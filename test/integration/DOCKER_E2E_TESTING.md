@@ -1,10 +1,10 @@
 # Docker-Based E2E Testing Infrastructure
 
-## MQTT+QUIC Test Execution
+## Transport Test Execution
 
-For MQTT+QUIC-specific testing strategy, see:
+For transport architecture details, see:
 
-- [MQTT+QUIC Testing Strategy](../../docs/testing/mqtt-quic-testing-strategy.md)
+- [Communication Layer Migration](../../docs/architecture/communication-layer-migration.md)
 
 ## Overview
 
@@ -66,12 +66,12 @@ go test -v -timeout 5m
 ## Tier 2: Controller + Steward
 
 ### Purpose
-Validates single controller with connected steward - basic MQTT+QUIC communication, registration, module execution.
+Validates single controller with connected steward - basic gRPC-over-QUIC communication, registration, module execution.
 
 ### Infrastructure
 **Docker Compose Services:**
 - `controller-standalone` - Controller with TimescaleDB storage
-- `steward-standalone` - Steward connecting via MQTT+QUIC
+- `steward-standalone` - Steward connecting via gRPC-over-QUIC
 - `timescaledb-test` - Shared database
 
 **Profile:** `--profile ha`
@@ -84,7 +84,7 @@ Validates single controller with connected steward - basic MQTT+QUIC communicati
 2. `TestControllerAPI` - HTTP API accessible
 3. `TestStewardConnection` - Steward connects to controller
 4. `TestStorageInitialization` - TimescaleDB storage initialized
-5. `TestMQTTBroker` - MQTT broker running
+5. `TestTransportServer` - Transport server running
 6. `TestModuleExecution` - Steward can execute modules
 7. `TestCertificateManagement` - Certificates managed properly
 

@@ -521,7 +521,7 @@ make build-controller
 
 The controller will start on default ports:
 - REST API: 9080
-- MQTT Broker: 1883
+- gRPC-over-QUIC transport: 4433
 - Internal services automatically configured
 
 **Use it for M365/cloud workflows**:

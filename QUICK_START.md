@@ -212,7 +212,7 @@ mkdir -p ./data ./certs ./logs
 
 # You should see:
 # INFO: Initializing storage provider: git
-# INFO: Starting MQTT broker
+# INFO: Starting transport server
 # INFO: Controller ready
 ```
 
@@ -342,14 +342,9 @@ logging:
   file:
     directory: ./logs
 
-mqtt:
-  enabled: true
-  listen_addr: "0.0.0.0:1883"
-  enable_tls: true
-
-quic:
-  enabled: true
+transport:
   listen_addr: "0.0.0.0:4433"
+  use_cert_manager: true
 EOF
 
 # Create required directories and start controller
@@ -358,7 +353,7 @@ mkdir -p ./data ./certs ./logs
 
 # You should see:
 # INFO: Initializing storage provider: git
-# INFO: Starting MQTT broker
+# INFO: Starting transport server
 # INFO: Controller ready
 ```
 
@@ -401,7 +396,7 @@ curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
 ./bin/cfgms-steward -regtoken cfgms_reg_abc123xyz...
 
 # You should see:
-# INFO: Registering with controller via MQTT+QUIC
+# INFO: Registering with controller via gRPC-over-QUIC
 # INFO: Certificate obtained
 # INFO: Connected to controller
 # INFO: Steward ready

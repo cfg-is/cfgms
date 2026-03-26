@@ -90,7 +90,7 @@ The roadmap provides detailed milestone planning from v0.1.0 through v3.5.0+, in
 
 CFGMS implements defense-in-depth security with:
 
-- **Mutual TLS**: All internal communication (MQTT+QUIC) uses certificate-based authentication
+- **Mutual TLS**: All internal communication (gRPC-over-QUIC) uses certificate-based authentication
 - **Zero-Trust RBAC**: Just-in-time access, continuous authorization, audit logging
 - **Automated Scanning**: CodeQL, Trivy, gosec, and supply chain security validation
 - **Data Protection**: SOPS encryption, TLS 1.3, OS keychain integration

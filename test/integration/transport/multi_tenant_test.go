@@ -13,14 +13,12 @@ import (
 // MultiTenantTestSuite tests multi-tenant isolation in the gRPC transport architecture.
 //
 // Multi-tenant isolation in gRPC transport:
-//   - Each steward has its own gRPC stream (not MQTT topic-based ACL)
+//   - Each steward has its own gRPC stream, isolated by connection registry
 //   - Isolation is enforced via the connection registry: each stream is keyed by steward ID
 //   - Commands sent to steward A's stream cannot reach steward B
 //   - Config routing uses tenant path prefix matching, not topic namespace
 //
-// MQTT-specific scenarios dropped:
-//   - Topic-based ACL validation (replaced by connection registry isolation)
-//   - QoS-based message ordering (HTTP/2 handles this natively)
+// gRPC-specific isolation replaces topic-based ACL and QoS ordering from previous transports.
 type MultiTenantTestSuite struct {
 	suite.Suite
 	helper *TestHelper
@@ -73,7 +71,7 @@ func (s *MultiTenantTestSuite) TestSimultaneousTenants() {
 }
 
 // TestConnectionIsolation verifies that steward connections are isolated per steward.
-// In gRPC transport, isolation is via connection registry (not MQTT topic ACL).
+// In gRPC transport, isolation is via connection registry (keyed by steward ID).
 // AC2/AC3: Steward A's stream cannot deliver commands/events to steward B.
 func (s *MultiTenantTestSuite) TestConnectionIsolation() {
 	s.T().Log("AC2/AC3: Testing connection isolation via unique steward IDs")

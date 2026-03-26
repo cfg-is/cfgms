@@ -225,7 +225,7 @@ docker compose version
 # CFGMS repository and binaries built
 make build
 
-# Infrastructure containers running (no separate MQTT broker needed)
+# Infrastructure containers running (no separate broker needed)
 docker compose up -d controller steward-standalone
 ```
 
@@ -338,7 +338,7 @@ func (s *TransportTestSuite) TestYourFeature() {
 - ❌ Hardcode timeouts (use timeout config)
 - ❌ Skip cleanup (can cause test pollution)
 - ❌ Test only happy path (test failures too)
-- ❌ Depend on MQTT — it has been removed
+- ❌ Depend on previous transport — it has been removed
 
 ## Debugging Failed Tests
 
@@ -444,7 +444,7 @@ E2E tests run in GitHub Actions via the Build Gate workflow:
 - ✅ 100% pass rate locally
 - ✅ 100% pass rate in CI
 - ✅ No flaky tests
-- ✅ No external broker dependency (no MQTT)
+- ✅ No external broker dependency
 
 ## Performance Baselines
 
@@ -462,4 +462,4 @@ E2E tests run in GitHub Actions via the Build Gate workflow:
 - **Transport Architecture**: [docs/architecture/communication-layer-migration.md](../architecture/communication-layer-migration.md)
 - **Home Lab Guide**: [docs/deployment/home-lab-deployment-guide.md](../deployment/home-lab-deployment-guide.md)
 - **Troubleshooting**: [docs/troubleshooting/connectivity.md](../troubleshooting/connectivity.md)
-- **Archived: MQTT+QUIC Strategy**: [docs/testing/archived/mqtt-quic-testing-strategy.md](archived/mqtt-quic-testing-strategy.md)
+- **Transport Architecture**: See [communication-layer-migration.md](../architecture/communication-layer-migration.md) for current transport design

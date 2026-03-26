@@ -82,7 +82,7 @@ func generateRegistrationCode() error {
 	}
 
 	// Validate controller URL format (host:port) using net.SplitHostPort
-	// This rejects scheme-prefixed URLs (e.g., mqtt://host:port) and bare hostnames
+	// This rejects scheme-prefixed URLs (e.g., grpc://host:port) and bare hostnames
 	host, port, err := net.SplitHostPort(controllerURL)
 	if err != nil || host == "" || port == "" {
 		return fmt.Errorf("controller URL must be in HOST:PORT format\n\nYour URL: %s\n\nExample:\n  controller.example.com:4433", controllerURL)

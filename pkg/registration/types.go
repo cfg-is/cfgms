@@ -16,7 +16,7 @@ type Token struct {
 	// TenantID is the tenant this token belongs to
 	TenantID string `json:"tenant_id"`
 
-	// ControllerURL is the MQTT broker URL for this tenant
+	// ControllerURL is the transport address for this tenant
 	ControllerURL string `json:"controller_url"`
 
 	// Group is an optional group identifier
@@ -83,7 +83,7 @@ type TokenCreateRequest struct {
 	// TenantID is the tenant this token belongs to
 	TenantID string `json:"tenant_id"`
 
-	// ControllerURL is the MQTT broker URL
+	// ControllerURL is the transport address
 	ControllerURL string `json:"controller_url"`
 
 	// Group is an optional group identifier

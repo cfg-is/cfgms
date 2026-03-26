@@ -5,7 +5,7 @@
 // This service monitors steward heartbeats via the ControlPlaneProvider and provides
 // failover detection with <15 second detection time as required by Story #198.
 //
-// Story #363: Migrated from direct MQTT broker to ControlPlaneProvider abstraction.
+// Story #363: Uses ControlPlaneProvider abstraction for transport-agnostic heartbeat monitoring.
 package heartbeat
 
 import (
@@ -138,7 +138,7 @@ func (s *Service) Stop(ctx context.Context) error {
 }
 
 // handleHeartbeatFromProvider processes incoming heartbeats from the ControlPlaneProvider.
-// Story #363: Replaces direct MQTT handler with typed heartbeat handler.
+// Story #363: Processes typed heartbeat messages from ControlPlaneProvider.
 func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlplaneTypes.Heartbeat) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

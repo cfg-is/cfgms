@@ -90,7 +90,7 @@ preserving all safety gates:
 
 **Safety gates deferred to CI (require Docker daemon):**
 - `test-integration-docker` — needs PostgreSQL + Gitea containers
-- `test-e2e-fast` — needs MQTT+QUIC infrastructure containers
+- `test-e2e-fast` — needs transport infrastructure containers
 
 **Safety gates deferred to human:**
 - Roadmap updates — architect responsibility
@@ -120,7 +120,7 @@ This gives agent containers ~95% of the `test-complete` validation. The remainin
 - **Model:** Agent containers use claude-sonnet-4-6 for implementation (more generous Max plan limits). Opus reserved for architect planning sessions.
 - **Language:** CFGMS is a Go monorepo. The container image must include the Go toolchain matching go.mod, golangci-lint, ripgrep, git, gh CLI, jq, curl, and make.
 - **GitFlow:** All branches created from `develop`, all PRs target `develop`. Never `main`.
-- **No Docker-in-Docker:** Agent containers do not have access to Docker. The only validation targets that require Docker are `test-integration-docker` (PostgreSQL + Gitea) and `test-e2e-fast` (MQTT+QUIC infrastructure). These are deferred to GitHub Actions CI. All other validation — including security scans, cross-platform compilation, and the full test suite — runs inside the container.
+- **No Docker-in-Docker:** Agent containers do not have access to Docker. The only validation targets that require Docker are `test-integration-docker` (PostgreSQL + Gitea) and `test-e2e-fast` (transport infrastructure). These are deferred to GitHub Actions CI. All other validation — including security scans, cross-platform compilation, and the full test suite — runs inside the container.
 
 ## Credential Strategy
 

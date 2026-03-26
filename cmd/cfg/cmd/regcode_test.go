@@ -51,9 +51,9 @@ func TestGenerateRegistrationCode_Validation(t *testing.T) {
 		assert.Contains(t, err.Error(), "HOST:PORT")
 	})
 
-	t.Run("old mqtt:// scheme format rejected", func(t *testing.T) {
+	t.Run("scheme-prefixed URL format rejected", func(t *testing.T) {
 		tenantID = "test-tenant"
-		controllerURL = "mqtt://controller.example.com:8883"
+		controllerURL = "grpc://controller.example.com:7443"
 		group = ""
 
 		err := generateRegistrationCode()

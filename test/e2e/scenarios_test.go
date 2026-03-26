@@ -26,7 +26,7 @@ type E2ETestSuite struct {
 
 // SetupSuite initializes the E2E testing framework
 func (s *E2ETestSuite) SetupSuite() {
-	// Story #294 Phase 1: Enable E2E tests for MQTT+QUIC standalone steward mode
+	// Story #294 Phase 1: Enable E2E tests for gRPC-over-QUIC standalone steward mode
 	config := CIOptimizedConfig() // Use CI-optimized config by default
 
 	// Override with local config if running locally (not in CI)
@@ -729,7 +729,7 @@ func (s *E2ETestSuite) TestTemplateRollbackIntegration() {
 
 // TestMultiStewardScenario tests scenarios with multiple stewards
 func (s *E2ETestSuite) TestMultiStewardScenario() {
-	// Story #294 Phase 3: Multi-steward test with MQTT connection to controller
+	// Story #294 Phase 3: Multi-steward test with gRPC connection to controller
 
 	err := s.framework.RunTest("multi-steward-scenario", "scalability", func() error {
 		stewardCount := 3
@@ -737,7 +737,7 @@ func (s *E2ETestSuite) TestMultiStewardScenario() {
 			stewardCount = 2 // Reduce for CI constraints
 		}
 
-		s.T().Logf("Creating %d stewards with MQTT connections to controller", stewardCount)
+		s.T().Logf("Creating %d stewards with gRPC connections to controller", stewardCount)
 
 		// Create multiple stewards registered with controller
 		registeredStewards := make([]*RegisteredSteward, stewardCount)
@@ -842,12 +842,12 @@ func (s *E2ETestSuite) TestFailoverDetection() {
 	require.NoError(s.T(), err)
 }
 
-// TestMQTTCommandResponse tests bidirectional transport communication
-func (s *E2ETestSuite) TestMQTTCommandResponse() {
+// TestTransportCommandResponse tests bidirectional transport communication
+func (s *E2ETestSuite) TestTransportCommandResponse() {
 	// Story #294 Phase 3: Verify controller can send commands and receive responses
-	// Updated for gRPC transport (Issue #516): uses ControlPlane.SubscribeCommands
+	// Uses gRPC transport (Issue #516): ControlPlane.SubscribeCommands
 
-	err := s.framework.RunTest("mqtt-command-response", "communication", func() error {
+	err := s.framework.RunTest("transport-command-response", "communication", func() error {
 		s.T().Log("Starting transport command/response test")
 
 		tenantID := "test-tenant-command"
@@ -1366,7 +1366,7 @@ func (s *E2ETestSuite) TestDataFlow() {
 
 // TestSecurityCompliance tests security compliance requirements
 func (s *E2ETestSuite) TestSecurityCompliance() {
-	// Story #294 Phase 2: Test MQTT broker and registration token system
+	// Story #294 Phase 2: Test registration token system and security compliance
 
 	err := s.framework.RunTest("security-compliance", "compliance", func() error {
 		// Story #294 Phase 2: Validate registration token generation

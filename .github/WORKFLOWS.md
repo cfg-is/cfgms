@@ -12,7 +12,7 @@ This document describes the GitHub Actions workflows configured for the CFGMS pr
 
 **Features:**
 - Weekly dependency updates (Mondays 9 AM UTC)
-- Grouped updates by domain (MQTT, QUIC, Microsoft, etc.)
+- Grouped updates by domain (transport, Microsoft, etc.)
 - Separate security update group for priority handling
 - Supports Go modules, GitHub Actions, and Docker base images
 - Automatic PR creation with maintainer reviewers

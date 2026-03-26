@@ -11,10 +11,10 @@ import (
 )
 
 // DockerIntegrationTestSuite tests against actual Docker containers.
-// MQTT-based tests (TestStewardHeartbeat, TestStewardDNACollection,
-// TestStewardStatusReporting, TestMQTTPortAccessibility) have been removed
-// as part of Phase 10.11 (Issue #522) — MQTT transport was replaced by
-// gRPC-over-QUIC. Equivalent validation is in test/integration/transport/.
+// Transport-specific tests (TestStewardHeartbeat, TestStewardDNACollection,
+// TestStewardStatusReporting, TestTransportPortAccessibility) have been removed
+// as part of Phase 10.11 (Issue #522) — replaced by gRPC-over-QUIC transport.
+// Equivalent validation is in test/integration/transport/.
 type DockerIntegrationTestSuite struct {
 	suite.Suite
 }

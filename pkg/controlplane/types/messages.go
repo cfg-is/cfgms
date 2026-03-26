@@ -3,7 +3,7 @@
 // Package types provides message types for the control plane communication layer.
 //
 // This package defines semantic message types for controller-steward communication,
-// abstracting away transport-specific details (MQTT, gRPC, etc.).
+// abstracting away transport-specific details (gRPC, WebSocket, etc.).
 package types
 
 import (

@@ -38,7 +38,7 @@ func NewDockerComposeHelper() *DockerComposeHelper {
 }
 
 // IsInfrastructureRunning checks if the required Docker containers are already running
-// (e.g., started by CI workflow or make test-mqtt-quic-setup)
+// (e.g., started by CI workflow or make test-integration-setup)
 func (h *DockerComposeHelper) IsInfrastructureRunning() bool {
 	cmd := exec.Command("docker", "ps", "--filter", "name=controller-standalone",
 		"--filter", "name=steward-standalone", "--filter", "name=cfgms-timescaledb-test",

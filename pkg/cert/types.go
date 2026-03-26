@@ -61,7 +61,7 @@ const (
 
 	// CertificateTypePublicAPI is for HTTPS REST API only (external-facing)
 	CertificateTypePublicAPI CertificateType = 3
-	// CertificateTypeInternalServer is for MQTT + QUIC mutual TLS (internal)
+	// CertificateTypeInternalServer is for gRPC-over-QUIC mutual TLS (internal)
 	CertificateTypeInternalServer CertificateType = 4
 	// CertificateTypeConfigSigning is for config/DNA signing only (CodeSigning EKU)
 	CertificateTypeConfigSigning CertificateType = 5

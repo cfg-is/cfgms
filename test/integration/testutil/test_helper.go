@@ -385,7 +385,7 @@ func (e *TestEnv) GetCertificateInfo(certType cert.CertificateType) ([]*cert.Cer
 	return e.CertManager.GetCertificatesByType(certType)
 }
 
-// CreateStewardClient is OBSOLETE - removed as part of Story #198 (MQTT+QUIC migration)
+// CreateStewardClient is OBSOLETE - removed as part of Story #198 (transport migration)
 // The old gRPC client.Client no longer exists. Use client.NewTransportClient() instead.
 // Tests using this method need to be updated for gRPC transport architecture.
 // func (e *TestEnv) CreateStewardClient() (*client.Client, error) {

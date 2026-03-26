@@ -11,9 +11,8 @@
 // enforces that the identity embedded in gRPC messages matches the cryptographic
 // identity established during the TLS handshake.
 //
-// This is the gRPC equivalent of the MQTT ACL (features/controller/server/mqtt_acl.go)
-// — stewards can only act as themselves; they cannot impersonate other stewards or
-// send message types reserved for controllers.
+// This enforces steward identity for gRPC transport: stewards can only act as themselves
+// and cannot impersonate other stewards or send message types reserved for controllers.
 //
 // # Usage
 //

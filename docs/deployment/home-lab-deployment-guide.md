@@ -69,7 +69,7 @@ Transport: gRPC-over-QUIC (commands, heartbeats, status, config sync) - port 443
 Management Plane: REST API (config uploads, admin operations) - port 9080
 ```
 
-**Note**: A single port (4433/UDP) handles all controller-steward communication via gRPC-over-QUIC. There is no separate MQTT broker.
+**Note**: A single port (4433/UDP) handles all controller-steward communication via gRPC-over-QUIC. There is no separate broker process.
 
 ### Communication Protocols
 

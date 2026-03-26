@@ -6,7 +6,7 @@
 // the CFGMS controller using the gRPC-over-QUIC ControlPlaneProvider (control plane)
 // and gRPC DataPlaneProvider (data plane). Both share the same transport_address
 // received from the HTTP registration response.
-// Story #516: Replaced MQTTClient with TransportClient using gRPC providers.
+// Story #516: Introduced TransportClient using gRPC providers.
 package client
 
 import (
@@ -37,7 +37,7 @@ import (
 
 // TransportClient represents the steward client using gRPC-over-QUIC for both
 // control plane and data plane communication with the controller.
-// Story #516: Replaces MQTTClient — connects once to transport_address for both CP and DP.
+// Story #516: Connects once to transport_address for both CP and DP.
 type TransportClient struct {
 	mu sync.RWMutex
 
@@ -173,7 +173,7 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 // Connect establishes gRPC control plane and data plane connections to the controller.
 // Both use the unified transport_address over QUIC. The data plane is initialized
 // eagerly alongside the control plane — no lazy connect_dataplane command required.
-// Story #516: Replaces MQTT+QUIC separate connection logic.
+// Story #516: Unified gRPC-over-QUIC connection for both control and data plane.
 func (c *TransportClient) Connect(ctx context.Context) error {
 	c.logger.Info("Connecting to controller via gRPC transport")
 

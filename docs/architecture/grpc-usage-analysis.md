@@ -2,14 +2,14 @@
 
 > **⚠️ HISTORICAL DOCUMENT**
 >
-> This document is preserved for historical reference and explains the analysis that led to the initial gRPC-to-MQTT+QUIC migration (Story #220), and later to the gRPC-over-QUIC unified transport.
+> This document is preserved for historical reference and explains the analysis that led to the initial transport migration (Story #220), and later to the gRPC-over-QUIC unified transport.
 >
 > **Analysis Date**: 2025-10-15
 > **Context**: v0.7.0 Pre-OSS preparation — Analysis that led to gRPC removal (Story #220)
 >
 > **Implementation History**:
-> - v0.7.0 (Story #220): gRPC service layer removed, replaced with MQTT+QUIC hybrid
-> - v0.9.x (Phase 10.11, Stories #519–#522): MQTT removed, gRPC re-introduced as the **transport** over QUIC
+> - v0.7.0 (Story #220): gRPC service layer removed, replaced with hybrid transport
+> - v0.9.x (Phase 10.11, Stories #519–#522): Previous transport removed, gRPC re-introduced as the **transport** over QUIC
 >
 > **Current Protocol**: gRPC-over-QUIC unified transport (see [communication-layer-migration.md](communication-layer-migration.md))
 >
@@ -23,14 +23,14 @@
 
 **Recommendation: REMOVE gRPC from codebase**
 
-gRPC is **not actively used** in CFGMS. The system migrated to MQTT+QUIC for controller-steward communication in Story #198, but gRPC artifacts (proto files, generated code, service implementations) were left behind.
+gRPC is **not actively used** in CFGMS. The system migrated to a different transport for controller-steward communication in Story #198, but gRPC artifacts (proto files, generated code, service implementations) were left behind.
 
 ## Current Architecture
 
 The controller uses:
 
-- **MQTT**: Control plane communication (commands, heartbeats, DNA sync)
-- **QUIC**: Data plane communication (configuration sync, bulk data transfer)
+- **Control plane**: Commands, heartbeats, DNA sync (previous transport)
+- **Data plane**: Configuration sync, bulk data transfer (previous transport)
 - **HTTP REST**: External API, registration, management endpoints
 - **gRPC**: NOT USED (but code remains)
 
@@ -51,7 +51,7 @@ api/proto/steward/steward.proto
 ```
 
 **Status**: Active use for data structures (protobuf messages)
-**Usage**: Message definitions used by MQTT+QUIC handlers
+**Usage**: Message definitions used by transport handlers
 **Keep**: YES - proto messages are used, but gRPC service definitions should be removed
 
 ### 2. Generated gRPC Code (4 files)
@@ -77,7 +77,7 @@ features/controller/service/rbac_service.go
 **Status**: Active use BUT not as gRPC services
 **Details**:
 
-- These implement business logic used by MQTT/QUIC/HTTP handlers
+- These implement business logic used by transport/HTTP handlers
 - They embed `UnimplementedXServer` for interface conformance (unused)
 - Methods take `context.Context` and return proto messages (still useful)
 - NOT registered with any gRPC server
@@ -97,7 +97,7 @@ features/rbac/middleware.go
 - Extracts metadata using `metadata.FromIncomingContext`
 - NOT actually used with gRPC server
 
-**Keep**: NO - redesign for HTTP/MQTT middleware
+**Keep**: NO - redesign for HTTP/transport middleware
 
 ### 5. Dependencies
 
@@ -135,7 +135,7 @@ google.golang.org/protobuf
 
 4. **Redesign RBAC middleware**
    - Create HTTP middleware for REST API
-   - Create MQTT authorization handler
+   - Create transport authorization handler
    - Remove gRPC interceptor code
 
 5. **Remove gRPC dependency**
@@ -152,7 +152,7 @@ google.golang.org/protobuf
 | `features/controller/service/controller_service.go` | Refactor | Remove `UnimplementedControllerServer` |
 | `features/controller/service/config_service.go` | Refactor | Remove `UnimplementedConfigurationServiceServer` |
 | `features/controller/service/rbac_service.go` | Refactor | Remove `UnimplementedRBACServiceServer` |
-| `features/rbac/middleware.go` | Redesign | Create HTTP/MQTT middleware, remove gRPC |
+| `features/rbac/middleware.go` | Redesign | Create HTTP/transport middleware, remove gRPC |
 | `go.mod` | Edit | Remove `google.golang.org/grpc` dependency |
 | `Makefile` | Edit | Update proto generation to skip gRPC |
 
@@ -172,7 +172,7 @@ Expected: Minimal impact (no gRPC server tests exist)
 
 **Current Communication Methods**:
 
-1. **Steward → Controller**: MQTT+QUIC (Story #198)
+1. **Steward → Controller**: gRPC-over-QUIC transport
 2. **CLI → Controller**: HTTP REST API
 3. **Web UI → Controller**: HTTP REST API (future)
 
@@ -187,17 +187,17 @@ Expected: Minimal impact (no gRPC server tests exist)
 | Criterion | gRPC | Current Architecture |
 |-----------|------|---------------------|
 | **Performance** | High | QUIC provides equivalent performance |
-| **Streaming** | Bidirectional | MQTT provides pub/sub, QUIC provides streams |
+| **Streaming** | Bidirectional | QUIC provides streams, gRPC provides bidirectional streaming |
 | **Type Safety** | Proto messages | Proto messages (without gRPC services) |
 | **Code Generation** | Yes | Still available for messages only |
 | **Mobile/Web** | gRPC-web needed | HTTP REST works everywhere |
-| **MSP Market Fit** | Uncommon | MQTT widely adopted in RMM/IoT space |
+| **MSP Market Fit** | Uncommon | Lightweight transport widely adopted in RMM/IoT space |
 
 **Additional Considerations**:
 
-1. **Market Positioning**: MSPs are familiar with MQTT (used by RMMs)
-2. **Network Traversal**: MQTT+TLS easier through firewalls than gRPC
-3. **Pub/Sub Model**: MQTT's pub/sub better for controller→steward commands
+1. **Market Positioning**: MSPs are familiar with lightweight transport protocols (used by RMMs)
+2. **Network Traversal**: Lightweight transport easier through firewalls than gRPC
+3. **Pub/Sub Model**: Pub/sub better for controller→steward commands
 4. **Reduced Complexity**: Fewer dependencies, simpler architecture
 5. **Open Source Readiness**: Cleaner codebase without unused tech
 
@@ -214,14 +214,14 @@ Expected: Minimal impact (no gRPC server tests exist)
 - [ ] Remove service definitions from .proto files
 - [ ] Regenerate proto code without gRPC
 - [ ] Refactor service implementations
-- [ ] Redesign RBAC middleware for HTTP/MQTT
+- [ ] Redesign RBAC middleware for HTTP/transport
 - [ ] Update Makefile and build scripts
 - [ ] Remove gRPC from go.mod
 
 ### Phase 3: Testing (1 day)
 
 - [ ] Run full test suite
-- [ ] Test MQTT+QUIC communication
+- [ ] Test transport communication
 - [ ] Test HTTP REST API
 - [ ] Test RBAC authorization
 
@@ -246,7 +246,7 @@ If full removal is too aggressive for v0.7.0, consider minimal cleanup:
 
 ## Conclusion
 
-gRPC artifacts in CFGMS are **legacy code from pre-MQTT+QUIC architecture**. They provide no value and add:
+gRPC artifacts in CFGMS are **legacy code from the pre-transport-migration architecture**. They provide no value and add:
 
 - Unnecessary dependencies
 - Confusing code structure

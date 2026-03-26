@@ -110,7 +110,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 	t.Run("successful token creation", func(t *testing.T) {
 		reqBody := TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 			Group:         "production",
 			ExpiresIn:     "7d",
 			SingleUse:     false,
@@ -135,7 +135,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 		assert.NotEmpty(t, resp.Token)
 		assert.True(t, len(resp.Token) > 10, "Token should be a reasonable length")
 		assert.Equal(t, "test-tenant", resp.TenantID)
-		assert.Equal(t, "mqtt://controller.example.com:8883", resp.ControllerURL)
+		assert.Equal(t, "grpc://controller.example.com:7443", resp.ControllerURL)
 		assert.Equal(t, "production", resp.Group)
 		assert.False(t, resp.SingleUse)
 		assert.NotNil(t, resp.ExpiresAt)
@@ -144,7 +144,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 	t.Run("single-use token creation", func(t *testing.T) {
 		reqBody := TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 			SingleUse:     true,
 		}
 
@@ -169,7 +169,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 
 	t.Run("missing tenant_id returns error", func(t *testing.T) {
 		reqBody := TokenCreateRequest{
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 		}
 
 		body, err := json.Marshal(reqBody)
@@ -219,7 +219,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 	t.Run("unauthorized without API key", func(t *testing.T) {
 		reqBody := TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 		}
 
 		body, err := json.Marshal(reqBody)
@@ -240,7 +240,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 
 		reqBody := TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 		}
 
 		body, err := json.Marshal(reqBody)
@@ -268,7 +268,7 @@ func TestListRegistrationTokens(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		token, err := registration.CreateToken(&registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 		})
 		require.NoError(t, err)
 		err = tokenStore.SaveToken(ctx, token)
@@ -278,7 +278,7 @@ func TestListRegistrationTokens(t *testing.T) {
 	// Create a token for a different tenant
 	otherToken, err := registration.CreateToken(&registration.TokenCreateRequest{
 		TenantID:      "other-tenant",
-		ControllerURL: "mqtt://controller.example.com:8883",
+		ControllerURL: "grpc://controller.example.com:7443",
 	})
 	require.NoError(t, err)
 	err = tokenStore.SaveToken(ctx, otherToken)
@@ -359,7 +359,7 @@ func TestGetRegistrationToken(t *testing.T) {
 	// Create a test token
 	token, err := registration.CreateToken(&registration.TokenCreateRequest{
 		TenantID:      "test-tenant",
-		ControllerURL: "mqtt://controller.example.com:8883",
+		ControllerURL: "grpc://controller.example.com:7443",
 		Group:         "test-group",
 	})
 	require.NoError(t, err)
@@ -381,7 +381,7 @@ func TestGetRegistrationToken(t *testing.T) {
 
 		assert.Equal(t, token.Token, resp.Token)
 		assert.Equal(t, "test-tenant", resp.TenantID)
-		assert.Equal(t, "mqtt://controller.example.com:8883", resp.ControllerURL)
+		assert.Equal(t, "grpc://controller.example.com:7443", resp.ControllerURL)
 		assert.Equal(t, "test-group", resp.Group)
 	})
 
@@ -416,7 +416,7 @@ func TestDeleteRegistrationToken(t *testing.T) {
 		// Create a test token
 		token, err := registration.CreateToken(&registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 		})
 		require.NoError(t, err)
 		err = tokenStore.SaveToken(ctx, token)
@@ -466,7 +466,7 @@ func TestRevokeRegistrationToken(t *testing.T) {
 		// Create a test token
 		token, err := registration.CreateToken(&registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 		})
 		require.NoError(t, err)
 		err = tokenStore.SaveToken(ctx, token)
@@ -532,7 +532,7 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 	t.Run("1_create_token", func(t *testing.T) {
 		reqBody := TokenCreateRequest{
 			TenantID:      "crud-test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 			Group:         "crud-test-group",
 			ExpiresIn:     "24h",
 			SingleUse:     false,
@@ -678,7 +678,7 @@ func TestTokenResponseFormat(t *testing.T) {
 	token := &registration.Token{
 		Token:         "testformat123",
 		TenantID:      "format-test-tenant",
-		ControllerURL: "mqtt://controller.example.com:8883",
+		ControllerURL: "grpc://controller.example.com:7443",
 		Group:         "format-group",
 		CreatedAt:     now,
 		ExpiresAt:     &expiresAt,
@@ -707,7 +707,7 @@ func TestTokenResponseFormat(t *testing.T) {
 	// Verify all fields are present and correctly formatted
 	assert.Equal(t, "testformat123", resp.Token)
 	assert.Equal(t, "format-test-tenant", resp.TenantID)
-	assert.Equal(t, "mqtt://controller.example.com:8883", resp.ControllerURL)
+	assert.Equal(t, "grpc://controller.example.com:7443", resp.ControllerURL)
 	assert.Equal(t, "format-group", resp.Group)
 	assert.NotEmpty(t, resp.CreatedAt)
 	assert.NotNil(t, resp.ExpiresAt)

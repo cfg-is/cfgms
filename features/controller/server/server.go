@@ -55,7 +55,7 @@ import (
 // BUILD_VERSION_CHECK is a compile-time constant to verify code version in Docker
 const BUILD_VERSION_CHECK = "story-362-config-signing-enabled"
 
-// Server represents the controller server component (MQTT+QUIC based)
+// Server represents the controller server component (gRPC-over-QUIC based)
 type Server struct {
 	mu                      sync.RWMutex
 	cfg                     *config.Config
@@ -599,7 +599,7 @@ func initializeReportsHandler(cfg *config.Config, logger logging.Logger) (*repor
 	return reportapi.New(reportEngine, exporter, logger), dnaStorageManager
 }
 
-// Start initializes and starts the controller server (MQTT+QUIC mode)
+// Start initializes and starts the controller server (gRPC-over-QUIC mode)
 func (s *Server) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1110,7 +1110,7 @@ func (s *Server) handleEventFromProvider(ctx context.Context, event *controlplan
 }
 
 // handleDNAEvent processes DNA change events from stewards.
-// Story #363: Replaces handleDNAUpdate which used direct MQTT subscription.
+// Story #363: Replaces handleDNAUpdate which used direct topic subscription.
 func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Event) error {
 	s.logger.Info("Received DNA change event",
 		"steward_id", event.StewardID,
@@ -1161,7 +1161,7 @@ func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Ev
 }
 
 // handleConfigAppliedEvent processes configuration applied events from stewards.
-// Story #363: Replaces handleConfigStatusReport which used direct MQTT subscription.
+// Story #363: Replaces handleConfigStatusReport which used direct topic subscription.
 func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlplaneTypes.Event) error {
 	s.logger.Info("Received config applied event",
 		"steward_id", event.StewardID,

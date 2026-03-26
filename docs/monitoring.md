@@ -16,7 +16,7 @@ The monitoring system is built on three core components:
 
 CFGMS uses OpenTelemetry for distributed tracing across all components:
 
-- **Trace Propagation**: Correlation IDs flow through MQTT+QUIC communication
+- **Trace Propagation**: Correlation IDs flow through gRPC-over-QUIC communication
 - **Span Management**: Automatic span creation with CFGMS-specific attributes
 - **Context Correlation**: Links traces with structured logs
 - **Export Support**: OTLP, Jaeger, and custom exporters

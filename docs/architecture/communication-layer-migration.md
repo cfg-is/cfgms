@@ -2,7 +2,7 @@
 
 ## Status: Migration Complete (Phase 10.11)
 
-As of Phase 10.11 (Stories #519–#522), the MQTT+QUIC hybrid transport has been fully replaced
+As of Phase 10.11 (Stories #519–#522), the previous hybrid transport has been fully replaced
 by **gRPC-over-QUIC**. All controller-steward communication now uses a single unified transport:
 
 - **Control Plane** (commands, events, heartbeats): `pkg/controlplane/interfaces` with gRPC provider
@@ -11,19 +11,19 @@ by **gRPC-over-QUIC**. All controller-steward communication now uses a single un
 
 ### What Was Removed
 
-- `pkg/mqtt` — MQTT broker infrastructure (mochi-mqtt)
-- `pkg/mqtt/client`, `pkg/mqtt/types` — deprecated client wrappers
+- `pkg/[legacy-broker]` packages — previous broker infrastructure (removed, see git history pre-#519)
+- Previous client wrapper packages — replaced by `pkg/controlplane/interfaces` and `pkg/controlplane/types`
 - `pkg/quic/client`, `pkg/quic/session` — standalone QUIC client (replaced by transport layer)
-- `github.com/mochi-mqtt/server` — go.mod dependency
+- Previous broker go.mod dependency — removed in Issue #522
 
 ### What Replaced It
 
 | Before | After |
 |--------|-------|
-| MQTT control plane (port 1883) | gRPC control service over QUIC (port 4433) |
+| Previous control plane (port 1883) | gRPC control service over QUIC (port 4433) |
 | Standalone QUIC data plane (port 4433) | gRPC data service over QUIC (port 4433) |
 | Two separate protocols, two ports | Single unified transport, one port |
-| Separate MQTT broker process in controller | Lightweight gRPC server on transport listener |
+| Separate broker process in controller | Lightweight gRPC server on transport listener |
 
 ---
 
@@ -73,8 +73,8 @@ transport:
 
 | Blocked Import             | Replacement                        |
 |----------------------------|------------------------------------|
-| `pkg/mqtt/client`          | (removed — use `pkg/controlplane/interfaces`) |
-| `pkg/mqtt/types`           | (removed — use `pkg/controlplane/types`) |
+| `pkg/[legacy-broker]/client` (removed) | `pkg/controlplane/interfaces` |
+| `pkg/[legacy-broker]/types` (removed)  | `pkg/controlplane/types` |
 | `pkg/quic/client`          | (removed — use `pkg/dataplane/interfaces`) |
 | `pkg/quic/session`         | (removed — use `pkg/dataplane/interfaces`) |
 
@@ -98,4 +98,4 @@ dp := dpInterfaces.GetProvider("grpc")
 
 - [Plugin Architecture](plugin-architecture.md) - Provider pattern foundation
 - [Central Provider Compliance](decisions/001-central-provider-compliance-enforcement.md) - Enforcement ADR
-- [Archived: MQTT+QUIC Protocol Design](archived/mqtt-quic-protocol.md) - Historical protocol specification
+- Archived: Previous transport protocol design (removed in Phase 10.11)

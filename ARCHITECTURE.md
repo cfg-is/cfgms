@@ -27,7 +27,7 @@ CFGMS is a modern configuration management system designed for Managed Service P
 │  • Configuration storage & versioning                       │
 └─────────────────────────────────────────────────────────────┘
                            ▲ │
-                           │ │ MQTT+QUIC (mTLS)
+                           │ │ gRPC-over-QUIC (mTLS)
                            │ ▼
 ┌──────────────────────────────────────────────────────────────┐
 │                      Stewards (Agents)                       │
@@ -38,7 +38,7 @@ CFGMS is a modern configuration management system designed for Managed Service P
 │  • Offline capability                                        │
 └──────────────────────────────────────────────────────────────┘
                            ▲ │
-                           │ │ MQTT (mTLS)
+                           │ │ gRPC-over-QUIC (mTLS)
                            │ ▼
 ┌──────────────────────────────────────────────────────────────┐
 │                      Outpost (Optional)                      │
@@ -102,9 +102,9 @@ CFGMS is a modern configuration management system designed for Managed Service P
 
 ## Communication Architecture
 
-CFGMS uses a **hybrid MQTT+QUIC protocol** for efficient, bi-directional communication:
+CFGMS uses a **unified gRPC-over-QUIC transport** for efficient, bi-directional communication:
 
-### MQTT Control Plane
+### gRPC Control Plane
 
 **Purpose**: Lightweight control messages and real-time status
 
@@ -113,17 +113,9 @@ CFGMS uses a **hybrid MQTT+QUIC protocol** for efficient, bi-directional communi
 - Command delivery (controller → steward)
 - Status updates (steward → controller)
 - Fast failure detection (<15s)
-- Low bandwidth overhead (40% reduction vs gRPC)
+- Single multiplexed QUIC connection per steward
 
-**Topics**:
-```
-cfgms/steward/{id}/heartbeat   - Steward health updates
-cfgms/steward/{id}/commands    - Controller commands
-cfgms/steward/{id}/status      - Steward status changes
-cfgms/controller/broadcast     - System-wide announcements
-```
-
-### QUIC Data Plane
+### gRPC Data Plane
 
 **Purpose**: Large data transfers and bulk operations
 
@@ -142,7 +134,7 @@ All communication uses **mutual TLS (mTLS)**:
 - Certificate pinning
 - Automatic certificate rotation
 
-See [docs/architecture/mqtt-quic-protocol.md](docs/architecture/mqtt-quic-protocol.md) for detailed protocol specification.
+See [docs/architecture/communication-layer-migration.md](docs/architecture/communication-layer-migration.md) for detailed transport specification.
 
 ## Provider System (Pluggable Architecture)
 
@@ -176,7 +168,7 @@ CFGMS uses providers for all cross-system capabilities:
 - **Certificate** - TLS certificate management (internal CA, Let's Encrypt, Vault)
 - **Telemetry** - Observability (OpenTelemetry, Datadog, Prometheus)
 - **Directory** - Directory services (M365, Active Directory)
-- **MQTT** - Message broker abstraction (mochi-mqtt)
+- **Transport** - gRPC-over-QUIC transport provider
 
 ### Architecture Pattern
 
@@ -369,7 +361,7 @@ Designed for:
 - `pkg/cert` - Certificate management (internal CA, Let's Encrypt, Vault)
 - `pkg/telemetry` - Observability (OpenTelemetry, Datadog, Prometheus)
 - `pkg/directory` - Directory services (M365, Active Directory)
-- `pkg/mqtt` - MQTT broker abstraction (mochi-mqtt)
+- `pkg/transport` - gRPC-over-QUIC transport provider
 
 **Design Philosophy**: Make providers pluggable by default. This allows the system to scale from single-server deployments to distributed, multi-region architectures without refactoring business logic.
 

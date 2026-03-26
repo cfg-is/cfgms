@@ -41,7 +41,7 @@ This runbook provides step-by-step procedures for common operational scenarios i
 
 - All steward connections are outbound (no open ports on endpoints)
 - Controller listens on port 8080 (HTTPS/REST API)
-- MQTT+QUIC protocol for steward-controller communication (MQTT control plane, QUIC data plane)
+- gRPC-over-QUIC protocol for steward-controller communication
 - mTLS required for all internal communication
 
 ## Monitoring and Alerting
@@ -60,8 +60,8 @@ This runbook provides step-by-step procedures for common operational scenarios i
 
 - **Session Creation Latency**: Alert if >2 seconds average
 - **Terminal Session Count**: Alert if approaching MaxSessions limit
-- **MQTT Request Latency**: Alert if P95 >500ms
-- **QUIC Data Transfer Latency**: Alert if P95 >1000ms
+- **gRPC Request Latency**: Alert if P95 >500ms
+- **Data Transfer Latency**: Alert if P95 >1000ms
 - **Error Rate**: Alert if >5% of requests fail
 
 #### Security Metrics
@@ -83,8 +83,8 @@ curl http://localhost:8080/metrics
 # - cfgms_controller_uptime_seconds
 # - cfgms_terminal_active_sessions
 # - cfgms_certificate_days_until_expiry
-# - cfgms_mqtt_request_duration_seconds
-# - cfgms_quic_transfer_duration_seconds
+# - cfgms_grpc_request_duration_seconds
+# - cfgms_transport_transfer_duration_seconds
 # - cfgms_error_rate_percent
 ```
 
@@ -269,7 +269,7 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
    curl -H "Authorization: Bearer $API_TOKEN" \
      https://localhost:8080/api/v1/terminal/sessions | jq length
    
-   # Check MQTT connection count
+   # Check transport connection count
    netstat -an | grep :8080 | wc -l
    ```
 
