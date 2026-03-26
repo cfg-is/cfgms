@@ -12,7 +12,7 @@ CFGMS has a **comprehensive, production-aligned test infrastructure** that close
 
 ### 1.1 Test Infrastructure Organization
 
-#### Location: `/home/jrdn/git/cfg.is/cfgms/test/`
+#### Location: `test/`
 
 **Directory Structure:**
 
@@ -90,9 +90,9 @@ test/
 
 ### 1.4 CI/CD Test Setup
 
-**Note**: `.github/workflows/` directory does NOT exist in repository
+**Note**: GitHub Actions workflows are in `.github/workflows/` (CI orchestration via GitHub Actions + Makefile)
 
-**Test Orchestration**: All via Makefile targets (90+ test-related targets)
+**Test Orchestration**: Via Makefile targets and GitHub Actions workflows
 
 **Key CI Targets**:
 

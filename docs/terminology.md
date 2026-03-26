@@ -278,7 +278,7 @@ A managed system or service that a Steward is responsible for.
 
 ## Version Information
 
-- **Document Version:** 1.3
-- **Last Updated:** 2024-04-04
-- **Status:** Draft
-- **Changes:** Clarified deployment model for specialized Stewards
+- **Document Version:** 1.4
+- **Last Updated:** 2026-03-26
+- **Status:** Current
+- **Changes:** Updated communication diagrams to reflect gRPC-over-QUIC transport

@@ -462,4 +462,3 @@ E2E tests run in GitHub Actions via the Build Gate workflow:
 - **Transport Architecture**: [docs/architecture/communication-layer-migration.md](../architecture/communication-layer-migration.md)
 - **Home Lab Guide**: [docs/deployment/home-lab-deployment-guide.md](../deployment/home-lab-deployment-guide.md)
 - **Troubleshooting**: [docs/troubleshooting/connectivity.md](../troubleshooting/connectivity.md)
-- **Transport Architecture**: See [communication-layer-migration.md](../architecture/communication-layer-migration.md) for current transport design
