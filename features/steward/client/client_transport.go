@@ -25,6 +25,7 @@ import (
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/steward/commands"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // Register gRPC control plane provider
@@ -67,8 +68,8 @@ type TransportClient struct {
 	// Command handler
 	commandHandler *commands.Handler
 
-	// Configuration executor
-	configExecutor *stewardconfig.Executor
+	// Configuration executor (unified engine — same as standalone mode)
+	configExecutor *execution.Executor
 
 	// Configuration signature verifier
 	configVerifier signature.Verifier
@@ -152,12 +153,13 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 
 // InitializeConfigExecutor creates and initializes the configuration executor.
 // This must be called after the client is connected but before config sync.
+// Uses the unified execution engine (all 7 modules, Get→Compare→Set→Verify).
 func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
-	execCfg := &stewardconfig.Config{
+	execCfg := &execution.ExecutorConfig{
 		TenantID: tenantID,
 		Logger:   c.logger,
 	}
-	executor, err := stewardconfig.New(execCfg)
+	executor, err := execution.NewExecutor(execCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create config executor: %w", err)
 	}
