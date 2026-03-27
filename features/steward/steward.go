@@ -336,19 +336,23 @@ func (s *Steward) Start(ctx context.Context) error {
 	return s.startController(ctx)
 }
 
-// startStandalone starts the steward in standalone mode with immediate execution.
+// startStandalone starts the steward in standalone mode with a cfg-driven convergence loop.
 //
 // This method:
 //  1. Starts health monitoring in a background goroutine
-//  2. Executes the configuration immediately on startup
-//  3. Logs execution results and any errors
+//  2. Converges immediately on startup
+//  3. Starts the scheduled convergence loop at the interval defined in the cfg
 //
-// Configuration execution errors are logged but do not cause startup to fail,
-// allowing the steward to continue operating and retry later.
+// The convergence loop runs until the context is cancelled or Stop() is called.
+// Convergence errors are logged but do not stop the loop — the steward retries
+// at the next scheduled interval.
 func (s *Steward) startStandalone(ctx context.Context) error {
+	interval := config.GetConvergeInterval(s.standaloneConfig)
+
 	s.logger.Info("Starting steward in standalone mode",
 		"id", s.standaloneConfig.Steward.ID,
-		"resources", len(s.standaloneConfig.Resources))
+		"resources", len(s.standaloneConfig.Resources),
+		"converge_interval", interval)
 
 	// Start health monitoring in background
 	go func() {
@@ -358,22 +362,56 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 	// Give health monitor a moment to start
 	time.Sleep(50 * time.Millisecond)
 
-	// Execute configuration immediately on startup
+	// Converge immediately on startup
+	s.runConvergence(ctx)
+
+	// Start scheduled convergence loop
+	go s.convergenceLoop(ctx, interval)
+
+	s.logger.Info("Steward started successfully in standalone mode")
+	return nil
+}
+
+// runConvergence executes a single convergence pass against the current cfg.
+//
+// Applies the Get→Compare→Set→Verify cycle for every resource. Errors are
+// logged individually but do not abort the overall run — error handling
+// policy is controlled by the cfg's error_handling settings.
+func (s *Steward) runConvergence(ctx context.Context) {
+	s.logger.Info("Starting convergence run",
+		"id", s.standaloneConfig.Steward.ID,
+		"resources", len(s.standaloneConfig.Resources))
+
 	report := s.executionEngine.ExecuteConfiguration(ctx, s.standaloneConfig)
 
-	s.logger.Info("Initial configuration execution completed",
+	s.logger.Info("Convergence run completed",
 		"total", report.TotalResources,
 		"successful", report.SuccessfulCount,
 		"failed", report.FailedCount,
 		"skipped", report.SkippedCount)
 
-	// Log configuration execution errors but don't fail startup
 	for _, err := range report.Errors {
-		s.logger.Error("Configuration execution error", "error", err)
+		s.logger.Error("Convergence error", "error", err)
 	}
+}
 
-	s.logger.Info("Steward started successfully in standalone mode")
-	return nil
+// convergenceLoop runs scheduled convergence at the given interval until the
+// context is cancelled or shutdown is signalled.
+func (s *Steward) convergenceLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.shutdown:
+			return
+		case <-ticker.C:
+			s.logger.Info("Scheduled convergence triggered", "interval", interval)
+			s.runConvergence(ctx)
+		}
+	}
 }
 
 // startController starts the steward in controller mode with full gRPC integration.

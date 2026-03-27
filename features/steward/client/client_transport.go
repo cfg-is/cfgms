@@ -74,6 +74,14 @@ type TransportClient struct {
 	// Configuration signature verifier
 	configVerifier signature.Verifier
 
+	// Last configuration received from the controller (for scheduled re-convergence)
+	lastConfigYAML    []byte
+	lastConfigMu      sync.RWMutex
+	lastConfigVersion string
+
+	// Convergence loop control
+	convergenceStop chan struct{}
+
 	// Connection state — single flag for unified gRPC transport
 	connected bool
 
@@ -138,6 +146,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	c := &TransportClient{
 		heartbeatInterval: heartbeatInterval,
 		heartbeatStop:     make(chan struct{}),
+		convergenceStop:   make(chan struct{}),
 		transportAddress:  cfg.ControllerURL,
 		certPath:          cfg.TLSCertPath,
 		caCertPEM:         cfg.CACertPEM,
@@ -429,6 +438,14 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			return fmt.Errorf("failed to marshal config: %w", err)
 		}
 
+		// Store validated config for scheduled re-convergence runs.
+		// This is set before Apply so that even if Apply fails, the next
+		// scheduled convergence attempt uses the latest verified cfg.
+		c.lastConfigMu.Lock()
+		c.lastConfigYAML = configYAML
+		c.lastConfigVersion = version
+		c.lastConfigMu.Unlock()
+
 		report, err := executor.ApplyConfiguration(ctx, configYAML, version)
 		if err != nil {
 			c.logger.Error("Configuration application failed", "error", err)
@@ -645,6 +662,78 @@ func (c *TransportClient) ValidateConfiguration(
 	return nil, fmt.Errorf("configuration validation not yet supported via control plane provider")
 }
 
+// StartConvergenceLoop starts a background goroutine that re-converges against
+// the last-received cfg on the given interval.
+//
+// On each tick the loop calls TriggerConvergence, which re-applies the last
+// verified cfg using the unified execution engine. If no cfg has been received
+// yet the tick is skipped silently and the loop waits for the next interval.
+//
+// The loop stops when ctx is cancelled or Disconnect is called.
+func (c *TransportClient) StartConvergenceLoop(ctx context.Context, interval time.Duration) {
+	c.logger.Info("Starting scheduled convergence loop", "interval", interval)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.convergenceStop:
+				return
+			case <-ticker.C:
+				c.logger.Info("Scheduled convergence triggered", "interval", interval)
+				if err := c.TriggerConvergence(ctx); err != nil {
+					c.logger.Warn("Scheduled convergence failed", "error", err)
+				}
+			}
+		}
+	}()
+}
+
+// TriggerConvergence re-applies the last configuration received from the controller.
+//
+// This is called both by the scheduled convergence loop and can be used directly
+// for immediate convergence outside the normal schedule (e.g. after reconnecting).
+// Returns nil without error if no cfg has been received yet.
+func (c *TransportClient) TriggerConvergence(ctx context.Context) error {
+	c.lastConfigMu.RLock()
+	lastCfg := c.lastConfigYAML
+	lastVersion := c.lastConfigVersion
+	c.lastConfigMu.RUnlock()
+
+	if len(lastCfg) == 0 {
+		c.logger.Info("No configuration available yet, skipping convergence run")
+		return nil
+	}
+
+	c.mu.RLock()
+	executor := c.configExecutor
+	sid := c.stewardID
+	c.mu.RUnlock()
+
+	if executor == nil {
+		return fmt.Errorf("configuration executor not available")
+	}
+
+	c.logger.Info("Running convergence against last-received cfg", "version", lastVersion)
+
+	report, err := executor.ApplyConfiguration(ctx, lastCfg, lastVersion)
+	if err != nil {
+		return fmt.Errorf("convergence failed: %w", err)
+	}
+
+	if report != nil {
+		report.StewardID = sid
+		if pubErr := c.publishConfigStatus(report); pubErr != nil {
+			c.logger.Warn("Failed to publish convergence status", "error", pubErr)
+		}
+	}
+
+	c.logger.Info("Convergence run completed", "version", lastVersion, "status", report.Status)
+	return nil
+}
+
 // Disconnect closes all gRPC connections to the controller.
 func (c *TransportClient) Disconnect(ctx context.Context) error {
 	c.logger.Info("Disconnecting from controller")
@@ -652,8 +741,9 @@ func (c *TransportClient) Disconnect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Stop heartbeat
+	// Stop heartbeat and convergence loop
 	close(c.heartbeatStop)
+	close(c.convergenceStop)
 
 	// Close data plane session
 	if c.dataPlaneSession != nil {
@@ -863,4 +953,3 @@ func (c *TransportClient) startHeartbeat() {
 		}
 	}
 }
-

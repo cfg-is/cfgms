@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -484,4 +485,95 @@ func TestValidateEnvVars(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConvergeIntervalDefault(t *testing.T) {
+	cfg := StewardConfig{
+		Steward: StewardSettings{
+			ID: "test-steward",
+		},
+	}
+	applyDefaults(&cfg)
+	assert.Equal(t, "30m", cfg.Steward.ConvergeInterval)
+}
+
+func TestConvergeIntervalValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval string
+		wantErr  bool
+	}{
+		{"valid 30m", "30m", false},
+		{"valid 5m", "5m", false},
+		{"valid 1h", "1h", false},
+		{"valid 45s", "45s", false},
+		{"invalid string", "invalid", true},
+		{"zero duration", "0s", true},
+		{"negative duration", "-5m", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := StewardConfig{
+				Steward: StewardSettings{
+					ID:               "test-steward",
+					Mode:             ModeStandalone,
+					Logging:          LoggingConfig{Level: "info"},
+					ConvergeInterval: tt.interval,
+				},
+			}
+			err := ValidateConfiguration(cfg)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestGetConvergeInterval(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval string
+		expected time.Duration
+	}{
+		{"30m returns 30 minutes", "30m", 30 * time.Minute},
+		{"5m returns 5 minutes", "5m", 5 * time.Minute},
+		{"1h returns 1 hour", "1h", time.Hour},
+		{"empty falls back to default", "", 30 * time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := StewardConfig{
+				Steward: StewardSettings{
+					ConvergeInterval: tt.interval,
+				},
+			}
+			assert.Equal(t, tt.expected, GetConvergeInterval(cfg))
+		})
+	}
+}
+
+func TestConvergeIntervalInConfigFile(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  converge_interval: 15m
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err)
+	assert.Equal(t, "15m", cfg.Steward.ConvergeInterval)
+	assert.Equal(t, 15*time.Minute, GetConvergeInterval(cfg))
 }
