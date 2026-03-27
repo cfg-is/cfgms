@@ -80,7 +80,8 @@ type TransportClient struct {
 	lastConfigVersion string
 
 	// Convergence loop control
-	convergenceStop chan struct{}
+	convergenceStop  chan struct{}
+	convergeInterval time.Duration // cfg-driven; updated on each sync_config
 
 	// Connection state — single flag for unified gRPC transport
 	connected bool
@@ -147,6 +148,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		heartbeatInterval: heartbeatInterval,
 		heartbeatStop:     make(chan struct{}),
 		convergenceStop:   make(chan struct{}),
+		convergeInterval:  30 * time.Minute,
 		transportAddress:  cfg.ControllerURL,
 		certPath:          cfg.TLSCertPath,
 		caCertPEM:         cfg.CACertPEM,
@@ -428,6 +430,13 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			return fmt.Errorf("configuration executor not available")
 		}
 
+		// Update convergence interval from the received cfg so the scheduled
+		// loop respects the controller-delivered converge_interval value.
+		newInterval := stewardconfig.GetConvergeInterval(*goConfig)
+		c.mu.Lock()
+		c.convergeInterval = newInterval
+		c.mu.Unlock()
+
 		// Marshal to YAML for executor
 		configYAML, err := yaml.Marshal(goConfig)
 		if err != nil {
@@ -663,14 +672,23 @@ func (c *TransportClient) ValidateConfiguration(
 }
 
 // StartConvergenceLoop starts a background goroutine that re-converges against
-// the last-received cfg on the given interval.
+// the last-received cfg on a schedule driven by the cfg's converge_interval field.
+//
+// The initial interval defaults to 30 minutes and is updated automatically
+// whenever a sync_config command delivers a cfg with a different converge_interval
+// value. The ticker is reset when the interval changes so that the new value
+// takes effect on the next tick.
 //
 // On each tick the loop calls TriggerConvergence, which re-applies the last
 // verified cfg using the unified execution engine. If no cfg has been received
 // yet the tick is skipped silently and the loop waits for the next interval.
 //
 // The loop stops when ctx is cancelled or Disconnect is called.
-func (c *TransportClient) StartConvergenceLoop(ctx context.Context, interval time.Duration) {
+func (c *TransportClient) StartConvergenceLoop(ctx context.Context) {
+	c.mu.RLock()
+	interval := c.convergeInterval
+	c.mu.RUnlock()
+
 	c.logger.Info("Starting scheduled convergence loop", "interval", interval)
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -682,6 +700,16 @@ func (c *TransportClient) StartConvergenceLoop(ctx context.Context, interval tim
 			case <-c.convergenceStop:
 				return
 			case <-ticker.C:
+				// Re-read the interval on every tick so that a cfg delivery
+				// with a different converge_interval takes effect promptly.
+				c.mu.RLock()
+				current := c.convergeInterval
+				c.mu.RUnlock()
+				if current != interval {
+					interval = current
+					ticker.Reset(interval)
+					c.logger.Info("Convergence interval updated", "interval", interval)
+				}
 				c.logger.Info("Scheduled convergence triggered", "interval", interval)
 				if err := c.TriggerConvergence(ctx); err != nil {
 					c.logger.Warn("Scheduled convergence failed", "error", err)
@@ -728,9 +756,10 @@ func (c *TransportClient) TriggerConvergence(ctx context.Context) error {
 		if pubErr := c.publishConfigStatus(report); pubErr != nil {
 			c.logger.Warn("Failed to publish convergence status", "error", pubErr)
 		}
+		c.logger.Info("Convergence run completed", "version", lastVersion, "status", report.Status)
+	} else {
+		c.logger.Info("Convergence run completed", "version", lastVersion)
 	}
-
-	c.logger.Info("Convergence run completed", "version", lastVersion, "status", report.Status)
 	return nil
 }
 
