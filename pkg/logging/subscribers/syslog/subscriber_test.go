@@ -17,6 +17,17 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
 
+// TestMain skips the entire package when no local syslog daemon is present.
+// The syslog subscriber requires a running syslog daemon (/dev/log socket on Linux)
+// that is absent in most container environments.
+func TestMain(m *testing.M) {
+	if _, err := os.Stat("/dev/log"); os.IsNotExist(err) {
+		// No syslog daemon — skip package entirely
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
 func TestNewSyslogSubscriber(t *testing.T) {
 	subscriber := NewSyslogSubscriber()
 

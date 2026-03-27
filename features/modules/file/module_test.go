@@ -115,7 +115,7 @@ permissions: 9999`,
 			wantErr: true,
 		},
 		{
-			name: "Invalid owner",
+			name:       "Invalid owner",
 			configData: testFileConfigYAML(testContent, "nonexistentuser", ""),
 			wantErr:    true,
 		},

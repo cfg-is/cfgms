@@ -16,9 +16,9 @@ The steward is a daemon that maintains a device in the state described by its cf
 1. **Load cfg** — Find and parse the `hostname.cfg` file (local file, or last-known cfg from controller)
 2. **Discover modules** — Scan module paths, load available modules, validate that all modules referenced in the cfg are available
 3. **Initial convergence** — Evaluate every resource in the cfg immediately (apply or monitor, depending on mode)
-4. **Collect DNA** — Gather device identity and attributes (hardware, software, network, security)
-5. **Connect to controller** (if configured) — Establish a gRPC-over-QUIC transport connection. Check for cfg updates
-6. **Start schedule** — Begin the compliance re-check loop on the interval defined in the cfg
+4. **Start convergence schedule** — Begin the compliance re-check loop at the interval defined by `converge_interval` in the cfg (default: 30 minutes)
+5. **Collect DNA** — Gather device identity and attributes (hardware, software, network, security)
+6. **Connect to controller** (if configured) — Establish a gRPC-over-QUIC transport connection. Check for cfg updates
 
 ### Normal Operation
 
@@ -61,11 +61,11 @@ This is the steward's core activity. It runs on startup, on schedule, and in res
 
 | Trigger | Description |
 |---------|-------------|
-| **Startup** | Full convergence immediately on start |
-| **Schedule** | Periodic re-check at the interval defined in the cfg |
+| **Startup** | Full convergence immediately on start (both standalone and controller-connected) |
+| **Schedule** | Periodic re-check at the `converge_interval` defined in the cfg (default: 30 minutes) |
 | **Cfg change** | New cfg received from controller, or local cfg file modified |
 | **Event hook** | Module-defined monitor detects a relevant change (e.g., file modified, service stopped) |
-| **Controller command** | Controller sends "sync now" — an optimization, not a dependency |
+| **Controller command** | Controller sends `sync_config` — immediate convergence trigger, an optimization not a dependency |
 
 ### Per-Resource Cycle
 
@@ -224,6 +224,18 @@ When the controller connection is lost:
 3. When connection is restored, queued reports are delivered in order
 4. Controller rebuilds its view of this steward from the resynced reports
 
+## Controller Channel
+
+The controller channel is an **additive overlay** on top of the convergence loop, not a replacement for it. A controller-connected steward behaves identically to a standalone steward for all convergence operations — the connection adds:
+
+1. **Cfg delivery** — the controller pushes cfg updates over the gRPC data plane
+2. **Near-real-time reporting** — convergence results, events, and heartbeats are forwarded upstream
+3. **Out-of-band `sync_config` trigger** — the controller can request immediate convergence (optimization only; the loop continues on schedule regardless)
+
+If the controller connection is lost, the steward continues converging on schedule against its last-received cfg and queues reports locally until reconnection.
+
+The `--regtoken` flag establishes the controller channel — it does not change the steward's fundamental convergence behaviour.
+
 ## Controller-Connected Capabilities
 
 These behaviors require an active controller connection and are not available in standalone mode.
@@ -263,6 +275,16 @@ How a steward joins a controller.
 
 After initial registration, the steward reconnects automatically on restart using its stored certificates. The registration token is only used once.
 
+## Cfg Fields Governing Convergence
+
+The convergence loop behaviour is controlled by fields in the cfg:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `steward.converge_interval` | `30m` | How often the steward re-converges against the cfg. Accepts any Go duration string: `"5m"`, `"30m"`, `"1h"`, etc. |
+
+Industry reference intervals: CFEngine 5 min, DSC 15 min, Chef/Puppet 30 min.
+
 ## Deployment-Independent Behavior
 
 The steward binary is the same in every deployment. The table below shows which behaviors are active in each mode:
@@ -271,7 +293,7 @@ The steward binary is the same in every deployment. The table below shows which 
 |----------|------------|---------------------|
 | Load and parse cfg | Local file | Pushed by controller, stored locally |
 | Convergence loop (apply/monitor) | Yes | Yes |
-| Scheduled re-check | Yes | Yes |
+| Scheduled re-check (`converge_interval`) | Yes | Yes (default 30m until cfg received) |
 | Event hooks | Yes | Yes |
 | DNA collection | Yes | Yes |
 | Health monitoring | Yes | Yes |

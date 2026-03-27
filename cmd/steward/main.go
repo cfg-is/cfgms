@@ -181,6 +181,13 @@ func runSteward(ctx context.Context, regToken, configPath, opMode, logLevel, log
 			"operation", "steward_mode",
 			"mode", "grpc_transport")
 
+		// Start scheduled convergence loop. The initial interval defaults to
+		// 30 minutes. When the controller delivers a cfg, the loop reads
+		// converge_interval from it and resets the ticker accordingly.
+		// sync_config commands from the controller also trigger immediate
+		// convergence as an out-of-band optimization on top of the schedule.
+		transportCl.StartConvergenceLoop(ctx)
+
 		// Wait for context cancellation (signal or SCM stop).
 		<-ctx.Done()
 		logger.Info("Shutdown signal received, disconnecting...",

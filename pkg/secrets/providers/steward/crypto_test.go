@@ -13,7 +13,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func requireMachineID(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "linux" {
+		if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
+			t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
+		}
+	}
+}
+
 func TestPlatformEncryptor_RoundTrip(t *testing.T) {
+	requireMachineID(t)
 	tmpDir := t.TempDir()
 
 	enc, err := newPlatformEncryptor(tmpDir)
@@ -49,6 +59,7 @@ func TestPlatformEncryptor_RoundTrip(t *testing.T) {
 }
 
 func TestPlatformEncryptor_DifferentCiphertexts(t *testing.T) {
+	requireMachineID(t)
 	tmpDir := t.TempDir()
 
 	enc, err := newPlatformEncryptor(tmpDir)
@@ -77,6 +88,7 @@ func TestPlatformEncryptor_DifferentCiphertexts(t *testing.T) {
 }
 
 func TestPlatformEncryptor_TamperedCiphertext(t *testing.T) {
+	requireMachineID(t)
 	tmpDir := t.TempDir()
 
 	enc, err := newPlatformEncryptor(tmpDir)
@@ -95,6 +107,7 @@ func TestPlatformEncryptor_TamperedCiphertext(t *testing.T) {
 }
 
 func TestPlatformEncryptor_Algorithm(t *testing.T) {
+	requireMachineID(t)
 	tmpDir := t.TempDir()
 
 	enc, err := newPlatformEncryptor(tmpDir)

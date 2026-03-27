@@ -55,6 +55,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -149,6 +150,11 @@ type StewardSettings struct {
 
 	// Secrets configures the steward secret store
 	Secrets SecretsConfig `yaml:"secrets,omitempty"`
+
+	// ConvergeInterval is how often the steward re-converges against the cfg
+	// (e.g. "30m", "5m", "1h"). Defaults to "30m" when not specified.
+	// Applies in both standalone and controller-connected modes.
+	ConvergeInterval string `yaml:"converge_interval,omitempty"`
 }
 
 // SecretsConfig defines configuration for steward-side secret storage.
@@ -380,6 +386,11 @@ func applyDefaults(config *StewardConfig) {
 		config.Steward.ErrorHandling.ConfigurationError = ActionFail
 	}
 
+	// Set default convergence interval
+	if config.Steward.ConvergeInterval == "" {
+		config.Steward.ConvergeInterval = "30m"
+	}
+
 	// Set default steward ID if not provided
 	if config.Steward.ID == "" {
 		if hostname, err := os.Hostname(); err == nil {
@@ -418,6 +429,17 @@ func ValidateConfiguration(config StewardConfig) error {
 		return fmt.Errorf("invalid log level: %s", config.Steward.Logging.Level)
 	}
 
+	// Validate convergence interval (only when explicitly set; empty means default will apply)
+	if config.Steward.ConvergeInterval != "" {
+		d, err := time.ParseDuration(config.Steward.ConvergeInterval)
+		if err != nil {
+			return fmt.Errorf("invalid converge_interval %q: must be a valid duration (e.g. \"30m\", \"5m\", \"1h\")", config.Steward.ConvergeInterval)
+		}
+		if d <= 0 {
+			return fmt.Errorf("converge_interval must be positive, got %q", config.Steward.ConvergeInterval)
+		}
+	}
+
 	// Validate resources
 	resourceNames := make(map[string]bool)
 	for i, resource := range config.Resources {
@@ -440,6 +462,20 @@ func ValidateConfiguration(config StewardConfig) error {
 	}
 
 	return nil
+}
+
+// GetConvergeInterval returns the parsed convergence interval for this configuration.
+// Falls back to 30 minutes if the field is empty or unparseable (should not happen
+// after validation, but guards against direct struct construction in tests).
+func GetConvergeInterval(cfg StewardConfig) time.Duration {
+	if cfg.Steward.ConvergeInterval == "" {
+		return 30 * time.Minute
+	}
+	d, err := time.ParseDuration(cfg.Steward.ConvergeInterval)
+	if err != nil || d <= 0 {
+		return 30 * time.Minute
+	}
+	return d
 }
 
 // GetConfiguredModules returns a list of module names required by the configuration

@@ -5,6 +5,7 @@ package saas
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -414,6 +415,14 @@ func TestMicrosoftMultiTenantProvider_StartAdminConsent(t *testing.T) {
 }
 
 func TestMicrosoftMultiTenantProvider_CreateInTenant(t *testing.T) {
+	// This test makes real HTTP calls to graph.microsoft.com.
+	// Skip when running without external network access (e.g. CI containers).
+	conn, dialErr := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(context.Background(), "tcp", "graph.microsoft.com:443")
+	if dialErr != nil {
+		t.Skipf("skipping: graph.microsoft.com unreachable (%v)", dialErr)
+	}
+	_ = conn.Close()
+
 	credStore := NewMockCredentialStore()
 	httpClient := &http.Client{}
 	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
@@ -446,7 +455,7 @@ func TestMicrosoftMultiTenantProvider_CreateInTenant(t *testing.T) {
 
 	// The mock implementation should return success
 	assert.NoError(t, err)
-	assert.NotNil(t, result)
+	require.NotNil(t, result)
 
 	// Debug: Print result details if test fails
 	if !result.Success {
