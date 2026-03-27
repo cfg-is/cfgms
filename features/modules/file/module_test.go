@@ -53,6 +53,22 @@ func getTestUser(t *testing.T) (string, string) {
 	}
 }
 
+// testFileConfigYAML returns a file config YAML string appropriate for the platform.
+// On Windows, omits permissions since NTFS does not support Unix permission bits.
+func testFileConfigYAML(content, owner, group string) string {
+	cfg := `content: "` + content + `"`
+	if platformSupportsPermissions() {
+		cfg += "\npermissions: 420"
+	}
+	if owner != "" {
+		cfg += "\nowner: " + owner
+	}
+	if group != "" {
+		cfg += "\ngroup: " + group
+	}
+	return cfg
+}
+
 func TestFileModule(t *testing.T) {
 	// Create a temporary directory for test files
 	tempDir := t.TempDir()
@@ -70,20 +86,16 @@ func TestFileModule(t *testing.T) {
 		wantErr    bool
 	}{
 		{
-			name: "Create new file",
-			configData: `content: "` + testContent + `"
-permissions: 420`,
+			name:       "Create new file",
+			configData: testFileConfigYAML(testContent, "", ""),
 			cleanup: func() error {
 				return os.Remove(testFile)
 			},
 			wantErr: false,
 		},
 		{
-			name: "Create file with ownership",
-			configData: `content: "` + testContent + `"
-permissions: 420
-owner: ` + testUser + `
-group: ` + testGroup,
+			name:       "Create file with ownership",
+			configData: testFileConfigYAML(testContent, testUser, testGroup),
 			cleanup: func() error {
 				return os.Remove(testFile)
 			},
@@ -93,6 +105,7 @@ group: ` + testGroup,
 			name: "Invalid content (empty)",
 			configData: `content: ""
 permissions: 420`,
+			// On Windows, permissions error fires before content validation
 			wantErr: true,
 		},
 		{
@@ -103,16 +116,12 @@ permissions: 9999`,
 		},
 		{
 			name: "Invalid owner",
-			configData: `content: "` + testContent + `"
-permissions: 420
-owner: nonexistentuser`,
-			wantErr: true,
+			configData: testFileConfigYAML(testContent, "nonexistentuser", ""),
+			wantErr:    true,
 		},
 		{
-			name: "Invalid group",
-			configData: `content: "` + testContent + `"
-permissions: 420
-group: nonexistentgroup`,
+			name:       "Invalid group",
+			configData: testFileConfigYAML(testContent, "", "nonexistentgroup"),
 			// Windows doesn't have Unix groups, so this won't error on Windows
 			wantErr: runtime.GOOS != "windows",
 		},
@@ -177,8 +186,7 @@ func TestFileModule_EdgeCases(t *testing.T) {
 	module := New()
 
 	// Test with empty resource ID
-	configData := `content: "test content"
-permissions: 420`
+	configData := testFileConfigYAML("test content", "", "")
 	configState := createConfigFromYAML(configData)
 
 	err := module.Set(context.Background(), "", configState)
@@ -196,9 +204,11 @@ permissions: 420`
 	}
 
 	// Test file creation and verification
-	configData = `content: "test content for verification"
-permissions: 493`
-	configState = createConfigFromYAML(configData)
+	verifyConfig := `content: "test content for verification"`
+	if platformSupportsPermissions() {
+		verifyConfig += "\npermissions: 493"
+	}
+	configState = createConfigFromYAML(verifyConfig)
 
 	err = module.Set(context.Background(), testFile, configState)
 	if err != nil {
@@ -226,5 +236,24 @@ permissions: 493`
 		if info.Mode().Perm() != expectedPerms {
 			t.Errorf("File permissions mismatch: got %v, want %v", info.Mode().Perm(), expectedPerms)
 		}
+	}
+}
+
+func TestFileModule_PermissionsRejectedOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only test")
+	}
+
+	tempDir := t.TempDir()
+	testFile := filepath.Join(tempDir, "test.txt")
+	module := New()
+
+	configData := `content: "test content"
+permissions: 420`
+	configState := createConfigFromYAML(configData)
+
+	err := module.Set(context.Background(), testFile, configState)
+	if err == nil {
+		t.Error("Set() with Unix permissions on Windows should fail")
 	}
 }

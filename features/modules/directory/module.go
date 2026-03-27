@@ -88,7 +88,7 @@ func (c *directoryConfig) Validate() error {
 func (c *directoryConfig) GetManagedFields() []string {
 	fields := []string{"state", "path"}
 
-	if c.State != "absent" {
+	if c.State != "absent" && platformSupportsPermissions() {
 		fields = append(fields, "permissions")
 	}
 
@@ -180,9 +180,14 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		dirConfig.Recursive = recursive
 	}
 
-	// Apply default permissions if not specified (0755 is a safe default for directories)
+	// Platform-specific permissions handling
+	if !platformSupportsPermissions() && dirConfig.Permissions != 0 {
+		return fmt.Errorf("Unix-style permissions are not supported on this platform (NTFS uses ACLs); remove the permissions field from your configuration")
+	}
+
+	// Apply default permissions if not specified
 	if dirConfig.Permissions == 0 {
-		dirConfig.Permissions = 0755
+		dirConfig.Permissions = int(defaultDirectoryMode())
 	}
 
 	// Validate configuration
@@ -231,14 +236,16 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		return ErrNotADirectory
 	}
 
-	// Set permissions
-	// Validate permissions are within os.FileMode range (check again for existing directories)
-	if dirConfig.Permissions < 0 || dirConfig.Permissions > 0777 {
-		return modules.ErrInvalidInput
-	}
-	fileMode := os.FileMode(dirConfig.Permissions) // Safe: bounds validated above
-	if err := os.Chmod(dirConfig.Path, fileMode); err != nil {
-		return fmt.Errorf("failed to set permissions: %w", err)
+	// Set permissions (only meaningful on platforms that support Unix permission bits)
+	if platformSupportsPermissions() {
+		// Validate permissions are within os.FileMode range (check again for existing directories)
+		if dirConfig.Permissions < 0 || dirConfig.Permissions > 0777 {
+			return modules.ErrInvalidInput
+		}
+		fileMode := os.FileMode(dirConfig.Permissions) // Safe: bounds validated above
+		if err := os.Chmod(dirConfig.Path, fileMode); err != nil {
+			return fmt.Errorf("failed to set permissions: %w", err)
+		}
 	}
 
 	// Set ownership if specified
@@ -311,8 +318,8 @@ func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.C
 		return nil, ErrNotADirectory
 	}
 
-	// Get current permissions
-	perms := info.Mode().Perm()
+	// Get current permissions (platform-aware)
+	perms := getDirectoryPermissions(info)
 
 	// Get current ownership (cross-platform)
 	ownerName, groupName, err := getFileOwnership(info)
@@ -323,7 +330,7 @@ func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.C
 	config := &directoryConfig{
 		State:       "present",
 		Path:        resourceID,
-		Permissions: int(perms),
+		Permissions: perms,
 		Owner:       ownerName,
 		Group:       groupName,
 	}
