@@ -20,9 +20,12 @@ import (
 // testFileConfig returns a file resource config appropriate for the current platform.
 // On Unix, includes permissions (0644 = 420 decimal). On Windows, omits permissions
 // since NTFS does not support Unix-style permission bits.
+// Always includes "state": "present" so the genericConfigState comparator has a
+// managed field to compare (path is excluded as an identifier field).
 func testFileConfig(path, content string) string {
 	if runtime.GOOS == "windows" {
 		return `{
+        "state": "present",
         "path": "` + filepath.ToSlash(path) + `",
         "content": "` + content + `"
       }`
@@ -36,9 +39,12 @@ func testFileConfig(path, content string) string {
 
 // testDirConfig returns a directory resource config appropriate for the current platform.
 // On Unix, includes permissions (0755 = 493 decimal). On Windows, omits permissions.
+// Always includes "state": "present" so the genericConfigState comparator has a
+// managed field to compare (path is excluded as an identifier field).
 func testDirConfig(path string) string {
 	if runtime.GOOS == "windows" {
 		return `{
+        "state": "present",
         "path": "` + filepath.ToSlash(path) + `"
       }`
 	}
