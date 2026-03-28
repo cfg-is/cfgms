@@ -89,6 +89,9 @@ func TestCollectHardwareInfo(t *testing.T) {
 }
 
 func TestCollectSoftwareInfo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping software collection in short mode — WMI enumeration on Windows takes 6+ minutes")
+	}
 	logger := logging.NewLogger("debug")
 	collector := NewCollector(logger)
 
