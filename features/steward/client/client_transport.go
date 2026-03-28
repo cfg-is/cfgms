@@ -90,6 +90,10 @@ type TransportClient struct {
 	heartbeatInterval time.Duration
 	heartbeatStop     chan struct{}
 
+	// offlineQueue persists reports locally when the controller is unreachable.
+	// Issue #419: drained in order after a successful reconnect.
+	offlineQueue *OfflineQueue
+
 	// Logger
 	logger logging.Logger
 }
@@ -126,6 +130,20 @@ type TransportConfig struct {
 	// HeartbeatInterval for periodic heartbeats
 	HeartbeatInterval time.Duration
 
+	// QueueDir is the directory used to persist the offline report queue.
+	// If empty the queue operates in-memory only (events are lost on restart).
+	// Issue #419: set this to a stable path (e.g. steward data directory) for
+	// durable offline queueing across restarts.
+	QueueDir string
+
+	// MaxQueueSize is the maximum number of events to retain in the offline
+	// queue before the oldest is evicted. Defaults to 1000.
+	MaxQueueSize int
+
+	// MaxQueueAge is the maximum time an event is kept in the offline queue
+	// before being discarded. Defaults to 24 hours.
+	MaxQueueAge time.Duration
+
 	// Logger for client logging
 	Logger logging.Logger
 }
@@ -144,6 +162,17 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		heartbeatInterval = 30 * time.Second
 	}
 
+	// Initialize offline queue for durable report persistence (Issue #419).
+	offlineQueue, err := NewOfflineQueue(OfflineQueueConfig{
+		Dir:     cfg.QueueDir,
+		MaxSize: cfg.MaxQueueSize,
+		MaxAge:  cfg.MaxQueueAge,
+		Logger:  cfg.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize offline queue: %w", err)
+	}
+
 	c := &TransportClient{
 		heartbeatInterval: heartbeatInterval,
 		heartbeatStop:     make(chan struct{}),
@@ -156,6 +185,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		clientKeyPEM:      cfg.ClientKeyPEM,
 		serverCertPEM:     cfg.ServerCertPEM,
 		signingCertPEM:    cfg.SigningCertPEM,
+		offlineQueue:      offlineQueue,
 		logger:            cfg.Logger,
 	}
 
@@ -306,6 +336,11 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	c.connected = true
 	c.mu.Unlock()
 
+	// Drain any events queued during the offline period (Issue #419).
+	// Done synchronously before starting the heartbeat so the controller
+	// receives a complete history before the next heartbeat arrives.
+	c.drainOfflineQueue(ctx)
+
 	// Start heartbeat
 	go c.startHeartbeat()
 
@@ -316,16 +351,11 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 // setupCommandHandler creates and configures the command handler with all command types.
 // Story #516: connect_dataplane handler removed — DP is initialized eagerly in Connect().
 func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID string) (*commands.Handler, error) {
-	// Create status callback that publishes events via gRPC control plane provider
+	// Create status callback that publishes events via the offline-queued path
+	// so events are not lost if the controller is temporarily unreachable (Issue #419).
 	statusCallback := func(ctx context.Context, event *cpTypes.Event) {
-		c.mu.RLock()
-		cp := c.controlPlane
-		c.mu.RUnlock()
-
-		if cp != nil {
-			if err := cp.PublishEvent(ctx, event); err != nil {
-				c.logger.Error("Failed to publish status event", "error", err)
-			}
+		if err := c.publishEventWithQueue(ctx, event); err != nil {
+			c.logger.Error("Failed to publish status event", "error", err)
 		}
 	}
 
@@ -571,19 +601,15 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 }
 
 // PublishDNAUpdate publishes DNA changes to the controller via the gRPC control plane provider.
+// If the controller is unreachable the event is queued locally and delivered on reconnect (Issue #419).
 func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dna map[string]string, configHash, syncFingerprint string) error {
 	c.mu.RLock()
 	stewardID := c.stewardID
 	tenantID := c.tenantID
-	cp := c.controlPlane
 	c.mu.RUnlock()
 
 	if stewardID == "" {
 		return fmt.Errorf("not registered")
-	}
-
-	if cp == nil {
-		return fmt.Errorf("control plane not connected")
 	}
 
 	event := &cpTypes.Event{
@@ -599,7 +625,7 @@ func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dna map[string]s
 		},
 	}
 
-	if err := cp.PublishEvent(ctx, event); err != nil {
+	if err := c.publishEventWithQueue(ctx, event); err != nil {
 		return fmt.Errorf("failed to publish DNA update: %w", err)
 	}
 
@@ -614,6 +640,7 @@ func (c *TransportClient) publishConfigStatus(report *cpTypes.ConfigStatusReport
 }
 
 // ReportConfigurationStatus reports detailed configuration execution status to the controller.
+// If the controller is unreachable the report is queued locally and delivered on reconnect (Issue #419).
 func (c *TransportClient) ReportConfigurationStatus(
 	ctx context.Context,
 	configVersion string,
@@ -624,15 +651,10 @@ func (c *TransportClient) ReportConfigurationStatus(
 	c.mu.RLock()
 	stewardID := c.stewardID
 	tenantID := c.tenantID
-	cp := c.controlPlane
 	c.mu.RUnlock()
 
 	if stewardID == "" {
 		return fmt.Errorf("not registered")
-	}
-
-	if cp == nil {
-		return fmt.Errorf("control plane not connected")
 	}
 
 	event := &cpTypes.Event{
@@ -649,7 +671,7 @@ func (c *TransportClient) ReportConfigurationStatus(
 		},
 	}
 
-	if err := cp.PublishEvent(ctx, event); err != nil {
+	if err := c.publishEventWithQueue(ctx, event); err != nil {
 		return fmt.Errorf("failed to publish config status: %w", err)
 	}
 
@@ -964,7 +986,66 @@ func (c *TransportClient) createTLSConfig() (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
+// publishEventWithQueue attempts to publish an event via the control plane.
+// If the control plane is unavailable or the publish fails, the event is
+// queued locally for delivery when the connection is restored (Issue #419).
+//
+// Returns nil when the event was either published or queued successfully.
+// Returns an error only when the control plane is unavailable AND no offline
+// queue is configured.
+func (c *TransportClient) publishEventWithQueue(ctx context.Context, event *cpTypes.Event) error {
+	c.mu.RLock()
+	cp := c.controlPlane
+	q := c.offlineQueue
+	c.mu.RUnlock()
+
+	if cp != nil {
+		if err := cp.PublishEvent(ctx, event); err == nil {
+			return nil
+		}
+		// Fall through to queue the event.
+		c.logger.Warn("Failed to publish event to controller, queuing for later delivery",
+			"event_id", event.ID, "event_type", event.Type)
+	}
+
+	if q != nil {
+		if q.Enqueue(event) {
+			c.logger.Info("Event queued for offline delivery",
+				"event_id", event.ID, "event_type", event.Type, "queue_depth", q.Len())
+		}
+		return nil
+	}
+
+	return fmt.Errorf("control plane unavailable and no offline queue configured")
+}
+
+// drainOfflineQueue delivers all queued events to the controller in order.
+// Called immediately after a successful Connect() to resync reports that
+// accumulated during any offline period (Issue #419).
+func (c *TransportClient) drainOfflineQueue(ctx context.Context) {
+	c.mu.RLock()
+	q := c.offlineQueue
+	cp := c.controlPlane
+	c.mu.RUnlock()
+
+	if q == nil || q.Len() == 0 {
+		return
+	}
+
+	depth := q.Len()
+	c.logger.Info("Draining offline event queue after reconnect", "depth", depth)
+
+	delivered := q.Drain(func(event *cpTypes.Event) error {
+		return cp.PublishEvent(ctx, event)
+	})
+
+	c.logger.Info("Offline queue drain complete",
+		"delivered", delivered, "remaining", q.Len())
+}
+
 // startHeartbeat starts the periodic heartbeat goroutine.
+// After each successful heartbeat, any events queued during a transient
+// offline period are drained so the controller receives them promptly (Issue #419).
 func (c *TransportClient) startHeartbeat() {
 	ticker := time.NewTicker(c.heartbeatInterval)
 	defer ticker.Stop()
@@ -977,6 +1058,10 @@ func (c *TransportClient) startHeartbeat() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := c.SendHeartbeat(ctx, "healthy", nil); err != nil {
 				c.logger.Warn("Failed to send heartbeat", "error", err)
+			} else {
+				// Heartbeat succeeded — drain any events queued during a
+				// transient disconnect that did not trigger a full reconnect.
+				c.drainOfflineQueue(ctx)
 			}
 			cancel()
 		}
