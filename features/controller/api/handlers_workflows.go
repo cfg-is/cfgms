@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -147,7 +148,9 @@ func (h *WorkflowHandler) handleCreateWorkflow(w http.ResponseWriter, r *http.Re
 	}
 
 	store := h.workflowStoreForRequest(r)
-	nameForLog := logging.SanitizeLogValue(req.Name)
+	// Apply strings.ReplaceAll directly after SanitizeLogValue so CodeQL's taint analysis
+	// recognises the CWE-117 sanitisation at the variable assignment site (not inside a wrapper).
+	nameForLog := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(req.Name), "\n", "_"), "\r", "_")
 	if err := store.StoreWorkflow(r.Context(), vw); err != nil {
 		h.logger.Error("Failed to create workflow", "name", nameForLog, "error", err)
 		h.sendError(w, http.StatusInternalServerError, "failed to create workflow")
@@ -170,7 +173,7 @@ func (h *WorkflowHandler) handleGetWorkflow(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	nameForLog := logging.SanitizeLogValue(name)
+	nameForLog := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(name), "\n", "_"), "\r", "_")
 	store := h.workflowStoreForRequest(r)
 	vw, err := store.GetLatestWorkflow(r.Context(), name)
 	if err != nil {
@@ -228,7 +231,7 @@ func (h *WorkflowHandler) handleUpdateWorkflow(w http.ResponseWriter, r *http.Re
 		SemanticVersion: *semver,
 	}
 
-	nameForLog := logging.SanitizeLogValue(name)
+	nameForLog := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(name), "\n", "_"), "\r", "_")
 	store := h.workflowStoreForRequest(r)
 	if err := store.StoreWorkflow(r.Context(), vw); err != nil {
 		h.logger.Error("Failed to update workflow", "name", nameForLog, "error", err)
@@ -252,7 +255,7 @@ func (h *WorkflowHandler) handleDeleteWorkflow(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	nameForLog := logging.SanitizeLogValue(name)
+	nameForLog := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(name), "\n", "_"), "\r", "_")
 	store := h.workflowStoreForRequest(r)
 
 	// Retrieve all versions to delete
@@ -269,7 +272,7 @@ func (h *WorkflowHandler) handleDeleteWorkflow(w http.ResponseWriter, r *http.Re
 
 	for _, vw := range versions {
 		if err := store.DeleteWorkflow(r.Context(), name, vw.SemanticVersion); err != nil {
-			versionForLog := logging.SanitizeLogValue(vw.SemanticVersion.String())
+			versionForLog := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(vw.SemanticVersion.String()), "\n", "_"), "\r", "_")
 			h.logger.Error("Failed to delete workflow version", "name", nameForLog, "version", versionForLog, "error", err)
 			h.sendError(w, http.StatusInternalServerError, "failed to delete workflow")
 			return
@@ -313,7 +316,7 @@ func (h *WorkflowHandler) handleExecuteWorkflow(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	nameForLog := logging.SanitizeLogValue(name)
+	nameForLog := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(name), "\n", "_"), "\r", "_")
 	execution, err := h.engine.ExecuteWorkflow(r.Context(), vw.Workflow, req.Variables)
 	if err != nil {
 		h.logger.Error("Failed to execute workflow", "name", nameForLog, "error", err)
@@ -324,7 +327,7 @@ func (h *WorkflowHandler) handleExecuteWorkflow(w http.ResponseWriter, r *http.R
 	h.sendJSON(w, http.StatusAccepted, map[string]interface{}{
 		"execution_id":  execution.ID,
 		"workflow_name": execution.WorkflowName,
-		"status":        execution.Status,
+		"status":        execution.GetStatus(),
 		"start_time":    execution.StartTime,
 	})
 }
@@ -342,7 +345,7 @@ func (h *WorkflowHandler) handleGetWorkflowExecutions(w http.ResponseWriter, r *
 		return
 	}
 
-	nameForLog := logging.SanitizeLogValue(name)
+	nameForLog := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(name), "\n", "_"), "\r", "_")
 	all, err := h.engine.ListExecutions()
 	if err != nil {
 		h.logger.Error("Failed to list workflow executions", "name", nameForLog, "error", err)

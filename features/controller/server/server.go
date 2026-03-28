@@ -676,7 +676,7 @@ func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *workf
 	return &workflowtrigger.WorkflowExecution{
 		ID:           exec.ID,
 		WorkflowName: exec.WorkflowName,
-		Status:       string(exec.Status),
+		Status:       string(exec.GetStatus()),
 		StartTime:    exec.StartTime,
 	}, nil
 }

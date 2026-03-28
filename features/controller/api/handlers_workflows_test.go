@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/gorilla/mux"
@@ -448,20 +449,78 @@ func TestWorkflowHandler_RegisterTriggerRoutes_NilManager_NoRegistration(t *test
 
 // --- log injection safety ----------------------------------------------------
 
+// capturingLogger records Error calls so tests can assert that user-supplied values
+// are sanitised before they reach the logger (CWE-117 / go/log-injection).
+type capturingLogger struct {
+	logging.NoopLogger
+	mu      sync.Mutex
+	entries []struct {
+		msg string
+		kvs []interface{}
+	}
+}
+
+func (l *capturingLogger) Error(msg string, kvs ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, struct {
+		msg string
+		kvs []interface{}
+	}{msg: msg, kvs: kvs})
+}
+
+// loggedNameValues returns all "name" key values captured across Error calls.
+func (l *capturingLogger) loggedNameValues() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var names []string
+	for _, e := range l.entries {
+		for i := 0; i+1 < len(e.kvs); i += 2 {
+			if k, ok := e.kvs[i].(string); ok && k == "name" {
+				if v, ok := e.kvs[i+1].(string); ok {
+					names = append(names, v)
+				}
+			}
+		}
+	}
+	return names
+}
+
 // TestWorkflowHandler_SpecialCharsInName_HandledSafely verifies that workflow names
-// containing characters that would be dangerous in log entries are handled safely.
-// The code sanitizes user-provided values via logging.SanitizeLogValue before logging.
+// containing CWE-117 log-injection characters (LF, CR) are stripped before they reach
+// the logger. The test uses a GET for a nonexistent workflow, which always exercises the
+// error path in handleGetWorkflow and guarantees logger.Error is called — making the
+// sanitisation assertion unconditional, not vacuous.
+//
+// URL path parameters may carry encoded control characters: gorilla/mux decodes %0a → \n
+// and %0d → \r when extracting path variables, so injecting them is realistic.
 func TestWorkflowHandler_SpecialCharsInName_HandledSafely(t *testing.T) {
-	h, _ := newTestWorkflowHandler(t)
+	_, configStore := newTestWorkflowHandler(t)
+	capLogger := &capturingLogger{}
+
+	registry := make(discovery.ModuleRegistry)
+	errCfg := stewardconfig.ErrorHandlingConfig{ModuleLoadFailure: stewardconfig.ActionContinue}
+	engine := workflow.NewEngine(factory.New(registry, errCfg), capLogger)
+	h := NewWorkflowHandler(engine, configStore, nil, capLogger)
 	router := newWorkflowRouter(h)
 
-	// URL-safe name that includes tab and other control characters
-	// (newlines cannot appear in HTTP request-URIs; they are rejected by Go's HTTP library)
-	req := httptest.NewRequest("GET", "/workflows/wf%09injected", nil)
+	// %0a = LF (\n), %0d = CR (\r) — gorilla/mux decodes these from the URL path.
+	// The workflow does not exist, so handleGetWorkflow always calls logger.Error,
+	// ensuring the sanitisation assertion below is never vacuous.
+	req := httptest.NewRequest("GET", "/workflows/wf%0ainjected%0dfake-log-line", nil)
 	req = withTenantContext(req, "test-tenant")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	// Handler must not return 5xx — the workflow simply won't be found
-	assert.True(t, rec.Code < 500, "handler must not return 5xx for special-char workflow name, got %d", rec.Code)
+	// Handler returns 404 (not 5xx) — the special-char name doesn't cause a crash.
+	assert.Equal(t, http.StatusNotFound, rec.Code, "nonexistent workflow must return 404")
+
+	// logger.Error must have been called with the sanitised name — exactly once because
+	// the workflow is not found and GetLatestWorkflow returns an error.
+	names := capLogger.loggedNameValues()
+	require.NotEmpty(t, names, "logger.Error must have been called with a 'name' key")
+	for _, name := range names {
+		assert.NotContains(t, name, "\n", "logger must not receive raw LF in workflow name")
+		assert.NotContains(t, name, "\r", "logger must not receive raw CR in workflow name")
+	}
 }
