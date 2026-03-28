@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -398,6 +399,33 @@ func (c *Collector) UpdateSyncMetadata(dna *commonpb.DNA, configHash string) {
 	dna.LastSyncTime = timestamppb.New(time.Now())
 	dna.AttributeCount = c.safeInt32(len(dna.Attributes)) // Safe conversion with bounds validation
 	dna.SyncFingerprint = c.generateSyncFingerprint(dna.Id, dna.Attributes, configHash)
+}
+
+// ComputeHash computes a deterministic SHA-256 hash of the given DNA attributes.
+//
+// The hash is stable across Go map iteration order: keys are sorted before
+// hashing so the same attribute set always produces the same hash regardless
+// of insertion order. Returns an empty string when attributes is nil or empty.
+//
+// Both the steward and the controller call this function with the same attribute
+// set so that matching hashes confirm synchronisation without full retransmission.
+func ComputeHash(attributes map[string]string) string {
+	if len(attributes) == 0 {
+		return ""
+	}
+
+	keys := make([]string, 0, len(attributes))
+	for k := range attributes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	h := sha256.New()
+	for _, k := range keys {
+		// Write errors on hash.Hash are documented as always nil; ignore per io.Writer contract.
+		_, _ = fmt.Fprintf(h, "%s=%s\n", k, attributes[k])
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 // safeInt32 safely converts an int to int32 with bounds validation
