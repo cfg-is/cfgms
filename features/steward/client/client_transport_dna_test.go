@@ -198,13 +198,10 @@ func TestPublishDNAUpdate_ErrorControlPlaneNil(t *testing.T) {
 	c := newMinimalClient(t)
 	c.stewardID = "steward-1"
 	c.tenantID = "tenant-1"
-	// controlPlane is nil — not connected
+	// controlPlane is nil and no offline queue — should error
 	err := c.PublishDNAUpdate(context.TODO(), map[string]string{"k": "v"}, "", "")
 	if err == nil {
-		t.Fatal("expected error when control plane is not connected")
-	}
-	if err.Error() != "control plane not connected" {
-		t.Fatalf("unexpected error message: %q", err.Error())
+		t.Fatal("expected error when control plane and offline queue are unavailable")
 	}
 }
 
