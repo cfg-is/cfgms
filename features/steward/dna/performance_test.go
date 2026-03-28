@@ -150,9 +150,9 @@ func TestDNACollectionComponents(t *testing.T) {
 		{"Basic Info", collector.collectBasicInfo},
 		{"Hardware Info", func(attrs map[string]string) { collector.collectHardwareInfo(ctx, attrs) }},
 		{"Software Info", func(attrs map[string]string) { collector.collectSoftwareInfo(ctx, attrs) }},
-		{"Network Info", collector.collectNetworkInfo},
+		{"Network Info", func(attrs map[string]string) { collector.collectNetworkInfo(ctx, attrs) }},
 		{"Environment Info", collector.collectEnvironmentInfo},
-		{"Security Info", collector.collectSecurityInfo},
+		{"Security Info", func(attrs map[string]string) { collector.collectSecurityInfo(ctx, attrs) }},
 	}
 
 	for _, component := range components {

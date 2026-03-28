@@ -14,14 +14,12 @@ import (
 )
 
 // WindowsSoftwareCollector handles Windows-specific software collection.
-// It uses the provided context to enforce per-command timeouts on WMI and PowerShell calls.
-type WindowsSoftwareCollector struct {
-	ctx context.Context
-}
+// Each method accepts a context to enforce per-command timeouts on WMI and PowerShell calls.
+type WindowsSoftwareCollector struct{}
 
 // CollectOS gathers detailed operating system information on Windows.
 // wmic is attempted first; PowerShell is used only as a fallback.
-func (w *WindowsSoftwareCollector) CollectOS(attributes map[string]string) error {
+func (w *WindowsSoftwareCollector) CollectOS(ctx context.Context, attributes map[string]string) error {
 	// Basic OS information
 	attributes["os"] = runtime.GOOS
 	attributes["go_version"] = runtime.Version()
@@ -31,22 +29,22 @@ func (w *WindowsSoftwareCollector) CollectOS(attributes map[string]string) error
 	attributes["runtime_compiler"] = runtime.Compiler
 
 	// Windows version — primary: wmic
-	if output, err := runCommand(w.ctx, "wmic", "os", "get",
+	if output, err := runCommand(ctx, "wmic", "os", "get",
 		"Caption,Version,BuildNumber,ServicePackMajorVersion,OSArchitecture", "/format:csv"); err == nil {
 		w.parseWMIOSOutput(output, attributes)
 	} else {
 		// Fallback: PowerShell Get-CimInstance
-		if psOutput, psErr := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		if psOutput, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 			"Get-CimInstance -ClassName Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber,OSArchitecture,InstallDate,LastBootUpTime | ConvertTo-Csv -NoTypeInformation"); psErr == nil {
 			w.parsePowerShellOSOutput(psOutput, attributes)
 		}
 	}
 
 	// .NET Framework versions
-	w.collectDotNetVersions(attributes)
+	w.collectDotNetVersions(ctx, attributes)
 
 	// PowerShell version
-	if output, err := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+	if output, err := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 		"$PSVersionTable.PSVersion.ToString()"); err == nil {
 		attributes["powershell_version"] = strings.TrimSpace(output)
 	}
@@ -56,62 +54,62 @@ func (w *WindowsSoftwareCollector) CollectOS(attributes map[string]string) error
 
 // CollectPackages gathers installed packages/applications on Windows.
 // Uses registry enumeration instead of Win32_Product to avoid MSI reconfiguration.
-func (w *WindowsSoftwareCollector) CollectPackages(attributes map[string]string) error {
+func (w *WindowsSoftwareCollector) CollectPackages(ctx context.Context, attributes map[string]string) error {
 	// Installed programs via registry scan (fast — no MSI reconfiguration)
-	w.collectInstalledPrograms(attributes)
+	w.collectInstalledPrograms(ctx, attributes)
 
 	// Windows Features
-	w.collectWindowsFeatures(attributes)
+	w.collectWindowsFeatures(ctx, attributes)
 
 	// Chocolatey packages (if available)
-	w.collectChocolateyPackages(attributes)
+	w.collectChocolateyPackages(ctx, attributes)
 
 	// Winget packages (if available)
-	w.collectWingetPackages(attributes)
+	w.collectWingetPackages(ctx, attributes)
 
 	// Windows Store apps
-	w.collectWindowsStoreApps(attributes)
+	w.collectWindowsStoreApps(ctx, attributes)
 
 	// System updates/hotfixes
-	w.collectInstalledUpdates(attributes)
+	w.collectInstalledUpdates(ctx, attributes)
 
 	return nil
 }
 
 // CollectServices gathers installed and running services on Windows.
-func (w *WindowsSoftwareCollector) CollectServices(attributes map[string]string) error {
+func (w *WindowsSoftwareCollector) CollectServices(ctx context.Context, attributes map[string]string) error {
 	// Windows services — primary: wmic
-	if output, err := runCommand(w.ctx, "wmic", "service", "get",
+	if output, err := runCommand(ctx, "wmic", "service", "get",
 		"Name,State,StartMode,ServiceType", "/format:csv"); err == nil {
 		w.parseWMIServicesOutput(output, attributes)
 	} else {
 		// Fallback: PowerShell
-		if psOutput, psErr := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		if psOutput, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 			"Get-CimInstance -ClassName Win32_Service | Select-Object Name,State,StartMode,ServiceType | ConvertTo-Csv -NoTypeInformation"); psErr == nil {
 			w.parseWMIServicesOutput(psOutput, attributes)
 		}
 	}
 
 	// Running processes count
-	if output, err := runCommand(w.ctx, "tasklist", "/fo", "csv"); err == nil {
+	if output, err := runCommand(ctx, "tasklist", "/fo", "csv"); err == nil {
 		lines := strings.Split(output, "\n")
 		attributes["running_process_count"] = fmt.Sprintf("%d", len(lines)-1) // -1 for header
 	}
 
 	// Startup programs
-	w.collectStartupPrograms(attributes)
+	w.collectStartupPrograms(ctx, attributes)
 
 	return nil
 }
 
 // CollectProcesses gathers information about running processes on Windows.
-func (w *WindowsSoftwareCollector) CollectProcesses(attributes map[string]string) error {
+func (w *WindowsSoftwareCollector) CollectProcesses(ctx context.Context, attributes map[string]string) error {
 	// Basic process information
 	attributes["current_pid"] = fmt.Sprintf("%d", os.Getpid())
 	attributes["parent_pid"] = fmt.Sprintf("%d", os.Getppid())
 
 	// Current user
-	if user, err := runCommand(w.ctx, "whoami"); err == nil {
+	if user, err := runCommand(ctx, "whoami"); err == nil {
 		attributes["current_user"] = strings.TrimSpace(user)
 	}
 
@@ -119,12 +117,12 @@ func (w *WindowsSoftwareCollector) CollectProcesses(attributes map[string]string
 	attributes["goroutine_count"] = fmt.Sprintf("%d", runtime.NumGoroutine())
 
 	// Detailed process information using tasklist
-	if output, err := runCommand(w.ctx, "tasklist", "/fo", "csv", "/v"); err == nil {
+	if output, err := runCommand(ctx, "tasklist", "/fo", "csv", "/v"); err == nil {
 		w.parseTasklistOutput(output, attributes)
 	}
 
 	// Process statistics using PowerShell
-	if output, err := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+	if output, err := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 		"Get-Process | Group-Object ProcessName | Select-Object Count,Name | Sort-Object Count -Descending | Select-Object -First 10 | ConvertTo-Csv -NoTypeInformation"); err == nil {
 		w.parsePowerShellProcessStatsOutput(output, attributes)
 	}
@@ -200,9 +198,9 @@ func (w *WindowsSoftwareCollector) parsePowerShellOSOutput(output string, attrib
 }
 
 // collectDotNetVersions collects .NET Framework versions
-func (w *WindowsSoftwareCollector) collectDotNetVersions(attributes map[string]string) {
+func (w *WindowsSoftwareCollector) collectDotNetVersions(ctx context.Context, attributes map[string]string) {
 	// .NET Framework versions via registry (using PowerShell)
-	if output, err := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+	if output, err := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 		"Get-ChildItem 'HKLM:SOFTWARE\\Microsoft\\NET Framework Setup\\NDP' -recurse | Get-ItemProperty -name Version,Release -EA 0 | Where { $_.PSChildName -match '^(?!S)\\p{L}'} | Select PSChildName, Version, Release"); err == nil {
 		lines := strings.Split(output, "\n")
 		var dotnetVersions []string
@@ -218,7 +216,7 @@ func (w *WindowsSoftwareCollector) collectDotNetVersions(attributes map[string]s
 	}
 
 	// .NET Core/5+ versions
-	if output, err := runCommand(w.ctx, "dotnet", "--list-runtimes"); err == nil {
+	if output, err := runCommand(ctx, "dotnet", "--list-runtimes"); err == nil {
 		attributes["dotnet_core_runtimes"] = strings.TrimSpace(output)
 	}
 }
@@ -231,9 +229,9 @@ func (w *WindowsSoftwareCollector) collectDotNetVersions(attributes map[string]s
 //
 // The registry scan reads directly from the Uninstall keys and completes in
 // under 2 seconds.
-func (w *WindowsSoftwareCollector) collectInstalledPrograms(attributes map[string]string) {
+func (w *WindowsSoftwareCollector) collectInstalledPrograms(ctx context.Context, attributes map[string]string) {
 	// Read from both 64-bit and 32-bit uninstall registry hives
-	output, err := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+	output, err := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 		"Get-ItemProperty "+
 			"'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"+
 			"'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' "+
@@ -278,8 +276,8 @@ func (w *WindowsSoftwareCollector) collectInstalledPrograms(attributes map[strin
 }
 
 // collectWindowsFeatures collects Windows features
-func (w *WindowsSoftwareCollector) collectWindowsFeatures(attributes map[string]string) {
-	if output, err := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+func (w *WindowsSoftwareCollector) collectWindowsFeatures(ctx context.Context, attributes map[string]string) {
+	if output, err := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 		"Get-WindowsOptionalFeature -Online | Where-Object {$_.State -eq 'Enabled'} | Select-Object FeatureName | ConvertTo-Csv -NoTypeInformation"); err == nil {
 		lines := strings.Split(output, "\n")
 		featureCount := len(lines) - 1 // -1 for header
@@ -302,8 +300,8 @@ func (w *WindowsSoftwareCollector) collectWindowsFeatures(attributes map[string]
 }
 
 // collectChocolateyPackages collects Chocolatey packages if available
-func (w *WindowsSoftwareCollector) collectChocolateyPackages(attributes map[string]string) {
-	if output, err := runCommand(w.ctx, "choco", "list", "--local-only"); err == nil {
+func (w *WindowsSoftwareCollector) collectChocolateyPackages(ctx context.Context, attributes map[string]string) {
+	if output, err := runCommand(ctx, "choco", "list", "--local-only"); err == nil {
 		lines := strings.Split(output, "\n")
 		var packageCount int
 		var packages []string
@@ -327,9 +325,9 @@ func (w *WindowsSoftwareCollector) collectChocolateyPackages(attributes map[stri
 }
 
 // collectWingetPackages collects Winget packages if available
-func (w *WindowsSoftwareCollector) collectWingetPackages(attributes map[string]string) {
+func (w *WindowsSoftwareCollector) collectWingetPackages(ctx context.Context, attributes map[string]string) {
 	// List installed packages
-	if output, err := runCommand(w.ctx, "winget", "list"); err == nil {
+	if output, err := runCommand(ctx, "winget", "list"); err == nil {
 		lines := strings.Split(output, "\n")
 		var packageCount int
 		var packages []string
@@ -380,7 +378,7 @@ func (w *WindowsSoftwareCollector) collectWingetPackages(attributes map[string]s
 	}
 
 	// Get winget version for diagnostics
-	if output, err := runCommand(w.ctx, "winget", "--version"); err == nil {
+	if output, err := runCommand(ctx, "winget", "--version"); err == nil {
 		version := strings.TrimSpace(output)
 		if version != "" {
 			attributes["winget_version"] = version
@@ -388,7 +386,7 @@ func (w *WindowsSoftwareCollector) collectWingetPackages(attributes map[string]s
 	}
 
 	// Check for winget sources
-	if output, err := runCommand(w.ctx, "winget", "source", "list"); err == nil {
+	if output, err := runCommand(ctx, "winget", "source", "list"); err == nil {
 		lines := strings.Split(output, "\n")
 		var sourceCount int
 		var sources []string
@@ -414,8 +412,8 @@ func (w *WindowsSoftwareCollector) collectWingetPackages(attributes map[string]s
 }
 
 // collectWindowsStoreApps collects Windows Store apps
-func (w *WindowsSoftwareCollector) collectWindowsStoreApps(attributes map[string]string) {
-	if output, err := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+func (w *WindowsSoftwareCollector) collectWindowsStoreApps(ctx context.Context, attributes map[string]string) {
+	if output, err := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 		"Get-AppxPackage | Select-Object Name,Version | ConvertTo-Csv -NoTypeInformation"); err == nil {
 		lines := strings.Split(output, "\n")
 		appCount := len(lines) - 1 // -1 for header
@@ -442,8 +440,8 @@ func (w *WindowsSoftwareCollector) collectWindowsStoreApps(attributes map[string
 }
 
 // collectInstalledUpdates collects system updates/hotfixes
-func (w *WindowsSoftwareCollector) collectInstalledUpdates(attributes map[string]string) {
-	if output, err := runCommand(w.ctx, "wmic", "qfe", "get",
+func (w *WindowsSoftwareCollector) collectInstalledUpdates(ctx context.Context, attributes map[string]string) {
+	if output, err := runCommand(ctx, "wmic", "qfe", "get",
 		"HotFixID,InstalledOn,Description", "/format:csv"); err == nil {
 		lines := strings.Split(output, "\n")
 		var updateCount int
@@ -521,8 +519,8 @@ func (w *WindowsSoftwareCollector) parseWMIServicesOutput(output string, attribu
 }
 
 // collectStartupPrograms collects startup programs
-func (w *WindowsSoftwareCollector) collectStartupPrograms(attributes map[string]string) {
-	if output, err := runCommand(w.ctx, "wmic", "startup", "get",
+func (w *WindowsSoftwareCollector) collectStartupPrograms(ctx context.Context, attributes map[string]string) {
+	if output, err := runCommand(ctx, "wmic", "startup", "get",
 		"Name,Command,Location", "/format:csv"); err == nil {
 		lines := strings.Split(output, "\n")
 		var startupCount int

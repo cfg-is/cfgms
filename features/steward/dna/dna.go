@@ -105,7 +105,7 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 
 	// Collect network information (fast on all platforms)
 	netStart := time.Now()
-	c.collectNetworkInfo(attributes)
+	c.collectNetworkInfo(ctx, attributes)
 	c.logger.Debug("Network info collected", "duration", time.Since(netStart))
 
 	// Collect environment information (always fast)
@@ -170,7 +170,7 @@ func (c *Collector) runBackgroundCollection(ctx context.Context) {
 
 	slowAttrs := make(map[string]string)
 	c.collectSoftwareInfo(ctx, slowAttrs)
-	c.collectSecurityInfo(slowAttrs)
+	c.collectSecurityInfo(ctx, slowAttrs)
 
 	c.slowMu.Lock()
 	c.slowAttrs = slowAttrs
@@ -212,19 +212,19 @@ func (c *Collector) collectHardwareInfo(ctx context.Context, attributes map[stri
 		cache := make(map[string]string)
 		hwCollector := NewHardwareCollector(cacheCtx)
 
-		if err := hwCollector.CollectCPU(cache); err != nil {
+		if err := hwCollector.CollectCPU(cacheCtx, cache); err != nil {
 			c.logger.Error("Failed to collect CPU information", "error", err)
 		}
 
-		if err := hwCollector.CollectMemory(cache); err != nil {
+		if err := hwCollector.CollectMemory(cacheCtx, cache); err != nil {
 			c.logger.Error("Failed to collect memory information", "error", err)
 		}
 
-		if err := hwCollector.CollectDisk(cache); err != nil {
+		if err := hwCollector.CollectDisk(cacheCtx, cache); err != nil {
 			c.logger.Error("Failed to collect disk information", "error", err)
 		}
 
-		if err := hwCollector.CollectMotherboard(cache); err != nil {
+		if err := hwCollector.CollectMotherboard(cacheCtx, cache); err != nil {
 			c.logger.Error("Failed to collect motherboard information", "error", err)
 		}
 
@@ -250,22 +250,22 @@ func (c *Collector) collectSoftwareInfo(ctx context.Context, attributes map[stri
 	swCollector := NewSoftwareCollector(ctx)
 
 	// Collect OS information
-	if err := swCollector.CollectOS(attributes); err != nil {
+	if err := swCollector.CollectOS(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect OS information", "error", err)
 	}
 
 	// Collect installed packages/applications
-	if err := swCollector.CollectPackages(attributes); err != nil {
+	if err := swCollector.CollectPackages(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect package information", "error", err)
 	}
 
 	// Collect service information
-	if err := swCollector.CollectServices(attributes); err != nil {
+	if err := swCollector.CollectServices(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect service information", "error", err)
 	}
 
 	// Collect process information
-	if err := swCollector.CollectProcesses(attributes); err != nil {
+	if err := swCollector.CollectProcesses(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect process information", "error", err)
 	}
 
@@ -276,51 +276,51 @@ func (c *Collector) collectSoftwareInfo(ctx context.Context, attributes map[stri
 }
 
 // collectNetworkInfo collects network configuration information using platform-specific collectors.
-func (c *Collector) collectNetworkInfo(attributes map[string]string) {
+func (c *Collector) collectNetworkInfo(ctx context.Context, attributes map[string]string) {
 	netCollector := NewNetworkCollector()
 
 	// Collect network interface information
-	if err := netCollector.CollectInterfaces(attributes); err != nil {
+	if err := netCollector.CollectInterfaces(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect network interface information", "error", err)
 	}
 
 	// Collect routing information
-	if err := netCollector.CollectRouting(attributes); err != nil {
+	if err := netCollector.CollectRouting(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect routing information", "error", err)
 	}
 
 	// Collect DNS configuration
-	if err := netCollector.CollectDNS(attributes); err != nil {
+	if err := netCollector.CollectDNS(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect DNS information", "error", err)
 	}
 
 	// Collect firewall configuration
-	if err := netCollector.CollectFirewall(attributes); err != nil {
+	if err := netCollector.CollectFirewall(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect firewall information", "error", err)
 	}
 }
 
 // collectSecurityInfo collects security attributes using platform-specific collectors.
-func (c *Collector) collectSecurityInfo(attributes map[string]string) {
+func (c *Collector) collectSecurityInfo(ctx context.Context, attributes map[string]string) {
 	secCollector := NewSecurityCollector()
 
 	// Collect user information
-	if err := secCollector.CollectUsers(attributes); err != nil {
+	if err := secCollector.CollectUsers(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect user information", "error", err)
 	}
 
 	// Collect group information
-	if err := secCollector.CollectGroups(attributes); err != nil {
+	if err := secCollector.CollectGroups(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect group information", "error", err)
 	}
 
 	// Collect permission information
-	if err := secCollector.CollectPermissions(attributes); err != nil {
+	if err := secCollector.CollectPermissions(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect permission information", "error", err)
 	}
 
 	// Collect certificate information
-	if err := secCollector.CollectCertificates(attributes); err != nil {
+	if err := secCollector.CollectCertificates(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect certificate information", "error", err)
 	}
 }

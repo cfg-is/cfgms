@@ -16,10 +16,8 @@ import (
 )
 
 // WindowsHardwareCollector handles Windows-specific hardware collection.
-// It uses the provided context to enforce per-command timeouts on WMI calls.
-type WindowsHardwareCollector struct {
-	ctx context.Context
-}
+// Each method accepts a context to enforce per-command timeouts on WMI calls.
+type WindowsHardwareCollector struct{}
 
 // commandTimeout is the per-command timeout applied to every WMI and PowerShell call.
 const commandTimeout = 30 * time.Second
@@ -35,13 +33,13 @@ func runCommand(ctx context.Context, name string, args ...string) (string, error
 
 // CollectCPU gathers detailed CPU information on Windows using WMI.
 // The wmic call is attempted first; PowerShell is used only as a fallback.
-func (w *WindowsHardwareCollector) CollectCPU(attributes map[string]string) error {
+func (w *WindowsHardwareCollector) CollectCPU(ctx context.Context, attributes map[string]string) error {
 	// Basic CPU count from runtime (always available)
 	attributes["cpu_count"] = fmt.Sprintf("%d", runtime.NumCPU())
 	attributes["cpu_arch"] = runtime.GOARCH
 
 	// Primary: wmic
-	output, err := runCommand(w.ctx, "wmic", "cpu", "get",
+	output, err := runCommand(ctx, "wmic", "cpu", "get",
 		"Name,Manufacturer,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors,Architecture",
 		"/format:csv")
 	if err == nil {
@@ -50,7 +48,7 @@ func (w *WindowsHardwareCollector) CollectCPU(attributes map[string]string) erro
 	}
 
 	// Fallback: PowerShell Get-CimInstance (modern replacement for Get-WmiObject)
-	psOutput, psErr := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+	psOutput, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 		"Get-CimInstance -ClassName Win32_Processor | Select-Object Name,Manufacturer,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors,Architecture | ConvertTo-Csv -NoTypeInformation")
 	if psErr == nil {
 		w.parsePowerShellCPUOutput(psOutput, attributes)
@@ -61,15 +59,15 @@ func (w *WindowsHardwareCollector) CollectCPU(attributes map[string]string) erro
 
 // CollectMemory gathers detailed memory information on Windows.
 // The wmic call is attempted first; PowerShell is used only as a fallback.
-func (w *WindowsHardwareCollector) CollectMemory(attributes map[string]string) error {
+func (w *WindowsHardwareCollector) CollectMemory(ctx context.Context, attributes map[string]string) error {
 	// Physical memory total — primary: wmic
-	memOutput, err := runCommand(w.ctx, "wmic", "computersystem", "get",
+	memOutput, err := runCommand(ctx, "wmic", "computersystem", "get",
 		"TotalPhysicalMemory", "/format:csv")
 	if err == nil {
 		w.parseWMIMemoryOutput(memOutput, attributes)
 	} else {
 		// Fallback: PowerShell
-		psOut, psErr := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 			"Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object TotalPhysicalMemory | ConvertTo-Csv -NoTypeInformation")
 		if psErr == nil {
 			w.parseWMIMemoryOutput(psOut, attributes)
@@ -77,14 +75,14 @@ func (w *WindowsHardwareCollector) CollectMemory(attributes map[string]string) e
 	}
 
 	// Memory modules — primary: wmic
-	modOutput, err := runCommand(w.ctx, "wmic", "memorychip", "get",
+	modOutput, err := runCommand(ctx, "wmic", "memorychip", "get",
 		"Capacity,Speed,MemoryType,FormFactor", "/format:csv")
 	if err == nil {
 		w.parseWMIMemoryModulesOutput(modOutput, attributes)
 	}
 
 	// Virtual memory — primary: PowerShell (no wmic equivalent)
-	vmOutput, err := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+	vmOutput, err := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 		"Get-CimInstance -ClassName Win32_PageFileUsage | Select-Object AllocatedBaseSize,CurrentUsage | ConvertTo-Csv -NoTypeInformation")
 	if err == nil {
 		w.parsePowerShellVirtualMemoryOutput(vmOutput, attributes)
@@ -94,22 +92,22 @@ func (w *WindowsHardwareCollector) CollectMemory(attributes map[string]string) e
 }
 
 // CollectDisk gathers disk and storage information on Windows.
-func (w *WindowsHardwareCollector) CollectDisk(attributes map[string]string) error {
+func (w *WindowsHardwareCollector) CollectDisk(ctx context.Context, attributes map[string]string) error {
 	// Physical disk — primary: wmic
-	diskOutput, err := runCommand(w.ctx, "wmic", "diskdrive", "get",
+	diskOutput, err := runCommand(ctx, "wmic", "diskdrive", "get",
 		"Model,Size,MediaType,InterfaceType", "/format:csv")
 	if err == nil {
 		w.parseWMIDiskOutput(diskOutput, attributes)
 	}
 
 	// Logical disk — primary: wmic
-	logicalOutput, err := runCommand(w.ctx, "wmic", "logicaldisk", "get",
+	logicalOutput, err := runCommand(ctx, "wmic", "logicaldisk", "get",
 		"Size,FreeSpace,FileSystem,DriveType,DeviceID", "/format:csv")
 	if err == nil {
 		w.parseWMILogicalDiskOutput(logicalOutput, attributes)
 	} else {
 		// Fallback: PowerShell
-		psOut, psErr := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 			"Get-CimInstance -ClassName Win32_LogicalDisk | Select-Object DeviceID,Size,FreeSpace,FileSystem | ConvertTo-Csv -NoTypeInformation")
 		if psErr == nil {
 			w.parsePowerShellDiskUsageOutput(psOut, attributes)
@@ -120,43 +118,43 @@ func (w *WindowsHardwareCollector) CollectDisk(attributes map[string]string) err
 }
 
 // CollectMotherboard gathers motherboard and system information on Windows.
-func (w *WindowsHardwareCollector) CollectMotherboard(attributes map[string]string) error {
+func (w *WindowsHardwareCollector) CollectMotherboard(ctx context.Context, attributes map[string]string) error {
 	// Computer system info — primary: wmic
-	csOutput, err := runCommand(w.ctx, "wmic", "computersystem", "get",
+	csOutput, err := runCommand(ctx, "wmic", "computersystem", "get",
 		"Manufacturer,Model,TotalPhysicalMemory", "/format:csv")
 	if err == nil {
 		w.parseWMIComputerSystemOutput(csOutput, attributes)
 	}
 
 	// BIOS info — primary: wmic
-	biosOutput, err := runCommand(w.ctx, "wmic", "bios", "get",
+	biosOutput, err := runCommand(ctx, "wmic", "bios", "get",
 		"Manufacturer,SMBIOSBIOSVersion,ReleaseDate", "/format:csv")
 	if err == nil {
 		w.parseWMIBIOSOutput(biosOutput, attributes)
 	}
 
 	// Baseboard info — primary: wmic
-	bbOutput, err := runCommand(w.ctx, "wmic", "baseboard", "get",
+	bbOutput, err := runCommand(ctx, "wmic", "baseboard", "get",
 		"Manufacturer,Product,Version,SerialNumber", "/format:csv")
 	if err == nil {
 		w.parseWMIMotherboardOutput(bbOutput, attributes)
 	}
 
 	// System UUID — primary: wmic
-	uuidOutput, err := runCommand(w.ctx, "wmic", "csproduct", "get",
+	uuidOutput, err := runCommand(ctx, "wmic", "csproduct", "get",
 		"UUID", "/format:csv")
 	if err == nil {
 		w.parseWMIUUIDOutput(uuidOutput, attributes)
 	}
 
 	// OS version for hardware context — primary: wmic
-	osOutput, err := runCommand(w.ctx, "wmic", "os", "get",
+	osOutput, err := runCommand(ctx, "wmic", "os", "get",
 		"Caption,Version,BuildNumber", "/format:csv")
 	if err == nil {
 		w.parseWMIOSVersionOutput(osOutput, attributes)
 	} else {
 		// Fallback: PowerShell
-		psOut, psErr := runCommand(w.ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
 			"Get-CimInstance -ClassName Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber | ConvertTo-Csv -NoTypeInformation")
 		if psErr == nil {
 			w.parsePowerShellOSOutput(psOut, attributes)

@@ -152,7 +152,7 @@ func TestCollectNetworkInfo(t *testing.T) {
 	collector := NewCollector(logger)
 
 	attributes := make(map[string]string)
-	collector.collectNetworkInfo(attributes)
+	collector.collectNetworkInfo(t.Context(), attributes)
 
 	// Test network attributes (may not be present in all environments)
 	assert.Contains(t, attributes, "network_interface_count")
