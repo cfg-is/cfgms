@@ -1062,9 +1062,11 @@ func (c *TransportClient) startHeartbeat() {
 // DNA sync helpers (Issue #418)
 // ---------------------------------------------------------------------------
 
-// computeDelta returns only the attributes in newAttrs that are absent from or
-// have a different value than those in oldAttrs.  When oldAttrs is nil or empty
-// every attribute in newAttrs is returned (treated as fully new state).
+// computeDelta returns attributes that changed between oldAttrs and newAttrs.
+// Added or updated keys carry their new value.  Keys present in oldAttrs but
+// absent from newAttrs (deletions) are emitted with an empty-string sentinel so
+// the controller can unset them rather than silently accumulating stale state.
+// When oldAttrs is nil or empty every attribute in newAttrs is returned.
 //
 // The returned map is always an independent copy — mutating it does not affect
 // either input map.
@@ -1073,6 +1075,12 @@ func computeDelta(oldAttrs, newAttrs map[string]string) map[string]string {
 	for k, v := range newAttrs {
 		if oldV, exists := oldAttrs[k]; !exists || oldV != v {
 			delta[k] = v
+		}
+	}
+	// Emit sentinel (empty string) for keys deleted from newAttrs.
+	for k := range oldAttrs {
+		if _, exists := newAttrs[k]; !exists {
+			delta[k] = ""
 		}
 	}
 	return delta

@@ -224,3 +224,18 @@ func TestHeartbeatService_GetAllStatusesDNAHash(t *testing.T) {
 	assert.Equal(t, "h2", all["s2"].DNAHash)
 	assert.Equal(t, "h3", all["s3"].DNAHash)
 }
+
+func TestSetExpectedDNAHash_UnknownSteward(t *testing.T) {
+	svc, _ := newTestService(t)
+
+	// Call SetExpectedDNAHash for a steward that has never sent a heartbeat.
+	// The service must create a placeholder entry rather than silently dropping it
+	// so that subsequent heartbeats from this steward can be validated.
+	svc.SetExpectedDNAHash("steward-new", "expected-hash")
+
+	status, ok := svc.GetStatus("steward-new")
+	require.True(t, ok,
+		"SetExpectedDNAHash must create a steward entry even when none exists yet")
+	assert.Equal(t, "expected-hash", status.expectedDNAHash,
+		"the expected hash must be persisted for a newly created entry")
+}

@@ -8,14 +8,65 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
+	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// ---------------------------------------------------------------------------
+// Minimal DataPlaneSession for sync_dna handler tests
+// ---------------------------------------------------------------------------
+
+// testDataPlaneSession satisfies dataplaneInterfaces.DataPlaneSession.
+// It records the most recent SendDNA call and signals dnaSent when it fires.
+type testDataPlaneSession struct {
+	dnaSent chan *dpTypes.DNATransfer
+}
+
+var _ dataplaneInterfaces.DataPlaneSession = (*testDataPlaneSession)(nil)
+
+func newTestSession() *testDataPlaneSession {
+	return &testDataPlaneSession{dnaSent: make(chan *dpTypes.DNATransfer, 1)}
+}
+
+func (s *testDataPlaneSession) ID() string         { return "test-session" }
+func (s *testDataPlaneSession) PeerID() string      { return "controller-1" }
+func (s *testDataPlaneSession) IsClosed() bool      { return false }
+func (s *testDataPlaneSession) LocalAddr() string   { return "127.0.0.1:0" }
+func (s *testDataPlaneSession) RemoteAddr() string  { return "127.0.0.1:1" }
+func (s *testDataPlaneSession) Close(_ context.Context) error { return nil }
+func (s *testDataPlaneSession) SendConfig(_ context.Context, _ *dpTypes.ConfigTransfer) error {
+	return nil
+}
+func (s *testDataPlaneSession) ReceiveConfig(_ context.Context) (*dpTypes.ConfigTransfer, error) {
+	return nil, nil
+}
+func (s *testDataPlaneSession) SendDNA(_ context.Context, dna *dpTypes.DNATransfer) error {
+	s.dnaSent <- dna
+	return nil
+}
+func (s *testDataPlaneSession) ReceiveDNA(_ context.Context) (*dpTypes.DNATransfer, error) {
+	return nil, nil
+}
+func (s *testDataPlaneSession) SendBulk(_ context.Context, _ *dpTypes.BulkTransfer) error {
+	return nil
+}
+func (s *testDataPlaneSession) ReceiveBulk(_ context.Context) (*dpTypes.BulkTransfer, error) {
+	return nil, nil
+}
+func (s *testDataPlaneSession) OpenStream(_ context.Context, _ dpTypes.StreamType) (dataplaneInterfaces.Stream, error) {
+	return nil, fmt.Errorf("testDataPlaneSession: OpenStream not implemented")
+}
+func (s *testDataPlaneSession) AcceptStream(_ context.Context) (dataplaneInterfaces.Stream, dpTypes.StreamType, error) {
+	return nil, "", fmt.Errorf("testDataPlaneSession: AcceptStream not implemented")
+}
 
 func newTestLogger(t *testing.T) logging.Logger {
 	t.Helper()
@@ -69,6 +120,15 @@ func TestComputeDelta_MultipleChanges(t *testing.T) {
 	new := map[string]string{"a": "99", "b": "2", "c": "99"}
 	delta := computeDelta(old, new)
 	assert.Equal(t, map[string]string{"a": "99", "c": "99"}, delta)
+}
+
+func TestComputeDelta_RemovedKey(t *testing.T) {
+	old := map[string]string{"a": "1", "b": "2", "c": "3"}
+	new := map[string]string{"a": "1", "c": "99"} // "b" was removed
+	delta := computeDelta(old, new)
+	// "b" must appear with empty-string sentinel so the controller can unset it.
+	assert.Equal(t, map[string]string{"b": "", "c": "99"}, delta,
+		"deleted keys must appear in the delta with an empty-string sentinel value")
 }
 
 func TestComputeDelta_IsolatesNewMap(t *testing.T) {
@@ -186,4 +246,55 @@ func TestHeartbeat_DNAHashField(t *testing.T) {
 func TestHeartbeat_DNAHashOmitempty(t *testing.T) {
 	hb := &cpTypes.Heartbeat{StewardID: "s1", Status: cpTypes.StatusHealthy}
 	assert.Empty(t, hb.DNAHash, "DNAHash must default to empty string")
+}
+
+// ---------------------------------------------------------------------------
+// sync_dna command handler — happy path
+// ---------------------------------------------------------------------------
+
+func TestSyncDNAHandler_SendsFullDNAOverDataPlane(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-1"
+	c.tenantID = "tenant-1"
+
+	// Seed the last-published DNA that the handler will serialize and send.
+	dnaAttrs := map[string]string{"os": "linux", "version": "1.2.3"}
+	c.dnaMu.Lock()
+	c.lastPublishedDNA = copyStringMap(dnaAttrs)
+	c.dnaMu.Unlock()
+
+	// Install a test data-plane session that records what SendDNA receives.
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	c.mu.Unlock()
+
+	// Build the command handler and dispatch a CommandSyncDNA command.
+	handler, err := c.setupCommandHandler(context.Background(), "steward-1")
+	require.NoError(t, err)
+
+	cmd := &cpTypes.Command{
+		ID:        "cmd-sync-dna-1",
+		Type:      cpTypes.CommandSyncDNA,
+		StewardID: "steward-1",
+		TenantID:  "tenant-1",
+		Timestamp: time.Now(),
+		Params:    map[string]interface{}{},
+	}
+	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
+
+	// HandleCommand dispatches the handler in a goroutine. The handler only does
+	// in-memory map reads and a channel write — 250 ms is ample for the scheduler.
+	select {
+	case transfer := <-sess.dnaSent:
+		require.NotNil(t, transfer, "SendDNA must be called with a non-nil transfer")
+		assert.Equal(t, "steward-1", transfer.StewardID)
+		assert.Equal(t, "tenant-1", transfer.TenantID)
+		assert.False(t, transfer.Delta, "full sync must set Delta=false")
+		assert.NotEmpty(t, transfer.Attributes, "attributes payload must be non-empty")
+		assert.Equal(t, "cmd-sync-dna-1", transfer.Metadata["command_id"])
+		assert.Equal(t, "2", transfer.Metadata["attr_count"])
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for sync_dna handler to call SendDNA")
+	}
 }

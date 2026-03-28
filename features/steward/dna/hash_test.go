@@ -61,6 +61,16 @@ func TestComputeHash_AdditionalAttribute(t *testing.T) {
 		"adding an attribute must change the hash")
 }
 
+func TestComputeHash_EmptyValueSentinelDistinctFromAbsent(t *testing.T) {
+	// computeDelta emits empty-string sentinels for deleted keys so the controller
+	// can detect the removal via hash comparison.  Verify that a map with key "b"
+	// set to "" produces a different hash than a map where "b" is simply absent.
+	withSentinel := map[string]string{"a": "1", "b": ""}
+	withoutKey := map[string]string{"a": "1"}
+	assert.NotEqual(t, ComputeHash(withSentinel), ComputeHash(withoutKey),
+		"empty-string sentinel value must produce a different hash than an absent key")
+}
+
 func TestComputeHash_ProducesHexString(t *testing.T) {
 	attrs := map[string]string{"k": "v"}
 	hash := ComputeHash(attrs)
