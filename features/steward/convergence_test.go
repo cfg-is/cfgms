@@ -109,6 +109,9 @@ func TestConvergeIntervalReadFromCfg(t *testing.T) {
 }
 
 func TestStandaloneRunsInitialConvergenceOnStart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode — Start() invokes DNA collection which takes 6+ minutes on Windows via WMI")
+	}
 	logger := logging.NewLogger("debug")
 	dir := t.TempDir()
 	cfgPath := writeMinimalCfg(t, dir, "initial-convergence-steward")
