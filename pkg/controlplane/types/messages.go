@@ -163,6 +163,13 @@ type Heartbeat struct {
 
 	// Version is the steward software version
 	Version string `json:"version,omitempty"`
+
+	// DNAHash is a deterministic SHA-256 hash of the steward's current DNA attributes.
+	// The controller uses this to detect drift without transmitting the full DNA dataset.
+	// When the controller sees a hash it did not expect (e.g. after missed deltas) it
+	// sends a CommandSyncDNA to request a full sync over the data plane.
+	// Empty for older stewards that do not support hash-based sync.
+	DNAHash string `json:"dna_hash,omitempty"`
 }
 
 // Response represents a command response/acknowledgment.
