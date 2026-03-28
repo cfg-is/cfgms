@@ -28,10 +28,24 @@ type StewardStatus struct {
 	Metrics        map[string]string
 	MissedBeats    int
 	ConnectedSince time.Time
+
+	// DNAHash is the most-recently reported DNA hash from the steward heartbeat.
+	// Empty when the steward has not yet sent a DNA hash (older steward versions).
+	DNAHash string
+
+	// expectedDNAHash is the hash the controller expects the steward to have,
+	// set after a successful full DNA sync.  Compared against DNAHash on each
+	// heartbeat to detect missed deltas.
+	expectedDNAHash string
 }
 
 // StatusChangeCallback is called when a steward's status changes.
 type StatusChangeCallback func(stewardID string, healthy bool, status StewardStatus)
+
+// DNAHashMismatchCallback is called when a heartbeat carries a DNA hash that
+// differs from the expected hash.  The controller should respond by sending
+// CommandSyncDNA to request a full sync over the data plane.
+type DNAHashMismatchCallback func(stewardID string)
 
 // Service monitors steward heartbeats via the ControlPlaneProvider.
 type Service struct {
@@ -48,7 +62,8 @@ type Service struct {
 	checkInterval    time.Duration // How often to check for timeouts
 
 	// Callbacks
-	onStatusChange StatusChangeCallback
+	onStatusChange    StatusChangeCallback
+	onDNAHashMismatch DNAHashMismatchCallback
 
 	// Control
 	ctx    context.Context
@@ -71,6 +86,12 @@ type Config struct {
 
 	// OnStatusChange callback for status changes
 	OnStatusChange StatusChangeCallback
+
+	// OnDNAHashMismatch is called when a heartbeat carries a DNA hash that
+	// differs from the hash the controller expects (set via SetExpectedDNAHash).
+	// The controller should respond by sending CommandSyncDNA to the steward.
+	// Optional — if nil hash-mismatch detection is disabled.
+	OnDNAHashMismatch DNAHashMismatchCallback
 
 	// Logger for service logging
 	Logger logging.Logger
@@ -95,14 +116,15 @@ func New(cfg *Config) (*Service, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Service{
-		controlPlane:     cfg.ControlPlane,
-		stewards:         make(map[string]*StewardStatus),
-		heartbeatTimeout: heartbeatTimeout,
-		checkInterval:    checkInterval,
-		onStatusChange:   cfg.OnStatusChange,
-		ctx:              ctx,
-		cancel:           cancel,
-		logger:           cfg.Logger,
+		controlPlane:      cfg.ControlPlane,
+		stewards:          make(map[string]*StewardStatus),
+		heartbeatTimeout:  heartbeatTimeout,
+		checkInterval:     checkInterval,
+		onStatusChange:    cfg.OnStatusChange,
+		onDNAHashMismatch: cfg.OnDNAHashMismatch,
+		ctx:               ctx,
+		cancel:            cancel,
+		logger:            cfg.Logger,
 	}, nil
 }
 
@@ -139,6 +161,7 @@ func (s *Service) Stop(ctx context.Context) error {
 
 // handleHeartbeatFromProvider processes incoming heartbeats from the ControlPlaneProvider.
 // Story #363: Processes typed heartbeat messages from ControlPlaneProvider.
+// Issue #418: Detects DNA hash mismatches and fires OnDNAHashMismatch callback.
 func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlplaneTypes.Heartbeat) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -171,6 +194,31 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 
 	status.MissedBeats = 0
 	status.Healthy = true
+
+	// DNA hash tracking (Issue #418).
+	// Only check for mismatch when:
+	//   1. The heartbeat carries a non-empty DNA hash (backward-compatible with older stewards).
+	//   2. An expected hash has been set (i.e. at least one full sync has completed).
+	//   3. The received hash differs from what the controller expects.
+	if hb.DNAHash != "" {
+		prevHash := status.DNAHash
+		status.DNAHash = hb.DNAHash
+
+		if status.expectedDNAHash != "" && hb.DNAHash != status.expectedDNAHash {
+			s.logger.Warn("DNA hash mismatch detected — requesting full sync",
+				"steward_id", hb.StewardID,
+				"heartbeat_hash", hb.DNAHash,
+				"expected_hash", status.expectedDNAHash)
+			if s.onDNAHashMismatch != nil {
+				s.onDNAHashMismatch(hb.StewardID)
+			}
+		} else if prevHash != hb.DNAHash {
+			s.logger.Debug("Steward DNA hash updated",
+				"steward_id", hb.StewardID,
+				"old_hash", prevHash,
+				"new_hash", hb.DNAHash)
+		}
+	}
 
 	// Trigger callback if status changed
 	if !previouslyHealthy && s.onStatusChange != nil {
@@ -264,6 +312,24 @@ func (s *Service) GetHealthyStewards() []string {
 	}
 
 	return healthy
+}
+
+// SetExpectedDNAHash records the hash the controller expects the steward to report
+// in future heartbeats.  Call this after a successful full DNA sync via the data
+// plane so that subsequent heartbeats can be validated against the known-good hash.
+func (s *Service) SetExpectedDNAHash(stewardID, hash string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	status, exists := s.stewards[stewardID]
+	if !exists {
+		status = &StewardStatus{
+			StewardID:      stewardID,
+			ConnectedSince: time.Now(),
+		}
+		s.stewards[stewardID] = status
+	}
+	status.expectedDNAHash = hash
 }
 
 // GetUnhealthyStewards returns a list of unhealthy steward IDs.

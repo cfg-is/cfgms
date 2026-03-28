@@ -12,6 +12,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/steward/commands"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	dna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
@@ -32,6 +34,7 @@ import (
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider
+	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
@@ -89,6 +92,12 @@ type TransportClient struct {
 	// Heartbeat
 	heartbeatInterval time.Duration
 	heartbeatStop     chan struct{}
+
+	// DNA state for hash-based sync (Issue #418).
+	// dnaMu guards currentDNAHash and lastPublishedDNA.
+	dnaMu            sync.RWMutex
+	currentDNAHash   string            // SHA-256 hash of most-recently observed DNA
+	lastPublishedDNA map[string]string // full DNA from the last PublishDNAUpdate call
 
 	// Logger
 	logger logging.Logger
@@ -481,24 +490,58 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		return nil
 	})
 
-	// Register sync_dna handler
+	// Register sync_dna handler — sends full DNA over the data plane.
+	// Triggered by the controller on initial registration or when it detects a
+	// hash mismatch from a heartbeat (i.e. deltas were missed).
 	handler.RegisterHandler(cpTypes.CommandSyncDNA, func(ctx context.Context, cmd *cpTypes.Command) error {
-		c.logger.Info("Received sync_dna command", "command_id", cmd.ID)
+		c.logger.Info("Received sync_dna command, initiating full DNA sync via data plane", "command_id", cmd.ID)
 
-		var requestedAttrs []string
-		if attrsParam, ok := cmd.Params["attributes"].([]interface{}); ok {
-			for _, attr := range attrsParam {
-				if attrStr, ok := attr.(string); ok {
-					requestedAttrs = append(requestedAttrs, attrStr)
-				}
-			}
+		c.mu.RLock()
+		session := c.dataPlaneSession
+		sid := c.stewardID
+		tid := c.tenantID
+		c.mu.RUnlock()
+
+		if session == nil || session.IsClosed() {
+			return fmt.Errorf("data plane session not available for DNA sync")
 		}
 
-		c.logger.Info("DNA sync triggered",
-			"command_id", cmd.ID,
-			"requested_attributes", requestedAttrs)
+		// Read the current DNA snapshot accumulated by PublishDNAUpdate calls.
+		c.dnaMu.RLock()
+		currentDNA := copyStringMap(c.lastPublishedDNA)
+		c.dnaMu.RUnlock()
 
-		c.logger.Info("DNA sync completed", "command_id", cmd.ID)
+		if len(currentDNA) == 0 {
+			return fmt.Errorf("no DNA state available for full sync — call PublishDNAUpdate first")
+		}
+
+		// Serialize attributes as JSON for the DNATransfer payload.
+		attrJSON, err := json.Marshal(currentDNA)
+		if err != nil {
+			return fmt.Errorf("failed to serialize DNA attributes: %w", err)
+		}
+
+		transfer := &dpTypes.DNATransfer{
+			ID:         fmt.Sprintf("dna_full_%d", time.Now().UnixNano()),
+			StewardID:  sid,
+			TenantID:   tid,
+			Timestamp:  time.Now(),
+			Attributes: attrJSON,
+			Delta:      false, // full snapshot
+			Metadata: map[string]string{
+				"command_id": cmd.ID,
+				"dna_hash":   dna.ComputeHash(currentDNA),
+				"attr_count": fmt.Sprintf("%d", len(currentDNA)),
+			},
+		}
+
+		if err := session.SendDNA(ctx, transfer); err != nil {
+			return fmt.Errorf("failed to send full DNA via data plane: %w", err)
+		}
+
+		c.logger.Info("Full DNA sync completed via data plane",
+			"command_id", cmd.ID,
+			"attributes", len(currentDNA))
 		return nil
 	})
 
@@ -555,12 +598,17 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 		}
 	}
 
+	c.dnaMu.RLock()
+	currentDNAHash := c.currentDNAHash
+	c.dnaMu.RUnlock()
+
 	heartbeat := &cpTypes.Heartbeat{
 		StewardID: stewardID,
 		TenantID:  tenantID,
 		Status:    cpTypes.HeartbeatStatus(status),
 		Timestamp: time.Now(),
 		Metrics:   metricsMap,
+		DNAHash:   currentDNAHash,
 	}
 
 	if err := cp.SendHeartbeat(ctx, heartbeat); err != nil {
@@ -571,7 +619,28 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 }
 
 // PublishDNAUpdate publishes DNA changes to the controller via the gRPC control plane provider.
-func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dna map[string]string, configHash, syncFingerprint string) error {
+//
+// Only changed attributes (delta) are sent over the control plane — unchanged
+// attributes are suppressed to minimise bandwidth. On the first call after
+// connection there is no previous state, so all attributes are treated as new.
+// Full DNA is never sent here; full syncs are triggered by CommandSyncDNA over
+// the data plane.
+func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dnaAttrs map[string]string, configHash, syncFingerprint string) error {
+	// Always update local DNA state first so the hash is available for heartbeats
+	// even when the control plane is temporarily unavailable.
+	c.dnaMu.Lock()
+	delta := computeDelta(c.lastPublishedDNA, dnaAttrs)
+	newHash := dna.ComputeHash(dnaAttrs)
+	c.lastPublishedDNA = copyStringMap(dnaAttrs)
+	c.currentDNAHash = newHash
+	c.dnaMu.Unlock()
+
+	// Skip publish when nothing changed — no need to validate the connection.
+	if len(delta) == 0 {
+		c.logger.Debug("No DNA changes detected, skipping control plane publish")
+		return nil
+	}
+
 	c.mu.RLock()
 	stewardID := c.stewardID
 	tenantID := c.tenantID
@@ -593,17 +662,23 @@ func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dna map[string]s
 		TenantID:  tenantID,
 		Timestamp: time.Now(),
 		Details: map[string]interface{}{
-			"dna":              dna,
+			"dna":              delta, // delta only — not full DNA
+			"dna_hash":         newHash,
 			"config_hash":      configHash,
 			"sync_fingerprint": syncFingerprint,
+			"is_delta":         true,
+			"total_count":      len(dnaAttrs),
 		},
 	}
 
 	if err := cp.PublishEvent(ctx, event); err != nil {
-		return fmt.Errorf("failed to publish DNA update: %w", err)
+		return fmt.Errorf("failed to publish DNA delta: %w", err)
 	}
 
-	c.logger.Info("Published DNA update", "attributes_count", len(dna))
+	c.logger.Info("Published DNA delta",
+		"delta_count", len(delta),
+		"total_count", len(dnaAttrs),
+		"dna_hash", newHash)
 	return nil
 }
 
@@ -981,4 +1056,45 @@ func (c *TransportClient) startHeartbeat() {
 			cancel()
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// DNA sync helpers (Issue #418)
+// ---------------------------------------------------------------------------
+
+// computeDelta returns attributes that changed between oldAttrs and newAttrs.
+// Added or updated keys carry their new value.  Keys present in oldAttrs but
+// absent from newAttrs (deletions) are emitted with an empty-string sentinel so
+// the controller can unset them rather than silently accumulating stale state.
+// When oldAttrs is nil or empty every attribute in newAttrs is returned.
+//
+// The returned map is always an independent copy — mutating it does not affect
+// either input map.
+func computeDelta(oldAttrs, newAttrs map[string]string) map[string]string {
+	delta := make(map[string]string)
+	for k, v := range newAttrs {
+		if oldV, exists := oldAttrs[k]; !exists || oldV != v {
+			delta[k] = v
+		}
+	}
+	// Emit sentinel (empty string) for keys deleted from newAttrs.
+	for k := range oldAttrs {
+		if _, exists := newAttrs[k]; !exists {
+			delta[k] = ""
+		}
+	}
+	return delta
+}
+
+// copyStringMap returns a shallow copy of a string→string map.
+// Returns nil when the input is nil.
+func copyStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
