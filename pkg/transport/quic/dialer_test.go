@@ -13,7 +13,12 @@ import (
 )
 
 // TestDialer_ReturnsNetConn verifies that Dial returns a valid net.Conn.
+// Skipped in short mode — QUIC dial requires UDP buffer allocation that can
+// fail on CI runners with restricted socket buffer limits (macOS GitHub Actions).
 func TestDialer_ReturnsNetConn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping QUIC dial test in short mode — requires UDP buffer allocation")
+	}
 	tlsPair := newTestTLSPair(t)
 
 	lis, err := Listen("127.0.0.1:0", tlsPair.server, nil)
@@ -45,7 +50,11 @@ func TestDialer_ReturnsNetConn(t *testing.T) {
 
 // TestDialer_NewDialer_ContextDialer verifies that NewDialer returns a function
 // with the correct signature for grpc.WithContextDialer.
+// Skipped in short mode — same UDP buffer requirement as TestDialer_ReturnsNetConn.
 func TestDialer_NewDialer_ContextDialer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping QUIC dial test in short mode — requires UDP buffer allocation")
+	}
 	tlsPair := newTestTLSPair(t)
 
 	dialFn := NewDialer(tlsPair.client, nil)

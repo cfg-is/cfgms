@@ -38,7 +38,12 @@ import (
 	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
 	dnadrift "github.com/cfgis/cfgms/features/steward/dna/drift"
 	dnaStorage "github.com/cfgis/cfgms/features/steward/dna/storage"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/features/steward/discovery"
+	stewardfactory "github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/features/workflow"
+	workflowtrigger "github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
@@ -81,7 +86,8 @@ type Server struct {
 	signerCertSerial        string                  // Serial number of server cert used for config signing (Story #378)
 	healthCollector         *health.Collector
 	alertManager            *health.DefaultAlertManager
-	dnaStorageManager       *dnaStorage.Manager // Reports engine DNA storage (must be closed on Stop)
+	dnaStorageManager       *dnaStorage.Manager             // Reports engine DNA storage (must be closed on Stop)
+	triggerManager          *workflowtrigger.TriggerManagerImpl // Issue #414: Workflow trigger manager
 }
 
 // New creates a new server instance
@@ -448,7 +454,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		storageStats := NewBasicStorageStats(cfg.Storage.Provider)
 		storageCollector := health.NewDefaultStorageCollector(storageStats)
 
-		// Application stats — no-op until workflow engine exists
+		// Application stats — uses no-op queue stats; workflow engine health
+		// is surfaced via the /api/v1/health endpoint (Issue #414)
 		appCollector := health.NewDefaultApplicationCollector(&NoOpApplicationQueueStats{})
 
 		// System stats (CPU, memory, goroutines)
@@ -524,6 +531,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Reports engine wired to HTTP API server")
 	}
 
+	// Issue #414: Wire workflow engine and trigger manager into API server
+	workflowHandler, triggerMgr := initializeWorkflowHandler(storageManager, logger)
+	if workflowHandler != nil {
+		httpServer.SetWorkflowHandler(workflowHandler)
+		srv.triggerManager = triggerMgr
+		logger.Info("Workflow engine wired to HTTP API server")
+	}
+
 	return srv, nil
 }
 
@@ -597,6 +612,80 @@ func initializeReportsHandler(cfg *config.Config, logger logging.Logger) (*repor
 
 	logger.Info("Reports engine initialized")
 	return reportapi.New(reportEngine, exporter, logger), dnaStorageManager
+}
+
+// initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.
+// Returns nil, nil on failure so the controller starts without workflow support rather than failing.
+func initializeWorkflowHandler(storageManager *interfaces.StorageManager, logger logging.Logger) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl) {
+	// Create a minimal module factory for the workflow engine.
+	// The controller does not load steward modules directly; the factory is
+	// required by the engine constructor but not exercised during REST API use.
+	moduleFactory := stewardfactory.New(
+		discovery.ModuleRegistry{},
+		stewardconfig.ErrorHandlingConfig{},
+	)
+
+	workflowEngine := workflow.NewEngine(moduleFactory, logger)
+
+	configStore := storageManager.GetConfigStore()
+
+	// workflowEngineAdapter bridges workflow.Engine to trigger.WorkflowTrigger.
+	// Triggers resolve workflows by name from the default tenant store.
+	adapter := &workflowEngineAdapter{
+		engine:      workflowEngine,
+		configStore: configStore,
+	}
+
+	storageProvider := storageManager.GetProvider()
+	triggerMgr := workflowtrigger.NewControllerTriggerManager(storageProvider, adapter)
+
+	handler := api.NewWorkflowHandler(workflowEngine, configStore, triggerMgr, logger)
+
+	logger.Info("Workflow engine and trigger manager initialized (Issue #414)")
+	return handler, triggerMgr
+}
+
+// workflowEngineAdapter implements trigger.WorkflowTrigger by delegating to the workflow engine.
+type workflowEngineAdapter struct {
+	engine      *workflow.Engine
+	configStore interfaces.ConfigStore
+}
+
+func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *workflowtrigger.Trigger, data map[string]interface{}) (*workflowtrigger.WorkflowExecution, error) {
+	// Resolve workflow from storage using a system-level (empty) tenant scope.
+	store := workflow.NewWorkflowStore(a.configStore, trig.TenantID)
+	vw, err := store.GetLatestWorkflow(ctx, trig.WorkflowName)
+	if err != nil {
+		return nil, fmt.Errorf("workflow %q not found for trigger %q: %w", trig.WorkflowName, trig.ID, err)
+	}
+
+	// Merge trigger default variables with runtime data
+	vars := make(map[string]interface{})
+	for k, v := range trig.Variables {
+		vars[k] = v
+	}
+	for k, v := range data {
+		vars[k] = v
+	}
+
+	exec, err := a.engine.ExecuteWorkflow(ctx, vw.Workflow, vars)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start workflow %q: %w", trig.WorkflowName, err)
+	}
+
+	return &workflowtrigger.WorkflowExecution{
+		ID:           exec.ID,
+		WorkflowName: exec.WorkflowName,
+		Status:       string(exec.GetStatus()),
+		StartTime:    exec.StartTime,
+	}, nil
+}
+
+func (a *workflowEngineAdapter) ValidateTrigger(_ context.Context, trig *workflowtrigger.Trigger) error {
+	if trig.WorkflowName == "" {
+		return fmt.Errorf("trigger %q must specify a workflow_name", trig.ID)
+	}
+	return nil
 }
 
 // Start initializes and starts the controller server (gRPC-over-QUIC mode)
@@ -725,6 +814,15 @@ func (s *Server) Start() error {
 		}
 	}
 
+	// Start workflow trigger manager (Issue #414)
+	if s.triggerManager != nil {
+		if err := s.triggerManager.Start(context.Background()); err != nil {
+			s.logger.Warn("Failed to start trigger manager", "error", err)
+		} else {
+			s.logger.Info("Workflow trigger manager started")
+		}
+	}
+
 	// Start health collector and alert manager (Story #417)
 	if s.healthCollector != nil {
 		if err := s.healthCollector.Start(context.Background(), 30*time.Second); err != nil {
@@ -784,6 +882,15 @@ func (s *Server) Stop() error {
 	if s.alertManager != nil {
 		if err := s.alertManager.Stop(); err != nil {
 			s.logger.Warn("Failed to stop alert manager", "error", err)
+		}
+	}
+
+	// Stop workflow trigger manager (Issue #414)
+	if s.triggerManager != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.triggerManager.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop trigger manager", "error", err)
 		}
 	}
 

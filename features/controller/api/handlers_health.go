@@ -69,6 +69,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		health.Status = "degraded"
 	}
 
+	// Workflow engine status (Issue #414)
+	if s.workflowHandler != nil && s.workflowHandler.engine != nil {
+		health.Services["workflow_engine"] = "healthy"
+	} else {
+		health.Services["workflow_engine"] = "unavailable"
+	}
+
 	// Return appropriate HTTP status
 	statusCode := http.StatusOK
 	if health.Status == "degraded" {
