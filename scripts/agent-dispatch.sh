@@ -28,6 +28,24 @@ sanitize_branch() {
   echo "$1" | sed 's|/|--|g'
 }
 
+# Refresh agent credentials from the host's Claude session.
+# Copies ~/.claude/.credentials.json into the claude-creds Docker volume
+# so agents always start with a fresh token. No interactive OAuth needed.
+refresh_creds_from_host() {
+  local host_creds="$HOME/.claude/.credentials.json"
+  if [ ! -f "$host_creds" ]; then
+    echo "WARN: No host credentials at $host_creds — agents may fail auth"
+    return 0
+  fi
+  docker run --rm --entrypoint bash \
+    -v claude-creds:/persist \
+    -v "$host_creds:/host-creds.json:ro" \
+    cfg-agent:latest \
+    -c "cp /host-creds.json /persist/.credentials.json" 2>/dev/null \
+    && echo "Refreshed agent credentials from host session" \
+    || echo "WARN: Failed to refresh credentials from host"
+}
+
 usage() {
   cat <<'EOF'
 Usage: agent-dispatch.sh <command> [args...]
@@ -196,6 +214,7 @@ case "$cmd" in
     num="$1"
     clone_path="${WORKTREE_BASE}/story-${num}"
     real_path=$(realpath "$clone_path")
+    refresh_creds_from_host
     gh_token=$(gh auth token)
     if container_id=$(docker run -d \
       --name "cfg-agent-${num}" \
@@ -230,6 +249,7 @@ case "$cmd" in
     entrypoint_args=("$@")
 
     real_path=$(realpath "$clone_dir")
+    refresh_creds_from_host
     gh_token=$(gh auth token)
 
     # Derive mode and metadata labels from entrypoint args
@@ -275,6 +295,7 @@ case "$cmd" in
     sanitized=$(sanitize_branch "$branch")
     clone_dir="${2:-${WORKTREE_BASE}/${sanitized}}"
     real_path=$(realpath "$clone_dir")
+    refresh_creds_from_host
     gh_token=$(gh auth token)
     container_name="cfg-agent-interactive-${sanitized}"
 
