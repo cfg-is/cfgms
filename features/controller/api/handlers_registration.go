@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // RegistrationRequest represents the steward registration request
@@ -40,6 +41,11 @@ type RegistrationResponse struct {
 	// When present, stewards should use this for config signature verification instead of ServerCert
 	// In unified mode, this is empty and ServerCert is used for both
 	SigningCert string `json:"signing_cert,omitempty"`
+
+	// Issue #422: Quarantined indicates the steward has been quarantined by the approval workflow.
+	// Quarantined stewards receive certificates but are restricted to baseline configuration
+	// (no secrets, no scripts) until an administrator promotes them.
+	Quarantined bool `json:"quarantined,omitempty"`
 }
 
 // handleRegister handles steward registration via REST API
@@ -102,6 +108,37 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("Attempted reuse of single-use token", "token", req.Token, "used_at", token.UsedAt, "used_by", token.UsedBy)
 		http.Error(w, "Registration token has already been used", http.StatusUnauthorized)
 		return
+	}
+
+	// Issue #422: Run registration approval hook.
+	// The hook evaluates the token metadata and source IP against the configured workflow.
+	// Hook errors are non-fatal: we log and fall back to approve so transient failures
+	// do not block legitimate registrations.
+	quarantined := false
+	{
+		input := RegistrationInput{
+			Token:    token,
+			SourceIP: extractSourceIP(r),
+		}
+		decision, reason, hookErr := s.approvalHook.Evaluate(r.Context(), input)
+		if hookErr != nil {
+			s.logger.Warn("Registration approval hook error, defaulting to approve",
+				"error", hookErr,
+				"tenant_id", token.TenantID)
+		} else {
+			switch decision {
+			case DecisionReject:
+				s.logger.Warn("Registration rejected by approval workflow",
+					"tenant_id", token.TenantID,
+					"reason", logging.SanitizeLogValue(reason))
+				http.Error(w, "Registration rejected", http.StatusForbidden)
+				return
+			case DecisionQuarantine:
+				quarantined = true
+				s.logger.Info("Registration quarantined by approval workflow",
+					"tenant_id", token.TenantID)
+			}
+		}
 	}
 
 	// Generate steward ID
@@ -217,14 +254,23 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"steward_id", stewardID,
 		"validity_days", validityDays)
 
+	// Issue #422: Set quarantine flag on the response so the steward knows its status.
+	if quarantined {
+		resp.Quarantined = true
+	}
+
 	// Store registered steward in memory for API queries
+	initialStatus := "registered" // Initial status before first heartbeat
+	if quarantined {
+		initialStatus = "quarantined"
+	}
 	s.mu.Lock()
 	s.registeredStewards[stewardID] = &RegisteredSteward{
 		StewardID:        stewardID,
 		TenantID:         token.TenantID,
 		Group:            token.Group,
 		RegisteredAt:     time.Now(),
-		Status:           "registered", // Initial status before first heartbeat
+		Status:           initialStatus,
 		TransportAddress: resp.TransportAddress,
 	}
 	s.mu.Unlock()
@@ -268,6 +314,24 @@ func replaceBindAddress(addr string) string {
 	// Replace 0.0.0.0 with external hostname
 	port := strings.TrimPrefix(addr, "0.0.0.0:")
 	return externalHostname + ":" + port
+}
+
+// extractSourceIP returns the source IP from the HTTP request.
+// It prefers X-Forwarded-For (first entry) when present, falling back to RemoteAddr.
+func extractSourceIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// Take the first address (client IP before any proxies)
+		if idx := strings.Index(xff, ","); idx != -1 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return strings.TrimSpace(xff)
+	}
+	// RemoteAddr is "host:port"; strip the port
+	addr := r.RemoteAddr
+	if idx := strings.LastIndex(addr, ":"); idx != -1 {
+		return addr[:idx]
+	}
+	return addr
 }
 
 // Helper function to create a time pointer

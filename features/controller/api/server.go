@@ -64,6 +64,7 @@ type Server struct {
 	rollbackManager         rollback.RollbackManager       // Story #416: Rollback system
 	reportsHandler          *reportapi.Handler             // Story #416: Reports engine
 	workflowHandler         *WorkflowHandler               // Story #414: Workflow engine REST API
+	approvalHook            RegistrationApprovalHook       // Issue #422: Registration approval hook
 }
 
 // APIKey represents an API key for external authentication
@@ -150,6 +151,7 @@ func New(
 		apiKeys:                 make(map[string]*APIKey),            // In-memory cache
 		secretStore:             secretStore,                         // M-AUTH-1: Central secrets provider
 		registeredStewards:      make(map[string]*RegisteredSteward), // In-memory steward registry
+		approvalHook:            &DefaultApprovalHook{},              // Issue #422: accept-all default
 	}
 
 	// Story #380: Initialize three-tier auth defense system
@@ -446,6 +448,16 @@ func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.workflowHandler = h
+}
+
+// SetApprovalHook replaces the registration approval hook (Issue #422).
+// Called during server startup when a workflow engine is available.
+func (s *Server) SetApprovalHook(hook RegistrationApprovalHook) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if hook != nil {
+		s.approvalHook = hook
+	}
 }
 
 // getHTTPListenAddr determines the HTTP listen address
