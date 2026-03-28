@@ -24,9 +24,10 @@ type SoftwareCollector interface {
 	CollectProcesses(ctx context.Context, attributes map[string]string) error
 }
 
-// NewSoftwareCollector creates a platform-specific software collector
-func NewSoftwareCollector() SoftwareCollector {
-	return newPlatformSoftwareCollector()
+// NewSoftwareCollector creates a platform-specific software collector.
+// The context is used by Windows implementations to enforce per-command timeouts.
+func NewSoftwareCollector(ctx context.Context) SoftwareCollector {
+	return newPlatformSoftwareCollector(ctx)
 }
 
 // GenericSoftwareCollector provides basic cross-platform software collection
@@ -81,10 +82,8 @@ func (g *GenericSoftwareCollector) CollectProcesses(_ context.Context, attribute
 
 // Platform-specific collector types (implementations in separate files)
 
-// WindowsSoftwareCollector handles Windows-specific software collection
-type WindowsSoftwareCollector struct{}
-
-// Windows-specific implementations are in software_windows.go
+// WindowsSoftwareCollector handles Windows-specific software collection.
+// Full definition (with ctx field) is in software_windows.go.
 
 // LinuxSoftwareCollector handles Linux-specific software collection
 type LinuxSoftwareCollector struct{}

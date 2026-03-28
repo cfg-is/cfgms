@@ -575,9 +575,9 @@ type FullCapabilityReport struct {
 func (r *FullCapabilityReport) GetCapabilitySummary() string {
 	var summary strings.Builder
 
-	summary.WriteString(fmt.Sprintf("Capability Test Results for Tenant: %s\n", r.TenantID))
-	summary.WriteString(fmt.Sprintf("Success Rate: %.1f%%\n", r.SuccessRate*100))
-	summary.WriteString(fmt.Sprintf("Overall Success: %t\n\n", r.OverallSuccess))
+	fmt.Fprintf(&summary, "Capability Test Results for Tenant: %s\n", r.TenantID)
+	fmt.Fprintf(&summary, "Success Rate: %.1f%%\n", r.SuccessRate*100)
+	fmt.Fprintf(&summary, "Overall Success: %t\n\n", r.OverallSuccess)
 
 	summary.WriteString("Available Capabilities:\n")
 	for capability, available := range r.Capabilities {
@@ -585,13 +585,13 @@ func (r *FullCapabilityReport) GetCapabilitySummary() string {
 		if available {
 			status = "✅"
 		}
-		summary.WriteString(fmt.Sprintf("  %s %s\n", status, capability))
+		fmt.Fprintf(&summary, "  %s %s\n", status, capability)
 	}
 
 	if len(r.Recommendations) > 0 {
 		summary.WriteString("\nRecommendations:\n")
 		for _, rec := range r.Recommendations {
-			summary.WriteString(fmt.Sprintf("  • %s\n", rec))
+			fmt.Fprintf(&summary, "  • %s\n", rec)
 		}
 	}
 
@@ -696,9 +696,9 @@ func TestMSPCapabilitiesWithClient(ctx context.Context, config *MSPOAuth2Config,
 func (r *FullCapabilityReport) GetMSPCapabilitySummary() string {
 	var summary strings.Builder
 
-	summary.WriteString(fmt.Sprintf("MSP Capability Assessment - Client Tenant: %s\n", r.TenantID))
-	summary.WriteString(fmt.Sprintf("Tested: %s\n", r.TestedAt.Format("2006-01-02 15:04:05 UTC")))
-	summary.WriteString(fmt.Sprintf("Operational Readiness: %.1f%%\n", r.SuccessRate*100))
+	fmt.Fprintf(&summary, "MSP Capability Assessment - Client Tenant: %s\n", r.TenantID)
+	fmt.Fprintf(&summary, "Tested: %s\n", r.TestedAt.Format("2006-01-02 15:04:05 UTC"))
+	fmt.Fprintf(&summary, "Operational Readiness: %.1f%%\n", r.SuccessRate*100)
 
 	if r.OverallSuccess {
 		summary.WriteString("Status: ✅ MSP READY - Client tenant is ready for management operations\n\n")
@@ -717,7 +717,7 @@ func (r *FullCapabilityReport) GetMSPCapabilitySummary() string {
 	}
 
 	for category, capList := range capabilities {
-		summary.WriteString(fmt.Sprintf("\n%s:\n", category))
+		fmt.Fprintf(&summary, "\n%s:\n", category)
 		for _, capability := range capList {
 			if available, exists := r.Capabilities[capability]; exists {
 				status := "❌"
@@ -726,9 +726,9 @@ func (r *FullCapabilityReport) GetMSPCapabilitySummary() string {
 				}
 				// Get the test details for better display name
 				if test, testExists := r.Tests[capability]; testExists {
-					summary.WriteString(fmt.Sprintf("  %s %s\n", status, test.Description))
+					fmt.Fprintf(&summary, "  %s %s\n", status, test.Description)
 				} else {
-					summary.WriteString(fmt.Sprintf("  %s %s\n", status, capability))
+					fmt.Fprintf(&summary, "  %s %s\n", status, capability)
 				}
 			}
 		}
@@ -737,7 +737,7 @@ func (r *FullCapabilityReport) GetMSPCapabilitySummary() string {
 	if len(r.Recommendations) > 0 {
 		summary.WriteString("\nMSP Setup Recommendations:\n")
 		for i, rec := range r.Recommendations {
-			summary.WriteString(fmt.Sprintf("  %d. %s\n", i+1, rec))
+			fmt.Fprintf(&summary, "  %d. %s\n", i+1, rec)
 		}
 	}
 

@@ -98,36 +98,36 @@ func (e *WorkflowError) Error() string {
 func (e *WorkflowError) FullError() string {
 	var builder strings.Builder
 
-	builder.WriteString(fmt.Sprintf("WorkflowError: %s\n", e.Error()))
-	builder.WriteString(fmt.Sprintf("  Code: %s\n", e.Code))
-	builder.WriteString(fmt.Sprintf("  Message: %s\n", e.Message))
-	builder.WriteString(fmt.Sprintf("  Timestamp: %s\n", e.Timestamp.Format(time.RFC3339)))
-	builder.WriteString(fmt.Sprintf("  Step: %s (%s)\n", e.StepName, e.StepType))
-	builder.WriteString(fmt.Sprintf("  Recoverable: %t\n", e.Recoverable))
-	builder.WriteString(fmt.Sprintf("  Retry Attempt: %d\n", e.RetryAttempt))
+	fmt.Fprintf(&builder, "WorkflowError: %s\n", e.Error())
+	fmt.Fprintf(&builder, "  Code: %s\n", e.Code)
+	fmt.Fprintf(&builder, "  Message: %s\n", e.Message)
+	fmt.Fprintf(&builder, "  Timestamp: %s\n", e.Timestamp.Format(time.RFC3339))
+	fmt.Fprintf(&builder, "  Step: %s (%s)\n", e.StepName, e.StepType)
+	fmt.Fprintf(&builder, "  Recoverable: %t\n", e.Recoverable)
+	fmt.Fprintf(&builder, "  Retry Attempt: %d\n", e.RetryAttempt)
 
 	if len(e.ExecutionPath) > 0 {
-		builder.WriteString(fmt.Sprintf("  Execution Path: %s\n", strings.Join(e.ExecutionPath, " -> ")))
+		fmt.Fprintf(&builder, "  Execution Path: %s\n", strings.Join(e.ExecutionPath, " -> "))
 	}
 
 	if len(e.VariableState) > 0 {
 		builder.WriteString("  Variable State:\n")
 		for k, v := range e.VariableState {
-			builder.WriteString(fmt.Sprintf("    %s: %v\n", k, v))
+			fmt.Fprintf(&builder, "    %s: %v\n", k, v)
 		}
 	}
 
 	if len(e.Details) > 0 {
 		builder.WriteString("  Details:\n")
 		for k, v := range e.Details {
-			builder.WriteString(fmt.Sprintf("    %s: %v\n", k, v))
+			fmt.Fprintf(&builder, "    %s: %v\n", k, v)
 		}
 	}
 
 	if len(e.StackTrace) > 0 {
 		builder.WriteString("  Stack Trace:\n")
 		for _, frame := range e.StackTrace {
-			builder.WriteString(fmt.Sprintf("    %s:%d in %s()\n", frame.File, frame.Line, frame.Function))
+			fmt.Fprintf(&builder, "    %s:%d in %s()\n", frame.File, frame.Line, frame.Function)
 		}
 	}
 
@@ -137,9 +137,9 @@ func (e *WorkflowError) FullError() string {
 			lines := strings.Split(childErr.FullError(), "\n")
 			for j, line := range lines {
 				if j == 0 {
-					builder.WriteString(fmt.Sprintf("    [%d] %s\n", i+1, line))
+					fmt.Fprintf(&builder, "    [%d] %s\n", i+1, line)
 				} else if line != "" {
-					builder.WriteString(fmt.Sprintf("      %s\n", line))
+					fmt.Fprintf(&builder, "      %s\n", line)
 				}
 			}
 		}

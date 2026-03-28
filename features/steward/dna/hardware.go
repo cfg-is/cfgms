@@ -23,9 +23,10 @@ type HardwareCollector interface {
 	CollectMotherboard(ctx context.Context, attributes map[string]string) error
 }
 
-// NewHardwareCollector creates a platform-specific hardware collector
-func NewHardwareCollector() HardwareCollector {
-	return newPlatformHardwareCollector()
+// NewHardwareCollector creates a platform-specific hardware collector.
+// The context is used by Windows implementations to enforce per-command timeouts.
+func NewHardwareCollector(ctx context.Context) HardwareCollector {
+	return newPlatformHardwareCollector(ctx)
 }
 
 // GenericHardwareCollector provides basic cross-platform hardware collection
@@ -62,10 +63,8 @@ func (g *GenericHardwareCollector) CollectMotherboard(_ context.Context, attribu
 
 // Platform-specific collector types (implementations in separate files)
 
-// WindowsHardwareCollector handles Windows-specific hardware collection
-type WindowsHardwareCollector struct{}
-
-// Windows-specific implementations are in hardware_windows.go
+// WindowsHardwareCollector handles Windows-specific hardware collection.
+// Full definition (with ctx field) is in hardware_windows.go.
 
 // LinuxHardwareCollector handles Linux-specific hardware collection
 type LinuxHardwareCollector struct{}

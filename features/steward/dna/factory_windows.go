@@ -5,13 +5,15 @@
 
 package dna
 
+import "context"
+
 // Platform-specific factory implementations for Windows
-func newPlatformHardwareCollector() HardwareCollector {
-	return &WindowsHardwareCollector{}
+func newPlatformHardwareCollector(ctx context.Context) HardwareCollector {
+	return &WindowsHardwareCollector{ctx: ctx}
 }
 
-func newPlatformSoftwareCollector() SoftwareCollector {
-	return &WindowsSoftwareCollector{}
+func newPlatformSoftwareCollector(ctx context.Context) SoftwareCollector {
+	return &WindowsSoftwareCollector{ctx: ctx}
 }
 
 func newPlatformNetworkCollector() NetworkCollector {

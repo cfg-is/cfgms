@@ -36,11 +36,11 @@ func newTestSession() *testDataPlaneSession {
 	return &testDataPlaneSession{dnaSent: make(chan *dpTypes.DNATransfer, 1)}
 }
 
-func (s *testDataPlaneSession) ID() string         { return "test-session" }
-func (s *testDataPlaneSession) PeerID() string      { return "controller-1" }
-func (s *testDataPlaneSession) IsClosed() bool      { return false }
-func (s *testDataPlaneSession) LocalAddr() string   { return "127.0.0.1:0" }
-func (s *testDataPlaneSession) RemoteAddr() string  { return "127.0.0.1:1" }
+func (s *testDataPlaneSession) ID() string                    { return "test-session" }
+func (s *testDataPlaneSession) PeerID() string                { return "controller-1" }
+func (s *testDataPlaneSession) IsClosed() bool                { return false }
+func (s *testDataPlaneSession) LocalAddr() string             { return "127.0.0.1:0" }
+func (s *testDataPlaneSession) RemoteAddr() string            { return "127.0.0.1:1" }
 func (s *testDataPlaneSession) Close(_ context.Context) error { return nil }
 func (s *testDataPlaneSession) SendConfig(_ context.Context, _ *dpTypes.ConfigTransfer) error {
 	return nil

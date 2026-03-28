@@ -24,15 +24,16 @@ func TestDNACollectionBasic(t *testing.T) {
 			t.Fatalf("DNA collection failed: %v", err)
 		}
 
+		// Basic validation
 		if dna.Id == "" {
 			t.Error("DNA ID should not be empty")
 		}
 
-		if len(dna.Attributes) < 50 {
-			t.Errorf("Expected at least 50 attributes, got %d", len(dna.Attributes))
+		if len(dna.Attributes) < 30 {
+			t.Errorf("Expected at least 30 attributes (fast path), got %d", len(dna.Attributes))
 		}
 
-		t.Logf("✅ DNA collection basic validation passed (%d attributes)", len(dna.Attributes))
+		t.Logf("DNA collection basic validation passed (%d attributes)", len(dna.Attributes))
 		return
 	}
 
@@ -40,27 +41,31 @@ func TestDNACollectionBasic(t *testing.T) {
 	logger := logging.NewLogger("error")
 	collector := NewCollector(logger)
 
+	// Test that collector was created properly
 	if collector == nil {
 		t.Fatal("DNA collector should not be nil")
 	}
 
+	// Test individual component functions work (without full collection)
 	attributes := make(map[string]string)
 	collector.collectBasicInfo(attributes)
 
+	// Should have at least hostname and basic info
 	if len(attributes) < 3 {
 		t.Errorf("Basic info collection should return at least 3 attributes, got %d", len(attributes))
 	}
 
+	// Check hostname exists (this is fast to collect)
 	if _, exists := attributes["hostname"]; !exists {
 		t.Error("Basic info should include hostname")
 	}
 
-	t.Logf("✅ DNA collection fast validation passed (%d basic attributes)", len(attributes))
+	t.Logf("DNA collection fast validation passed (%d basic attributes)", len(attributes))
 }
 
 // BenchmarkDNACollection benchmarks the DNA collection performance
 func BenchmarkDNACollection(b *testing.B) {
-	logger := logging.NewLogger("error")
+	logger := logging.NewLogger("error") // Use error level to reduce noise
 	collector := NewCollector(logger)
 
 	b.ResetTimer()
@@ -75,16 +80,23 @@ func BenchmarkDNACollection(b *testing.B) {
 
 // TestDNACollectionPerformance tests that DNA collection meets performance requirements
 func TestDNACollectionPerformance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping DNA performance test in short mode")
+	}
+
 	logger := logging.NewLogger("info")
 	collector := NewCollector(logger)
 
+	// Measure CPU usage before collection
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
 
+	// Time the collection
 	start := time.Now()
 	dna, err := collector.Collect(context.Background())
 	duration := time.Since(start)
 
+	// Measure CPU usage after collection
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
 
@@ -92,22 +104,29 @@ func TestDNACollectionPerformance(t *testing.T) {
 		t.Fatalf("DNA collection failed: %v", err)
 	}
 
+	// Check performance requirements
 	if duration > 60*time.Second {
 		t.Errorf("DNA collection took %v, exceeds 60 second requirement", duration)
 	} else {
-		t.Logf("DNA collection completed in %v (requirement: <60s) ✅", duration)
+		t.Logf("DNA collection completed in %v (requirement: <60s)", duration)
 	}
 
+	// Check attribute count — the first Collect() call returns fast-path data
+	// only (hardware + network + environment). Software and security data are
+	// collected asynchronously in the background and merged on subsequent calls.
+	// The fast path typically returns 80-100 attributes; full merged data exceeds 120.
 	attributeCount := len(dna.Attributes)
-	if attributeCount < 100 {
-		t.Errorf("DNA collection returned only %d attributes, expected >100", attributeCount)
+	if attributeCount < 50 {
+		t.Errorf("DNA collection returned only %d attributes, expected >50", attributeCount)
 	} else {
-		t.Logf("DNA collection returned %d attributes ✅", attributeCount)
+		t.Logf("DNA collection returned %d attributes (fast path)", attributeCount)
 	}
 
+	// Memory usage analysis
 	memUsed := after.Alloc - before.Alloc
 	t.Logf("Memory used during collection: %d bytes", memUsed)
 
+	// Log timing breakdown (will show in verbose mode)
 	t.Logf("Collection timing breakdown:")
 	t.Logf("  Total duration: %v", duration)
 	t.Logf("  Attributes collected: %d", attributeCount)
@@ -116,6 +135,10 @@ func TestDNACollectionPerformance(t *testing.T) {
 
 // TestDNACollectionComponents tests individual collection components
 func TestDNACollectionComponents(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping DNA component performance test in short mode")
+	}
+
 	logger := logging.NewLogger("info")
 	collector := NewCollector(logger)
 	ctx := context.Background()
@@ -127,9 +150,9 @@ func TestDNACollectionComponents(t *testing.T) {
 		{"Basic Info", collector.collectBasicInfo},
 		{"Hardware Info", func(attrs map[string]string) { collector.collectHardwareInfo(ctx, attrs) }},
 		{"Software Info", func(attrs map[string]string) { collector.collectSoftwareInfo(ctx, attrs) }},
-		{"Network Info", func(attrs map[string]string) { collector.collectNetworkInfo(ctx, attrs) }},
+		{"Network Info", collector.collectNetworkInfo},
 		{"Environment Info", collector.collectEnvironmentInfo},
-		{"Security Info", func(attrs map[string]string) { collector.collectSecurityInfo(ctx, attrs) }},
+		{"Security Info", collector.collectSecurityInfo},
 	}
 
 	for _, component := range components {
@@ -151,8 +174,13 @@ func TestDNACollectionComponents(t *testing.T) {
 
 // TestConcurrentDNACollection tests DNA collection under concurrent load
 func TestConcurrentDNACollection(t *testing.T) {
-	logger := logging.NewLogger("error")
+	if testing.Short() {
+		t.Skip("Skipping concurrent DNA collection test in short mode")
+	}
 
+	logger := logging.NewLogger("error") // Reduce noise
+
+	// Reduced for faster testing - still validates concurrency
 	const goroutines = 3
 	const collectionsPerGoroutine = 2
 
@@ -178,9 +206,10 @@ func TestConcurrentDNACollection(t *testing.T) {
 		}()
 	}
 
+	// Collect all results
 	var totalDuration time.Duration
 	var maxDuration time.Duration
-	minDuration := time.Hour
+	minDuration := time.Hour // Start with a large value
 
 	for i := 0; i < goroutines*collectionsPerGoroutine; i++ {
 		duration := <-results

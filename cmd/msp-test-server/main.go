@@ -465,7 +465,7 @@ func testGraphAPIAccess(config *auth.MultiTenantConfig, clientTenantID string) s
 	}
 
 	var results strings.Builder
-	results.WriteString(fmt.Sprintf(`<div class="success"><h3>Access Token Acquired</h3><p>Successfully obtained token for tenant %s</p></div>`, clientTenantID))
+	fmt.Fprintf(&results, `<div class="success"><h3>Access Token Acquired</h3><p>Successfully obtained token for tenant %s</p></div>`, clientTenantID)
 
 	for _, test := range tests {
 		result := testAPIEndpoint(test.endpoint, token.Token, test.name, test.desc)
