@@ -537,6 +537,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		httpServer.SetWorkflowHandler(workflowHandler)
 		srv.triggerManager = triggerMgr
 		logger.Info("Workflow engine wired to HTTP API server")
+
+		// Issue #422: Wire registration approval hook backed by the workflow engine.
+		// Operators configure the "steward-registration-approval" workflow to customise policy.
+		approvalHook := workflowHandler.NewRegistrationApprovalHook(logger)
+		httpServer.SetApprovalHook(approvalHook)
+		logger.Info("Registration approval hook wired (Issue #422)")
 	}
 
 	return srv, nil
