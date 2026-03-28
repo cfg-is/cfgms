@@ -90,6 +90,7 @@ func (cs *CronScheduler) Start(ctx context.Context) error {
 	logger.InfoCtx(ctx, "Starting cron scheduler")
 
 	cs.running = true
+	cs.stopChan = make(chan struct{}) // Reinitialize for restartability after Stop()
 	go cs.schedulerLoop(ctx)
 
 	logger.InfoCtx(ctx, "Cron scheduler started successfully")

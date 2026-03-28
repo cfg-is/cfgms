@@ -63,6 +63,7 @@ type Server struct {
 	authDefense             *authdefense.AuthDefenseSystem // Story #380: Three-tier auth defense
 	rollbackManager         rollback.RollbackManager       // Story #416: Rollback system
 	reportsHandler          *reportapi.Handler             // Story #416: Reports engine
+	workflowHandler         *WorkflowHandler               // Story #414: Workflow engine REST API
 }
 
 // APIKey represents an API key for external authentication
@@ -336,6 +337,16 @@ func (s *Server) setupRouter() {
 		s.reportsHandler.RegisterRoutes(reportsRouter)
 		s.logger.Info("Reports API routes registered")
 	}
+
+	// Workflow engine endpoints (Issue #414)
+	if s.workflowHandler != nil {
+		workflowRouter := api.PathPrefix("/workflows").Subrouter()
+		s.workflowHandler.RegisterWorkflowRoutes(workflowRouter)
+
+		triggerRouter := api.PathPrefix("/triggers").Subrouter()
+		s.workflowHandler.RegisterTriggerRoutes(triggerRouter)
+		s.logger.Info("Workflow and trigger API routes registered")
+	}
 }
 
 // Start starts the HTTP server
@@ -428,6 +439,13 @@ func (s *Server) SetReportsHandler(h *reportapi.Handler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reportsHandler = h
+}
+
+// SetWorkflowHandler sets the workflow handler for workflow and trigger API routes (Issue #414)
+func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workflowHandler = h
 }
 
 // getHTTPListenAddr determines the HTTP listen address
