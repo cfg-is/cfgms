@@ -6,15 +6,19 @@
 package dna
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
 
+const windowsSwCmdTimeout = 30 * time.Second
+
 // CollectOS gathers detailed operating system information on Windows
-func (w *WindowsSoftwareCollector) CollectOS(attributes map[string]string) error {
+func (w *WindowsSoftwareCollector) CollectOS(ctx context.Context, attributes map[string]string) error {
 	// Basic OS information
 	attributes["os"] = runtime.GOOS
 	attributes["go_version"] = runtime.Version()
@@ -23,92 +27,118 @@ func (w *WindowsSoftwareCollector) CollectOS(attributes map[string]string) error
 	attributes["runtime_os"] = runtime.GOOS
 	attributes["runtime_compiler"] = runtime.Compiler
 
-	// Windows version using WMI
-	if output, err := exec.Command("wmic", "os", "get", "Caption,Version,BuildNumber,ServicePackMajorVersion,OSArchitecture", "/format:csv").Output(); err == nil {
-		w.parseWMIOSOutput(string(output), attributes)
-	}
+	// Windows version using wmic
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	output, err := exec.CommandContext(cmdCtx, "wmic", "os", "get",
+		"Caption,Version,BuildNumber,ServicePackMajorVersion,OSArchitecture",
+		"/format:csv").Output()
+	cancel()
 
-	// Detailed OS information using PowerShell
-	if output, err := exec.Command("powershell", "-Command", "Get-WmiObject -Class Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber,OSArchitecture,InstallDate,LastBootUpTime | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
-		w.parsePowerShellOSOutput(string(output), attributes)
+	if err == nil {
+		w.parseWMIOSOutput(string(output), attributes)
+	} else {
+		// Fallback: PowerShell (only if wmic fails)
+		cmdCtx2, cancel2 := context.WithTimeout(ctx, windowsSwCmdTimeout)
+		if output2, err2 := exec.CommandContext(cmdCtx2, "powershell", "-NoProfile", "-Command",
+			"Get-CimInstance -ClassName Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber,OSArchitecture,InstallDate,LastBootUpTime | ConvertTo-Csv -NoTypeInformation").Output(); err2 == nil {
+			w.parsePowerShellOSOutput(string(output2), attributes)
+		}
+		cancel2()
 	}
 
 	// .NET Framework versions
-	w.collectDotNetVersions(attributes)
+	w.collectDotNetVersions(ctx, attributes)
 
 	// PowerShell version
-	if output, err := exec.Command("powershell", "-Command", "$PSVersionTable.PSVersion").Output(); err == nil {
-		attributes["powershell_version"] = strings.TrimSpace(string(output))
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	if output3, err3 := exec.CommandContext(cmdCtx3, "powershell", "-NoProfile", "-Command",
+		"$PSVersionTable.PSVersion").Output(); err3 == nil {
+		attributes["powershell_version"] = strings.TrimSpace(string(output3))
 	}
+	cancel3()
 
 	return nil
 }
 
 // CollectPackages gathers installed packages/applications on Windows
-func (w *WindowsSoftwareCollector) CollectPackages(attributes map[string]string) error {
-	// Installed programs via WMI
-	w.collectInstalledPrograms(attributes)
+func (w *WindowsSoftwareCollector) CollectPackages(ctx context.Context, attributes map[string]string) error {
+	// Installed programs via registry enumeration (fast, no MSI reconfiguration)
+	w.collectInstalledPrograms(ctx, attributes)
 
 	// Windows Features
-	w.collectWindowsFeatures(attributes)
+	w.collectWindowsFeatures(ctx, attributes)
 
 	// Chocolatey packages (if available)
-	w.collectChocolateyPackages(attributes)
+	w.collectChocolateyPackages(ctx, attributes)
 
 	// Winget packages (if available)
-	w.collectWingetPackages(attributes)
+	w.collectWingetPackages(ctx, attributes)
 
 	// Windows Store apps
-	w.collectWindowsStoreApps(attributes)
+	w.collectWindowsStoreApps(ctx, attributes)
 
 	// System updates/hotfixes
-	w.collectInstalledUpdates(attributes)
+	w.collectInstalledUpdates(ctx, attributes)
 
 	return nil
 }
 
 // CollectServices gathers installed and running services on Windows
-func (w *WindowsSoftwareCollector) CollectServices(attributes map[string]string) error {
-	// Windows services using WMI
-	if output, err := exec.Command("wmic", "service", "get", "Name,State,StartMode,ServiceType", "/format:csv").Output(); err == nil {
+func (w *WindowsSoftwareCollector) CollectServices(ctx context.Context, attributes map[string]string) error {
+	// Windows services using wmic
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	output, err := exec.CommandContext(cmdCtx, "wmic", "service", "get",
+		"Name,State,StartMode,ServiceType", "/format:csv").Output()
+	cancel()
+
+	if err == nil {
 		w.parseWMIServicesOutput(string(output), attributes)
 	}
 
 	// Running processes count
-	if output, err := exec.Command("tasklist", "/fo", "csv").Output(); err == nil {
-		lines := strings.Split(string(output), "\n")
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	if output2, err2 := exec.CommandContext(cmdCtx2, "tasklist", "/fo", "csv").Output(); err2 == nil {
+		lines := strings.Split(string(output2), "\n")
 		attributes["running_process_count"] = fmt.Sprintf("%d", len(lines)-1) // -1 for header
 	}
+	cancel2()
 
 	// Startup programs
-	w.collectStartupPrograms(attributes)
+	w.collectStartupPrograms(ctx, attributes)
 
 	return nil
 }
 
 // CollectProcesses gathers information about running processes on Windows
-func (w *WindowsSoftwareCollector) CollectProcesses(attributes map[string]string) error {
+func (w *WindowsSoftwareCollector) CollectProcesses(ctx context.Context, attributes map[string]string) error {
 	// Basic process information
 	attributes["current_pid"] = fmt.Sprintf("%d", os.Getpid())
 	attributes["parent_pid"] = fmt.Sprintf("%d", os.Getppid())
 
 	// Current user
-	if user, err := exec.Command("whoami").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	if user, err := exec.CommandContext(cmdCtx, "whoami").Output(); err == nil {
 		attributes["current_user"] = strings.TrimSpace(string(user))
 	}
+	cancel()
 
 	// Number of goroutines
 	attributes["goroutine_count"] = fmt.Sprintf("%d", runtime.NumGoroutine())
 
 	// Detailed process information using tasklist
-	if output, err := exec.Command("tasklist", "/fo", "csv", "/v").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "tasklist", "/fo", "csv", "/v").Output(); err == nil {
 		w.parseTasklistOutput(string(output), attributes)
 	}
+	cancel2()
 
 	// Process statistics using PowerShell
-	if output, err := exec.Command("powershell", "-Command", "Get-Process | Group-Object ProcessName | Select-Object Count,Name | Sort-Object Count -Descending | Select-Object -First 10 | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx3, "powershell", "-NoProfile", "-Command",
+		"Get-Process | Group-Object ProcessName | Select-Object Count,Name | Sort-Object Count -Descending | Select-Object -First 10 | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
 		w.parsePowerShellProcessStatsOutput(string(output), attributes)
 	}
+	cancel3()
 
 	return nil
 }
@@ -181,9 +211,11 @@ func (w *WindowsSoftwareCollector) parsePowerShellOSOutput(output string, attrib
 }
 
 // collectDotNetVersions collects .NET Framework versions
-func (w *WindowsSoftwareCollector) collectDotNetVersions(attributes map[string]string) {
+func (w *WindowsSoftwareCollector) collectDotNetVersions(ctx context.Context, attributes map[string]string) {
 	// .NET Framework versions via registry (using PowerShell)
-	if output, err := exec.Command("powershell", "-Command", "Get-ChildItem 'HKLM:SOFTWARE\\Microsoft\\NET Framework Setup\\NDP' -recurse | Get-ItemProperty -name Version,Release -EA 0 | Where { $_.PSChildName -match '^(?!S)\\p{L}'} | Select PSChildName, Version, Release").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "powershell", "-NoProfile", "-Command",
+		"Get-ChildItem 'HKLM:SOFTWARE\\Microsoft\\NET Framework Setup\\NDP' -recurse | Get-ItemProperty -name Version,Release -EA 0 | Where { $_.PSChildName -match '^(?!S)\\p{L}'} | Select PSChildName, Version, Release").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var dotnetVersions []string
 		for _, line := range lines {
@@ -196,49 +228,77 @@ func (w *WindowsSoftwareCollector) collectDotNetVersions(attributes map[string]s
 			attributes["dotnet_framework_versions"] = strings.Join(dotnetVersions, "; ")
 		}
 	}
+	cancel()
 
 	// .NET Core/5+ versions
-	if output, err := exec.Command("dotnet", "--list-runtimes").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "dotnet", "--list-runtimes").Output(); err == nil {
 		attributes["dotnet_core_runtimes"] = strings.TrimSpace(string(output))
 	}
+	cancel2()
 }
 
-// collectInstalledPrograms collects installed programs via WMI
-func (w *WindowsSoftwareCollector) collectInstalledPrograms(attributes map[string]string) {
-	if output, err := exec.Command("wmic", "product", "get", "Name,Version,Vendor,InstallDate", "/format:csv").Output(); err == nil {
-		lines := strings.Split(string(output), "\n")
-		var programCount int
-		var programs []string
+// collectInstalledPrograms collects installed programs via registry enumeration.
+//
+// This uses direct registry access instead of Win32_Product (WMI), which
+// eliminates the MSI reconfiguration trigger that causes 6+ minute delays.
+// Registry enumeration completes in under 2 seconds.
+func (w *WindowsSoftwareCollector) collectInstalledPrograms(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	defer cancel()
 
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "Node") {
-				continue
-			}
+	output, err := exec.CommandContext(cmdCtx, "powershell", "-NoProfile", "-Command",
+		"Get-ItemProperty "+
+			"'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"+
+			"'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' "+
+			"2>$null "+
+			"| Where-Object { $_.DisplayName } "+
+			"| Select-Object DisplayName,DisplayVersion,Publisher,InstallDate "+
+			"| ConvertTo-Csv -NoTypeInformation").Output()
 
-			fields := strings.Split(line, ",")
-			if len(fields) >= 5 && fields[2] != "" { // Name field
-				programCount++
-				if programCount <= 20 { // Store first 20 as sample
-					programInfo := fields[2]                // Name
-					if len(fields) > 4 && fields[4] != "" { // Version
-						programInfo += " " + fields[4]
-					}
-					programs = append(programs, programInfo)
+	if err != nil {
+		return
+	}
+
+	lines := strings.Split(string(output), "\n")
+	var programCount int
+	var programs []string
+
+	for i, line := range lines {
+		if i == 0 { // Skip header
+			continue
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		fields := w.parseCSVLine(line)
+		if len(fields) >= 1 && fields[0] != "" {
+			programCount++
+			if programCount <= 20 { // Store first 20 as sample
+				programInfo := fields[0] // DisplayName
+				if len(fields) > 1 && fields[1] != "" {
+					programInfo += " " + fields[1] // DisplayVersion
 				}
+				programs = append(programs, programInfo)
 			}
 		}
+	}
 
-		attributes["installed_program_count"] = fmt.Sprintf("%d", programCount)
-		if len(programs) > 0 {
-			attributes["installed_programs_sample"] = strings.Join(programs, "; ")
-		}
+	attributes["installed_program_count"] = fmt.Sprintf("%d", programCount)
+	if len(programs) > 0 {
+		attributes["installed_programs_sample"] = strings.Join(programs, "; ")
 	}
 }
 
 // collectWindowsFeatures collects Windows features
-func (w *WindowsSoftwareCollector) collectWindowsFeatures(attributes map[string]string) {
-	if output, err := exec.Command("powershell", "-Command", "Get-WindowsOptionalFeature -Online | Where-Object {$_.State -eq 'Enabled'} | Select-Object FeatureName | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
+func (w *WindowsSoftwareCollector) collectWindowsFeatures(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "powershell", "-NoProfile", "-Command",
+		"Get-WindowsOptionalFeature -Online | Where-Object {$_.State -eq 'Enabled'} | Select-Object FeatureName | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		featureCount := len(lines) - 1 // -1 for header
 		if featureCount > 0 {
@@ -260,8 +320,11 @@ func (w *WindowsSoftwareCollector) collectWindowsFeatures(attributes map[string]
 }
 
 // collectChocolateyPackages collects Chocolatey packages if available
-func (w *WindowsSoftwareCollector) collectChocolateyPackages(attributes map[string]string) {
-	if output, err := exec.Command("choco", "list", "--local-only").Output(); err == nil {
+func (w *WindowsSoftwareCollector) collectChocolateyPackages(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "choco", "list", "--local-only").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var packageCount int
 		var packages []string
@@ -285,9 +348,10 @@ func (w *WindowsSoftwareCollector) collectChocolateyPackages(attributes map[stri
 }
 
 // collectWingetPackages collects Winget packages if available
-func (w *WindowsSoftwareCollector) collectWingetPackages(attributes map[string]string) {
+func (w *WindowsSoftwareCollector) collectWingetPackages(ctx context.Context, attributes map[string]string) {
 	// List installed packages
-	if output, err := exec.Command("winget", "list").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "winget", "list").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var packageCount int
 		var packages []string
@@ -323,7 +387,7 @@ func (w *WindowsSoftwareCollector) collectWingetPackages(attributes map[string]s
 						// Try to find version (usually after ID)
 						for _, field := range fields {
 							// Version often contains dots or numbers
-							if strings.Contains(field, ".") && (strings.ContainsAny(field, "0123456789")) {
+							if strings.Contains(field, ".") && strings.ContainsAny(field, "0123456789") {
 								packageInfo += " " + field
 								break
 							}
@@ -339,17 +403,21 @@ func (w *WindowsSoftwareCollector) collectWingetPackages(attributes map[string]s
 			attributes["winget_packages_sample"] = strings.Join(packages, "; ")
 		}
 	}
+	cancel()
 
 	// Get winget version for diagnostics
-	if output, err := exec.Command("winget", "--version").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "winget", "--version").Output(); err == nil {
 		version := strings.TrimSpace(string(output))
 		if version != "" {
 			attributes["winget_version"] = version
 		}
 	}
+	cancel2()
 
 	// Check for winget sources
-	if output, err := exec.Command("winget", "source", "list").Output(); err == nil {
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx3, "winget", "source", "list").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var sourceCount int
 		var sources []string
@@ -372,11 +440,16 @@ func (w *WindowsSoftwareCollector) collectWingetPackages(attributes map[string]s
 			attributes["winget_sources"] = strings.Join(sources, ", ")
 		}
 	}
+	cancel3()
 }
 
 // collectWindowsStoreApps collects Windows Store apps
-func (w *WindowsSoftwareCollector) collectWindowsStoreApps(attributes map[string]string) {
-	if output, err := exec.Command("powershell", "-Command", "Get-AppxPackage | Select-Object Name,Version | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
+func (w *WindowsSoftwareCollector) collectWindowsStoreApps(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "powershell", "-NoProfile", "-Command",
+		"Get-AppxPackage | Select-Object Name,Version | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		appCount := len(lines) - 1 // -1 for header
 		if appCount > 0 {
@@ -402,8 +475,12 @@ func (w *WindowsSoftwareCollector) collectWindowsStoreApps(attributes map[string
 }
 
 // collectInstalledUpdates collects system updates/hotfixes
-func (w *WindowsSoftwareCollector) collectInstalledUpdates(attributes map[string]string) {
-	if output, err := exec.Command("wmic", "qfe", "get", "HotFixID,InstalledOn,Description", "/format:csv").Output(); err == nil {
+func (w *WindowsSoftwareCollector) collectInstalledUpdates(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "wmic", "qfe", "get",
+		"HotFixID,InstalledOn,Description", "/format:csv").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var updateCount int
 		var updates []string
@@ -480,8 +557,12 @@ func (w *WindowsSoftwareCollector) parseWMIServicesOutput(output string, attribu
 }
 
 // collectStartupPrograms collects startup programs
-func (w *WindowsSoftwareCollector) collectStartupPrograms(attributes map[string]string) {
-	if output, err := exec.Command("wmic", "startup", "get", "Name,Command,Location", "/format:csv").Output(); err == nil {
+func (w *WindowsSoftwareCollector) collectStartupPrograms(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "wmic", "startup", "get",
+		"Name,Command,Location", "/format:csv").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var startupCount int
 		var startupPrograms []string

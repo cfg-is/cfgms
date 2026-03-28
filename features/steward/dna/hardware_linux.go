@@ -6,142 +6,143 @@
 package dna
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
+const linuxCmdTimeout = 30 * time.Second
+
 // CollectCPU gathers detailed CPU information on Linux using /proc and utilities
-func (l *LinuxHardwareCollector) CollectCPU(attributes map[string]string) error {
+func (l *LinuxHardwareCollector) CollectCPU(ctx context.Context, attributes map[string]string) error {
 	// Basic CPU count
 	attributes["cpu_count"] = fmt.Sprintf("%d", runtime.NumCPU())
 	attributes["cpu_arch"] = runtime.GOARCH
 
 	// Parse /proc/cpuinfo for detailed CPU information
-	if output, err := exec.Command("cat", "/proc/cpuinfo").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "cat", "/proc/cpuinfo").Output(); err == nil {
 		l.parseProcCPUInfo(string(output), attributes)
+		l.parseCPUFrequency(ctx, string(output), attributes)
 	}
-
-	// Get CPU frequency information
-	if output, err := exec.Command("cat", "/proc/cpuinfo").Output(); err == nil {
-		l.parseCPUFrequency(string(output), attributes)
-	}
+	cancel()
 
 	// CPU architecture details using lscpu if available
-	if output, err := exec.Command("lscpu").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "lscpu").Output(); err == nil {
 		l.parseLSCPUOutput(string(output), attributes)
 	}
+	cancel2()
 
 	return nil
 }
 
 // CollectMemory gathers detailed memory information on Linux
-func (l *LinuxHardwareCollector) CollectMemory(attributes map[string]string) error {
+func (l *LinuxHardwareCollector) CollectMemory(ctx context.Context, attributes map[string]string) error {
 	// Parse /proc/meminfo for memory details
-	if output, err := exec.Command("cat", "/proc/meminfo").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "cat", "/proc/meminfo").Output(); err == nil {
 		l.parseProcMemInfo(string(output), attributes)
 	}
+	cancel()
 
 	// Memory hardware information using dmidecode if available
-	if output, err := exec.Command("dmidecode", "-t", "memory").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "dmidecode", "-t", "memory").Output(); err == nil {
 		l.parseDMIDecodeMemory(string(output), attributes)
 	}
+	cancel2()
 
 	// Memory usage summary
-	if output, err := exec.Command("free", "-h").Output(); err == nil {
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, linuxCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx3, "free", "-h").Output(); err == nil {
 		l.parseMemoryUsage(string(output), attributes)
 	}
+	cancel3()
 
 	return nil
 }
 
 // CollectDisk gathers disk and storage information on Linux
-func (l *LinuxHardwareCollector) CollectDisk(attributes map[string]string) error {
+func (l *LinuxHardwareCollector) CollectDisk(ctx context.Context, attributes map[string]string) error {
 	// Disk usage using df
-	if output, err := exec.Command("df", "-h").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "df", "-h").Output(); err == nil {
 		l.parseDiskUsage(string(output), attributes)
 	}
+	cancel()
 
 	// Block device information using lsblk
-	if output, err := exec.Command("lsblk", "-d", "-o", "NAME,SIZE,TYPE,MODEL,VENDOR").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "lsblk", "-d", "-o", "NAME,SIZE,TYPE,MODEL,VENDOR").Output(); err == nil {
 		l.parseLSBLKOutput(string(output), attributes)
 	}
+	cancel2()
 
 	// Disk hardware information using fdisk if available
-	if output, err := exec.Command("fdisk", "-l").Output(); err == nil {
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, linuxCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx3, "fdisk", "-l").Output(); err == nil {
 		l.parseFdiskOutput(string(output), attributes)
 	}
+	cancel3()
 
 	// SMART information for health status (if smartctl is available)
-	l.collectSMARTInfo(attributes)
+	l.collectSMARTInfo(ctx, attributes)
 
 	return nil
 }
 
 // CollectMotherboard gathers motherboard and system information on Linux
-func (l *LinuxHardwareCollector) CollectMotherboard(attributes map[string]string) error {
+func (l *LinuxHardwareCollector) CollectMotherboard(ctx context.Context, attributes map[string]string) error {
 	// System information using dmidecode
-	if output, err := exec.Command("dmidecode", "-s", "system-manufacturer").Output(); err == nil {
-		attributes["system_manufacturer"] = strings.TrimSpace(string(output))
+	dmidecodeKeys := []struct {
+		flag string
+		attr string
+	}{
+		{"system-manufacturer", "system_manufacturer"},
+		{"system-product-name", "system_product_name"},
+		{"system-version", "system_version"},
+		{"system-serial-number", "system_serial_number"},
+		{"system-uuid", "system_uuid"},
+		{"bios-vendor", "bios_vendor"},
+		{"bios-version", "bios_version"},
+		{"bios-release-date", "bios_release_date"},
+		{"baseboard-manufacturer", "motherboard_manufacturer"},
+		{"baseboard-product-name", "motherboard_product"},
+		{"baseboard-version", "motherboard_version"},
 	}
 
-	if output, err := exec.Command("dmidecode", "-s", "system-product-name").Output(); err == nil {
-		attributes["system_product_name"] = strings.TrimSpace(string(output))
-	}
-
-	if output, err := exec.Command("dmidecode", "-s", "system-version").Output(); err == nil {
-		attributes["system_version"] = strings.TrimSpace(string(output))
-	}
-
-	if output, err := exec.Command("dmidecode", "-s", "system-serial-number").Output(); err == nil {
-		attributes["system_serial_number"] = strings.TrimSpace(string(output))
-	}
-
-	if output, err := exec.Command("dmidecode", "-s", "system-uuid").Output(); err == nil {
-		attributes["system_uuid"] = strings.TrimSpace(string(output))
-	}
-
-	// BIOS information
-	if output, err := exec.Command("dmidecode", "-s", "bios-vendor").Output(); err == nil {
-		attributes["bios_vendor"] = strings.TrimSpace(string(output))
-	}
-
-	if output, err := exec.Command("dmidecode", "-s", "bios-version").Output(); err == nil {
-		attributes["bios_version"] = strings.TrimSpace(string(output))
-	}
-
-	if output, err := exec.Command("dmidecode", "-s", "bios-release-date").Output(); err == nil {
-		attributes["bios_release_date"] = strings.TrimSpace(string(output))
-	}
-
-	// Motherboard information
-	if output, err := exec.Command("dmidecode", "-s", "baseboard-manufacturer").Output(); err == nil {
-		attributes["motherboard_manufacturer"] = strings.TrimSpace(string(output))
-	}
-
-	if output, err := exec.Command("dmidecode", "-s", "baseboard-product-name").Output(); err == nil {
-		attributes["motherboard_product"] = strings.TrimSpace(string(output))
-	}
-
-	if output, err := exec.Command("dmidecode", "-s", "baseboard-version").Output(); err == nil {
-		attributes["motherboard_version"] = strings.TrimSpace(string(output))
+	for _, kv := range dmidecodeKeys {
+		cmdCtx, cancel := context.WithTimeout(ctx, linuxCmdTimeout)
+		if output, err := exec.CommandContext(cmdCtx, "dmidecode", "-s", kv.flag).Output(); err == nil {
+			attributes[kv.attr] = strings.TrimSpace(string(output))
+		}
+		cancel()
 	}
 
 	// System uptime
-	if output, err := exec.Command("uptime").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "uptime").Output(); err == nil {
 		attributes["system_uptime"] = strings.TrimSpace(string(output))
 	}
+	cancel()
 
 	// Kernel information
-	if output, err := exec.Command("uname", "-r").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "uname", "-r").Output(); err == nil {
 		attributes["kernel_version"] = strings.TrimSpace(string(output))
 	}
+	cancel2()
 
-	if output, err := exec.Command("uname", "-a").Output(); err == nil {
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, linuxCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx3, "uname", "-a").Output(); err == nil {
 		attributes["kernel_info"] = strings.TrimSpace(string(output))
 	}
+	cancel3()
 
 	return nil
 }
@@ -196,10 +197,6 @@ func (l *LinuxHardwareCollector) parseProcCPUInfo(output string, attributes map[
 			if attributes["cpu_cache_size"] == "" {
 				attributes["cpu_cache_size"] = value
 			}
-		case "physical id":
-			// Count physical CPUs
-		case "core id":
-			// Count cores per CPU
 		case "flags":
 			if attributes["cpu_flags"] == "" {
 				// Store first few flags as sample
@@ -216,7 +213,7 @@ func (l *LinuxHardwareCollector) parseProcCPUInfo(output string, attributes map[
 }
 
 // parseCPUFrequency parses CPU frequency information
-func (l *LinuxHardwareCollector) parseCPUFrequency(output string, attributes map[string]string) {
+func (l *LinuxHardwareCollector) parseCPUFrequency(ctx context.Context, output string, attributes map[string]string) {
 	// Try to get current CPU frequency from /proc/cpuinfo
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
@@ -233,20 +230,24 @@ func (l *LinuxHardwareCollector) parseCPUFrequency(output string, attributes map
 		}
 	}
 
-	// Try to get min/max frequencies from cpufreq if available
-	if output, err := exec.Command("cat", "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq").Output(); err == nil {
-		if minFreq, parseErr := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64); parseErr == nil {
+	// Try to get min/max frequencies from cpufreq sysfs files
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxCmdTimeout)
+	if out, err := exec.CommandContext(cmdCtx, "cat", "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq").Output(); err == nil {
+		if minFreq, parseErr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); parseErr == nil {
 			attributes["cpu_min_frequency_khz"] = fmt.Sprintf("%d", minFreq)
 			attributes["cpu_min_frequency_mhz"] = fmt.Sprintf("%.0f", float64(minFreq)/1000)
 		}
 	}
+	cancel()
 
-	if output, err := exec.Command("cat", "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq").Output(); err == nil {
-		if maxFreq, parseErr := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64); parseErr == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxCmdTimeout)
+	if out, err := exec.CommandContext(cmdCtx2, "cat", "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq").Output(); err == nil {
+		if maxFreq, parseErr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); parseErr == nil {
 			attributes["cpu_max_frequency_khz"] = fmt.Sprintf("%d", maxFreq)
 			attributes["cpu_max_frequency_mhz"] = fmt.Sprintf("%.0f", float64(maxFreq)/1000)
 		}
 	}
+	cancel2()
 }
 
 // parseLSCPUOutput parses lscpu output for CPU architecture details
@@ -496,18 +497,20 @@ func (l *LinuxHardwareCollector) parseFdiskOutput(output string, attributes map[
 }
 
 // collectSMARTInfo collects SMART information if available
-func (l *LinuxHardwareCollector) collectSMARTInfo(attributes map[string]string) {
+func (l *LinuxHardwareCollector) collectSMARTInfo(ctx context.Context, attributes map[string]string) {
 	// Try to get SMART info for first few drives
 	drives := []string{"sda", "sdb", "nvme0n1", "nvme1n1"}
 
 	for _, drive := range drives {
+		cmdCtx, cancel := context.WithTimeout(ctx, linuxCmdTimeout)
 		// #nosec G204 - Hardware discovery requires system command execution
-		if output, err := exec.Command("smartctl", "-H", "/dev/"+drive).Output(); err == nil {
+		if output, err := exec.CommandContext(cmdCtx, "smartctl", "-H", "/dev/"+drive).Output(); err == nil {
 			if strings.Contains(string(output), "PASSED") {
 				attributes["smart_"+drive+"_health"] = "PASSED"
 			} else if strings.Contains(string(output), "FAILED") {
 				attributes["smart_"+drive+"_health"] = "FAILED"
 			}
 		}
+		cancel()
 	}
 }

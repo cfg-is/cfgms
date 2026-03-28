@@ -6,38 +6,42 @@
 package dna
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
+const darwinHwCmdTimeout = 30 * time.Second
+
 // CollectCPU gathers detailed CPU information on macOS using system_profiler
-func (d *DarwinHardwareCollector) CollectCPU(attributes map[string]string) error {
+func (d *DarwinHardwareCollector) CollectCPU(ctx context.Context, attributes map[string]string) error {
 	// Basic CPU count
 	attributes["cpu_count"] = fmt.Sprintf("%d", runtime.NumCPU())
 	attributes["cpu_arch"] = runtime.GOARCH
 
 	// Get detailed CPU info using sysctl
-	if brand, err := d.getSysctl("machdep.cpu.brand_string"); err == nil {
+	if brand, err := d.getSysctl(ctx, "machdep.cpu.brand_string"); err == nil {
 		attributes["cpu_model"] = strings.TrimSpace(brand)
 	}
 
-	if family, err := d.getSysctl("machdep.cpu.family"); err == nil {
+	if family, err := d.getSysctl(ctx, "machdep.cpu.family"); err == nil {
 		attributes["cpu_family"] = strings.TrimSpace(family)
 	}
 
-	if model, err := d.getSysctl("machdep.cpu.model"); err == nil {
+	if model, err := d.getSysctl(ctx, "machdep.cpu.model"); err == nil {
 		attributes["cpu_model_id"] = strings.TrimSpace(model)
 	}
 
-	if stepping, err := d.getSysctl("machdep.cpu.stepping"); err == nil {
+	if stepping, err := d.getSysctl(ctx, "machdep.cpu.stepping"); err == nil {
 		attributes["cpu_stepping"] = strings.TrimSpace(stepping)
 	}
 
 	// CPU frequency (if available)
-	if freq, err := d.getSysctl("hw.cpufrequency"); err == nil {
+	if freq, err := d.getSysctl(ctx, "hw.cpufrequency"); err == nil {
 		if freqInt, parseErr := strconv.ParseInt(strings.TrimSpace(freq), 10, 64); parseErr == nil {
 			attributes["cpu_frequency_hz"] = fmt.Sprintf("%d", freqInt)
 			attributes["cpu_frequency_mhz"] = fmt.Sprintf("%.0f", float64(freqInt)/1000000)
@@ -45,11 +49,11 @@ func (d *DarwinHardwareCollector) CollectCPU(attributes map[string]string) error
 	}
 
 	// Physical and logical core counts
-	if physCores, err := d.getSysctl("hw.physicalcpu"); err == nil {
+	if physCores, err := d.getSysctl(ctx, "hw.physicalcpu"); err == nil {
 		attributes["cpu_physical_cores"] = strings.TrimSpace(physCores)
 	}
 
-	if logCores, err := d.getSysctl("hw.logicalcpu"); err == nil {
+	if logCores, err := d.getSysctl(ctx, "hw.logicalcpu"); err == nil {
 		attributes["cpu_logical_cores"] = strings.TrimSpace(logCores)
 	}
 
@@ -57,9 +61,9 @@ func (d *DarwinHardwareCollector) CollectCPU(attributes map[string]string) error
 }
 
 // CollectMemory gathers detailed memory information on macOS
-func (d *DarwinHardwareCollector) CollectMemory(attributes map[string]string) error {
+func (d *DarwinHardwareCollector) CollectMemory(ctx context.Context, attributes map[string]string) error {
 	// Physical memory size
-	if memSize, err := d.getSysctl("hw.memsize"); err == nil {
+	if memSize, err := d.getSysctl(ctx, "hw.memsize"); err == nil {
 		if memInt, parseErr := strconv.ParseInt(strings.TrimSpace(memSize), 10, 64); parseErr == nil {
 			attributes["memory_total_bytes"] = fmt.Sprintf("%d", memInt)
 			attributes["memory_total_gb"] = fmt.Sprintf("%.2f", float64(memInt)/1024/1024/1024)
@@ -67,12 +71,15 @@ func (d *DarwinHardwareCollector) CollectMemory(attributes map[string]string) er
 	}
 
 	// Memory type and speed (if available)
-	if pageSize, err := d.getSysctl("hw.pagesize"); err == nil {
+	if pageSize, err := d.getSysctl(ctx, "hw.pagesize"); err == nil {
 		attributes["memory_page_size"] = strings.TrimSpace(pageSize)
 	}
 
 	// Additional memory info from vm_stat if available
-	if vmstat, err := exec.Command("vm_stat").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinHwCmdTimeout)
+	defer cancel()
+
+	if vmstat, err := exec.CommandContext(cmdCtx, "vm_stat").Output(); err == nil {
 		d.parseVMStat(string(vmstat), attributes)
 	}
 
@@ -80,17 +87,22 @@ func (d *DarwinHardwareCollector) CollectMemory(attributes map[string]string) er
 }
 
 // CollectDisk gathers disk and storage information on macOS
-func (d *DarwinHardwareCollector) CollectDisk(attributes map[string]string) error {
+func (d *DarwinHardwareCollector) CollectDisk(ctx context.Context, attributes map[string]string) error {
 	// Get disk information using diskutil
-	if _, err := exec.Command("diskutil", "list", "-plist").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinHwCmdTimeout)
+	if _, err := exec.CommandContext(cmdCtx, "diskutil", "list", "-plist").Output(); err == nil {
 		// For now, just indicate we have disk info available
 		// Could parse the plist output for detailed disk information
 		attributes["disk_info_available"] = "true"
 		attributes["disk_collection_method"] = "diskutil"
 	}
+	cancel()
 
 	// Get filesystem information using df
-	if output, err := exec.Command("df", "-h").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinHwCmdTimeout)
+	defer cancel2()
+
+	if output, err := exec.CommandContext(cmdCtx2, "df", "-h").Output(); err == nil {
 		d.parseDiskUsage(string(output), attributes)
 	}
 
@@ -98,32 +110,38 @@ func (d *DarwinHardwareCollector) CollectDisk(attributes map[string]string) erro
 }
 
 // CollectMotherboard gathers motherboard and system information on macOS
-func (d *DarwinHardwareCollector) CollectMotherboard(attributes map[string]string) error {
+func (d *DarwinHardwareCollector) CollectMotherboard(ctx context.Context, attributes map[string]string) error {
 	// Hardware model
-	if model, err := d.getSysctl("hw.model"); err == nil {
+	if model, err := d.getSysctl(ctx, "hw.model"); err == nil {
 		attributes["hardware_model"] = strings.TrimSpace(model)
 	}
 
 	// System version
-	if version, err := exec.Command("sw_vers", "-productVersion").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinHwCmdTimeout)
+	if version, err := exec.CommandContext(cmdCtx, "sw_vers", "-productVersion").Output(); err == nil {
 		attributes["os_version"] = strings.TrimSpace(string(version))
 	}
+	cancel()
 
-	if build, err := exec.Command("sw_vers", "-buildVersion").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinHwCmdTimeout)
+	if build, err := exec.CommandContext(cmdCtx2, "sw_vers", "-buildVersion").Output(); err == nil {
 		attributes["os_build"] = strings.TrimSpace(string(build))
 	}
+	cancel2()
 
-	if name, err := exec.Command("sw_vers", "-productName").Output(); err == nil {
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, darwinHwCmdTimeout)
+	if name, err := exec.CommandContext(cmdCtx3, "sw_vers", "-productName").Output(); err == nil {
 		attributes["os_name"] = strings.TrimSpace(string(name))
 	}
+	cancel3()
 
 	// Hardware UUID (if available)
-	if uuid, err := d.getSysctl("kern.uuid"); err == nil {
+	if uuid, err := d.getSysctl(ctx, "kern.uuid"); err == nil {
 		attributes["hardware_uuid"] = strings.TrimSpace(uuid)
 	}
 
 	// Boot time
-	if boottime, err := d.getSysctl("kern.boottime"); err == nil {
+	if boottime, err := d.getSysctl(ctx, "kern.boottime"); err == nil {
 		attributes["boot_time"] = strings.TrimSpace(boottime)
 	}
 
@@ -131,9 +149,11 @@ func (d *DarwinHardwareCollector) CollectMotherboard(attributes map[string]strin
 }
 
 // getSysctl executes sysctl to get system information
-func (d *DarwinHardwareCollector) getSysctl(key string) (string, error) {
-	cmd := exec.Command("sysctl", "-n", key)
-	output, err := cmd.Output()
+func (d *DarwinHardwareCollector) getSysctl(ctx context.Context, key string) (string, error) {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinHwCmdTimeout)
+	defer cancel()
+
+	output, err := exec.CommandContext(cmdCtx, "sysctl", "-n", key).Output()
 	if err != nil {
 		return "", err
 	}

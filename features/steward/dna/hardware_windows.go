@@ -6,98 +6,148 @@
 package dna
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
+const windowsHwCmdTimeout = 30 * time.Second
+
 // CollectCPU gathers detailed CPU information on Windows using WMI
-func (w *WindowsHardwareCollector) CollectCPU(attributes map[string]string) error {
+func (w *WindowsHardwareCollector) CollectCPU(ctx context.Context, attributes map[string]string) error {
 	// Basic CPU count
 	attributes["cpu_count"] = fmt.Sprintf("%d", runtime.NumCPU())
 	attributes["cpu_arch"] = runtime.GOARCH
 
-	// Get detailed CPU info using WMI
-	if output, err := exec.Command("wmic", "cpu", "get", "Name,Manufacturer,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors,Architecture", "/format:csv").Output(); err == nil {
-		w.parseWMICPUOutput(string(output), attributes)
-	}
+	// Get detailed CPU info using wmic
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsHwCmdTimeout)
+	output, err := exec.CommandContext(cmdCtx, "wmic", "cpu", "get",
+		"Name,Manufacturer,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors,Architecture",
+		"/format:csv").Output()
+	cancel()
 
-	// Alternative: PowerShell approach for more detailed info
-	if output, err := exec.Command("powershell", "-Command", "Get-WmiObject -Class Win32_Processor | Select-Object Name,Manufacturer,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors,Architecture | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
-		w.parsePowerShellCPUOutput(string(output), attributes)
+	if err == nil {
+		w.parseWMICPUOutput(string(output), attributes)
+	} else {
+		// Fallback: PowerShell with Get-CimInstance (only if wmic failed)
+		cmdCtx2, cancel2 := context.WithTimeout(ctx, windowsHwCmdTimeout)
+		if output2, err2 := exec.CommandContext(cmdCtx2, "powershell", "-NoProfile", "-Command",
+			"Get-CimInstance -ClassName Win32_Processor | Select-Object Name,Manufacturer,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors,Architecture | ConvertTo-Csv -NoTypeInformation").Output(); err2 == nil {
+			w.parsePowerShellCPUOutput(string(output2), attributes)
+		}
+		cancel2()
 	}
 
 	return nil
 }
 
 // CollectMemory gathers detailed memory information on Windows
-func (w *WindowsHardwareCollector) CollectMemory(attributes map[string]string) error {
-	// Physical memory using WMI
-	if output, err := exec.Command("wmic", "computersystem", "get", "TotalPhysicalMemory", "/format:csv").Output(); err == nil {
+func (w *WindowsHardwareCollector) CollectMemory(ctx context.Context, attributes map[string]string) error {
+	// Physical memory using wmic
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsHwCmdTimeout)
+	output, err := exec.CommandContext(cmdCtx, "wmic", "computersystem", "get",
+		"TotalPhysicalMemory", "/format:csv").Output()
+	cancel()
+
+	if err == nil {
 		w.parseWMIMemoryOutput(string(output), attributes)
+	} else {
+		// Fallback: PowerShell (only if wmic failed)
+		cmdCtx2, cancel2 := context.WithTimeout(ctx, windowsHwCmdTimeout)
+		if output2, err2 := exec.CommandContext(cmdCtx2, "powershell", "-NoProfile", "-Command",
+			"Get-CimInstance -ClassName Win32_PageFileUsage | Select-Object AllocatedBaseSize,CurrentUsage | ConvertTo-Csv -NoTypeInformation").Output(); err2 == nil {
+			w.parsePowerShellVirtualMemoryOutput(string(output2), attributes)
+		}
+		cancel2()
 	}
 
 	// Memory modules information
-	if output, err := exec.Command("wmic", "memorychip", "get", "Capacity,Speed,MemoryType,FormFactor", "/format:csv").Output(); err == nil {
-		w.parseWMIMemoryModulesOutput(string(output), attributes)
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, windowsHwCmdTimeout)
+	if output3, err3 := exec.CommandContext(cmdCtx3, "wmic", "memorychip", "get",
+		"Capacity,Speed,MemoryType,FormFactor", "/format:csv").Output(); err3 == nil {
+		w.parseWMIMemoryModulesOutput(string(output3), attributes)
 	}
-
-	// Virtual memory information using PowerShell
-	if output, err := exec.Command("powershell", "-Command", "Get-WmiObject -Class Win32_PageFileUsage | Select-Object AllocatedBaseSize,CurrentUsage | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
-		w.parsePowerShellVirtualMemoryOutput(string(output), attributes)
-	}
+	cancel3()
 
 	return nil
 }
 
 // CollectDisk gathers disk and storage information on Windows
-func (w *WindowsHardwareCollector) CollectDisk(attributes map[string]string) error {
-	// Physical disk information using WMI
-	if output, err := exec.Command("wmic", "diskdrive", "get", "Model,Size,MediaType,InterfaceType", "/format:csv").Output(); err == nil {
+func (w *WindowsHardwareCollector) CollectDisk(ctx context.Context, attributes map[string]string) error {
+	// Physical disk information using wmic
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsHwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "wmic", "diskdrive", "get",
+		"Model,Size,MediaType,InterfaceType", "/format:csv").Output(); err == nil {
 		w.parseWMIDiskOutput(string(output), attributes)
 	}
+	cancel()
 
-	// Logical disk information (drive letters)
-	if output, err := exec.Command("wmic", "logicaldisk", "get", "Size,FreeSpace,FileSystem,DriveType,DeviceID", "/format:csv").Output(); err == nil {
-		w.parseWMILogicalDiskOutput(string(output), attributes)
-	}
+	// Logical disk information (drive letters and free space)
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, windowsHwCmdTimeout)
+	output2, err2 := exec.CommandContext(cmdCtx2, "wmic", "logicaldisk", "get",
+		"Size,FreeSpace,FileSystem,DriveType,DeviceID", "/format:csv").Output()
+	cancel2()
 
-	// Disk usage using PowerShell
-	if output, err := exec.Command("powershell", "-Command", "Get-WmiObject -Class Win32_LogicalDisk | Select-Object DeviceID,Size,FreeSpace,FileSystem | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
-		w.parsePowerShellDiskUsageOutput(string(output), attributes)
+	if err2 == nil {
+		w.parseWMILogicalDiskOutput(string(output2), attributes)
+	} else {
+		// Fallback: PowerShell (only if wmic failed)
+		cmdCtx3, cancel3 := context.WithTimeout(ctx, windowsHwCmdTimeout)
+		if output3, err3 := exec.CommandContext(cmdCtx3, "powershell", "-NoProfile", "-Command",
+			"Get-CimInstance -ClassName Win32_LogicalDisk | Select-Object DeviceID,Size,FreeSpace,FileSystem | ConvertTo-Csv -NoTypeInformation").Output(); err3 == nil {
+			w.parsePowerShellDiskUsageOutput(string(output3), attributes)
+		}
+		cancel3()
 	}
 
 	return nil
 }
 
 // CollectMotherboard gathers motherboard and system information on Windows
-func (w *WindowsHardwareCollector) CollectMotherboard(attributes map[string]string) error {
+func (w *WindowsHardwareCollector) CollectMotherboard(ctx context.Context, attributes map[string]string) error {
 	// Computer system information
-	if output, err := exec.Command("wmic", "computersystem", "get", "Manufacturer,Model,TotalPhysicalMemory", "/format:csv").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, windowsHwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "wmic", "computersystem", "get",
+		"Manufacturer,Model,TotalPhysicalMemory", "/format:csv").Output(); err == nil {
 		w.parseWMIComputerSystemOutput(string(output), attributes)
 	}
+	cancel()
 
 	// BIOS information
-	if output, err := exec.Command("wmic", "bios", "get", "Manufacturer,SMBIOSBIOSVersion,ReleaseDate", "/format:csv").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, windowsHwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "wmic", "bios", "get",
+		"Manufacturer,SMBIOSBIOSVersion,ReleaseDate", "/format:csv").Output(); err == nil {
 		w.parseWMIBIOSOutput(string(output), attributes)
 	}
+	cancel2()
 
 	// Motherboard information
-	if output, err := exec.Command("wmic", "baseboard", "get", "Manufacturer,Product,Version,SerialNumber", "/format:csv").Output(); err == nil {
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, windowsHwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx3, "wmic", "baseboard", "get",
+		"Manufacturer,Product,Version,SerialNumber", "/format:csv").Output(); err == nil {
 		w.parseWMIMotherboardOutput(string(output), attributes)
 	}
+	cancel3()
 
 	// System UUID
-	if output, err := exec.Command("wmic", "csproduct", "get", "UUID", "/format:csv").Output(); err == nil {
+	cmdCtx4, cancel4 := context.WithTimeout(ctx, windowsHwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx4, "wmic", "csproduct", "get",
+		"UUID", "/format:csv").Output(); err == nil {
 		w.parseWMIUUIDOutput(string(output), attributes)
 	}
+	cancel4()
 
-	// Windows version information
-	if output, err := exec.Command("powershell", "-Command", "Get-WmiObject -Class Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
-		w.parsePowerShellOSOutput(string(output), attributes)
+	// Windows version information (using wmic; no PowerShell fallback needed)
+	cmdCtx5, cancel5 := context.WithTimeout(ctx, windowsHwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx5, "wmic", "os", "get",
+		"Caption,Version,BuildNumber", "/format:csv").Output(); err == nil {
+		w.parseWMIOSVersionOutput(string(output), attributes)
 	}
+	cancel5()
 
 	return nil
 }
@@ -374,8 +424,6 @@ func (w *WindowsHardwareCollector) parsePowerShellDiskUsageOutput(output string,
 	}
 }
 
-// Additional parsing methods for system information...
-
 func (w *WindowsHardwareCollector) parseWMIComputerSystemOutput(output string, attributes map[string]string) {
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
@@ -465,30 +513,26 @@ func (w *WindowsHardwareCollector) parseWMIUUIDOutput(output string, attributes 
 	}
 }
 
-func (w *WindowsHardwareCollector) parsePowerShellOSOutput(output string, attributes map[string]string) {
+func (w *WindowsHardwareCollector) parseWMIOSVersionOutput(output string, attributes map[string]string) {
 	lines := strings.Split(output, "\n")
-	for i, line := range lines {
-		if i == 0 { // Skip header
-			continue
-		}
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" {
+		if line == "" || strings.HasPrefix(line, "Node") {
 			continue
 		}
 
-		fields := w.parseCSVLine(line)
-		if len(fields) >= 3 {
-			if fields[0] != "" {
-				attributes["windows_build_number"] = fields[0]
-			}
+		fields := strings.Split(line, ",")
+		if len(fields) >= 4 {
 			if fields[1] != "" {
-				attributes["windows_caption"] = fields[1]
+				attributes["windows_build_number"] = fields[1]
 			}
 			if fields[2] != "" {
-				attributes["windows_version"] = fields[2]
+				attributes["windows_caption"] = fields[2]
+			}
+			if fields[3] != "" {
+				attributes["windows_version"] = fields[3]
 			}
 		}
-		break // Only process first OS entry
 	}
 }
 

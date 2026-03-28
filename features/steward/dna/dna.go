@@ -10,7 +10,7 @@
 // Basic usage:
 //
 //	collector := dna.NewCollector(logger)
-//	dna, err := collector.Collect()
+//	dna, err := collector.Collect(ctx)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
@@ -20,12 +20,14 @@
 package dna
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -39,8 +41,24 @@ import (
 // The collector gathers hardware, software, and network information to create
 // a comprehensive system profile. This information is used by the controller
 // for configuration targeting and system management.
+//
+// Static hardware data (CPU, memory, motherboard) is cached after the first
+// collection and reused on subsequent calls. Slow software data (packages,
+// services, processes) is collected in the background so that Collect()
+// returns fast data synchronously on every call.
 type Collector struct {
 	logger logging.Logger
+
+	// Static hardware cache: CPU, memory, motherboard do not change at runtime.
+	cachedHardware map[string]string
+	hardwareMu     sync.RWMutex
+	hardwareCached bool
+
+	// Background slow-software data: packages, services, processes.
+	bgData      map[string]string
+	bgMu        sync.RWMutex
+	bgRunning   bool
+	bgRunningMu sync.Mutex
 }
 
 // NewCollector creates a new DNA collector.
@@ -55,49 +73,68 @@ func NewCollector(logger logging.Logger) *Collector {
 
 // Collect gathers the current system DNA (attributes).
 //
-// This method collects comprehensive system information including:
-//   - Hardware: CPU, memory, architecture
-//   - Software: OS, kernel, runtime version
-//   - Network: Hostname, IP addresses, MAC addresses
-//   - Environment: User, working directory, environment variables
+// Fast data (basic info, cached hardware, OS info, network, environment,
+// security) is collected synchronously. Slow data (packages, services,
+// processes) is collected in the background; the results from the previous
+// background run are merged into this call's result.
+//
+// Static hardware (CPU, memory, motherboard) is cached after the first call
+// and reused on all subsequent calls. Disk free space is always re-collected.
 //
 // Returns a DNA structure with a unique system ID and all collected attributes.
-// The system ID is generated from stable hardware identifiers.
-func (c *Collector) Collect() (*commonpb.DNA, error) {
+func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 	startTime := time.Now()
 	c.logger.Debug("Collecting system DNA")
 
 	attributes := make(map[string]string)
 
-	// Collect basic system information (fastest first)
+	// Basic system information (fastest first)
 	basicStart := time.Now()
 	c.collectBasicInfo(attributes)
 	c.logger.Debug("Basic info collected", "duration", time.Since(basicStart))
 
-	// Collect hardware information
+	// Hardware information: static fields from cache, disk always fresh
 	hwStart := time.Now()
-	c.collectHardwareInfo(attributes)
+	c.collectHardwareInfoCached(ctx, attributes)
 	c.logger.Debug("Hardware info collected", "duration", time.Since(hwStart))
 
-	// Collect software information (potentially slow)
-	swStart := time.Now()
-	c.collectSoftwareInfo(attributes)
-	c.logger.Debug("Software info collected", "duration", time.Since(swStart))
+	// OS info only (fast part of software collection)
+	osStart := time.Now()
+	c.collectOSInfo(ctx, attributes)
+	c.logger.Debug("OS info collected", "duration", time.Since(osStart))
 
-	// Collect network information
+	// Network information
 	netStart := time.Now()
-	c.collectNetworkInfo(attributes)
+	c.collectNetworkInfo(ctx, attributes)
 	c.logger.Debug("Network info collected", "duration", time.Since(netStart))
 
-	// Collect environment information (fast)
+	// Environment information (fast)
 	envStart := time.Now()
 	c.collectEnvironmentInfo(attributes)
 	c.logger.Debug("Environment info collected", "duration", time.Since(envStart))
 
-	// Collect security information (potentially slow)
+	// Security information
 	secStart := time.Now()
-	c.collectSecurityInfo(attributes)
+	c.collectSecurityInfo(ctx, attributes)
 	c.logger.Debug("Security info collected", "duration", time.Since(secStart))
+
+	// Merge any available background software data from the previous run
+	c.bgMu.RLock()
+	for k, v := range c.bgData {
+		attributes[k] = v
+	}
+	c.bgMu.RUnlock()
+
+	// Launch background goroutine for slow software if not already running
+	c.bgRunningMu.Lock()
+	if !c.bgRunning {
+		c.bgRunning = true
+		// Use a detached context so the background goroutine is not cancelled
+		// when the caller's context is cancelled. Each command has its own
+		// 30-second timeout enforced inside the platform collectors.
+		go c.collectSlowSoftwareBackground(context.Background())
+	}
+	c.bgRunningMu.Unlock()
 
 	// Generate stable system ID from hardware characteristics
 	systemID := c.generateSystemID(attributes)
@@ -142,118 +179,182 @@ func (c *Collector) collectBasicInfo(attributes map[string]string) {
 	}
 }
 
-// collectHardwareInfo collects hardware-specific information using platform-specific collectors.
-func (c *Collector) collectHardwareInfo(attributes map[string]string) {
+// collectHardwareInfoCached collects hardware information with caching.
+//
+// CPU, memory, and motherboard data are static and cached after first
+// collection. Disk data (which includes free space) is always re-collected.
+func (c *Collector) collectHardwareInfoCached(ctx context.Context, attributes map[string]string) {
 	hwCollector := NewHardwareCollector()
 
-	// Collect CPU information
-	if err := hwCollector.CollectCPU(attributes); err != nil {
-		c.logger.Error("Failed to collect CPU information", "error", err)
-	}
-
-	// Collect memory information
-	if err := hwCollector.CollectMemory(attributes); err != nil {
-		c.logger.Error("Failed to collect memory information", "error", err)
-	}
-
-	// Collect disk information
-	if err := hwCollector.CollectDisk(attributes); err != nil {
+	// Always collect disk — free space changes at runtime.
+	if err := hwCollector.CollectDisk(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect disk information", "error", err)
 	}
 
-	// Collect motherboard/system information
-	if err := hwCollector.CollectMotherboard(attributes); err != nil {
+	// Return cached static hardware if available.
+	c.hardwareMu.RLock()
+	if c.hardwareCached {
+		for k, v := range c.cachedHardware {
+			attributes[k] = v
+		}
+		c.hardwareMu.RUnlock()
+		attributes["runtime_arch"] = runtime.GOARCH
+		attributes["runtime_os"] = runtime.GOOS
+		return
+	}
+	c.hardwareMu.RUnlock()
+
+	// First call: collect and cache static hardware.
+	staticAttrs := make(map[string]string)
+
+	if err := hwCollector.CollectCPU(ctx, staticAttrs); err != nil {
+		c.logger.Error("Failed to collect CPU information", "error", err)
+	}
+	if err := hwCollector.CollectMemory(ctx, staticAttrs); err != nil {
+		c.logger.Error("Failed to collect memory information", "error", err)
+	}
+	if err := hwCollector.CollectMotherboard(ctx, staticAttrs); err != nil {
 		c.logger.Error("Failed to collect motherboard information", "error", err)
 	}
 
-	// Add basic runtime information as backup
+	c.hardwareMu.Lock()
+	c.cachedHardware = staticAttrs
+	c.hardwareCached = true
+	c.hardwareMu.Unlock()
+
+	for k, v := range staticAttrs {
+		attributes[k] = v
+	}
+
 	attributes["runtime_arch"] = runtime.GOARCH
 	attributes["runtime_os"] = runtime.GOOS
 }
 
-// collectSoftwareInfo collects software and OS information using platform-specific collectors.
-func (c *Collector) collectSoftwareInfo(attributes map[string]string) {
+// collectHardwareInfo collects all hardware information (CPU, memory, disk,
+// motherboard) without caching. Used for direct testing.
+func (c *Collector) collectHardwareInfo(ctx context.Context, attributes map[string]string) {
+	hwCollector := NewHardwareCollector()
+
+	if err := hwCollector.CollectCPU(ctx, attributes); err != nil {
+		c.logger.Error("Failed to collect CPU information", "error", err)
+	}
+	if err := hwCollector.CollectMemory(ctx, attributes); err != nil {
+		c.logger.Error("Failed to collect memory information", "error", err)
+	}
+	if err := hwCollector.CollectDisk(ctx, attributes); err != nil {
+		c.logger.Error("Failed to collect disk information", "error", err)
+	}
+	if err := hwCollector.CollectMotherboard(ctx, attributes); err != nil {
+		c.logger.Error("Failed to collect motherboard information", "error", err)
+	}
+
+	attributes["runtime_arch"] = runtime.GOARCH
+	attributes["runtime_os"] = runtime.GOOS
+}
+
+// collectOSInfo collects only the OS portion of software information (fast).
+func (c *Collector) collectOSInfo(ctx context.Context, attributes map[string]string) {
 	swCollector := NewSoftwareCollector()
 
-	// Collect OS information
-	if err := swCollector.CollectOS(attributes); err != nil {
+	if err := swCollector.CollectOS(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect OS information", "error", err)
 	}
 
-	// Collect installed packages/applications
-	if err := swCollector.CollectPackages(attributes); err != nil {
-		c.logger.Error("Failed to collect package information", "error", err)
-	}
-
-	// Collect service information
-	if err := swCollector.CollectServices(attributes); err != nil {
-		c.logger.Error("Failed to collect service information", "error", err)
-	}
-
-	// Collect process information
-	if err := swCollector.CollectProcesses(attributes); err != nil {
-		c.logger.Error("Failed to collect process information", "error", err)
-	}
-
-	// Environment-based OS info as backup
 	if osName := os.Getenv("OS"); osName != "" {
 		attributes["env_os_name"] = osName
 	}
 }
 
+// collectSoftwareInfo collects all software information synchronously.
+// Used for direct testing; Collect() uses collectOSInfo + background goroutine instead.
+func (c *Collector) collectSoftwareInfo(ctx context.Context, attributes map[string]string) {
+	swCollector := NewSoftwareCollector()
+
+	if err := swCollector.CollectOS(ctx, attributes); err != nil {
+		c.logger.Error("Failed to collect OS information", "error", err)
+	}
+	if err := swCollector.CollectPackages(ctx, attributes); err != nil {
+		c.logger.Error("Failed to collect package information", "error", err)
+	}
+	if err := swCollector.CollectServices(ctx, attributes); err != nil {
+		c.logger.Error("Failed to collect service information", "error", err)
+	}
+	if err := swCollector.CollectProcesses(ctx, attributes); err != nil {
+		c.logger.Error("Failed to collect process information", "error", err)
+	}
+
+	if osName := os.Getenv("OS"); osName != "" {
+		attributes["env_os_name"] = osName
+	}
+}
+
+// collectSlowSoftwareBackground collects packages, services, and processes in
+// the background and stores the result for the next Collect() call to merge.
+func (c *Collector) collectSlowSoftwareBackground(ctx context.Context) {
+	defer func() {
+		c.bgRunningMu.Lock()
+		c.bgRunning = false
+		c.bgRunningMu.Unlock()
+	}()
+
+	swCollector := NewSoftwareCollector()
+	bgAttrs := make(map[string]string)
+
+	if err := swCollector.CollectPackages(ctx, bgAttrs); err != nil {
+		c.logger.Error("Background: failed to collect package information", "error", err)
+	}
+	if err := swCollector.CollectServices(ctx, bgAttrs); err != nil {
+		c.logger.Error("Background: failed to collect service information", "error", err)
+	}
+	if err := swCollector.CollectProcesses(ctx, bgAttrs); err != nil {
+		c.logger.Error("Background: failed to collect process information", "error", err)
+	}
+
+	c.bgMu.Lock()
+	c.bgData = bgAttrs
+	c.bgMu.Unlock()
+
+	c.logger.Debug("Background software collection complete", "attributes", len(bgAttrs))
+}
+
 // collectNetworkInfo collects network configuration information using platform-specific collectors.
-func (c *Collector) collectNetworkInfo(attributes map[string]string) {
+func (c *Collector) collectNetworkInfo(ctx context.Context, attributes map[string]string) {
 	netCollector := NewNetworkCollector()
 
-	// Collect network interface information
-	if err := netCollector.CollectInterfaces(attributes); err != nil {
+	if err := netCollector.CollectInterfaces(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect network interface information", "error", err)
 	}
-
-	// Collect routing information
-	if err := netCollector.CollectRouting(attributes); err != nil {
+	if err := netCollector.CollectRouting(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect routing information", "error", err)
 	}
-
-	// Collect DNS configuration
-	if err := netCollector.CollectDNS(attributes); err != nil {
+	if err := netCollector.CollectDNS(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect DNS information", "error", err)
 	}
-
-	// Collect firewall configuration
-	if err := netCollector.CollectFirewall(attributes); err != nil {
+	if err := netCollector.CollectFirewall(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect firewall information", "error", err)
 	}
 }
 
 // collectSecurityInfo collects security attributes using platform-specific collectors.
-func (c *Collector) collectSecurityInfo(attributes map[string]string) {
+func (c *Collector) collectSecurityInfo(ctx context.Context, attributes map[string]string) {
 	secCollector := NewSecurityCollector()
 
-	// Collect user information
-	if err := secCollector.CollectUsers(attributes); err != nil {
+	if err := secCollector.CollectUsers(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect user information", "error", err)
 	}
-
-	// Collect group information
-	if err := secCollector.CollectGroups(attributes); err != nil {
+	if err := secCollector.CollectGroups(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect group information", "error", err)
 	}
-
-	// Collect permission information
-	if err := secCollector.CollectPermissions(attributes); err != nil {
+	if err := secCollector.CollectPermissions(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect permission information", "error", err)
 	}
-
-	// Collect certificate information
-	if err := secCollector.CollectCertificates(attributes); err != nil {
+	if err := secCollector.CollectCertificates(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect certificate information", "error", err)
 	}
 }
 
 // collectEnvironmentInfo collects environment and user information.
 func (c *Collector) collectEnvironmentInfo(attributes map[string]string) {
-	// User information
 	if user := os.Getenv("USER"); user != "" {
 		attributes["user"] = user
 	}
@@ -261,27 +362,20 @@ func (c *Collector) collectEnvironmentInfo(attributes map[string]string) {
 		attributes["home_directory"] = home
 	}
 
-	// Path information
 	if path := os.Getenv("PATH"); path != "" {
-		// Store only the count to avoid exposing sensitive paths
 		attributes["path_elements"] = fmt.Sprintf("%d", len(strings.Split(path, string(os.PathListSeparator))))
 	}
 
-	// Shell information
 	if shell := os.Getenv("SHELL"); shell != "" {
 		attributes["shell"] = shell
 	}
-
-	// Terminal information
 	if term := os.Getenv("TERM"); term != "" {
 		attributes["terminal"] = term
 	}
 
-	// Timezone
 	if tz := os.Getenv("TZ"); tz != "" {
 		attributes["timezone"] = tz
 	} else {
-		// Get timezone from system
 		if zone, offset := time.Now().Zone(); zone != "" {
 			attributes["timezone"] = zone
 			attributes["timezone_offset"] = fmt.Sprintf("%d", offset)
@@ -294,20 +388,14 @@ func (c *Collector) collectEnvironmentInfo(attributes map[string]string) {
 // The system ID is generated from stable hardware identifiers like MAC addresses
 // and hostname to ensure the same system gets the same ID across restarts.
 func (c *Collector) generateSystemID(attributes map[string]string) string {
-	// Use stable identifiers to generate system ID
 	var identifiers []string
 
-	// Primary MAC address (most stable)
 	if mac := attributes["primary_mac"]; mac != "" {
 		identifiers = append(identifiers, mac)
 	}
-
-	// Hostname (usually stable)
 	if hostname := attributes["hostname"]; hostname != "" {
 		identifiers = append(identifiers, hostname)
 	}
-
-	// CPU count and architecture (hardware characteristics)
 	if cpuCount := attributes["cpu_count"]; cpuCount != "" {
 		identifiers = append(identifiers, cpuCount)
 	}
@@ -315,48 +403,38 @@ func (c *Collector) generateSystemID(attributes map[string]string) string {
 		identifiers = append(identifiers, arch)
 	}
 
-	// If we have no stable identifiers, use runtime characteristics
 	if len(identifiers) == 0 {
 		identifiers = append(identifiers,
 			attributes["runtime_os"],
 			attributes["runtime_arch"],
-			fmt.Sprintf("%d", time.Now().Unix()/3600), // Change hourly as fallback
+			fmt.Sprintf("%d", time.Now().Unix()/3600),
 		)
 	}
 
-	// Generate SHA256 hash of identifiers
 	data := strings.Join(identifiers, "|")
 	hash := sha256.Sum256([]byte(data))
-
-	// Return first 16 characters of hex encoding
 	return fmt.Sprintf("%x", hash[:8])
 }
 
 // RefreshDNA collects fresh DNA information.
 //
-// This is a convenience method that calls Collect() to get fresh system information.
-// It's useful for periodic DNA updates where some attributes may have changed.
-func (c *Collector) RefreshDNA() (*commonpb.DNA, error) {
-	return c.Collect()
+// This is a convenience method that calls Collect() to get fresh system
+// information. It's useful for periodic DNA updates where some attributes
+// may have changed.
+func (c *Collector) RefreshDNA(ctx context.Context) (*commonpb.DNA, error) {
+	return c.Collect(ctx)
 }
 
 // CompareDNA compares two DNA structures and returns true if they represent the same system.
-//
-// This method compares the system IDs and key hardware characteristics to determine
-// if two DNA structures represent the same physical system.
 func CompareDNA(dna1, dna2 *commonpb.DNA) bool {
 	if dna1 == nil || dna2 == nil {
 		return false
 	}
-
-	// Primary comparison: system ID
 	if dna1.Id != dna2.Id {
 		return false
 	}
 
-	// Secondary comparison: key hardware characteristics
 	keyAttributes := []string{"primary_mac", "hostname", "cpu_count", "arch"}
-
 	for _, attr := range keyAttributes {
 		if dna1.Attributes[attr] != dna2.Attributes[attr] {
 			return false
@@ -367,22 +445,15 @@ func CompareDNA(dna1, dna2 *commonpb.DNA) bool {
 }
 
 // generateSyncFingerprint creates a fingerprint for sync verification.
-//
-// This combines the system ID, number of attributes, and config hash into a single
-// fingerprint that can be used to quickly verify if DNA and configuration are in sync.
 func (c *Collector) generateSyncFingerprint(systemID string, attributes map[string]string, configHash string) string {
-	// Combine stable elements for sync verification
 	elements := []string{
 		systemID,
 		fmt.Sprintf("%d", len(attributes)),
 		configHash,
 	}
 
-	// Generate SHA256 hash
 	data := strings.Join(elements, "|")
 	hash := sha256.Sum256([]byte(data))
-
-	// Return first 12 characters for compact representation
 	return fmt.Sprintf("%x", hash[:6])
 }
 
@@ -397,7 +468,7 @@ func (c *Collector) UpdateSyncMetadata(dna *commonpb.DNA, configHash string) {
 
 	dna.ConfigHash = configHash
 	dna.LastSyncTime = timestamppb.New(time.Now())
-	dna.AttributeCount = c.safeInt32(len(dna.Attributes)) // Safe conversion with bounds validation
+	dna.AttributeCount = c.safeInt32(len(dna.Attributes))
 	dna.SyncFingerprint = c.generateSyncFingerprint(dna.Id, dna.Attributes, configHash)
 }
 
@@ -406,9 +477,6 @@ func (c *Collector) UpdateSyncMetadata(dna *commonpb.DNA, configHash string) {
 // The hash is stable across Go map iteration order: keys are sorted before
 // hashing so the same attribute set always produces the same hash regardless
 // of insertion order. Returns an empty string when attributes is nil or empty.
-//
-// Both the steward and the controller call this function with the same attribute
-// set so that matching hashes confirm synchronisation without full retransmission.
 func ComputeHash(attributes map[string]string) string {
 	if len(attributes) == 0 {
 		return ""
@@ -422,7 +490,6 @@ func ComputeHash(attributes map[string]string) string {
 
 	h := sha256.New()
 	for _, k := range keys {
-		// Write errors on hash.Hash are documented as always nil; ignore per io.Writer contract.
 		_, _ = fmt.Fprintf(h, "%s=%s\n", k, attributes[k])
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
@@ -430,12 +497,11 @@ func ComputeHash(attributes map[string]string) string {
 
 // safeInt32 safely converts an int to int32 with bounds validation
 func (c *Collector) safeInt32(value int) int32 {
-	// Clamp to int32 max to prevent overflow
 	if value > 2147483647 {
 		return 2147483647
 	}
 	if value < -2147483648 {
 		return -2147483648
 	}
-	return int32(value) // Safe: bounds validated above
+	return int32(value)
 }

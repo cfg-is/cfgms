@@ -3,6 +3,7 @@
 package dna
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 )
@@ -10,16 +11,16 @@ import (
 // HardwareCollector defines the interface for platform-specific hardware collection
 type HardwareCollector interface {
 	// CollectCPU gathers detailed CPU information
-	CollectCPU(attributes map[string]string) error
+	CollectCPU(ctx context.Context, attributes map[string]string) error
 
 	// CollectMemory gathers detailed memory information
-	CollectMemory(attributes map[string]string) error
+	CollectMemory(ctx context.Context, attributes map[string]string) error
 
 	// CollectDisk gathers disk and storage information
-	CollectDisk(attributes map[string]string) error
+	CollectDisk(ctx context.Context, attributes map[string]string) error
 
 	// CollectMotherboard gathers motherboard and system information
-	CollectMotherboard(attributes map[string]string) error
+	CollectMotherboard(ctx context.Context, attributes map[string]string) error
 }
 
 // NewHardwareCollector creates a platform-specific hardware collector
@@ -31,14 +32,14 @@ func NewHardwareCollector() HardwareCollector {
 // This is used as a fallback when platform-specific collectors are not available
 type GenericHardwareCollector struct{}
 
-func (g *GenericHardwareCollector) CollectCPU(attributes map[string]string) error {
+func (g *GenericHardwareCollector) CollectCPU(_ context.Context, attributes map[string]string) error {
 	// Basic CPU information available on all platforms
 	attributes["cpu_count"] = fmt.Sprintf("%d", runtime.NumCPU())
 	attributes["cpu_arch"] = runtime.GOARCH
 	return nil
 }
 
-func (g *GenericHardwareCollector) CollectMemory(attributes map[string]string) error {
+func (g *GenericHardwareCollector) CollectMemory(_ context.Context, attributes map[string]string) error {
 	// Basic memory information from Go runtime
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
@@ -47,13 +48,13 @@ func (g *GenericHardwareCollector) CollectMemory(attributes map[string]string) e
 	return nil
 }
 
-func (g *GenericHardwareCollector) CollectDisk(attributes map[string]string) error {
+func (g *GenericHardwareCollector) CollectDisk(_ context.Context, attributes map[string]string) error {
 	// Generic disk collection - limited without platform-specific APIs
 	attributes["disk_info"] = "generic_collector_limited"
 	return nil
 }
 
-func (g *GenericHardwareCollector) CollectMotherboard(attributes map[string]string) error {
+func (g *GenericHardwareCollector) CollectMotherboard(_ context.Context, attributes map[string]string) error {
 	// Generic motherboard collection - limited without platform-specific APIs
 	attributes["system_info"] = "generic_collector_limited"
 	return nil
