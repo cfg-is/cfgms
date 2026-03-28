@@ -42,9 +42,11 @@ import (
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/dna"
+	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/factory"
-	"github.com/cfgis/cfgms/features/steward/testing"
+	"github.com/cfgis/cfgms/features/steward/performance"
+	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
@@ -155,17 +157,23 @@ type Steward struct {
 	// Health monitoring and metrics collection
 	healthCheck *HealthMonitor
 
+	// Performance monitoring — CPU, memory, disk/network metrics with local retention
+	performanceCollector *performance.DefaultCollector
+
 	// Standalone components (nil in controller mode)
 	moduleRegistry  discovery.ModuleRegistry
 	moduleFactory   *factory.ModuleFactory
-	comparator      *testing.StateComparator
+	comparator      *stewardtesting.StateComparator
 	executionEngine *execution.ExecutionEngine
 
-	// Controller mode components - DEPRECATED (Story #198)
-	// The old gRPC-based controller mode is replaced by gRPC-over-QUIC registration
-	// Use cmd/steward/main.go with --regtoken parameter instead
-	// controllerClient *client.Client
-	dnaCollector *dna.Collector
+	// DNA collection and drift detection for unmanaged attribute reporting
+	dnaCollector  *dna.Collector
+	driftDetector drift.Detector
+
+	// previousDNA is the DNA snapshot from the last convergence cycle.
+	// Comparing it against a fresh snapshot detects unmanaged attribute changes.
+	previousDNA   *commonpb.DNA
+	previousDNAMu sync.Mutex
 
 	// Transport client for controller testing mode (interface{} to avoid import cycle)
 	transportClient interface{}
@@ -222,13 +230,21 @@ func NewForControllerTesting(cfg *Config, logger logging.Logger) (*Steward, erro
 	// Create health monitor
 	healthMonitor := NewHealthMonitor(logger)
 
+	// Create performance collector for controller testing mode
+	stewardID := cfg.ID
+	if stewardID == "" {
+		stewardID = "steward-controller-test"
+	}
+	perfCollector := performance.NewCollector(stewardID, nil)
+
 	return &Steward{
-		legacyConfig: cfg,
-		logger:       logger,
-		dnaCollector: dnaCollector,
-		healthCheck:  healthMonitor,
-		shutdown:     make(chan struct{}),
-		isStandalone: false, // Controller testing mode
+		legacyConfig:         cfg,
+		logger:               logger,
+		dnaCollector:         dnaCollector,
+		healthCheck:          healthMonitor,
+		performanceCollector: perfCollector,
+		shutdown:             make(chan struct{}),
+		isStandalone:         false, // Controller testing mode
 	}, nil
 }
 
@@ -297,7 +313,7 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 	}
 
 	// Create state comparator for configuration drift detection
-	comparator := testing.NewStateComparator()
+	comparator := stewardtesting.NewStateComparator()
 
 	// Create execution engine for resource orchestration
 	executionEngine := execution.New(moduleFactory, comparator, cfg.Steward.ErrorHandling, logger)
@@ -305,17 +321,38 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 	// Create health monitor for metrics collection
 	healthMonitor := NewHealthMonitor(logger)
 
+	// Create performance collector for CPU/memory/disk/network metrics
+	// stewardID is already set above for the module factory
+	perfCollector := performance.NewCollector(stewardID, nil)
+
+	// Create DNA collector for system fingerprinting and unmanaged drift detection
+	dnaCollector := dna.NewCollector(logger)
+
+	// Create drift detector for unmanaged DNA attribute change detection
+	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
+	if err != nil {
+		// Drift detector is best-effort — log warning but continue
+		if logger != nil {
+			logger.Warn("Failed to initialize drift detector, DNA drift reporting will be disabled",
+				"error", err)
+		}
+		driftDetector = nil
+	}
+
 	return &Steward{
-		standaloneConfig: cfg,
-		logger:           logger,
-		healthCheck:      healthMonitor,
-		moduleRegistry:   registry,
-		moduleFactory:    moduleFactory,
-		secretStore:      secretStore,
-		comparator:       comparator,
-		executionEngine:  executionEngine,
-		shutdown:         make(chan struct{}),
-		isStandalone:     true,
+		standaloneConfig:     cfg,
+		logger:               logger,
+		healthCheck:          healthMonitor,
+		performanceCollector: perfCollector,
+		moduleRegistry:       registry,
+		moduleFactory:        moduleFactory,
+		secretStore:          secretStore,
+		comparator:           comparator,
+		executionEngine:      executionEngine,
+		dnaCollector:         dnaCollector,
+		driftDetector:        driftDetector,
+		shutdown:             make(chan struct{}),
+		isStandalone:         true,
 	}, nil
 }
 
@@ -359,7 +396,21 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 		s.healthCheck.Start(ctx)
 	}()
 
-	// Give health monitor a moment to start
+	// Start performance monitoring in background.
+	// This is independently useful in both standalone and controller-connected modes.
+	if s.performanceCollector != nil {
+		if err := s.performanceCollector.Start(ctx); err != nil {
+			s.logger.Warn("Failed to start performance collector", "error", err)
+		} else {
+			s.logger.Info("Performance monitoring started")
+		}
+	}
+
+	// Register managed resource drift handler on the execution engine.
+	// When the Compare step detects drift, this logs the event before Set corrects it.
+	s.executionEngine.SetDriftEventHandler(s.onManagedResourceDrift)
+
+	// Give monitors a moment to start
 	time.Sleep(50 * time.Millisecond)
 
 	// Converge immediately on startup
@@ -377,6 +428,12 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 // Applies the Get→Compare→Set→Verify cycle for every resource. Errors are
 // logged individually but do not abort the overall run — error handling
 // policy is controlled by the cfg's error_handling settings.
+//
+// After convergence, a DNA snapshot is collected and compared against the previous
+// snapshot to detect changes to unmanaged attributes (hardware, installed software,
+// network config). These are attributes not controlled by cfg resources — the
+// convergence loop handles managed resources, so changes here represent out-of-band
+// system modifications.
 func (s *Steward) runConvergence(ctx context.Context) {
 	s.logger.Info("Starting convergence run",
 		"id", s.standaloneConfig.Steward.ID,
@@ -393,6 +450,92 @@ func (s *Steward) runConvergence(ctx context.Context) {
 	for _, err := range report.Errors {
 		s.logger.Error("Convergence error", "error", err)
 	}
+
+	// Collect a fresh DNA snapshot and compare against the previous one to detect
+	// changes to unmanaged attributes. This is a natural post-convergence activity:
+	// the convergence loop already handled managed resources above.
+	s.detectUnmanagedDNADrift(ctx)
+}
+
+// detectUnmanagedDNADrift collects a fresh DNA snapshot and compares it against
+// the previous snapshot. Changes to unmanaged attributes (hardware, OS, network)
+// are logged and reported to the controller for visibility.
+//
+// This is NOT a separate monitoring loop — it runs as part of the convergence cycle.
+func (s *Steward) detectUnmanagedDNADrift(ctx context.Context) {
+	if s.dnaCollector == nil {
+		return
+	}
+
+	currentDNA, err := s.dnaCollector.Collect()
+	if err != nil {
+		s.logger.Warn("Failed to collect DNA for drift detection", "error", err)
+		return
+	}
+
+	s.previousDNAMu.Lock()
+	prevDNA := s.previousDNA
+	s.previousDNA = currentDNA
+	s.previousDNAMu.Unlock()
+
+	// On the first run there is no previous snapshot — just record and return.
+	if prevDNA == nil {
+		s.logger.Debug("DNA snapshot captured (first convergence run)")
+		return
+	}
+
+	// DNA IDs are derived from stable hardware identifiers (MAC + hostname).
+	// If they differ we are likely running in a VM or container migration scenario —
+	// skip comparison rather than emitting spurious events.
+	if prevDNA.Id != currentDNA.Id {
+		s.logger.Warn("DNA identity changed between convergence cycles — skipping drift detection",
+			"previous_id", prevDNA.Id,
+			"current_id", currentDNA.Id)
+		return
+	}
+
+	if s.driftDetector == nil {
+		return
+	}
+
+	events, err := s.driftDetector.DetectDrift(ctx, prevDNA, currentDNA)
+	if err != nil {
+		s.logger.Warn("DNA drift detection failed", "error", err)
+		return
+	}
+
+	if len(events) == 0 {
+		s.logger.Debug("No unmanaged DNA attribute changes detected")
+		return
+	}
+
+	// Log detected unmanaged drift events.
+	// When connected to a controller these would also be reported via the data plane.
+	for _, event := range events {
+		s.logger.Info("Unmanaged DNA attribute change detected",
+			"event_id", event.ID,
+			"severity", event.Severity,
+			"category", event.Category,
+			"change_count", event.ChangeCount,
+			"title", event.Title)
+	}
+}
+
+// onManagedResourceDrift is the DriftEventHandler registered on the execution engine.
+// It is called by the convergence Compare step when a managed resource has drifted,
+// before Set corrects it. This gives visibility into what was out of compliance.
+func (s *Steward) onManagedResourceDrift(resourceName string, moduleName string, diff *stewardtesting.StateDiff) {
+	changedCount := len(diff.ChangedFields)
+	addedCount := len(diff.AddedFields)
+	removedCount := len(diff.RemovedFields)
+
+	s.logger.Info("Managed resource drift detected (will be corrected by convergence)",
+		"resource", resourceName,
+		"module", moduleName,
+		"changed_fields", changedCount,
+		"added_fields", addedCount,
+		"removed_fields", removedCount,
+		"summary", diff.GetDriftSummary())
 }
 
 // convergenceLoop runs scheduled convergence at the given interval until the
@@ -446,7 +589,17 @@ func (s *Steward) startControllerTesting(ctx context.Context) error {
 		s.healthCheck.Start(ctx)
 	}()
 
-	// Give health monitor a moment to start
+	// Start performance monitoring in background.
+	// Performance monitoring works in both standalone and controller-connected modes.
+	if s.performanceCollector != nil {
+		if err := s.performanceCollector.Start(ctx); err != nil {
+			s.logger.Warn("Failed to start performance collector", "error", err)
+		} else {
+			s.logger.Info("Performance monitoring started")
+		}
+	}
+
+	// Give monitors a moment to start
 	time.Sleep(50 * time.Millisecond)
 
 	// For testing mode, we expect a specific interface - use reflection to call methods
@@ -614,8 +767,22 @@ func (s *Steward) Stop(ctx context.Context) error {
 	// Stop health monitoring
 	s.healthCheck.Stop()
 
+	// Stop performance monitoring
+	if s.performanceCollector != nil {
+		if err := s.performanceCollector.Stop(); err != nil {
+			s.logger.Warn("Failed to stop performance collector", "error", err)
+		}
+	}
+
 	// Cleanup based on mode
 	if s.isStandalone {
+		// Close drift detector
+		if s.driftDetector != nil {
+			if err := s.driftDetector.Close(); err != nil {
+				s.logger.Warn("Failed to close drift detector", "error", err)
+			}
+		}
+
 		// Close secret store if initialized
 		if s.secretStore != nil {
 			if err := s.secretStore.Close(); err != nil {
@@ -740,6 +907,18 @@ func (s *Steward) GetStewardID() string {
 		return s.standaloneConfig.Steward.ID
 	}
 	return ""
+}
+
+// GetPerformanceMetrics returns the most recent performance metrics snapshot.
+//
+// Returns an error if the performance collector has not been started yet or
+// if no metrics have been collected. This is valid in both standalone and
+// controller-connected modes.
+func (s *Steward) GetPerformanceMetrics() (*performance.PerformanceMetrics, error) {
+	if s.performanceCollector == nil {
+		return nil, fmt.Errorf("performance collector not initialized")
+	}
+	return s.performanceCollector.GetCurrentMetrics()
 }
 
 // GetCertificateManager returns the certificate manager instance.
