@@ -36,10 +36,10 @@ import (
 	reportsexporters "github.com/cfgis/cfgms/features/reports/exporters"
 	reportsprovider "github.com/cfgis/cfgms/features/reports/provider"
 	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
-	dnadrift "github.com/cfgis/cfgms/features/steward/dna/drift"
-	dnaStorage "github.com/cfgis/cfgms/features/steward/dna/storage"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
+	dnadrift "github.com/cfgis/cfgms/features/steward/dna/drift"
+	dnaStorage "github.com/cfgis/cfgms/features/steward/dna/storage"
 	stewardfactory "github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/features/workflow"
@@ -86,7 +86,7 @@ type Server struct {
 	signerCertSerial        string                  // Serial number of server cert used for config signing (Story #378)
 	healthCollector         *health.Collector
 	alertManager            *health.DefaultAlertManager
-	dnaStorageManager       *dnaStorage.Manager             // Reports engine DNA storage (must be closed on Stop)
+	dnaStorageManager       *dnaStorage.Manager                 // Reports engine DNA storage (must be closed on Stop)
 	triggerManager          *workflowtrigger.TriggerManagerImpl // Issue #414: Workflow trigger manager
 }
 

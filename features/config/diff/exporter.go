@@ -40,16 +40,16 @@ func (e *DefaultExporter) ExportText(ctx context.Context, result *ComparisonResu
 	if options.IncludeSummary {
 		buf.WriteString("Configuration Diff Report\n")
 		buf.WriteString("========================\n\n")
-		buf.WriteString(fmt.Sprintf("From: %s (%s)\n", result.FromRef.Repository, result.FromRef.Commit[:8]))
-		buf.WriteString(fmt.Sprintf("To:   %s (%s)\n", result.ToRef.Repository, result.ToRef.Commit[:8]))
-		buf.WriteString(fmt.Sprintf("Generated: %s\n\n", result.Metadata.CreatedAt.Format(time.RFC3339)))
+		fmt.Fprintf(&buf, "From: %s (%s)\n", result.FromRef.Repository, result.FromRef.Commit[:8])
+		fmt.Fprintf(&buf, "To:   %s (%s)\n", result.ToRef.Repository, result.ToRef.Commit[:8])
+		fmt.Fprintf(&buf, "Generated: %s\n\n", result.Metadata.CreatedAt.Format(time.RFC3339))
 
 		buf.WriteString("Summary:\n")
-		buf.WriteString(fmt.Sprintf("  Total Changes: %d\n", result.Summary.TotalChanges))
-		buf.WriteString(fmt.Sprintf("  Added:         %d\n", result.Summary.AddedItems))
-		buf.WriteString(fmt.Sprintf("  Modified:      %d\n", result.Summary.ModifiedItems))
-		buf.WriteString(fmt.Sprintf("  Deleted:       %d\n", result.Summary.DeletedItems))
-		buf.WriteString(fmt.Sprintf("  Breaking:      %d\n", result.Summary.BreakingChanges))
+		fmt.Fprintf(&buf, "  Total Changes: %d\n", result.Summary.TotalChanges)
+		fmt.Fprintf(&buf, "  Added:         %d\n", result.Summary.AddedItems)
+		fmt.Fprintf(&buf, "  Modified:      %d\n", result.Summary.ModifiedItems)
+		fmt.Fprintf(&buf, "  Deleted:       %d\n", result.Summary.DeletedItems)
+		fmt.Fprintf(&buf, "  Breaking:      %d\n", result.Summary.BreakingChanges)
 		buf.WriteString("\n")
 	}
 
@@ -59,7 +59,7 @@ func (e *DefaultExporter) ExportText(ctx context.Context, result *ComparisonResu
 
 	for i, entry := range filteredEntries {
 		if options.MaxEntries > 0 && i >= options.MaxEntries {
-			buf.WriteString(fmt.Sprintf("... and %d more changes\n", len(filteredEntries)-i))
+			fmt.Fprintf(&buf, "... and %d more changes\n", len(filteredEntries)-i)
 			break
 		}
 
@@ -72,12 +72,12 @@ func (e *DefaultExporter) ExportText(ctx context.Context, result *ComparisonResu
 	if options.IncludeMetadata {
 		buf.WriteString("\nMetadata:\n")
 		buf.WriteString("---------\n")
-		buf.WriteString(fmt.Sprintf("Engine: %s v%s\n", result.Metadata.Engine, result.Metadata.Version))
-		buf.WriteString(fmt.Sprintf("Duration: %v\n", result.Metadata.Duration))
+		fmt.Fprintf(&buf, "Engine: %s v%s\n", result.Metadata.Engine, result.Metadata.Version)
+		fmt.Fprintf(&buf, "Duration: %v\n", result.Metadata.Duration)
 		if len(result.Metadata.Warnings) > 0 {
 			buf.WriteString("Warnings:\n")
 			for _, warning := range result.Metadata.Warnings {
-				buf.WriteString(fmt.Sprintf("  - %s\n", warning))
+				fmt.Fprintf(&buf, "  - %s\n", warning)
 			}
 		}
 	}
@@ -161,8 +161,8 @@ func (e *DefaultExporter) ExportUnified(ctx context.Context, result *ComparisonR
 	filteredEntries := e.filterEntries(result.Entries, options)
 
 	// Write unified diff header
-	buf.WriteString(fmt.Sprintf("--- %s\t%s\n", result.FromRef.Path, result.FromRef.Timestamp.Format(time.RFC3339)))
-	buf.WriteString(fmt.Sprintf("+++ %s\t%s\n", result.ToRef.Path, result.ToRef.Timestamp.Format(time.RFC3339)))
+	fmt.Fprintf(&buf, "--- %s\t%s\n", result.FromRef.Path, result.FromRef.Timestamp.Format(time.RFC3339))
+	fmt.Fprintf(&buf, "+++ %s\t%s\n", result.ToRef.Path, result.ToRef.Timestamp.Format(time.RFC3339))
 
 	// Group changes by file/section for unified format
 	changesByPath := e.groupChangesByPath(filteredEntries)
@@ -172,7 +172,7 @@ func (e *DefaultExporter) ExportUnified(ctx context.Context, result *ComparisonR
 			entries = entries[:options.MaxEntries]
 		}
 
-		buf.WriteString(fmt.Sprintf("@@ %s @@\n", path))
+		fmt.Fprintf(&buf, "@@ %s @@\n", path)
 
 		for _, entry := range entries {
 			e.formatUnifiedEntry(&buf, entry, options)
@@ -191,12 +191,12 @@ func (e *DefaultExporter) ExportSideBySide(ctx context.Context, result *Comparis
 	filteredEntries := e.filterEntries(result.Entries, options)
 
 	// Write header
-	buf.WriteString(fmt.Sprintf("%-50s | %s\n", "OLD ("+result.FromRef.Commit[:8]+")", "NEW ("+result.ToRef.Commit[:8]+")"))
+	fmt.Fprintf(&buf, "%-50s | %s\n", "OLD ("+result.FromRef.Commit[:8]+")", "NEW ("+result.ToRef.Commit[:8]+")")
 	buf.WriteString(strings.Repeat("-", 50) + " | " + strings.Repeat("-", 50) + "\n")
 
 	for i, entry := range filteredEntries {
 		if options.MaxEntries > 0 && i >= options.MaxEntries {
-			buf.WriteString(fmt.Sprintf("... and %d more changes\n", len(filteredEntries)-i))
+			fmt.Fprintf(&buf, "... and %d more changes\n", len(filteredEntries)-i)
 			break
 		}
 
@@ -218,18 +218,18 @@ func (e *DefaultExporter) ExportMarkdown(ctx context.Context, result *Comparison
 
 	if options.IncludeSummary {
 		buf.WriteString("## Summary\n\n")
-		buf.WriteString(fmt.Sprintf("- **From**: %s (`%s`)\n", result.FromRef.Repository, result.FromRef.Commit[:8]))
-		buf.WriteString(fmt.Sprintf("- **To**: %s (`%s`)\n", result.ToRef.Repository, result.ToRef.Commit[:8]))
-		buf.WriteString(fmt.Sprintf("- **Generated**: %s\n\n", result.Metadata.CreatedAt.Format(time.RFC3339)))
+		fmt.Fprintf(&buf, "- **From**: %s (`%s`)\n", result.FromRef.Repository, result.FromRef.Commit[:8])
+		fmt.Fprintf(&buf, "- **To**: %s (`%s`)\n", result.ToRef.Repository, result.ToRef.Commit[:8])
+		fmt.Fprintf(&buf, "- **Generated**: %s\n\n", result.Metadata.CreatedAt.Format(time.RFC3339))
 
 		buf.WriteString("### Change Statistics\n\n")
 		buf.WriteString("| Type | Count |\n")
 		buf.WriteString("|------|-------|\n")
-		buf.WriteString(fmt.Sprintf("| Total | %d |\n", result.Summary.TotalChanges))
-		buf.WriteString(fmt.Sprintf("| Added | %d |\n", result.Summary.AddedItems))
-		buf.WriteString(fmt.Sprintf("| Modified | %d |\n", result.Summary.ModifiedItems))
-		buf.WriteString(fmt.Sprintf("| Deleted | %d |\n", result.Summary.DeletedItems))
-		buf.WriteString(fmt.Sprintf("| Breaking | %d |\n", result.Summary.BreakingChanges))
+		fmt.Fprintf(&buf, "| Total | %d |\n", result.Summary.TotalChanges)
+		fmt.Fprintf(&buf, "| Added | %d |\n", result.Summary.AddedItems)
+		fmt.Fprintf(&buf, "| Modified | %d |\n", result.Summary.ModifiedItems)
+		fmt.Fprintf(&buf, "| Deleted | %d |\n", result.Summary.DeletedItems)
+		fmt.Fprintf(&buf, "| Breaking | %d |\n", result.Summary.BreakingChanges)
 		buf.WriteString("\n")
 	}
 
@@ -238,7 +238,7 @@ func (e *DefaultExporter) ExportMarkdown(ctx context.Context, result *Comparison
 
 	for i, entry := range filteredEntries {
 		if options.MaxEntries > 0 && i >= options.MaxEntries {
-			buf.WriteString(fmt.Sprintf("*... and %d more changes*\n", len(filteredEntries)-i))
+			fmt.Fprintf(&buf, "*... and %d more changes*\n", len(filteredEntries)-i)
 			break
 		}
 
@@ -248,13 +248,13 @@ func (e *DefaultExporter) ExportMarkdown(ctx context.Context, result *Comparison
 	// Write metadata
 	if options.IncludeMetadata {
 		buf.WriteString("## Metadata\n\n")
-		buf.WriteString(fmt.Sprintf("- **Engine**: %s v%s\n", result.Metadata.Engine, result.Metadata.Version))
-		buf.WriteString(fmt.Sprintf("- **Duration**: %v\n", result.Metadata.Duration))
+		fmt.Fprintf(&buf, "- **Engine**: %s v%s\n", result.Metadata.Engine, result.Metadata.Version)
+		fmt.Fprintf(&buf, "- **Duration**: %v\n", result.Metadata.Duration)
 
 		if len(result.Metadata.Warnings) > 0 {
 			buf.WriteString("- **Warnings**:\n")
 			for _, warning := range result.Metadata.Warnings {
-				buf.WriteString(fmt.Sprintf("  - %s\n", warning))
+				fmt.Fprintf(&buf, "  - %s\n", warning)
 			}
 		}
 	}

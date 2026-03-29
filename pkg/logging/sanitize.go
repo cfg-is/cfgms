@@ -156,7 +156,7 @@ func formatKeysAndValues(keysAndValues []any) string {
 		if str, ok := val.(string); ok {
 			b.WriteString(SanitizeLogValue(str))
 		} else {
-			b.WriteString(fmt.Sprintf("%v", val))
+			fmt.Fprintf(&b, "%v", val)
 		}
 	}
 

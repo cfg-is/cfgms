@@ -378,7 +378,7 @@ func (s *ModuleExecutionTestSuite) TestLargeFileCreation() {
 	// Create >100KB content
 	var sb strings.Builder
 	for i := 0; i < 2000; i++ {
-		sb.WriteString(fmt.Sprintf("Line %d: Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n", i+1))
+		fmt.Fprintf(&sb, "Line %d: Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n", i+1)
 	}
 	largeContent := sb.String()
 

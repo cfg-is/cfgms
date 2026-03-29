@@ -6,83 +6,102 @@
 package dna
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os/exec"
 	"strings"
+	"time"
 )
 
+const darwinNetCmdTimeout = 30 * time.Second
+
 // CollectInterfaces gathers detailed network interface information on macOS
-func (d *DarwinNetworkCollector) CollectInterfaces(attributes map[string]string) error {
+func (d *DarwinNetworkCollector) CollectInterfaces(ctx context.Context, attributes map[string]string) error {
 	// First collect basic interface info using Go's standard library
-	if err := (&GenericNetworkCollector{}).CollectInterfaces(attributes); err != nil {
+	if err := (&GenericNetworkCollector{}).CollectInterfaces(ctx, attributes); err != nil {
 		return err
 	}
 
 	// Enhanced interface information using ifconfig
-	if output, err := exec.Command("ifconfig").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "ifconfig").Output(); err == nil {
 		d.parseIfconfigOutput(string(output), attributes)
 	}
+	cancel()
 
 	// Network service information using networksetup
-	if output, err := exec.Command("networksetup", "-listallnetworkservices").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "networksetup", "-listallnetworkservices").Output(); err == nil {
 		d.parseNetworkServices(string(output), attributes)
 	}
+	cancel2()
 
 	// Wi-Fi information if available
-	d.collectWiFiInfo(attributes)
+	d.collectWiFiInfo(ctx, attributes)
 
 	return nil
 }
 
 // CollectRouting gathers routing table information on macOS
-func (d *DarwinNetworkCollector) CollectRouting(attributes map[string]string) error {
+func (d *DarwinNetworkCollector) CollectRouting(ctx context.Context, attributes map[string]string) error {
 	// IPv4 routing table
-	if output, err := exec.Command("netstat", "-rn", "-f", "inet").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "netstat", "-rn", "-f", "inet").Output(); err == nil {
 		d.parseRoutingTable(string(output), attributes, "ipv4")
 	}
+	cancel()
 
 	// IPv6 routing table
-	if output, err := exec.Command("netstat", "-rn", "-f", "inet6").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "netstat", "-rn", "-f", "inet6").Output(); err == nil {
 		d.parseRoutingTable(string(output), attributes, "ipv6")
 	}
+	cancel2()
 
 	// Default gateway information
-	if output, err := exec.Command("route", "get", "default").Output(); err == nil {
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx3, "route", "get", "default").Output(); err == nil {
 		d.parseDefaultGateway(string(output), attributes)
 	}
+	cancel3()
 
 	return nil
 }
 
 // CollectDNS gathers DNS configuration on macOS
-func (d *DarwinNetworkCollector) CollectDNS(attributes map[string]string) error {
+func (d *DarwinNetworkCollector) CollectDNS(ctx context.Context, attributes map[string]string) error {
 	// DNS configuration using scutil
-	if output, err := exec.Command("scutil", "--dns").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "scutil", "--dns").Output(); err == nil {
 		d.parseDNSConfig(string(output), attributes)
 	}
+	cancel()
 
 	// System DNS servers using networksetup
-	d.collectDNSServers(attributes)
+	d.collectDNSServers(ctx, attributes)
 
 	// Search domains
-	d.collectSearchDomains(attributes)
+	d.collectSearchDomains(ctx, attributes)
 
 	// /etc/hosts file information
-	if output, err := exec.Command("wc", "-l", "/etc/hosts").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "wc", "-l", "/etc/hosts").Output(); err == nil {
 		hostsLines := strings.TrimSpace(string(output))
 		if lines := strings.Fields(hostsLines); len(lines) > 0 {
 			attributes["hosts_file_lines"] = lines[0]
 		}
 	}
+	cancel2()
 
 	return nil
 }
 
 // CollectFirewall gathers firewall configuration on macOS
-func (d *DarwinNetworkCollector) CollectFirewall(attributes map[string]string) error {
+func (d *DarwinNetworkCollector) CollectFirewall(ctx context.Context, attributes map[string]string) error {
 	// macOS firewall status using defaults
-	if output, err := exec.Command("defaults", "read", "/Library/Preferences/com.apple.alf", "globalstate").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "defaults", "read", "/Library/Preferences/com.apple.alf", "globalstate").Output(); err == nil {
 		firewallState := strings.TrimSpace(string(output))
 		switch firewallState {
 		case "0":
@@ -95,9 +114,11 @@ func (d *DarwinNetworkCollector) CollectFirewall(attributes map[string]string) e
 			attributes["macos_firewall_state"] = "unknown_" + firewallState
 		}
 	}
+	cancel()
 
 	// pfctl firewall rules (if enabled and accessible)
-	if output, err := exec.Command("pfctl", "-s", "rules").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "pfctl", "-s", "rules").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var ruleCount int
 		for _, line := range lines {
@@ -110,18 +131,21 @@ func (d *DarwinNetworkCollector) CollectFirewall(attributes map[string]string) e
 			attributes["pfctl_rule_count"] = fmt.Sprintf("%d", ruleCount)
 		}
 	}
+	cancel2()
 
 	// Stealth mode status
-	if output, err := exec.Command("defaults", "read", "/Library/Preferences/com.apple.alf", "stealthenabled").Output(); err == nil {
-		stealthMode := strings.TrimSpace(string(output))
-		attributes["macos_firewall_stealth"] = stealthMode
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx3, "defaults", "read", "/Library/Preferences/com.apple.alf", "stealthenabled").Output(); err == nil {
+		attributes["macos_firewall_stealth"] = strings.TrimSpace(string(output))
 	}
+	cancel3()
 
 	// Logging enabled status
-	if output, err := exec.Command("defaults", "read", "/Library/Preferences/com.apple.alf", "loggingenabled").Output(); err == nil {
-		loggingEnabled := strings.TrimSpace(string(output))
-		attributes["macos_firewall_logging"] = loggingEnabled
+	cmdCtx4, cancel4 := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx4, "defaults", "read", "/Library/Preferences/com.apple.alf", "loggingenabled").Output(); err == nil {
+		attributes["macos_firewall_logging"] = strings.TrimSpace(string(output))
 	}
+	cancel4()
 
 	return nil
 }
@@ -209,9 +233,10 @@ func (d *DarwinNetworkCollector) parseNetworkServices(output string, attributes 
 }
 
 // collectWiFiInfo collects Wi-Fi specific information
-func (d *DarwinNetworkCollector) collectWiFiInfo(attributes map[string]string) {
+func (d *DarwinNetworkCollector) collectWiFiInfo(ctx context.Context, attributes map[string]string) {
 	// Current Wi-Fi SSID
-	if output, err := exec.Command("networksetup", "-getairportnetwork", "en0").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "networksetup", "-getairportnetwork", "en0").Output(); err == nil {
 		ssidLine := strings.TrimSpace(string(output))
 		if strings.Contains(ssidLine, ":") {
 			parts := strings.SplitN(ssidLine, ":", 2)
@@ -223,9 +248,11 @@ func (d *DarwinNetworkCollector) collectWiFiInfo(attributes map[string]string) {
 			}
 		}
 	}
+	cancel()
 
 	// Wi-Fi power status
-	if output, err := exec.Command("networksetup", "-getairportpower", "en0").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinNetCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "networksetup", "-getairportpower", "en0").Output(); err == nil {
 		powerStatus := strings.TrimSpace(string(output))
 		if strings.Contains(powerStatus, ":") {
 			parts := strings.SplitN(powerStatus, ":", 2)
@@ -234,6 +261,7 @@ func (d *DarwinNetworkCollector) collectWiFiInfo(attributes map[string]string) {
 			}
 		}
 	}
+	cancel2()
 }
 
 // parseRoutingTable parses netstat routing table output
@@ -325,11 +353,12 @@ func (d *DarwinNetworkCollector) parseDNSConfig(output string, attributes map[st
 }
 
 // collectDNSServers collects DNS servers using networksetup
-func (d *DarwinNetworkCollector) collectDNSServers(attributes map[string]string) {
+func (d *DarwinNetworkCollector) collectDNSServers(ctx context.Context, attributes map[string]string) {
 	services := []string{"Wi-Fi", "Ethernet", "USB 10/100/1000 LAN"}
 
 	for _, service := range services {
-		if output, err := exec.Command("networksetup", "-getdnsservers", service).Output(); err == nil {
+		cmdCtx, cancel := context.WithTimeout(ctx, darwinNetCmdTimeout)
+		if output, err := exec.CommandContext(cmdCtx, "networksetup", "-getdnsservers", service).Output(); err == nil {
 			dnsOutput := strings.TrimSpace(string(output))
 			if dnsOutput != "" && !strings.Contains(dnsOutput, "There aren't any DNS Servers") {
 				servers := strings.Split(dnsOutput, "\n")
@@ -341,20 +370,22 @@ func (d *DarwinNetworkCollector) collectDNSServers(attributes map[string]string)
 					}
 				}
 				if len(validServers) > 0 {
-					serviceKey := strings.ToLower(strings.Replace(service, " ", "_", -1))
+					serviceKey := strings.ToLower(strings.ReplaceAll(service, " ", "_"))
 					attributes["dns_servers_"+serviceKey] = strings.Join(validServers, ",")
 				}
 			}
 		}
+		cancel()
 	}
 }
 
 // collectSearchDomains collects DNS search domains
-func (d *DarwinNetworkCollector) collectSearchDomains(attributes map[string]string) {
+func (d *DarwinNetworkCollector) collectSearchDomains(ctx context.Context, attributes map[string]string) {
 	services := []string{"Wi-Fi", "Ethernet"}
 
 	for _, service := range services {
-		if output, err := exec.Command("networksetup", "-getsearchdomains", service).Output(); err == nil {
+		cmdCtx, cancel := context.WithTimeout(ctx, darwinNetCmdTimeout)
+		if output, err := exec.CommandContext(cmdCtx, "networksetup", "-getsearchdomains", service).Output(); err == nil {
 			searchOutput := strings.TrimSpace(string(output))
 			if searchOutput != "" && !strings.Contains(searchOutput, "There aren't any Search Domains") {
 				domains := strings.Split(searchOutput, "\n")
@@ -366,10 +397,11 @@ func (d *DarwinNetworkCollector) collectSearchDomains(attributes map[string]stri
 					}
 				}
 				if len(validDomains) > 0 {
-					serviceKey := strings.ToLower(strings.Replace(service, " ", "_", -1))
+					serviceKey := strings.ToLower(strings.ReplaceAll(service, " ", "_"))
 					attributes["search_domains_"+serviceKey] = strings.Join(validDomains, ",")
 				}
 			}
 		}
+		cancel()
 	}
 }

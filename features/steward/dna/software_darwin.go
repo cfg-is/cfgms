@@ -6,15 +6,19 @@
 package dna
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
 
+const darwinSwCmdTimeout = 30 * time.Second
+
 // CollectOS gathers detailed operating system information on macOS
-func (d *DarwinSoftwareCollector) CollectOS(attributes map[string]string) error {
+func (d *DarwinSoftwareCollector) CollectOS(ctx context.Context, attributes map[string]string) error {
 	// Basic OS information
 	attributes["os"] = runtime.GOOS
 	attributes["go_version"] = runtime.Version()
@@ -24,62 +28,77 @@ func (d *DarwinSoftwareCollector) CollectOS(attributes map[string]string) error 
 	attributes["runtime_compiler"] = runtime.Compiler
 
 	// macOS-specific OS information
-	if version, err := exec.Command("sw_vers", "-productVersion").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	if version, err := exec.CommandContext(cmdCtx, "sw_vers", "-productVersion").Output(); err == nil {
 		attributes["macos_version"] = strings.TrimSpace(string(version))
 	}
+	cancel()
 
-	if build, err := exec.Command("sw_vers", "-buildVersion").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	if build, err := exec.CommandContext(cmdCtx2, "sw_vers", "-buildVersion").Output(); err == nil {
 		attributes["macos_build"] = strings.TrimSpace(string(build))
 	}
+	cancel2()
 
-	if name, err := exec.Command("sw_vers", "-productName").Output(); err == nil {
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	if name, err := exec.CommandContext(cmdCtx3, "sw_vers", "-productName").Output(); err == nil {
 		attributes["macos_product_name"] = strings.TrimSpace(string(name))
 	}
+	cancel3()
 
 	// Kernel information
-	if kernelVersion, err := exec.Command("uname", "-r").Output(); err == nil {
+	cmdCtx4, cancel4 := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	if kernelVersion, err := exec.CommandContext(cmdCtx4, "uname", "-r").Output(); err == nil {
 		attributes["kernel_version"] = strings.TrimSpace(string(kernelVersion))
 	}
+	cancel4()
 
-	if kernelName, err := exec.Command("uname", "-s").Output(); err == nil {
+	cmdCtx5, cancel5 := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	if kernelName, err := exec.CommandContext(cmdCtx5, "uname", "-s").Output(); err == nil {
 		attributes["kernel_name"] = strings.TrimSpace(string(kernelName))
 	}
+	cancel5()
 
 	// System uptime
-	if uptime, err := exec.Command("uptime").Output(); err == nil {
+	cmdCtx6, cancel6 := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	if uptime, err := exec.CommandContext(cmdCtx6, "uptime").Output(); err == nil {
 		attributes["system_uptime"] = strings.TrimSpace(string(uptime))
 	}
+	cancel6()
 
 	return nil
 }
 
 // CollectPackages gathers installed packages/applications on macOS
-func (d *DarwinSoftwareCollector) CollectPackages(attributes map[string]string) error {
+func (d *DarwinSoftwareCollector) CollectPackages(ctx context.Context, attributes map[string]string) error {
 	// Homebrew packages
-	d.collectHomebrewPackages(attributes)
+	d.collectHomebrewPackages(ctx, attributes)
 
 	// MacPorts packages (if available)
-	d.collectMacPortsPackages(attributes)
+	d.collectMacPortsPackages(ctx, attributes)
 
 	// Applications in /Applications
-	d.collectApplications(attributes)
+	d.collectApplications(ctx, attributes)
 
 	// System frameworks and libraries
-	d.collectSystemLibraries(attributes)
+	d.collectSystemLibraries(ctx, attributes)
 
 	return nil
 }
 
 // CollectServices gathers installed and running services on macOS
-func (d *DarwinSoftwareCollector) CollectServices(attributes map[string]string) error {
+func (d *DarwinSoftwareCollector) CollectServices(ctx context.Context, attributes map[string]string) error {
 	// LaunchDaemons (system services)
-	d.collectLaunchDaemons(attributes)
+	d.collectLaunchDaemons(ctx, attributes)
 
 	// LaunchAgents (user services)
-	d.collectLaunchAgents(attributes)
+	d.collectLaunchAgents(ctx, attributes)
 
 	// Running processes count as a service indicator
-	if output, err := exec.Command("ps", "aux").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "ps", "aux").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		attributes["running_process_count"] = fmt.Sprintf("%d", len(lines)-1) // -1 for header
 	}
@@ -88,7 +107,7 @@ func (d *DarwinSoftwareCollector) CollectServices(attributes map[string]string) 
 }
 
 // CollectProcesses gathers information about running processes on macOS
-func (d *DarwinSoftwareCollector) CollectProcesses(attributes map[string]string) error {
+func (d *DarwinSoftwareCollector) CollectProcesses(ctx context.Context, attributes map[string]string) error {
 	// Basic process information
 	attributes["current_pid"] = fmt.Sprintf("%d", os.Getpid())
 	attributes["parent_pid"] = fmt.Sprintf("%d", os.Getppid())
@@ -111,7 +130,10 @@ func (d *DarwinSoftwareCollector) CollectProcesses(attributes map[string]string)
 	attributes["goroutine_count"] = fmt.Sprintf("%d", runtime.NumGoroutine())
 
 	// Process statistics
-	if output, err := exec.Command("ps", "-eo", "pid,ppid,user,comm").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "ps", "-eo", "pid,ppid,user,comm").Output(); err == nil {
 		d.parseProcessStats(string(output), attributes)
 	}
 
@@ -119,8 +141,11 @@ func (d *DarwinSoftwareCollector) CollectProcesses(attributes map[string]string)
 }
 
 // collectHomebrewPackages collects installed Homebrew packages
-func (d *DarwinSoftwareCollector) collectHomebrewPackages(attributes map[string]string) {
-	if output, err := exec.Command("brew", "list", "--formula").Output(); err == nil {
+func (d *DarwinSoftwareCollector) collectHomebrewPackages(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "brew", "list", "--formula").Output(); err == nil {
 		packages := strings.Fields(string(output))
 		attributes["homebrew_formula_count"] = fmt.Sprintf("%d", len(packages))
 
@@ -134,7 +159,10 @@ func (d *DarwinSoftwareCollector) collectHomebrewPackages(attributes map[string]
 		}
 	}
 
-	if output, err := exec.Command("brew", "list", "--cask").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	defer cancel2()
+
+	if output, err := exec.CommandContext(cmdCtx2, "brew", "list", "--cask").Output(); err == nil {
 		casks := strings.Fields(string(output))
 		attributes["homebrew_cask_count"] = fmt.Sprintf("%d", len(casks))
 
@@ -150,8 +178,11 @@ func (d *DarwinSoftwareCollector) collectHomebrewPackages(attributes map[string]
 }
 
 // collectMacPortsPackages collects installed MacPorts packages
-func (d *DarwinSoftwareCollector) collectMacPortsPackages(attributes map[string]string) {
-	if output, err := exec.Command("port", "installed").Output(); err == nil {
+func (d *DarwinSoftwareCollector) collectMacPortsPackages(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "port", "installed").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var packageCount int
 		for _, line := range lines {
@@ -166,8 +197,11 @@ func (d *DarwinSoftwareCollector) collectMacPortsPackages(attributes map[string]
 }
 
 // collectApplications collects applications in /Applications
-func (d *DarwinSoftwareCollector) collectApplications(attributes map[string]string) {
-	if output, err := exec.Command("find", "/Applications", "-name", "*.app", "-maxdepth", "2").Output(); err == nil {
+func (d *DarwinSoftwareCollector) collectApplications(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "find", "/Applications", "-name", "*.app", "-maxdepth", "2").Output(); err == nil {
 		apps := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(apps) > 0 && apps[0] != "" {
 			attributes["applications_count"] = fmt.Sprintf("%d", len(apps))
@@ -196,9 +230,12 @@ func (d *DarwinSoftwareCollector) collectApplications(attributes map[string]stri
 }
 
 // collectSystemLibraries collects information about system libraries
-func (d *DarwinSoftwareCollector) collectSystemLibraries(attributes map[string]string) {
+func (d *DarwinSoftwareCollector) collectSystemLibraries(ctx context.Context, attributes map[string]string) {
 	// Count dylibs in /usr/lib
-	if output, err := exec.Command("find", "/usr/lib", "-name", "*.dylib", "-type", "f").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "find", "/usr/lib", "-name", "*.dylib", "-type", "f").Output(); err == nil {
 		libs := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(libs) > 0 && libs[0] != "" {
 			attributes["system_dylib_count"] = fmt.Sprintf("%d", len(libs))
@@ -206,7 +243,10 @@ func (d *DarwinSoftwareCollector) collectSystemLibraries(attributes map[string]s
 	}
 
 	// Count frameworks in /System/Library/Frameworks
-	if output, err := exec.Command("find", "/System/Library/Frameworks", "-name", "*.framework", "-maxdepth", "1").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	defer cancel2()
+
+	if output, err := exec.CommandContext(cmdCtx2, "find", "/System/Library/Frameworks", "-name", "*.framework", "-maxdepth", "1").Output(); err == nil {
 		frameworks := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(frameworks) > 0 && frameworks[0] != "" {
 			attributes["system_framework_count"] = fmt.Sprintf("%d", len(frameworks))
@@ -215,15 +255,21 @@ func (d *DarwinSoftwareCollector) collectSystemLibraries(attributes map[string]s
 }
 
 // collectLaunchDaemons collects system launch daemons
-func (d *DarwinSoftwareCollector) collectLaunchDaemons(attributes map[string]string) {
-	if output, err := exec.Command("find", "/System/Library/LaunchDaemons", "-name", "*.plist").Output(); err == nil {
+func (d *DarwinSoftwareCollector) collectLaunchDaemons(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "find", "/System/Library/LaunchDaemons", "-name", "*.plist").Output(); err == nil {
 		daemons := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(daemons) > 0 && daemons[0] != "" {
 			attributes["system_launch_daemon_count"] = fmt.Sprintf("%d", len(daemons))
 		}
 	}
 
-	if output, err := exec.Command("find", "/Library/LaunchDaemons", "-name", "*.plist").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	defer cancel2()
+
+	if output, err := exec.CommandContext(cmdCtx2, "find", "/Library/LaunchDaemons", "-name", "*.plist").Output(); err == nil {
 		daemons := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(daemons) > 0 && daemons[0] != "" {
 			attributes["user_launch_daemon_count"] = fmt.Sprintf("%d", len(daemons))
@@ -232,15 +278,21 @@ func (d *DarwinSoftwareCollector) collectLaunchDaemons(attributes map[string]str
 }
 
 // collectLaunchAgents collects user launch agents
-func (d *DarwinSoftwareCollector) collectLaunchAgents(attributes map[string]string) {
-	if output, err := exec.Command("find", "/System/Library/LaunchAgents", "-name", "*.plist").Output(); err == nil {
+func (d *DarwinSoftwareCollector) collectLaunchAgents(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "find", "/System/Library/LaunchAgents", "-name", "*.plist").Output(); err == nil {
 		agents := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(agents) > 0 && agents[0] != "" {
 			attributes["system_launch_agent_count"] = fmt.Sprintf("%d", len(agents))
 		}
 	}
 
-	if output, err := exec.Command("find", "/Library/LaunchAgents", "-name", "*.plist").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinSwCmdTimeout)
+	defer cancel2()
+
+	if output, err := exec.CommandContext(cmdCtx2, "find", "/Library/LaunchAgents", "-name", "*.plist").Output(); err == nil {
 		agents := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(agents) > 0 && agents[0] != "" {
 			attributes["user_launch_agent_count"] = fmt.Sprintf("%d", len(agents))

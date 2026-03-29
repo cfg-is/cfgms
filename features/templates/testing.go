@@ -294,21 +294,21 @@ func FormatTestResults(results []TemplateTestResult) string {
 		totalDuration += result.Duration
 		if result.Passed {
 			passedTests++
-			sb.WriteString(fmt.Sprintf("✓ %s (%.2fs)\n", result.TestName, result.Duration.Seconds()))
+			fmt.Fprintf(&sb, "✓ %s (%.2fs)\n", result.TestName, result.Duration.Seconds())
 		} else {
 			failedTests++
-			sb.WriteString(fmt.Sprintf("✗ %s (%.2fs)\n", result.TestName, result.Duration.Seconds()))
+			fmt.Fprintf(&sb, "✗ %s (%.2fs)\n", result.TestName, result.Duration.Seconds())
 			if result.Error != nil {
-				sb.WriteString(fmt.Sprintf("  Error: %s\n", result.Error.Error()))
+				fmt.Fprintf(&sb, "  Error: %s\n", result.Error.Error())
 			}
 			for _, failure := range result.Failures {
-				sb.WriteString(fmt.Sprintf("  - %s\n", failure))
+				fmt.Fprintf(&sb, "  - %s\n", failure)
 			}
 		}
 	}
 
-	sb.WriteString(fmt.Sprintf("\nTotal: %d tests, %d passed, %d failed (%.2fs)\n",
-		totalTests, passedTests, failedTests, totalDuration.Seconds()))
+	fmt.Fprintf(&sb, "\nTotal: %d tests, %d passed, %d failed (%.2fs)\n",
+		totalTests, passedTests, failedTests, totalDuration.Seconds())
 
 	return sb.String()
 }

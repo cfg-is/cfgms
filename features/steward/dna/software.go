@@ -3,6 +3,7 @@
 package dna
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"runtime"
@@ -11,28 +12,29 @@ import (
 // SoftwareCollector defines the interface for platform-specific software inventory collection
 type SoftwareCollector interface {
 	// CollectOS gathers detailed operating system information
-	CollectOS(attributes map[string]string) error
+	CollectOS(ctx context.Context, attributes map[string]string) error
 
 	// CollectPackages gathers installed packages/applications
-	CollectPackages(attributes map[string]string) error
+	CollectPackages(ctx context.Context, attributes map[string]string) error
 
 	// CollectServices gathers installed and running services
-	CollectServices(attributes map[string]string) error
+	CollectServices(ctx context.Context, attributes map[string]string) error
 
 	// CollectProcesses gathers information about running processes
-	CollectProcesses(attributes map[string]string) error
+	CollectProcesses(ctx context.Context, attributes map[string]string) error
 }
 
-// NewSoftwareCollector creates a platform-specific software collector
-func NewSoftwareCollector() SoftwareCollector {
-	return newPlatformSoftwareCollector()
+// NewSoftwareCollector creates a platform-specific software collector.
+// The context is used by Windows implementations to enforce per-command timeouts.
+func NewSoftwareCollector(ctx context.Context) SoftwareCollector {
+	return newPlatformSoftwareCollector(ctx)
 }
 
 // GenericSoftwareCollector provides basic cross-platform software collection
 // This is used as a fallback when platform-specific collectors are not available
 type GenericSoftwareCollector struct{}
 
-func (g *GenericSoftwareCollector) CollectOS(attributes map[string]string) error {
+func (g *GenericSoftwareCollector) CollectOS(_ context.Context, attributes map[string]string) error {
 	// Basic OS information available on all platforms
 	attributes["os"] = runtime.GOOS
 	attributes["go_version"] = runtime.Version()
@@ -46,19 +48,19 @@ func (g *GenericSoftwareCollector) CollectOS(attributes map[string]string) error
 	return nil
 }
 
-func (g *GenericSoftwareCollector) CollectPackages(attributes map[string]string) error {
+func (g *GenericSoftwareCollector) CollectPackages(_ context.Context, attributes map[string]string) error {
 	// Generic package collection - limited without platform-specific APIs
 	attributes["package_info"] = "generic_collector_limited"
 	return nil
 }
 
-func (g *GenericSoftwareCollector) CollectServices(attributes map[string]string) error {
+func (g *GenericSoftwareCollector) CollectServices(_ context.Context, attributes map[string]string) error {
 	// Generic service collection - limited without platform-specific APIs
 	attributes["service_info"] = "generic_collector_limited"
 	return nil
 }
 
-func (g *GenericSoftwareCollector) CollectProcesses(attributes map[string]string) error {
+func (g *GenericSoftwareCollector) CollectProcesses(_ context.Context, attributes map[string]string) error {
 	// Basic process information available on all platforms
 	attributes["current_pid"] = fmt.Sprintf("%d", os.Getpid())
 	attributes["parent_pid"] = fmt.Sprintf("%d", os.Getppid())
@@ -80,10 +82,8 @@ func (g *GenericSoftwareCollector) CollectProcesses(attributes map[string]string
 
 // Platform-specific collector types (implementations in separate files)
 
-// WindowsSoftwareCollector handles Windows-specific software collection
-type WindowsSoftwareCollector struct{}
-
-// Windows-specific implementations are in software_windows.go
+// WindowsSoftwareCollector handles Windows-specific software collection.
+// Full definition (with ctx field) is in software_windows.go.
 
 // LinuxSoftwareCollector handles Linux-specific software collection
 type LinuxSoftwareCollector struct{}

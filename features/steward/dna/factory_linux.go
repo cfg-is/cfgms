@@ -5,12 +5,14 @@
 
 package dna
 
+import "context"
+
 // Platform-specific factory implementations for Linux
-func newPlatformHardwareCollector() HardwareCollector {
+func newPlatformHardwareCollector(_ context.Context) HardwareCollector {
 	return &LinuxHardwareCollector{}
 }
 
-func newPlatformSoftwareCollector() SoftwareCollector {
+func newPlatformSoftwareCollector(_ context.Context) SoftwareCollector {
 	return &LinuxSoftwareCollector{}
 }
 

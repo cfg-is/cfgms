@@ -3,6 +3,7 @@
 package dna
 
 import (
+	"context"
 	"runtime"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func TestDNACollectionBasic(t *testing.T) {
 		collector := NewCollector(logger)
 
 		// Quick validation that collection works
-		dna, err := collector.Collect()
+		dna, err := collector.Collect(context.Background())
 		if err != nil {
 			t.Fatalf("DNA collection failed: %v", err)
 		}
@@ -28,11 +29,11 @@ func TestDNACollectionBasic(t *testing.T) {
 			t.Error("DNA ID should not be empty")
 		}
 
-		if len(dna.Attributes) < 50 {
-			t.Errorf("Expected at least 50 attributes, got %d", len(dna.Attributes))
+		if len(dna.Attributes) < 30 {
+			t.Errorf("Expected at least 30 attributes (fast path), got %d", len(dna.Attributes))
 		}
 
-		t.Logf("✅ DNA collection basic validation passed (%d attributes)", len(dna.Attributes))
+		t.Logf("DNA collection basic validation passed (%d attributes)", len(dna.Attributes))
 		return
 	}
 
@@ -59,7 +60,7 @@ func TestDNACollectionBasic(t *testing.T) {
 		t.Error("Basic info should include hostname")
 	}
 
-	t.Logf("✅ DNA collection fast validation passed (%d basic attributes)", len(attributes))
+	t.Logf("DNA collection fast validation passed (%d basic attributes)", len(attributes))
 }
 
 // BenchmarkDNACollection benchmarks the DNA collection performance
@@ -70,7 +71,7 @@ func BenchmarkDNACollection(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		_, err := collector.Collect()
+		_, err := collector.Collect(context.Background())
 		if err != nil {
 			b.Fatalf("DNA collection failed: %v", err)
 		}
@@ -92,7 +93,7 @@ func TestDNACollectionPerformance(t *testing.T) {
 
 	// Time the collection
 	start := time.Now()
-	dna, err := collector.Collect()
+	dna, err := collector.Collect(context.Background())
 	duration := time.Since(start)
 
 	// Measure CPU usage after collection
@@ -107,15 +108,18 @@ func TestDNACollectionPerformance(t *testing.T) {
 	if duration > 60*time.Second {
 		t.Errorf("DNA collection took %v, exceeds 60 second requirement", duration)
 	} else {
-		t.Logf("DNA collection completed in %v (requirement: <60s) ✅", duration)
+		t.Logf("DNA collection completed in %v (requirement: <60s)", duration)
 	}
 
-	// Check attribute count
+	// Check attribute count — the first Collect() call returns fast-path data
+	// only (hardware + network + environment). Software and security data are
+	// collected asynchronously in the background and merged on subsequent calls.
+	// The fast path typically returns 80-100 attributes; full merged data exceeds 120.
 	attributeCount := len(dna.Attributes)
-	if attributeCount < 100 {
-		t.Errorf("DNA collection returned only %d attributes, expected >100", attributeCount)
+	if attributeCount < 50 {
+		t.Errorf("DNA collection returned only %d attributes, expected >50", attributeCount)
 	} else {
-		t.Logf("DNA collection returned %d attributes ✅", attributeCount)
+		t.Logf("DNA collection returned %d attributes (fast path)", attributeCount)
 	}
 
 	// Memory usage analysis
@@ -137,17 +141,18 @@ func TestDNACollectionComponents(t *testing.T) {
 
 	logger := logging.NewLogger("info")
 	collector := NewCollector(logger)
+	ctx := context.Background()
 
 	components := []struct {
 		name string
 		fn   func(map[string]string)
 	}{
 		{"Basic Info", collector.collectBasicInfo},
-		{"Hardware Info", collector.collectHardwareInfo},
-		{"Software Info", collector.collectSoftwareInfo},
-		{"Network Info", collector.collectNetworkInfo},
+		{"Hardware Info", func(attrs map[string]string) { collector.collectHardwareInfo(ctx, attrs) }},
+		{"Software Info", func(attrs map[string]string) { collector.collectSoftwareInfo(ctx, attrs) }},
+		{"Network Info", func(attrs map[string]string) { collector.collectNetworkInfo(ctx, attrs) }},
 		{"Environment Info", collector.collectEnvironmentInfo},
-		{"Security Info", collector.collectSecurityInfo},
+		{"Security Info", func(attrs map[string]string) { collector.collectSecurityInfo(ctx, attrs) }},
 	}
 
 	for _, component := range components {
@@ -188,7 +193,7 @@ func TestConcurrentDNACollection(t *testing.T) {
 			collector := NewCollector(logger)
 			for j := 0; j < collectionsPerGoroutine; j++ {
 				collectionStart := time.Now()
-				_, err := collector.Collect()
+				_, err := collector.Collect(context.Background())
 				collectionDuration := time.Since(collectionStart)
 
 				if err != nil {

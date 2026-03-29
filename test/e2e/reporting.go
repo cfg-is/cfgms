@@ -515,25 +515,25 @@ func (r *TestReporter) formatTextReport(report *TestSummaryReport) string {
 	builder.WriteString("============================\n\n")
 
 	// Execution info
-	builder.WriteString(fmt.Sprintf("Generated: %s\n", report.GeneratedAt.Format(time.RFC3339)))
-	builder.WriteString(fmt.Sprintf("Duration: %v\n", report.ExecutionInfo.ExecutionDuration))
-	builder.WriteString(fmt.Sprintf("Environment: CI=%s\n\n", report.ExecutionInfo.Environment["CI"]))
+	fmt.Fprintf(&builder, "Generated: %s\n", report.GeneratedAt.Format(time.RFC3339))
+	fmt.Fprintf(&builder, "Duration: %v\n", report.ExecutionInfo.ExecutionDuration)
+	fmt.Fprintf(&builder, "Environment: CI=%s\n\n", report.ExecutionInfo.Environment["CI"])
 
 	// Test results
 	results := report.TestResults
 	builder.WriteString("Test Results Summary\n")
 	builder.WriteString("-------------------\n")
-	builder.WriteString(fmt.Sprintf("Total Tests: %d\n", results.TotalTests))
-	builder.WriteString(fmt.Sprintf("Passed: %d\n", results.PassedTests))
-	builder.WriteString(fmt.Sprintf("Failed: %d\n", results.FailedTests))
-	builder.WriteString(fmt.Sprintf("Success Rate: %.1f%%\n\n", results.SuccessRate))
+	fmt.Fprintf(&builder, "Total Tests: %d\n", results.TotalTests)
+	fmt.Fprintf(&builder, "Passed: %d\n", results.PassedTests)
+	fmt.Fprintf(&builder, "Failed: %d\n", results.FailedTests)
+	fmt.Fprintf(&builder, "Success Rate: %.1f%%\n\n", results.SuccessRate)
 
 	// Category breakdown
 	builder.WriteString("Results by Category\n")
 	builder.WriteString("------------------\n")
 	for category, result := range results.CategoryResults {
-		builder.WriteString(fmt.Sprintf("%s: %d/%d (%.1f%%)\n",
-			category, result.Passed, result.Total, result.SuccessRate))
+		fmt.Fprintf(&builder, "%s: %d/%d (%.1f%%)\n",
+			category, result.Passed, result.Total, result.SuccessRate)
 	}
 	builder.WriteString("\n")
 
@@ -542,7 +542,7 @@ func (r *TestReporter) formatTextReport(report *TestSummaryReport) string {
 		builder.WriteString("Critical Failures\n")
 		builder.WriteString("----------------\n")
 		for _, failure := range report.FailureAnalysis.CriticalFailures {
-			builder.WriteString(fmt.Sprintf("- %s: %s\n", failure.TestName, failure.FailureReason))
+			fmt.Fprintf(&builder, "- %s: %s\n", failure.TestName, failure.FailureReason)
 		}
 		builder.WriteString("\n")
 	}
@@ -552,7 +552,7 @@ func (r *TestReporter) formatTextReport(report *TestSummaryReport) string {
 		builder.WriteString("Recommendations\n")
 		builder.WriteString("--------------\n")
 		for _, rec := range report.Recommendations {
-			builder.WriteString(fmt.Sprintf("- %s\n", rec))
+			fmt.Fprintf(&builder, "- %s\n", rec)
 		}
 	}
 
@@ -572,11 +572,11 @@ func (r *TestReporter) formatCISummary(report *TestSummaryReport) string {
 		builder.WriteString("❌ MANY TESTS FAILED\n")
 	}
 
-	builder.WriteString(fmt.Sprintf("Success Rate: %.1f%% (%d/%d)\n",
-		results.SuccessRate, results.PassedTests, results.TotalTests))
+	fmt.Fprintf(&builder, "Success Rate: %.1f%% (%d/%d)\n",
+		results.SuccessRate, results.PassedTests, results.TotalTests)
 
 	if len(report.FailureAnalysis.CriticalFailures) > 0 {
-		builder.WriteString(fmt.Sprintf("Critical Failures: %d\n", len(report.FailureAnalysis.CriticalFailures)))
+		fmt.Fprintf(&builder, "Critical Failures: %d\n", len(report.FailureAnalysis.CriticalFailures))
 	}
 
 	return builder.String()
