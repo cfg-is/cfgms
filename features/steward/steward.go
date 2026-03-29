@@ -467,7 +467,7 @@ func (s *Steward) detectUnmanagedDNADrift(ctx context.Context) {
 		return
 	}
 
-	currentDNA, err := s.dnaCollector.Collect()
+	currentDNA, err := s.dnaCollector.Collect(ctx)
 	if err != nil {
 		s.logger.Warn("Failed to collect DNA for drift detection", "error", err)
 		return
