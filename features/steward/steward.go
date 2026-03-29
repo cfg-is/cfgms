@@ -631,7 +631,7 @@ func (s *Steward) startControllerTesting(ctx context.Context) error {
 	s.healthCheck.UpdateControllerConnectivity(true)
 
 	// Collect system DNA
-	systemDNA, err := s.dnaCollector.Collect()
+	systemDNA, err := s.dnaCollector.Collect(ctx)
 	if err != nil {
 		s.logger.Warn("Failed to collect system DNA", "error", err)
 	} else {
@@ -715,7 +715,7 @@ func (s *Steward) startController_OLD(ctx context.Context) error {
 	s.healthCheck.UpdateControllerConnectivity(true)
 
 	// Collect system DNA for registration
-	systemDNA, err := s.dnaCollector.Collect()
+	systemDNA, err := s.dnaCollector.Collect(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to collect system DNA: %w", err)
 	}
@@ -873,7 +873,7 @@ func (s *Steward) GetSystemDNA(ctx context.Context) (*commonpb.DNA, error) {
 		return nil, fmt.Errorf("DNA collector not initialized")
 	}
 
-	return s.dnaCollector.Collect()
+	return s.dnaCollector.Collect(ctx)
 }
 
 // SyncDNAWithController synchronizes the current system DNA with the controller.

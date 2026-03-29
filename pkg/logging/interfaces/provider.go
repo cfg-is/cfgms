@@ -271,16 +271,16 @@ func (entry LogEntry) ToSyslogFormat() string {
 	structuredData.WriteString("[cfgms")
 
 	if entry.TenantID != "" {
-		structuredData.WriteString(fmt.Sprintf(` tenant_id="%s"`, entry.TenantID))
+		fmt.Fprintf(&structuredData, ` tenant_id="%s"`, entry.TenantID)
 	}
 	if entry.SessionID != "" {
-		structuredData.WriteString(fmt.Sprintf(` session_id="%s"`, entry.SessionID))
+		fmt.Fprintf(&structuredData, ` session_id="%s"`, entry.SessionID)
 	}
 	if entry.CorrelationID != "" {
-		structuredData.WriteString(fmt.Sprintf(` correlation_id="%s"`, entry.CorrelationID))
+		fmt.Fprintf(&structuredData, ` correlation_id="%s"`, entry.CorrelationID)
 	}
 	if entry.TraceID != "" {
-		structuredData.WriteString(fmt.Sprintf(` trace_id="%s"`, entry.TraceID))
+		fmt.Fprintf(&structuredData, ` trace_id="%s"`, entry.TraceID)
 	}
 
 	// Add custom fields in sorted order for deterministic output
@@ -300,7 +300,7 @@ func (entry LogEntry) ToSyslogFormat() string {
 		}
 
 		for _, key := range keys {
-			structuredData.WriteString(fmt.Sprintf(` %s="%v"`, key, entry.Fields[key]))
+			fmt.Fprintf(&structuredData, ` %s="%v"`, key, entry.Fields[key])
 		}
 	}
 

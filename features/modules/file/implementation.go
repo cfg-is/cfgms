@@ -144,7 +144,7 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 
 	// Platform-specific permissions handling
 	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
-		return fmt.Errorf("Unix-style permissions are not supported on this platform (NTFS uses ACLs); remove the permissions field from your configuration")
+		return fmt.Errorf("unix-style permissions are not supported on this platform (NTFS uses ACLs); remove the permissions field from your configuration")
 	}
 
 	// Apply default permissions if not specified

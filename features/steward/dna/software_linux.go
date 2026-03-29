@@ -6,15 +6,19 @@
 package dna
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
 
+const linuxSwCmdTimeout = 30 * time.Second
+
 // CollectOS gathers detailed operating system information on Linux
-func (l *LinuxSoftwareCollector) CollectOS(attributes map[string]string) error {
+func (l *LinuxSoftwareCollector) CollectOS(ctx context.Context, attributes map[string]string) error {
 	// Basic OS information
 	attributes["os"] = runtime.GOOS
 	attributes["go_version"] = runtime.Version()
@@ -24,81 +28,99 @@ func (l *LinuxSoftwareCollector) CollectOS(attributes map[string]string) error {
 	attributes["runtime_compiler"] = runtime.Compiler
 
 	// Distribution information from /etc/os-release
-	if output, err := exec.Command("cat", "/etc/os-release").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "cat", "/etc/os-release").Output(); err == nil {
 		l.parseOSRelease(string(output), attributes)
 	}
+	cancel()
 
 	// Alternative: LSB release information
-	if output, err := exec.Command("lsb_release", "-a").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "lsb_release", "-a").Output(); err == nil {
 		l.parseLSBRelease(string(output), attributes)
 	}
+	cancel2()
 
 	// Kernel information
-	if output, err := exec.Command("uname", "-a").Output(); err == nil {
+	cmdCtx3, cancel3 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx3, "uname", "-a").Output(); err == nil {
 		attributes["kernel_info"] = strings.TrimSpace(string(output))
 	}
+	cancel3()
 
-	if output, err := exec.Command("uname", "-r").Output(); err == nil {
+	cmdCtx4, cancel4 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx4, "uname", "-r").Output(); err == nil {
 		attributes["kernel_version"] = strings.TrimSpace(string(output))
 	}
+	cancel4()
 
-	if output, err := exec.Command("uname", "-v").Output(); err == nil {
+	cmdCtx5, cancel5 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx5, "uname", "-v").Output(); err == nil {
 		attributes["kernel_build_info"] = strings.TrimSpace(string(output))
 	}
+	cancel5()
 
 	// System information
-	if output, err := exec.Command("hostnamectl").Output(); err == nil {
+	cmdCtx6, cancel6 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx6, "hostnamectl").Output(); err == nil {
 		l.parseHostnamectl(string(output), attributes)
 	}
+	cancel6()
 
 	// Uptime information
-	if output, err := exec.Command("uptime").Output(); err == nil {
+	cmdCtx7, cancel7 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx7, "uptime").Output(); err == nil {
 		attributes["system_uptime"] = strings.TrimSpace(string(output))
 	}
+	cancel7()
 
 	// Boot time
-	if output, err := exec.Command("who", "-b").Output(); err == nil {
+	cmdCtx8, cancel8 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx8, "who", "-b").Output(); err == nil {
 		attributes["system_boot_time"] = strings.TrimSpace(string(output))
 	}
+	cancel8()
 
 	return nil
 }
 
 // CollectPackages gathers installed packages/applications on Linux
-func (l *LinuxSoftwareCollector) CollectPackages(attributes map[string]string) error {
+func (l *LinuxSoftwareCollector) CollectPackages(ctx context.Context, attributes map[string]string) error {
 	// Determine package manager and collect packages
-	l.collectAPTPackages(attributes)
-	l.collectYUMPackages(attributes)
-	l.collectDNFPackages(attributes)
-	l.collectPacmanPackages(attributes)
-	l.collectZypperPackages(attributes)
-	l.collectSnapPackages(attributes)
-	l.collectFlatpakPackages(attributes)
-	l.collectPipPackages(attributes)
-	l.collectNPMPackages(attributes)
+	l.collectAPTPackages(ctx, attributes)
+	l.collectYUMPackages(ctx, attributes)
+	l.collectDNFPackages(ctx, attributes)
+	l.collectPacmanPackages(ctx, attributes)
+	l.collectZypperPackages(ctx, attributes)
+	l.collectSnapPackages(ctx, attributes)
+	l.collectFlatpakPackages(ctx, attributes)
+	l.collectPipPackages(ctx, attributes)
+	l.collectNPMPackages(ctx, attributes)
 
 	return nil
 }
 
 // CollectServices gathers installed and running services on Linux
-func (l *LinuxSoftwareCollector) CollectServices(attributes map[string]string) error {
+func (l *LinuxSoftwareCollector) CollectServices(ctx context.Context, attributes map[string]string) error {
 	// Systemd services
-	l.collectSystemdServices(attributes)
+	l.collectSystemdServices(ctx, attributes)
 
 	// Init.d services (legacy)
-	l.collectInitDServices(attributes)
+	l.collectInitDServices(ctx, attributes)
 
 	// Running processes count
-	if output, err := exec.Command("ps", "aux").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "ps", "aux").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		attributes["running_process_count"] = fmt.Sprintf("%d", len(lines)-1) // -1 for header
 	}
+	cancel()
 
 	return nil
 }
 
 // CollectProcesses gathers information about running processes on Linux
-func (l *LinuxSoftwareCollector) CollectProcesses(attributes map[string]string) error {
+func (l *LinuxSoftwareCollector) CollectProcesses(ctx context.Context, attributes map[string]string) error {
 	// Basic process information
 	attributes["current_pid"] = fmt.Sprintf("%d", os.Getpid())
 	attributes["parent_pid"] = fmt.Sprintf("%d", os.Getppid())
@@ -121,14 +143,18 @@ func (l *LinuxSoftwareCollector) CollectProcesses(attributes map[string]string) 
 	attributes["goroutine_count"] = fmt.Sprintf("%d", runtime.NumGoroutine())
 
 	// Process statistics using ps
-	if output, err := exec.Command("ps", "-eo", "pid,ppid,user,comm,state").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx, "ps", "-eo", "pid,ppid,user,comm,state").Output(); err == nil {
 		l.parseProcessStats(string(output), attributes)
 	}
+	cancel()
 
 	// Top processes by CPU/memory
-	if output, err := exec.Command("ps", "-eo", "pid,comm,pcpu,pmem", "--sort=-pcpu").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	if output, err := exec.CommandContext(cmdCtx2, "ps", "-eo", "pid,comm,pcpu,pmem", "--sort=-pcpu").Output(); err == nil {
 		l.parseTopProcesses(string(output), attributes)
 	}
+	cancel2()
 
 	return nil
 }
@@ -244,8 +270,11 @@ func (l *LinuxSoftwareCollector) parseHostnamectl(output string, attributes map[
 }
 
 // collectAPTPackages collects APT packages (Debian/Ubuntu)
-func (l *LinuxSoftwareCollector) collectAPTPackages(attributes map[string]string) {
-	if output, err := exec.Command("dpkg", "--get-selections").Output(); err == nil {
+func (l *LinuxSoftwareCollector) collectAPTPackages(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "dpkg", "--get-selections").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var installedCount int
 		var packages []string
@@ -269,10 +298,14 @@ func (l *LinuxSoftwareCollector) collectAPTPackages(attributes map[string]string
 			attributes["apt_package_count"] = fmt.Sprintf("%d", installedCount)
 			attributes["apt_packages_sample"] = strings.Join(packages, ", ")
 		}
+		return // dpkg succeeded; skip fallback
 	}
 
-	// Alternative: dpkg -l
-	if output, err := exec.Command("dpkg", "-l").Output(); err == nil {
+	// Fallback: dpkg -l (only if dpkg --get-selections failed)
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel2()
+
+	if output, err := exec.CommandContext(cmdCtx2, "dpkg", "-l").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var installedCount int
 
@@ -289,8 +322,11 @@ func (l *LinuxSoftwareCollector) collectAPTPackages(attributes map[string]string
 }
 
 // collectYUMPackages collects YUM packages (RHEL/CentOS)
-func (l *LinuxSoftwareCollector) collectYUMPackages(attributes map[string]string) {
-	if output, err := exec.Command("yum", "list", "installed").Output(); err == nil {
+func (l *LinuxSoftwareCollector) collectYUMPackages(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "yum", "list", "installed").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var packageCount int
 		var packages []string
@@ -313,11 +349,15 @@ func (l *LinuxSoftwareCollector) collectYUMPackages(attributes map[string]string
 		if packageCount > 0 {
 			attributes["yum_package_count"] = fmt.Sprintf("%d", packageCount)
 			attributes["yum_packages_sample"] = strings.Join(packages, ", ")
+			return // yum succeeded; skip rpm fallback
 		}
 	}
 
-	// Alternative: rpm -qa
-	if output, err := exec.Command("rpm", "-qa").Output(); err == nil {
+	// Fallback: rpm -qa (only if yum failed)
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel2()
+
+	if output, err := exec.CommandContext(cmdCtx2, "rpm", "-qa").Output(); err == nil {
 		packages := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(packages) > 0 && packages[0] != "" {
 			attributes["rpm_package_count"] = fmt.Sprintf("%d", len(packages))
@@ -333,8 +373,11 @@ func (l *LinuxSoftwareCollector) collectYUMPackages(attributes map[string]string
 }
 
 // collectDNFPackages collects DNF packages (newer Fedora/RHEL)
-func (l *LinuxSoftwareCollector) collectDNFPackages(attributes map[string]string) {
-	if output, err := exec.Command("dnf", "list", "installed").Output(); err == nil {
+func (l *LinuxSoftwareCollector) collectDNFPackages(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "dnf", "list", "installed").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var packageCount int
 
@@ -356,8 +399,11 @@ func (l *LinuxSoftwareCollector) collectDNFPackages(attributes map[string]string
 }
 
 // collectPacmanPackages collects Pacman packages (Arch Linux)
-func (l *LinuxSoftwareCollector) collectPacmanPackages(attributes map[string]string) {
-	if output, err := exec.Command("pacman", "-Q").Output(); err == nil {
+func (l *LinuxSoftwareCollector) collectPacmanPackages(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "pacman", "-Q").Output(); err == nil {
 		packages := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(packages) > 0 && packages[0] != "" {
 			attributes["pacman_package_count"] = fmt.Sprintf("%d", len(packages))
@@ -372,7 +418,10 @@ func (l *LinuxSoftwareCollector) collectPacmanPackages(attributes map[string]str
 	}
 
 	// AUR packages if yay is available
-	if output, err := exec.Command("yay", "-Qm").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel2()
+
+	if output, err := exec.CommandContext(cmdCtx2, "yay", "-Qm").Output(); err == nil {
 		aurPackages := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(aurPackages) > 0 && aurPackages[0] != "" {
 			attributes["aur_package_count"] = fmt.Sprintf("%d", len(aurPackages))
@@ -381,8 +430,11 @@ func (l *LinuxSoftwareCollector) collectPacmanPackages(attributes map[string]str
 }
 
 // collectZypperPackages collects Zypper packages (openSUSE)
-func (l *LinuxSoftwareCollector) collectZypperPackages(attributes map[string]string) {
-	if output, err := exec.Command("zypper", "search", "--installed-only").Output(); err == nil {
+func (l *LinuxSoftwareCollector) collectZypperPackages(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "zypper", "search", "--installed-only").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var packageCount int
 
@@ -399,8 +451,11 @@ func (l *LinuxSoftwareCollector) collectZypperPackages(attributes map[string]str
 }
 
 // collectSnapPackages collects Snap packages
-func (l *LinuxSoftwareCollector) collectSnapPackages(attributes map[string]string) {
-	if output, err := exec.Command("snap", "list").Output(); err == nil {
+func (l *LinuxSoftwareCollector) collectSnapPackages(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "snap", "list").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		snapCount := len(lines) - 1 // -1 for header
 		if snapCount > 0 {
@@ -422,8 +477,11 @@ func (l *LinuxSoftwareCollector) collectSnapPackages(attributes map[string]strin
 }
 
 // collectFlatpakPackages collects Flatpak packages
-func (l *LinuxSoftwareCollector) collectFlatpakPackages(attributes map[string]string) {
-	if output, err := exec.Command("flatpak", "list").Output(); err == nil {
+func (l *LinuxSoftwareCollector) collectFlatpakPackages(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "flatpak", "list").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var flatpakCount int
 		var flatpaks []string
@@ -451,18 +509,25 @@ func (l *LinuxSoftwareCollector) collectFlatpakPackages(attributes map[string]st
 }
 
 // collectPipPackages collects Python pip packages
-func (l *LinuxSoftwareCollector) collectPipPackages(attributes map[string]string) {
+func (l *LinuxSoftwareCollector) collectPipPackages(ctx context.Context, attributes map[string]string) {
 	// Python 3 pip
-	if output, err := exec.Command("pip3", "list").Output(); err == nil {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "pip3", "list").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		pipCount := len(lines) - 2 // -2 for header lines
 		if pipCount > 0 {
 			attributes["pip3_package_count"] = fmt.Sprintf("%d", pipCount)
 		}
+		return // pip3 succeeded; skip pip2 fallback
 	}
 
 	// Python 2 pip (if available)
-	if output, err := exec.Command("pip", "list").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel2()
+
+	if output, err := exec.CommandContext(cmdCtx2, "pip", "list").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		pipCount := len(lines) - 2 // -2 for header lines
 		if pipCount > 0 {
@@ -472,9 +537,11 @@ func (l *LinuxSoftwareCollector) collectPipPackages(attributes map[string]string
 }
 
 // collectNPMPackages collects Node.js npm packages
-func (l *LinuxSoftwareCollector) collectNPMPackages(attributes map[string]string) {
-	// Global npm packages
-	if output, err := exec.Command("npm", "list", "-g", "--depth=0").Output(); err == nil {
+func (l *LinuxSoftwareCollector) collectNPMPackages(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "npm", "list", "-g", "--depth=0").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var npmCount int
 
@@ -491,8 +558,11 @@ func (l *LinuxSoftwareCollector) collectNPMPackages(attributes map[string]string
 }
 
 // collectSystemdServices collects systemd services
-func (l *LinuxSoftwareCollector) collectSystemdServices(attributes map[string]string) {
-	if output, err := exec.Command("systemctl", "list-units", "--type=service", "--all").Output(); err == nil {
+func (l *LinuxSoftwareCollector) collectSystemdServices(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "systemctl", "list-units", "--type=service", "--all").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var totalServices, activeServices, failedServices int
 
@@ -515,12 +585,16 @@ func (l *LinuxSoftwareCollector) collectSystemdServices(attributes map[string]st
 	}
 
 	// Enabled services
-	if output, err := exec.Command("systemctl", "list-unit-files", "--type=service", "--state=enabled").Output(); err == nil {
+	cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel2()
+
+	if output, err := exec.CommandContext(cmdCtx2, "systemctl", "list-unit-files", "--type=service", "--state=enabled").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var enabledServices int
 
 		for _, line := range lines {
-			if strings.Contains(line, "enabled") && strings.HasSuffix(strings.Fields(line)[0], ".service") {
+			fields := strings.Fields(line)
+			if len(fields) > 0 && strings.Contains(line, "enabled") && strings.HasSuffix(fields[0], ".service") {
 				enabledServices++
 			}
 		}
@@ -530,8 +604,11 @@ func (l *LinuxSoftwareCollector) collectSystemdServices(attributes map[string]st
 }
 
 // collectInitDServices collects init.d services (legacy)
-func (l *LinuxSoftwareCollector) collectInitDServices(attributes map[string]string) {
-	if output, err := exec.Command("ls", "/etc/init.d/").Output(); err == nil {
+func (l *LinuxSoftwareCollector) collectInitDServices(ctx context.Context, attributes map[string]string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxSwCmdTimeout)
+	defer cancel()
+
+	if output, err := exec.CommandContext(cmdCtx, "ls", "/etc/init.d/").Output(); err == nil {
 		services := strings.Fields(string(output))
 		if len(services) > 0 {
 			attributes["initd_service_count"] = fmt.Sprintf("%d", len(services))

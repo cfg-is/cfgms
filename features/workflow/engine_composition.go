@@ -791,7 +791,7 @@ func (e *Engine) fanInConcat(sourceData []interface{}) (interface{}, error) {
 		if str, ok := data.(string); ok {
 			result.WriteString(str)
 		} else {
-			result.WriteString(fmt.Sprintf("%v", data))
+			fmt.Fprintf(&result, "%v", data)
 		}
 	}
 	return result.String(), nil
