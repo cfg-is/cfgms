@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-03-15
+**Last Updated**: 2026-03-28
 
 ## Versioning Strategy
 
@@ -183,7 +183,7 @@ Transition from interactive Claude Code sessions to headless agent dispatch in D
 - [x] Skill: `/dispatch` for launching agent containers from issues (Issue #441 - 8 points) - Replaces dispatch.sh; worktree creation, `docker run -d` (non-blocking), quality checks
 - [x] Skill: `/isoagents` for agent status and lifecycle management (Issues #442, #443 - 8 points) - Replaces monitor.sh + status.sh; status dashboard, detailed logs, cleanup, PR review suggestions
 - [x] Skill: `/agent-setup` one-time bootstrap (Issue #444 - 5 points) - Replaces setup.sh; image build, credential setup, label creation, directory setup
-- [ ] Docs: agent dispatch infrastructure developer reference (Issue #445 - 5 points) - Story sizing guidelines, CI failure workflow, troubleshooting
+- [x] Docs: agent dispatch infrastructure developer reference (Issue #445 - 5 points) - Story sizing guidelines, CI failure workflow, troubleshooting
 
 #### v0.9.1.2 — Code Structure Refactoring (~23 pts, ~2 sprints)
 
@@ -212,19 +212,28 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [ ] Beta deployment guide (Issue #391 - 3-5 points) - Production-like deployment documentation beyond dev-focused QUICK_START.md
 
 **Post-validation (discovered gaps, do not block #390):**
-- [ ] Steward: unify operating model — cfg-driven convergence with optional controller channel (Issue #411) - Two divergent code paths that should be one
-- [ ] Steward: unify execution engines — standalone has 7 modules, controller has 3 (Issue #412) - Controller-connected steward has fewer capabilities
-- [ ] Steward: wire drift detection and performance monitoring into lifecycle (Issue #413) - Built but never started
-- [ ] Steward: implement offline report queueing (Issue #419) - Reports discarded when controller unreachable
-- [ ] Steward/Controller: implement hash-based DNA sync (Issue #418) - Full DNA sent every time, QUIC handler is a stub
+- [x] Steward: unify operating model — cfg-driven convergence with optional controller channel (Issue #411) - Single code path, 30-min default converge_interval, controller as additive overlay
+- [x] Steward: unify execution engines — standalone has 7 modules, controller has 3 (Issue #412) - Single Get→Compare→Set→Verify engine, platform-aware permissions
+- [ ] Steward: wire drift detection and performance monitoring into lifecycle (Issue #413) - Drift as part of convergence cycle, performance collector wired into lifecycle
+- [x] Steward: implement offline report queueing (Issue #419) - File-backed FIFO queue, atomic writes, ordered delivery on reconnect
+- [x] Steward/Controller: implement hash-based DNA sync (Issue #418) - DNA hash in heartbeats, delta over control plane, full sync over data plane
 - [x] Controller: wire monitoring and health infrastructure into server (Issue #417) - Passed as nil, placeholder responses
 - [x] Controller: wire reports engine and rollback system into API (Issue #416) - Built but routes never registered
-- [ ] Controller: implement multi-node orchestration (Issue #415) - No multi-steward coordination
-- [ ] Controller: implement workflow engine (Issue #414) - Documented as core capability, no code exists
-- [ ] Steward: registration approval via workflow engine hook (Issue #422) - Approval logic as workflow policy, default accept-all, depends on #414
-- [ ] Controller: per-tenant config source routing via mount points (Issue #428) - External git repos as read-only config source at any hierarchy level, one-way sync, versioned compiled configs
+- [x] Controller: wire existing workflow engine into REST API and startup (Issue #414) - 7 REST endpoints, trigger manager lifecycle, tenant-scoped
+- [x] Steward: registration approval via workflow engine hook (Issue #422) - Hook point with default accept-all, quarantine/reject support
+- [x] Controller: per-tenant config source routing Phase 1 (Issue #555, from #428) - ConfigSourceRouter with tenant metadata inheritance, backward compatible
 - [x] Controller: fix tenant context key mismatch between auth middleware and config handlers (Issue #430) - Tenant ID never flows from auth to config operations, all ops use "default"
 - [x] Controller: replace MockConfigStore in config_service_storage_test.go with real storage (Issue #431) - Testing standards violation, uses mock instead of real git backend
+- [x] Steward: optimize Windows DNA collection (Issue #567) - Eliminate Win32_Product, add exec.CommandContext timeouts, cache static hardware data
+- [x] Agent dispatch: close quality gaps with adversarial review and enforcement (Issue #557) - 3-specialist review, shell-level validation, strengthened prompts
+- [x] Steward: implement Windows ACL support for file/directory modules (Issue #553) - Created, future work
+
+**Post-E2E infrastructure:**
+- [ ] Deploy self-hosted CI runners on Hyper-V managed by CFGMS (Issue #565) - Linux + Windows runners, 3x CI speed improvement, dog-food validation
+
+**Deferred to v0.10.0:**
+- [ ] Controller: implement multi-node orchestration (Issue #415) - Rolling updates, cluster quorum, dependency awareness
+- [ ] Controller: per-tenant config source routing Phases 2-3 (Issue #428) - External git integration, observability
 
 #### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks)
 
@@ -438,7 +447,7 @@ Multi-layered validation approach:
 ## Version Information
 
 - **Document Version**: 3.0
-- **Last Updated**: 2026-03-15
+- **Last Updated**: 2026-03-28
 
 ### Related Documentation
 
