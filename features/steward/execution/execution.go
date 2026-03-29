@@ -43,12 +43,30 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// DriftEventHandler is called when managed resource drift is detected during
+// the Compare step of the Get→Compare→Set→Verify cycle, before Set corrects it.
+// This provides the controller visibility into what drifted and when.
+//
+// Parameters:
+//   - resourceName: the cfg resource name where drift was detected
+//   - moduleName: the module managing the resource (e.g. "file", "package")
+//   - diff: the state diff describing exactly what changed
+type DriftEventHandler func(resourceName string, moduleName string, diff *testing.StateDiff)
+
 // ExecutionEngine orchestrates resource configuration management
 type ExecutionEngine struct {
-	factory    *factory.ModuleFactory
-	comparator *testing.StateComparator
-	config     config.ErrorHandlingConfig
-	logger     logging.Logger
+	factory      *factory.ModuleFactory
+	comparator   *testing.StateComparator
+	config       config.ErrorHandlingConfig
+	logger       logging.Logger
+	driftHandler DriftEventHandler
+}
+
+// SetDriftEventHandler registers a callback that is invoked when the Compare step
+// detects drift on a managed resource, before Set corrects it.
+// Pass nil to remove an existing handler.
+func (e *ExecutionEngine) SetDriftEventHandler(handler DriftEventHandler) {
+	e.driftHandler = handler
 }
 
 // ExecutionReport contains the results of configuration execution
@@ -213,6 +231,12 @@ func (e *ExecutionEngine) ExecuteResource(ctx context.Context, resource config.R
 	e.logger.Info("Configuration drift detected",
 		"resource", resource.Name,
 		"changes_required", len(stateDiff.ChangedFields))
+
+	// Emit drift event before Set corrects the drift.
+	// This gives the controller visibility into what drifted and when.
+	if e.driftHandler != nil {
+		e.driftHandler(resource.Name, resource.Module, &stateDiff)
+	}
 
 	// Apply changes using the resource identifier
 	if err := module.Set(ctx, resourceID, desiredState); err != nil {

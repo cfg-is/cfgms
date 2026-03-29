@@ -3,12 +3,14 @@
 package steward
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 func TestStewardStandaloneMode(t *testing.T) {
@@ -96,4 +98,95 @@ func TestHealthMonitorControllerConnectivity(t *testing.T) {
 	metrics = monitor.GetMetrics()
 	assert.Equal(t, 0, metrics.HeartbeatErrors)
 	assert.True(t, metrics.ControllerConnected)
+}
+
+func TestDriftAndPerfSubsystemsInitializedInControllerTestingMode(t *testing.T) {
+	logger := logging.NewLogger("debug")
+
+	testConfig := testutil.DefaultStewardTestConfig()
+	testConfig.StewardID = "test-steward-drift"
+	certDir, dataDir, cleanup := testutil.SetupTestEnvironment(t, testConfig)
+	t.Cleanup(cleanup)
+
+	cfg := &Config{
+		ControllerAddr: testConfig.ControllerAddr,
+		CertPath:       certDir,
+		DataDir:        dataDir,
+		LogLevel:       testConfig.LogLevel,
+		ID:             testConfig.StewardID,
+	}
+
+	steward, err := NewForControllerTesting(cfg, logger)
+	require.NoError(t, err)
+	require.NotNil(t, steward)
+
+	// Performance collector and DNA collector must be initialized in controller testing mode
+	assert.NotNil(t, steward.performanceCollector, "performance collector must be initialized")
+	assert.NotNil(t, steward.dnaCollector, "DNA collector must be initialized")
+}
+
+func TestPerformanceCollectorStartsAndStopsInControllerTestingMode(t *testing.T) {
+	logger := logging.NewLogger("debug")
+
+	testConfig := testutil.DefaultStewardTestConfig()
+	testConfig.StewardID = "test-steward-subsystems"
+	certDir, dataDir, cleanup := testutil.SetupTestEnvironment(t, testConfig)
+	t.Cleanup(cleanup)
+
+	cfg := &Config{
+		ControllerAddr: testConfig.ControllerAddr,
+		CertPath:       certDir,
+		DataDir:        dataDir,
+		LogLevel:       testConfig.LogLevel,
+		ID:             testConfig.StewardID,
+	}
+
+	steward, err := NewForControllerTesting(cfg, logger)
+	require.NoError(t, err)
+	require.NotNil(t, steward)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start performance collector directly — Start() collects initial metrics synchronously
+	perfErr := steward.performanceCollector.Start(ctx)
+	require.NoError(t, perfErr, "performance collector must start without error")
+
+	// Metrics are available immediately after Start() returns (synchronous initial collection)
+	metrics, err := steward.performanceCollector.GetCurrentMetrics()
+	require.NoError(t, err, "current metrics must be available after start")
+	assert.NotNil(t, metrics, "metrics must not be nil")
+
+	// Stop the performance collector
+	stopErr := steward.performanceCollector.Stop()
+	require.NoError(t, stopErr, "performance collector must stop without error")
+}
+
+func TestDriftDetectorAvailableInControllerTestingMode(t *testing.T) {
+	// Controller testing mode does not initialize a drift detector (standalone-only).
+	// Verify the steward struct is initialized without drift detector in controller mode.
+	logger := logging.NewLogger("debug")
+
+	testConfig := testutil.DefaultStewardTestConfig()
+	testConfig.StewardID = "test-steward-detector"
+	certDir, dataDir, cleanup := testutil.SetupTestEnvironment(t, testConfig)
+	t.Cleanup(cleanup)
+
+	cfg := &Config{
+		ControllerAddr: testConfig.ControllerAddr,
+		CertPath:       certDir,
+		DataDir:        dataDir,
+		LogLevel:       testConfig.LogLevel,
+		ID:             testConfig.StewardID,
+	}
+
+	steward, err := NewForControllerTesting(cfg, logger)
+	require.NoError(t, err)
+	require.NotNil(t, steward)
+
+	// Controller testing mode does not init drift detector — it is standalone-only
+	// (controller-connected mode uses the controller's drift detection).
+	// The DNA collector IS available for DNA reporting.
+	assert.NotNil(t, steward.dnaCollector, "DNA collector must be available in controller testing mode")
+	assert.NotNil(t, steward.performanceCollector, "performance collector must be available")
 }

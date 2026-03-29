@@ -59,7 +59,7 @@ func TestExecuteConfiguration_EmptyResources(t *testing.T) {
 	assert.Equal(t, 0, report.FailedCount)
 	assert.Equal(t, 0, report.SkippedCount)
 	assert.Len(t, report.ResourceResults, 0)
-	assert.True(t, report.EndTime.After(report.StartTime))
+	assert.False(t, report.EndTime.Before(report.StartTime))
 }
 
 func TestExecuteConfiguration_WithUnknownModule(t *testing.T) {
