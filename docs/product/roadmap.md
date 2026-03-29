@@ -214,7 +214,7 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 **Post-validation (discovered gaps, do not block #390):**
 - [x] Steward: unify operating model — cfg-driven convergence with optional controller channel (Issue #411) - Single code path, 30-min default converge_interval, controller as additive overlay
 - [x] Steward: unify execution engines — standalone has 7 modules, controller has 3 (Issue #412) - Single Get→Compare→Set→Verify engine, platform-aware permissions
-- [ ] Steward: wire drift detection and performance monitoring into lifecycle (Issue #413) - Drift as part of convergence cycle, performance collector wired into lifecycle
+- [x] Steward: wire drift detection and performance monitoring into lifecycle (Issue #413) - Drift as part of convergence cycle, performance collector wired into lifecycle
 - [x] Steward: implement offline report queueing (Issue #419) - File-backed FIFO queue, atomic writes, ordered delivery on reconnect
 - [x] Steward/Controller: implement hash-based DNA sync (Issue #418) - DNA hash in heartbeats, delta over control plane, full sync over data plane
 - [x] Controller: wire monitoring and health infrastructure into server (Issue #417) - Passed as nil, placeholder responses
