@@ -100,7 +100,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize global storage provider system - REQUIRED for all deployments
 	if cfg.Storage == nil {
-		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.provider as 'git' (minimum) or 'database' (production). See docs/examples/controller-storage-config.yaml for examples")
+		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.provider as 'git' (minimum) or 'database' (production). See docs/examples/controller-storage-config.cfg for examples")
 	}
 
 	logger.Info("Initializing global storage provider", "provider", cfg.Storage.Provider)

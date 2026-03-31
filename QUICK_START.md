@@ -48,7 +48,7 @@ make build-steward
 sudo mkdir -p /etc/cfgms
 
 # Create a simple configuration file
-sudo tee /etc/cfgms/config.yaml > /dev/null <<EOF
+sudo tee /etc/cfgms/quickstart.cfg > /dev/null <<EOF
 steward:
   id: quickstart-steward
 
@@ -87,13 +87,13 @@ EOF
 
 ```bash
 # Run steward in standalone mode
-sudo ./bin/cfgms-steward -config /etc/cfgms/config.yaml
+sudo ./bin/cfgms-steward -config /etc/cfgms/quickstart.cfg
 ```
 
 You should see:
 ```
 INFO: Starting CFGMS Steward in standalone mode
-INFO: Loading configuration from /etc/cfgms/config.yaml
+INFO: Loading configuration from /etc/cfgms/quickstart.cfg
 INFO: Applying configuration...
 INFO: [file] Creating /tmp/hello-cfgms.txt
 INFO: [directory] Creating /tmp/cfgms-test
@@ -118,7 +118,7 @@ cat /tmp/cfgms-test/info.txt
 
 ```bash
 # Modify the configuration
-sudo tee /etc/cfgms/config.yaml > /dev/null <<EOF
+sudo tee /etc/cfgms/quickstart.cfg > /dev/null <<EOF
 steward:
   id: quickstart-steward
 
@@ -132,7 +132,7 @@ resources:
 EOF
 
 # Run again
-sudo ./bin/cfgms-steward -config /etc/cfgms/config.yaml
+sudo ./bin/cfgms-steward -config /etc/cfgms/quickstart.cfg
 ```
 
 CFGMS will detect the change and update only what's needed!
@@ -180,7 +180,7 @@ The controller requires a storage provider. Create a minimum configuration file:
 
 ```bash
 # Create config file
-cat > controller.yaml <<EOF
+cat > controller.cfg <<EOF
 storage:
   provider: git
   config:
@@ -207,7 +207,7 @@ EOF
 # Create required directories
 mkdir -p ./data ./certs ./logs
 
-# Start controller (reads controller.yaml from current directory)
+# Start controller (reads controller.cfg from current directory)
 ./bin/controller
 
 # You should see:
@@ -323,7 +323,7 @@ First, create the controller configuration (same as Option B):
 
 ```bash
 # Create config file
-cat > controller.yaml <<EOF
+cat > controller.cfg <<EOF
 storage:
   provider: git
   config:
@@ -563,7 +563,7 @@ resources:
 
 ### Security Benefits
 
-1. **Audit Trail**: `cat config.yaml` shows exactly which values come from env vars
+1. **Audit Trail**: `cat hostname.cfg` shows exactly which values come from env vars
 2. **Attack Surface**: Attacker must modify both config file AND env var to hijack settings
 3. **Fail-Safe**: Missing required env vars cause immediate startup failure (no silent hijacking)
 
@@ -596,7 +596,7 @@ export CFGMS_LOG_DIR=/custom/log/path
 
 **After** (explicit, recommended):
 ```yaml
-# In your config.yaml or hostname.cfg:
+# In your hostname.cfg:
 logging:
   config:
     directory: ${CFGMS_LOG_DIR:-/var/log/cfgms}
@@ -612,12 +612,12 @@ This makes your configuration self-documenting and more secure.
 
 ```bash
 # Use sudo for system paths
-sudo ./bin/cfgms-steward -config /etc/cfgms/config.yaml
+sudo ./bin/cfgms-steward -config /etc/cfgms/quickstart.cfg
 
 # Or use a user-writable path:
 mkdir -p ~/.cfgms
-# Create config at ~/.cfgms/config.yaml then run:
-./bin/cfgms-steward -config ~/.cfgms/config.yaml
+# Create config at ~/.cfgms/quickstart.cfg then run:
+./bin/cfgms-steward -config ~/.cfgms/quickstart.cfg
 ```
 
 ### "Controller not reachable"

@@ -1970,7 +1970,7 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	sleep 5; \
 	kill $$CONTROLLER_PID 2>/dev/null || true; \
 	wait $$CONTROLLER_PID 2>/dev/null || true
-	@rm -f config.yaml
+	@rm -f controller.cfg
 	@if [ ! -f "test/integration/transport/certs/ca/ca.crt" ]; then \
 		echo "❌ CA certificate not generated. Controller log:"; \
 		cat /tmp/controller-cert-gen.log; \
