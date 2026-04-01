@@ -113,9 +113,9 @@ test/
 **Three official deployment patterns**:
 
 1. **Option A: Standalone Steward** (5 min)
-   - Local configuration file: `/etc/cfgms/config.yaml`
+   - Local configuration file: `/etc/cfgms/<hostname>.cfg`
    - No network/controller required
-   - Direct: `./bin/cfgms-steward -config /etc/cfgms/config.yaml`
+   - Direct: `./bin/cfgms-steward -config /etc/cfgms/<hostname>.cfg`
 
 2. **Option B: Standalone Controller** (10 min)
    - Workflow engine only, no agents
@@ -152,8 +152,8 @@ test/
 
 **Config File Locations**:
 
-- `/etc/cfgms/config.yaml` - Steward config
-- `/etc/cfgms/controller.yaml` - Controller config (documented in runbooks)
+- `/etc/cfgms/<hostname>.cfg` - Steward config (YAML format)
+- `/etc/cfgms/controller.cfg` - Controller config (YAML format)
 - Environment variables (all services support env override)
 
 **Storage Providers**:
@@ -282,15 +282,15 @@ CFGMS_TRANSPORT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
 
 **Issue**: YAML config files shown in QUICK_START not validated in tests
 
-- QUICK_START shows: `sudo tee /etc/cfgms/config.yaml << EOF`
-- Tests use environment variables and Docker compose, not YAML files
+- QUICK_START shows: `sudo tee /etc/cfgms/quickstart.cfg << EOF`
+- Tests use environment variables and Docker compose, not config files
 - Config parsing untested
 
 **Evidence**:
 
 ```bash
 # QUICK_START step 2
-sudo tee /etc/cfgms/config.yaml > /dev/null <<EOF
+sudo tee /etc/cfgms/quickstart.cfg > /dev/null <<EOF
 steward:
   id: quickstart-steward
 resources:

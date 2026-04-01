@@ -173,7 +173,7 @@ mkdir /var/log/cfgms: permission denied
 Add to docker-compose service:
 ```yaml
 user: root
-command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward -config /path/to/config.yaml"]
+command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward -config /path/to/steward.cfg"]
 environment:
   CFGMS_LOG_DIR: "/tmp/cfgms"
 ```

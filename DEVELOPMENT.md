@@ -475,7 +475,7 @@ make build-steward
 
 # Create local configuration
 mkdir -p /etc/cfgms
-cat > /etc/cfgms/config.yaml <<EOF
+cat > /etc/cfgms/dev-steward.cfg <<EOF
 steward:
   id: dev-steward
 
@@ -496,7 +496,7 @@ resources:
 EOF
 
 # Run steward in standalone mode
-./bin/cfgms-steward -config /etc/cfgms/config.yaml
+./bin/cfgms-steward -config /etc/cfgms/dev-steward.cfg
 
 # Verify it worked
 cat /tmp/hello-cfgms.txt
@@ -555,7 +555,7 @@ make build-steward
 # 3. Use CLI to manage fleet
 make build-cli
 ./bin/cfg steward list
-./bin/cfg config apply fleet-config.yaml
+./bin/cfg config apply fleet-config.cfg
 ```
 
 **For production**: See [docs/development/security-setup.md](docs/development/security-setup.md) for proper certificate management.
