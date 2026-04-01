@@ -199,8 +199,12 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 				assert.NotNil(t, server.tenantManager)
 				assert.NotNil(t, server.rbacService)
 
-				// Note: if certificate management is enabled, certManager might be nil if CA setup fails, which is expected in test environment
-				_ = tt.config.Certificate != nil && tt.config.Certificate.EnableCertManagement
+				// If certificate management is enabled and certs were pre-initialized, certManager must be set
+				if tt.config.Certificate != nil && tt.config.Certificate.EnableCertManagement {
+					assert.NotNil(t, server.certManager, "certManager must be initialized when EnableCertManagement is true")
+				} else {
+					assert.Nil(t, server.certManager, "certManager must be nil when EnableCertManagement is false")
+				}
 			}
 		})
 	}
@@ -209,11 +213,6 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 // TestServer_StorageProviderValidation dynamically validates storage provider configuration
 // against all registered global storage providers
 func TestServer_StorageProviderValidation(t *testing.T) {
-	// Skip if integration tests are explicitly disabled (e.g., cross-platform CI without Docker)
-	if os.Getenv("CFGMS_TEST_INTEGRATION") == "0" {
-		t.Skip("Skipping storage provider validation - integration tests disabled (CFGMS_TEST_INTEGRATION=0)")
-	}
-
 	logger := logging.NewNoopLogger()
 	tempDir, err := os.MkdirTemp("", "storage_provider_test")
 	require.NoError(t, err)
@@ -224,6 +223,11 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 	require.NotEmpty(t, registeredProviders, "No storage providers registered - this indicates a system configuration problem")
 
 	t.Run("ValidateRegisteredProvidersWork", func(t *testing.T) {
+		// Skip if integration tests are explicitly disabled (e.g., cross-platform CI without Docker)
+		if os.Getenv("CFGMS_TEST_INTEGRATION") == "0" {
+			t.Skip("Skipping storage provider validation - integration tests disabled (CFGMS_TEST_INTEGRATION=0)")
+		}
+
 		// Test each registered provider works
 		for _, providerInfo := range registeredProviders {
 			if !providerInfo.Available {

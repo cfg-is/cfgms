@@ -480,8 +480,18 @@ func TestACMECertStore_StorageRoundTrip(t *testing.T) {
 }
 
 // newTestSecretStore creates a real steward secret store for testing.
+func requireMachineID(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "linux" {
+		if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
+			t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
+		}
+	}
+}
+
 func newTestSecretStore(t *testing.T) secretsinterfaces.SecretStore {
 	t.Helper()
+	requireMachineID(t)
 	tmpDir := t.TempDir()
 
 	provider, err := secretsinterfaces.GetSecretProvider("steward")
@@ -854,6 +864,7 @@ func TestACMECertStore_AccountKey_NoSecretStore_Error(t *testing.T) {
 }
 
 func TestACMECertStore_AccountKey_EncryptedAtRest(t *testing.T) {
+	requireMachineID(t)
 	secretsDir := t.TempDir()
 
 	provider, err := secretsinterfaces.GetSecretProvider("steward")
