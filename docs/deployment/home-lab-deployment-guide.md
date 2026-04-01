@@ -30,6 +30,14 @@ A modular guide to deploying CFGMS with a controller and stewards. Follow the se
 
 **Ports**: Controller listens on 8080/TCP (REST) and 4433/UDP (transport). Stewards make outbound connections only — no ports to open.
 
+## Production: Steward-Managed Controller
+
+For production fleets and multi-node deployments, controller nodes should be managed by a steward — the same way every other endpoint is managed. The steward handles directories, packages, firewall rules, and systemd services via its convergence loop, while the controller focuses on fleet orchestration.
+
+See [Controller Bootstrap with Steward](controller-bootstrap-with-steward.md) for the production deployment guide and [ADR-002](../architecture/decisions/002-steward-bootstrap-for-controllers.md) for the architectural rationale.
+
+The steps below are the manual deployment path — suitable for home labs, development, and single-server setups where a steward isn't needed.
+
 ## Prerequisites
 
 - **Controller**: Debian/Ubuntu Linux VM with `git` and `sops` installed

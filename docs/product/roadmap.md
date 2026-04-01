@@ -251,10 +251,17 @@ Authorization hardening + fixes from deployment validation.
 - [ ] Complete high availability validation on real cluster (multi-node, beyond Docker E2E)
 - [ ] Deployment validation fixes (TBD based on v0.9.2 findings)
 
+#### v0.9.5 — Steward-First Controller Bootstrap (~18 pts, ~2 weeks)
+
+Controller nodes managed by stewards — clean separation of node management from fleet orchestration. See [ADR-002](../architecture/decisions/002-steward-bootstrap-for-controllers.md).
+
+- [ ] Controller: remove writeTransportCertsToDir — certs used in-memory only (Issue #576 - 5 points) - File export exists only for test infrastructure; update tests to get certs via API
+- [ ] Steward: implement service module for idempotent OS service management (Issue #577 - 8 points) - systemd/Windows Service/launchd Get→Compare→Set→Verify, replaces script workaround
+- [ ] Controller: add install/uninstall/status subcommands (Issue #578 - 5 points) - Mirror steward self-install pattern for OS service registration
+
 #### v0.10.0 - Web Interface Foundation & Deferred Features
 
 **Deferred from v0.9.x** (functional but not on beta critical path):
-- [ ] Service module implementation (script module covers as workaround)
 - [ ] Workflow management REST API (engine works internally, API needed for Web UI)
 - [ ] Config broadcast push API (individual `PUT /stewards/{id}/config` works)
 - [ ] Session/connection monitoring API (steward list + health endpoints cover beta)
