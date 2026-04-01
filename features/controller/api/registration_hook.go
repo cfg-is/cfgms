@@ -113,7 +113,7 @@ func (h *WorkflowApprovalHook) Evaluate(ctx context.Context, input RegistrationI
 	}
 
 	// Short-circuit: built-in accept-all policy via Variables["policy"] = "accept".
-	if policy, ok := vw.Workflow.Variables["policy"].(string); ok && policy == "accept" {
+	if policy, ok := vw.Variables["policy"].(string); ok && policy == "accept" {
 		return DecisionApprove, "", nil
 	}
 
