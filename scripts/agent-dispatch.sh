@@ -415,7 +415,9 @@ case "$cmd" in
     ;;
 
   check-creds)
-    # Check OAuth credential validity in the shared volume
+    # Refresh from host session first so we check what agents will actually use
+    refresh_creds_from_host >/dev/null 2>&1
+    # Then check OAuth credential validity in the shared volume
     if ! docker volume inspect claude-creds >/dev/null 2>&1; then
       echo "CREDS_MISSING:no claude-creds volume"
     elif ! docker run --rm -v claude-creds:/persist --entrypoint test cfg-agent:latest -f /persist/.credentials.json 2>/dev/null; then
