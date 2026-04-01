@@ -82,6 +82,26 @@ After initialization, the controller starts normally. If required infrastructure
 - Storage schema mismatch → error with migration instructions
 - Transport address conflict → error with port details and resolution steps
 
+### Node Management
+
+The controller is a self-sufficient application — it creates its own directories, certificates, and storage during `--init` and runs without external dependencies beyond the OS. For quick-start and development, no steward is needed.
+
+For production fleets, a steward runs alongside the controller on each node. The steward manages node-level infrastructure via its convergence loop, while the controller focuses on fleet operations.
+
+| Responsibility | Owner | Examples |
+|----------------|-------|----------|
+| OS packages | Steward | `git`, `sops`, system updates |
+| System directories | Steward | `/etc/cfgms/`, `/var/lib/cfgms/`, `/var/log/cfgms/` |
+| Firewall rules | Steward | Ports 8080/TCP, 4433/UDP |
+| OS service management | Steward | systemd unit, service restart on failure |
+| Controller config file | Steward | `/etc/cfgms/controller.cfg` |
+| CA and certificates | Controller | Generated during `--init`, managed in-memory |
+| RBAC and tenant data | Controller | Stored in durable storage backend |
+| Storage backend | Controller | Git repo or PostgreSQL operations |
+| Fleet orchestration | Controller | Config distribution, steward registration, workflows |
+
+See [Controller Bootstrap with Steward](../../deployment/controller-bootstrap-with-steward.md) for the production deployment guide and [ADR-002](decisions/002-steward-bootstrap-for-controllers.md) for the architectural decision.
+
 ### Normal Operation
 
 The controller runs several concurrent activities:
