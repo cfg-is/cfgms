@@ -1,0 +1,33 @@
+name: service
+version: 0.1.0
+description: >
+  Manages OS service resources on the system.
+  Provides idempotent Get/Set management of service running state and boot-enable
+  configuration via the native service manager (systemd on Linux, SCM on Windows,
+  launchd on macOS).
+
+# Supported execution environments
+executors:
+  - steward  # Local service management on steward systems
+
+dependencies: []
+
+requirements:
+  os: [windows, linux, darwin]
+  arch: [amd64, arm64]
+  min_memory: "64MB"
+  min_disk: "1MB"
+
+interfaces:
+  - Get
+  - Set
+  - Test
+
+security:
+  requires_root: true  # start/stop/enable/disable require elevated privileges
+  capabilities: []
+  ports: []
+
+documentation:
+  api: "docs/api.md"
+  examples: "docs/examples/"
