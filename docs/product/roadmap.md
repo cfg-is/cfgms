@@ -255,9 +255,9 @@ Authorization hardening + fixes from deployment validation.
 
 Controller nodes managed by stewards — clean separation of node management from fleet orchestration. See [ADR-002](../architecture/decisions/002-steward-bootstrap-for-controllers.md).
 
-- [ ] Controller: remove writeTransportCertsToDir — certs used in-memory only (Issue #576 - 5 points) - File export exists only for test infrastructure; update tests to get certs via API
-- [ ] Steward: implement service module for idempotent OS service management (Issue #577 - 8 points) - systemd/Windows Service/launchd Get→Compare→Set→Verify, replaces script workaround
-- [ ] Controller: add install/uninstall/status subcommands (Issue #578 - 5 points) - Mirror steward self-install pattern for OS service registration
+- [x] Controller: remove writeTransportCertsToDir — certs used in-memory only (Issue #576 - 5 points) - Removed test-only cert file export, fixed cert_path config alignment, cleaned up docker-compose test-certs mounts
+- [x] Steward: implement service module for idempotent OS service management (Issue #577 - 8 points) - systemd/Windows Service/launchd Get→Compare→Set→Verify, replaces script workaround
+- [x] Controller: add install/uninstall/status subcommands (Issue #578 - 5 points) - Mirror steward self-install pattern for OS service registration
 
 #### v0.10.0 - Web Interface Foundation & Deferred Features
 
