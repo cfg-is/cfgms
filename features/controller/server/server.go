@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -1156,13 +1155,6 @@ func buildGRPCControlPlaneTLSConfig(cfg *config.Config, certManager *cert.Manage
 		return nil, fmt.Errorf("failed to get CA certificate for gRPC control plane: %w", err)
 	}
 
-	// Write cert files to disk so integration test infrastructure can find them.
-	// The cert manager stores certs in its internal format; this exports them as
-	// standard PEM files at well-known paths under cert_path.
-	if cfg.Certificate != nil && cfg.Certificate.CAPath != "" {
-		writeTransportCertsToDir(cfg.Certificate.CAPath, serverCertPEM, serverKeyPEM, caCertPEM, logger)
-	}
-
 	// Build mTLS server config using pkg/cert helper
 	tlsConfig, err := cert.CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM, tls.VersionTLS13)
 	if err != nil {
@@ -1174,33 +1166,6 @@ func buildGRPCControlPlaneTLSConfig(cfg *config.Config, certManager *cert.Manage
 
 	logger.Info("gRPC control plane TLS config created", "alpn", quictransport.ALPNProtocol)
 	return tlsConfig, nil
-}
-
-// writeTransportCertsToDir exports server and CA certs to disk as PEM files.
-// Integration test infrastructure (Makefile generate-test-certificates, Docker) reads
-// these files to configure test clients with matching TLS credentials.
-func writeTransportCertsToDir(caPath string, serverCertPEM, serverKeyPEM, caCertPEM []byte, logger logging.Logger) {
-	serverDir := filepath.Join(caPath, "server")
-	if err := os.MkdirAll(serverDir, 0750); err != nil {
-		logger.Warn("Failed to create server cert directory", "error", err)
-		return
-	}
-
-	pairs := []struct {
-		path string
-		data []byte
-	}{
-		{filepath.Join(serverDir, "server.crt"), serverCertPEM},
-		{filepath.Join(serverDir, "server.key"), serverKeyPEM},
-		{filepath.Join(caPath, "ca.crt"), caCertPEM},
-	}
-
-	for _, p := range pairs {
-		if err := os.WriteFile(p.path, p.data, 0600); err != nil {
-			logger.Warn("Failed to write cert file", "path", p.path, "error", err)
-		}
-	}
-	logger.Info("Transport certificates written to disk", "dir", caPath)
 }
 
 // handleEventFromProvider processes events from stewards via the ControlPlaneProvider.

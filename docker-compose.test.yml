@@ -166,8 +166,6 @@ services:
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
       CFGMS_API_KEY: "${API_KEY_EAST}"
-    volumes:
-      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS certificates
     depends_on:
       timescaledb-test:
         condition: service_healthy
@@ -225,8 +223,6 @@ services:
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
       CFGMS_API_KEY: "${API_KEY_CENTRAL}"
-    volumes:
-      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS certificates
     depends_on:
       timescaledb-test:
         condition: service_healthy
@@ -284,8 +280,6 @@ services:
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
       CFGMS_API_KEY: "${API_KEY_WEST}"
-    volumes:
-      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS certificates
     depends_on:
       timescaledb-test:
         condition: service_healthy
@@ -315,8 +309,6 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    volumes:
-      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS client certificates
     depends_on:
       controller-east:
         condition: service_healthy
@@ -346,8 +338,6 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    volumes:
-      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS client certificates
     depends_on:
       controller-central:
         condition: service_healthy
@@ -377,8 +367,6 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    volumes:
-      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS client certificates
     depends_on:
       controller-west:
         condition: service_healthy
@@ -479,7 +467,6 @@ services:
     volumes:
       - controller_standalone_certs:/app/certs  # Use volume for writable certs
       - controller_standalone_data:/app/data
-      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS certificates
     depends_on:
       timescaledb-test:
         condition: service_healthy

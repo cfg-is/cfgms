@@ -5,6 +5,7 @@ package server
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -198,8 +199,12 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 				assert.NotNil(t, server.tenantManager)
 				assert.NotNil(t, server.rbacService)
 
-				// Note: if certificate management is enabled, certManager might be nil if CA setup fails, which is expected in test environment
-				_ = tt.config.Certificate != nil && tt.config.Certificate.EnableCertManagement
+				// If certificate management is enabled and certs were pre-initialized, certManager must be set
+				if tt.config.Certificate != nil && tt.config.Certificate.EnableCertManagement {
+					assert.NotNil(t, server.certManager, "certManager must be initialized when EnableCertManagement is true")
+				} else {
+					assert.Nil(t, server.certManager, "certManager must be nil when EnableCertManagement is false")
+				}
 			}
 		})
 	}
@@ -208,11 +213,6 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 // TestServer_StorageProviderValidation dynamically validates storage provider configuration
 // against all registered global storage providers
 func TestServer_StorageProviderValidation(t *testing.T) {
-	// Skip if integration tests are explicitly disabled (e.g., cross-platform CI without Docker)
-	if os.Getenv("CFGMS_TEST_INTEGRATION") == "0" {
-		t.Skip("Skipping storage provider validation - integration tests disabled (CFGMS_TEST_INTEGRATION=0)")
-	}
-
 	logger := logging.NewNoopLogger()
 	tempDir, err := os.MkdirTemp("", "storage_provider_test")
 	require.NoError(t, err)
@@ -223,6 +223,11 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 	require.NotEmpty(t, registeredProviders, "No storage providers registered - this indicates a system configuration problem")
 
 	t.Run("ValidateRegisteredProvidersWork", func(t *testing.T) {
+		// Skip if integration tests are explicitly disabled (e.g., cross-platform CI without Docker)
+		if os.Getenv("CFGMS_TEST_INTEGRATION") == "0" {
+			t.Skip("Skipping storage provider validation - integration tests disabled (CFGMS_TEST_INTEGRATION=0)")
+		}
+
 		// Test each registered provider works
 		for _, providerInfo := range registeredProviders {
 			if !providerInfo.Available {
@@ -1088,6 +1093,52 @@ func TestServer_New_MarkerButNoCA(t *testing.T) {
 	assert.Error(t, err, "Server should fail when marker exists but CA files are missing")
 	assert.Nil(t, srv)
 	assert.Contains(t, err.Error(), "load", "Error should mention loading CA")
+}
+
+// TestBuildGRPCControlPlaneTLSConfig_DoesNotWriteCertFilesToDisk verifies that
+// buildGRPCControlPlaneTLSConfig does not write cert files to disk.
+//
+// Per ADR-002: the function previously called writeTransportCertsToDir, which existed
+// solely so integration test infrastructure could find certs at well-known paths.
+// Certs must be used in-memory only — no filesystem side-effects.
+func TestBuildGRPCControlPlaneTLSConfig_DoesNotWriteCertFilesToDisk(t *testing.T) {
+	tempDir := t.TempDir()
+
+	certManager, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: tempDir,
+		CAConfig: &cert.CAConfig{
+			Organization: "CFGMS Test",
+			Country:      "US",
+			ValidityDays: 365,
+			KeySize:      2048,
+		},
+		LoadExistingCA:       false,
+		RenewalThresholdDays: 30,
+	})
+	require.NoError(t, err)
+
+	cfg := &config.Config{
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               tempDir,
+		},
+	}
+
+	logger := logging.NewNoopLogger()
+
+	tlsConfig, err := buildGRPCControlPlaneTLSConfig(cfg, certManager, logger)
+	require.NoError(t, err)
+	require.NotNil(t, tlsConfig)
+
+	// The TLS config must carry the server certificate in-memory.
+	assert.NotEmpty(t, tlsConfig.Certificates, "TLS config must contain server certificate in-memory")
+
+	// writeTransportCertsToDir wrote server cert/key to well-known paths under CAPath.
+	// After its removal these files must not exist — certs are in-memory only.
+	assert.NoFileExists(t, filepath.Join(tempDir, "server", "server.crt"),
+		"buildGRPCControlPlaneTLSConfig must not write server cert to disk")
+	assert.NoFileExists(t, filepath.Join(tempDir, "server", "server.key"),
+		"buildGRPCControlPlaneTLSConfig must not write server key to disk")
 }
 
 // Check if we're running in Docker integration test environment
