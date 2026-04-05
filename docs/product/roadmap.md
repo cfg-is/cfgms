@@ -230,6 +230,7 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 
 **Post-E2E infrastructure:**
 - [ ] Deploy self-hosted CI runners on Hyper-V managed by CFGMS (Issue #565) - Linux + Windows runners, 3x CI speed improvement, dog-food validation
+- [ ] GitHub Actions dispatch — trigger agent containers from label changes (Issue #596) - Depends on #565, replaces manual `/dispatch` with Actions workflows triggered by `agent:ready`/`pipeline:fix` labels on self-hosted runners
 
 **Deferred to v0.10.0:**
 - [ ] Controller: implement multi-node orchestration (Issue #415) - Rolling updates, cluster quorum, dependency awareness
