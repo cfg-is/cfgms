@@ -129,6 +129,9 @@ func newTestTLSConfigs(t *testing.T) (serverTLS, clientTLS *tls.Config) {
 
 // TestGRPC_ConfigSync verifies server and client exchange config via SyncConfig RPC.
 func TestGRPC_ConfigSync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping QUIC integration test in short mode — requires UDP buffer allocation")
+	}
 	env := newIntegrationEnv(t)
 	serverSess, clientSess := env.getSessions(t)
 
@@ -166,6 +169,9 @@ func TestGRPC_ConfigSync(t *testing.T) {
 
 // TestGRPC_DNASync verifies a steward streams DNA to the controller via SyncDNA RPC.
 func TestGRPC_DNASync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping QUIC integration test in short mode — requires UDP buffer allocation")
+	}
 	env := newIntegrationEnv(t)
 	serverSess, clientSess := env.getSessions(t)
 
@@ -202,6 +208,9 @@ func TestGRPC_DNASync(t *testing.T) {
 
 // TestGRPC_BulkTransfer verifies bidirectional bulk transfer via BulkTransfer RPC.
 func TestGRPC_BulkTransfer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping QUIC integration test in short mode — requires UDP buffer allocation")
+	}
 	env := newIntegrationEnv(t)
 	_, clientSess := env.getSessions(t)
 
@@ -224,6 +233,9 @@ func TestGRPC_BulkTransfer(t *testing.T) {
 
 // TestGRPC_LargeConfigSync verifies a 1 MB config syncs correctly over multiple chunks.
 func TestGRPC_LargeConfigSync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping QUIC integration test in short mode — requires UDP buffer allocation")
+	}
 	env := newIntegrationEnv(t)
 	serverSess, clientSess := env.getSessions(t)
 
@@ -267,6 +279,9 @@ func TestGRPC_LargeConfigSync(t *testing.T) {
 // It does not assert a 1-to-1 mapping between a specific server session and
 // the client goroutine that sent the matching config.
 func TestGRPC_ConcurrentTransfers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping QUIC integration test in short mode — requires UDP buffer allocation")
+	}
 	env := newIntegrationEnv(t)
 
 	const numTransfers = 5
