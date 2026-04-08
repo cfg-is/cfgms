@@ -101,7 +101,7 @@ gh pr merge <PR_NUM> --repo cfg-is/cfgms --squash --auto
 
 If the story had `pipeline:fix`, remove it:
 ```bash
-gh issue edit <STORY_NUM> --repo cfg-is/cfgms --remove-label "pipeline:fix"
+./scripts/pipeline-helper.sh label-remove <STORY_NUM> "pipeline:fix"
 ```
 
 ### Any Findings — First Review
@@ -109,7 +109,7 @@ gh issue edit <STORY_NUM> --repo cfg-is/cfgms --remove-label "pipeline:fix"
 Apply fix label and post findings:
 
 ```bash
-gh issue edit <STORY_NUM> --repo cfg-is/cfgms --add-label "pipeline:fix"
+./scripts/pipeline-helper.sh label-add <STORY_NUM> "pipeline:fix"
 ```
 
 ### Any Findings — Second Review (Fix Cycle)
@@ -117,16 +117,18 @@ gh issue edit <STORY_NUM> --repo cfg-is/cfgms --add-label "pipeline:fix"
 Escalate to founder:
 
 ```bash
-gh issue edit <STORY_NUM> --repo cfg-is/cfgms --remove-label "pipeline:fix" --add-label "pipeline:blocked"
-gh issue edit <STORY_NUM> --repo cfg-is/cfgms --add-assignee "jrdn"
+./scripts/pipeline-helper.sh label-swap <STORY_NUM> "pipeline:fix" "pipeline:blocked"
+gh issue edit <STORY_NUM> --repo cfg-is/cfgms --add-assignee "jrdnr"
 ```
 
 ## Structured Review Comment
 
+**IMPORTANT:** Use `./scripts/pipeline-helper.sh` for comments. Direct `gh` calls with heredocs or subshells will be blocked by permission rules.
+
 Post this comment on the PR regardless of verdict:
 
 ```bash
-gh pr comment <PR_NUM> --repo cfg-is/cfgms --body "$(cat <<'EOF'
+cat > /tmp/review-<PR_NUM>.md <<'REVIEW_EOF'
 ## Acceptance Review — [PASS/FAIL]
 
 ### Acceptance Criteria
@@ -143,8 +145,10 @@ All checks passing / Check X failing
 
 ### Verdict
 [Auto-merged / Fix required — pipeline:fix applied / Blocked — escalated to founder]
-EOF
-)"
+REVIEW_EOF
+
+./scripts/pipeline-helper.sh comment <PR_NUM> /tmp/review-<PR_NUM>.md
+rm /tmp/review-<PR_NUM>.md
 ```
 
 If there are zero findings, the Findings table should say "None" and the Acceptance Criteria should all be checked.

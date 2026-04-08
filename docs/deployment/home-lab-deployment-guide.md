@@ -6,7 +6,7 @@ A modular guide to deploying CFGMS with a controller and stewards. Follow the se
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │            Controller (Linux)           │
 │                                         │
@@ -491,6 +491,7 @@ sudo journalctl -u cfgms-steward --since "5 minutes ago"
 ### Connection drops
 
 Stewards reconnect automatically with exponential backoff. Check:
+
 - Network connectivity to controller ports 8080 and 4433
 - Controller logs: `sudo journalctl -u cfgms-controller | grep -i error`
 - Transport metrics: `cfg controller metrics --url https://controller.example.com:8080 --insecure`
