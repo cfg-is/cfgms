@@ -113,10 +113,10 @@ func (m *ExecutionMonitor) StartExecution(ctx context.Context, scriptID, scriptN
 // UpdateDeviceStatus updates the status of a device execution
 func (m *ExecutionMonitor) UpdateDeviceStatus(executionID, deviceID string, status ExecutionStatus, result *ExecutionResult, err error) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	execution, exists := m.executions[executionID]
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("execution %s not found", executionID)
 	}
 
@@ -130,6 +130,7 @@ func (m *ExecutionMonitor) UpdateDeviceStatus(executionID, deviceID string, stat
 	}
 
 	if deviceIndex == -1 {
+		m.mu.Unlock()
 		return fmt.Errorf("device %s not found in execution %s", deviceID, executionID)
 	}
 
@@ -156,23 +157,41 @@ func (m *ExecutionMonitor) UpdateDeviceStatus(executionID, deviceID string, stat
 	// Update summary
 	m.updateSummary(execution, oldStatus, status)
 
-	// Check if execution is complete
+	// Determine what notifications are needed while still holding the lock,
+	// then release before calling notify methods. The notify methods acquire
+	// RLock internally; calling them while holding the write lock would deadlock
+	// since sync.RWMutex is not reentrant.
+	var execToNotifyComplete *MonitoredExecution
+	var deviceToNotifyStart, deviceToNotifyComplete, deviceToNotifyError *DeviceExecution
+
 	if m.isExecutionComplete(execution) {
 		now := time.Now()
 		execution.EndTime = &now
 		execution.Status = m.calculateExecutionStatus(execution)
-		m.notifyExecutionComplete(execution)
+		execToNotifyComplete = execution
 	}
-
-	// Notify listeners
 	if status == StatusRunning && oldStatus == StatusPending {
-		m.notifyDeviceStart(executionID, device)
+		deviceToNotifyStart = device
 	} else if status == StatusCompleted || status == StatusFailed {
-		m.notifyDeviceComplete(executionID, device)
+		deviceToNotifyComplete = device
+	}
+	if err != nil {
+		deviceToNotifyError = device
 	}
 
-	if err != nil {
-		m.notifyDeviceError(executionID, device, err)
+	m.mu.Unlock() // Release write lock before calling notify (which acquire RLock)
+
+	if execToNotifyComplete != nil {
+		m.notifyExecutionComplete(execToNotifyComplete)
+	}
+	if deviceToNotifyStart != nil {
+		m.notifyDeviceStart(executionID, deviceToNotifyStart)
+	}
+	if deviceToNotifyComplete != nil {
+		m.notifyDeviceComplete(executionID, deviceToNotifyComplete)
+	}
+	if deviceToNotifyError != nil {
+		m.notifyDeviceError(executionID, deviceToNotifyError, err)
 	}
 
 	return nil

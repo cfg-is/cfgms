@@ -7,7 +7,10 @@
 // This ensures consistent filter semantics across all device-selection code paths.
 package fleet
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // Filter defines criteria for selecting devices from the fleet.
 // Field names match the REST API query parameters for consistency:
@@ -72,7 +75,8 @@ type Device struct {
 // The controller service implements this via its steward registry.
 type DeviceSource interface {
 	// ListDevices returns all currently known devices with their metadata.
-	ListDevices() []Device
+	// Returns an error if the underlying registry is unavailable.
+	ListDevices() ([]Device, error)
 }
 
 // StewardFleetQuery implements FleetQuery against a DeviceSource.
@@ -90,7 +94,10 @@ func NewStewardFleetQuery(source DeviceSource) *StewardFleetQuery {
 // Search returns all device IDs that match the filter.
 // The filter is evaluated against the live DeviceSource on every call.
 func (q *StewardFleetQuery) Search(filter Filter) ([]string, error) {
-	devices := q.source.ListDevices()
+	devices, err := q.source.ListDevices()
+	if err != nil {
+		return nil, fmt.Errorf("listing devices: %w", err)
+	}
 	matches := make([]string, 0, len(devices))
 
 	for _, d := range devices {

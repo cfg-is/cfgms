@@ -14,7 +14,7 @@ type staticDeviceSource struct {
 	devices []Device
 }
 
-func (s *staticDeviceSource) ListDevices() []Device { return s.devices }
+func (s *staticDeviceSource) ListDevices() ([]Device, error) { return s.devices, nil }
 
 func TestFilter_IsEmpty(t *testing.T) {
 	tests := []struct {
