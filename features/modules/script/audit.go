@@ -43,8 +43,8 @@ type AuditRecord struct {
 
 	// Security and compliance
 	SignatureValidated bool             `json:"signature_validated"`
-	ExecutionContext   ExecutionContext  `json:"execution_context"`           // How the script was run (system or logged_in_user)
-	ActualUser         string           `json:"actual_user,omitempty"`       // OS user the script ran as; empty means system/root
+	ExecutionContext   ExecutionContext `json:"execution_context"`     // How the script was run (system or logged_in_user)
+	ActualUser         string           `json:"actual_user,omitempty"` // OS user the script ran as; empty means system/root
 	UserID             string           `json:"user_id,omitempty"`
 	TenantID           string           `json:"tenant_id,omitempty"`
 
@@ -55,13 +55,13 @@ type AuditRecord struct {
 
 // ScriptAuditInfo contains sanitized script configuration for audit purposes
 type ScriptAuditInfo struct {
-	Shell            ShellType        `json:"shell"`
-	Timeout          int64            `json:"timeout_ms"`
-	WorkingDir       string           `json:"working_dir,omitempty"`
+	Shell            ShellType         `json:"shell"`
+	Timeout          int64             `json:"timeout_ms"`
+	WorkingDir       string            `json:"working_dir,omitempty"`
 	Environment      map[string]string `json:"environment,omitempty"`
 	SigningPolicy    SigningPolicy     `json:"signing_policy"`
 	ExecutionContext ExecutionContext  `json:"execution_context"` // How the script was configured to run
-	Description      string           `json:"description,omitempty"`
+	Description      string            `json:"description,omitempty"`
 	// Note: Content is not logged for security reasons - only hash
 	ContentHash   string `json:"content_hash"`
 	ContentLength int    `json:"content_length"`

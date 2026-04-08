@@ -15,10 +15,10 @@ import (
 // parsed from the raw config map and stored on ScriptStepConfig.
 func TestParseScriptStepConfig_ExecutionContext(t *testing.T) {
 	tests := []struct {
-		name       string
-		configMap  map[string]interface{}
-		wantCtx    script.ExecutionContext
-		wantErr    bool
+		name      string
+		configMap map[string]interface{}
+		wantCtx   script.ExecutionContext
+		wantErr   bool
 	}{
 		{
 			name: "system context",
@@ -71,14 +71,14 @@ func TestParseScriptStepConfig_ExecutionContext(t *testing.T) {
 // ExecutionContext are parsed correctly from a complete config map.
 func TestParseScriptStepConfig_AllFields(t *testing.T) {
 	configMap := map[string]interface{}{
-		"script_id":         "my-script",
-		"script_version":    "1.0",
-		"inline_script":     "echo hello",
-		"shell":             "powershell",
-		"execution_context": "logged_in_user",
-		"timeout":           "30s",
-		"capture_output":    true,
-		"generate_api_key":  false,
+		"script_id":           "my-script",
+		"script_version":      "1.0",
+		"inline_script":       "echo hello",
+		"shell":               "powershell",
+		"execution_context":   "logged_in_user",
+		"timeout":             "30s",
+		"capture_output":      true,
+		"generate_api_key":    false,
 		"wait_for_completion": true,
 	}
 
@@ -101,8 +101,8 @@ func TestParseScriptStepConfig_AllFields(t *testing.T) {
 // present on ScriptStepConfig with the correct type (compile-time + runtime check).
 func TestScriptStepConfig_ExecutionContextField(t *testing.T) {
 	cfg := &ScriptStepConfig{
-		InlineScript:    "echo hello",
-		Shell:           script.ShellBash,
+		InlineScript:     "echo hello",
+		Shell:            script.ShellBash,
 		ExecutionContext: script.ExecutionContextLoggedInUser,
 	}
 	assert.Equal(t, script.ExecutionContextLoggedInUser, cfg.ExecutionContext)
