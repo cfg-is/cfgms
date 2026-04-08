@@ -219,6 +219,7 @@ func TestHandleListStewards_FilterByStatus_ReturnsOnlineOnly(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	// No stewards with status=online; empty result is correct behavior
 	assert.NotNil(t, resp.Data)
+	assert.Empty(t, resp.Data)
 }
 
 func TestHandleListStewards_FilterByHostname_SubstringMatch(t *testing.T) {
