@@ -11,7 +11,7 @@ import (
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/steward/dna/storage"
+	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 

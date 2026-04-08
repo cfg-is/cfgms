@@ -61,6 +61,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/rbac"
 	reportcache "github.com/cfgis/cfgms/features/reports/cache"
 	"github.com/cfgis/cfgms/features/reports/engine"
@@ -69,7 +70,6 @@ import (
 	"github.com/cfgis/cfgms/features/reports/provider"
 	"github.com/cfgis/cfgms/features/reports/templates"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
-	"github.com/cfgis/cfgms/features/steward/dna/storage"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
