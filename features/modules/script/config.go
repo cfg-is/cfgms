@@ -114,6 +114,23 @@ func (c *ScriptConfig) Validate() error {
 	return nil
 }
 
+// EffectiveSigningPolicy returns the more restrictive of the script's own signing policy
+// and the steward-level minimum enforced by the operator. This allows the steward config
+// to mandate a floor (e.g. "required") without having to modify every individual script config.
+func (c *ScriptConfig) EffectiveSigningPolicy(stewardMinimum SigningPolicy) SigningPolicy {
+	level := map[SigningPolicy]int{
+		SigningPolicyNone:     0,
+		SigningPolicyOptional: 1,
+		SigningPolicyRequired: 2,
+	}
+	scriptLevel := level[c.SigningPolicy]
+	stewardLevel := level[stewardMinimum]
+	if stewardLevel > scriptLevel {
+		return stewardMinimum
+	}
+	return c.SigningPolicy
+}
+
 // GetManagedFields returns the list of fields this configuration manages
 func (c *ScriptConfig) GetManagedFields() []string {
 	fields := []string{"content", "shell", "timeout", "signing_policy"}

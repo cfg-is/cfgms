@@ -155,6 +155,10 @@ type StewardSettings struct {
 	// (e.g. "30m", "5m", "1h"). Defaults to "30m" when not specified.
 	// Applies in both standalone and controller-connected modes.
 	ConvergeInterval string `yaml:"converge_interval,omitempty"`
+
+	// ScriptSigning configures script signing policy, trust modes, and trusted key allowlist.
+	// Child tenants inherit this config and may only tighten (not loosen) the policy.
+	ScriptSigning ScriptSigningConfig `yaml:"script_signing,omitempty"`
 }
 
 // SecretsConfig defines configuration for steward-side secret storage.
@@ -164,6 +168,70 @@ type SecretsConfig struct {
 
 	// Provider selects the secrets provider (default: "steward")
 	Provider string `yaml:"provider,omitempty"`
+}
+
+// ScriptSigningPolicy defines the enforcement level for script signatures at the steward level.
+type ScriptSigningPolicy string
+
+const (
+	// ScriptSigningPolicyNone does not require or validate script signatures.
+	ScriptSigningPolicyNone ScriptSigningPolicy = "none"
+
+	// ScriptSigningPolicyOptional validates signatures when present but does not require them.
+	ScriptSigningPolicyOptional ScriptSigningPolicy = "optional"
+
+	// ScriptSigningPolicyRequired rejects any script that lacks a valid signature.
+	ScriptSigningPolicyRequired ScriptSigningPolicy = "required"
+)
+
+// ScriptTrustMode defines which signing keys or CAs are considered trustworthy.
+type ScriptTrustMode string
+
+const (
+	// TrustModeAnyValid accepts any valid signature from a well-formed key.
+	TrustModeAnyValid ScriptTrustMode = "any_valid"
+
+	// TrustModeTrustedKeys accepts signatures only from keys in TrustedKeys.
+	TrustModeTrustedKeys ScriptTrustMode = "trusted_keys"
+
+	// TrustModeTrustedKeysAndPublic accepts TrustedKeys and, when AllowPublicCA is true, public CAs.
+	TrustModeTrustedKeysAndPublic ScriptTrustMode = "trusted_keys_and_public"
+)
+
+// TrustedKeyRef identifies a trusted signing key or certificate by name, thumbprint, or key reference.
+type TrustedKeyRef struct {
+	// Name is a human-readable label for this key entry.
+	Name string `yaml:"name"`
+
+	// Thumbprint is the certificate thumbprint used to identify the key.
+	Thumbprint string `yaml:"thumbprint,omitempty"`
+
+	// PublicKeyRef is an opaque reference to a public key stored in the secrets provider.
+	PublicKeyRef string `yaml:"public_key_ref,omitempty"`
+}
+
+// ScriptSigningConfig defines the steward-level script signing policy and trust configuration.
+//
+// Config inheritance: child tenants inherit parent config via MergeScriptSigningConfig.
+// Children may tighten policy (e.g. optional→required) but may not loosen it.
+type ScriptSigningConfig struct {
+	// Policy sets the enforcement level: none, optional, or required.
+	Policy ScriptSigningPolicy `yaml:"policy,omitempty"`
+
+	// TrustMode defines which keys are accepted: any_valid, trusted_keys, or trusted_keys_and_public.
+	TrustMode ScriptTrustMode `yaml:"trust_mode,omitempty"`
+
+	// TrustedKeys lists keys/certificates that are allowed to sign scripts.
+	// Required when TrustMode is trusted_keys or trusted_keys_and_public.
+	TrustedKeys []TrustedKeyRef `yaml:"trusted_keys,omitempty"`
+
+	// AllowPublicCA, when true alongside trusted_keys_and_public mode, also accepts
+	// signatures from public certificate authorities.
+	AllowPublicCA bool `yaml:"allow_public_ca,omitempty"`
+
+	// ScriptRepoURL is the MSP-level Git repository URL for the tenant's script store.
+	// Tenant-scoped; child tenants may override this to point to their own repo.
+	ScriptRepoURL string `yaml:"script_repo_url,omitempty"`
 }
 
 // ResourceConfig defines a single resource to be managed by the steward.
@@ -401,6 +469,108 @@ func applyDefaults(config *StewardConfig) {
 	}
 }
 
+// scriptSigningPolicyLevel returns the numeric strictness level of a signing policy.
+// Higher values are more restrictive. Returns -1 for unknown values.
+func scriptSigningPolicyLevel(p ScriptSigningPolicy) int {
+	switch p {
+	case ScriptSigningPolicyNone, "":
+		return 0
+	case ScriptSigningPolicyOptional:
+		return 1
+	case ScriptSigningPolicyRequired:
+		return 2
+	}
+	return -1
+}
+
+// validateScriptSigningConfig validates a ScriptSigningConfig for internal consistency.
+func validateScriptSigningConfig(cfg ScriptSigningConfig) error {
+	// Validate policy value
+	switch cfg.Policy {
+	case ScriptSigningPolicyNone, ScriptSigningPolicyOptional, ScriptSigningPolicyRequired, "":
+		// valid
+	default:
+		return fmt.Errorf("invalid script_signing policy %q: must be none, optional, or required", cfg.Policy)
+	}
+
+	// Validate trust_mode value
+	switch cfg.TrustMode {
+	case TrustModeAnyValid, TrustModeTrustedKeys, TrustModeTrustedKeysAndPublic, "":
+		// valid
+	default:
+		return fmt.Errorf("invalid script_signing trust_mode %q: must be any_valid, trusted_keys, or trusted_keys_and_public", cfg.TrustMode)
+	}
+
+	// trusted_keys and trusted_keys_and_public require a non-empty key list
+	if cfg.TrustMode == TrustModeTrustedKeys || cfg.TrustMode == TrustModeTrustedKeysAndPublic {
+		if len(cfg.TrustedKeys) == 0 {
+			return fmt.Errorf("script_signing trust_mode %q requires at least one entry in trusted_keys", cfg.TrustMode)
+		}
+	}
+
+	// Each key ref must have at least a thumbprint or public_key_ref
+	for i, key := range cfg.TrustedKeys {
+		if key.Thumbprint == "" && key.PublicKeyRef == "" {
+			return fmt.Errorf("script_signing trusted_keys[%d] (%q): must provide thumbprint or public_key_ref", i, key.Name)
+		}
+	}
+
+	return nil
+}
+
+// MergeScriptSigningConfig merges a parent ScriptSigningConfig into a child, applying inheritance rules.
+//
+// The child inherits all parent settings that the child has not explicitly set.
+// Policy may only be tightened (none→optional→required) — if the child specifies a policy
+// less restrictive than the parent's, an error is returned.
+func MergeScriptSigningConfig(parent, child ScriptSigningConfig) (ScriptSigningConfig, error) {
+	// Apply parent defaults where child has not set values
+	result := child
+
+	// Inherit policy from parent if child has none
+	if result.Policy == "" {
+		result.Policy = parent.Policy
+	}
+	if result.Policy == "" {
+		result.Policy = ScriptSigningPolicyNone
+	}
+
+	// Enforce tightening-only: child cannot loosen what parent has set
+	parentLevel := scriptSigningPolicyLevel(parent.Policy)
+	childLevel := scriptSigningPolicyLevel(result.Policy)
+	if parentLevel < 0 || childLevel < 0 {
+		return ScriptSigningConfig{}, fmt.Errorf("invalid signing policy value")
+	}
+	if childLevel < parentLevel {
+		return ScriptSigningConfig{}, fmt.Errorf(
+			"child tenant cannot loosen script_signing policy: parent requires %q, child specified %q",
+			parent.Policy, child.Policy,
+		)
+	}
+
+	// Inherit trust_mode from parent if child has none
+	if result.TrustMode == "" {
+		result.TrustMode = parent.TrustMode
+	}
+
+	// Inherit trusted_keys from parent if child has none
+	if len(result.TrustedKeys) == 0 && len(parent.TrustedKeys) > 0 {
+		result.TrustedKeys = parent.TrustedKeys
+	}
+
+	// AllowPublicCA: child inherits parent value if not set (bool — treat parent true as inherited)
+	if !result.AllowPublicCA && parent.AllowPublicCA {
+		result.AllowPublicCA = parent.AllowPublicCA
+	}
+
+	// ScriptRepoURL: child overrides parent; inherit if child has none
+	if result.ScriptRepoURL == "" {
+		result.ScriptRepoURL = parent.ScriptRepoURL
+	}
+
+	return result, nil
+}
+
 // ValidateConfiguration checks if the configuration is valid
 func ValidateConfiguration(config StewardConfig) error {
 	// Validate steward settings
@@ -438,6 +608,11 @@ func ValidateConfiguration(config StewardConfig) error {
 		if d <= 0 {
 			return fmt.Errorf("converge_interval must be positive, got %q", config.Steward.ConvergeInterval)
 		}
+	}
+
+	// Validate script signing config
+	if err := validateScriptSigningConfig(config.Steward.ScriptSigning); err != nil {
+		return fmt.Errorf("script_signing configuration invalid: %w", err)
 	}
 
 	// Validate resources

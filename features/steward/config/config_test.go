@@ -577,3 +577,340 @@ resources:
 	assert.Equal(t, "15m", cfg.Steward.ConvergeInterval)
 	assert.Equal(t, 15*time.Minute, GetConvergeInterval(cfg))
 }
+
+// --- ScriptSigningConfig tests ---
+
+func TestValidateScriptSigningConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     ScriptSigningConfig
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "empty config is valid (no signing)",
+			cfg:     ScriptSigningConfig{},
+			wantErr: false,
+		},
+		{
+			name: "none policy with no trust mode is valid",
+			cfg: ScriptSigningConfig{
+				Policy: ScriptSigningPolicyNone,
+			},
+			wantErr: false,
+		},
+		{
+			name: "optional policy with any_valid trust mode is valid",
+			cfg: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyOptional,
+				TrustMode: TrustModeAnyValid,
+			},
+			wantErr: false,
+		},
+		{
+			name: "required policy with trusted_keys and non-empty key list is valid",
+			cfg: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeTrustedKeys,
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "corp-signing-key", Thumbprint: "abc123"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "trusted_keys mode with empty key list is invalid",
+			cfg: ScriptSigningConfig{
+				Policy:      ScriptSigningPolicyRequired,
+				TrustMode:   TrustModeTrustedKeys,
+				TrustedKeys: []TrustedKeyRef{},
+			},
+			wantErr: true,
+			errMsg:  "trusted_keys",
+		},
+		{
+			name: "trusted_keys_and_public mode with keys and AllowPublicCA is valid",
+			cfg: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeTrustedKeysAndPublic,
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "corp-signing-key", Thumbprint: "abc123"},
+				},
+				AllowPublicCA: true,
+			},
+			wantErr: false,
+		},
+		{
+			name: "trusted_keys_and_public mode with empty key list is invalid",
+			cfg: ScriptSigningConfig{
+				Policy:        ScriptSigningPolicyRequired,
+				TrustMode:     TrustModeTrustedKeysAndPublic,
+				TrustedKeys:   []TrustedKeyRef{},
+				AllowPublicCA: true,
+			},
+			wantErr: true,
+			errMsg:  "trusted_keys",
+		},
+		{
+			name: "invalid policy value is rejected",
+			cfg: ScriptSigningConfig{
+				Policy: ScriptSigningPolicy("bogus"),
+			},
+			wantErr: true,
+			errMsg:  "invalid",
+		},
+		{
+			name: "invalid trust mode value is rejected",
+			cfg: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: ScriptTrustMode("bogus"),
+			},
+			wantErr: true,
+			errMsg:  "invalid",
+		},
+		{
+			name: "key ref with neither thumbprint nor public_key_ref is invalid",
+			cfg: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeTrustedKeys,
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "incomplete-key"},
+				},
+			},
+			wantErr: true,
+			errMsg:  "thumbprint or public_key_ref",
+		},
+		{
+			name: "script_repo_url is optional and does not affect validation",
+			cfg: ScriptSigningConfig{
+				Policy:        ScriptSigningPolicyNone,
+				ScriptRepoURL: "https://git.example.com/msp/scripts.git",
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateScriptSigningConfig(tt.cfg)
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestMergeScriptSigningConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		parent      ScriptSigningConfig
+		child       ScriptSigningConfig
+		wantErr     bool
+		errMsg      string
+		wantPolicy  ScriptSigningPolicy
+		wantMode    ScriptTrustMode
+		wantRepoURL string
+	}{
+		{
+			name:       "empty parent and child returns empty",
+			parent:     ScriptSigningConfig{},
+			child:      ScriptSigningConfig{},
+			wantPolicy: ScriptSigningPolicyNone,
+		},
+		{
+			name: "child inherits parent policy when child is empty",
+			parent: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyOptional,
+				TrustMode: TrustModeAnyValid,
+			},
+			child:      ScriptSigningConfig{},
+			wantPolicy: ScriptSigningPolicyOptional,
+			wantMode:   TrustModeAnyValid,
+		},
+		{
+			name: "child can tighten policy from optional to required",
+			parent: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyOptional,
+				TrustMode: TrustModeAnyValid,
+			},
+			child: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeTrustedKeys,
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "child-key", Thumbprint: "def456"},
+				},
+			},
+			wantPolicy: ScriptSigningPolicyRequired,
+			wantMode:   TrustModeTrustedKeys,
+		},
+		{
+			name: "child can tighten policy from none to required",
+			parent: ScriptSigningConfig{
+				Policy: ScriptSigningPolicyNone,
+			},
+			child: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeAnyValid,
+			},
+			wantPolicy: ScriptSigningPolicyRequired,
+			wantMode:   TrustModeAnyValid,
+		},
+		{
+			name: "child cannot loosen policy from required to optional",
+			parent: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeAnyValid,
+			},
+			child: ScriptSigningConfig{
+				Policy: ScriptSigningPolicyOptional,
+			},
+			wantErr: true,
+			errMsg:  "loosen",
+		},
+		{
+			name: "child cannot loosen policy from required to none",
+			parent: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeAnyValid,
+			},
+			child: ScriptSigningConfig{
+				Policy: ScriptSigningPolicyNone,
+			},
+			wantErr: true,
+			errMsg:  "loosen",
+		},
+		{
+			name: "child cannot loosen policy from optional to none",
+			parent: ScriptSigningConfig{
+				Policy: ScriptSigningPolicyOptional,
+			},
+			child: ScriptSigningConfig{
+				Policy: ScriptSigningPolicyNone,
+			},
+			wantErr: true,
+			errMsg:  "loosen",
+		},
+		{
+			name: "child overrides script_repo_url",
+			parent: ScriptSigningConfig{
+				Policy:        ScriptSigningPolicyNone,
+				ScriptRepoURL: "https://parent.example.com/scripts.git",
+			},
+			child: ScriptSigningConfig{
+				ScriptRepoURL: "https://child.example.com/scripts.git",
+			},
+			wantPolicy:  ScriptSigningPolicyNone,
+			wantRepoURL: "https://child.example.com/scripts.git",
+		},
+		{
+			name: "child inherits parent script_repo_url when not set",
+			parent: ScriptSigningConfig{
+				Policy:        ScriptSigningPolicyNone,
+				ScriptRepoURL: "https://parent.example.com/scripts.git",
+			},
+			child:       ScriptSigningConfig{},
+			wantPolicy:  ScriptSigningPolicyNone,
+			wantRepoURL: "https://parent.example.com/scripts.git",
+		},
+		{
+			name: "child overrides trusted keys",
+			parent: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeTrustedKeys,
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "parent-key", Thumbprint: "parent123"},
+				},
+			},
+			child: ScriptSigningConfig{
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "child-key", Thumbprint: "child456"},
+				},
+			},
+			wantPolicy: ScriptSigningPolicyRequired,
+			wantMode:   TrustModeTrustedKeys,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := MergeScriptSigningConfig(tt.parent, tt.child)
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantPolicy, result.Policy)
+			if tt.wantMode != "" {
+				assert.Equal(t, tt.wantMode, result.TrustMode)
+			}
+			if tt.wantRepoURL != "" {
+				assert.Equal(t, tt.wantRepoURL, result.ScriptRepoURL)
+			}
+		})
+	}
+}
+
+func TestScriptSigningConfigInConfigFile(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  script_signing:
+    policy: required
+    trust_mode: trusted_keys
+    trusted_keys:
+      - name: corp-cert
+        thumbprint: abc123def456
+    script_repo_url: https://git.example.com/msp/scripts.git
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err)
+	assert.Equal(t, ScriptSigningPolicyRequired, cfg.Steward.ScriptSigning.Policy)
+	assert.Equal(t, TrustModeTrustedKeys, cfg.Steward.ScriptSigning.TrustMode)
+	assert.Len(t, cfg.Steward.ScriptSigning.TrustedKeys, 1)
+	assert.Equal(t, "corp-cert", cfg.Steward.ScriptSigning.TrustedKeys[0].Name)
+	assert.Equal(t, "abc123def456", cfg.Steward.ScriptSigning.TrustedKeys[0].Thumbprint)
+	assert.Equal(t, "https://git.example.com/msp/scripts.git", cfg.Steward.ScriptSigning.ScriptRepoURL)
+}
+
+func TestScriptSigningConfigValidationInLoadConfiguration(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	// trusted_keys mode with empty key list should fail validation
+	configData := `steward:
+  id: test-steward
+  script_signing:
+    policy: required
+    trust_mode: trusted_keys
+    trusted_keys: []
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	_, err := LoadConfiguration(configFile)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "trusted_keys")
+}
