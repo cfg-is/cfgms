@@ -39,7 +39,8 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		"working_dir", e.config.WorkingDir,
 		"timeout", e.config.Timeout,
 		"content_hash", hashScriptContent(e.config.Content),
-		"env_vars", len(e.config.Environment))
+		"env_vars", len(e.config.Environment),
+		"execution_context", string(e.config.ExecutionContext))
 
 	// Create timeout context
 	timeoutCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
@@ -51,12 +52,20 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		return nil, fmt.Errorf("failed to build command: %w", err)
 	}
 
-	// Set working directory if specified
+	// Apply execution context: may replace cmd with a sudo wrapper (Unix) or attach a
+	// user token (Windows). This must happen before Dir/Env are set so those values
+	// land on the final command regardless of which platform path is taken.
+	cmd, actualUser, cleanupToken, err := applyExecutionContext(timeoutCtx, e.config, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply execution context: %w", err)
+	}
+
+	// Set working directory on the (potentially wrapped) command
 	if e.config.WorkingDir != "" {
 		cmd.Dir = e.config.WorkingDir
 	}
 
-	// Set environment variables
+	// Set environment variables on the (potentially wrapped) command
 	if len(e.config.Environment) > 0 {
 		env := os.Environ()
 		for key, value := range e.config.Environment {
@@ -67,7 +76,8 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 
 	// Execute the command
 	result := &ExecutionResult{
-		StartTime: startTime,
+		StartTime:  startTime,
+		ActualUser: actualUser,
 	}
 
 	// Capture stdout and stderr
@@ -82,8 +92,11 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 
 	// Start the command
 	if err := cmd.Start(); err != nil {
+		cleanupToken()
 		return nil, fmt.Errorf("failed to start command: %w", err)
 	}
+	// Token (Windows) or no-op (Unix): release the handle after the process is created.
+	cleanupToken()
 
 	result.PID = cmd.Process.Pid
 
