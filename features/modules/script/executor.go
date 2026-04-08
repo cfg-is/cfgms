@@ -13,12 +13,15 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // Executor handles cross-platform script execution
 type Executor struct {
-	config *ScriptConfig
-	logger logging.Logger
+	config         *ScriptConfig
+	logger         logging.Logger
+	secretStore    interfaces.SecretStore
+	secretBindings []ParamBinding
 }
 
 // NewExecutor creates a new script executor with the given configuration
@@ -26,6 +29,18 @@ func NewExecutor(config *ScriptConfig) *Executor {
 	return &Executor{
 		config: config,
 		logger: logging.NewLogger("info"),
+	}
+}
+
+// NewExecutorWithSecrets creates a script executor that resolves secret
+// bindings from the provided store at execution time. Secrets are delivered
+// via process-scoped environment variables and cleared after the script exits.
+func NewExecutorWithSecrets(config *ScriptConfig, store interfaces.SecretStore, bindings []ParamBinding) *Executor {
+	return &Executor{
+		config:         config,
+		logger:         logging.NewLogger("info"),
+		secretStore:    store,
+		secretBindings: bindings,
 	}
 }
 
@@ -40,6 +55,24 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		"timeout", e.config.Timeout,
 		"content_hash", hashScriptContent(e.config.Content),
 		"env_vars", len(e.config.Environment))
+
+	// Resolve secret bindings before building the command.
+	// Secrets are injected exclusively into cmd.Env on the child process — the
+	// parent process environment is never modified, eliminating race conditions
+	// when multiple scripts execute concurrently and preventing secret leakage
+	// beyond the lifetime of the child process.
+	var secretEnvEntries []string
+	if e.secretStore != nil && len(e.secretBindings) > 0 {
+		resolved, err := ResolveSecretBindings(ctx, e.secretStore, e.secretBindings)
+		if err != nil {
+			return nil, fmt.Errorf("secret injection blocked: %w", err)
+		}
+		secretEnvEntries = make([]string, 0, len(resolved))
+		for _, param := range resolved {
+			envKey := SecretEnvVarName(e.config.Shell, param.Name)
+			secretEnvEntries = append(secretEnvEntries, fmt.Sprintf("%s=%s", envKey, param.Value))
+		}
+	}
 
 	// Create timeout context
 	timeoutCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
@@ -56,12 +89,15 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		cmd.Dir = e.config.WorkingDir
 	}
 
-	// Set environment variables
-	if len(e.config.Environment) > 0 {
+	// Build child process environment from the parent snapshot plus any
+	// configured env vars and resolved secrets. Always set cmd.Env explicitly
+	// when there is anything to add so secrets are isolated to the child.
+	if len(e.config.Environment) > 0 || len(secretEnvEntries) > 0 {
 		env := os.Environ()
 		for key, value := range e.config.Environment {
 			env = append(env, fmt.Sprintf("%s=%s", key, value))
 		}
+		env = append(env, secretEnvEntries...)
 		cmd.Env = env
 	}
 
