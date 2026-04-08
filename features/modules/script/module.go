@@ -21,6 +21,8 @@ type Module struct {
 	auditLogger *AuditLogger
 	// stewardID identifies the steward this module belongs to
 	stewardID string
+	// signingConfig holds the steward-level signing policy injected via SetSigningConfig.
+	signingConfig ModuleSigningConfig
 	// logger provides structured logging for the module
 	logger *logging.ModuleLogger
 	// Embed default logging support for automatic injection capability
@@ -260,32 +262,24 @@ func (m *Module) validateSignature(config *ScriptConfig) error {
 	}
 }
 
-// verifySignature performs the actual signature verification
-// NOTE: This is a placeholder implementation that validates signature metadata only.
-// Future enhancement: Implement full cryptographic signature verification including:
-//   - Parsing public key or retrieving certificate by thumbprint
-//   - Verifying signature against script content using specified algorithm
-//   - Returning appropriate error if verification fails
+// verifySignature performs real cryptographic signature verification.
 //
-// Until implemented, scripts with signing policies will pass validation if signature
-// metadata is present and correctly formatted.
+// For PowerShell scripts on Windows, Authenticode verification is used.
+// For all other scripts (and for PowerShell on non-Windows), detached RSA/ECDSA
+// signature verification is performed using the public key embedded in the signature.
+//
+// Trust mode and trusted key enforcement are applied after cryptographic verification
+// using the ModuleSigningConfig set via SetSigningConfig.
 func (m *Module) verifySignature(config *ScriptConfig) error {
 	if config.Signature == nil {
 		return fmt.Errorf("%w: signature is required but not provided", modules.ErrInvalidInput)
 	}
 
-	// Basic validation that signature fields are present
-	if config.Signature.Algorithm == "" {
-		return fmt.Errorf("%w: signature algorithm is missing", modules.ErrInvalidInput)
-	}
-	if config.Signature.Signature == "" {
-		return fmt.Errorf("%w: signature value is missing", modules.ErrInvalidInput)
-	}
-	if config.Signature.PublicKey == "" && config.Signature.Thumbprint == "" {
-		return fmt.Errorf("%w: either public key or certificate thumbprint is required", modules.ErrInvalidInput)
-	}
+	m.mu.RLock()
+	sigCfg := m.signingConfig
+	m.mu.RUnlock()
 
-	return nil
+	return verifyScriptSignature([]byte(config.Content), config.Signature, config.Shell, sigCfg)
 }
 
 // GetExecutionState returns the current execution state for a resource
@@ -349,4 +343,13 @@ func (m *Module) SetStewardID(stewardID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stewardID = stewardID
+}
+
+// SetSigningConfig injects the steward-level signing policy into the module.
+// It must be called before any script execution when signature enforcement is needed.
+// The zero value of ModuleSigningConfig corresponds to TrustModeAnyValid (no key restriction).
+func (m *Module) SetSigningConfig(cfg ModuleSigningConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.signingConfig = cfg
 }
