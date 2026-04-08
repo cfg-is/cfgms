@@ -9,6 +9,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
@@ -243,7 +244,9 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 		if execErr != nil {
 			status = script.StatusFailed
 		}
-		_ = n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr)
+		if monErr := n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr); monErr != nil {
+			logging.NewLogger("warn").Warn("failed to update device execution status", "device_id", deviceID, "error", monErr)
+		}
 
 		results[deviceID] = result
 	}

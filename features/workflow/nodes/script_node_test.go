@@ -11,6 +11,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 // newTestStore returns a real StewardSecretStore in a temp directory.
@@ -56,7 +57,7 @@ func TestScriptStepExecutor_SetSecretStore(t *testing.T) {
 // correctly deserialises secret_bindings from a raw map.
 func TestParseScriptStepConfig_SecretBindings(t *testing.T) {
 	rawConfig := map[string]interface{}{
-		"shell":        "bash",
+		"shell":         "bash",
 		"inline_script": "echo hello",
 		"secret_bindings": []interface{}{
 			map[string]interface{}{
@@ -105,15 +106,25 @@ func TestParseScriptStepConfig_NilInput(t *testing.T) {
 	assert.Empty(t, config.SecretBindings)
 }
 
-// TestScriptStepConfig_SecretBindingsYAMLTags verifies that the SecretBindings
-// field is correctly annotated for YAML/JSON serialisation.
+// TestScriptStepConfig_SecretBindingsYAMLTags verifies that SecretBindings
+// round-trips through YAML using the "secret_bindings" key, confirming that
+// the struct tag is correct and a tag typo would be caught by this test.
 func TestScriptStepConfig_SecretBindingsYAMLTags(t *testing.T) {
-	// Ensure the field is present and properly initialised via direct construction.
-	config := ScriptStepConfig{
+	original := ScriptStepConfig{
+		Shell: "bash",
 		SecretBindings: []script.ParamBinding{
 			{Name: "Token", From: script.ParamSourceSecretStore, Key: "api/token"},
 		},
 	}
-	assert.Len(t, config.SecretBindings, 1)
-	assert.Equal(t, "Token", config.SecretBindings[0].Name)
+
+	data, err := yaml.Marshal(original)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "secret_bindings:", "marshalled YAML must use the secret_bindings key")
+
+	var roundTripped ScriptStepConfig
+	require.NoError(t, yaml.Unmarshal(data, &roundTripped))
+	require.Len(t, roundTripped.SecretBindings, 1)
+	assert.Equal(t, "Token", roundTripped.SecretBindings[0].Name)
+	assert.Equal(t, script.ParamSourceSecretStore, roundTripped.SecretBindings[0].From)
+	assert.Equal(t, "api/token", roundTripped.SecretBindings[0].Key)
 }

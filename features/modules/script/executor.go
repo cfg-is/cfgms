@@ -191,8 +191,7 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 	case <-timeoutCtx.Done():
 		// Timeout occurred
 		if err := cmd.Process.Kill(); err != nil {
-			// Log or handle kill error if needed, but don't fail the timeout handling
-			_ = err // Explicitly ignore kill errors during timeout handling
+			e.logger.Warn("failed to kill timed-out script process", "error", err)
 		}
 		result.EndTime = time.Now()
 		result.Duration = result.EndTime.Sub(result.StartTime)
