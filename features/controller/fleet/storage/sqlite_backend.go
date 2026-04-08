@@ -123,6 +123,14 @@ func NewSQLiteBackend(config *Config, logger logging.Logger) (*SQLiteBackend, er
 	return backend, nil
 }
 
+// extractDNAAttr extracts an attribute from DNA, returning empty string if not found.
+func extractDNAAttr(dna *commonpb.DNA, key string) string {
+	if dna == nil || dna.Attributes == nil {
+		return ""
+	}
+	return dna.Attributes[key]
+}
+
 // StoreRecord stores a DNA record with compressed data in SQLite
 func (b *SQLiteBackend) StoreRecord(ctx context.Context, record *DNARecord, compressedData []byte) error {
 	b.mutex.Lock()
@@ -133,6 +141,11 @@ func (b *SQLiteBackend) StoreRecord(ctx context.Context, record *DNARecord, comp
 	if err != nil {
 		return fmt.Errorf("failed to marshal DNA to JSON: %w", err)
 	}
+
+	// Extract fleet query fields from DNA attributes for indexed columns
+	osVal := extractDNAAttr(record.DNA, "os")
+	arch := extractDNAAttr(record.DNA, "architecture")
+	hostname := extractDNAAttr(record.DNA, "hostname")
 
 	// Execute insert with prepared statement
 	_, err = b.stmts.insertRecord.ExecContext(ctx,
@@ -145,6 +158,11 @@ func (b *SQLiteBackend) StoreRecord(ctx context.Context, record *DNARecord, comp
 		record.CompressedSize,
 		record.CompressionRatio,
 		record.ShardID,
+		record.TenantID,
+		osVal,
+		arch,
+		hostname,
+		record.Status,
 	)
 
 	if err != nil {
@@ -219,6 +237,8 @@ func (b *SQLiteBackend) GetRecord(ctx context.Context, contentHash, shardID stri
 		&record.CompressedSize,
 		&record.CompressionRatio,
 		&record.ShardID,
+		&record.TenantID,
+		&record.Status,
 	)
 
 	if err == sql.ErrNoRows {
@@ -336,10 +356,11 @@ func (b *SQLiteBackend) prepareStatements() error {
 
 	// Insert DNA record statement
 	b.stmts.insertRecord, err = b.db.Prepare(`
-		INSERT INTO dna_history 
-		(device_id, timestamp, version, dna_json, content_hash, 
-		 original_size, compressed_size, compression_ratio, shard_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO dna_history
+		(device_id, timestamp, version, dna_json, content_hash,
+		 original_size, compressed_size, compression_ratio, shard_id,
+		 tenant_id, os, architecture, hostname, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert record statement: %w", err)
@@ -358,7 +379,8 @@ func (b *SQLiteBackend) prepareStatements() error {
 	// Get record statement
 	b.stmts.getRecord, err = b.db.Prepare(`
 		SELECT device_id, timestamp, version, dna_json, content_hash,
-		       original_size, compressed_size, compression_ratio, shard_id
+		       original_size, compressed_size, compression_ratio, shard_id,
+		       tenant_id, status
 		FROM dna_history
 		WHERE content_hash = ?
 		LIMIT 1
