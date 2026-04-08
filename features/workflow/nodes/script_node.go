@@ -275,20 +275,37 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 		executor := script.NewExecutor(scriptConfig)
 		result, execErr := executor.Execute(ctx)
 
-		// Update execution monitor.
-		// Best-effort telemetry: a status-update failure must not mask the actual
-		// script execution result, so the error is intentionally ignored here.
+		// Update execution monitor so the WaitForCompletion poller and any
+		// registered listeners see the terminal status.
 		status := script.StatusCompleted
 		if execErr != nil {
 			status = script.StatusFailed
 		}
-		_ = n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr) //nolint:errcheck // best-effort telemetry
+		if monitorErr := n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr); monitorErr != nil {
+			// The execution or device ID was not found in the monitor — this is an
+			// internal consistency error (we just created the execution above).
+			// The WaitForCompletion poller cannot detect terminal status when the
+			// monitor state is corrupted, so return immediately with partial results.
+			results[deviceID] = result
+			return workflow.NodeOutput{
+				Success: false,
+				Error:   fmt.Sprintf("execution monitor consistency error for device %s: %v", deviceID, monitorErr),
+				Data:    map[string]interface{}{"results": results},
+			}, monitorErr
+		}
 
 		results[deviceID] = result
 	}
 
 	// Wait for completion if requested
 	if n.config.WaitForCompletion {
+		if n.config.Timeout == 0 {
+			return workflow.NodeOutput{
+				Success: false,
+				Error:   "wait_for_completion requires a non-zero timeout",
+			}, fmt.Errorf("wait_for_completion is true but timeout is zero")
+		}
+
 		// Poll execution status until complete
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()

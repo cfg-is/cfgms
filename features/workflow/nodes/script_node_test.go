@@ -361,3 +361,25 @@ func TestScriptNode_WaitForCompletion(t *testing.T) {
 	require.True(t, ok, "output must include results map")
 	assert.Contains(t, results, "localhost")
 }
+
+// TestScriptNode_WaitForCompletion_ZeroTimeoutError verifies that
+// WaitForCompletion: true with Timeout: 0 returns an error rather than
+// silently timing out immediately via time.After(0).
+func TestScriptNode_WaitForCompletion_ZeroTimeoutError(t *testing.T) {
+	config := &ScriptStepConfig{
+		InlineScript:      "echo hello",
+		Shell:             script.ShellBash,
+		Timeout:           0, // zero value — misconfiguration
+		WaitForCompletion: true,
+	}
+
+	node := buildScriptNode(t, config, nil)
+	output, err := node.Execute(context.Background(), workflow.NodeInput{
+		Data:    map[string]interface{}{},
+		Context: map[string]interface{}{},
+	})
+
+	require.Error(t, err, "zero timeout with WaitForCompletion must return an error")
+	assert.False(t, output.Success)
+	assert.Contains(t, err.Error(), "timeout is zero")
+}
