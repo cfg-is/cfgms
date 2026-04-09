@@ -13,12 +13,15 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // Executor handles cross-platform script execution
 type Executor struct {
-	config *ScriptConfig
-	logger logging.Logger
+	config         *ScriptConfig
+	logger         logging.Logger
+	secretStore    interfaces.SecretStore
+	secretBindings []ParamBinding
 }
 
 // NewExecutor creates a new script executor with the given configuration
@@ -26,6 +29,18 @@ func NewExecutor(config *ScriptConfig) *Executor {
 	return &Executor{
 		config: config,
 		logger: logging.NewLogger("info"),
+	}
+}
+
+// NewExecutorWithSecrets creates a script executor that resolves secret
+// bindings from the provided store at execution time. Secrets are delivered
+// via process-scoped environment variables and cleared after the script exits.
+func NewExecutorWithSecrets(config *ScriptConfig, store interfaces.SecretStore, bindings []ParamBinding) *Executor {
+	return &Executor{
+		config:         config,
+		logger:         logging.NewLogger("info"),
+		secretStore:    store,
+		secretBindings: bindings,
 	}
 }
 
@@ -40,6 +55,35 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		"timeout", e.config.Timeout,
 		"content_hash", hashScriptContent(e.config.Content),
 		"env_vars", len(e.config.Environment))
+
+	// Resolve param bindings before building the command. All params — both
+	// secret-store and literal — are injected exclusively into cmd.Env on the
+	// child process; the parent process environment is never modified, eliminating
+	// race conditions at 50k+ steward scale and preventing value leakage via
+	// /proc/pid/cmdline (Linux), ps output, or Windows Event 4688.
+	//
+	// Env var naming by binding type:
+	//   secret-store  → SecretEnvVarName(): CFGMS_SECRET_<PARAM> on Windows (avoids
+	//                   Event 4688 cmdline logging), <PARAM> on Unix (12-factor)
+	//   literal       → strings.ToUpper(param.Name) on all platforms — no secret
+	//                   prefix because the value is not a credential
+	var secretEnvEntries []string
+	if e.secretStore != nil && len(e.secretBindings) > 0 {
+		resolved, err := ResolveSecretBindings(ctx, e.secretStore, e.secretBindings)
+		if err != nil {
+			return nil, fmt.Errorf("secret injection blocked: %w", err)
+		}
+		secretEnvEntries = make([]string, 0, len(resolved))
+		for _, param := range resolved {
+			var envKey string
+			if param.IsSecret {
+				envKey = SecretEnvVarName(e.config.Shell, param.Name)
+			} else {
+				envKey = strings.ToUpper(param.Name)
+			}
+			secretEnvEntries = append(secretEnvEntries, fmt.Sprintf("%s=%s", envKey, param.Value))
+		}
+	}
 
 	// Create timeout context
 	timeoutCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
@@ -56,12 +100,15 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		cmd.Dir = e.config.WorkingDir
 	}
 
-	// Set environment variables
-	if len(e.config.Environment) > 0 {
+	// Build child process environment from the parent snapshot plus any
+	// configured env vars and resolved secrets. Always set cmd.Env explicitly
+	// when there is anything to add so secrets are isolated to the child.
+	if len(e.config.Environment) > 0 || len(secretEnvEntries) > 0 {
 		env := os.Environ()
 		for key, value := range e.config.Environment {
 			env = append(env, fmt.Sprintf("%s=%s", key, value))
 		}
+		env = append(env, secretEnvEntries...)
 		cmd.Env = env
 	}
 
@@ -155,8 +202,7 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 	case <-timeoutCtx.Done():
 		// Timeout occurred
 		if err := cmd.Process.Kill(); err != nil {
-			// Log or handle kill error if needed, but don't fail the timeout handling
-			_ = err // Explicitly ignore kill errors during timeout handling
+			e.logger.Warn("failed to kill timed-out script process", "error", err)
 		}
 		result.EndTime = time.Now()
 		result.Duration = result.EndTime.Sub(result.StartTime)

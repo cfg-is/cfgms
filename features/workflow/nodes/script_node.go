@@ -9,6 +9,8 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // ScriptStepConfig defines configuration for script execution workflow steps
@@ -48,6 +50,11 @@ type ScriptStepConfig struct {
 
 	// WaitForCompletion determines if workflow should wait for script to complete
 	WaitForCompletion bool `yaml:"wait_for_completion,omitempty" json:"wait_for_completion,omitempty"`
+
+	// SecretBindings declares parameters that are resolved from the steward
+	// secret store at execution time. Secrets are delivered via env vars and
+	// never appear in command-line arguments or script block content.
+	SecretBindings []script.ParamBinding `yaml:"secret_bindings,omitempty" json:"secret_bindings,omitempty"`
 
 	// OnSuccess defines actions to take on successful execution
 	OnSuccess *ScriptActionConfig `yaml:"on_success,omitempty" json:"on_success,omitempty"`
@@ -104,6 +111,7 @@ type ScriptNode struct {
 	keyManager     *script.EphemeralKeyManager
 	dnaProvider    script.DNAProvider
 	configProvider script.ConfigProvider
+	secretStore    interfaces.SecretStore
 }
 
 // NewScriptNode creates a new script execution node
@@ -222,8 +230,13 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 			scriptConfig.Environment["CFGMS_DEVICE_ID"] = deviceID
 		}
 
-		// Execute script
-		executor := script.NewExecutor(scriptConfig)
+		// Execute script — use secret-aware executor when bindings are configured.
+		var executor *script.Executor
+		if n.secretStore != nil && len(n.config.SecretBindings) > 0 {
+			executor = script.NewExecutorWithSecrets(scriptConfig, n.secretStore, n.config.SecretBindings)
+		} else {
+			executor = script.NewExecutor(scriptConfig)
+		}
 		result, execErr := executor.Execute(ctx)
 
 		// Update execution monitor
@@ -231,7 +244,9 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 		if execErr != nil {
 			status = script.StatusFailed
 		}
-		_ = n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr)
+		if monErr := n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr); monErr != nil {
+			logging.NewLogger("warn").Warn("failed to update device execution status", "device_id", deviceID, "error", monErr)
+		}
 
 		results[deviceID] = result
 	}
@@ -311,6 +326,12 @@ func (n *ScriptNode) SetConfigProvider(provider script.ConfigProvider) {
 	n.configProvider = provider
 }
 
+// SetSecretStore sets the secret store used to resolve secret bindings at
+// execution time. Required when ScriptStepConfig.SecretBindings is non-empty.
+func (n *ScriptNode) SetSecretStore(store interfaces.SecretStore) {
+	n.secretStore = store
+}
+
 // ScriptStepExecutor executes script workflow steps
 type ScriptStepExecutor struct {
 	repository     script.ScriptRepository
@@ -318,6 +339,7 @@ type ScriptStepExecutor struct {
 	keyManager     *script.EphemeralKeyManager
 	dnaProvider    script.DNAProvider
 	configProvider script.ConfigProvider
+	secretStore    interfaces.SecretStore
 }
 
 // NewScriptStepExecutor creates a new script step executor
@@ -345,6 +367,7 @@ func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step
 	node := NewScriptNode(step.Name, step.Name, config, e.repository, e.monitor, e.keyManager)
 	node.SetDNAProvider(e.dnaProvider)
 	node.SetConfigProvider(e.configProvider)
+	node.SetSecretStore(e.secretStore)
 
 	// Execute node
 	startTime := time.Now()
@@ -378,6 +401,11 @@ func (e *ScriptStepExecutor) SetDNAProvider(provider script.DNAProvider) {
 // SetConfigProvider sets the config provider
 func (e *ScriptStepExecutor) SetConfigProvider(provider script.ConfigProvider) {
 	e.configProvider = provider
+}
+
+// SetSecretStore sets the secret store for resolving secret bindings in steps.
+func (e *ScriptStepExecutor) SetSecretStore(store interfaces.SecretStore) {
+	e.secretStore = store
 }
 
 // parseScriptStepConfig converts a map[string]interface{} to ScriptStepConfig
@@ -455,6 +483,31 @@ func parseScriptStepConfig(configMap map[string]interface{}) (*ScriptStepConfig,
 		config.APIKeyTTL = time.Duration(apiKeyTTLInt)
 	} else if apiKeyTTLInt, ok := configMap["api_key_ttl"].(int); ok {
 		config.APIKeyTTL = time.Duration(apiKeyTTLInt)
+	}
+
+	// Parse secret_bindings slice
+	if rawBindings, ok := configMap["secret_bindings"].([]interface{}); ok {
+		config.SecretBindings = make([]script.ParamBinding, 0, len(rawBindings))
+		for i, rb := range rawBindings {
+			bm, ok := rb.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("secret_bindings[%d]: expected a mapping, got %T", i, rb)
+			}
+			var binding script.ParamBinding
+			if name, ok := bm["name"].(string); ok {
+				binding.Name = name
+			}
+			if from, ok := bm["from"].(string); ok {
+				binding.From = script.ParamSource(from)
+			}
+			if key, ok := bm["key"].(string); ok {
+				binding.Key = key
+			}
+			if value, ok := bm["value"].(string); ok {
+				binding.Value = value
+			}
+			config.SecretBindings = append(config.SecretBindings, binding)
+		}
 	}
 
 	return config, nil
