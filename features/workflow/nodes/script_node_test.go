@@ -3,9 +3,13 @@
 package nodes
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/secrets/providers/steward"
@@ -13,6 +17,39 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
+
+// testStewardProvider implements fleet.StewardProvider for use in fleet query tests.
+type testStewardProvider struct {
+	stewards []fleet.StewardData
+}
+
+func (p *testStewardProvider) GetAllStewards() []fleet.StewardData {
+	return p.stewards
+}
+
+func makeSteward(id, status string, attrs map[string]string) fleet.StewardData {
+	return fleet.StewardData{
+		ID:            id,
+		TenantID:      "test-tenant",
+		Status:        status,
+		LastHeartbeat: time.Now(),
+		DNAAttributes: attrs,
+	}
+}
+
+// errorFleetQuery is a test-local implementation of fleet.FleetQuery that
+// always returns a configured error. Used to verify error propagation.
+type errorFleetQuery struct {
+	err error
+}
+
+func (q *errorFleetQuery) Search(_ context.Context, _ fleet.Filter) ([]fleet.StewardResult, error) {
+	return nil, q.err
+}
+
+func (q *errorFleetQuery) Count(_ context.Context, _ fleet.Filter) (int, error) {
+	return 0, q.err
+}
 
 // newTestStore returns a real StewardSecretStore in a temp directory.
 // Skips the test when /etc/machine-id is absent (containers without platform identity).
@@ -144,4 +181,224 @@ func TestScriptStepConfig_SecretBindingsYAMLTags(t *testing.T) {
 	assert.Equal(t, "Token", roundTripped.SecretBindings[0].Name)
 	assert.Equal(t, script.ParamSourceSecretStore, roundTripped.SecretBindings[0].From)
 	assert.Equal(t, "api/token", roundTripped.SecretBindings[0].Key)
+}
+
+// TestScriptNode_SetFleetQuery verifies that SetFleetQuery assigns the fleet
+// query to the node so it is used during device resolution.
+func TestScriptNode_SetFleetQuery(t *testing.T) {
+	provider := &testStewardProvider{}
+	q := fleet.NewMemoryQuery(provider)
+
+	node := NewScriptNode("id", "name", &ScriptStepConfig{}, nil, nil, nil)
+	assert.Nil(t, node.fleetQuery, "fleetQuery must be nil before SetFleetQuery")
+
+	node.SetFleetQuery(q)
+	assert.Equal(t, q, node.fleetQuery, "SetFleetQuery must assign the query to the node field")
+}
+
+// TestScriptStepExecutor_SetFleetQuery verifies that SetFleetQuery stores the
+// reference on the executor so it is propagated to created script nodes.
+func TestScriptStepExecutor_SetFleetQuery(t *testing.T) {
+	provider := &testStewardProvider{}
+	q := fleet.NewMemoryQuery(provider)
+
+	executor := NewScriptStepExecutor(nil, nil, nil)
+	assert.Nil(t, executor.fleetQuery, "fleetQuery must be nil before SetFleetQuery")
+
+	executor.SetFleetQuery(q)
+	assert.Equal(t, q, executor.fleetQuery, "SetFleetQuery must assign the query to the executor field")
+}
+
+// TestResolveDeviceIDs_ExplicitDevicesWin verifies that explicit Devices take
+// priority over the fleet filter and the localhost fallback.
+func TestResolveDeviceIDs_ExplicitDevicesWin(t *testing.T) {
+	provider := &testStewardProvider{
+		stewards: []fleet.StewardData{
+			makeSteward("fleet-device", "online", map[string]string{"os": "linux"}),
+		},
+	}
+	q := fleet.NewMemoryQuery(provider)
+
+	node := NewScriptNode("id", "name", &ScriptStepConfig{
+		Devices:      []string{"explicit-device-1", "explicit-device-2"},
+		DeviceFilter: &fleet.Filter{OS: "linux"},
+	}, nil, nil, nil)
+	node.SetFleetQuery(q)
+
+	ids, err := node.resolveDeviceIDs(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"explicit-device-1", "explicit-device-2"}, ids,
+		"explicit Devices must take priority over fleet filter")
+}
+
+// TestResolveDeviceIDs_FleetFilter verifies that the fleet filter is used to
+// resolve device IDs when no explicit devices are configured.
+func TestResolveDeviceIDs_FleetFilter(t *testing.T) {
+	provider := &testStewardProvider{
+		stewards: []fleet.StewardData{
+			makeSteward("linux-1", "online", map[string]string{"os": "linux"}),
+			makeSteward("linux-2", "online", map[string]string{"os": "linux"}),
+			makeSteward("win-1", "online", map[string]string{"os": "windows"}),
+		},
+	}
+	q := fleet.NewMemoryQuery(provider)
+
+	node := NewScriptNode("id", "name", &ScriptStepConfig{
+		DeviceFilter: &fleet.Filter{OS: "linux"},
+	}, nil, nil, nil)
+	node.SetFleetQuery(q)
+
+	ids, err := node.resolveDeviceIDs(context.Background())
+	require.NoError(t, err)
+	require.Len(t, ids, 2)
+	assert.Contains(t, ids, "linux-1")
+	assert.Contains(t, ids, "linux-2")
+}
+
+// TestResolveDeviceIDs_LocalhostFallback verifies that localhost is used when
+// no explicit devices and no device filter are configured.
+func TestResolveDeviceIDs_LocalhostFallback(t *testing.T) {
+	node := NewScriptNode("id", "name", &ScriptStepConfig{}, nil, nil, nil)
+
+	ids, err := node.resolveDeviceIDs(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"localhost"}, ids)
+}
+
+// TestResolveDeviceIDs_ZeroMatch verifies that a fleet filter matching no
+// devices returns (nil, nil) — zero-match is success with a warning, not an error.
+func TestResolveDeviceIDs_ZeroMatch(t *testing.T) {
+	provider := &testStewardProvider{
+		stewards: []fleet.StewardData{
+			makeSteward("win-1", "online", map[string]string{"os": "windows"}),
+		},
+	}
+	q := fleet.NewMemoryQuery(provider)
+
+	node := NewScriptNode("id", "name", &ScriptStepConfig{
+		DeviceFilter: &fleet.Filter{OS: "linux"}, // no linux devices
+	}, nil, nil, nil)
+	node.SetFleetQuery(q)
+
+	ids, err := node.resolveDeviceIDs(context.Background())
+	require.NoError(t, err, "zero-match must not return an error")
+	assert.Empty(t, ids, "zero-match must return an empty ID list")
+}
+
+// TestResolveDeviceIDs_FilterWithoutFleetQuery verifies that when a device
+// filter is set but no fleet query is injected, localhost fallback is used.
+func TestResolveDeviceIDs_FilterWithoutFleetQuery(t *testing.T) {
+	node := NewScriptNode("id", "name", &ScriptStepConfig{
+		DeviceFilter: &fleet.Filter{OS: "linux"},
+	}, nil, nil, nil)
+	// No SetFleetQuery call.
+
+	ids, err := node.resolveDeviceIDs(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"localhost"}, ids, "missing fleet query falls back to localhost")
+}
+
+// TestResolveDeviceIDs_ReEvaluatedEachCall verifies that the fleet filter is
+// re-evaluated on every resolveDeviceIDs call, so recurring workflows pick up
+// newly registered devices without node recreation.
+func TestResolveDeviceIDs_ReEvaluatedEachCall(t *testing.T) {
+	provider := &testStewardProvider{
+		stewards: []fleet.StewardData{
+			makeSteward("device-1", "online", map[string]string{"os": "linux"}),
+		},
+	}
+	q := fleet.NewMemoryQuery(provider)
+
+	node := NewScriptNode("id", "name", &ScriptStepConfig{
+		DeviceFilter: &fleet.Filter{OS: "linux"},
+	}, nil, nil, nil)
+	node.SetFleetQuery(q)
+
+	ids1, err := node.resolveDeviceIDs(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, ids1, 1)
+
+	// Add a new device to the provider.
+	provider.stewards = append(provider.stewards,
+		makeSteward("device-2", "online", map[string]string{"os": "linux"}),
+	)
+
+	ids2, err := node.resolveDeviceIDs(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, ids2, 2, "second call must re-evaluate the filter and see the new device")
+}
+
+// TestScriptStepConfig_DeviceFilter_UsesFleetFilter verifies that
+// ScriptStepConfig.DeviceFilter is typed as *fleet.Filter (not a local struct).
+func TestScriptStepConfig_DeviceFilter_UsesFleetFilter(t *testing.T) {
+	f := &fleet.Filter{
+		OS:           "linux",
+		Architecture: "amd64",
+		Tags:         []string{"production"},
+		Status:       "online",
+	}
+	cfg := ScriptStepConfig{DeviceFilter: f}
+	assert.Equal(t, f, cfg.DeviceFilter)
+}
+
+// TestResolveDeviceIDs_FleetQueryError verifies that a fleet query error is
+// propagated as an error from resolveDeviceIDs (not silently swallowed).
+func TestResolveDeviceIDs_FleetQueryError(t *testing.T) {
+	sentinel := fmt.Errorf("fleet backend unavailable")
+	node := NewScriptNode("id", "name", &ScriptStepConfig{
+		DeviceFilter: &fleet.Filter{OS: "linux"},
+	}, nil, nil, nil)
+	node.SetFleetQuery(&errorFleetQuery{err: sentinel})
+
+	ids, err := node.resolveDeviceIDs(context.Background())
+	require.Error(t, err, "fleet query error must be returned, not swallowed")
+	assert.Contains(t, err.Error(), "fleet query failed")
+	assert.Contains(t, err.Error(), sentinel.Error())
+	assert.Nil(t, ids)
+}
+
+// TestParseScriptStepConfig_DeviceFilter verifies that parseScriptStepConfig
+// correctly deserialises all device_filter sub-fields into a *fleet.Filter.
+func TestParseScriptStepConfig_DeviceFilter(t *testing.T) {
+	rawConfig := map[string]interface{}{
+		"shell":         "bash",
+		"inline_script": "echo hello",
+		"device_filter": map[string]interface{}{
+			"tenant_id":    "msp-a/client-1",
+			"os":           "linux",
+			"platform":     "ubuntu",
+			"architecture": "amd64",
+			"status":       "online",
+			"hostname":     "web-server",
+			"tags":         []interface{}{"production", "web"},
+			"dna_attributes": map[string]interface{}{
+				"env":    "prod",
+				"region": "us-east-1",
+			},
+		},
+	}
+
+	config, err := parseScriptStepConfig(rawConfig)
+	require.NoError(t, err)
+	require.NotNil(t, config.DeviceFilter, "DeviceFilter must be populated")
+
+	f := config.DeviceFilter
+	assert.Equal(t, "msp-a/client-1", f.TenantID)
+	assert.Equal(t, "linux", f.OS)
+	assert.Equal(t, "ubuntu", f.Platform)
+	assert.Equal(t, "amd64", f.Architecture)
+	assert.Equal(t, "online", f.Status)
+	assert.Equal(t, "web-server", f.Hostname)
+	assert.Equal(t, []string{"production", "web"}, f.Tags)
+	assert.Equal(t, map[string]string{"env": "prod", "region": "us-east-1"}, f.DNAAttributes)
+}
+
+// TestParseScriptStepConfig_DeviceFilter_Absent verifies that a missing
+// device_filter key results in a nil DeviceFilter (not an empty struct).
+func TestParseScriptStepConfig_DeviceFilter_Absent(t *testing.T) {
+	config, err := parseScriptStepConfig(map[string]interface{}{
+		"shell": "bash",
+	})
+	require.NoError(t, err)
+	assert.Nil(t, config.DeviceFilter, "DeviceFilter must be nil when not specified")
 }

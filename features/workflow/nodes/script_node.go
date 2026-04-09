@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -30,11 +31,14 @@ type ScriptStepConfig struct {
 	// Parameters are custom parameters to pass to the script
 	Parameters map[string]string `yaml:"parameters,omitempty" json:"parameters,omitempty"`
 
-	// Devices specifies which devices to run the script on
+	// Devices specifies explicit device IDs to run the script on.
+	// Takes priority over DeviceFilter when non-empty.
 	Devices []string `yaml:"devices,omitempty" json:"devices,omitempty"`
 
-	// DeviceFilter allows filtering devices by criteria
-	DeviceFilter *DeviceFilter `yaml:"device_filter,omitempty" json:"device_filter,omitempty"`
+	// DeviceFilter resolves target devices via the fleet package at execution
+	// time. Re-evaluated on every Execute call (recurring workflow support).
+	// Ignored when Devices is non-empty.
+	DeviceFilter *fleet.Filter `yaml:"device_filter,omitempty" json:"device_filter,omitempty"`
 
 	// Timeout for script execution
 	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
@@ -61,21 +65,6 @@ type ScriptStepConfig struct {
 
 	// OnFailure defines actions to take on failed execution
 	OnFailure *ScriptActionConfig `yaml:"on_failure,omitempty" json:"on_failure,omitempty"`
-}
-
-// DeviceFilter defines criteria for filtering devices
-type DeviceFilter struct {
-	// Platform filters by platform (windows, linux, darwin)
-	Platform string `yaml:"platform,omitempty" json:"platform,omitempty"`
-
-	// DNAQuery filters by DNA properties
-	DNAQuery map[string]interface{} `yaml:"dna_query,omitempty" json:"dna_query,omitempty"`
-
-	// Tags filters by device tags
-	Tags []string `yaml:"tags,omitempty" json:"tags,omitempty"`
-
-	// Groups filters by device groups
-	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
 }
 
 // ScriptActionConfig defines actions to take based on script results
@@ -112,6 +101,7 @@ type ScriptNode struct {
 	dnaProvider    script.DNAProvider
 	configProvider script.ConfigProvider
 	secretStore    interfaces.SecretStore
+	fleetQuery     fleet.FleetQuery
 }
 
 // NewScriptNode creates a new script execution node
@@ -127,6 +117,38 @@ func NewScriptNode(id, name string, config *ScriptStepConfig, repository script.
 		monitor:    monitor,
 		keyManager: keyManager,
 	}
+}
+
+// resolveDeviceIDs returns the device IDs to target for this execution.
+// Priority: explicit Devices > fleet filter > localhost fallback.
+// A fleet filter matching zero devices returns (nil, nil) — the caller logs a
+// warning and returns success rather than treating this as an error.
+// The filter is re-evaluated on every call to support recurring workflows.
+func (n *ScriptNode) resolveDeviceIDs(ctx context.Context) ([]string, error) {
+	// Priority 1: explicit device list wins
+	if len(n.config.Devices) > 0 {
+		return n.config.Devices, nil
+	}
+
+	// Priority 2: fleet filter (re-evaluated each call for recurring workflows)
+	if n.config.DeviceFilter != nil && n.fleetQuery != nil {
+		results, err := n.fleetQuery.Search(ctx, *n.config.DeviceFilter)
+		if err != nil {
+			return nil, fmt.Errorf("fleet query failed: %w", err)
+		}
+		if len(results) == 0 {
+			// Zero-match: not an error — caller logs warning and returns success.
+			return nil, nil
+		}
+		ids := make([]string, len(results))
+		for i, r := range results {
+			ids[i] = r.ID
+		}
+		return ids, nil
+	}
+
+	// Priority 3: localhost fallback
+	return []string{"localhost"}, nil
 }
 
 // Execute implements workflow.Node interface
@@ -169,10 +191,24 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 		scriptContent = injectedContent
 	}
 
-	// Start execution monitoring
-	deviceIDs := n.config.Devices
+	// Resolve device IDs — re-evaluated on each Execute for recurring workflows.
+	deviceIDs, err := n.resolveDeviceIDs(ctx)
+	if err != nil {
+		return workflow.NodeOutput{
+			Success: false,
+			Error:   fmt.Sprintf("failed to resolve device IDs: %v", err),
+		}, err
+	}
 	if len(deviceIDs) == 0 {
-		deviceIDs = []string{"localhost"} // Default to localhost
+		// Zero-match from fleet filter: success with warning, no dispatch.
+		logging.NewLogger("warn").Warn("fleet filter matched no devices; skipping script dispatch",
+			"node", n.Name)
+		return workflow.NodeOutput{
+			Success: true,
+			Data: map[string]interface{}{
+				"warning": "fleet filter matched no devices",
+			},
+		}, nil
 	}
 
 	scriptName := n.Name
@@ -332,6 +368,12 @@ func (n *ScriptNode) SetSecretStore(store interfaces.SecretStore) {
 	n.secretStore = store
 }
 
+// SetFleetQuery sets the fleet query implementation used to resolve device IDs
+// from DeviceFilter at execution time.
+func (n *ScriptNode) SetFleetQuery(q fleet.FleetQuery) {
+	n.fleetQuery = q
+}
+
 // ScriptStepExecutor executes script workflow steps
 type ScriptStepExecutor struct {
 	repository     script.ScriptRepository
@@ -340,6 +382,7 @@ type ScriptStepExecutor struct {
 	dnaProvider    script.DNAProvider
 	configProvider script.ConfigProvider
 	secretStore    interfaces.SecretStore
+	fleetQuery     fleet.FleetQuery
 }
 
 // NewScriptStepExecutor creates a new script step executor
@@ -368,6 +411,7 @@ func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step
 	node.SetDNAProvider(e.dnaProvider)
 	node.SetConfigProvider(e.configProvider)
 	node.SetSecretStore(e.secretStore)
+	node.SetFleetQuery(e.fleetQuery)
 
 	// Execute node
 	startTime := time.Now()
@@ -406,6 +450,11 @@ func (e *ScriptStepExecutor) SetConfigProvider(provider script.ConfigProvider) {
 // SetSecretStore sets the secret store for resolving secret bindings in steps.
 func (e *ScriptStepExecutor) SetSecretStore(store interfaces.SecretStore) {
 	e.secretStore = store
+}
+
+// SetFleetQuery sets the fleet query implementation propagated to created script nodes.
+func (e *ScriptStepExecutor) SetFleetQuery(q fleet.FleetQuery) {
+	e.fleetQuery = q
 }
 
 // parseScriptStepConfig converts a map[string]interface{} to ScriptStepConfig
@@ -450,6 +499,46 @@ func parseScriptStepConfig(configMap map[string]interface{}) (*ScriptStepConfig,
 				config.Devices = append(config.Devices, devStr)
 			}
 		}
+	}
+
+	// Parse device_filter into fleet.Filter
+	if df, ok := configMap["device_filter"].(map[string]interface{}); ok {
+		filter := &fleet.Filter{}
+		if v, ok := df["tenant_id"].(string); ok {
+			filter.TenantID = v
+		}
+		if v, ok := df["os"].(string); ok {
+			filter.OS = v
+		}
+		if v, ok := df["platform"].(string); ok {
+			filter.Platform = v
+		}
+		if v, ok := df["architecture"].(string); ok {
+			filter.Architecture = v
+		}
+		if v, ok := df["status"].(string); ok {
+			filter.Status = v
+		}
+		if v, ok := df["hostname"].(string); ok {
+			filter.Hostname = v
+		}
+		if rawTags, ok := df["tags"].([]interface{}); ok {
+			filter.Tags = make([]string, 0, len(rawTags))
+			for _, t := range rawTags {
+				if s, ok := t.(string); ok {
+					filter.Tags = append(filter.Tags, s)
+				}
+			}
+		}
+		if rawAttrs, ok := df["dna_attributes"].(map[string]interface{}); ok {
+			filter.DNAAttributes = make(map[string]string, len(rawAttrs))
+			for k, v := range rawAttrs {
+				if s, ok := v.(string); ok {
+					filter.DNAAttributes[k] = s
+				}
+			}
+		}
+		config.DeviceFilter = filter
 	}
 
 	// Parse timeout duration
