@@ -20,6 +20,10 @@ var (
 	ErrInvalidTimeout        = errors.New("invalid timeout value")
 	ErrEmptyScript           = errors.New("script content cannot be empty")
 	ErrInvalidSigningPolicy  = errors.New("invalid signing policy")
+	// ErrNoUserLoggedIn is returned when logged_in_user execution context is requested
+	// but no interactive user is currently logged in. Callers should queue the execution
+	// for retry rather than treating this as a permanent failure.
+	ErrNoUserLoggedIn = errors.New("no user currently logged in")
 )
 
 // ScriptError represents a script execution error with additional context
