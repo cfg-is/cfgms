@@ -19,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/ctxkeys"
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/monitoring"
@@ -65,6 +66,7 @@ type Server struct {
 	reportsHandler          *reportapi.Handler             // Story #416: Reports engine
 	workflowHandler         *WorkflowHandler               // Story #414: Workflow engine REST API
 	approvalHook            RegistrationApprovalHook       // Issue #422: Registration approval hook
+	fleetQuery              fleet.FleetQuery               // Issue #603: Single query path for device filtering
 }
 
 // APIKey represents an API key for external authentication
@@ -180,10 +182,37 @@ func New(
 	// M-AUTH-1: Do NOT generate default API keys (security anti-pattern)
 	// API keys must be explicitly created by administrators
 
+	// Issue #603: Initialize fleet query using the controller service as the steward provider
+	server.fleetQuery = fleet.NewMemoryQuery(&controllerServiceAdapter{svc: controllerService})
+
 	// Start background cleanup for expired API keys
 	server.startAPIKeyCleanup()
 
 	return server, nil
+}
+
+// controllerServiceAdapter adapts *service.ControllerService to fleet.StewardProvider.
+type controllerServiceAdapter struct {
+	svc *service.ControllerService
+}
+
+func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
+	infos := a.svc.GetAllStewards()
+	result := make([]fleet.StewardData, 0, len(infos))
+	for _, info := range infos {
+		var attrs map[string]string
+		if info.DNA != nil {
+			attrs = info.DNA.Attributes
+		}
+		result = append(result, fleet.StewardData{
+			ID:            info.ID,
+			TenantID:      info.TenantID,
+			Status:        info.Status,
+			LastHeartbeat: info.LastHeartbeat,
+			DNAAttributes: attrs,
+		})
+	}
+	return result
 }
 
 // setupRouter initializes the HTTP router with all routes and middleware

@@ -1,0 +1,274 @@
+# SPDX-License-Identifier: Apache-2.0
+# Composite GitHub Action: sign-scripts
+#
+# Signs scripts changed in a push using `cfg script sign`, then commits the
+# resulting .sig files back to the branch.  Add this action to your MSP script
+# repository CI pipeline so every merge automatically produces verified
+# signatures that CFGMS stewards can enforce.
+#
+# Platforms: ubuntu-latest, windows-latest
+# Requires: cfg binary published to CFGMS releases (v0.4.0+)
+
+name: 'Sign Scripts'
+description: >
+  Signs scripts changed in the current push using cfg script sign.
+  Commits the resulting .sig sidecar files back to the branch.
+
+inputs:
+  signing-key:
+    description: >
+      PEM-encoded RSA or ECDSA private key used for signing.
+      Pass this from a GitHub secret: signing-key: ${{ secrets.SCRIPT_SIGNING_KEY }}
+    required: true
+
+  script-glob:
+    description: >
+      Glob pattern for script files to consider when signing.
+      Only files matching this pattern AND changed in the current push are signed.
+    default: '**/*.{ps1,sh,py,bat,cmd}'
+    required: false
+
+  algorithm:
+    description: >
+      Signing algorithm passed to cfg script sign.
+      Supported values: rsa-sha256, rsa-sha512, ecdsa-sha256, ecdsa-sha384
+    default: 'rsa-sha256'
+    required: false
+
+  cfg-version:
+    description: >
+      Version of the cfg binary to download from CFGMS releases.
+      Use "latest" for the most recent published release, or pin to a specific
+      tag (e.g. "v0.4.0") for reproducible builds.
+    default: 'latest'
+    required: false
+
+  commit-message:
+    description: >
+      Git commit message written when .sig files are committed back.
+      The string "[skip ci]" is included by default to prevent a signing loop.
+    default: 'ci: add script signatures [skip ci]'
+    required: false
+
+  cfgms-repo:
+    description: >
+      GitHub repository from which to download the cfg binary.
+      Override only when hosting a private CFGMS fork.
+    default: 'cfgis/cfgms'
+    required: false
+
+runs:
+  using: composite
+  steps:
+
+    # ── Detect changed scripts (Linux / macOS) ────────────────────────────────
+
+    - name: Detect changed scripts (Linux)
+      id: changed-linux
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        # Collect files changed by the most recent commit.
+        # Falls back to listing all tracked files on the very first commit.
+        if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+          CHANGED=$(git diff --name-only HEAD~1 HEAD)
+        else
+          CHANGED=$(git ls-files)
+        fi
+
+        # Filter to script extensions only.
+        SCRIPTS=$(printf '%s\n' "$CHANGED" \
+          | grep -E '\.(ps1|sh|py|bat|cmd)$' \
+          | tr '\n' ' ' \
+          | sed 's/ $//')
+
+        if [ -z "$SCRIPTS" ]; then
+          echo "No changed scripts match the signing filter."
+        else
+          echo "Scripts to sign: $SCRIPTS"
+        fi
+        echo "scripts=$SCRIPTS" >> "$GITHUB_OUTPUT"
+
+    # ── Detect changed scripts (Windows) ─────────────────────────────────────
+
+    - name: Detect changed scripts (Windows)
+      id: changed-windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $hasParent = git rev-parse --verify HEAD~1 2>$null
+        if ($LASTEXITCODE -eq 0) {
+          $changed = git diff --name-only HEAD~1 HEAD
+        } else {
+          $changed = git ls-files
+        }
+
+        $extensions = @('.ps1', '.sh', '.py', '.bat', '.cmd')
+        $scripts = ($changed | Where-Object {
+          $ext = [IO.Path]::GetExtension($_).ToLower()
+          $extensions -contains $ext
+        }) -join ' '
+
+        if (-not $scripts) {
+          Write-Host "No changed scripts match the signing filter."
+        } else {
+          Write-Host "Scripts to sign: $scripts"
+        }
+        "scripts=$scripts" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+    # ── Download cfg binary (Linux) ───────────────────────────────────────────
+
+    - name: Download cfg binary (Linux)
+      if: runner.os != 'Windows' && steps.changed-linux.outputs.scripts != ''
+      shell: bash
+      env:
+        CFG_VERSION: ${{ inputs.cfg-version }}
+        CFGMS_REPO: ${{ inputs.cfgms-repo }}
+      run: |
+        BASE="https://github.com/${CFGMS_REPO}/releases"
+        if [ "$CFG_VERSION" = "latest" ]; then
+          URL="${BASE}/latest/download/cfg-linux-amd64"
+        else
+          URL="${BASE}/download/${CFG_VERSION}/cfg-linux-amd64"
+        fi
+
+        echo "Downloading cfg from $URL"
+        curl -fsSL "$URL" -o /usr/local/bin/cfg
+        chmod +x /usr/local/bin/cfg
+        cfg version
+
+    # ── Download cfg binary (Windows) ────────────────────────────────────────
+
+    - name: Download cfg binary (Windows)
+      if: runner.os == 'Windows' && steps.changed-windows.outputs.scripts != ''
+      shell: pwsh
+      env:
+        CFG_VERSION: ${{ inputs.cfg-version }}
+        CFGMS_REPO: ${{ inputs.cfgms-repo }}
+      run: |
+        $base = "https://github.com/$env:CFGMS_REPO/releases"
+        if ($env:CFG_VERSION -eq 'latest') {
+          $url = "$base/latest/download/cfg-windows-amd64.exe"
+        } else {
+          $url = "$base/download/$env:CFG_VERSION/cfg-windows-amd64.exe"
+        }
+
+        $cfgBin = Join-Path $env:RUNNER_TEMP 'cfg.exe'
+        Write-Host "Downloading cfg from $url"
+        Invoke-WebRequest -Uri $url -OutFile $cfgBin -UseBasicParsing
+        # Add RUNNER_TEMP to PATH for subsequent steps
+        "$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        & $cfgBin version
+
+    # ── Sign changed scripts (Linux) ──────────────────────────────────────────
+    # The signing key is passed via an environment variable so GitHub's secret
+    # masking applies automatically. The temp file is cleaned up via trap.
+
+    - name: Sign changed scripts (Linux)
+      if: runner.os != 'Windows' && steps.changed-linux.outputs.scripts != ''
+      shell: bash
+      env:
+        SIGNING_KEY: ${{ inputs.signing-key }}
+        CFG_ALGORITHM: ${{ inputs.algorithm }}
+        CFG_SCRIPTS: ${{ steps.changed-linux.outputs.scripts }}
+      run: |
+        KEY_FILE=$(mktemp /tmp/cfgms-key.XXXXXX)
+        chmod 600 "$KEY_FILE"
+        # Register cleanup before writing the key so it is removed on any exit.
+        trap 'rm -f "$KEY_FILE"' EXIT
+
+        printf '%s' "$SIGNING_KEY" > "$KEY_FILE"
+
+        FAILED=0
+        for script in $CFG_SCRIPTS; do
+          if [ ! -f "$script" ]; then
+            echo "Warning: $script not found, skipping."
+            continue
+          fi
+          echo "Signing: $script"
+          if ! cfg script sign \
+              --key "$KEY_FILE" \
+              --algorithm "$CFG_ALGORITHM" \
+              "$script"; then
+            echo "ERROR: failed to sign $script"
+            FAILED=1
+          fi
+        done
+
+        exit $FAILED
+
+    # ── Sign changed scripts (Windows) ────────────────────────────────────────
+
+    - name: Sign changed scripts (Windows)
+      if: runner.os == 'Windows' && steps.changed-windows.outputs.scripts != ''
+      shell: pwsh
+      env:
+        SIGNING_KEY: ${{ inputs.signing-key }}
+        CFG_ALGORITHM: ${{ inputs.algorithm }}
+        CFG_SCRIPTS: ${{ steps.changed-windows.outputs.scripts }}
+      run: |
+        $keyFile = Join-Path $env:RUNNER_TEMP 'cfgms-key.pem'
+        try {
+          [IO.File]::WriteAllText($keyFile, $env:SIGNING_KEY)
+
+          $failed = $false
+          foreach ($script in ($env:CFG_SCRIPTS -split '\s+' | Where-Object { $_ })) {
+            if (-not (Test-Path $script)) {
+              Write-Host "Warning: $script not found, skipping."
+              continue
+            }
+            Write-Host "Signing: $script"
+            cfg script sign `
+              --key $keyFile `
+              --algorithm $env:CFG_ALGORITHM `
+              $script
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to sign $script"
+              $failed = $true
+            }
+          }
+
+          if ($failed) { exit 1 }
+        } finally {
+          if (Test-Path $keyFile) { Remove-Item -Force $keyFile }
+        }
+
+    # ── Commit .sig files back to the branch ─────────────────────────────────
+
+    - name: Commit signature files (Linux)
+      if: runner.os != 'Windows' && steps.changed-linux.outputs.scripts != ''
+      shell: bash
+      env:
+        COMMIT_MSG: ${{ inputs.commit-message }}
+      run: |
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Stage .sig sidecars only — never stage anything else.
+        git add -- '*.sig'
+
+        if git diff --cached --quiet; then
+          echo "No new .sig files to commit."
+        else
+          git commit -m "$COMMIT_MSG"
+          git push
+        fi
+
+    - name: Commit signature files (Windows)
+      if: runner.os == 'Windows' && steps.changed-windows.outputs.scripts != ''
+      shell: pwsh
+      env:
+        COMMIT_MSG: ${{ inputs.commit-message }}
+      run: |
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        git add -- '*.sig'
+
+        git diff --cached --quiet
+        if ($LASTEXITCODE -eq 0) {
+          Write-Host "No new .sig files to commit."
+        } else {
+          git commit -m $env:COMMIT_MSG
+          git push
+        }

@@ -71,16 +71,22 @@ Flag and block if the story implies any of these:
 
 ## Passing a Story
 
+**IMPORTANT:** Use `./scripts/pipeline-helper.sh` for ALL GitHub write operations. Direct `gh` calls with heredocs, subshells, or compound commands will be blocked by permission rules.
+
 When all 5 checks pass:
 
 1. Update the issue body with any additions (implementation notes, dependency fixes):
    ```bash
-   gh issue edit <NUM> --repo cfg-is/cfgms --body "<updated body>"
+   # Fetch current body, write updated version to temp file
+   gh issue view <NUM> --repo cfg-is/cfgms --json body -q .body > /tmp/story-<NUM>-body.md
+   # ... edit the file to add implementation notes ...
+   ./scripts/pipeline-helper.sh edit-body <NUM> /tmp/story-<NUM>-body.md
+   rm /tmp/story-<NUM>-body.md
    ```
 
 2. Promote labels:
    ```bash
-   gh issue edit <NUM> --repo cfg-is/cfgms --remove-label "pipeline:draft" --add-label "agent:ready"
+   ./scripts/pipeline-helper.sh promote <NUM>
    ```
 
 ## Failing a Story
@@ -89,11 +95,7 @@ When any check fails:
 
 1. Create a `pipeline:blocked` issue with the specific gap:
    ```bash
-   gh issue create --repo cfg-is/cfgms \
-     --title "Tech Lead: story #<NUM> — <specific issue>" \
-     --label "pipeline:blocked" \
-     --assignee "jrdn" \
-     --body "$(cat <<'EOF'
+   cat > /tmp/blocked-<NUM>.md <<'BLOCK_EOF'
    ## Blocked Story
 
    #<NUM> — <story title>
@@ -105,8 +107,10 @@ When any check fails:
    ## Recommendation
 
    <What the founder should do to unblock — e.g., split the story, clarify scope, approve a dependency>
-   EOF
-   )"
+   BLOCK_EOF
+
+   ./scripts/pipeline-helper.sh block <NUM> "Tech Lead: story #<NUM> — <specific issue>" /tmp/blocked-<NUM>.md
+   rm /tmp/blocked-<NUM>.md
    ```
 
 2. Leave the story as `pipeline:draft` — do NOT remove the label
@@ -119,7 +123,7 @@ After reviewing all stories, post a summary comment on the parent epic:
 # Find parent epic from story body
 EPIC_NUM=<extracted from ## Parent Epic section>
 
-gh issue comment $EPIC_NUM --repo cfg-is/cfgms --body "$(cat <<'EOF'
+cat > /tmp/tl-summary.md <<'SUMMARY_EOF'
 ## Tech Lead Review Complete
 
 ### Promoted to agent:ready
@@ -130,8 +134,10 @@ gh issue comment $EPIC_NUM --repo cfg-is/cfgms --body "$(cat <<'EOF'
 
 ### Still draft (awaiting dependency)
 - #NNN — depends on #NNN
-EOF
-)"
+SUMMARY_EOF
+
+./scripts/pipeline-helper.sh comment $EPIC_NUM /tmp/tl-summary.md
+rm /tmp/tl-summary.md
 ```
 
 ## Rules

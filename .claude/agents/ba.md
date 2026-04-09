@@ -115,38 +115,41 @@ Each story must use this exact format:
 
 ## Creating Stories
 
-For each story, create the issue and link it as a sub-issue:
+**IMPORTANT:** Use `./scripts/pipeline-helper.sh` for ALL GitHub write operations. Direct `gh` calls with heredocs, subshells, or compound commands will be blocked by permission rules.
+
+For each story, write the body to a temp file and use the helper:
 
 ```bash
-# Create the story issue
-STORY_URL=$(gh issue create --repo cfg-is/cfgms \
-  --title "<scope>: <concise description, <70 chars>" \
-  --label "pipeline:story,pipeline:draft" \
-  --body "<full story body>")
+# Write story body to a temp file
+cat > /tmp/story-body.md <<'STORY_EOF'
+## Parent Epic
+...full story body...
+STORY_EOF
 
-# Link as sub-issue of the epic
-EPIC_ID=$(gh issue view $ARGUMENTS --repo cfg-is/cfgms --json id -q .id)
-gh api graphql -f query='
-  mutation($parentId: ID!, $childUrl: String!) {
-    addSubIssue(input: {issueId: $parentId, subIssueUrl: $childUrl}) {
-      issue { number }
-      subIssue { number }
-    }
-  }
-' -f parentId="$EPIC_ID" -f childUrl="$STORY_URL"
+# Create the story issue AND link as sub-issue (helper does both)
+./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md
+# Output: CREATED:<NUM>:<URL> then LINKED:<NUM>:epic-<EPIC_NUM>
+
+rm /tmp/story-body.md
 ```
 
 ## Ambiguity Handling
 
 If you encounter ambiguity that prevents correct decomposition:
 
-1. Create a `pipeline:blocked` issue assigned to the founder:
+1. Create a `pipeline:blocked` issue:
    ```bash
-   gh issue create --repo cfg-is/cfgms \
-     --title "BA blocked: <specific question about epic #EPIC_NUMBER>" \
-     --label "pipeline:blocked" \
-     --assignee "jrdn" \
-     --body "<the specific question and enough context to answer it>"
+   cat > /tmp/blocked-body.md <<'BLOCK_EOF'
+   ## Blocked Story
+   #<NUM> — <story title>
+   ## Issue
+   <What specifically prevents decomposition>
+   ## Recommendation
+   <What the founder should do>
+   BLOCK_EOF
+
+   ./scripts/pipeline-helper.sh block <STORY_NUM> "BA blocked: <specific question about epic #NUM>" /tmp/blocked-body.md
+   rm /tmp/blocked-body.md
    ```
 2. Continue decomposing stories you CAN write. Partial decomposition is acceptable.
 3. Report back what was created and what is blocked.
@@ -156,7 +159,7 @@ If you encounter ambiguity that prevents correct decomposition:
 After creating all stories, post a completion comment on the epic:
 
 ```bash
-gh issue comment $ARGUMENTS --repo cfg-is/cfgms --body "$(cat <<'EOF'
+cat > /tmp/ba-summary.md <<'SUMMARY_EOF'
 ## BA Decomposition Complete
 
 Stories created:
@@ -167,8 +170,10 @@ Stories created:
 Dependency order: #A → #B → #C
 
 Blocked items: <none, or list>
-EOF
-)"
+SUMMARY_EOF
+
+./scripts/pipeline-helper.sh comment <EPIC_NUM> /tmp/ba-summary.md
+rm /tmp/ba-summary.md
 ```
 
 ## Rules

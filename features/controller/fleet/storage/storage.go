@@ -104,6 +104,10 @@ type DNARecord struct {
 	CompressionRatio float64       `json:"compression_ratio"`
 	Version          int64         `json:"version"`  // Incremental version for this device
 	ShardID          string        `json:"shard_id"` // Which shard contains this record
+
+	// Fleet query fields — extracted from DNA attributes for indexed access
+	TenantID string `json:"tenant_id"`
+	Status   string `json:"status"`
 }
 
 // TimeRange defines a time range for historical queries
@@ -190,6 +194,14 @@ func NewManager(config *Config, logger logging.Logger) (*Manager, error) {
 	return manager, nil
 }
 
+// StoreOptions provides optional metadata for DNA storage operations.
+type StoreOptions struct {
+	// TenantID identifies which tenant this steward belongs to.
+	TenantID string
+	// Status is the current steward status (e.g. "online", "offline", "registered").
+	Status string
+}
+
 // Store stores a DNA record for the specified device with deduplication and compression.
 //
 // The storage process includes:
@@ -198,7 +210,7 @@ func NewManager(config *Config, logger logging.Logger) (*Manager, error) {
 // 3. Shard assignment for horizontal scaling
 // 4. Index updates for fast queries
 // 5. Retention policy enforcement
-func (m *Manager) Store(ctx context.Context, deviceID string, dna *commonpb.DNA) error {
+func (m *Manager) Store(ctx context.Context, deviceID string, dna *commonpb.DNA, opts *StoreOptions) error {
 	startTime := time.Now()
 
 	// Generate content hash for deduplication
@@ -241,6 +253,14 @@ func (m *Manager) Store(ctx context.Context, deviceID string, dna *commonpb.DNA)
 		return fmt.Errorf("failed to get next version: %w", err)
 	}
 
+	// Populate fleet query metadata from options
+	tenantID := ""
+	status := ""
+	if opts != nil {
+		tenantID = opts.TenantID
+		status = opts.Status
+	}
+
 	// Create DNA record
 	record := &DNARecord{
 		DeviceID:         deviceID,
@@ -252,6 +272,8 @@ func (m *Manager) Store(ctx context.Context, deviceID string, dna *commonpb.DNA)
 		CompressionRatio: compressionRatio,
 		Version:          version,
 		ShardID:          shardID,
+		TenantID:         tenantID,
+		Status:           status,
 	}
 
 	// Store compressed data and record
@@ -361,6 +383,11 @@ func (m *Manager) GetHistory(ctx context.Context, deviceID string, options *Quer
 		"compression_savings", compressionSavings)
 
 	return result, nil
+}
+
+// GetLatest retrieves the most recent DNA record for a device (alias for GetCurrent).
+func (m *Manager) GetLatest(ctx context.Context, deviceID string) (*DNARecord, error) {
+	return m.GetCurrent(ctx, deviceID)
 }
 
 // GetCurrent retrieves the most recent DNA record for a device.

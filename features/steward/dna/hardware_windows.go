@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 // WindowsHardwareCollector handles Windows-specific hardware collection.
@@ -147,19 +149,8 @@ func (w *WindowsHardwareCollector) CollectMotherboard(ctx context.Context, attri
 		w.parseWMIUUIDOutput(uuidOutput, attributes)
 	}
 
-	// OS version for hardware context — primary: wmic
-	osOutput, err := runCommand(ctx, "wmic", "os", "get",
-		"Caption,Version,BuildNumber", "/format:csv")
-	if err == nil {
-		w.parseWMIOSVersionOutput(osOutput, attributes)
-	} else {
-		// Fallback: PowerShell
-		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
-			"Get-CimInstance -ClassName Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber | ConvertTo-Csv -NoTypeInformation")
-		if psErr == nil {
-			w.parsePowerShellOSOutput(psOut, attributes)
-		}
-	}
+	// OS version for hardware context — native registry reads (no process spawn)
+	w.collectOSVersionFromRegistry(attributes)
 
 	return nil
 }
@@ -524,54 +515,29 @@ func (w *WindowsHardwareCollector) parseWMIUUIDOutput(output string, attributes 
 	}
 }
 
-// parseWMIOSVersionOutput parses minimal OS info from wmic for hardware context
-func (w *WindowsHardwareCollector) parseWMIOSVersionOutput(output string, attributes map[string]string) {
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "Node") {
-			continue
-		}
-
-		fields := strings.Split(line, ",")
-		if len(fields) >= 4 {
-			if fields[1] != "" {
-				attributes["windows_build_number"] = fields[1]
-			}
-			if fields[2] != "" {
-				attributes["windows_caption"] = fields[2]
-			}
-			if fields[3] != "" {
-				attributes["windows_version"] = fields[3]
-			}
-		}
+// collectOSVersionFromRegistry reads Windows version info directly from the
+// registry for the hardware cache fast path. No process spawn required.
+func (w *WindowsHardwareCollector) collectOSVersionFromRegistry(attributes map[string]string) {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE)
+	if err != nil {
+		return
 	}
-}
+	defer key.Close()
 
-func (w *WindowsHardwareCollector) parsePowerShellOSOutput(output string, attributes map[string]string) {
-	lines := strings.Split(output, "\n")
-	for i, line := range lines {
-		if i == 0 { // Skip header
-			continue
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
+	if product, _, err := key.GetStringValue("ProductName"); err == nil {
+		attributes["windows_caption"] = product
+	}
 
-		fields := w.parseCSVLine(line)
-		if len(fields) >= 3 {
-			if fields[0] != "" {
-				attributes["windows_build_number"] = fields[0]
-			}
-			if fields[1] != "" {
-				attributes["windows_caption"] = fields[1]
-			}
-			if fields[2] != "" {
-				attributes["windows_version"] = fields[2]
-			}
-		}
-		break // Only process first OS entry
+	if build, _, err := key.GetStringValue("CurrentBuildNumber"); err == nil {
+		attributes["windows_build_number"] = build
+	}
+
+	major, _, majorErr := key.GetIntegerValue("CurrentMajorVersionNumber")
+	minor, _, minorErr := key.GetIntegerValue("CurrentMinorVersionNumber")
+	buildStr, _, buildErr := key.GetStringValue("CurrentBuildNumber")
+	if majorErr == nil && minorErr == nil && buildErr == nil {
+		attributes["windows_version"] = fmt.Sprintf("%d.%d.%s", major, minor, buildStr)
 	}
 }
 

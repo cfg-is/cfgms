@@ -163,14 +163,34 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 }
 
 // runBackgroundCollection collects slow software and security data asynchronously.
+// Software and security run concurrently since they write to separate attribute keys.
 // It merges results into slowAttrs and closes bgDone when finished.
 func (c *Collector) runBackgroundCollection(ctx context.Context) {
 	c.logger.Debug("Starting background DNA collection (software + security)")
 	start := time.Now()
 
-	slowAttrs := make(map[string]string)
-	c.collectSoftwareInfo(ctx, slowAttrs)
-	c.collectSecurityInfo(ctx, slowAttrs)
+	swAttrs := make(map[string]string)
+	secAttrs := make(map[string]string)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		c.collectSoftwareInfo(ctx, swAttrs)
+	}()
+	go func() {
+		defer wg.Done()
+		c.collectSecurityInfo(ctx, secAttrs)
+	}()
+	wg.Wait()
+
+	slowAttrs := make(map[string]string, len(swAttrs)+len(secAttrs))
+	for k, v := range swAttrs {
+		slowAttrs[k] = v
+	}
+	for k, v := range secAttrs {
+		slowAttrs[k] = v
+	}
 
 	c.slowMu.Lock()
 	c.slowAttrs = slowAttrs
