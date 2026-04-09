@@ -488,10 +488,10 @@ func parseScriptStepConfig(configMap map[string]interface{}) (*ScriptStepConfig,
 	// Parse secret_bindings slice
 	if rawBindings, ok := configMap["secret_bindings"].([]interface{}); ok {
 		config.SecretBindings = make([]script.ParamBinding, 0, len(rawBindings))
-		for _, rb := range rawBindings {
+		for i, rb := range rawBindings {
 			bm, ok := rb.(map[string]interface{})
 			if !ok {
-				continue
+				return nil, fmt.Errorf("secret_bindings[%d]: expected a mapping, got %T", i, rb)
 			}
 			var binding script.ParamBinding
 			if name, ok := bm["name"].(string); ok {

@@ -88,6 +88,23 @@ func TestParseScriptStepConfig_SecretBindings(t *testing.T) {
 	assert.Equal(t, "https://example.com", api.Value)
 }
 
+// TestParseScriptStepConfig_MalformedBinding verifies that parseScriptStepConfig
+// returns an error when a secret_bindings entry is not a map (e.g. a bare string
+// in YAML), so that misconfigured bindings are never silently dropped.
+func TestParseScriptStepConfig_MalformedBinding(t *testing.T) {
+	rawConfig := map[string]interface{}{
+		"shell": "bash",
+		"secret_bindings": []interface{}{
+			"not-a-map", // invalid — must be map[string]interface{}
+		},
+	}
+
+	config, err := parseScriptStepConfig(rawConfig)
+	require.Error(t, err, "malformed binding entry must return an error, not be silently dropped")
+	assert.Nil(t, config)
+	assert.Contains(t, err.Error(), "secret_bindings[0]")
+}
+
 // TestParseScriptStepConfig_EmptySecretBindings verifies that parseScriptStepConfig
 // returns no bindings when the key is absent.
 func TestParseScriptStepConfig_EmptySecretBindings(t *testing.T) {
