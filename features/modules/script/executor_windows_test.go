@@ -8,6 +8,7 @@ package script
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,7 +133,21 @@ func TestApplyExecutionContext_Windows_LoggedInUser_WithUser(t *testing.T) {
 
 	original := exec.CommandContext(ctx, "powershell.exe", "-Command", "echo hello")
 	cmd, actualUser, cleanup, err := applyExecutionContext(ctx, config, original)
-	require.NoError(t, err)
+	if err != nil {
+		errMsg := err.Error()
+		// WTSQueryUserToken requires SE_TCB_NAME privilege, which is typically
+		// unavailable in CI runners (e.g., GitHub Actions runneradmin). Skip
+		// rather than fail when the error is privilege-related.
+		if strings.Contains(errMsg, "privilege") ||
+			strings.Contains(errMsg, "SE_TCB_NAME") ||
+			strings.Contains(errMsg, "Access is denied") ||
+			strings.Contains(errMsg, "WTSQueryUserToken") {
+			cleanup()
+			t.Skipf("insufficient privilege for user-token acquisition: %v", err)
+		}
+		cleanup()
+		require.NoError(t, err, "unexpected error from applyExecutionContext")
+	}
 	cleanup()
 
 	assert.Equal(t, user, actualUser, "actualUser must match the detected console user")
