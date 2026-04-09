@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/controller/ctxkeys"
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -23,13 +25,58 @@ import (
 var identifierRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // handleListStewards handles GET /api/v1/stewards
+// Supports optional query parameters for filtered search: os, platform, arch, status, hostname,
+// tag (repeatable). TenantID is always taken from the authenticated context, never from query params.
+// When no query params are provided, the existing all-stewards behavior is preserved.
 func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
-	// Get all stewards from the controller service (connected stewards with heartbeats)
+	// Extract tenant from authenticated context (same pattern as handleUpdateStewardConfig).
+	tenantID := ""
+	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
+		tenantID = tid
+	}
+
+	// Build a filter from query params and authenticated tenant scope.
+	filter, err := buildFleetFilter(r, tenantID)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_FILTER")
+		return
+	}
+
+	// When a filter is specified, use FleetQuery for filtered results (connected stewards only).
+	if !isEmptyFilter(filter) {
+		results, err := s.fleetQuery.Search(r.Context(), filter)
+		if err != nil {
+			s.logger.Error("Fleet query failed", "error", err)
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
+			return
+		}
+		stewardList := make([]StewardInfo, 0, len(results))
+		for _, res := range results {
+			info := StewardInfo{
+				ID:       res.ID,
+				Status:   res.Status,
+				LastSeen: res.LastHeartbeat,
+			}
+			if len(res.DNAAttributes) > 0 {
+				info.DNA = &DNAInfo{
+					Hostname:     res.Hostname,
+					OS:           res.OS,
+					Architecture: res.Architecture,
+					Attributes:   res.DNAAttributes,
+				}
+			}
+			stewardList = append(stewardList, info)
+		}
+		s.logger.Info("Listed stewards (filtered)", "count", len(stewardList))
+		s.writeSuccessResponse(w, stewardList)
+		return
+	}
+
+	// No filter: existing behavior — return all stewards including registered-but-not-connected.
 	stewards := s.controllerService.GetAllStewards()
 
-	// Convert to API response format
 	stewardList := make([]StewardInfo, 0, len(stewards))
-	seenStewards := make(map[string]bool) // Track which stewards we've seen
+	seenStewards := make(map[string]bool)
 
 	for _, steward := range stewards {
 		info := StewardInfo{
@@ -37,11 +84,10 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			Version:     steward.Version,
 			Status:      steward.Status,
 			LastSeen:    steward.LastHeartbeat,
-			ConnectedAt: steward.LastHeartbeat, // Using LastHeartbeat as ConnectedAt for now
+			ConnectedAt: steward.LastHeartbeat,
 			Metrics:     steward.Metrics,
 		}
 
-		// Convert DNA if available
 		if steward.DNA != nil {
 			info.DNA = &DNAInfo{
 				Hostname:     steward.DNA.Attributes["hostname"],
@@ -55,11 +101,9 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		seenStewards[steward.ID] = true
 	}
 
-	// Also include recently registered stewards that may not have connected yet
 	s.mu.RLock()
 	for stewardID, registered := range s.registeredStewards {
 		if !seenStewards[stewardID] {
-			// Steward registered but hasn't connected yet
 			info := StewardInfo{
 				ID:          stewardID,
 				Status:      registered.Status,
@@ -73,6 +117,57 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("Listed stewards", "count", len(stewardList))
 	s.writeSuccessResponse(w, stewardList)
+}
+
+// buildFleetFilter constructs a fleet.Filter from HTTP query parameters.
+// tenantID comes from the authenticated context, not from query params, to prevent
+// cross-tenant enumeration. Recognized params: os, platform, arch, status, hostname,
+// tag (repeatable).
+//
+// Validation rules:
+//   - status must be "online", "offline", "any", or empty
+//   - string fields are capped at 253 characters (max DNS hostname length)
+func buildFleetFilter(r *http.Request, tenantID string) (fleet.Filter, error) {
+	const maxFieldLen = 253
+	q := r.URL.Query()
+
+	status := q.Get("status")
+	if status != "" && status != "online" && status != "offline" && status != "any" {
+		return fleet.Filter{}, fmt.Errorf("invalid status %q: must be online, offline, or any", status)
+	}
+
+	os := q.Get("os")
+	platform := q.Get("platform")
+	arch := q.Get("arch")
+	hostname := q.Get("hostname")
+
+	for name, val := range map[string]string{"os": os, "platform": platform, "arch": arch, "hostname": hostname} {
+		if len(val) > maxFieldLen {
+			return fleet.Filter{}, fmt.Errorf("filter field %q exceeds maximum length of %d", name, maxFieldLen)
+		}
+	}
+
+	return fleet.Filter{
+		TenantID:     tenantID,
+		OS:           os,
+		Platform:     platform,
+		Architecture: arch,
+		Status:       status,
+		Hostname:     hostname,
+		Tags:         q["tag"],
+	}, nil
+}
+
+// isEmptyFilter reports whether a filter has no criteria set.
+func isEmptyFilter(f fleet.Filter) bool {
+	return f.TenantID == "" &&
+		f.OS == "" &&
+		f.Platform == "" &&
+		f.Architecture == "" &&
+		f.Status == "" &&
+		f.Hostname == "" &&
+		len(f.Tags) == 0 &&
+		len(f.DNAAttributes) == 0
 }
 
 // handleGetSteward handles GET /api/v1/stewards/{id}

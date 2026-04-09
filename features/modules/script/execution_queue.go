@@ -5,235 +5,265 @@ package script
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 )
 
-// ExecutionQueue manages pending script executions for offline devices
+// ExecutionQueue manages pending script executions for offline devices.
+// All state is persisted through a QueueStore, so executions survive controller
+// restarts. The state machine enforces: queued → dispatched → completed/failed.
+// Dispatched executions that receive no completion callback within dispatchTimeout
+// are automatically re-queued for retry on next steward reconnect.
 type ExecutionQueue struct {
-	queue         map[string][]*QueuedExecution // deviceID -> executions
-	mu            sync.RWMutex
-	monitor       *ExecutionMonitor
-	keyManager    *EphemeralKeyManager
-	maxAge        time.Duration // Maximum time to keep queued executions
-	controllerURL string        // Controller external URL for script callbacks
+	store           QueueStore
+	scriptRepo      ScriptRepository // optional; used for latest-version content resolution
+	monitor         *ExecutionMonitor
+	keyManager      *EphemeralKeyManager
+	maxAge          time.Duration  // Maximum time to keep queued executions
+	dispatchTimeout time.Duration  // Maximum time a dispatched execution may wait before re-queue
+	controllerURL   string         // Controller external URL for script callbacks
+	stopCh          chan struct{}
 }
 
-// QueuedExecution represents a script execution waiting for device to come online
+// QueuedExecution represents a script execution waiting for a device to come online.
+// ScriptRef identifies the script in the repository; actual content is resolved
+// at dispatch time via ScriptRepository.Get(ScriptRef, "").
 type QueuedExecution struct {
 	ExecutionID       string                 `json:"execution_id"`
 	ScriptID          string                 `json:"script_id"`
-	ScriptVersion     string                 `json:"script_version"`
-	ScriptContent     string                 `json:"script_content"`
+	ScriptVersion     string                 `json:"script_version"` // empty = resolve latest at dispatch
+	ScriptRef         string                 `json:"script_ref"`     // script identifier in the repository
 	Shell             ShellType              `json:"shell"`
 	Parameters        map[string]string      `json:"parameters"`
 	Environment       map[string]string      `json:"environment"`
 	Timeout           time.Duration          `json:"timeout"`
 	QueuedAt          time.Time              `json:"queued_at"`
 	ExpiresAt         time.Time              `json:"expires_at"`
+	State             QueueState             `json:"state"`
 	GenerateAPIKey    bool                   `json:"generate_api_key"`
 	APIKeyTTL         time.Duration          `json:"api_key_ttl"`
 	APIKeyPermissions []string               `json:"api_key_permissions"`
 	Metadata          map[string]interface{} `json:"metadata"`
 }
 
-// NewExecutionQueue creates a new execution queue
-func NewExecutionQueue(monitor *ExecutionMonitor, keyManager *EphemeralKeyManager, maxAge time.Duration, controllerURL string) *ExecutionQueue {
+// NewExecutionQueue creates a new ExecutionQueue backed by the provided QueueStore.
+//
+// If store is nil, an InMemoryQueueStore is used (suitable for testing and dev).
+// If scriptRepo is nil, PrepareExecutionForDevice will leave ScriptContent empty.
+// If maxAge is 0, defaults to 24 hours.
+// If dispatchTimeout is 0, defaults to 1 hour.
+// If controllerURL is empty, defaults to "https://localhost:8080".
+func NewExecutionQueue(
+	monitor *ExecutionMonitor,
+	keyManager *EphemeralKeyManager,
+	maxAge time.Duration,
+	controllerURL string,
+	store QueueStore,
+	scriptRepo ScriptRepository,
+	dispatchTimeout time.Duration,
+) *ExecutionQueue {
 	if maxAge == 0 {
-		maxAge = 24 * time.Hour // Default: keep queued executions for 24 hours
+		maxAge = 24 * time.Hour
 	}
-
+	if dispatchTimeout == 0 {
+		dispatchTimeout = 1 * time.Hour
+	}
 	if controllerURL == "" {
-		controllerURL = "https://localhost:8080" // Default controller URL if not specified
+		controllerURL = "https://localhost:8080"
+	}
+	if store == nil {
+		store = NewInMemoryQueueStore()
 	}
 
-	queue := &ExecutionQueue{
-		queue:         make(map[string][]*QueuedExecution),
-		monitor:       monitor,
-		keyManager:    keyManager,
-		maxAge:        maxAge,
-		controllerURL: controllerURL,
+	q := &ExecutionQueue{
+		store:           store,
+		scriptRepo:      scriptRepo,
+		monitor:         monitor,
+		keyManager:      keyManager,
+		maxAge:          maxAge,
+		dispatchTimeout: dispatchTimeout,
+		controllerURL:   controllerURL,
+		stopCh:          make(chan struct{}),
 	}
 
-	// Start cleanup goroutine
-	go queue.cleanupExpired()
+	go q.backgroundMaintenance()
 
-	return queue
+	return q
 }
 
-// QueueExecution queues a script execution for a device
+// QueueExecution queues a script execution for a device.
+// Dedup: same ScriptRef + deviceID + parameters → ErrDuplicateExecution (silently ignored
+// by the queue; callers may check if dedup is relevant to them).
 func (q *ExecutionQueue) QueueExecution(deviceID string, execution *QueuedExecution) error {
+	now := time.Now()
 	if execution.QueuedAt.IsZero() {
-		execution.QueuedAt = time.Now()
+		execution.QueuedAt = now
 	}
-
 	if execution.ExpiresAt.IsZero() {
 		execution.ExpiresAt = execution.QueuedAt.Add(q.maxAge)
 	}
 
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	if _, exists := q.queue[deviceID]; !exists {
-		q.queue[deviceID] = make([]*QueuedExecution, 0)
+	scriptRef := execution.ScriptRef
+	if scriptRef == "" {
+		scriptRef = execution.ScriptID
 	}
 
-	q.queue[deviceID] = append(q.queue[deviceID], execution)
+	entry := &QueueEntry{
+		ExecutionID:       execution.ExecutionID,
+		DeviceID:          deviceID,
+		ScriptRef:         scriptRef,
+		Shell:             execution.Shell,
+		Parameters:        execution.Parameters,
+		Environment:       execution.Environment,
+		Timeout:           execution.Timeout,
+		QueuedAt:          execution.QueuedAt,
+		ExpiresAt:         execution.ExpiresAt,
+		State:             QueueStateQueued,
+		ParamHash:         ComputeParamHash(scriptRef, deviceID, execution.Parameters),
+		GenerateAPIKey:    execution.GenerateAPIKey,
+		APIKeyTTL:         execution.APIKeyTTL,
+		APIKeyPermissions: execution.APIKeyPermissions,
+		Metadata:          execution.Metadata,
+	}
+
+	if err := q.store.Enqueue(entry); err != nil {
+		if err == ErrDuplicateExecution {
+			// Dedup: silently ignore duplicate queued executions
+			return nil
+		}
+		return fmt.Errorf("failed to enqueue execution: %w", err)
+	}
 
 	return nil
 }
 
-// DequeueForDevice retrieves and removes all pending executions for a device
-// This is called when a device comes online (heartbeat received)
+// DequeueForDevice retrieves all pending executions for a device and transitions
+// them to the dispatched state. This is called when a device comes online (heartbeat
+// received). It also re-dispatches any previously-dispatched executions that the
+// steward has not yet reported completion for (handles steward reconnect).
 func (q *ExecutionQueue) DequeueForDevice(deviceID string) ([]*QueuedExecution, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	entries, err := q.store.Dequeue(deviceID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dequeue for device %s: %w", deviceID, err)
+	}
 
-	executions, exists := q.queue[deviceID]
-	if !exists || len(executions) == 0 {
+	if len(entries) == 0 {
 		return nil, nil
 	}
 
-	// Remove expired executions
-	validExecutions := make([]*QueuedExecution, 0)
-	now := time.Now()
-	for _, exec := range executions {
-		if now.Before(exec.ExpiresAt) {
-			validExecutions = append(validExecutions, exec)
-		} else {
-			// Mark as failed in monitor
-			if q.monitor != nil {
-				_ = q.monitor.UpdateDeviceStatus(
-					exec.ExecutionID,
-					deviceID,
-					StatusFailed,
-					nil,
-					fmt.Errorf("execution expired while waiting for device to come online"),
-				)
-			}
-		}
+	result := make([]*QueuedExecution, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, entryToQueued(entry))
 	}
 
-	// Clear the queue for this device
-	delete(q.queue, deviceID)
-
-	return validExecutions, nil
+	return result, nil
 }
 
-// PeekForDevice returns pending executions without removing them
+// PeekForDevice returns pending (queued + dispatched) executions without changing state.
 func (q *ExecutionQueue) PeekForDevice(deviceID string) []*QueuedExecution {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-
-	executions, exists := q.queue[deviceID]
-	if !exists {
+	entries, err := q.store.List(deviceID)
+	if err != nil {
 		return nil
 	}
 
-	// Return a deep copy to prevent external modification
-	result := make([]*QueuedExecution, len(executions))
-	for i, exec := range executions {
-		execCopy := *exec
-		// Deep copy maps
-		if exec.Parameters != nil {
-			execCopy.Parameters = make(map[string]string, len(exec.Parameters))
-			for k, v := range exec.Parameters {
-				execCopy.Parameters[k] = v
-			}
-		}
-		if exec.Environment != nil {
-			execCopy.Environment = make(map[string]string, len(exec.Environment))
-			for k, v := range exec.Environment {
-				execCopy.Environment[k] = v
-			}
-		}
-		if exec.APIKeyPermissions != nil {
-			execCopy.APIKeyPermissions = make([]string, len(exec.APIKeyPermissions))
-			copy(execCopy.APIKeyPermissions, exec.APIKeyPermissions)
-		}
-		if exec.Metadata != nil {
-			execCopy.Metadata = make(map[string]interface{}, len(exec.Metadata))
-			for k, v := range exec.Metadata {
-				execCopy.Metadata[k] = v
-			}
-		}
-		result[i] = &execCopy
+	result := make([]*QueuedExecution, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, entryToQueued(entry))
 	}
+
 	return result
 }
 
-// GetQueueDepth returns the number of pending executions for a device
+// GetQueueDepth returns the number of active (queued + dispatched) executions for a device.
 func (q *ExecutionQueue) GetQueueDepth(deviceID string) int {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-
-	if executions, exists := q.queue[deviceID]; exists {
-		return len(executions)
+	entries, err := q.store.List(deviceID)
+	if err != nil {
+		return 0
 	}
-	return 0
+	return len(entries)
 }
 
-// GetTotalQueueDepth returns the total number of pending executions across all devices
+// GetTotalQueueDepth returns the total number of active executions across all devices.
 func (q *ExecutionQueue) GetTotalQueueDepth() int {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-
-	total := 0
-	for _, executions := range q.queue {
-		total += len(executions)
+	entries, err := q.store.List("")
+	if err != nil {
+		return 0
 	}
-	return total
+	return len(entries)
 }
 
-// CancelExecution removes a specific execution from the queue
+// CancelExecution removes a specific execution from the active queue.
 func (q *ExecutionQueue) CancelExecution(deviceID, executionID string) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	executions, exists := q.queue[deviceID]
-	if !exists {
-		return fmt.Errorf("no queued executions for device %s", deviceID)
+	if err := q.store.Cancel(deviceID, executionID); err != nil {
+		return err
 	}
 
-	// Find and remove the execution
-	for i, exec := range executions {
-		if exec.ExecutionID == executionID {
-			// Remove from slice
-			q.queue[deviceID] = append(executions[:i], executions[i+1:]...)
-
-			// Update monitor
-			if q.monitor != nil {
-				_ = q.monitor.UpdateDeviceStatus(
-					executionID,
-					deviceID,
-					StatusCancelled,
-					nil,
-					nil,
-				)
-			}
-
-			return nil
-		}
+	if q.monitor != nil {
+		// UpdateDeviceStatus is best-effort: the monitor may not have an entry for
+		// every queued execution (tracking is optional). Ignore the error intentionally.
+		_ = q.monitor.UpdateDeviceStatus(executionID, deviceID, StatusCancelled, nil, nil) //nolint:errcheck // monitor is optional audit side-channel
 	}
 
-	return fmt.Errorf("execution %s not found in queue for device %s", executionID, deviceID)
+	return nil
 }
 
-// PrepareExecutionForDevice prepares an execution for immediate delivery to a device
-// This generates ephemeral API keys just-in-time and injects parameters
+// AcknowledgeCompletion records the completion of a dispatched execution.
+// This is called when the steward reports back with the execution result.
+// state must be QueueStateCompleted or QueueStateFailed.
+func (q *ExecutionQueue) AcknowledgeCompletion(executionID, deviceID string, state QueueState, result *ExecutionResult) error {
+	if err := q.store.AcknowledgeCompletion(executionID, deviceID, state, result); err != nil {
+		return fmt.Errorf("failed to acknowledge completion: %w", err)
+	}
+
+	if q.monitor != nil {
+		var monitorStatus ExecutionStatus
+		switch state {
+		case QueueStateCompleted:
+			monitorStatus = StatusCompleted
+		default:
+			monitorStatus = StatusFailed
+		}
+		// UpdateDeviceStatus is best-effort: the monitor may not have an entry for
+		// every queued execution (tracking is optional). Ignore the error intentionally.
+		_ = q.monitor.UpdateDeviceStatus(executionID, deviceID, monitorStatus, result, nil) //nolint:errcheck // monitor is optional audit side-channel
+	}
+
+	return nil
+}
+
+// PrepareExecutionForDevice prepares an execution for immediate delivery to a device.
+// It generates ephemeral API keys just-in-time and resolves the latest script content
+// from the script repository.
 func (q *ExecutionQueue) PrepareExecutionForDevice(ctx context.Context, deviceID, tenantID string, execution *QueuedExecution) (*PreparedExecution, error) {
+	scriptRef := execution.ScriptRef
+	if scriptRef == "" {
+		scriptRef = execution.ScriptID
+	}
+
+	// Resolve latest script content from repository
+	var resolvedContent string
+	var resolvedVersion string
+
+	if q.scriptRepo != nil && scriptRef != "" {
+		pinVersion := execution.ScriptVersion // empty = resolve latest
+		script, err := q.scriptRepo.Get(scriptRef, pinVersion)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve script %q from repository: %w", scriptRef, err)
+		}
+		resolvedContent = script.Content
+		resolvedVersion = script.Metadata.Version.String()
+	}
+
 	prepared := &PreparedExecution{
 		ExecutionID:   execution.ExecutionID,
 		ScriptID:      execution.ScriptID,
-		ScriptVersion: execution.ScriptVersion,
-		ScriptContent: execution.ScriptContent,
+		ScriptVersion: resolvedVersion,
+		ScriptContent: resolvedContent,
 		Shell:         execution.Shell,
 		Timeout:       execution.Timeout,
 		Environment:   make(map[string]string),
 		PreparedAt:    time.Now(),
 	}
 
-	// Copy environment variables
 	for k, v := range execution.Environment {
 		prepared.Environment[k] = v
 	}
@@ -242,7 +272,7 @@ func (q *ExecutionQueue) PrepareExecutionForDevice(ctx context.Context, deviceID
 	if execution.GenerateAPIKey && q.keyManager != nil {
 		ttl := execution.APIKeyTTL
 		if ttl == 0 {
-			ttl = 1 * time.Hour // Default TTL
+			ttl = 1 * time.Hour
 		}
 
 		permissions := execution.APIKeyPermissions
@@ -263,7 +293,6 @@ func (q *ExecutionQueue) PrepareExecutionForDevice(ctx context.Context, deviceID
 			return nil, fmt.Errorf("failed to generate ephemeral API key: %w", err)
 		}
 
-		// Add API key to environment
 		prepared.Environment["CFGMS_API_KEY"] = apiKey.Key
 		prepared.Environment["CFGMS_EXECUTION_ID"] = execution.ExecutionID
 		prepared.Environment["CFGMS_DEVICE_ID"] = deviceID
@@ -277,12 +306,12 @@ func (q *ExecutionQueue) PrepareExecutionForDevice(ctx context.Context, deviceID
 	return prepared, nil
 }
 
-// PreparedExecution represents a script execution ready for immediate delivery
+// PreparedExecution represents a script execution ready for immediate delivery.
 type PreparedExecution struct {
 	ExecutionID   string            `json:"execution_id"`
 	ScriptID      string            `json:"script_id"`
-	ScriptVersion string            `json:"script_version"`
-	ScriptContent string            `json:"script_content"`
+	ScriptVersion string            `json:"script_version"` // resolved version
+	ScriptContent string            `json:"script_content"` // resolved content
 	Shell         ShellType         `json:"shell"`
 	Timeout       time.Duration     `json:"timeout"`
 	Environment   map[string]string `json:"environment"`
@@ -291,138 +320,122 @@ type PreparedExecution struct {
 	PreparedAt    time.Time         `json:"prepared_at"`
 }
 
-// cleanupExpired periodically removes expired executions
-func (q *ExecutionQueue) cleanupExpired() {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		q.performCleanup()
-	}
-}
-
-// performCleanup removes expired executions and updates monitoring
-func (q *ExecutionQueue) performCleanup() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	now := time.Now()
-	expiredCount := 0
-
-	for deviceID, executions := range q.queue {
-		validExecutions := make([]*QueuedExecution, 0)
-
-		for _, exec := range executions {
-			if now.Before(exec.ExpiresAt) {
-				validExecutions = append(validExecutions, exec)
-			} else {
-				// Mark as failed in monitor
-				if q.monitor != nil {
-					_ = q.monitor.UpdateDeviceStatus(
-						exec.ExecutionID,
-						deviceID,
-						StatusFailed,
-						nil,
-						fmt.Errorf("execution expired while waiting for device (queued at %v, expired at %v)",
-							exec.QueuedAt.Format(time.RFC3339),
-							exec.ExpiresAt.Format(time.RFC3339)),
-					)
-				}
-				expiredCount++
-			}
-		}
-
-		if len(validExecutions) > 0 {
-			q.queue[deviceID] = validExecutions
-		} else {
-			delete(q.queue, deviceID)
-		}
-	}
-
-	if expiredCount > 0 {
-		// Log cleanup (would use proper logger in production)
-		_ = fmt.Sprintf("Cleaned up %d expired executions from queue", expiredCount)
-	}
-}
-
-// ListQueuedExecutions returns all queued executions (for monitoring/debugging)
+// ListQueuedExecutions returns all active (queued + dispatched) executions.
 func (q *ExecutionQueue) ListQueuedExecutions() map[string][]*QueuedExecution {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
+	entries, err := q.store.List("")
+	if err != nil {
+		return make(map[string][]*QueuedExecution)
+	}
 
-	// Return a deep copy to prevent external modification
 	result := make(map[string][]*QueuedExecution)
-	for deviceID, executions := range q.queue {
-		deviceExecs := make([]*QueuedExecution, len(executions))
-		for i, exec := range executions {
-			execCopy := *exec
-			// Deep copy maps
-			if exec.Parameters != nil {
-				execCopy.Parameters = make(map[string]string, len(exec.Parameters))
-				for k, v := range exec.Parameters {
-					execCopy.Parameters[k] = v
-				}
-			}
-			if exec.Environment != nil {
-				execCopy.Environment = make(map[string]string, len(exec.Environment))
-				for k, v := range exec.Environment {
-					execCopy.Environment[k] = v
-				}
-			}
-			if exec.APIKeyPermissions != nil {
-				execCopy.APIKeyPermissions = make([]string, len(exec.APIKeyPermissions))
-				copy(execCopy.APIKeyPermissions, exec.APIKeyPermissions)
-			}
-			if exec.Metadata != nil {
-				execCopy.Metadata = make(map[string]interface{}, len(exec.Metadata))
-				for k, v := range exec.Metadata {
-					execCopy.Metadata[k] = v
-				}
-			}
-			deviceExecs[i] = &execCopy
-		}
-		result[deviceID] = deviceExecs
+	for _, entry := range entries {
+		result[entry.DeviceID] = append(result[entry.DeviceID], entryToQueued(entry))
 	}
 
 	return result
 }
 
-// GetStatistics returns queue statistics
+// GetStatistics returns queue statistics.
 func (q *ExecutionQueue) GetStatistics() QueueStatistics {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-
-	stats := QueueStatistics{
-		TotalDevicesWithQueue: len(q.queue),
-		TotalQueuedExecutions: 0,
-		OldestQueuedAt:        time.Now(),
-		DeviceQueueDepths:     make(map[string]int),
-	}
-
-	now := time.Now()
-	for deviceID, executions := range q.queue {
-		stats.DeviceQueueDepths[deviceID] = len(executions)
-		stats.TotalQueuedExecutions += len(executions)
-
-		for _, exec := range executions {
-			if exec.QueuedAt.Before(stats.OldestQueuedAt) {
-				stats.OldestQueuedAt = exec.QueuedAt
-			}
-
-			if now.After(exec.ExpiresAt) {
-				stats.ExpiredExecutions++
-			}
+	stats, err := q.store.GetStats()
+	if err != nil {
+		return QueueStatistics{
+			DeviceQueueDepths: make(map[string]int),
 		}
 	}
 
-	return stats
+	return QueueStatistics{
+		TotalDevicesWithQueue: len(stats.DeviceQueueDepths),
+		TotalQueuedExecutions: stats.QueuedCount + stats.DispatchedCount,
+		ExpiredExecutions:     stats.ExpiredCount,
+		DeviceQueueDepths:     stats.DeviceQueueDepths,
+	}
 }
 
-// QueueStatistics provides insights into the execution queue
+// QueueStatistics provides insights into the execution queue.
 type QueueStatistics struct {
 	TotalDevicesWithQueue int            `json:"total_devices_with_queue"`
 	TotalQueuedExecutions int            `json:"total_queued_executions"`
 	ExpiredExecutions     int            `json:"expired_executions"`
 	OldestQueuedAt        time.Time      `json:"oldest_queued_at"`
 	DeviceQueueDepths     map[string]int `json:"device_queue_depths"`
+}
+
+// backgroundMaintenance runs periodic queue maintenance until Stop is called.
+func (q *ExecutionQueue) backgroundMaintenance() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			q.performMaintenance()
+		case <-q.stopCh:
+			return
+		}
+	}
+}
+
+// performMaintenance expires stale queued entries and re-queues timed-out dispatched entries.
+func (q *ExecutionQueue) performMaintenance() {
+	// Expire queued entries past their TTL.
+	// CleanupExpired errors are intentionally ignored: the InMemoryQueueStore never
+	// errors here, and a future durable store failure leaves entries in a safe state
+	// (they remain queued and will be expired on the next maintenance cycle).
+	_, _ = q.store.CleanupExpired() //nolint:errcheck // best-effort background cleanup; entries stay safe on error
+
+	// Re-queue dispatched entries that never received a completion callback.
+	// RequeueStale errors are intentionally ignored for the same reason: a failure
+	// leaves dispatched entries in place and they will be retried next cycle.
+	_, _ = q.store.RequeueStale(q.dispatchTimeout) //nolint:errcheck // best-effort background maintenance; entries stay safe on error
+}
+
+// Stop halts the background maintenance goroutine.
+func (q *ExecutionQueue) Stop() {
+	close(q.stopCh)
+}
+
+// entryToQueued converts a QueueEntry to a QueuedExecution for API compatibility.
+func entryToQueued(entry *QueueEntry) *QueuedExecution {
+	exec := &QueuedExecution{
+		ExecutionID:       entry.ExecutionID,
+		ScriptID:          entry.ScriptRef, // ScriptRef doubles as ScriptID
+		ScriptRef:         entry.ScriptRef,
+		Shell:             entry.Shell,
+		Timeout:           entry.Timeout,
+		QueuedAt:          entry.QueuedAt,
+		ExpiresAt:         entry.ExpiresAt,
+		State:             entry.State,
+		GenerateAPIKey:    entry.GenerateAPIKey,
+		APIKeyTTL:         entry.APIKeyTTL,
+		APIKeyPermissions: entry.APIKeyPermissions,
+	}
+
+	if entry.Parameters != nil {
+		exec.Parameters = make(map[string]string, len(entry.Parameters))
+		for k, v := range entry.Parameters {
+			exec.Parameters[k] = v
+		}
+	}
+
+	if entry.Environment != nil {
+		exec.Environment = make(map[string]string, len(entry.Environment))
+		for k, v := range entry.Environment {
+			exec.Environment[k] = v
+		}
+	}
+
+	if entry.APIKeyPermissions != nil {
+		exec.APIKeyPermissions = make([]string, len(entry.APIKeyPermissions))
+		copy(exec.APIKeyPermissions, entry.APIKeyPermissions)
+	}
+
+	if entry.Metadata != nil {
+		exec.Metadata = make(map[string]interface{}, len(entry.Metadata))
+		for k, v := range entry.Metadata {
+			exec.Metadata[k] = v
+		}
+	}
+
+	return exec
 }

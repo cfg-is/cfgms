@@ -239,13 +239,8 @@ Each step creates a `pipeline:blocked` issue on unrecoverable failure and contin
 Find recently merged PRs. Check if any `pipeline:draft` stories had `## Dependencies` referencing the merged story. If satisfied, they're eligible for Tech Lead review.
 
 **Step 2 — Tech Lead pass:**
-Find `pipeline:draft` stories. Collect their issue numbers, then spawn the Tech Lead agent:
-```
-Agent tool:
-  subagent_type: tech-lead
-  prompt: "Review draft stories for dev agent executability: #NNN #NNN #NNN"
-  mode: auto
-```
+Find `pipeline:draft` stories. Collect their issue numbers, then use the **Agent tool** (not Bash) to spawn the Tech Lead: subagent_type `tech-lead`, prompt `"Review draft stories for dev agent executability: #NNN #NNN #NNN"`, mode `auto`.
+
 The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency ordering, implementation notes, scope, constraints, and ambiguity. Passing stories get promoted (`pipeline:draft` → `agent:ready`). Failing stories get a `pipeline:blocked` issue.
 
 **Step 3 — Dispatch:**
@@ -266,26 +261,16 @@ gh pr list --repo cfg-is/cfgms --search "head:feature/story-<NUM>" --json number
 ```
 
 **Step 5 — QA pass (Acceptance Reviewer):**
-Find agent PRs (branch `feature/story-*`) without Acceptance Reviewer comment. For each, extract the story number from the branch name and spawn the Acceptance Reviewer:
-```
-Agent tool:
-  subagent_type: acceptance-reviewer
-  prompt: "Review agent PR. pr:<PR_NUM> story:<STORY_NUM>"
-  mode: auto
-```
+Find agent PRs (branch `feature/story-*`) without Acceptance Reviewer comment. For each, extract the story number from the branch name and use the **Agent tool** (not Bash) to spawn the Acceptance Reviewer: subagent_type `acceptance-reviewer`, prompt `"Review agent PR. pr:<PR_NUM> story:<STORY_NUM>"`, mode `auto`. Launch multiple reviewers in parallel when there are multiple PRs to review.
+
 The Acceptance Reviewer (`.claude/agents/acceptance-reviewer.md`) verifies CI, checks acceptance criteria against the diff, and renders a verdict:
 - Zero findings: auto-merge via `gh pr merge --squash --auto`, clean up container/worktree
 - Any findings (first review): apply `pipeline:fix` to story, post review comment on PR
 - Any findings (second review): apply `pipeline:blocked`, assign to founder
 
 **Step 6 — BA pass:**
-Find `pipeline:epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each, spawn the BA agent:
-```
-Agent tool:
-  subagent_type: ba
-  prompt: "Decompose epic #<NUM> into story sub-issues."
-  mode: auto
-```
+Find `pipeline:epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each, use the **Agent tool** (not Bash) to spawn the BA agent: subagent_type `ba`, prompt `"Decompose epic #<NUM> into story sub-issues."`, mode `auto`.
+
 The BA agent (`.claude/agents/ba.md`) reads the epic, surveys the codebase, creates story sub-issues with `pipeline:story` + `pipeline:draft` labels, and links them via GraphQL `addSubIssue`.
 
 **Step 7 — Forward edge:**

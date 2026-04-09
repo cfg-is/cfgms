@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
-	"github.com/cfgis/cfgms/features/steward/dna/storage"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 

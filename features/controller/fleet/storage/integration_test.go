@@ -102,7 +102,7 @@ func TestDNAStorageIntegration(t *testing.T) {
 		}
 
 		// Store DNA
-		err := manager.Store(ctx, deviceID, dna)
+		err := manager.Store(ctx, deviceID, dna, nil)
 		if err != nil {
 			t.Fatalf("Failed to store DNA: %v", err)
 		}
@@ -160,7 +160,7 @@ func TestDNAStorageIntegration(t *testing.T) {
 		}
 
 		// Store DNA
-		err := manager.Store(ctx, deviceID, dna)
+		err := manager.Store(ctx, deviceID, dna, nil)
 		if err != nil {
 			t.Fatalf("Failed to store DNA: %v", err)
 		}
@@ -213,7 +213,7 @@ func TestDNAStorageIntegration(t *testing.T) {
 				SyncFingerprint: fmt.Sprintf("sync-fp-v%d", i+1),
 			}
 
-			err := manager.Store(ctx, deviceID, dna)
+			err := manager.Store(ctx, deviceID, dna, nil)
 			if err != nil {
 				t.Fatalf("Failed to store DNA version %d: %v", i+1, err)
 			}

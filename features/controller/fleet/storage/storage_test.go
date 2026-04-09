@@ -108,7 +108,7 @@ func testStoreAndRetrieve(t *testing.T, manager *Manager) {
 	})
 
 	// Store DNA
-	err := manager.Store(ctx, deviceID, dna)
+	err := manager.Store(ctx, deviceID, dna, nil)
 	if err != nil {
 		t.Fatalf("Failed to store DNA: %v", err)
 	}
@@ -179,12 +179,12 @@ func testDeduplication(t *testing.T, manager *Manager) {
 	}
 
 	// Store both DNA records
-	err := manager.Store(ctx, device1ID, dna1)
+	err := manager.Store(ctx, device1ID, dna1, nil)
 	if err != nil {
 		t.Fatalf("Failed to store DNA for device 1: %v", err)
 	}
 
-	err = manager.Store(ctx, device2ID, dna2)
+	err = manager.Store(ctx, device2ID, dna2, nil)
 	if err != nil {
 		t.Fatalf("Failed to store DNA for device 2: %v", err)
 	}
@@ -242,7 +242,7 @@ func testHistoricalQueries(t *testing.T, manager *Manager) {
 		// Simulate time progression
 		dna.LastUpdated = timestamppb.New(baseTime.Add(time.Duration(i) * time.Hour))
 
-		err := manager.Store(ctx, deviceID, dna)
+		err := manager.Store(ctx, deviceID, dna, nil)
 		if err != nil {
 			t.Fatalf("Failed to store DNA version %d: %v", i+1, err)
 		}
@@ -319,7 +319,7 @@ func testCompression(t *testing.T, manager *Manager) {
 	dna := createTestDNA(deviceID, largeAttributes)
 
 	// Store DNA
-	err := manager.Store(ctx, deviceID, dna)
+	err := manager.Store(ctx, deviceID, dna, nil)
 	if err != nil {
 		t.Fatalf("Failed to store DNA: %v", err)
 	}
@@ -374,7 +374,7 @@ func testStorageStats(t *testing.T, manager *Manager) {
 		}
 
 		dna := createTestDNA(deviceID, attributes)
-		err := manager.Store(ctx, deviceID, dna)
+		err := manager.Store(ctx, deviceID, dna, nil)
 		if err != nil {
 			t.Fatalf("Failed to store DNA for device %s: %v", deviceID, err)
 		}
@@ -861,7 +861,7 @@ func BenchmarkDNAStorage(b *testing.B) {
 	// Benchmark storage operations
 	for i := 0; i < b.N; i++ {
 		deviceID := fmt.Sprintf("bench-device-%d", i)
-		err := manager.Store(ctx, deviceID, dnas[i])
+		err := manager.Store(ctx, deviceID, dnas[i], nil)
 		if err != nil {
 			b.Fatalf("Failed to store DNA: %v", err)
 		}
@@ -895,7 +895,7 @@ func BenchmarkDNARetrieval(b *testing.B) {
 			"seq":  fmt.Sprintf("%d", i),
 		})
 
-		err := manager.Store(ctx, deviceID, dna)
+		err := manager.Store(ctx, deviceID, dna, nil)
 		if err != nil {
 			b.Fatalf("Failed to store DNA: %v", err)
 		}

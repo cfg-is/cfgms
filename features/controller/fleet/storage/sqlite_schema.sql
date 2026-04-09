@@ -1,5 +1,5 @@
 -- CFGMS DNA Storage SQLite Schema
--- Optimized for DNA record storage with time-series queries
+-- Optimized for DNA record storage with time-series queries and fleet query support
 
 -- Enable WAL mode for better concurrent access
 PRAGMA journal_mode = WAL;
@@ -20,7 +20,14 @@ CREATE TABLE IF NOT EXISTS dna_history (
     compression_ratio REAL NOT NULL,
     shard_id TEXT NOT NULL DEFAULT 'default',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    
+
+    -- Fleet query fields extracted from DNA attributes for efficient filtering
+    tenant_id TEXT NOT NULL DEFAULT '',
+    os TEXT NOT NULL DEFAULT '',
+    architecture TEXT NOT NULL DEFAULT '',
+    hostname TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+
     -- Ensure unique version per device
     UNIQUE(device_id, version)
 );
@@ -34,6 +41,12 @@ CREATE INDEX IF NOT EXISTS idx_created_at ON dna_history(created_at);
 
 -- Index for time-based queries across all devices
 CREATE INDEX IF NOT EXISTS idx_timestamp_global ON dna_history(timestamp DESC);
+
+-- Fleet query indexes for efficient filtered searches
+CREATE INDEX IF NOT EXISTS idx_dna_tenant ON dna_history(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_dna_os ON dna_history(os);
+CREATE INDEX IF NOT EXISTS idx_dna_architecture ON dna_history(architecture);
+CREATE INDEX IF NOT EXISTS idx_dna_status ON dna_history(status);
 
 -- Reference table for deduplication tracking
 CREATE TABLE IF NOT EXISTS dna_references (
