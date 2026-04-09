@@ -269,6 +269,43 @@ func TestExecutorWithSecrets_BlocksOnMissingSecret(t *testing.T) {
 	assert.Contains(t, err.Error(), "secret injection blocked")
 }
 
+// TestExecutorWithSecrets_LiteralParamUsesPlainName verifies that literal
+// (non-secret) param bindings are injected with a plain uppercase env var name
+// (no CFGMS_SECRET_ prefix) even when secrets in the same executor would use
+// the prefixed name on Windows-targeted shells.
+func TestExecutorWithSecrets_LiteralParamUsesPlainName(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping literal param env var integration test in short mode")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-only test; Windows runner required for PowerShell path")
+	}
+
+	bindings := []ParamBinding{
+		{Name: "ApiUrl", From: ParamSourceLiteral, Value: "https://example.com"},
+	}
+
+	// Script echoes the env var; literal params use plain UPPER name.
+	config := &ScriptConfig{
+		Content: "echo $APIURL",
+		Shell:   ShellBash,
+		Timeout: 10 * time.Second,
+	}
+
+	// Literal bindings don't require a secret store — pass nil.
+	executor := NewExecutorWithSecrets(config, nil, bindings)
+	result, err := executor.Execute(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Equal(t, 0, result.ExitCode, "script should exit 0; stderr: %s", result.Stderr)
+	assert.Contains(t, strings.TrimSpace(result.Stdout), "https://example.com",
+		"literal param should be accessible as plain uppercase env var APIURL")
+
+	assert.Empty(t, os.Getenv("APIURL"),
+		"APIURL env var must not appear in the parent process (child-process-scoped only)")
+}
+
 // TestExecutorWithSecrets_CleansUpOnFailure verifies that secret env vars are
 // never present in the parent process even when the script itself fails.
 // Since secrets are injected only into cmd.Env (child process), they never

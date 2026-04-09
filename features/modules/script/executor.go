@@ -56,11 +56,17 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		"content_hash", hashScriptContent(e.config.Content),
 		"env_vars", len(e.config.Environment))
 
-	// Resolve secret bindings before building the command.
-	// Secrets are injected exclusively into cmd.Env on the child process — the
-	// parent process environment is never modified, eliminating race conditions
-	// when multiple scripts execute concurrently and preventing secret leakage
-	// beyond the lifetime of the child process.
+	// Resolve param bindings before building the command. All params — both
+	// secret-store and literal — are injected exclusively into cmd.Env on the
+	// child process; the parent process environment is never modified, eliminating
+	// race conditions at 50k+ steward scale and preventing value leakage via
+	// /proc/pid/cmdline (Linux), ps output, or Windows Event 4688.
+	//
+	// Env var naming by binding type:
+	//   secret-store  → SecretEnvVarName(): CFGMS_SECRET_<PARAM> on Windows (avoids
+	//                   Event 4688 cmdline logging), <PARAM> on Unix (12-factor)
+	//   literal       → strings.ToUpper(param.Name) on all platforms — no secret
+	//                   prefix because the value is not a credential
 	var secretEnvEntries []string
 	if e.secretStore != nil && len(e.secretBindings) > 0 {
 		resolved, err := ResolveSecretBindings(ctx, e.secretStore, e.secretBindings)
@@ -69,7 +75,12 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		}
 		secretEnvEntries = make([]string, 0, len(resolved))
 		for _, param := range resolved {
-			envKey := SecretEnvVarName(e.config.Shell, param.Name)
+			var envKey string
+			if param.IsSecret {
+				envKey = SecretEnvVarName(e.config.Shell, param.Name)
+			} else {
+				envKey = strings.ToUpper(param.Name)
+			}
 			secretEnvEntries = append(secretEnvEntries, fmt.Sprintf("%s=%s", envKey, param.Value))
 		}
 	}
