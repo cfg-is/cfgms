@@ -53,8 +53,8 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		stewardList := make([]StewardInfo, 0, len(results))
 		for _, res := range results {
 			info := StewardInfo{
-				ID:      res.ID,
-				Status:  res.Status,
+				ID:       res.ID,
+				Status:   res.Status,
 				LastSeen: res.LastHeartbeat,
 			}
 			if len(res.DNAAttributes) > 0 {

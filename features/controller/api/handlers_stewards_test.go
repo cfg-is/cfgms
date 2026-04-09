@@ -8,13 +8,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/api/proto/common"
+	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/controller/ctxkeys"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 )
 
@@ -73,7 +75,7 @@ func TestBuildFleetFilter_InvalidStatus_ReturnsError(t *testing.T) {
 }
 
 func TestBuildFleetFilter_FieldTooLong_ReturnsError(t *testing.T) {
-	longVal := string(make([]byte, 300))
+	longVal := strings.Repeat("a", 300)
 	req := httptest.NewRequest("GET", "/api/v1/stewards?hostname="+longVal, nil)
 	_, err := buildFleetFilter(req, "")
 	require.Error(t, err)
@@ -126,6 +128,7 @@ func TestHandleListStewards_FleetQueryError_Returns500(t *testing.T) {
 // ---- Integration tests: handleListStewards with fleet filtering ----
 
 // registerTestSteward adds a steward to the controller service via AcceptRegistration.
+// It uses the "test-tenant" tenant ID (same as NewTestKey) so fleet filter scoping works.
 func registerTestSteward(t *testing.T, svc interface {
 	AcceptRegistration(context.Context, *controller.RegisterRequest) (*controller.RegisterResponse, error)
 }, attrs map[string]string) string {
@@ -137,7 +140,8 @@ func registerTestSteward(t *testing.T, svc interface {
 			Attributes: attrs,
 		},
 	}
-	resp, err := svc.AcceptRegistration(context.Background(), req)
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
+	resp, err := svc.AcceptRegistration(ctx, req)
 	require.NoError(t, err)
 	return resp.StewardId
 }
