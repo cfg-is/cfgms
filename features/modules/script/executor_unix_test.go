@@ -99,12 +99,13 @@ func TestApplyExecutionContext_SystemPassesThrough(t *testing.T) {
 }
 
 // TestApplyExecutionContext_LoggedInUser_NoUser verifies that ErrNoUserLoggedIn is
-// propagated when no interactive user is present. Skipped when a user IS logged in.
+// propagated when no interactive user is present. Uses test hook injection so this test
+// is environment-independent and always runs in CI.
 func TestApplyExecutionContext_LoggedInUser_NoUser(t *testing.T) {
-	// Skip if a user is actually logged in — the retry-signal path cannot be exercised.
-	if _, err := detectLoggedInUser(); err == nil {
-		t.Skip("an interactive user is logged in; skipping no-user error path test")
-	}
+	// Inject a no-user error without calling real OS utilities.
+	old := unixDetectLoggedInUser
+	unixDetectLoggedInUser = func() (string, error) { return "", ErrNoUserLoggedIn }
+	defer func() { unixDetectLoggedInUser = old }()
 
 	ctx := context.Background()
 	config := &ScriptConfig{

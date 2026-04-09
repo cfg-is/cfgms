@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	modWtsapi32                     = windows.NewLazySystemDLL("wtsapi32.dll")
-	procWTSGetActiveConsoleSessionId = modWtsapi32.NewProc("WTSGetActiveConsoleSessionId")
+	modKernel32                      = windows.NewLazySystemDLL("kernel32.dll")
+	modWtsapi32                      = windows.NewLazySystemDLL("wtsapi32.dll")
+	procWTSGetActiveConsoleSessionId = modKernel32.NewProc("WTSGetActiveConsoleSessionId")
 	procWTSQueryUserToken            = modWtsapi32.NewProc("WTSQueryUserToken")
 	procWTSQuerySessionInformationW  = modWtsapi32.NewProc("WTSQuerySessionInformationW")
 	procWTSFreeMemory                = modWtsapi32.NewProc("WTSFreeMemory")
@@ -30,15 +31,30 @@ const wtsUserName = 5
 // when no interactive session is present (0xFFFFFFFF).
 const activeConsoleSessionNone = ^uint32(0)
 
+// windowsGetSessionID is a test hook; override in tests to inject session ID errors
+// without calling the real WTS API.
+var windowsGetSessionID = getActiveConsoleSessionID
+
 // detectLoggedInUser detects the currently logged-in console user on Windows using the
 // WTS API. Returns ErrNoUserLoggedIn when no interactive session is present so the caller
 // can queue the execution for retry rather than treating it as a permanent failure.
 func detectLoggedInUser() (string, error) {
-	sessionID, err := getActiveConsoleSessionID()
+	sessionID, err := windowsGetSessionID()
 	if err != nil {
 		return "", err
 	}
 	return querySessionUsername(sessionID)
+}
+
+// parseActiveSessionID converts the raw WTSGetActiveConsoleSessionId return value into
+// a session ID, returning ErrNoUserLoggedIn for the sentinel value 0xFFFFFFFF.
+// This is a pure function exposed for unit testing.
+func parseActiveSessionID(r1 uintptr) (uint32, error) {
+	sessionID := uint32(r1)
+	if sessionID == activeConsoleSessionNone {
+		return 0, ErrNoUserLoggedIn
+	}
+	return sessionID, nil
 }
 
 // getActiveConsoleSessionID returns the active console session ID via
@@ -46,11 +62,7 @@ func detectLoggedInUser() (string, error) {
 // value 0xFFFFFFFF is returned (no active session).
 func getActiveConsoleSessionID() (uint32, error) {
 	r1, _, _ := procWTSGetActiveConsoleSessionId.Call()
-	sessionID := uint32(r1)
-	if sessionID == activeConsoleSessionNone {
-		return 0, ErrNoUserLoggedIn
-	}
-	return sessionID, nil
+	return parseActiveSessionID(r1)
 }
 
 // querySessionUsername retrieves the username for a WTS session ID using
@@ -110,7 +122,7 @@ func applyExecutionContext(ctx context.Context, config *ScriptConfig, cmd *exec.
 		return cmd, "", noCleanup, nil
 	}
 
-	sessionID, err := getActiveConsoleSessionID()
+	sessionID, err := windowsGetSessionID()
 	if err != nil {
 		return nil, "", noCleanup, err
 	}

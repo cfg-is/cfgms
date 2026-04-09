@@ -230,12 +230,14 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 		executor := script.NewExecutor(scriptConfig)
 		result, execErr := executor.Execute(ctx)
 
-		// Update execution monitor
+		// Update execution monitor. The error is intentionally ignored: a monitor
+		// tracking failure must not prevent the script result from being recorded
+		// in the results map or returned to the caller.
 		status := script.StatusCompleted
 		if execErr != nil {
 			status = script.StatusFailed
 		}
-		_ = n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr)
+		_ = n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr) //nolint:errcheck // monitor failure is non-fatal; see comment above
 
 		results[deviceID] = result
 	}

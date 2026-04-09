@@ -3,10 +3,13 @@
 package nodes
 
 import (
+	"context"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -106,6 +109,33 @@ func TestScriptStepConfig_ExecutionContextField(t *testing.T) {
 		ExecutionContext: script.ExecutionContextLoggedInUser,
 	}
 	assert.Equal(t, script.ExecutionContextLoggedInUser, cfg.ExecutionContext)
+}
+
+// TestScriptNode_Execute_WiresExecutionContext verifies that the ExecutionContext from
+// ScriptStepConfig flows through ScriptNode.Execute to the script executor. Exercises
+// the production code path at script_node.go:218 (ExecutionContext: n.config.ExecutionContext).
+func TestScriptNode_Execute_WiresExecutionContext(t *testing.T) {
+	shell := script.ShellBash
+	if runtime.GOOS == "windows" {
+		shell = script.ShellPowerShell
+	}
+
+	monitor := script.NewExecutionMonitor()
+	config := &ScriptStepConfig{
+		InlineScript:      "echo hello",
+		Shell:             shell,
+		Timeout:           10 * time.Second,
+		ExecutionContext:  script.ExecutionContextSystem,
+		WaitForCompletion: false,
+	}
+	node := NewScriptNode("test-node", "Test Script", config, nil, monitor, nil)
+
+	output, err := node.Execute(context.Background(), workflow.NodeInput{})
+
+	require.NoError(t, err, "Execute with system execution context must succeed")
+	assert.True(t, output.Success, "system execution context must produce a successful output")
+	require.NotNil(t, output.Data, "output must contain result data")
+	assert.Contains(t, output.Data, "execution_id", "output data must include execution_id")
 }
 
 // TestParseScriptStepConfig_ExecutionContextPassedToScriptConfig verifies that the

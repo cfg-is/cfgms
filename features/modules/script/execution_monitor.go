@@ -112,11 +112,16 @@ func (m *ExecutionMonitor) StartExecution(ctx context.Context, scriptID, scriptN
 
 // UpdateDeviceStatus updates the status of a device execution
 func (m *ExecutionMonitor) UpdateDeviceStatus(executionID, deviceID string, status ExecutionStatus, result *ExecutionResult, err error) error {
+	// Capture notification work while holding the write lock, then dispatch after
+	// releasing it. The notify* helpers acquire m.mu.RLock() internally; calling them
+	// while m.mu is write-locked causes a deadlock in Go's sync.RWMutex.
+	var notifications []func()
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	execution, exists := m.executions[executionID]
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("execution %s not found", executionID)
 	}
 
@@ -130,6 +135,7 @@ func (m *ExecutionMonitor) UpdateDeviceStatus(executionID, deviceID string, stat
 	}
 
 	if deviceIndex == -1 {
+		m.mu.Unlock()
 		return fmt.Errorf("device %s not found in execution %s", deviceID, executionID)
 	}
 
@@ -156,23 +162,33 @@ func (m *ExecutionMonitor) UpdateDeviceStatus(executionID, deviceID string, stat
 	// Update summary
 	m.updateSummary(execution, oldStatus, status)
 
-	// Check if execution is complete
+	// Collect notification work — must be dispatched after releasing the write lock.
 	if m.isExecutionComplete(execution) {
 		now := time.Now()
 		execution.EndTime = &now
 		execution.Status = m.calculateExecutionStatus(execution)
-		m.notifyExecutionComplete(execution)
+		exec := execution // capture for closure
+		notifications = append(notifications, func() { m.notifyExecutionComplete(exec) })
 	}
 
-	// Notify listeners
 	if status == StatusRunning && oldStatus == StatusPending {
-		m.notifyDeviceStart(executionID, device)
+		dev := device // capture for closure
+		notifications = append(notifications, func() { m.notifyDeviceStart(executionID, dev) })
 	} else if status == StatusCompleted || status == StatusFailed {
-		m.notifyDeviceComplete(executionID, device)
+		dev := device // capture for closure
+		notifications = append(notifications, func() { m.notifyDeviceComplete(executionID, dev) })
 	}
 
 	if err != nil {
-		m.notifyDeviceError(executionID, device, err)
+		dev := device // capture for closure
+		notifications = append(notifications, func() { m.notifyDeviceError(executionID, dev, err) })
+	}
+
+	m.mu.Unlock()
+
+	// Dispatch notifications with no lock held.
+	for _, notify := range notifications {
+		notify()
 	}
 
 	return nil

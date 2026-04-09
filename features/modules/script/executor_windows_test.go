@@ -15,6 +15,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestWTSGetActiveConsoleSessionId_FindsInKernel32 verifies that
+// WTSGetActiveConsoleSessionId is loadable from kernel32.dll (not wtsapi32.dll).
+// This test always runs regardless of whether a console session is active, providing
+// CI-safe regression coverage for the DLL fix.
+func TestWTSGetActiveConsoleSessionId_FindsInKernel32(t *testing.T) {
+	err := procWTSGetActiveConsoleSessionId.Find()
+	require.NoError(t, err, "WTSGetActiveConsoleSessionId must be found in kernel32.dll")
+}
+
+// TestParseActiveSessionID_SentinelReturnsNoUser verifies that the sentinel value
+// 0xFFFFFFFF maps to ErrNoUserLoggedIn. Pure function; no WTS API call needed.
+func TestParseActiveSessionID_SentinelReturnsNoUser(t *testing.T) {
+	id, err := parseActiveSessionID(uintptr(activeConsoleSessionNone))
+	require.ErrorIs(t, err, ErrNoUserLoggedIn)
+	assert.Zero(t, id)
+}
+
+// TestParseActiveSessionID_ValidIDPassesThrough verifies that a non-sentinel session ID
+// is returned unchanged. Pure function; no WTS API call needed.
+func TestParseActiveSessionID_ValidIDPassesThrough(t *testing.T) {
+	const testSessionID uint32 = 1
+	id, err := parseActiveSessionID(uintptr(testSessionID))
+	require.NoError(t, err)
+	assert.Equal(t, testSessionID, id)
+}
+
 // TestDetectLoggedInUser_Windows_Behavior verifies that detectLoggedInUser either
 // returns a non-empty username or ErrNoUserLoggedIn. Both are valid depending on
 // whether an interactive console session is active.
@@ -62,12 +88,13 @@ func TestApplyExecutionContext_Windows_SystemPassesThrough(t *testing.T) {
 }
 
 // TestApplyExecutionContext_Windows_LoggedInUser_NoUser verifies that ErrNoUserLoggedIn
-// is returned when no interactive console session is present.
+// is returned when no interactive console session is present. Uses test hook injection so
+// this test is environment-independent and always runs in CI.
 func TestApplyExecutionContext_Windows_LoggedInUser_NoUser(t *testing.T) {
-	// Skip if a user IS logged in — the no-session path cannot be tested then.
-	if _, err := detectLoggedInUser(); err == nil {
-		t.Skip("an interactive user is logged in; skipping no-user error path test")
-	}
+	// Inject a no-session error without calling the real WTS API.
+	old := windowsGetSessionID
+	windowsGetSessionID = func() (uint32, error) { return 0, ErrNoUserLoggedIn }
+	defer func() { windowsGetSessionID = old }()
 
 	ctx := context.Background()
 	config := &ScriptConfig{

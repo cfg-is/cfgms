@@ -93,6 +93,10 @@ func detectLinuxUserViaWho() (string, error) {
 	return "", ErrNoUserLoggedIn
 }
 
+// unixDetectLoggedInUser is a test hook; override in tests to inject user detection
+// errors without calling the real OS utilities (loginctl/who/stat).
+var unixDetectLoggedInUser = detectLoggedInUser
+
 // applyExecutionContext returns a (potentially modified) command configured to run
 // under the execution context specified in config, the actual OS user the script will
 // run as (empty for system context), a cleanup function (no-op on Unix), and any error.
@@ -107,7 +111,7 @@ func applyExecutionContext(ctx context.Context, config *ScriptConfig, cmd *exec.
 		return cmd, "", noCleanup, nil
 	}
 
-	user, err := detectLoggedInUser()
+	user, err := unixDetectLoggedInUser()
 	if err != nil {
 		return nil, "", noCleanup, err
 	}
