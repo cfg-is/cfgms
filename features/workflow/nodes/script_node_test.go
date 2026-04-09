@@ -5,6 +5,7 @@ package nodes
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 
@@ -14,6 +15,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// testShellAndScript returns the appropriate shell type and shell name string
+// for the current platform. On Windows, cmd.exe is used; on Linux/macOS, bash.
+func testShellAndScript() (script.ShellType, string) {
+	switch runtime.GOOS {
+	case "windows":
+		return script.ShellCmd, "cmd"
+	default:
+		return script.ShellBash, "bash"
+	}
+}
 
 // testDeviceSource is a real DeviceSource backed by a configurable device list.
 // Using a real DeviceSource with StewardFleetQuery exercises the actual filtering
@@ -54,9 +66,10 @@ func TestScriptNode_FleetQueryWiring(t *testing.T) {
 	}
 	fq := fleet.NewStewardFleetQuery(src)
 
+	testShell, _ := testShellAndScript()
 	config := &ScriptStepConfig{
 		InlineScript: "echo hello",
-		Shell:        script.ShellBash,
+		Shell:        testShell,
 		DeviceFilter: &fleet.Filter{
 			OS:   "linux",
 			Tags: []string{"prod"},
@@ -92,9 +105,10 @@ func TestScriptNode_ExplicitDevicesSkipFleetQuery(t *testing.T) {
 	}
 	fq := fleet.NewStewardFleetQuery(src)
 
+	testShell, _ := testShellAndScript()
 	config := &ScriptStepConfig{
 		InlineScript: "echo hello",
-		Shell:        script.ShellBash,
+		Shell:        testShell,
 		Devices:      []string{"explicit-dev-1"},
 		DeviceFilter: &fleet.Filter{OS: "linux"},
 		Timeout:      5 * time.Second,
@@ -125,9 +139,10 @@ func TestScriptNode_ZeroMatchReturnsSuccessWithWarning(t *testing.T) {
 	}
 	fq := fleet.NewStewardFleetQuery(src)
 
+	testShell, _ := testShellAndScript()
 	config := &ScriptStepConfig{
 		InlineScript: "echo hello",
-		Shell:        script.ShellBash,
+		Shell:        testShell,
 		DeviceFilter: &fleet.Filter{OS: "linux"},
 		Timeout:      5 * time.Second,
 	}
@@ -152,9 +167,10 @@ func TestScriptNode_ZeroMatchReturnsSuccessWithWarning(t *testing.T) {
 // TestScriptNode_NoFilterNoDevicesDefaultsToLocalhost verifies the existing
 // fallback behaviour: no explicit devices and no filter → targets localhost.
 func TestScriptNode_NoFilterNoDevicesDefaultsToLocalhost(t *testing.T) {
+	testShell, _ := testShellAndScript()
 	config := &ScriptStepConfig{
 		InlineScript: "echo hello",
-		Shell:        script.ShellBash,
+		Shell:        testShell,
 		Timeout:      5 * time.Second,
 	}
 
@@ -182,9 +198,10 @@ func TestScriptNode_RecurringFilterReEvaluated(t *testing.T) {
 	}
 	fq := fleet.NewStewardFleetQuery(src)
 
+	testShell, _ := testShellAndScript()
 	config := &ScriptStepConfig{
 		InlineScript: "echo hello",
-		Shell:        script.ShellBash,
+		Shell:        testShell,
 		DeviceFilter: &fleet.Filter{OS: "linux"},
 		Timeout:      5 * time.Second,
 	}
@@ -228,9 +245,10 @@ func TestScriptNode_FilterANDSemantics(t *testing.T) {
 	}
 	fq := fleet.NewStewardFleetQuery(src)
 
+	testShell, _ := testShellAndScript()
 	config := &ScriptStepConfig{
 		InlineScript: "echo hello",
-		Shell:        script.ShellBash,
+		Shell:        testShell,
 		DeviceFilter: &fleet.Filter{
 			OS:   "linux",
 			Tags: []string{"prod"},
@@ -265,12 +283,13 @@ func TestScriptStepExecutor_FleetQueryInjection(t *testing.T) {
 	executor := NewScriptStepExecutor(nil, monitor, nil)
 	executor.SetFleetQuery(fq)
 
+	_, testShellName := testShellAndScript()
 	step := workflow.Step{
 		Name: "run-script",
 		Type: workflow.StepTypeTask,
 		Config: map[string]interface{}{
 			"inline_script": "echo hello",
-			"shell":         "bash",
+			"shell":         testShellName,
 			"device_filter": map[string]interface{}{
 				"os": "linux",
 			},
@@ -296,9 +315,10 @@ func TestScriptNode_FleetQueryError(t *testing.T) {
 	src := &errorDeviceSource{err: errors.New("registry unavailable")}
 	fq := fleet.NewStewardFleetQuery(src)
 
+	testShell, _ := testShellAndScript()
 	config := &ScriptStepConfig{
 		InlineScript: "echo hello",
-		Shell:        script.ShellBash,
+		Shell:        testShell,
 		DeviceFilter: &fleet.Filter{OS: "linux"},
 		Timeout:      5 * time.Second,
 	}
@@ -319,9 +339,10 @@ func TestScriptNode_FleetQueryError(t *testing.T) {
 // configuring a DeviceFilter without wiring a FleetQuery returns an error
 // rather than silently falling back to localhost.
 func TestScriptNode_DeviceFilterWithoutFleetQueryReturnsError(t *testing.T) {
+	testShell, _ := testShellAndScript()
 	config := &ScriptStepConfig{
 		InlineScript: "echo hello",
-		Shell:        script.ShellBash,
+		Shell:        testShell,
 		DeviceFilter: &fleet.Filter{OS: "linux"},
 		Timeout:      5 * time.Second,
 	}
@@ -342,9 +363,10 @@ func TestScriptNode_DeviceFilterWithoutFleetQueryReturnsError(t *testing.T) {
 // TestScriptNode_WaitForCompletion verifies that when WaitForCompletion is true,
 // Execute polls until the execution reaches a terminal status and returns success.
 func TestScriptNode_WaitForCompletion(t *testing.T) {
+	testShell, _ := testShellAndScript()
 	config := &ScriptStepConfig{
 		InlineScript:      "echo hello",
-		Shell:             script.ShellBash,
+		Shell:             testShell,
 		Timeout:           5 * time.Second,
 		WaitForCompletion: true,
 	}
@@ -366,9 +388,10 @@ func TestScriptNode_WaitForCompletion(t *testing.T) {
 // WaitForCompletion: true with Timeout: 0 returns an error rather than
 // silently timing out immediately via time.After(0).
 func TestScriptNode_WaitForCompletion_ZeroTimeoutError(t *testing.T) {
+	testShell, _ := testShellAndScript()
 	config := &ScriptStepConfig{
 		InlineScript:      "echo hello",
-		Shell:             script.ShellBash,
+		Shell:             testShell,
 		Timeout:           0, // zero value — misconfiguration
 		WaitForCompletion: true,
 	}
