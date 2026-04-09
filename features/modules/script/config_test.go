@@ -10,10 +10,10 @@ import (
 
 func TestEffectiveSigningPolicy(t *testing.T) {
 	tests := []struct {
-		name            string
-		scriptPolicy    SigningPolicy
-		stewardMinimum  SigningPolicy
-		expectedPolicy  SigningPolicy
+		name           string
+		scriptPolicy   SigningPolicy
+		stewardMinimum SigningPolicy
+		expectedPolicy SigningPolicy
 	}{
 		{
 			name:           "script none, steward none — returns none",

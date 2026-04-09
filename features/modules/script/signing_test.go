@@ -361,8 +361,8 @@ func TestApplyTrustMode_TrustedKeysAndPublic_MatchingThumbprint(t *testing.T) {
 
 func TestApplyTrustMode_TrustedKeysAndPublic_NoMatchAllowPublicCA(t *testing.T) {
 	cfg := ModuleSigningConfig{
-		TrustMode:   TrustModeTrustedKeysAndPublic,
-		TrustedKeys: []TrustedKeyEntry{{Name: "corp-cert", Thumbprint: "AABBCCDD"}},
+		TrustMode:     TrustModeTrustedKeysAndPublic,
+		TrustedKeys:   []TrustedKeyEntry{{Name: "corp-cert", Thumbprint: "AABBCCDD"}},
 		AllowPublicCA: true,
 	}
 	// Thumbprint doesn't match the allowlist but AllowPublicCA permits it.
@@ -373,8 +373,8 @@ func TestApplyTrustMode_TrustedKeysAndPublic_NoMatchAllowPublicCA(t *testing.T) 
 
 func TestApplyTrustMode_TrustedKeysAndPublic_NoMatchPublicCAFalse(t *testing.T) {
 	cfg := ModuleSigningConfig{
-		TrustMode:   TrustModeTrustedKeysAndPublic,
-		TrustedKeys: []TrustedKeyEntry{{Name: "corp-cert", Thumbprint: "AABBCCDD"}},
+		TrustMode:     TrustModeTrustedKeysAndPublic,
+		TrustedKeys:   []TrustedKeyEntry{{Name: "corp-cert", Thumbprint: "AABBCCDD"}},
 		AllowPublicCA: false,
 	}
 	if err := applyTrustMode("99887766", cfg); err == nil {
