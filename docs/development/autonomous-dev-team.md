@@ -89,15 +89,25 @@ Agents run in parallel — multiple stories can be in flight simultaneously.
 
 The **Acceptance Reviewer** checks each PR against the story's acceptance criteria, CI status, and code quality. The outcome is fully automated:
 
-- **Zero findings**: PR is **auto-merged** — no human involvement needed
+- **Zero findings**: PR is **auto-merged**, agent container and clone cleaned up — no human involvement needed
 - **Any findings (1st review)**: A **fix agent** is dispatched in a container to address the findings
-- **Any findings (2nd review)**: **Escalated to PM** as a `pipeline:blocked` item — the agent team couldn't resolve it
+- **Any findings (2nd review)**: **Escalated to PM** as a `pipeline:blocked` item, agent container and clone cleaned up — the agent team couldn't resolve it
 
 The PM only sees PRs that agents failed to get right after two attempts. For those, the PM provides guidance (updated story spec, clarification, or direct code fix) and the cycle restarts.
 
 ### 5. Completion
 
 Merged PRs auto-close their story issues. The PO tracks epic completion via GitHub sub-issue progress and surfaces the next action.
+
+### Container Cleanup
+
+Agent containers and their clones are cleaned up automatically:
+
+- **On auto-merge** — Acceptance Reviewer removes the container and clone immediately
+- **On escalation** — Acceptance Reviewer cleans up when applying `pipeline:blocked` (2nd review failure)
+- **PO cron sweep** — each cycle runs `agent-dispatch.sh cleanup-stale` before dispatch, removing containers whose stories are closed, `agent:failed`, or `pipeline:blocked`
+
+Failed or stale containers are preserved until the PO cron sweep runs or the story is re-dispatched, so logs and results remain available for debugging.
 
 ## Pipeline State Machine
 

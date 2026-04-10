@@ -208,14 +208,23 @@ The standalone Tech Lead pass (PO agent §4.1 Step 2) handles `pipeline:draft` s
 - Fix agent pushes changes
 - QA subagent re-reviews the PR
 - On pass: removes `pipeline:fix`, applies `pipeline:review`, assigns to founder
-- On second fail: removes `pipeline:fix`, applies `pipeline:blocked`, assigns to founder with specific failure detail
+- On second fail: removes `pipeline:fix`, applies `pipeline:blocked`, assigns to founder with specific failure detail. Agent container and clone are cleaned up.
 
 ### 5.7 Merge Decision (Founder, synchronous)
 
 - Founder runs `/po` — dashboard shows PRs with `pipeline:review` label
 - Founder reads QA verdict comment — no further investigation needed
 - Founder merges or requests changes
-- On merge: story Issue auto-closes, PO checks if any dependent draft stories are now unblocked
+- On merge: story Issue auto-closes, agent container and clone cleaned up, PO checks if any dependent draft stories are now unblocked
+
+### 5.8 Container Cleanup (PO cron, automatic)
+
+Agent containers and clones are cleaned up at three points:
+- **On auto-merge:** Acceptance Reviewer removes the container immediately after merge
+- **On escalation:** Acceptance Reviewer cleans up when a story is blocked after the fix cycle
+- **PO cron sweep:** Each cycle runs `agent-dispatch.sh cleanup-stale` before dispatch, removing any remaining containers whose stories are closed, `agent:failed`, or `pipeline:blocked`
+
+Failed or stale containers are preserved until the cron sweep so logs remain available for debugging.
 
 -----
 
