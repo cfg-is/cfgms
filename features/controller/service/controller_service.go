@@ -139,10 +139,10 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 	tenantID := s.extractTenantID(ctx)
 
 	s.logger.Info("Registration request received",
-		"tenant_id", tenantID,
-		"version", req.Version,
+		"tenant_id", logging.SanitizeLogValue(tenantID),
+		"version", logging.SanitizeLogValue(req.Version),
 		"is_reconnection", req.IsReconnection,
-		"steward_dna_id", req.InitialDna.Id)
+		"steward_dna_id", logging.SanitizeLogValue(req.InitialDna.Id))
 
 	var stewardID string
 	var syncStatus *common.SyncStatus
@@ -158,7 +158,7 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 			// Verify sync status
 			syncStatus, requiresDNAResync, requiresConfigResync = s.verifySyncStatus(existingSteward, req)
 		} else {
-			s.logger.Warn("Reconnection claimed but no existing steward found", "dna_id", req.InitialDna.Id)
+			s.logger.Warn("Reconnection claimed but no existing steward found", "dna_id", logging.SanitizeLogValue(req.InitialDna.Id))
 			// Treat as new registration
 			req.IsReconnection = false
 		}
@@ -208,7 +208,7 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 
 	s.logger.Info("Steward registration completed",
 		"steward_id", stewardID,
-		"version", req.Version,
+		"version", logging.SanitizeLogValue(req.Version),
 		"requires_dna_resync", requiresDNAResync,
 		"requires_config_resync", requiresConfigResync)
 
@@ -231,14 +231,14 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 // ProcessHeartbeat handles heartbeat requests from stewards.
 // When a heartbeat includes DNA updates, the DNA is written to durable storage.
 func (s *ControllerService) ProcessHeartbeat(ctx context.Context, req *controller.HeartbeatRequest) (*common.Status, error) {
-	s.logger.Debug("Heartbeat received", "steward_id", req.StewardId, "status", req.Status)
+	s.logger.Debug("Heartbeat received", "steward_id", logging.SanitizeLogValue(req.StewardId), "status", logging.SanitizeLogValue(req.Status))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	steward, exists := s.stewards[req.StewardId]
 	if !exists {
-		s.logger.Warn("Heartbeat from unknown steward", "steward_id", req.StewardId)
+		s.logger.Warn("Heartbeat from unknown steward", "steward_id", logging.SanitizeLogValue(req.StewardId))
 		return &common.Status{
 			Code:    common.Status_NOT_FOUND,
 			Message: "Steward not found",
@@ -257,7 +257,7 @@ func (s *ControllerService) ProcessHeartbeat(ctx context.Context, req *controlle
 		s.storeDNA(ctx, req.StewardId, steward.TenantID, steward.DNA, req.Status)
 	}
 
-	s.logger.Debug("Heartbeat processed successfully", "steward_id", req.StewardId)
+	s.logger.Debug("Heartbeat processed successfully", "steward_id", logging.SanitizeLogValue(req.StewardId))
 
 	return &common.Status{
 		Code:    common.Status_OK,
@@ -268,14 +268,14 @@ func (s *ControllerService) ProcessHeartbeat(ctx context.Context, req *controlle
 // SyncDNA handles DNA synchronization requests.
 // The full DNA snapshot is written to durable storage on every sync.
 func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*common.Status, error) {
-	s.logger.Debug("DNA sync request received", "steward_id", dna.Id)
+	s.logger.Debug("DNA sync request received", "steward_id", logging.SanitizeLogValue(dna.Id))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	steward, exists := s.stewards[dna.Id]
 	if !exists {
-		s.logger.Warn("DNA sync from unknown steward", "steward_id", dna.Id)
+		s.logger.Warn("DNA sync from unknown steward", "steward_id", logging.SanitizeLogValue(dna.Id))
 		return &common.Status{
 			Code:    common.Status_NOT_FOUND,
 			Message: "Steward not found",
@@ -288,7 +288,7 @@ func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*comm
 	// Persist full DNA snapshot to durable storage
 	s.storeDNA(ctx, dna.Id, steward.TenantID, dna, steward.Status)
 
-	s.logger.Debug("DNA synchronized successfully", "steward_id", dna.Id)
+	s.logger.Debug("DNA synchronized successfully", "steward_id", logging.SanitizeLogValue(dna.Id))
 
 	return &common.Status{
 		Code:    common.Status_OK,
@@ -298,18 +298,18 @@ func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*comm
 
 // GetStewardDNA retrieves DNA information for a specific steward
 func (s *ControllerService) GetStewardDNA(ctx context.Context, req *controller.StewardRequest) (*common.DNA, error) {
-	s.logger.Debug("DNA retrieval request", "steward_id", req.StewardId)
+	s.logger.Debug("DNA retrieval request", "steward_id", logging.SanitizeLogValue(req.StewardId))
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	steward, exists := s.stewards[req.StewardId]
 	if !exists {
-		s.logger.Warn("DNA request for unknown steward", "steward_id", req.StewardId)
-		return nil, fmt.Errorf("steward not found: %s", req.StewardId)
+		s.logger.Warn("DNA request for unknown steward", "steward_id", logging.SanitizeLogValue(req.StewardId))
+		return nil, fmt.Errorf("steward not found: %s", logging.SanitizeLogValue(req.StewardId))
 	}
 
-	s.logger.Debug("DNA retrieved successfully", "steward_id", req.StewardId)
+	s.logger.Debug("DNA retrieved successfully", "steward_id", logging.SanitizeLogValue(req.StewardId))
 	return steward.DNA, nil
 }
 
