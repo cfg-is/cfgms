@@ -8,6 +8,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - '*.md'              # Root-level markdown only (README.md, CONTRIBUTING.md)
+      - '.claude/**'
       - 'LICENSE'
       - '.gitignore'
       - '.editorconfig'
