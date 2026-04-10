@@ -23,18 +23,24 @@ Multiple human operators can work in parallel — each owns one or more epics, a
 
 ```mermaid
 flowchart TD
-    PM[PM captures intent] --> PO[PO creates epic]
-    PO --> BA[BA decomposes into stories]
-    BA --> TL[Tech Lead validates stories]
-    TL --> DEV[Dev agent implements in container]
-    DEV --> AR[Acceptance Reviewer checks PR]
-    AR -->|pass| MERGE[PM merges]
-    AR -->|fail, 1st attempt| FIX[Fix agent patches PR]
+    PM[PM captures intent]:::human --> PO[PO creates epic]:::agent
+    PO --> BA[BA decomposes into stories]:::agent
+    BA --> TL[Tech Lead validates stories]:::agent
+    TL --> DEV[Dev agent implements in container]:::container
+    DEV --> AR[Acceptance Reviewer checks PR]:::agent
+    AR -->|pass| MERGE[PM merges]:::human
+    AR -->|fail, 1st attempt| FIX[Fix agent patches PR]:::container
     FIX --> AR
-    AR -->|fail, 2nd attempt| BLOCKED[Escalate to PM]
+    AR -->|fail, 2nd attempt| BLOCKED[Escalate to PM]:::human
     BLOCKED --> PM
     MERGE --> DONE[Story closed, epic progress updated]
+
+    classDef human fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef agent fill:#6ab04c,stroke:#3e7a2a,color:#fff
+    classDef container fill:#f0932b,stroke:#b5700f,color:#fff
 ```
+
+> **Legend:** 🔵 Human operator | 🟢 Agent (subagent) | 🟠 Agent (isolated container)
 
 ## How It Works
 
@@ -124,20 +130,24 @@ The Product Owner operates in two modes:
 ```mermaid
 flowchart LR
     subgraph Scheduled Cycle
-        S1[Check unblocked stories] --> S2[Tech Lead review]
-        S2 --> S3[Dispatch ready stories]
-        S3 --> S4[Run fix cycles]
-        S4 --> S5[Acceptance review new PRs]
-        S5 --> S6[Decompose new epics]
-        S6 --> S7[Check forward edge]
+        S1[Check unblocked stories]:::agent --> S2[Tech Lead review]:::agent
+        S2 --> S3[Dispatch to containers]:::container
+        S3 --> S4[Run fix cycles]:::container
+        S4 --> S5[Acceptance review PRs]:::agent
+        S5 --> S6[Decompose new epics]:::agent
+        S6 --> S7[Check forward edge]:::agent
     end
 
     subgraph Interactive Session
-        I1[Dashboard] --> I2{PM action}
-        I2 -->|new idea| I3[Intent capture]
-        I2 -->|resolve blocker| I4[Targeted unblock]
-        I2 -->|merge PR| I5[Merge decision]
+        I1[Dashboard]:::agent --> I2{PM action}:::human
+        I2 -->|new idea| I3[Intent capture]:::human
+        I2 -->|resolve blocker| I4[Targeted unblock]:::human
+        I2 -->|merge PR| I5[Merge decision]:::human
     end
+
+    classDef human fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef agent fill:#6ab04c,stroke:#3e7a2a,color:#fff
+    classDef container fill:#f0932b,stroke:#b5700f,color:#fff
 ```
 
 ## Design Principles
