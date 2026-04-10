@@ -22,8 +22,8 @@ This directory contains detailed development guides, standards, and workflows fo
 
 ### Development Guides
 
-- [Getting Started Guide](guides/getting-started.md) - Onboarding for new developers
-- [Development Workflow](guides/development-workflow.md) - Daily development workflow
+- [Autonomous Dev Team](autonomous-dev-team.md) - How the agent pipeline turns ideas into code
+- [Agent Dispatch Reference](agent-dispatch.md) - Container infrastructure, credentials, troubleshooting
 - [Standalone Steward Implementation](guides/standalone-steward-implementation.md) - Steward architecture guide
 
 ## Standards & Best Practices
@@ -58,7 +58,6 @@ This directory contains detailed development guides, standards, and workflows fo
 ### CI/CD & Testing
 
 - [CI Infrastructure Setup](ci-infrastructure-setup.md) - GitHub Actions configuration
-- [Test Cache Architecture](test-cache-architecture.md) - Test performance optimization
 - [Project Management](project_management.md) - Project tracking and planning
 
 ## Slash Commands (Automated Workflow)

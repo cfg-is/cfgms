@@ -165,7 +165,7 @@ Minimum security hygiene before deploying on a real network.
 
 #### v0.9.1.1 — Agent Dispatch Infrastructure (~60 pts, ~3 sprints)
 
-Transition from interactive Claude Code sessions to headless agent dispatch in Docker containers. Adapts Stripe's "Minion" model for solo developer workflow: architect writes PRDs/stories, agents implement in sandboxed containers, developer reviews PRs and merges. See [Agent Dispatch PRD](../development/prd-agent-dispatch.md).
+Transition from interactive Claude Code sessions to headless agent dispatch in Docker containers. Adapts Stripe's "Minion" model for solo developer workflow: architect writes PRDs/stories, agents implement in sandboxed containers, developer reviews PRs and merges. See [Agent Dispatch PRD](../archive/prd-agent-dispatch.md).
 
 **Sprint 1 — Prerequisites & Configuration (~13 pts):**
 - [x] CI: add integration-tests-controller as required check on develop (Issue #433 - 2 points) - Close CI coverage gap before agents skip Docker tests

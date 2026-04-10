@@ -53,9 +53,9 @@ func initializeGitRepo(repoPath string) error {
 
 		// Set up initial config required for commits
 		configCmds := [][]string{
-			{"git", "config", "user.name", "CFGMS Controller"},
-			{"git", "config", "user.email", "controller@cfgms.local"},
-			{"git", "config", "init.defaultBranch", "main"},
+			{"git", "config", "--local", "user.name", "CFGMS Controller"},
+			{"git", "config", "--local", "user.email", "controller@cfgms.local"},
+			{"git", "config", "--local", "init.defaultBranch", "main"},
 		}
 
 		for _, cmdArgs := range configCmds {

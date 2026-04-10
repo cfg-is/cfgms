@@ -43,14 +43,14 @@ If you're new to the project, start with these essential documents:
 
 ### Historical Design Documents
 
-- [gRPC Usage Analysis](architecture/grpc-usage-analysis.md) - Historical: Analysis that led to the gRPC-over-QUIC unified transport
+- [gRPC Usage Analysis](archive/grpc-usage-analysis.md) - Historical: Analysis that led to the gRPC-over-QUIC unified transport
 
 ## Development Guides
 
 ### Getting Started
 
-- [Development Workflow](development/guides/development-workflow.md) - Daily development workflow
-- [Getting Started Guide](development/guides/getting-started.md) - Onboarding for new developers
+- [Autonomous Dev Team](development/autonomous-dev-team.md) - How the agent pipeline turns ideas into code
+- [Agent Dispatch Reference](development/agent-dispatch.md) - Container infrastructure, credentials, troubleshooting
 - [Standalone Steward Implementation](development/guides/standalone-steward-implementation.md)
 
 ### Development Standards
@@ -71,7 +71,6 @@ If you're new to the project, start with these essential documents:
 ### Development Infrastructure
 
 - [CI Infrastructure Setup](development/ci-infrastructure-setup.md) - GitHub Actions configuration
-- [Test Cache Architecture](development/test-cache-architecture.md) - Test performance optimization
 
 ### Security Development
 

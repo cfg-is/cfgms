@@ -245,4 +245,4 @@ See the [Monitoring Guide](monitoring.md) for detailed configuration and usage.
 - [Steward Configuration](steward-configuration.md) - hostname.cfg format and options
 - [Module Development](modules/interface.md) - Module interface and development guide
 - [Development Roadmap](product/roadmap.md) - Feature timeline and future considerations
-- [Development Workflow](development/guides/getting-started.md) - Getting started guide
+- [Development Guide](development/README.md) - Development documentation
