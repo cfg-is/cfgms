@@ -472,11 +472,15 @@ func (s *Server) SetReportsHandler(h *reportapi.Handler) {
 	s.reportsHandler = h
 }
 
-// SetWorkflowHandler sets the workflow handler for workflow and trigger API routes (Issue #414)
+// SetWorkflowHandler sets the workflow handler for workflow and trigger API routes (Issue #414).
+// Propagates the server's fleet query so that script dispatch targeting is wired at setup time (Issue #609).
 func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.workflowHandler = h
+	if h != nil && s.fleetQuery != nil {
+		h.SetFleetQuery(s.fleetQuery)
+	}
 }
 
 // SetApprovalHook replaces the registration approval hook (Issue #422).

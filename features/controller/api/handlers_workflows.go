@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/ctxkeys"
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -25,6 +26,7 @@ type WorkflowHandler struct {
 	triggerManager trigger.TriggerManager
 	triggerAPI     *trigger.APIHandler
 	logger         logging.Logger
+	fleetQuery     fleet.FleetQuery // Issue #609: fleet query for script dispatch targeting
 }
 
 // NewWorkflowHandler creates a new WorkflowHandler.
@@ -44,6 +46,12 @@ func NewWorkflowHandler(
 		h.triggerAPI = trigger.NewAPIHandler(triggerManager)
 	}
 	return h
+}
+
+// SetFleetQuery sets the fleet query implementation used for script dispatch targeting (Issue #609).
+// Must be called before workflow execution begins; propagated to script step executors at dispatch time.
+func (h *WorkflowHandler) SetFleetQuery(q fleet.FleetQuery) {
+	h.fleetQuery = q
 }
 
 // RegisterWorkflowRoutes registers workflow CRUD and execution routes on the provided subrouter.

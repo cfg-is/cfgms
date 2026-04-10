@@ -50,13 +50,13 @@ type QueueEntry struct {
 	ExecutionID       string                 `json:"execution_id"`
 	DeviceID          string                 `json:"device_id"`
 	TenantID          string                 `json:"tenant_id"`
-	ScriptRef         string                 `json:"script_ref"`                    // Script identifier in the repository (used for latest-version lookup)
+	ScriptRef         string                 `json:"script_ref"` // Script identifier in the repository (used for latest-version lookup)
 	Shell             ShellType              `json:"shell"`
 	Parameters        map[string]string      `json:"parameters,omitempty"`
 	Environment       map[string]string      `json:"environment,omitempty"`
 	Timeout           time.Duration          `json:"timeout"`
 	QueuedAt          time.Time              `json:"queued_at"`
-	ExpiresAt         time.Time             `json:"expires_at"`
+	ExpiresAt         time.Time              `json:"expires_at"`
 	DispatchedAt      *time.Time             `json:"dispatched_at,omitempty"`
 	CompletedAt       *time.Time             `json:"completed_at,omitempty"`
 	State             QueueState             `json:"state"`

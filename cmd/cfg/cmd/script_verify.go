@@ -70,6 +70,6 @@ func runScriptVerify(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Fprintln(cmd.OutOrStdout(), "signature valid")
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "signature valid")
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/ctxkeys"
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/factory"
@@ -484,6 +485,25 @@ func (l *capturingLogger) loggedNameValues() []string {
 		}
 	}
 	return names
+}
+
+// --- fleet query wiring (Issue #609) -----------------------------------------
+
+// staticStewardProvider is a minimal fleet.StewardProvider for wiring tests.
+type staticStewardProvider struct{}
+
+func (p *staticStewardProvider) GetAllStewards() []fleet.StewardData { return nil }
+
+// TestWorkflowHandler_SetFleetQuery verifies that SetFleetQuery stores the fleet
+// query implementation on WorkflowHandler so it is available for script dispatch targeting.
+func TestWorkflowHandler_SetFleetQuery(t *testing.T) {
+	logger := logging.NewNoopLogger()
+	h := NewWorkflowHandler(nil, nil, nil, logger)
+	assert.Nil(t, h.fleetQuery, "fleetQuery must be nil before SetFleetQuery")
+
+	q := fleet.NewMemoryQuery(&staticStewardProvider{})
+	h.SetFleetQuery(q)
+	assert.Equal(t, q, h.fleetQuery, "SetFleetQuery must assign the query to the handler field")
 }
 
 // TestWorkflowHandler_SpecialCharsInName_HandledSafely verifies that workflow names

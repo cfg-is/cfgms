@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,7 +22,6 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	testutil "github.com/cfgis/cfgms/pkg/testing"
 
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
@@ -364,7 +364,7 @@ func TestConfigurationValidation(t *testing.T) {
 
 	server.router.ServeHTTP(rec, req)
 
-	// Should return validation result (even if service is mock)
+	// Should return validation result
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var response APIResponse
@@ -786,8 +786,39 @@ func TestEphemeralAPIKeys(t *testing.T) {
 	})
 }
 
+// capturingWarnLogger records Warn-level messages so tests can assert on security-relevant log output.
+type capturingWarnLogger struct {
+	logging.NoopLogger
+	mu      sync.Mutex
+	entries []string
+}
+
+func (l *capturingWarnLogger) Warn(msg string, _ ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, msg)
+}
+
+func (l *capturingWarnLogger) WarnCtx(_ context.Context, msg string, kvs ...interface{}) {
+	l.Warn(msg, kvs...)
+}
+
+func (l *capturingWarnLogger) reset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = nil
+}
+
+func (l *capturingWarnLogger) warnMessages() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, len(l.entries))
+	copy(out, l.entries)
+	return out
+}
+
 // setupTestServerWithLogger creates a test server using the provided logger.
-// Use this when you need to capture log output (e.g., with MockLogger).
+// Use this when you need to capture log output for assertions.
 func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -888,8 +919,8 @@ func TestTestEndpointAuthGate(t *testing.T) {
 	})
 
 	t.Run("warn log emitted on bypass", func(t *testing.T) {
-		mockLogger := testutil.NewMockLogger(true)
-		server := setupTestServerWithLogger(t, mockLogger)
+		capLogger := &capturingWarnLogger{}
+		server := setupTestServerWithLogger(t, capLogger)
 
 		t.Setenv("CFGMS_ENABLE_TEST_ENDPOINTS", "true")
 
@@ -899,7 +930,7 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		wrappedHandler := server.authenticationMiddleware(testHandler)
 
 		// Clear any startup log messages before testing
-		mockLogger.Reset()
+		capLogger.reset()
 
 		// Trigger bypass for config endpoint
 		req := httptest.NewRequest("PUT", "/api/v1/test/stewards/steward-abc/config", nil)
@@ -907,20 +938,20 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		wrappedHandler.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusOK, rec.Code)
-		warnLogs := mockLogger.GetLogs("warn")
-		require.NotEmpty(t, warnLogs, "Should emit warn log on auth bypass")
-		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnLogs[0].Message)
+		warnMsgs := capLogger.warnMessages()
+		require.NotEmpty(t, warnMsgs, "Should emit warn log on auth bypass")
+		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnMsgs[0])
 
 		// Trigger bypass for QUIC endpoint
-		mockLogger.Reset()
+		capLogger.reset()
 		req = httptest.NewRequest("POST", "/api/v1/test/stewards/steward-abc/quic/connect", nil)
 		rec = httptest.NewRecorder()
 		wrappedHandler.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusOK, rec.Code)
-		warnLogs = mockLogger.GetLogs("warn")
-		require.NotEmpty(t, warnLogs, "Should emit warn log on QUIC auth bypass")
-		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnLogs[0].Message)
+		warnMsgs = capLogger.warnMessages()
+		require.NotEmpty(t, warnMsgs, "Should emit warn log on QUIC auth bypass")
+		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnMsgs[0])
 	})
 
 	t.Run("non-test endpoints still require auth when env var is set", func(t *testing.T) {
@@ -1061,4 +1092,31 @@ func TestTenantContextKeyType(t *testing.T) {
 	// Old hyphenated string "tenant-id" must also not match.
 	oldVal := ctx.Value("tenant-id")
 	assert.Nil(t, oldVal, "old plain string 'tenant-id' must not match the typed ctxkeys.TenantID")
+}
+
+// TestServer_SetWorkflowHandler_PropagatesFleetQuery verifies that SetWorkflowHandler
+// propagates the server's fleet query to the workflow handler (Issue #609).
+// This exercises the integration path: server.fleetQuery → handler.fleetQuery.
+func TestServer_SetWorkflowHandler_PropagatesFleetQuery(t *testing.T) {
+	server := setupTestServer(t)
+	// server.fleetQuery is always set by New() via fleet.NewMemoryQuery.
+	require.NotNil(t, server.fleetQuery, "server must have a fleet query after New()")
+
+	handler := NewWorkflowHandler(nil, nil, nil, logging.NewNoopLogger())
+	assert.Nil(t, handler.fleetQuery, "handler fleetQuery must be nil before SetWorkflowHandler")
+
+	server.SetWorkflowHandler(handler)
+
+	assert.Equal(t, server.fleetQuery, handler.fleetQuery,
+		"SetWorkflowHandler must propagate the server fleet query to the handler")
+}
+
+// TestServer_SetWorkflowHandler_NilHandler_NoopSafe verifies that passing nil to
+// SetWorkflowHandler does not panic (defensive guard on the propagation branch).
+func TestServer_SetWorkflowHandler_NilHandler_NoopSafe(t *testing.T) {
+	server := setupTestServer(t)
+	assert.NotPanics(t, func() {
+		server.SetWorkflowHandler(nil)
+	}, "SetWorkflowHandler(nil) must not panic")
+	assert.Nil(t, server.workflowHandler, "workflowHandler must be nil after SetWorkflowHandler(nil)")
 }
