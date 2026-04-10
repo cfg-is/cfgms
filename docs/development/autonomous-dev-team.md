@@ -9,9 +9,9 @@ The autonomous development pipeline mirrors a standard product delivery org. Hum
 | Role | Who | Responsibility |
 |------|-----|----------------|
 | **Product Manager** | Human operator | Vision, intent, unblocking agents when they get stuck |
-| **Product Owner** | Claude Code session | Pipeline orchestration, dashboard, intent capture |
-| **Business Analyst** | PO-spawned subagent | Decomposes epics into implementable stories |
-| **Tech Lead** | PO-spawned subagent | Validates stories for agent executability |
+| **Product Owner** | Claude Code session | Pipeline orchestration, dashboard, intent capture, planning team lead |
+| **Business Analyst** | Planning Team member | Proposes story decomposition, defends scope decisions, revises based on Tech Lead feedback |
+| **Tech Lead** | Planning Team member | Validates story proposals for dev agent executability, challenges BA on scope and feasibility |
 | **Developer** | Containerized agent | Implements code in isolated Docker containers, opens PR |
 | **Acceptance Reviewer** | PO-spawned subagent | Reviews PRs against acceptance criteria, auto-merges clean PRs |
 | **QA Reviewer** | PO-spawned subagent | Code quality, test correctness (manual review path) |
@@ -24,9 +24,10 @@ Multiple human operators can work in parallel — each owns one or more epics, a
 ```mermaid
 flowchart TD
     PM[PM captures intent]:::human --> PO[PO creates epic]:::agent
-    PO --> BA[BA decomposes into stories]:::agent
-    BA --> TL[Tech Lead validates stories]:::agent
-    TL --> DEV[Dev agent implements & opens PR]:::container
+    PO --> TEAM[Planning Team: PO + BA + Tech Lead]:::team
+    TEAM -->|consensus reached| STORIES[Stories created as agent:ready]:::agent
+    TEAM -->|can't converge| BLOCKED_PLAN[Escalate to PM]:::human
+    STORIES --> DEV[Dev agent implements & opens PR]:::container
     DEV --> AR[Acceptance Reviewer checks PR]:::agent
     AR -->|zero findings| MERGE[Auto-merged]:::agent
     AR -->|any findings, 1st review| FIX[Fix agent patches PR]:::container
@@ -39,9 +40,10 @@ flowchart TD
     classDef human fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef agent fill:#6ab04c,stroke:#3e7a2a,color:#fff
     classDef container fill:#f0932b,stroke:#b5700f,color:#fff
+    classDef team fill:#9b59b6,stroke:#6c3483,color:#fff
 ```
 
-> **Legend:** 🔵 Human operator | 🟢 Agent (subagent) | 🟠 Agent (isolated container)
+> **Legend:** 🔵 Human operator | 🟢 Agent (subagent) | 🟠 Agent (isolated container) | 🟣 Agent team (collaborative)
 
 ## How It Works
 
@@ -51,20 +53,26 @@ A PM describes what they want built in conversation with the Product Owner. The 
 
 The PO creates a GitHub **epic issue** with the structured intent.
 
-### 2. Story Decomposition
+### 2. Collaborative Planning (Planning Team)
 
-The **Business Analyst** agent reads the epic, surveys the codebase, and breaks it into implementable stories. Each story is a GitHub sub-issue with:
+The PO creates a temporary **Planning Team** — spawning the BA and Tech Lead as teammates who collaborate in real time via `SendMessage`.
+
+The **Business Analyst** surveys the codebase and proposes story decompositions. The **Tech Lead** validates each proposal against the codebase — checking dependency ordering, file references, scope, constraints, and ambiguity. The **PO** mediates, makes product decisions when the BA and Tech Lead disagree, and breaks ties.
+
+The conversation iterates (max 3 rounds) until all stories are agreed upon:
+- BA proposes stories → Tech Lead reviews → feedback/revision → repeat
+- BA and Tech Lead can challenge each other directly
+- PO makes product calls when they disagree on scope or priority
+
+Once consensus is reached, the PO creates all stories on GitHub as sub-issues with `agent:ready` labels — they skip the draft phase entirely since the Tech Lead already validated them during the planning conversation. Each story includes:
 
 - Specific files in scope
 - Reference implementations to follow
 - Testable acceptance criteria
 - Dependency ordering
+- Implementation notes (added by Tech Lead during review)
 
-### 3. Tech Lead Review
-
-The **Tech Lead** agent validates each story for dev agent executability. It checks dependency ordering, verifies file references against current code, removes ambiguity, and adds implementation notes. Stories that pass are promoted to the dispatch queue. Stories with gaps get flagged.
-
-### 4. Development
+### 3. Development
 
 Each story is dispatched to an isolated **Docker container** running Claude Code. The dev agent:
 
@@ -77,7 +85,7 @@ Each story is dispatched to an isolated **Docker container** running Claude Code
 
 Agents run in parallel — multiple stories can be in flight simultaneously.
 
-### 5. Acceptance Review
+### 4. Acceptance Review
 
 The **Acceptance Reviewer** checks each PR against the story's acceptance criteria, CI status, and code quality. The outcome is fully automated:
 
@@ -87,7 +95,7 @@ The **Acceptance Reviewer** checks each PR against the story's acceptance criter
 
 The PM only sees PRs that agents failed to get right after two attempts. For those, the PM provides guidance (updated story spec, clarification, or direct code fix) and the cycle restarts.
 
-### 6. Completion
+### 5. Completion
 
 Merged PRs auto-close their story issues. The PO tracks epic completion via GitHub sub-issue progress and surfaces the next action.
 
@@ -98,9 +106,9 @@ All coordination happens through GitHub labels — no external state store.
 ```mermaid
 stateDiagram-v2
     [*] --> Epic: PO creates epic
-    Epic --> Draft: BA decomposes
-    Draft --> Ready: Tech Lead approves
-    Draft --> Blocked: Tech Lead finds gaps
+    Epic --> Planning: Planning Team convenes
+    Planning --> Ready: Team reaches consensus
+    Planning --> Blocked: Can't converge (3 rounds)
     Ready --> InProgress: Agent dispatched
     InProgress --> PR: Agent opens PR
     PR --> Merged: Zero findings, auto-merged
@@ -113,12 +121,13 @@ stateDiagram-v2
 
 | Label | Stage |
 |-------|-------|
-| `pipeline:epic` | Epic defined, awaiting decomposition |
-| `pipeline:draft` | Story written, awaiting Tech Lead review |
-| `agent:ready` | Story validated, queued for dispatch |
+| `pipeline:epic` | Epic defined, awaiting Planning Team |
+| `pipeline:story` | Story sub-issue of an epic (applied to all stories) |
+| `agent:ready` | Story validated by Planning Team, queued for dispatch |
 | `agent:in-progress` | Dev agent container running |
 | `pipeline:fix` | PR has findings, fix agent dispatched |
 | `pipeline:blocked` | Escalation — agents couldn't resolve, needs human input |
+| `pipeline:draft` | (Legacy) Story awaiting standalone Tech Lead review |
 
 ## Orchestration
 
@@ -131,11 +140,11 @@ The Product Owner operates in two modes:
 ```mermaid
 flowchart LR
     subgraph Scheduled Cycle
-        S1[Check unblocked stories]:::agent --> S2[Tech Lead review]:::agent
+        S1[Check unblocked stories]:::agent --> S2[Legacy Tech Lead review]:::agent
         S2 --> S3[Dispatch to containers]:::container
         S3 --> S4[Run fix cycles]:::container
         S4 --> S5[Acceptance review PRs]:::agent
-        S5 --> S6[Decompose new epics]:::agent
+        S5 --> S6[Planning Team for new epics]:::team
         S6 --> S7[Check forward edge]:::agent
     end
 
@@ -149,13 +158,14 @@ flowchart LR
     classDef human fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef agent fill:#6ab04c,stroke:#3e7a2a,color:#fff
     classDef container fill:#f0932b,stroke:#b5700f,color:#fff
+    classDef team fill:#9b59b6,stroke:#6c3483,color:#fff
 ```
 
 ## Design Principles
 
 **GitHub is the single source of truth.** All pipeline state lives in GitHub issues, labels, and PRs. No local files, no external databases. Any team member can check status from their phone.
 
-**Agents don't guess.** Stories must be self-contained with explicit file references and testable criteria. Vague specs get rejected by the Tech Lead, not interpreted by the dev agent.
+**Agents don't guess.** Stories must be self-contained with explicit file references and testable criteria. The Planning Team debates and resolves ambiguity before stories are created — vague proposals get challenged by the Tech Lead and refined by the BA before any dev agent sees them.
 
 **One escalation surface.** Every blocker becomes a `pipeline:blocked` issue assigned to the responsible person. No Slack messages, no email, no notifications outside GitHub.
 

@@ -238,7 +238,9 @@ Each step creates a `pipeline:blocked` issue on unrecoverable failure and contin
 **Step 1 — Unblock check:**
 Find recently merged PRs. Check if any `pipeline:draft` stories had `## Dependencies` referencing the merged story. If satisfied, they're eligible for Tech Lead review.
 
-**Step 2 — Tech Lead pass:**
+**Step 2 — Tech Lead pass (legacy only):**
+Handles `pipeline:draft` stories that were created before the Planning Team was introduced. New epics go through Step 6 (Planning Team) and produce `agent:ready` stories directly. Once the backlog of legacy drafts clears, this step becomes a no-op.
+
 Find `pipeline:draft` stories. Collect their issue numbers, then use the **Agent tool** (not Bash) to spawn the Tech Lead: subagent_type `tech-lead`, prompt `"Review draft stories for dev agent executability: #NNN #NNN #NNN"`, mode `auto`.
 
 The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency ordering, implementation notes, scope, constraints, and ambiguity. Passing stories get promoted (`pipeline:draft` → `agent:ready`). Failing stories get a `pipeline:blocked` issue.
@@ -277,10 +279,102 @@ The Acceptance Reviewer (`.claude/agents/acceptance-reviewer.md`) verifies CI, c
 - Any findings (first review): apply `pipeline:fix` to story, post review comment on PR
 - Any findings (second review): apply `pipeline:blocked`, assign to founder
 
-**Step 6 — BA pass:**
-Find `pipeline:epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each, use the **Agent tool** (not Bash) to spawn the BA agent: subagent_type `ba`, prompt `"Decompose epic #<NUM> into story sub-issues."`, mode `auto`.
+**Step 6 — Planning Team (BA + Tech Lead collaboration):**
+Find `pipeline:epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each epic, orchestrate a collaborative planning session where BA and Tech Lead work together to produce stories that are ready on the first try.
 
-The BA agent (`.claude/agents/ba.md`) reads the epic, surveys the codebase, creates story sub-issues with `pipeline:story` + `pipeline:draft` labels, and links them via GraphQL `addSubIssue`.
+**6a. Read the epic and gather context:**
+```bash
+gh issue view <NUM> --repo cfg-is/cfgms --json number,title,body,labels
+```
+Extract the epic's Goal, Success Criteria, Non-Goals, Constraints, and PM Notes. Also read `CLAUDE.md` architecture rules and `docs/product/roadmap.md` for milestone context.
+
+**6b. Create the planning team:**
+```
+TeamCreate(team_name: "planning-epic-<NUM>")
+```
+
+**6c. Spawn BA and Tech Lead as teammates (in parallel):**
+
+Spawn both using the **Agent tool** with `team_name` and `name` parameters. Read each agent's `.claude/agents/*.md` file and include the **Team Mode** section instructions in the prompt. Use `subagent_type: "general-purpose"`, `model: "sonnet"`, `mode: "auto"`.
+
+- BA: `Agent(subagent_type: "general-purpose", team_name: "planning-epic-<NUM>", name: "ba", model: "sonnet", mode: "auto", prompt: <ba.md Team Mode instructions>)`
+- Tech Lead: `Agent(subagent_type: "general-purpose", team_name: "planning-epic-<NUM>", name: "tech-lead", model: "sonnet", mode: "auto", prompt: <tech-lead.md Team Mode instructions>)`
+
+**6d. Broadcast epic context to the team:**
+```
+SendMessage(to: "*", summary: "Epic context for planning", message: <epic body + architectural context from CLAUDE.md>)
+```
+
+**6e. Orchestrate the planning conversation:**
+
+The conversation follows this protocol:
+
+1. **BA proposes** — BA surveys the codebase and sends story proposals to PO via `SendMessage`
+2. **PO relays to Tech Lead** — forward BA's proposals: `SendMessage(to: "tech-lead", message: <proposals>)`
+3. **Tech Lead reviews** — validates proposals against the codebase (5-check validation) and sends per-story verdicts (APPROVED / REVISION NEEDED) to PO. Tech Lead may also message BA directly for clarifications.
+4. **If revisions needed** — PO relays Tech Lead feedback to BA: `SendMessage(to: "ba", message: <feedback>)`. BA revises and re-proposes. PO relays to Tech Lead for re-review. Only unresolved stories iterate — approved stories are locked.
+5. **PO product decisions** — if BA and Tech Lead disagree on scope, priority, or approach, PO makes the product call and sends the decision to both: `SendMessage(to: "*", message: "PO DECISION: ...")`
+
+**Maximum 3 revision rounds.** A round = BA revises + Tech Lead re-reviews. After 3 rounds, any remaining REVISION NEEDED stories are resolved by PO decision: either accept with a PO note, or drop and document in a `pipeline:blocked` issue.
+
+**6f. Create stories on GitHub (after consensus):**
+
+Once all stories are APPROVED (or PO-decided), create them on GitHub. For each story:
+```bash
+cat > /tmp/story-body.md <<'STORY_EOF'
+<full story body from final agreed proposal>
+STORY_EOF
+
+./scripts/pipeline-helper.sh create-ready-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md
+rm /tmp/story-body.md
+```
+
+Stories are created with `pipeline:story` + `agent:ready` labels — they skip `pipeline:draft` entirely since the Tech Lead already validated them during the planning conversation.
+
+**6g. Post summary on epic:**
+```bash
+cat > /tmp/planning-summary.md <<'SUMMARY_EOF'
+## Planning Team — Decomposition Complete
+
+Stories created (agent:ready):
+- #NNN — <title>
+- #NNN — <title>
+
+Dependency order: #A → #B → #C
+
+Planning rounds: <N> (BA proposed, Tech Lead reviewed, <N-1> revision rounds)
+
+Blocked items: <none, or list with reasons>
+SUMMARY_EOF
+
+./scripts/pipeline-helper.sh comment <EPIC_NUM> /tmp/planning-summary.md
+rm /tmp/planning-summary.md
+```
+
+**6h. Shutdown the planning team:**
+Send shutdown to both teammates: `SendMessage(to: "*", message: {type: "shutdown_request"})`. Then clean up:
+```
+TeamDelete()
+```
+
+**6i. Fallback — convergence failure:**
+If the PO drops any stories (couldn't converge after 3 rounds), create a single `pipeline:blocked` issue:
+```bash
+cat > /tmp/blocked-body.md <<'BLOCK_EOF'
+## Planning Team: Could Not Converge
+
+Epic: #<NUM> — <title>
+
+## Stories Agreed
+- #NNN — <title> (created as agent:ready)
+
+## Stories Disputed
+- "<story title>": BA proposed: <summary>. Tech Lead objected: <objection>. PO recommendation: <what the founder should decide>.
+BLOCK_EOF
+
+./scripts/pipeline-helper.sh block <EPIC_NUM> "Planning team: convergence failure on epic #<NUM>" /tmp/blocked-body.md
+rm /tmp/blocked-body.md
+```
 
 **Step 7 — Forward edge:**
 If active milestone >80% complete and next milestone has no epics, create `pipeline:blocked` requesting intent capture.
@@ -292,7 +386,7 @@ Post timestamped summary on each active epic. Skip if no actions taken.
 
 Safe to run multiple times:
 - Don't dispatch for `agent:in-progress` issues
-- Don't spawn BA for epics with existing sub-issues
+- Don't spawn Planning Team for epics with existing sub-issues
 - Don't re-review PRs with existing Acceptance Reviewer comment
 - Check `pipeline:fix` history before fix vs. blocked decision
 
