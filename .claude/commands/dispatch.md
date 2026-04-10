@@ -113,11 +113,6 @@ For each branch name:
       ```
       Include `--issue <NUM>` only if auto-detected from branch name.
 
-   f. **Post-launch auth check**:
-      ```bash
-      ./scripts/agent-dispatch.sh wait-for-auth --container cfg-agent-branch-<sanitized>
-      ```
-
 ### 4c. PR-Fix Dispatch
 
 For each `fix-pr <NUM>`:
@@ -145,11 +140,6 @@ For each `fix-pr <NUM>`:
    e. **Launch container** (skip in dry-run):
       ```bash
       ./scripts/agent-dispatch.sh launch-generic cfg-agent-pr-fix-<NUM> <clone_dir> --fix-pr <NUM>
-      ```
-
-   f. **Post-launch auth check**:
-      ```bash
-      ./scripts/agent-dispatch.sh wait-for-auth --container cfg-agent-pr-fix-<NUM>
       ```
 
 ### 4d. Interactive Dispatch
@@ -193,30 +183,13 @@ The target determines how the clone is created; the launch is always the same (`
       This launches a detached container running `claude remote-control --dangerously-skip-permissions`.
       The user connects via https://claude.ai/code — no TTY required.
 
-   d. **Post-launch auth check**:
-      ```bash
-      ./scripts/agent-dispatch.sh wait-for-auth --container cfg-agent-interactive-<sanitized>
-      ```
-
-   e. **Tell the user**:
+   d. **Tell the user**:
       "Interactive session starting. Connect at https://claude.ai/code — look for session named `<BRANCH>`."
       "To view the session URL: `docker logs cfg-agent-interactive-<sanitized>`"
       "To drop into a shell: `docker exec -it cfg-agent-interactive-<sanitized> bash`"
       No label updates — interactive is user-driven.
 
-5. **Post-launch auth check** (skip in dry-run): After ALL headless containers are launched, verify they survive past the OAuth authentication phase.
-
-   ```bash
-   ./scripts/agent-dispatch.sh wait-for-auth <NUM1> [NUM2...]
-   ```
-   For issue-mode containers, pass issue numbers. For branch/PR-fix containers, use `--container` mode.
-
-   Parse output lines:
-   - `AUTH_OK:<ID>:...` — Container survived auth, agent is working
-   - `AUTH_FAILED:<ID>:...` — Container died early (likely expired OAuth token). Print the exit code and last log lines. Suggest: "Run `/agent-setup creds` to refresh OAuth credentials, then re-dispatch."
-   - `AUTH_UNKNOWN:<ID>:...` — Unexpected state, report as warning
-
-6. **Print full agent dashboard** (skip in dry-run): After auth check, gather state for ALL agents (not just the ones dispatched this run):
+5. **Print full agent dashboard** (skip in dry-run): After launch, gather state for ALL agents (not just the ones dispatched this run):
 
    ```bash
    ./scripts/agent-dispatch.sh list-running
@@ -226,15 +199,14 @@ The target determines how the clone is created; the launch is always the same (`
    Print a single summary table showing ALL agents:
 
    **Agent Dashboard:**
-   | Name | Mode | Issue | Status | Auth | Branch | Notes |
-   |------|------|-------|--------|------|--------|-------|
+   | Name | Mode | Issue | Status | Branch | Notes |
+   |------|------|-------|--------|--------|-------|
 
-   Mode values: issue, branch, fix-pr, interactive
+   Mode values: issue, branch, fix-pr, interactive, live
    Status values: Running, Exited (exit code), Not found
-   Auth column: OK / FAILED / n/a (for agents from prior dispatches)
    Notes: uptime for running, PR URL for exited with code 0, failure hint for exited with non-zero
 
-7. **Remind user**: If all auth checks passed: "Agents are running. Use `/isoagents` to check progress (typically 15-45 minutes)." If any failed: "Some agents failed auth — run `/agent-setup creds` to refresh, then re-dispatch the failed targets."
+6. **Remind user**: "Agents are running. Use `/isoagents` to check progress (typically 15-45 minutes)."
 
 ## Error Handling
 

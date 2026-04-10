@@ -61,8 +61,8 @@ Commands:
   launch-generic  <NAME> <DIR> [ARGS...]    Launch agent container with custom name and args
   live            <BRANCH>                   Create branch from develop and drop into live Claude session
   launch-interactive <BRANCH>               Print docker run command for interactive session
-  wait-for-auth   <NUM> [NUM...]            Poll containers until past auth phase (~30s)
-  wait-for-auth   --container <NAME> [...]  Poll named containers until past auth phase
+  wait-for-auth   <NUM> [NUM...]            (deprecated, no-op) Legacy auth polling
+  wait-for-auth   --container <NAME> [...]  (deprecated, no-op) Legacy auth polling
   check-creds                                Check OAuth credential validity and remaining time
   cleanup-issue   <NUM>                     Remove container and clone for a specific issue
   cleanup-container <NAME>                  Remove container and associated clone by name
@@ -419,64 +419,9 @@ case "$cmd" in
     ;;
 
   wait-for-auth)
-    [[ $# -ge 1 ]] || { echo "wait-for-auth requires at least one argument"; exit 1; }
-
-    # Parse container names — either --container <name> [<name>...] or issue numbers
-    container_mode=false
-    containers=()
-    if [[ "$1" == "--container" ]]; then
-      container_mode=true
-      shift
-      containers=("$@")
-    else
-      for num in "$@"; do
-        containers+=("cfg-agent-${num}")
-      done
-    fi
-
-    max_wait=30
-    interval=5
-    elapsed=0
-    while [[ $elapsed -lt $max_wait ]]; do
-      sleep "$interval"
-      elapsed=$((elapsed + interval))
-      all_resolved=true
-      for cname in "${containers[@]}"; do
-        # Derive display name (strip cfg-agent- prefix for issue mode)
-        display="$cname"
-        if [[ "$cname" =~ ^cfg-agent-([0-9]+)$ ]]; then
-          display="${BASH_REMATCH[1]}"
-        fi
-        status=$(docker inspect --format "{{.State.Status}}" "$cname" 2>/dev/null || echo "not_found")
-        if [[ "$status" == "exited" ]]; then
-          exit_code=$(docker inspect --format "{{.State.ExitCode}}" "$cname" 2>/dev/null || echo "?")
-          last_log=$(docker logs --tail 5 "$cname" 2>/dev/null || echo "(no logs)")
-          echo "AUTH_FAILED:${display}:exit_code=${exit_code}:${last_log}"
-        elif [[ "$status" == "running" ]]; then
-          if [[ $elapsed -ge $max_wait ]]; then
-            echo "AUTH_OK:${display}:running after ${elapsed}s"
-          else
-            all_resolved=false
-          fi
-        else
-          echo "AUTH_UNKNOWN:${display}:status=${status}"
-        fi
-      done
-      if $all_resolved; then
-        break
-      fi
-    done
-    # Final check for any still running
-    for cname in "${containers[@]}"; do
-      display="$cname"
-      if [[ "$cname" =~ ^cfg-agent-([0-9]+)$ ]]; then
-        display="${BASH_REMATCH[1]}"
-      fi
-      status=$(docker inspect --format "{{.State.Status}}" "$cname" 2>/dev/null || echo "not_found")
-      if [[ "$status" == "running" ]]; then
-        echo "AUTH_OK:${display}:running after ${elapsed}s"
-      fi
-    done
+    # Deprecated: credentials are now pre-validated via check-creds and copied
+    # from the host via refresh_creds_from_host before launch. This no-op
+    # preserves backward compatibility for any callers that still invoke it.
     echo "WAIT_DONE"
     ;;
 

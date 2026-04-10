@@ -172,10 +172,10 @@ git push origin feature/story-N-agent
 
 ## Troubleshooting
 
-### Agent container exits immediately (AUTH_FAILED)
+### Agent container exits immediately
 
-**Cause**: OAuth token expired.
-**Fix**: `./scripts/refresh-agent-creds.sh` (in a real terminal), then re-dispatch.
+**Cause**: OAuth token expired or credentials missing.
+**Fix**: Run `/agent-setup creds` to refresh credentials, then re-dispatch.
 
 ### "Image not found" on dispatch
 
