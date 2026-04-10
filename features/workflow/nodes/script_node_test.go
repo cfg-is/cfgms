@@ -206,7 +206,6 @@ func TestParseScriptStepConfig_ExecutionContextPassedToScriptConfig(t *testing.T
 
 // --- Secret injection tests (Issue #601) ---
 
-
 // newTestStore returns a real StewardSecretStore in a temp directory.
 // Skips the test when /etc/machine-id is absent (containers without platform identity).
 func newTestStore(t *testing.T) interfaces.SecretStore {

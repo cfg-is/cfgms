@@ -18,9 +18,9 @@ type ExecutionQueue struct {
 	scriptRepo      ScriptRepository // optional; used for latest-version content resolution
 	monitor         *ExecutionMonitor
 	keyManager      *EphemeralKeyManager
-	maxAge          time.Duration  // Maximum time to keep queued executions
-	dispatchTimeout time.Duration  // Maximum time a dispatched execution may wait before re-queue
-	controllerURL   string         // Controller external URL for script callbacks
+	maxAge          time.Duration // Maximum time to keep queued executions
+	dispatchTimeout time.Duration // Maximum time a dispatched execution may wait before re-queue
+	controllerURL   string        // Controller external URL for script callbacks
 	stopCh          chan struct{}
 }
 

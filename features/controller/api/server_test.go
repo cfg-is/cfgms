@@ -1062,3 +1062,30 @@ func TestTenantContextKeyType(t *testing.T) {
 	oldVal := ctx.Value("tenant-id")
 	assert.Nil(t, oldVal, "old plain string 'tenant-id' must not match the typed ctxkeys.TenantID")
 }
+
+// TestServer_SetWorkflowHandler_PropagatesFleetQuery verifies that SetWorkflowHandler
+// propagates the server's fleet query to the workflow handler (Issue #609).
+// This exercises the integration path: server.fleetQuery → handler.fleetQuery.
+func TestServer_SetWorkflowHandler_PropagatesFleetQuery(t *testing.T) {
+	server := setupTestServer(t)
+	// server.fleetQuery is always set by New() via fleet.NewMemoryQuery.
+	require.NotNil(t, server.fleetQuery, "server must have a fleet query after New()")
+
+	handler := NewWorkflowHandler(nil, nil, nil, logging.NewNoopLogger())
+	assert.Nil(t, handler.fleetQuery, "handler fleetQuery must be nil before SetWorkflowHandler")
+
+	server.SetWorkflowHandler(handler)
+
+	assert.Equal(t, server.fleetQuery, handler.fleetQuery,
+		"SetWorkflowHandler must propagate the server fleet query to the handler")
+}
+
+// TestServer_SetWorkflowHandler_NilHandler_NoopSafe verifies that passing nil to
+// SetWorkflowHandler does not panic (defensive guard on the propagation branch).
+func TestServer_SetWorkflowHandler_NilHandler_NoopSafe(t *testing.T) {
+	server := setupTestServer(t)
+	assert.NotPanics(t, func() {
+		server.SetWorkflowHandler(nil)
+	}, "SetWorkflowHandler(nil) must not panic")
+	assert.Nil(t, server.workflowHandler, "workflowHandler must be nil after SetWorkflowHandler(nil)")
+}
