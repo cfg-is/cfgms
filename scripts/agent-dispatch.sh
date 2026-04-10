@@ -59,6 +59,7 @@ Commands:
   create-clone-pr <PR_NUM>                  Clone repo and checkout PR branch
   launch          <NUM>                     Launch agent container (issue mode)
   launch-generic  <NAME> <DIR> [ARGS...]    Launch agent container with custom name and args
+  live            <BRANCH>                   Create branch from develop and drop into live Claude session
   launch-interactive <BRANCH>               Print docker run command for interactive session
   wait-for-auth   <NUM> [NUM...]            Poll containers until past auth phase (~30s)
   wait-for-auth   --container <NAME> [...]  Poll named containers until past auth phase
@@ -287,6 +288,70 @@ case "$cmd" in
       echo "CLEANED:clone:${clone_dir}"
       exit 1
     fi
+    ;;
+
+  live)
+    [[ $# -ge 1 ]] || { echo "live requires a branch name"; exit 1; }
+    branch="$1"
+    validate_branch "$branch"
+    sanitized=$(sanitize_branch "$branch")
+    clone_dir="${WORKTREE_BASE}/${sanitized}"
+    container_name="cfg-agent-live-${sanitized}"
+    github_url=$(git -C "$REPO_ROOT" remote get-url origin)
+
+    # Create clone from develop with new branch (or checkout existing)
+    if [[ -d "$clone_dir" ]]; then
+      echo "Clone already exists at ${clone_dir}, reusing"
+    else
+      trap "rm -rf '$clone_dir'" ERR
+      if git -C "$REPO_ROOT" ls-remote --heads origin "$branch" | grep -q .; then
+        git clone --local --branch develop "$REPO_ROOT" "$clone_dir"
+        cd "$clone_dir"
+        git remote set-url origin "$github_url"
+        sync_to_remote_develop
+        git fetch origin "$branch"
+        git checkout "$branch"
+      else
+        git clone --local --branch develop "$REPO_ROOT" "$clone_dir"
+        cd "$clone_dir"
+        git remote set-url origin "$github_url"
+        sync_to_remote_develop
+        git checkout -b "$branch"
+      fi
+      trap - ERR
+    fi
+
+    real_path=$(realpath "$clone_dir")
+    refresh_creds_from_host
+    gh_token=$(gh auth token)
+
+    # Remove stale container with the same name if it exists
+    docker rm -f "$container_name" 2>/dev/null || true
+
+    echo "================================================"
+    echo " CFGMS Live Session"
+    echo " Branch: ${branch}"
+    echo " Clone:  ${real_path}"
+    echo "================================================"
+
+    # Launch interactive container with TTY — drops straight into claude
+    exec docker run -it --rm \
+      --name "$container_name" \
+      --label "cfg-agent=true" \
+      --label "mode=live" \
+      --label "branch=${branch}" \
+      --memory=4g \
+      --cpus=4 \
+      -v "${real_path}:/workspace" \
+      -v "claude-creds:/persist" \
+      -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
+      -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
+      -e "GH_TOKEN=${gh_token}" \
+      -e "CFGMS_AGENT_MODE=true" \
+      --cap-add NET_ADMIN \
+      --entrypoint /bin/bash \
+      cfg-agent:latest \
+      -c "setup-env.sh && exec claude --dangerously-skip-permissions"
     ;;
 
   launch-interactive)
