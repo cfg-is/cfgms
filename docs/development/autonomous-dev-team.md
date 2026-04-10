@@ -8,14 +8,14 @@ The autonomous development pipeline mirrors a standard product delivery org. Hum
 
 | Role | Who | Responsibility |
 |------|-----|----------------|
-| **Product Manager** | Human operator | Vision, intent, merge decisions, unblocking agents |
+| **Product Manager** | Human operator | Vision, intent, unblocking agents when they get stuck |
 | **Product Owner** | Claude Code session | Pipeline orchestration, dashboard, intent capture |
 | **Business Analyst** | PO-spawned subagent | Decomposes epics into implementable stories |
 | **Tech Lead** | PO-spawned subagent | Validates stories for agent executability |
-| **Developer** | Containerized agent | Implements code in isolated Docker containers |
-| **Acceptance Reviewer** | PO-spawned subagent | Reviews PRs against acceptance criteria |
-| **QA Reviewer** | PO-spawned subagent | Code quality, test correctness |
-| **Security Engineer** | PO-spawned subagent | Vulnerability scanning, architecture compliance |
+| **Developer** | Containerized agent | Implements code in isolated Docker containers, opens PR |
+| **Acceptance Reviewer** | PO-spawned subagent | Reviews PRs against acceptance criteria, auto-merges clean PRs |
+| **QA Reviewer** | PO-spawned subagent | Code quality, test correctness (manual review path) |
+| **Security Engineer** | PO-spawned subagent | Vulnerability scanning, architecture compliance (manual review path) |
 
 Multiple human operators can work in parallel — each owns one or more epics, and `pipeline:blocked` items route to the correct person via GitHub assignee.
 
@@ -26,13 +26,13 @@ flowchart TD
     PM[PM captures intent]:::human --> PO[PO creates epic]:::agent
     PO --> BA[BA decomposes into stories]:::agent
     BA --> TL[Tech Lead validates stories]:::agent
-    TL --> DEV[Dev agent implements in container]:::container
+    TL --> DEV[Dev agent implements & opens PR]:::container
     DEV --> AR[Acceptance Reviewer checks PR]:::agent
-    AR -->|pass| MERGE[PM merges]:::human
-    AR -->|fail, 1st attempt| FIX[Fix agent patches PR]:::container
+    AR -->|zero findings| MERGE[Auto-merged]:::agent
+    AR -->|any findings, 1st review| FIX[Fix agent patches PR]:::container
     FIX --> AR
-    AR -->|fail, 2nd attempt| BLOCKED[Escalate to PM]:::human
-    BLOCKED --> PM
+    AR -->|any findings, 2nd review| BLOCKED[Escalate to PM]:::human
+    BLOCKED -->|PM provides guidance| DEV
     MERGE --> DONE[Story closed, epic progress updated]
 
     classDef human fill:#4a90d9,stroke:#2c5f8a,color:#fff
@@ -76,16 +76,17 @@ Each story is dispatched to an isolated **Docker container** running Claude Code
 
 Agents run in parallel — multiple stories can be in flight simultaneously.
 
-### 5. Review
+### 5. Acceptance Review
 
-The **Acceptance Reviewer** checks each PR against the story's acceptance criteria and CI status. If everything passes, the PR is auto-merged. If there are findings, the PR enters a fix cycle:
+The **Acceptance Reviewer** checks each PR against the story's acceptance criteria, CI status, and code quality. The outcome is fully automated:
 
-- **First failure**: A fix agent is dispatched to address the review findings
-- **Second failure**: Escalated to the responsible PM as a blocked item
+- **Zero findings**: PR is **auto-merged** — no human involvement needed
+- **Any findings (1st review)**: A **fix agent** is dispatched in a container to address the findings
+- **Any findings (2nd review)**: **Escalated to PM** as a `pipeline:blocked` item — the agent team couldn't resolve it
 
-For blocked PRs, **QA** and **Security** specialist agents provide additional review context to help the human resolve the issue.
+The PM only sees PRs that agents failed to get right after two attempts. For those, the PM provides guidance (updated story spec, clarification, or direct code fix) and the cycle restarts.
 
-### 6. Merge & Completion
+### 6. Completion
 
 Merged PRs auto-close their story issues. The PO tracks epic completion via GitHub sub-issue progress and surfaces the next action.
 
@@ -101,11 +102,11 @@ stateDiagram-v2
     Draft --> Blocked: Tech Lead finds gaps
     Ready --> InProgress: Agent dispatched
     InProgress --> PR: Agent opens PR
-    PR --> Merged: Acceptance review passes
-    PR --> Fix: Acceptance review fails (1st)
+    PR --> Merged: Zero findings, auto-merged
+    PR --> Fix: Any findings (1st review)
     Fix --> PR: Fix agent pushes update
-    PR --> Blocked: Acceptance review fails (2nd)
-    Blocked --> Draft: PM resolves
+    PR --> Blocked: Any findings (2nd review)
+    Blocked --> InProgress: PM resolves, re-dispatched
     Merged --> [*]: Story closed
 ```
 
@@ -115,9 +116,8 @@ stateDiagram-v2
 | `pipeline:draft` | Story written, awaiting Tech Lead review |
 | `agent:ready` | Story validated, queued for dispatch |
 | `agent:in-progress` | Dev agent container running |
-| `pipeline:fix` | PR failed review, fix agent dispatched |
-| `pipeline:review` | PR passed review, awaiting merge |
-| `pipeline:blocked` | Escalation — needs human input |
+| `pipeline:fix` | PR has findings, fix agent dispatched |
+| `pipeline:blocked` | Escalation — agents couldn't resolve, needs human input |
 
 ## Orchestration
 
@@ -142,7 +142,7 @@ flowchart LR
         I1[Dashboard]:::agent --> I2{PM action}:::human
         I2 -->|new idea| I3[Intent capture]:::human
         I2 -->|resolve blocker| I4[Targeted unblock]:::human
-        I2 -->|merge PR| I5[Merge decision]:::human
+        I2 -->|review stuck PR| I5[Guide agent fix]:::human
     end
 
     classDef human fill:#4a90d9,stroke:#2c5f8a,color:#fff
