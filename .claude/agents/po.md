@@ -238,6 +238,13 @@ Each step creates a `pipeline:blocked` issue on unrecoverable failure and contin
 **Step 1 — Unblock check:**
 Find recently merged PRs. Check if any `pipeline:draft` stories had `## Dependencies` referencing the merged story. If satisfied, they're eligible for Tech Lead review.
 
+**Step 1.5 — Agent cleanup:**
+Remove stale agent containers and clones. Run:
+```bash
+./scripts/agent-dispatch.sh cleanup-stale
+```
+This finds containers whose stories are closed, `agent:failed`, or `pipeline:blocked` and removes them. Runs before dispatch so re-dispatched stories start with a clean environment. Safe to run every cycle — idempotent, skips containers whose stories are still active.
+
 **Step 2 — Tech Lead pass (legacy only):**
 Handles `pipeline:draft` stories that were created before the Planning Team was introduced. New epics go through Step 6 (Planning Team) and produce `agent:ready` stories directly. Once the backlog of legacy drafts clears, this step becomes a no-op.
 
