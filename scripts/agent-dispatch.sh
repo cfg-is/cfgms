@@ -369,14 +369,17 @@ case "$cmd" in
       -v "${real_path}:/workspace" \
       -v "${host_claude_dir}:/home/agent/.claude" \
       -v "${host_claude_json}:/home/agent/.claude.json" \
+      -v "${REPO_ROOT}/.devcontainer/scripts/setup-env.sh:/usr/local/bin/setup-env.sh:ro" \
       -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_AGENT_MODE=true" \
+      -e "GOMODCACHE=/home/agent/go/pkg/mod" \
+      -e "GOFLAGS=-modcacherw" \
       --cap-add NET_ADMIN \
       --entrypoint /bin/bash \
       cfg-agent:latest \
-      -c "init-firewall.sh && exec claude --dangerously-skip-permissions"
+      -c "setup-env.sh && exec claude --dangerously-skip-permissions"
     ;;
 
   launch-interactive)
