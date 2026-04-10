@@ -557,3 +557,297 @@ func TestParseScriptStepConfig_DeviceFilter_Absent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, config.DeviceFilter, "DeviceFilter must be nil when not specified")
 }
+
+// --- ExecutionQueue wiring tests (Issue #633) ---
+
+// newTestQueue creates a real ExecutionQueue backed by an InMemoryQueueStore for testing.
+func newTestQueue(t *testing.T) *script.ExecutionQueue {
+	t.Helper()
+	monitor := script.NewExecutionMonitor()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", script.NewInMemoryQueueStore(), nil, 0)
+	t.Cleanup(q.Stop)
+	return q
+}
+
+// TestScriptNode_SetExecutionQueue verifies that SetExecutionQueue assigns the queue
+// to the node field so it is used during Execute.
+func TestScriptNode_SetExecutionQueue(t *testing.T) {
+	q := newTestQueue(t)
+
+	node := NewScriptNode("id", "name", &ScriptStepConfig{}, nil, nil, nil)
+	assert.Nil(t, node.executionQueue, "executionQueue must be nil before SetExecutionQueue")
+
+	node.SetExecutionQueue(q)
+	assert.Equal(t, q, node.executionQueue, "SetExecutionQueue must assign the queue to the node field")
+}
+
+// TestScriptStepExecutor_SetExecutionQueue verifies that SetExecutionQueue stores the
+// reference on the executor so it is propagated to created script nodes.
+func TestScriptStepExecutor_SetExecutionQueue(t *testing.T) {
+	q := newTestQueue(t)
+
+	executor := NewScriptStepExecutor(nil, nil, nil)
+	assert.Nil(t, executor.executionQueue, "executionQueue must be nil before SetExecutionQueue")
+
+	executor.SetExecutionQueue(q)
+	assert.Equal(t, q, executor.executionQueue, "SetExecutionQueue must assign the queue to the executor field")
+}
+
+// TestScriptNode_Execute_QueueDispatch verifies that when an ExecutionQueue is wired,
+// ScriptNode.Execute enqueues one entry per device instead of executing inline.
+func TestScriptNode_Execute_QueueDispatch(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	store := script.NewInMemoryQueueStore()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", store, nil, 0)
+	defer q.Stop()
+
+	config := &ScriptStepConfig{
+		ScriptID: "my-script",
+		Shell:    script.ShellBash,
+		Devices:  []string{"device-1", "device-2"},
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionQueue(q)
+
+	output, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+	assert.True(t, output.Success, "Execute with queue must return success")
+	assert.Equal(t, 2, output.Data["queued"], "queued count must equal number of target devices")
+
+	// Each device must have a queue entry.
+	assert.Equal(t, 1, q.GetQueueDepth("device-1"), "device-1 must have one queued entry")
+	assert.Equal(t, 1, q.GetQueueDepth("device-2"), "device-2 must have one queued entry")
+}
+
+// TestScriptNode_Execute_NoContentResolution_WithQueue verifies that script content is
+// NOT resolved inside ScriptNode.Execute when a queue is configured — no repository required.
+func TestScriptNode_Execute_NoContentResolution_WithQueue(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", script.NewInMemoryQueueStore(), nil, 0)
+	defer q.Stop()
+
+	// No repository wired — would panic on content resolution if attempted.
+	config := &ScriptStepConfig{
+		ScriptID: "repo-script",
+		Shell:    script.ShellBash,
+		Devices:  []string{"device-1"},
+	}
+	node := NewScriptNode("id", "name", config, nil /* no repository */, monitor, nil)
+	node.SetExecutionQueue(q)
+
+	output, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err, "Execute must not attempt content resolution when queue is set")
+	assert.True(t, output.Success)
+
+	entries := q.PeekForDevice("device-1")
+	require.Len(t, entries, 1)
+	assert.Equal(t, "repo-script", entries[0].ScriptRef,
+		"ScriptRef must be set from ScriptID without resolving content")
+}
+
+// TestScriptNode_Execute_WorkflowRunIDInQueueMetadata verifies that workflow_run_id and
+// workflow_name from input.Context are stored in the queue entry Metadata.
+func TestScriptNode_Execute_WorkflowRunIDInQueueMetadata(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	store := script.NewInMemoryQueueStore()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", store, nil, 0)
+	defer q.Stop()
+
+	config := &ScriptStepConfig{
+		ScriptID: "my-script",
+		Shell:    script.ShellBash,
+		Devices:  []string{"device-1"},
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionQueue(q)
+
+	output, err := node.Execute(context.Background(), workflow.NodeInput{
+		Context: map[string]interface{}{
+			"workflow_run_id": "run-abc-123",
+			"workflow_name":   "deploy-workflow",
+		},
+	})
+	require.NoError(t, err)
+	assert.True(t, output.Success)
+
+	entries := q.PeekForDevice("device-1")
+	require.Len(t, entries, 1)
+	assert.Equal(t, "run-abc-123", entries[0].Metadata["workflow_run_id"],
+		"workflow_run_id must be stored in queue entry metadata")
+	assert.Equal(t, "deploy-workflow", entries[0].Metadata["workflow_name"],
+		"workflow_name must be stored in queue entry metadata")
+}
+
+// TestScriptNode_Execute_WorkflowRunID_OmittedWhenAbsent verifies that workflow_run_id
+// is simply absent from metadata when not present in input.Context (ad-hoc execution).
+func TestScriptNode_Execute_WorkflowRunID_OmittedWhenAbsent(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", script.NewInMemoryQueueStore(), nil, 0)
+	defer q.Stop()
+
+	config := &ScriptStepConfig{
+		ScriptID: "my-script",
+		Shell:    script.ShellBash,
+		Devices:  []string{"device-1"},
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionQueue(q)
+
+	// Empty context — no workflow_run_id.
+	output, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+	assert.True(t, output.Success)
+
+	entries := q.PeekForDevice("device-1")
+	require.Len(t, entries, 1)
+	_, hasRunID := entries[0].Metadata["workflow_run_id"]
+	assert.False(t, hasRunID, "workflow_run_id must not appear in metadata for ad-hoc executions")
+}
+
+// TestScriptNode_Execute_QueueDedup verifies that a second dispatch with identical
+// script+device+params does not create a duplicate queue entry.
+func TestScriptNode_Execute_QueueDedup(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	store := script.NewInMemoryQueueStore()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", store, nil, 0)
+	defer q.Stop()
+
+	config := &ScriptStepConfig{
+		ScriptID: "my-script",
+		Shell:    script.ShellBash,
+		Devices:  []string{"device-1"},
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionQueue(q)
+
+	// First dispatch.
+	output1, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+	assert.True(t, output1.Success)
+
+	// Second dispatch — identical script+device+params.
+	output2, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+	assert.True(t, output2.Success, "duplicate dispatch must still return success")
+
+	// Queue depth must remain 1 — dedup silently discards the second enqueue.
+	assert.Equal(t, 1, q.GetQueueDepth("device-1"),
+		"dedup must prevent a second identical entry from entering the queue")
+}
+
+// TestScriptNode_Execute_CatchUpDequeue verifies the catch-up path: entries queued
+// while a device was offline are returned by DequeueForDevice when the device reconnects.
+func TestScriptNode_Execute_CatchUpDequeue(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	store := script.NewInMemoryQueueStore()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", store, nil, 0)
+	defer q.Stop()
+
+	config := &ScriptStepConfig{
+		ScriptID: "my-script",
+		Shell:    script.ShellBash,
+		Devices:  []string{"offline-device"},
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionQueue(q)
+
+	// Queue execution while device is "offline".
+	_, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, q.GetQueueDepth("offline-device"), "entry must be queued")
+
+	// Simulate device coming online: dequeue.
+	entries, err := q.DequeueForDevice("offline-device")
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "catch-up dequeue must return the queued entry")
+	assert.Equal(t, "my-script", entries[0].ScriptRef,
+		"dequeued entry must carry the correct ScriptRef for repository lookup at dispatch time")
+}
+
+// TestScriptNode_Execute_ExecutionContextInQueue verifies that ExecutionContext is
+// carried through to the queue entry so the steward receives the correct run-as context.
+func TestScriptNode_Execute_ExecutionContextInQueue(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", script.NewInMemoryQueueStore(), nil, 0)
+	defer q.Stop()
+
+	config := &ScriptStepConfig{
+		ScriptID:         "my-script",
+		Shell:            script.ShellBash,
+		Devices:          []string{"device-1"},
+		ExecutionContext: script.ExecutionContextLoggedInUser,
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionQueue(q)
+
+	output, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+	assert.True(t, output.Success)
+
+	entries := q.PeekForDevice("device-1")
+	require.Len(t, entries, 1)
+	assert.Equal(t, script.ExecutionContextLoggedInUser, entries[0].ExecutionContext,
+		"ExecutionContext must be carried into the queue entry")
+}
+
+// TestScriptNode_Execute_NilQueue_InlineFallback verifies that when executionQueue is nil,
+// the existing inline execution path is used unchanged (backward compatibility).
+func TestScriptNode_Execute_NilQueue_InlineFallback(t *testing.T) {
+	shell := script.ShellBash
+	if runtime.GOOS == "windows" {
+		shell = script.ShellPowerShell
+	}
+
+	monitor := script.NewExecutionMonitor()
+	config := &ScriptStepConfig{
+		InlineScript: "echo fallback",
+		Shell:        shell,
+		Timeout:      10 * time.Second,
+	}
+	// No queue set — executionQueue is nil.
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+
+	output, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err, "nil queue must fall through to inline execution without error")
+	assert.True(t, output.Success, "inline execution must succeed")
+	assert.Contains(t, output.Data, "execution_id", "inline path must return execution_id")
+}
+
+// TestScriptStepExecutor_ExecuteStep_WorkflowRunIDPropagated verifies that
+// variables["workflow_run_id"] and variables["workflow_name"] from the step variables
+// map are propagated into input.Context and then into queue entry metadata.
+func TestScriptStepExecutor_ExecuteStep_WorkflowRunIDPropagated(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	store := script.NewInMemoryQueueStore()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", store, nil, 0)
+	defer q.Stop()
+
+	executor := NewScriptStepExecutor(nil, monitor, nil)
+	executor.SetExecutionQueue(q)
+
+	step := workflow.Step{
+		Name: "test-step",
+		Config: map[string]interface{}{
+			"script_id": "test-script",
+			"shell":     "bash",
+			"devices":   []interface{}{"device-1"},
+		},
+	}
+
+	variables := map[string]interface{}{
+		"workflow_run_id": "wf-run-999",
+		"workflow_name":   "test-workflow",
+	}
+
+	result, err := executor.ExecuteStep(context.Background(), step, variables)
+	require.NoError(t, err)
+	assert.Equal(t, workflow.StatusCompleted, result.Status)
+
+	// Verify that the queue entry carries the workflow context.
+	entries := q.PeekForDevice("device-1")
+	require.NotEmpty(t, entries, "queue must have an entry for device-1")
+	assert.Equal(t, "wf-run-999", entries[0].Metadata["workflow_run_id"],
+		"workflow_run_id must flow from variables through ExecuteStep into queue metadata")
+	assert.Equal(t, "test-workflow", entries[0].Metadata["workflow_name"],
+		"workflow_name must flow from variables through ExecuteStep into queue metadata")
+}

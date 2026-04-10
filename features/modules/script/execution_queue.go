@@ -42,6 +42,7 @@ type QueuedExecution struct {
 	GenerateAPIKey    bool                   `json:"generate_api_key"`
 	APIKeyTTL         time.Duration          `json:"api_key_ttl"`
 	APIKeyPermissions []string               `json:"api_key_permissions"`
+	ExecutionContext  ExecutionContext       `json:"execution_context,omitempty"` // run-as context (system or logged_in_user)
 	Metadata          map[string]interface{} `json:"metadata"`
 }
 
@@ -122,6 +123,7 @@ func (q *ExecutionQueue) QueueExecution(deviceID string, execution *QueuedExecut
 		GenerateAPIKey:    execution.GenerateAPIKey,
 		APIKeyTTL:         execution.APIKeyTTL,
 		APIKeyPermissions: execution.APIKeyPermissions,
+		ExecutionContext:  execution.ExecutionContext,
 		Metadata:          execution.Metadata,
 	}
 
@@ -409,6 +411,7 @@ func entryToQueued(entry *QueueEntry) *QueuedExecution {
 		GenerateAPIKey:    entry.GenerateAPIKey,
 		APIKeyTTL:         entry.APIKeyTTL,
 		APIKeyPermissions: entry.APIKeyPermissions,
+		ExecutionContext:  entry.ExecutionContext,
 	}
 
 	if entry.Parameters != nil {

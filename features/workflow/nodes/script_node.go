@@ -4,6 +4,7 @@ package nodes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -105,6 +106,7 @@ type ScriptNode struct {
 	configProvider script.ConfigProvider
 	secretStore    interfaces.SecretStore
 	fleetQuery     fleet.FleetQuery
+	executionQueue *script.ExecutionQueue
 }
 
 // NewScriptNode creates a new script execution node
@@ -156,44 +158,6 @@ func (n *ScriptNode) resolveDeviceIDs(ctx context.Context) ([]string, error) {
 
 // Execute implements workflow.Node interface
 func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (workflow.NodeOutput, error) {
-	// Get script content
-	var scriptContent string
-	var metadata *script.ScriptMetadata
-
-	if n.config.InlineScript != "" {
-		// Use inline script
-		scriptContent = n.config.InlineScript
-	} else if n.config.ScriptID != "" {
-		// Get script from repository
-		script, err := n.repository.Get(n.config.ScriptID, n.config.ScriptVersion)
-		if err != nil {
-			return workflow.NodeOutput{
-				Success: false,
-				Error:   fmt.Sprintf("failed to get script: %v", err),
-			}, err
-		}
-		scriptContent = script.Content
-		metadata = script.Metadata
-	} else {
-		return workflow.NodeOutput{
-			Success: false,
-			Error:   "either script_id or inline_script must be specified",
-		}, fmt.Errorf("no script specified")
-	}
-
-	// Inject parameters
-	if n.dnaProvider != nil || n.configProvider != nil {
-		injector := script.NewParameterInjector(n.dnaProvider, n.configProvider)
-		injectedContent, err := injector.InjectParameters(scriptContent, n.config.Parameters)
-		if err != nil {
-			return workflow.NodeOutput{
-				Success: false,
-				Error:   fmt.Sprintf("failed to inject parameters: %v", err),
-			}, err
-		}
-		scriptContent = injectedContent
-	}
-
 	// Resolve device IDs — re-evaluated on each Execute for recurring workflows.
 	deviceIDs, err := n.resolveDeviceIDs(ctx)
 	if err != nil {
@@ -214,9 +178,111 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 		}, nil
 	}
 
+	// Queue path: enqueue each device; content resolution deferred to dispatch time.
+	// StartExecution is called per device so each queue entry has a unique ExecutionID
+	// (the queue store uses ExecutionID as the map key).
+	if n.executionQueue != nil {
+		// Build shared metadata once — the store deep-copies it on enqueue.
+		queueMeta := make(map[string]interface{})
+		if runID, ok := input.Context["workflow_run_id"]; ok {
+			queueMeta["workflow_run_id"] = runID
+		}
+		if wfName, ok := input.Context["workflow_name"]; ok {
+			queueMeta["workflow_name"] = wfName
+		}
+		if len(n.config.SecretBindings) > 0 {
+			bindingsJSON, err := json.Marshal(n.config.SecretBindings)
+			if err != nil {
+				return workflow.NodeOutput{
+					Success: false,
+					Error:   fmt.Sprintf("failed to encode secret bindings: %v", err),
+				}, err
+			}
+			queueMeta["secret_bindings"] = string(bindingsJSON)
+		}
+
+		var firstExecutionID string
+		for _, deviceID := range deviceIDs {
+			// Per-device execution so each queue entry gets a unique ExecutionID.
+			execution, err := n.monitor.StartExecution(ctx, n.config.ScriptID, n.Name, "", []string{deviceID})
+			if err != nil {
+				return workflow.NodeOutput{
+					Success: false,
+					Error:   fmt.Sprintf("failed to start execution monitoring: %v", err),
+				}, err
+			}
+			if firstExecutionID == "" {
+				firstExecutionID = execution.ID
+			}
+
+			qe := &script.QueuedExecution{
+				ExecutionID:      execution.ID,
+				ScriptRef:        n.config.ScriptID,
+				ScriptVersion:    n.config.ScriptVersion,
+				Shell:            n.config.Shell,
+				Parameters:       n.config.Parameters,
+				Timeout:          n.config.Timeout,
+				GenerateAPIKey:   n.config.GenerateAPIKey,
+				APIKeyTTL:        n.config.APIKeyTTL,
+				ExecutionContext: n.config.ExecutionContext,
+				Metadata:         queueMeta,
+			}
+			if err := n.executionQueue.QueueExecution(deviceID, qe); err != nil {
+				return workflow.NodeOutput{
+					Success: false,
+					Error:   fmt.Sprintf("failed to queue execution for device %s: %v", deviceID, err),
+				}, err
+			}
+		}
+
+		return workflow.NodeOutput{
+			Success: true,
+			Data: map[string]interface{}{
+				"execution_id": firstExecutionID,
+				"queued":       len(deviceIDs),
+			},
+		}, nil
+	}
+
+	// Inline execution path (no queue configured): resolve content and execute immediately.
+	var scriptContent string
+	var scriptMeta *script.ScriptMetadata
+
+	if n.config.InlineScript != "" {
+		scriptContent = n.config.InlineScript
+	} else if n.config.ScriptID != "" {
+		s, err := n.repository.Get(n.config.ScriptID, n.config.ScriptVersion)
+		if err != nil {
+			return workflow.NodeOutput{
+				Success: false,
+				Error:   fmt.Sprintf("failed to get script: %v", err),
+			}, err
+		}
+		scriptContent = s.Content
+		scriptMeta = s.Metadata
+	} else {
+		return workflow.NodeOutput{
+			Success: false,
+			Error:   "either script_id or inline_script must be specified",
+		}, fmt.Errorf("no script specified")
+	}
+
+	// Inject parameters
+	if n.dnaProvider != nil || n.configProvider != nil {
+		injector := script.NewParameterInjector(n.dnaProvider, n.configProvider)
+		injectedContent, err := injector.InjectParameters(scriptContent, n.config.Parameters)
+		if err != nil {
+			return workflow.NodeOutput{
+				Success: false,
+				Error:   fmt.Sprintf("failed to inject parameters: %v", err),
+			}, err
+		}
+		scriptContent = injectedContent
+	}
+
 	scriptName := n.Name
-	if metadata != nil {
-		scriptName = metadata.Name
+	if scriptMeta != nil {
+		scriptName = scriptMeta.Name
 	}
 
 	execution, err := n.monitor.StartExecution(ctx, n.config.ScriptID, scriptName, "", deviceIDs)
@@ -380,6 +446,12 @@ func (n *ScriptNode) SetFleetQuery(q fleet.FleetQuery) {
 	n.fleetQuery = q
 }
 
+// SetExecutionQueue sets the durable execution queue. When set, Execute routes
+// each per-device dispatch through the queue instead of executing inline.
+func (n *ScriptNode) SetExecutionQueue(q *script.ExecutionQueue) {
+	n.executionQueue = q
+}
+
 // ScriptStepExecutor executes script workflow steps
 type ScriptStepExecutor struct {
 	repository     script.ScriptRepository
@@ -389,6 +461,7 @@ type ScriptStepExecutor struct {
 	configProvider script.ConfigProvider
 	secretStore    interfaces.SecretStore
 	fleetQuery     fleet.FleetQuery
+	executionQueue *script.ExecutionQueue
 }
 
 // NewScriptStepExecutor creates a new script step executor
@@ -418,12 +491,22 @@ func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step
 	node.SetConfigProvider(e.configProvider)
 	node.SetSecretStore(e.secretStore)
 	node.SetFleetQuery(e.fleetQuery)
+	node.SetExecutionQueue(e.executionQueue)
+
+	// Propagate workflow context so queue metadata includes workflow_run_id/workflow_name.
+	inputCtx := make(map[string]interface{})
+	if runID, ok := variables["workflow_run_id"]; ok {
+		inputCtx["workflow_run_id"] = runID
+	}
+	if wfName, ok := variables["workflow_name"]; ok {
+		inputCtx["workflow_name"] = wfName
+	}
 
 	// Execute node
 	startTime := time.Now()
 	output, err := node.Execute(ctx, workflow.NodeInput{
 		Data:    variables,
-		Context: make(map[string]interface{}),
+		Context: inputCtx,
 	})
 	endTime := time.Now()
 
@@ -461,6 +544,11 @@ func (e *ScriptStepExecutor) SetSecretStore(store interfaces.SecretStore) {
 // SetFleetQuery sets the fleet query implementation propagated to created script nodes.
 func (e *ScriptStepExecutor) SetFleetQuery(q fleet.FleetQuery) {
 	e.fleetQuery = q
+}
+
+// SetExecutionQueue sets the durable execution queue propagated to created script nodes.
+func (e *ScriptStepExecutor) SetExecutionQueue(q *script.ExecutionQueue) {
+	e.executionQueue = q
 }
 
 // parseScriptStepConfig converts a map[string]interface{} to ScriptStepConfig
