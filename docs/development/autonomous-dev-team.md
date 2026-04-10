@@ -1,14 +1,14 @@
 # Autonomous Development Team
 
-How ideas become tested, reviewed, merged code — with one human in the loop.
+How ideas become tested, reviewed, merged code — with humans operating at the PM level.
 
 ## The Team
 
-CFGMS is built by a solo founder supported by an autonomous agent team. The founder acts as **Product Manager** — setting direction, resolving ambiguities, and making merge decisions. Everything downstream is handled by AI agents coordinated through GitHub.
+The autonomous development pipeline mirrors a standard product delivery org. Human operators focus on product direction, unblocking, and merge decisions. AI agents handle everything downstream — decomposition, implementation, review, and fix cycles. Operators only step into code-level work when an agent gets stuck or needs domain-specific guidance.
 
 | Role | Who | Responsibility |
 |------|-----|----------------|
-| **Product Manager** | Human (founder) | Vision, intent, merge decisions, unblocking |
+| **Product Manager** | Human operator | Vision, intent, merge decisions, unblocking agents |
 | **Product Owner** | Claude Code session | Pipeline orchestration, dashboard, intent capture |
 | **Business Analyst** | PO-spawned subagent | Decomposes epics into implementable stories |
 | **Tech Lead** | PO-spawned subagent | Validates stories for agent executability |
@@ -16,6 +16,8 @@ CFGMS is built by a solo founder supported by an autonomous agent team. The foun
 | **Acceptance Reviewer** | PO-spawned subagent | Reviews PRs against acceptance criteria |
 | **QA Reviewer** | PO-spawned subagent | Code quality, test correctness |
 | **Security Engineer** | PO-spawned subagent | Vulnerability scanning, architecture compliance |
+
+Multiple human operators can work in parallel — each owns one or more epics, and `pipeline:blocked` items route to the correct person via GitHub assignee.
 
 ## Pipeline Flow
 
@@ -38,7 +40,7 @@ flowchart TD
 
 ### 1. Intent Capture
 
-The founder describes what they want built in conversation with the Product Owner. The PO pushes for specificity — outcome-based goals, testable success criteria, explicit non-goals. Vague ideas get refined before anything is written.
+A PM describes what they want built in conversation with the Product Owner. The PO pushes for specificity — outcome-based goals, testable success criteria, explicit non-goals. Vague ideas get refined before anything is written.
 
 The PO creates a GitHub **epic issue** with the structured intent.
 
@@ -73,9 +75,9 @@ Agents run in parallel — multiple stories can be in flight simultaneously.
 The **Acceptance Reviewer** checks each PR against the story's acceptance criteria and CI status. If everything passes, the PR is auto-merged. If there are findings, the PR enters a fix cycle:
 
 - **First failure**: A fix agent is dispatched to address the review findings
-- **Second failure**: Escalated to the founder as a blocked item
+- **Second failure**: Escalated to the responsible PM as a blocked item
 
-For PRs that reach the founder, **QA** and **Security** specialist agents provide additional review context.
+For blocked PRs, **QA** and **Security** specialist agents provide additional review context to help the human resolve the issue.
 
 ### 6. Merge & Completion
 
@@ -115,7 +117,7 @@ stateDiagram-v2
 
 The Product Owner operates in two modes:
 
-**Interactive** — when the founder is present. Shows a prioritized dashboard, captures new intent, processes targeted unblocks. The founder's only required interface.
+**Interactive** — when a PM is present. Shows a prioritized dashboard, captures new intent, processes targeted unblocks. The primary human interface to the pipeline.
 
 **Scheduled** — runs autonomously on a timer. Executes the full pipeline cycle: decomposition, tech lead review, dispatch, fix cycles, acceptance review. Creates `pipeline:blocked` issues for anything it can't resolve.
 
@@ -131,7 +133,7 @@ flowchart LR
     end
 
     subgraph Interactive Session
-        I1[Dashboard] --> I2{Founder action}
+        I1[Dashboard] --> I2{PM action}
         I2 -->|new idea| I3[Intent capture]
         I2 -->|resolve blocker| I4[Targeted unblock]
         I2 -->|merge PR| I5[Merge decision]
@@ -140,15 +142,17 @@ flowchart LR
 
 ## Design Principles
 
-**GitHub is the single source of truth.** All pipeline state lives in GitHub issues, labels, and PRs. No local files, no external databases. The founder can check status from their phone.
+**GitHub is the single source of truth.** All pipeline state lives in GitHub issues, labels, and PRs. No local files, no external databases. Any team member can check status from their phone.
 
 **Agents don't guess.** Stories must be self-contained with explicit file references and testable criteria. Vague specs get rejected by the Tech Lead, not interpreted by the dev agent.
 
-**One escalation surface.** Every blocker becomes a `pipeline:blocked` issue assigned to the founder. No Slack messages, no email, no notifications outside GitHub.
+**One escalation surface.** Every blocker becomes a `pipeline:blocked` issue assigned to the responsible person. No Slack messages, no email, no notifications outside GitHub.
 
-**Autonomous fix before escalation.** When a PR fails review, the system attempts one automated fix cycle before involving the founder.
+**Autonomous fix before escalation.** When a PR fails review, the system attempts one automated fix cycle before involving a human.
 
 **No mocks, no shortcuts.** Dev agents use real components, run real tests, and pass real CI. The same validation gates apply to human and agent code.
+
+**Humans operate at the PM level.** The pipeline is designed so that human operators spend their time on product direction, intent capture, and resolving ambiguities — not writing code. When an agent gets stuck, the human provides guidance and the agent retries. Direct code intervention is the exception, not the workflow.
 
 ## Further Reading
 
