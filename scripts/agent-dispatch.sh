@@ -59,9 +59,10 @@ Commands:
   create-clone-pr <PR_NUM>                  Clone repo and checkout PR branch
   launch          <NUM>                     Launch agent container (issue mode)
   launch-generic  <NAME> <DIR> [ARGS...]    Launch agent container with custom name and args
+  live            <BRANCH|NUM>               Drop into live Claude session (branch name or issue number)
   launch-interactive <BRANCH>               Print docker run command for interactive session
-  wait-for-auth   <NUM> [NUM...]            Poll containers until past auth phase (~30s)
-  wait-for-auth   --container <NAME> [...]  Poll named containers until past auth phase
+  wait-for-auth   <NUM> [NUM...]            (deprecated, no-op) Legacy auth polling
+  wait-for-auth   --container <NAME> [...]  (deprecated, no-op) Legacy auth polling
   check-creds                                Check OAuth credential validity and remaining time
   cleanup-issue   <NUM>                     Remove container and clone for a specific issue
   cleanup-container <NAME>                  Remove container and associated clone by name
@@ -289,6 +290,95 @@ case "$cmd" in
     fi
     ;;
 
+  live)
+    [[ $# -ge 1 ]] || { echo "live requires a branch name or issue number"; exit 1; }
+    target="$1"
+    github_url=$(git -C "$REPO_ROOT" remote get-url origin)
+
+    # Determine branch and clone dir based on target type
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+      # Issue number: look for existing branch, or create one
+      num="$target"
+      # Check for existing feature branch on remote (agent or non-agent)
+      existing_branch=$(git -C "$REPO_ROOT" ls-remote --heads origin "feature/story-${num}-*" 2>/dev/null | head -1 | sed 's|.*refs/heads/||')
+      if [[ -n "$existing_branch" ]]; then
+        branch="$existing_branch"
+        echo "Found existing branch: ${branch}"
+      else
+        branch="feature/story-${num}"
+        echo "No existing branch — will create: ${branch}"
+      fi
+      clone_dir="${WORKTREE_BASE}/story-${num}"
+    else
+      # Branch name
+      branch="$target"
+      validate_branch "$branch"
+      clone_dir="${WORKTREE_BASE}/$(sanitize_branch "$branch")"
+    fi
+
+    sanitized=$(sanitize_branch "$branch")
+    container_name="cfg-agent-live-${sanitized}"
+
+    # Create clone from develop with branch (or reuse existing clone)
+    if [[ -d "$clone_dir" ]]; then
+      echo "Clone already exists at ${clone_dir}, reusing"
+    else
+      trap "rm -rf '$clone_dir'" ERR
+      if git -C "$REPO_ROOT" ls-remote --heads origin "$branch" | grep -q .; then
+        git clone --local --branch develop "$REPO_ROOT" "$clone_dir"
+        cd "$clone_dir"
+        git remote set-url origin "$github_url"
+        sync_to_remote_develop
+        git fetch origin "$branch"
+        git checkout "$branch"
+      else
+        git clone --local --branch develop "$REPO_ROOT" "$clone_dir"
+        cd "$clone_dir"
+        git remote set-url origin "$github_url"
+        sync_to_remote_develop
+        git checkout -b "$branch"
+      fi
+      trap - ERR
+    fi
+
+    real_path=$(realpath "$clone_dir")
+    refresh_creds_from_host
+    gh_token=$(gh auth token)
+
+    # Remove stale container with the same name if it exists
+    docker rm -f "$container_name" 2>/dev/null || true
+
+    echo "================================================"
+    echo " CFGMS Live Session"
+    echo " Branch: ${branch}"
+    echo " Clone:  ${real_path}"
+    echo "================================================"
+
+    # Mount the host's ~/.claude directly so interactive claude shares the
+    # host's auth state — no login prompt, no credential dance.
+    host_claude_dir="$HOME/.claude"
+    host_claude_json="$HOME/.claude.json"
+
+    exec docker run -it --rm \
+      --name "$container_name" \
+      --label "cfg-agent=true" \
+      --label "mode=live" \
+      --label "branch=${branch}" \
+      --memory=4g \
+      --cpus=4 \
+      -v "${real_path}:/workspace" \
+      -v "${host_claude_dir}:/home/agent/.claude" \
+      -v "${host_claude_json}:/home/agent/.claude.json" \
+      -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
+      -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
+      -e "GH_TOKEN=${gh_token}" \
+      -e "CFGMS_AGENT_MODE=true" \
+      --cap-add NET_ADMIN \
+      --entrypoint /bin/bash \
+      cfg-agent:latest \
+      -c "init-firewall.sh && exec claude --dangerously-skip-permissions"
+    ;;
+
   launch-interactive)
     [[ $# -ge 1 ]] || { echo "launch-interactive requires a branch name and optional clone dir"; exit 1; }
     branch="$1"
@@ -354,64 +444,9 @@ case "$cmd" in
     ;;
 
   wait-for-auth)
-    [[ $# -ge 1 ]] || { echo "wait-for-auth requires at least one argument"; exit 1; }
-
-    # Parse container names — either --container <name> [<name>...] or issue numbers
-    container_mode=false
-    containers=()
-    if [[ "$1" == "--container" ]]; then
-      container_mode=true
-      shift
-      containers=("$@")
-    else
-      for num in "$@"; do
-        containers+=("cfg-agent-${num}")
-      done
-    fi
-
-    max_wait=30
-    interval=5
-    elapsed=0
-    while [[ $elapsed -lt $max_wait ]]; do
-      sleep "$interval"
-      elapsed=$((elapsed + interval))
-      all_resolved=true
-      for cname in "${containers[@]}"; do
-        # Derive display name (strip cfg-agent- prefix for issue mode)
-        display="$cname"
-        if [[ "$cname" =~ ^cfg-agent-([0-9]+)$ ]]; then
-          display="${BASH_REMATCH[1]}"
-        fi
-        status=$(docker inspect --format "{{.State.Status}}" "$cname" 2>/dev/null || echo "not_found")
-        if [[ "$status" == "exited" ]]; then
-          exit_code=$(docker inspect --format "{{.State.ExitCode}}" "$cname" 2>/dev/null || echo "?")
-          last_log=$(docker logs --tail 5 "$cname" 2>/dev/null || echo "(no logs)")
-          echo "AUTH_FAILED:${display}:exit_code=${exit_code}:${last_log}"
-        elif [[ "$status" == "running" ]]; then
-          if [[ $elapsed -ge $max_wait ]]; then
-            echo "AUTH_OK:${display}:running after ${elapsed}s"
-          else
-            all_resolved=false
-          fi
-        else
-          echo "AUTH_UNKNOWN:${display}:status=${status}"
-        fi
-      done
-      if $all_resolved; then
-        break
-      fi
-    done
-    # Final check for any still running
-    for cname in "${containers[@]}"; do
-      display="$cname"
-      if [[ "$cname" =~ ^cfg-agent-([0-9]+)$ ]]; then
-        display="${BASH_REMATCH[1]}"
-      fi
-      status=$(docker inspect --format "{{.State.Status}}" "$cname" 2>/dev/null || echo "not_found")
-      if [[ "$status" == "running" ]]; then
-        echo "AUTH_OK:${display}:running after ${elapsed}s"
-      fi
-    done
+    # Deprecated: credentials are now pre-validated via check-creds and copied
+    # from the host via refresh_creds_from_host before launch. This no-op
+    # preserves backward compatibility for any callers that still invoke it.
     echo "WAIT_DONE"
     ;;
 
