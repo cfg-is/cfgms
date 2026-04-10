@@ -354,11 +354,15 @@ case "$cmd" in
     echo " Clone:  ${real_path}"
     echo "================================================"
 
-    # Launch interactive container with TTY — drops straight into claude
-    # Warmup ensures workspace trust and token refresh before the interactive session.
+    # Launch interactive container with TTY — drops into a shell with auth pre-warmed.
+    # Interactive claude always prompts for login, so we warm up with -p first,
+    # then hand off to bash for the user to launch claude manually.
     setup_cmds="setup-env.sh"
     setup_cmds+=" && claude -p 'ready' --dangerously-skip-permissions 2>/dev/null || true"
-    setup_cmds+=" && exec claude --dangerously-skip-permissions"
+    setup_cmds+=" && echo ''"
+    setup_cmds+=" && echo 'Run:  claude --dangerously-skip-permissions'"
+    setup_cmds+=" && echo ''"
+    setup_cmds+=" && exec bash"
 
     exec docker run -it --rm \
       --name "$container_name" \
