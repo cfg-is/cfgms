@@ -106,7 +106,7 @@ func NewWorkflowApprovalHook(
 func (h *WorkflowApprovalHook) Evaluate(ctx context.Context, input RegistrationInput) (ApprovalDecision, string, error) {
 	// Fail open on cancelled context to avoid blocking legitimate registrations.
 	if err := ctx.Err(); err != nil {
-		return DecisionApprove, "", nil
+		return DecisionApprove, "", ctx.Err()
 	}
 
 	store := workflow.NewWorkflowStore(h.configStore, input.Token.TenantID)
