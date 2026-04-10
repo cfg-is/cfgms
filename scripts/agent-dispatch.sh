@@ -354,15 +354,10 @@ case "$cmd" in
     echo " Clone:  ${real_path}"
     echo "================================================"
 
-    # Launch interactive container with TTY — drops into a shell with auth pre-warmed.
-    # Interactive claude always prompts for login, so we warm up with -p first,
-    # then hand off to bash for the user to launch claude manually.
-    setup_cmds="setup-env.sh"
-    setup_cmds+=" && claude -p 'ready' --dangerously-skip-permissions 2>/dev/null || true"
-    setup_cmds+=" && echo ''"
-    setup_cmds+=" && echo 'Run:  claude --dangerously-skip-permissions'"
-    setup_cmds+=" && echo ''"
-    setup_cmds+=" && exec bash"
+    # Mount the host's ~/.claude directly so interactive claude shares the
+    # host's auth state — no login prompt, no credential dance.
+    host_claude_dir="$HOME/.claude"
+    host_claude_json="$HOME/.claude.json"
 
     exec docker run -it --rm \
       --name "$container_name" \
@@ -372,7 +367,8 @@ case "$cmd" in
       --memory=4g \
       --cpus=4 \
       -v "${real_path}:/workspace" \
-      -v "claude-creds:/persist" \
+      -v "${host_claude_dir}:/home/agent/.claude" \
+      -v "${host_claude_json}:/home/agent/.claude.json" \
       -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
@@ -380,7 +376,7 @@ case "$cmd" in
       --cap-add NET_ADMIN \
       --entrypoint /bin/bash \
       cfg-agent:latest \
-      -c "$setup_cmds"
+      -c "init-firewall.sh && exec claude --dangerously-skip-permissions"
     ;;
 
   launch-interactive)
