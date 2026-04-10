@@ -114,11 +114,14 @@ Apply fix label and post findings:
 
 ### Any Findings — Second Review (Fix Cycle)
 
-Escalate to founder:
+Escalate to founder and clean up the agent container (the dev agent is done regardless):
 
 ```bash
 ./scripts/pipeline-helper.sh label-swap <STORY_NUM> "pipeline:fix" "pipeline:blocked"
 gh issue edit <STORY_NUM> --repo cfg-is/cfgms --add-assignee "jrdnr"
+
+# Clean up — agent is done, founder takes over
+./scripts/agent-dispatch.sh cleanup-issue <STORY_NUM>
 ```
 
 ## Structured Review Comment

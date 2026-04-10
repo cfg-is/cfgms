@@ -65,6 +65,7 @@ Commands:
   check-creds                                Check OAuth credential validity and remaining time
   cleanup-issue   <NUM>                     Remove container and clone for a specific issue
   cleanup-container <NAME>                  Remove container and associated clone by name
+  cleanup-stale                             Remove containers/clones for closed, blocked, or failed stories
   list-running                              List running agent containers
   list-exited                               List exited agent containers
   inspect-exit    <NUM>                     Print exit code of container
@@ -561,6 +562,65 @@ else:
     fi
 
     echo "HEALTH_DONE:warnings=${warnings}"
+    ;;
+
+  cleanup-stale)
+    # Find agent containers (running or exited) whose stories no longer need them.
+    # A container is stale if its story issue is CLOSED or has label agent:failed or pipeline:blocked.
+    cleaned=0
+
+    # Get all cfg-agent-<NUM> containers (running + exited)
+    containers=$(docker ps -a --filter "label=cfg-agent=true" --format "{{.Names}}" 2>/dev/null || true)
+
+    for container_name in $containers; do
+      # Extract issue number from container name (cfg-agent-<NUM>)
+      if [[ "$container_name" =~ ^cfg-agent-([0-9]+)$ ]]; then
+        num="${BASH_REMATCH[1]}"
+      else
+        # Skip non-issue containers (pr-fix, branch, interactive)
+        continue
+      fi
+
+      # Check issue state and labels
+      issue_json=$(gh issue view "$num" --repo cfg-is/cfgms --json state,labels 2>/dev/null || echo '{"state":"UNKNOWN","labels":[]}')
+      state=$(echo "$issue_json" | grep -oP '"state"\s*:\s*"\K[^"]+' || echo "UNKNOWN")
+      labels=$(echo "$issue_json" | grep -oP '"name"\s*:\s*"\K[^"]+' || true)
+
+      should_clean=false
+
+      # Clean if story is closed (merged or manually closed)
+      if [[ "$state" == "CLOSED" ]]; then
+        should_clean=true
+        reason="story closed"
+      fi
+
+      # Clean if story is failed or blocked (agent is done, needs human intervention)
+      if echo "$labels" | grep -q "agent:failed"; then
+        should_clean=true
+        reason="agent:failed"
+      fi
+      if echo "$labels" | grep -q "pipeline:blocked"; then
+        should_clean=true
+        reason="pipeline:blocked"
+      fi
+
+      if $should_clean; then
+        echo "STALE:${num}:${reason}"
+        # Reuse cleanup-issue logic
+        docker cp "cfg-agent-${num}:/tmp/agent-result.json" "/tmp/agent-result-${num}.json" 2>/dev/null || true
+        if docker rm -f "cfg-agent-${num}" >/dev/null 2>&1; then
+          echo "CLEANED:container:cfg-agent-${num}"
+        fi
+        clone_dir="${WORKTREE_BASE}/story-${num}"
+        if [[ -d "$clone_dir" ]]; then
+          rm -rf "$clone_dir"
+          echo "CLEANED:clone:${clone_dir}"
+        fi
+        cleaned=$((cleaned + 1))
+      fi
+    done
+
+    echo "CLEANUP_STALE_DONE:cleaned=${cleaned}"
     ;;
 
   *)
