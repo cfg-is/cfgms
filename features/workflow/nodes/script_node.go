@@ -52,6 +52,9 @@ type ScriptStepConfig struct {
 	// APIKeyTTL is the time-to-live for the ephemeral API key
 	APIKeyTTL time.Duration `yaml:"api_key_ttl,omitempty" json:"api_key_ttl,omitempty"`
 
+	// ExecutionContext controls which OS user runs the script (system or logged_in_user)
+	ExecutionContext script.ExecutionContext `yaml:"execution_context,omitempty" json:"execution_context,omitempty"`
+
 	// WaitForCompletion determines if workflow should wait for script to complete
 	WaitForCompletion bool `yaml:"wait_for_completion,omitempty" json:"wait_for_completion,omitempty"`
 
@@ -253,10 +256,11 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 	for _, deviceID := range deviceIDs {
 		// Create script config
 		scriptConfig := &script.ScriptConfig{
-			Content:     scriptContent,
-			Shell:       n.config.Shell,
-			Timeout:     n.config.Timeout,
-			Environment: make(map[string]string),
+			Content:          scriptContent,
+			Shell:            n.config.Shell,
+			Timeout:          n.config.Timeout,
+			ExecutionContext: n.config.ExecutionContext,
+			Environment:      make(map[string]string),
 		}
 
 		// Add API key to environment if generated
@@ -275,7 +279,9 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 		}
 		result, execErr := executor.Execute(ctx)
 
-		// Update execution monitor
+		// Update execution monitor. The error is intentionally ignored: a monitor
+		// tracking failure must not prevent the script result from being recorded
+		// in the results map or returned to the caller.
 		status := script.StatusCompleted
 		if execErr != nil {
 			status = script.StatusFailed
@@ -477,6 +483,9 @@ func parseScriptStepConfig(configMap map[string]interface{}) (*ScriptStepConfig,
 	}
 	if shell, ok := configMap["shell"].(string); ok {
 		config.Shell = script.ShellType(shell)
+	}
+	if ec, ok := configMap["execution_context"].(string); ok {
+		config.ExecutionContext = script.ExecutionContext(ec)
 	}
 
 	// Parse parameters map

@@ -15,24 +15,26 @@ import (
 
 // ScriptConfig represents the configuration for a script resource
 type ScriptConfig struct {
-	Content       string                 `yaml:"content"`               // Script content
-	Shell         ShellType              `yaml:"shell"`                 // Required shell type
-	Timeout       time.Duration          `yaml:"timeout"`               // Execution timeout
-	Environment   map[string]string      `yaml:"environment,omitempty"` // Environment variables
-	WorkingDir    string                 `yaml:"working_dir,omitempty"` // Working directory
-	Signature     *ScriptSignature       `yaml:"signature,omitempty"`   // Script signature
-	SigningPolicy SigningPolicy          `yaml:"signing_policy"`        // Signing policy
-	Description   string                 `yaml:"description,omitempty"` // Script description
-	Metadata      map[string]interface{} `yaml:"metadata,omitempty"`    // Additional metadata
+	Content          string                 `yaml:"content"`                     // Script content
+	Shell            ShellType              `yaml:"shell"`                       // Required shell type
+	Timeout          time.Duration          `yaml:"timeout"`                     // Execution timeout
+	Environment      map[string]string      `yaml:"environment,omitempty"`       // Environment variables
+	WorkingDir       string                 `yaml:"working_dir,omitempty"`       // Working directory
+	Signature        *ScriptSignature       `yaml:"signature,omitempty"`         // Script signature
+	SigningPolicy    SigningPolicy          `yaml:"signing_policy"`              // Signing policy
+	ExecutionContext ExecutionContext       `yaml:"execution_context,omitempty"` // How the script runs (system or logged_in_user)
+	Description      string                 `yaml:"description,omitempty"`       // Script description
+	Metadata         map[string]interface{} `yaml:"metadata,omitempty"`          // Additional metadata
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
 func (c *ScriptConfig) AsMap() map[string]interface{} {
 	result := map[string]interface{}{
-		"content":        c.Content,
-		"shell":          string(c.Shell),
-		"timeout":        c.Timeout.String(),
-		"signing_policy": string(c.SigningPolicy),
+		"content":           c.Content,
+		"shell":             string(c.Shell),
+		"timeout":           c.Timeout.String(),
+		"signing_policy":    string(c.SigningPolicy),
+		"execution_context": string(c.ExecutionContext),
 	}
 
 	if len(c.Environment) > 0 {
@@ -89,6 +91,16 @@ func (c *ScriptConfig) Validate() error {
 		c.Timeout = 5 * time.Minute // Default 5 minute timeout
 	}
 
+	// Validate and default execution context
+	switch c.ExecutionContext {
+	case ExecutionContextSystem, ExecutionContextLoggedInUser:
+		// Valid
+	case "":
+		c.ExecutionContext = ExecutionContextSystem // default
+	default:
+		return fmt.Errorf("%w: invalid execution context: %s", modules.ErrInvalidInput, c.ExecutionContext)
+	}
+
 	// Validate signing policy
 	switch c.SigningPolicy {
 	case SigningPolicyNone, SigningPolicyOptional, SigningPolicyRequired:
@@ -133,7 +145,7 @@ func (c *ScriptConfig) EffectiveSigningPolicy(stewardMinimum SigningPolicy) Sign
 
 // GetManagedFields returns the list of fields this configuration manages
 func (c *ScriptConfig) GetManagedFields() []string {
-	fields := []string{"content", "shell", "timeout", "signing_policy"}
+	fields := []string{"content", "shell", "timeout", "signing_policy", "execution_context"}
 
 	if len(c.Environment) > 0 {
 		fields = append(fields, "environment")
