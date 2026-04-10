@@ -246,10 +246,12 @@ The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency orderin
 **Step 3 — Dispatch:**
 Find `agent:ready` issues without `agent:in-progress`. Before dispatching, check for file conflicts with in-flight agents:
 
-1. For each `agent:ready` story, extract `## Files In Scope` from the issue body
-2. For each `agent:in-progress` story, extract `## Files In Scope` from the issue body
-3. If any ready story shares files with an in-progress story, **skip dispatch** — leave it as `agent:ready` and it will be picked up in a future cycle after the conflicting story merges
-4. Also check `## Dependencies` — skip if any dependency is not yet closed
+1. **Dependency gate:** Extract `## Dependencies` from the story body. For each referenced issue number (`#NNN`), check its state:
+   ```bash
+   gh issue view <DEP_NUM> --repo cfg-is/cfgms --json state -q .state
+   ```
+   If ANY dependency is not `CLOSED`, **skip dispatch** — leave the story as `agent:ready`. It will be picked up in a future cycle after the dependency merges and closes.
+2. **File conflict gate:** Extract `## Files In Scope` from the story body. For each `agent:in-progress` story, extract the same section. If any ready story shares files with an in-progress story, **skip dispatch** — leave it as `agent:ready` until the conflicting story merges.
 
 For stories that pass conflict checks:
 ```bash
