@@ -104,6 +104,11 @@ func NewWorkflowApprovalHook(
 // The workflow is looked up using the token's TenantID so that different tenants
 // can configure different approval policies.
 func (h *WorkflowApprovalHook) Evaluate(ctx context.Context, input RegistrationInput) (ApprovalDecision, string, error) {
+	// Fail open on cancelled context to avoid blocking legitimate registrations.
+	if err := ctx.Err(); err != nil {
+		return DecisionApprove, "", nil
+	}
+
 	store := workflow.NewWorkflowStore(h.configStore, input.Token.TenantID)
 	vw, err := store.GetLatestWorkflow(ctx, registrationWorkflowName)
 	if err != nil {
