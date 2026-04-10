@@ -907,3 +907,323 @@ func TestScriptStepExecutor_ExecuteStep_WorkflowRunIDPropagated(t *testing.T) {
 	assert.Equal(t, "test-workflow", entries[0].Metadata["workflow_name"],
 		"workflow_name must flow from variables through ExecuteStep into queue metadata")
 }
+
+// --- Execution tracking tests (Issue #634) ---
+
+// inMemoryTracker is a test-local ExecutionTracker that stores records in
+// memory. It implements the script.ExecutionTracker interface without requiring
+// SQLite/CGO, keeping these tests fast and dependency-free.
+type inMemoryTracker struct {
+	records []*script.ExecutionRecord
+}
+
+func (t *inMemoryTracker) Record(_ context.Context, r *script.ExecutionRecord) error {
+	// Idempotent: replace existing record with same (execution_id, device_id).
+	for i, existing := range t.records {
+		if existing.ExecutionID == r.ExecutionID && existing.DeviceID == r.DeviceID {
+			t.records[i] = r
+			return nil
+		}
+	}
+	t.records = append(t.records, r)
+	return nil
+}
+
+func (t *inMemoryTracker) QueryByDevice(_ context.Context, deviceID string, limit int) ([]*script.ExecutionRecord, error) {
+	var out []*script.ExecutionRecord
+	for _, r := range t.records {
+		if r.DeviceID == deviceID {
+			out = append(out, r)
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (t *inMemoryTracker) QueryByWorkflowRun(_ context.Context, workflowRunID string) ([]*script.ExecutionRecord, error) {
+	var out []*script.ExecutionRecord
+	for _, r := range t.records {
+		if r.WorkflowRunID == workflowRunID {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// TestScriptNode_Execute_InlinePath_WritesTrackingRecord verifies that the
+// inline execution path writes exactly one ExecutionRecord per device when the
+// execution reaches a terminal state.
+func TestScriptNode_Execute_InlinePath_WritesTrackingRecord(t *testing.T) {
+	shell := script.ShellBash
+	if runtime.GOOS == "windows" {
+		shell = script.ShellPowerShell
+	}
+
+	monitor := script.NewExecutionMonitor()
+	tracker := &inMemoryTracker{}
+
+	config := &ScriptStepConfig{
+		InlineScript: "echo tracking",
+		Shell:        shell,
+		Devices:      []string{"device-track-1", "device-track-2"},
+		Timeout:      10 * time.Second,
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionTracker(tracker)
+
+	_, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+
+	assert.Len(t, tracker.records, 2, "one tracking record per device must be written")
+
+	deviceIDs := make(map[string]bool)
+	for _, r := range tracker.records {
+		deviceIDs[r.DeviceID] = true
+		assert.NotEmpty(t, r.ExecutionID, "ExecutionID must be set")
+		assert.NotEmpty(t, r.State, "State must be set")
+		assert.False(t, r.CompletedAt.IsZero(), "CompletedAt must be set")
+	}
+	assert.True(t, deviceIDs["device-track-1"], "record for device-track-1 must be written")
+	assert.True(t, deviceIDs["device-track-2"], "record for device-track-2 must be written")
+}
+
+// TestScriptNode_Execute_InlinePath_DeviceView verifies that QueryByDevice on
+// the tracker returns correct records for the requested device only.
+func TestScriptNode_Execute_InlinePath_DeviceView(t *testing.T) {
+	shell := script.ShellBash
+	if runtime.GOOS == "windows" {
+		shell = script.ShellPowerShell
+	}
+
+	monitor := script.NewExecutionMonitor()
+	tracker := &inMemoryTracker{}
+
+	config := &ScriptStepConfig{
+		InlineScript: "echo device-view",
+		Shell:        shell,
+		Devices:      []string{"dev-a", "dev-b"},
+		Timeout:      10 * time.Second,
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionTracker(tracker)
+
+	_, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+
+	byDevA, err := tracker.QueryByDevice(context.Background(), "dev-a", 10)
+	require.NoError(t, err)
+	require.Len(t, byDevA, 1, "QueryByDevice must return exactly one record for dev-a")
+	assert.Equal(t, "dev-a", byDevA[0].DeviceID)
+
+	byDevB, err := tracker.QueryByDevice(context.Background(), "dev-b", 10)
+	require.NoError(t, err)
+	require.Len(t, byDevB, 1, "QueryByDevice must return exactly one record for dev-b")
+	assert.Equal(t, "dev-b", byDevB[0].DeviceID)
+}
+
+// TestScriptNode_Execute_InlinePath_WorkflowContextPropagated verifies that
+// workflow_run_id and workflow_name from input.Context flow into the tracking
+// record, while ad-hoc executions have empty WorkflowRunID.
+func TestScriptNode_Execute_InlinePath_WorkflowContextPropagated(t *testing.T) {
+	shell := script.ShellBash
+	if runtime.GOOS == "windows" {
+		shell = script.ShellPowerShell
+	}
+
+	monitor := script.NewExecutionMonitor()
+	tracker := &inMemoryTracker{}
+
+	config := &ScriptStepConfig{
+		InlineScript: "echo wf-ctx",
+		Shell:        shell,
+		Devices:      []string{"dev-wf"},
+		Timeout:      10 * time.Second,
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionTracker(tracker)
+
+	input := workflow.NodeInput{
+		Context: map[string]interface{}{
+			"workflow_run_id": "wf-run-ctx-1",
+			"workflow_name":   "my-workflow",
+		},
+	}
+	_, err := node.Execute(context.Background(), input)
+	require.NoError(t, err)
+
+	require.Len(t, tracker.records, 1)
+	assert.Equal(t, "wf-run-ctx-1", tracker.records[0].WorkflowRunID,
+		"WorkflowRunID must be populated from input.Context")
+	assert.Equal(t, "my-workflow", tracker.records[0].WorkflowName,
+		"WorkflowName must be populated from input.Context")
+}
+
+// TestScriptNode_Execute_InlinePath_AdHocHasEmptyWorkflowRunID verifies that
+// ad-hoc (non-workflow) executions produce tracking records with empty WorkflowRunID.
+func TestScriptNode_Execute_InlinePath_AdHocHasEmptyWorkflowRunID(t *testing.T) {
+	shell := script.ShellBash
+	if runtime.GOOS == "windows" {
+		shell = script.ShellPowerShell
+	}
+
+	monitor := script.NewExecutionMonitor()
+	tracker := &inMemoryTracker{}
+
+	config := &ScriptStepConfig{
+		InlineScript: "echo adhoc",
+		Shell:        shell,
+		Devices:      []string{"dev-adhoc"},
+		Timeout:      10 * time.Second,
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionTracker(tracker)
+
+	// No Context set — ad-hoc execution
+	_, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+
+	require.Len(t, tracker.records, 1)
+	assert.Equal(t, "", tracker.records[0].WorkflowRunID,
+		"ad-hoc execution must produce empty WorkflowRunID")
+}
+
+// TestScriptNode_Execute_QueuePath_WritesTrackingRecord verifies that the queue
+// path writes one ExecutionRecord per device when AcknowledgeCompletion is called
+// with the steward callback result.
+func TestScriptNode_Execute_QueuePath_WritesTrackingRecord(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	store := script.NewInMemoryQueueStore()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", store, nil, 0)
+	defer q.Stop()
+
+	tracker := &inMemoryTracker{}
+
+	config := &ScriptStepConfig{
+		ScriptID: "my-script",
+		Shell:    script.ShellBash,
+		Devices:  []string{"dev-q1"},
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionQueue(q)
+	node.SetExecutionTracker(tracker) // tracker wired into queue via SetExecutionTracker
+
+	output, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+	assert.True(t, output.Success)
+
+	// Dequeue so the entry moves to dispatched state (required before AcknowledgeCompletion)
+	entries, err := q.DequeueForDevice("dev-q1")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	execID := entries[0].ExecutionID
+
+	result := &script.ExecutionResult{
+		ExitCode: 0,
+		Stdout:   "done",
+		Duration: 500 * time.Millisecond,
+	}
+	require.NoError(t, q.AcknowledgeCompletion(execID, "dev-q1", script.QueueStateCompleted, result))
+
+	// Tracker must now have the record
+	records, err := tracker.QueryByDevice(context.Background(), "dev-q1", 10)
+	require.NoError(t, err)
+	require.Len(t, records, 1, "AcknowledgeCompletion must trigger one tracking record")
+
+	rec := records[0]
+	assert.Equal(t, execID, rec.ExecutionID)
+	assert.Equal(t, "dev-q1", rec.DeviceID)
+	assert.Equal(t, string(script.QueueStateCompleted), rec.State)
+	assert.Equal(t, 0, rec.ExitCode)
+	assert.Equal(t, "done", rec.Stdout)
+}
+
+// TestScriptNode_Execute_QueuePath_WorkflowRunView verifies that
+// QueryByWorkflowRun returns all device records written for a workflow run via
+// the queue path.
+func TestScriptNode_Execute_QueuePath_WorkflowRunView(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	store := script.NewInMemoryQueueStore()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", store, nil, 0)
+	defer q.Stop()
+
+	tracker := &inMemoryTracker{}
+	devices := []string{"dev-r1", "dev-r2", "dev-r3"}
+
+	config := &ScriptStepConfig{
+		ScriptID: "my-script",
+		Shell:    script.ShellBash,
+		Devices:  devices,
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionQueue(q)
+	node.SetExecutionTracker(tracker)
+
+	input := workflow.NodeInput{
+		Context: map[string]interface{}{
+			"workflow_run_id": "wf-run-multi",
+			"workflow_name":   "multi-device-workflow",
+		},
+	}
+	_, err := node.Execute(context.Background(), input)
+	require.NoError(t, err)
+
+	// Dequeue and acknowledge each device
+	for _, deviceID := range devices {
+		entries, err := q.DequeueForDevice(deviceID)
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+		require.NoError(t, q.AcknowledgeCompletion(
+			entries[0].ExecutionID, deviceID, script.QueueStateCompleted,
+			&script.ExecutionResult{ExitCode: 0},
+		))
+	}
+
+	// All three device records must appear in the workflow-run view
+	byRun, err := tracker.QueryByWorkflowRun(context.Background(), "wf-run-multi")
+	require.NoError(t, err)
+	assert.Len(t, byRun, 3, "workflow-run view must return all device records for the run")
+
+	for _, r := range byRun {
+		assert.Equal(t, "wf-run-multi", r.WorkflowRunID,
+			"all records must carry the workflow run ID")
+	}
+}
+
+// TestScriptNode_Execute_InlinePath_ExactlyOneRecordPerDevice verifies that
+// even if Execute is called multiple times for the same node (recurring workflow),
+// each invocation writes exactly one record per device (no monitor duplication).
+func TestScriptNode_Execute_InlinePath_ExactlyOneRecordPerDevice(t *testing.T) {
+	shell := script.ShellBash
+	if runtime.GOOS == "windows" {
+		shell = script.ShellPowerShell
+	}
+
+	monitor := script.NewExecutionMonitor()
+	tracker := &inMemoryTracker{}
+
+	config := &ScriptStepConfig{
+		InlineScript: "echo once",
+		Shell:        shell,
+		Devices:      []string{"dev-once"},
+		Timeout:      10 * time.Second,
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionTracker(tracker)
+
+	// First execution
+	_, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+
+	// Second execution (different ExecutionID, same device)
+	_, err = node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+
+	// Two records must exist — one per Execute call — not deduplicated across runs
+	// because each run produces a distinct ExecutionID.
+	records, err := tracker.QueryByDevice(context.Background(), "dev-once", 10)
+	require.NoError(t, err)
+	assert.Len(t, records, 2, "each Execute invocation must produce exactly one record per device")
+}

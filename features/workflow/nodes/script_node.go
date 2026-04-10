@@ -98,15 +98,16 @@ type NotificationConfig struct {
 // ScriptNode implements the workflow.Node interface for script execution
 type ScriptNode struct {
 	workflow.BaseNode
-	config         *ScriptStepConfig
-	repository     script.ScriptRepository
-	monitor        *script.ExecutionMonitor
-	keyManager     *script.EphemeralKeyManager
-	dnaProvider    script.DNAProvider
-	configProvider script.ConfigProvider
-	secretStore    interfaces.SecretStore
-	fleetQuery     fleet.FleetQuery
-	executionQueue *script.ExecutionQueue
+	config           *ScriptStepConfig
+	repository       script.ScriptRepository
+	monitor          *script.ExecutionMonitor
+	keyManager       *script.EphemeralKeyManager
+	dnaProvider      script.DNAProvider
+	configProvider   script.ConfigProvider
+	secretStore      interfaces.SecretStore
+	fleetQuery       fleet.FleetQuery
+	executionQueue   *script.ExecutionQueue
+	executionTracker script.ExecutionTracker
 }
 
 // NewScriptNode creates a new script execution node
@@ -362,6 +363,14 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 			logging.NewLogger("warn").Warn("failed to update device execution status", "device_id", deviceID, "error", monErr)
 		}
 
+		// Write durable tracking record on terminal state — best-effort.
+		if n.executionTracker != nil {
+			rec := buildInlineTrackingRecord(execution.ID, deviceID, n.config.ScriptID, n.config.Shell, status, result, input)
+			if trackErr := n.executionTracker.Record(ctx, rec); trackErr != nil {
+				logging.NewLogger("warn").Warn("failed to write execution tracking record", "device_id", deviceID, "error", trackErr)
+			}
+		}
+
 		results[deviceID] = result
 	}
 
@@ -456,18 +465,34 @@ func (n *ScriptNode) SetFleetQuery(q fleet.FleetQuery) {
 // each per-device dispatch through the queue instead of executing inline.
 func (n *ScriptNode) SetExecutionQueue(q *script.ExecutionQueue) {
 	n.executionQueue = q
+	// Wire tracker into queue if already set so queue-path completions are tracked.
+	if n.executionTracker != nil && q != nil {
+		q.SetExecutionTracker(n.executionTracker)
+	}
+}
+
+// SetExecutionTracker sets the durable execution tracker. When set, Execute
+// writes one ExecutionRecord per device when it reaches a terminal state.
+// For the queue path, the tracker is also threaded into the ExecutionQueue so
+// that AcknowledgeCompletion writes the record on steward callback.
+func (n *ScriptNode) SetExecutionTracker(t script.ExecutionTracker) {
+	n.executionTracker = t
+	if n.executionQueue != nil {
+		n.executionQueue.SetExecutionTracker(t)
+	}
 }
 
 // ScriptStepExecutor executes script workflow steps
 type ScriptStepExecutor struct {
-	repository     script.ScriptRepository
-	monitor        *script.ExecutionMonitor
-	keyManager     *script.EphemeralKeyManager
-	dnaProvider    script.DNAProvider
-	configProvider script.ConfigProvider
-	secretStore    interfaces.SecretStore
-	fleetQuery     fleet.FleetQuery
-	executionQueue *script.ExecutionQueue
+	repository       script.ScriptRepository
+	monitor          *script.ExecutionMonitor
+	keyManager       *script.EphemeralKeyManager
+	dnaProvider      script.DNAProvider
+	configProvider   script.ConfigProvider
+	secretStore      interfaces.SecretStore
+	fleetQuery       fleet.FleetQuery
+	executionQueue   *script.ExecutionQueue
+	executionTracker script.ExecutionTracker
 }
 
 // NewScriptStepExecutor creates a new script step executor
@@ -498,6 +523,7 @@ func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step
 	node.SetSecretStore(e.secretStore)
 	node.SetFleetQuery(e.fleetQuery)
 	node.SetExecutionQueue(e.executionQueue)
+	node.SetExecutionTracker(e.executionTracker)
 
 	// Propagate workflow context so queue metadata includes workflow_run_id/workflow_name.
 	inputCtx := make(map[string]interface{})
@@ -555,6 +581,48 @@ func (e *ScriptStepExecutor) SetFleetQuery(q fleet.FleetQuery) {
 // SetExecutionQueue sets the durable execution queue propagated to created script nodes.
 func (e *ScriptStepExecutor) SetExecutionQueue(q *script.ExecutionQueue) {
 	e.executionQueue = q
+}
+
+// SetExecutionTracker sets the durable execution tracker propagated to created
+// script nodes so inline and queue-path completions are both recorded.
+func (e *ScriptStepExecutor) SetExecutionTracker(t script.ExecutionTracker) {
+	e.executionTracker = t
+}
+
+// buildInlineTrackingRecord constructs an ExecutionRecord for the inline
+// (non-queue) execution path. WorkflowRunID and WorkflowName are extracted
+// from input.Context if present.
+func buildInlineTrackingRecord(
+	executionID, deviceID, scriptRef string,
+	shell script.ShellType,
+	status script.ExecutionStatus,
+	result *script.ExecutionResult,
+	input workflow.NodeInput,
+) *script.ExecutionRecord {
+	rec := &script.ExecutionRecord{
+		ExecutionID: executionID,
+		DeviceID:    deviceID,
+		ScriptRef:   scriptRef,
+		Shell:       string(shell),
+		State:       string(status),
+		CompletedAt: time.Now(),
+	}
+
+	if v, ok := input.Context["workflow_run_id"]; ok {
+		rec.WorkflowRunID, _ = v.(string)
+	}
+	if v, ok := input.Context["workflow_name"]; ok {
+		rec.WorkflowName, _ = v.(string)
+	}
+
+	if result != nil {
+		rec.ExitCode = result.ExitCode
+		rec.Stdout = result.Stdout
+		rec.Stderr = result.Stderr
+		rec.DurationMs = result.Duration.Milliseconds()
+	}
+
+	return rec
 }
 
 // parseScriptStepConfig converts a map[string]interface{} to ScriptStepConfig

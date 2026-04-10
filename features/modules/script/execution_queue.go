@@ -18,9 +18,10 @@ type ExecutionQueue struct {
 	scriptRepo      ScriptRepository // optional; used for latest-version content resolution
 	monitor         *ExecutionMonitor
 	keyManager      *EphemeralKeyManager
-	maxAge          time.Duration // Maximum time to keep queued executions
-	dispatchTimeout time.Duration // Maximum time a dispatched execution may wait before re-queue
-	controllerURL   string        // Controller external URL for script callbacks
+	tracker         ExecutionTracker // optional; writes durable audit records on terminal state
+	maxAge          time.Duration    // Maximum time to keep queued executions
+	dispatchTimeout time.Duration    // Maximum time a dispatched execution may wait before re-queue
+	controllerURL   string           // Controller external URL for script callbacks
 	stopCh          chan struct{}
 }
 
@@ -207,10 +208,30 @@ func (q *ExecutionQueue) CancelExecution(deviceID, executionID string) error {
 	return nil
 }
 
+// SetExecutionTracker sets the durable execution tracker. When set,
+// AcknowledgeCompletion writes one ExecutionRecord per device on terminal state.
+func (q *ExecutionQueue) SetExecutionTracker(t ExecutionTracker) {
+	q.tracker = t
+}
+
 // AcknowledgeCompletion records the completion of a dispatched execution.
 // This is called when the steward reports back with the execution result.
 // state must be QueueStateCompleted or QueueStateFailed.
 func (q *ExecutionQueue) AcknowledgeCompletion(executionID, deviceID string, state QueueState, result *ExecutionResult) error {
+	// Fetch the queue entry metadata before acknowledging so we can build the
+	// tracking record. We look through active (dispatched) entries for this device.
+	var entry *QueueEntry
+	if q.tracker != nil {
+		if entries, err := q.store.List(deviceID); err == nil {
+			for _, e := range entries {
+				if e.ExecutionID == executionID {
+					entry = e
+					break
+				}
+			}
+		}
+	}
+
 	if err := q.store.AcknowledgeCompletion(executionID, deviceID, state, result); err != nil {
 		return fmt.Errorf("failed to acknowledge completion: %w", err)
 	}
@@ -228,7 +249,48 @@ func (q *ExecutionQueue) AcknowledgeCompletion(executionID, deviceID string, sta
 		_ = q.monitor.UpdateDeviceStatus(executionID, deviceID, monitorStatus, result, nil) //nolint:errcheck // monitor is optional audit side-channel
 	}
 
+	// Write durable tracking record — best-effort, must not fail the acknowledgement.
+	if q.tracker != nil && entry != nil {
+		rec := buildQueueTrackingRecord(entry, state, result)
+		_ = q.tracker.Record(context.Background(), rec) //nolint:errcheck // tracker is optional audit side-channel
+	}
+
 	return nil
+}
+
+// buildQueueTrackingRecord converts a QueueEntry and completion result into an
+// ExecutionRecord for durable audit storage.
+func buildQueueTrackingRecord(entry *QueueEntry, state QueueState, result *ExecutionResult) *ExecutionRecord {
+	rec := &ExecutionRecord{
+		ExecutionID: entry.ExecutionID,
+		DeviceID:    entry.DeviceID,
+		ScriptRef:   entry.ScriptRef,
+		Shell:       string(entry.Shell),
+		State:       string(state),
+		QueuedAt:    entry.QueuedAt,
+		CompletedAt: time.Now(),
+	}
+
+	if entry.DispatchedAt != nil {
+		rec.DispatchedAt = *entry.DispatchedAt
+	}
+
+	// Extract workflow metadata threaded through QueueEntry.Metadata.
+	if v, ok := entry.Metadata["workflow_run_id"]; ok {
+		rec.WorkflowRunID, _ = v.(string)
+	}
+	if v, ok := entry.Metadata["workflow_name"]; ok {
+		rec.WorkflowName, _ = v.(string)
+	}
+
+	if result != nil {
+		rec.ExitCode = result.ExitCode
+		rec.Stdout = result.Stdout
+		rec.Stderr = result.Stderr
+		rec.DurationMs = result.Duration.Milliseconds()
+	}
+
+	return rec
 }
 
 // PrepareExecutionForDevice prepares an execution for immediate delivery to a device.
