@@ -42,6 +42,7 @@ type QueuedExecution struct {
 	GenerateAPIKey    bool                   `json:"generate_api_key"`
 	APIKeyTTL         time.Duration          `json:"api_key_ttl"`
 	APIKeyPermissions []string               `json:"api_key_permissions"`
+	ExecutionContext  ExecutionContext       `json:"execution_context,omitempty"` // run-as context (system or logged_in_user)
 	Metadata          map[string]interface{} `json:"metadata"`
 }
 
@@ -91,8 +92,8 @@ func NewExecutionQueue(
 }
 
 // QueueExecution queues a script execution for a device.
-// Dedup: same ScriptRef + deviceID + parameters → ErrDuplicateExecution (silently ignored
-// by the queue; callers may check if dedup is relevant to them).
+// Dedup: same ScriptRef + deviceID + parameters → returns ErrDuplicateExecution so
+// callers can handle cleanup (e.g. cancelling orphaned monitor entries).
 func (q *ExecutionQueue) QueueExecution(deviceID string, execution *QueuedExecution) error {
 	now := time.Now()
 	if execution.QueuedAt.IsZero() {
@@ -122,13 +123,13 @@ func (q *ExecutionQueue) QueueExecution(deviceID string, execution *QueuedExecut
 		GenerateAPIKey:    execution.GenerateAPIKey,
 		APIKeyTTL:         execution.APIKeyTTL,
 		APIKeyPermissions: execution.APIKeyPermissions,
+		ExecutionContext:  execution.ExecutionContext,
 		Metadata:          execution.Metadata,
 	}
 
 	if err := q.store.Enqueue(entry); err != nil {
 		if err == ErrDuplicateExecution {
-			// Dedup: silently ignore duplicate queued executions
-			return nil
+			return ErrDuplicateExecution
 		}
 		return fmt.Errorf("failed to enqueue execution: %w", err)
 	}
@@ -409,6 +410,7 @@ func entryToQueued(entry *QueueEntry) *QueuedExecution {
 		GenerateAPIKey:    entry.GenerateAPIKey,
 		APIKeyTTL:         entry.APIKeyTTL,
 		APIKeyPermissions: entry.APIKeyPermissions,
+		ExecutionContext:  entry.ExecutionContext,
 	}
 
 	if entry.Parameters != nil {

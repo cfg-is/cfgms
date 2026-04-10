@@ -64,6 +64,7 @@ type QueueEntry struct {
 	GenerateAPIKey    bool                   `json:"generate_api_key"`
 	APIKeyTTL         time.Duration          `json:"api_key_ttl"`
 	APIKeyPermissions []string               `json:"api_key_permissions,omitempty"`
+	ExecutionContext  ExecutionContext       `json:"execution_context,omitempty"` // run-as context (system or logged_in_user)
 	Metadata          map[string]interface{} `json:"metadata,omitempty"`
 }
 

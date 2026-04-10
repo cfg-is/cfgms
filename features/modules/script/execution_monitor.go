@@ -6,8 +6,13 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// executionIDCounter provides a monotonic suffix so IDs stay unique even when
+// the system clock has low resolution (e.g. ~15ms on Windows).
+var executionIDCounter atomic.Uint64
 
 // ExecutionMonitor tracks and monitors script executions across devices
 type ExecutionMonitor struct {
@@ -446,7 +451,9 @@ func (m *ExecutionMonitor) notifyDeviceError(executionID string, device *DeviceE
 	}
 }
 
-// generateScriptExecutionID generates a unique execution ID for script monitoring
+// generateScriptExecutionID generates a unique execution ID for script monitoring.
+// The atomic counter suffix ensures uniqueness even on platforms where the system
+// clock has coarse granularity (Windows ~15ms).
 func generateScriptExecutionID() string {
-	return fmt.Sprintf("script-exec-%d", time.Now().UnixNano())
+	return fmt.Sprintf("script-exec-%d-%d", time.Now().UnixNano(), executionIDCounter.Add(1))
 }
