@@ -59,7 +59,7 @@ Commands:
   create-clone-pr <PR_NUM>                  Clone repo and checkout PR branch
   launch          <NUM>                     Launch agent container (issue mode)
   launch-generic  <NAME> <DIR> [ARGS...]    Launch agent container with custom name and args
-  live            <BRANCH>                   Create branch from develop and drop into live Claude session
+  live            <BRANCH|NUM>               Drop into live Claude session (branch name or issue number)
   launch-interactive <BRANCH>               Print docker run command for interactive session
   wait-for-auth   <NUM> [NUM...]            (deprecated, no-op) Legacy auth polling
   wait-for-auth   --container <NAME> [...]  (deprecated, no-op) Legacy auth polling
@@ -291,15 +291,35 @@ case "$cmd" in
     ;;
 
   live)
-    [[ $# -ge 1 ]] || { echo "live requires a branch name"; exit 1; }
-    branch="$1"
-    validate_branch "$branch"
-    sanitized=$(sanitize_branch "$branch")
-    clone_dir="${WORKTREE_BASE}/${sanitized}"
-    container_name="cfg-agent-live-${sanitized}"
+    [[ $# -ge 1 ]] || { echo "live requires a branch name or issue number"; exit 1; }
+    target="$1"
     github_url=$(git -C "$REPO_ROOT" remote get-url origin)
 
-    # Create clone from develop with new branch (or checkout existing)
+    # Determine branch and clone dir based on target type
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+      # Issue number: look for existing branch, or create one
+      num="$target"
+      # Check for existing feature branch on remote (agent or non-agent)
+      existing_branch=$(git -C "$REPO_ROOT" ls-remote --heads origin "feature/story-${num}-*" 2>/dev/null | head -1 | sed 's|.*refs/heads/||')
+      if [[ -n "$existing_branch" ]]; then
+        branch="$existing_branch"
+        echo "Found existing branch: ${branch}"
+      else
+        branch="feature/story-${num}"
+        echo "No existing branch — will create: ${branch}"
+      fi
+      clone_dir="${WORKTREE_BASE}/story-${num}"
+    else
+      # Branch name
+      branch="$target"
+      validate_branch "$branch"
+      clone_dir="${WORKTREE_BASE}/$(sanitize_branch "$branch")"
+    fi
+
+    sanitized=$(sanitize_branch "$branch")
+    container_name="cfg-agent-live-${sanitized}"
+
+    # Create clone from develop with branch (or reuse existing clone)
     if [[ -d "$clone_dir" ]]; then
       echo "Clone already exists at ${clone_dir}, reusing"
     else
