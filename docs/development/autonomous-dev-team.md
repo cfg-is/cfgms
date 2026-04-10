@@ -1,0 +1,157 @@
+# Autonomous Development Team
+
+How ideas become tested, reviewed, merged code — with one human in the loop.
+
+## The Team
+
+CFGMS is built by a solo founder supported by an autonomous agent team. The founder acts as **Product Manager** — setting direction, resolving ambiguities, and making merge decisions. Everything downstream is handled by AI agents coordinated through GitHub.
+
+| Role | Who | Responsibility |
+|------|-----|----------------|
+| **Product Manager** | Human (founder) | Vision, intent, merge decisions, unblocking |
+| **Product Owner** | Claude Code session | Pipeline orchestration, dashboard, intent capture |
+| **Business Analyst** | PO-spawned subagent | Decomposes epics into implementable stories |
+| **Tech Lead** | PO-spawned subagent | Validates stories for agent executability |
+| **Developer** | Containerized agent | Implements code in isolated Docker containers |
+| **Acceptance Reviewer** | PO-spawned subagent | Reviews PRs against acceptance criteria |
+| **QA Reviewer** | PO-spawned subagent | Code quality, test correctness |
+| **Security Engineer** | PO-spawned subagent | Vulnerability scanning, architecture compliance |
+
+## Pipeline Flow
+
+```mermaid
+flowchart TD
+    PM[PM captures intent] --> PO[PO creates epic]
+    PO --> BA[BA decomposes into stories]
+    BA --> TL[Tech Lead validates stories]
+    TL --> DEV[Dev agent implements in container]
+    DEV --> AR[Acceptance Reviewer checks PR]
+    AR -->|pass| MERGE[PM merges]
+    AR -->|fail, 1st attempt| FIX[Fix agent patches PR]
+    FIX --> AR
+    AR -->|fail, 2nd attempt| BLOCKED[Escalate to PM]
+    BLOCKED --> PM
+    MERGE --> DONE[Story closed, epic progress updated]
+```
+
+## How It Works
+
+### 1. Intent Capture
+
+The founder describes what they want built in conversation with the Product Owner. The PO pushes for specificity — outcome-based goals, testable success criteria, explicit non-goals. Vague ideas get refined before anything is written.
+
+The PO creates a GitHub **epic issue** with the structured intent.
+
+### 2. Story Decomposition
+
+The **Business Analyst** agent reads the epic, surveys the codebase, and breaks it into implementable stories. Each story is a GitHub sub-issue with:
+
+- Specific files in scope
+- Reference implementations to follow
+- Testable acceptance criteria
+- Dependency ordering
+
+### 3. Tech Lead Review
+
+The **Tech Lead** agent validates each story for dev agent executability. It checks dependency ordering, verifies file references against current code, removes ambiguity, and adds implementation notes. Stories that pass are promoted to the dispatch queue. Stories with gaps get flagged.
+
+### 4. Development
+
+Each story is dispatched to an isolated **Docker container** running Claude Code. The dev agent:
+
+- Checks out a fresh branch from `develop`
+- Reads the story spec
+- Writes tests first (TDD)
+- Implements using real components (no mocks)
+- Runs the full validation suite
+- Opens a PR against `develop`
+
+Agents run in parallel — multiple stories can be in flight simultaneously.
+
+### 5. Review
+
+The **Acceptance Reviewer** checks each PR against the story's acceptance criteria and CI status. If everything passes, the PR is auto-merged. If there are findings, the PR enters a fix cycle:
+
+- **First failure**: A fix agent is dispatched to address the review findings
+- **Second failure**: Escalated to the founder as a blocked item
+
+For PRs that reach the founder, **QA** and **Security** specialist agents provide additional review context.
+
+### 6. Merge & Completion
+
+Merged PRs auto-close their story issues. The PO tracks epic completion via GitHub sub-issue progress and surfaces the next action.
+
+## Pipeline State Machine
+
+All coordination happens through GitHub labels — no external state store.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Epic: PO creates epic
+    Epic --> Draft: BA decomposes
+    Draft --> Ready: Tech Lead approves
+    Draft --> Blocked: Tech Lead finds gaps
+    Ready --> InProgress: Agent dispatched
+    InProgress --> PR: Agent opens PR
+    PR --> Merged: Acceptance review passes
+    PR --> Fix: Acceptance review fails (1st)
+    Fix --> PR: Fix agent pushes update
+    PR --> Blocked: Acceptance review fails (2nd)
+    Blocked --> Draft: PM resolves
+    Merged --> [*]: Story closed
+```
+
+| Label | Stage |
+|-------|-------|
+| `pipeline:epic` | Epic defined, awaiting decomposition |
+| `pipeline:draft` | Story written, awaiting Tech Lead review |
+| `agent:ready` | Story validated, queued for dispatch |
+| `agent:in-progress` | Dev agent container running |
+| `pipeline:fix` | PR failed review, fix agent dispatched |
+| `pipeline:review` | PR passed review, awaiting merge |
+| `pipeline:blocked` | Escalation — needs human input |
+
+## Orchestration
+
+The Product Owner operates in two modes:
+
+**Interactive** — when the founder is present. Shows a prioritized dashboard, captures new intent, processes targeted unblocks. The founder's only required interface.
+
+**Scheduled** — runs autonomously on a timer. Executes the full pipeline cycle: decomposition, tech lead review, dispatch, fix cycles, acceptance review. Creates `pipeline:blocked` issues for anything it can't resolve.
+
+```mermaid
+flowchart LR
+    subgraph Scheduled Cycle
+        S1[Check unblocked stories] --> S2[Tech Lead review]
+        S2 --> S3[Dispatch ready stories]
+        S3 --> S4[Run fix cycles]
+        S4 --> S5[Acceptance review new PRs]
+        S5 --> S6[Decompose new epics]
+        S6 --> S7[Check forward edge]
+    end
+
+    subgraph Interactive Session
+        I1[Dashboard] --> I2{Founder action}
+        I2 -->|new idea| I3[Intent capture]
+        I2 -->|resolve blocker| I4[Targeted unblock]
+        I2 -->|merge PR| I5[Merge decision]
+    end
+```
+
+## Design Principles
+
+**GitHub is the single source of truth.** All pipeline state lives in GitHub issues, labels, and PRs. No local files, no external databases. The founder can check status from their phone.
+
+**Agents don't guess.** Stories must be self-contained with explicit file references and testable criteria. Vague specs get rejected by the Tech Lead, not interpreted by the dev agent.
+
+**One escalation surface.** Every blocker becomes a `pipeline:blocked` issue assigned to the founder. No Slack messages, no email, no notifications outside GitHub.
+
+**Autonomous fix before escalation.** When a PR fails review, the system attempts one automated fix cycle before involving the founder.
+
+**No mocks, no shortcuts.** Dev agents use real components, run real tests, and pass real CI. The same validation gates apply to human and agent code.
+
+## Further Reading
+
+- [Agent Dispatch Reference](agent-dispatch.md) — container infrastructure, credentials, troubleshooting
+- [Autonomous Agent System PRD](../product/autonomous-agent-system-prd.md) — full product requirements
+- [PR Review Methodology](pr-review-methodology.md) — how code review works

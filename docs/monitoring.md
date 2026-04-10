@@ -379,4 +379,4 @@ Monitoring has minimal performance impact:
 
 - [REST API Documentation](api/rest-api.md) - Complete API reference
 - [Architecture Overview](architecture.md) - System architecture details
-- [Development Guide](development/guides/getting-started.md) - Development setup
+- [Development Guide](development/README.md) - Development documentation
