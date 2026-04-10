@@ -3,11 +3,12 @@ name: Documentation Validation
 on:
   pull_request:
     branches: [ main, develop ]
-    # ONLY run when documentation actually changes
+    # ONLY run when documentation or agent definitions change
     # Does NOT run on code-only PRs
     paths:
       - 'docs/**'
       - '*.md'
+      - '.claude/**'
   push:
     branches:
       - main
@@ -16,6 +17,7 @@ on:
     paths:
       - 'docs/**'
       - '*.md'
+      - '.claude/**'
   workflow_dispatch:
 
 env:
