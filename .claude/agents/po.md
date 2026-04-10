@@ -244,7 +244,14 @@ Find `pipeline:draft` stories. Collect their issue numbers, then use the **Agent
 The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency ordering, implementation notes, scope, constraints, and ambiguity. Passing stories get promoted (`pipeline:draft` → `agent:ready`). Failing stories get a `pipeline:blocked` issue.
 
 **Step 3 — Dispatch:**
-Find `agent:ready` issues without `agent:in-progress`. For each:
+Find `agent:ready` issues without `agent:in-progress`. Before dispatching, check for file conflicts with in-flight agents:
+
+1. For each `agent:ready` story, extract `## Files In Scope` from the issue body
+2. For each `agent:in-progress` story, extract `## Files In Scope` from the issue body
+3. If any ready story shares files with an in-progress story, **skip dispatch** — leave it as `agent:ready` and it will be picked up in a future cycle after the conflicting story merges
+4. Also check `## Dependencies` — skip if any dependency is not yet closed
+
+For stories that pass conflict checks:
 ```bash
 ./scripts/agent-dispatch.sh check-conflicts <NUM>
 ./scripts/agent-dispatch.sh create-clone <NUM>

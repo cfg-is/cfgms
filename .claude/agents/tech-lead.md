@@ -25,12 +25,29 @@ Also read `CLAUDE.md` for architecture rules, central providers, and anti-patter
 
 For each story, run all 5 checks. A story must pass ALL checks to be promoted.
 
-### 1. Dependency Ordering
+### 1. Dependency Ordering & File Conflict Detection
 
 - Read the story's `## Dependencies` section
 - Cross-check against other stories in the same epic — does this story require interfaces, types, or changes from a sibling story?
 - If a dependency is missing, add it to the story body
 - If a circular dependency exists, create `pipeline:blocked`
+
+**File overlap check (required when reviewing multiple stories in the same epic):**
+
+- Extract `## Files In Scope` from every story in the batch
+- Also check all `agent:in-progress` and `agent:ready` stories in the same epic:
+  ```bash
+  # Get sibling stories that are queued or in flight
+  gh issue list --repo cfg-is/cfgms --label "agent:ready" --state open --json number,body
+  gh issue list --repo cfg-is/cfgms --label "agent:in-progress" --state open --json number,body
+  ```
+- Cross-reference files across all stories. If two stories edit the same file, they **cannot run in parallel** — the second to merge will hit conflicts
+- When overlap is found: add an explicit `## Dependencies` entry on the story that should run second (the one that builds on the other's changes, or the less foundational one)
+- Mark the dependency reason as `file-conflict` so the PO knows it's a serialization constraint, not a functional dependency:
+  ```
+  ## Dependencies
+  - #NNN — file-conflict: both stories edit `path/to/file.go`
+  ```
 
 ### 2. Implementation Notes
 
