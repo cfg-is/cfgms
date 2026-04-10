@@ -652,7 +652,7 @@ func TestDedup(t *testing.T) {
 		Parameters:  map[string]string{"key": "value"},
 	}
 	err = queue.QueueExecution("device-001", dup)
-	require.NoError(t, err, "duplicate enqueue must not return error (silently ignored)")
+	require.ErrorIs(t, err, ErrDuplicateExecution, "duplicate enqueue must return ErrDuplicateExecution")
 	assert.Equal(t, 1, queue.GetQueueDepth("device-001"), "duplicate must not add a second entry")
 
 	// Different params create a distinct execution

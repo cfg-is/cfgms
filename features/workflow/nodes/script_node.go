@@ -228,6 +228,12 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 				Metadata:         queueMeta,
 			}
 			if err := n.executionQueue.QueueExecution(deviceID, qe); err != nil {
+				if err == script.ErrDuplicateExecution {
+					// Dedup: identical script+device+params already queued.
+					// Cancel the orphaned monitor entry to prevent leaks.
+					_ = n.monitor.CancelExecution(execution.ID)
+					continue
+				}
 				return workflow.NodeOutput{
 					Success: false,
 					Error:   fmt.Sprintf("failed to queue execution for device %s: %v", deviceID, err),

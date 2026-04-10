@@ -92,8 +92,8 @@ func NewExecutionQueue(
 }
 
 // QueueExecution queues a script execution for a device.
-// Dedup: same ScriptRef + deviceID + parameters → ErrDuplicateExecution (silently ignored
-// by the queue; callers may check if dedup is relevant to them).
+// Dedup: same ScriptRef + deviceID + parameters → returns ErrDuplicateExecution so
+// callers can handle cleanup (e.g. cancelling orphaned monitor entries).
 func (q *ExecutionQueue) QueueExecution(deviceID string, execution *QueuedExecution) error {
 	now := time.Now()
 	if execution.QueuedAt.IsZero() {
@@ -129,8 +129,7 @@ func (q *ExecutionQueue) QueueExecution(deviceID string, execution *QueuedExecut
 
 	if err := q.store.Enqueue(entry); err != nil {
 		if err == ErrDuplicateExecution {
-			// Dedup: silently ignore duplicate queued executions
-			return nil
+			return ErrDuplicateExecution
 		}
 		return fmt.Errorf("failed to enqueue execution: %w", err)
 	}

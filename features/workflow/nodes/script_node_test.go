@@ -735,6 +735,62 @@ func TestScriptNode_Execute_QueueDedup(t *testing.T) {
 		"dedup must prevent a second identical entry from entering the queue")
 }
 
+// TestScriptNode_Execute_QueueDedup_NoOrphanedMonitorEntries verifies that duplicate
+// dispatch does not leak orphaned entries in the execution monitor. When QueueExecution
+// detects a duplicate, the monitor entry created by StartExecution must be cancelled
+// so it doesn't accumulate indefinitely.
+func TestScriptNode_Execute_QueueDedup_NoOrphanedMonitorEntries(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	store := script.NewInMemoryQueueStore()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", store, nil, 0)
+	defer q.Stop()
+
+	config := &ScriptStepConfig{
+		ScriptID: "my-script",
+		Shell:    script.ShellBash,
+		Devices:  []string{"device-1"},
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetExecutionQueue(q)
+
+	// First dispatch — creates one monitor entry (running).
+	output1, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+	assert.True(t, output1.Success)
+
+	execsBefore := monitor.ListExecutions("")
+	runningBefore := 0
+	for _, e := range execsBefore {
+		if e.Status == script.StatusRunning {
+			runningBefore++
+		}
+	}
+	assert.Equal(t, 1, runningBefore, "first dispatch should create exactly 1 running execution")
+
+	// Second dispatch — duplicate. Should NOT leave an orphaned running entry.
+	output2, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+	assert.True(t, output2.Success)
+
+	execsAfter := monitor.ListExecutions("")
+	runningAfter := 0
+	cancelledCount := 0
+	for _, e := range execsAfter {
+		if e.Status == script.StatusRunning {
+			runningAfter++
+		}
+		if e.Status == script.StatusCancelled {
+			cancelledCount++
+		}
+	}
+
+	// Only the original execution should be running. The dedup entry must be cancelled.
+	assert.Equal(t, 1, runningAfter,
+		"duplicate dispatch must not leave orphaned running monitor entries")
+	assert.Equal(t, 1, cancelledCount,
+		"duplicate dispatch should produce exactly 1 cancelled monitor entry")
+}
+
 // TestScriptNode_Execute_CatchUpDequeue verifies the catch-up path: entries queued
 // while a device was offline are returned by DequeueForDevice when the device reconnects.
 func TestScriptNode_Execute_CatchUpDequeue(t *testing.T) {
