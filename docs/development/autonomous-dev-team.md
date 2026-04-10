@@ -32,7 +32,8 @@ flowchart TD
     AR -->|any findings, 1st review| FIX[Fix agent patches PR]:::container
     FIX --> AR
     AR -->|any findings, 2nd review| BLOCKED[Escalate to PM]:::human
-    BLOCKED -->|PM provides guidance| DEV
+    BLOCKED -->|update spec, re-dispatch| DEV
+    BLOCKED -->|fix code, merge directly| DONE
     MERGE --> DONE[Story closed, epic progress updated]
 
     classDef human fill:#4a90d9,stroke:#2c5f8a,color:#fff
