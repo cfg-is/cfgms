@@ -355,6 +355,11 @@ case "$cmd" in
     echo "================================================"
 
     # Launch interactive container with TTY — drops straight into claude
+    # Warmup ensures workspace trust and token refresh before the interactive session.
+    setup_cmds="setup-env.sh"
+    setup_cmds+=" && claude -p 'ready' --dangerously-skip-permissions 2>/dev/null || true"
+    setup_cmds+=" && exec claude --dangerously-skip-permissions"
+
     exec docker run -it --rm \
       --name "$container_name" \
       --label "cfg-agent=true" \
@@ -371,7 +376,7 @@ case "$cmd" in
       --cap-add NET_ADMIN \
       --entrypoint /bin/bash \
       cfg-agent:latest \
-      -c "setup-env.sh && exec claude --dangerously-skip-permissions"
+      -c "$setup_cmds"
     ;;
 
   launch-interactive)
