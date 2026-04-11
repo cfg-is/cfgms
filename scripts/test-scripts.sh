@@ -37,7 +37,7 @@ test_syntax() {
     log_test "Testing shell script syntax..."
 
     local scripts_tested=0
-    for script in scripts/*.sh; do
+    for script in scripts/*.sh .claude/scripts/*.sh; do
         if [ -f "$script" ]; then
             if bash -n "$script" 2>/dev/null; then
                 log_pass "$(basename "$script"): Valid syntax"

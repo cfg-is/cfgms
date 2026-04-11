@@ -242,7 +242,7 @@ The `/po` command is the founder's only required interface. It bootstraps from G
 - Issues with `agent:ready` label — stories queued for dispatch
 - Issues with `pipeline:epic` label — active epics, child issue completion percentage (via `subIssuesSummary`)
 - `docs/product/roadmap.md` — active milestone, next milestone definition quality
-- `./scripts/agent-dispatch.sh list-running` — container status cross-reference
+- `./.claude/scripts/agent-dispatch.sh list-running` — container status cross-reference
 
 ### 6.2 Session Dashboard — Priority Order
 

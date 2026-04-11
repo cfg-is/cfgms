@@ -22,13 +22,13 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 
 2. **If `$ARGUMENTS` is 'creds'**: Tell the user to run the refresh script directly in their terminal:
    ```
-   ./scripts/refresh-agent-creds.sh
+   ./.claude/scripts/refresh-agent-creds.sh
    ```
-   This script handles Docker volume creation, OAuth login, workspace trust, and remote-control consent interactively. It requires a TTY and cannot be run via the Bash tool. After the user confirms completion, verify credentials with `./scripts/agent-dispatch.sh check-creds` and stop (skip all other steps).
+   This script handles Docker volume creation, OAuth login, workspace trust, and remote-control consent interactively. It requires a TTY and cannot be run via the Bash tool. After the user confirms completion, verify credentials with `./.claude/scripts/agent-dispatch.sh check-creds` and stop (skip all other steps).
 
 3. **Health check** (runs when image already exists and `$ARGUMENTS` is NOT 'rebuild'):
    ```bash
-   ./scripts/agent-dispatch.sh health-check
+   ./.claude/scripts/agent-dispatch.sh health-check
    ```
    Parse the output lines:
    - `WARN:image_age:...` — Image is stale, recommend rebuild
@@ -57,7 +57,7 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
        -f /persist/.credentials.json && echo "exists"
      ```
    - If credentials exist and `$ARGUMENTS` is not 'creds': skip
-   - If credentials missing: tell the user to run `./scripts/refresh-agent-creds.sh` in their terminal, then confirm when done.
+   - If credentials missing: tell the user to run `./.claude/scripts/refresh-agent-creds.sh` in their terminal, then confirm when done.
 
 7. **Create directories**:
    ```bash
@@ -90,5 +90,5 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 - **Docker not installed**: Provide install link, stop
 - **GitHub not authenticated**: Tell user to run `gh auth login`, stop
 - **Image build fails**: Show build output, suggest checking Dockerfile
-- **OAuth flow fails**: Tell user to retry with `./scripts/refresh-agent-creds.sh`
+- **OAuth flow fails**: Tell user to retry with `./.claude/scripts/refresh-agent-creds.sh`
 - **Network issues during build**: Suggest checking internet connection

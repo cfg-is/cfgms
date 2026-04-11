@@ -96,7 +96,7 @@ gh pr merge <PR_NUM> --repo cfg-is/cfgms --squash --auto
 
 # Extract story number from branch for cleanup
 # Branch pattern: feature/story-<NUM>-*
-./scripts/agent-dispatch.sh cleanup-issue <STORY_NUM>
+./.claude/scripts/agent-dispatch.sh cleanup-issue <STORY_NUM>
 ```
 
 If the story had `pipeline:fix`, remove it:
@@ -121,7 +121,7 @@ Escalate to founder and clean up the agent container (the dev agent is done rega
 gh issue edit <STORY_NUM> --repo cfg-is/cfgms --add-assignee "jrdnr"
 
 # Clean up — agent is done, founder takes over
-./scripts/agent-dispatch.sh cleanup-issue <STORY_NUM>
+./.claude/scripts/agent-dispatch.sh cleanup-issue <STORY_NUM>
 ```
 
 ## Structured Review Comment

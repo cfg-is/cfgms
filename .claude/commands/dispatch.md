@@ -33,7 +33,7 @@ Launch isolated agent containers to implement GitHub issues, continue work on br
    - If image missing, tell user to run `/agent-setup` first
    - **Check credential validity**:
      ```bash
-     ./scripts/agent-dispatch.sh check-creds
+     ./.claude/scripts/agent-dispatch.sh check-creds
      ```
      Parse the output:
      - `CREDS_OK:<minutes>` — Credentials valid, proceed
@@ -62,18 +62,18 @@ For each issue number:
 
    c. **Check for conflicts** (uses helper to avoid approval prompts):
       ```bash
-      ./scripts/agent-dispatch.sh check-conflicts <NUM1> [NUM2...]
+      ./.claude/scripts/agent-dispatch.sh check-conflicts <NUM1> [NUM2...]
       ```
       Output lines prefixed `CONTAINER_EXISTS:<NUM>:` or `CLONE_EXISTS:<NUM>:` indicate conflicts — skip those issues with a warning.
 
    d. **Create local clone** (skip in dry-run):
       ```bash
-      ./scripts/agent-dispatch.sh create-clone <NUM>
+      ./.claude/scripts/agent-dispatch.sh create-clone <NUM>
       ```
 
    e. **Launch container** (skip in dry-run):
       ```bash
-      ./scripts/agent-dispatch.sh launch <NUM>
+      ./.claude/scripts/agent-dispatch.sh launch <NUM>
       ```
 
    f. **Update labels** (skip in dry-run):
@@ -96,20 +96,20 @@ For each branch name:
 
    c. **Check for conflicts**:
       ```bash
-      ./scripts/agent-dispatch.sh check-conflicts --branch <BRANCH>
+      ./.claude/scripts/agent-dispatch.sh check-conflicts --branch <BRANCH>
       ```
       Skip if `CONTAINER_EXISTS` or `CLONE_EXISTS` in output.
 
    d. **Create local clone** (skip in dry-run):
       ```bash
-      ./scripts/agent-dispatch.sh create-clone-branch <BRANCH>
+      ./.claude/scripts/agent-dispatch.sh create-clone-branch <BRANCH>
       ```
       Output: `CLONE_OK:<dir>:<branch>` (existing) or `CLONE_NEW:<dir>:<branch>` (new branch created).
 
    e. **Launch container** (skip in dry-run):
       Derive sanitized name from branch (`/` → `--`).
       ```bash
-      ./scripts/agent-dispatch.sh launch-generic cfg-agent-branch-<sanitized> <clone_dir> --branch <BRANCH> [--issue <NUM>]
+      ./.claude/scripts/agent-dispatch.sh launch-generic cfg-agent-branch-<sanitized> <clone_dir> --branch <BRANCH> [--issue <NUM>]
       ```
       Include `--issue <NUM>` only if auto-detected from branch name.
 
@@ -128,18 +128,18 @@ For each `fix-pr <NUM>`:
 
    c. **Check for conflicts**:
       ```bash
-      ./scripts/agent-dispatch.sh check-conflicts --pr <NUM>
+      ./.claude/scripts/agent-dispatch.sh check-conflicts --pr <NUM>
       ```
       Skip if conflict found.
 
    d. **Create local clone** (skip in dry-run):
       ```bash
-      ./scripts/agent-dispatch.sh create-clone-pr <NUM>
+      ./.claude/scripts/agent-dispatch.sh create-clone-pr <NUM>
       ```
 
    e. **Launch container** (skip in dry-run):
       ```bash
-      ./scripts/agent-dispatch.sh launch-generic cfg-agent-pr-fix-<NUM> <clone_dir> --fix-pr <NUM>
+      ./.claude/scripts/agent-dispatch.sh launch-generic cfg-agent-pr-fix-<NUM> <clone_dir> --fix-pr <NUM>
       ```
 
 ### 4d. Interactive Dispatch
@@ -151,23 +151,23 @@ The target determines how the clone is created; the launch is always the same (`
 
    - **Branch target** (`interactive feature/foo`):
      - Branch = the argument directly
-     - Clone: `./scripts/agent-dispatch.sh create-clone-branch <BRANCH>`
+     - Clone: `./.claude/scripts/agent-dispatch.sh create-clone-branch <BRANCH>`
      - Clone dir: `../worktrees/<sanitized>`
-     - Conflict check: `./scripts/agent-dispatch.sh check-conflicts --branch <BRANCH>`
+     - Conflict check: `./.claude/scripts/agent-dispatch.sh check-conflicts --branch <BRANCH>`
 
    - **Issue target** (`interactive 416`):
      - Validate issue exists: `gh issue view <NUM> --json title,state`
      - Branch = `feature/story-<NUM>-agent` (same as issue dispatch)
-     - Clone: `./scripts/agent-dispatch.sh create-clone <NUM>`
+     - Clone: `./.claude/scripts/agent-dispatch.sh create-clone <NUM>`
      - Clone dir: `../worktrees/story-<NUM>`
-     - Conflict check: `./scripts/agent-dispatch.sh check-conflicts <NUM>`
+     - Conflict check: `./.claude/scripts/agent-dispatch.sh check-conflicts <NUM>`
 
    - **PR target** (`interactive fix-pr 478`):
      - Validate PR exists and is open: `gh pr view <NUM> --json state,headRefName,title`
      - Branch = PR's `headRefName`
-     - Clone: `./scripts/agent-dispatch.sh create-clone-pr <NUM>`
+     - Clone: `./.claude/scripts/agent-dispatch.sh create-clone-pr <NUM>`
      - Clone dir: `../worktrees/pr-fix-<NUM>`
-     - Conflict check: `./scripts/agent-dispatch.sh check-conflicts --pr <NUM>`
+     - Conflict check: `./.claude/scripts/agent-dispatch.sh check-conflicts --pr <NUM>`
 
 **Then for all target types:**
 
@@ -177,7 +177,7 @@ The target determines how the clone is created; the launch is always the same (`
 
    c. **Launch interactive container** (skip in dry-run):
       ```bash
-      ./scripts/agent-dispatch.sh launch-interactive <BRANCH> [<CLONE_DIR>]
+      ./.claude/scripts/agent-dispatch.sh launch-interactive <BRANCH> [<CLONE_DIR>]
       ```
       Pass `<CLONE_DIR>` explicitly for issue and PR targets (since their clone dirs don't match the sanitized branch pattern).
       This launches a detached container running `claude remote-control --dangerously-skip-permissions`.
@@ -192,8 +192,8 @@ The target determines how the clone is created; the launch is always the same (`
 5. **Print full agent dashboard** (skip in dry-run): After launch, gather state for ALL agents (not just the ones dispatched this run):
 
    ```bash
-   ./scripts/agent-dispatch.sh list-running
-   ./scripts/agent-dispatch.sh list-exited
+   ./.claude/scripts/agent-dispatch.sh list-running
+   ./.claude/scripts/agent-dispatch.sh list-exited
    ```
 
    Print a single summary table showing ALL agents:

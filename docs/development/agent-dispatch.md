@@ -28,9 +28,9 @@ gh pr merge 456 --squash
 Developer (architect)
 │
 ├── /dispatch <issue#>          deterministic, no LLM
-│     ├── scripts/agent-dispatch.sh create-clone <N>
+│     ├── .claude/scripts/agent-dispatch.sh create-clone <N>
 │     │     └── git worktree add -b feature/story-N-agent ../worktrees/story-N develop
-│     └── scripts/agent-dispatch.sh launch <N>
+│     └── .claude/scripts/agent-dispatch.sh launch <N>
 │           └── docker run --detach cfg-agent:latest
 │                 ├── Mounts: worktree (rw), claude-creds (ro), gh-creds (ro)
 │                 ├── Firewall: GitHub + Anthropic API + Go proxy only
@@ -71,7 +71,7 @@ Claude credentials expire periodically. If `/dispatch` reports `CREDS_EXPIRED`:
 
 ```bash
 # Run in a real terminal (requires TTY — not in Claude session)
-./scripts/refresh-agent-creds.sh
+./.claude/scripts/refresh-agent-creds.sh
 ```
 
 Then verify: `/agent-setup creds`
@@ -89,10 +89,10 @@ Then verify: `/agent-setup creds`
 ### Check Credential Status
 
 ```bash
-./scripts/agent-dispatch.sh check-creds
+./.claude/scripts/agent-dispatch.sh check-creds
 # CREDS_OK:<minutes>     — valid, minutes until expiry
 # CREDS_LOW:<minutes>    — valid but expiring soon, refresh recommended
-# CREDS_EXPIRED:<N>      — run ./scripts/refresh-agent-creds.sh
+# CREDS_EXPIRED:<N>      — run ./.claude/scripts/refresh-agent-creds.sh
 # CREDS_MISSING:*        — run /agent-setup
 ```
 

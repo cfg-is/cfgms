@@ -2,7 +2,7 @@
 # Refresh Claude Code OAuth credentials for agent dispatch containers.
 # Run this script directly in a terminal (requires TTY for interactive login).
 #
-# Usage: ./scripts/refresh-agent-creds.sh
+# Usage: ./.claude/scripts/refresh-agent-creds.sh
 
 set -euo pipefail
 
