@@ -17,7 +17,7 @@ You are reviewing PR #$ARGUMENTS for the CFGMS project. Execute all 6 phases seq
 Fetch PR details and validate workflow (uses helper to avoid approval prompts):
 
 ```bash
-./scripts/pr-review-helper.sh pr-overview $ARGUMENTS
+./.claude/scripts/pr-review-helper.sh pr-overview $ARGUMENTS
 ```
 
 **Validate git workflow FIRST (BLOCKING)**:
@@ -71,7 +71,7 @@ Check all changed `.go` files for violations:
 - Table-driven patterns where appropriate
 
 ```bash
-./scripts/pr-review-helper.sh diff-scan $ARGUMENTS
+./.claude/scripts/pr-review-helper.sh diff-scan $ARGUMENTS
 ```
 
 ## Phase 4: Documentation & Integration Review
@@ -85,7 +85,7 @@ Check all changed `.go` files for violations:
 ## Phase 5: GitHub Actions CI Verification (MANDATORY — BLOCKING)
 
 ```bash
-./scripts/pr-review-helper.sh pr-checks $ARGUMENTS
+./.claude/scripts/pr-review-helper.sh pr-checks $ARGUMENTS
 ```
 
 **Required checks** (ALL must pass):

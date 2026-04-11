@@ -30,7 +30,7 @@ gh pr list --state=open --json number,title,author,headRefName,isDraft --limit 2
 Ensure the local repo reflects the latest state (uses helper to avoid approval prompts):
 
 ```bash
-./scripts/pr-review-helper.sh pre-review <NUM>
+./.claude/scripts/pr-review-helper.sh pre-review <NUM>
 ```
 
 Parse output:
@@ -67,7 +67,7 @@ If the review result is **APPROVED FOR MERGE** or **APPROVED WITH COMMENTS**, ch
 1. Extract the story number from the branch name
 2. Clean up the agent's container and clone:
    ```bash
-   ./scripts/agent-dispatch.sh cleanup-issue <story_number>
+   ./.claude/scripts/agent-dispatch.sh cleanup-issue <story_number>
    ```
 3. Report what was cleaned up
 

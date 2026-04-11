@@ -18,7 +18,7 @@ allowed-tools: Bash
 
 1. **Check PR required checks** (uses helper to avoid approval prompts):
    ```bash
-   ./scripts/pr-review-helper.sh pr-checks $ARGUMENTS
+   ./.claude/scripts/pr-review-helper.sh pr-checks $ARGUMENTS
    ```
 
 2. **Evaluate results**:
@@ -29,7 +29,7 @@ allowed-tools: Bash
 
 3. **For failures, get details** (uses helper to avoid approval prompts):
    ```bash
-   ./scripts/pr-review-helper.sh ci-details $ARGUMENTS
+   ./.claude/scripts/pr-review-helper.sh ci-details $ARGUMENTS
    ```
 
 ## Blocking Policy

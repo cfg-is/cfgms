@@ -16,7 +16,7 @@ Detect internal tracking documents in the diff that should NOT be in PRs. These 
 Run the doc scan helper (wraps pipe+regex commands to avoid approval prompts):
 
 ```bash
-./scripts/pr-review-helper.sh doc-scan
+./.claude/scripts/pr-review-helper.sh doc-scan
 ```
 
 Parse the output sections:

@@ -94,7 +94,7 @@ gh api graphql -f query='
 
 Also read:
 - `docs/product/roadmap.md` — find the first uncompleted milestone (section without "COMPLETED"). Count `- [x]` vs `- [ ]` items.
-- `./scripts/agent-dispatch.sh list-running` — running container count and names
+- `./.claude/scripts/agent-dispatch.sh list-running` — running container count and names
 - Cron PO status via `RemoteTrigger` tool with `action: "list"` — check for a trigger named "po-cron". Report: enabled/disabled, last run time, next scheduled run. If no trigger exists, report "not configured".
 
 ### 1.2 Dashboard Output
@@ -241,7 +241,7 @@ Find recently merged PRs. Check if any `pipeline:draft` stories had `## Dependen
 **Step 1.5 — Agent cleanup:**
 Remove stale agent containers and clones. Run:
 ```bash
-./scripts/agent-dispatch.sh cleanup-stale
+./.claude/scripts/agent-dispatch.sh cleanup-stale
 ```
 This finds containers whose stories are closed, `agent:failed`, or `pipeline:blocked` and removes them. Runs before dispatch so re-dispatched stories start with a clean environment. Safe to run every cycle — idempotent, skips containers whose stories are still active.
 
@@ -264,9 +264,9 @@ Find `agent:ready` issues without `agent:in-progress`. Before dispatching, check
 
 For stories that pass conflict checks:
 ```bash
-./scripts/agent-dispatch.sh check-conflicts <NUM>
-./scripts/agent-dispatch.sh create-clone <NUM>
-./scripts/agent-dispatch.sh launch <NUM>
+./.claude/scripts/agent-dispatch.sh check-conflicts <NUM>
+./.claude/scripts/agent-dispatch.sh create-clone <NUM>
+./.claude/scripts/agent-dispatch.sh launch <NUM>
 gh issue edit <NUM> --remove-label "agent:ready" --add-label "agent:in-progress"
 ```
 
@@ -274,8 +274,8 @@ gh issue edit <NUM> --remove-label "agent:ready" --add-label "agent:in-progress"
 Find stories with `pipeline:fix` label. Dispatch fix agent via:
 ```bash
 gh pr list --repo cfg-is/cfgms --search "head:feature/story-<NUM>" --json number -q '.[0].number'
-./scripts/agent-dispatch.sh create-clone-pr <PR_NUM>
-./scripts/agent-dispatch.sh launch-generic cfg-agent-pr-fix-<PR_NUM> <clone_dir> --fix-pr <PR_NUM>
+./.claude/scripts/agent-dispatch.sh create-clone-pr <PR_NUM>
+./.claude/scripts/agent-dispatch.sh launch-generic cfg-agent-pr-fix-<PR_NUM> <clone_dir> --fix-pr <PR_NUM>
 ```
 
 **Step 5 — QA pass (Acceptance Reviewer):**
