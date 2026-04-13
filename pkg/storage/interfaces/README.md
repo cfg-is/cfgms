@@ -1,210 +1,90 @@
-# CFGMS Global Storage Interfaces
+# CFGMS Storage Interfaces
 
-This package defines the global storage interfaces that unify CFGMS storage architecture. All modules import only these interfaces, never specific storage providers, enabling flexible deployment configurations.
+This package defines the storage interfaces used by controller-side business logic. Modules import only these interfaces, never specific providers.
 
-## Overview
+> **Scope**: Controller-side storage only. Steward persistence (local config file, OS keychain, in-memory state between convergence runs) is separate.
 
-The global storage system provides three main storage interfaces:
+> **Direction**: This layout is being reorganized into a five-type taxonomy. See [ADR-003: Storage Data Taxonomy](../../../docs/architecture/decisions/003-storage-data-taxonomy.md) for the authoritative plan. The existing `pkg/storage/providers/git/` is deprecated and will be removed in favor of a new flat-file provider plus a git-sync component.
 
-1. **ClientTenantStore** - MSP client tenant management (M365 consent, client data)
-2. **ConfigStore** - All configuration data (templates, certificates, settings) 
-3. **AuditStore** - All audit logs and compliance data (immutable events)
+## Current Interfaces (flat layout)
 
-## Core Concept: "One Storage Decision"
+The files in this directory today:
 
-```yaml
-# Single configuration affects entire system
-controller.storage.provider: database  # Everything uses PostgreSQL
-# OR
-controller.storage.provider: git       # Everything uses Git + SOPS
+| File | Interface(s) | Purpose |
+|------|--------------|---------|
+| `provider.go` | `StorageProvider` | Provider registration and capability reporting |
+| `client_tenant.go` | `ClientTenantStore` | MSP client tenant data |
+| `m365_client_tenant_store.go` | `M365ClientTenantStore` | M365-specific consent state (will fold into `ClientTenantStore`) |
+| `tenant_store.go` | `TenantStore` | Recursive tenant hierarchy |
+| `config_store.go` | `ConfigStore` | Configuration data (YAML/JSON, inheritance) |
+| `audit_store.go` | `AuditStore` | Immutable audit events |
+| `rbac_store.go` | `RBACStore` | RBAC policy and role data |
+| `registration_store.go` | `RegistrationStore` (tokens) | Steward registration tokens |
+| `runtime_store.go` | `RuntimeStore` | Ephemeral/session runtime state |
+| `hybrid_manager.go` | `HybridStorageManager` | Composes multiple provider instances |
+
+## Target Layout (per ADR-003)
+
+```
+pkg/storage/interfaces/
+  business/       # TenantStore, ClientTenantStore, StewardStore (new), CommandStore (new),
+                  # AuditStore, RBACStore, SessionStore (new), RegistrationTokenStore
+  config/         # ConfigStore
+  secrets/        # SecretStore (new — unifies SOPS and key vaults)
+  timeseries/     # MetricsStore (new), LogStore (new)
+  blob/           # BlobStore (new)
 ```
 
-## Architecture
+**Naming rule**: `*Store` = durable. Ephemeral/rebuildable state goes to `pkg/cache/` as `*Cache`, with no storage interface. `RuntimeStore` is retired — it mixed both.
 
-### StorageProvider Interface
+### Current → Target Mapping
 
-All storage providers must implement:
-- `CreateClientTenantStore()` - Create client tenant storage
-- `CreateConfigStore()` - Create configuration storage  
-- `CreateAuditStore()` - Create audit storage
-- `GetCapabilities()` - Describe provider features
-- `Available()` - Check if provider is ready
+| Current interface | Target location | Notes |
+|-------------------|-----------------|-------|
+| `TenantStore` | `business/` | |
+| `ClientTenantStore` | `business/` | Absorbs `M365ClientTenantStore`; provider-specific data (M365 consent, AD binding, Intune enrollment) as extension fields |
+| `M365ClientTenantStore` | **folded into `ClientTenantStore`** | Removed as separate interface |
+| `AuditStore` | `business/` | |
+| `RBACStore` | `business/` | |
+| `RegistrationStore` | `business/` | Renames to `RegistrationTokenStore` |
+| `ConfigStore` | `config/` | |
+| `RuntimeStore` | **retired** | Durable session state → `business/SessionStore`; ephemeral/derived state → `pkg/cache` |
+| *(new)* `StewardStore` | `business/` | Replaces in-memory fleet state in `features/steward/health.go` |
+| *(new)* `CommandStore` | `business/` | Replaces in-memory dispatch map in `features/steward/commands/handler.go` |
+| *(new)* `SessionStore` | `business/` | Durable session state extracted from the retired `RuntimeStore` |
+| *(new)* `SecretStore` | `secrets/` | Unifies SOPS and vault providers |
+| *(new)* `MetricsStore` | `timeseries/` | |
+| *(new)* `LogStore` | `timeseries/` | |
+| *(new)* `BlobStore` | `blob/` | |
 
-### Auto-Registration System
+### Controller Interfaces Misplaced Under `features/steward/*`
 
-Providers register themselves via `init()` functions:
+Per ADR-003, no controller-side storage/logging interface may remain under `features/steward/` when the epic closes. Known offenders the reorganization story (sub-story I) must relocate:
+
+- `features/steward/dna/events/drift_subscriber.go` — `StorageManager` interface (controller-side drift event persistence); move under the appropriate type directory here.
+- `features/modules/m365/auth/admin_consent_flow.go` — duplicate `ClientTenantStore` interface; consolidate with the canonical `ClientTenantStore` in this package.
+
+## Backend Selection (per type)
+
+Per ADR-003, deployments compose one provider per type:
+
+| Type | OSS backend | Commercial/SaaS backend |
+|------|-------------|-------------------------|
+| Business data | SQLite | PostgreSQL |
+| Config storage | Flat file | PostgreSQL |
+| Secrets | SOPS files | Key vault (AWS Secrets Manager / Vault / Azure Key Vault) |
+| Timeseries | Local log files | ClickHouse / Timescale / Influx |
+| Blobs | Local filesystem | S3-compatible object storage |
+
+The OSS column is the zero-config default, not a limit. Any Commercial backend is available to OSS deployments — licensing boundary is tenant-tree shape, not backend choice.
+
+Git is **not** a backend. It is an optional sync source bound to admin-designated config scopes; see ADR-003 for the sync model.
+
+## Module Usage Pattern
+
+Modules receive interfaces, never specific providers:
 
 ```go
-// In provider package
-func init() {
-    interfaces.RegisterStorageProvider(&MyProvider{})
-}
-```
-
-### StorageManager
-
-Unified access to all storage interfaces:
-
-```go
-manager, err := interfaces.CreateAllStoresFromConfig("database", config)
-if err != nil {
-    return err
-}
-
-// Access any storage interface
-configStore := manager.GetConfigStore()
-auditStore := manager.GetAuditStore()
-clientStore := manager.GetClientTenantStore()
-```
-
-## Storage Interfaces
-
-### ConfigStore
-
-Handles human-editable configurations with YAML/JSON support:
-
-```go
-// Store configuration
-config := &interfaces.ConfigEntry{
-    Key: &interfaces.ConfigKey{
-        TenantID:  "client1",
-        Namespace: "templates", 
-        Name:      "firewall",
-    },
-    Data:   []byte("firewall:\n  rules:\n    - allow: 443"),
-    Format: interfaces.ConfigFormatYAML,
-}
-err := store.StoreConfig(ctx, config)
-
-// Retrieve with inheritance
-resolved, err := store.ResolveConfigWithInheritance(ctx, key)
-```
-
-**Key Features:**
-- YAML for human-editable configs (firewall rules, templates)
-- JSON for system configs (metadata, settings)
-- Version history and rollback
-- Multi-tenant isolation via TenantID
-- Template inheritance resolution
-- Batch operations for performance
-
-### AuditStore
-
-Handles immutable audit logs for compliance:
-
-```go
-// Store audit event
-entry := &interfaces.AuditEntry{
-    TenantID:     "client1",
-    EventType:    interfaces.AuditEventAuthentication,
-    Action:       "login",
-    UserID:       "admin@client1.com",
-    UserType:     interfaces.AuditUserTypeHuman,
-    Result:       interfaces.AuditResultSuccess,
-    ResourceType: "terminal_session",
-    ResourceID:   "session-123",
-    Severity:     interfaces.AuditSeverityMedium,
-}
-err := store.StoreAuditEntry(ctx, entry)
-
-// Query for compliance reports
-failed := store.GetFailedActions(ctx, timeRange, 100)
-```
-
-**Key Features:**
-- Immutable audit events (no updates/deletes)
-- Rich event categorization and filtering
-- Security monitoring queries
-- Compliance reporting
-- Batch operations for high-volume logging
-- Retention and archival policies
-
-### ClientTenantStore
-
-Handles MSP client tenant data (M365 consent, client information):
-
-```go
-// Store client tenant
-client := &interfaces.ClientTenant{
-    TenantID:    "12345-abcd-efgh",
-    TenantName:  "Contoso Ltd",
-    DomainName:  "contoso.com", 
-    AdminEmail:  "admin@contoso.com",
-    Status:      interfaces.ClientTenantStatusActive,
-}
-err := store.StoreClientTenant(client)
-```
-
-## Data Formats
-
-### Configuration Data Strategy
-
-**YAML for Human-Editable:**
-```yaml
-# configs/client1/firewall.yaml
-firewall:
-  rules:
-    - name: web
-      action: allow 
-      port: 443
-      source: any
-```
-
-**JSON for System-Managed:**
-```json
-// clients/client1.json
-{
-  "tenant_id": "12345-abcd",
-  "tenant_name": "Contoso Ltd",
-  "consented_at": "2025-01-15T10:30:00Z",
-  "status": "active"
-}
-```
-
-## Provider Capabilities
-
-Providers declare their capabilities:
-
-```go
-type ProviderCapabilities struct {
-    SupportsTransactions    bool // ACID transactions
-    SupportsVersioning      bool // Config versioning  
-    SupportsFullTextSearch  bool // Full-text search
-    SupportsEncryption      bool // At-rest encryption
-    SupportsCompression     bool // Data compression
-    SupportsReplication     bool // HA replication
-    SupportsSharding        bool // Horizontal scaling
-    MaxBatchSize           int  // Max batch operations
-    MaxConfigSize          int  // Max single config size
-    MaxAuditRetentionDays  int  // Max audit retention
-}
-```
-
-## Usage Examples
-
-### Controller Integration
-
-```go
-// Create unified storage from config
-config := map[string]interface{}{
-    "database_url": "postgresql://...",
-}
-
-manager, err := interfaces.CreateAllStoresFromConfig("database", config)
-if err != nil {
-    log.Fatal(err)
-}
-
-// Use throughout application
-configSvc := NewConfigService(manager.GetConfigStore())
-auditSvc := NewAuditService(manager.GetAuditStore()) 
-clientSvc := NewClientService(manager.GetClientTenantStore())
-```
-
-### Module Integration
-
-```go
-// Modules receive interfaces, never specific providers
 type TemplateModule struct {
     configStore interfaces.ConfigStore
 }
@@ -214,7 +94,7 @@ func NewTemplateModule(configStore interfaces.ConfigStore) *TemplateModule {
 }
 
 func (tm *TemplateModule) SaveTemplate(ctx context.Context, template Template) error {
-    config := &interfaces.ConfigEntry{
+    return tm.configStore.StoreConfig(ctx, &interfaces.ConfigEntry{
         Key: &interfaces.ConfigKey{
             TenantID:  template.TenantID,
             Namespace: "templates",
@@ -222,75 +102,21 @@ func (tm *TemplateModule) SaveTemplate(ctx context.Context, template Template) e
         },
         Data:   template.YAMLData,
         Format: interfaces.ConfigFormatYAML,
-    }
-    
-    return tm.configStore.StoreConfig(ctx, config)
+    })
 }
-```
-
-## Error Handling
-
-All interfaces define standard error types:
-
-```go
-// Config errors
-var (
-    ErrConfigNotFound    = &ConfigValidationError{...}
-    ErrInvalidFormat     = &ConfigValidationError{...}
-    ErrChecksumMismatch  = &ConfigValidationError{...}
-)
-
-// Audit errors
-var (
-    ErrAuditNotFound      = &AuditValidationError{...} 
-    ErrInvalidTimeRange   = &AuditValidationError{...}
-    ErrUserIDRequired     = &AuditValidationError{...}
-)
-
-// Client tenant errors
-var (
-    ErrTenantNotFound = &ClientTenantValidationError{...}
-    ErrTenantExists   = &ClientTenantValidationError{...}
-    ErrConsentExpired = &ClientTenantValidationError{...}
-)
 ```
 
 ## Testing
 
-The package provides comprehensive mock implementations:
+Use real providers with a temporary root or in-memory database:
 
-```go
-func TestMyFeature(t *testing.T) {
-    provider := interfaces.NewMockStorageProvider()
-    manager, err := interfaces.CreateAllStoresFromConfig("mock", nil)
-    require.NoError(t, err)
-    
-    // Test with real interfaces, mock backend
-    configStore := manager.GetConfigStore()
-    // ... test implementation
-}
-```
+- OSS path: flat-file provider under `t.TempDir()`, SQLite under `file::memory:?cache=shared`.
+- Commercial path: PostgreSQL via testcontainers or the repo's existing docker-compose fixture.
 
-## Migration from Existing Storage
+CFGMS does not mock storage interfaces in tests (per CLAUDE.md "Real Component Testing").
 
-When migrating existing storage patterns to global interfaces:
+## References
 
-1. **Replace direct storage imports** with interface imports
-2. **Update constructors** to receive interfaces via dependency injection  
-3. **Adapt data models** to use ConfigEntry/AuditEntry formats
-4. **Test with multiple providers** to ensure portability
-
-Example migration:
-```go
-// Before: Direct storage dependency
-type CertificateManager struct {
-    storage *cert.FileStore  // Direct dependency
-}
-
-// After: Interface dependency 
-type CertificateManager struct {
-    configStore interfaces.ConfigStore  // Interface dependency
-}
-```
-
-This enables the same certificate manager to work with any storage provider (git, database, memory) without code changes.
+- [ADR-003: Storage Data Taxonomy](../../../docs/architecture/decisions/003-storage-data-taxonomy.md) — the authoritative plan
+- [Storage Architecture](../../../docs/architecture/storage-architecture.md) — operator walk-through
+- [`pkg/README.md`](../../README.md) — central provider rules (pluggable by default)
