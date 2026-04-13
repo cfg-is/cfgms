@@ -6,7 +6,7 @@
 
 **Deciders**: Development Team
 
-**Related**: ADR-001 (Central Provider Compliance Enforcement), `docs/product/feature-boundaries.md`, `docs/architecture/hybrid-storage-solution.md`
+**Related**: ADR-001 (Central Provider Compliance Enforcement), `docs/product/feature-boundaries.md`, `docs/architecture/storage-architecture.md`
 
 ## Context
 
@@ -60,14 +60,16 @@ Verified during exploration; each becomes a sub-issue under the epic tracked by 
 
 Storage is partitioned by data type, not by a single global backend. Each type has its own interfaces and its own backend selection. Deployments compose one provider per type.
 
-| Type | OSS backend | Commercial/SaaS backend |
+| Type | OSS default | Commercial/SaaS default |
 |------|-------------|-------------------------|
 | Business data | SQLite | PostgreSQL |
-| Config storage | Flat file (authoritative) or PostgreSQL | PostgreSQL (authoritative) |
+| Config storage | Flat file | PostgreSQL |
 | Config *git sync* (optional, per-scope) | Flat file ⇄ external git origin | PostgreSQL ⇄ external git origin |
 | Secrets | SOPS files | Key vault (AWS Secrets Manager / HashiCorp Vault / Azure Key Vault) |
 | Timeseries | Local log files | ClickHouse / Timescale / Influx |
 | Blobs | Local filesystem | S3-compatible object storage |
+
+**The OSS column shows the zero-config default, not a limit.** Any backend listed in the Commercial column is available to OSS deployments. The licensing boundary is tenant-tree shape (single-root vs multi-root), not backend choice — see `docs/product/feature-boundaries.md`. An OSS single-root deployment is free to run PostgreSQL for business data, a key vault for secrets, and S3 for blobs if the operator wants that.
 
 ### 2. Interface Mapping
 
@@ -75,13 +77,22 @@ Storage is partitioned by data type, not by a single global backend. Each type h
 
 | Type | Interfaces |
 |------|------------|
-| `business/` | `TenantStore`, `ClientTenantStore`, `StewardStore` (new), `CommandStore` (new), `AuditStore`, `RBACStore`, `SessionStore`, `RegistrationTokenStore` |
-| `config/` | `ConfigStore`, `RuntimeStore` |
+| `business/` | `TenantStore`, `ClientTenantStore`, `StewardStore` (new), `CommandStore` (new), `AuditStore`, `RBACStore`, `SessionStore` (new — extracted from `RuntimeStore`), `RegistrationTokenStore` |
+| `config/` | `ConfigStore` |
 | `secrets/` | `SecretStore` (new) — unifies SOPS and vault providers |
 | `timeseries/` | `MetricsStore` (new), `LogStore` (new) |
 | `blob/` | `BlobStore` (new) |
 
 Providers implement one or more type interfaces (not all). A deployment's storage config names one provider per type.
+
+**`ClientTenantStore` absorbs provider-specific variants.** The current `M365ClientTenantStore` is folded into `ClientTenantStore`; provider-specific data (M365 consent state, AD domain binding, Intune enrollment) is carried as extension fields on the unified entity. Cross-entity identity is an explicit design goal: a single endpoint must be correlatable across steward / Intune / AD, and a single user must be correlatable across AD / Intune / active sessions. Sub-stories touching `ClientTenantStore` must preserve this correlation capability. The concrete correlation model (identity keys, resolution rules) is out of scope for this ADR and will be its own follow-up.
+
+**`RuntimeStore` is retired, not reorganized.** The current `RuntimeStore` interface mixes durable session state with ephemeral resolved-config memoization. Under this ADR:
+- Durable session state moves to `business/SessionStore`.
+- Ephemeral/derived state (resolved configs, inheritance memoization, anything rebuildable on restart) moves to `pkg/cache` with no storage interface at all.
+- `RuntimeStore` ceases to exist.
+
+General rule for the epic: **anything named `*Store` is durable; anything ephemeral is named `*Cache` and lives under `pkg/cache/`.**
 
 ### 3. Git Is a Sync Source, Not a Storage Backend
 
@@ -96,7 +107,7 @@ The existing `pkg/storage/providers/git/` is **deprecated and removed**. Git re-
 - Imported configs write through to the chosen config backend — flat-file (OSS) or PostgreSQL (commercial).
 - Scopes without a git binding live natively in the backend.
 - Read path is always the backend; git is the editing surface for bound scopes, not a query target.
-- v1 is read-only (git → backend). Bidirectional sync (backend → git commits for UI-initiated edits) is a future extension.
+- **v1 is one-way, read-only** (git → backend). The controller never writes back to the git origin. For bound scopes, all edits happen at the git origin (PRs, commits, merges via the tenant's normal GitOps workflow) and flow down via sync. Bidirectional sync (backend → git commits for UI-initiated edits) is explicitly out of scope for v1 and will be a future ADR if demand emerges.
 
 This gives tenants their existing GitHub/GitLab PR workflow without CFGMS hosting git. One code path serves both OSS and commercial deployments.
 
@@ -128,7 +139,8 @@ Tracked under the epic referenced in [Code Changes Required](#code-changes-requi
 3. **Tenant workflow preserved**: MSPs continue editing config on their own GitHub/GitLab; git-sync imports the result.
 4. **Clean swap boundaries**: a new timeseries backend doesn't force rewriting config or business stores.
 5. **SaaS-ready**: SQLite/flat-file for OSS, PostgreSQL/S3/vault for SaaS — each type picks its own scaling story.
-6. **Eliminates the `RuntimeStore` memory-cache lie**: the broken git implementation goes away; flat-file or PostgreSQL backs runtime state durably.
+6. **Eliminates the `RuntimeStore` memory-cache lie**: the broken git implementation goes away. Durable pieces move to `SessionStore`; ephemeral pieces move to `pkg/cache`. No more interface pretending to be storage while returning a cache.
+7. **Purges controller concerns from steward paths**: drift event storage, M365 admin-consent `ClientTenantStore`, and similar controller-side interfaces currently living under `features/steward/*` and `features/modules/m365/auth/*` relocate to the canonical `pkg/storage/interfaces/` tree. One authoritative location per interface.
 
 ### Negative
 
@@ -182,26 +194,58 @@ Cleanest shape for the backend-technology clusters we actually need, preserves t
 
 This ADR ratifies the direction. Implementation is tracked by the epic **Storage Architecture: Five-Type Data Taxonomy (ADR-003)** with the following sub-stories (priorities reflect SaaS-unblock ordering):
 
-| # | Title | Priority |
-|---|-------|----------|
-| A | Flat-file storage provider (OSS file-based backend) | P0 |
-| B | Deprecate and remove `pkg/storage/providers/git/` | P1 |
-| C | SQLite storage provider for OSS business data | P1 |
-| D | `StewardStore` interface + persistent fleet registry | P0 |
-| E | Persist command dispatch state (audit-integrated) | P1 |
-| F | Git-sync component (shared OSS/commercial) | P1 |
-| G | `BlobStore` interface + filesystem and S3-compatible providers | P2 |
-| H | `SecretStore` interface unifying SOPS and key vaults | P2 |
-| I | Reorganize `pkg/storage/interfaces/` into type-based taxonomy | P2 |
+| # | Title | Priority | Depends on |
+|---|-------|----------|------------|
+| A | Flat-file storage provider (OSS file-based backend) | P0 | — |
+| C | SQLite storage provider for OSS business data | P0 | — |
+| D | `StewardStore` interface + persistent fleet registry | P0 | A, C |
+| B | Deprecate and remove `pkg/storage/providers/git/` | P1 | A |
+| E | Persist command dispatch state (audit-integrated) | P1 | C |
+| F | Git-sync component (shared OSS/commercial) | P1 | A |
+| G | `BlobStore` interface + filesystem and S3-compatible providers | P2 | — |
+| H | `SecretStore` interface unifying SOPS and key vaults | P2 | — |
+| I | Reorganize `pkg/storage/interfaces/` into type-based taxonomy | P2 | A, B, C, D, E, F, G, H |
+
+**Dependency order** (must be respected by the Planning Team when decomposing this epic):
+
+```
+A, C  →  D, E, F  →  B  →  G, H  →  I
+```
+
+- A (flat-file) and C (SQLite) have no dependencies and can proceed in parallel.
+- D (StewardStore) needs at least one backend (A or C) to persist into; the story must be built against both.
+- B (remove git provider) can only land after A exists as its OSS replacement.
+- F (git-sync) requires A (flat-file write-through target).
+- I (interfaces reorganization) lands last so it doesn't cause churn during the earlier stories.
 
 Each sub-story has its own testable acceptance criteria. This ADR is the shared source of truth for the taxonomy and the git-sync model.
+
+## Documentation Currency
+
+Any sub-story under this epic that changes the shape of the product — adds or removes a backend, changes the OSS/commercial boundary, renames a public interface, changes config schema, or moves an interface between packages — **must update the following in the same PR**:
+
+- `docs/product/feature-boundaries.md` — if backend lists or licensing boundary wording changes
+- `docs/architecture/storage-architecture.md` — operator walk-through of the taxonomy
+- `pkg/storage/interfaces/README.md` — if interface inventory changes
+- Any deployment, testing, or troubleshooting doc that names the changed interface or backend
+
+Acceptance criteria for those stories **must include** a "Docs updated" checkbox that enumerates the files touched. Tests covering product-shape changes (test fixtures, integration tests, contract tests) must also be updated in the same PR. Stories that skip this are not "done" regardless of code state.
+
+## Controller Interface Location
+
+No controller-side storage, logging, or persistence interface may live under `features/steward/*` when this epic closes. Known offenders the sweep must relocate (non-exhaustive — sub-story I is responsible for the full audit):
+
+- `features/steward/dna/events/drift_subscriber.go` — `StorageManager` interface (controller-side drift event persistence)
+- `features/modules/m365/auth/admin_consent_flow.go` — duplicate `ClientTenantStore` interface (redundant with the canonical `pkg/storage/interfaces/ClientTenantStore`; must be unified)
+
+Rule of thumb: **if a steward does not use the interface, it does not belong under `features/steward/`.** Sub-story I includes an exhaustive audit and relocation pass, and the story's acceptance criteria must include `grep` evidence that no controller-only interfaces remain under `features/steward/*`.
 
 ## References
 
 - `docs/architecture/decisions/001-central-provider-compliance-enforcement.md` — format template and the "pluggable by default" principle this ADR builds on
 - `docs/product/feature-boundaries.md` — OSS/commercial line and storage backend advertisement
 - `docs/architecture/ha-commercial-split.md` — build-tag pattern for OSS vs commercial code paths
-- `docs/architecture/hybrid-storage-solution.md` — prior two-bucket framing (superseded by this ADR)
+- `docs/architecture/storage-architecture.md` — operator-facing walk-through of this decision (renamed from `hybrid-storage-solution.md`)
 - `pkg/storage/providers/git/plugin.go:152-166` — evidence for git-provider deprecation (`RuntimeStore` memory-cache admission)
 - `features/steward/health.go` — in-memory fleet state (motivates `StewardStore`)
 - `features/steward/commands/handler.go` — in-memory command dispatch (motivates `CommandStore`)

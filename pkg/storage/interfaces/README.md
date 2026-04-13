@@ -14,7 +14,7 @@ The files in this directory today:
 |------|--------------|---------|
 | `provider.go` | `StorageProvider` | Provider registration and capability reporting |
 | `client_tenant.go` | `ClientTenantStore` | MSP client tenant data |
-| `m365_client_tenant_store.go` | `M365ClientTenantStore` | M365-specific consent state |
+| `m365_client_tenant_store.go` | `M365ClientTenantStore` | M365-specific consent state (will fold into `ClientTenantStore`) |
 | `tenant_store.go` | `TenantStore` | Recursive tenant hierarchy |
 | `config_store.go` | `ConfigStore` | Configuration data (YAML/JSON, inheritance) |
 | `audit_store.go` | `AuditStore` | Immutable audit events |
@@ -28,32 +28,41 @@ The files in this directory today:
 ```
 pkg/storage/interfaces/
   business/       # TenantStore, ClientTenantStore, StewardStore (new), CommandStore (new),
-                  # AuditStore, RBACStore, SessionStore, RegistrationTokenStore
-  config/         # ConfigStore, RuntimeStore
+                  # AuditStore, RBACStore, SessionStore (new), RegistrationTokenStore
+  config/         # ConfigStore
   secrets/        # SecretStore (new — unifies SOPS and key vaults)
   timeseries/     # MetricsStore (new), LogStore (new)
   blob/           # BlobStore (new)
 ```
 
+**Naming rule**: `*Store` = durable. Ephemeral/rebuildable state goes to `pkg/cache/` as `*Cache`, with no storage interface. `RuntimeStore` is retired — it mixed both.
+
 ### Current → Target Mapping
 
-| Current interface | Target type directory | Notes |
-|-------------------|-----------------------|-------|
+| Current interface | Target location | Notes |
+|-------------------|-----------------|-------|
 | `TenantStore` | `business/` | |
-| `ClientTenantStore` | `business/` | |
-| `M365ClientTenantStore` | `business/` | M365-specific variant |
+| `ClientTenantStore` | `business/` | Absorbs `M365ClientTenantStore`; provider-specific data (M365 consent, AD binding, Intune enrollment) as extension fields |
+| `M365ClientTenantStore` | **folded into `ClientTenantStore`** | Removed as separate interface |
 | `AuditStore` | `business/` | |
 | `RBACStore` | `business/` | |
 | `RegistrationStore` | `business/` | Renames to `RegistrationTokenStore` |
 | `ConfigStore` | `config/` | |
-| `RuntimeStore` | `config/` | Durable impls only (see below) |
+| `RuntimeStore` | **retired** | Durable session state → `business/SessionStore`; ephemeral/derived state → `pkg/cache` |
 | *(new)* `StewardStore` | `business/` | Replaces in-memory fleet state in `features/steward/health.go` |
 | *(new)* `CommandStore` | `business/` | Replaces in-memory dispatch map in `features/steward/commands/handler.go` |
-| *(new)* `SessionStore` | `business/` | Extracted from current `RuntimeStore` usage where applicable |
+| *(new)* `SessionStore` | `business/` | Durable session state extracted from the retired `RuntimeStore` |
 | *(new)* `SecretStore` | `secrets/` | Unifies SOPS and vault providers |
 | *(new)* `MetricsStore` | `timeseries/` | |
 | *(new)* `LogStore` | `timeseries/` | |
 | *(new)* `BlobStore` | `blob/` | |
+
+### Controller Interfaces Misplaced Under `features/steward/*`
+
+Per ADR-003, no controller-side storage/logging interface may remain under `features/steward/` when the epic closes. Known offenders the reorganization story (sub-story I) must relocate:
+
+- `features/steward/dna/events/drift_subscriber.go` — `StorageManager` interface (controller-side drift event persistence); move under the appropriate type directory here.
+- `features/modules/m365/auth/admin_consent_flow.go` — duplicate `ClientTenantStore` interface; consolidate with the canonical `ClientTenantStore` in this package.
 
 ## Backend Selection (per type)
 
@@ -62,10 +71,12 @@ Per ADR-003, deployments compose one provider per type:
 | Type | OSS backend | Commercial/SaaS backend |
 |------|-------------|-------------------------|
 | Business data | SQLite | PostgreSQL |
-| Config storage | Flat file or PostgreSQL | PostgreSQL |
+| Config storage | Flat file | PostgreSQL |
 | Secrets | SOPS files | Key vault (AWS Secrets Manager / Vault / Azure Key Vault) |
 | Timeseries | Local log files | ClickHouse / Timescale / Influx |
 | Blobs | Local filesystem | S3-compatible object storage |
+
+The OSS column is the zero-config default, not a limit. Any Commercial backend is available to OSS deployments — licensing boundary is tenant-tree shape, not backend choice.
 
 Git is **not** a backend. It is an optional sync source bound to admin-designated config scopes; see ADR-003 for the sync model.
 
@@ -107,5 +118,5 @@ CFGMS does not mock storage interfaces in tests (per CLAUDE.md "Real Component T
 ## References
 
 - [ADR-003: Storage Data Taxonomy](../../../docs/architecture/decisions/003-storage-data-taxonomy.md) — the authoritative plan
-- [Storage Architecture](../../../docs/architecture/hybrid-storage-solution.md) — operator walk-through
+- [Storage Architecture](../../../docs/architecture/storage-architecture.md) — operator walk-through
 - [`pkg/README.md`](../../README.md) — central provider rules (pluggable by default)
