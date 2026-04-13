@@ -67,6 +67,7 @@ certs/
 # Configuration files that might contain sensitive data
 *.cfg
 !docs/examples/*.cfg
+!docs/deployment/**/*.cfg
 !examples/**/*.cfg
 *.env
 .env.local

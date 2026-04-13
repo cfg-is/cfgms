@@ -194,7 +194,7 @@ The following files appear accurate and ready for OSS launch:
 - `docs/CSP_SANDBOX_SETUP_GUIDE.md` ✅ (useful for OSS M365 testing)
 - `docs/M365_INTEGRATION_GUIDE.md` ✅
 - `docs/deployment/platform-support.md` ✅
-- `docs/deployment/registration-codes.md` ✅
+- `docs/deployment/README.md` ✅ (deployment mode index)
 - `docs/guides/configuration-inheritance.md` ✅
 - `docs/modules/script-module.md` ✅
 - `docs/testing/testing-strategy.md` ✅
