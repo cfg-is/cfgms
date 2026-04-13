@@ -91,7 +91,7 @@ The steward has `install`/`uninstall`/`status` subcommands for OS service regist
 
 ## Related
 
-- [Controller Bootstrap with Steward](../../deployment/controller-bootstrap-with-steward.md) — deployment guide
+- [Single Controller Deployment](../../deployment/single-controller/walkthrough.md) — deployment guide
 - [Controller Operating Model](../controller-operating-model.md) — startup sequence and node management boundary
 - [Steward Operating Model](../steward-operating-model.md) — convergence loop
-- [Example: controller-node.cfg](../../examples/controller-node.cfg) — standalone steward config for controller nodes
+- [Example: controller-steward.cfg](../../deployment/single-controller/controller-steward.cfg) — steward config for controller nodes

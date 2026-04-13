@@ -1,0 +1,25 @@
+# CFGMS Controller systemd unit file
+#
+# Copy this file to /etc/systemd/system/cfgms-controller.service
+# then run:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable cfgms-controller
+
+[Unit]
+Description=CFGMS Controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cfgms-controller --config /etc/cfgms/controller.cfg
+Restart=on-failure
+RestartSec=5
+User=root
+WorkingDirectory=/var/lib/cfgms
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cfgms-controller
+
+[Install]
+WantedBy=multi-user.target

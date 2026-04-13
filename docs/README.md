@@ -136,7 +136,7 @@ If you're new to the project, start with these essential documents:
 ## Deployment
 
 - [Platform Support](deployment/platform-support.md) - Supported platforms and requirements
-- [Registration Codes](deployment/registration-codes.md) - Steward registration system
+- [Deployment Guide](deployment/README.md) - Deployment modes and walkthroughs
 
 ## Configuration
 

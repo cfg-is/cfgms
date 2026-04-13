@@ -9,12 +9,12 @@ CFGMS is designed as a cross-platform configuration management system that suppo
 The CFGMS Steward is designed for broad cross-platform deployment to managed endpoints:
 
 | Platform | Architecture | Status | Notes |
-|----------|-------------|--------|-------|
+| -------- | ------------ | ------ | ----- |
 | **Linux** | AMD64 (x86_64) | ✅ Fully Supported | Primary development platform |
 | **Linux** | ARM64 (aarch64) | ✅ Fully Supported | Raspberry Pi, AWS Graviton, etc. |
 | **Windows** | AMD64 (x86_64) | ✅ Fully Supported | Windows 10, 11, Server 2019+ |
 | **Windows** | ARM64 | ✅ Fully Supported | Surface Pro X, Windows on ARM |
-| **macOS** | ARM64 (M series) | ✅ Fully Supported | Apple Silicon Macs (M1, M2, M3+) |
+| **macOS** | ARM64 (M series) | ✅ Fully Supported | Apple Silicon Macs |
 
 ### Controller Support
 
@@ -155,7 +155,7 @@ sudo chmod +x /usr/local/bin/cfgms-steward
 # Register with controller and start
 ./cfgms-steward --regtoken <TOKEN>
 
-# systemd service (optional, see home-lab-deployment-guide.md)
+# systemd service (optional, see single-controller/walkthrough.md)
 sudo systemctl enable cfgms-steward
 sudo systemctl start cfgms-steward
 ```

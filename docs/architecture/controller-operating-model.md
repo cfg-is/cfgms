@@ -100,7 +100,7 @@ For production fleets, a steward runs alongside the controller on each node. The
 | Storage backend | Controller | Git repo or PostgreSQL operations |
 | Fleet orchestration | Controller | Config distribution, steward registration, workflows |
 
-See [Controller Bootstrap with Steward](../../deployment/controller-bootstrap-with-steward.md) for the production deployment guide and [ADR-002](decisions/002-steward-bootstrap-for-controllers.md) for the architectural decision.
+See [Single Controller Deployment](../../deployment/single-controller/walkthrough.md) for the deployment guide and [ADR-002](decisions/002-steward-bootstrap-for-controllers.md) for the architectural decision.
 
 ### Normal Operation
 

@@ -483,5 +483,5 @@ If issues persist after following this guide:
 ## References
 
 - **E2E Testing Guide**: [docs/testing/e2e-testing-guide.md](../testing/e2e-testing-guide.md)
-- **Home Lab Deployment**: [docs/deployment/home-lab-deployment-guide.md](../deployment/home-lab-deployment-guide.md)
+- **Deployment Guide**: [docs/deployment/README.md](../deployment/README.md)
 - **Transport Architecture**: [docs/architecture/communication-layer-migration.md](../architecture/communication-layer-migration.md)
