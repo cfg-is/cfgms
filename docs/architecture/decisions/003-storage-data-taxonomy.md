@@ -1,4 +1,4 @@
-# ADR 002: Storage Data Taxonomy
+# ADR 003: Storage Data Taxonomy
 
 **Status**: Proposed
 
