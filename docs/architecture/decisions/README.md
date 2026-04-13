@@ -48,6 +48,7 @@ What becomes easier or harder by making this decision?
 | ADR | Title | Date | Status |
 |-----|-------|------|--------|
 | [001](001-central-provider-compliance-enforcement.md) | Central Provider Compliance Enforcement | 2025-10-20 | Accepted |
+| [002](002-storage-data-taxonomy.md) | Storage Data Taxonomy | 2026-04-13 | Proposed |
 
 ### Superseded/Deprecated
 
