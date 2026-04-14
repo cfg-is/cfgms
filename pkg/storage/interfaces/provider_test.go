@@ -90,6 +90,10 @@ func (m *MockStorageProvider) CreateRegistrationTokenStore(config map[string]int
 	return &MockRegistrationTokenStore{}, nil
 }
 
+func (m *MockStorageProvider) CreateSessionStore(config map[string]interface{}) (SessionStore, error) {
+	return nil, ErrNotSupported
+}
+
 // Mock implementations of store interfaces
 type MockClientTenantStore struct{}
 

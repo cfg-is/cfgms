@@ -346,6 +346,10 @@ func (p *mockProvider) CreateRegistrationTokenStore(config map[string]interface{
 	return &mockRegistrationTokenStore{}, nil
 }
 
+func (p *mockProvider) CreateSessionStore(config map[string]interface{}) (SessionStore, error) {
+	return nil, ErrNotSupported
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:   true,

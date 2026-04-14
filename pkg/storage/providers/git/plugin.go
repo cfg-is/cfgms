@@ -210,6 +210,12 @@ func (p *GitProvider) CreateRegistrationTokenStore(config map[string]interface{}
 	return store, nil
 }
 
+// CreateSessionStore is not supported by the git provider.
+// Use the SQLite provider for durable session storage.
+func (p *GitProvider) CreateSessionStore(config map[string]interface{}) (interfaces.SessionStore, error) {
+	return nil, interfaces.ErrNotSupported
+}
+
 // Auto-register this provider (Salt-style)
 func init() {
 	interfaces.RegisterStorageProvider(&GitProvider{})

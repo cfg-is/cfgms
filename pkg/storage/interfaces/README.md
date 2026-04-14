@@ -21,6 +21,7 @@ The files in this directory today:
 | `rbac_store.go` | `RBACStore` | RBAC policy and role data |
 | `registration_store.go` | `RegistrationStore` (tokens) | Steward registration tokens |
 | `runtime_store.go` | `RuntimeStore` | Ephemeral/session runtime state |
+| `session_store.go` | `SessionStore` | Durable session state (persistent sessions only; ephemeral state lives in `pkg/cache`) |
 | `hybrid_manager.go` | `HybridStorageManager` | Composes multiple provider instances |
 
 ## Target Layout (per ADR-003)

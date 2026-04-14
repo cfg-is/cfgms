@@ -138,6 +138,10 @@ func (t *TestStorageProvider) CreateRegistrationTokenStore(config map[string]int
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
+func (t *TestStorageProvider) CreateSessionStore(_ map[string]interface{}) (interfaces.SessionStore, error) {
+	return nil, interfaces.ErrNotSupported
+}
+
 func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{
 		MaxBatchSize:          100,

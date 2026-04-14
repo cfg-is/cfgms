@@ -105,6 +105,10 @@ func (m *MockStorageProvider) CreateRegistrationTokenStore(config map[string]int
 	return args.Get(0).(interfaces.RegistrationTokenStore), args.Error(1)
 }
 
+func (m *MockStorageProvider) CreateSessionStore(_ map[string]interface{}) (interfaces.SessionStore, error) {
+	return nil, interfaces.ErrNotSupported
+}
+
 func (m *MockStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	args := m.Called()
 	return args.Get(0).(interfaces.ProviderCapabilities)
