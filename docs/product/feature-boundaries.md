@@ -24,7 +24,7 @@ This maximizes trust, community velocity for integrations, and follows proven mo
 | Feature | OSS | Commercial (includes all OSS) | Notes |
 |---------|-----|-------------------------------|-------|
 | **Architecture** | ✅ Single controller | ✅ Single controller + HA clustering | HA: Raft consensus, auto-failover |
-| **Storage** | ✅ Git, SQLite, PostgreSQL | ✅ Same + HA-optimized PostgreSQL | All providers support encryption |
+| **Storage** | ✅ Flat-file (config), SQLite (business data), PostgreSQL (optional) | ✅ Same + HA-optimized PostgreSQL | All providers support encryption. Git is not a storage backend — it is an optional sync source. |
 | **Communication** | ✅ gRPC-over-QUIC | ✅ Same | No difference |
 | **CLI/API** | ✅ All | ✅ Same | Complete CLI access in both |
 | **Web UI** | ❌ None | ✅ Full UI | Graphical workflow builder, dashboards |

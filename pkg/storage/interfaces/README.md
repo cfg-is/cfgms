@@ -64,6 +64,14 @@ Per ADR-003, no controller-side storage/logging interface may remain under `feat
 - `features/steward/dna/events/drift_subscriber.go` — `StorageManager` interface (controller-side drift event persistence); move under the appropriate type directory here.
 - `features/modules/m365/auth/admin_consent_flow.go` — duplicate `ClientTenantStore` interface; consolidate with the canonical `ClientTenantStore` in this package.
 
+## Provider Inventory
+
+| Provider | Package | Implements | Status |
+|----------|---------|------------|--------|
+| `flatfile` | `pkg/storage/providers/flatfile` | `ConfigStore`, `AuditStore` | Available — OSS default for config storage |
+| `database` | `pkg/storage/providers/database` | All stores | Available — commercial PostgreSQL backend |
+| `git` | `pkg/storage/providers/git` | All stores | Deprecated — use `flatfile` + git-sync |
+
 ## Backend Selection (per type)
 
 Per ADR-003, deployments compose one provider per type:
@@ -71,7 +79,7 @@ Per ADR-003, deployments compose one provider per type:
 | Type | OSS backend | Commercial/SaaS backend |
 |------|-------------|-------------------------|
 | Business data | SQLite | PostgreSQL |
-| Config storage | Flat file | PostgreSQL |
+| Config storage | **Flat file** (`flatfile`) | PostgreSQL (`database`) |
 | Secrets | SOPS files | Key vault (AWS Secrets Manager / Vault / Azure Key Vault) |
 | Timeseries | Local log files | ClickHouse / Timescale / Influx |
 | Blobs | Local filesystem | S3-compatible object storage |
