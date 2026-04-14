@@ -67,17 +67,40 @@ Commercial deployments: the imported configs land in PostgreSQL. HA, replication
 
 ## Flat-File Provider (OSS)
 
-The flat-file provider is the replacement for the deprecated git provider. It stores configs and runtime data as files under a configured root directory.
+The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for config storage and the replacement for the deprecated git provider. It stores configs and audit logs as files under a configured root directory.
+
+**File layout**:
+
+```
+<root>/
+  <tenantID>/
+    configs/
+      <namespace>/
+        <name>.<format>    # JSON-encoded ConfigEntry; extension = data format
+    audit/
+      <YYYY-MM-DD>.jsonl   # Append-only JSONL; one entry per line
+```
 
 **Admin responsibilities**:
-- Backups. CFGMS does not version at the storage layer. Use filesystem snapshots, rsync, restic, or an equivalent.
+- Backups. CFGMS does not version at the storage layer. Use filesystem snapshots, rsync, restic, or an equivalent. A `cfg backup` CLI helper is planned (sub-story B).
 - Filesystem durability. SSD + regular snapshots is sufficient for single-controller OSS.
 - Access control. Directory is readable/writable only by the controller process.
 
+**What the flat-file provider implements**:
+- `ConfigStore`: store, retrieve, list, delete configs; inheritance resolution via tenant path
+- `AuditStore`: append-only JSONL per day per tenant; immutable entries; purge/archive by date
+
 **What the flat-file provider does not do**:
-- Automatic version history. (Use git-sync if you want PR-based change management.)
+- Automatic version history. (`GetConfigHistory` returns the current version only. Use git-sync if you want PR-based change management.)
 - Replication. (Use PostgreSQL if you need HA.)
 - Arbitration. (Single-writer; not safe for multiple controllers to share the same root.)
+- Business-data stores (`RBACStore`, `TenantStore`, `RuntimeStore`, etc.) — these belong in SQLite/PostgreSQL.
+
+**Registration**: The provider auto-registers on import via `init()`. A blank import is sufficient:
+
+```go
+import _ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+```
 
 ## Interface Layout
 
