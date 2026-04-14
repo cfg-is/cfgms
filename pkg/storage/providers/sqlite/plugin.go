@@ -62,7 +62,7 @@ func (p *SQLiteProvider) GetCapabilities() interfaces.ProviderCapabilities {
 		SupportsSharding:       false,
 		MaxBatchSize:           500,
 		MaxConfigSize:          10 * 1024 * 1024, // 10 MB
-		MaxAuditRetentionDays:  3650,              // 10 years
+		MaxAuditRetentionDays:  3650,             // 10 years
 	}
 }
 

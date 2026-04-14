@@ -7,7 +7,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
@@ -314,6 +313,3 @@ func populateTenant(t *interfaces.TenantData, parentID sql.NullString, metaStr, 
 
 // ensure SQLiteTenantStore satisfies the interface at compile time
 var _ interfaces.TenantStore = (*SQLiteTenantStore)(nil)
-
-// nowForTenant returns current time (extracted so tests can verify timestamps are recent)
-func nowForTenant() time.Time { return nowUTC() }

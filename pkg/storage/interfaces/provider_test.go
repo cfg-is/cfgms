@@ -118,7 +118,7 @@ func (m *MockClientTenantStore) GetAdminConsentRequest(state string) (*AdminCons
 	return nil, ErrTenantNotFound
 }
 func (m *MockClientTenantStore) DeleteAdminConsentRequest(state string) error { return nil }
-func (m *MockClientTenantStore) Close() error                                  { return nil }
+func (m *MockClientTenantStore) Close() error                                 { return nil }
 
 type MockConfigStore struct{}
 

@@ -111,27 +111,3 @@ func unmarshalJSONStringMap(s string) (map[string]string, error) {
 	}
 	return result, nil
 }
-
-// placeholders returns a comma-separated list of n `?` placeholders for use in SQL IN clauses.
-func placeholders(n int) string {
-	if n <= 0 {
-		return ""
-	}
-	b := make([]byte, n*2-1)
-	for i := 0; i < n; i++ {
-		b[i*2] = '?'
-		if i < n-1 {
-			b[i*2+1] = ','
-		}
-	}
-	return string(b)
-}
-
-// stringSliceToInterface converts []string to []interface{} for use as variadic SQL args.
-func stringSliceToInterface(ss []string) []interface{} {
-	out := make([]interface{}, len(ss))
-	for i, s := range ss {
-		out[i] = s
-	}
-	return out
-}

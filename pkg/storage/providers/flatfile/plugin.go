@@ -179,6 +179,12 @@ func (p *FlatFileProvider) CreateRegistrationTokenStore(config map[string]interf
 	return nil, ErrNotSupported
 }
 
+// CreateSessionStore is not supported by the flatfile provider.
+// Use the SQLite provider for durable session storage.
+func (p *FlatFileProvider) CreateSessionStore(config map[string]interface{}) (interfaces.SessionStore, error) {
+	return nil, ErrNotSupported
+}
+
 // init auto-registers the flat-file provider so that a blank import is sufficient.
 func init() {
 	interfaces.RegisterStorageProvider(&FlatFileProvider{})

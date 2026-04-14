@@ -374,11 +374,11 @@ func buildSessionQuery(filter *interfaces.SessionFilter) (string, []interface{})
 func scanSession(row *sql.Row) (*interfaces.Session, error) {
 	sess := &interfaces.Session{}
 	var (
-		sessionTypeStr, statusStr                                    string
-		createdStr, lastActivityStr, expiresStr                      string
-		clientInfoStr, metaStr, sessionDataStr, secCtxStr, flagsStr  string
-		persistentInt                                                 int
-		modifiedAt                                                    sql.NullString
+		sessionTypeStr, statusStr                                   string
+		createdStr, lastActivityStr, expiresStr                     string
+		clientInfoStr, metaStr, sessionDataStr, secCtxStr, flagsStr string
+		persistentInt                                               int
+		modifiedAt                                                  sql.NullString
 	)
 	err := row.Scan(
 		&sess.SessionID, &sess.UserID, &sess.TenantID, &sessionTypeStr,
@@ -399,11 +399,11 @@ func scanSession(row *sql.Row) (*interfaces.Session, error) {
 func scanSessionRow(rows *sql.Rows) (*interfaces.Session, error) {
 	sess := &interfaces.Session{}
 	var (
-		sessionTypeStr, statusStr                                    string
-		createdStr, lastActivityStr, expiresStr                      string
-		clientInfoStr, metaStr, sessionDataStr, secCtxStr, flagsStr  string
-		persistentInt                                                 int
-		modifiedAt                                                    sql.NullString
+		sessionTypeStr, statusStr                                   string
+		createdStr, lastActivityStr, expiresStr                     string
+		clientInfoStr, metaStr, sessionDataStr, secCtxStr, flagsStr string
+		persistentInt                                               int
+		modifiedAt                                                  sql.NullString
 	)
 	if err := rows.Scan(
 		&sess.SessionID, &sess.UserID, &sess.TenantID, &sessionTypeStr,

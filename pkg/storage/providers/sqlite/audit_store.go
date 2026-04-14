@@ -487,7 +487,8 @@ func populateAuditEntry(e *interfaces.AuditEntry, tsStr, detailsStr, changesStr,
 
 func computeChecksum(entry *interfaces.AuditEntry) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s",
+	// sha256.Hash.Write never returns an error; the return values are intentionally ignored.
+	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s",
 		entry.ID, entry.TenantID, entry.Timestamp.UTC().Format(time.RFC3339Nano),
 		entry.Action, entry.UserID, entry.ResourceID)
 	return hex.EncodeToString(h.Sum(nil))

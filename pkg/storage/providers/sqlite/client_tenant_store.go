@@ -286,7 +286,7 @@ func (s *SQLiteClientTenantStore) DeleteAdminConsentRequest(state string) error 
 func scanClientTenant(row *sql.Row) (*interfaces.ClientTenant, error) {
 	c := &interfaces.ClientTenant{}
 	var (
-		statusStr, consentedStr, createdStr, updatedStr, metaStr string
+		statusStr, consentedStr, createdStr, updatedStr, metaStr  string
 		m365TenantID, m365AdminEmail, m365ConsentedAt, m365Status sql.NullString
 	)
 	err := row.Scan(
@@ -308,7 +308,7 @@ func scanClientTenant(row *sql.Row) (*interfaces.ClientTenant, error) {
 func scanClientTenantRow(rows *sql.Rows) (*interfaces.ClientTenant, error) {
 	c := &interfaces.ClientTenant{}
 	var (
-		statusStr, consentedStr, createdStr, updatedStr, metaStr string
+		statusStr, consentedStr, createdStr, updatedStr, metaStr  string
 		m365TenantID, m365AdminEmail, m365ConsentedAt, m365Status sql.NullString
 	)
 	err := rows.Scan(

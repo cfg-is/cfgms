@@ -637,6 +637,12 @@ func (s *FlatFileAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate t
 	return count, nil
 }
 
+// Close satisfies interfaces.AuditStore. FlatFileAuditStore opens files
+// per-write, so there is no persistent handle to release.
+func (s *FlatFileAuditStore) Close() error {
+	return nil
+}
+
 // Helper functions for slice membership checks.
 
 func containsEventType(slice []interfaces.AuditEventType, v interfaces.AuditEventType) bool {
