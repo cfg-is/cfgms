@@ -185,7 +185,7 @@ func TestS3BlobStore_PutGetBlob(t *testing.T) {
 
 	rc, gotMeta, err := store.GetBlob(ctx, key)
 	require.NoError(t, err)
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
@@ -206,8 +206,9 @@ func TestS3BlobStore_PutBlob_DefaultContentType(t *testing.T) {
 	err := store.PutBlob(ctx, testS3Key("notype.bin"), bytes.NewReader([]byte("data")), interfaces.BlobMeta{})
 	require.NoError(t, err)
 
-	_, meta, err := store.GetBlob(ctx, testS3Key("notype.bin"))
+	rc, meta, err := store.GetBlob(ctx, testS3Key("notype.bin"))
 	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
 	assert.Equal(t, "application/octet-stream", meta.ContentType)
 }
 
@@ -354,7 +355,7 @@ func TestS3BlobStore_Overwrite(t *testing.T) {
 
 	rc, meta, err := store.GetBlob(ctx, key)
 	require.NoError(t, err)
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
@@ -405,7 +406,7 @@ func TestS3BlobStore_ChecksumMismatch(t *testing.T) {
 
 	rc, _, err := store.GetBlob(ctx, key)
 	require.NoError(t, err)
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	// Reading the tampered blob must return ErrBlobChecksumMismatch at EOF.
 	_, err = io.ReadAll(rc)
@@ -430,8 +431,9 @@ func TestS3BlobStore_ChecksumRoundtrip(t *testing.T) {
 	err := store.PutBlob(ctx, key, bytes.NewReader(content), interfaces.BlobMeta{})
 	require.NoError(t, err)
 
-	_, meta, err := store.GetBlob(ctx, key)
+	rc, meta, err := store.GetBlob(ctx, key)
 	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
 	// Should be a 64-char lowercase hex SHA-256.
 	assert.Len(t, meta.Checksum, 64, "checksum should be a 64-char SHA-256 hex string")
 	assert.NotEmpty(t, meta.Checksum)
@@ -466,4 +468,79 @@ func TestS3BlobProviderRegistration(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "s3 blob provider should be registered via init()")
+}
+
+// TestS3BlobStore_PathTraversal verifies that ".." and "/" in any key component
+// are rejected by PutBlob, GetBlob, DeleteBlob, BlobExists, and ListBlobs.
+// The S3 provider must enforce the same key validation contract as the filesystem
+// provider: "/" in a key component would corrupt parseObjectKey's SplitN logic,
+// and ".." is rejected for defensive-in-depth parity between providers.
+func TestS3BlobStore_PathTraversal(t *testing.T) {
+	store := newTestS3Store(t)
+	ctx := context.Background()
+
+	traversalKeys := []struct {
+		name string
+		key  interfaces.BlobKey
+	}{
+		{"dotdot in namespace", interfaces.BlobKey{TenantID: "t", Namespace: "../etc", Name: "passwd"}},
+		{"dotdot in name", interfaces.BlobKey{TenantID: "t", Namespace: "ns", Name: "../secret"}},
+		{"dotdot in tenant", interfaces.BlobKey{TenantID: "../etc", Namespace: "ns", Name: "file"}},
+		{"slash in name", interfaces.BlobKey{TenantID: "t", Namespace: "ns", Name: "sub/file"}},
+		{"slash in tenant", interfaces.BlobKey{TenantID: "t/../../etc", Namespace: "ns", Name: "file"}},
+	}
+
+	for _, tc := range traversalKeys {
+		tc := tc
+		t.Run(tc.name+"/PutBlob", func(t *testing.T) {
+			err := store.PutBlob(ctx, tc.key, bytes.NewReader([]byte("x")), interfaces.BlobMeta{})
+			assert.Error(t, err, "PutBlob should reject path traversal in key component")
+		})
+		t.Run(tc.name+"/GetBlob", func(t *testing.T) {
+			_, _, err := store.GetBlob(ctx, tc.key)
+			assert.Error(t, err, "GetBlob should reject path traversal in key component")
+		})
+		t.Run(tc.name+"/DeleteBlob", func(t *testing.T) {
+			err := store.DeleteBlob(ctx, tc.key)
+			assert.Error(t, err, "DeleteBlob should reject path traversal in key component")
+		})
+		t.Run(tc.name+"/BlobExists", func(t *testing.T) {
+			_, err := store.BlobExists(ctx, tc.key)
+			assert.Error(t, err, "BlobExists should reject path traversal in key component")
+		})
+	}
+
+	// ListBlobs uses a prefix key — only TenantID and Namespace are validated.
+	t.Run("dotdot in tenant/ListBlobs", func(t *testing.T) {
+		_, err := store.ListBlobs(ctx, interfaces.BlobKey{TenantID: "../etc", Namespace: "ns"})
+		assert.Error(t, err, "ListBlobs should reject path traversal in TenantID")
+	})
+	t.Run("dotdot in namespace/ListBlobs", func(t *testing.T) {
+		_, err := store.ListBlobs(ctx, interfaces.BlobKey{TenantID: "t", Namespace: "../etc"})
+		assert.Error(t, err, "ListBlobs should reject path traversal in Namespace")
+	})
+}
+
+// TestS3BlobStore_ListBlobs_SidecarError verifies that ListBlobs returns an error
+// when fetchSidecar fails with a non-not-found error (e.g., parse failure).
+// Orphaned blobs (missing sidecar) are silently skipped; unexpected errors surface.
+func TestS3BlobStore_ListBlobs_SidecarError(t *testing.T) {
+	client := newInMemoryS3()
+	store := &S3BlobStore{client: client, bucket: "test-bucket"}
+	ctx := context.Background()
+
+	// Write a blob object without a valid sidecar (corrupt JSON).
+	key := testS3Key("orphan.bin")
+	corruptSidecar := []byte("not valid json{{{")
+	metaKey := "test-bucket/" + store.metaObjectKey(key)
+	blobKey := "test-bucket/" + store.objectKey(key)
+
+	client.mu.Lock()
+	client.objects[blobKey] = &inMemoryObject{body: []byte("data"), contentType: "application/octet-stream"}
+	client.objects[metaKey] = &inMemoryObject{body: corruptSidecar, contentType: "application/json"}
+	client.mu.Unlock()
+
+	// ListBlobs should propagate the sidecar parse error (not silently skip).
+	_, err := store.ListBlobs(ctx, interfaces.BlobKey{TenantID: "tenant-a"})
+	assert.Error(t, err, "ListBlobs should return error when sidecar cannot be parsed")
 }

@@ -61,7 +61,7 @@ type s3API interface {
 // S3BlobProvider implements BlobProvider using an S3-compatible object store.
 type S3BlobProvider struct{}
 
-func (p *S3BlobProvider) Name() string        { return "s3" }
+func (p *S3BlobProvider) Name() string { return "s3" }
 func (p *S3BlobProvider) Description() string {
 	return "S3-compatible object storage blob provider; commercial/operator choice for the blob data type (ADR-003)"
 }
@@ -137,6 +137,37 @@ type s3BlobMetaSidecar struct {
 	Labels      map[string]string `json:"labels,omitempty"`
 }
 
+// validateKeyComponent rejects blob key fields that would cause object key ambiguity.
+// S3 keys are opaque strings (no directory traversal), but accepting "/" or ".."
+// in components would break parseObjectKey's SplitN logic and enable namespace
+// confusion between tenants. Mirrors the filesystem provider's validation contract.
+func validateKeyComponent(field, value string) error {
+	if strings.Contains(value, "..") {
+		return fmt.Errorf("blob key %s must not contain '..'", field)
+	}
+	if strings.ContainsAny(value, `/\`) {
+		return fmt.Errorf("blob key %s must not contain path separators", field)
+	}
+	return nil
+}
+
+// validateKey validates all components of a BlobKey.
+func validateKey(key interfaces.BlobKey) error {
+	if key.TenantID == "" {
+		return interfaces.ErrBlobTenantRequired
+	}
+	if err := validateKeyComponent("TenantID", key.TenantID); err != nil {
+		return err
+	}
+	if err := validateKeyComponent("Namespace", key.Namespace); err != nil {
+		return err
+	}
+	if err := validateKeyComponent("Name", key.Name); err != nil {
+		return err
+	}
+	return nil
+}
+
 // objectKey returns the S3 object key for a blob.
 func (s *S3BlobStore) objectKey(key interfaces.BlobKey) string {
 	parts := []string{key.TenantID, key.Namespace, key.Name}
@@ -154,8 +185,8 @@ func (s *S3BlobStore) metaObjectKey(key interfaces.BlobKey) string {
 // PutBlob streams the blob to S3 and writes a JSON metadata sidecar object.
 // SHA-256 is computed in one streaming pass via io.TeeReader.
 func (s *S3BlobStore) PutBlob(ctx context.Context, key interfaces.BlobKey, r io.Reader, meta interfaces.BlobMeta) error {
-	if key.TenantID == "" {
-		return interfaces.ErrBlobTenantRequired
+	if err := validateKey(key); err != nil {
+		return err
 	}
 
 	contentType := meta.ContentType
@@ -223,8 +254,8 @@ func (s *S3BlobStore) PutBlob(ctx context.Context, key interfaces.BlobKey, r io.
 // The returned reader streams the blob body. The stored checksum is available
 // in the returned BlobMeta for callers that want to verify integrity.
 func (s *S3BlobStore) GetBlob(ctx context.Context, key interfaces.BlobKey) (io.ReadCloser, interfaces.BlobMeta, error) {
-	if key.TenantID == "" {
-		return nil, interfaces.BlobMeta{}, interfaces.ErrBlobTenantRequired
+	if err := validateKey(key); err != nil {
+		return nil, interfaces.BlobMeta{}, err
 	}
 
 	// Fetch the metadata sidecar.
@@ -281,8 +312,8 @@ func (s *S3BlobStore) GetBlob(ctx context.Context, key interfaces.BlobKey) (io.R
 // DeleteBlob removes the blob object and its metadata sidecar from S3.
 // S3 DeleteObject is idempotent; missing objects are silently ignored.
 func (s *S3BlobStore) DeleteBlob(ctx context.Context, key interfaces.BlobKey) error {
-	if key.TenantID == "" {
-		return interfaces.ErrBlobTenantRequired
+	if err := validateKey(key); err != nil {
+		return err
 	}
 
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -310,6 +341,12 @@ func (s *S3BlobStore) DeleteBlob(ctx context.Context, key interfaces.BlobKey) er
 func (s *S3BlobStore) ListBlobs(ctx context.Context, prefix interfaces.BlobKey) ([]interfaces.BlobInfo, error) {
 	if prefix.TenantID == "" {
 		return nil, interfaces.ErrBlobTenantRequired
+	}
+	if err := validateKeyComponent("TenantID", prefix.TenantID); err != nil {
+		return nil, err
+	}
+	if err := validateKeyComponent("Namespace", prefix.Namespace); err != nil {
+		return nil, err
 	}
 
 	// Build the S3 key prefix to filter objects.
@@ -345,11 +382,15 @@ func (s *S3BlobStore) ListBlobs(ctx context.Context, prefix interfaces.BlobKey) 
 			continue
 		}
 
-		// Fetch sidecar for this blob.
+		// Fetch sidecar for this blob. Orphaned blobs (sidecar not found) are
+		// skipped silently; any other error (network, parse failure) is surfaced
+		// to preserve the reliability contract of the return value.
 		sidecar, err := s.fetchSidecar(ctx, blobKey)
 		if err != nil {
-			// Skip blobs whose sidecar is unavailable rather than failing the whole list.
-			continue
+			if isS3NotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("blob s3 list: failed to fetch sidecar for %q: %w", objKey, err)
 		}
 
 		results = append(results, interfaces.BlobInfo{
@@ -369,8 +410,8 @@ func (s *S3BlobStore) ListBlobs(ctx context.Context, prefix interfaces.BlobKey) 
 
 // BlobExists reports whether a blob exists by issuing a HeadObject on the sidecar.
 func (s *S3BlobStore) BlobExists(ctx context.Context, key interfaces.BlobKey) (bool, error) {
-	if key.TenantID == "" {
-		return false, interfaces.ErrBlobTenantRequired
+	if err := validateKey(key); err != nil {
+		return false, err
 	}
 
 	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
@@ -411,7 +452,7 @@ func (s *S3BlobStore) fetchSidecar(ctx context.Context, key interfaces.BlobKey) 
 	if err != nil {
 		return nil, err
 	}
-	defer out.Body.Close()
+	defer func() { _ = out.Body.Close() }()
 
 	data, err := io.ReadAll(out.Body)
 	if err != nil {
@@ -455,10 +496,7 @@ func isS3NotFound(err error) bool {
 		return true
 	}
 	var notFound *s3types.NotFound
-	if errors.As(err, &notFound) {
-		return true
-	}
-	return false
+	return errors.As(err, &notFound)
 }
 
 // s3ChecksumVerifyingReader computes SHA-256 during reads and returns

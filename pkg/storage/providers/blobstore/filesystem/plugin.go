@@ -27,7 +27,7 @@ const defaultContentType = "application/octet-stream"
 // FilesystemBlobProvider implements BlobProvider using the local filesystem.
 type FilesystemBlobProvider struct{}
 
-func (p *FilesystemBlobProvider) Name() string        { return "filesystem" }
+func (p *FilesystemBlobProvider) Name() string { return "filesystem" }
 func (p *FilesystemBlobProvider) Description() string {
 	return "Local filesystem blob storage; OSS default for the blob data type (ADR-003)"
 }

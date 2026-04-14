@@ -47,7 +47,7 @@ func TestFilesystemBlobStore_PutGetBlob(t *testing.T) {
 
 	rc, gotMeta, err := s.GetBlob(ctx, key)
 	require.NoError(t, err)
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
@@ -69,8 +69,9 @@ func TestFilesystemBlobStore_PutBlob_DefaultContentType(t *testing.T) {
 	err := s.PutBlob(ctx, key, bytes.NewReader([]byte("data")), interfaces.BlobMeta{})
 	require.NoError(t, err)
 
-	_, meta, err := s.GetBlob(ctx, key)
+	rc, meta, err := s.GetBlob(ctx, key)
 	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
 	assert.Equal(t, "application/octet-stream", meta.ContentType)
 }
 
@@ -226,7 +227,7 @@ func TestFilesystemBlobStore_ChecksumMismatch(t *testing.T) {
 
 	rc, _, err := s.GetBlob(ctx, key)
 	require.NoError(t, err)
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	// Reading the tampered blob should return ErrBlobChecksumMismatch at EOF.
 	_, err = io.ReadAll(rc)
@@ -247,7 +248,7 @@ func TestFilesystemBlobStore_Overwrite(t *testing.T) {
 
 	rc, meta, err := s.GetBlob(ctx, key)
 	require.NoError(t, err)
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
@@ -278,7 +279,7 @@ func TestFilesystemBlobStore_LargeBlob_Streaming(t *testing.T) {
 
 	rc, meta, err := s.GetBlob(ctx, key)
 	require.NoError(t, err)
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	n, err := io.Copy(io.Discard, rc)
 	require.NoError(t, err)
@@ -349,8 +350,9 @@ func TestFilesystemBlobStore_CreatedAt(t *testing.T) {
 	require.NoError(t, err)
 	after := time.Now().UTC().Add(time.Second)
 
-	_, meta, err := s.GetBlob(ctx, testKey("ts.bin"))
+	rc, meta, err := s.GetBlob(ctx, testKey("ts.bin"))
 	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
 	assert.True(t, meta.CreatedAt.After(before), "CreatedAt should be after test start")
 	assert.True(t, meta.CreatedAt.Before(after), "CreatedAt should be before test end")
 }
@@ -370,8 +372,9 @@ func TestFilesystemBlobStore_Labels(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify via GetBlob.
-	_, meta, err := s.GetBlob(ctx, key)
+	rc, meta, err := s.GetBlob(ctx, key)
 	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
 	assert.Equal(t, labels, meta.Labels)
 
 	// Verify via ListBlobs.
