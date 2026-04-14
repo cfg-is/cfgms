@@ -70,6 +70,21 @@ Extract acceptance criteria from the story body (`- [ ]` checkboxes). For each c
 
 A criterion is "met" only if there is concrete evidence in the diff. "Probably met" is not met.
 
+### Docs & Tests Currency Gate
+
+If the story body has a `## Docs In Scope` section listing files, **every file listed must appear in the PR diff**. If any listed doc file is missing from the diff, that is a finding:
+
+- **Severity**: High — docs currency is a product-shape commitment from the Tech Lead
+- **Description**: "Story lists `<file>` in Docs In Scope but no change present in PR diff"
+
+If the story changes product shape (adds/removes a backend, changes a public interface, changes CLI/API surface, changes the OSS/commercial boundary) but the PR has **no doc changes at all**, that is also a finding — even if the story body didn't list them. Check for obvious missed updates:
+
+- Backend or provider added/removed → `docs/product/feature-boundaries.md` expected
+- Public interface changed → the relevant `pkg/*/README.md` expected
+- Architecture changed → relevant `docs/architecture/*.md` expected
+
+Same rule for tests: if the PR changes behavior but has no corresponding test diffs, flag it as a finding. "Docs will come later" and "tests in a follow-up" are not acceptable — the story should have been split by the Tech Lead, not deferred here.
+
 ## Phase 4: Code Review
 
 Review the PR diff for:

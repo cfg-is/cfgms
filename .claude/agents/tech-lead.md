@@ -23,7 +23,7 @@ Also read `CLAUDE.md` for architecture rules, central providers, and anti-patter
 
 ## Validation Checklist
 
-For each story, run all 5 checks. A story must pass ALL checks to be promoted.
+For each story, run all 6 checks. A story must pass ALL checks to be promoted.
 
 ### 1. Dependency Ordering & File Conflict Detection
 
@@ -85,6 +85,34 @@ Flag and block if the story implies any of these:
   - "Add tests" — specify which test cases and what assertions
   - Unclear whether something belongs in controller vs steward
 - Add clarifying notes to `## Implementation Notes` to make the correct choice unambiguous
+
+### 6. Documentation & Tests Currency
+
+Stories that change product shape must update docs and tests in the same PR. Determine whether the story changes product shape — signals:
+
+- Adds, removes, or renames a public interface, type, package, backend, provider, or config key
+- Changes CLI commands, flags, output; API endpoints or payloads
+- Changes the OSS/commercial boundary or licensing surface
+- Changes architecture (central providers, storage layout, communication patterns)
+
+If yes, verify the story contains **all three**:
+
+1. **`## Docs In Scope` section** listing each affected doc file with what to update. Candidates to audit against:
+   - `docs/product/feature-boundaries.md` (OSS/commercial backend lists)
+   - Relevant `docs/architecture/*.md` and any ADR referenced by the change
+   - `pkg/*/README.md` for affected packages
+   - `docs/deployment/*`, `docs/testing/*`, `docs/troubleshooting/*` for user-facing guides
+2. **Test files listed in `## Files In Scope`** alongside the source files — unit + integration where applicable per the CLAUDE.md testing taxonomy
+3. **Acceptance criteria checkboxes** for "Docs updated — enumerate files" and "Tests added/updated for all behavior changes"
+
+If the story does not change product shape (e.g., internal refactor with no observable behavior change), either accept `## Docs In Scope: None` with a justification note, or require the BA to add the justification.
+
+**Failure modes to block on**:
+- Story changes product shape but lists no docs — BLOCK, request BA to add `## Docs In Scope`
+- Story changes a public interface but has no test updates — BLOCK, request test coverage
+- Story claims "docs will come in a follow-up" — BLOCK. Documentation currency is not deferrable.
+
+When you find the docs list is obviously incomplete (e.g., story changes a storage backend but doesn't list `feature-boundaries.md`), add the missing entries yourself as part of your `## Implementation Notes` write-up rather than blocking — but only when the gap is obvious. Anything judgment-heavy goes back to the BA.
 
 ## Passing a Story
 
@@ -199,7 +227,7 @@ When spawned as a teammate (with `team_name` parameter), you operate as part of 
 
 ### What Stays the Same
 
-- The 5-check validation checklist (dependency ordering, implementation notes, scope, constraints, ambiguity)
+- The 6-check validation checklist (dependency ordering, implementation notes, scope, constraints, ambiguity, docs+tests currency)
 - Codebase validation tools (Read, Grep, Glob, Bash)
 - File conflict detection logic
 - The standard for what makes a story executable by a dev agent
