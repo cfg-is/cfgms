@@ -21,6 +21,7 @@ func newAuditStore(t *testing.T) interfaces.AuditStore {
 	p := sqlite.NewSQLiteProvider(dir)
 	store, err := p.CreateAuditStore(map[string]interface{}{"path": filepath.Join(dir, "audit.db")})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 

@@ -5,6 +5,7 @@ package sqlite_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -60,6 +61,9 @@ func TestAvailable_InMemory(t *testing.T) {
 
 // TestAvailable_NonWritableDir returns false for a non-writable directory.
 func TestAvailable_NonWritableDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Chmod does not enforce POSIX directory permissions on Windows")
+	}
 	if os.Getuid() == 0 {
 		t.Skip("skipping non-writable dir test when running as root")
 	}
@@ -105,6 +109,7 @@ func TestCreateTenantStore_InMemory(t *testing.T) {
 	store, err := p.CreateTenantStore(map[string]interface{}{"path": ":memory:"})
 	require.NoError(t, err)
 	require.NotNil(t, store)
+	t.Cleanup(func() { _ = store.Close() })
 }
 
 // TestCreateSessionStore_InMemory verifies session store can be created.
@@ -114,6 +119,7 @@ func TestCreateSessionStore_InMemory(t *testing.T) {
 	store, err := p.CreateSessionStore(map[string]interface{}{"path": ":memory:"})
 	require.NoError(t, err)
 	require.NotNil(t, store)
+	t.Cleanup(func() { _ = store.Close() })
 }
 
 // TestCreateAuditStore_FileDB verifies audit store with a file-based SQLite DB.
@@ -126,4 +132,5 @@ func TestCreateAuditStore_FileDB(t *testing.T) {
 	store, err := p.CreateAuditStore(map[string]interface{}{"path": dbPath})
 	require.NoError(t, err)
 	require.NotNil(t, store)
+	t.Cleanup(func() { _ = store.Close() })
 }

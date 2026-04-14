@@ -245,6 +245,11 @@ func (s *SQLiteAuditStore) GetAuditStats(ctx context.Context) (*interfaces.Audit
 	return stats, nil
 }
 
+// Close releases the underlying database connection.
+func (s *SQLiteAuditStore) Close() error {
+	return s.db.Close()
+}
+
 // ArchiveAuditEntries returns ErrImmutable — audit entries are immutable at this tier.
 func (s *SQLiteAuditStore) ArchiveAuditEntries(_ context.Context, _ time.Time) (int64, error) {
 	return 0, interfaces.ErrImmutable

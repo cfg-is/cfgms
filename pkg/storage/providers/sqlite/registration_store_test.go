@@ -21,6 +21,7 @@ func newRegistrationStore(t *testing.T) interfaces.RegistrationTokenStore {
 	p := sqlite.NewSQLiteProvider(dir)
 	store, err := p.CreateRegistrationTokenStore(map[string]interface{}{"path": filepath.Join(dir, "reg.db")})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 

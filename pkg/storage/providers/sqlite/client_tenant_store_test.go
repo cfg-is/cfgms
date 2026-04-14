@@ -20,7 +20,7 @@ func newClientTenantStore(t *testing.T) interfaces.ClientTenantStore {
 	p := sqlite.NewSQLiteProvider(dir)
 	store, err := p.CreateClientTenantStore(map[string]interface{}{"path": filepath.Join(dir, "ct.db")})
 	require.NoError(t, err)
-	// DB is in t.TempDir() which is auto-cleaned; no explicit Close needed
+	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 

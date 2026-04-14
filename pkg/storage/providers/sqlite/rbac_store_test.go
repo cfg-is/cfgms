@@ -21,6 +21,7 @@ func newRBACStore(t *testing.T) interfaces.RBACStore {
 	p := sqlite.NewSQLiteProvider(dir)
 	store, err := p.CreateRBACStore(map[string]interface{}{"path": filepath.Join(dir, "rbac.db")})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 

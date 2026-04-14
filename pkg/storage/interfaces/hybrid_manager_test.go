@@ -408,6 +408,10 @@ func (s *mockClientTenantStore) DeleteAdminConsentRequest(state string) error {
 	return nil
 }
 
+func (s *mockClientTenantStore) Close() error {
+	return nil
+}
+
 type mockConfigStore struct{}
 
 func (s *mockConfigStore) StoreConfig(ctx context.Context, config *ConfigEntry) error {
@@ -520,6 +524,10 @@ func (s *mockAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate tim
 
 func (s *mockAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
 	return 0, nil
+}
+
+func (s *mockAuditStore) Close() error {
+	return nil
 }
 
 type mockRBACStore struct{}

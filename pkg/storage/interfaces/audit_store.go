@@ -34,6 +34,9 @@ type AuditStore interface {
 	// Retention and archival (implementation dependent)
 	ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error)
 	PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error)
+
+	// Lifecycle
+	Close() error
 }
 
 // AuditEntry represents an immutable audit log entry

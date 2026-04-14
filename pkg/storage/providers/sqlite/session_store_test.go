@@ -21,6 +21,7 @@ func newSessionStore(t *testing.T) interfaces.SessionStore {
 	p := sqlite.NewSQLiteProvider(dir)
 	store, err := p.CreateSessionStore(map[string]interface{}{"path": filepath.Join(dir, "sessions.db")})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 
