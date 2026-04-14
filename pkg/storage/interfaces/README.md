@@ -13,6 +13,8 @@ The files in this directory today:
 | File | Interface(s) | Purpose |
 |------|--------------|---------|
 | `provider.go` | `StorageProvider` | Provider registration and capability reporting |
+| `blob_store.go` | `BlobStore` | Large binary object storage (installers, reports, DNA snapshots) |
+| `blob_provider.go` | `BlobProvider` | BlobStore provider registry (separate from `StorageProvider`) |
 | `client_tenant.go` | `ClientTenantStore` | MSP client tenant data |
 | `m365_client_tenant_store.go` | `M365ClientTenantStore` | M365-specific consent state (will fold into `ClientTenantStore`) |
 | `tenant_store.go` | `TenantStore` | Recursive tenant hierarchy |
@@ -55,7 +57,7 @@ pkg/storage/interfaces/
 | *(new)* `SecretStore` | `secrets/` | Unifies SOPS and vault providers |
 | *(new)* `MetricsStore` | `timeseries/` | |
 | *(new)* `LogStore` | `timeseries/` | |
-| *(new)* `BlobStore` | `blob/` | |
+| *(new→implemented)* `BlobStore` | flat layout (`blob_store.go`) | **Implemented** in `providers/blobstore/filesystem/` (OSS) and `providers/blobstore/s3/` (commercial). Full reorganization into `blob/` subdirectory tracked under the ADR-003 epic. |
 
 ### Controller Interfaces Misplaced Under `features/steward/*`
 
@@ -68,13 +70,13 @@ Per ADR-003, no controller-side storage/logging interface may remain under `feat
 
 Per ADR-003, deployments compose one provider per type:
 
-| Type | OSS backend | Commercial/SaaS backend |
-|------|-------------|-------------------------|
-| Business data | SQLite | PostgreSQL |
-| Config storage | Flat file | PostgreSQL |
-| Secrets | SOPS files | Key vault (AWS Secrets Manager / Vault / Azure Key Vault) |
-| Timeseries | Local log files | ClickHouse / Timescale / Influx |
-| Blobs | Local filesystem | S3-compatible object storage |
+| Type | OSS backend | Commercial/SaaS backend | Interface file(s) | Provider packages |
+|------|-------------|-------------------------|-------------------|-------------------|
+| Business data | SQLite | PostgreSQL | `client_tenant.go`, `tenant_store.go`, `audit_store.go`, `rbac_store.go`, `registration_store.go` | `providers/database/` |
+| Config storage | Flat file | PostgreSQL | `config_store.go` | `providers/database/`, `providers/git/` (deprecated) |
+| Secrets | SOPS files | Key vault (AWS Secrets Manager / Vault / Azure Key Vault) | *(planned: `secrets/`)* | *(planned)* |
+| Timeseries | Local log files | ClickHouse / Timescale / Influx | *(planned: `timeseries/`)* | *(planned)* |
+| Blobs | Local filesystem | S3-compatible object storage | `blob_store.go`, `blob_provider.go` | `providers/blobstore/filesystem/`, `providers/blobstore/s3/` |
 
 The OSS column is the zero-config default, not a limit. Any Commercial backend is available to OSS deployments — licensing boundary is tenant-tree shape, not backend choice.
 

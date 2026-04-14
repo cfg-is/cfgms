@@ -173,6 +173,72 @@ controller:
         root: /var/lib/cfgms/blobs
 ```
 
+## Blob Storage
+
+Blobs are large, immutable artifacts: installer binaries, script bodies, report exports, DNA snapshots. They are not embedded in config entries; they live in a dedicated `BlobStore` provider.
+
+### Interface
+
+`pkg/storage/interfaces/blob_store.go` defines the `BlobStore` interface and associated types:
+
+```go
+// BlobKey uniquely identifies a blob within CFGMS.
+type BlobKey struct {
+    TenantID  string // Mandatory. Multi-tenant isolation.
+    Namespace string // Category partition (e.g., "installers", "reports", "dna-snapshots").
+    Name      string // Blob name within the namespace.
+}
+
+// BlobStore methods: PutBlob, GetBlob, DeleteBlob, ListBlobs, BlobExists, HealthCheck
+```
+
+`BlobStore` is **not** part of the general `StorageProvider` interface. It has its own registry in `blob_provider.go` (`RegisterBlobProvider` / `GetBlobProvider` / `CreateBlobStoreFromConfig`) following the same auto-registration pattern.
+
+### Providers
+
+| Provider | Package | OSS default | Notes |
+|----------|---------|-------------|-------|
+| `filesystem` | `pkg/storage/providers/blobstore/filesystem/` | Yes | Streams via `io.Copy`; atomic temp+rename writes; SHA-256 sidecar |
+| `s3` | `pkg/storage/providers/blobstore/s3/` | No (operator choice) | AWS SDK v2; bucket + prefix key mapping; JSON sidecar object |
+
+Both providers:
+- Validate that `BlobKey.TenantID` is non-empty (`ErrBlobTenantRequired`).
+- Store a JSON metadata sidecar (`<key>.meta.json`) alongside each blob holding `ContentType`, `Size`, `Checksum` (SHA-256 hex), `CreatedAt`, and `Labels`.
+- Compute SHA-256 during the write pass (no re-read required).
+
+**Filesystem provider specifics**:
+- Blob path: `<root>/<tenantID>/<namespace>/<name>`
+- Writes are streamed through `io.TeeReader` into a temp file; SHA-256 is computed inline; the temp file is renamed atomically to the final path (`os.Rename`).
+- On `GetBlob`, the returned `io.ReadCloser` is a `checksumVerifyingReader` that computes SHA-256 during reads and returns `ErrBlobChecksumMismatch` at EOF if the digest does not match the stored checksum.
+
+**S3 provider specifics**:
+- Object key: `[prefix/]<tenantID>/<namespace>/<name>`; metadata sidecar: `<key>.meta.json`
+- Configured via `bucket` (required), `region`, `endpoint_url` (for MinIO/local dev), `prefix`, `access_key_id`, `secret_access_key`.
+- Uses an injectable `s3API` interface so tests run against an in-memory implementation without requiring a real S3/MinIO endpoint.
+
+### Configuration example
+
+```yaml
+# OSS single-controller
+blobs:
+  provider: filesystem
+  config:
+    root: /var/lib/cfgms/blobs
+
+# Commercial/SaaS
+blobs:
+  provider: s3
+  config:
+    bucket: cfgms-blobs
+    region: us-east-1
+    # endpoint_url: http://minio.internal:9000  # optional: MinIO or local dev
+    # prefix: cfgms                              # optional: global key prefix
+```
+
+### Multi-tenant isolation
+
+`BlobKey.TenantID` is mandatory and maps directly to a path segment (filesystem) or key prefix (S3). An empty `TenantID` returns `ErrBlobTenantRequired`. The filesystem provider additionally rejects key components containing `..` or `/` to prevent path traversal.
+
 ## Implementation Status
 
 Per ADR-003, the providers and interfaces above are **not all implemented today**. The ADR ratifies the direction; implementation is tracked by the **Storage Architecture: Five-Type Data Taxonomy (ADR-003)** epic and its sub-stories. See the ADR's [Code Changes Required](decisions/003-storage-data-taxonomy.md#code-changes-required) section for the authoritative sub-story list and priorities.
