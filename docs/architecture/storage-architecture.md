@@ -51,6 +51,43 @@ The previous architecture treated Git as a first-class storage backend (one comm
 
 The same git-sync code path serves both OSS and commercial deployments. The only variable is the backend adapter it writes through to. This avoids the fork that would result from git-as-backend-for-OSS and git-sync-for-SaaS existing side-by-side.
 
+### Implementation: `pkg/gitsync`
+
+The git-sync component lives in `pkg/gitsync/` and is wired into the controller server at startup.
+
+**Key types:**
+
+| Type | Purpose |
+|------|---------|
+| `ScopeBinding` | Binds a tenant path + namespace to an external git origin (URL, branch, credential ref, polling interval) |
+| `BindingStore` | Persists bindings to `<data-dir>/.gitsync/bindings.json`; tracks last-synced SHA per scope |
+| `Syncer` | Orchestrates clone/pull, idempotency checks, and write-through to `ConfigStore` |
+| `WebhookHandler` | HTTP handler for push-event webhooks; validates HMAC-SHA256; dispatches `TriggerSync` |
+
+**Scope binding fields:**
+
+| Field | Description |
+|-------|-------------|
+| `TenantPath` | CFGMS tenant path, e.g. `root/msp-a/client-1` |
+| `Namespace` | Config namespace supplied by the bound origin, e.g. `firewall` |
+| `OriginURL` | External git repository URL |
+| `Branch` | Branch to track (default: `main`) |
+| `CredentialsRef` | Credential reference: `""` = anonymous, `"env:<VAR>"` = env var, path = file |
+| `WebhookSecretRef` | Webhook HMAC-SHA256 secret reference (same format as CredentialsRef) |
+| `PollingInterval` | Polling frequency; minimum 60 s; zero disables polling |
+
+**Credentials (v1):** `CredentialsRef` and `WebhookSecretRef` accept an environment-variable name (prefix `env:`) or a filesystem path to a file containing the credential. TODO: migrate to `pkg/secrets` `SecretStore` once sub-story H lands.
+
+**Webhook endpoint:** `POST /api/v1/webhooks/git-push`. Accepts GitHub and GitLab push-event payloads. Validates `X-Hub-Signature-256` when `WebhookSecretRef` is configured. Requests with an invalid or missing signature are rejected with HTTP 401.
+
+**Polling:** Minimum interval is 60 seconds. Polling goroutines are per-scope; a failure in one scope does not block others.
+
+**Idempotency:** The syncer tracks the last-synced commit SHA per scope in the `BindingStore`. Re-syncing the same commit is a no-op — `ConfigStore.StoreConfig` is not called a second time.
+
+**Conflict detection:** v1 does not merge; if the remote has diverged from the last-synced commit in a non-fast-forward way, the sync is logged and skipped for that scope.
+
+**Scope isolation:** A failure syncing one scope (origin unreachable, auth failure, branch not found) does not stop other scopes from syncing. Errors are logged with origin URL sanitized (`logging.SanitizeLogValue`).
+
 ## MSP GitOps Example
 
 An MSP hosting configs on GitHub with PR-based change management continues to work exactly as today:

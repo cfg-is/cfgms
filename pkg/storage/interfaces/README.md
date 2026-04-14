@@ -88,6 +88,8 @@ The OSS column is the zero-config default, not a limit. Any Commercial backend i
 
 Git is **not** a backend. It is an optional sync source bound to admin-designated config scopes; see ADR-003 for the sync model.
 
+**`pkg/gitsync` is a write-through adapter, not a storage provider.** It sits in front of a `ConfigStore` (flat-file for OSS, PostgreSQL for commercial) and forwards imported configs via `ConfigStore.StoreConfig`. It does not implement the `ConfigStore` interface itself, and it is not registered through the provider system. Modules that read config data always target the `ConfigStore` directly — git-sync is invisible at read time. The adapter is wired at controller startup when `cfg.DataDir` is set and scope bindings exist.
+
 ## Module Usage Pattern
 
 Modules receive interfaces, never specific providers:
