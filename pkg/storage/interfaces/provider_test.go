@@ -98,6 +98,10 @@ func (m *MockStorageProvider) CreateStewardStore(config map[string]interface{}) 
 	return nil, ErrNotSupported
 }
 
+func (m *MockStorageProvider) CreateCommandStore(config map[string]interface{}) (CommandStore, error) {
+	return nil, ErrNotSupported
+}
+
 // Mock implementations of store interfaces
 type MockClientTenantStore struct{}
 

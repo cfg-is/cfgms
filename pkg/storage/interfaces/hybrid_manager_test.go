@@ -354,6 +354,10 @@ func (p *mockProvider) CreateStewardStore(config map[string]interface{}) (Stewar
 	return nil, ErrNotSupported
 }
 
+func (p *mockProvider) CreateCommandStore(config map[string]interface{}) (CommandStore, error) {
+	return nil, ErrNotSupported
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:   true,

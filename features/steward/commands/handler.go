@@ -4,6 +4,11 @@
 //
 // This package implements the command handler that processes commands
 // from the controller and executes appropriate actions (Story #198).
+//
+// Story #665: Command dispatch state is now persisted to a CommandStore so that
+// executing/completed/failed status survives a process restart. The in-memory
+// executing map retains only the context.CancelFunc needed for in-flight
+// cancellation; all durable state is in the store.
 package commands
 
 import (
@@ -14,6 +19,7 @@ import (
 
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // Handler processes control plane commands from the controller.
@@ -32,8 +38,17 @@ type Handler struct {
 	// Logger
 	logger logging.Logger
 
-	// Execution tracking
+	// CommandStore for durable command dispatch state (Story #665).
+	// When nil the handler operates without persistence (in-memory only).
+	store interfaces.CommandStore
+
+	// Execution tracking — holds only the CancelFunc for in-flight cancellation.
+	// Durable state (status, timestamps, result) lives in the CommandStore.
 	executing map[string]*executionContext
+
+	// wg tracks in-flight executeCommand goroutines to support graceful shutdown
+	// and deterministic test synchronization.
+	wg sync.WaitGroup
 }
 
 // CommandFunc is a function that handles a specific command type.
@@ -42,11 +57,10 @@ type CommandFunc func(ctx context.Context, cmd *cpTypes.Command) error
 // StatusCallback is called when status events should be published to controller.
 type StatusCallback func(ctx context.Context, event *cpTypes.Event)
 
-// executionContext tracks command execution state.
+// executionContext tracks in-flight cancellation only.
+// All durable command state is written to the CommandStore.
 type executionContext struct {
-	CommandID string
-	StartTime time.Time
-	Cancel    context.CancelFunc
+	Cancel context.CancelFunc
 }
 
 // Config holds command handler configuration.
@@ -59,9 +73,15 @@ type Config struct {
 
 	// Logger for command execution logging
 	Logger logging.Logger
+
+	// Store is the durable command dispatch state backend (Story #665).
+	// When nil, state transitions are not persisted across restarts.
+	Store interfaces.CommandStore
 }
 
-// New creates a new command handler.
+// New creates a new command handler and, when a CommandStore is configured,
+// sweeps any commands left in "executing" state from a previous run and marks
+// them as failed with reason "controller_restart".
 func New(cfg *Config) (*Handler, error) {
 	if cfg.StewardID == "" {
 		return nil, fmt.Errorf("steward ID is required")
@@ -73,13 +93,53 @@ func New(cfg *Config) (*Handler, error) {
 		return nil, fmt.Errorf("logger is required")
 	}
 
-	return &Handler{
+	h := &Handler{
 		stewardID: cfg.StewardID,
 		handlers:  make(map[cpTypes.CommandType]CommandFunc),
 		onStatus:  cfg.OnStatus,
 		logger:    cfg.Logger,
+		store:     cfg.Store,
 		executing: make(map[string]*executionContext),
-	}, nil
+	}
+
+	// Startup sweep: flip stale "executing" records from a previous run to "failed".
+	if cfg.Store != nil {
+		if err := h.sweepStaleExecutingCommands(context.Background()); err != nil {
+			// Log but do not abort startup — stale records do not block operation.
+			cfg.Logger.Error("Failed to sweep stale executing commands on startup",
+				"error", err)
+		}
+	}
+
+	return h, nil
+}
+
+// Wait blocks until all in-flight executeCommand goroutines have finished.
+// Useful for graceful shutdown and deterministic test synchronization.
+func (h *Handler) Wait() {
+	h.wg.Wait()
+}
+
+// sweepStaleExecutingCommands marks commands that were left in "executing" state
+// (from a crashed or restarted process) as "failed" with error "controller_restart".
+func (h *Handler) sweepStaleExecutingCommands(ctx context.Context) error {
+	stale, err := h.store.ListCommandsByStatus(ctx, interfaces.CommandStatusExecuting)
+	if err != nil {
+		return fmt.Errorf("listing stale executing commands: %w", err)
+	}
+
+	for _, cmd := range stale {
+		if err := h.store.UpdateCommandStatus(ctx, cmd.ID,
+			interfaces.CommandStatusFailed, nil, "controller_restart"); err != nil {
+			h.logger.Error("Failed to mark stale command as failed",
+				"command_id", cmd.ID,
+				"error", err)
+		} else {
+			h.logger.Info("Marked stale executing command as failed (controller_restart)",
+				"command_id", cmd.ID)
+		}
+	}
+	return nil
 }
 
 // RegisterHandler registers a handler function for a specific command type.
@@ -96,6 +156,22 @@ func (h *Handler) RegisterHandler(cmdType cpTypes.CommandType, handler CommandFu
 func (h *Handler) HandleCommand(ctx context.Context, cmd *cpTypes.Command) error {
 	h.logger.Debug("Received command", "id", cmd.ID, "type", cmd.Type)
 
+	// Persist incoming command record (Story #665).
+	if h.store != nil {
+		record := &interfaces.CommandRecord{
+			ID:        cmd.ID,
+			Type:      string(cmd.Type),
+			StewardID: h.stewardID, // raw value — SanitizeLogValue is for log output only
+			IssuedAt:  cmd.Timestamp,
+		}
+		if err := h.store.CreateCommandRecord(ctx, record); err != nil {
+			h.logger.Error("Failed to persist incoming command record",
+				"command_id", cmd.ID,
+				"error", err)
+			// Do not abort — command execution continues without durable record.
+		}
+	}
+
 	// Send command received event
 	h.sendStatus(ctx, &cpTypes.Event{
 		ID:        fmt.Sprintf("evt_%d", time.Now().UnixNano()),
@@ -108,7 +184,8 @@ func (h *Handler) HandleCommand(ctx context.Context, cmd *cpTypes.Command) error
 		},
 	})
 
-	// Execute command in background
+	// Execute command in background; wg.Done is called inside executeCommand.
+	h.wg.Add(1)
 	go h.executeCommand(cmd)
 
 	return nil
@@ -116,6 +193,8 @@ func (h *Handler) HandleCommand(ctx context.Context, cmd *cpTypes.Command) error
 
 // executeCommand executes a command with timeout and error handling.
 func (h *Handler) executeCommand(cmd *cpTypes.Command) {
+	defer h.wg.Done()
+
 	h.logger.Info("Executing command",
 		"command_id", cmd.ID,
 		"type", cmd.Type,
@@ -130,16 +209,22 @@ func (h *Handler) executeCommand(cmd *cpTypes.Command) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// Track execution
+	// Track in-flight cancellation (CancelFunc only — not persisted).
 	h.mu.Lock()
-	h.executing[cmd.ID] = &executionContext{
-		CommandID: cmd.ID,
-		StartTime: time.Now(),
-		Cancel:    cancel,
-	}
+	h.executing[cmd.ID] = &executionContext{Cancel: cancel}
 	h.mu.Unlock()
 
-	// Clean up execution tracking
+	// Transition to executing state in the store.
+	if h.store != nil {
+		if err := h.store.UpdateCommandStatus(ctx, cmd.ID,
+			interfaces.CommandStatusExecuting, nil, ""); err != nil {
+			h.logger.Error("Failed to update command status to executing",
+				"command_id", cmd.ID,
+				"error", err)
+		}
+	}
+
+	// Clean up in-flight tracking on exit.
 	defer func() {
 		h.mu.Lock()
 		delete(h.executing, cmd.ID)
@@ -155,6 +240,15 @@ func (h *Handler) executeCommand(cmd *cpTypes.Command) {
 		h.logger.Error("No handler registered for command type",
 			"command_id", cmd.ID,
 			"type", cmd.Type)
+
+		if h.store != nil {
+			if err := h.store.UpdateCommandStatus(ctx, cmd.ID, interfaces.CommandStatusFailed, nil,
+				fmt.Sprintf("no handler for command type: %s", cmd.Type)); err != nil {
+				h.logger.Error("Failed to update command status to failed (no handler)",
+					"command_id", cmd.ID,
+					"error", err)
+			}
+		}
 
 		h.sendStatus(ctx, &cpTypes.Event{
 			ID:        fmt.Sprintf("evt_%d", time.Now().UnixNano()),
@@ -181,6 +275,15 @@ func (h *Handler) executeCommand(cmd *cpTypes.Command) {
 			"error", err.Error(),
 			"execution_time", executionTime)
 
+		if h.store != nil {
+			if storeErr := h.store.UpdateCommandStatus(ctx, cmd.ID,
+				interfaces.CommandStatusFailed, nil, err.Error()); storeErr != nil {
+				h.logger.Error("Failed to update command status to failed",
+					"command_id", cmd.ID,
+					"error", storeErr)
+			}
+		}
+
 		h.sendStatus(ctx, &cpTypes.Event{
 			ID:        fmt.Sprintf("evt_%d", time.Now().UnixNano()),
 			Type:      cpTypes.EventCommandFailed,
@@ -199,6 +302,18 @@ func (h *Handler) executeCommand(cmd *cpTypes.Command) {
 		"command_id", cmd.ID,
 		"type", cmd.Type,
 		"execution_time", executionTime)
+
+	if h.store != nil {
+		result := map[string]interface{}{
+			"execution_time_ms": executionTime.Milliseconds(),
+		}
+		if storeErr := h.store.UpdateCommandStatus(ctx, cmd.ID,
+			interfaces.CommandStatusCompleted, result, ""); storeErr != nil {
+			h.logger.Error("Failed to update command status to completed",
+				"command_id", cmd.ID,
+				"error", storeErr)
+		}
+	}
 
 	h.sendStatus(ctx, &cpTypes.Event{
 		ID:        fmt.Sprintf("evt_%d", time.Now().UnixNano()),

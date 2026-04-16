@@ -146,6 +146,10 @@ func (t *TestStorageProvider) CreateStewardStore(_ map[string]interface{}) (inte
 	return nil, interfaces.ErrNotSupported
 }
 
+func (t *TestStorageProvider) CreateCommandStore(_ map[string]interface{}) (interfaces.CommandStore, error) {
+	return nil, interfaces.ErrNotSupported
+}
+
 func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{
 		MaxBatchSize:          100,

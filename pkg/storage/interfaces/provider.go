@@ -26,6 +26,7 @@ type StorageProvider interface {
 	CreateRegistrationTokenStore(config map[string]interface{}) (RegistrationTokenStore, error)
 	CreateSessionStore(config map[string]interface{}) (SessionStore, error)
 	CreateStewardStore(config map[string]interface{}) (StewardStore, error)
+	CreateCommandStore(config map[string]interface{}) (CommandStore, error)
 
 	// Future: CreateDNAStore for DNA storage integration (Epic 6)
 	// CreateDNAStore(config map[string]interface{}) (DNAStore, error)
@@ -435,6 +436,11 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		return nil, fmt.Errorf("failed to create steward store: %w", err)
 	}
 
+	commandStore, err := provider.CreateCommandStore(config)
+	if err != nil && err != ErrNotSupported {
+		return nil, fmt.Errorf("failed to create command store: %w", err)
+	}
+
 	return &StorageManager{
 		providerName:           providerName,
 		provider:               provider,
@@ -447,7 +453,17 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		registrationTokenStore: registrationTokenStore,
 		sessionStore:           sessionStore,
 		stewardStore:           stewardStore,
+		commandStore:           commandStore,
 	}, nil
+}
+
+// CreateCommandStoreFromConfig creates a CommandStore from configuration.
+func CreateCommandStoreFromConfig(providerName string, config map[string]interface{}) (CommandStore, error) {
+	provider, err := GetStorageProvider(providerName)
+	if err != nil {
+		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
+	}
+	return provider.CreateCommandStore(config)
 }
 
 // StorageManager provides unified access to all storage interfaces
@@ -463,6 +479,7 @@ type StorageManager struct {
 	registrationTokenStore RegistrationTokenStore
 	sessionStore           SessionStore
 	stewardStore           StewardStore
+	commandStore           CommandStore
 }
 
 // GetProviderName returns the name of the storage provider
@@ -518,6 +535,11 @@ func (sm *StorageManager) GetSessionStore() SessionStore {
 // GetStewardStore returns the steward fleet registry interface (nil if not supported by provider)
 func (sm *StorageManager) GetStewardStore() StewardStore {
 	return sm.stewardStore
+}
+
+// GetCommandStore returns the command dispatch state interface (nil if not supported by provider)
+func (sm *StorageManager) GetCommandStore() CommandStore {
+	return sm.commandStore
 }
 
 // GetCapabilities returns the provider's capabilities
