@@ -10,6 +10,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // HealthStatus represents the current health status of the steward
@@ -445,4 +446,134 @@ func (h *HealthMonitor) updateCertificateHealth() {
 			"days_until_expiration", daysUntilExpiration,
 			"expires_at", mostRecentCert.ExpiresAt.Format("2006-01-02"))
 	}
+}
+
+// ---- StewardHealthTracker --------------------------------------------------
+//
+// StewardHealthTracker is the controller-side fleet registry. It persists
+// durable steward fields (status, last_seen, last_heartbeat) via a StewardStore
+// so the fleet view survives controller restarts. Ephemeral per-process metrics
+// (task latency, config errors, recovery counters) remain in-memory via a sync.Map
+// and are not written to the store.
+//
+// Constructor injection: the caller (controller initialization) provides the
+// concrete StewardStore implementation (flat-file for OSS, SQLite for default
+// business-data tier).
+
+// StewardHealthTracker tracks the fleet health state for the controller.
+// Durable fields are persisted via StewardStore; ephemeral HealthMetrics stay in-memory.
+type StewardHealthTracker struct {
+	store   interfaces.StewardStore
+	logger  logging.Logger
+	metrics sync.Map // map[stewardID string]*HealthMetrics
+}
+
+// NewStewardHealthTracker creates a StewardHealthTracker backed by the given store.
+func NewStewardHealthTracker(store interfaces.StewardStore, logger logging.Logger) *StewardHealthTracker {
+	return &StewardHealthTracker{
+		store:  store,
+		logger: logger,
+	}
+}
+
+// RegisterSteward persists a new steward record and initialises in-memory metrics.
+func (t *StewardHealthTracker) RegisterSteward(ctx context.Context, record *interfaces.StewardRecord) error {
+	if err := t.store.RegisterSteward(ctx, record); err != nil {
+		return err
+	}
+	t.metrics.Store(record.ID, &HealthMetrics{
+		Status:           StatusHealthy,
+		LastStatusChange: time.Now(),
+	})
+	t.logger.Info("Steward registered",
+		"steward_id", logging.SanitizeLogValue(record.ID),
+		"hostname", logging.SanitizeLogValue(record.Hostname),
+		"platform", record.Platform)
+	return nil
+}
+
+// UpdateHeartbeat records a steward heartbeat, updating durable timestamps.
+// Also marks the steward active if it was previously registered.
+func (t *StewardHealthTracker) UpdateHeartbeat(ctx context.Context, stewardID string) error {
+	if err := t.store.UpdateHeartbeat(ctx, stewardID); err != nil {
+		return err
+	}
+	// Promote registered → active on first heartbeat
+	rec, err := t.store.GetSteward(ctx, stewardID)
+	if err == nil && rec.Status == interfaces.StewardStatusRegistered {
+		if statusErr := t.store.UpdateStewardStatus(ctx, stewardID, interfaces.StewardStatusActive); statusErr != nil {
+			t.logger.Warn("Failed to promote steward to active",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", statusErr)
+		}
+	}
+	// Refresh in-memory heartbeat time
+	if m, ok := t.metrics.Load(stewardID); ok {
+		metrics := m.(*HealthMetrics)
+		metrics.LastHeartbeat = time.Now()
+		metrics.HeartbeatErrors = 0
+		metrics.ControllerConnected = true
+	}
+	return nil
+}
+
+// MarkLost marks a steward as lost (last_seen exceeded the configured TTL).
+func (t *StewardHealthTracker) MarkLost(ctx context.Context, stewardID string) error {
+	t.logger.Warn("Marking steward as lost", "steward_id", logging.SanitizeLogValue(stewardID))
+	return t.store.UpdateStewardStatus(ctx, stewardID, interfaces.StewardStatusLost)
+}
+
+// DeregisterSteward marks a steward as deregistered. Records are retained for audit.
+func (t *StewardHealthTracker) DeregisterSteward(ctx context.Context, stewardID string) error {
+	t.logger.Info("Deregistering steward", "steward_id", logging.SanitizeLogValue(stewardID))
+	return t.store.DeregisterSteward(ctx, stewardID)
+}
+
+// GetSteward returns the durable record for the given steward.
+func (t *StewardHealthTracker) GetSteward(ctx context.Context, stewardID string) (*interfaces.StewardRecord, error) {
+	return t.store.GetSteward(ctx, stewardID)
+}
+
+// ListStewards returns all steward records from the durable store.
+func (t *StewardHealthTracker) ListStewards(ctx context.Context) ([]*interfaces.StewardRecord, error) {
+	return t.store.ListStewards(ctx)
+}
+
+// ListActiveStewards returns stewards currently in the active state.
+func (t *StewardHealthTracker) ListActiveStewards(ctx context.Context) ([]*interfaces.StewardRecord, error) {
+	return t.store.ListStewardsByStatus(ctx, interfaces.StewardStatusActive)
+}
+
+// GetEphemeralMetrics returns the in-memory HealthMetrics for a steward.
+// Returns nil if no metrics have been initialised for the steward (e.g. after a controller restart).
+func (t *StewardHealthTracker) GetEphemeralMetrics(stewardID string) *HealthMetrics {
+	if v, ok := t.metrics.Load(stewardID); ok {
+		return v.(*HealthMetrics)
+	}
+	return nil
+}
+
+// RecordTaskLatency records task latency for a steward's in-memory metrics.
+func (t *StewardHealthTracker) RecordTaskLatency(stewardID string, latency time.Duration) {
+	m := t.getOrInitMetrics(stewardID)
+	m.TaskCount++
+	m.TotalTaskLatency += latency
+	if m.TaskCount > 0 {
+		m.AverageTaskLatency = m.TotalTaskLatency / time.Duration(m.TaskCount)
+	}
+}
+
+// RecordConfigError increments the config error counter for a steward's in-memory metrics.
+func (t *StewardHealthTracker) RecordConfigError(stewardID string) {
+	m := t.getOrInitMetrics(stewardID)
+	m.ConfigErrors++
+}
+
+// getOrInitMetrics loads or creates the in-memory HealthMetrics for a steward.
+func (t *StewardHealthTracker) getOrInitMetrics(stewardID string) *HealthMetrics {
+	v, _ := t.metrics.LoadOrStore(stewardID, &HealthMetrics{
+		Status:           StatusHealthy,
+		LastStatusChange: time.Now(),
+	})
+	return v.(*HealthMetrics)
 }

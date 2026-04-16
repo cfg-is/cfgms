@@ -187,6 +187,12 @@ func (p *DatabaseProvider) CreateSessionStore(config map[string]interface{}) (in
 	return nil, interfaces.ErrNotSupported
 }
 
+// CreateStewardStore is not supported by the database provider.
+// StewardStore is implemented by the flat-file and SQLite providers (Issue #663).
+func (p *DatabaseProvider) CreateStewardStore(config map[string]interface{}) (interfaces.StewardStore, error) {
+	return nil, interfaces.ErrNotSupported
+}
+
 func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)

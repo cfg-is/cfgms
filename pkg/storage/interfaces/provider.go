@@ -25,6 +25,7 @@ type StorageProvider interface {
 	CreateTenantStore(config map[string]interface{}) (TenantStore, error)
 	CreateRegistrationTokenStore(config map[string]interface{}) (RegistrationTokenStore, error)
 	CreateSessionStore(config map[string]interface{}) (SessionStore, error)
+	CreateStewardStore(config map[string]interface{}) (StewardStore, error)
 
 	// Future: CreateDNAStore for DNA storage integration (Epic 6)
 	// CreateDNAStore(config map[string]interface{}) (DNAStore, error)
@@ -152,6 +153,10 @@ func RegisterStorageProviderWithValidation(provider StorageProvider, testConfig 
 
 		if _, err := provider.CreateRegistrationTokenStore(testConfig); err != nil {
 			return fmt.Errorf("failed to create RegistrationTokenStore: %w", err)
+		}
+
+		if _, err := provider.CreateStewardStore(testConfig); err != nil && err != ErrNotSupported {
+			return fmt.Errorf("failed to create StewardStore: %w", err)
 		}
 	}
 
@@ -360,6 +365,16 @@ func CreateSessionStoreFromConfig(providerName string, config map[string]interfa
 	return provider.CreateSessionStore(config)
 }
 
+// CreateStewardStoreFromConfig creates a StewardStore from configuration
+func CreateStewardStoreFromConfig(providerName string, config map[string]interface{}) (StewardStore, error) {
+	provider, err := GetStorageProvider(providerName)
+	if err != nil {
+		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
+	}
+
+	return provider.CreateStewardStore(config)
+}
+
 // CreateAllStoresFromConfig creates all storage interfaces from a single configuration
 // This is the main entry point for unified storage configuration (legacy single-backend)
 func CreateAllStoresFromConfig(providerName string, config map[string]interface{}) (*StorageManager, error) {
@@ -415,6 +430,11 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		return nil, fmt.Errorf("failed to create session store: %w", err)
 	}
 
+	stewardStore, err := provider.CreateStewardStore(config)
+	if err != nil && err != ErrNotSupported {
+		return nil, fmt.Errorf("failed to create steward store: %w", err)
+	}
+
 	return &StorageManager{
 		providerName:           providerName,
 		provider:               provider,
@@ -426,6 +446,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		tenantStore:            tenantStore,
 		registrationTokenStore: registrationTokenStore,
 		sessionStore:           sessionStore,
+		stewardStore:           stewardStore,
 	}, nil
 }
 
@@ -441,6 +462,7 @@ type StorageManager struct {
 	tenantStore            TenantStore
 	registrationTokenStore RegistrationTokenStore
 	sessionStore           SessionStore
+	stewardStore           StewardStore
 }
 
 // GetProviderName returns the name of the storage provider
@@ -491,6 +513,11 @@ func (sm *StorageManager) GetRegistrationTokenStore() RegistrationTokenStore {
 // GetSessionStore returns the session storage interface (nil if not supported by provider)
 func (sm *StorageManager) GetSessionStore() SessionStore {
 	return sm.sessionStore
+}
+
+// GetStewardStore returns the steward fleet registry interface (nil if not supported by provider)
+func (sm *StorageManager) GetStewardStore() StewardStore {
+	return sm.stewardStore
 }
 
 // GetCapabilities returns the provider's capabilities

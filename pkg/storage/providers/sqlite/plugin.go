@@ -222,6 +222,15 @@ func (p *SQLiteProvider) CreateRuntimeStore(config map[string]interface{}) (inte
 	return nil, interfaces.ErrNotSupported
 }
 
+// CreateStewardStore returns a SQLite-backed StewardStore for fleet registry persistence.
+func (p *SQLiteProvider) CreateStewardStore(config map[string]interface{}) (interfaces.StewardStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteStewardStore{db: db}, nil
+}
+
 // init auto-registers the SQLite provider so it is available after a blank import.
 func init() {
 	interfaces.RegisterStorageProvider(&SQLiteProvider{})
