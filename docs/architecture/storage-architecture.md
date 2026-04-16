@@ -18,7 +18,7 @@ Git is not a storage backend. For OSS, file-based storage is served by a flat-fi
 | Business data | SQLite | PostgreSQL |
 | Config storage | Flat file | PostgreSQL |
 | Config *git sync* (optional, per-scope) | Flat file ⇄ external git origin | PostgreSQL ⇄ external git origin |
-| Secrets | SOPS files | Key vault (AWS Secrets Manager / HashiCorp Vault / Azure Key Vault) |
+| Secrets | SOPS files / OpenBao (dev-mode) | Key vault (AWS Secrets Manager / HashiCorp Vault / OpenBao cluster / Azure Key Vault) |
 | Timeseries | Local log files | ClickHouse / Timescale / Influx |
 | Blobs | Local filesystem | S3-compatible object storage |
 

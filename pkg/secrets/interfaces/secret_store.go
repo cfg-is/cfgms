@@ -6,8 +6,12 @@ package interfaces
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrTenantRequired is returned when TenantID is empty in a multi-tenant context.
+var ErrTenantRequired = errors.New("TenantID is required for multi-tenant secret operations")
 
 // SecretStore defines the interface for storing and retrieving secrets
 // All implementations MUST encrypt secrets at rest - no cleartext storage allowed
@@ -83,6 +87,9 @@ type SecretMetadata struct {
 	UpdatedBy   string            `json:"updated_by"`
 	TenantID    string            `json:"tenant_id"`
 	Description string            `json:"description,omitempty"`
+	// Policy holds provider-level access policy metadata when available.
+	// Populated by providers that expose policy information (e.g. OpenBao mount policies).
+	Policy map[string]string `json:"policy,omitempty"`
 }
 
 // SecretVersion represents a historical version of a secret

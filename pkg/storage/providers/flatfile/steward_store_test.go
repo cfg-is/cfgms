@@ -16,13 +16,13 @@ import (
 // testStewardRecord returns a StewardRecord with sensible defaults for tests.
 func testStewardRecord(id string) *interfaces.StewardRecord {
 	return &interfaces.StewardRecord{
-		ID:       id,
-		Hostname: "host-" + id,
-		Platform: "linux",
-		Arch:     "amd64",
-		Version:  "1.0.0",
+		ID:        id,
+		Hostname:  "host-" + id,
+		Platform:  "linux",
+		Arch:      "amd64",
+		Version:   "1.0.0",
 		IPAddress: "10.0.0.1",
-		Status:   interfaces.StewardStatusRegistered,
+		Status:    interfaces.StewardStatusRegistered,
 	}
 }
 
