@@ -180,6 +180,13 @@ func (p *DatabaseProvider) CreateTenantStore(config map[string]interface{}) (int
 	return store, nil
 }
 
+// CreateSessionStore is not supported by the database provider in this release.
+// The database provider exposes session data via CreateRuntimeStore.
+// Use the SQLite provider for SessionStore, or extend this provider in a future story.
+func (p *DatabaseProvider) CreateSessionStore(config map[string]interface{}) (interfaces.SessionStore, error) {
+	return nil, interfaces.ErrNotSupported
+}
+
 func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)

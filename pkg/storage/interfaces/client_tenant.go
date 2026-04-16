@@ -22,6 +22,9 @@ type ClientTenantStore interface {
 	StoreAdminConsentRequest(request *AdminConsentRequest) error
 	GetAdminConsentRequest(state string) (*AdminConsentRequest, error)
 	DeleteAdminConsentRequest(state string) error
+
+	// Lifecycle
+	Close() error
 }
 
 // ClientTenant represents an MSP client organization

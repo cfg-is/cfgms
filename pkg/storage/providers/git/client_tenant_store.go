@@ -163,3 +163,8 @@ func (s *GitClientTenantStore) DeleteAdminConsentRequest(state string) error {
 	delete(s.storage.requests, state)
 	return nil
 }
+
+// Close is a no-op for the git-based client tenant store (no persistent connections to release).
+func (s *GitClientTenantStore) Close() error {
+	return nil
+}

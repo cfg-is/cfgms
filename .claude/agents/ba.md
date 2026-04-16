@@ -75,6 +75,13 @@ Each story must use this exact format:
 - `path/to/file.go` — <what to do with this file>
 - `path/to/file_test.go` — <what tests to add>
 
+## Docs In Scope
+
+- `docs/path/to/doc.md` — <what to update / add / remove>
+- `pkg/path/to/README.md` — <what to update>
+
+(Use "None" only if the story genuinely does not change product shape. See "Documentation & Tests Currency" rule below.)
+
 ## Reference Implementation
 
 - <Pointers to existing patterns in the codebase to follow>
@@ -92,8 +99,36 @@ Each story must use this exact format:
 
 - [ ] <Specific, testable criterion>
 - [ ] <Another criterion>
+- [ ] Tests added/updated for all behavior changes (unit + integration where applicable)
+- [ ] Docs updated — enumerate files here, or write "N/A — no product-shape change" with justification
 - [ ] `make test-complete` passes
 ```
+
+## Documentation & Tests Currency
+
+Every story that **changes the shape of the product** must include both docs updates and test updates in the same story (no follow-ups, no "docs will come later"). Product-shape changes include:
+
+- Adding, removing, or renaming a public interface, type, or package
+- Adding, removing, or renaming a backend, provider, or configuration key
+- Changing the OSS/commercial boundary or licensing surface
+- Changing a CLI command, flag, or output format
+- Changing an API endpoint or payload shape
+- Changing architecture (central providers, storage layout, communication patterns)
+
+When decomposing an epic, for each story:
+
+1. **Identify the product-shape delta.** If the story changes behavior a user or operator observes, it changes product shape.
+2. **List affected docs in `## Docs In Scope`.** Candidates to check:
+   - `docs/product/feature-boundaries.md` — OSS/commercial line, backend lists
+   - `docs/architecture/*.md` — architecture docs under the relevant area
+   - `docs/architecture/decisions/*.md` — any ADR referenced by the change
+   - `pkg/*/README.md` — package-level docs for affected packages
+   - `docs/deployment/*`, `docs/testing/*`, `docs/troubleshooting/*` — user-facing guides
+   - `CLAUDE.md` (only if the epic authorizes it — otherwise flag as PO-review needed)
+3. **List test updates in `## Files In Scope`** alongside the source files. Tests covering the changed behavior (unit + integration, per the testing taxonomy in CLAUDE.md) must be in the same PR as the code.
+4. **Include acceptance-criteria checkboxes** for docs and tests — the Acceptance Reviewer will verify these against the diff.
+
+A story that changes product shape without listing docs and tests is **not ready for a dev agent** and will be blocked by the Tech Lead.
 
 ## Decomposition Process
 

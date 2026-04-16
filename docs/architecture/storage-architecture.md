@@ -51,6 +51,43 @@ The previous architecture treated Git as a first-class storage backend (one comm
 
 The same git-sync code path serves both OSS and commercial deployments. The only variable is the backend adapter it writes through to. This avoids the fork that would result from git-as-backend-for-OSS and git-sync-for-SaaS existing side-by-side.
 
+### Implementation: `pkg/gitsync`
+
+The git-sync component lives in `pkg/gitsync/` and is wired into the controller server at startup.
+
+**Key types:**
+
+| Type | Purpose |
+|------|---------|
+| `ScopeBinding` | Binds a tenant path + namespace to an external git origin (URL, branch, credential ref, polling interval) |
+| `BindingStore` | Persists bindings to `<data-dir>/.gitsync/bindings.json`; tracks last-synced SHA per scope |
+| `Syncer` | Orchestrates clone/pull, idempotency checks, and write-through to `ConfigStore` |
+| `WebhookHandler` | HTTP handler for push-event webhooks; validates HMAC-SHA256; dispatches `TriggerSync` |
+
+**Scope binding fields:**
+
+| Field | Description |
+|-------|-------------|
+| `TenantPath` | CFGMS tenant path, e.g. `root/msp-a/client-1` |
+| `Namespace` | Config namespace supplied by the bound origin, e.g. `firewall` |
+| `OriginURL` | External git repository URL |
+| `Branch` | Branch to track (default: `main`) |
+| `CredentialsRef` | Credential reference: `""` = anonymous, `"env:<VAR>"` = env var, path = file |
+| `WebhookSecretRef` | Webhook HMAC-SHA256 secret reference (same format as CredentialsRef) |
+| `PollingInterval` | Polling frequency; minimum 60 s; zero disables polling |
+
+**Credentials (v1):** `CredentialsRef` and `WebhookSecretRef` accept an environment-variable name (prefix `env:`) or a filesystem path to a file containing the credential. TODO: migrate to `pkg/secrets` `SecretStore` once sub-story H lands.
+
+**Webhook endpoint:** `POST /api/v1/webhooks/git-push`. Accepts GitHub and GitLab push-event payloads. Validates `X-Hub-Signature-256` when `WebhookSecretRef` is configured. Requests with an invalid or missing signature are rejected with HTTP 401.
+
+**Polling:** Minimum interval is 60 seconds. Polling goroutines are per-scope; a failure in one scope does not block others.
+
+**Idempotency:** The syncer tracks the last-synced commit SHA per scope in the `BindingStore`. Re-syncing the same commit is a no-op — `ConfigStore.StoreConfig` is not called a second time.
+
+**Conflict detection:** v1 does not merge; if the remote has diverged from the last-synced commit in a non-fast-forward way, the sync is logged and skipped for that scope.
+
+**Scope isolation:** A failure syncing one scope (origin unreachable, auth failure, branch not found) does not stop other scopes from syncing. Errors are logged with origin URL sanitized (`logging.SanitizeLogValue`).
+
 ## MSP GitOps Example
 
 An MSP hosting configs on GitHub with PR-based change management continues to work exactly as today:
@@ -67,17 +104,40 @@ Commercial deployments: the imported configs land in PostgreSQL. HA, replication
 
 ## Flat-File Provider (OSS)
 
-The flat-file provider is the replacement for the deprecated git provider. It stores configs and runtime data as files under a configured root directory.
+The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for config storage and the replacement for the deprecated git provider. It stores configs and audit logs as files under a configured root directory.
+
+**File layout**:
+
+```
+<root>/
+  <tenantID>/
+    configs/
+      <namespace>/
+        <name>.<format>    # JSON-encoded ConfigEntry; extension = data format
+    audit/
+      <YYYY-MM-DD>.jsonl   # Append-only JSONL; one entry per line
+```
 
 **Admin responsibilities**:
-- Backups. CFGMS does not version at the storage layer. Use filesystem snapshots, rsync, restic, or an equivalent.
+- Backups. CFGMS does not version at the storage layer. Use filesystem snapshots, rsync, restic, or an equivalent. A `cfg backup` CLI helper is planned (sub-story B).
 - Filesystem durability. SSD + regular snapshots is sufficient for single-controller OSS.
 - Access control. Directory is readable/writable only by the controller process.
 
+**What the flat-file provider implements**:
+- `ConfigStore`: store, retrieve, list, delete configs; inheritance resolution via tenant path
+- `AuditStore`: append-only JSONL per day per tenant; immutable entries; purge/archive by date
+
 **What the flat-file provider does not do**:
-- Automatic version history. (Use git-sync if you want PR-based change management.)
+- Automatic version history. (`GetConfigHistory` returns the current version only. Use git-sync if you want PR-based change management.)
 - Replication. (Use PostgreSQL if you need HA.)
 - Arbitration. (Single-writer; not safe for multiple controllers to share the same root.)
+- Business-data stores (`RBACStore`, `TenantStore`, `RuntimeStore`, etc.) — these belong in SQLite/PostgreSQL.
+
+**Registration**: The provider auto-registers on import via `init()`. A blank import is sufficient:
+
+```go
+import _ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+```
 
 ## Interface Layout
 
@@ -242,6 +302,14 @@ blobs:
 ## Implementation Status
 
 Per ADR-003, the providers and interfaces above are **not all implemented today**. The ADR ratifies the direction; implementation is tracked by the **Storage Architecture: Five-Type Data Taxonomy (ADR-003)** epic and its sub-stories. See the ADR's [Code Changes Required](decisions/003-storage-data-taxonomy.md#code-changes-required) section for the authoritative sub-story list and priorities.
+
+### Completed (as of Epic #647)
+
+| Provider | Story | Stores implemented |
+|----------|-------|--------------------|
+| `pkg/storage/providers/sqlite` | #662 | `TenantStore`, `ClientTenantStore`, `AuditStore`, `RBACStore`, `RegistrationTokenStore`, `SessionStore` |
+
+`SessionStore` is implemented in this story (#662). It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` and `RuntimeStore` interfaces return `ErrNotSupported` from the SQLite provider — config storage targets the flat-file provider (OSS) and PostgreSQL (commercial).
 
 ## References
 

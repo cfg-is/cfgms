@@ -50,6 +50,7 @@ import (
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider
+	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -87,6 +88,7 @@ type Server struct {
 	alertManager            *health.DefaultAlertManager
 	dnaStorageManager       *dnaStorage.Manager                 // Reports engine DNA storage (must be closed on Stop)
 	triggerManager          *workflowtrigger.TriggerManagerImpl // Issue #414: Workflow trigger manager
+	gitSyncer               *gitsync.Syncer                     // Issue #666: git-sync write-through component
 }
 
 // New creates a new server instance
@@ -544,7 +546,47 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Registration approval hook wired (Issue #422)")
 	}
 
+	// Issue #666: Wire git-sync component when a data directory is configured.
+	// The syncer writes through to the controller's config store.
+	if cfg.DataDir != "" {
+		gitSyncer, webhookHandler := initializeGitSync(cfg.DataDir, storageManager.GetConfigStore(), logger)
+		if gitSyncer != nil {
+			srv.gitSyncer = gitSyncer
+			if err := gitSyncer.Start(context.Background()); err != nil {
+				logger.Warn("git-sync: failed to start syncer", "error", err)
+			} else {
+				logger.Info("git-sync: syncer started", "data_dir", cfg.DataDir)
+			}
+			if webhookHandler != nil {
+				httpServer.SetGitSyncWebhookHandler(webhookHandler)
+			}
+		}
+	}
+
 	return srv, nil
+}
+
+// initializeGitSync creates a git-sync Syncer and webhook handler using the
+// given config root and config store. Returns nil, nil when the binding store
+// cannot be created.
+func initializeGitSync(
+	dataDir string,
+	configStore interfaces.ConfigStore,
+	logger logging.Logger,
+) (*gitsync.Syncer, *gitsync.WebhookHandler) {
+	workDir := filepath.Join(dataDir, ".gitsync", "repos")
+	bindingStore, err := gitsync.NewBindingStore(dataDir)
+	if err != nil {
+		logger.Warn("git-sync: failed to create binding store, git-sync disabled", "error", err)
+		return nil, nil
+	}
+	syncer, err := gitsync.NewSyncer(configStore, bindingStore, workDir, logger)
+	if err != nil {
+		logger.Warn("git-sync: failed to create syncer, git-sync disabled", "error", err)
+		return nil, nil
+	}
+	webhookHandler := gitsync.NewWebhookHandler(syncer, bindingStore, logger)
+	return syncer, webhookHandler
 }
 
 // noOpModuleRegistry is a minimal ModuleRegistry for controller wiring.
@@ -964,6 +1006,12 @@ func (s *Server) Stop() error {
 		if err := s.dnaStorageManager.Close(); err != nil {
 			s.logger.Warn("Failed to close DNA storage manager", "error", err)
 		}
+	}
+
+	// Stop git-sync syncer (Issue #666)
+	if s.gitSyncer != nil {
+		s.gitSyncer.Stop()
+		s.logger.Info("git-sync syncer stopped")
 	}
 
 	// Stop HTTP server

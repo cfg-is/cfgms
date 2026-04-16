@@ -448,3 +448,7 @@ func (m *mockAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate tim
 func (m *mockAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
 	return 0, nil
 }
+
+func (m *mockAuditStore) Close() error {
+	return nil
+}

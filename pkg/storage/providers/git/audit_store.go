@@ -757,3 +757,8 @@ func (s *GitAuditStore) SetRemoteURL(remoteURL string) error {
 
 	return nil
 }
+
+// Close is a no-op for the git-based audit store (no persistent connections to release).
+func (s *GitAuditStore) Close() error {
+	return nil
+}

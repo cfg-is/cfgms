@@ -23,6 +23,7 @@ The files in this directory today:
 | `rbac_store.go` | `RBACStore` | RBAC policy and role data |
 | `registration_store.go` | `RegistrationStore` (tokens) | Steward registration tokens |
 | `runtime_store.go` | `RuntimeStore` | Ephemeral/session runtime state |
+| `session_store.go` | `SessionStore` | Durable session state (persistent sessions only; ephemeral state lives in `pkg/cache`) |
 | `hybrid_manager.go` | `HybridStorageManager` | Composes multiple provider instances |
 
 ## Target Layout (per ADR-003)
@@ -66,21 +67,31 @@ Per ADR-003, no controller-side storage/logging interface may remain under `feat
 - `features/steward/dna/events/drift_subscriber.go` — `StorageManager` interface (controller-side drift event persistence); move under the appropriate type directory here.
 - `features/modules/m365/auth/admin_consent_flow.go` — duplicate `ClientTenantStore` interface; consolidate with the canonical `ClientTenantStore` in this package.
 
+## Provider Inventory
+
+| Provider | Package | Implements | Status |
+|----------|---------|------------|--------|
+| `flatfile` | `pkg/storage/providers/flatfile` | `ConfigStore`, `AuditStore` | Available — OSS default for config storage |
+| `database` | `pkg/storage/providers/database` | All stores | Available — commercial PostgreSQL backend |
+| `git` | `pkg/storage/providers/git` | All stores | Deprecated — use `flatfile` + git-sync |
+
 ## Backend Selection (per type)
 
 Per ADR-003, deployments compose one provider per type:
 
-| Type | OSS backend | Commercial/SaaS backend | Interface file(s) | Provider packages |
-|------|-------------|-------------------------|-------------------|-------------------|
-| Business data | SQLite | PostgreSQL | `client_tenant.go`, `tenant_store.go`, `audit_store.go`, `rbac_store.go`, `registration_store.go` | `providers/database/` |
-| Config storage | Flat file | PostgreSQL | `config_store.go` | `providers/database/`, `providers/git/` (deprecated) |
-| Secrets | SOPS files | Key vault (AWS Secrets Manager / Vault / Azure Key Vault) | *(planned: `secrets/`)* | *(planned)* |
-| Timeseries | Local log files | ClickHouse / Timescale / Influx | *(planned: `timeseries/`)* | *(planned)* |
-| Blobs | Local filesystem | S3-compatible object storage | `blob_store.go`, `blob_provider.go` | `providers/blobstore/filesystem/`, `providers/blobstore/s3/` |
+| Type | OSS backend | Commercial/SaaS backend |
+|------|-------------|-------------------------|
+| Business data | SQLite | PostgreSQL |
+| Config storage | **Flat file** (`flatfile`) | PostgreSQL (`database`) |
+| Secrets | SOPS files | Key vault (AWS Secrets Manager / Vault / Azure Key Vault) |
+| Timeseries | Local log files | ClickHouse / Timescale / Influx |
+| Blobs | Local filesystem | S3-compatible object storage |
 
 The OSS column is the zero-config default, not a limit. Any Commercial backend is available to OSS deployments — licensing boundary is tenant-tree shape, not backend choice.
 
 Git is **not** a backend. It is an optional sync source bound to admin-designated config scopes; see ADR-003 for the sync model.
+
+**`pkg/gitsync` is a write-through adapter, not a storage provider.** It sits in front of a `ConfigStore` (flat-file for OSS, PostgreSQL for commercial) and forwards imported configs via `ConfigStore.StoreConfig`. It does not implement the `ConfigStore` interface itself, and it is not registered through the provider system. Modules that read config data always target the `ConfigStore` directly — git-sync is invisible at read time. The adapter is wired at controller startup when `cfg.DataDir` is set and scope bindings exist.
 
 ## Module Usage Pattern
 
