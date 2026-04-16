@@ -6,7 +6,7 @@ toolchain go1.25.8
 
 require (
 	github.com/creack/pty v1.1.24
-	github.com/go-acme/lego/v4 v4.32.0
+	github.com/go-acme/lego/v4 v4.33.0
 	github.com/go-git/go-git/v5 v5.17.2
 	github.com/go-ldap/ldap/v3 v3.4.13
 	github.com/go-ole/go-ole v1.3.0
