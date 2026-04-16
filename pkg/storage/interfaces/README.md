@@ -96,6 +96,74 @@ Git is **not** a backend. It is an optional sync source bound to admin-designate
 
 **`pkg/gitsync` is a write-through adapter, not a storage provider.** It sits in front of a `ConfigStore` (flat-file for OSS, PostgreSQL for commercial) and forwards imported configs via `ConfigStore.StoreConfig`. It does not implement the `ConfigStore` interface itself, and it is not registered through the provider system. Modules that read config data always target the `ConfigStore` directly — git-sync is invisible at read time. The adapter is wired at controller startup when `cfg.DataDir` is set and scope bindings exist.
 
+## Composite Storage Manager (OSS Factory)
+
+### `NewStorageManagerFromStores`
+
+```go
+func NewStorageManagerFromStores(
+    configStore ConfigStore,
+    auditStore AuditStore,
+    rbacStore RBACStore,
+    runtimeStore RuntimeStore,  // always nil — RuntimeStore is being retired per ADR-003
+    tenantStore TenantStore,
+    clientTenantStore ClientTenantStore,
+    registrationTokenStore RegistrationTokenStore,
+    sessionStore SessionStore,
+    stewardStore StewardStore,
+    commandStore CommandStore,
+) *StorageManager
+```
+
+Composes a `StorageManager` from individually-supplied store implementations. The resulting
+manager has `GetProviderName() == "composite"` and `GetProvider() == nil`. Any parameter may
+be nil; the caller is responsible for providing the stores it needs.
+
+`GetCapabilities()` returns a zero-value `ProviderCapabilities{}` for composite managers —
+callers must not rely on capability flags when using composites. `GetVersion()` returns
+`"composite"`.
+
+### `CreateOSSStorageManager`
+
+```go
+func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManager, error)
+```
+
+Creates the OSS composite storage tier by wiring stores from the flatfile and SQLite
+providers per the ADR-003 store-to-provider mapping:
+
+| Store | Provider |
+|-------|----------|
+| `ConfigStore` | flatfile |
+| `AuditStore` | flatfile |
+| `StewardStore` | flatfile |
+| `TenantStore` | SQLite |
+| `ClientTenantStore` | SQLite |
+| `RBACStore` | SQLite |
+| `RegistrationTokenStore` | SQLite |
+| `SessionStore` | SQLite |
+| `CommandStore` | SQLite |
+| `RuntimeStore` | nil (retired per ADR-003) |
+
+**`sqliteConnStr`** is a caller-controlled DSN:
+- Production: `"/var/lib/cfgms/cfgms.db"` (file path)
+- Tests: `t.TempDir() + "/test.db"` (per-test isolation)
+- Do NOT use `":memory:"` — parallel tests sharing `file::memory:?cache=shared` collide on schema.
+
+Both the `"flatfile"` and `"sqlite"` providers must be registered via blank imports before
+calling this function:
+
+```go
+import (
+    _ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+    _ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+)
+```
+
+**`CreateAllStoresFromConfig` remains** for backward compatibility with single-provider
+deployments (e.g., `provider: git` or `provider: database`). It is removed in Issue #664
+when the git provider is retired.
+
 ## Module Usage Pattern
 
 Modules receive interfaces, never specific providers:
@@ -124,9 +192,10 @@ func (tm *TemplateModule) SaveTemplate(ctx context.Context, template Template) e
 
 ## Testing
 
-Use real providers with a temporary root or in-memory database:
+Use real providers with a temporary directory:
 
-- OSS path: flat-file provider under `t.TempDir()`, SQLite under `file::memory:?cache=shared`.
+- OSS path: call `interfaces.CreateOSSStorageManager(t.TempDir(), t.TempDir()+"/test.db")` — or use `pkg/testing.SetupTestStorage(t)` which wraps this for you.
+- Do NOT use `":memory:"` for SQLite in tests — parallel tests sharing `file::memory:?cache=shared` collide on schema migrations.
 - Commercial path: PostgreSQL via testcontainers or the repo's existing docker-compose fixture.
 
 CFGMS does not mock storage interfaces in tests (per CLAUDE.md "Real Component Testing").

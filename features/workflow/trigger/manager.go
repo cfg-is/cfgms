@@ -815,6 +815,10 @@ func (tm *TriggerManagerImpl) loadTriggersFromStorage(ctx context.Context) error
 }
 
 func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger *Trigger) error {
+	// No storage provider (e.g. composite OSS manager where GetProvider returns nil) — skip persistence.
+	if tm.storage == nil {
+		return nil
+	}
 	// Check if storage is available
 	available, err := tm.storage.Available()
 	if err != nil {
@@ -847,6 +851,10 @@ func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger 
 }
 
 func (tm *TriggerManagerImpl) deleteTriggerFromStorage(ctx context.Context, triggerID string) error {
+	// No storage provider (e.g. composite OSS manager where GetProvider returns nil) — skip persistence.
+	if tm.storage == nil {
+		return nil
+	}
 	// Check if storage is available
 	available, err := tm.storage.Available()
 	if err != nil {

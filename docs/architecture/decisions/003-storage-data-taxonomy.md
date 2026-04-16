@@ -194,17 +194,18 @@ Cleanest shape for the backend-technology clusters we actually need, preserves t
 
 This ADR ratifies the direction. Implementation is tracked by the epic **Storage Architecture: Five-Type Data Taxonomy (ADR-003)** with the following sub-stories (priorities reflect SaaS-unblock ordering):
 
-| # | Title | Priority | Depends on |
-|---|-------|----------|------------|
-| A | Flat-file storage provider (OSS file-based backend) | P0 | — |
-| C | SQLite storage provider for OSS business data | P0 | — |
-| D | `StewardStore` interface + persistent fleet registry | P0 | A, C |
-| B | Deprecate and remove `pkg/storage/providers/git/` | P1 | A |
-| E | Persist command dispatch state (audit-integrated) | P1 | C |
-| F | Git-sync component (shared OSS/commercial) | P1 | A |
-| G | `BlobStore` interface + filesystem and S3-compatible providers | P2 | — |
-| H | `SecretStore` interface unifying SOPS and key vaults | P2 | — |
-| I | Reorganize `pkg/storage/interfaces/` into type-based taxonomy | P2 | A, B, C, D, E, F, G, H |
+| # | Title | Priority | Depends on | Status |
+|---|-------|----------|------------|--------|
+| A | Flat-file storage provider (OSS file-based backend) | P0 | — | **Merged** (Issue #661) |
+| C | SQLite storage provider for OSS business data | P0 | — | **Merged** (Issues #662, #663, #665) |
+| D | `StewardStore` interface + persistent fleet registry | P0 | A, C | **Merged** (Issue #663) |
+| E | Persist command dispatch state (audit-integrated) | P1 | C | **Merged** (Issue #665) |
+| J | Composite storage manager + OSS factory (`NewStorageManagerFromStores`, `CreateOSSStorageManager`) | P0 | A, C, D, E | **Merged** (Issue #692) |
+| B | Deprecate and remove `pkg/storage/providers/git/` | P1 | A, J | In progress (Issue #664) |
+| F | Git-sync component (shared OSS/commercial) | P1 | A | Not started |
+| G | `BlobStore` interface + filesystem and S3-compatible providers | P2 | — | **Merged** (Issue #667) |
+| H | `SecretStore` interface unifying SOPS and key vaults | P2 | — | Not started |
+| I | Reorganize `pkg/storage/interfaces/` into type-based taxonomy | P2 | A, B, C, D, E, F, G, H | Not started |
 
 **Dependency order** (must be respected by the Planning Team when decomposing this epic):
 

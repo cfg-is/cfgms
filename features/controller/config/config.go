@@ -223,6 +223,17 @@ type StorageConfig struct {
 	// Configuration options passed to the storage provider
 	// The structure depends on the specific provider being used
 	Config map[string]interface{} `yaml:"config"`
+
+	// FlatfileRoot is the directory root for the flat-file storage provider.
+	// When set, the OSS composite storage manager is used (flatfile + SQLite) instead
+	// of the single-provider path. Requires SQLitePath to also be set.
+	// Example: "/var/lib/cfgms/config"
+	FlatfileRoot string `yaml:"flatfile_root,omitempty"`
+
+	// SQLitePath is the file path for the SQLite database used by the OSS composite
+	// storage manager. Caller-controlled DSN — use a file path such as
+	// "/var/lib/cfgms/cfgms.db". Only used when FlatfileRoot is set.
+	SQLitePath string `yaml:"sqlite_path,omitempty"`
 }
 
 // LoggingConfig contains global logging provider configuration

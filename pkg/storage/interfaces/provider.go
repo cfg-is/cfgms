@@ -542,13 +542,22 @@ func (sm *StorageManager) GetCommandStore() CommandStore {
 	return sm.commandStore
 }
 
-// GetCapabilities returns the provider's capabilities
+// GetCapabilities returns the provider's capabilities.
+// Returns a zero-value ProviderCapabilities when the manager has no backing provider
+// (e.g. a composite manager created with NewStorageManagerFromStores).
 func (sm *StorageManager) GetCapabilities() ProviderCapabilities {
+	if sm.provider == nil {
+		return ProviderCapabilities{}
+	}
 	return sm.provider.GetCapabilities()
 }
 
-// GetVersion returns the provider's version
+// GetVersion returns the provider's version.
+// Returns "composite" when the manager has no backing provider.
 func (sm *StorageManager) GetVersion() string {
+	if sm.provider == nil {
+		return sm.providerName
+	}
 	return sm.provider.GetVersion()
 }
 
@@ -585,4 +594,111 @@ func ListProvidersV2() []ProviderInfoV2 {
 // This is the recommended entry point for production deployments with mixed storage needs
 func CreateHybridStorageManagerFromConfig(config HybridStorageConfig) (*HybridStorageManager, error) {
 	return CreateHybridStorageFromConfig(config)
+}
+
+// NewStorageManagerFromStores composes a StorageManager from individually-provided store
+// implementations.  The caller is responsible for providing the stores it needs; any
+// parameter may be nil.  The resulting manager has providerName "composite" and a nil
+// provider field — callers must not rely on GetProvider() returning a non-nil value, and
+// GetCapabilities() returns a zero-value ProviderCapabilities{} for composite managers.
+//
+// runtimeStore is accepted for signature compatibility but should always be nil: RuntimeStore
+// is being retired per ADR-003.  Callers that pass a non-nil runtimeStore will compile, but
+// the field will not be used by any current CFGMS code path.
+func NewStorageManagerFromStores(
+	configStore ConfigStore,
+	auditStore AuditStore,
+	rbacStore RBACStore,
+	runtimeStore RuntimeStore,
+	tenantStore TenantStore,
+	clientTenantStore ClientTenantStore,
+	registrationTokenStore RegistrationTokenStore,
+	sessionStore SessionStore,
+	stewardStore StewardStore,
+	commandStore CommandStore,
+) *StorageManager {
+	return &StorageManager{
+		providerName:           "composite",
+		provider:               nil,
+		configStore:            configStore,
+		auditStore:             auditStore,
+		rbacStore:              rbacStore,
+		runtimeStore:           runtimeStore,
+		tenantStore:            tenantStore,
+		clientTenantStore:      clientTenantStore,
+		registrationTokenStore: registrationTokenStore,
+		sessionStore:           sessionStore,
+		stewardStore:           stewardStore,
+		commandStore:           commandStore,
+	}
+}
+
+// CreateOSSStorageManager composes the OSS storage tier from a flatfile provider (for
+// config/audit/steward stores) and a SQLite provider (for business-data stores), following
+// the ADR-003 store-to-provider mapping.
+//
+// flatfileRoot is the directory root for the flat-file provider.
+// sqliteConnStr is the SQLite DSN passed to the SQLite provider.  Use a file path such as
+// "/var/lib/cfgms/cfgms.db" in production.  In tests use t.TempDir()+"/test.db" for
+// per-test isolation — do NOT pass ":memory:", because parallel tests sharing
+// "file::memory:?cache=shared" collide on schema migrations.
+//
+// Both the "flatfile" and "sqlite" providers must be registered (via blank imports of their
+// respective packages) before calling this function.
+func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManager, error) {
+	flatfileCfg := map[string]interface{}{"root": flatfileRoot}
+	sqliteCfg := map[string]interface{}{"path": sqliteConnStr}
+
+	ffProvider, err := GetStorageProvider("flatfile")
+	if err != nil {
+		return nil, fmt.Errorf("flatfile provider not registered: %w", err)
+	}
+	sqProvider, err := GetStorageProvider("sqlite")
+	if err != nil {
+		return nil, fmt.Errorf("sqlite provider not registered: %w", err)
+	}
+
+	configStore, err := ffProvider.CreateConfigStore(flatfileCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create config store (flatfile): %w", err)
+	}
+	auditStore, err := ffProvider.CreateAuditStore(flatfileCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create audit store (flatfile): %w", err)
+	}
+	stewardStore, err := ffProvider.CreateStewardStore(flatfileCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create steward store (flatfile): %w", err)
+	}
+
+	rbacStore, err := sqProvider.CreateRBACStore(sqliteCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create RBAC store (sqlite): %w", err)
+	}
+	tenantStore, err := sqProvider.CreateTenantStore(sqliteCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tenant store (sqlite): %w", err)
+	}
+	clientTenantStore, err := sqProvider.CreateClientTenantStore(sqliteCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create client tenant store (sqlite): %w", err)
+	}
+	registrationTokenStore, err := sqProvider.CreateRegistrationTokenStore(sqliteCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create registration token store (sqlite): %w", err)
+	}
+	sessionStore, err := sqProvider.CreateSessionStore(sqliteCfg)
+	if err != nil && err != ErrNotSupported {
+		return nil, fmt.Errorf("failed to create session store (sqlite): %w", err)
+	}
+	commandStore, err := sqProvider.CreateCommandStore(sqliteCfg)
+	if err != nil && err != ErrNotSupported {
+		return nil, fmt.Errorf("failed to create command store (sqlite): %w", err)
+	}
+
+	return NewStorageManagerFromStores(
+		configStore, auditStore, rbacStore, nil,
+		tenantStore, clientTenantStore, registrationTokenStore,
+		sessionStore, stewardStore, commandStore,
+	), nil
 }

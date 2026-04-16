@@ -11,20 +11,21 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
-	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	// Import storage providers for testing — OSS composite (flatfile + SQLite)
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
-// SetupTestStorage creates a git-based storage manager for testing
-// This is the minimum durable storage required for CFGMS testing
+// SetupTestStorage creates an OSS composite storage manager for testing.
+// Uses flatfile (config/audit/steward) and SQLite (business data) providers backed
+// by temporary directories — each call produces fully isolated storage.
 func SetupTestStorage(t *testing.T) *interfaces.StorageManager {
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
+	t.Helper()
 
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	flatfileRoot := t.TempDir()
+	sqlitePath := t.TempDir() + "/cfgms.db"
+
+	storageManager, err := interfaces.CreateOSSStorageManager(flatfileRoot, sqlitePath)
 	if err != nil {
 		t.Fatalf("Failed to create test storage: %v", err)
 	}
