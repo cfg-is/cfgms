@@ -193,6 +193,12 @@ func (p *DatabaseProvider) CreateStewardStore(config map[string]interface{}) (in
 	return nil, interfaces.ErrNotSupported
 }
 
+// CreateCommandStore is not supported by the database provider.
+// Command dispatch state belongs in the business-data tier (SQLite for OSS).
+func (p *DatabaseProvider) CreateCommandStore(config map[string]interface{}) (interfaces.CommandStore, error) {
+	return nil, interfaces.ErrNotSupported
+}
+
 func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)

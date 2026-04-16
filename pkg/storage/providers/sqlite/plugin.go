@@ -231,6 +231,15 @@ func (p *SQLiteProvider) CreateStewardStore(config map[string]interface{}) (inte
 	return &SQLiteStewardStore{db: db}, nil
 }
 
+// CreateCommandStore returns a SQLite-backed CommandStore for durable command dispatch state.
+func (p *SQLiteProvider) CreateCommandStore(config map[string]interface{}) (interfaces.CommandStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteCommandStore{db: db}, nil
+}
+
 // init auto-registers the SQLite provider so it is available after a blank import.
 func init() {
 	interfaces.RegisterStorageProvider(&SQLiteProvider{})

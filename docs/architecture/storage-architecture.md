@@ -311,6 +311,7 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 | `pkg/storage/providers/flatfile` | #661 | `ConfigStore`, `AuditStore` |
 | `pkg/storage/providers/sqlite` | #663 | `StewardStore` |
 | `pkg/storage/providers/flatfile` | #663 | `StewardStore` |
+| `pkg/storage/providers/sqlite` | #665 | `CommandStore` |
 
 ### StewardStore (Issue #663)
 
@@ -325,6 +326,23 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 **Fleet tracker**: `features/steward/StewardHealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`) in-memory via a `sync.Map`.
 
 `SessionStore` is implemented in story #662. It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` and `RuntimeStore` interfaces return `ErrNotSupported` from the SQLite provider — config storage targets the flat-file provider (OSS) and PostgreSQL (commercial).
+
+### CommandStore (Issue #665)
+
+`CommandStore` is the durable command dispatch state backend. It persists the full lifecycle of commands dispatched to stewards so that dispatch state (executing, completed, failed) survives a process restart and forms a crash-survivable audit trail.
+
+**Key design decisions**:
+- Two tables: `commands` (current state) and `command_transitions` (immutable audit log of every status change, including initial creation as `pending`).
+- `GetCommandAuditTrail(commandID)` returns all transitions in chronological order — this record is immutable; only `PurgeExpiredRecords` can delete it (by age).
+- `PurgeExpiredRecords(ctx, olderThan)` removes `completed`, `failed`, and `cancelled` records older than the threshold. `executing` and `pending` records are never purged.
+- **Startup sweep**: when `features/steward/commands.Handler` is initialised with a `CommandStore`, it queries all `executing` records and flips them to `failed` with error `"controller_restart"`. This converts crash-time in-progress state into a queryable audit entry.
+- The in-memory `executing` map in `Handler` retains only `context.CancelFunc` for in-flight cancellation — durable state is entirely in the store.
+
+**Status values**: `pending` → `executing` → `completed` / `failed` / `cancelled`.
+
+**Implementations**:
+- `pkg/storage/providers/sqlite`: `commands` and `command_transitions` tables added to the shared SQLite schema. This is the OSS default.
+- `pkg/storage/providers/flatfile`, `database`, `git`: return `ErrNotSupported` — command state is business data, not config data.
 
 ## References
 

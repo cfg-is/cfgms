@@ -201,6 +201,39 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_stewards_status    ON stewards(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_stewards_last_seen ON stewards(last_seen)`,
 
+		// Commands — durable command dispatch state (ADR-003 §1 Deficiency #5, Issue #665)
+		// Records are append-only for audit purposes; PurgeExpiredRecords removes
+		// completed/failed records older than the configured threshold.
+		`CREATE TABLE IF NOT EXISTS commands (
+			id            TEXT PRIMARY KEY,
+			type          TEXT NOT NULL,
+			steward_id    TEXT NOT NULL,
+			tenant_id     TEXT NOT NULL DEFAULT '',
+			payload       TEXT NOT NULL DEFAULT '{}',
+			status        TEXT NOT NULL DEFAULT 'pending',
+			issued_at     TEXT NOT NULL,
+			started_at    TEXT,
+			completed_at  TEXT,
+			result        TEXT NOT NULL DEFAULT '{}',
+			error_message TEXT NOT NULL DEFAULT '',
+			issued_by     TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_commands_steward_id  ON commands(steward_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_commands_status      ON commands(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_commands_issued_at   ON commands(issued_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_commands_tenant_id   ON commands(tenant_id)`,
+
+		// Command audit trail — immutable log of each state transition
+		`CREATE TABLE IF NOT EXISTS command_transitions (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			command_id    TEXT NOT NULL,
+			status        TEXT NOT NULL,
+			timestamp     TEXT NOT NULL,
+			error_message TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_command_transitions_command_id ON command_transitions(command_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_command_transitions_timestamp  ON command_transitions(timestamp)`,
+
 		// Durable sessions (Persistent=true only)
 		`CREATE TABLE IF NOT EXISTS sessions (
 			session_id       TEXT PRIMARY KEY,

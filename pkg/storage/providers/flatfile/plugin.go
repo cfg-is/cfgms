@@ -200,6 +200,12 @@ func (p *FlatFileProvider) CreateStewardStore(config map[string]interface{}) (in
 	return store, nil
 }
 
+// CreateCommandStore returns ErrNotSupported.
+// Command dispatch state belongs in the business-data tier (SQLite).
+func (p *FlatFileProvider) CreateCommandStore(config map[string]interface{}) (interfaces.CommandStore, error) {
+	return nil, ErrNotSupported
+}
+
 // init auto-registers the flat-file provider so that a blank import is sufficient.
 func init() {
 	interfaces.RegisterStorageProvider(&FlatFileProvider{})

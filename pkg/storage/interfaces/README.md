@@ -25,6 +25,7 @@ The files in this directory today:
 | `runtime_store.go` | `RuntimeStore` | Ephemeral/session runtime state |
 | `session_store.go` | `SessionStore` | Durable session state (persistent sessions only; ephemeral state lives in `pkg/cache`) |
 | `steward_store.go` | `StewardStore` | Durable fleet registry (steward status, last_seen, heartbeat); implemented by flat-file and SQLite providers |
+| `command_store.go` | `CommandStore` | Durable command dispatch state (status, audit trail); implemented by SQLite provider (Issue #665) |
 | `hybrid_manager.go` | `HybridStorageManager` | Composes multiple provider instances |
 
 ## Target Layout (per ADR-003)

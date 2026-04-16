@@ -222,6 +222,12 @@ func (p *GitProvider) CreateStewardStore(config map[string]interface{}) (interfa
 	return nil, interfaces.ErrNotSupported
 }
 
+// CreateCommandStore is not supported by the git provider.
+// Command dispatch state belongs in the business-data tier (SQLite).
+func (p *GitProvider) CreateCommandStore(config map[string]interface{}) (interfaces.CommandStore, error) {
+	return nil, interfaces.ErrNotSupported
+}
+
 // Auto-register this provider (Salt-style)
 func init() {
 	interfaces.RegisterStorageProvider(&GitProvider{})
