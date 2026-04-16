@@ -64,7 +64,7 @@ func (h *stewardServiceHandler) Execute(
 	opMode := flags.String("mode", "", "operation mode")
 	// Ignore unknown flags (e.g. subcommand names) so the service can start even
 	// if the arg list changes between versions.
-	flags.ParseErrorsWhitelist.UnknownFlags = true
+	flags.ParseErrorsAllowlist.UnknownFlags = true
 	_ = flags.Parse(os.Args[1:])
 
 	ctx, cancel := context.WithCancel(context.Background())
