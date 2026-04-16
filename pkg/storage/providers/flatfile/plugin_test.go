@@ -113,6 +113,13 @@ func TestUnsupportedStoresReturnErrNotSupported(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not supported")
 	})
+
+	t.Run("CreateCommandStore", func(t *testing.T) {
+		store, err := p.CreateCommandStore(cfg)
+		assert.Nil(t, store)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not supported")
+	})
 }
 
 func TestCreateConfigStoreRequiresRoot(t *testing.T) {

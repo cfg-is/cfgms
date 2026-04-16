@@ -161,12 +161,7 @@ var _ interfaces.CommandStore = (*memCommandStore)(nil)
 
 func newTestLogger(t *testing.T) logging.Logger {
 	t.Helper()
-	logger, err := logging.NewLogger(logging.Config{
-		Level:  "debug",
-		Format: "text",
-	})
-	require.NoError(t, err)
-	return logger
+	return logging.NewLogger("debug")
 }
 
 func noopStatus(_ context.Context, _ *cpTypes.Event) {}

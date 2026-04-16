@@ -113,6 +113,10 @@ func (m *MockStorageProvider) CreateStewardStore(_ map[string]interface{}) (inte
 	return nil, interfaces.ErrNotSupported
 }
 
+func (m *MockStorageProvider) CreateCommandStore(_ map[string]interface{}) (interfaces.CommandStore, error) {
+	return nil, interfaces.ErrNotSupported
+}
+
 func (m *MockStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	args := m.Called()
 	return args.Get(0).(interfaces.ProviderCapabilities)

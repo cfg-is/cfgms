@@ -828,6 +828,15 @@ func TestGitProvider_CreateStores(t *testing.T) {
 	assert.NotNil(t, auditStore)
 }
 
+func TestGitProvider_CreateCommandStoreReturnsErrNotSupported(t *testing.T) {
+	provider := &GitProvider{}
+
+	store, err := provider.CreateCommandStore(map[string]interface{}{})
+	assert.Nil(t, store)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, interfaces.ErrNotSupported)
+}
+
 func TestGitConfigStore_ErrorCases(t *testing.T) {
 	tempDir := t.TempDir()
 	repoPath := filepath.Join(tempDir, "test-error-repo")

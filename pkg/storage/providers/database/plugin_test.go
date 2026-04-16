@@ -472,6 +472,15 @@ func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 	assert.Contains(t, err.Error(), "password is required")
 }
 
+func TestDatabaseProvider_CreateCommandStoreReturnsErrNotSupported(t *testing.T) {
+	provider := &DatabaseProvider{}
+
+	store, err := provider.CreateCommandStore(map[string]interface{}{})
+	assert.Nil(t, store)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, interfaces.ErrNotSupported)
+}
+
 func TestUtilityFunctions(t *testing.T) {
 	// Test getStringFromConfig
 	config := map[string]interface{}{
