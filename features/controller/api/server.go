@@ -67,6 +67,7 @@ type Server struct {
 	workflowHandler         *WorkflowHandler               // Story #414: Workflow engine REST API
 	approvalHook            RegistrationApprovalHook       // Issue #422: Registration approval hook
 	fleetQuery              fleet.FleetQuery               // Issue #603: Single query path for device filtering
+	gitSyncWebhookHandler   http.Handler                   // Issue #666: git-sync webhook endpoint (optional)
 }
 
 // APIKey represents an API key for external authentication
@@ -350,6 +351,10 @@ func (s *Server) setupRouter() {
 	compliance := api.PathPrefix("/compliance").Subrouter()
 	compliance.Handle("/summary", s.requirePermission("compliance", "read-summary")(http.HandlerFunc(s.handleGetComplianceSummary))).Methods("GET")
 
+	// Git-sync webhook is registered lazily by SetGitSyncWebhookHandler (Issue #666).
+	// No route is pre-registered here; the endpoint only exists when a git-sync
+	// handler is explicitly wired in after server creation.
+
 	// Raft consensus endpoints (no auth required - internal cluster communication)
 	s.router.HandleFunc("/raft/message", s.handleRaftMessage).Methods("POST")
 	s.router.HandleFunc("/raft/status", s.handleRaftStatus).Methods("GET")
@@ -490,6 +495,20 @@ func (s *Server) SetApprovalHook(hook RegistrationApprovalHook) {
 	defer s.mu.Unlock()
 	if hook != nil {
 		s.approvalHook = hook
+	}
+}
+
+// SetGitSyncWebhookHandler registers the git-sync push-event webhook handler.
+// The handler is mounted at POST /api/v1/webhooks/git-push and uses its own
+// HMAC-SHA256 signature validation (no API-key auth). Call this after New()
+// returns but before Start() is called (Issue #666).
+func (s *Server) SetGitSyncWebhookHandler(h http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gitSyncWebhookHandler = h
+	if h != nil {
+		s.router.Handle("/api/v1/webhooks/git-push", h).Methods("POST")
+		s.logger.Info("git-sync webhook endpoint registered at /api/v1/webhooks/git-push")
 	}
 }
 
