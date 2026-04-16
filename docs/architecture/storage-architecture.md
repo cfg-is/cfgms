@@ -205,8 +205,23 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 | Provider | Story | Stores implemented |
 |----------|-------|--------------------|
 | `pkg/storage/providers/sqlite` | #662 | `TenantStore`, `ClientTenantStore`, `AuditStore`, `RBACStore`, `RegistrationTokenStore`, `SessionStore` |
+| `pkg/storage/providers/flatfile` | #661 | `ConfigStore`, `AuditStore` |
+| `pkg/storage/providers/sqlite` | #663 | `StewardStore` |
+| `pkg/storage/providers/flatfile` | #663 | `StewardStore` |
 
-`SessionStore` is implemented in this story (#662). It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` and `RuntimeStore` interfaces return `ErrNotSupported` from the SQLite provider — config storage targets the flat-file provider (OSS) and PostgreSQL (commercial).
+### StewardStore (Issue #663)
+
+`StewardStore` is the durable fleet registry. The controller persists per-steward data (ID, hostname, platform, arch, version, IP address, status, `registered_at`, `last_seen`, `last_heartbeat_at`) so the fleet view survives controller restarts without waiting for all stewards to re-register.
+
+**Status values**: `registered` → `active` → `lost` / `deregistered`. Records are never deleted; `lost` and `deregistered` stewards are retained for audit history.
+
+**Implementations**:
+- `pkg/storage/providers/flatfile`: one JSON file per steward at `<root>/stewards/<stewardID>.json`. `ListStewards` is O(n) in the number of stewards — a known limitation for large fleets; prefer SQLite for fleets where query performance matters.
+- `pkg/storage/providers/sqlite`: stewards stored in the `stewards` table; `ListStewardsByStatus` uses an indexed query on `status`.
+
+**Fleet tracker**: `features/steward/StewardHealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`) in-memory via a `sync.Map`.
+
+`SessionStore` is implemented in story #662. It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` and `RuntimeStore` interfaces return `ErrNotSupported` from the SQLite provider — config storage targets the flat-file provider (OSS) and PostgreSQL (commercial).
 
 ## References
 

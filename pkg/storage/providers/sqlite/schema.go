@@ -184,6 +184,23 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_registration_tokens_tenant_id  ON registration_tokens(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_registration_tokens_group_name ON registration_tokens(group_name)`,
 
+		// Stewards — durable fleet registry (ADR-003 §2, Issue #663)
+		// Records are never deleted; deregistered stewards are retained for audit.
+		`CREATE TABLE IF NOT EXISTS stewards (
+			id                TEXT PRIMARY KEY,
+			hostname          TEXT NOT NULL DEFAULT '',
+			platform          TEXT NOT NULL DEFAULT '',
+			arch              TEXT NOT NULL DEFAULT '',
+			version           TEXT NOT NULL DEFAULT '',
+			ip_address        TEXT NOT NULL DEFAULT '',
+			status            TEXT NOT NULL DEFAULT 'registered',
+			registered_at     TEXT NOT NULL,
+			last_seen         TEXT NOT NULL,
+			last_heartbeat_at TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_stewards_status    ON stewards(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_stewards_last_seen ON stewards(last_seen)`,
+
 		// Durable sessions (Persistent=true only)
 		`CREATE TABLE IF NOT EXISTS sessions (
 			session_id       TEXT PRIMARY KEY,

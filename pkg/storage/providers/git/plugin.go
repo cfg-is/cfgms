@@ -216,6 +216,12 @@ func (p *GitProvider) CreateSessionStore(config map[string]interface{}) (interfa
 	return nil, interfaces.ErrNotSupported
 }
 
+// CreateStewardStore is not supported by the git provider.
+// StewardStore is implemented by the flat-file and SQLite providers (Issue #663).
+func (p *GitProvider) CreateStewardStore(config map[string]interface{}) (interfaces.StewardStore, error) {
+	return nil, interfaces.ErrNotSupported
+}
+
 // Auto-register this provider (Salt-style)
 func init() {
 	interfaces.RegisterStorageProvider(&GitProvider{})

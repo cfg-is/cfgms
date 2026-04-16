@@ -97,6 +97,7 @@ For production fleets, a steward runs alongside the controller on each node. The
 | Controller config file | Steward | `/etc/cfgms/controller.cfg` |
 | CA and certificates | Controller | Generated during `--init`, managed in-memory |
 | RBAC and tenant data | Controller | Stored in durable storage backend |
+| Fleet registry | Controller | Steward registrations and heartbeats persisted in `StewardStore` — survives controller restarts (Issue #663) |
 | Storage backend | Controller | Git repo or PostgreSQL operations |
 | Fleet orchestration | Controller | Config distribution, steward registration, workflows |
 
@@ -170,6 +171,16 @@ Every cfg distributed to a steward is signed using the controller's dedicated si
 ## Fleet Management
 
 The controller maintains awareness of all registered stewards and their state.
+
+### Fleet Registry Durability (Issue #663)
+
+The fleet registry is backed by a `StewardStore` (see `pkg/storage/interfaces/steward_store.go`). Registrations, heartbeats, and status transitions are persisted to durable storage so the fleet view survives controller restarts without waiting for all stewards to re-register.
+
+**Steward lifecycle states**: `registered` → `active` → `lost` / `deregistered`. Records are retained indefinitely for audit; a `lost` steward can re-register and will have its record updated in place.
+
+**Implementation**: `features/steward/StewardHealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`: task latency counters, config error counts, recovery attempts) in-memory only. The in-memory metrics are not persisted and reset on restart — this is by design.
+
+**After a restart**: On startup, the controller can call `ListStewards()` or `ListStewardsByStatus()` to enumerate the fleet without waiting for stewards to check in. The stored `last_seen` and `last_heartbeat_at` timestamps allow the controller to identify stewards that went silent before or during the restart.
 
 ### Steward Tracking
 

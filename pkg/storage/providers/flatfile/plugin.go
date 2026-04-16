@@ -185,6 +185,21 @@ func (p *FlatFileProvider) CreateSessionStore(config map[string]interface{}) (in
 	return nil, ErrNotSupported
 }
 
+// CreateStewardStore creates a flat-file-based StewardStore.
+// Config map must contain "root" (string): the root directory.
+// Steward records are stored as JSON files under <root>/stewards/.
+func (p *FlatFileProvider) CreateStewardStore(config map[string]interface{}) (interfaces.StewardStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileStewardStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create steward store: %w", err)
+	}
+	return store, nil
+}
+
 // init auto-registers the flat-file provider so that a blank import is sufficient.
 func init() {
 	interfaces.RegisterStorageProvider(&FlatFileProvider{})

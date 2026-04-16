@@ -22,6 +22,7 @@ The files in this directory today:
 | `registration_store.go` | `RegistrationStore` (tokens) | Steward registration tokens |
 | `runtime_store.go` | `RuntimeStore` | Ephemeral/session runtime state |
 | `session_store.go` | `SessionStore` | Durable session state (persistent sessions only; ephemeral state lives in `pkg/cache`) |
+| `steward_store.go` | `StewardStore` | Durable fleet registry (steward status, last_seen, heartbeat); implemented by flat-file and SQLite providers |
 | `hybrid_manager.go` | `HybridStorageManager` | Composes multiple provider instances |
 
 ## Target Layout (per ADR-003)
@@ -69,7 +70,8 @@ Per ADR-003, no controller-side storage/logging interface may remain under `feat
 
 | Provider | Package | Implements | Status |
 |----------|---------|------------|--------|
-| `flatfile` | `pkg/storage/providers/flatfile` | `ConfigStore`, `AuditStore` | Available — OSS default for config storage |
+| `flatfile` | `pkg/storage/providers/flatfile` | `ConfigStore`, `AuditStore`, `StewardStore` | Available — OSS default for config storage and fleet registry |
+| `sqlite` | `pkg/storage/providers/sqlite` | Business-data stores + `StewardStore` | Available — OSS default for business-data tier |
 | `database` | `pkg/storage/providers/database` | All stores | Available — commercial PostgreSQL backend |
 | `git` | `pkg/storage/providers/git` | All stores | Deprecated — use `flatfile` + git-sync |
 

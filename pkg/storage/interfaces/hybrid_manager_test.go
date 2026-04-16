@@ -350,6 +350,10 @@ func (p *mockProvider) CreateSessionStore(config map[string]interface{}) (Sessio
 	return nil, ErrNotSupported
 }
 
+func (p *mockProvider) CreateStewardStore(config map[string]interface{}) (StewardStore, error) {
+	return nil, ErrNotSupported
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:   true,
