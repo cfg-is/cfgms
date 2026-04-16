@@ -13,6 +13,8 @@ The files in this directory today:
 | File | Interface(s) | Purpose |
 |------|--------------|---------|
 | `provider.go` | `StorageProvider` | Provider registration and capability reporting |
+| `blob_store.go` | `BlobStore` | Large binary object storage (installers, reports, DNA snapshots) |
+| `blob_provider.go` | `BlobProvider` | BlobStore provider registry (separate from `StorageProvider`) |
 | `client_tenant.go` | `ClientTenantStore` | MSP client tenant data |
 | `m365_client_tenant_store.go` | `M365ClientTenantStore` | M365-specific consent state (will fold into `ClientTenantStore`) |
 | `tenant_store.go` | `TenantStore` | Recursive tenant hierarchy |
@@ -56,7 +58,7 @@ pkg/storage/interfaces/
 | *(new)* `SecretStore` | `secrets/` | Unifies SOPS and vault providers |
 | *(new)* `MetricsStore` | `timeseries/` | |
 | *(new)* `LogStore` | `timeseries/` | |
-| *(new)* `BlobStore` | `blob/` | |
+| *(new→implemented)* `BlobStore` | flat layout (`blob_store.go`) | **Implemented** in `providers/blobstore/filesystem/` (OSS) and `providers/blobstore/s3/` (commercial). Full reorganization into `blob/` subdirectory tracked under the ADR-003 epic. |
 
 ### Controller Interfaces Misplaced Under `features/steward/*`
 
