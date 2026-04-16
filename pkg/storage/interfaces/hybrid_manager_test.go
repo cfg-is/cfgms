@@ -346,6 +346,10 @@ func (p *mockProvider) CreateRegistrationTokenStore(config map[string]interface{
 	return &mockRegistrationTokenStore{}, nil
 }
 
+func (p *mockProvider) CreateSessionStore(config map[string]interface{}) (SessionStore, error) {
+	return nil, ErrNotSupported
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:   true,
@@ -401,6 +405,10 @@ func (s *mockClientTenantStore) GetAdminConsentRequest(state string) (*AdminCons
 }
 
 func (s *mockClientTenantStore) DeleteAdminConsentRequest(state string) error {
+	return nil
+}
+
+func (s *mockClientTenantStore) Close() error {
 	return nil
 }
 
@@ -516,6 +524,10 @@ func (s *mockAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate tim
 
 func (s *mockAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
 	return 0, nil
+}
+
+func (s *mockAuditStore) Close() error {
+	return nil
 }
 
 type mockRBACStore struct{}

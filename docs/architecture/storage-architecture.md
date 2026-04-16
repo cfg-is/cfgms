@@ -200,6 +200,14 @@ controller:
 
 Per ADR-003, the providers and interfaces above are **not all implemented today**. The ADR ratifies the direction; implementation is tracked by the **Storage Architecture: Five-Type Data Taxonomy (ADR-003)** epic and its sub-stories. See the ADR's [Code Changes Required](decisions/003-storage-data-taxonomy.md#code-changes-required) section for the authoritative sub-story list and priorities.
 
+### Completed (as of Epic #647)
+
+| Provider | Story | Stores implemented |
+|----------|-------|--------------------|
+| `pkg/storage/providers/sqlite` | #662 | `TenantStore`, `ClientTenantStore`, `AuditStore`, `RBACStore`, `RegistrationTokenStore`, `SessionStore` |
+
+`SessionStore` is implemented in this story (#662). It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` and `RuntimeStore` interfaces return `ErrNotSupported` from the SQLite provider — config storage targets the flat-file provider (OSS) and PostgreSQL (commercial).
+
 ## References
 
 - [ADR-003: Storage Data Taxonomy](decisions/003-storage-data-taxonomy.md) — authoritative design document

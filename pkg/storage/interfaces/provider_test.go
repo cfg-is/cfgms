@@ -90,6 +90,10 @@ func (m *MockStorageProvider) CreateRegistrationTokenStore(config map[string]int
 	return &MockRegistrationTokenStore{}, nil
 }
 
+func (m *MockStorageProvider) CreateSessionStore(config map[string]interface{}) (SessionStore, error) {
+	return nil, ErrNotSupported
+}
+
 // Mock implementations of store interfaces
 type MockClientTenantStore struct{}
 
@@ -114,6 +118,7 @@ func (m *MockClientTenantStore) GetAdminConsentRequest(state string) (*AdminCons
 	return nil, ErrTenantNotFound
 }
 func (m *MockClientTenantStore) DeleteAdminConsentRequest(state string) error { return nil }
+func (m *MockClientTenantStore) Close() error                                 { return nil }
 
 type MockConfigStore struct{}
 
@@ -179,6 +184,7 @@ func (m *MockAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate tim
 func (m *MockAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
 	return 0, nil
 }
+func (m *MockAuditStore) Close() error { return nil }
 
 type MockRBACStore struct{}
 
