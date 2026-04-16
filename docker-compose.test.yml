@@ -642,6 +642,28 @@ services:
     profiles:
       - standalone  # NEW profile for Tier 1 testing
 
+  # OpenBao dev-mode instance for secrets provider integration tests.
+  # Uses host port 8201 to avoid collision with any local Vault/OpenBao on 8200.
+  # Start with: docker compose --profile openbao -f docker-compose.test.yml up -d openbao-test
+  openbao-test:
+    image: openbao/openbao:latest
+    container_name: cfgms-openbao-test
+    command: server -dev -dev-root-token-id=root
+    environment:
+      BAO_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    ports:
+      - "8201:8200"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8200/v1/sys/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - cfgms-test
+    profiles:
+      - openbao
+
 volumes:
   postgres_test_data:
     driver: local

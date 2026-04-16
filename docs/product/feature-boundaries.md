@@ -25,6 +25,7 @@ This maximizes trust, community velocity for integrations, and follows proven mo
 |---------|-----|-------------------------------|-------|
 | **Architecture** | ✅ Single controller | ✅ Single controller + HA clustering | HA: Raft consensus, auto-failover |
 | **Storage** | ✅ Flat-file (config), SQLite (business data), PostgreSQL (optional) | ✅ Same + HA-optimized PostgreSQL | All providers support encryption. Git is not a storage backend — it is an optional sync source. |
+| **Secrets backend** | ✅ SOPS (file-based), OpenBao (Apache 2.0, dev-mode and single-node) | ✅ Same + AWS Secrets Manager, HashiCorp Vault cluster, Azure Key Vault | OpenBao is Apache 2.0; a dev-mode instance runs via `docker-compose --profile openbao`. |
 | **Communication** | ✅ gRPC-over-QUIC | ✅ Same | No difference |
 | **CLI/API** | ✅ All | ✅ Same | Complete CLI access in both |
 | **Web UI** | ❌ None | ✅ Full UI | Graphical workflow builder, dashboards |

@@ -457,8 +457,52 @@ E2E tests run in GitHub Actions via the Build Gate workflow:
 | Config Status Reporting | < 5s | < 10s | > 10s |
 | Multi-Tenant Isolation | < 10s | < 30s | > 30s |
 
+## OpenBao-Backed Integration Tests
+
+The `openbao` docker-compose profile starts an OpenBao dev-mode instance on
+**host port 8201** used by the secrets provider integration tests.
+
+### Start the fixture
+
+```bash
+docker compose --profile openbao -f docker-compose.test.yml up -d openbao-test
+
+# Wait for healthy
+docker compose -f docker-compose.test.yml ps openbao-test
+```
+
+### Run OpenBao integration tests
+
+```bash
+OPENBAO_ADDR=http://localhost:8201 \
+OPENBAO_TOKEN=root \
+go test -v -tags integration ./pkg/secrets/providers/openbao/...
+```
+
+The tests cover:
+
+- Full CRUD round-trip (store, get, delete)
+- KV v2 native versioning (GetSecretVersion, ListSecretVersions)
+- Secret rotation with old-version access
+- Custom metadata update and retrieval
+- `ListSecrets` with prefix filter and tenant isolation
+- Lease semantics: `LeaseSecret` returns `ErrLeaseNotSupported` for static KV v2
+- `RenewLease` / `RevokeLease` error paths for invalid lease IDs
+- Bulk `StoreSecrets` / `GetSecrets`
+- `HealthCheck` and `Close`
+
+### Stop the fixture
+
+```bash
+docker compose --profile openbao -f docker-compose.test.yml down
+```
+
+> **Note**: The `openbao` profile is separate from `database`, `timescale`,
+> `ha`, and `git` profiles. Each can be started independently.
+
 ## References
 
 - **Transport Architecture**: [docs/architecture/communication-layer-migration.md](../architecture/communication-layer-migration.md)
 - **Deployment Guide**: [docs/deployment/README.md](../deployment/README.md)
 - **Troubleshooting**: [docs/troubleshooting/connectivity.md](../troubleshooting/connectivity.md)
+- **OpenBao Provider**: [pkg/secrets/providers/openbao/README.md](../../pkg/secrets/providers/openbao/README.md)
