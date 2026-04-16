@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -755,27 +756,20 @@ func TestSecurityEdgeCases_CryptographicSafety(t *testing.T) {
 
 			assert.Equal(t, expectedSignature, signature, tt.description)
 
-			// Test timing attack resistance
-			// Both comparisons should take similar time
-			start1 := time.Now()
-			hmac.Equal([]byte(signature), []byte(expectedSignature))
-			duration1 := time.Since(start1)
-
-			start2 := time.Now()
-			hmac.Equal([]byte("wrong-signature"), []byte(expectedSignature))
-			duration2 := time.Since(start2)
-
-			// The timing difference should be minimal (within reasonable bounds)
-			// This is a basic check - real timing attack detection would require more sophisticated testing
-			timingDiff := duration1 - duration2
-			if timingDiff < 0 {
-				timingDiff = -timingDiff
-			}
-
-			// Allow for up to 1ms difference (this is quite generous for testing)
-			assert.LessOrEqual(t, timingDiff, time.Millisecond, "HMAC comparison should be timing-safe")
+			// Constant-time HMAC comparison is verified by TestWebhookHandlerUsesHmacEqual below —
+			// wall-clock timing is statistically unreliable for single calls.
 		})
 	}
+}
+
+// TestWebhookHandlerUsesHmacEqual verifies that the production webhook handler uses
+// hmac.Equal for signature comparison, ensuring constant-time behavior. This fails
+// if a future refactor accidentally replaces it with bytes.Equal or ==.
+func TestWebhookHandlerUsesHmacEqual(t *testing.T) {
+	source, err := os.ReadFile("webhook.go")
+	require.NoError(t, err, "failed to read webhook.go")
+	assert.True(t, strings.Contains(string(source), "hmac.Equal("),
+		"webhook.go must use hmac.Equal() for signature comparison to ensure constant-time behavior")
 }
 
 // Helper function to generate random bytes for testing
