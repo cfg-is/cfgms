@@ -139,6 +139,38 @@ The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for
 import _ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 ```
 
+## Secrets
+
+Secrets (credentials, API keys, certificates) are always encrypted at rest. The secrets
+tier lives in **`pkg/secrets/`** — a pre-existing pluggable package with its own provider
+registry, separate from `pkg/storage/interfaces/`. Sub-story I (interfaces reorganization)
+does NOT move `pkg/secrets/` — see [ADR-003 Addendum](decisions/003-storage-data-taxonomy.md#addendum--secretstore-package-location).
+
+**Interface location**: `pkg/secrets/interfaces/` — see the [README](../../pkg/secrets/interfaces/README.md)
+for the full interface surface.
+
+**Providers**:
+
+| Provider | Package | Secret model |
+|----------|---------|-------------|
+| SOPS | `pkg/secrets/providers/sops` | Static — AES-256-GCM encrypted files backed by a ConfigStore |
+| Steward | `pkg/secrets/providers/steward` | Static — OS-native encrypted blobs (DPAPI/AES-256-GCM) |
+| OpenBao / HashiCorp Vault (future) | `pkg/secrets/providers/openbao` | Static + dynamic leased |
+| AWS Secrets Manager (future) | `pkg/secrets/providers/awssm` | Static + dynamic leased |
+| Azure Key Vault (future) | `pkg/secrets/providers/azkv` | Static + dynamic leased |
+
+**`LeasedSecret` mixin**: Future vault-class providers that generate per-request dynamic
+credentials implement the optional `interfaces.LeasedSecret` mixin in addition to
+`SecretStore`. Callers check for the capability at runtime:
+
+```go
+if ls, ok := store.(interfaces.LeasedSecret); ok {
+    secret, lease, err := ls.LeaseSecret(ctx, "db/creds", req)
+}
+```
+
+SOPS and steward are static-secret providers and do **not** implement `LeasedSecret`.
+
 ## Interface Layout
 
 Target layout (tracked under the ADR-003 epic):
@@ -148,9 +180,13 @@ pkg/storage/interfaces/
   business/       # TenantStore, ClientTenantStore, StewardStore, CommandStore,
                   # AuditStore, RBACStore, SessionStore, RegistrationTokenStore
   config/         # ConfigStore
-  secrets/        # SecretStore
   timeseries/     # MetricsStore, LogStore
   blob/           # BlobStore
+
+pkg/secrets/interfaces/   # SecretStore lives here (pre-existing pluggable package)
+  secret_store.go         # SecretStore, SecretMetadata, Secret, SecretRequest, ...
+  leased_secret.go        # LeasedSecret mixin, Lease, LeaseRequest
+  provider.go             # SecretProvider registry (auto-registration via init())
 ```
 
 **Naming rule**: anything ending in `*Store` is durable. Anything ephemeral (resolved configs, inheritance memoization, rebuildable-on-restart state) is named `*Cache` and lives under [`pkg/cache/`](../../pkg/cache/). The old `RuntimeStore` mixed both and has been retired — its durable parts moved to `business/SessionStore`, its ephemeral parts moved to `pkg/cache`.

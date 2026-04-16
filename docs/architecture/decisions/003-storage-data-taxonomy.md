@@ -251,3 +251,9 @@ Rule of thumb: **if a steward does not use the interface, it does not belong und
 - `features/steward/commands/handler.go` — in-memory command dispatch (motivates `CommandStore`)
 - `pkg/storage/interfaces/` — current interface layout being reorganized
 - CLAUDE.md — 50k+ steward scale target, pluggable-by-default rule
+
+## Addendum — SecretStore Package Location
+
+The ADR's Interface Mapping table specifies `secrets/SecretStore` under `pkg/storage/interfaces/`. During pre-implementation audit (Issue #671), a fully-formed `SecretStore` interface was found at `pkg/secrets/interfaces/secret_store.go`, with a SOPS implementation at `pkg/secrets/providers/sops/` and a steward implementation at `pkg/secrets/providers/steward/`. Creating a parallel interface at `pkg/storage/interfaces/secrets/` would produce a duplicate registry and duplicate provider pattern.
+
+Decision (PO, 2026-04-13): `SecretStore` stays in `pkg/secrets/`. The taxonomy holds — secrets are their own type with their own providers. The path is a footnote. Sub-story I (interface reorganization) does NOT move `pkg/secrets/` into `pkg/storage/interfaces/`.

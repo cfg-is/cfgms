@@ -83,6 +83,11 @@ type SecretMetadata struct {
 	UpdatedBy   string            `json:"updated_by"`
 	TenantID    string            `json:"tenant_id"`
 	Description string            `json:"description,omitempty"`
+	// Policy carries provider-specific access-control and lease-policy parameters as an
+	// opaque map. Each provider populates only the fields it understands; all others leave
+	// it nil. Callers must not log or expose Policy values — they may contain sensitive
+	// policy identifiers. SOPS and steward providers always leave this nil.
+	Policy map[string]any `json:"policy,omitempty"`
 }
 
 // SecretVersion represents a historical version of a secret
