@@ -20,7 +20,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/jcmturner/gokrb5/v8 v8.4.4
 	github.com/joho/godotenv v1.5.1
-	github.com/lib/pq v1.10.9
+	github.com/lib/pq v1.12.3
 	github.com/mattn/go-sqlite3 v1.14.42
 	github.com/openbao/openbao/api/v2 v2.5.1
 	github.com/quic-go/quic-go v0.59.0

@@ -22,8 +22,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"     // register git provider for legacy single-provider path
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"  // register sqlite provider for OSS composite manager
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"      // register git provider for legacy single-provider path
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for OSS composite manager
 	"github.com/cfgis/cfgms/pkg/version"
 )
 
