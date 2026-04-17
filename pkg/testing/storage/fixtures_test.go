@@ -11,7 +11,9 @@ import (
 
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 func TestStorageTestFixture_Creation(t *testing.T) {
@@ -46,6 +48,20 @@ func TestStorageTestFixture_Creation(t *testing.T) {
 	assert.Contains(t, dbConfig.Config, "database")
 	assert.Contains(t, dbConfig.Config, "username")
 	assert.Contains(t, dbConfig.Config, "password")
+
+	// Verify flatfile configuration
+	flatfileConfig, exists := fixture.GetProviderConfig("flatfile")
+	require.True(t, exists, "Flatfile configuration should exist")
+	require.Equal(t, "flatfile", flatfileConfig.Provider)
+	require.NotNil(t, flatfileConfig.Config, "Flatfile config should not be nil")
+	assert.Contains(t, flatfileConfig.Config, "root")
+
+	// Verify sqlite configuration
+	sqliteConfig, exists := fixture.GetProviderConfig("sqlite")
+	require.True(t, exists, "SQLite configuration should exist")
+	require.Equal(t, "sqlite", sqliteConfig.Provider)
+	require.NotNil(t, sqliteConfig.Config, "SQLite config should not be nil")
+	assert.Contains(t, sqliteConfig.Config, "path")
 }
 
 func TestStorageTestFixture_ControllerConfig(t *testing.T) {

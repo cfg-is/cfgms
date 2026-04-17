@@ -1074,3 +1074,27 @@ func TestTriggerManagerImpl_ExecuteTrigger(t *testing.T) {
 
 	mockWorkflowTrigger.AssertExpectations(t)
 }
+
+func TestTriggerManagerImpl_NilStoragePersistence(t *testing.T) {
+	// When storage is nil (e.g. composite OSS manager where GetProvider returns nil),
+	// save and delete should be no-ops, not panics.
+	manager := &TriggerManagerImpl{
+		storage:    nil,
+		triggers:   make(map[string]*Trigger),
+		executions: make(map[string]*TriggerExecution),
+		logger:     logging.NewNoopLogger(),
+	}
+
+	ctx := context.Background()
+	trigger := &Trigger{ID: "t-nil-storage", Name: "nil-storage-trigger"}
+
+	t.Run("saveTriggerToStorage returns nil when storage is nil", func(t *testing.T) {
+		err := manager.saveTriggerToStorage(ctx, trigger)
+		assert.NoError(t, err, "saveTriggerToStorage must not error when storage is nil")
+	})
+
+	t.Run("deleteTriggerFromStorage returns nil when storage is nil", func(t *testing.T) {
+		err := manager.deleteTriggerFromStorage(ctx, trigger.ID)
+		assert.NoError(t, err, "deleteTriggerFromStorage must not error when storage is nil")
+	})
+}
