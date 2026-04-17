@@ -200,6 +200,10 @@ func migrateConfigStore(ctx context.Context, configsDir string, store interfaces
 		if d.IsDir() {
 			return nil
 		}
+		// Skip symlinks and non-regular files (defense-in-depth: TOCTOU protection)
+		if !d.Type().IsRegular() {
+			return nil
+		}
 
 		// Determine relative path from the configs root
 		// Expected structure: <configsDir>/<tenantID>/<namespace>/<name>.<format>
@@ -217,6 +221,12 @@ func migrateConfigStore(ctx context.Context, configsDir string, store interfaces
 		tenantID := parts[0]
 		name := parts[len(parts)-1]
 		namespace := strings.Join(parts[1:len(parts)-1], "/")
+
+		// Validate tenantID and namespace to prevent path traversal injection
+		if !isValidPathComponent(tenantID) || !isValidNamespace(namespace) {
+			fmt.Printf("  WARNING: skipping file with unsafe path components: %s\n", rel)
+			return nil
+		}
 
 		// Determine format from extension
 		ext := strings.TrimPrefix(filepath.Ext(name), ".")
@@ -271,6 +281,10 @@ func migrateAuditStore(ctx context.Context, auditDir string, store interfaces.Au
 		if d.IsDir() {
 			return nil
 		}
+		// Skip symlinks and non-regular files (defense-in-depth: TOCTOU protection)
+		if !d.Type().IsRegular() {
+			return nil
+		}
 		if !strings.HasSuffix(path, ".jsonl") {
 			return nil
 		}
@@ -305,4 +319,27 @@ func migrateAuditStore(ctx context.Context, auditDir string, store interfaces.Au
 	})
 
 	return count, err
+}
+
+// isValidPathComponent returns true if s is safe to use as a tenant ID or
+// single namespace segment: non-empty, no path separators or ".." components.
+func isValidPathComponent(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	return !strings.ContainsAny(s, "/\\")
+}
+
+// isValidNamespace returns true if every segment of the slash-separated
+// namespace string is a valid path component.
+func isValidNamespace(ns string) bool {
+	if ns == "" {
+		return true // empty namespace is allowed
+	}
+	for _, part := range strings.Split(ns, "/") {
+		if !isValidPathComponent(part) {
+			return false
+		}
+	}
+	return true
 }
