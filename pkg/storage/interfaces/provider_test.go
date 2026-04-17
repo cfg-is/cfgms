@@ -369,6 +369,96 @@ func (m *MockRegistrationTokenStore) ListTokens(ctx context.Context, filter *Reg
 func (m *MockRegistrationTokenStore) Initialize(ctx context.Context) error { return nil }
 func (m *MockRegistrationTokenStore) Close() error                         { return nil }
 
+// MockStewardStore implements StewardStore for testing
+type MockStewardStore struct{}
+
+func (m *MockStewardStore) RegisterSteward(_ context.Context, _ *StewardRecord) error { return nil }
+func (m *MockStewardStore) UpdateHeartbeat(_ context.Context, _ string) error         { return nil }
+func (m *MockStewardStore) GetSteward(_ context.Context, _ string) (*StewardRecord, error) {
+	return nil, ErrStewardNotFound
+}
+func (m *MockStewardStore) ListStewards(_ context.Context) ([]*StewardRecord, error) {
+	return nil, nil
+}
+func (m *MockStewardStore) ListStewardsByStatus(_ context.Context, _ StewardStatus) ([]*StewardRecord, error) {
+	return nil, nil
+}
+func (m *MockStewardStore) UpdateStewardStatus(_ context.Context, _ string, _ StewardStatus) error {
+	return nil
+}
+func (m *MockStewardStore) DeregisterSteward(_ context.Context, _ string) error { return nil }
+func (m *MockStewardStore) GetStewardsSeen(_ context.Context, _ time.Time) ([]*StewardRecord, error) {
+	return nil, nil
+}
+func (m *MockStewardStore) HealthCheck(_ context.Context) error  { return nil }
+func (m *MockStewardStore) Initialize(_ context.Context) error   { return nil }
+func (m *MockStewardStore) Close() error                         { return nil }
+
+// MockSessionStore implements SessionStore for testing
+type MockSessionStore struct{}
+
+func (m *MockSessionStore) CreateSession(_ context.Context, _ *Session) error { return nil }
+func (m *MockSessionStore) GetSession(_ context.Context, _ string) (*Session, error) {
+	return nil, fmt.Errorf("not found")
+}
+func (m *MockSessionStore) UpdateSession(_ context.Context, _ string, _ *Session) error {
+	return nil
+}
+func (m *MockSessionStore) DeleteSession(_ context.Context, _ string) error { return nil }
+func (m *MockSessionStore) ListSessions(_ context.Context, _ *SessionFilter) ([]*Session, error) {
+	return nil, nil
+}
+func (m *MockSessionStore) SetSessionTTL(_ context.Context, _ string, _ time.Duration) error {
+	return nil
+}
+func (m *MockSessionStore) CleanupExpiredSessions(_ context.Context) (int, error) { return 0, nil }
+func (m *MockSessionStore) GetSessionsByUser(_ context.Context, _ string) ([]*Session, error) {
+	return nil, nil
+}
+func (m *MockSessionStore) GetSessionsByTenant(_ context.Context, _ string) ([]*Session, error) {
+	return nil, nil
+}
+func (m *MockSessionStore) GetSessionsByType(_ context.Context, _ SessionType) ([]*Session, error) {
+	return nil, nil
+}
+func (m *MockSessionStore) GetActiveSessionsCount(_ context.Context) (int64, error) { return 0, nil }
+func (m *MockSessionStore) HealthCheck(_ context.Context) error                     { return nil }
+func (m *MockSessionStore) GetStats(_ context.Context) (*RuntimeStoreStats, error) {
+	return &RuntimeStoreStats{}, nil
+}
+func (m *MockSessionStore) Initialize(_ context.Context) error { return nil }
+func (m *MockSessionStore) Close() error                       { return nil }
+
+// MockCommandStore implements CommandStore for testing
+type MockCommandStore struct{}
+
+func (m *MockCommandStore) CreateCommandRecord(_ context.Context, _ *CommandRecord) error {
+	return nil
+}
+func (m *MockCommandStore) UpdateCommandStatus(_ context.Context, _ string, _ CommandStatus, _ map[string]interface{}, _ string) error {
+	return nil
+}
+func (m *MockCommandStore) GetCommandRecord(_ context.Context, _ string) (*CommandRecord, error) {
+	return nil, fmt.Errorf("not found")
+}
+func (m *MockCommandStore) ListCommandRecords(_ context.Context, _ *CommandFilter) ([]*CommandRecord, error) {
+	return nil, nil
+}
+func (m *MockCommandStore) ListCommandsByDevice(_ context.Context, _ string) ([]*CommandRecord, error) {
+	return nil, nil
+}
+func (m *MockCommandStore) ListCommandsByStatus(_ context.Context, _ CommandStatus) ([]*CommandRecord, error) {
+	return nil, nil
+}
+func (m *MockCommandStore) GetCommandAuditTrail(_ context.Context, _ string) ([]*CommandTransition, error) {
+	return nil, nil
+}
+func (m *MockCommandStore) PurgeExpiredRecords(_ context.Context, _ time.Time) (int64, error) {
+	return 0, nil
+}
+func (m *MockCommandStore) HealthCheck(_ context.Context) error { return nil }
+func (m *MockCommandStore) Close() error                        { return nil }
+
 // Test provider registration
 func TestRegisterStorageProvider(t *testing.T) {
 	// Clear registry for test
@@ -646,6 +736,403 @@ func TestListProvidersV2(t *testing.T) {
 
 	if !providers[0].Capabilities.SupportsTransactions {
 		t.Errorf("Expected provider to support transactions")
+	}
+}
+
+func TestNewStorageManagerFromStores(t *testing.T) {
+	t.Run("composite provider name and nil provider", func(t *testing.T) {
+		sm := NewStorageManagerFromStores(
+			&MockConfigStore{}, &MockAuditStore{}, &MockRBACStore{}, nil,
+			&MockTenantStore{}, &MockClientTenantStore{}, &MockRegistrationTokenStore{},
+			nil, nil, nil,
+		)
+
+		if sm.GetProviderName() != "composite" {
+			t.Errorf("expected providerName %q, got %q", "composite", sm.GetProviderName())
+		}
+		if sm.GetProvider() != nil {
+			t.Errorf("expected nil provider for composite manager, got non-nil")
+		}
+	})
+
+	t.Run("GetCapabilities returns zero value without panic", func(t *testing.T) {
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		caps := sm.GetCapabilities()
+		// Zero value — no field should be set
+		if caps.SupportsTransactions || caps.SupportsVersioning || caps.MaxBatchSize != 0 {
+			t.Errorf("expected zero-value ProviderCapabilities, got %+v", caps)
+		}
+	})
+
+	t.Run("GetVersion returns composite without panic", func(t *testing.T) {
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		if sm.GetVersion() != "composite" {
+			t.Errorf("expected version %q, got %q", "composite", sm.GetVersion())
+		}
+	})
+
+	t.Run("GetProvider returns nil without panic", func(t *testing.T) {
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		if sm.GetProvider() != nil {
+			t.Errorf("expected nil from GetProvider on composite manager")
+		}
+	})
+
+	t.Run("all 10 store parameters accepted and retrievable", func(t *testing.T) {
+		configStore := &MockConfigStore{}
+		auditStore := &MockAuditStore{}
+		rbacStore := &MockRBACStore{}
+		runtimeStore := &MockRuntimeStore{}
+		tenantStore := &MockTenantStore{}
+		clientTenantStore := &MockClientTenantStore{}
+		registrationTokenStore := &MockRegistrationTokenStore{}
+
+		sm := NewStorageManagerFromStores(
+			configStore, auditStore, rbacStore, runtimeStore,
+			tenantStore, clientTenantStore, registrationTokenStore,
+			nil, nil, nil,
+		)
+
+		if sm.GetConfigStore() != configStore {
+			t.Errorf("ConfigStore mismatch")
+		}
+		if sm.GetAuditStore() != auditStore {
+			t.Errorf("AuditStore mismatch")
+		}
+		if sm.GetRBACStore() != rbacStore {
+			t.Errorf("RBACStore mismatch")
+		}
+		if sm.GetTenantStore() != tenantStore {
+			t.Errorf("TenantStore mismatch")
+		}
+		if sm.GetClientTenantStore() != clientTenantStore {
+			t.Errorf("ClientTenantStore mismatch")
+		}
+		if sm.GetRegistrationTokenStore() != registrationTokenStore {
+			t.Errorf("RegistrationTokenStore mismatch")
+		}
+		if sm.GetSessionStore() != nil {
+			t.Errorf("SessionStore should be nil")
+		}
+		if sm.GetStewardStore() != nil {
+			t.Errorf("StewardStore should be nil")
+		}
+		if sm.GetCommandStore() != nil {
+			t.Errorf("CommandStore should be nil")
+		}
+	})
+
+	t.Run("nil values allowed for all stores", func(t *testing.T) {
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		// Should not panic
+		if sm.GetConfigStore() != nil {
+			t.Errorf("expected nil ConfigStore")
+		}
+		if sm.GetAuditStore() != nil {
+			t.Errorf("expected nil AuditStore")
+		}
+	})
+}
+
+func TestCreateOSSStorageManager(t *testing.T) {
+	// Register flatfile and sqlite providers for this test
+	// We use the mock provider approach since the real providers require CGo (sqlite) / filesystem
+	// and are exercised by their own provider-level integration tests.
+
+	// Save registry state
+	originalProviders := make(map[string]StorageProvider)
+	globalRegistry.mutex.RLock()
+	for name, provider := range globalRegistry.providers {
+		originalProviders[name] = provider
+	}
+	globalRegistry.mutex.RUnlock()
+
+	globalRegistry.mutex.Lock()
+	globalRegistry.providers = make(map[string]StorageProvider)
+	globalRegistry.mutex.Unlock()
+
+	defer func() {
+		globalRegistry.mutex.Lock()
+		globalRegistry.providers = originalProviders
+		globalRegistry.mutex.Unlock()
+	}()
+
+	t.Run("error when flatfile provider not registered", func(t *testing.T) {
+		_, err := CreateOSSStorageManager(t.TempDir(), t.TempDir()+"/test.db")
+		if err == nil {
+			t.Fatal("expected error when flatfile provider not registered")
+		}
+	})
+
+	t.Run("error when sqlite provider not registered", func(t *testing.T) {
+		// Register only flatfile
+		ffMock := &MockOSSProvider{providerName: "flatfile"}
+		globalRegistry.mutex.Lock()
+		globalRegistry.providers["flatfile"] = ffMock
+		globalRegistry.mutex.Unlock()
+
+		_, err := CreateOSSStorageManager(t.TempDir(), t.TempDir()+"/test.db")
+		if err == nil {
+			t.Fatal("expected error when sqlite provider not registered")
+		}
+
+		globalRegistry.mutex.Lock()
+		delete(globalRegistry.providers, "flatfile")
+		globalRegistry.mutex.Unlock()
+	})
+
+	t.Run("creates composite manager with correct providerName", func(t *testing.T) {
+		ffMock := &MockOSSProvider{providerName: "flatfile"}
+		sqMock := &MockOSSProvider{providerName: "sqlite"}
+
+		globalRegistry.mutex.Lock()
+		globalRegistry.providers["flatfile"] = ffMock
+		globalRegistry.providers["sqlite"] = sqMock
+		globalRegistry.mutex.Unlock()
+
+		sm, err := CreateOSSStorageManager(t.TempDir(), t.TempDir()+"/test.db")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if sm.GetProviderName() != "composite" {
+			t.Errorf("expected providerName %q, got %q", "composite", sm.GetProviderName())
+		}
+		if sm.GetProvider() != nil {
+			t.Errorf("expected nil provider")
+		}
+
+		// Config/Audit/Steward come from flatfile
+		if sm.GetConfigStore() == nil {
+			t.Errorf("ConfigStore should not be nil")
+		}
+		if sm.GetAuditStore() == nil {
+			t.Errorf("AuditStore should not be nil")
+		}
+		if sm.GetStewardStore() == nil {
+			t.Errorf("StewardStore should not be nil")
+		}
+
+		// Business stores come from sqlite
+		if sm.GetRBACStore() == nil {
+			t.Errorf("RBACStore should not be nil")
+		}
+		if sm.GetTenantStore() == nil {
+			t.Errorf("TenantStore should not be nil")
+		}
+		if sm.GetClientTenantStore() == nil {
+			t.Errorf("ClientTenantStore should not be nil")
+		}
+		if sm.GetRegistrationTokenStore() == nil {
+			t.Errorf("RegistrationTokenStore should not be nil")
+		}
+
+		// RuntimeStore is always nil (being retired per ADR-003)
+		if sm.GetRuntimeStore() != nil {
+			t.Errorf("RuntimeStore should be nil in OSS composite manager")
+		}
+
+		globalRegistry.mutex.Lock()
+		delete(globalRegistry.providers, "flatfile")
+		delete(globalRegistry.providers, "sqlite")
+		globalRegistry.mutex.Unlock()
+	})
+}
+
+// MockOSSProvider is a minimal StorageProvider for testing OSS factory wiring.
+// Unlike MockStorageProvider, it always returns non-nil stores for all supported methods.
+type MockOSSProvider struct {
+	providerName string
+}
+
+func (m *MockOSSProvider) Name() string        { return m.providerName }
+func (m *MockOSSProvider) Description() string { return "mock oss provider for testing" }
+func (m *MockOSSProvider) GetVersion() string  { return "1.0.0" }
+func (m *MockOSSProvider) Available() (bool, error) {
+	return true, nil
+}
+func (m *MockOSSProvider) GetCapabilities() ProviderCapabilities { return ProviderCapabilities{} }
+
+func (m *MockOSSProvider) CreateConfigStore(_ map[string]interface{}) (ConfigStore, error) {
+	return &MockConfigStore{}, nil
+}
+func (m *MockOSSProvider) CreateAuditStore(_ map[string]interface{}) (AuditStore, error) {
+	return &MockAuditStore{}, nil
+}
+func (m *MockOSSProvider) CreateStewardStore(_ map[string]interface{}) (StewardStore, error) {
+	return &MockStewardStore{}, nil
+}
+func (m *MockOSSProvider) CreateRBACStore(_ map[string]interface{}) (RBACStore, error) {
+	return &MockRBACStore{}, nil
+}
+func (m *MockOSSProvider) CreateTenantStore(_ map[string]interface{}) (TenantStore, error) {
+	return &MockTenantStore{}, nil
+}
+func (m *MockOSSProvider) CreateClientTenantStore(_ map[string]interface{}) (ClientTenantStore, error) {
+	return &MockClientTenantStore{}, nil
+}
+func (m *MockOSSProvider) CreateRegistrationTokenStore(_ map[string]interface{}) (RegistrationTokenStore, error) {
+	return &MockRegistrationTokenStore{}, nil
+}
+func (m *MockOSSProvider) CreateSessionStore(_ map[string]interface{}) (SessionStore, error) {
+	return &MockSessionStore{}, nil
+}
+func (m *MockOSSProvider) CreateCommandStore(_ map[string]interface{}) (CommandStore, error) {
+	return &MockCommandStore{}, nil
+}
+func (m *MockOSSProvider) CreateRuntimeStore(_ map[string]interface{}) (RuntimeStore, error) {
+	return nil, ErrNotSupported
+}
+
+// MockOSSProviderWithError is an interface stub that returns an error from a designated Create* method.
+// It is used to test that CreateOSSStorageManager propagates store-creation errors correctly.
+// Real providers cannot be used here because pkg/storage/providers/* imports this package
+// (pkg/storage/interfaces), which would create an import cycle.
+type MockOSSProviderWithError struct {
+	providerName string
+	failMethod   string // name of the Create* method that should fail
+}
+
+func (m *MockOSSProviderWithError) Name() string               { return m.providerName }
+func (m *MockOSSProviderWithError) Description() string        { return "error mock" }
+func (m *MockOSSProviderWithError) GetVersion() string         { return "1.0.0" }
+func (m *MockOSSProviderWithError) Available() (bool, error)   { return true, nil }
+func (m *MockOSSProviderWithError) GetCapabilities() ProviderCapabilities {
+	return ProviderCapabilities{}
+}
+
+func (m *MockOSSProviderWithError) mayFail(method string) error {
+	if m.failMethod == method {
+		return fmt.Errorf("injected %s failure", method)
+	}
+	return nil
+}
+
+func (m *MockOSSProviderWithError) CreateConfigStore(_ map[string]interface{}) (ConfigStore, error) {
+	if err := m.mayFail("CreateConfigStore"); err != nil {
+		return nil, err
+	}
+	return &MockConfigStore{}, nil
+}
+func (m *MockOSSProviderWithError) CreateAuditStore(_ map[string]interface{}) (AuditStore, error) {
+	if err := m.mayFail("CreateAuditStore"); err != nil {
+		return nil, err
+	}
+	return &MockAuditStore{}, nil
+}
+func (m *MockOSSProviderWithError) CreateStewardStore(_ map[string]interface{}) (StewardStore, error) {
+	if err := m.mayFail("CreateStewardStore"); err != nil {
+		return nil, err
+	}
+	return &MockStewardStore{}, nil
+}
+func (m *MockOSSProviderWithError) CreateRBACStore(_ map[string]interface{}) (RBACStore, error) {
+	if err := m.mayFail("CreateRBACStore"); err != nil {
+		return nil, err
+	}
+	return &MockRBACStore{}, nil
+}
+func (m *MockOSSProviderWithError) CreateTenantStore(_ map[string]interface{}) (TenantStore, error) {
+	if err := m.mayFail("CreateTenantStore"); err != nil {
+		return nil, err
+	}
+	return &MockTenantStore{}, nil
+}
+func (m *MockOSSProviderWithError) CreateClientTenantStore(_ map[string]interface{}) (ClientTenantStore, error) {
+	if err := m.mayFail("CreateClientTenantStore"); err != nil {
+		return nil, err
+	}
+	return &MockClientTenantStore{}, nil
+}
+func (m *MockOSSProviderWithError) CreateRegistrationTokenStore(_ map[string]interface{}) (RegistrationTokenStore, error) {
+	if err := m.mayFail("CreateRegistrationTokenStore"); err != nil {
+		return nil, err
+	}
+	return &MockRegistrationTokenStore{}, nil
+}
+func (m *MockOSSProviderWithError) CreateSessionStore(_ map[string]interface{}) (SessionStore, error) {
+	if err := m.mayFail("CreateSessionStore"); err != nil {
+		return nil, err
+	}
+	return &MockSessionStore{}, nil
+}
+func (m *MockOSSProviderWithError) CreateCommandStore(_ map[string]interface{}) (CommandStore, error) {
+	if err := m.mayFail("CreateCommandStore"); err != nil {
+		return nil, err
+	}
+	return &MockCommandStore{}, nil
+}
+func (m *MockOSSProviderWithError) CreateRuntimeStore(_ map[string]interface{}) (RuntimeStore, error) {
+	return nil, ErrNotSupported
+}
+
+func TestCreateOSSStorageManager_StoreCreationErrors(t *testing.T) {
+	// Save and clear registry
+	originalProviders := make(map[string]StorageProvider)
+	globalRegistry.mutex.RLock()
+	for name, provider := range globalRegistry.providers {
+		originalProviders[name] = provider
+	}
+	globalRegistry.mutex.RUnlock()
+
+	globalRegistry.mutex.Lock()
+	globalRegistry.providers = make(map[string]StorageProvider)
+	globalRegistry.mutex.Unlock()
+
+	defer func() {
+		globalRegistry.mutex.Lock()
+		globalRegistry.providers = originalProviders
+		globalRegistry.mutex.Unlock()
+	}()
+
+	// Each subtest injects an error from one of the flatfile Create* methods
+	// to verify CreateOSSStorageManager propagates all store-creation errors.
+	flatfileFailures := []string{
+		"CreateConfigStore",
+		"CreateAuditStore",
+		"CreateStewardStore",
+	}
+	sqliteFailures := []string{
+		"CreateRBACStore",
+		"CreateTenantStore",
+		"CreateClientTenantStore",
+		"CreateRegistrationTokenStore",
+		"CreateSessionStore",
+		"CreateCommandStore",
+	}
+
+	for _, failMethod := range flatfileFailures {
+		failMethod := failMethod
+		t.Run("flatfile_"+failMethod+"_returns_error", func(t *testing.T) {
+			globalRegistry.mutex.Lock()
+			globalRegistry.providers = map[string]StorageProvider{
+				"flatfile": &MockOSSProviderWithError{providerName: "flatfile", failMethod: failMethod},
+				"sqlite":   &MockOSSProvider{providerName: "sqlite"},
+			}
+			globalRegistry.mutex.Unlock()
+
+			_, err := CreateOSSStorageManager(t.TempDir(), t.TempDir()+"/test.db")
+			if err == nil {
+				t.Errorf("expected error when flatfile %s fails, got nil", failMethod)
+			}
+		})
+	}
+
+	for _, failMethod := range sqliteFailures {
+		failMethod := failMethod
+		t.Run("sqlite_"+failMethod+"_returns_error", func(t *testing.T) {
+			globalRegistry.mutex.Lock()
+			globalRegistry.providers = map[string]StorageProvider{
+				"flatfile": &MockOSSProvider{providerName: "flatfile"},
+				"sqlite":   &MockOSSProviderWithError{providerName: "sqlite", failMethod: failMethod},
+			}
+			globalRegistry.mutex.Unlock()
+
+			_, err := CreateOSSStorageManager(t.TempDir(), t.TempDir()+"/test.db")
+			if err == nil {
+				t.Errorf("expected error when sqlite %s fails, got nil", failMethod)
+			}
+		})
 	}
 }
 

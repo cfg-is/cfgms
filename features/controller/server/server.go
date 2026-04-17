@@ -54,6 +54,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"  // register sqlite provider for OSS composite manager
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
 
@@ -104,12 +106,25 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.provider as 'git' (minimum) or 'database' (production). See docs/examples/controller-storage-config.cfg for examples")
 	}
 
-	logger.Info("Initializing global storage provider", "provider", cfg.Storage.Provider)
-
-	// Create storage manager with pluggable provider - no fallbacks allowed
-	storageManager, err := interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize storage provider '%s': %w. Verify storage configuration and ensure storage backend is accessible", cfg.Storage.Provider, err)
+	// Create storage manager — OSS composite path (flatfile+SQLite) or legacy single-provider path
+	var storageManager *interfaces.StorageManager
+	if cfg.Storage.FlatfileRoot != "" {
+		logger.Info("Initializing OSS composite storage backend...",
+			"flatfile_root", cfg.Storage.FlatfileRoot,
+			"sqlite_path", cfg.Storage.SQLitePath)
+		var ossErr error
+		storageManager, ossErr = interfaces.CreateOSSStorageManager(cfg.Storage.FlatfileRoot, cfg.Storage.SQLitePath)
+		if ossErr != nil {
+			return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", ossErr)
+		}
+		logger.Info("OSS composite storage backend initialized")
+	} else {
+		logger.Info("Initializing global storage provider", "provider", cfg.Storage.Provider)
+		var legacyErr error
+		storageManager, legacyErr = interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
+		if legacyErr != nil {
+			return nil, fmt.Errorf("failed to initialize storage provider '%s': %w. Verify storage configuration and ensure storage backend is accessible", cfg.Storage.Provider, legacyErr)
+		}
 	}
 
 	// Initialize RBAC system with pluggable storage only

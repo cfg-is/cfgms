@@ -5,10 +5,12 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +20,25 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/testutil"
 )
+
+// isUnsupportedStoreError reports whether err signals that a provider does not
+// implement the requested store type. Post-ADR-003, providers are partitioned
+// by data tier (flatfile: config/audit only; sqlite: business data only), so
+// calling every Create*Store on every provider is expected to yield these
+// errors for out-of-tier combinations. The interfaces package exports
+// ErrNotSupported; individual providers (flatfile) define their own sentinel
+// with the same meaning. Both contain "operation not supported" in their
+// message, so a substring fallback catches provider-local sentinels that do
+// not wrap the canonical one.
+func isUnsupportedStoreError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, interfaces.ErrNotSupported) {
+		return true
+	}
+	return strings.Contains(err.Error(), "operation not supported")
+}
 
 // isInfrastructureRequired determines if infrastructure should be available
 // Returns true in CI environments or when Docker/infrastructure is explicitly enabled
@@ -102,6 +123,8 @@ func NewStorageTestFixture(t *testing.T) *StorageTestFixture {
 	// Create configurations for all storage providers
 	fixture.setupGitConfig(t)
 	fixture.setupDatabaseConfig(t)
+	fixture.setupFlatfileConfig(t)
+	fixture.setupSQLiteConfig(t)
 
 	return fixture
 }
@@ -156,6 +179,37 @@ func (f *StorageTestFixture) setupDatabaseConfig(t *testing.T) {
 			"password": testPassword,
 			"sslmode":  "disable", // For testing only
 		},
+	}
+}
+
+// setupFlatfileConfig creates a flatfile provider configuration backed by a temp dir.
+func (f *StorageTestFixture) setupFlatfileConfig(t *testing.T) {
+	flatfileDir := filepath.Join(f.TempDir, "flatfile-storage")
+	err := os.MkdirAll(flatfileDir, 0755)
+	require.NoError(t, err, "Failed to create flatfile storage directory")
+
+	f.Configs["flatfile"] = &StorageTestConfig{
+		Provider: "flatfile",
+		Config: map[string]interface{}{
+			"root": flatfileDir,
+		},
+		TempDir: flatfileDir,
+	}
+}
+
+// setupSQLiteConfig creates a sqlite provider configuration backed by a temp file.
+// Uses a real file path (not :memory:) to avoid parallel-test issues.
+func (f *StorageTestFixture) setupSQLiteConfig(t *testing.T) {
+	sqliteDir := filepath.Join(f.TempDir, "sqlite-storage")
+	err := os.MkdirAll(sqliteDir, 0755)
+	require.NoError(t, err, "Failed to create sqlite storage directory")
+
+	f.Configs["sqlite"] = &StorageTestConfig{
+		Provider: "sqlite",
+		Config: map[string]interface{}{
+			"path": filepath.Join(sqliteDir, "cfgms-test.db"),
+		},
+		TempDir: sqliteDir,
 	}
 }
 
@@ -227,6 +281,10 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 
 	t.Run(fmt.Sprintf("provider_%s_client_tenant_store", providerName), func(t *testing.T) {
 		store, err := provider.CreateClientTenantStore(testConfig.Config)
+		if isUnsupportedStoreError(err) {
+			t.Skipf("provider %q does not implement ClientTenantStore (ADR-003 tier boundary)", providerName)
+			return
+		}
 		if err != nil && providerName == "database" {
 			requireInfrastructureOrSkip(t, err, "Database provider")
 			return
@@ -241,6 +299,10 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 
 	t.Run(fmt.Sprintf("provider_%s_config_store", providerName), func(t *testing.T) {
 		store, err := provider.CreateConfigStore(testConfig.Config)
+		if isUnsupportedStoreError(err) {
+			t.Skipf("provider %q does not implement ConfigStore (ADR-003 tier boundary)", providerName)
+			return
+		}
 		if err != nil && providerName == "database" {
 			requireInfrastructureOrSkip(t, err, "Database provider")
 			return
@@ -255,6 +317,10 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 
 	t.Run(fmt.Sprintf("provider_%s_audit_store", providerName), func(t *testing.T) {
 		store, err := provider.CreateAuditStore(testConfig.Config)
+		if isUnsupportedStoreError(err) {
+			t.Skipf("provider %q does not implement AuditStore (ADR-003 tier boundary)", providerName)
+			return
+		}
 		if err != nil && providerName == "database" {
 			requireInfrastructureOrSkip(t, err, "Database provider")
 			return
@@ -269,6 +335,10 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 
 	t.Run(fmt.Sprintf("provider_%s_runtime_store", providerName), func(t *testing.T) {
 		store, err := provider.CreateRuntimeStore(testConfig.Config)
+		if isUnsupportedStoreError(err) {
+			t.Skipf("provider %q does not implement RuntimeStore (ADR-003 tier boundary)", providerName)
+			return
+		}
 		if err != nil && providerName == "database" {
 			requireInfrastructureOrSkip(t, err, "Database provider")
 			return
