@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -63,8 +63,8 @@ func NewSQLiteBackend(config *Config, logger logging.Logger) (*SQLiteBackend, er
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
-	// Open SQLite database
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=ON&_synchronous=NORMAL")
+	// Open SQLite database (modernc.org/sqlite: pure-Go, CGO-free)
+	db, err := sql.Open("sqlite", "file:"+dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
@@ -73,6 +73,18 @@ func NewSQLiteBackend(config *Config, logger logging.Logger) (*SQLiteBackend, er
 	db.SetMaxOpenConns(1) // SQLite works best with single connection
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0) // No connection lifetime limit
+
+	// Pragmas applied explicitly (portable across mattn and modernc drivers)
+	for _, pragma := range []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA foreign_keys = ON",
+		"PRAGMA synchronous = NORMAL",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("failed to set %s: %w", pragma, err)
+		}
+	}
 
 	backend := &SQLiteBackend{
 		logger:   logger,

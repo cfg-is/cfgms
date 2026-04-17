@@ -693,7 +693,11 @@ func initializeWorkflowHandler(storageManager *interfaces.StorageManager, logger
 		configStore: configStore,
 	}
 
-	storageProvider, _ := interfaces.GetStorageProvider("flatfile")
+	storageProvider, err := interfaces.GetStorageProvider("flatfile")
+	if err != nil {
+		logger.Warn("Failed to get flatfile storage provider for trigger manager", "error", err)
+		return nil, nil
+	}
 	triggerMgr := workflowtrigger.NewControllerTriggerManager(storageProvider, adapter)
 
 	handler := api.NewWorkflowHandler(workflowEngine, configStore, triggerMgr, logger)

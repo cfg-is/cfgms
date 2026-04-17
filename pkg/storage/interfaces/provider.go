@@ -562,6 +562,44 @@ func (sm *StorageManager) GetVersion() string {
 	return sm.provider.GetVersion()
 }
 
+// Close releases resources held by every non-nil backing store. It returns
+// the first error encountered but attempts to close every store regardless,
+// so a single failure does not leak the remaining handles.
+//
+// Not every store interface declares Close (e.g. ConfigStore) but concrete
+// implementations often do, so each slot is checked with a type assertion.
+//
+// SQLite-backed stores in particular must be closed before temp-directory
+// cleanup on Windows; without this hook, `t.TempDir()` RemoveAll fails with
+// "file in use by another process" when tests exit.
+func (sm *StorageManager) Close() error {
+	slots := []interface{}{
+		sm.clientTenantStore,
+		sm.configStore,
+		sm.auditStore,
+		sm.rbacStore,
+		sm.tenantStore,
+		sm.registrationTokenStore,
+		sm.sessionStore,
+		sm.stewardStore,
+		sm.commandStore,
+	}
+	var firstErr error
+	for _, s := range slots {
+		if s == nil {
+			continue
+		}
+		closer, ok := s.(interface{ Close() error })
+		if !ok {
+			continue
+		}
+		if err := closer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // ListProvidersV2 returns enhanced information about all registered providers
 func ListProvidersV2() []ProviderInfoV2 {
 	globalRegistry.mutex.RLock()

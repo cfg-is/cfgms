@@ -7,7 +7,6 @@ package storage
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,30 +15,6 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
-
-// skipWithoutCGO skips the test if CGO is not enabled (SQLite requires CGO).
-// This is a local version to avoid circular imports with testutil.
-func skipWithoutCGO(t *testing.T) {
-	t.Helper()
-	config := DefaultConfig()
-	config.Backend = BackendSQLite
-	config.DataDir = t.TempDir() // Use temp directory to avoid file conflicts
-	logger := logging.NewLogger("error")
-
-	manager, err := NewManager(config, logger)
-	if err != nil {
-		errStr := err.Error()
-		if strings.Contains(errStr, "CGO_ENABLED=0") ||
-			strings.Contains(errStr, "go-sqlite3 requires cgo") ||
-			strings.Contains(errStr, "This is a stub") {
-			t.Skip("Skipping test: SQLite requires CGO which is not enabled (no C compiler available)")
-		}
-	}
-	// Close the manager if it was successfully created
-	if manager != nil {
-		_ = manager.Close()
-	}
-}
 
 // createTestConfig creates a test configuration with unique database path
 func createTestConfig(t *testing.T, backendType BackendType) *Config {
@@ -56,7 +31,6 @@ func createTestConfig(t *testing.T, backendType BackendType) *Config {
 }
 
 func TestStorageManager(t *testing.T) {
-	skipWithoutCGO(t)
 	logger := logging.NewLogger("debug")
 	config := createTestConfig(t, BackendSQLite)
 
@@ -513,10 +487,6 @@ func TestStorageBackends(t *testing.T) {
 
 	for _, backendType := range backends {
 		t.Run(string(backendType), func(t *testing.T) {
-			// Skip SQLite tests if CGO is not available
-			if backendType == BackendSQLite {
-				skipWithoutCGO(t)
-			}
 			// Use createTestConfig to get proper temp directory isolation
 			testConfig := createTestConfig(t, backendType)
 			testStorageBackend(t, backendType, testConfig, logger)

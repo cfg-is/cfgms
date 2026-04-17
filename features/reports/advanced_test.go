@@ -15,8 +15,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/testutil"
-
 	// Import storage providers to register them
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,9 +47,6 @@ func TestAdvancedServiceCreation(t *testing.T) {
 
 // TestAdvancedServiceWithConfig tests service creation with custom configuration
 func TestAdvancedServiceWithConfig(t *testing.T) {
-	// Skip test if CGO is not enabled (SQLite requires CGO)
-	testutil.SkipWithoutCGO(t)
-
 	logger := &testLogger{}
 
 	// Create DNA storage manager
@@ -571,9 +566,6 @@ func TestGetCrossSystemMetrics(t *testing.T) {
 
 // createTestAdvancedService creates a test instance of AdvancedService using minimal real components
 func createTestAdvancedService(t *testing.T) *AdvancedService {
-	// Skip test if CGO is not enabled (SQLite requires CGO)
-	testutil.SkipWithoutCGO(t)
-
 	logger := &testLogger{}
 
 	// Create minimal real components needed for the service
