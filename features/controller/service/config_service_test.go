@@ -72,6 +72,7 @@ func createTestServiceV2(t *testing.T) *ConfigurationServiceV2 {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	return NewConfigurationServiceV2(logger, storageManager, nil)
 }

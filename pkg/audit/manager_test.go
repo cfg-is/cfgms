@@ -32,6 +32,7 @@ func TestNewManager(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
+				t.Cleanup(func() { _ = storageManager.Close() })
 				return storageManager.GetAuditStore(), nil
 			},
 			wantErr: false,
@@ -89,6 +90,8 @@ func TestManager_RecordEvent(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManager(storageManager.GetAuditStore(), "test")
 	ctx := context.Background()
@@ -113,6 +116,8 @@ func TestManager_RecordBatch(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManager(storageManager.GetAuditStore(), "test")
 	ctx := context.Background()

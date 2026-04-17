@@ -432,6 +432,7 @@ func TestPersistenceRegressionGuard(t *testing.T) {
 
 	storageManager, err := interfaces.CreateOSSStorageManager(filepath.Join(tempDir, "flatfile"), filepath.Join(tempDir, "cfgms.db"))
 	require.NoError(t, err, "Should create storage manager")
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	// Create tenant data
 	tenantStore := storageManager.GetTenantStore()
@@ -496,6 +497,7 @@ func TestPersistenceRegressionGuard(t *testing.T) {
 
 	newStorageManager, err := interfaces.CreateOSSStorageManager(filepath.Join(tempDir, "flatfile"), filepath.Join(tempDir, "cfgms.db"))
 	require.NoError(t, err, "Should create new storage manager after restart")
+	t.Cleanup(func() { _ = newStorageManager.Close() })
 
 	newTenantStore := newStorageManager.GetTenantStore()
 	err = newTenantStore.Initialize(ctx)

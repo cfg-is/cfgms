@@ -28,6 +28,7 @@ func createTestConfigStore(t *testing.T) interfaces.ConfigStore {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	return storageManager.GetConfigStore()
 }

@@ -68,6 +68,7 @@ func newRealWorkflowTrigger(tb testing.TB) WorkflowTrigger {
 	tmpDir := tb.TempDir()
 	storageManager, err := storageif.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(tb, err)
+	tb.Cleanup(func() { _ = storageManager.Close() })
 
 	registry := make(discovery.ModuleRegistry)
 	errCfg := stewardconfig.ErrorHandlingConfig{ModuleLoadFailure: stewardconfig.ActionContinue}

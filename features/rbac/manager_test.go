@@ -22,6 +22,7 @@ func TestManager_Initialize(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -61,6 +62,7 @@ func TestManager_CreateTenantDefaultRoles(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -99,6 +101,7 @@ func TestManager_SubjectManagement(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -161,6 +164,7 @@ func TestManager_RoleAssignment(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -224,6 +228,7 @@ func TestManager_PermissionChecking(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -309,6 +314,7 @@ func TestManager_SystemAdminPermissions(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -373,6 +379,7 @@ func TestManager_CreateStewardSubject(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -430,6 +437,7 @@ func TestManager_InactiveSubjectPermissions(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),

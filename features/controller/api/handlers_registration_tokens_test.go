@@ -42,6 +42,7 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	// Initialize RBAC system with OSS composite storage
 	storageManager, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),

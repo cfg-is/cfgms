@@ -40,6 +40,7 @@ func setupTestServer(t *testing.T) *Server {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -823,6 +824,7 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),

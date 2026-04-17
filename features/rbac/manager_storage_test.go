@@ -54,6 +54,7 @@ func TestNewManagerWithStorage(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.NotNil(t, storageManager)
+			t.Cleanup(func() { _ = storageManager.Close() })
 
 			// Test creating manager with storage interfaces
 			manager := NewManagerWithStorage(
@@ -184,6 +185,7 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -252,6 +254,7 @@ func TestManagerWithStorage_AuditTrail(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),

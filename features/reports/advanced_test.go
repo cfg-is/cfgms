@@ -82,6 +82,7 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	globalStorageManager, err := storageInterfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStorageManager.Close() })
 
 	auditStore := globalStorageManager.GetAuditStore()
 	auditManager := audit.NewManager(auditStore, "test-reports")
@@ -602,6 +603,7 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 	tmpDir := t.TempDir()
 	globalStorageManager, err := storageInterfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err, "Failed to create global storage manager")
+	t.Cleanup(func() { _ = globalStorageManager.Close() })
 
 	auditStore := globalStorageManager.GetAuditStore()
 	auditManager := audit.NewManager(auditStore, "test-reports")

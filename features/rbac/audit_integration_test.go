@@ -23,6 +23,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	// Create RBAC manager with audit integration
 	manager := NewManagerWithStorage(
@@ -300,6 +301,7 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	// Create manager but then simulate audit failure by setting auditManager to nil
 	manager := NewManagerWithStorage(
@@ -344,6 +346,7 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 		tmpDir := t.TempDir()
 		storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 		require.NoError(t, err)
+		t.Cleanup(func() { _ = storageManager.Close() })
 
 		// Create a properly configured manager (audit manager is always present in Epic 6)
 		manager := NewManagerWithStorage(

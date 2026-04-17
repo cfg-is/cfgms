@@ -167,6 +167,7 @@ func (s *MultiTenantScaleValidationSuite) SetupSuite() {
 	var storageErr error
 	s.storageManager, storageErr = interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	s.Require().NoError(storageErr, "Failed to create storage manager")
+	s.T().Cleanup(func() { _ = s.storageManager.Close() })
 
 	s.tenantStore = tenant.NewStorageAdapter(s.storageManager.GetTenantStore())
 	s.tenantManager = tenant.NewManager(s.tenantStore, nil)
