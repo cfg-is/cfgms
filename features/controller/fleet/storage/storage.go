@@ -88,9 +88,7 @@ const (
 	BackendSQLite   BackendType = "sqlite"   // SQLite embedded database (DEFAULT)
 	BackendMemory   BackendType = "memory"   // In-memory only (DEPRECATED - data loss risk)
 	BackendFile     BackendType = "file"     // File system storage (fallback)
-	BackendGit      BackendType = "git"      // Git-based storage (DEPRECATED)
 	BackendDatabase BackendType = "database" // External PostgreSQL database (scale)
-	BackendHybrid   BackendType = "hybrid"   // Git + database (DEPRECATED)
 )
 
 // DNARecord represents a stored DNA record with metadata

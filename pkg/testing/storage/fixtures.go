@@ -121,31 +121,11 @@ func NewStorageTestFixture(t *testing.T) *StorageTestFixture {
 	}
 
 	// Create configurations for all storage providers
-	fixture.setupGitConfig(t)
 	fixture.setupDatabaseConfig(t)
 	fixture.setupFlatfileConfig(t)
 	fixture.setupSQLiteConfig(t)
 
 	return fixture
-}
-
-// setupGitConfig creates a proper git provider configuration with repository initialization
-func (f *StorageTestFixture) setupGitConfig(t *testing.T) {
-	gitDir := filepath.Join(f.TempDir, "git-storage")
-	err := os.MkdirAll(gitDir, 0755)
-	require.NoError(t, err, "Failed to create git storage directory")
-
-	f.Configs["git"] = &StorageTestConfig{
-		Provider: "git",
-		Config: map[string]interface{}{
-			"repository_path": gitDir,
-			"branch":          "main",
-			"auto_init":       true,
-			"user_name":       "Test User",
-			"user_email":      "test@cfgms.test",
-		},
-		TempDir: gitDir,
-	}
 }
 
 // setupDatabaseConfig creates a proper database provider configuration for testing
@@ -371,22 +351,17 @@ func SkipIfDatabaseNotAvailable(t *testing.T) {
 	}
 }
 
-// SkipIfGitNotAvailable skips the test if git provider is not available
-func SkipIfGitNotAvailable(t *testing.T) {
-	// Git should always be available as it uses local filesystem
-	// This is a placeholder for future git-specific requirements
+// CreateTestStorageManager creates a storage manager for testing purposes using
+// the OSS composite backend (flatfile + SQLite). Both providers must be registered
+// before calling this function (import _ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+// and _ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite").
+func CreateTestStorageManager() (*interfaces.StorageManager, error) {
+	flatfileRoot := filepath.Join(os.TempDir(), fmt.Sprintf("cfgms-test-flatfile-%d", timeNowNano()))
+	sqlitePath := filepath.Join(os.TempDir(), fmt.Sprintf("cfgms-test-%d.db", timeNowNano()))
+	return interfaces.CreateOSSStorageManager(flatfileRoot, sqlitePath)
 }
 
-// CreateTestStorageManager creates a storage manager for testing purposes
-func CreateTestStorageManager() (*interfaces.StorageManager, error) {
-	// Use git provider as it's always available for testing
-	config := map[string]interface{}{
-		"repository_path": "/tmp/cfgms-test-storage",
-		"branch":          "main",
-		"auto_init":       true,
-		"user_name":       "Test User",
-		"user_email":      "test@cfgms.test",
-	}
-
-	return interfaces.CreateAllStoresFromConfig("git", config)
+// timeNowNano returns the current time in nanoseconds, used for unique temp paths.
+func timeNowNano() int64 {
+	return time.Now().UnixNano()
 }

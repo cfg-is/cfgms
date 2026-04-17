@@ -28,7 +28,6 @@ import (
 
 	// Import storage providers to register them
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 
 	// Import secrets providers to register them
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/steward"

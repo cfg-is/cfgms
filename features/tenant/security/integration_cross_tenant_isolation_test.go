@@ -19,7 +19,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestCrossTenantPermissionIsolationIntegration tests tenant isolation using real RBAC components
@@ -28,12 +29,8 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 	ctx := context.Background()
 
 	// Setup REAL RBAC and tenant infrastructure with git storage
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tempDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	rbacManager := rbac.NewManagerWithStorage(

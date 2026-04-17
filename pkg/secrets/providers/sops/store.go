@@ -18,7 +18,7 @@ import (
 
 // SOPSSecretStoreConfig provides configuration for SOPS secret store
 type SOPSSecretStoreConfig struct {
-	StorageProvider string                 // Storage provider name (default: "git")
+	StorageProvider string                 // Storage provider name (default: "flatfile")
 	StorageConfig   map[string]interface{} // Storage provider configuration
 	CacheEnabled    bool                   // Enable secret caching
 	CacheTTL        int                    // Cache TTL in seconds

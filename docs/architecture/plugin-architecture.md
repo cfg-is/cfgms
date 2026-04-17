@@ -152,7 +152,8 @@ controller:
       # Provider-specific config
       database_url: postgresql://...  # for database provider
       file_path: /var/lib/cfgms       # for file provider  
-      git_repository: https://...     # for git provider
+      flatfile_root: /var/lib/cfgms/flatfile  # for flatfile provider
+      sqlite_path: /var/lib/cfgms/data.db    # for sqlite provider
 ```
 
 ```go
@@ -214,7 +215,8 @@ Available Storage Plugins:
   ✅ memory      - In-memory storage (development/testing)
   ✅ file        - Local file storage (simple deployments)
   ❌ database    - PostgreSQL storage (requires: postgresql client)
-  ❌ git         - Git-based storage (requires: git, mozilla-sops)
+  ✅ flatfile    - Local flatfile storage (config/audit tier)
+  ✅ sqlite      - SQLite storage (business data tier)
 ```
 
 ### Runtime Plugin Information

@@ -34,7 +34,7 @@ CFGMS implements a **pluggable provider architecture** where cross-cutting conce
 
 **Existing Central Providers**:
 
-- `pkg/storage` - Data persistence (git, database, cache)
+- `pkg/storage` - Data persistence (flatfile, sqlite, database, cache)
 - `pkg/logging` - Structured logging with tenant isolation
 - `pkg/cert` - Certificate/TLS management (prevents dual-CA bugs)
 - `pkg/secrets` - Secret storage with encryption

@@ -199,7 +199,9 @@ func (s *FlatFileConfigStore) StoreConfig(ctx context.Context, config *interface
 		entry.CreatedBy = existing.CreatedBy
 	} else {
 		entry.Version = 1
-		entry.CreatedAt = now
+		if entry.CreatedAt.IsZero() {
+			entry.CreatedAt = now
+		}
 	}
 	entry.UpdatedAt = now
 	entry.Checksum = dataChecksum(config.Data)

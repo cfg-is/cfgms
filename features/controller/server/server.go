@@ -55,7 +55,7 @@ import (
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"  // register sqlite provider for OSS composite manager
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for OSS composite manager
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
 
@@ -103,29 +103,22 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize global storage provider system - REQUIRED for all deployments
 	if cfg.Storage == nil {
-		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.provider as 'git' (minimum) or 'database' (production). See docs/examples/controller-storage-config.cfg for examples")
+		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.flatfile_root and storage.sqlite_path. See docs/examples/controller-storage-config.cfg for examples")
 	}
 
-	// Create storage manager — OSS composite path (flatfile+SQLite) or legacy single-provider path
-	var storageManager *interfaces.StorageManager
-	if cfg.Storage.FlatfileRoot != "" {
-		logger.Info("Initializing OSS composite storage backend...",
-			"flatfile_root", cfg.Storage.FlatfileRoot,
-			"sqlite_path", cfg.Storage.SQLitePath)
-		var ossErr error
-		storageManager, ossErr = interfaces.CreateOSSStorageManager(cfg.Storage.FlatfileRoot, cfg.Storage.SQLitePath)
-		if ossErr != nil {
-			return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", ossErr)
-		}
-		logger.Info("OSS composite storage backend initialized")
-	} else {
-		logger.Info("Initializing global storage provider", "provider", cfg.Storage.Provider)
-		var legacyErr error
-		storageManager, legacyErr = interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
-		if legacyErr != nil {
-			return nil, fmt.Errorf("failed to initialize storage provider '%s': %w. Verify storage configuration and ensure storage backend is accessible", cfg.Storage.Provider, legacyErr)
-		}
+	// Create storage manager — OSS composite path (flatfile + SQLite)
+	if cfg.Storage.FlatfileRoot == "" {
+		return nil, fmt.Errorf("storage.flatfile_root is required: configure flatfile_root and sqlite_path in your controller configuration, then run 'cfg storage migrate' to import existing data")
 	}
+
+	logger.Info("Initializing OSS composite storage backend...",
+		"flatfile_root", cfg.Storage.FlatfileRoot,
+		"sqlite_path", cfg.Storage.SQLitePath)
+	storageManager, ossErr := interfaces.CreateOSSStorageManager(cfg.Storage.FlatfileRoot, cfg.Storage.SQLitePath)
+	if ossErr != nil {
+		return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", ossErr)
+	}
+	logger.Info("OSS composite storage backend initialized")
 
 	// Initialize RBAC system with pluggable storage only
 	auditStore := storageManager.GetAuditStore()
@@ -698,7 +691,9 @@ func initializeWorkflowHandler(storageManager *interfaces.StorageManager, logger
 		configStore: configStore,
 	}
 
-	storageProvider := storageManager.GetProvider()
+	// flatfile is always registered and Available() returns (true, nil) unconditionally.
+	// GetProvider() on a composite manager returns nil; use GetStorageProvider instead.
+	storageProvider, _ := interfaces.GetStorageProvider("flatfile")
 	triggerMgr := workflowtrigger.NewControllerTriggerManager(storageProvider, adapter)
 
 	handler := api.NewWorkflowHandler(workflowEngine, configStore, triggerMgr, logger)

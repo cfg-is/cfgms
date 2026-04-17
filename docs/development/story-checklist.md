@@ -43,7 +43,7 @@ git branch --show-current  # Must show feature branch name
 - ❌ **STOP**: Am I storing secrets in cleartext anywhere? (PROHIBITED)
 - ✅ **VERIFY**: Does my component use write-through caching (memory → durable)?
 - ✅ **VERIFY**: Does my component import only `pkg/storage/interfaces`?
-- ✅ **VERIFY**: Does my implementation work with ALL global storage providers (git/database)?
+- ✅ **VERIFY**: Does my implementation work with ALL global storage providers (flatfile+sqlite/database)?
 - ✅ **VERIFY**: Does my test use proper storage configuration in test helpers?
 
 #### 5. **Basic Security Review** (CRITICAL)

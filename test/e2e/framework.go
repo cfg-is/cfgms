@@ -35,7 +35,8 @@ import (
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 
 	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // RegisteredSteward represents a steward registered with the controller via gRPC transport
@@ -284,13 +285,11 @@ func (f *E2ETestFramework) initializeCertificates() error {
 func (f *E2ETestFramework) initializeRBAC() error {
 	f.metrics.ComponentStartTimes["rbac"] = time.Now()
 
-	// Use git storage for durable E2E testing - minimum storage requirement
-	storageConfig := map[string]interface{}{
-		"repository_path": filepath.Join(f.tempDir, "rbac-storage"),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	// Use OSS composite storage for durable E2E testing
+	storageManager, err := interfaces.CreateOSSStorageManager(
+		filepath.Join(f.tempDir, "rbac-flatfile"),
+		filepath.Join(f.tempDir, "rbac-cfgms.db"),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to setup E2E storage: %w", err)
 	}
@@ -323,13 +322,8 @@ func (f *E2ETestFramework) initializeController() error {
 		DataDir:    filepath.Join(f.tempDir, "controller-data"),
 		LogLevel:   "info",
 		Storage: &controllerConfig.StorageConfig{
-			Provider: "git",
-			Config: map[string]interface{}{
-				"repository_path": filepath.Join(f.tempDir, "storage-git"),
-				"encryption": map[string]interface{}{
-					"enabled": false, // Disable encryption for tests
-				},
-			},
+			FlatfileRoot: filepath.Join(f.tempDir, "storage-flatfile"),
+			SQLitePath:   filepath.Join(f.tempDir, "storage-cfgms.db"),
 		},
 		Certificate: &controllerConfig.CertificateConfig{
 			EnableCertManagement:   f.config.EnableTLS,

@@ -95,7 +95,7 @@ func parseStoreConfig(config map[string]interface{}) (*SOPSSecretStoreConfig, er
 	if providerName, ok := config["storage_provider"].(string); ok {
 		storeConfig.StorageProvider = providerName
 	} else {
-		storeConfig.StorageProvider = "git" // Default to git
+		storeConfig.StorageProvider = "flatfile" // Default to flatfile (git removed in Issue #664)
 	}
 
 	// Parse cache settings

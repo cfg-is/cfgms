@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -22,7 +21,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // setupTestServerWithTokenStore creates a test server with a real registration token store
@@ -39,13 +39,10 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	// Create temporary directory for storage
 	tempDir := t.TempDir()
 
-	// Initialize RBAC system with git storage
-	storageConfig := map[string]interface{}{
-		"repository_path": tempDir,
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	// Initialize RBAC system with OSS composite storage
+	flatfileRoot := tempDir + "/flatfile"
+	sqlitePath := tempDir + "/cfgms.db"
+	storageManager, err := interfaces.CreateOSSStorageManager(flatfileRoot, sqlitePath)
 	require.NoError(t, err)
 
 	rbacManager := rbac.NewManagerWithStorage(
@@ -60,17 +57,15 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 
-	// Create registration token store
-	tokenStorePath, err := os.MkdirTemp("", "token-store-test-*")
+	// Create registration token store using SQLite
+	sqliteTokenStore, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{
+		"path": tempDir + "/tokens.db",
+	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(tokenStorePath) })
-
-	gitTokenStore, err := git.NewGitRegistrationTokenStore(tokenStorePath, "")
-	require.NoError(t, err)
-	err = gitTokenStore.Initialize(context.Background())
+	err = sqliteTokenStore.Initialize(context.Background())
 	require.NoError(t, err)
 
-	tokenStore := registration.NewStorageAdapter(gitTokenStore)
+	tokenStore := registration.NewStorageAdapter(sqliteTokenStore)
 
 	// Create services
 	controllerService := service.NewControllerService(logger)

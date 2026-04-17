@@ -15,7 +15,7 @@ import (
 
 func TestNewCollector(t *testing.T) {
 	transportCollector := health.NewDefaultTransportCollector(&health.MockTransportProviderStats{})
-	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
+	storageCollector := &health.MockStorageProviderStats{ProviderName: "flatfile"}
 	appCollector := &health.MockApplicationQueueStats{}
 
 	systemCollector, err := health.NewDefaultSystemCollector()
@@ -33,7 +33,7 @@ func TestNewCollector(t *testing.T) {
 
 func TestCollector_StartStop(t *testing.T) {
 	transportCollector := health.NewDefaultTransportCollector(&health.MockTransportProviderStats{})
-	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
+	storageCollector := &health.MockStorageProviderStats{ProviderName: "flatfile"}
 	appCollector := &health.MockApplicationQueueStats{}
 
 	systemCollector, err := health.NewDefaultSystemCollector()
@@ -79,7 +79,7 @@ func TestCollector_MetricsCollection(t *testing.T) {
 	}
 
 	storageStats := &health.MockStorageProviderStats{
-		ProviderName:    "git",
+		ProviderName:    "flatfile",
 		PoolUtilization: 0.75,
 		AvgLatencyMs:    50.5,
 		P95LatencyMs:    150.0,
@@ -133,7 +133,7 @@ func TestCollector_MetricsCollection(t *testing.T) {
 	assert.Equal(t, int64(3), metrics.Transport.ReconnectionAttempts)
 
 	// Verify Storage metrics
-	assert.Equal(t, "git", metrics.Storage.Provider)
+	assert.Equal(t, "flatfile", metrics.Storage.Provider)
 	assert.Equal(t, 0.75, metrics.Storage.PoolUtilization)
 	assert.Equal(t, 50.5, metrics.Storage.AvgQueryLatencyMs)
 	assert.Equal(t, 150.0, metrics.Storage.P95QueryLatencyMs)
@@ -152,7 +152,7 @@ func TestCollector_MetricsCollection(t *testing.T) {
 
 func TestCollector_MetricsHistory(t *testing.T) {
 	transportCollector := health.NewDefaultTransportCollector(&health.MockTransportProviderStats{})
-	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
+	storageCollector := &health.MockStorageProviderStats{ProviderName: "flatfile"}
 	appCollector := &health.MockApplicationQueueStats{}
 
 	systemCollector, err := health.NewDefaultSystemCollector()
@@ -189,7 +189,7 @@ func TestCollector_MetricsHistory(t *testing.T) {
 
 func TestCollector_StartAlreadyStarted(t *testing.T) {
 	transportCollector := health.NewDefaultTransportCollector(&health.MockTransportProviderStats{})
-	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
+	storageCollector := &health.MockStorageProviderStats{ProviderName: "flatfile"}
 	appCollector := &health.MockApplicationQueueStats{}
 
 	systemCollector, err := health.NewDefaultSystemCollector()
@@ -218,7 +218,7 @@ func TestCollector_StartAlreadyStarted(t *testing.T) {
 
 func TestCollector_StopNotStarted(t *testing.T) {
 	transportCollector := health.NewDefaultTransportCollector(&health.MockTransportProviderStats{})
-	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
+	storageCollector := &health.MockStorageProviderStats{ProviderName: "flatfile"}
 	appCollector := &health.MockApplicationQueueStats{}
 
 	systemCollector, err := health.NewDefaultSystemCollector()
@@ -238,7 +238,7 @@ func TestCollector_StopNotStarted(t *testing.T) {
 
 func TestCollector_GetCurrentMetricsBeforeStart(t *testing.T) {
 	transportCollector := health.NewDefaultTransportCollector(&health.MockTransportProviderStats{})
-	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
+	storageCollector := &health.MockStorageProviderStats{ProviderName: "flatfile"}
 	appCollector := &health.MockApplicationQueueStats{}
 
 	systemCollector, err := health.NewDefaultSystemCollector()
@@ -257,7 +257,7 @@ func TestCollector_GetCurrentMetricsBeforeStart(t *testing.T) {
 }
 
 func TestCollector_NilTransportCollector(t *testing.T) {
-	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
+	storageCollector := &health.MockStorageProviderStats{ProviderName: "flatfile"}
 	appCollector := &health.MockApplicationQueueStats{}
 
 	systemCollector, err := health.NewDefaultSystemCollector()

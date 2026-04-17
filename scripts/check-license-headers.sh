@@ -10,8 +10,8 @@ ERRORS=""
 # Check Go files
 echo "🔍 Checking Go files for SPDX license headers..."
 while IFS= read -r file; do
-    # Skip vendor, .git, and .cache directories
-    if [[ "$file" == *"/vendor/"* ]] || [[ "$file" == *"/.git/"* ]] || [[ "$file" == *"/.cache/"* ]]; then
+    # Skip vendor, .git, .cache, and .gomodcache directories
+    if [[ "$file" == *"/vendor/"* ]] || [[ "$file" == *"/.git/"* ]] || [[ "$file" == *"/.cache/"* ]] || [[ "$file" == *"/.gomodcache/"* ]]; then
         continue
     fi
 
@@ -25,8 +25,8 @@ done < <(find . -name "*.go" -type f)
 # Check proto files
 echo "🔍 Checking .proto files for SPDX license headers..."
 while IFS= read -r file; do
-    # Skip vendor, .git, and .cache directories
-    if [[ "$file" == *"/vendor/"* ]] || [[ "$file" == *"/.git/"* ]] || [[ "$file" == *"/.cache/"* ]]; then
+    # Skip vendor, .git, .cache, and .gomodcache directories
+    if [[ "$file" == *"/vendor/"* ]] || [[ "$file" == *"/.git/"* ]] || [[ "$file" == *"/.cache/"* ]] || [[ "$file" == *"/.gomodcache/"* ]]; then
         continue
     fi
 

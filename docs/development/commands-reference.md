@@ -249,8 +249,8 @@ make test-with-real-storage
 # Test database provider specifically
 make test-integration-db
 
-# Test git provider specifically
-make test-integration-git
+# Test OSS composite storage (flatfile+sqlite) specifically
+make test-integration-oss
 
 # Complete integration testing workflow
 make test-integration-complete

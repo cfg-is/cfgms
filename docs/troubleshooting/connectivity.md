@@ -278,7 +278,7 @@ docker compose restart steward-standalone
 
 ```bash
 # 1. Verify config was stored
-docker exec controller ls -la /data/git-storage/
+docker exec controller ls -la /data/flatfile-storage/ /data/sqlite-storage/
 
 # 2. Check steward received sync command via gRPC control plane
 docker logs steward-standalone | grep "sync_config\|SyncConfig"
@@ -401,7 +401,7 @@ docker logs controller | grep -E "took|duration|elapsed|slow"
 **Solutions**:
 
 ```bash
-# 1. Check disk I/O (for git storage — commit is on critical path)
+# 1. Check disk I/O (for flatfile storage — write is on critical path)
 docker exec controller df -h
 docker exec controller iostat -x 1 5
 

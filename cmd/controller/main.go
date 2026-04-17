@@ -26,7 +26,6 @@ import (
 	// Import storage providers to register them
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
@@ -83,6 +82,25 @@ func runController(configPath string, initMode bool) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 	fmt.Printf("[DEBUG] main.go: Configuration loaded successfully\n")
+
+	// Startup guard: the git storage provider was removed in Issue #664.
+	// If the config still references provider: git, exit with a clear error
+	// directing the operator to run the migration CLI before restarting.
+	if cfg.Storage != nil && cfg.Storage.Provider == "git" {
+		fmt.Fprintln(os.Stderr, "ERROR: The 'git' storage provider has been removed.")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "To migrate your data to the OSS composite backend, run:")
+		fmt.Fprintln(os.Stderr, "  cfg storage migrate --from git --to flatfile \\")
+		fmt.Fprintln(os.Stderr, "    --git-root <current storage.config.repository_path> \\")
+		fmt.Fprintln(os.Stderr, "    --flatfile-root /var/lib/cfgms/config \\")
+		fmt.Fprintln(os.Stderr, "    --sqlite-path /var/lib/cfgms/cfgms.db")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Then update your controller.cfg:")
+		fmt.Fprintln(os.Stderr, "  storage:")
+		fmt.Fprintln(os.Stderr, "    flatfile_root: /var/lib/cfgms/config")
+		fmt.Fprintln(os.Stderr, "    sqlite_path:   /var/lib/cfgms/cfgms.db")
+		os.Exit(1)
+	}
 
 	loggingConfig := &logging.LoggingConfig{
 		Provider:          getLogProvider(cfg),

@@ -20,7 +20,8 @@ import (
 
 	// Import storage providers for integration testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 func TestStorageProviderIntegration_WithDockerEnvironment(t *testing.T) {
@@ -56,25 +57,14 @@ func TestStorageProviderIntegration_WithDockerEnvironment(t *testing.T) {
 		t.Log("✅ Database provider successfully initialized with real PostgreSQL")
 	})
 
-	t.Run("git_provider_with_real_git_server", func(t *testing.T) {
-		config, err := fixture.CreateControllerConfig("git")
-		require.NoError(t, err, "Should create git controller config")
-
-		// Override with Docker environment settings
-		gitConfig := config.Storage.Config
-		gitConfig["repository_url"] = os.Getenv("CFGMS_TEST_GITEA_URL") + "/cfgms_test/cfgms-test-global.git"
-		gitConfig["username"] = os.Getenv("CFGMS_TEST_GITEA_USER")
-		gitConfig["password"] = os.Getenv("CFGMS_TEST_GITEA_PASSWORD")
+	t.Run("flatfile_provider_local_filesystem", func(t *testing.T) {
+		config, err := fixture.CreateControllerConfig("flatfile")
+		require.NoError(t, err, "Should create flatfile controller config")
 
 		serverInstance, err := server.New(config, logger)
-		if err != nil {
-			// Git provider might need repository initialization
-			t.Logf("Git provider initialization warning: %v", err)
-			t.Skip("Git provider requires repository setup - this will be fixed in subsequent tasks")
-		}
-
+		require.NoError(t, err, "Should create server with flatfile storage")
 		require.NotNil(t, serverInstance, "Server should not be nil")
-		t.Log("✅ Git provider successfully initialized with real Git server")
+		t.Log("✅ Flatfile provider successfully initialized")
 	})
 
 	t.Run("storage_provider_fixture_validation", func(t *testing.T) {
@@ -89,44 +79,37 @@ func TestStorageProviderIntegration_LocalFallback(t *testing.T) {
 	fixture := NewStorageTestFixture(t)
 	defer fixture.Cleanup()
 
-	t.Run("git_provider_local_filesystem", func(t *testing.T) {
-		config, err := fixture.CreateControllerConfig("git")
-		require.NoError(t, err, "Should create git controller config")
+	t.Run("flatfile_provider_local_filesystem", func(t *testing.T) {
+		config, err := fixture.CreateControllerConfig("flatfile")
+		require.NoError(t, err, "Should create flatfile controller config")
 
 		serverInstance, err := server.New(config, logger)
-		if err != nil {
-			t.Logf("Git provider local initialization: %v", err)
-			// This is expected without proper git setup - we'll fix in next task
-		} else {
-			require.NotNil(t, serverInstance, "Server should not be nil")
-			t.Log("✅ Git provider works with local filesystem")
-		}
+		require.NoError(t, err, "Should create server with flatfile storage")
+		require.NotNil(t, serverInstance, "Server should not be nil")
+		t.Log("✅ Flatfile provider works with local filesystem")
 	})
 
 	t.Run("test_fixture_infrastructure", func(t *testing.T) {
 		// Test that our test infrastructure components work
-		gitConfig, exists := fixture.GetProviderConfig("git")
-		assert.True(t, exists, "Git config should exist")
-		assert.Equal(t, "git", gitConfig.Provider)
+		flatfileConfig, exists := fixture.GetProviderConfig("flatfile")
+		assert.True(t, exists, "Flatfile config should exist")
+		assert.Equal(t, "flatfile", flatfileConfig.Provider)
 
 		dbConfig, exists := fixture.GetProviderConfig("database")
 		assert.True(t, exists, "Database config should exist")
 		assert.Equal(t, "database", dbConfig.Provider)
 
 		// Verify configurations contain required fields
-		assert.Contains(t, gitConfig.Config, "repository_path", "Git config should have repository_path")
+		assert.Contains(t, flatfileConfig.Config, "root", "Flatfile config should have root")
 		assert.Contains(t, dbConfig.Config, "password", "Database config should have password")
 	})
 }
 
-// Check if Docker integration environment is available
+// Check if Docker integration environment is available (database required)
 func isDockerEnvironmentAvailable() bool {
 	requiredEnvVars := []string{
 		"CFGMS_TEST_DB_PASSWORD",
 		"CFGMS_TEST_DB_HOST",
-		"CFGMS_TEST_GITEA_URL",
-		"CFGMS_TEST_GITEA_USER",
-		"CFGMS_TEST_GITEA_PASSWORD",
 	}
 
 	for _, envVar := range requiredEnvVars {

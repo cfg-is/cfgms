@@ -164,7 +164,7 @@ func ValidateHybridConfig(config HybridStorageConfig) error {
 		return fmt.Errorf("configuration storage provider is required")
 	}
 
-	cfgProvider, err := GetStorageProvider(config.Configuration.Provider)
+	_, err = GetStorageProvider(config.Configuration.Provider)
 	if err != nil {
 		return fmt.Errorf("configuration storage provider '%s' not available: %w",
 			config.Configuration.Provider, err)
@@ -174,12 +174,6 @@ func ValidateHybridConfig(config HybridStorageConfig) error {
 	opCaps := opProvider.GetCapabilities()
 	if !opCaps.SupportsTransactions {
 		return fmt.Errorf("operational storage provider should support transactions for data consistency")
-	}
-
-	// Validate configuration provider capabilities for GitOps workflow
-	cfgCaps := cfgProvider.GetCapabilities()
-	if !cfgCaps.SupportsVersioning {
-		return fmt.Errorf("configuration storage provider should support versioning for change tracking")
 	}
 
 	return nil
@@ -196,7 +190,10 @@ func CreateHybridStorageFromConfig(config HybridStorageConfig) (*HybridStorageMa
 	return NewHybridStorageManager(config)
 }
 
-// GetRecommendedHybridConfig returns recommended hybrid storage configuration
+// GetRecommendedHybridConfig returns recommended hybrid storage configuration.
+// The configuration tier uses flatfile (ADR-003 OSS default) for change-tracked
+// configuration storage. The operational tier uses the PostgreSQL database backend
+// for high-performance queries and ACID transactions.
 func GetRecommendedHybridConfig() HybridStorageConfig {
 	return HybridStorageConfig{
 		Operational: StorageBackendConfig{
@@ -214,13 +211,9 @@ func GetRecommendedHybridConfig() HybridStorageConfig {
 			},
 		},
 		Configuration: StorageBackendConfig{
-			Provider: "git",
+			Provider: "flatfile",
 			Config: map[string]interface{}{
-				"repository_path": "/data/cfgms-configs",
-				"remote_url":      "git@github.com:msp-corp/cfgms-configs.git",
-				"branch":          "main",
-				"auto_sync":       true,
-				"sops_enabled":    true,
+				"root": "/var/lib/cfgms/config",
 			},
 		},
 	}
@@ -249,22 +242,21 @@ func PlanHybridMigration(currentProvider string, currentConfig map[string]interf
 	// Recommend hybrid configuration based on current setup
 	switch currentProvider {
 	case "database":
-		// Already using database - keep for operational, add git for configs
+		// Already using database - keep for operational, add flatfile for configs
 		strategy.TargetConfig = HybridStorageConfig{
 			Operational: StorageBackendConfig{
 				Provider: "database",
 				Config:   currentConfig, // Keep existing DB config
 			},
 			Configuration: StorageBackendConfig{
-				Provider: "git",
+				Provider: "flatfile",
 				Config: map[string]interface{}{
-					"repository_path": "/data/cfgms-configs",
-					"remote_url":      "", // Must be configured by user
+					"root": "/var/lib/cfgms/config",
 				},
 			},
 		}
-	case "git":
-		// Already using git - keep for configs, add database for operational
+	case "flatfile":
+		// Already using flatfile - add database for operational
 		strategy.TargetConfig = HybridStorageConfig{
 			Operational: StorageBackendConfig{
 				Provider: "database",
@@ -276,8 +268,8 @@ func PlanHybridMigration(currentProvider string, currentConfig map[string]interf
 				},
 			},
 			Configuration: StorageBackendConfig{
-				Provider: "git",
-				Config:   currentConfig, // Keep existing git config
+				Provider: "flatfile",
+				Config:   currentConfig, // Keep existing flatfile config
 			},
 		}
 	}

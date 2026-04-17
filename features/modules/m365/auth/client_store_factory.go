@@ -116,28 +116,23 @@ func NewClientTenantStore(config *ClientStoreConfig, logger interface{}) (Client
 
 	switch config.Type {
 	case ClientStoreMemory:
-		// Memory storage deprecated - use git provider instead
-		providerName = "git"
-		globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-memory-replacement-%s.git", generateUniqueID())
+		// Memory storage deprecated - use SQLite provider instead
+		providerName = "sqlite"
+		globalConfig["path"] = fmt.Sprintf("/tmp/cfgms-memory-replacement-%s.db", generateUniqueID())
 
 	case ClientStoreFile:
-		// Use git provider with local repository path
-		providerName = "git"
-		globalConfig["repository_path"] = config.FilePath
-		if config.FilePath == "" {
-			globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.git", generateUniqueID())
+		// Use SQLite provider for business data persistence
+		providerName = "sqlite"
+		if config.FilePath != "" {
+			globalConfig["path"] = config.FilePath + ".db"
+		} else {
+			globalConfig["path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.db", generateUniqueID())
 		}
 
 	case ClientStoreGit:
-		providerName = "git"
-		if config.GitRepository != "" {
-			globalConfig["remote_url"] = config.GitRepository
-			// Use unique path to avoid test conflicts
-			globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-client-git-%s", generateUniqueID())
-		} else {
-			// Use unique path to avoid test conflicts
-			globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.git", generateUniqueID())
-		}
+		// Git storage deprecated - use SQLite provider for business data (ADR-003)
+		providerName = "sqlite"
+		globalConfig["path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.db", generateUniqueID())
 
 	case ClientStoreDatabase:
 		providerName = "database"
@@ -368,10 +363,6 @@ func GetRecommendedStoreType(clientCount int, requiresHA bool, hasDatabase bool)
 		return ClientStoreFile
 	}
 
-	if clientCount <= 100 && !requiresHA && !hasDatabase {
-		return ClientStoreGit
-	}
-
 	// Check for hybrid first (most specific - requires both HA and database)
 	if hasDatabase && requiresHA {
 		return ClientStoreHybrid
@@ -381,8 +372,8 @@ func GetRecommendedStoreType(clientCount int, requiresHA bool, hasDatabase bool)
 		return ClientStoreDatabase
 	}
 
-	// Default to git-based storage (CFGMS philosophy)
-	return ClientStoreGit
+	// Default to file-based storage (OSS default)
+	return ClientStoreFile
 }
 
 // ClientStoreInfo provides information about the configured client store

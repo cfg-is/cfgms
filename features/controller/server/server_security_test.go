@@ -22,37 +22,23 @@ import (
 	// Import storage providers for Epic 6 compliance testing
 	// Note: memory provider is NOT imported as it's not a global provider
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // Security-focused tests for the controller server
 
-// Epic 6: Helper function to create storage configuration for all tests using Docker fixtures
+// Epic 6: Helper function to create storage configuration for all tests using OSS composite storage
 func createTestStorageConfig(tempDir, suffix string) *config.StorageConfig {
 	return &config.StorageConfig{
-		Provider: "git",
-		Config: map[string]interface{}{
-			"repository_path": tempDir + "/" + suffix + "-storage",
-			"branch":          "main",
-			"auto_init":       true,
-		},
+		FlatfileRoot: tempDir + "/" + suffix + "-flatfile",
+		SQLitePath:   tempDir + "/" + suffix + "-cfgms.db",
 	}
 }
 
 // createDockerTestStorageConfig creates storage configs for Docker-based testing
 func createDockerTestStorageConfig(provider string) *config.StorageConfig {
 	switch provider {
-	case "git":
-		return &config.StorageConfig{
-			Provider: "git",
-			Config: map[string]interface{}{
-				"repository_url": os.Getenv("CFGMS_TEST_GITEA_URL") + "/cfgms_test/cfgms-test-global.git",
-				"branch":         "main",
-				"auto_init":      true,
-				"username":       os.Getenv("CFGMS_TEST_GITEA_USER"),
-				"password":       os.Getenv("CFGMS_TEST_GITEA_PASSWORD"),
-			},
-		}
 	case "database":
 		return &config.StorageConfig{
 			Provider: "database",
@@ -111,19 +97,19 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 			errMsg:  "storage configuration is required",
 		},
 		{
-			name: "invalid storage provider should fail",
+			name: "missing flatfile_root should fail",
 			config: &config.Config{
 				ListenAddr: "127.0.0.1:0",
 				Certificate: &config.CertificateConfig{
 					EnableCertManagement: false,
 				},
 				Storage: &config.StorageConfig{
-					Provider: "invalid-provider-name",
-					Config:   make(map[string]interface{}),
+					// FlatfileRoot intentionally omitted
+					SQLitePath: tempDir + "/test-missing-root.db",
 				},
 			},
 			wantErr: true,
-			errMsg:  "storage provider",
+			errMsg:  "storage.flatfile_root is required",
 		},
 		{
 			name: "insecure config should create server but with warnings",
@@ -134,12 +120,8 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 				},
 				// Epic 6: Storage configuration now required
 				Storage: &config.StorageConfig{
-					Provider: "git",
-					Config: map[string]interface{}{
-						"repository_path": tempDir + "/test-storage",
-						"branch":          "main",
-						"auto_init":       true,
-					},
+					FlatfileRoot: tempDir + "/test-flatfile",
+					SQLitePath:   tempDir + "/test-cfgms.db",
 				},
 			},
 			wantErr: false,
@@ -167,12 +149,8 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 						},
 					},
 					Storage: &config.StorageConfig{
-						Provider: "git",
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/secure-storage",
-							"branch":          "main",
-							"auto_init":       true,
-						},
+						FlatfileRoot: tempDir + "/secure-flatfile",
+						SQLitePath:   tempDir + "/secure-cfgms.db",
 					},
 				}
 			}(),
@@ -293,34 +271,23 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 	})
 
 	t.Run("InvalidProviderShouldFail", func(t *testing.T) {
-		// Generate an invalid provider name that's guaranteed not to be registered
-		invalidProvider := "definitely-not-a-real-provider-name"
-
-		// Verify it's actually not registered
-		isRegistered := false
-		for _, providerInfo := range registeredProviders {
-			if providerInfo.Name == invalidProvider {
-				isRegistered = true
-				break
-			}
-		}
-		require.False(t, isRegistered, "Test setup error: invalid provider name is actually registered")
-
+		// With OSS composite storage, FlatfileRoot is required.
+		// An empty FlatfileRoot is the primary invalid configuration.
 		config := &config.Config{
 			ListenAddr: "127.0.0.1:0",
 			Certificate: &config.CertificateConfig{
 				EnableCertManagement: false,
 			},
 			Storage: &config.StorageConfig{
-				Provider: invalidProvider,
-				Config:   make(map[string]interface{}),
+				// FlatfileRoot intentionally empty — should fail validation
+				SQLitePath: tempDir + "/invalid-test.db",
 			},
 		}
 
 		server, err := New(config, logger)
-		assert.Error(t, err, "Invalid storage provider should cause server creation to fail")
-		assert.Nil(t, server, "Server should not be created with invalid provider")
-		assert.Contains(t, err.Error(), "storage provider", "Error should mention storage provider issue")
+		assert.Error(t, err, "Missing flatfile_root should cause server creation to fail")
+		assert.Nil(t, server, "Server should not be created with missing flatfile_root")
+		assert.Contains(t, err.Error(), "storage.flatfile_root is required", "Error should mention storage configuration requirement")
 	})
 
 	t.Run("FutureProofProviderList", func(t *testing.T) {
@@ -332,8 +299,8 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 
 		t.Logf("Currently registered storage providers: %v", providerNames)
 
-		// These are the providers we expect to exist based on our architecture
-		expectedProviders := []string{"git", "database"}
+		// These are the providers we expect to exist based on our architecture (Issue #664: git removed)
+		expectedProviders := []string{"flatfile", "sqlite", "database"}
 
 		for _, expected := range expectedProviders {
 			found := false
@@ -380,12 +347,8 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 					ListenAddr: "127.0.0.1:0",
 					CertPath:   certDir,
 					Storage: &config.StorageConfig{
-						Provider: "git",
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/prod-storage",
-							"branch":          "main",
-							"auto_init":       true,
-						},
+						FlatfileRoot: tempDir + "/prod-flatfile",
+						SQLitePath:   tempDir + "/prod-cfgms.db",
 					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement:   true,
@@ -422,12 +385,8 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 				ListenAddr: "127.0.0.1:0",
 				// Epic 6: Storage configuration required
 				Storage: &config.StorageConfig{
-					Provider: "git",
-					Config: map[string]interface{}{
-						"repository_path": tempDir + "/dev-storage",
-						"branch":          "main",
-						"auto_init":       true,
-					},
+					FlatfileRoot: tempDir + "/dev-flatfile",
+					SQLitePath:   tempDir + "/dev-cfgms.db",
 				},
 				Certificate: &config.CertificateConfig{
 					EnableCertManagement: false, // Insecure for development
@@ -479,12 +438,8 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					ListenAddr: "127.0.0.1:0",
 					CertPath:   tempDir,
 					Storage: &config.StorageConfig{
-						Provider: "git",
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/malformed-paths-storage",
-							"branch":          "main",
-							"auto_init":       true,
-						},
+						FlatfileRoot: tempDir + "/malformed-flatfile",
+						SQLitePath:   tempDir + "/malformed-cfgms.db",
 					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: true,
@@ -509,12 +464,8 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					ListenAddr: "127.0.0.1:0",
 					CertPath:   certDir,
 					Storage: &config.StorageConfig{
-						Provider: "git",
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/excessive-validity-storage",
-							"branch":          "main",
-							"auto_init":       true,
-						},
+						FlatfileRoot: tempDir + "/excessive-flatfile",
+						SQLitePath:   tempDir + "/excessive-cfgms.db",
 					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement:   true,
@@ -538,12 +489,8 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					ListenAddr: "127.0.0.1:80", // Privileged port
 					// Epic 6: Storage configuration required
 					Storage: &config.StorageConfig{
-						Provider: "git",
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/privileged-port-storage",
-							"branch":          "main",
-							"auto_init":       true,
-						},
+						FlatfileRoot: tempDir + "/privileged-flatfile",
+						SQLitePath:   tempDir + "/privileged-cfgms.db",
 					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: false,
@@ -560,12 +507,8 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					ListenAddr: "127.0.0.1:0", // Localhost only
 					// Epic 6: Storage configuration required
 					Storage: &config.StorageConfig{
-						Provider: "git",
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/localhost-storage",
-							"branch":          "main",
-							"auto_init":       true,
-						},
+						FlatfileRoot: tempDir + "/localhost-flatfile",
+						SQLitePath:   tempDir + "/localhost-cfgms.db",
 					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: false,
@@ -585,12 +528,8 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					ListenAddr: "0.0.0.0:0",
 					CertPath:   certDir,
 					Storage: &config.StorageConfig{
-						Provider: "git",
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/wildcard-storage",
-							"branch":          "main",
-							"auto_init":       true,
-						},
+						FlatfileRoot: tempDir + "/wildcard-flatfile",
+						SQLitePath:   tempDir + "/wildcard-cfgms.db",
 					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: true,

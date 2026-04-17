@@ -198,9 +198,9 @@ func TestCreateHybridStorageManagerFromConfig(t *testing.T) {
 func TestGetRecommendedHybridConfig(t *testing.T) {
 	config := GetRecommendedHybridConfig()
 
-	// Verify structure
+	// Verify structure: operational=database, configuration=flatfile (ADR-003)
 	assert.Equal(t, "database", config.Operational.Provider)
-	assert.Equal(t, "git", config.Configuration.Provider)
+	assert.Equal(t, "flatfile", config.Configuration.Provider)
 
 	// Verify operational config has database-specific settings
 	opConfig := config.Operational.Config
@@ -209,11 +209,9 @@ func TestGetRecommendedHybridConfig(t *testing.T) {
 	assert.Contains(t, opConfig, "database")
 	assert.Contains(t, opConfig, "max_open_connections")
 
-	// Verify configuration config has git-specific settings
+	// Verify configuration config has flatfile-specific settings
 	cfgConfig := config.Configuration.Config
-	assert.Contains(t, cfgConfig, "repository_path")
-	assert.Contains(t, cfgConfig, "remote_url")
-	assert.Contains(t, cfgConfig, "branch")
+	assert.Contains(t, cfgConfig, "root")
 }
 
 func TestPlanHybridMigration(t *testing.T) {
@@ -232,17 +230,16 @@ func TestPlanHybridMigration(t *testing.T) {
 				"database": "cfgms",
 			},
 			expectedOp:  "database", // Keep existing database for operational
-			expectedCfg: "git",      // Add git for configuration
+			expectedCfg: "flatfile", // Add flatfile for configuration (ADR-003)
 		},
 		{
-			name:            "migrate from git to hybrid",
-			currentProvider: "git",
+			name:            "migrate from flatfile to hybrid",
+			currentProvider: "flatfile",
 			currentConfig: map[string]interface{}{
-				"repository_path": "/data/cfgms",
-				"remote_url":      "git@github.com:org/repo.git",
+				"root": "/var/lib/cfgms/config",
 			},
 			expectedOp:  "database", // Add database for operational
-			expectedCfg: "git",      // Keep existing git for configuration
+			expectedCfg: "flatfile", // Keep existing flatfile for configuration
 		},
 	}
 
@@ -262,7 +259,7 @@ func TestPlanHybridMigration(t *testing.T) {
 			switch tt.currentProvider {
 			case "database":
 				assert.Equal(t, tt.currentConfig, strategy.TargetConfig.Operational.Config)
-			case "git":
+			case "flatfile":
 				assert.Equal(t, tt.currentConfig, strategy.TargetConfig.Configuration.Config)
 			}
 		})

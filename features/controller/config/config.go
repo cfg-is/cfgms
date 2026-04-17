@@ -217,7 +217,10 @@ type ServerCertificateConfig struct {
 
 // StorageConfig contains global storage provider configuration
 type StorageConfig struct {
-	// Provider specifies which storage provider to use (database, git)
+	// Provider specifies which storage provider to use (database).
+	// Deprecated: "git" is no longer supported as of Issue #664.
+	// Existing git-backed deployments must migrate with: cfg storage migrate --from git --to flatfile
+	// New deployments should set flatfile_root and sqlite_path instead.
 	Provider string `yaml:"provider"`
 
 	// Configuration options passed to the storage provider
@@ -471,12 +474,12 @@ func DefaultConfig() *Config {
 			},
 		},
 		Storage: &StorageConfig{
-			Provider: "git", // Epic 6: Use git as minimum viable storage (no in-memory fallbacks)
-			Config: map[string]interface{}{
-				"repository_path": "data/cfgms-storage", // Default local git repository
-				"branch":          "main",
-				"auto_init":       true,
-			},
+			// OSS composite storage: flatfile for config/audit, SQLite for business data.
+			// Set flatfile_root and sqlite_path before starting the controller.
+			// To migrate from a git-backed deployment: cfg storage migrate --from git --to flatfile
+			FlatfileRoot: "",
+			SQLitePath:   "",
+			Config:       map[string]interface{}{},
 		},
 		Logging: &LoggingConfig{
 			Provider: "file", // Default to file-based time-series logging
@@ -804,26 +807,6 @@ func LoadWithPath(configPath string) (*Config, error) {
 			} else if sslmode := os.Getenv("CFGMS_DB_SSLMODE"); sslmode != "" {
 				cfg.Storage.Config["sslmode"] = sslmode
 			}
-		case "git":
-			// Git storage configuration mapping
-			if path := os.Getenv("CFGMS_STORAGE_GIT_PATH"); path != "" {
-				cfg.Storage.Config["path"] = path
-			}
-			if url := os.Getenv("CFGMS_STORAGE_GIT_URL"); url != "" {
-				cfg.Storage.Config["url"] = url
-			}
-			if branch := os.Getenv("CFGMS_STORAGE_GIT_BRANCH"); branch != "" {
-				cfg.Storage.Config["branch"] = branch
-			}
-			if username := os.Getenv("CFGMS_STORAGE_GIT_USERNAME"); username != "" {
-				cfg.Storage.Config["username"] = username
-			}
-			if password := os.Getenv("CFGMS_STORAGE_GIT_PASSWORD"); password != "" {
-				cfg.Storage.Config["password"] = password
-			}
-			if token := os.Getenv("CFGMS_STORAGE_GIT_TOKEN"); token != "" {
-				cfg.Storage.Config["token"] = token
-			}
 		}
 	}
 
@@ -876,6 +859,14 @@ func LoadWithPath(configPath string) (*Config, error) {
 	// HTTP API configuration environment variables
 	if httpListenAddr := os.Getenv("CFGMS_HTTP_LISTEN_ADDR"); httpListenAddr != "" {
 		cfg.ListenAddr = httpListenAddr
+	}
+
+	// Validate storage: reject the removed git provider with a helpful error.
+	if cfg.Storage != nil && cfg.Storage.Provider == "git" {
+		return nil, fmt.Errorf("storage provider 'git' is no longer supported (Issue #664): " +
+			"migrate with 'cfg storage migrate --from git --to flatfile " +
+			"--git-root <repository_path> --flatfile-root <path> --sqlite-path <path>' " +
+			"then set storage.flatfile_root and storage.sqlite_path in your config file")
 	}
 
 	return cfg, nil

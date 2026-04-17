@@ -376,8 +376,12 @@ func CreateStewardStoreFromConfig(providerName string, config map[string]interfa
 	return provider.CreateStewardStore(config)
 }
 
-// CreateAllStoresFromConfig creates all storage interfaces from a single configuration
-// This is the main entry point for unified storage configuration (legacy single-backend)
+// CreateAllStoresFromConfig creates all storage interfaces from a single configuration.
+// This is the legacy single-backend entry point.
+//
+// Deprecated: use CreateOSSStorageManager for new deployments.
+// This function remains for commercial database deployments that pass providerName="database".
+// It will be removed when sub-story I (#669) completes the commercial storage refactor.
 func CreateAllStoresFromConfig(providerName string, config map[string]interface{}) (*StorageManager, error) {
 	provider, err := GetStorageProvider(providerName)
 	if err != nil {

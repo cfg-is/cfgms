@@ -103,9 +103,9 @@ func TestGRPCTransportStatsAdapter_NoReconnectAttemptsKey(t *testing.T) {
 }
 
 func TestBasicStorageStats_ReturnsProviderName(t *testing.T) {
-	stats := NewBasicStorageStats("git")
+	stats := NewBasicStorageStats("flatfile")
 
-	require.Equal(t, "git", stats.GetProviderName())
+	require.Equal(t, "flatfile", stats.GetProviderName())
 	assert.Equal(t, float64(0), stats.GetPoolUtilization())
 
 	avg, p95, total, slow, errors := stats.GetQueryMetrics()

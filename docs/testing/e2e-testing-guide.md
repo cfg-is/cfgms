@@ -47,7 +47,7 @@ E2E tests use Docker Compose to create a complete CFGMS environment:
     │                                                 │
     │           Controller (Docker)                   │
     │                                                 │
-    │  - Config storage (git)                         │
+    │  - Config storage (flatfile+sqlite)              │
     │  - Config signer                                │
     │  - gRPC-over-QUIC transport server (:4433)      │
     │    ├── ControlPlaneService (heartbeats, cmds)   │

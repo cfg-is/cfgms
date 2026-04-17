@@ -95,7 +95,7 @@ sudo rm /tmp/cfgms-release-test.txt /etc/cfgms/test-release.yaml
 
 ### 3. QUICK_START.md Option B - Standalone Controller ✅
 
-Validates controller with git storage for workflow/SaaS operations.
+Validates controller with flatfile+sqlite OSS composite storage for workflow/SaaS operations.
 
 ```bash
 # Run Docker-based E2E tests

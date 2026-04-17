@@ -103,7 +103,7 @@ Agents cannot ask clarifying questions. Everything they need must be in the issu
 ### Checklist
 
 - [ ] **Self-contained**: all context in the issue body, no "see our discussion in Slack"
-- [ ] **Reference files explicitly**: "follow the pattern in `pkg/storage/providers/git/`" not "follow existing patterns"
+- [ ] **Reference files explicitly**: "follow the pattern in `pkg/storage/providers/flatfile/`" not "follow existing patterns"
 - [ ] **Testable acceptance criteria**: `- [ ]` checkboxes that can be mechanically verified
 - [ ] **Single concern**: one focused change, not "refactor X and also add Y"
 - [ ] **No vague verbs**: "add", "implement", "fix" — not "improve", "enhance", "clean up"

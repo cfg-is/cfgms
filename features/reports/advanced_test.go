@@ -22,7 +22,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestAdvancedServiceCreation tests the creation of AdvancedService
@@ -82,13 +83,9 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
 	require.NoError(t, err)
 
-	// Create audit components using git storage for testing
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	globalStorageManager, err := storageInterfaces.CreateAllStoresFromConfig("git", config)
+	// Create audit components using OSS composite storage for testing
+	tempDir := t.TempDir()
+	globalStorageManager, err := storageInterfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	auditStore := globalStorageManager.GetAuditStore()
@@ -609,13 +606,9 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
 	require.NoError(t, err, "Failed to create drift detector")
 
-	// Create audit components using git storage for testing
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	globalStorageManager, err := storageInterfaces.CreateAllStoresFromConfig("git", config)
+	// Create audit components using OSS composite storage for testing
+	tempDir := t.TempDir()
+	globalStorageManager, err := storageInterfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
 	require.NoError(t, err, "Failed to create global storage manager")
 
 	auditStore := globalStorageManager.GetAuditStore()

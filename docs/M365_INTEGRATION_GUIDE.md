@@ -297,17 +297,17 @@ msp:
 
 ### Storage Migration
 
-**Upgrade Path:** Simple → Git → Database → Hybrid
+**Upgrade Path:** Flatfile+SQLite (OSS) → Database → Hybrid
 
 ```bash
-# Start simple for POC
-cfgms init --storage-type=file
+# Start with OSS composite storage (flatfile for config/audit, SQLite for business data)
+cfgms init --storage-type=flatfile
 
-# Upgrade to git for team collaboration
-cfgms migrate-storage --from=file --to=git --repository=https://github.com/msp/config.git
+# Migrate from legacy git storage if applicable
+cfg storage migrate --from git --to flatfile --git-root <path> --flatfile-root <path> --sqlite-path <path>
 
 # Scale to database for production
-cfgms migrate-storage --from=git --to=database --url=postgresql://...
+cfgms migrate-storage --from=flatfile --to=database --url=postgresql://...
 
 # Add hybrid for enterprise features
 cfgms migrate-storage --from=database --to=hybrid

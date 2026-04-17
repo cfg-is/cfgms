@@ -133,13 +133,8 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		DataDir:    filepath.Join(tempDir, "controller-data"),
 		LogLevel:   "debug",
 		Storage: &config.StorageConfig{
-			Provider: "git",
-			Config: map[string]interface{}{
-				"repository_path": filepath.Join(tempDir, "storage-git"),
-				"encryption": map[string]interface{}{
-					"enabled": false, // Disable encryption for tests
-				},
-			},
+			FlatfileRoot: filepath.Join(tempDir, "storage-flatfile"),
+			SQLitePath:   filepath.Join(tempDir, "storage-cfgms.db"),
 		},
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement:   true, // Enable full certificate lifecycle management
@@ -162,11 +157,6 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 
 	// Create controller data directory
 	err = os.MkdirAll(controllerCfg.DataDir, 0755)
-	require.NoError(t, err)
-
-	// Create storage directory
-	storageDir := filepath.Join(tempDir, "storage-git")
-	err = os.MkdirAll(storageDir, 0755)
 	require.NoError(t, err)
 
 	// Pre-initialize if not already initialized (Story #410: first-run init guard)

@@ -12,7 +12,6 @@ import (
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
@@ -25,16 +24,9 @@ func TestStorageTestFixture_Creation(t *testing.T) {
 	require.NotNil(t, fixture.Configs, "Configs should be initialized")
 	require.NotNil(t, fixture.Cleanup, "Cleanup function should be set")
 
-	// Verify git configuration
-	gitConfig, exists := fixture.GetProviderConfig("git")
-	require.True(t, exists, "Git configuration should exist")
-	require.Equal(t, "git", gitConfig.Provider)
-	require.NotNil(t, gitConfig.Config, "Git config should not be nil")
-
-	// Verify git config contains required fields
-	assert.Contains(t, gitConfig.Config, "repository_path")
-	assert.Contains(t, gitConfig.Config, "branch")
-	assert.Contains(t, gitConfig.Config, "auto_init")
+	// Verify git configuration is no longer present
+	_, exists := fixture.GetProviderConfig("git")
+	assert.False(t, exists, "Git configuration must not exist (provider removed in Issue #664)")
 
 	// Verify database configuration
 	dbConfig, exists := fixture.GetProviderConfig("database")
@@ -68,13 +60,13 @@ func TestStorageTestFixture_ControllerConfig(t *testing.T) {
 	fixture := NewStorageTestFixture(t)
 	defer fixture.Cleanup()
 
-	t.Run("git_provider_controller_config", func(t *testing.T) {
-		config, err := fixture.CreateControllerConfig("git")
-		require.NoError(t, err, "Should create git controller config")
+	t.Run("flatfile_provider_controller_config", func(t *testing.T) {
+		config, err := fixture.CreateControllerConfig("flatfile")
+		require.NoError(t, err, "Should create flatfile controller config")
 		require.NotNil(t, config, "Config should not be nil")
 
 		require.NotNil(t, config.Storage, "Storage config should be set")
-		assert.Equal(t, "git", config.Storage.Provider)
+		assert.Equal(t, "flatfile", config.Storage.Provider)
 		assert.NotNil(t, config.Storage.Config, "Storage provider config should be set")
 	})
 
@@ -100,8 +92,12 @@ func TestStorageTestFixture_ProviderValidation(t *testing.T) {
 	defer fixture.Cleanup()
 
 	// Test individual provider validation
-	t.Run("git_provider_validation", func(t *testing.T) {
-		fixture.ValidateStorageProvider(t, "git")
+	t.Run("flatfile_provider_validation", func(t *testing.T) {
+		fixture.ValidateStorageProvider(t, "flatfile")
+	})
+
+	t.Run("sqlite_provider_validation", func(t *testing.T) {
+		fixture.ValidateStorageProvider(t, "sqlite")
 	})
 
 	t.Run("database_provider_validation", func(t *testing.T) {
@@ -127,12 +123,5 @@ func TestSkipHelpers(t *testing.T) {
 
 		// If we reach here, database is available for testing
 		t.Log("Database testing is available")
-	})
-
-	t.Run("git_skip_helper", func(t *testing.T) {
-		SkipIfGitNotAvailable(t)
-
-		// Git should always be available
-		t.Log("Git testing is available")
 	})
 }

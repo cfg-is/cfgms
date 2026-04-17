@@ -812,7 +812,12 @@ security-trivy:
 	fi
 	@echo "Running trivy filesystem scan..."
 	@echo "🔍 Vulnerability Scan (Blocking Issues):"
-	@trivy fs . --scanners vuln --format table --severity CRITICAL,HIGH,MEDIUM --skip-dirs .cache --exit-code 1 || { \
+	@TRIVY_FLAGS=""; \
+	if [ -f "$(HOME)/.cache/trivy/db/trivy.db" ] && ! curl -s --max-time 3 https://mirror.gcr.io/v2/ >/dev/null 2>&1; then \
+		echo "   (offline mode: using cached vulnerability DB)"; \
+		TRIVY_FLAGS="--skip-db-update"; \
+	fi; \
+	trivy fs . --scanners vuln --format table --severity CRITICAL,HIGH,MEDIUM --skip-dirs .cache --skip-dirs .gomodcache $$TRIVY_FLAGS --exit-code 1 || { \
 		echo ""; \
 		echo "❌ CRITICAL/HIGH/MEDIUM vulnerabilities found - deployment blocked!"; \
 		echo "   Please update dependencies to fix these security issues."; \
@@ -820,7 +825,11 @@ security-trivy:
 		exit 1; \
 	}
 	@echo "🔍 Complete Security Scan (All Issues):"
-	@trivy fs . --scanners vuln,secret,misconfig --format table --skip-dirs .cache --exit-code 0 || true
+	@TRIVY_FLAGS=""; \
+	if [ -f "$(HOME)/.cache/trivy/db/trivy.db" ] && ! curl -s --max-time 3 https://mirror.gcr.io/v2/ >/dev/null 2>&1; then \
+		TRIVY_FLAGS="--skip-db-update"; \
+	fi; \
+	trivy fs . --scanners vuln,secret,misconfig --format table --skip-dirs .cache --skip-dirs .gomodcache $$TRIVY_FLAGS --exit-code 0 || true
 	@echo ""; \
 	echo "✅ Trivy scan completed"; \
 	echo "   Note: Development certificates detected in features/controller/certs/ are expected"; \
@@ -1561,18 +1570,12 @@ test-integration-db:
 	CFGMS_TEST_DB_PORT=5433 \
 	go test -v -tags=integration ./pkg/storage/providers/database/...
 
-# Test git provider specifically  
+# Git storage provider has been removed (Issue #664).
+# Use test-integration-database or test-integration-sqlite instead.
 test-integration-git:
-	@echo "📁 Testing Git Storage Provider"
-	@echo "==============================="
-	@if [ ! -f .env.test ]; then \
-		echo "❌ .env.test not found. Run: make test-integration-setup"; \
-		exit 1; \
-	fi
-	@set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh && \
-	CFGMS_TEST_GITEA_URL=http://localhost:3001 \
-	CFGMS_TEST_GITEA_USER=cfgms_test \
-	go test -v -tags=integration ./pkg/storage/providers/git/...
+	@echo "Git storage provider has been removed (Issue #664)."
+	@echo "Use 'make test-integration-database' or 'make test-integration-sqlite' instead."
+	@exit 1
 
 # Future: Test Redis provider (when implemented)
 test-integration-redis:

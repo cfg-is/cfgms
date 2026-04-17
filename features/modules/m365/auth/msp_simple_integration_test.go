@@ -13,7 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	// Import git plugin to register it with global storage
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestMSPCompleteFlow tests the complete MSP flow using the new global storage architecture
@@ -284,7 +285,7 @@ func TestMSPStorageConfiguration(t *testing.T) {
 		expectedType ClientStoreType
 	}{
 		{"Small MSP", 10, false, false, ClientStoreFile},
-		{"Medium MSP", 75, false, false, ClientStoreGit},
+		{"Medium MSP", 75, false, false, ClientStoreFile},
 		{"Large MSP", 200, false, true, ClientStoreDatabase},
 		{"Enterprise MSP", 500, true, true, ClientStoreHybrid},
 	}
@@ -305,8 +306,6 @@ func TestMSPStorageConfiguration(t *testing.T) {
 			switch recommended {
 			case ClientStoreFile:
 				config = DefaultClientStoreConfig()
-			case ClientStoreGit:
-				config = GitBasedClientStoreConfig("https://github.com/test/repo.git", "main")
 			case ClientStoreDatabase:
 				config = ProductionClientStoreConfig("postgresql://user:pass@localhost/db")
 			case ClientStoreHybrid:
@@ -396,46 +395,44 @@ func TestMSPIntegrationSummary(t *testing.T) {
 func TestMSPWithGlobalStorage(t *testing.T) {
 	t.Log("🚀 Testing MSP with Global Storage Plugin Architecture")
 
-	// Test git storage provider
-	t.Run("GitStorageProvider", func(t *testing.T) {
-		// Create git-based storage config with temp directory
+	// Test OSS composite storage provider
+	t.Run("OSSStorageProvider", func(t *testing.T) {
+		// Create SQLite-backed storage config (OSS default for business data)
 		config := &ClientStoreConfig{
-			Type:          ClientStoreGit,
-			GitRepository: "",
-			GitBranch:     "main",
+			Type: ClientStoreFile,
 		}
 
 		// Create client store using the global plugin system
 		clientStore, err := NewClientTenantStore(config, nil)
-		require.NoError(t, err, "Should create git-based client store")
+		require.NoError(t, err, "Should create OSS-backed client store")
 		assert.NotNil(t, clientStore, "Store should not be nil")
 
 		// Create MSP configuration
 		mspConfig := &MultiTenantConfig{
-			ClientID:               "git-test-client-id",
-			ClientSecret:           "git-test-secret",
+			ClientID:               "oss-test-client-id",
+			ClientSecret:           "oss-test-secret",
 			TenantID:               "cfgis-tenant",
 			AdminCallbackURI:       "https://portal.example.com/admin/callback",
 			ApplicationPermissions: []string{"User.ReadWrite.All"},
 		}
 
-		// Test admin consent flow with git storage
+		// Test admin consent flow with OSS storage
 		flow := NewAdminConsentFlow(mspConfig, clientStore)
 		ctx := context.Background()
 
 		// Initiate consent
 		request, adminURL, err := flow.StartAdminConsentFlow(
 			ctx,
-			"git-test-client",
-			"Git Test Client",
+			"oss-test-client",
+			"OSS Test Client",
 			"admin@example.com",
 		)
 
-		require.NoError(t, err, "Git storage should support admin consent initiation")
+		require.NoError(t, err, "OSS storage should support admin consent initiation")
 		assert.NotEmpty(t, adminURL, "Should generate admin URL")
-		assert.Equal(t, "git-test-client", request.ClientIdentifier)
+		assert.Equal(t, "oss-test-client", request.ClientIdentifier)
 
-		t.Logf("✅ Git storage provider working correctly")
+		t.Logf("✅ OSS storage provider working correctly")
 		t.Logf("   Admin URL: %s", adminURL[:80]+"...")
 		t.Logf("   State: %s", request.State[:16]+"...")
 	})

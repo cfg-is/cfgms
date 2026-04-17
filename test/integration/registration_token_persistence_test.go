@@ -6,7 +6,7 @@ package integration
 
 import (
 	"context"
-	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,25 +15,32 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
+// newSQLiteTokenStore creates a SQLite-backed registration token store at path.
+func newSQLiteTokenStore(t *testing.T, path string) interfaces.RegistrationTokenStore {
+	t.Helper()
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{
+		"path": path,
+	})
+	require.NoError(t, err)
+	return store
+}
+
 // TestRegistrationTokenPersistence_AcrossRestart validates that registration tokens
-// persist across simulated controller restarts using git-based storage.
+// persist across simulated controller restarts using SQLite-based storage.
 // This is a critical test for Story #263.
 func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 	// Create temporary directory for persistent storage
-	tempDir, err := os.MkdirTemp("", "reg-token-persistence-*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tempDir) }()
-
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "tokens.db")
 	ctx := context.Background()
 
 	// Phase 1: Create store and add tokens (simulates first controller run)
 	t.Log("Phase 1: Creating tokens in first store instance")
-	store1, err := git.NewGitRegistrationTokenStore(tempDir, "")
-	require.NoError(t, err)
-	err = store1.Initialize(ctx)
+	store1 := newSQLiteTokenStore(t, dbPath)
+	err := store1.Initialize(ctx)
 	require.NoError(t, err)
 
 	// Create adapter for the first store
@@ -93,17 +100,15 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, allTokens, 2, "Should have 2 tokens for tenant-persistence-1")
 
-	// Phase 2: Simulate controller restart by creating new store instance
-	t.Log("Phase 2: Simulating controller restart - creating new store instance")
+	// Phase 2: Simulate controller restart by closing and reopening the store
+	t.Log("Phase 2: Simulating controller restart - closing and reopening store")
+	require.NoError(t, store1.Close())
 
-	// Close first store (optional - git store has no connection to close)
-	// In production, this happens when controller process terminates
-
-	// Create new store instance pointing to same directory
-	store2, err := git.NewGitRegistrationTokenStore(tempDir, "")
-	require.NoError(t, err)
+	// Create new store instance pointing to same file
+	store2 := newSQLiteTokenStore(t, dbPath)
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
+	defer func() { _ = store2.Close() }()
 
 	// Create new adapter
 	adapter2 := registration.NewStorageAdapter(store2)
@@ -149,16 +154,13 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 // TestRegistrationTokenPersistence_TokenExpiration validates that token expiration
 // is correctly evaluated after storage reload
 func TestRegistrationTokenPersistence_TokenExpiration(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "reg-token-expiry-*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tempDir) }()
-
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "tokens.db")
 	ctx := context.Background()
 
 	// Create store and token with past expiry
-	store, err := git.NewGitRegistrationTokenStore(tempDir, "")
-	require.NoError(t, err)
-	err = store.Initialize(ctx)
+	store := newSQLiteTokenStore(t, dbPath)
+	err := store.Initialize(ctx)
 	require.NoError(t, err)
 
 	now := time.Now()
@@ -174,11 +176,13 @@ func TestRegistrationTokenPersistence_TokenExpiration(t *testing.T) {
 	err = store.SaveToken(ctx, expiredToken)
 	require.NoError(t, err)
 
-	// Reload store
-	store2, err := git.NewGitRegistrationTokenStore(tempDir, "")
-	require.NoError(t, err)
+	// Simulate restart
+	require.NoError(t, store.Close())
+
+	store2 := newSQLiteTokenStore(t, dbPath)
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
+	defer func() { _ = store2.Close() }()
 
 	// Retrieve and check validity
 	retrieved, err := store2.GetToken(ctx, "cfgms_reg_expired_test")
@@ -189,16 +193,13 @@ func TestRegistrationTokenPersistence_TokenExpiration(t *testing.T) {
 // TestRegistrationTokenPersistence_TokenRevocation validates that revocation status
 // is correctly persisted
 func TestRegistrationTokenPersistence_TokenRevocation(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "reg-token-revoke-*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tempDir) }()
-
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "tokens.db")
 	ctx := context.Background()
 
 	// Create store and add token
-	store, err := git.NewGitRegistrationTokenStore(tempDir, "")
-	require.NoError(t, err)
-	err = store.Initialize(ctx)
+	store := newSQLiteTokenStore(t, dbPath)
+	err := store.Initialize(ctx)
 	require.NoError(t, err)
 
 	adapter := registration.NewStorageAdapter(store)
@@ -216,11 +217,13 @@ func TestRegistrationTokenPersistence_TokenRevocation(t *testing.T) {
 	err = adapter.UpdateToken(ctx, token)
 	require.NoError(t, err)
 
-	// Reload store
-	store2, err := git.NewGitRegistrationTokenStore(tempDir, "")
-	require.NoError(t, err)
+	// Simulate restart
+	require.NoError(t, store.Close())
+
+	store2 := newSQLiteTokenStore(t, dbPath)
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
+	defer func() { _ = store2.Close() }()
 
 	adapter2 := registration.NewStorageAdapter(store2)
 
@@ -235,16 +238,13 @@ func TestRegistrationTokenPersistence_TokenRevocation(t *testing.T) {
 // TestRegistrationTokenPersistence_DeletePersists validates that token deletion
 // is persistent
 func TestRegistrationTokenPersistence_DeletePersists(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "reg-token-delete-*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tempDir) }()
-
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "tokens.db")
 	ctx := context.Background()
 
 	// Create store and add token
-	store, err := git.NewGitRegistrationTokenStore(tempDir, "")
-	require.NoError(t, err)
-	err = store.Initialize(ctx)
+	store := newSQLiteTokenStore(t, dbPath)
+	err := store.Initialize(ctx)
 	require.NoError(t, err)
 
 	adapter := registration.NewStorageAdapter(store)
@@ -261,11 +261,13 @@ func TestRegistrationTokenPersistence_DeletePersists(t *testing.T) {
 	err = adapter.DeleteToken(ctx, "cfgms_reg_delete_test")
 	require.NoError(t, err)
 
-	// Reload store
-	store2, err := git.NewGitRegistrationTokenStore(tempDir, "")
-	require.NoError(t, err)
+	// Simulate restart
+	require.NoError(t, store.Close())
+
+	store2 := newSQLiteTokenStore(t, dbPath)
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
+	defer func() { _ = store2.Close() }()
 
 	adapter2 := registration.NewStorageAdapter(store2)
 

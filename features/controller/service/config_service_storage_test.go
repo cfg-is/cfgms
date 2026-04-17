@@ -16,20 +16,16 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import git storage provider for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
-// createTestConfigStore creates a real git-backed ConfigStore for testing.
-// This follows the same pattern as createTestServiceV2 in config_service_test.go.
+// createTestConfigStore creates a real flatfile-backed ConfigStore for testing.
 func createTestConfigStore(t *testing.T) interfaces.ConfigStore {
 	t.Helper()
 
-	storageConfig := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	tempDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	return storageManager.GetConfigStore()
@@ -140,13 +136,14 @@ func TestConfigurationStorageMigration(t *testing.T) {
 		err = migration.StoreConfiguration(ctx, "version-tenant", "version-test", &modifiedConfig)
 		require.NoError(t, err)
 
-		// Get history - git tracks each commit, so both versions appear in history
+		// Get history - flatfile tracks the current version only
 		history, err := migration.GetConfigurationHistory(ctx, "version-tenant", "version-test", 5)
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, len(history), 1) // At least one version in history
 
 		// GetConfigurationVersion exercises the version retrieval code path
-		versionConfig, err := migration.GetConfigurationVersion(ctx, "version-tenant", "version-test", 1)
+		// Flatfile only retains the current version (2 after two stores)
+		versionConfig, err := migration.GetConfigurationVersion(ctx, "version-tenant", "version-test", 2)
 		require.NoError(t, err)
 		assert.NotNil(t, versionConfig)
 
