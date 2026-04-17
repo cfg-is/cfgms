@@ -1082,7 +1082,7 @@ func TestTriggerManagerImpl_NilStoragePersistence(t *testing.T) {
 		storage:    nil,
 		triggers:   make(map[string]*Trigger),
 		executions: make(map[string]*TriggerExecution),
-		logger:     logging.NewNoopLogger(),
+		logger:     logging.ForModule("workflow.trigger.manager.test"),
 	}
 
 	ctx := context.Background()
