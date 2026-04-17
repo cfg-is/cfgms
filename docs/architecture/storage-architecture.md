@@ -104,7 +104,7 @@ Commercial deployments: the imported configs land in PostgreSQL. HA, replication
 
 ## Flat-File Provider (OSS)
 
-The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for config storage and the replacement for the deprecated git provider. It stores configs and audit logs as files under a configured root directory.
+The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for config storage. It stores configs and audit logs as files under a configured root directory.
 
 **File layout**:
 

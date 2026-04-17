@@ -22,7 +22,7 @@ const (
 	// ClientStoreFile uses file-based storage (simple deployments)
 	ClientStoreFile ClientStoreType = "file"
 
-	// ClientStoreGit uses git-based storage with Mozilla's secret management (default CFGMS approach)
+	// ClientStoreGit uses flatfile storage (previously git; git provider removed in Issue #664)
 	ClientStoreGit ClientStoreType = "git"
 
 	// ClientStoreDatabase uses database storage (production deployments)
@@ -116,28 +116,23 @@ func NewClientTenantStore(config *ClientStoreConfig, logger interface{}) (Client
 
 	switch config.Type {
 	case ClientStoreMemory:
-		// Memory storage deprecated - use git provider instead
-		providerName = "git"
-		globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-memory-replacement-%s.git", generateUniqueID())
+		// Memory storage deprecated - use sqlite provider (business data tier per ADR-003)
+		providerName = "sqlite"
+		globalConfig["path"] = fmt.Sprintf("/tmp/cfgms-memory-replacement-%s.db", generateUniqueID())
 
 	case ClientStoreFile:
-		// Use git provider with local repository path
-		providerName = "git"
-		globalConfig["repository_path"] = config.FilePath
-		if config.FilePath == "" {
-			globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.git", generateUniqueID())
+		// Use sqlite provider for client tenant store (business data tier per ADR-003)
+		providerName = "sqlite"
+		if config.FilePath != "" {
+			globalConfig["path"] = config.FilePath
+		} else {
+			globalConfig["path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.db", generateUniqueID())
 		}
 
 	case ClientStoreGit:
-		providerName = "git"
-		if config.GitRepository != "" {
-			globalConfig["remote_url"] = config.GitRepository
-			// Use unique path to avoid test conflicts
-			globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-client-git-%s", generateUniqueID())
-		} else {
-			// Use unique path to avoid test conflicts
-			globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.git", generateUniqueID())
-		}
+		// Git provider removed (Issue #664) - use sqlite provider (business data tier per ADR-003)
+		providerName = "sqlite"
+		globalConfig["path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.db", generateUniqueID())
 
 	case ClientStoreDatabase:
 		providerName = "database"

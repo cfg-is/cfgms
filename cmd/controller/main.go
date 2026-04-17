@@ -26,7 +26,6 @@ import (
 	// Import storage providers to register them
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
@@ -83,6 +82,13 @@ func runController(configPath string, initMode bool) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 	fmt.Printf("[DEBUG] main.go: Configuration loaded successfully\n")
+
+	// Guard: reject deprecated git provider before any initialization
+	if cfg.Storage != nil && cfg.Storage.Provider == "git" {
+		return fmt.Errorf("the 'git' storage provider has been removed; " +
+			"run 'cfg storage migrate --from git --to flatfile' to migrate your data, " +
+			"then update your configuration to use 'flatfile' or 'database'")
+	}
 
 	loggingConfig := &logging.LoggingConfig{
 		Provider:          getLogProvider(cfg),

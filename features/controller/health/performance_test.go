@@ -35,7 +35,7 @@ func TestCollectorPerformanceOverhead(t *testing.T) {
 
 	storageCollector := &MockStorageCollector{
 		metrics: &health.StorageMetrics{
-			Provider:          "git",
+			Provider:          "flatfile",
 			PoolUtilization:   0.45,
 			AvgQueryLatencyMs: 12.5,
 			P95QueryLatencyMs: 25.3,
@@ -124,7 +124,7 @@ func BenchmarkMetricsCollection(b *testing.B) {
 	}
 	storageCollector := &MockStorageCollector{
 		metrics: &health.StorageMetrics{
-			Provider:    "git",
+			Provider:    "flatfile",
 			CollectedAt: time.Now(),
 		},
 	}
@@ -176,7 +176,7 @@ func TestMetricsCollectionMemoryUsage(t *testing.T) {
 	}
 	storageCollector := &MockStorageCollector{
 		metrics: &health.StorageMetrics{
-			Provider:    "git",
+			Provider:    "flatfile",
 			CollectedAt: time.Now(),
 		},
 	}
@@ -256,7 +256,7 @@ func TestCollectionInterval(t *testing.T) {
 	}
 	storageCollector := &MockStorageCollector{
 		metrics: &health.StorageMetrics{
-			Provider:    "git",
+			Provider:    "flatfile",
 			CollectedAt: time.Now(),
 		},
 	}

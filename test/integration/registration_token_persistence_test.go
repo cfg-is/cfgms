@@ -15,7 +15,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestRegistrationTokenPersistence_AcrossRestart validates that registration tokens
@@ -31,7 +31,7 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 
 	// Phase 1: Create store and add tokens (simulates first controller run)
 	t.Log("Phase 1: Creating tokens in first store instance")
-	store1, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store1, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
 	err = store1.Initialize(ctx)
 	require.NoError(t, err)
@@ -100,7 +100,7 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 	// In production, this happens when controller process terminates
 
 	// Create new store instance pointing to same directory
-	store2, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store2, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
@@ -156,7 +156,7 @@ func TestRegistrationTokenPersistence_TokenExpiration(t *testing.T) {
 	ctx := context.Background()
 
 	// Create store and token with past expiry
-	store, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
 	err = store.Initialize(ctx)
 	require.NoError(t, err)
@@ -175,7 +175,7 @@ func TestRegistrationTokenPersistence_TokenExpiration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reload store
-	store2, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store2, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
@@ -196,7 +196,7 @@ func TestRegistrationTokenPersistence_TokenRevocation(t *testing.T) {
 	ctx := context.Background()
 
 	// Create store and add token
-	store, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
 	err = store.Initialize(ctx)
 	require.NoError(t, err)
@@ -217,7 +217,7 @@ func TestRegistrationTokenPersistence_TokenRevocation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reload store
-	store2, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store2, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
@@ -242,7 +242,7 @@ func TestRegistrationTokenPersistence_DeletePersists(t *testing.T) {
 	ctx := context.Background()
 
 	// Create store and add token
-	store, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
 	err = store.Initialize(ctx)
 	require.NoError(t, err)
@@ -262,7 +262,7 @@ func TestRegistrationTokenPersistence_DeletePersists(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reload store
-	store2, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store2, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)

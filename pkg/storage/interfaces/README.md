@@ -4,7 +4,7 @@ This package defines the storage interfaces used by controller-side business log
 
 > **Scope**: Controller-side storage only. Steward persistence (local config file, OS keychain, in-memory state between convergence runs) is separate.
 
-> **Direction**: This layout is being reorganized into a five-type taxonomy. See [ADR-003: Storage Data Taxonomy](../../../docs/architecture/decisions/003-storage-data-taxonomy.md) for the authoritative plan. The existing `pkg/storage/providers/git/` is deprecated and will be removed in favor of a new flat-file provider plus a git-sync component.
+> **Direction**: This layout is being reorganized into a five-type taxonomy. See [ADR-003: Storage Data Taxonomy](../../../docs/architecture/decisions/003-storage-data-taxonomy.md) for the authoritative plan. The git storage provider has been removed (Issue #664); use the flat-file provider plus the git-sync component.
 
 ## Current Interfaces (flat layout)
 
@@ -76,7 +76,7 @@ Per ADR-003, no controller-side storage/logging interface may remain under `feat
 | `flatfile` | `pkg/storage/providers/flatfile` | `ConfigStore`, `AuditStore`, `StewardStore` | Available — OSS default for config storage and fleet registry |
 | `sqlite` | `pkg/storage/providers/sqlite` | Business-data stores + `StewardStore` | Available — OSS default for business-data tier |
 | `database` | `pkg/storage/providers/database` | All stores | Available — commercial PostgreSQL backend |
-| `git` | `pkg/storage/providers/git` | All stores | Deprecated — use `flatfile` + git-sync |
+| `git` | *(removed)* | *(removed)* | Removed in Issue #664 — use `flatfile` + git-sync |
 
 ## Backend Selection (per type)
 
@@ -160,9 +160,9 @@ import (
 )
 ```
 
-**`CreateAllStoresFromConfig` remains** for backward compatibility with single-provider
-deployments (e.g., `provider: git` or `provider: database`). It is removed in Issue #664
-when the git provider is retired.
+**`CreateAllStoresFromConfig` is deprecated** and retained only for backward compatibility with
+single-provider deployments (e.g., `provider: database`). New deployments should use
+`CreateOSSStorageManager`.
 
 ## Module Usage Pattern
 

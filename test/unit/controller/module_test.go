@@ -26,7 +26,8 @@ func newTestController(t *testing.T) *controller.Controller {
 	cfg.DataDir = tempDir + "/data"
 	cfg.CertPath = tempDir + "/certs"
 	cfg.Certificate.CAPath = tempDir + "/certs/ca"
-	cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+	cfg.Storage.FlatfileRoot = tempDir + "/storage-flatfile"
+	cfg.Storage.SQLitePath = tempDir + "/cfgms.db"
 
 	// Pre-initialize: create CA and write init marker (Story #410)
 	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)

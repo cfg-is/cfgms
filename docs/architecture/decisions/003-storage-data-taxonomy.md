@@ -117,7 +117,7 @@ Tracked under the epic referenced in [Code Changes Required](#code-changes-requi
 
 1. Flat-file provider (replaces git provider for OSS)
 2. `StewardStore` + persistent fleet registry
-3. Deprecate and remove `pkg/storage/providers/git/`
+3. ~~Deprecate and remove `pkg/storage/providers/git/`~~ **Done** (Issue #664)
 4. SQLite provider for OSS business data
 5. Persist command dispatch (audit-integrated)
 6. Git-sync component

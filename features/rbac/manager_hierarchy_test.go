@@ -13,17 +13,14 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 func TestManager_CreateRoleWithParent(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	manager := NewManagerWithStorage(
@@ -158,12 +155,8 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 
 func TestManager_GetRoleHierarchy(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	manager := NewManagerWithStorage(
@@ -251,12 +244,8 @@ func TestManager_GetRoleHierarchy(t *testing.T) {
 
 func TestManager_SetAndRemoveRoleParent(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	manager := NewManagerWithStorage(
@@ -324,12 +313,8 @@ func TestManager_SetAndRemoveRoleParent(t *testing.T) {
 
 func TestManager_ComputeRolePermissions(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	manager := NewManagerWithStorage(
@@ -396,12 +381,8 @@ func TestManager_ComputeRolePermissions(t *testing.T) {
 
 func TestManager_ValidateHierarchyOperation(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	manager := NewManagerWithStorage(

@@ -24,19 +24,16 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Auto-register git storage provider
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // newTestApprovalHook builds a WorkflowApprovalHook backed by real git storage and workflow engine.
 func newTestApprovalHook(t *testing.T) (*WorkflowApprovalHook, interfaces.ConfigStore) {
 	t.Helper()
 
-	storageConfig := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 	configStore := storageManager.GetConfigStore()
 

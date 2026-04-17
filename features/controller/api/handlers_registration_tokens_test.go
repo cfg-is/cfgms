@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -22,7 +21,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // setupTestServerWithTokenStore creates a test server with a real registration token store
@@ -39,13 +39,8 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	// Create temporary directory for storage
 	tempDir := t.TempDir()
 
-	// Initialize RBAC system with git storage
-	storageConfig := map[string]interface{}{
-		"repository_path": tempDir,
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	// Initialize RBAC system with OSS composite storage
+	storageManager, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	rbacManager := rbac.NewManagerWithStorage(
@@ -61,16 +56,17 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 
 	// Create registration token store
-	tokenStorePath, err := os.MkdirTemp("", "token-store-test-*")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(tokenStorePath) })
+	tokenStorePath := t.TempDir()
 
-	gitTokenStore, err := git.NewGitRegistrationTokenStore(tokenStorePath, "")
+	regTokenStore, err := interfaces.CreateRegistrationTokenStoreFromConfig(
+		"sqlite",
+		map[string]interface{}{"path": tokenStorePath + "/tokens.db"},
+	)
 	require.NoError(t, err)
-	err = gitTokenStore.Initialize(context.Background())
+	err = regTokenStore.Initialize(context.Background())
 	require.NoError(t, err)
 
-	tokenStore := registration.NewStorageAdapter(gitTokenStore)
+	tokenStore := registration.NewStorageAdapter(regTokenStore)
 
 	// Create services
 	controllerService := service.NewControllerService(logger)

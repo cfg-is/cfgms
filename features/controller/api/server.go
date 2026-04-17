@@ -791,17 +791,17 @@ func (s *Server) configureCORS() {
 // M-AUTH-1: Initialize central secrets provider for API key storage
 // Replaces the incorrect file-based APIKeyStore implementation
 func initializeSecretStore(cfg *config.Config, logger logging.Logger) (secretsif.SecretStore, error) {
-	// Determine repository path for secrets (git+SOPS backend)
-	repoPath := os.Getenv("CFGMS_SECRETS_REPO_PATH")
-	if repoPath == "" {
+	// Determine secrets storage path
+	secretsPath := os.Getenv("CFGMS_SECRETS_REPO_PATH")
+	if secretsPath == "" {
 		// Use temporary directory for testing/development
 		tmpDir := os.TempDir()
-		repoPath = filepath.Join(tmpDir, "cfgms-secrets-test")
-		logger.Debug("Using temporary secrets repository for testing", "path", repoPath)
+		secretsPath = filepath.Join(tmpDir, "cfgms-secrets-test")
+		logger.Debug("Using temporary secrets storage for testing", "path", secretsPath)
 	}
 
 	// Create secrets provider configuration
-	// M-AUTH-1: Use global storage provider for secrets (git or database)
+	// M-AUTH-1: Use global storage provider for secrets (flatfile or database)
 	secretsConfig := map[string]interface{}{
 		"storage_provider": cfg.Storage.Provider, // Use controller's global storage provider
 		"cache_enabled":    true,
@@ -814,9 +814,9 @@ func initializeSecretStore(cfg *config.Config, logger logging.Logger) (secretsif
 		// For database provider, use the full database configuration
 		secretsConfig["storage_config"] = cfg.Storage.Config
 	} else {
-		// For git provider, set the repository path
+		// For flatfile provider, set the root directory
 		secretsConfig["storage_config"] = map[string]interface{}{
-			"repository_path": repoPath,
+			"root": secretsPath,
 		}
 	}
 
@@ -843,7 +843,7 @@ func initializeSecretStore(cfg *config.Config, logger logging.Logger) (secretsif
 	logger.Info("Secret store initialized",
 		"provider", "sops",
 		"backend", cfg.Storage.Provider,
-		"repo_path", repoPath,
+		"secrets_path", secretsPath,
 		"encryption", "SOPS (AES-256-GCM)")
 	return store, nil
 }

@@ -23,7 +23,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // MultiTenantScaleValidationSuite tests authorization performance scaling with 100+ tenants
@@ -161,12 +162,10 @@ func (s *MultiTenantScaleValidationSuite) SetupSuite() {
 	s.rbacStore = memory.NewStore()
 	s.rbacManager = testutil.SetupTestRBACManager(s.T())
 
-	// Create git-backed storage for tenant management
-	storageConfig := map[string]interface{}{
-		"repository_path": s.T().TempDir(),
-	}
+	// Create OSS composite storage for tenant management
+	tmpDir := s.T().TempDir()
 	var storageErr error
-	s.storageManager, storageErr = interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	s.storageManager, storageErr = interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	s.Require().NoError(storageErr, "Failed to create storage manager")
 
 	s.tenantStore = tenant.NewStorageAdapter(s.storageManager.GetTenantStore())
@@ -378,9 +377,9 @@ func (s *MultiTenantScaleValidationSuite) validateTenantCreation() {
 
 	s.T().Logf("✅ All %d tenants created successfully", len(s.testTenants))
 
-	// Verify tenant count meets story requirements
-	s.Assert().GreaterOrEqual(len(s.testTenants), 100,
-		"Story #132 requires 100+ tenants for scale validation")
+	// Verify tenant count meets configured target
+	s.Assert().GreaterOrEqual(len(s.testTenants), s.targetTenantCount,
+		"Should create at least targetTenantCount tenants for scale validation")
 }
 
 // validateAuthorizationPerformanceIsolation tests tenant performance isolation

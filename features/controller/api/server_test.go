@@ -24,7 +24,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 func setupTestServer(t *testing.T) *Server {
@@ -36,12 +37,8 @@ func setupTestServer(t *testing.T) *Server {
 	logger := logging.NewNoopLogger()
 
 	// Initialize RBAC system with git storage
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	rbacManager := rbac.NewManagerWithStorage(
@@ -823,12 +820,8 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
 
-	storageConfig := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	rbacManager := rbac.NewManagerWithStorage(

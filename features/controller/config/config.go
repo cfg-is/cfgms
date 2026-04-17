@@ -217,7 +217,9 @@ type ServerCertificateConfig struct {
 
 // StorageConfig contains global storage provider configuration
 type StorageConfig struct {
-	// Provider specifies which storage provider to use (database, git)
+	// Provider specifies which storage provider to use (database, flatfile, sqlite).
+	// The "git" provider is no longer supported; run "cfg storage migrate --from git --to flatfile"
+	// to migrate an existing git-backed deployment.
 	Provider string `yaml:"provider"`
 
 	// Configuration options passed to the storage provider
@@ -471,12 +473,9 @@ func DefaultConfig() *Config {
 			},
 		},
 		Storage: &StorageConfig{
-			Provider: "git", // Epic 6: Use git as minimum viable storage (no in-memory fallbacks)
-			Config: map[string]interface{}{
-				"repository_path": "data/cfgms-storage", // Default local git repository
-				"branch":          "main",
-				"auto_init":       true,
-			},
+			Provider:     "flatfile",
+			FlatfileRoot: "data/cfgms-config",
+			SQLitePath:   "data/cfgms.db",
 		},
 		Logging: &LoggingConfig{
 			Provider: "file", // Default to file-based time-series logging

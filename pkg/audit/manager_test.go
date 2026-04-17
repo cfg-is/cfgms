@@ -13,7 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestNewManager tests audit manager creation
@@ -26,12 +27,8 @@ func TestNewManager(t *testing.T) {
 		{
 			name: "with git storage provider",
 			setupStorage: func(t *testing.T) (interfaces.AuditStore, error) {
-				config := map[string]interface{}{
-					"repository_path": t.TempDir(),
-					"branch":          "main",
-					"auto_init":       true,
-				}
-				storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+				tmpDir := t.TempDir()
+				storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 				if err != nil {
 					return nil, err
 				}
@@ -89,12 +86,8 @@ func TestNewManager_PanicConditions(t *testing.T) {
 // TestManager_RecordEvent tests basic event recording
 func TestManager_RecordEvent(t *testing.T) {
 	// Setup git storage for testing
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	manager := NewManager(storageManager.GetAuditStore(), "test")
@@ -117,12 +110,8 @@ func TestManager_RecordEvent(t *testing.T) {
 // TestManager_RecordBatch tests batch event recording
 func TestManager_RecordBatch(t *testing.T) {
 	// Setup git storage for testing
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 
 	manager := NewManager(storageManager.GetAuditStore(), "test")

@@ -1,3 +1,7 @@
+> **DEPRECATED**: The git storage backend has been removed as of CFGMS v0.10.
+> See [Storage Architecture](storage-architecture.md) for the current storage design.
+> To migrate data from an existing git-backed deployment, use `cfg storage migrate --from git --to flatfile`.
+
 # Git Backend Architecture Design
 
 ## Overview

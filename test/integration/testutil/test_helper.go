@@ -133,13 +133,9 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		DataDir:    filepath.Join(tempDir, "controller-data"),
 		LogLevel:   "debug",
 		Storage: &config.StorageConfig{
-			Provider: "git",
-			Config: map[string]interface{}{
-				"repository_path": filepath.Join(tempDir, "storage-git"),
-				"encryption": map[string]interface{}{
-					"enabled": false, // Disable encryption for tests
-				},
-			},
+			Provider:     "flatfile",
+			FlatfileRoot: filepath.Join(tempDir, "storage-flatfile"),
+			SQLitePath:   filepath.Join(tempDir, "cfgms.db"),
 		},
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement:   true, // Enable full certificate lifecycle management

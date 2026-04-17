@@ -13,7 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	// Import git plugin to register it with global storage
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestMSPCompleteFlow tests the complete MSP flow using the new global storage architecture

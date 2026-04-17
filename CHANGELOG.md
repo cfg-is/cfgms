@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **BREAKING**: The `git` storage provider has been removed (Issue #664). Existing git-backed
+  deployments must migrate to the OSS composite (flatfile + SQLite) using
+  `cfg storage migrate --from git --to flatfile` before upgrading. The controller now rejects
+  `storage.provider: git` at startup with actionable instructions.
+
 ### Added
 - Semantic versioning policy documentation
 - CHANGELOG.md for tracking version history

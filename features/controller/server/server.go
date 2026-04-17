@@ -119,12 +119,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 		logger.Info("OSS composite storage backend initialized")
 	} else {
-		logger.Info("Initializing global storage provider", "provider", cfg.Storage.Provider)
-		var legacyErr error
-		storageManager, legacyErr = interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
-		if legacyErr != nil {
-			return nil, fmt.Errorf("failed to initialize storage provider '%s': %w. Verify storage configuration and ensure storage backend is accessible", cfg.Storage.Provider, legacyErr)
-		}
+		return nil, fmt.Errorf("storage.flatfile_root is required for OSS composite storage; legacy single-provider mode is no longer supported. Set storage.flatfile_root and storage.sqlite_path in configuration")
 	}
 
 	// Initialize RBAC system with pluggable storage only
@@ -698,7 +693,7 @@ func initializeWorkflowHandler(storageManager *interfaces.StorageManager, logger
 		configStore: configStore,
 	}
 
-	storageProvider := storageManager.GetProvider()
+	storageProvider, _ := interfaces.GetStorageProvider("flatfile")
 	triggerMgr := workflowtrigger.NewControllerTriggerManager(storageProvider, adapter)
 
 	handler := api.NewWorkflowHandler(workflowEngine, configStore, triggerMgr, logger)
