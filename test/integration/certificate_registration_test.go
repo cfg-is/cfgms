@@ -84,6 +84,7 @@ func (s *CertificateRegistrationTestSuite) SetupSuite() {
 		map[string]interface{}{"path": filepath.Join(tokenStorePath, "tokens.db")},
 	)
 	require.NoError(s.T(), err)
+	s.T().Cleanup(func() { _ = s.tokenStore.Close() })
 
 	ctx := context.Background()
 	err = s.tokenStore.Initialize(ctx)

@@ -91,6 +91,7 @@ type Server struct {
 	dnaStorageManager       *dnaStorage.Manager                 // Reports engine DNA storage (must be closed on Stop)
 	triggerManager          *workflowtrigger.TriggerManagerImpl // Issue #414: Workflow trigger manager
 	gitSyncer               *gitsync.Syncer                     // Issue #666: git-sync write-through component
+	storageManager          *interfaces.StorageManager          // Main storage manager (must be closed on Stop to release SQLite handles)
 }
 
 // New creates a new server instance
@@ -103,7 +104,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize global storage provider system - REQUIRED for all deployments
 	if cfg.Storage == nil {
-		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.provider as 'git' (minimum) or 'database' (production). See docs/examples/controller-storage-config.cfg for examples")
+		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.flatfile_root and storage.sqlite_path (OSS composite). See docs/examples/minimum-storage-config.cfg for examples")
 	}
 
 	// Create storage manager — OSS composite path (flatfile+SQLite) or legacy single-provider path
@@ -527,6 +528,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
 		healthCollector:         healthCollector,
 		alertManager:            healthAlertManager,
+		storageManager:          storageManager,
 	}
 
 	// Story #416: Wire rollback manager into API server
@@ -1019,6 +1021,15 @@ func (s *Server) Stop() error {
 	if s.dnaStorageManager != nil {
 		if err := s.dnaStorageManager.Close(); err != nil {
 			s.logger.Warn("Failed to close DNA storage manager", "error", err)
+		}
+	}
+
+	// Close main storage manager — releases flatfile + SQLite store handles so
+	// temp-directory cleanup succeeds on Windows. Must run after managers that
+	// use the stores have stopped.
+	if s.storageManager != nil {
+		if err := s.storageManager.Close(); err != nil {
+			s.logger.Warn("Failed to close storage manager", "error", err)
 		}
 	}
 

@@ -27,6 +27,7 @@ func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
 		map[string]interface{}{"path": tempDir + "/tokens.db"},
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 
 	ctx := context.Background()
 	err = store.Initialize(ctx)
@@ -151,6 +152,7 @@ func TestStorageAdapter_InterfaceCompliance(t *testing.T) {
 		map[string]interface{}{"path": tempDir + "/tokens.db"},
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 
 	// Create adapter
 	adapter := NewStorageAdapter(store)

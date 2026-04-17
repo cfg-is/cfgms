@@ -64,6 +64,7 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 		map[string]interface{}{"path": tokenStorePath + "/tokens.db"},
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = regTokenStore.Close() })
 	err = regTokenStore.Initialize(context.Background())
 	require.NoError(t, err)
 

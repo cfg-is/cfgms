@@ -33,6 +33,7 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 	t.Log("Phase 1: Creating tokens in first store instance")
 	store1, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store1.Close() })
 	err = store1.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -102,6 +103,7 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 	// Create new store instance pointing to same directory
 	store2, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store2.Close() })
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -158,6 +160,7 @@ func TestRegistrationTokenPersistence_TokenExpiration(t *testing.T) {
 	// Create store and token with past expiry
 	store, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 	err = store.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -177,6 +180,7 @@ func TestRegistrationTokenPersistence_TokenExpiration(t *testing.T) {
 	// Reload store
 	store2, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store2.Close() })
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -198,6 +202,7 @@ func TestRegistrationTokenPersistence_TokenRevocation(t *testing.T) {
 	// Create store and add token
 	store, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 	err = store.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -219,6 +224,7 @@ func TestRegistrationTokenPersistence_TokenRevocation(t *testing.T) {
 	// Reload store
 	store2, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store2.Close() })
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -244,6 +250,7 @@ func TestRegistrationTokenPersistence_DeletePersists(t *testing.T) {
 	// Create store and add token
 	store, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 	err = store.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -264,6 +271,7 @@ func TestRegistrationTokenPersistence_DeletePersists(t *testing.T) {
 	// Reload store
 	store2, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store2.Close() })
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
 
