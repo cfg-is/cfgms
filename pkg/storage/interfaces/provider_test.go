@@ -390,9 +390,9 @@ func (m *MockStewardStore) DeregisterSteward(_ context.Context, _ string) error 
 func (m *MockStewardStore) GetStewardsSeen(_ context.Context, _ time.Time) ([]*StewardRecord, error) {
 	return nil, nil
 }
-func (m *MockStewardStore) HealthCheck(_ context.Context) error  { return nil }
-func (m *MockStewardStore) Initialize(_ context.Context) error   { return nil }
-func (m *MockStewardStore) Close() error                         { return nil }
+func (m *MockStewardStore) HealthCheck(_ context.Context) error { return nil }
+func (m *MockStewardStore) Initialize(_ context.Context) error  { return nil }
+func (m *MockStewardStore) Close() error                        { return nil }
 
 // MockSessionStore implements SessionStore for testing
 type MockSessionStore struct{}
@@ -993,10 +993,10 @@ type MockOSSProviderWithError struct {
 	failMethod   string // name of the Create* method that should fail
 }
 
-func (m *MockOSSProviderWithError) Name() string               { return m.providerName }
-func (m *MockOSSProviderWithError) Description() string        { return "error mock" }
-func (m *MockOSSProviderWithError) GetVersion() string         { return "1.0.0" }
-func (m *MockOSSProviderWithError) Available() (bool, error)   { return true, nil }
+func (m *MockOSSProviderWithError) Name() string             { return m.providerName }
+func (m *MockOSSProviderWithError) Description() string      { return "error mock" }
+func (m *MockOSSProviderWithError) GetVersion() string       { return "1.0.0" }
+func (m *MockOSSProviderWithError) Available() (bool, error) { return true, nil }
 func (m *MockOSSProviderWithError) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{}
 }
