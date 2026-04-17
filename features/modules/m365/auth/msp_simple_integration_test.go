@@ -19,8 +19,8 @@ import (
 
 // TestMSPCompleteFlow tests the complete MSP flow using the new global storage architecture
 func TestMSPCompleteFlow(t *testing.T) {
-	// Create working client store using the new factory with git backend
-	config := &ClientStoreConfig{Type: ClientStoreMemory} // Will use git provider now
+	// Create working client store using the new factory with OSS backend
+	config := &ClientStoreConfig{Type: ClientStoreMemory} // Uses OSS storage provider
 	clientStore, err := NewClientTenantStore(config, nil)
 	require.NoError(t, err, "Should create client store")
 
@@ -162,7 +162,7 @@ func TestMSPCompleteFlow(t *testing.T) {
 
 // TestMSPErrorScenarios tests error handling in MSP flows
 func TestMSPErrorScenarios(t *testing.T) {
-	config := &ClientStoreConfig{Type: ClientStoreMemory} // Will use git provider now
+	config := &ClientStoreConfig{Type: ClientStoreMemory} // Uses OSS storage provider
 	clientStore, err := NewClientTenantStore(config, nil)
 	require.NoError(t, err, "Should create client store")
 

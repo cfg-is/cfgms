@@ -50,7 +50,7 @@ func (p *SOPSProvider) GetCapabilities() interfaces.ProviderCapabilities {
 
 // Available checks if SOPS and git are available
 func (p *SOPSProvider) Available() (bool, error) {
-	// Check if we can access storage provider (git provider should be registered)
+	// Check if we can access storage provider (flatfile provider should be registered)
 	// The actual availability check happens when creating the store
 	return true, nil
 }

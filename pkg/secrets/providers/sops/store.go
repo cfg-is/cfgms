@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
 // Package sops implements SOPS-based secret store
-// M-AUTH-1: SecretStore implementation using git ConfigStore with SOPS encryption
+// M-AUTH-1: SecretStore implementation using flatfile ConfigStore with SOPS encryption
 package sops
 
 import (
@@ -26,8 +26,8 @@ type SOPSSecretStoreConfig struct {
 	KMSKeyID        string                 // KMS key ID for encryption (optional)
 }
 
-// SOPSSecretStore implements SecretStore using git ConfigStore with SOPS encryption
-// M-AUTH-1: Secrets are stored as ConfigEntry objects in git, automatically encrypted by SOPS
+// SOPSSecretStore implements SecretStore using flatfile ConfigStore with SOPS encryption
+// M-AUTH-1: Secrets are stored as ConfigEntry objects in flatfile storage, automatically encrypted by SOPS
 type SOPSSecretStore struct {
 	configStore  storageif.ConfigStore // Underlying config store (git with SOPS)
 	cache        *cache.Cache          // Secret cache

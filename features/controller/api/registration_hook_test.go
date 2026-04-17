@@ -23,7 +23,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
-	// Auto-register git storage provider
+	// Auto-register OSS storage providers
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )

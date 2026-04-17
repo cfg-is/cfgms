@@ -348,12 +348,6 @@ func (f *E2ETestFramework) initializeController() error {
 		},
 	}
 
-	// Create storage directory
-	storageDir := filepath.Join(f.tempDir, "storage-git")
-	if err := os.MkdirAll(storageDir, 0755); err != nil {
-		return fmt.Errorf("failed to create storage directory: %w", err)
-	}
-
 	ctrl, err := controller.New(config, f.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create controller: %w", err)

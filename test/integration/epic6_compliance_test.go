@@ -198,7 +198,7 @@ func TestEpic6ComplianceValidation(t *testing.T) {
 
 	// Test configuration validation
 	t.Run("Epic6_ConfigurationValidation", func(t *testing.T) {
-		t.Skip("Configuration validation requires complete config structure - will be fixed in future story")
+		t.Skip("TODO(#664): Configuration validation requires non-nil Steward.ID - tracked as follow-up")
 		// Valid configuration should pass
 		err := configStorageMigration.ValidateConfiguration(ctx, validConfig)
 		assert.NoError(t, err)

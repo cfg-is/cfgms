@@ -15,7 +15,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
-	// Import git storage provider for testing
+	// Import OSS storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )

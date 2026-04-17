@@ -6,13 +6,14 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	// Import git plugin to register it with global storage
+	// Import OSS storage providers
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
@@ -37,11 +38,10 @@ func TestMSPEndToEndClientOnboarding(t *testing.T) {
 	t.Run("Step1_SetupStorageInfrastructure", func(t *testing.T) {
 		t.Log("📦 Step 1: Setting up storage infrastructure")
 
-		// Configure git-based storage for production-like scenario
+		// Configure OSS storage for production-like scenario
 		config := &ClientStoreConfig{
-			Type:          ClientStoreGit,
-			GitRepository: "", // Local git repo for this test
-			GitBranch:     "main",
+			Type:     ClientStoreFile,
+			FilePath: filepath.Join(t.TempDir(), "client-tenants"),
 		}
 
 		// Validate configuration
@@ -353,7 +353,7 @@ func TestMSPMultiClientScenario(t *testing.T) {
 	t.Log("🏢 Testing Multi-Client MSP Scenario")
 
 	// Setup storage
-	config := &ClientStoreConfig{Type: ClientStoreGit}
+	config := &ClientStoreConfig{Type: ClientStoreFile}
 	clientStore, err := NewClientTenantStore(config, nil)
 	require.NoError(t, err)
 
@@ -438,7 +438,7 @@ func TestMSPMultiClientScenario(t *testing.T) {
 func TestMSPErrorRecoveryScenarios(t *testing.T) {
 	t.Log("🚨 Testing MSP Error Recovery Scenarios")
 
-	config := &ClientStoreConfig{Type: ClientStoreGit}
+	config := &ClientStoreConfig{Type: ClientStoreFile}
 	clientStore, err := NewClientTenantStore(config, nil)
 	require.NoError(t, err)
 

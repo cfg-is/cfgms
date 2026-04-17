@@ -181,7 +181,7 @@ func TestNewManagerWithStorage_NilStorageHandling(t *testing.T) {
 
 // TestManagerWithStorage_TenantIsolation tests that tenant isolation works correctly with pluggable storage
 func TestManagerWithStorage_TenantIsolation(t *testing.T) {
-	// Create storage manager using git provider
+	// Create storage manager using OSS composite provider
 	tempDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
 	require.NoError(t, err)
@@ -249,7 +249,7 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 
 // TestManagerWithStorage_AuditTrail tests that RBAC operations are properly audited
 func TestManagerWithStorage_AuditTrail(t *testing.T) {
-	// Create storage manager using git provider
+	// Create storage manager using OSS composite provider
 	tempDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
 	require.NoError(t, err)

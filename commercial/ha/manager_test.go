@@ -78,7 +78,7 @@ func TestManager_SingleServerMode(t *testing.T) {
 }
 
 func TestManager_BlueGreenMode(t *testing.T) {
-	t.Skip("Skipping due to known deadlock issue in discovery - will be addressed in future PR")
+	t.Skip("known deadlock issue in HA discovery (pre-existing, tracked separately)")
 	// Create test logger
 	logger := logging.GetLogger()
 
@@ -127,7 +127,7 @@ func TestManager_BlueGreenMode(t *testing.T) {
 }
 
 func TestManager_ClusterMode(t *testing.T) {
-	t.Skip("Skipping due to known deadlock issue in discovery - will be addressed in future PR")
+	t.Skip("known deadlock issue in HA discovery (pre-existing, tracked separately)")
 	// Create test logger
 	logger := logging.GetLogger()
 
@@ -183,7 +183,7 @@ func TestManager_ClusterMode(t *testing.T) {
 }
 
 func TestManager_HealthChecks(t *testing.T) {
-	t.Skip("Skipping due to synchronization issues in health checker - will be addressed in future PR")
+	t.Skip("known deadlock issue in HA discovery (pre-existing, tracked separately)")
 	// Create test logger
 	logger := logging.GetLogger()
 
@@ -316,7 +316,7 @@ func TestDeploymentModeProgression(t *testing.T) {
 
 	// Phase 2: Blue-Green (simulating upgrade scenario)
 	t.Run("BlueGreen", func(t *testing.T) {
-		t.Skip("Skipping due to known deadlock issue in discovery - will be addressed in future PR")
+		t.Skip("known deadlock issue in HA discovery (pre-existing, tracked separately)")
 		cfg := DefaultConfig()
 		cfg.Mode = BlueGreenMode
 
@@ -335,7 +335,7 @@ func TestDeploymentModeProgression(t *testing.T) {
 
 	// Phase 3: Full Cluster
 	t.Run("Cluster", func(t *testing.T) {
-		t.Skip("Skipping due to known deadlock issue in discovery - will be addressed in future PR")
+		t.Skip("known deadlock issue in HA discovery (pre-existing, tracked separately)")
 		cfg := DefaultConfig()
 		cfg.Mode = ClusterMode
 		cfg.Cluster.ExpectedSize = 3

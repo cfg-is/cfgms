@@ -43,7 +43,7 @@ type Manager struct {
 // Migration example:
 //   // OLD: manager := rbac.NewManager()
 //   // NEW:
-//   storageManager := interfaces.CreateAllStoresFromConfig("git", config)
+//   storageManager, _ := interfaces.CreateOSSStorageManager(flatfileRoot, sqlitePath)
 //   manager := rbac.NewManagerWithStorage(storageManager.GetAuditStore(), storageManager.GetClientTenantStore())
 //
 // For testing, use: pkg/testing.SetupTestRBACManager(t)

@@ -19,7 +19,7 @@ import (
 
 // TestRBACManager_AuditIntegration tests that RBAC operations generate proper audit events
 func TestRBACManager_AuditIntegration(t *testing.T) {
-	// Setup git storage provider for testing
+	// Setup OSS storage providers for testing
 	tempDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
 	require.NoError(t, err)
@@ -296,7 +296,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 
 // TestRBACManager_AuditFailureHandling tests audit failure scenarios
 func TestRBACManager_AuditFailureHandling(t *testing.T) {
-	// Setup git storage provider
+	// Setup OSS storage providers for testing
 	tempDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
 	require.NoError(t, err)

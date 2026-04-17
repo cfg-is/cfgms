@@ -58,8 +58,8 @@ func main() {
 		},
 	}
 
-	// Create storage using git provider
-	config := &auth.ClientStoreConfig{Type: auth.ClientStoreGit}
+	// Create storage using OSS storage provider
+	config := &auth.ClientStoreConfig{Type: auth.ClientStoreFile}
 	clientStore, err := auth.NewClientTenantStore(config, nil)
 	if err != nil {
 		log.Fatal("Failed to create client store:", err)
