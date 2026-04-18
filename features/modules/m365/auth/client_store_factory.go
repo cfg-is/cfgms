@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -118,7 +120,7 @@ func NewClientTenantStore(config *ClientStoreConfig, logger interface{}) (Client
 	case ClientStoreMemory:
 		// Memory storage deprecated - use sqlite provider (business data tier per ADR-003)
 		providerName = "sqlite"
-		globalConfig["path"] = fmt.Sprintf("/tmp/cfgms-memory-replacement-%s.db", generateUniqueID())
+		globalConfig["path"] = filepath.Join(os.TempDir(), fmt.Sprintf("cfgms-memory-replacement-%s.db", generateUniqueID()))
 
 	case ClientStoreFile:
 		// Use sqlite provider for client tenant store (business data tier per ADR-003)
@@ -126,13 +128,13 @@ func NewClientTenantStore(config *ClientStoreConfig, logger interface{}) (Client
 		if config.FilePath != "" {
 			globalConfig["path"] = config.FilePath
 		} else {
-			globalConfig["path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.db", generateUniqueID())
+			globalConfig["path"] = filepath.Join(os.TempDir(), fmt.Sprintf("cfgms-client-tenants-%s.db", generateUniqueID()))
 		}
 
 	case ClientStoreGit:
 		// Git provider removed (Issue #664) - use sqlite provider (business data tier per ADR-003)
 		providerName = "sqlite"
-		globalConfig["path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.db", generateUniqueID())
+		globalConfig["path"] = filepath.Join(os.TempDir(), fmt.Sprintf("cfgms-client-tenants-%s.db", generateUniqueID()))
 
 	case ClientStoreDatabase:
 		providerName = "database"
