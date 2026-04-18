@@ -79,6 +79,34 @@ func TestRegistrationStore_Update(t *testing.T) {
 	assert.Equal(t, "steward-xyz", got.UsedBy)
 }
 
+// TestRegistrationStore_SaveToken_Upsert verifies that SaveToken acts as an
+// UPSERT — saving the same token twice updates mutable state (e.g., used_at).
+// This matches the database provider behavior (Story #299) and is the basis
+// for single-use token enforcement in the registration handler.
+func TestRegistrationStore_SaveToken_Upsert(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	tok := &interfaces.RegistrationTokenData{
+		Token:         "tok-upsert",
+		TenantID:      "tenant-1",
+		ControllerURL: "https://c.example.com",
+		SingleUse:     true,
+	}
+	require.NoError(t, store.SaveToken(ctx, tok))
+
+	// Second SaveToken with the same primary key must not fail and must
+	// persist the updated state (used_at, used_by).
+	tok.MarkUsed("steward-xyz")
+	require.NoError(t, store.SaveToken(ctx, tok))
+
+	got, err := store.GetToken(ctx, "tok-upsert")
+	require.NoError(t, err)
+	assert.NotNil(t, got.UsedAt, "UsedAt must be persisted after second SaveToken")
+	assert.Equal(t, "steward-xyz", got.UsedBy)
+	assert.False(t, got.IsValid(), "single-use token must be invalid once used")
+}
+
 func TestRegistrationStore_Delete(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()

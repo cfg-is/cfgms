@@ -27,7 +27,9 @@ func (s *SQLiteRegistrationTokenStore) Close() error {
 	return nil
 }
 
-// SaveToken persists a new registration token.
+// SaveToken persists a registration token. Uses UPSERT semantics so that
+// subsequent calls with the same token update mutable state — required for
+// single-use enforcement (Story #299 parity with the database provider).
 func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *interfaces.RegistrationTokenData) error {
 	if token == nil {
 		return fmt.Errorf("token cannot be nil")
@@ -43,7 +45,17 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *int
 		INSERT INTO registration_tokens
 			(token, tenant_id, controller_url, group_name, created_at,
 			 expires_at, single_use, used_at, used_by, revoked, revoked_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(token) DO UPDATE SET
+			tenant_id = excluded.tenant_id,
+			controller_url = excluded.controller_url,
+			group_name = excluded.group_name,
+			expires_at = excluded.expires_at,
+			single_use = excluded.single_use,
+			used_at = excluded.used_at,
+			used_by = excluded.used_by,
+			revoked = excluded.revoked,
+			revoked_at = excluded.revoked_at`,
 		token.Token,
 		token.TenantID,
 		token.ControllerURL,
