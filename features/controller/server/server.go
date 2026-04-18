@@ -123,6 +123,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	} else if cfg.Storage.Provider == "database" {
 		logger.Info("Initializing database storage provider (commercial single-provider mode)")
 		var dbErr error
+		// Database provider deliberately uses the legacy single-provider helper: commercial
+		// deployments run all stores through one PostgreSQL backend, which CreateAllStoresFromConfig
+		// is explicitly retained to support (see pkg/storage/interfaces/provider.go).
+		//nolint:staticcheck // SA1019 — retained for database single-provider mode
 		storageManager, dbErr = interfaces.CreateAllStoresFromConfig("database", cfg.Storage.Config)
 		if dbErr != nil {
 			return nil, fmt.Errorf("failed to initialize database storage provider: %w. Verify storage.config contains valid database connection parameters", dbErr)
