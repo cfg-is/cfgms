@@ -107,7 +107,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.flatfile_root and storage.sqlite_path (OSS composite). See docs/examples/minimum-storage-config.cfg for examples")
 	}
 
-	// Create storage manager — OSS composite path (flatfile+SQLite) or legacy single-provider path
+	// Create storage manager — OSS composite (flatfile+SQLite) or database single-provider.
+	// The git provider is removed (Issue #664) and is rejected here with a migration hint.
 	var storageManager *interfaces.StorageManager
 	if cfg.Storage.FlatfileRoot != "" {
 		logger.Info("Initializing OSS composite storage backend...",
@@ -119,8 +120,15 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", ossErr)
 		}
 		logger.Info("OSS composite storage backend initialized")
+	} else if cfg.Storage.Provider == "database" {
+		logger.Info("Initializing database storage provider (commercial single-provider mode)")
+		var dbErr error
+		storageManager, dbErr = interfaces.CreateAllStoresFromConfig("database", cfg.Storage.Config)
+		if dbErr != nil {
+			return nil, fmt.Errorf("failed to initialize database storage provider: %w. Verify storage.config contains valid database connection parameters", dbErr)
+		}
 	} else {
-		return nil, fmt.Errorf("storage.flatfile_root is required for OSS composite storage; legacy single-provider mode is no longer supported. Set storage.flatfile_root and storage.sqlite_path in configuration")
+		return nil, fmt.Errorf("storage.flatfile_root is required for OSS composite storage, or storage.provider must be 'database' for commercial single-provider mode. The 'git' storage provider has been removed — run 'cfg storage migrate --from git --to flatfile' to migrate existing data")
 	}
 
 	// Initialize RBAC system with pluggable storage only
