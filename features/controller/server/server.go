@@ -150,7 +150,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize unified audit system with pluggable storage only
 	logger.Info("Creating audit manager...")
-	auditManager := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	auditManager, auditErr := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	if auditErr != nil {
+		return nil, fmt.Errorf("failed to initialize audit manager: %w", auditErr)
+	}
 	logger.Info("Audit manager created")
 
 	logger.Info("RBAC and Audit systems initialized with pluggable storage", "provider", cfg.Storage.Provider)
@@ -932,7 +935,8 @@ func (s *Server) Start() error {
 	// Record system startup audit event
 	if s.auditManager != nil {
 		ctx := context.Background()
-		event := audit.SystemEvent("system", "controller_start", fmt.Sprintf("Controller server started on %s", s.cfg.ListenAddr))
+		// TODO(#751): controller identity as a real tenant — replace audit.SystemTenantID with proper identity.
+		event := audit.SystemEvent(audit.SystemTenantID, "controller_start", fmt.Sprintf("Controller server started on %s", s.cfg.ListenAddr))
 		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
 			s.logger.Warn("Failed to record startup audit event", "error", err)
 		}
@@ -979,7 +983,8 @@ func (s *Server) Stop() error {
 	// Record system shutdown audit event
 	if s.auditManager != nil {
 		ctx := context.Background()
-		event := audit.SystemEvent("system", "controller_stop", "Controller server shutting down")
+		// TODO(#751): controller identity as a real tenant — replace audit.SystemTenantID with proper identity.
+		event := audit.SystemEvent(audit.SystemTenantID, "controller_stop", "Controller server shutting down")
 		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
 			s.logger.Warn("Failed to record shutdown audit event", "error", err)
 		}

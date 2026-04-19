@@ -15,6 +15,14 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
+// SystemTenantID is the sentinel tenant ID used for controller-internal system events.
+// TODO(#751): controller identity as a real tenant — replace with proper tenant identity.
+const SystemTenantID = "system"
+
+// SystemUserID is the sentinel user ID used for system-originated audit events.
+// TODO(#751): controller identity as a real tenant — replace with proper user identity.
+const SystemUserID = "system"
+
 // Manager provides centralized audit functionality using pluggable storage
 type Manager struct {
 	store  interfaces.AuditStore
@@ -22,18 +30,18 @@ type Manager struct {
 }
 
 // NewManager creates a new audit manager with the specified storage backend
-func NewManager(store interfaces.AuditStore, source string) *Manager {
+func NewManager(store interfaces.AuditStore, source string) (*Manager, error) {
 	if store == nil {
-		panic("audit manager requires non-nil audit store")
+		return nil, fmt.Errorf("audit manager requires non-nil audit store")
 	}
 	if source == "" {
-		panic("audit manager requires non-empty source identifier")
+		return nil, fmt.Errorf("audit manager requires non-empty source identifier")
 	}
 
 	return &Manager{
 		store:  store,
 		source: source,
-	}
+	}, nil
 }
 
 // RecordEvent records an audit event with automatic metadata generation
@@ -352,7 +360,7 @@ func AuthenticationEvent(tenantID, userID, action string, result interfaces.Audi
 		Type(interfaces.AuditEventAuthentication).
 		Action(action).
 		User(userID, interfaces.AuditUserTypeHuman).
-		Resource("session", "", "").
+		Resource("session", userID, "").
 		Result(result).
 		Severity(interfaces.AuditSeverityHigh)
 }
@@ -410,7 +418,7 @@ func SecurityEvent(tenantID, userID, action, description string, severity interf
 		Type(interfaces.AuditEventSecurityEvent).
 		Action(action).
 		User(userID, interfaces.AuditUserTypeSystem).
-		Resource("security", "", "").
+		Resource("security", userID, "").
 		Detail("description", description).
 		Severity(severity)
 }
@@ -421,8 +429,8 @@ func SystemEvent(tenantID, action, description string) *AuditEventBuilder {
 		Tenant(tenantID).
 		Type(interfaces.AuditEventSystemEvent).
 		Action(action).
-		User("system", interfaces.AuditUserTypeSystem).
-		Resource("system", "", "").
+		User(SystemUserID, interfaces.AuditUserTypeSystem).
+		Resource("system", "controller", "").
 		Detail("description", description).
 		Severity(interfaces.AuditSeverityLow)
 }

@@ -65,7 +65,10 @@ func NewManagerWithStorage(auditStore interfaces.AuditStore, clientTenantStore i
 	hierarchyEngine := NewHierarchyEngine(ephemeralStore, ephemeralStore)
 
 	// Create audit manager for RBAC operations
-	auditManager := audit.NewManager(auditStore, "rbac")
+	auditManager, auditErr := audit.NewManager(auditStore, "rbac")
+	if auditErr != nil {
+		panic(fmt.Sprintf("NewManagerWithStorage: failed to create audit manager: %v", auditErr))
+	}
 
 	// Create manager instance with pluggable storage
 	manager := &Manager{
