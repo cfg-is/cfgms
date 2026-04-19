@@ -29,7 +29,7 @@ on:
         - full
 
 env:
-  GO_VERSION: '1.23'
+  GO_VERSION: '1.25.9'
 
 jobs:
   # Fast unit tests - runs on every push/PR
