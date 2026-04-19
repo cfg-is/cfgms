@@ -65,6 +65,11 @@ func SetupTestRBACManager(t *testing.T) *rbac.Manager {
 
 // SetupTestAuditManager creates an audit manager with git storage for testing
 func SetupTestAuditManager(t *testing.T) *audit.Manager {
+	t.Helper()
 	storageManager := SetupTestStorage(t)
-	return audit.NewManager(storageManager.GetAuditStore(), "test")
+	m, err := audit.NewManager(storageManager.GetAuditStore(), "test")
+	if err != nil {
+		t.Fatalf("Failed to initialize test audit manager: %v", err)
+	}
+	return m
 }

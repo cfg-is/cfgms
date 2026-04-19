@@ -16,7 +16,7 @@ import (
 
 // TestNewComplianceReporter tests compliance reporter creation
 func TestNewComplianceReporter(t *testing.T) {
-	manager := NewManager(&mockAuditStore{}, "test")
+	manager := newTestManager(t, "test")
 	reporter := NewComplianceReporter(manager)
 
 	assert.NotNil(t, reporter)
@@ -25,15 +25,13 @@ func TestNewComplianceReporter(t *testing.T) {
 
 // TestGenerateReport tests compliance report generation
 func TestGenerateReport(t *testing.T) {
-	// Setup mock audit store with test data
-	mockStore := &mockAuditStore{}
-	manager := NewManager(mockStore, "test")
+	manager := newTestManager(t, "test")
 	reporter := NewComplianceReporter(manager)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	// Create test audit entries
+	// Create and store test audit entries via the manager's store directly
 	testEntries := []*interfaces.AuditEntry{
 		{
 			ID:           "entry1",
@@ -82,13 +80,11 @@ func TestGenerateReport(t *testing.T) {
 		},
 	}
 
-	// Store test entries
 	for _, entry := range testEntries {
-		err := mockStore.StoreAuditEntry(ctx, entry)
+		err := manager.store.StoreAuditEntry(ctx, entry)
 		require.NoError(t, err)
 	}
 
-	// Generate compliance report
 	req := &ComplianceReportRequest{
 		TenantID:    "test-tenant",
 		ReportType:  ComplianceReportGeneral,
@@ -103,7 +99,6 @@ func TestGenerateReport(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, report)
 
-	// Validate report structure
 	assert.Equal(t, "test-tenant", report.TenantID)
 	assert.Equal(t, ComplianceReportGeneral, report.ReportType)
 	assert.Equal(t, "test-user", report.GeneratedBy)
@@ -111,41 +106,34 @@ func TestGenerateReport(t *testing.T) {
 	assert.Equal(t, int64(1), report.FailedActionsCount)
 	assert.Equal(t, int64(1), report.SecurityEventsCount)
 
-	// Validate event counts by type
 	assert.Equal(t, int64(1), report.EventsByType["authentication"])
 	assert.Equal(t, int64(1), report.EventsByType["security_event"])
 	assert.Equal(t, int64(1), report.EventsByType["authorization"])
 
-	// Validate event counts by result
 	assert.Equal(t, int64(1), report.EventsByResult["success"])
 	assert.Equal(t, int64(1), report.EventsByResult["failure"])
 	assert.Equal(t, int64(1), report.EventsByResult["denied"])
 
-	// Validate findings
 	assert.NotEmpty(t, report.SecurityFindings)
 	assert.NotEmpty(t, report.AccessFindings)
 
-	// Validate user activity report
 	assert.Len(t, report.UserActivityReport, 3)
 	for _, userActivity := range report.UserActivityReport {
 		assert.Equal(t, int64(1), userActivity.TotalActions)
 	}
 
-	// Validate resource access report
 	assert.Len(t, report.ResourceAccessReport, 3)
 
-	// Validate compliance status assessment
-	assert.NotEqual(t, ComplianceStatusCompliant, report.ComplianceStatus) // Should have warnings due to security events
+	assert.NotEqual(t, ComplianceStatusCompliant, report.ComplianceStatus)
 }
 
 // TestGenerateReport_ValidationErrors tests validation error handling
 func TestGenerateReport_ValidationErrors(t *testing.T) {
-	manager := NewManager(&mockAuditStore{}, "test")
+	manager := newTestManager(t, "test")
 	reporter := NewComplianceReporter(manager)
 
 	ctx := context.Background()
 
-	// Test missing tenant ID
 	req := &ComplianceReportRequest{
 		TenantID:    "",
 		ReportType:  ComplianceReportGeneral,
@@ -160,13 +148,12 @@ func TestGenerateReport_ValidationErrors(t *testing.T) {
 
 // TestExportReport tests report export functionality
 func TestExportReport(t *testing.T) {
-	manager := NewManager(&mockAuditStore{}, "test")
+	manager := newTestManager(t, "test")
 	reporter := NewComplianceReporter(manager)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	// Create a test report
 	report := &ComplianceReport{
 		ID:          "test-report",
 		TenantID:    "test-tenant",
@@ -218,7 +205,6 @@ func TestExportReport(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotEmpty(t, data)
 
-		// Validate it's valid JSON by checking it contains expected fields
 		jsonStr := string(data)
 		assert.Contains(t, jsonStr, "test-report")
 		assert.Contains(t, jsonStr, "test-tenant")
@@ -231,15 +217,12 @@ func TestExportReport(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotEmpty(t, data)
 
-		// Validate CSV structure
 		csvStr := string(data)
 		lines := strings.Split(csvStr, "\n")
-		assert.GreaterOrEqual(t, len(lines), 2) // At least header + one data row
+		assert.GreaterOrEqual(t, len(lines), 2)
 
-		// Check header
 		assert.Contains(t, lines[0], "Category,Type,Count,Description,Severity,First Seen,Last Seen")
 
-		// Check data rows contain our findings
 		assert.Contains(t, csvStr, "Security")
 		assert.Contains(t, csvStr, "Access Control")
 	})
@@ -249,7 +232,6 @@ func TestExportReport(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotEmpty(t, data)
 
-		// Validate HTML structure
 		htmlStr := string(data)
 		assert.Contains(t, htmlStr, "<!DOCTYPE html>")
 		assert.Contains(t, htmlStr, "<title>Compliance Report")
@@ -267,7 +249,7 @@ func TestExportReport(t *testing.T) {
 
 // TestComplianceStatusAssessment tests compliance status determination
 func TestComplianceStatusAssessment(t *testing.T) {
-	manager := NewManager(&mockAuditStore{}, "test")
+	manager := newTestManager(t, "test")
 	reporter := NewComplianceReporter(manager)
 
 	tests := []struct {
@@ -298,7 +280,7 @@ func TestComplianceStatusAssessment(t *testing.T) {
 				{Severity: interfaces.AuditSeverityHigh},
 				{Severity: interfaces.AuditSeverityHigh},
 				{Severity: interfaces.AuditSeverityHigh},
-				{Severity: interfaces.AuditSeverityHigh}, // 6 high findings
+				{Severity: interfaces.AuditSeverityHigh},
 			},
 			failedActions:  50,
 			expectedStatus: ComplianceStatusViolations,
@@ -328,7 +310,7 @@ func TestComplianceStatusAssessment(t *testing.T) {
 
 // TestComplianceFindingGeneration tests finding generation logic
 func TestComplianceFindingGeneration(t *testing.T) {
-	manager := NewManager(&mockAuditStore{}, "test")
+	manager := newTestManager(t, "test")
 	reporter := NewComplianceReporter(manager)
 
 	now := time.Now().UTC()
@@ -370,15 +352,13 @@ func TestComplianceFindingGeneration(t *testing.T) {
 	report := &ComplianceReport{}
 	reporter.generateFindings(report, entries)
 
-	// Validate security findings
 	require.Len(t, report.SecurityFindings, 1)
 	securityFinding := report.SecurityFindings[0]
 	assert.Equal(t, "security-intrusion_attempt", securityFinding.ID)
 	assert.Equal(t, "Security", securityFinding.Category)
 	assert.Equal(t, interfaces.AuditSeverityCritical, securityFinding.Severity)
-	assert.Equal(t, int64(2), securityFinding.Count) // Two intrusion attempts
+	assert.Equal(t, int64(2), securityFinding.Count)
 
-	// Validate access findings
 	require.Len(t, report.AccessFindings, 1)
 	accessFinding := report.AccessFindings[0]
 	assert.Equal(t, "access-denied-access_resource", accessFinding.ID)
@@ -386,7 +366,6 @@ func TestComplianceFindingGeneration(t *testing.T) {
 	assert.Equal(t, interfaces.AuditSeverityHigh, accessFinding.Severity)
 	assert.Equal(t, int64(1), accessFinding.Count)
 
-	// Validate configuration findings
 	require.Len(t, report.ConfigFindings, 1)
 	configFinding := report.ConfigFindings[0]
 	assert.Equal(t, "config-failed-update_config", configFinding.ID)
@@ -397,7 +376,7 @@ func TestComplianceFindingGeneration(t *testing.T) {
 
 // TestRecommendationGeneration tests recommendation generation logic
 func TestRecommendationGeneration(t *testing.T) {
-	manager := NewManager(&mockAuditStore{}, "test")
+	manager := newTestManager(t, "test")
 	reporter := NewComplianceReporter(manager)
 
 	tests := []struct {
@@ -419,28 +398,28 @@ func TestRecommendationGeneration(t *testing.T) {
 			failedActions:           100,
 			securityEvents:          5,
 			accessFindingsCount:     2,
-			expectedRecommendations: 1, // Reduce failures recommendation
+			expectedRecommendations: 1,
 		},
 		{
 			name:                    "high security events",
 			failedActions:           10,
 			securityEvents:          50,
 			accessFindingsCount:     2,
-			expectedRecommendations: 1, // Investigate security recommendation
+			expectedRecommendations: 1,
 		},
 		{
 			name:                    "many access findings",
 			failedActions:           10,
 			securityEvents:          5,
 			accessFindingsCount:     10,
-			expectedRecommendations: 1, // Review access controls recommendation
+			expectedRecommendations: 1,
 		},
 		{
 			name:                    "all issues",
 			failedActions:           100,
 			securityEvents:          50,
 			accessFindingsCount:     10,
-			expectedRecommendations: 3, // All recommendations
+			expectedRecommendations: 3,
 		},
 	}
 
@@ -455,7 +434,6 @@ func TestRecommendationGeneration(t *testing.T) {
 			reporter.generateRecommendations(report)
 			assert.Len(t, report.Recommendations, tt.expectedRecommendations)
 
-			// Validate recommendation categories
 			categories := make(map[string]bool)
 			for _, rec := range report.Recommendations {
 				categories[rec.Category] = true

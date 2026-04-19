@@ -17,6 +17,19 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
+// newTestManager creates a real audit manager backed by OSS storage in a temp dir.
+func newTestManager(t *testing.T, source string) *Manager {
+	t.Helper()
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	m, err := NewManager(storageManager.GetAuditStore(), source)
+	require.NoError(t, err)
+	return m
+}
+
 // TestNewManager tests audit manager creation
 func TestNewManager(t *testing.T) {
 	tests := []struct {
@@ -49,15 +62,21 @@ func TestNewManager(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, auditStore)
 
-			// Test creating audit manager
-			manager := NewManager(auditStore, "test")
+			manager, err := NewManager(auditStore, "test")
+			require.NoError(t, err)
 			require.NotNil(t, manager)
 		})
 	}
 }
 
-// TestNewManager_PanicConditions tests panic conditions
-func TestNewManager_PanicConditions(t *testing.T) {
+// TestNewManager_ErrorConditions tests error conditions (previously tested as panics)
+func TestNewManager_ErrorConditions(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+	realStore := storageManager.GetAuditStore()
+
 	tests := []struct {
 		name   string
 		store  interfaces.AuditStore
@@ -70,31 +89,25 @@ func TestNewManager_PanicConditions(t *testing.T) {
 		},
 		{
 			name:   "empty source",
-			store:  &mockAuditStore{},
+			store:  realStore,
 			source: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Panics(t, func() {
-				NewManager(tt.store, tt.source)
-			})
+			m, err := NewManager(tt.store, tt.source)
+			assert.Error(t, err)
+			assert.Nil(t, m)
 		})
 	}
 }
 
 // TestManager_RecordEvent tests basic event recording
 func TestManager_RecordEvent(t *testing.T) {
-	tmpDir := t.TempDir()
-	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
-
-	manager := NewManager(storageManager.GetAuditStore(), "test")
+	manager := newTestManager(t, "test")
 	ctx := context.Background()
 
-	// Test basic event recording
 	event := NewEventBuilder().
 		Tenant("test-tenant").
 		Type(interfaces.AuditEventConfiguration).
@@ -104,21 +117,15 @@ func TestManager_RecordEvent(t *testing.T) {
 		Detail("test_key", "test_value").
 		Severity(interfaces.AuditSeverityMedium)
 
-	err = manager.RecordEvent(ctx, event)
+	err := manager.RecordEvent(ctx, event)
 	assert.NoError(t, err)
 }
 
 // TestManager_RecordBatch tests batch event recording
 func TestManager_RecordBatch(t *testing.T) {
-	tmpDir := t.TempDir()
-	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
-
-	manager := NewManager(storageManager.GetAuditStore(), "test")
+	manager := newTestManager(t, "test")
 	ctx := context.Background()
 
-	// Create multiple events
 	events := []*AuditEventBuilder{
 		NewEventBuilder().
 			Tenant("test-tenant").
@@ -136,13 +143,13 @@ func TestManager_RecordBatch(t *testing.T) {
 			Severity(interfaces.AuditSeverityMedium),
 	}
 
-	err = manager.RecordBatch(ctx, events)
+	err := manager.RecordBatch(ctx, events)
 	assert.NoError(t, err)
 }
 
 // TestManager_ValidationErrors tests validation error handling
 func TestManager_ValidationErrors(t *testing.T) {
-	manager := NewManager(&mockAuditStore{}, "test")
+	manager := newTestManager(t, "test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -199,7 +206,6 @@ func TestManager_ValidationErrors(t *testing.T) {
 
 // TestAuditEventBuilder tests the fluent builder interface
 func TestAuditEventBuilder(t *testing.T) {
-	// Test complete event building
 	event := NewEventBuilder().
 		Tenant("test-tenant").
 		Type(interfaces.AuditEventAuthentication).
@@ -215,11 +221,9 @@ func TestAuditEventBuilder(t *testing.T) {
 		Tag("authentication").
 		Severity(interfaces.AuditSeverityHigh)
 
-	// Build into audit entry
 	entry := &interfaces.AuditEntry{}
 	event.build(entry)
 
-	// Validate all fields are set correctly
 	assert.Equal(t, "test-tenant", entry.TenantID)
 	assert.Equal(t, interfaces.AuditEventAuthentication, entry.EventType)
 	assert.Equal(t, "login", entry.Action)
@@ -254,6 +258,8 @@ func TestPredefinedEventBuilders(t *testing.T) {
 		assert.Equal(t, "login", entry.Action)
 		assert.Equal(t, "user1", entry.UserID)
 		assert.Equal(t, interfaces.AuditUserTypeHuman, entry.UserType)
+		assert.Equal(t, "session", entry.ResourceType)
+		assert.Equal(t, "user1", entry.ResourceID)
 		assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
 		assert.Equal(t, interfaces.AuditSeverityHigh, entry.Severity)
 	})
@@ -296,9 +302,10 @@ func TestPredefinedEventBuilders(t *testing.T) {
 		assert.Equal(t, "tenant1", entry.TenantID)
 		assert.Equal(t, interfaces.AuditEventSystemEvent, entry.EventType)
 		assert.Equal(t, "startup", entry.Action)
-		assert.Equal(t, "system", entry.UserID)
+		assert.Equal(t, SystemUserID, entry.UserID)
 		assert.Equal(t, interfaces.AuditUserTypeSystem, entry.UserType)
 		assert.Equal(t, "system", entry.ResourceType)
+		assert.Equal(t, "controller", entry.ResourceID)
 		assert.Equal(t, "System started successfully", entry.Details["description"])
 		assert.Equal(t, interfaces.AuditSeverityLow, entry.Severity)
 	})
@@ -313,16 +320,49 @@ func TestPredefinedEventBuilders(t *testing.T) {
 		assert.Equal(t, "intrusion_detected", entry.Action)
 		assert.Equal(t, "user1", entry.UserID)
 		assert.Equal(t, "security", entry.ResourceType)
+		assert.Equal(t, "user1", entry.ResourceID)
 		assert.Equal(t, "Multiple failed login attempts", entry.Details["description"])
 		assert.Equal(t, interfaces.AuditSeverityCritical, entry.Severity)
 	})
 }
 
+// TestAuthenticationEvent_Persists verifies AuthenticationEvent produces an entry that passes
+// validateEntry and is successfully stored via RecordEvent.
+func TestAuthenticationEvent_Persists(t *testing.T) {
+	manager := newTestManager(t, "controller")
+	ctx := context.Background()
+
+	event := AuthenticationEvent("tenant1", "user1", "login", interfaces.AuditResultSuccess)
+	err := manager.RecordEvent(ctx, event)
+	assert.NoError(t, err, "AuthenticationEvent must not return a validation error")
+}
+
+// TestSystemEvent_Persists verifies SystemEvent produces an entry that passes validateEntry
+// and is successfully stored via RecordEvent.
+func TestSystemEvent_Persists(t *testing.T) {
+	manager := newTestManager(t, "controller")
+	ctx := context.Background()
+
+	event := SystemEvent(SystemTenantID, "startup", "Controller started")
+	err := manager.RecordEvent(ctx, event)
+	assert.NoError(t, err, "SystemEvent must not return a validation error")
+}
+
+// TestSecurityEvent_Persists verifies SecurityEvent produces an entry that passes validateEntry
+// and is successfully stored via RecordEvent.
+func TestSecurityEvent_Persists(t *testing.T) {
+	manager := newTestManager(t, "controller")
+	ctx := context.Background()
+
+	event := SecurityEvent(SystemTenantID, SystemUserID, "brute_force_detected", "Multiple failed auth attempts", interfaces.AuditSeverityHigh)
+	err := manager.RecordEvent(ctx, event)
+	assert.NoError(t, err, "SecurityEvent must not return a validation error")
+}
+
 // TestManager_IntegrityVerification tests audit integrity verification
 func TestManager_IntegrityVerification(t *testing.T) {
-	manager := NewManager(&mockAuditStore{}, "test")
+	manager := newTestManager(t, "test")
 
-	// Create a test entry
 	entry := &interfaces.AuditEntry{
 		ID:           "test-id",
 		TenantID:     "test-tenant",
@@ -339,106 +379,14 @@ func TestManager_IntegrityVerification(t *testing.T) {
 		Version:      "1.0",
 	}
 
-	// Generate checksum
 	entry.Checksum = manager.generateChecksum(entry)
 
-	// Verify integrity (should pass)
 	assert.True(t, manager.VerifyIntegrity(entry))
 
-	// Tamper with the entry
 	originalAction := entry.Action
 	entry.Action = "tampered_action"
-
-	// Verify integrity (should fail)
 	assert.False(t, manager.VerifyIntegrity(entry))
 
-	// Restore original action
 	entry.Action = originalAction
-
-	// Verify integrity (should pass again)
 	assert.True(t, manager.VerifyIntegrity(entry))
-}
-
-// mockAuditStore is a simple mock implementation for testing
-type mockAuditStore struct {
-	entries map[string]*interfaces.AuditEntry
-}
-
-func (m *mockAuditStore) StoreAuditEntry(ctx context.Context, entry *interfaces.AuditEntry) error {
-	if m.entries == nil {
-		m.entries = make(map[string]*interfaces.AuditEntry)
-	}
-	m.entries[entry.ID] = entry
-	return nil
-}
-
-func (m *mockAuditStore) GetAuditEntry(ctx context.Context, id string) (*interfaces.AuditEntry, error) {
-	if m.entries == nil {
-		return nil, interfaces.ErrAuditNotFound
-	}
-	entry, ok := m.entries[id]
-	if !ok {
-		return nil, interfaces.ErrAuditNotFound
-	}
-	return entry, nil
-}
-
-func (m *mockAuditStore) ListAuditEntries(ctx context.Context, filter *interfaces.AuditFilter) ([]*interfaces.AuditEntry, error) {
-	if m.entries == nil {
-		return []*interfaces.AuditEntry{}, nil
-	}
-
-	result := make([]*interfaces.AuditEntry, 0, len(m.entries))
-	for _, entry := range m.entries {
-		result = append(result, entry)
-	}
-	return result, nil
-}
-
-func (m *mockAuditStore) StoreAuditBatch(ctx context.Context, entries []*interfaces.AuditEntry) error {
-	for _, entry := range entries {
-		if err := m.StoreAuditEntry(ctx, entry); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (m *mockAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return []*interfaces.AuditEntry{}, nil
-}
-
-func (m *mockAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return []*interfaces.AuditEntry{}, nil
-}
-
-func (m *mockAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return []*interfaces.AuditEntry{}, nil
-}
-
-func (m *mockAuditStore) GetFailedActions(ctx context.Context, timeRange *interfaces.TimeRange, limit int) ([]*interfaces.AuditEntry, error) {
-	return []*interfaces.AuditEntry{}, nil
-}
-
-func (m *mockAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return []*interfaces.AuditEntry{}, nil
-}
-
-func (m *mockAuditStore) GetAuditStats(ctx context.Context) (*interfaces.AuditStats, error) {
-	return &interfaces.AuditStats{
-		TotalEntries: int64(len(m.entries)),
-		LastUpdated:  time.Now(),
-	}, nil
-}
-
-func (m *mockAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
-	return 0, nil
-}
-
-func (m *mockAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
-	return 0, nil
-}
-
-func (m *mockAuditStore) Close() error {
-	return nil
 }
