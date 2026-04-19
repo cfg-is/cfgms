@@ -52,14 +52,11 @@ jobs:
         echo "🔧 Installing Security Tools for Production Gate"
         echo "=============================================="
         
-        # Install Trivy
-        sudo apt-get update
-        sudo apt-get install wget apt-transport-https gnupg lsb-release
-        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
-        sudo apt-get update
-        sudo apt-get install -y trivy=0.69.3  # Pinned: v0.69.4+ are compromised (CVE-2026-33634)
-        
+        # Install Trivy — v0.69.4+ are compromised (CVE-2026-33634); apt repo
+        # no longer ships v0.69.3. Install from the official install.sh against
+        # the still-available GitHub release.
+        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin v0.69.3
+
         # Install other security tools
         make install-nancy
         go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
