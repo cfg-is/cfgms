@@ -47,3 +47,10 @@ if err := auditManager.RecordEvent(ctx, event); err != nil {
 ```
 
 `SecurityEvent` uses `userID` as both the user and the `ResourceID`, satisfying validation.
+
+## Compliance Reporting
+
+Compliance report generation is handled by `features/reports/`, not by this package.
+`pkg/audit` does not contain a `ComplianceReporter`; that symbol was removed in
+Issue #766 because the implementation was dead code with XSS and CSV-injection
+vulnerabilities. Use `features/reports/` for all compliance reporting needs.
