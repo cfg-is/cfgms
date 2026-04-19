@@ -6,13 +6,13 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	// Import git plugin to register it with global storage
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
@@ -465,7 +465,7 @@ func TestMSPWithGlobalStorage(t *testing.T) {
 				case ClientStoreFile:
 					config = &ClientStoreConfig{
 						Type:     ClientStoreFile,
-						FilePath: "/tmp/cfgms-test-git",
+						FilePath: filepath.Join(t.TempDir(), "cfgms-test-file.db"),
 					}
 				case ClientStoreGit:
 					config = GitBasedClientStoreConfig("", "main")
