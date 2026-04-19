@@ -19,6 +19,10 @@ import (
 // SetupTestStorage creates an OSS composite storage manager for testing.
 // Uses flatfile (config/audit/steward) and SQLite (business data) providers backed
 // by temporary directories — each call produces fully isolated storage.
+//
+// The returned manager is registered with t.Cleanup to close all SQLite handles
+// before t.TempDir cleanup runs. This is required on Windows, where RemoveAll
+// fails if any database file is still held open.
 func SetupTestStorage(t *testing.T) *interfaces.StorageManager {
 	t.Helper()
 
@@ -29,6 +33,12 @@ func SetupTestStorage(t *testing.T) *interfaces.StorageManager {
 	if err != nil {
 		t.Fatalf("Failed to create test storage: %v", err)
 	}
+
+	t.Cleanup(func() {
+		if err := storageManager.Close(); err != nil {
+			t.Logf("SetupTestStorage cleanup: storage close error: %v", err)
+		}
+	})
 
 	return storageManager
 }

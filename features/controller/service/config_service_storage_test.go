@@ -16,7 +16,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import git storage provider for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // createTestConfigStore creates a real git-backed ConfigStore for testing.
@@ -24,13 +25,10 @@ import (
 func createTestConfigStore(t *testing.T) interfaces.ConfigStore {
 	t.Helper()
 
-	storageConfig := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	return storageManager.GetConfigStore()
 }
@@ -140,15 +138,22 @@ func TestConfigurationStorageMigration(t *testing.T) {
 		err = migration.StoreConfiguration(ctx, "version-tenant", "version-test", &modifiedConfig)
 		require.NoError(t, err)
 
-		// Get history - git tracks each commit, so both versions appear in history
+		// Get history — flatfile only stores the current version, so history may be limited
 		history, err := migration.GetConfigurationHistory(ctx, "version-tenant", "version-test", 5)
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, len(history), 1) // At least one version in history
 
-		// GetConfigurationVersion exercises the version retrieval code path
+		// GetConfigurationVersion exercises the version retrieval code path.
+		// Note: flatfile provider does not support historical version retrieval
+		// (only the current version is stored), so version 1 may not be available
+		// after storing version 2. We verify the current version instead.
 		versionConfig, err := migration.GetConfigurationVersion(ctx, "version-tenant", "version-test", 1)
-		require.NoError(t, err)
-		assert.NotNil(t, versionConfig)
+		if err != nil {
+			// Expected with flatfile: historical versions not available
+			assert.Contains(t, err.Error(), "not available", "Error should indicate version not available")
+		} else {
+			assert.NotNil(t, versionConfig)
+		}
 
 		// Current version should have debug level (most recent store)
 		currentConfig, err := migration.GetConfiguration(ctx, "version-tenant", "version-test")

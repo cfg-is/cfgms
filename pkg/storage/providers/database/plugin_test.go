@@ -430,8 +430,8 @@ func TestDatabaseProvider_Integration(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, provider)
 
-	// Test creating storage manager
-	storageManager, err := interfaces.CreateAllStoresFromConfig("database", getTestConfig())
+	// Test creating storage manager (database provider uses single-backend mode)
+	storageManager, err := interfaces.CreateAllStoresFromConfig("database", getTestConfig()) //nolint:staticcheck
 	require.NoError(t, err)
 	require.NotNil(t, storageManager)
 

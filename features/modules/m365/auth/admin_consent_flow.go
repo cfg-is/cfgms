@@ -106,6 +106,11 @@ type ClientTenantStore interface {
 	StoreAdminConsentRequest(ctx context.Context, request *AdminConsentRequest) error
 	GetAdminConsentRequest(ctx context.Context, state string) (*AdminConsentRequest, error)
 	DeleteAdminConsentRequest(ctx context.Context, state string) error
+
+	// Close releases underlying storage resources (e.g., sqlite file handles).
+	// Callers MUST invoke Close when done with the store — on Windows a held
+	// handle prevents t.TempDir() cleanup from deleting the DB file.
+	Close() error
 }
 
 // NewAdminConsentFlow creates a new admin consent flow manager

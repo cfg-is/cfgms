@@ -16,18 +16,16 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // setupTestRBACManager creates an RBAC manager with git storage for tenant testing
 func setupTestRBACManager(t *testing.T) *rbac.Manager {
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),

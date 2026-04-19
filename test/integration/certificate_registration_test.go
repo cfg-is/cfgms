@@ -25,7 +25,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // CertificateRegistrationTestSuite tests the certificate provisioning flow
@@ -76,10 +76,15 @@ func (s *CertificateRegistrationTestSuite) SetupSuite() {
 	})
 	require.NoError(s.T(), err)
 
-	// Initialize registration token store (git-based)
+	// Initialize registration token store (sqlite-based)
 	tokenStorePath := filepath.Join(s.tempDir, "tokens")
-	s.tokenStore, err = git.NewGitRegistrationTokenStore(tokenStorePath, "")
+	require.NoError(s.T(), os.MkdirAll(tokenStorePath, 0755))
+	s.tokenStore, err = interfaces.CreateRegistrationTokenStoreFromConfig(
+		"sqlite",
+		map[string]interface{}{"path": filepath.Join(tokenStorePath, "tokens.db")},
+	)
 	require.NoError(s.T(), err)
+	s.T().Cleanup(func() { _ = s.tokenStore.Close() })
 
 	ctx := context.Background()
 	err = s.tokenStore.Initialize(ctx)

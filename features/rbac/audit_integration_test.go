@@ -13,20 +13,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestRBACManager_AuditIntegration tests that RBAC operations generate proper audit events
 func TestRBACManager_AuditIntegration(t *testing.T) {
 	// Setup git storage provider for testing
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	// Create RBAC manager with audit integration
 	manager := NewManagerWithStorage(
@@ -301,14 +298,10 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 // TestRBACManager_AuditFailureHandling tests audit failure scenarios
 func TestRBACManager_AuditFailureHandling(t *testing.T) {
 	// Setup git storage provider
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	// Create manager but then simulate audit failure by setting auditManager to nil
 	manager := NewManagerWithStorage(
@@ -350,13 +343,10 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 	t.Run("Audit system is resilient to nil manager", func(t *testing.T) {
 		// With Epic 6, all managers require proper storage configuration
 		// Test that operations work normally even if audit events might fail
-		config := map[string]interface{}{
-			"repository_path": t.TempDir(),
-			"branch":          "main",
-			"auto_init":       true,
-		}
-		storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+		tmpDir := t.TempDir()
+		storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 		require.NoError(t, err)
+		t.Cleanup(func() { _ = storageManager.Close() })
 
 		// Create a properly configured manager (audit manager is always present in Epic 6)
 		manager := NewManagerWithStorage(

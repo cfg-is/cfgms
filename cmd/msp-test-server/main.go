@@ -16,8 +16,9 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 
-	// Import git plugin for storage
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	// Import storage providers
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 func main() {

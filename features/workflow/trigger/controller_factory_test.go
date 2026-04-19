@@ -16,7 +16,8 @@ import (
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
 	storageif "github.com/cfgis/cfgms/pkg/storage/interfaces"
-	gitprovider "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // workflowEngineAdapter implements WorkflowTrigger using a real *workflow.Engine and a real
@@ -61,16 +62,13 @@ func (a *workflowEngineAdapter) ValidateTrigger(_ context.Context, trig *Trigger
 }
 
 // newRealWorkflowTrigger creates a WorkflowTrigger backed by a real *workflow.Engine and
-// real git-based ConfigStore, matching the production wiring in server.go.
+// real flatfile+SQLite ConfigStore, matching the production wiring in server.go.
 func newRealWorkflowTrigger(tb testing.TB) WorkflowTrigger {
 	tb.Helper()
-	storageConfig := map[string]interface{}{
-		"repository_path": tb.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := storageif.CreateAllStoresFromConfig("git", storageConfig)
+	tmpDir := tb.TempDir()
+	storageManager, err := storageif.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(tb, err)
+	tb.Cleanup(func() { _ = storageManager.Close() })
 
 	registry := make(discovery.ModuleRegistry)
 	errCfg := stewardconfig.ErrorHandlingConfig{ModuleLoadFailure: stewardconfig.ActionContinue}
@@ -85,7 +83,7 @@ func newRealWorkflowTrigger(tb testing.TB) WorkflowTrigger {
 // TestNewControllerTriggerManager_ReturnsWiredManager verifies that the factory creates a
 // manager with all three components (scheduler, webhookHandler, siemIntegration) non-nil.
 func TestNewControllerTriggerManager_ReturnsWiredManager(t *testing.T) {
-	storage := &gitprovider.GitProvider{}
+	storage := &flatfile.FlatFileProvider{}
 	wt := newRealWorkflowTrigger(t)
 
 	manager := NewControllerTriggerManager(storage, wt)
@@ -101,7 +99,7 @@ func TestNewControllerTriggerManager_ReturnsWiredManager(t *testing.T) {
 // TestNewControllerTriggerManager_ComponentsReferenceManager verifies that the two-phase
 // circular-dependency resolution wires each component back to the parent manager.
 func TestNewControllerTriggerManager_ComponentsReferenceManager(t *testing.T) {
-	storage := &gitprovider.GitProvider{}
+	storage := &flatfile.FlatFileProvider{}
 	wt := newRealWorkflowTrigger(t)
 
 	manager := NewControllerTriggerManager(storage, wt)
@@ -123,7 +121,7 @@ func TestNewControllerTriggerManager_ComponentsReferenceManager(t *testing.T) {
 // TestNewControllerTriggerManager_StartStopLifecycle verifies that the manager created by
 // the factory starts and stops cleanly using the real component implementations.
 func TestNewControllerTriggerManager_StartStopLifecycle(t *testing.T) {
-	storage := &gitprovider.GitProvider{}
+	storage := &flatfile.FlatFileProvider{}
 	wt := newRealWorkflowTrigger(t)
 
 	manager := NewControllerTriggerManager(storage, wt)

@@ -200,7 +200,7 @@ func TestGetRecommendedHybridConfig(t *testing.T) {
 
 	// Verify structure
 	assert.Equal(t, "database", config.Operational.Provider)
-	assert.Equal(t, "git", config.Configuration.Provider)
+	assert.Equal(t, "flatfile", config.Configuration.Provider)
 
 	// Verify operational config has database-specific settings
 	opConfig := config.Operational.Config
@@ -209,11 +209,9 @@ func TestGetRecommendedHybridConfig(t *testing.T) {
 	assert.Contains(t, opConfig, "database")
 	assert.Contains(t, opConfig, "max_open_connections")
 
-	// Verify configuration config has git-specific settings
+	// Verify configuration config has flatfile-specific settings
 	cfgConfig := config.Configuration.Config
-	assert.Contains(t, cfgConfig, "repository_path")
-	assert.Contains(t, cfgConfig, "remote_url")
-	assert.Contains(t, cfgConfig, "branch")
+	assert.Contains(t, cfgConfig, "root")
 }
 
 func TestPlanHybridMigration(t *testing.T) {
@@ -232,7 +230,7 @@ func TestPlanHybridMigration(t *testing.T) {
 				"database": "cfgms",
 			},
 			expectedOp:  "database", // Keep existing database for operational
-			expectedCfg: "git",      // Add git for configuration
+			expectedCfg: "flatfile", // Add flatfile for configuration
 		},
 		{
 			name:            "migrate from git to hybrid",
@@ -242,7 +240,7 @@ func TestPlanHybridMigration(t *testing.T) {
 				"remote_url":      "git@github.com:org/repo.git",
 			},
 			expectedOp:  "database", // Add database for operational
-			expectedCfg: "git",      // Keep existing git for configuration
+			expectedCfg: "flatfile", // Migrate git to flatfile
 		},
 	}
 
@@ -258,12 +256,9 @@ func TestPlanHybridMigration(t *testing.T) {
 			assert.Equal(t, tt.expectedOp, strategy.TargetConfig.Operational.Provider)
 			assert.Equal(t, tt.expectedCfg, strategy.TargetConfig.Configuration.Provider)
 
-			// Verify config preservation
-			switch tt.currentProvider {
-			case "database":
+			// Verify config preservation for database case
+			if tt.currentProvider == "database" {
 				assert.Equal(t, tt.currentConfig, strategy.TargetConfig.Operational.Config)
-			case "git":
-				assert.Equal(t, tt.currentConfig, strategy.TargetConfig.Configuration.Config)
 			}
 		})
 	}
@@ -303,7 +298,17 @@ func TestHybridBackendInfo(t *testing.T) {
 	assert.NotNil(t, info.Configuration.Capabilities)
 }
 
-// mockProvider implements StorageProvider for testing
+// mockProvider implements StorageProvider for testing HybridStorageManager wiring logic.
+//
+// Architecture note: This test file is in package "interfaces" (same package as the
+// tested code) to access package-internal registration helpers. Adding real provider
+// imports (flatfile, sqlite) here would create a circular dependency:
+//
+//	interfaces_test → pkg/storage/providers/flatfile → pkg/storage/interfaces
+//
+// The mock is therefore the only viable option for unit-testing HybridStorageManager
+// wiring within this package. End-to-end hybrid storage behaviour is tested via
+// integration tests that use real providers.
 type mockProvider struct{}
 
 func (p *mockProvider) Name() string {

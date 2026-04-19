@@ -6,14 +6,15 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	// Import git plugin to register it with global storage
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestMSPCompleteFlow tests the complete MSP flow using the new global storage architecture
@@ -22,6 +23,7 @@ func TestMSPCompleteFlow(t *testing.T) {
 	config := &ClientStoreConfig{Type: ClientStoreMemory} // Will use git provider now
 	clientStore, err := NewClientTenantStore(config, nil)
 	require.NoError(t, err, "Should create client store")
+	t.Cleanup(func() { _ = clientStore.Close() })
 
 	// Create MSP configuration
 	mspConfig := &MultiTenantConfig{
@@ -164,6 +166,7 @@ func TestMSPErrorScenarios(t *testing.T) {
 	config := &ClientStoreConfig{Type: ClientStoreMemory} // Will use git provider now
 	clientStore, err := NewClientTenantStore(config, nil)
 	require.NoError(t, err, "Should create client store")
+	t.Cleanup(func() { _ = clientStore.Close() })
 
 	mspConfig := &MultiTenantConfig{
 		ClientID:               "test-client-id",
@@ -409,6 +412,7 @@ func TestMSPWithGlobalStorage(t *testing.T) {
 		clientStore, err := NewClientTenantStore(config, nil)
 		require.NoError(t, err, "Should create git-based client store")
 		assert.NotNil(t, clientStore, "Store should not be nil")
+		t.Cleanup(func() { _ = clientStore.Close() })
 
 		// Create MSP configuration
 		mspConfig := &MultiTenantConfig{
@@ -464,7 +468,7 @@ func TestMSPWithGlobalStorage(t *testing.T) {
 				case ClientStoreFile:
 					config = &ClientStoreConfig{
 						Type:     ClientStoreFile,
-						FilePath: "/tmp/cfgms-test-git",
+						FilePath: filepath.Join(t.TempDir(), "cfgms-test-file.db"),
 					}
 				case ClientStoreGit:
 					config = GitBasedClientStoreConfig("", "main")
@@ -484,6 +488,7 @@ func TestMSPWithGlobalStorage(t *testing.T) {
 				if scenario.shouldWork {
 					require.NoError(t, err, "Should create %s store", scenario.name)
 					assert.NotNil(t, store, "Store should not be nil")
+					t.Cleanup(func() { _ = store.Close() })
 
 					// All working storage types should use global storage adapter
 					_, isAdapter := store.(*GlobalStorageAdapter)

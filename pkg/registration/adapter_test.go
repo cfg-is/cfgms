@@ -11,25 +11,30 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/providers/git"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
-func TestStorageAdapter_WithGitStore(t *testing.T) {
+func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
 	// Create temporary directory for test
 	tempDir, err := os.MkdirTemp("", "adapter-test-*")
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
-	// Create git store
-	gitStore, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	// Create sqlite registration token store
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
+		"sqlite",
+		map[string]interface{}{"path": tempDir + "/tokens.db"},
+	)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 
 	ctx := context.Background()
-	err = gitStore.Initialize(ctx)
+	err = store.Initialize(ctx)
 	require.NoError(t, err)
 
 	// Create adapter
-	adapter := NewStorageAdapter(gitStore)
+	adapter := NewStorageAdapter(store)
 
 	// Test SaveToken
 	t.Run("SaveToken", func(t *testing.T) {
@@ -141,12 +146,16 @@ func TestStorageAdapter_InterfaceCompliance(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
-	// Create git store
-	gitStore, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	// Create sqlite registration token store
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
+		"sqlite",
+		map[string]interface{}{"path": tempDir + "/tokens.db"},
+	)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 
 	// Create adapter
-	adapter := NewStorageAdapter(gitStore)
+	adapter := NewStorageAdapter(store)
 
 	// Verify adapter implements Store interface
 	var _ Store = adapter

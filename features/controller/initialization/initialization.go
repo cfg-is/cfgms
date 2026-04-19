@@ -22,7 +22,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"      // register git provider for legacy single-provider path
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for OSS composite manager
 	"github.com/cfgis/cfgms/pkg/version"
 )
@@ -74,25 +73,15 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		storageManager *interfaces.StorageManager
 		err            error
 	)
-	if cfg.Storage.FlatfileRoot != "" {
-		// OSS composite path: flatfile (config/audit/steward) + SQLite (business data)
-		logger.Info("Initializing OSS composite storage backend...",
-			"flatfile_root", cfg.Storage.FlatfileRoot,
-			"sqlite_path", cfg.Storage.SQLitePath)
-		storageManager, err = interfaces.CreateOSSStorageManager(cfg.Storage.FlatfileRoot, cfg.Storage.SQLitePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", err)
-		}
-		logger.Info("OSS composite storage backend initialized")
-	} else {
-		// Legacy single-provider path (backward-compatible)
-		logger.Info("Initializing storage backend...", "provider", cfg.Storage.Provider)
-		storageManager, err = interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize storage provider '%s': %w", cfg.Storage.Provider, err)
-		}
-		logger.Info("Storage backend initialized", "provider", cfg.Storage.Provider)
+	// OSS composite path: flatfile (config/audit/steward) + SQLite (business data)
+	logger.Info("Initializing OSS composite storage backend...",
+		"flatfile_root", cfg.Storage.FlatfileRoot,
+		"sqlite_path", cfg.Storage.SQLitePath)
+	storageManager, err = interfaces.CreateOSSStorageManager(cfg.Storage.FlatfileRoot, cfg.Storage.SQLitePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", err)
 	}
+	logger.Info("OSS composite storage backend initialized")
 
 	// Step 2: Create CA and certificates
 	logger.Info("Creating Certificate Authority...", "ca_path", caPath)

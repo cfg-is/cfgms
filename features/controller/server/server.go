@@ -91,6 +91,7 @@ type Server struct {
 	dnaStorageManager       *dnaStorage.Manager                 // Reports engine DNA storage (must be closed on Stop)
 	triggerManager          *workflowtrigger.TriggerManagerImpl // Issue #414: Workflow trigger manager
 	gitSyncer               *gitsync.Syncer                     // Issue #666: git-sync write-through component
+	storageManager          *interfaces.StorageManager          // Main storage manager (must be closed on Stop to release SQLite handles)
 }
 
 // New creates a new server instance
@@ -103,10 +104,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize global storage provider system - REQUIRED for all deployments
 	if cfg.Storage == nil {
-		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.provider as 'git' (minimum) or 'database' (production). See docs/examples/controller-storage-config.cfg for examples")
+		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.flatfile_root and storage.sqlite_path (OSS composite). See docs/examples/minimum-storage-config.cfg for examples")
 	}
 
-	// Create storage manager — OSS composite path (flatfile+SQLite) or legacy single-provider path
+	// Create storage manager — OSS composite (flatfile+SQLite) or database single-provider.
+	// The git provider is removed (Issue #664) and is rejected here with a migration hint.
 	var storageManager *interfaces.StorageManager
 	if cfg.Storage.FlatfileRoot != "" {
 		logger.Info("Initializing OSS composite storage backend...",
@@ -118,13 +120,19 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", ossErr)
 		}
 		logger.Info("OSS composite storage backend initialized")
-	} else {
-		logger.Info("Initializing global storage provider", "provider", cfg.Storage.Provider)
-		var legacyErr error
-		storageManager, legacyErr = interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
-		if legacyErr != nil {
-			return nil, fmt.Errorf("failed to initialize storage provider '%s': %w. Verify storage configuration and ensure storage backend is accessible", cfg.Storage.Provider, legacyErr)
+	} else if cfg.Storage.Provider == "database" {
+		logger.Info("Initializing database storage provider (commercial single-provider mode)")
+		var dbErr error
+		// Database provider deliberately uses the legacy single-provider helper: commercial
+		// deployments run all stores through one PostgreSQL backend, which CreateAllStoresFromConfig
+		// is explicitly retained to support (see pkg/storage/interfaces/provider.go).
+		//nolint:staticcheck // SA1019 — retained for database single-provider mode
+		storageManager, dbErr = interfaces.CreateAllStoresFromConfig("database", cfg.Storage.Config)
+		if dbErr != nil {
+			return nil, fmt.Errorf("failed to initialize database storage provider: %w. Verify storage.config contains valid database connection parameters", dbErr)
 		}
+	} else {
+		return nil, fmt.Errorf("storage.flatfile_root is required for OSS composite storage, or storage.provider must be 'database' for commercial single-provider mode. The 'git' storage provider has been removed — run 'cfg storage migrate --from git --to flatfile' to migrate existing data")
 	}
 
 	// Initialize RBAC system with pluggable storage only
@@ -532,6 +540,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
 		healthCollector:         healthCollector,
 		alertManager:            healthAlertManager,
+		storageManager:          storageManager,
 	}
 
 	// Story #416: Wire rollback manager into API server
@@ -698,7 +707,11 @@ func initializeWorkflowHandler(storageManager *interfaces.StorageManager, logger
 		configStore: configStore,
 	}
 
-	storageProvider := storageManager.GetProvider()
+	storageProvider, err := interfaces.GetStorageProvider("flatfile")
+	if err != nil {
+		logger.Warn("Failed to get flatfile storage provider for trigger manager", "error", err)
+		return nil, nil
+	}
 	triggerMgr := workflowtrigger.NewControllerTriggerManager(storageProvider, adapter)
 
 	handler := api.NewWorkflowHandler(workflowEngine, configStore, triggerMgr, logger)
@@ -1020,6 +1033,15 @@ func (s *Server) Stop() error {
 	if s.dnaStorageManager != nil {
 		if err := s.dnaStorageManager.Close(); err != nil {
 			s.logger.Warn("Failed to close DNA storage manager", "error", err)
+		}
+	}
+
+	// Close main storage manager — releases flatfile + SQLite store handles so
+	// temp-directory cleanup succeeds on Windows. Must run after managers that
+	// use the stores have stopped.
+	if s.storageManager != nil {
+		if err := s.storageManager.Close(); err != nil {
+			s.logger.Warn("Failed to close storage manager", "error", err)
 		}
 	}
 

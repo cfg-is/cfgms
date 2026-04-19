@@ -35,7 +35,8 @@ import (
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 
 	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // RegisteredSteward represents a steward registered with the controller via gRPC transport
@@ -284,16 +285,15 @@ func (f *E2ETestFramework) initializeCertificates() error {
 func (f *E2ETestFramework) initializeRBAC() error {
 	f.metrics.ComponentStartTimes["rbac"] = time.Now()
 
-	// Use git storage for durable E2E testing - minimum storage requirement
-	storageConfig := map[string]interface{}{
-		"repository_path": filepath.Join(f.tempDir, "rbac-storage"),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	// Use OSS composite storage for durable E2E testing
+	rbacDir := filepath.Join(f.tempDir, "rbac-storage")
+	storageManager, err := interfaces.CreateOSSStorageManager(filepath.Join(rbacDir, "flatfile"), filepath.Join(rbacDir, "cfgms.db"))
 	if err != nil {
 		return fmt.Errorf("failed to setup E2E storage: %w", err)
 	}
+	// Release the sqlite file handle during Cleanup; on Windows a held handle
+	// blocks RemoveAll on f.tempDir and surfaces as a TestE2EScenarios failure.
+	f.addCleanup(func() error { return storageManager.Close() })
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -323,13 +323,9 @@ func (f *E2ETestFramework) initializeController() error {
 		DataDir:    filepath.Join(f.tempDir, "controller-data"),
 		LogLevel:   "info",
 		Storage: &controllerConfig.StorageConfig{
-			Provider: "git",
-			Config: map[string]interface{}{
-				"repository_path": filepath.Join(f.tempDir, "storage-git"),
-				"encryption": map[string]interface{}{
-					"enabled": false, // Disable encryption for tests
-				},
-			},
+			Provider:     "flatfile",
+			FlatfileRoot: filepath.Join(f.tempDir, "storage-flatfile"),
+			SQLitePath:   filepath.Join(f.tempDir, "cfgms-e2e.db"),
 		},
 		Certificate: &controllerConfig.CertificateConfig{
 			EnableCertManagement:   f.config.EnableTLS,
@@ -354,8 +350,8 @@ func (f *E2ETestFramework) initializeController() error {
 		},
 	}
 
-	// Create storage directory
-	storageDir := filepath.Join(f.tempDir, "storage-git")
+	// Create storage directories
+	storageDir := filepath.Join(f.tempDir, "storage-flatfile")
 	if err := os.MkdirAll(storageDir, 0755); err != nil {
 		return fmt.Errorf("failed to create storage directory: %w", err)
 	}

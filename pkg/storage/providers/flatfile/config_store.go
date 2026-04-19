@@ -199,7 +199,11 @@ func (s *FlatFileConfigStore) StoreConfig(ctx context.Context, config *interface
 		entry.CreatedBy = existing.CreatedBy
 	} else {
 		entry.Version = 1
-		entry.CreatedAt = now
+		// Preserve caller-supplied CreatedAt (e.g. rollback operations with
+		// historic timestamps); fall back to now for new entries without one.
+		if entry.CreatedAt.IsZero() {
+			entry.CreatedAt = now
+		}
 	}
 	entry.UpdatedAt = now
 	entry.Checksum = dataChecksum(config.Data)

@@ -15,7 +15,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 
 	// Register storage providers for init tests
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 func TestIsInitialized(t *testing.T) {
@@ -190,12 +191,9 @@ func TestRun_FullInitialization(t *testing.T) {
 			},
 		},
 		Storage: &config.StorageConfig{
-			Provider: "git",
-			Config: map[string]interface{}{
-				"repository_path": filepath.Join(tempDir, "storage"),
-				"branch":          "main",
-				"auto_init":       true,
-			},
+			Provider:     "flatfile",
+			FlatfileRoot: filepath.Join(tempDir, "flatfile"),
+			SQLitePath:   filepath.Join(tempDir, "cfgms.db"),
 		},
 	}
 
@@ -204,7 +202,7 @@ func TestRun_FullInitialization(t *testing.T) {
 	require.NotNil(t, result)
 
 	assert.NotEmpty(t, result.CAFingerprint)
-	assert.Equal(t, "git", result.StorageProvider)
+	assert.Equal(t, "flatfile", result.StorageProvider)
 	assert.False(t, result.InitializedAt.IsZero())
 
 	// Verify CA files were created
@@ -238,12 +236,9 @@ func TestRun_AlreadyInitialized(t *testing.T) {
 			},
 		},
 		Storage: &config.StorageConfig{
-			Provider: "git",
-			Config: map[string]interface{}{
-				"repository_path": filepath.Join(tempDir, "storage"),
-				"branch":          "main",
-				"auto_init":       true,
-			},
+			Provider:     "flatfile",
+			FlatfileRoot: filepath.Join(tempDir, "flatfile"),
+			SQLitePath:   filepath.Join(tempDir, "cfgms.db"),
 		},
 	}
 

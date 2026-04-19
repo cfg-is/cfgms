@@ -9,20 +9,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // newTestTrackingStore opens an in-memory SQLite database, initializes the
-// ExecutionTrackingStore schema, and returns the store. The test is skipped
-// if CGO is not available (SQLite requires CGO).
+// ExecutionTrackingStore schema, and returns the store.
 func newTestTrackingStore(t *testing.T) *ExecutionTrackingStore {
 	t.Helper()
-	testutil.SkipWithoutCGO(t)
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err, "open in-memory sqlite3")
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err, "open in-memory sqlite")
 	t.Cleanup(func() { _ = db.Close() })
 
 	store := NewExecutionTrackingStore(db)
@@ -55,9 +52,7 @@ func sampleRecord(executionID, deviceID, workflowRunID string) *ExecutionRecord 
 // TestExecutionTrackingStore_Init verifies that calling Init creates the table
 // and both indexes, and that calling Init a second time is idempotent.
 func TestExecutionTrackingStore_Init(t *testing.T) {
-	testutil.SkipWithoutCGO(t)
-
-	db, err := sql.Open("sqlite3", ":memory:")
+	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 

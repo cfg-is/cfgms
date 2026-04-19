@@ -13,7 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	// Import git plugin to register it with global storage
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestMSPEndToEndClientOnboarding simulates a complete real-world MSP client onboarding scenario
@@ -51,6 +52,7 @@ func TestMSPEndToEndClientOnboarding(t *testing.T) {
 		clientStore, err := NewClientTenantStore(config, nil)
 		require.NoError(t, err, "Should create git-based storage")
 		assert.NotNil(t, clientStore, "Storage should be initialized")
+		t.Cleanup(func() { _ = clientStore.Close() })
 
 		// Verify it's using the global storage adapter
 		_, isAdapter := clientStore.(*GlobalStorageAdapter)
@@ -355,6 +357,7 @@ func TestMSPMultiClientScenario(t *testing.T) {
 	config := &ClientStoreConfig{Type: ClientStoreGit}
 	clientStore, err := NewClientTenantStore(config, nil)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = clientStore.Close() })
 
 	mspConfig := &MultiTenantConfig{
 		ClientID:               "msp-multi-client-test",
@@ -440,6 +443,7 @@ func TestMSPErrorRecoveryScenarios(t *testing.T) {
 	config := &ClientStoreConfig{Type: ClientStoreGit}
 	clientStore, err := NewClientTenantStore(config, nil)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = clientStore.Close() })
 
 	mspConfig := &MultiTenantConfig{
 		ClientID:               "error-test-client",

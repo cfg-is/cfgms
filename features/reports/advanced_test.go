@@ -15,14 +15,14 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/testutil"
 
 	// Import storage providers to register them
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestAdvancedServiceCreation tests the creation of AdvancedService
@@ -48,9 +48,6 @@ func TestAdvancedServiceCreation(t *testing.T) {
 
 // TestAdvancedServiceWithConfig tests service creation with custom configuration
 func TestAdvancedServiceWithConfig(t *testing.T) {
-	// Skip test if CGO is not enabled (SQLite requires CGO)
-	testutil.SkipWithoutCGO(t)
-
 	logger := &testLogger{}
 
 	// Create DNA storage manager
@@ -83,13 +80,10 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create audit components using git storage for testing
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	globalStorageManager, err := storageInterfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	globalStorageManager, err := storageInterfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStorageManager.Close() })
 
 	auditStore := globalStorageManager.GetAuditStore()
 	auditManager := audit.NewManager(auditStore, "test-reports")
@@ -574,9 +568,6 @@ func TestGetCrossSystemMetrics(t *testing.T) {
 
 // createTestAdvancedService creates a test instance of AdvancedService using minimal real components
 func createTestAdvancedService(t *testing.T) *AdvancedService {
-	// Skip test if CGO is not enabled (SQLite requires CGO)
-	testutil.SkipWithoutCGO(t)
-
 	logger := &testLogger{}
 
 	// Create minimal real components needed for the service
@@ -610,13 +601,10 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 	require.NoError(t, err, "Failed to create drift detector")
 
 	// Create audit components using git storage for testing
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	globalStorageManager, err := storageInterfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	globalStorageManager, err := storageInterfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err, "Failed to create global storage manager")
+	t.Cleanup(func() { _ = globalStorageManager.Close() })
 
 	auditStore := globalStorageManager.GetAuditStore()
 	auditManager := audit.NewManager(auditStore, "test-reports")

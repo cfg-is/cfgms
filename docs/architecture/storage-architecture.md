@@ -104,7 +104,7 @@ Commercial deployments: the imported configs land in PostgreSQL. HA, replication
 
 ## Flat-File Provider (OSS)
 
-The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for config storage and the replacement for the deprecated git provider. It stores configs and audit logs as files under a configured root directory.
+The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for config storage. It stores configs and audit logs as files under a configured root directory.
 
 **File layout**:
 
@@ -138,6 +138,47 @@ The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for
 ```go
 import _ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 ```
+
+## Migration from the git provider
+
+The git storage provider was removed in Issue #664. Existing deployments running on the git backend must migrate to `flatfile` (config + audit) plus `sqlite` (business data) before upgrading. The controller rejects `provider: git` at startup with a message pointing here.
+
+**One-shot migration command:**
+
+```bash
+cfg storage migrate \
+  --from git \
+  --to flatfile \
+  --git-root  /var/lib/cfgms/git-storage \
+  --flatfile-root /var/lib/cfgms/flatfile
+```
+
+What this does:
+
+- Reads every config and audit entry from the git-backed store at `--git-root`
+- Writes them into the flatfile layout at `--flatfile-root` using upsert semantics
+- Reports per-store counts (configs migrated, audit entries migrated)
+- Leaves the source repository untouched — safe to re-run for verification
+
+**Idempotent**: running the command twice against the same target produces the same record count with no duplicates. Safe to rehearse against a copy of production data before cutting over.
+
+**Config update required after migration.** Replace the old single-provider block with OSS composite:
+
+```yaml
+# Before (git — no longer supported)
+storage:
+  provider: git
+  config:
+    repository_path: /var/lib/cfgms/git-storage
+
+# After (flatfile + sqlite composite)
+storage:
+  provider: flatfile
+  flatfile_root: /var/lib/cfgms/flatfile
+  sqlite_path: /var/lib/cfgms/cfgms.db
+```
+
+Business-data tables (tenants, RBAC, sessions, registration tokens) are created fresh in the new SQLite file — they weren't persisted by the git provider in a migratable form. Plan a short re-seeding window (re-issue registration tokens, re-apply RBAC bindings) as part of the cutover.
 
 ## Interface Layout
 

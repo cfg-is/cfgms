@@ -3,9 +3,8 @@
 // Package sqlite implements the SQLite storage provider for CFGMS business data.
 //
 // This is the default OSS backend for the business-data tier (ADR-003).
-// It requires CGo because it uses github.com/mattn/go-sqlite3.
-// Cross-compile targets that disable CGo should use the modernc.org/sqlite driver instead;
-// see docs/architecture/storage-architecture.md for guidance.
+// It uses modernc.org/sqlite, a pure-Go port of SQLite, which builds with
+// CGO_ENABLED=0 and cross-compiles cleanly to all steward platforms.
 package sqlite
 
 import (
@@ -17,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3" // SQLite driver (requires CGo)
+	_ "modernc.org/sqlite" // Pure-Go SQLite driver (CGO-free)
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
@@ -109,22 +108,34 @@ func (p *SQLiteProvider) Available() (bool, error) {
 
 // openDB opens (or creates) a SQLite database at path and enables WAL mode and foreign keys.
 func openDB(path string) (*sql.DB, error) {
-	// mattn/go-sqlite3 accepts DSN parameters via the path.
-	// Append shared-cache for in-memory so multiple connections in tests share state.
+	// modernc.org/sqlite accepts the path directly. For in-memory databases a
+	// shared cache is required so multiple connections in tests see the same data.
 	dsn := path
 	if path == ":memory:" {
-		dsn = "file::memory:?cache=shared&_journal_mode=WAL&_foreign_keys=on"
+		dsn = "file::memory:?cache=shared"
 	} else if !strings.HasPrefix(path, "file:") {
-		dsn = fmt.Sprintf("file:%s?_journal_mode=WAL&_foreign_keys=on", path)
+		dsn = "file:" + path
 	}
 
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to open %s: %w", path, err)
 	}
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite: failed to ping %s: %w", path, err)
+	}
+	// Pragmas are set via explicit statements so they apply across both
+	// mattn/go-sqlite3 (CGO) and modernc.org/sqlite (pure-Go) without relying
+	// on driver-specific DSN query parameters.
+	for _, pragma := range []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA foreign_keys = ON",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("sqlite: failed to set %s on %s: %w", pragma, path, err)
+		}
 	}
 	return db, nil
 }

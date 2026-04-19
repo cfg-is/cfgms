@@ -14,7 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestNewManagerWithStorage tests the new constructor that accepts storage interfaces
@@ -35,15 +36,10 @@ func TestNewManagerWithStorage(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "with git storage provider",
+			name: "with flatfile+sqlite storage provider",
 			setupStorage: func(t *testing.T) (*interfaces.StorageManager, error) {
-				// Git provider with temporary directory
-				config := map[string]interface{}{
-					"repository_path": t.TempDir(),
-					"branch":          "main",
-					"auto_init":       true,
-				}
-				return interfaces.CreateAllStoresFromConfig("git", config)
+				tmpDir := t.TempDir()
+				return interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 			},
 			wantErr: false,
 		},
@@ -58,6 +54,7 @@ func TestNewManagerWithStorage(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.NotNil(t, storageManager)
+			t.Cleanup(func() { _ = storageManager.Close() })
 
 			// Test creating manager with storage interfaces
 			manager := NewManagerWithStorage(
@@ -185,13 +182,10 @@ func TestNewManagerWithStorage_NilStorageHandling(t *testing.T) {
 // TestManagerWithStorage_TenantIsolation tests that tenant isolation works correctly with pluggable storage
 func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 	// Create storage manager using git provider
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -257,13 +251,10 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 // TestManagerWithStorage_AuditTrail tests that RBAC operations are properly audited
 func TestManagerWithStorage_AuditTrail(t *testing.T) {
 	// Create storage manager using git provider
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),

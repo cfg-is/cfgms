@@ -13,18 +13,16 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 func TestManager_Initialize(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -61,13 +59,10 @@ func TestManager_Initialize(t *testing.T) {
 
 func TestManager_CreateTenantDefaultRoles(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -103,13 +98,10 @@ func TestManager_CreateTenantDefaultRoles(t *testing.T) {
 
 func TestManager_SubjectManagement(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -169,13 +161,10 @@ func TestManager_SubjectManagement(t *testing.T) {
 
 func TestManager_RoleAssignment(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -236,13 +225,10 @@ func TestManager_RoleAssignment(t *testing.T) {
 
 func TestManager_PermissionChecking(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -325,13 +311,10 @@ func TestManager_PermissionChecking(t *testing.T) {
 
 func TestManager_SystemAdminPermissions(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -393,13 +376,10 @@ func TestManager_SystemAdminPermissions(t *testing.T) {
 
 func TestManager_CreateStewardSubject(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -454,13 +434,10 @@ func TestManager_CreateStewardSubject(t *testing.T) {
 
 func TestManager_InactiveSubjectPermissions(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
