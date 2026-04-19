@@ -86,11 +86,9 @@ func TestNewManager_PanicConditions(t *testing.T) {
 
 // TestManager_RecordEvent tests basic event recording
 func TestManager_RecordEvent(t *testing.T) {
-	// Setup git storage for testing
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
 	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManager(storageManager.GetAuditStore(), "test")
@@ -112,11 +110,9 @@ func TestManager_RecordEvent(t *testing.T) {
 
 // TestManager_RecordBatch tests batch event recording
 func TestManager_RecordBatch(t *testing.T) {
-	// Setup git storage for testing
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
 	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManager(storageManager.GetAuditStore(), "test")
