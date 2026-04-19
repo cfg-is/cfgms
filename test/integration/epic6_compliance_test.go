@@ -16,12 +16,14 @@ import (
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider
 )
 
 // newTestConfigStore creates a real flatfile-backed ConfigStore for testing.
-func newTestConfigStore(t *testing.T) interfaces.ConfigStore {
+func newTestConfigStore(t *testing.T) cfgconfig.ConfigStore {
 	t.Helper()
 	provider, err := interfaces.GetStorageProvider("flatfile")
 	require.NoError(t, err, "flatfile provider must be registered")
@@ -268,11 +270,11 @@ func TestEpic6TenantStoragePersistence(t *testing.T) {
 	// Test: Create tenant with hierarchy
 	t.Run("CreateTenantHierarchy", func(t *testing.T) {
 		// Create root tenant (MSP level)
-		rootTenant := &interfaces.TenantData{
+		rootTenant := &business.TenantData{
 			ID:          "msp-root",
 			Name:        "Test MSP",
 			Description: "Root MSP tenant for testing",
-			Status:      interfaces.TenantStatusActive,
+			Status:      business.TenantStatusActive,
 			Metadata:    map[string]string{"tier": "msp"},
 			CreatedAt:   time.Now(),
 			UpdatedAt:   time.Now(),
@@ -281,12 +283,12 @@ func TestEpic6TenantStoragePersistence(t *testing.T) {
 		require.NoError(t, err, "Should create root tenant")
 
 		// Create child tenant (Client level)
-		childTenant := &interfaces.TenantData{
+		childTenant := &business.TenantData{
 			ID:          "client-1",
 			Name:        "Test Client",
 			Description: "Client under MSP",
 			ParentID:    "msp-root",
-			Status:      interfaces.TenantStatusActive,
+			Status:      business.TenantStatusActive,
 			Metadata:    map[string]string{"tier": "client"},
 			CreatedAt:   time.Now(),
 			UpdatedAt:   time.Now(),
@@ -295,12 +297,12 @@ func TestEpic6TenantStoragePersistence(t *testing.T) {
 		require.NoError(t, err, "Should create child tenant")
 
 		// Create grandchild tenant (Group level)
-		groupTenant := &interfaces.TenantData{
+		groupTenant := &business.TenantData{
 			ID:          "group-1",
 			Name:        "Test Group",
 			Description: "Group under client",
 			ParentID:    "client-1",
-			Status:      interfaces.TenantStatusActive,
+			Status:      business.TenantStatusActive,
 			Metadata:    map[string]string{"tier": "group"},
 			CreatedAt:   time.Now(),
 			UpdatedAt:   time.Now(),
@@ -395,7 +397,7 @@ func TestEpic6TenantStoragePersistence(t *testing.T) {
 		assert.GreaterOrEqual(t, len(all), 3, "Should have at least 3 tenants")
 
 		// Filter by parent
-		filter := &interfaces.TenantFilter{ParentID: "msp-root"}
+		filter := &business.TenantFilter{ParentID: "msp-root"}
 		children, err := tenantStore.ListTenants(ctx, filter)
 		require.NoError(t, err)
 		assert.Len(t, children, 1)
@@ -439,11 +441,11 @@ func TestPersistenceRegressionGuard(t *testing.T) {
 	err = tenantStore.Initialize(ctx)
 	require.NoError(t, err)
 
-	testTenant := &interfaces.TenantData{
+	testTenant := &business.TenantData{
 		ID:          "persistence-test-tenant",
 		Name:        "Persistence Test Tenant",
 		Description: "Tenant for persistence regression testing",
-		Status:      interfaces.TenantStatusActive,
+		Status:      business.TenantStatusActive,
 		Metadata:    map[string]string{"test": "persistence"},
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
@@ -453,8 +455,8 @@ func TestPersistenceRegressionGuard(t *testing.T) {
 
 	// Create configuration data
 	configStore := storageManager.GetConfigStore()
-	testConfig := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	testConfig := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  "persistence-test-tenant",
 			Namespace: "test-namespace",
 			Name:      "test-config",

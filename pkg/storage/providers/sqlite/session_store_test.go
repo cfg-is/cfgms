@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
-func newSessionStore(t *testing.T) interfaces.SessionStore {
+func newSessionStore(t *testing.T) business.SessionStore {
 	t.Helper()
 	dir := t.TempDir()
 	p := sqlite.NewSQLiteProvider(dir)
@@ -25,17 +25,17 @@ func newSessionStore(t *testing.T) interfaces.SessionStore {
 	return store
 }
 
-func sampleSession(id string) *interfaces.Session {
+func sampleSession(id string) *business.Session {
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	return &interfaces.Session{
+	return &business.Session{
 		SessionID:    id,
 		UserID:       "user-1",
 		TenantID:     "tenant-1",
-		SessionType:  interfaces.SessionTypeAPI,
+		SessionType:  business.SessionTypeAPI,
 		CreatedAt:    now,
 		LastActivity: now,
 		ExpiresAt:    now.Add(1 * time.Hour),
-		Status:       interfaces.SessionStatusActive,
+		Status:       business.SessionStatusActive,
 		Persistent:   true,
 	}
 }
@@ -47,7 +47,7 @@ func TestSessionStore_CreateAndGet(t *testing.T) {
 	sess := sampleSession("sess-001")
 	sess.CreatedBy = "admin"
 	sess.Metadata = map[string]string{"source": "api"}
-	sess.ClientInfo = &interfaces.ClientInfo{
+	sess.ClientInfo = &business.ClientInfo{
 		IPAddress: "192.168.1.1",
 		Platform:  "linux",
 	}
@@ -59,8 +59,8 @@ func TestSessionStore_CreateAndGet(t *testing.T) {
 	assert.Equal(t, sess.SessionID, got.SessionID)
 	assert.Equal(t, sess.UserID, got.UserID)
 	assert.Equal(t, sess.TenantID, got.TenantID)
-	assert.Equal(t, interfaces.SessionTypeAPI, got.SessionType)
-	assert.Equal(t, interfaces.SessionStatusActive, got.Status)
+	assert.Equal(t, business.SessionTypeAPI, got.SessionType)
+	assert.Equal(t, business.SessionStatusActive, got.Status)
 	assert.True(t, got.Persistent)
 	assert.Equal(t, "api", got.Metadata["source"])
 	require.NotNil(t, got.ClientInfo)
@@ -81,13 +81,13 @@ func TestSessionStore_Update(t *testing.T) {
 	sess := sampleSession("sess-upd")
 	require.NoError(t, store.CreateSession(ctx, sess))
 
-	sess.Status = interfaces.SessionStatusInactive
+	sess.Status = business.SessionStatusInactive
 	sess.LastActivity = time.Now().UTC()
 	require.NoError(t, store.UpdateSession(ctx, "sess-upd", sess))
 
 	got, err := store.GetSession(ctx, "sess-upd")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.SessionStatusInactive, got.Status)
+	assert.Equal(t, business.SessionStatusInactive, got.Status)
 	assert.NotNil(t, got.ModifiedAt)
 }
 
@@ -137,15 +137,15 @@ func TestSessionStore_CleanupExpiredSessions(t *testing.T) {
 	// Create a session already expired (CreatedAt must be before ExpiresAt to pass validation)
 	pastCreated := time.Now().UTC().Add(-3 * time.Hour)
 	pastExpired := time.Now().UTC().Add(-1 * time.Hour)
-	expired := &interfaces.Session{
+	expired := &business.Session{
 		SessionID:    "sess-exp",
 		UserID:       "user-1",
 		TenantID:     "tenant-1",
-		SessionType:  interfaces.SessionTypeAPI,
+		SessionType:  business.SessionTypeAPI,
 		CreatedAt:    pastCreated,
 		LastActivity: pastCreated,
 		ExpiresAt:    pastExpired, // expired 1 hour ago
-		Status:       interfaces.SessionStatusExpired,
+		Status:       business.SessionStatusExpired,
 		Persistent:   true,
 	}
 	require.NoError(t, store.CreateSession(ctx, expired))
@@ -206,16 +206,16 @@ func TestSessionStore_GetSessionsByType(t *testing.T) {
 	ctx := context.Background()
 
 	s1 := sampleSession("by-type-api")
-	s1.SessionType = interfaces.SessionTypeAPI
+	s1.SessionType = business.SessionTypeAPI
 	s2 := sampleSession("by-type-web")
-	s2.SessionType = interfaces.SessionTypeWeb
+	s2.SessionType = business.SessionTypeWeb
 	require.NoError(t, store.CreateSession(ctx, s1))
 	require.NoError(t, store.CreateSession(ctx, s2))
 
-	results, err := store.GetSessionsByType(ctx, interfaces.SessionTypeAPI)
+	results, err := store.GetSessionsByType(ctx, business.SessionTypeAPI)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
-	assert.Equal(t, interfaces.SessionTypeAPI, results[0].SessionType)
+	assert.Equal(t, business.SessionTypeAPI, results[0].SessionType)
 }
 
 func TestSessionStore_GetActiveSessionsCount(t *testing.T) {
@@ -225,7 +225,7 @@ func TestSessionStore_GetActiveSessionsCount(t *testing.T) {
 	active1 := sampleSession("active-1")
 	active2 := sampleSession("active-2")
 	inactive := sampleSession("inactive-1")
-	inactive.Status = interfaces.SessionStatusInactive
+	inactive.Status = business.SessionStatusInactive
 
 	require.NoError(t, store.CreateSession(ctx, active1))
 	require.NoError(t, store.CreateSession(ctx, active2))
@@ -246,14 +246,14 @@ func TestSessionStore_GetStats(t *testing.T) {
 	store := newSessionStore(t)
 	ctx := context.Background()
 
-	for _, sess := range []*interfaces.Session{
+	for _, sess := range []*business.Session{
 		sampleSession("stats-1"),
 		sampleSession("stats-2"),
 		{SessionID: "stats-3", UserID: "u", TenantID: "t",
-			SessionType: interfaces.SessionTypeWeb,
+			SessionType: business.SessionTypeWeb,
 			CreatedAt:   time.Now().UTC(), LastActivity: time.Now().UTC(),
 			ExpiresAt: time.Now().UTC().Add(time.Hour),
-			Status:    interfaces.SessionStatusActive, Persistent: true},
+			Status:    business.SessionStatusActive, Persistent: true},
 	} {
 		require.NoError(t, store.CreateSession(ctx, sess))
 	}
@@ -269,32 +269,32 @@ func TestSessionStore_ListSessions_Filter(t *testing.T) {
 	ctx := context.Background()
 
 	now := time.Now().UTC()
-	for _, sess := range []*interfaces.Session{
-		{SessionID: "f-1", UserID: "u1", TenantID: "t1", SessionType: interfaces.SessionTypeAPI,
+	for _, sess := range []*business.Session{
+		{SessionID: "f-1", UserID: "u1", TenantID: "t1", SessionType: business.SessionTypeAPI,
 			CreatedAt: now, LastActivity: now, ExpiresAt: now.Add(time.Hour),
-			Status: interfaces.SessionStatusActive, Persistent: true},
-		{SessionID: "f-2", UserID: "u2", TenantID: "t1", SessionType: interfaces.SessionTypeWeb,
+			Status: business.SessionStatusActive, Persistent: true},
+		{SessionID: "f-2", UserID: "u2", TenantID: "t1", SessionType: business.SessionTypeWeb,
 			CreatedAt: now, LastActivity: now, ExpiresAt: now.Add(time.Hour),
-			Status: interfaces.SessionStatusActive, Persistent: true},
-		{SessionID: "f-3", UserID: "u1", TenantID: "t2", SessionType: interfaces.SessionTypeAPI,
+			Status: business.SessionStatusActive, Persistent: true},
+		{SessionID: "f-3", UserID: "u1", TenantID: "t2", SessionType: business.SessionTypeAPI,
 			CreatedAt: now, LastActivity: now, ExpiresAt: now.Add(time.Hour),
-			Status: interfaces.SessionStatusInactive, Persistent: true},
+			Status: business.SessionStatusInactive, Persistent: true},
 	} {
 		require.NoError(t, store.CreateSession(ctx, sess))
 	}
 
 	// Filter by tenant
-	byTenant, err := store.ListSessions(ctx, &interfaces.SessionFilter{TenantID: "t1"})
+	byTenant, err := store.ListSessions(ctx, &business.SessionFilter{TenantID: "t1"})
 	require.NoError(t, err)
 	assert.Len(t, byTenant, 2)
 
 	// Filter by status
-	active, err := store.ListSessions(ctx, &interfaces.SessionFilter{Status: interfaces.SessionStatusActive})
+	active, err := store.ListSessions(ctx, &business.SessionFilter{Status: business.SessionStatusActive})
 	require.NoError(t, err)
 	assert.Len(t, active, 2)
 
 	// Filter by limit
-	limited, err := store.ListSessions(ctx, &interfaces.SessionFilter{Limit: 1})
+	limited, err := store.ListSessions(ctx, &business.SessionFilter{Limit: 1})
 	require.NoError(t, err)
 	assert.Len(t, limited, 1)
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// Package interfaces defines global storage contracts used by all CFGMS modules
-package interfaces
+// Package business defines business-data storage contracts for CFGMS
+package business
 
 import (
 	"time"
@@ -47,8 +47,10 @@ type ClientTenantStatus string
 
 const (
 	ClientTenantStatusPending   ClientTenantStatus = "pending"
+	ClientTenantStatusConsented ClientTenantStatus = "consented"
 	ClientTenantStatusActive    ClientTenantStatus = "active"
 	ClientTenantStatusSuspended ClientTenantStatus = "suspended"
+	ClientTenantStatusRevoked   ClientTenantStatus = "revoked"
 	ClientTenantStatusDeleted   ClientTenantStatus = "deleted"
 )
 

@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 )
 
 // inMemoryS3 is a real in-memory implementation of the s3API interface used for tests.
@@ -160,8 +160,8 @@ func newTestS3Store(t *testing.T) *S3BlobStore {
 	}
 }
 
-func testS3Key(name string) interfaces.BlobKey {
-	return interfaces.BlobKey{
+func testS3Key(name string) blob.BlobKey {
+	return blob.BlobKey{
 		TenantID:  "tenant-a",
 		Namespace: "installers",
 		Name:      name,
@@ -175,7 +175,7 @@ func TestS3BlobStore_PutGetBlob(t *testing.T) {
 
 	content := []byte("s3 blob content")
 	key := testS3Key("agent.pkg")
-	meta := interfaces.BlobMeta{
+	meta := blob.BlobMeta{
 		ContentType: "application/octet-stream",
 		Labels:      map[string]string{"arch": "amd64"},
 	}
@@ -203,7 +203,7 @@ func TestS3BlobStore_PutBlob_DefaultContentType(t *testing.T) {
 	store := newTestS3Store(t)
 	ctx := context.Background()
 
-	err := store.PutBlob(ctx, testS3Key("notype.bin"), bytes.NewReader([]byte("data")), interfaces.BlobMeta{})
+	err := store.PutBlob(ctx, testS3Key("notype.bin"), bytes.NewReader([]byte("data")), blob.BlobMeta{})
 	require.NoError(t, err)
 
 	rc, meta, err := store.GetBlob(ctx, testS3Key("notype.bin"))
@@ -216,25 +216,25 @@ func TestS3BlobStore_PutBlob_DefaultContentType(t *testing.T) {
 func TestS3BlobStore_PutBlob_TenantRequired(t *testing.T) {
 	store := newTestS3Store(t)
 	err := store.PutBlob(context.Background(),
-		interfaces.BlobKey{Namespace: "ns", Name: "file.bin"},
+		blob.BlobKey{Namespace: "ns", Name: "file.bin"},
 		bytes.NewReader([]byte("x")),
-		interfaces.BlobMeta{})
-	assert.ErrorIs(t, err, interfaces.ErrBlobTenantRequired)
+		blob.BlobMeta{})
+	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
 }
 
 // TestS3BlobStore_GetBlob_NotFound verifies ErrBlobNotFound for a missing key.
 func TestS3BlobStore_GetBlob_NotFound(t *testing.T) {
 	store := newTestS3Store(t)
 	_, _, err := store.GetBlob(context.Background(), testS3Key("missing.bin"))
-	assert.ErrorIs(t, err, interfaces.ErrBlobNotFound)
+	assert.ErrorIs(t, err, blob.ErrBlobNotFound)
 }
 
 // TestS3BlobStore_GetBlob_TenantRequired verifies TenantID validation in GetBlob.
 func TestS3BlobStore_GetBlob_TenantRequired(t *testing.T) {
 	store := newTestS3Store(t)
 	_, _, err := store.GetBlob(context.Background(),
-		interfaces.BlobKey{Namespace: "ns", Name: "f"})
-	assert.ErrorIs(t, err, interfaces.ErrBlobTenantRequired)
+		blob.BlobKey{Namespace: "ns", Name: "f"})
+	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
 }
 
 // TestS3BlobStore_BlobExists verifies true for existing, false for missing.
@@ -247,7 +247,7 @@ func TestS3BlobStore_BlobExists(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, exists)
 
-	err = store.PutBlob(ctx, key, bytes.NewReader([]byte("data")), interfaces.BlobMeta{})
+	err = store.PutBlob(ctx, key, bytes.NewReader([]byte("data")), blob.BlobMeta{})
 	require.NoError(t, err)
 
 	exists, err = store.BlobExists(ctx, key)
@@ -258,8 +258,8 @@ func TestS3BlobStore_BlobExists(t *testing.T) {
 // TestS3BlobStore_BlobExists_TenantRequired verifies TenantID validation.
 func TestS3BlobStore_BlobExists_TenantRequired(t *testing.T) {
 	store := newTestS3Store(t)
-	_, err := store.BlobExists(context.Background(), interfaces.BlobKey{Namespace: "ns", Name: "f"})
-	assert.ErrorIs(t, err, interfaces.ErrBlobTenantRequired)
+	_, err := store.BlobExists(context.Background(), blob.BlobKey{Namespace: "ns", Name: "f"})
+	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
 }
 
 // TestS3BlobStore_DeleteBlob verifies delete and idempotency.
@@ -268,7 +268,7 @@ func TestS3BlobStore_DeleteBlob(t *testing.T) {
 	ctx := context.Background()
 
 	key := testS3Key("del.bin")
-	err := store.PutBlob(ctx, key, bytes.NewReader([]byte("data")), interfaces.BlobMeta{})
+	err := store.PutBlob(ctx, key, bytes.NewReader([]byte("data")), blob.BlobMeta{})
 	require.NoError(t, err)
 
 	err = store.DeleteBlob(ctx, key)
@@ -286,8 +286,8 @@ func TestS3BlobStore_DeleteBlob(t *testing.T) {
 // TestS3BlobStore_DeleteBlob_TenantRequired verifies TenantID validation in DeleteBlob.
 func TestS3BlobStore_DeleteBlob_TenantRequired(t *testing.T) {
 	store := newTestS3Store(t)
-	err := store.DeleteBlob(context.Background(), interfaces.BlobKey{Namespace: "ns", Name: "f"})
-	assert.ErrorIs(t, err, interfaces.ErrBlobTenantRequired)
+	err := store.DeleteBlob(context.Background(), blob.BlobKey{Namespace: "ns", Name: "f"})
+	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
 }
 
 // TestS3BlobStore_ListBlobs verifies namespace-scoped listing.
@@ -295,19 +295,19 @@ func TestS3BlobStore_ListBlobs(t *testing.T) {
 	store := newTestS3Store(t)
 	ctx := context.Background()
 
-	blobs := []interfaces.BlobKey{
+	blobs := []blob.BlobKey{
 		{TenantID: "tenant-a", Namespace: "installers", Name: "v1.pkg"},
 		{TenantID: "tenant-a", Namespace: "installers", Name: "v2.pkg"},
 		{TenantID: "tenant-a", Namespace: "reports", Name: "report.pdf"},
 		{TenantID: "tenant-b", Namespace: "installers", Name: "other.pkg"},
 	}
 	for _, k := range blobs {
-		err := store.PutBlob(ctx, k, bytes.NewReader([]byte("body")), interfaces.BlobMeta{})
+		err := store.PutBlob(ctx, k, bytes.NewReader([]byte("body")), blob.BlobMeta{})
 		require.NoError(t, err)
 	}
 
 	// List tenant-a installers only.
-	results, err := store.ListBlobs(ctx, interfaces.BlobKey{TenantID: "tenant-a", Namespace: "installers"})
+	results, err := store.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-a", Namespace: "installers"})
 	require.NoError(t, err)
 	assert.Len(t, results, 2)
 	for _, r := range results {
@@ -316,12 +316,12 @@ func TestS3BlobStore_ListBlobs(t *testing.T) {
 	}
 
 	// List all tenant-a blobs.
-	all, err := store.ListBlobs(ctx, interfaces.BlobKey{TenantID: "tenant-a"})
+	all, err := store.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-a"})
 	require.NoError(t, err)
 	assert.Len(t, all, 3)
 
 	// Tenant-b has one.
-	tb, err := store.ListBlobs(ctx, interfaces.BlobKey{TenantID: "tenant-b"})
+	tb, err := store.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-b"})
 	require.NoError(t, err)
 	assert.Len(t, tb, 1)
 }
@@ -329,7 +329,7 @@ func TestS3BlobStore_ListBlobs(t *testing.T) {
 // TestS3BlobStore_ListBlobs_Empty verifies empty list when tenant has no blobs.
 func TestS3BlobStore_ListBlobs_Empty(t *testing.T) {
 	store := newTestS3Store(t)
-	results, err := store.ListBlobs(context.Background(), interfaces.BlobKey{TenantID: "nobody"})
+	results, err := store.ListBlobs(context.Background(), blob.BlobKey{TenantID: "nobody"})
 	require.NoError(t, err)
 	assert.Empty(t, results)
 }
@@ -337,8 +337,8 @@ func TestS3BlobStore_ListBlobs_Empty(t *testing.T) {
 // TestS3BlobStore_ListBlobs_TenantRequired verifies TenantID validation.
 func TestS3BlobStore_ListBlobs_TenantRequired(t *testing.T) {
 	store := newTestS3Store(t)
-	_, err := store.ListBlobs(context.Background(), interfaces.BlobKey{Namespace: "ns"})
-	assert.ErrorIs(t, err, interfaces.ErrBlobTenantRequired)
+	_, err := store.ListBlobs(context.Background(), blob.BlobKey{Namespace: "ns"})
+	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
 }
 
 // TestS3BlobStore_Overwrite verifies that PutBlob replaces an existing blob.
@@ -347,10 +347,10 @@ func TestS3BlobStore_Overwrite(t *testing.T) {
 	ctx := context.Background()
 
 	key := testS3Key("overwrite.bin")
-	err := store.PutBlob(ctx, key, bytes.NewReader([]byte("v1")), interfaces.BlobMeta{})
+	err := store.PutBlob(ctx, key, bytes.NewReader([]byte("v1")), blob.BlobMeta{})
 	require.NoError(t, err)
 
-	err = store.PutBlob(ctx, key, bytes.NewReader([]byte("v2 longer")), interfaces.BlobMeta{})
+	err = store.PutBlob(ctx, key, bytes.NewReader([]byte("v2 longer")), blob.BlobMeta{})
 	require.NoError(t, err)
 
 	rc, meta, err := store.GetBlob(ctx, key)
@@ -371,7 +371,7 @@ func TestS3BlobStore_WithPrefix(t *testing.T) {
 	ctx := context.Background()
 	key := testS3Key("file.bin")
 
-	err := store.PutBlob(ctx, key, bytes.NewReader([]byte("data")), interfaces.BlobMeta{})
+	err := store.PutBlob(ctx, key, bytes.NewReader([]byte("data")), blob.BlobMeta{})
 	require.NoError(t, err)
 
 	// Verify the raw S3 object key includes the prefix.
@@ -395,7 +395,7 @@ func TestS3BlobStore_ChecksumMismatch(t *testing.T) {
 	ctx := context.Background()
 
 	key := testS3Key("tampered.bin")
-	err := store.PutBlob(ctx, key, bytes.NewReader([]byte("original content")), interfaces.BlobMeta{})
+	err := store.PutBlob(ctx, key, bytes.NewReader([]byte("original content")), blob.BlobMeta{})
 	require.NoError(t, err)
 
 	// Tamper with the stored blob object directly in the in-memory client.
@@ -410,7 +410,7 @@ func TestS3BlobStore_ChecksumMismatch(t *testing.T) {
 
 	// Reading the tampered blob must return ErrBlobChecksumMismatch at EOF.
 	_, err = io.ReadAll(rc)
-	assert.ErrorIs(t, err, interfaces.ErrBlobChecksumMismatch)
+	assert.ErrorIs(t, err, blob.ErrBlobChecksumMismatch)
 }
 
 // TestS3BlobStore_HealthCheck_Reachable verifies that HealthCheck returns nil
@@ -428,7 +428,7 @@ func TestS3BlobStore_ChecksumRoundtrip(t *testing.T) {
 
 	content := []byte("checksum content")
 	key := testS3Key("checksum.bin")
-	err := store.PutBlob(ctx, key, bytes.NewReader(content), interfaces.BlobMeta{})
+	err := store.PutBlob(ctx, key, bytes.NewReader(content), blob.BlobMeta{})
 	require.NoError(t, err)
 
 	rc, meta, err := store.GetBlob(ctx, key)
@@ -459,7 +459,7 @@ func TestS3BlobProvider_CreateBlobStore_MissingBucket(t *testing.T) {
 
 // TestS3BlobProviderRegistration verifies auto-registration via init().
 func TestS3BlobProviderRegistration(t *testing.T) {
-	names := interfaces.GetRegisteredBlobProviderNames()
+	names := blob.GetRegisteredBlobProviderNames()
 	found := false
 	for _, n := range names {
 		if n == "s3" {
@@ -481,19 +481,19 @@ func TestS3BlobStore_PathTraversal(t *testing.T) {
 
 	traversalKeys := []struct {
 		name string
-		key  interfaces.BlobKey
+		key  blob.BlobKey
 	}{
-		{"dotdot in namespace", interfaces.BlobKey{TenantID: "t", Namespace: "../etc", Name: "passwd"}},
-		{"dotdot in name", interfaces.BlobKey{TenantID: "t", Namespace: "ns", Name: "../secret"}},
-		{"dotdot in tenant", interfaces.BlobKey{TenantID: "../etc", Namespace: "ns", Name: "file"}},
-		{"slash in name", interfaces.BlobKey{TenantID: "t", Namespace: "ns", Name: "sub/file"}},
-		{"slash in tenant", interfaces.BlobKey{TenantID: "t/../../etc", Namespace: "ns", Name: "file"}},
+		{"dotdot in namespace", blob.BlobKey{TenantID: "t", Namespace: "../etc", Name: "passwd"}},
+		{"dotdot in name", blob.BlobKey{TenantID: "t", Namespace: "ns", Name: "../secret"}},
+		{"dotdot in tenant", blob.BlobKey{TenantID: "../etc", Namespace: "ns", Name: "file"}},
+		{"slash in name", blob.BlobKey{TenantID: "t", Namespace: "ns", Name: "sub/file"}},
+		{"slash in tenant", blob.BlobKey{TenantID: "t/../../etc", Namespace: "ns", Name: "file"}},
 	}
 
 	for _, tc := range traversalKeys {
 		tc := tc
 		t.Run(tc.name+"/PutBlob", func(t *testing.T) {
-			err := store.PutBlob(ctx, tc.key, bytes.NewReader([]byte("x")), interfaces.BlobMeta{})
+			err := store.PutBlob(ctx, tc.key, bytes.NewReader([]byte("x")), blob.BlobMeta{})
 			assert.Error(t, err, "PutBlob should reject path traversal in key component")
 		})
 		t.Run(tc.name+"/GetBlob", func(t *testing.T) {
@@ -512,11 +512,11 @@ func TestS3BlobStore_PathTraversal(t *testing.T) {
 
 	// ListBlobs uses a prefix key — only TenantID and Namespace are validated.
 	t.Run("dotdot in tenant/ListBlobs", func(t *testing.T) {
-		_, err := store.ListBlobs(ctx, interfaces.BlobKey{TenantID: "../etc", Namespace: "ns"})
+		_, err := store.ListBlobs(ctx, blob.BlobKey{TenantID: "../etc", Namespace: "ns"})
 		assert.Error(t, err, "ListBlobs should reject path traversal in TenantID")
 	})
 	t.Run("dotdot in namespace/ListBlobs", func(t *testing.T) {
-		_, err := store.ListBlobs(ctx, interfaces.BlobKey{TenantID: "t", Namespace: "../etc"})
+		_, err := store.ListBlobs(ctx, blob.BlobKey{TenantID: "t", Namespace: "../etc"})
 		assert.Error(t, err, "ListBlobs should reject path traversal in Namespace")
 	})
 }
@@ -541,6 +541,6 @@ func TestS3BlobStore_ListBlobs_SidecarError(t *testing.T) {
 	client.mu.Unlock()
 
 	// ListBlobs should propagate the sidecar parse error (not silently skip).
-	_, err := store.ListBlobs(ctx, interfaces.BlobKey{TenantID: "tenant-a"})
+	_, err := store.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-a"})
 	assert.Error(t, err, "ListBlobs should return error when sidecar cannot be parsed")
 }

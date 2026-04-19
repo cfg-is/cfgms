@@ -13,7 +13,7 @@ import (
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // StoredConfiguration represents a configuration stored in the controller with metadata
@@ -29,12 +29,12 @@ type StoredConfiguration struct {
 // ConfigurationStorageMigration provides Epic 6 compliant storage for ConfigurationService
 // This replaces the in-memory map[string]*StoredConfiguration with ConfigStore persistence
 type ConfigurationStorageMigration struct {
-	configStore interfaces.ConfigStore
+	configStore cfgconfig.ConfigStore
 	logger      logging.Logger
 }
 
 // NewConfigurationStorageMigration creates a storage migration adapter
-func NewConfigurationStorageMigration(configStore interfaces.ConfigStore, logger logging.Logger) *ConfigurationStorageMigration {
+func NewConfigurationStorageMigration(configStore cfgconfig.ConfigStore, logger logging.Logger) *ConfigurationStorageMigration {
 	return &ConfigurationStorageMigration{
 		configStore: configStore,
 		logger:      logger,
@@ -53,14 +53,14 @@ func (csm *ConfigurationStorageMigration) StoreConfiguration(ctx context.Context
 	checksum := fmt.Sprintf("%x", sha256.Sum256(configData))
 
 	// Create config entry
-	configEntry := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	configEntry := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  tenantID,
 			Namespace: "stewards",
 			Name:      stewardID,
 		},
 		Data:      configData,
-		Format:    interfaces.ConfigFormatYAML,
+		Format:    cfgconfig.ConfigFormatYAML,
 		Checksum:  checksum,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
@@ -86,7 +86,7 @@ func (csm *ConfigurationStorageMigration) StoreConfiguration(ctx context.Context
 // GetConfiguration retrieves a steward configuration from ConfigStore
 func (csm *ConfigurationStorageMigration) GetConfiguration(ctx context.Context, tenantID, stewardID string) (*stewardconfig.StewardConfig, error) {
 	// Create config key
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		Name:      stewardID,
@@ -120,7 +120,7 @@ func (csm *ConfigurationStorageMigration) GetConfiguration(ctx context.Context, 
 // GetConfigurationWithInheritance retrieves configuration with tenant hierarchy inheritance
 func (csm *ConfigurationStorageMigration) GetConfigurationWithInheritance(ctx context.Context, tenantID, stewardID string) (*stewardconfig.StewardConfig, error) {
 	// Use storage provider's built-in inheritance resolution
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		Name:      stewardID,
@@ -143,7 +143,7 @@ func (csm *ConfigurationStorageMigration) GetConfigurationWithInheritance(ctx co
 // GetStoredConfiguration retrieves configuration with metadata (compatible with existing interface)
 func (csm *ConfigurationStorageMigration) GetStoredConfiguration(ctx context.Context, tenantID, stewardID string) (*StoredConfiguration, error) {
 	// Create config key
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		Name:      stewardID,
@@ -176,7 +176,7 @@ func (csm *ConfigurationStorageMigration) GetStoredConfiguration(ctx context.Con
 
 // ListConfigurations lists all configurations for a tenant
 func (csm *ConfigurationStorageMigration) ListConfigurations(ctx context.Context, tenantID string) ([]*StoredConfiguration, error) {
-	filter := &interfaces.ConfigFilter{
+	filter := &cfgconfig.ConfigFilter{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		SortBy:    "updated_at",
@@ -215,7 +215,7 @@ func (csm *ConfigurationStorageMigration) ListConfigurations(ctx context.Context
 
 // DeleteConfiguration removes a configuration from persistent storage
 func (csm *ConfigurationStorageMigration) DeleteConfiguration(ctx context.Context, tenantID, stewardID string) error {
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		Name:      stewardID,
@@ -234,7 +234,7 @@ func (csm *ConfigurationStorageMigration) DeleteConfiguration(ctx context.Contex
 
 // GetConfigurationHistory retrieves version history for a configuration
 func (csm *ConfigurationStorageMigration) GetConfigurationHistory(ctx context.Context, tenantID, stewardID string, limit int) ([]*ConfigurationVersion, error) {
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		Name:      stewardID,
@@ -262,7 +262,7 @@ func (csm *ConfigurationStorageMigration) GetConfigurationHistory(ctx context.Co
 
 // GetConfigurationVersion retrieves a specific version of a configuration
 func (csm *ConfigurationStorageMigration) GetConfigurationVersion(ctx context.Context, tenantID, stewardID string, version int64) (*stewardconfig.StewardConfig, error) {
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		Name:      stewardID,
@@ -295,14 +295,14 @@ func (csm *ConfigurationStorageMigration) ValidateConfiguration(ctx context.Cont
 		return fmt.Errorf("failed to marshal configuration for validation: %w", err)
 	}
 
-	tempEntry := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	tempEntry := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  "validation",
 			Namespace: "stewards",
 			Name:      "temp",
 		},
 		Data:   configData,
-		Format: interfaces.ConfigFormatYAML,
+		Format: cfgconfig.ConfigFormatYAML,
 	}
 
 	// Use storage provider's validation
@@ -310,7 +310,7 @@ func (csm *ConfigurationStorageMigration) ValidateConfiguration(ctx context.Cont
 }
 
 // GetStats returns storage statistics
-func (csm *ConfigurationStorageMigration) GetStats(ctx context.Context) (*interfaces.ConfigStats, error) {
+func (csm *ConfigurationStorageMigration) GetStats(ctx context.Context) (*cfgconfig.ConfigStats, error) {
 	return csm.configStore.GetConfigStats(ctx)
 }
 

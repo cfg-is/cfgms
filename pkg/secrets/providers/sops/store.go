@@ -14,6 +14,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cache"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	storageif "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // SOPSSecretStoreConfig provides configuration for SOPS secret store
@@ -29,7 +30,7 @@ type SOPSSecretStoreConfig struct {
 // SOPSSecretStore implements SecretStore using git ConfigStore with SOPS encryption
 // M-AUTH-1: Secrets are stored as ConfigEntry objects in git, automatically encrypted by SOPS
 type SOPSSecretStore struct {
-	configStore  storageif.ConfigStore // Underlying config store (git with SOPS)
+	configStore  cfgconfig.ConfigStore // Underlying config store (git with SOPS)
 	cache        *cache.Cache          // Secret cache
 	config       *SOPSSecretStoreConfig
 	providerName string
@@ -103,17 +104,17 @@ func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.Secret
 	}
 
 	// Store as ConfigEntry (will be automatically encrypted by SOPS)
-	configKey := &storageif.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  req.TenantID,
 		Namespace: "secrets", // Use "secrets" namespace for all secrets
 		Name:      req.Key,   // Secret key is the config name
 		Scope:     "",        // No scope needed for secrets
 	}
 
-	configEntry := &storageif.ConfigEntry{
+	configEntry := &cfgconfig.ConfigEntry{
 		Key:       configKey,
 		Data:      secretData,
-		Format:    storageif.ConfigFormatJSON, // Secrets are stored as JSON
+		Format:    cfgconfig.ConfigFormatJSON, // Secrets are stored as JSON
 		CreatedBy: req.CreatedBy,
 		UpdatedBy: req.CreatedBy,
 		Tags:      append(req.Tags, "secret"), // Add "secret" tag
@@ -177,7 +178,7 @@ func (s *SOPSSecretStore) getSecretWithTenant(ctx context.Context, tenantID, key
 	}
 
 	// Retrieve from ConfigStore
-	configKey := &storageif.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "secrets",
 		Name:      key,
@@ -185,7 +186,7 @@ func (s *SOPSSecretStore) getSecretWithTenant(ctx context.Context, tenantID, key
 
 	configEntry, err := s.configStore.GetConfig(ctx, configKey)
 	if err != nil {
-		if err == storageif.ErrConfigNotFound {
+		if err == cfgconfig.ErrConfigNotFound {
 			return nil, fmt.Errorf("secret not found: %s", key)
 		}
 		return nil, fmt.Errorf("failed to retrieve secret: %w", err)
@@ -230,14 +231,14 @@ func (s *SOPSSecretStore) DeleteSecret(ctx context.Context, key string) error {
 	secretKey := parts[1]
 
 	// Delete from ConfigStore
-	configKey := &storageif.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "secrets",
 		Name:      secretKey,
 	}
 
 	if err := s.configStore.DeleteConfig(ctx, configKey); err != nil {
-		if err == storageif.ErrConfigNotFound {
+		if err == cfgconfig.ErrConfigNotFound {
 			return fmt.Errorf("secret not found: %s", key)
 		}
 		return fmt.Errorf("failed to delete secret: %w", err)
@@ -256,7 +257,7 @@ func (s *SOPSSecretStore) DeleteSecret(ctx context.Context, key string) error {
 // M-AUTH-1: Lists secrets from ConfigStore
 func (s *SOPSSecretStore) ListSecrets(ctx context.Context, filter *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
 	// Convert secret filter to config filter
-	configFilter := &storageif.ConfigFilter{
+	configFilter := &cfgconfig.ConfigFilter{
 		TenantID:  filter.TenantID,
 		Namespace: "secrets",
 		Tags:      append(filter.Tags, "secret"), // Must have "secret" tag
@@ -368,7 +369,7 @@ func (s *SOPSSecretStore) GetSecretVersion(ctx context.Context, key string, vers
 	secretKey := parts[1]
 
 	// Get version from ConfigStore
-	configKey := &storageif.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "secrets",
 		Name:      secretKey,
@@ -400,7 +401,7 @@ func (s *SOPSSecretStore) ListSecretVersions(ctx context.Context, key string) ([
 	secretKey := parts[1]
 
 	// Get version history from ConfigStore
-	configKey := &storageif.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "secrets",
 		Name:      secretKey,

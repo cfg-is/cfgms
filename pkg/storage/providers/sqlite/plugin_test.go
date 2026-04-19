@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
@@ -89,15 +90,7 @@ func TestCreateConfigStore_NotSupported(t *testing.T) {
 	p, err := interfaces.GetStorageProvider("sqlite")
 	require.NoError(t, err)
 	_, err = p.CreateConfigStore(map[string]interface{}{})
-	assert.ErrorIs(t, err, interfaces.ErrNotSupported)
-}
-
-// TestCreateRuntimeStore_NotSupported verifies runtime store is not supported.
-func TestCreateRuntimeStore_NotSupported(t *testing.T) {
-	p, err := interfaces.GetStorageProvider("sqlite")
-	require.NoError(t, err)
-	_, err = p.CreateRuntimeStore(map[string]interface{}{})
-	assert.ErrorIs(t, err, interfaces.ErrNotSupported)
+	assert.ErrorIs(t, err, business.ErrNotSupported)
 }
 
 // TestCreateTenantStore_InMemory verifies tenant store can be created.

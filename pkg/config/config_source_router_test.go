@@ -10,34 +10,35 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // inMemoryTenantStore is a minimal in-memory TenantStore for testing
 type inMemoryTenantStore struct {
-	tenants map[string]*interfaces.TenantData
+	tenants map[string]*business.TenantData
 }
 
 func newInMemoryTenantStore() *inMemoryTenantStore {
 	return &inMemoryTenantStore{
-		tenants: make(map[string]*interfaces.TenantData),
+		tenants: make(map[string]*business.TenantData),
 	}
 }
 
-func (s *inMemoryTenantStore) CreateTenant(_ context.Context, tenant *interfaces.TenantData) error {
+func (s *inMemoryTenantStore) CreateTenant(_ context.Context, tenant *business.TenantData) error {
 	s.tenants[tenant.ID] = tenant
 	return nil
 }
 
-func (s *inMemoryTenantStore) GetTenant(_ context.Context, tenantID string) (*interfaces.TenantData, error) {
+func (s *inMemoryTenantStore) GetTenant(_ context.Context, tenantID string) (*business.TenantData, error) {
 	t, ok := s.tenants[tenantID]
 	if !ok {
-		return nil, &interfaces.ConfigValidationError{Field: "tenant_id", Message: "tenant not found", Code: "TENANT_NOT_FOUND"}
+		return nil, &cfgconfig.ConfigValidationError{Field: "tenant_id", Message: "tenant not found", Code: "TENANT_NOT_FOUND"}
 	}
 	return t, nil
 }
 
-func (s *inMemoryTenantStore) UpdateTenant(_ context.Context, tenant *interfaces.TenantData) error {
+func (s *inMemoryTenantStore) UpdateTenant(_ context.Context, tenant *business.TenantData) error {
 	s.tenants[tenant.ID] = tenant
 	return nil
 }
@@ -47,15 +48,15 @@ func (s *inMemoryTenantStore) DeleteTenant(_ context.Context, tenantID string) e
 	return nil
 }
 
-func (s *inMemoryTenantStore) ListTenants(_ context.Context, _ *interfaces.TenantFilter) ([]*interfaces.TenantData, error) {
-	var result []*interfaces.TenantData
+func (s *inMemoryTenantStore) ListTenants(_ context.Context, _ *business.TenantFilter) ([]*business.TenantData, error) {
+	var result []*business.TenantData
 	for _, t := range s.tenants {
 		result = append(result, t)
 	}
 	return result, nil
 }
 
-func (s *inMemoryTenantStore) GetTenantHierarchy(_ context.Context, tenantID string) (*interfaces.TenantHierarchy, error) {
+func (s *inMemoryTenantStore) GetTenantHierarchy(_ context.Context, tenantID string) (*business.TenantHierarchy, error) {
 	path, err := s.GetTenantPath(context.Background(), tenantID)
 	if err != nil {
 		return nil, err
@@ -65,7 +66,7 @@ func (s *inMemoryTenantStore) GetTenantHierarchy(_ context.Context, tenantID str
 	for _, c := range children {
 		childIDs = append(childIDs, c.ID)
 	}
-	return &interfaces.TenantHierarchy{
+	return &business.TenantHierarchy{
 		TenantID: tenantID,
 		Path:     path,
 		Depth:    len(path) - 1,
@@ -73,8 +74,8 @@ func (s *inMemoryTenantStore) GetTenantHierarchy(_ context.Context, tenantID str
 	}, nil
 }
 
-func (s *inMemoryTenantStore) GetChildTenants(_ context.Context, parentID string) ([]*interfaces.TenantData, error) {
-	var result []*interfaces.TenantData
+func (s *inMemoryTenantStore) GetChildTenants(_ context.Context, parentID string) ([]*business.TenantData, error) {
+	var result []*business.TenantData
 	for _, t := range s.tenants {
 		if t.ParentID == parentID {
 			result = append(result, t)
@@ -90,7 +91,7 @@ func (s *inMemoryTenantStore) GetTenantPath(_ context.Context, tenantID string) 
 	seen := make(map[string]bool)
 	for {
 		if seen[current] {
-			return nil, &interfaces.ConfigValidationError{Field: "tenant_id", Message: "circular hierarchy detected", Code: "CIRCULAR_HIERARCHY"}
+			return nil, &cfgconfig.ConfigValidationError{Field: "tenant_id", Message: "circular hierarchy detected", Code: "CIRCULAR_HIERARCHY"}
 		}
 		seen[current] = true
 		path = append([]string{current}, path...)
@@ -133,13 +134,13 @@ func (s *inMemoryTenantStore) Close() error                       { return nil }
 
 // helpers for building test tenant hierarchies
 
-func newTenant(id, parentID string, metadata map[string]string) *interfaces.TenantData {
-	return &interfaces.TenantData{
+func newTenant(id, parentID string, metadata map[string]string) *business.TenantData {
+	return &business.TenantData{
 		ID:        id,
 		Name:      id,
 		ParentID:  parentID,
 		Metadata:  metadata,
-		Status:    interfaces.TenantStatusActive,
+		Status:    business.TenantStatusActive,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -162,7 +163,7 @@ func TestConfigSourceMetadataKeys(t *testing.T) {
 }
 
 // TestNewConfigSourceRouter verifies constructor returns a non-nil, functional
-// router that implements interfaces.ConfigStore.
+// router that implements cfgconfig.ConfigStore.
 func TestNewConfigSourceRouter(t *testing.T) {
 	store := NewMockConfigStore()
 	ts := newInMemoryTenantStore()
@@ -171,7 +172,7 @@ func TestNewConfigSourceRouter(t *testing.T) {
 	require.NotNil(t, router)
 
 	// Verify it satisfies the interface at compile time and is usable at runtime.
-	var cs interfaces.ConfigStore = router
+	var cs cfgconfig.ConfigStore = router
 	require.NotNil(t, cs)
 
 	// GetConfigStats is a zero-dependency operation that confirms the router
@@ -376,10 +377,10 @@ func TestConfigSourceRouter_DelegatesStoreConfig(t *testing.T) {
 
 	router := NewConfigSourceRouter(store, ts)
 
-	entry := &interfaces.ConfigEntry{
-		Key:    &interfaces.ConfigKey{TenantID: "t1", Namespace: "stewards", Name: "s1"},
+	entry := &cfgconfig.ConfigEntry{
+		Key:    &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "stewards", Name: "s1"},
 		Data:   []byte("key: value"),
-		Format: interfaces.ConfigFormatYAML,
+		Format: cfgconfig.ConfigFormatYAML,
 	}
 	require.NoError(t, router.StoreConfig(ctx, entry))
 
@@ -397,10 +398,10 @@ func TestConfigSourceRouter_DelegatesDeleteConfig(t *testing.T) {
 
 	router := NewConfigSourceRouter(store, ts)
 
-	entry := &interfaces.ConfigEntry{
-		Key:    &interfaces.ConfigKey{TenantID: "t1", Namespace: "stewards", Name: "s1"},
+	entry := &cfgconfig.ConfigEntry{
+		Key:    &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "stewards", Name: "s1"},
 		Data:   []byte("key: value"),
-		Format: interfaces.ConfigFormatYAML,
+		Format: cfgconfig.ConfigFormatYAML,
 	}
 	require.NoError(t, router.StoreConfig(ctx, entry))
 	require.NoError(t, router.DeleteConfig(ctx, entry.Key))
@@ -419,14 +420,14 @@ func TestConfigSourceRouter_DelegatesListConfigs(t *testing.T) {
 	router := NewConfigSourceRouter(store, ts)
 
 	for _, name := range []string{"s1", "s2"} {
-		require.NoError(t, router.StoreConfig(ctx, &interfaces.ConfigEntry{
-			Key:    &interfaces.ConfigKey{TenantID: "t1", Namespace: "stewards", Name: name},
+		require.NoError(t, router.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+			Key:    &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "stewards", Name: name},
 			Data:   []byte("key: val"),
-			Format: interfaces.ConfigFormatYAML,
+			Format: cfgconfig.ConfigFormatYAML,
 		}))
 	}
 
-	list, err := router.ListConfigs(ctx, &interfaces.ConfigFilter{TenantID: "t1"})
+	list, err := router.ListConfigs(ctx, &cfgconfig.ConfigFilter{TenantID: "t1"})
 	require.NoError(t, err)
 	assert.Len(t, list, 2)
 }
@@ -439,13 +440,13 @@ func TestConfigSourceRouter_DelegatesHistory(t *testing.T) {
 	require.NoError(t, ts.CreateTenant(ctx, newTenant("t1", "", nil)))
 
 	router := NewConfigSourceRouter(store, ts)
-	key := &interfaces.ConfigKey{TenantID: "t1", Namespace: "stewards", Name: "s1"}
+	key := &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "stewards", Name: "s1"}
 
 	for i := 0; i < 3; i++ {
-		require.NoError(t, router.StoreConfig(ctx, &interfaces.ConfigEntry{
+		require.NoError(t, router.StoreConfig(ctx, &cfgconfig.ConfigEntry{
 			Key:    key,
 			Data:   []byte("v"),
-			Format: interfaces.ConfigFormatYAML,
+			Format: cfgconfig.ConfigFormatYAML,
 		}))
 	}
 
@@ -473,8 +474,8 @@ func TestConfigSourceRouter_DelegatesValidateConfig(t *testing.T) {
 	ts := newInMemoryTenantStore()
 
 	router := NewConfigSourceRouter(store, ts)
-	err := router.ValidateConfig(ctx, &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "n"},
+	err := router.ValidateConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "n"},
 	})
 	assert.NoError(t, err)
 }
@@ -487,12 +488,12 @@ func TestConfigSourceRouter_DelegatesResolveWithInheritance(t *testing.T) {
 	ts := newInMemoryTenantStore()
 
 	router := NewConfigSourceRouter(store, ts)
-	key := &interfaces.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "n"}
+	key := &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "n"}
 
-	require.NoError(t, store.StoreConfig(ctx, &interfaces.ConfigEntry{
+	require.NoError(t, store.StoreConfig(ctx, &cfgconfig.ConfigEntry{
 		Key:    key,
 		Data:   []byte("ok: true"),
-		Format: interfaces.ConfigFormatYAML,
+		Format: cfgconfig.ConfigFormatYAML,
 	}))
 
 	got, err := router.ResolveConfigWithInheritance(ctx, key)
@@ -509,13 +510,13 @@ func TestConfigSourceRouter_DelegatesBatchOperations(t *testing.T) {
 
 	router := NewConfigSourceRouter(store, ts)
 
-	entries := []*interfaces.ConfigEntry{
-		{Key: &interfaces.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "a"}, Data: []byte("a: 1"), Format: interfaces.ConfigFormatYAML},
-		{Key: &interfaces.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "b"}, Data: []byte("b: 2"), Format: interfaces.ConfigFormatYAML},
+	entries := []*cfgconfig.ConfigEntry{
+		{Key: &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "a"}, Data: []byte("a: 1"), Format: cfgconfig.ConfigFormatYAML},
+		{Key: &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "b"}, Data: []byte("b: 2"), Format: cfgconfig.ConfigFormatYAML},
 	}
 	require.NoError(t, router.StoreConfigBatch(ctx, entries))
 
-	keys := []*interfaces.ConfigKey{entries[0].Key, entries[1].Key}
+	keys := []*cfgconfig.ConfigKey{entries[0].Key, entries[1].Key}
 	require.NoError(t, router.DeleteConfigBatch(ctx, keys))
 
 	_, err := router.GetConfig(ctx, entries[0].Key)
@@ -529,11 +530,11 @@ func TestConfigSourceRouter_GetConfigVersion(t *testing.T) {
 	ts := newInMemoryTenantStore()
 
 	router := NewConfigSourceRouter(store, ts)
-	key := &interfaces.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "cfg"}
+	key := &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "cfg"}
 
 	// Store two versions
-	require.NoError(t, router.StoreConfig(ctx, &interfaces.ConfigEntry{Key: key, Data: []byte("v1"), Format: interfaces.ConfigFormatYAML}))
-	require.NoError(t, router.StoreConfig(ctx, &interfaces.ConfigEntry{Key: key, Data: []byte("v2"), Format: interfaces.ConfigFormatYAML}))
+	require.NoError(t, router.StoreConfig(ctx, &cfgconfig.ConfigEntry{Key: key, Data: []byte("v1"), Format: cfgconfig.ConfigFormatYAML}))
+	require.NoError(t, router.StoreConfig(ctx, &cfgconfig.ConfigEntry{Key: key, Data: []byte("v2"), Format: cfgconfig.ConfigFormatYAML}))
 
 	// Version 1 should be in history
 	entry, err := router.GetConfigVersion(ctx, key, 1)

@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
-func newAuditStore(t *testing.T) interfaces.AuditStore {
+func newAuditStore(t *testing.T) business.AuditStore {
 	t.Helper()
 	dir := t.TempDir()
 	p := sqlite.NewSQLiteProvider(dir)
@@ -25,19 +25,19 @@ func newAuditStore(t *testing.T) interfaces.AuditStore {
 	return store
 }
 
-func sampleAuditEntry(id string) *interfaces.AuditEntry {
-	return &interfaces.AuditEntry{
+func sampleAuditEntry(id string) *business.AuditEntry {
+	return &business.AuditEntry{
 		ID:           id,
 		TenantID:     "tenant-audit",
 		Timestamp:    time.Now().UTC().Truncate(time.Millisecond),
-		EventType:    interfaces.AuditEventAuthentication,
+		EventType:    business.AuditEventAuthentication,
 		Action:       "login",
 		UserID:       "user-1",
-		UserType:     interfaces.AuditUserTypeHuman,
+		UserType:     business.AuditUserTypeHuman,
 		ResourceType: "session",
 		ResourceID:   "sess-1",
-		Result:       interfaces.AuditResultSuccess,
-		Severity:     interfaces.AuditSeverityLow,
+		Result:       business.AuditResultSuccess,
+		Severity:     business.AuditSeverityLow,
 		Source:       "controller",
 		Checksum:     "",
 	}
@@ -75,7 +75,7 @@ func TestAuditStore_Immutability(t *testing.T) {
 
 	// Attempting to store the same ID again must return ErrImmutable
 	err := store.StoreAuditEntry(ctx, sampleAuditEntry("audit-immutable"))
-	assert.ErrorIs(t, err, interfaces.ErrImmutable)
+	assert.ErrorIs(t, err, business.ErrImmutable)
 }
 
 func TestAuditStore_ArchivePurgeReturnImmutable(t *testing.T) {
@@ -83,10 +83,10 @@ func TestAuditStore_ArchivePurgeReturnImmutable(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := store.ArchiveAuditEntries(ctx, time.Now())
-	assert.ErrorIs(t, err, interfaces.ErrImmutable)
+	assert.ErrorIs(t, err, business.ErrImmutable)
 
 	_, err = store.PurgeAuditEntries(ctx, time.Now())
-	assert.ErrorIs(t, err, interfaces.ErrImmutable)
+	assert.ErrorIs(t, err, business.ErrImmutable)
 }
 
 func TestAuditStore_ListByTimeRange(t *testing.T) {
@@ -107,8 +107,8 @@ func TestAuditStore_ListByTimeRange(t *testing.T) {
 
 	start := base.Add(-2*time.Hour - 1*time.Minute)
 	end := base.Add(-30 * time.Minute)
-	results, err := store.ListAuditEntries(ctx, &interfaces.AuditFilter{
-		TimeRange: &interfaces.TimeRange{Start: &start, End: &end},
+	results, err := store.ListAuditEntries(ctx, &business.AuditFilter{
+		TimeRange: &business.TimeRange{Start: &start, End: &end},
 	})
 	require.NoError(t, err)
 	// Should include entries at -2h and -1h
@@ -119,7 +119,7 @@ func TestAuditStore_Batch(t *testing.T) {
 	store := newAuditStore(t)
 	ctx := context.Background()
 
-	entries := []*interfaces.AuditEntry{
+	entries := []*business.AuditEntry{
 		sampleAuditEntry("batch-1"),
 		sampleAuditEntry("batch-2"),
 		sampleAuditEntry("batch-3"),
@@ -168,7 +168,7 @@ func TestAuditStore_GetFailedActions(t *testing.T) {
 
 	ok := sampleAuditEntry("ok-1")
 	fail := sampleAuditEntry("fail-1")
-	fail.Result = interfaces.AuditResultFailure
+	fail.Result = business.AuditResultFailure
 
 	require.NoError(t, store.StoreAuditEntry(ctx, ok))
 	require.NoError(t, store.StoreAuditEntry(ctx, fail))
@@ -176,5 +176,5 @@ func TestAuditStore_GetFailedActions(t *testing.T) {
 	results, err := store.GetFailedActions(ctx, nil, 10)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
-	assert.Equal(t, interfaces.AuditResultFailure, results[0].Result)
+	assert.Equal(t, business.AuditResultFailure, results[0].Result)
 }

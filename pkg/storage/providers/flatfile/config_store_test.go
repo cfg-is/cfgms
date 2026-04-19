@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
 
@@ -25,9 +25,9 @@ func newTestConfigStore(t *testing.T) *flatfile.FlatFileConfigStore {
 }
 
 // testEntry builds a minimal ConfigEntry for testing.
-func testEntry(tenantID, namespace, name string, data []byte, format interfaces.ConfigFormat) *interfaces.ConfigEntry {
-	return &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+func testEntry(tenantID, namespace, name string, data []byte, format cfgconfig.ConfigFormat) *cfgconfig.ConfigEntry {
+	return &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  tenantID,
 			Namespace: namespace,
 			Name:      name,
@@ -44,7 +44,7 @@ func TestStoreAndGetConfig(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	entry := testEntry("tenant1", "default", "policy", []byte(`{"key":"value"}`), interfaces.ConfigFormatJSON)
+	entry := testEntry("tenant1", "default", "policy", []byte(`{"key":"value"}`), cfgconfig.ConfigFormatJSON)
 	require.NoError(t, store.StoreConfig(ctx, entry))
 
 	got, err := store.GetConfig(ctx, entry.Key)
@@ -63,12 +63,12 @@ func TestStoreConfigYAML(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	entry := testEntry("tenant1", "ns", "rules", []byte("key: value\n"), interfaces.ConfigFormatYAML)
+	entry := testEntry("tenant1", "ns", "rules", []byte("key: value\n"), cfgconfig.ConfigFormatYAML)
 	require.NoError(t, store.StoreConfig(ctx, entry))
 
 	got, err := store.GetConfig(ctx, entry.Key)
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.ConfigFormatYAML, got.Format)
+	assert.Equal(t, cfgconfig.ConfigFormatYAML, got.Format)
 	assert.Equal(t, entry.Data, got.Data)
 }
 
@@ -77,7 +77,7 @@ func TestStoreConfigVersionIncrement(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	entry := testEntry("tenant1", "ns", "cfg", []byte(`v1`), interfaces.ConfigFormatJSON)
+	entry := testEntry("tenant1", "ns", "cfg", []byte(`v1`), cfgconfig.ConfigFormatJSON)
 	require.NoError(t, store.StoreConfig(ctx, entry))
 
 	entry.Data = []byte(`v2`)
@@ -94,12 +94,12 @@ func TestGetConfigNotFound(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	_, err := store.GetConfig(ctx, &interfaces.ConfigKey{
+	_, err := store.GetConfig(ctx, &cfgconfig.ConfigKey{
 		TenantID:  "tenant1",
 		Namespace: "ns",
 		Name:      "nonexistent",
 	})
-	assert.Equal(t, interfaces.ErrConfigNotFound, err)
+	assert.Equal(t, cfgconfig.ErrConfigNotFound, err)
 }
 
 // TestDeleteConfig verifies that a stored config can be deleted.
@@ -107,12 +107,12 @@ func TestDeleteConfig(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	entry := testEntry("t1", "ns", "cfg", []byte(`data`), interfaces.ConfigFormatJSON)
+	entry := testEntry("t1", "ns", "cfg", []byte(`data`), cfgconfig.ConfigFormatJSON)
 	require.NoError(t, store.StoreConfig(ctx, entry))
 	require.NoError(t, store.DeleteConfig(ctx, entry.Key))
 
 	_, err := store.GetConfig(ctx, entry.Key)
-	assert.Equal(t, interfaces.ErrConfigNotFound, err)
+	assert.Equal(t, cfgconfig.ErrConfigNotFound, err)
 }
 
 // TestDeleteConfigNotFound verifies that deleting a non-existent config returns ErrConfigNotFound.
@@ -120,12 +120,12 @@ func TestDeleteConfigNotFound(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	err := store.DeleteConfig(ctx, &interfaces.ConfigKey{
+	err := store.DeleteConfig(ctx, &cfgconfig.ConfigKey{
 		TenantID:  "t1",
 		Namespace: "ns",
 		Name:      "gone",
 	})
-	assert.Equal(t, interfaces.ErrConfigNotFound, err)
+	assert.Equal(t, cfgconfig.ErrConfigNotFound, err)
 }
 
 // TestListConfigs verifies that stored configs can be listed.
@@ -133,36 +133,36 @@ func TestListConfigs(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	entries := []*interfaces.ConfigEntry{
-		testEntry("t1", "ns", "alpha", []byte(`a`), interfaces.ConfigFormatJSON),
-		testEntry("t1", "ns", "beta", []byte(`b`), interfaces.ConfigFormatJSON),
-		testEntry("t1", "ns2", "gamma", []byte(`c`), interfaces.ConfigFormatJSON),
+	entries := []*cfgconfig.ConfigEntry{
+		testEntry("t1", "ns", "alpha", []byte(`a`), cfgconfig.ConfigFormatJSON),
+		testEntry("t1", "ns", "beta", []byte(`b`), cfgconfig.ConfigFormatJSON),
+		testEntry("t1", "ns2", "gamma", []byte(`c`), cfgconfig.ConfigFormatJSON),
 	}
 	for _, e := range entries {
 		require.NoError(t, store.StoreConfig(ctx, e))
 	}
 
 	t.Run("all entries", func(t *testing.T) {
-		results, err := store.ListConfigs(ctx, &interfaces.ConfigFilter{TenantID: "t1"})
+		results, err := store.ListConfigs(ctx, &cfgconfig.ConfigFilter{TenantID: "t1"})
 		require.NoError(t, err)
 		assert.Len(t, results, 3)
 	})
 
 	t.Run("filter by namespace", func(t *testing.T) {
-		results, err := store.ListConfigs(ctx, &interfaces.ConfigFilter{TenantID: "t1", Namespace: "ns"})
+		results, err := store.ListConfigs(ctx, &cfgconfig.ConfigFilter{TenantID: "t1", Namespace: "ns"})
 		require.NoError(t, err)
 		assert.Len(t, results, 2)
 	})
 
 	t.Run("filter by name", func(t *testing.T) {
-		results, err := store.ListConfigs(ctx, &interfaces.ConfigFilter{TenantID: "t1", Names: []string{"alpha"}})
+		results, err := store.ListConfigs(ctx, &cfgconfig.ConfigFilter{TenantID: "t1", Names: []string{"alpha"}})
 		require.NoError(t, err)
 		require.Len(t, results, 1)
 		assert.Equal(t, "alpha", results[0].Key.Name)
 	})
 
 	t.Run("empty result", func(t *testing.T) {
-		results, err := store.ListConfigs(ctx, &interfaces.ConfigFilter{TenantID: "notexist"})
+		results, err := store.ListConfigs(ctx, &cfgconfig.ConfigFilter{TenantID: "notexist"})
 		require.NoError(t, err)
 		assert.Empty(t, results)
 	})
@@ -174,11 +174,11 @@ func TestListConfigsPagination(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		e := testEntry("t1", "ns", fmt.Sprintf("cfg%d", i), []byte(`x`), interfaces.ConfigFormatJSON)
+		e := testEntry("t1", "ns", fmt.Sprintf("cfg%d", i), []byte(`x`), cfgconfig.ConfigFormatJSON)
 		require.NoError(t, store.StoreConfig(ctx, e))
 	}
 
-	results, err := store.ListConfigs(ctx, &interfaces.ConfigFilter{
+	results, err := store.ListConfigs(ctx, &cfgconfig.ConfigFilter{
 		TenantID: "t1",
 		Limit:    2,
 		Offset:   1,
@@ -193,11 +193,11 @@ func TestResolveConfigWithInheritanceTwoLevel(t *testing.T) {
 	ctx := context.Background()
 
 	// Store at parent level (root/msp-a)
-	parent := testEntry("root/msp-a", "firewall", "rules", []byte(`parent`), interfaces.ConfigFormatJSON)
+	parent := testEntry("root/msp-a", "firewall", "rules", []byte(`parent`), cfgconfig.ConfigFormatJSON)
 	require.NoError(t, store.StoreConfig(ctx, parent))
 
 	// Resolve from child (root/msp-a/client-1) — should fall back to parent
-	childKey := &interfaces.ConfigKey{
+	childKey := &cfgconfig.ConfigKey{
 		TenantID:  "root/msp-a/client-1",
 		Namespace: "firewall",
 		Name:      "rules",
@@ -208,7 +208,7 @@ func TestResolveConfigWithInheritanceTwoLevel(t *testing.T) {
 	assert.Equal(t, "root/msp-a", got.Key.TenantID)
 
 	// Now store a child-level override
-	child := testEntry("root/msp-a/client-1", "firewall", "rules", []byte(`child`), interfaces.ConfigFormatJSON)
+	child := testEntry("root/msp-a/client-1", "firewall", "rules", []byte(`child`), cfgconfig.ConfigFormatJSON)
 	require.NoError(t, store.StoreConfig(ctx, child))
 
 	// Resolve again — should now return child override
@@ -222,12 +222,12 @@ func TestResolveConfigWithInheritanceNotFound(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	_, err := store.ResolveConfigWithInheritance(ctx, &interfaces.ConfigKey{
+	_, err := store.ResolveConfigWithInheritance(ctx, &cfgconfig.ConfigKey{
 		TenantID:  "root/msp-a/client-1",
 		Namespace: "ns",
 		Name:      "nope",
 	})
-	assert.Equal(t, interfaces.ErrConfigNotFound, err)
+	assert.Equal(t, cfgconfig.ErrConfigNotFound, err)
 }
 
 // TestStoreConfigValidation verifies required-field validation.
@@ -236,31 +236,31 @@ func TestStoreConfigValidation(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("missing tenant", func(t *testing.T) {
-		err := store.StoreConfig(ctx, &interfaces.ConfigEntry{
-			Key:  &interfaces.ConfigKey{Namespace: "ns", Name: "n"},
+		err := store.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+			Key:  &cfgconfig.ConfigKey{Namespace: "ns", Name: "n"},
 			Data: []byte(`x`),
 		})
 		assert.Error(t, err)
 	})
 
 	t.Run("missing namespace", func(t *testing.T) {
-		err := store.StoreConfig(ctx, &interfaces.ConfigEntry{
-			Key:  &interfaces.ConfigKey{TenantID: "t1", Name: "n"},
+		err := store.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+			Key:  &cfgconfig.ConfigKey{TenantID: "t1", Name: "n"},
 			Data: []byte(`x`),
 		})
 		assert.Error(t, err)
 	})
 
 	t.Run("missing name", func(t *testing.T) {
-		err := store.StoreConfig(ctx, &interfaces.ConfigEntry{
-			Key:  &interfaces.ConfigKey{TenantID: "t1", Namespace: "ns"},
+		err := store.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+			Key:  &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "ns"},
 			Data: []byte(`x`),
 		})
 		assert.Error(t, err)
 	})
 
 	t.Run("nil key", func(t *testing.T) {
-		err := store.StoreConfig(ctx, &interfaces.ConfigEntry{Data: []byte(`x`)})
+		err := store.StoreConfig(ctx, &cfgconfig.ConfigEntry{Data: []byte(`x`)})
 		assert.Error(t, err)
 	})
 }
@@ -270,14 +270,14 @@ func TestPathTraversalPrevention(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	err := store.StoreConfig(ctx, &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	err := store.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  "../escaped",
 			Namespace: "ns",
 			Name:      "cfg",
 		},
 		Data:   []byte(`bad`),
-		Format: interfaces.ConfigFormatJSON,
+		Format: cfgconfig.ConfigFormatJSON,
 	})
 	require.Error(t, err)
 }
@@ -296,14 +296,14 @@ func TestConcurrentWrites(t *testing.T) {
 		i := i
 		go func() {
 			defer wg.Done()
-			entry := &interfaces.ConfigEntry{
-				Key: &interfaces.ConfigKey{
+			entry := &cfgconfig.ConfigEntry{
+				Key: &cfgconfig.ConfigKey{
 					TenantID:  "concurrent-tenant",
 					Namespace: "shared-ns",
 					Name:      fmt.Sprintf("cfg-%d", i),
 				},
 				Data:   []byte(fmt.Sprintf(`{"writer":%d}`, i)),
-				Format: interfaces.ConfigFormatJSON,
+				Format: cfgconfig.ConfigFormatJSON,
 			}
 			errs[i] = store.StoreConfig(ctx, entry)
 		}()
@@ -315,7 +315,7 @@ func TestConcurrentWrites(t *testing.T) {
 	}
 
 	// Verify all writes are readable without corruption
-	results, err := store.ListConfigs(ctx, &interfaces.ConfigFilter{
+	results, err := store.ListConfigs(ctx, &cfgconfig.ConfigFilter{
 		TenantID:  "concurrent-tenant",
 		Namespace: "shared-ns",
 	})
@@ -333,9 +333,9 @@ func TestStoreConfigBatch(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	entries := []*interfaces.ConfigEntry{
-		testEntry("t1", "ns", "a", []byte(`1`), interfaces.ConfigFormatJSON),
-		testEntry("t1", "ns", "b", []byte(`2`), interfaces.ConfigFormatJSON),
+	entries := []*cfgconfig.ConfigEntry{
+		testEntry("t1", "ns", "a", []byte(`1`), cfgconfig.ConfigFormatJSON),
+		testEntry("t1", "ns", "b", []byte(`2`), cfgconfig.ConfigFormatJSON),
 	}
 	require.NoError(t, store.StoreConfigBatch(ctx, entries))
 
@@ -351,18 +351,18 @@ func TestDeleteConfigBatch(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	entries := []*interfaces.ConfigEntry{
-		testEntry("t1", "ns", "a", []byte(`1`), interfaces.ConfigFormatJSON),
-		testEntry("t1", "ns", "b", []byte(`2`), interfaces.ConfigFormatJSON),
+	entries := []*cfgconfig.ConfigEntry{
+		testEntry("t1", "ns", "a", []byte(`1`), cfgconfig.ConfigFormatJSON),
+		testEntry("t1", "ns", "b", []byte(`2`), cfgconfig.ConfigFormatJSON),
 	}
 	require.NoError(t, store.StoreConfigBatch(ctx, entries))
 
-	keys := []*interfaces.ConfigKey{entries[0].Key, entries[1].Key}
+	keys := []*cfgconfig.ConfigKey{entries[0].Key, entries[1].Key}
 	require.NoError(t, store.DeleteConfigBatch(ctx, keys))
 
 	for _, key := range keys {
 		_, err := store.GetConfig(ctx, key)
-		assert.Equal(t, interfaces.ErrConfigNotFound, err)
+		assert.Equal(t, cfgconfig.ErrConfigNotFound, err)
 	}
 }
 
@@ -371,7 +371,7 @@ func TestGetConfigHistory(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	entry := testEntry("t1", "ns", "cfg", []byte(`v1`), interfaces.ConfigFormatJSON)
+	entry := testEntry("t1", "ns", "cfg", []byte(`v1`), cfgconfig.ConfigFormatJSON)
 	require.NoError(t, store.StoreConfig(ctx, entry))
 
 	history, err := store.GetConfigHistory(ctx, entry.Key, 10)
@@ -385,7 +385,7 @@ func TestGetConfigVersion(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	entry := testEntry("t1", "ns", "cfg", []byte(`v1`), interfaces.ConfigFormatJSON)
+	entry := testEntry("t1", "ns", "cfg", []byte(`v1`), cfgconfig.ConfigFormatJSON)
 	require.NoError(t, store.StoreConfig(ctx, entry))
 
 	got, err := store.GetConfigVersion(ctx, entry.Key, 1)
@@ -402,7 +402,7 @@ func TestValidateConfig(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("valid entry", func(t *testing.T) {
-		err := store.ValidateConfig(ctx, testEntry("t1", "ns", "cfg", []byte(`x`), interfaces.ConfigFormatJSON))
+		err := store.ValidateConfig(ctx, testEntry("t1", "ns", "cfg", []byte(`x`), cfgconfig.ConfigFormatJSON))
 		assert.NoError(t, err)
 	})
 
@@ -414,7 +414,7 @@ func TestValidateConfig(t *testing.T) {
 	})
 
 	t.Run("checksum mismatch", func(t *testing.T) {
-		e := testEntry("t1", "ns", "cfg", []byte(`data`), interfaces.ConfigFormatJSON)
+		e := testEntry("t1", "ns", "cfg", []byte(`data`), cfgconfig.ConfigFormatJSON)
 		e.Checksum = "badhash"
 		err := store.ValidateConfig(ctx, e)
 		assert.Error(t, err)
@@ -426,9 +426,9 @@ func TestGetConfigStats(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	entries := []*interfaces.ConfigEntry{
-		testEntry("t1", "ns", "a", []byte(`data1`), interfaces.ConfigFormatJSON),
-		testEntry("t1", "ns", "b", []byte(`data2`), interfaces.ConfigFormatYAML),
+	entries := []*cfgconfig.ConfigEntry{
+		testEntry("t1", "ns", "a", []byte(`data1`), cfgconfig.ConfigFormatJSON),
+		testEntry("t1", "ns", "b", []byte(`data2`), cfgconfig.ConfigFormatYAML),
 	}
 	for _, e := range entries {
 		require.NoError(t, store.StoreConfig(ctx, e))
@@ -447,15 +447,15 @@ func TestConfigScopeInKey(t *testing.T) {
 	store := newTestConfigStore(t)
 	ctx := context.Background()
 
-	entry := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	entry := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  "t1",
 			Namespace: "ns",
 			Name:      "cfg",
 			Scope:     "group1",
 		},
 		Data:   []byte(`scoped`),
-		Format: interfaces.ConfigFormatJSON,
+		Format: cfgconfig.ConfigFormatJSON,
 	}
 	require.NoError(t, store.StoreConfig(ctx, entry))
 
@@ -470,10 +470,10 @@ func TestListConfigsSortByName(t *testing.T) {
 	ctx := context.Background()
 
 	for _, name := range []string{"zzz", "aaa", "mmm"} {
-		require.NoError(t, store.StoreConfig(ctx, testEntry("t1", "ns", name, []byte(`x`), interfaces.ConfigFormatJSON)))
+		require.NoError(t, store.StoreConfig(ctx, testEntry("t1", "ns", name, []byte(`x`), cfgconfig.ConfigFormatJSON)))
 	}
 
-	results, err := store.ListConfigs(ctx, &interfaces.ConfigFilter{
+	results, err := store.ListConfigs(ctx, &cfgconfig.ConfigFilter{
 		TenantID: "t1",
 		SortBy:   "name",
 		Order:    "asc",
@@ -491,7 +491,7 @@ func TestCreatedAtPreservedOnUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	beforeFirst := time.Now().UTC()
-	entry := testEntry("t1", "ns", "cfg", []byte(`v1`), interfaces.ConfigFormatJSON)
+	entry := testEntry("t1", "ns", "cfg", []byte(`v1`), cfgconfig.ConfigFormatJSON)
 	require.NoError(t, store.StoreConfig(ctx, entry))
 
 	got1, err := store.GetConfig(ctx, entry.Key)

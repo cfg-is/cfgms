@@ -19,6 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // IntegrationTestSuite provides integration testing for the complete trigger system
@@ -110,44 +112,40 @@ func (t *TestStorageProvider) Description() string {
 	return "Test storage provider for integration tests"
 }
 
-func (t *TestStorageProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
+func (t *TestStorageProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
-func (t *TestStorageProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
+func (t *TestStorageProvider) CreateConfigStore(config map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
-func (t *TestStorageProvider) CreateAuditStore(config map[string]interface{}) (interfaces.AuditStore, error) {
+func (t *TestStorageProvider) CreateAuditStore(config map[string]interface{}) (business.AuditStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
-func (t *TestStorageProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
+func (t *TestStorageProvider) CreateRBACStore(config map[string]interface{}) (business.RBACStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
-func (t *TestStorageProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
+func (t *TestStorageProvider) CreateTenantStore(config map[string]interface{}) (business.TenantStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
-func (t *TestStorageProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+func (t *TestStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
-func (t *TestStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
-	return nil, fmt.Errorf("not implemented in test provider")
+func (t *TestStorageProvider) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
+	return nil, business.ErrNotSupported
 }
 
-func (t *TestStorageProvider) CreateSessionStore(_ map[string]interface{}) (interfaces.SessionStore, error) {
-	return nil, interfaces.ErrNotSupported
+func (t *TestStorageProvider) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
+	return nil, business.ErrNotSupported
 }
 
-func (t *TestStorageProvider) CreateStewardStore(_ map[string]interface{}) (interfaces.StewardStore, error) {
-	return nil, interfaces.ErrNotSupported
-}
-
-func (t *TestStorageProvider) CreateCommandStore(_ map[string]interface{}) (interfaces.CommandStore, error) {
-	return nil, interfaces.ErrNotSupported
+func (t *TestStorageProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
+	return nil, business.ErrNotSupported
 }
 
 func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {

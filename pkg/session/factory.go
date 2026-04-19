@@ -10,6 +10,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cache"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // NewSessionManagerWithGlobalStorage creates a session manager using the global storage manager
@@ -24,7 +25,7 @@ func NewSessionManagerWithGlobalStorage(storageManager *interfaces.StorageManage
 
 	// Epic 6 Compliance: Blindly use the global storage provider
 	// The session manager has NO knowledge of which provider it is using
-	globalRuntimeStore := storageManager.GetRuntimeStore()
+	durableSessionStore := storageManager.GetSessionStore()
 
 	// Create shared cache for ephemeral sessions (always needed for performance)
 	// Epic 6 Compliance: No external memory provider dependency
@@ -42,10 +43,8 @@ func NewSessionManagerWithGlobalStorage(storageManager *interfaces.StorageManage
 		config = DefaultConfig()
 	}
 
-	// Epic 6: Use global provider for persistent sessions, memory for ephemeral
-	// If global provider doesn't support runtime storage, CreateRuntimeStore will fail
-	// and the system configuration is invalid (user must fix config)
-	return NewUnifiedSessionManager(ephemeralStore, globalRuntimeStore, config, logger)
+	// Use global provider for persistent sessions, memory for ephemeral
+	return NewUnifiedSessionManager(ephemeralStore, durableSessionStore, config, logger)
 }
 
 // NewSessionManagerWithStorage creates a unified session manager with the specified storage backends
@@ -60,7 +59,7 @@ func NewSessionManagerWithStorage(config *SessionManagerConfig, logger logging.L
 	}
 
 	// Create ephemeral store (required)
-	ephemeralStore, err := interfaces.CreateRuntimeStoreFromConfig(
+	ephemeralStore, err := interfaces.CreateSessionStoreFromConfig(
 		config.EphemeralProviderName,
 		config.StorageConfig,
 	)
@@ -69,9 +68,9 @@ func NewSessionManagerWithStorage(config *SessionManagerConfig, logger logging.L
 	}
 
 	// Create persistent store (optional)
-	var persistentStore interfaces.RuntimeStore
+	var persistentStore business.SessionStore
 	if config.PersistentProviderName != "" {
-		persistentStore, err = interfaces.CreateRuntimeStoreFromConfig(
+		persistentStore, err = interfaces.CreateSessionStoreFromConfig(
 			config.PersistentProviderName,
 			config.StorageConfig,
 		)

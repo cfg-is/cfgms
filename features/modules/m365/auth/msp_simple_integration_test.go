@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
@@ -21,7 +23,7 @@ import (
 func TestMSPCompleteFlow(t *testing.T) {
 	// Create working client store using the new factory with git backend
 	config := &ClientStoreConfig{Type: ClientStoreMemory} // Will use git provider now
-	clientStore, err := NewClientTenantStore(config, nil)
+	clientStore, err := NewClientTenantStore(config)
 	require.NoError(t, err, "Should create client store")
 	t.Cleanup(func() { _ = clientStore.Close() })
 
@@ -102,7 +104,7 @@ func TestMSPCompleteFlow(t *testing.T) {
 			assert.Equal(t, clientIdentifier, client.ClientIdentifier)
 			assert.Equal(t, clientName, client.TenantName)
 			assert.Equal(t, "client-tenant-uuid-12345", client.TenantID)
-			assert.Equal(t, ClientTenantStatusActive, client.Status)
+			assert.Equal(t, business.ClientTenantStatusActive, client.Status)
 			assert.False(t, client.ConsentedAt.IsZero())
 
 			t.Logf("✅ Callback processed successfully")
@@ -112,23 +114,23 @@ func TestMSPCompleteFlow(t *testing.T) {
 			// Test Step 3: Verify storage
 			t.Run("VerifyClientStorage", func(t *testing.T) {
 				// Retrieve by tenant ID
-				stored, err := clientStore.GetClientTenant(context.Background(), client.TenantID)
+				stored, err := clientStore.GetClientTenant(client.TenantID)
 				require.NoError(t, err, "Should retrieve stored client")
 				assert.Equal(t, client.ClientIdentifier, stored.ClientIdentifier)
 				assert.Equal(t, client.TenantName, stored.TenantName)
 
 				// Retrieve by client identifier
-				storedByID, err := clientStore.GetClientTenantByIdentifier(context.Background(), clientIdentifier)
+				storedByID, err := clientStore.GetClientTenantByIdentifier(clientIdentifier)
 				require.NoError(t, err, "Should retrieve by identifier")
 				assert.Equal(t, client.TenantID, storedByID.TenantID)
 
 				// List all clients
-				allClients, err := clientStore.ListClientTenants(context.Background(), "")
+				allClients, err := clientStore.ListClientTenants("")
 				require.NoError(t, err, "Should list all clients")
 				assert.Len(t, allClients, 1, "Should have one client")
 
 				// List active clients
-				activeClients, err := clientStore.ListClientTenants(context.Background(), ClientTenantStatusActive)
+				activeClients, err := clientStore.ListClientTenants(business.ClientTenantStatusActive)
 				require.NoError(t, err, "Should list active clients")
 				assert.Len(t, activeClients, 1, "Should have one active client")
 
@@ -137,22 +139,22 @@ func TestMSPCompleteFlow(t *testing.T) {
 				// Test Step 4: Client management operations
 				t.Run("ClientManagementOperations", func(t *testing.T) {
 					// Suspend client
-					err := clientStore.UpdateClientTenantStatus(context.Background(), client.TenantID, ClientTenantStatusSuspended)
+					err := clientStore.UpdateClientTenantStatus(client.TenantID, business.ClientTenantStatusSuspended)
 					require.NoError(t, err, "Should update client status")
 
 					// Verify suspension
-					suspended, err := clientStore.GetClientTenant(context.Background(), client.TenantID)
+					suspended, err := clientStore.GetClientTenant(client.TenantID)
 					require.NoError(t, err, "Should retrieve suspended client")
-					assert.Equal(t, ClientTenantStatusSuspended, suspended.Status)
+					assert.Equal(t, business.ClientTenantStatusSuspended, suspended.Status)
 
 					// Reactivate client
-					err = clientStore.UpdateClientTenantStatus(context.Background(), client.TenantID, ClientTenantStatusActive)
+					err = clientStore.UpdateClientTenantStatus(client.TenantID, business.ClientTenantStatusActive)
 					require.NoError(t, err, "Should reactivate client")
 
 					// Verify reactivation
-					reactivated, err := clientStore.GetClientTenant(context.Background(), client.TenantID)
+					reactivated, err := clientStore.GetClientTenant(client.TenantID)
 					require.NoError(t, err, "Should retrieve reactivated client")
-					assert.Equal(t, ClientTenantStatusActive, reactivated.Status)
+					assert.Equal(t, business.ClientTenantStatusActive, reactivated.Status)
 
 					t.Logf("✅ Client management operations verified")
 				})
@@ -164,7 +166,7 @@ func TestMSPCompleteFlow(t *testing.T) {
 // TestMSPErrorScenarios tests error handling in MSP flows
 func TestMSPErrorScenarios(t *testing.T) {
 	config := &ClientStoreConfig{Type: ClientStoreMemory} // Will use git provider now
-	clientStore, err := NewClientTenantStore(config, nil)
+	clientStore, err := NewClientTenantStore(config)
 	require.NoError(t, err, "Should create client store")
 	t.Cleanup(func() { _ = clientStore.Close() })
 
@@ -209,7 +211,7 @@ func TestMSPErrorScenarios(t *testing.T) {
 
 	t.Run("ExpiredConsentRequest", func(t *testing.T) {
 		// Create expired request manually
-		expiredRequest := &AdminConsentRequest{
+		expiredRequest := &business.AdminConsentRequest{
 			ClientIdentifier: "expired-client",
 			ClientName:       "Expired Client",
 			RequestedBy:      "admin@test.com",
@@ -218,11 +220,11 @@ func TestMSPErrorScenarios(t *testing.T) {
 			CreatedAt:        time.Now().Add(-2 * time.Hour),
 		}
 
-		err := clientStore.StoreAdminConsentRequest(context.Background(), expiredRequest)
+		err := clientStore.StoreAdminConsentRequest(expiredRequest)
 		require.NoError(t, err)
 
 		// Try to retrieve expired request
-		_, err = clientStore.GetAdminConsentRequest(context.Background(), expiredRequest.State)
+		_, err = clientStore.GetAdminConsentRequest(expiredRequest.State)
 		assert.Error(t, err, "Should reject expired request")
 		assert.Contains(t, err.Error(), "expired", "Error should mention expiration")
 
@@ -409,7 +411,7 @@ func TestMSPWithGlobalStorage(t *testing.T) {
 		}
 
 		// Create client store using the global plugin system
-		clientStore, err := NewClientTenantStore(config, nil)
+		clientStore, err := NewClientTenantStore(config)
 		require.NoError(t, err, "Should create git-based client store")
 		assert.NotNil(t, clientStore, "Store should not be nil")
 		t.Cleanup(func() { _ = clientStore.Close() })
@@ -483,16 +485,12 @@ func TestMSPWithGlobalStorage(t *testing.T) {
 					}
 				}
 
-				store, err := NewClientTenantStore(config, nil)
+				store, err := NewClientTenantStore(config)
 
 				if scenario.shouldWork {
 					require.NoError(t, err, "Should create %s store", scenario.name)
 					assert.NotNil(t, store, "Store should not be nil")
 					t.Cleanup(func() { _ = store.Close() })
-
-					// All working storage types should use global storage adapter
-					_, isAdapter := store.(*GlobalStorageAdapter)
-					assert.True(t, isAdapter, "Should be global storage adapter")
 
 					t.Logf("✅ %s storage type working", scenario.name)
 				} else {

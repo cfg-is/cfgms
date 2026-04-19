@@ -25,12 +25,13 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Auto-register git storage provider
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // newTestWorkflowHandler creates a WorkflowHandler backed by real git storage and a real engine.
-func newTestWorkflowHandler(t *testing.T) (*WorkflowHandler, interfaces.ConfigStore) {
+func newTestWorkflowHandler(t *testing.T) (*WorkflowHandler, cfgconfig.ConfigStore) {
 	t.Helper()
 
 	tmpDir := t.TempDir()

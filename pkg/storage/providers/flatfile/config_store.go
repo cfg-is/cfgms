@@ -15,10 +15,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
-// FlatFileConfigStore implements interfaces.ConfigStore using the local filesystem.
+// FlatFileConfigStore implements cfgconfig.ConfigStore using the local filesystem.
 //
 // File layout: <root>/<tenantID>/configs/<namespace>/<name>.<format>
 //
@@ -56,9 +56,9 @@ func safeJoin(base string, parts ...string) (string, error) {
 }
 
 // configExt returns the file extension for a given config format.
-func configExt(format interfaces.ConfigFormat) string {
+func configExt(format cfgconfig.ConfigFormat) string {
 	switch format {
-	case interfaces.ConfigFormatYAML:
+	case cfgconfig.ConfigFormatYAML:
 		return "yaml"
 	default:
 		return "json"
@@ -66,7 +66,7 @@ func configExt(format interfaces.ConfigFormat) string {
 }
 
 // configFileName returns the base filename for a config key.
-func configFileName(key *interfaces.ConfigKey, format interfaces.ConfigFormat) string {
+func configFileName(key *cfgconfig.ConfigKey, format cfgconfig.ConfigFormat) string {
 	name := key.Name
 	if key.Scope != "" {
 		name = key.Name + "@" + key.Scope
@@ -80,7 +80,7 @@ func (s *FlatFileConfigStore) configDir(tenantID, namespace string) (string, err
 }
 
 // configPath returns the filesystem path for a config entry with the given format.
-func (s *FlatFileConfigStore) configPath(key *interfaces.ConfigKey, format interfaces.ConfigFormat) (string, error) {
+func (s *FlatFileConfigStore) configPath(key *cfgconfig.ConfigKey, format cfgconfig.ConfigFormat) (string, error) {
 	dir, err := s.configDir(key.TenantID, key.Namespace)
 	if err != nil {
 		return "", err
@@ -90,8 +90,8 @@ func (s *FlatFileConfigStore) configPath(key *interfaces.ConfigKey, format inter
 
 // findConfigFile locates the file for a config key, trying .yaml then .json.
 // Returns ErrConfigNotFound if neither exists.
-func (s *FlatFileConfigStore) findConfigFile(key *interfaces.ConfigKey) (string, error) {
-	for _, format := range []interfaces.ConfigFormat{interfaces.ConfigFormatYAML, interfaces.ConfigFormatJSON} {
+func (s *FlatFileConfigStore) findConfigFile(key *cfgconfig.ConfigKey) (string, error) {
+	for _, format := range []cfgconfig.ConfigFormat{cfgconfig.ConfigFormatYAML, cfgconfig.ConfigFormatJSON} {
 		dir, err := s.configDir(key.TenantID, key.Namespace)
 		if err != nil {
 			continue
@@ -101,7 +101,7 @@ func (s *FlatFileConfigStore) findConfigFile(key *interfaces.ConfigKey) (string,
 			return path, nil
 		}
 	}
-	return "", interfaces.ErrConfigNotFound
+	return "", cfgconfig.ErrConfigNotFound
 }
 
 // writeAtomic writes data to path atomically via a temp file in the same directory.
@@ -150,22 +150,22 @@ func dataChecksum(data []byte) string {
 }
 
 // readConfigFile reads and unmarshals a config file. Must be called without holding mutex.
-func (s *FlatFileConfigStore) readConfigFile(key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
+func (s *FlatFileConfigStore) readConfigFile(key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	path, err := s.findConfigFile(key)
 	if err != nil {
-		return nil, interfaces.ErrConfigNotFound
+		return nil, cfgconfig.ErrConfigNotFound
 	}
 
 	// #nosec G304 — path is validated by safeJoin inside findConfigFile
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, interfaces.ErrConfigNotFound
+			return nil, cfgconfig.ErrConfigNotFound
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	var entry interfaces.ConfigEntry
+	var entry cfgconfig.ConfigEntry
 	if err := json.Unmarshal(raw, &entry); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config entry: %w", err)
 	}
@@ -174,15 +174,15 @@ func (s *FlatFileConfigStore) readConfigFile(key *interfaces.ConfigKey) (*interf
 
 // StoreConfig stores a configuration entry atomically.
 // If an entry already exists, its version is incremented and CreatedAt/CreatedBy are preserved.
-func (s *FlatFileConfigStore) StoreConfig(ctx context.Context, config *interfaces.ConfigEntry) error {
+func (s *FlatFileConfigStore) StoreConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
 	if config.Key == nil || config.Key.TenantID == "" {
-		return interfaces.ErrTenantRequired
+		return cfgconfig.ErrTenantRequired
 	}
 	if config.Key.Namespace == "" {
-		return interfaces.ErrNamespaceRequired
+		return cfgconfig.ErrNamespaceRequired
 	}
 	if config.Key.Name == "" {
-		return interfaces.ErrNameRequired
+		return cfgconfig.ErrNameRequired
 	}
 
 	s.mutex.Lock()
@@ -209,7 +209,7 @@ func (s *FlatFileConfigStore) StoreConfig(ctx context.Context, config *interface
 	entry.Checksum = dataChecksum(config.Data)
 
 	if entry.Format == "" {
-		entry.Format = interfaces.ConfigFormatJSON
+		entry.Format = cfgconfig.ConfigFormatJSON
 	}
 
 	// Remove old file if format changed
@@ -236,25 +236,25 @@ func (s *FlatFileConfigStore) StoreConfig(ctx context.Context, config *interface
 }
 
 // GetConfig retrieves a configuration entry by key.
-func (s *FlatFileConfigStore) GetConfig(ctx context.Context, key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
+func (s *FlatFileConfigStore) GetConfig(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	return s.readConfigFile(key)
 }
 
 // DeleteConfig removes a configuration entry.
-func (s *FlatFileConfigStore) DeleteConfig(ctx context.Context, key *interfaces.ConfigKey) error {
+func (s *FlatFileConfigStore) DeleteConfig(ctx context.Context, key *cfgconfig.ConfigKey) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	path, err := s.findConfigFile(key)
 	if err != nil {
-		return interfaces.ErrConfigNotFound
+		return cfgconfig.ErrConfigNotFound
 	}
 
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
-			return interfaces.ErrConfigNotFound
+			return cfgconfig.ErrConfigNotFound
 		}
 		return fmt.Errorf("failed to delete config: %w", err)
 	}
@@ -262,7 +262,7 @@ func (s *FlatFileConfigStore) DeleteConfig(ctx context.Context, key *interfaces.
 }
 
 // ListConfigs returns all configuration entries matching the filter.
-func (s *FlatFileConfigStore) ListConfigs(ctx context.Context, filter *interfaces.ConfigFilter) ([]*interfaces.ConfigEntry, error) {
+func (s *FlatFileConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -271,7 +271,7 @@ func (s *FlatFileConfigStore) ListConfigs(ctx context.Context, filter *interface
 		return nil, err
 	}
 
-	var results []*interfaces.ConfigEntry
+	var results []*cfgconfig.ConfigEntry
 
 	walkErr := filepath.WalkDir(searchRoot, func(path string, d os.DirEntry, ferr error) error {
 		if ferr != nil {
@@ -293,7 +293,7 @@ func (s *FlatFileConfigStore) ListConfigs(ctx context.Context, filter *interface
 		if err != nil {
 			return nil // skip unreadable files
 		}
-		var entry interfaces.ConfigEntry
+		var entry cfgconfig.ConfigEntry
 		if err := json.Unmarshal(raw, &entry); err != nil {
 			return nil // skip malformed files
 		}
@@ -312,7 +312,7 @@ func (s *FlatFileConfigStore) ListConfigs(ctx context.Context, filter *interface
 }
 
 // listSearchRoot returns the directory to start the WalkDir from, based on filter.
-func (s *FlatFileConfigStore) listSearchRoot(filter *interfaces.ConfigFilter) (string, error) {
+func (s *FlatFileConfigStore) listSearchRoot(filter *cfgconfig.ConfigFilter) (string, error) {
 	if filter == nil || filter.TenantID == "" {
 		return s.root, nil
 	}
@@ -331,7 +331,7 @@ func (s *FlatFileConfigStore) listSearchRoot(filter *interfaces.ConfigFilter) (s
 }
 
 // applyConfigFilter returns true if the entry matches all filter criteria.
-func applyConfigFilter(entry *interfaces.ConfigEntry, filter *interfaces.ConfigFilter) bool {
+func applyConfigFilter(entry *cfgconfig.ConfigEntry, filter *cfgconfig.ConfigFilter) bool {
 	if filter == nil {
 		return true
 	}
@@ -387,7 +387,7 @@ func applyConfigFilter(entry *interfaces.ConfigEntry, filter *interfaces.ConfigF
 }
 
 // sortConfigs sorts results according to the filter's SortBy and Order fields.
-func sortConfigs(results []*interfaces.ConfigEntry, filter *interfaces.ConfigFilter) {
+func sortConfigs(results []*cfgconfig.ConfigEntry, filter *cfgconfig.ConfigFilter) {
 	if filter == nil || filter.SortBy == "" {
 		return
 	}
@@ -414,7 +414,7 @@ func sortConfigs(results []*interfaces.ConfigEntry, filter *interfaces.ConfigFil
 }
 
 // paginateConfigs applies offset and limit from the filter.
-func paginateConfigs(results []*interfaces.ConfigEntry, filter *interfaces.ConfigFilter) []*interfaces.ConfigEntry {
+func paginateConfigs(results []*cfgconfig.ConfigEntry, filter *cfgconfig.ConfigFilter) []*cfgconfig.ConfigEntry {
 	if filter == nil {
 		return results
 	}
@@ -433,7 +433,7 @@ func paginateConfigs(results []*interfaces.ConfigEntry, filter *interfaces.Confi
 // GetConfigHistory returns the current entry as the only history item.
 // The flat-file provider does not retain historical versions; only the
 // current state is stored. Use git-sync if you need PR-based change history.
-func (s *FlatFileConfigStore) GetConfigHistory(ctx context.Context, key *interfaces.ConfigKey, limit int) ([]*interfaces.ConfigEntry, error) {
+func (s *FlatFileConfigStore) GetConfigHistory(ctx context.Context, key *cfgconfig.ConfigKey, limit int) ([]*cfgconfig.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -441,12 +441,12 @@ func (s *FlatFileConfigStore) GetConfigHistory(ctx context.Context, key *interfa
 	if err != nil {
 		return nil, err
 	}
-	return []*interfaces.ConfigEntry{entry}, nil
+	return []*cfgconfig.ConfigEntry{entry}, nil
 }
 
 // GetConfigVersion returns the current entry if its version matches; otherwise ErrConfigNotFound.
 // The flat-file provider does not retain historical versions.
-func (s *FlatFileConfigStore) GetConfigVersion(ctx context.Context, key *interfaces.ConfigKey, version int64) (*interfaces.ConfigEntry, error) {
+func (s *FlatFileConfigStore) GetConfigVersion(ctx context.Context, key *cfgconfig.ConfigKey, version int64) (*cfgconfig.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -456,13 +456,13 @@ func (s *FlatFileConfigStore) GetConfigVersion(ctx context.Context, key *interfa
 	}
 	if entry.Version != version {
 		return nil, fmt.Errorf("%w: version %d not available (current: %d)",
-			interfaces.ErrConfigNotFound, version, entry.Version)
+			cfgconfig.ErrConfigNotFound, version, entry.Version)
 	}
 	return entry, nil
 }
 
 // StoreConfigBatch stores multiple configuration entries, stopping on first error.
-func (s *FlatFileConfigStore) StoreConfigBatch(ctx context.Context, configs []*interfaces.ConfigEntry) error {
+func (s *FlatFileConfigStore) StoreConfigBatch(ctx context.Context, configs []*cfgconfig.ConfigEntry) error {
 	for _, config := range configs {
 		if err := s.StoreConfig(ctx, config); err != nil {
 			return fmt.Errorf("batch store failed at %v: %w", config.Key, err)
@@ -472,10 +472,10 @@ func (s *FlatFileConfigStore) StoreConfigBatch(ctx context.Context, configs []*i
 }
 
 // DeleteConfigBatch deletes multiple configuration entries, ignoring not-found entries.
-func (s *FlatFileConfigStore) DeleteConfigBatch(ctx context.Context, keys []*interfaces.ConfigKey) error {
+func (s *FlatFileConfigStore) DeleteConfigBatch(ctx context.Context, keys []*cfgconfig.ConfigKey) error {
 	for _, key := range keys {
 		err := s.DeleteConfig(ctx, key)
-		if err != nil && err != interfaces.ErrConfigNotFound {
+		if err != nil && err != cfgconfig.ErrConfigNotFound {
 			return fmt.Errorf("batch delete failed at %v: %w", key, err)
 		}
 	}
@@ -490,7 +490,7 @@ func (s *FlatFileConfigStore) DeleteConfigBatch(ctx context.Context, keys []*int
 //  1. root/msp-a/client-1/configs/<namespace>/<name>
 //  2. root/msp-a/configs/<namespace>/<name>
 //  3. root/configs/<namespace>/<name>
-func (s *FlatFileConfigStore) ResolveConfigWithInheritance(ctx context.Context, key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
+func (s *FlatFileConfigStore) ResolveConfigWithInheritance(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -498,7 +498,7 @@ func (s *FlatFileConfigStore) ResolveConfigWithInheritance(ctx context.Context, 
 
 	for i := len(parts); i > 0; i-- {
 		tenantID := strings.Join(parts[:i], "/")
-		searchKey := &interfaces.ConfigKey{
+		searchKey := &cfgconfig.ConfigKey{
 			TenantID:  tenantID,
 			Namespace: key.Namespace,
 			Name:      key.Name,
@@ -509,39 +509,39 @@ func (s *FlatFileConfigStore) ResolveConfigWithInheritance(ctx context.Context, 
 			return entry, nil
 		}
 	}
-	return nil, interfaces.ErrConfigNotFound
+	return nil, cfgconfig.ErrConfigNotFound
 }
 
 // ValidateConfig validates the required fields of a configuration entry.
-func (s *FlatFileConfigStore) ValidateConfig(ctx context.Context, config *interfaces.ConfigEntry) error {
+func (s *FlatFileConfigStore) ValidateConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
 	if config.Key == nil || config.Key.TenantID == "" {
-		return interfaces.ErrTenantRequired
+		return cfgconfig.ErrTenantRequired
 	}
 	if config.Key.Namespace == "" {
-		return interfaces.ErrNamespaceRequired
+		return cfgconfig.ErrNamespaceRequired
 	}
 	if config.Key.Name == "" {
-		return interfaces.ErrNameRequired
+		return cfgconfig.ErrNameRequired
 	}
 	if config.Format != "" &&
-		config.Format != interfaces.ConfigFormatYAML &&
-		config.Format != interfaces.ConfigFormatJSON {
-		return interfaces.ErrInvalidFormat
+		config.Format != cfgconfig.ConfigFormatYAML &&
+		config.Format != cfgconfig.ConfigFormatJSON {
+		return cfgconfig.ErrInvalidFormat
 	}
 	if config.Checksum != "" && len(config.Data) > 0 {
 		if config.Checksum != dataChecksum(config.Data) {
-			return interfaces.ErrChecksumMismatch
+			return cfgconfig.ErrChecksumMismatch
 		}
 	}
 	return nil
 }
 
 // GetConfigStats scans the root directory and returns aggregate statistics.
-func (s *FlatFileConfigStore) GetConfigStats(ctx context.Context) (*interfaces.ConfigStats, error) {
+func (s *FlatFileConfigStore) GetConfigStats(ctx context.Context) (*cfgconfig.ConfigStats, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
-	stats := &interfaces.ConfigStats{
+	stats := &cfgconfig.ConfigStats{
 		ConfigsByTenant:    make(map[string]int64),
 		ConfigsByFormat:    make(map[string]int64),
 		ConfigsByNamespace: make(map[string]int64),
@@ -564,7 +564,7 @@ func (s *FlatFileConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 		if err != nil {
 			return nil
 		}
-		var entry interfaces.ConfigEntry
+		var entry cfgconfig.ConfigEntry
 		if err := json.Unmarshal(raw, &entry); err != nil {
 			return nil
 		}

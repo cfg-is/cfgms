@@ -16,14 +16,14 @@ import (
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
-	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // AdvancedProvider implements AdvancedDataProvider interface
 type AdvancedProvider struct {
-	*DataProvider                              // Embed existing DNA provider
-	auditManager  *audit.Manager               // Audit system integration
-	auditStore    storageInterfaces.AuditStore // Direct audit store access for advanced queries
+	*DataProvider                     // Embed existing DNA provider
+	auditManager  *audit.Manager      // Audit system integration
+	auditStore    business.AuditStore // Direct audit store access for advanced queries
 	logger        logging.Logger
 }
 
@@ -32,7 +32,7 @@ func NewAdvancedProvider(
 	storageManager *storage.Manager,
 	driftDetector drift.Detector,
 	auditManager *audit.Manager,
-	auditStore storageInterfaces.AuditStore,
+	auditStore business.AuditStore,
 	logger logging.Logger,
 ) *AdvancedProvider {
 	// Create base provider
@@ -47,7 +47,7 @@ func NewAdvancedProvider(
 }
 
 // GetAuditData retrieves audit data based on query parameters
-func (p *AdvancedProvider) GetAuditData(ctx context.Context, query interfaces.AuditDataQuery) ([]storageInterfaces.AuditEntry, error) {
+func (p *AdvancedProvider) GetAuditData(ctx context.Context, query interfaces.AuditDataQuery) ([]business.AuditEntry, error) {
 	// Convert to storage filter - handle single tenant for now
 	tenantID := ""
 	if len(query.TenantIDs) > 0 {
@@ -59,8 +59,8 @@ func (p *AdvancedProvider) GetAuditData(ctx context.Context, query interfaces.Au
 		resourceTypes = []string{query.ResourceType}
 	}
 
-	filter := &storageInterfaces.AuditFilter{
-		TimeRange: &storageInterfaces.TimeRange{
+	filter := &business.AuditFilter{
+		TimeRange: &business.TimeRange{
 			Start: &query.TimeRange.Start,
 			End:   &query.TimeRange.End,
 		},
@@ -83,7 +83,7 @@ func (p *AdvancedProvider) GetAuditData(ctx context.Context, query interfaces.Au
 	}
 
 	// Convert from []*AuditEntry to []AuditEntry
-	result := make([]storageInterfaces.AuditEntry, len(entries))
+	result := make([]business.AuditEntry, len(entries))
 	for i, entry := range entries {
 		result[i] = *entry
 	}
@@ -114,9 +114,9 @@ func (p *AdvancedProvider) GetComplianceData(ctx context.Context, query interfac
 	auditQuery := interfaces.AuditDataQuery{
 		TimeRange: query.TimeRange,
 		TenantIDs: query.TenantIDs,
-		EventTypes: []storageInterfaces.AuditEventType{
-			storageInterfaces.AuditEventConfiguration,
-			storageInterfaces.AuditEventSecurityEvent,
+		EventTypes: []business.AuditEventType{
+			business.AuditEventConfiguration,
+			business.AuditEventSecurityEvent,
 		},
 		Limit: 1000,
 	}
@@ -157,11 +157,11 @@ func (p *AdvancedProvider) GetSecurityEvents(ctx context.Context, query interfac
 	auditQuery := interfaces.AuditDataQuery{
 		TimeRange: query.TimeRange,
 		TenantIDs: query.TenantIDs,
-		EventTypes: []storageInterfaces.AuditEventType{
-			storageInterfaces.AuditEventAuthentication,
-			storageInterfaces.AuditEventAuthorization,
-			storageInterfaces.AuditEventSecurityEvent,
-			storageInterfaces.AuditEventSystemAccess,
+		EventTypes: []business.AuditEventType{
+			business.AuditEventAuthentication,
+			business.AuditEventAuthorization,
+			business.AuditEventSecurityEvent,
+			business.AuditEventSystemAccess,
 		},
 		Severities: query.Severities,
 		Limit:      1000,
@@ -329,7 +329,7 @@ func (p *AdvancedProvider) GetMultiTenantAggregation(ctx context.Context, tenant
 
 func (p *AdvancedProvider) generateComplianceAssessment(
 	dnaRecords []storage.DNARecord,
-	auditEntries []storageInterfaces.AuditEntry,
+	auditEntries []business.AuditEntry,
 	frameworks []string,
 ) []*interfaces.ComplianceData {
 	if len(frameworks) == 0 {
@@ -355,7 +355,7 @@ func (p *AdvancedProvider) generateComplianceAssessment(
 
 func (p *AdvancedProvider) calculateGeneralComplianceScore(
 	dnaRecords []storage.DNARecord,
-	auditEntries []storageInterfaces.AuditEntry,
+	auditEntries []business.AuditEntry,
 ) float64 {
 	if len(dnaRecords) == 0 {
 		return 0.0
@@ -372,8 +372,8 @@ func (p *AdvancedProvider) calculateGeneralComplianceScore(
 
 	failedAuditCount := 0
 	for _, entry := range auditEntries {
-		if entry.Result == storageInterfaces.AuditResultError ||
-			entry.Result == storageInterfaces.AuditResultFailure {
+		if entry.Result == business.AuditResultError ||
+			entry.Result == business.AuditResultFailure {
 			failedAuditCount++
 		}
 	}
@@ -392,7 +392,7 @@ func (p *AdvancedProvider) calculateGeneralComplianceScore(
 
 func (p *AdvancedProvider) calculateComplianceScore(
 	dnaRecords []storage.DNARecord,
-	auditEntries []storageInterfaces.AuditEntry,
+	auditEntries []business.AuditEntry,
 	framework string,
 ) float64 {
 	switch framework {
@@ -407,17 +407,17 @@ func (p *AdvancedProvider) calculateComplianceScore(
 	}
 }
 
-func (p *AdvancedProvider) calculateCISScore(dnaRecords []storage.DNARecord, auditEntries []storageInterfaces.AuditEntry) float64 {
+func (p *AdvancedProvider) calculateCISScore(dnaRecords []storage.DNARecord, auditEntries []business.AuditEntry) float64 {
 	// Simplified CIS scoring - would be more complex in real implementation
 	return p.calculateGeneralComplianceScore(dnaRecords, auditEntries)
 }
 
-func (p *AdvancedProvider) calculateHIPAAScore(dnaRecords []storage.DNARecord, auditEntries []storageInterfaces.AuditEntry) float64 {
+func (p *AdvancedProvider) calculateHIPAAScore(dnaRecords []storage.DNARecord, auditEntries []business.AuditEntry) float64 {
 	// Simplified HIPAA scoring - would be more complex in real implementation
 	return p.calculateGeneralComplianceScore(dnaRecords, auditEntries)
 }
 
-func (p *AdvancedProvider) calculatePCIDSSScore(dnaRecords []storage.DNARecord, auditEntries []storageInterfaces.AuditEntry) float64 {
+func (p *AdvancedProvider) calculatePCIDSSScore(dnaRecords []storage.DNARecord, auditEntries []business.AuditEntry) float64 {
 	// Simplified PCI-DSS scoring - would be more complex in real implementation
 	return p.calculateGeneralComplianceScore(dnaRecords, auditEntries)
 }
@@ -449,14 +449,14 @@ func (p *AdvancedProvider) generateComplianceControls(framework string, dnaRecor
 func (p *AdvancedProvider) findComplianceViolations(
 	framework string,
 	dnaRecords []storage.DNARecord,
-	auditEntries []storageInterfaces.AuditEntry,
+	auditEntries []business.AuditEntry,
 ) []interfaces.ComplianceViolation {
 	violations := []interfaces.ComplianceViolation{}
 
 	// Find violations based on failed audit entries
 	for _, entry := range auditEntries {
-		if entry.Result == storageInterfaces.AuditResultError ||
-			entry.Result == storageInterfaces.AuditResultFailure {
+		if entry.Result == business.AuditResultError ||
+			entry.Result == business.AuditResultFailure {
 			violation := interfaces.ComplianceViolation{
 				ControlID:   "CTRL-002", // Would map to specific control
 				DeviceID:    entry.ResourceID,
@@ -472,9 +472,9 @@ func (p *AdvancedProvider) findComplianceViolations(
 	return violations
 }
 
-func (p *AdvancedProvider) generateComplianceTrends(framework string, auditEntries []storageInterfaces.AuditEntry) []interfaces.ComplianceTrend {
+func (p *AdvancedProvider) generateComplianceTrends(framework string, auditEntries []business.AuditEntry) []interfaces.ComplianceTrend {
 	// Group entries by day and calculate daily compliance scores
-	trendMap := make(map[string][]storageInterfaces.AuditEntry)
+	trendMap := make(map[string][]business.AuditEntry)
 
 	for _, entry := range auditEntries {
 		day := entry.Timestamp.Format("2006-01-02")
@@ -502,15 +502,15 @@ func (p *AdvancedProvider) generateComplianceTrends(framework string, auditEntri
 	return trends
 }
 
-func (p *AdvancedProvider) calculateDailyComplianceScore(entries []storageInterfaces.AuditEntry) float64 {
+func (p *AdvancedProvider) calculateDailyComplianceScore(entries []business.AuditEntry) float64 {
 	if len(entries) == 0 {
 		return 100.0
 	}
 
 	failedCount := 0
 	for _, entry := range entries {
-		if entry.Result == storageInterfaces.AuditResultError ||
-			entry.Result == storageInterfaces.AuditResultFailure {
+		if entry.Result == business.AuditResultError ||
+			entry.Result == business.AuditResultFailure {
 			failedCount++
 		}
 	}
@@ -519,13 +519,13 @@ func (p *AdvancedProvider) calculateDailyComplianceScore(entries []storageInterf
 	return successRate * 100.0
 }
 
-func (p *AdvancedProvider) isSecurityEvent(entry storageInterfaces.AuditEntry, eventTypes []interfaces.SecurityEventType) bool {
+func (p *AdvancedProvider) isSecurityEvent(entry business.AuditEntry, eventTypes []interfaces.SecurityEventType) bool {
 	// Map audit event types to security event types
-	securityEventTypes := map[storageInterfaces.AuditEventType]interfaces.SecurityEventType{
-		storageInterfaces.AuditEventAuthentication: interfaces.SecurityEventTypeAuthentication,
-		storageInterfaces.AuditEventAuthorization:  interfaces.SecurityEventTypeAuthorization,
-		storageInterfaces.AuditEventSystemAccess:   interfaces.SecurityEventTypeAccess,
-		storageInterfaces.AuditEventSecurityEvent:  interfaces.SecurityEventTypeBreach,
+	securityEventTypes := map[business.AuditEventType]interfaces.SecurityEventType{
+		business.AuditEventAuthentication: interfaces.SecurityEventTypeAuthentication,
+		business.AuditEventAuthorization:  interfaces.SecurityEventTypeAuthorization,
+		business.AuditEventSystemAccess:   interfaces.SecurityEventTypeAccess,
+		business.AuditEventSecurityEvent:  interfaces.SecurityEventTypeBreach,
 	}
 
 	securityType, isSecurityEvent := securityEventTypes[entry.EventType]
@@ -546,19 +546,19 @@ func (p *AdvancedProvider) isSecurityEvent(entry storageInterfaces.AuditEntry, e
 	return true
 }
 
-func (p *AdvancedProvider) convertToSecurityEvent(entry storageInterfaces.AuditEntry) interfaces.SecurityEvent {
+func (p *AdvancedProvider) convertToSecurityEvent(entry business.AuditEntry) interfaces.SecurityEvent {
 	// Map audit event to security event
-	securityEventTypes := map[storageInterfaces.AuditEventType]interfaces.SecurityEventType{
-		storageInterfaces.AuditEventAuthentication: interfaces.SecurityEventTypeAuthentication,
-		storageInterfaces.AuditEventAuthorization:  interfaces.SecurityEventTypeAuthorization,
-		storageInterfaces.AuditEventSystemAccess:   interfaces.SecurityEventTypeAccess,
-		storageInterfaces.AuditEventSecurityEvent:  interfaces.SecurityEventTypeBreach,
+	securityEventTypes := map[business.AuditEventType]interfaces.SecurityEventType{
+		business.AuditEventAuthentication: interfaces.SecurityEventTypeAuthentication,
+		business.AuditEventAuthorization:  interfaces.SecurityEventTypeAuthorization,
+		business.AuditEventSystemAccess:   interfaces.SecurityEventTypeAccess,
+		business.AuditEventSecurityEvent:  interfaces.SecurityEventTypeBreach,
 	}
 
 	securityType := securityEventTypes[entry.EventType]
 
 	// Determine if event is resolved (simplified logic)
-	resolved := entry.Result == storageInterfaces.AuditResultSuccess
+	resolved := entry.Result == business.AuditResultSuccess
 
 	securityEvent := interfaces.SecurityEvent{
 		ID:          entry.ID,
@@ -582,9 +582,9 @@ func (p *AdvancedProvider) convertToSecurityEvent(entry storageInterfaces.AuditE
 	return securityEvent
 }
 
-func (p *AdvancedProvider) aggregateUserActivities(auditEntries []storageInterfaces.AuditEntry, includeFailures bool) []interfaces.UserActivity {
+func (p *AdvancedProvider) aggregateUserActivities(auditEntries []business.AuditEntry, includeFailures bool) []interfaces.UserActivity {
 	// Group entries by user
-	userMap := make(map[string][]storageInterfaces.AuditEntry)
+	userMap := make(map[string][]business.AuditEntry)
 
 	for _, entry := range auditEntries {
 		userMap[entry.UserID] = append(userMap[entry.UserID], entry)
@@ -605,8 +605,8 @@ func (p *AdvancedProvider) aggregateUserActivities(auditEntries []storageInterfa
 		activityDetails := make([]interfaces.UserActivityDetail, 0, len(userEntries))
 
 		for _, entry := range userEntries {
-			if entry.Result == storageInterfaces.AuditResultError ||
-				entry.Result == storageInterfaces.AuditResultFailure {
+			if entry.Result == business.AuditResultError ||
+				entry.Result == business.AuditResultFailure {
 				failureCount++
 			}
 
@@ -614,7 +614,7 @@ func (p *AdvancedProvider) aggregateUserActivities(auditEntries []storageInterfa
 				lastActivity = entry.Timestamp
 			}
 
-			if includeFailures || entry.Result == storageInterfaces.AuditResultSuccess {
+			if includeFailures || entry.Result == business.AuditResultSuccess {
 				detail := interfaces.UserActivityDetail{
 					Action:       entry.Action,
 					ResourceType: entry.ResourceType,
@@ -651,7 +651,7 @@ func (p *AdvancedProvider) aggregateUserActivities(auditEntries []storageInterfa
 	return activities
 }
 
-func (p *AdvancedProvider) calculateUserRiskScore(entries []storageInterfaces.AuditEntry) float64 {
+func (p *AdvancedProvider) calculateUserRiskScore(entries []business.AuditEntry) float64 {
 	if len(entries) == 0 {
 		return 0.0
 	}
@@ -661,13 +661,13 @@ func (p *AdvancedProvider) calculateUserRiskScore(entries []storageInterfaces.Au
 	highSeverityCount := 0
 
 	for _, entry := range entries {
-		if entry.Result == storageInterfaces.AuditResultError ||
-			entry.Result == storageInterfaces.AuditResultFailure {
+		if entry.Result == business.AuditResultError ||
+			entry.Result == business.AuditResultFailure {
 			failureCount++
 		}
 
-		if entry.Severity == storageInterfaces.AuditSeverityHigh ||
-			entry.Severity == storageInterfaces.AuditSeverityCritical {
+		if entry.Severity == business.AuditSeverityHigh ||
+			entry.Severity == business.AuditSeverityCritical {
 			highSeverityCount++
 		}
 	}
@@ -684,7 +684,7 @@ func (p *AdvancedProvider) calculateUserRiskScore(entries []storageInterfaces.Au
 func (p *AdvancedProvider) calculateCrossSystemMetrics(
 	dnaRecords []storage.DNARecord,
 	driftEvents []drift.DriftEvent,
-	auditEntries []storageInterfaces.AuditEntry,
+	auditEntries []business.AuditEntry,
 	correlationMetrics []string,
 ) *interfaces.CrossSystemMetrics {
 	// Calculate DNA metrics
@@ -726,7 +726,7 @@ func (p *AdvancedProvider) calculateCrossSystemMetrics(
 func (p *AdvancedProvider) calculateCorrelations(
 	dnaRecords []storage.DNARecord,
 	driftEvents []drift.DriftEvent,
-	auditEntries []storageInterfaces.AuditEntry,
+	auditEntries []business.AuditEntry,
 	metrics []string,
 ) []interfaces.SystemCorrelation {
 	correlations := []interfaces.SystemCorrelation{}
@@ -748,7 +748,7 @@ func (p *AdvancedProvider) calculateSpecificCorrelation(
 	metric string,
 	dnaRecords []storage.DNARecord,
 	driftEvents []drift.DriftEvent,
-	auditEntries []storageInterfaces.AuditEntry,
+	auditEntries []business.AuditEntry,
 ) interfaces.SystemCorrelation {
 	switch metric {
 	case "drift_vs_changes":
@@ -793,7 +793,7 @@ func (p *AdvancedProvider) generateTenantSummary(
 	timeRange interfaces.TimeRange,
 	dnaRecords []storage.DNARecord,
 	driftEvents []drift.DriftEvent,
-	auditEntries []storageInterfaces.AuditEntry,
+	auditEntries []business.AuditEntry,
 ) *interfaces.TenantSummary {
 	deviceCount := p.countUniqueDevices(dnaRecords)
 	userCount := p.countUniqueUsers(auditEntries)
@@ -887,7 +887,7 @@ func (p *AdvancedProvider) countUniqueDevices(records []storage.DNARecord) int {
 	return len(deviceSet)
 }
 
-func (p *AdvancedProvider) countUniqueUsers(entries []storageInterfaces.AuditEntry) int {
+func (p *AdvancedProvider) countUniqueUsers(entries []business.AuditEntry) int {
 	userSet := make(map[string]bool)
 	for _, entry := range entries {
 		userSet[entry.UserID] = true
@@ -895,15 +895,15 @@ func (p *AdvancedProvider) countUniqueUsers(entries []storageInterfaces.AuditEnt
 	return len(userSet)
 }
 
-func (p *AdvancedProvider) calculateFailureRate(entries []storageInterfaces.AuditEntry) float64 {
+func (p *AdvancedProvider) calculateFailureRate(entries []business.AuditEntry) float64 {
 	if len(entries) == 0 {
 		return 0.0
 	}
 
 	failureCount := 0
 	for _, entry := range entries {
-		if entry.Result == storageInterfaces.AuditResultError ||
-			entry.Result == storageInterfaces.AuditResultFailure {
+		if entry.Result == business.AuditResultError ||
+			entry.Result == business.AuditResultFailure {
 			failureCount++
 		}
 	}
@@ -911,22 +911,22 @@ func (p *AdvancedProvider) calculateFailureRate(entries []storageInterfaces.Audi
 	return float64(failureCount) / float64(len(entries)) * 100.0
 }
 
-func (p *AdvancedProvider) countSecurityEvents(entries []storageInterfaces.AuditEntry) int {
+func (p *AdvancedProvider) countSecurityEvents(entries []business.AuditEntry) int {
 	count := 0
 	for _, entry := range entries {
-		if entry.EventType == storageInterfaces.AuditEventAuthentication ||
-			entry.EventType == storageInterfaces.AuditEventAuthorization ||
-			entry.EventType == storageInterfaces.AuditEventSecurityEvent {
+		if entry.EventType == business.AuditEventAuthentication ||
+			entry.EventType == business.AuditEventAuthorization ||
+			entry.EventType == business.AuditEventSecurityEvent {
 			count++
 		}
 	}
 	return count
 }
 
-func (p *AdvancedProvider) countCriticalEvents(entries []storageInterfaces.AuditEntry) int {
+func (p *AdvancedProvider) countCriticalEvents(entries []business.AuditEntry) int {
 	count := 0
 	for _, entry := range entries {
-		if entry.Severity == storageInterfaces.AuditSeverityCritical {
+		if entry.Severity == business.AuditSeverityCritical {
 			count++
 		}
 	}
@@ -949,7 +949,7 @@ func (p *AdvancedProvider) calculateHealthScore(records []storage.DNARecord, eve
 	return healthScore
 }
 
-func (p *AdvancedProvider) correlateDriftWithChanges(events []drift.DriftEvent, entries []storageInterfaces.AuditEntry) float64 {
+func (p *AdvancedProvider) correlateDriftWithChanges(events []drift.DriftEvent, entries []business.AuditEntry) float64 {
 	// Simplified correlation calculation
 	// In real implementation, would analyze timing and affected resources
 	if len(events) == 0 || len(entries) == 0 {
@@ -959,7 +959,7 @@ func (p *AdvancedProvider) correlateDriftWithChanges(events []drift.DriftEvent, 
 	// Count configuration change events that occur around drift events
 	configChanges := 0
 	for _, entry := range entries {
-		if entry.EventType == storageInterfaces.AuditEventConfiguration {
+		if entry.EventType == business.AuditEventConfiguration {
 			configChanges++
 		}
 	}
@@ -973,14 +973,14 @@ func (p *AdvancedProvider) correlateDriftWithChanges(events []drift.DriftEvent, 
 	return correlation
 }
 
-func (p *AdvancedProvider) correlateAccessWithEvents(entries []storageInterfaces.AuditEntry) float64 {
+func (p *AdvancedProvider) correlateAccessWithEvents(entries []business.AuditEntry) float64 {
 	// Simplified correlation of access events with other system events
 	accessEvents := 0
 	systemEvents := 0
 
 	for _, entry := range entries {
-		if entry.EventType == storageInterfaces.AuditEventSystemAccess ||
-			entry.EventType == storageInterfaces.AuditEventAuthentication {
+		if entry.EventType == business.AuditEventSystemAccess ||
+			entry.EventType == business.AuditEventAuthentication {
 			accessEvents++
 		} else {
 			systemEvents++
@@ -995,12 +995,12 @@ func (p *AdvancedProvider) correlateAccessWithEvents(entries []storageInterfaces
 	return correlation
 }
 
-func (p *AdvancedProvider) correlateFailuresWithDrift(entries []storageInterfaces.AuditEntry, events []drift.DriftEvent) float64 {
+func (p *AdvancedProvider) correlateFailuresWithDrift(entries []business.AuditEntry, events []drift.DriftEvent) float64 {
 	// Count failed audit entries
 	failures := 0
 	for _, entry := range entries {
-		if entry.Result == storageInterfaces.AuditResultError ||
-			entry.Result == storageInterfaces.AuditResultFailure {
+		if entry.Result == business.AuditResultError ||
+			entry.Result == business.AuditResultFailure {
 			failures++
 		}
 	}
@@ -1013,7 +1013,7 @@ func (p *AdvancedProvider) correlateFailuresWithDrift(entries []storageInterface
 	return correlation
 }
 
-func (p *AdvancedProvider) calculateSecurityScore(entries []storageInterfaces.AuditEntry) float64 {
+func (p *AdvancedProvider) calculateSecurityScore(entries []business.AuditEntry) float64 {
 	if len(entries) == 0 {
 		return 100.0
 	}
@@ -1023,12 +1023,12 @@ func (p *AdvancedProvider) calculateSecurityScore(entries []storageInterfaces.Au
 	failedSecurityEvents := 0
 
 	for _, entry := range entries {
-		if entry.EventType == storageInterfaces.AuditEventAuthentication ||
-			entry.EventType == storageInterfaces.AuditEventAuthorization ||
-			entry.EventType == storageInterfaces.AuditEventSecurityEvent {
+		if entry.EventType == business.AuditEventAuthentication ||
+			entry.EventType == business.AuditEventAuthorization ||
+			entry.EventType == business.AuditEventSecurityEvent {
 			securityEvents++
-			if entry.Result == storageInterfaces.AuditResultError ||
-				entry.Result == storageInterfaces.AuditResultFailure {
+			if entry.Result == business.AuditResultError ||
+				entry.Result == business.AuditResultFailure {
 				failedSecurityEvents++
 			}
 		}
@@ -1078,7 +1078,7 @@ func (p *AdvancedProvider) determineRiskLevel(complianceScore, securityScore flo
 	}
 }
 
-func (p *AdvancedProvider) generateTenantAlerts(events []drift.DriftEvent, entries []storageInterfaces.AuditEntry) []interfaces.TenantAlert {
+func (p *AdvancedProvider) generateTenantAlerts(events []drift.DriftEvent, entries []business.AuditEntry) []interfaces.TenantAlert {
 	alerts := []interfaces.TenantAlert{}
 
 	// Generate alerts from critical drift events
@@ -1087,7 +1087,7 @@ func (p *AdvancedProvider) generateTenantAlerts(events []drift.DriftEvent, entri
 			alert := interfaces.TenantAlert{
 				ID:          fmt.Sprintf("drift-%s", event.ID),
 				Type:        "drift",
-				Severity:    storageInterfaces.AuditSeverityHigh,
+				Severity:    business.AuditSeverityHigh,
 				Description: fmt.Sprintf("Critical drift detected: %s", event.Description),
 				Timestamp:   event.Timestamp,
 				Resolved:    false,
@@ -1098,14 +1098,14 @@ func (p *AdvancedProvider) generateTenantAlerts(events []drift.DriftEvent, entri
 
 	// Generate alerts from critical audit events
 	for _, entry := range entries {
-		if entry.Severity == storageInterfaces.AuditSeverityCritical {
+		if entry.Severity == business.AuditSeverityCritical {
 			alert := interfaces.TenantAlert{
 				ID:          fmt.Sprintf("audit-%s", entry.ID),
 				Type:        "security",
 				Severity:    entry.Severity,
 				Description: fmt.Sprintf("Critical security event: %s", entry.Action),
 				Timestamp:   entry.Timestamp,
-				Resolved:    entry.Result == storageInterfaces.AuditResultSuccess,
+				Resolved:    entry.Result == business.AuditResultSuccess,
 			}
 			alerts = append(alerts, alert)
 		}
@@ -1119,11 +1119,11 @@ func (p *AdvancedProvider) generateTenantAlerts(events []drift.DriftEvent, entri
 	return alerts
 }
 
-func (p *AdvancedProvider) countFailedAudits(entries []storageInterfaces.AuditEntry) int {
+func (p *AdvancedProvider) countFailedAudits(entries []business.AuditEntry) int {
 	count := 0
 	for _, entry := range entries {
-		if entry.Result == storageInterfaces.AuditResultError ||
-			entry.Result == storageInterfaces.AuditResultFailure {
+		if entry.Result == business.AuditResultError ||
+			entry.Result == business.AuditResultFailure {
 			count++
 		}
 	}

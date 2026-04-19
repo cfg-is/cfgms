@@ -9,7 +9,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // AdvancedDataProvider extends DataProvider to include audit data integration
@@ -17,7 +17,7 @@ type AdvancedDataProvider interface {
 	DataProvider // Embed existing DNA-focused provider
 
 	// Audit data integration
-	GetAuditData(ctx context.Context, query AuditDataQuery) ([]interfaces.AuditEntry, error)
+	GetAuditData(ctx context.Context, query AuditDataQuery) ([]business.AuditEntry, error)
 	GetComplianceData(ctx context.Context, query ComplianceDataQuery) (*ComplianceData, error)
 	GetSecurityEvents(ctx context.Context, query SecurityEventQuery) ([]SecurityEvent, error)
 	GetUserActivity(ctx context.Context, query UserActivityQuery) ([]UserActivity, error)
@@ -70,10 +70,10 @@ type AuditDataQuery struct {
 	TimeRange    TimeRange
 	TenantIDs    []string
 	UserIDs      []string
-	EventTypes   []interfaces.AuditEventType
+	EventTypes   []business.AuditEventType
 	Actions      []string
-	Results      []interfaces.AuditResult
-	Severities   []interfaces.AuditSeverity
+	Results      []business.AuditResult
+	Severities   []business.AuditSeverity
 	ResourceType string
 	ResourceIDs  []string
 	Limit        int
@@ -94,7 +94,7 @@ type ComplianceDataQuery struct {
 type SecurityEventQuery struct {
 	TimeRange       TimeRange
 	TenantIDs       []string
-	Severities      []interfaces.AuditSeverity
+	Severities      []business.AuditSeverity
 	EventTypes      []SecurityEventType
 	IncludeResolved bool
 }
@@ -104,7 +104,7 @@ type UserActivityQuery struct {
 	TimeRange       TimeRange
 	TenantIDs       []string
 	UserIDs         []string
-	UserTypes       []interfaces.AuditUserType
+	UserTypes       []business.AuditUserType
 	Actions         []string
 	IncludeFailures bool
 }
@@ -183,19 +183,19 @@ type ComplianceTrend struct {
 
 // SecurityEvent represents a security-related event
 type SecurityEvent struct {
-	ID          string                   `json:"id"`
-	Type        SecurityEventType        `json:"type"`
-	Severity    interfaces.AuditSeverity `json:"severity"`
-	Description string                   `json:"description"`
-	DeviceID    string                   `json:"device_id,omitempty"`
-	UserID      string                   `json:"user_id"`
-	TenantID    string                   `json:"tenant_id"`
-	Timestamp   time.Time                `json:"timestamp"`
-	Source      string                   `json:"source"`
-	Resolved    bool                     `json:"resolved"`
-	ResolvedAt  *time.Time               `json:"resolved_at,omitempty"`
-	ResolvedBy  string                   `json:"resolved_by,omitempty"`
-	Context     map[string]interface{}   `json:"context,omitempty"`
+	ID          string                 `json:"id"`
+	Type        SecurityEventType      `json:"type"`
+	Severity    business.AuditSeverity `json:"severity"`
+	Description string                 `json:"description"`
+	DeviceID    string                 `json:"device_id,omitempty"`
+	UserID      string                 `json:"user_id"`
+	TenantID    string                 `json:"tenant_id"`
+	Timestamp   time.Time              `json:"timestamp"`
+	Source      string                 `json:"source"`
+	Resolved    bool                   `json:"resolved"`
+	ResolvedAt  *time.Time             `json:"resolved_at,omitempty"`
+	ResolvedBy  string                 `json:"resolved_by,omitempty"`
+	Context     map[string]interface{} `json:"context,omitempty"`
 }
 
 // UserActivity represents user activity summary
@@ -211,12 +211,12 @@ type UserActivity struct {
 
 // UserActivityDetail represents detailed user activity
 type UserActivityDetail struct {
-	Action       string                 `json:"action"`
-	ResourceType string                 `json:"resource_type"`
-	ResourceID   string                 `json:"resource_id"`
-	Timestamp    time.Time              `json:"timestamp"`
-	Result       interfaces.AuditResult `json:"result"`
-	IPAddress    string                 `json:"ip_address,omitempty"`
+	Action       string               `json:"action"`
+	ResourceType string               `json:"resource_type"`
+	ResourceID   string               `json:"resource_id"`
+	Timestamp    time.Time            `json:"timestamp"`
+	Result       business.AuditResult `json:"result"`
+	IPAddress    string               `json:"ip_address,omitempty"`
 }
 
 // CrossSystemMetrics represents metrics across DNA and audit systems
@@ -269,12 +269,12 @@ type TenantSummary struct {
 
 // TenantAlert represents an alert for a tenant
 type TenantAlert struct {
-	ID          string                   `json:"id"`
-	Type        string                   `json:"type"`
-	Severity    interfaces.AuditSeverity `json:"severity"`
-	Description string                   `json:"description"`
-	Timestamp   time.Time                `json:"timestamp"`
-	Resolved    bool                     `json:"resolved"`
+	ID          string                 `json:"id"`
+	Type        string                 `json:"type"`
+	Severity    business.AuditSeverity `json:"severity"`
+	Description string                 `json:"description"`
+	Timestamp   time.Time              `json:"timestamp"`
+	Resolved    bool                   `json:"resolved"`
 }
 
 // MultiTenantAggregation represents aggregated metrics across multiple tenants
@@ -323,14 +323,14 @@ type ComplianceReportRequest struct {
 
 // SecurityReportRequest specifies parameters for security reports
 type SecurityReportRequest struct {
-	TimeRange       TimeRange                  `json:"time_range"`
-	TenantIDs       []string                   `json:"tenant_ids"`
-	UserIDs         []string                   `json:"user_ids,omitempty"`
-	Severities      []interfaces.AuditSeverity `json:"severities,omitempty"`
-	EventTypes      []SecurityEventType        `json:"event_types,omitempty"`
-	IncludeResolved bool                       `json:"include_resolved"`
-	Format          ExportFormat               `json:"format"`
-	AnalysisType    string                     `json:"analysis_type"` // "threat", "user_behavior", "access_patterns"
+	TimeRange       TimeRange                `json:"time_range"`
+	TenantIDs       []string                 `json:"tenant_ids"`
+	UserIDs         []string                 `json:"user_ids,omitempty"`
+	Severities      []business.AuditSeverity `json:"severities,omitempty"`
+	EventTypes      []SecurityEventType      `json:"event_types,omitempty"`
+	IncludeResolved bool                     `json:"include_resolved"`
+	Format          ExportFormat             `json:"format"`
+	AnalysisType    string                   `json:"analysis_type"` // "threat", "user_behavior", "access_patterns"
 }
 
 // ExecutiveReportRequest specifies parameters for executive reports
@@ -358,12 +358,12 @@ type MultiTenantReportRequest struct {
 
 // AdvancedReport extends Report with additional audit and cross-system data
 type AdvancedReport struct {
-	Report                                     // Embed base report
-	AuditData          []interfaces.AuditEntry `json:"audit_data,omitempty"`
-	ComplianceData     *ComplianceData         `json:"compliance_data,omitempty"`
-	SecurityEvents     []SecurityEvent         `json:"security_events,omitempty"`
-	CrossSystemMetrics *CrossSystemMetrics     `json:"cross_system_metrics,omitempty"`
-	RiskAssessment     *RiskAssessment         `json:"risk_assessment,omitempty"`
+	Report                                   // Embed base report
+	AuditData          []business.AuditEntry `json:"audit_data,omitempty"`
+	ComplianceData     *ComplianceData       `json:"compliance_data,omitempty"`
+	SecurityEvents     []SecurityEvent       `json:"security_events,omitempty"`
+	CrossSystemMetrics *CrossSystemMetrics   `json:"cross_system_metrics,omitempty"`
+	RiskAssessment     *RiskAssessment       `json:"risk_assessment,omitempty"`
 }
 
 // ComplianceReport represents a compliance assessment report
@@ -425,15 +425,15 @@ type MultiTenantReport struct {
 
 // SecurityAnomaly represents a detected security anomaly
 type SecurityAnomaly struct {
-	ID          string                   `json:"id"`
-	Type        string                   `json:"type"`
-	Description string                   `json:"description"`
-	Severity    interfaces.AuditSeverity `json:"severity"`
-	Confidence  float64                  `json:"confidence"`
-	DeviceID    string                   `json:"device_id,omitempty"`
-	UserID      string                   `json:"user_id,omitempty"`
-	DetectedAt  time.Time                `json:"detected_at"`
-	Context     map[string]interface{}   `json:"context"`
+	ID          string                 `json:"id"`
+	Type        string                 `json:"type"`
+	Description string                 `json:"description"`
+	Severity    business.AuditSeverity `json:"severity"`
+	Confidence  float64                `json:"confidence"`
+	DeviceID    string                 `json:"device_id,omitempty"`
+	UserID      string                 `json:"user_id,omitempty"`
+	DetectedAt  time.Time              `json:"detected_at"`
+	Context     map[string]interface{} `json:"context"`
 }
 
 // RiskAssessment represents overall risk assessment

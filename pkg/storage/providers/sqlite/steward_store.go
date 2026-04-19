@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// SQLiteStewardStore implements interfaces.StewardStore using a SQLite database.
+// SQLiteStewardStore implements business.StewardStore using a SQLite database.
 // It stores fleet registration data in the `stewards` table, which is append-only
 // in practice (deregistered records are retained, never deleted).
 type SQLiteStewardStore struct {
@@ -33,7 +33,7 @@ func (s *SQLiteStewardStore) Close() error {
 
 // RegisterSteward creates a new steward record. Returns ErrStewardAlreadyExists if
 // a record with the same ID already exists.
-func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *interfaces.StewardRecord) error {
+func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *business.StewardRecord) error {
 	if record == nil {
 		return fmt.Errorf("sqlite: record cannot be nil")
 	}
@@ -44,7 +44,7 @@ func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *interf
 	now := nowUTC()
 	status := record.Status
 	if status == "" {
-		status = interfaces.StewardStatusRegistered
+		status = business.StewardStatusRegistered
 	}
 
 	_, err := s.db.ExecContext(ctx, `
@@ -65,7 +65,7 @@ func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *interf
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return interfaces.ErrStewardAlreadyExists
+			return business.ErrStewardAlreadyExists
 		}
 		return fmt.Errorf("sqlite: failed to register steward %s: %w", record.ID, err)
 	}
@@ -84,13 +84,13 @@ func (s *SQLiteStewardStore) UpdateHeartbeat(ctx context.Context, stewardID stri
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return interfaces.ErrStewardNotFound
+		return business.ErrStewardNotFound
 	}
 	return nil
 }
 
 // GetSteward retrieves the record for the given steward ID.
-func (s *SQLiteStewardStore) GetSteward(ctx context.Context, stewardID string) (*interfaces.StewardRecord, error) {
+func (s *SQLiteStewardStore) GetSteward(ctx context.Context, stewardID string) (*business.StewardRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at
@@ -99,7 +99,7 @@ func (s *SQLiteStewardStore) GetSteward(ctx context.Context, stewardID string) (
 }
 
 // ListStewards returns all steward records regardless of status.
-func (s *SQLiteStewardStore) ListStewards(ctx context.Context) ([]*interfaces.StewardRecord, error) {
+func (s *SQLiteStewardStore) ListStewards(ctx context.Context) ([]*business.StewardRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at
@@ -112,7 +112,7 @@ func (s *SQLiteStewardStore) ListStewards(ctx context.Context) ([]*interfaces.St
 }
 
 // ListStewardsByStatus returns records with the given status. Uses an indexed query.
-func (s *SQLiteStewardStore) ListStewardsByStatus(ctx context.Context, status interfaces.StewardStatus) ([]*interfaces.StewardRecord, error) {
+func (s *SQLiteStewardStore) ListStewardsByStatus(ctx context.Context, status business.StewardStatus) ([]*business.StewardRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at
@@ -127,7 +127,7 @@ func (s *SQLiteStewardStore) ListStewardsByStatus(ctx context.Context, status in
 }
 
 // UpdateStewardStatus updates the lifecycle status of the given steward and bumps last_seen.
-func (s *SQLiteStewardStore) UpdateStewardStatus(ctx context.Context, stewardID string, status interfaces.StewardStatus) error {
+func (s *SQLiteStewardStore) UpdateStewardStatus(ctx context.Context, stewardID string, status business.StewardStatus) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE stewards SET status = ?, last_seen = ? WHERE id = ?`,
 		string(status), formatTime(nowUTC()), stewardID,
@@ -137,18 +137,18 @@ func (s *SQLiteStewardStore) UpdateStewardStatus(ctx context.Context, stewardID 
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return interfaces.ErrStewardNotFound
+		return business.ErrStewardNotFound
 	}
 	return nil
 }
 
 // DeregisterSteward marks the steward as deregistered. Records are retained for audit.
 func (s *SQLiteStewardStore) DeregisterSteward(ctx context.Context, stewardID string) error {
-	return s.UpdateStewardStatus(ctx, stewardID, interfaces.StewardStatusDeregistered)
+	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)
 }
 
 // GetStewardsSeen returns all stewards whose last_seen time is after the given time.
-func (s *SQLiteStewardStore) GetStewardsSeen(ctx context.Context, since time.Time) ([]*interfaces.StewardRecord, error) {
+func (s *SQLiteStewardStore) GetStewardsSeen(ctx context.Context, since time.Time) ([]*business.StewardRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at
@@ -170,15 +170,15 @@ func (s *SQLiteStewardStore) HealthCheck(ctx context.Context) error {
 // ---- helpers ----------------------------------------------------------------
 
 // scanStewardRow scans a *sql.Row into a StewardRecord.
-func scanStewardRow(row *sql.Row) (*interfaces.StewardRecord, error) {
-	r := &interfaces.StewardRecord{}
+func scanStewardRow(row *sql.Row) (*business.StewardRecord, error) {
+	r := &business.StewardRecord{}
 	var statusStr, regStr, lastSeenStr, lastHBStr string
 	err := row.Scan(
 		&r.ID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 		&statusStr, &regStr, &lastSeenStr, &lastHBStr,
 	)
 	if err == sql.ErrNoRows {
-		return nil, interfaces.ErrStewardNotFound
+		return nil, business.ErrStewardNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to scan steward: %w", err)
@@ -187,10 +187,10 @@ func scanStewardRow(row *sql.Row) (*interfaces.StewardRecord, error) {
 }
 
 // scanStewardRows scans *sql.Rows into a slice of StewardRecords.
-func scanStewardRows(rows *sql.Rows) ([]*interfaces.StewardRecord, error) {
-	var records []*interfaces.StewardRecord
+func scanStewardRows(rows *sql.Rows) ([]*business.StewardRecord, error) {
+	var records []*business.StewardRecord
 	for rows.Next() {
-		r := &interfaces.StewardRecord{}
+		r := &business.StewardRecord{}
 		var statusStr, regStr, lastSeenStr, lastHBStr string
 		if err := rows.Scan(
 			&r.ID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
@@ -204,8 +204,8 @@ func scanStewardRows(rows *sql.Rows) ([]*interfaces.StewardRecord, error) {
 }
 
 // populateSteward fills in the time and status fields from their string representations.
-func populateSteward(r *interfaces.StewardRecord, statusStr, regStr, lastSeenStr, lastHBStr string) *interfaces.StewardRecord {
-	r.Status = interfaces.StewardStatus(statusStr)
+func populateSteward(r *business.StewardRecord, statusStr, regStr, lastSeenStr, lastHBStr string) *business.StewardRecord {
+	r.Status = business.StewardStatus(statusStr)
 	r.RegisteredAt = parseTime(regStr)
 	r.LastSeen = parseTime(lastSeenStr)
 	if lastHBStr != "" {
@@ -215,4 +215,4 @@ func populateSteward(r *interfaces.StewardRecord, statusStr, regStr, lastSeenStr
 }
 
 // Compile-time assertion
-var _ interfaces.StewardStore = (*SQLiteStewardStore)(nil)
+var _ business.StewardStore = (*SQLiteStewardStore)(nil)

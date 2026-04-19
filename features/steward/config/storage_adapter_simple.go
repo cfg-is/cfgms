@@ -13,18 +13,18 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // SimpleStorageAdapter provides Epic 6 compliant storage without circular dependencies
 type SimpleStorageAdapter struct {
-	configStore interfaces.ConfigStore
+	configStore cfgconfig.ConfigStore
 	tenantID    string
 	stewardID   string
 }
 
 // NewSimpleStorageAdapter creates a new simple storage adapter
-func NewSimpleStorageAdapter(configStore interfaces.ConfigStore, tenantID, stewardID string) *SimpleStorageAdapter {
+func NewSimpleStorageAdapter(configStore cfgconfig.ConfigStore, tenantID, stewardID string) *SimpleStorageAdapter {
 	return &SimpleStorageAdapter{
 		configStore: configStore,
 		tenantID:    tenantID,
@@ -44,14 +44,14 @@ func (ssa *SimpleStorageAdapter) StoreConfiguration(ctx context.Context, config 
 	checksum := fmt.Sprintf("%x", sha256.Sum256(configData))
 
 	// Create config entry
-	configEntry := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	configEntry := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  ssa.tenantID,
 			Namespace: "stewards",
 			Name:      ssa.stewardID,
 		},
 		Data:      configData,
-		Format:    interfaces.ConfigFormatYAML,
+		Format:    cfgconfig.ConfigFormatYAML,
 		Checksum:  checksum,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
@@ -68,7 +68,7 @@ func (ssa *SimpleStorageAdapter) StoreConfiguration(ctx context.Context, config 
 // LoadConfiguration loads steward configuration from ConfigStore (Epic 6 compliant)
 func (ssa *SimpleStorageAdapter) LoadConfiguration(ctx context.Context) (*StewardConfig, error) {
 	// Create config key
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  ssa.tenantID,
 		Namespace: "stewards",
 		Name:      ssa.stewardID,
@@ -108,7 +108,7 @@ func (ssa *SimpleStorageAdapter) LoadConfiguration(ctx context.Context) (*Stewar
 // LoadConfigurationWithInheritance loads configuration with tenant hierarchy inheritance (Epic 6 compliant)
 func (ssa *SimpleStorageAdapter) LoadConfigurationWithInheritance(ctx context.Context) (*StewardConfig, error) {
 	// Use storage provider's built-in inheritance resolution (Epic 6 requirement)
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  ssa.tenantID,
 		Namespace: "stewards",
 		Name:      ssa.stewardID,
@@ -138,7 +138,7 @@ func (ssa *SimpleStorageAdapter) LoadConfigurationWithInheritance(ctx context.Co
 
 // DeleteConfiguration removes configuration from storage (Epic 6 compliant)
 func (ssa *SimpleStorageAdapter) DeleteConfiguration(ctx context.Context) error {
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  ssa.tenantID,
 		Namespace: "stewards",
 		Name:      ssa.stewardID,
@@ -149,7 +149,7 @@ func (ssa *SimpleStorageAdapter) DeleteConfiguration(ctx context.Context) error 
 
 // GetConfigurationHistory returns version history (Epic 6 compliant)
 func (ssa *SimpleStorageAdapter) GetConfigurationHistory(ctx context.Context, limit int) ([]*ConfigurationVersion, error) {
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  ssa.tenantID,
 		Namespace: "stewards",
 		Name:      ssa.stewardID,
@@ -177,7 +177,7 @@ func (ssa *SimpleStorageAdapter) GetConfigurationHistory(ctx context.Context, li
 
 // GetConfigurationVersion retrieves a specific version (Epic 6 compliant)
 func (ssa *SimpleStorageAdapter) GetConfigurationVersion(ctx context.Context, version int64) (*StewardConfig, error) {
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  ssa.tenantID,
 		Namespace: "stewards",
 		Name:      ssa.stewardID,
@@ -240,7 +240,7 @@ func isConfigNotFoundError(err error) bool {
 	}
 
 	// Check for ConfigValidationError with CONFIG_NOT_FOUND code
-	if configErr, ok := err.(*interfaces.ConfigValidationError); ok {
+	if configErr, ok := err.(*cfgconfig.ConfigValidationError); ok {
 		return configErr.Code == "CONFIG_NOT_FOUND"
 	}
 
@@ -288,7 +288,7 @@ func GetDefaultTenantID() string {
 }
 
 // Epic6CompliantLoadConfiguration is the main entry point for Epic 6 compliant configuration loading
-func Epic6CompliantLoadConfiguration(ctx context.Context, configStore interfaces.ConfigStore, tenantID, stewardID string) (*StewardConfig, error) {
+func Epic6CompliantLoadConfiguration(ctx context.Context, configStore cfgconfig.ConfigStore, tenantID, stewardID string) (*StewardConfig, error) {
 	adapter := NewSimpleStorageAdapter(configStore, tenantID, stewardID)
 
 	// Try storage first, fall back to file if needed

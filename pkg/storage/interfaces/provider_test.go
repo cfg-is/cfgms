@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // MockStorageProvider implements StorageProvider for testing
@@ -62,395 +64,338 @@ func (m *MockStorageProvider) GetCapabilities() ProviderCapabilities {
 	return m.capabilities
 }
 
-func (m *MockStorageProvider) CreateClientTenantStore(config map[string]interface{}) (ClientTenantStore, error) {
+func (m *MockStorageProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
 	return &MockClientTenantStore{}, nil
 }
 
-func (m *MockStorageProvider) CreateConfigStore(config map[string]interface{}) (ConfigStore, error) {
+func (m *MockStorageProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	return &MockConfigStore{}, nil
 }
 
-func (m *MockStorageProvider) CreateAuditStore(config map[string]interface{}) (AuditStore, error) {
+func (m *MockStorageProvider) CreateAuditStore(_ map[string]interface{}) (business.AuditStore, error) {
 	return &MockAuditStore{}, nil
 }
 
-func (m *MockStorageProvider) CreateRBACStore(config map[string]interface{}) (RBACStore, error) {
+func (m *MockStorageProvider) CreateRBACStore(_ map[string]interface{}) (business.RBACStore, error) {
 	return &MockRBACStore{}, nil
 }
 
-func (m *MockStorageProvider) CreateRuntimeStore(config map[string]interface{}) (RuntimeStore, error) {
-	return &MockRuntimeStore{}, nil
-}
-
-func (m *MockStorageProvider) CreateTenantStore(config map[string]interface{}) (TenantStore, error) {
+func (m *MockStorageProvider) CreateTenantStore(_ map[string]interface{}) (business.TenantStore, error) {
 	return &MockTenantStore{}, nil
 }
 
-func (m *MockStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (RegistrationTokenStore, error) {
+func (m *MockStorageProvider) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
 	return &MockRegistrationTokenStore{}, nil
 }
 
-func (m *MockStorageProvider) CreateSessionStore(config map[string]interface{}) (SessionStore, error) {
-	return nil, ErrNotSupported
+func (m *MockStorageProvider) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
+	return nil, business.ErrNotSupported
 }
 
-func (m *MockStorageProvider) CreateStewardStore(config map[string]interface{}) (StewardStore, error) {
-	return nil, ErrNotSupported
+func (m *MockStorageProvider) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
+	return nil, business.ErrNotSupported
 }
 
-func (m *MockStorageProvider) CreateCommandStore(config map[string]interface{}) (CommandStore, error) {
-	return nil, ErrNotSupported
+func (m *MockStorageProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
+	return nil, business.ErrNotSupported
 }
 
 // Mock implementations of store interfaces
 type MockClientTenantStore struct{}
 
-func (m *MockClientTenantStore) StoreClientTenant(client *ClientTenant) error { return nil }
-func (m *MockClientTenantStore) GetClientTenant(tenantID string) (*ClientTenant, error) {
-	return nil, ErrTenantNotFound
+func (m *MockClientTenantStore) StoreClientTenant(_ *business.ClientTenant) error { return nil }
+func (m *MockClientTenantStore) GetClientTenant(_ string) (*business.ClientTenant, error) {
+	return nil, business.ErrTenantNotFound
 }
-func (m *MockClientTenantStore) GetClientTenantByIdentifier(clientIdentifier string) (*ClientTenant, error) {
-	return nil, ErrTenantNotFound
+func (m *MockClientTenantStore) GetClientTenantByIdentifier(_ string) (*business.ClientTenant, error) {
+	return nil, business.ErrTenantNotFound
 }
-func (m *MockClientTenantStore) ListClientTenants(status ClientTenantStatus) ([]*ClientTenant, error) {
+func (m *MockClientTenantStore) ListClientTenants(_ business.ClientTenantStatus) ([]*business.ClientTenant, error) {
 	return nil, nil
 }
-func (m *MockClientTenantStore) UpdateClientTenantStatus(tenantID string, status ClientTenantStatus) error {
+func (m *MockClientTenantStore) UpdateClientTenantStatus(_ string, _ business.ClientTenantStatus) error {
 	return nil
 }
-func (m *MockClientTenantStore) DeleteClientTenant(tenantID string) error { return nil }
-func (m *MockClientTenantStore) StoreAdminConsentRequest(request *AdminConsentRequest) error {
+func (m *MockClientTenantStore) DeleteClientTenant(_ string) error { return nil }
+func (m *MockClientTenantStore) StoreAdminConsentRequest(_ *business.AdminConsentRequest) error {
 	return nil
 }
-func (m *MockClientTenantStore) GetAdminConsentRequest(state string) (*AdminConsentRequest, error) {
-	return nil, ErrTenantNotFound
+func (m *MockClientTenantStore) GetAdminConsentRequest(_ string) (*business.AdminConsentRequest, error) {
+	return nil, business.ErrTenantNotFound
 }
-func (m *MockClientTenantStore) DeleteAdminConsentRequest(state string) error { return nil }
-func (m *MockClientTenantStore) Close() error                                 { return nil }
+func (m *MockClientTenantStore) DeleteAdminConsentRequest(_ string) error { return nil }
+func (m *MockClientTenantStore) Close() error                             { return nil }
 
 type MockConfigStore struct{}
 
-func (m *MockConfigStore) StoreConfig(ctx context.Context, config *ConfigEntry) error { return nil }
-func (m *MockConfigStore) GetConfig(ctx context.Context, key *ConfigKey) (*ConfigEntry, error) {
-	return nil, ErrConfigNotFound
-}
-func (m *MockConfigStore) DeleteConfig(ctx context.Context, key *ConfigKey) error { return nil }
-func (m *MockConfigStore) ListConfigs(ctx context.Context, filter *ConfigFilter) ([]*ConfigEntry, error) {
-	return nil, nil
-}
-func (m *MockConfigStore) GetConfigHistory(ctx context.Context, key *ConfigKey, limit int) ([]*ConfigEntry, error) {
-	return nil, nil
-}
-func (m *MockConfigStore) GetConfigVersion(ctx context.Context, key *ConfigKey, version int64) (*ConfigEntry, error) {
-	return nil, ErrConfigNotFound
-}
-func (m *MockConfigStore) StoreConfigBatch(ctx context.Context, configs []*ConfigEntry) error {
+func (m *MockConfigStore) StoreConfig(_ context.Context, _ *cfgconfig.ConfigEntry) error {
 	return nil
 }
-func (m *MockConfigStore) DeleteConfigBatch(ctx context.Context, keys []*ConfigKey) error { return nil }
-func (m *MockConfigStore) ResolveConfigWithInheritance(ctx context.Context, key *ConfigKey) (*ConfigEntry, error) {
-	return nil, ErrConfigNotFound
+func (m *MockConfigStore) GetConfig(_ context.Context, _ *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
+	return nil, cfgconfig.ErrConfigNotFound
 }
-func (m *MockConfigStore) ValidateConfig(ctx context.Context, config *ConfigEntry) error { return nil }
-func (m *MockConfigStore) GetConfigStats(ctx context.Context) (*ConfigStats, error) {
-	return &ConfigStats{}, nil
+func (m *MockConfigStore) DeleteConfig(_ context.Context, _ *cfgconfig.ConfigKey) error { return nil }
+func (m *MockConfigStore) ListConfigs(_ context.Context, _ *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) GetConfigHistory(_ context.Context, _ *cfgconfig.ConfigKey, _ int) ([]*cfgconfig.ConfigEntry, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) GetConfigVersion(_ context.Context, _ *cfgconfig.ConfigKey, _ int64) (*cfgconfig.ConfigEntry, error) {
+	return nil, cfgconfig.ErrConfigNotFound
+}
+func (m *MockConfigStore) StoreConfigBatch(_ context.Context, _ []*cfgconfig.ConfigEntry) error {
+	return nil
+}
+func (m *MockConfigStore) DeleteConfigBatch(_ context.Context, _ []*cfgconfig.ConfigKey) error {
+	return nil
+}
+func (m *MockConfigStore) ResolveConfigWithInheritance(_ context.Context, _ *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
+	return nil, cfgconfig.ErrConfigNotFound
+}
+func (m *MockConfigStore) ValidateConfig(_ context.Context, _ *cfgconfig.ConfigEntry) error {
+	return nil
+}
+func (m *MockConfigStore) GetConfigStats(_ context.Context) (*cfgconfig.ConfigStats, error) {
+	return &cfgconfig.ConfigStats{}, nil
 }
 
 type MockAuditStore struct{}
 
-func (m *MockAuditStore) StoreAuditEntry(ctx context.Context, entry *AuditEntry) error { return nil }
-func (m *MockAuditStore) GetAuditEntry(ctx context.Context, id string) (*AuditEntry, error) {
-	return nil, ErrAuditNotFound
-}
-func (m *MockAuditStore) ListAuditEntries(ctx context.Context, filter *AuditFilter) ([]*AuditEntry, error) {
-	return nil, nil
-}
-func (m *MockAuditStore) StoreAuditBatch(ctx context.Context, entries []*AuditEntry) error {
+func (m *MockAuditStore) StoreAuditEntry(_ context.Context, _ *business.AuditEntry) error {
 	return nil
 }
-func (m *MockAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *TimeRange) ([]*AuditEntry, error) {
+func (m *MockAuditStore) GetAuditEntry(_ context.Context, _ string) (*business.AuditEntry, error) {
+	return nil, business.ErrAuditNotFound
+}
+func (m *MockAuditStore) ListAuditEntries(_ context.Context, _ *business.AuditFilter) ([]*business.AuditEntry, error) {
 	return nil, nil
 }
-func (m *MockAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *TimeRange) ([]*AuditEntry, error) {
+func (m *MockAuditStore) StoreAuditBatch(_ context.Context, _ []*business.AuditEntry) error {
+	return nil
+}
+func (m *MockAuditStore) GetAuditsByUser(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
 	return nil, nil
 }
-func (m *MockAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *TimeRange) ([]*AuditEntry, error) {
+func (m *MockAuditStore) GetAuditsByResource(_ context.Context, _, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
 	return nil, nil
 }
-func (m *MockAuditStore) GetFailedActions(ctx context.Context, timeRange *TimeRange, limit int) ([]*AuditEntry, error) {
+func (m *MockAuditStore) GetAuditsByAction(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
 	return nil, nil
 }
-func (m *MockAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *TimeRange) ([]*AuditEntry, error) {
+func (m *MockAuditStore) GetFailedActions(_ context.Context, _ *business.TimeRange, _ int) ([]*business.AuditEntry, error) {
 	return nil, nil
 }
-func (m *MockAuditStore) GetAuditStats(ctx context.Context) (*AuditStats, error) {
-	return &AuditStats{}, nil
+func (m *MockAuditStore) GetSuspiciousActivity(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
+	return nil, nil
 }
-func (m *MockAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
+func (m *MockAuditStore) GetAuditStats(_ context.Context) (*business.AuditStats, error) {
+	return &business.AuditStats{}, nil
+}
+func (m *MockAuditStore) ArchiveAuditEntries(_ context.Context, _ time.Time) (int64, error) {
 	return 0, nil
 }
-func (m *MockAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
+func (m *MockAuditStore) PurgeAuditEntries(_ context.Context, _ time.Time) (int64, error) {
 	return 0, nil
 }
 func (m *MockAuditStore) Close() error { return nil }
 
 type MockRBACStore struct{}
 
-func (m *MockRBACStore) StorePermission(ctx context.Context, permission *common.Permission) error {
+func (m *MockRBACStore) StorePermission(_ context.Context, _ *common.Permission) error {
 	return nil
 }
-func (m *MockRBACStore) GetPermission(ctx context.Context, id string) (*common.Permission, error) {
+func (m *MockRBACStore) GetPermission(_ context.Context, _ string) (*common.Permission, error) {
 	return nil, fmt.Errorf("permission not found")
 }
-func (m *MockRBACStore) ListPermissions(ctx context.Context, resourceType string) ([]*common.Permission, error) {
+func (m *MockRBACStore) ListPermissions(_ context.Context, _ string) ([]*common.Permission, error) {
 	return nil, nil
 }
-func (m *MockRBACStore) UpdatePermission(ctx context.Context, permission *common.Permission) error {
+func (m *MockRBACStore) UpdatePermission(_ context.Context, _ *common.Permission) error {
 	return nil
 }
-func (m *MockRBACStore) DeletePermission(ctx context.Context, id string) error  { return nil }
-func (m *MockRBACStore) StoreRole(ctx context.Context, role *common.Role) error { return nil }
-func (m *MockRBACStore) GetRole(ctx context.Context, id string) (*common.Role, error) {
+func (m *MockRBACStore) DeletePermission(_ context.Context, _ string) error { return nil }
+func (m *MockRBACStore) StoreRole(_ context.Context, _ *common.Role) error  { return nil }
+func (m *MockRBACStore) GetRole(_ context.Context, _ string) (*common.Role, error) {
 	return nil, fmt.Errorf("role not found")
 }
-func (m *MockRBACStore) ListRoles(ctx context.Context, tenantID string) ([]*common.Role, error) {
+func (m *MockRBACStore) ListRoles(_ context.Context, _ string) ([]*common.Role, error) {
 	return nil, nil
 }
-func (m *MockRBACStore) UpdateRole(ctx context.Context, role *common.Role) error         { return nil }
-func (m *MockRBACStore) DeleteRole(ctx context.Context, id string) error                 { return nil }
-func (m *MockRBACStore) StoreSubject(ctx context.Context, subject *common.Subject) error { return nil }
-func (m *MockRBACStore) GetSubject(ctx context.Context, id string) (*common.Subject, error) {
+func (m *MockRBACStore) UpdateRole(_ context.Context, _ *common.Role) error      { return nil }
+func (m *MockRBACStore) DeleteRole(_ context.Context, _ string) error            { return nil }
+func (m *MockRBACStore) StoreSubject(_ context.Context, _ *common.Subject) error { return nil }
+func (m *MockRBACStore) GetSubject(_ context.Context, _ string) (*common.Subject, error) {
 	return nil, fmt.Errorf("subject not found")
 }
-func (m *MockRBACStore) ListSubjects(ctx context.Context, tenantID string, subjectType common.SubjectType) ([]*common.Subject, error) {
+func (m *MockRBACStore) ListSubjects(_ context.Context, _ string, _ common.SubjectType) ([]*common.Subject, error) {
 	return nil, nil
 }
-func (m *MockRBACStore) UpdateSubject(ctx context.Context, subject *common.Subject) error { return nil }
-func (m *MockRBACStore) DeleteSubject(ctx context.Context, id string) error               { return nil }
-func (m *MockRBACStore) StoreRoleAssignment(ctx context.Context, assignment *common.RoleAssignment) error {
+func (m *MockRBACStore) UpdateSubject(_ context.Context, _ *common.Subject) error { return nil }
+func (m *MockRBACStore) DeleteSubject(_ context.Context, _ string) error          { return nil }
+func (m *MockRBACStore) StoreRoleAssignment(_ context.Context, _ *common.RoleAssignment) error {
 	return nil
 }
-func (m *MockRBACStore) GetRoleAssignment(ctx context.Context, id string) (*common.RoleAssignment, error) {
+func (m *MockRBACStore) GetRoleAssignment(_ context.Context, _ string) (*common.RoleAssignment, error) {
 	return nil, fmt.Errorf("assignment not found")
 }
-func (m *MockRBACStore) ListRoleAssignments(ctx context.Context, subjectID, roleID, tenantID string) ([]*common.RoleAssignment, error) {
+func (m *MockRBACStore) ListRoleAssignments(_ context.Context, _, _, _ string) ([]*common.RoleAssignment, error) {
 	return nil, nil
 }
-func (m *MockRBACStore) DeleteRoleAssignment(ctx context.Context, subjectID, roleID, tenantID string) error {
+func (m *MockRBACStore) DeleteRoleAssignment(_ context.Context, _, _, _ string) error {
 	return nil
 }
-func (m *MockRBACStore) StoreBulkPermissions(ctx context.Context, permissions []*common.Permission) error {
+func (m *MockRBACStore) StoreBulkPermissions(_ context.Context, _ []*common.Permission) error {
 	return nil
 }
-func (m *MockRBACStore) StoreBulkRoles(ctx context.Context, roles []*common.Role) error { return nil }
-func (m *MockRBACStore) StoreBulkSubjects(ctx context.Context, subjects []*common.Subject) error {
+func (m *MockRBACStore) StoreBulkRoles(_ context.Context, _ []*common.Role) error { return nil }
+func (m *MockRBACStore) StoreBulkSubjects(_ context.Context, _ []*common.Subject) error {
 	return nil
 }
-func (m *MockRBACStore) GetSubjectRoles(ctx context.Context, subjectID, tenantID string) ([]*common.Role, error) {
+func (m *MockRBACStore) GetSubjectRoles(_ context.Context, _, _ string) ([]*common.Role, error) {
 	return nil, nil
 }
-func (m *MockRBACStore) GetRolePermissions(ctx context.Context, roleID string) ([]*common.Permission, error) {
+func (m *MockRBACStore) GetRolePermissions(_ context.Context, _ string) ([]*common.Permission, error) {
 	return nil, nil
 }
-func (m *MockRBACStore) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) {
+func (m *MockRBACStore) GetSubjectAssignments(_ context.Context, _, _ string) ([]*common.RoleAssignment, error) {
 	return nil, nil
 }
-func (m *MockRBACStore) Initialize(ctx context.Context) error { return nil }
-func (m *MockRBACStore) Close() error                         { return nil }
+func (m *MockRBACStore) Initialize(_ context.Context) error { return nil }
+func (m *MockRBACStore) Close() error                       { return nil }
 
-type MockRuntimeStore struct{}
-
-// Session Management
-func (m *MockRuntimeStore) CreateSession(ctx context.Context, session *Session) error { return nil }
-func (m *MockRuntimeStore) GetSession(ctx context.Context, sessionID string) (*Session, error) {
-	return &Session{SessionID: sessionID}, nil
-}
-func (m *MockRuntimeStore) UpdateSession(ctx context.Context, sessionID string, session *Session) error {
-	return nil
-}
-func (m *MockRuntimeStore) DeleteSession(ctx context.Context, sessionID string) error { return nil }
-func (m *MockRuntimeStore) ListSessions(ctx context.Context, filters *SessionFilter) ([]*Session, error) {
-	return nil, nil
-}
-
-// Session Lifecycle Management
-func (m *MockRuntimeStore) SetSessionTTL(ctx context.Context, sessionID string, ttl time.Duration) error {
-	return nil
-}
-func (m *MockRuntimeStore) CleanupExpiredSessions(ctx context.Context) (int, error) { return 0, nil }
-func (m *MockRuntimeStore) ListExpiredSessions(ctx context.Context, cutoff time.Time) ([]string, error) {
-	return nil, nil
-}
-
-// Runtime State Management
-func (m *MockRuntimeStore) SetRuntimeState(ctx context.Context, key string, value interface{}) error {
-	return nil
-}
-func (m *MockRuntimeStore) GetRuntimeState(ctx context.Context, key string) (interface{}, error) {
-	return nil, fmt.Errorf("not found")
-}
-func (m *MockRuntimeStore) DeleteRuntimeState(ctx context.Context, key string) error { return nil }
-func (m *MockRuntimeStore) ListRuntimeKeys(ctx context.Context, prefix string) ([]string, error) {
-	return nil, nil
-}
-
-// Batch Operations
-func (m *MockRuntimeStore) CreateSessionsBatch(ctx context.Context, sessions []*Session) error {
-	return nil
-}
-func (m *MockRuntimeStore) DeleteSessionsBatch(ctx context.Context, sessionIDs []string) error {
-	return nil
-}
-
-// Session Queries
-func (m *MockRuntimeStore) GetSessionsByUser(ctx context.Context, userID string) ([]*Session, error) {
-	return nil, nil
-}
-func (m *MockRuntimeStore) GetSessionsByTenant(ctx context.Context, tenantID string) ([]*Session, error) {
-	return nil, nil
-}
-func (m *MockRuntimeStore) GetSessionsByType(ctx context.Context, sessionType SessionType) ([]*Session, error) {
-	return nil, nil
-}
-func (m *MockRuntimeStore) GetActiveSessionsCount(ctx context.Context) (int64, error) { return 0, nil }
-
-// Health and Maintenance
-func (m *MockRuntimeStore) HealthCheck(ctx context.Context) error { return nil }
-func (m *MockRuntimeStore) GetStats(ctx context.Context) (*RuntimeStoreStats, error) {
-	return &RuntimeStoreStats{}, nil
-}
-func (m *MockRuntimeStore) Vacuum(ctx context.Context) error { return nil }
-
-// MockTenantStore implements TenantStore for testing
+// MockTenantStore implements business.TenantStore for testing
 type MockTenantStore struct{}
 
-func (m *MockTenantStore) CreateTenant(ctx context.Context, tenant *TenantData) error { return nil }
-func (m *MockTenantStore) GetTenant(ctx context.Context, tenantID string) (*TenantData, error) {
-	return &TenantData{ID: tenantID, Name: "Test Tenant"}, nil
+func (m *MockTenantStore) CreateTenant(_ context.Context, _ *business.TenantData) error { return nil }
+func (m *MockTenantStore) GetTenant(_ context.Context, tenantID string) (*business.TenantData, error) {
+	return &business.TenantData{ID: tenantID, Name: "Test Tenant"}, nil
 }
-func (m *MockTenantStore) UpdateTenant(ctx context.Context, tenant *TenantData) error { return nil }
-func (m *MockTenantStore) DeleteTenant(ctx context.Context, tenantID string) error    { return nil }
-func (m *MockTenantStore) ListTenants(ctx context.Context, filter *TenantFilter) ([]*TenantData, error) {
+func (m *MockTenantStore) UpdateTenant(_ context.Context, _ *business.TenantData) error { return nil }
+func (m *MockTenantStore) DeleteTenant(_ context.Context, _ string) error               { return nil }
+func (m *MockTenantStore) ListTenants(_ context.Context, _ *business.TenantFilter) ([]*business.TenantData, error) {
 	return nil, nil
 }
-func (m *MockTenantStore) GetTenantHierarchy(ctx context.Context, tenantID string) (*TenantHierarchy, error) {
-	return &TenantHierarchy{TenantID: tenantID}, nil
+func (m *MockTenantStore) GetTenantHierarchy(_ context.Context, tenantID string) (*business.TenantHierarchy, error) {
+	return &business.TenantHierarchy{TenantID: tenantID}, nil
 }
-func (m *MockTenantStore) GetChildTenants(ctx context.Context, parentID string) ([]*TenantData, error) {
+func (m *MockTenantStore) GetChildTenants(_ context.Context, _ string) ([]*business.TenantData, error) {
 	return nil, nil
 }
-func (m *MockTenantStore) GetTenantPath(ctx context.Context, tenantID string) ([]string, error) {
+func (m *MockTenantStore) GetTenantPath(_ context.Context, tenantID string) ([]string, error) {
 	return []string{tenantID}, nil
 }
-func (m *MockTenantStore) IsTenantAncestor(ctx context.Context, ancestorID, descendantID string) (bool, error) {
+func (m *MockTenantStore) IsTenantAncestor(_ context.Context, _, _ string) (bool, error) {
 	return false, nil
 }
-func (m *MockTenantStore) Initialize(ctx context.Context) error { return nil }
-func (m *MockTenantStore) Close() error                         { return nil }
+func (m *MockTenantStore) Initialize(_ context.Context) error { return nil }
+func (m *MockTenantStore) Close() error                       { return nil }
 
-// MockRegistrationTokenStore implements RegistrationTokenStore for testing
+// MockRegistrationTokenStore implements business.RegistrationTokenStore for testing
 type MockRegistrationTokenStore struct{}
 
-func (m *MockRegistrationTokenStore) SaveToken(ctx context.Context, token *RegistrationTokenData) error {
+func (m *MockRegistrationTokenStore) SaveToken(_ context.Context, _ *business.RegistrationTokenData) error {
 	return nil
 }
-func (m *MockRegistrationTokenStore) GetToken(ctx context.Context, tokenStr string) (*RegistrationTokenData, error) {
+func (m *MockRegistrationTokenStore) GetToken(_ context.Context, _ string) (*business.RegistrationTokenData, error) {
 	return nil, fmt.Errorf("token not found")
 }
-func (m *MockRegistrationTokenStore) UpdateToken(ctx context.Context, token *RegistrationTokenData) error {
+func (m *MockRegistrationTokenStore) UpdateToken(_ context.Context, _ *business.RegistrationTokenData) error {
 	return nil
 }
-func (m *MockRegistrationTokenStore) DeleteToken(ctx context.Context, tokenStr string) error {
+func (m *MockRegistrationTokenStore) DeleteToken(_ context.Context, _ string) error {
 	return nil
 }
-func (m *MockRegistrationTokenStore) ListTokens(ctx context.Context, filter *RegistrationTokenFilter) ([]*RegistrationTokenData, error) {
+func (m *MockRegistrationTokenStore) ListTokens(_ context.Context, _ *business.RegistrationTokenFilter) ([]*business.RegistrationTokenData, error) {
 	return nil, nil
 }
-func (m *MockRegistrationTokenStore) Initialize(ctx context.Context) error { return nil }
-func (m *MockRegistrationTokenStore) Close() error                         { return nil }
+func (m *MockRegistrationTokenStore) Initialize(_ context.Context) error { return nil }
+func (m *MockRegistrationTokenStore) Close() error                       { return nil }
 
-// MockStewardStore implements StewardStore for testing
+// MockStewardStore implements business.StewardStore for testing
 type MockStewardStore struct{}
 
-func (m *MockStewardStore) RegisterSteward(_ context.Context, _ *StewardRecord) error { return nil }
-func (m *MockStewardStore) UpdateHeartbeat(_ context.Context, _ string) error         { return nil }
-func (m *MockStewardStore) GetSteward(_ context.Context, _ string) (*StewardRecord, error) {
-	return nil, ErrStewardNotFound
+func (m *MockStewardStore) RegisterSteward(_ context.Context, _ *business.StewardRecord) error {
+	return nil
 }
-func (m *MockStewardStore) ListStewards(_ context.Context) ([]*StewardRecord, error) {
+func (m *MockStewardStore) UpdateHeartbeat(_ context.Context, _ string) error { return nil }
+func (m *MockStewardStore) GetSteward(_ context.Context, _ string) (*business.StewardRecord, error) {
+	return nil, business.ErrStewardNotFound
+}
+func (m *MockStewardStore) ListStewards(_ context.Context) ([]*business.StewardRecord, error) {
 	return nil, nil
 }
-func (m *MockStewardStore) ListStewardsByStatus(_ context.Context, _ StewardStatus) ([]*StewardRecord, error) {
+func (m *MockStewardStore) ListStewardsByStatus(_ context.Context, _ business.StewardStatus) ([]*business.StewardRecord, error) {
 	return nil, nil
 }
-func (m *MockStewardStore) UpdateStewardStatus(_ context.Context, _ string, _ StewardStatus) error {
+func (m *MockStewardStore) UpdateStewardStatus(_ context.Context, _ string, _ business.StewardStatus) error {
 	return nil
 }
 func (m *MockStewardStore) DeregisterSteward(_ context.Context, _ string) error { return nil }
-func (m *MockStewardStore) GetStewardsSeen(_ context.Context, _ time.Time) ([]*StewardRecord, error) {
+func (m *MockStewardStore) GetStewardsSeen(_ context.Context, _ time.Time) ([]*business.StewardRecord, error) {
 	return nil, nil
 }
 func (m *MockStewardStore) HealthCheck(_ context.Context) error { return nil }
 func (m *MockStewardStore) Initialize(_ context.Context) error  { return nil }
 func (m *MockStewardStore) Close() error                        { return nil }
 
-// MockSessionStore implements SessionStore for testing
+// MockSessionStore implements business.SessionStore for testing
 type MockSessionStore struct{}
 
-func (m *MockSessionStore) CreateSession(_ context.Context, _ *Session) error { return nil }
-func (m *MockSessionStore) GetSession(_ context.Context, _ string) (*Session, error) {
+func (m *MockSessionStore) CreateSession(_ context.Context, _ *business.Session) error { return nil }
+func (m *MockSessionStore) GetSession(_ context.Context, _ string) (*business.Session, error) {
 	return nil, fmt.Errorf("not found")
 }
-func (m *MockSessionStore) UpdateSession(_ context.Context, _ string, _ *Session) error {
+func (m *MockSessionStore) UpdateSession(_ context.Context, _ string, _ *business.Session) error {
 	return nil
 }
 func (m *MockSessionStore) DeleteSession(_ context.Context, _ string) error { return nil }
-func (m *MockSessionStore) ListSessions(_ context.Context, _ *SessionFilter) ([]*Session, error) {
+func (m *MockSessionStore) ListSessions(_ context.Context, _ *business.SessionFilter) ([]*business.Session, error) {
 	return nil, nil
 }
 func (m *MockSessionStore) SetSessionTTL(_ context.Context, _ string, _ time.Duration) error {
 	return nil
 }
 func (m *MockSessionStore) CleanupExpiredSessions(_ context.Context) (int, error) { return 0, nil }
-func (m *MockSessionStore) GetSessionsByUser(_ context.Context, _ string) ([]*Session, error) {
+func (m *MockSessionStore) GetSessionsByUser(_ context.Context, _ string) ([]*business.Session, error) {
 	return nil, nil
 }
-func (m *MockSessionStore) GetSessionsByTenant(_ context.Context, _ string) ([]*Session, error) {
+func (m *MockSessionStore) GetSessionsByTenant(_ context.Context, _ string) ([]*business.Session, error) {
 	return nil, nil
 }
-func (m *MockSessionStore) GetSessionsByType(_ context.Context, _ SessionType) ([]*Session, error) {
+func (m *MockSessionStore) GetSessionsByType(_ context.Context, _ business.SessionType) ([]*business.Session, error) {
 	return nil, nil
 }
 func (m *MockSessionStore) GetActiveSessionsCount(_ context.Context) (int64, error) { return 0, nil }
 func (m *MockSessionStore) HealthCheck(_ context.Context) error                     { return nil }
-func (m *MockSessionStore) GetStats(_ context.Context) (*RuntimeStoreStats, error) {
-	return &RuntimeStoreStats{}, nil
+func (m *MockSessionStore) GetStats(_ context.Context) (*business.RuntimeStoreStats, error) {
+	return &business.RuntimeStoreStats{}, nil
 }
 func (m *MockSessionStore) Initialize(_ context.Context) error { return nil }
 func (m *MockSessionStore) Close() error                       { return nil }
 
-// MockCommandStore implements CommandStore for testing
+// MockCommandStore implements business.CommandStore for testing
 type MockCommandStore struct{}
 
-func (m *MockCommandStore) CreateCommandRecord(_ context.Context, _ *CommandRecord) error {
+func (m *MockCommandStore) CreateCommandRecord(_ context.Context, _ *business.CommandRecord) error {
 	return nil
 }
-func (m *MockCommandStore) UpdateCommandStatus(_ context.Context, _ string, _ CommandStatus, _ map[string]interface{}, _ string) error {
+func (m *MockCommandStore) UpdateCommandStatus(_ context.Context, _ string, _ business.CommandStatus, _ map[string]interface{}, _ string) error {
 	return nil
 }
-func (m *MockCommandStore) GetCommandRecord(_ context.Context, _ string) (*CommandRecord, error) {
+func (m *MockCommandStore) GetCommandRecord(_ context.Context, _ string) (*business.CommandRecord, error) {
 	return nil, fmt.Errorf("not found")
 }
-func (m *MockCommandStore) ListCommandRecords(_ context.Context, _ *CommandFilter) ([]*CommandRecord, error) {
+func (m *MockCommandStore) ListCommandRecords(_ context.Context, _ *business.CommandFilter) ([]*business.CommandRecord, error) {
 	return nil, nil
 }
-func (m *MockCommandStore) ListCommandsByDevice(_ context.Context, _ string) ([]*CommandRecord, error) {
+func (m *MockCommandStore) ListCommandsByDevice(_ context.Context, _ string) ([]*business.CommandRecord, error) {
 	return nil, nil
 }
-func (m *MockCommandStore) ListCommandsByStatus(_ context.Context, _ CommandStatus) ([]*CommandRecord, error) {
+func (m *MockCommandStore) ListCommandsByStatus(_ context.Context, _ business.CommandStatus) ([]*business.CommandRecord, error) {
 	return nil, nil
 }
-func (m *MockCommandStore) GetCommandAuditTrail(_ context.Context, _ string) ([]*CommandTransition, error) {
+func (m *MockCommandStore) GetCommandAuditTrail(_ context.Context, _ string) ([]*business.CommandTransition, error) {
 	return nil, nil
 }
 func (m *MockCommandStore) PurgeExpiredRecords(_ context.Context, _ time.Time) (int64, error) {
@@ -662,12 +607,12 @@ func TestCreateAllStoresFromConfig(t *testing.T) {
 func TestConfigKeyString(t *testing.T) {
 	tests := []struct {
 		name     string
-		key      *ConfigKey
+		key      *cfgconfig.ConfigKey
 		expected string
 	}{
 		{
 			name: "with scope",
-			key: &ConfigKey{
+			key: &cfgconfig.ConfigKey{
 				TenantID:  "tenant1",
 				Namespace: "templates",
 				Name:      "firewall",
@@ -677,7 +622,7 @@ func TestConfigKeyString(t *testing.T) {
 		},
 		{
 			name: "without scope",
-			key: &ConfigKey{
+			key: &cfgconfig.ConfigKey{
 				TenantID:  "tenant1",
 				Namespace: "certificates",
 				Name:      "root-ca",
@@ -742,7 +687,7 @@ func TestListProvidersV2(t *testing.T) {
 func TestNewStorageManagerFromStores(t *testing.T) {
 	t.Run("composite provider name and nil provider", func(t *testing.T) {
 		sm := NewStorageManagerFromStores(
-			&MockConfigStore{}, &MockAuditStore{}, &MockRBACStore{}, nil,
+			&MockConfigStore{}, &MockAuditStore{}, &MockRBACStore{},
 			&MockTenantStore{}, &MockClientTenantStore{}, &MockRegistrationTokenStore{},
 			nil, nil, nil,
 		)
@@ -756,39 +701,38 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	})
 
 	t.Run("GetCapabilities returns zero value without panic", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		caps := sm.GetCapabilities()
-		// Zero value — no field should be set
+		// Zero value - no field should be set
 		if caps.SupportsTransactions || caps.SupportsVersioning || caps.MaxBatchSize != 0 {
 			t.Errorf("expected zero-value ProviderCapabilities, got %+v", caps)
 		}
 	})
 
 	t.Run("GetVersion returns composite without panic", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if sm.GetVersion() != "composite" {
 			t.Errorf("expected version %q, got %q", "composite", sm.GetVersion())
 		}
 	})
 
 	t.Run("GetProvider returns nil without panic", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if sm.GetProvider() != nil {
 			t.Errorf("expected nil from GetProvider on composite manager")
 		}
 	})
 
-	t.Run("all 10 store parameters accepted and retrievable", func(t *testing.T) {
+	t.Run("all store parameters accepted and retrievable", func(t *testing.T) {
 		configStore := &MockConfigStore{}
 		auditStore := &MockAuditStore{}
 		rbacStore := &MockRBACStore{}
-		runtimeStore := &MockRuntimeStore{}
 		tenantStore := &MockTenantStore{}
 		clientTenantStore := &MockClientTenantStore{}
 		registrationTokenStore := &MockRegistrationTokenStore{}
 
 		sm := NewStorageManagerFromStores(
-			configStore, auditStore, rbacStore, runtimeStore,
+			configStore, auditStore, rbacStore,
 			tenantStore, clientTenantStore, registrationTokenStore,
 			nil, nil, nil,
 		)
@@ -823,7 +767,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	})
 
 	t.Run("nil values allowed for all stores", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		// Should not panic
 		if sm.GetConfigStore() != nil {
 			t.Errorf("expected nil ConfigStore")
@@ -927,11 +871,6 @@ func TestCreateOSSStorageManager(t *testing.T) {
 			t.Errorf("RegistrationTokenStore should not be nil")
 		}
 
-		// RuntimeStore is always nil (being retired per ADR-003)
-		if sm.GetRuntimeStore() != nil {
-			t.Errorf("RuntimeStore should be nil in OSS composite manager")
-		}
-
 		globalRegistry.mutex.Lock()
 		delete(globalRegistry.providers, "flatfile")
 		delete(globalRegistry.providers, "sqlite")
@@ -953,35 +892,32 @@ func (m *MockOSSProvider) Available() (bool, error) {
 }
 func (m *MockOSSProvider) GetCapabilities() ProviderCapabilities { return ProviderCapabilities{} }
 
-func (m *MockOSSProvider) CreateConfigStore(_ map[string]interface{}) (ConfigStore, error) {
+func (m *MockOSSProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	return &MockConfigStore{}, nil
 }
-func (m *MockOSSProvider) CreateAuditStore(_ map[string]interface{}) (AuditStore, error) {
+func (m *MockOSSProvider) CreateAuditStore(_ map[string]interface{}) (business.AuditStore, error) {
 	return &MockAuditStore{}, nil
 }
-func (m *MockOSSProvider) CreateStewardStore(_ map[string]interface{}) (StewardStore, error) {
+func (m *MockOSSProvider) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
 	return &MockStewardStore{}, nil
 }
-func (m *MockOSSProvider) CreateRBACStore(_ map[string]interface{}) (RBACStore, error) {
+func (m *MockOSSProvider) CreateRBACStore(_ map[string]interface{}) (business.RBACStore, error) {
 	return &MockRBACStore{}, nil
 }
-func (m *MockOSSProvider) CreateTenantStore(_ map[string]interface{}) (TenantStore, error) {
+func (m *MockOSSProvider) CreateTenantStore(_ map[string]interface{}) (business.TenantStore, error) {
 	return &MockTenantStore{}, nil
 }
-func (m *MockOSSProvider) CreateClientTenantStore(_ map[string]interface{}) (ClientTenantStore, error) {
+func (m *MockOSSProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
 	return &MockClientTenantStore{}, nil
 }
-func (m *MockOSSProvider) CreateRegistrationTokenStore(_ map[string]interface{}) (RegistrationTokenStore, error) {
+func (m *MockOSSProvider) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
 	return &MockRegistrationTokenStore{}, nil
 }
-func (m *MockOSSProvider) CreateSessionStore(_ map[string]interface{}) (SessionStore, error) {
+func (m *MockOSSProvider) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
 	return &MockSessionStore{}, nil
 }
-func (m *MockOSSProvider) CreateCommandStore(_ map[string]interface{}) (CommandStore, error) {
+func (m *MockOSSProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
 	return &MockCommandStore{}, nil
-}
-func (m *MockOSSProvider) CreateRuntimeStore(_ map[string]interface{}) (RuntimeStore, error) {
-	return nil, ErrNotSupported
 }
 
 // MockOSSProviderWithError is an interface stub that returns an error from a designated Create* method.
@@ -1008,62 +944,59 @@ func (m *MockOSSProviderWithError) mayFail(method string) error {
 	return nil
 }
 
-func (m *MockOSSProviderWithError) CreateConfigStore(_ map[string]interface{}) (ConfigStore, error) {
+func (m *MockOSSProviderWithError) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	if err := m.mayFail("CreateConfigStore"); err != nil {
 		return nil, err
 	}
 	return &MockConfigStore{}, nil
 }
-func (m *MockOSSProviderWithError) CreateAuditStore(_ map[string]interface{}) (AuditStore, error) {
+func (m *MockOSSProviderWithError) CreateAuditStore(_ map[string]interface{}) (business.AuditStore, error) {
 	if err := m.mayFail("CreateAuditStore"); err != nil {
 		return nil, err
 	}
 	return &MockAuditStore{}, nil
 }
-func (m *MockOSSProviderWithError) CreateStewardStore(_ map[string]interface{}) (StewardStore, error) {
+func (m *MockOSSProviderWithError) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
 	if err := m.mayFail("CreateStewardStore"); err != nil {
 		return nil, err
 	}
 	return &MockStewardStore{}, nil
 }
-func (m *MockOSSProviderWithError) CreateRBACStore(_ map[string]interface{}) (RBACStore, error) {
+func (m *MockOSSProviderWithError) CreateRBACStore(_ map[string]interface{}) (business.RBACStore, error) {
 	if err := m.mayFail("CreateRBACStore"); err != nil {
 		return nil, err
 	}
 	return &MockRBACStore{}, nil
 }
-func (m *MockOSSProviderWithError) CreateTenantStore(_ map[string]interface{}) (TenantStore, error) {
+func (m *MockOSSProviderWithError) CreateTenantStore(_ map[string]interface{}) (business.TenantStore, error) {
 	if err := m.mayFail("CreateTenantStore"); err != nil {
 		return nil, err
 	}
 	return &MockTenantStore{}, nil
 }
-func (m *MockOSSProviderWithError) CreateClientTenantStore(_ map[string]interface{}) (ClientTenantStore, error) {
+func (m *MockOSSProviderWithError) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
 	if err := m.mayFail("CreateClientTenantStore"); err != nil {
 		return nil, err
 	}
 	return &MockClientTenantStore{}, nil
 }
-func (m *MockOSSProviderWithError) CreateRegistrationTokenStore(_ map[string]interface{}) (RegistrationTokenStore, error) {
+func (m *MockOSSProviderWithError) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
 	if err := m.mayFail("CreateRegistrationTokenStore"); err != nil {
 		return nil, err
 	}
 	return &MockRegistrationTokenStore{}, nil
 }
-func (m *MockOSSProviderWithError) CreateSessionStore(_ map[string]interface{}) (SessionStore, error) {
+func (m *MockOSSProviderWithError) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
 	if err := m.mayFail("CreateSessionStore"); err != nil {
 		return nil, err
 	}
 	return &MockSessionStore{}, nil
 }
-func (m *MockOSSProviderWithError) CreateCommandStore(_ map[string]interface{}) (CommandStore, error) {
+func (m *MockOSSProviderWithError) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
 	if err := m.mayFail("CreateCommandStore"); err != nil {
 		return nil, err
 	}
 	return &MockCommandStore{}, nil
-}
-func (m *MockOSSProviderWithError) CreateRuntimeStore(_ map[string]interface{}) (RuntimeStore, error) {
-	return nil, ErrNotSupported
 }
 
 func TestCreateOSSStorageManager_StoreCreationErrors(t *testing.T) {

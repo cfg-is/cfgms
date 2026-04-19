@@ -93,13 +93,6 @@ func TestUnsupportedStoresReturnErrNotSupported(t *testing.T) {
 		assert.Contains(t, err.Error(), "not supported")
 	})
 
-	t.Run("CreateRuntimeStore", func(t *testing.T) {
-		store, err := p.CreateRuntimeStore(cfg)
-		assert.Nil(t, store)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not supported")
-	})
-
 	t.Run("CreateTenantStore", func(t *testing.T) {
 		store, err := p.CreateTenantStore(cfg)
 		assert.Nil(t, store)

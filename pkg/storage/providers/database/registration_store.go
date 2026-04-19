@@ -11,7 +11,7 @@ import (
 
 	_ "github.com/lib/pq" // PostgreSQL driver
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // DatabaseRegistrationTokenStore implements RegistrationTokenStore using PostgreSQL for persistence
@@ -101,7 +101,7 @@ func (s *DatabaseRegistrationTokenStore) Close() error {
 
 // SaveToken implements RegistrationTokenStore.SaveToken
 // Uses UPSERT to handle both new tokens and updates to existing tokens
-func (s *DatabaseRegistrationTokenStore) SaveToken(ctx context.Context, token *interfaces.RegistrationTokenData) error {
+func (s *DatabaseRegistrationTokenStore) SaveToken(ctx context.Context, token *business.RegistrationTokenData) error {
 	if token == nil {
 		return fmt.Errorf("token cannot be nil")
 	}
@@ -151,7 +151,7 @@ func (s *DatabaseRegistrationTokenStore) SaveToken(ctx context.Context, token *i
 }
 
 // GetToken implements RegistrationTokenStore.GetToken
-func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr string) (*interfaces.RegistrationTokenData, error) {
+func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr string) (*business.RegistrationTokenData, error) {
 	if tokenStr == "" {
 		return nil, fmt.Errorf("token string cannot be empty")
 	}
@@ -165,7 +165,7 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 		WHERE token = $1
 	`
 
-	var token interfaces.RegistrationTokenData
+	var token business.RegistrationTokenData
 	var expiresAt, usedAt, revokedAt sql.NullTime
 	var group sql.NullString
 	var usedBy sql.NullString
@@ -209,7 +209,7 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 }
 
 // UpdateToken implements RegistrationTokenStore.UpdateToken
-func (s *DatabaseRegistrationTokenStore) UpdateToken(ctx context.Context, token *interfaces.RegistrationTokenData) error {
+func (s *DatabaseRegistrationTokenStore) UpdateToken(ctx context.Context, token *business.RegistrationTokenData) error {
 	if token == nil {
 		return fmt.Errorf("token cannot be nil")
 	}
@@ -284,7 +284,7 @@ func (s *DatabaseRegistrationTokenStore) DeleteToken(ctx context.Context, tokenS
 }
 
 // ListTokens implements RegistrationTokenStore.ListTokens
-func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter *interfaces.RegistrationTokenFilter) ([]*interfaces.RegistrationTokenData, error) {
+func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter *business.RegistrationTokenFilter) ([]*business.RegistrationTokenData, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -335,9 +335,9 @@ func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter 
 	}
 	defer func() { _ = rows.Close() }()
 
-	var tokens []*interfaces.RegistrationTokenData
+	var tokens []*business.RegistrationTokenData
 	for rows.Next() {
-		var token interfaces.RegistrationTokenData
+		var token business.RegistrationTokenData
 		var expiresAt, usedAt, revokedAt sql.NullTime
 		var group sql.NullString
 		var usedBy sql.NullString

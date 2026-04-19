@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// SQLiteRBACStore implements interfaces.RBACStore using SQLite.
+// SQLiteRBACStore implements business.RBACStore using SQLite.
 type SQLiteRBACStore struct {
 	db *sql.DB
 }
@@ -723,4 +723,4 @@ func wrapErr(err error, op string) error {
 }
 
 // ensure SQLiteRBACStore satisfies the interface at compile time
-var _ interfaces.RBACStore = (*SQLiteRBACStore)(nil)
+var _ business.RBACStore = (*SQLiteRBACStore)(nil)

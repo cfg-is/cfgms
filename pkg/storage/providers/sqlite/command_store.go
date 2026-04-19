@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// SQLiteCommandStore implements interfaces.CommandStore using a SQLite database.
+// SQLiteCommandStore implements business.CommandStore using a SQLite database.
 // Command records and their audit trail are stored in the `commands` and
 // `command_transitions` tables, which are created by initializeSchema.
 type SQLiteCommandStore struct {
@@ -20,7 +20,7 @@ type SQLiteCommandStore struct {
 }
 
 // Compile-time assertion that SQLiteCommandStore satisfies CommandStore.
-var _ interfaces.CommandStore = (*SQLiteCommandStore)(nil)
+var _ business.CommandStore = (*SQLiteCommandStore)(nil)
 
 // Initialize is a no-op; schema is applied in openAndInit before this store is returned.
 func (s *SQLiteCommandStore) Initialize(_ context.Context) error { return nil }
@@ -35,15 +35,15 @@ func (s *SQLiteCommandStore) Close() error {
 
 // CreateCommandRecord inserts a new command record with status=pending and records
 // the initial transition in the audit trail.
-func (s *SQLiteCommandStore) CreateCommandRecord(ctx context.Context, record *interfaces.CommandRecord) error {
+func (s *SQLiteCommandStore) CreateCommandRecord(ctx context.Context, record *business.CommandRecord) error {
 	if record == nil {
 		return fmt.Errorf("sqlite: command record cannot be nil")
 	}
 	if record.ID == "" {
-		return interfaces.ErrCommandIDRequired
+		return business.ErrCommandIDRequired
 	}
 	if record.StewardID == "" {
-		return interfaces.ErrCommandStewardIDRequired
+		return business.ErrCommandStewardIDRequired
 	}
 
 	now := nowUTC()
@@ -51,7 +51,7 @@ func (s *SQLiteCommandStore) CreateCommandRecord(ctx context.Context, record *in
 		record.IssuedAt = now
 	}
 	// Always start in pending state.
-	record.Status = interfaces.CommandStatusPending
+	record.Status = business.CommandStatusPending
 
 	payload, err := marshalJSON(record.Payload)
 	if err != nil {
@@ -78,7 +78,7 @@ func (s *SQLiteCommandStore) CreateCommandRecord(ctx context.Context, record *in
 		record.StewardID,
 		record.TenantID,
 		payload,
-		string(interfaces.CommandStatusPending),
+		string(business.CommandStatusPending),
 		formatTime(record.IssuedAt),
 		result,
 		record.ErrorMessage,
@@ -89,7 +89,7 @@ func (s *SQLiteCommandStore) CreateCommandRecord(ctx context.Context, record *in
 	}
 
 	// Record initial transition (creation counts as first audit entry).
-	if err := insertTransition(ctx, tx, record.ID, interfaces.CommandStatusPending, now, ""); err != nil {
+	if err := insertTransition(ctx, tx, record.ID, business.CommandStatusPending, now, ""); err != nil {
 		return err
 	}
 
@@ -101,12 +101,12 @@ func (s *SQLiteCommandStore) CreateCommandRecord(ctx context.Context, record *in
 func (s *SQLiteCommandStore) UpdateCommandStatus(
 	ctx context.Context,
 	id string,
-	status interfaces.CommandStatus,
+	status business.CommandStatus,
 	result map[string]interface{},
 	errorMessage string,
 ) error {
 	if id == "" {
-		return interfaces.ErrCommandIDRequired
+		return business.ErrCommandIDRequired
 	}
 
 	now := nowUTC()
@@ -125,12 +125,12 @@ func (s *SQLiteCommandStore) UpdateCommandStatus(
 	// Build the UPDATE: set timestamps based on the new status.
 	var res sql.Result
 	switch status {
-	case interfaces.CommandStatusExecuting:
+	case business.CommandStatusExecuting:
 		res, err = tx.ExecContext(ctx, `
 			UPDATE commands SET status = ?, started_at = ?, result = ?, error_message = ?
 			WHERE id = ?`,
 			string(status), formatTime(now), resultJSON, errorMessage, id)
-	case interfaces.CommandStatusCompleted, interfaces.CommandStatusFailed, interfaces.CommandStatusCancelled:
+	case business.CommandStatusCompleted, business.CommandStatusFailed, business.CommandStatusCancelled:
 		res, err = tx.ExecContext(ctx, `
 			UPDATE commands SET status = ?, completed_at = ?, result = ?, error_message = ?
 			WHERE id = ?`,
@@ -146,7 +146,7 @@ func (s *SQLiteCommandStore) UpdateCommandStatus(
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return interfaces.ErrCommandNotFound
+		return business.ErrCommandNotFound
 	}
 
 	if err := insertTransition(ctx, tx, id, status, now, errorMessage); err != nil {
@@ -157,9 +157,9 @@ func (s *SQLiteCommandStore) UpdateCommandStatus(
 }
 
 // GetCommandRecord retrieves the current state of a command by ID.
-func (s *SQLiteCommandStore) GetCommandRecord(ctx context.Context, id string) (*interfaces.CommandRecord, error) {
+func (s *SQLiteCommandStore) GetCommandRecord(ctx context.Context, id string) (*business.CommandRecord, error) {
 	if id == "" {
-		return nil, interfaces.ErrCommandIDRequired
+		return nil, business.ErrCommandIDRequired
 	}
 
 	row := s.db.QueryRowContext(ctx, `
@@ -171,7 +171,7 @@ func (s *SQLiteCommandStore) GetCommandRecord(ctx context.Context, id string) (*
 }
 
 // ListCommandRecords returns commands matching the optional filter.
-func (s *SQLiteCommandStore) ListCommandRecords(ctx context.Context, filter *interfaces.CommandFilter) ([]*interfaces.CommandRecord, error) {
+func (s *SQLiteCommandStore) ListCommandRecords(ctx context.Context, filter *business.CommandFilter) ([]*business.CommandRecord, error) {
 	query := `
 		SELECT id, type, steward_id, tenant_id, payload, status,
 		       issued_at, started_at, completed_at, result, error_message, issued_by
@@ -214,7 +214,7 @@ func (s *SQLiteCommandStore) ListCommandRecords(ctx context.Context, filter *int
 	}
 	defer func() { _ = rows.Close() }()
 
-	var records []*interfaces.CommandRecord
+	var records []*business.CommandRecord
 	for rows.Next() {
 		rec, err := scanCommandRow(rows)
 		if err != nil {
@@ -226,20 +226,20 @@ func (s *SQLiteCommandStore) ListCommandRecords(ctx context.Context, filter *int
 }
 
 // ListCommandsByDevice returns all commands dispatched to the given steward.
-func (s *SQLiteCommandStore) ListCommandsByDevice(ctx context.Context, stewardID string) ([]*interfaces.CommandRecord, error) {
-	return s.ListCommandRecords(ctx, &interfaces.CommandFilter{StewardID: stewardID})
+func (s *SQLiteCommandStore) ListCommandsByDevice(ctx context.Context, stewardID string) ([]*business.CommandRecord, error) {
+	return s.ListCommandRecords(ctx, &business.CommandFilter{StewardID: stewardID})
 }
 
 // ListCommandsByStatus returns all commands in the given status.
-func (s *SQLiteCommandStore) ListCommandsByStatus(ctx context.Context, status interfaces.CommandStatus) ([]*interfaces.CommandRecord, error) {
-	return s.ListCommandRecords(ctx, &interfaces.CommandFilter{Status: status})
+func (s *SQLiteCommandStore) ListCommandsByStatus(ctx context.Context, status business.CommandStatus) ([]*business.CommandRecord, error) {
+	return s.ListCommandRecords(ctx, &business.CommandFilter{Status: status})
 }
 
 // GetCommandAuditTrail returns all state transitions for the command in
 // chronological order (oldest first).
-func (s *SQLiteCommandStore) GetCommandAuditTrail(ctx context.Context, commandID string) ([]*interfaces.CommandTransition, error) {
+func (s *SQLiteCommandStore) GetCommandAuditTrail(ctx context.Context, commandID string) ([]*business.CommandTransition, error) {
 	if commandID == "" {
-		return nil, interfaces.ErrCommandIDRequired
+		return nil, business.ErrCommandIDRequired
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
@@ -252,14 +252,14 @@ func (s *SQLiteCommandStore) GetCommandAuditTrail(ctx context.Context, commandID
 	}
 	defer func() { _ = rows.Close() }()
 
-	var transitions []*interfaces.CommandTransition
+	var transitions []*business.CommandTransition
 	for rows.Next() {
-		var t interfaces.CommandTransition
+		var t business.CommandTransition
 		var tsStr, statusStr string
 		if err := rows.Scan(&t.CommandID, &statusStr, &tsStr, &t.ErrorMessage); err != nil {
 			return nil, fmt.Errorf("sqlite: failed to scan transition: %w", err)
 		}
-		t.Status = interfaces.CommandStatus(statusStr)
+		t.Status = business.CommandStatus(statusStr)
 		t.Timestamp = parseTime(tsStr)
 		transitions = append(transitions, &t)
 	}
@@ -333,7 +333,7 @@ func (s *SQLiteCommandStore) HealthCheck(ctx context.Context) error {
 // ---- internal helpers -------------------------------------------------------
 
 // insertTransition appends a single row to command_transitions within tx.
-func insertTransition(ctx context.Context, tx *sql.Tx, commandID string, status interfaces.CommandStatus, ts time.Time, errorMessage string) error {
+func insertTransition(ctx context.Context, tx *sql.Tx, commandID string, status business.CommandStatus, ts time.Time, errorMessage string) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO command_transitions (command_id, status, timestamp, error_message)
 		VALUES (?, ?, ?, ?)`,
@@ -345,8 +345,8 @@ func insertTransition(ctx context.Context, tx *sql.Tx, commandID string, status 
 }
 
 // scanCommandRecord scans a *sql.Row (single QueryRow result) into a CommandRecord.
-func scanCommandRecord(row *sql.Row) (*interfaces.CommandRecord, error) {
-	var rec interfaces.CommandRecord
+func scanCommandRecord(row *sql.Row) (*business.CommandRecord, error) {
+	var rec business.CommandRecord
 	var payloadStr, statusStr, issuedAtStr, resultStr string
 	var startedAt, completedAt sql.NullString
 
@@ -357,7 +357,7 @@ func scanCommandRecord(row *sql.Row) (*interfaces.CommandRecord, error) {
 		&resultStr, &rec.ErrorMessage, &rec.IssuedBy,
 	)
 	if err == sql.ErrNoRows {
-		return nil, interfaces.ErrCommandNotFound
+		return nil, business.ErrCommandNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to scan command record: %w", err)
@@ -366,8 +366,8 @@ func scanCommandRecord(row *sql.Row) (*interfaces.CommandRecord, error) {
 }
 
 // scanCommandRow scans a *sql.Rows (multi-row Query result) into a CommandRecord.
-func scanCommandRow(rows *sql.Rows) (*interfaces.CommandRecord, error) {
-	var rec interfaces.CommandRecord
+func scanCommandRow(rows *sql.Rows) (*business.CommandRecord, error) {
+	var rec business.CommandRecord
 	var payloadStr, statusStr, issuedAtStr, resultStr string
 	var startedAt, completedAt sql.NullString
 
@@ -384,12 +384,12 @@ func scanCommandRow(rows *sql.Rows) (*interfaces.CommandRecord, error) {
 
 // populateCommandRecord deserialises JSON columns and nullable timestamps.
 func populateCommandRecord(
-	rec *interfaces.CommandRecord,
+	rec *business.CommandRecord,
 	payloadStr, statusStr, issuedAtStr string,
 	startedAt, completedAt sql.NullString,
 	resultStr string,
-) (*interfaces.CommandRecord, error) {
-	rec.Status = interfaces.CommandStatus(statusStr)
+) (*business.CommandRecord, error) {
+	rec.Status = business.CommandStatus(statusStr)
 	rec.IssuedAt = parseTime(issuedAtStr)
 	rec.StartedAt = parseNullTime(startedAt)
 	rec.CompletedAt = parseNullTime(completedAt)

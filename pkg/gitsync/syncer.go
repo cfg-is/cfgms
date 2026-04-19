@@ -16,7 +16,7 @@ import (
 	gogithttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // SyncState represents the current state of a scope sync.
@@ -43,7 +43,7 @@ type ScopeStatus struct {
 // any git origin.
 type Syncer struct {
 	mu            sync.RWMutex
-	store         interfaces.ConfigStore
+	store         cfgconfig.ConfigStore
 	bindings      *BindingStore
 	workDir       string // local directory for cloned repos
 	logger        logging.Logger
@@ -80,7 +80,7 @@ func WithSyncNotify(ch chan<- struct{}) Option {
 // created if it does not already exist. Optional functional options (see
 // WithTickerFunc, WithSyncNotify) may be provided for testing.
 func NewSyncer(
-	store interfaces.ConfigStore,
+	store cfgconfig.ConfigStore,
 	bindings *BindingStore,
 	workDir string,
 	logger logging.Logger,
@@ -339,18 +339,18 @@ func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha
 		}
 
 		name := dirEntry.Name()
-		var format interfaces.ConfigFormat
+		var format cfgconfig.ConfigFormat
 		var configName string
 
 		switch {
 		case strings.HasSuffix(name, ".yaml"):
-			format = interfaces.ConfigFormatYAML
+			format = cfgconfig.ConfigFormatYAML
 			configName = strings.TrimSuffix(name, ".yaml")
 		case strings.HasSuffix(name, ".yml"):
-			format = interfaces.ConfigFormatYAML
+			format = cfgconfig.ConfigFormatYAML
 			configName = strings.TrimSuffix(name, ".yml")
 		case strings.HasSuffix(name, ".json"):
-			format = interfaces.ConfigFormatJSON
+			format = cfgconfig.ConfigFormatJSON
 			configName = strings.TrimSuffix(name, ".json")
 		default:
 			continue // skip non-config files
@@ -361,8 +361,8 @@ func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha
 			return fmt.Errorf("gitsync: failed to read config file %s: %w", name, readErr)
 		}
 
-		configEntry := &interfaces.ConfigEntry{
-			Key: &interfaces.ConfigKey{
+		configEntry := &cfgconfig.ConfigEntry{
+			Key: &cfgconfig.ConfigKey{
 				TenantID:  b.TenantPath,
 				Namespace: b.Namespace,
 				Name:      configName,

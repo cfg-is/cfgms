@@ -11,17 +11,17 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // WorkflowStore handles workflow storage using the global storage provider system
 type WorkflowStore struct {
-	configStore interfaces.ConfigStore
+	configStore cfgconfig.ConfigStore
 	tenantID    string
 }
 
 // NewWorkflowStore creates a new workflow store
-func NewWorkflowStore(configStore interfaces.ConfigStore, tenantID string) *WorkflowStore {
+func NewWorkflowStore(configStore cfgconfig.ConfigStore, tenantID string) *WorkflowStore {
 	return &WorkflowStore{
 		configStore: configStore,
 		tenantID:    tenantID,
@@ -37,7 +37,7 @@ const (
 
 // StoreWorkflow stores a versioned workflow
 func (ws *WorkflowStore) StoreWorkflow(ctx context.Context, workflow *VersionedWorkflow) error {
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowNamespace,
 		Name:      workflow.Name,
@@ -49,10 +49,10 @@ func (ws *WorkflowStore) StoreWorkflow(ctx context.Context, workflow *VersionedW
 		return fmt.Errorf("failed to marshal workflow: %w", err)
 	}
 
-	entry := &interfaces.ConfigEntry{
+	entry := &cfgconfig.ConfigEntry{
 		Key:    key,
 		Data:   data,
-		Format: interfaces.ConfigFormatYAML,
+		Format: cfgconfig.ConfigFormatYAML,
 		Metadata: map[string]interface{}{
 			"workflow_version": workflow.SemanticVersion.String(),
 			"workflow_name":    workflow.Name,
@@ -68,7 +68,7 @@ func (ws *WorkflowStore) StoreWorkflow(ctx context.Context, workflow *VersionedW
 
 // GetWorkflow retrieves a specific version of a workflow
 func (ws *WorkflowStore) GetWorkflow(ctx context.Context, name string, version SemanticVersion) (*VersionedWorkflow, error) {
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowNamespace,
 		Name:      name,
@@ -112,7 +112,7 @@ func (ws *WorkflowStore) GetLatestWorkflow(ctx context.Context, name string) (*V
 
 // ListWorkflowVersions lists all versions of a workflow, sorted by version (latest first)
 func (ws *WorkflowStore) ListWorkflowVersions(ctx context.Context, name string) ([]*VersionedWorkflow, error) {
-	filter := &interfaces.ConfigFilter{
+	filter := &cfgconfig.ConfigFilter{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowNamespace,
 		Names:     []string{name},
@@ -144,7 +144,7 @@ func (ws *WorkflowStore) ListWorkflowVersions(ctx context.Context, name string) 
 
 // ListWorkflows lists all workflows (latest version of each)
 func (ws *WorkflowStore) ListWorkflows(ctx context.Context) ([]*VersionedWorkflow, error) {
-	filter := &interfaces.ConfigFilter{
+	filter := &cfgconfig.ConfigFilter{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowNamespace,
 		SortBy:    "updated_at",
@@ -180,7 +180,7 @@ func (ws *WorkflowStore) ListWorkflows(ctx context.Context) ([]*VersionedWorkflo
 
 // DeleteWorkflow deletes a specific version of a workflow
 func (ws *WorkflowStore) DeleteWorkflow(ctx context.Context, name string, version SemanticVersion) error {
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowNamespace,
 		Name:      name,
@@ -248,7 +248,7 @@ func (ws *WorkflowStore) DeprecateWorkflow(ctx context.Context, name string, ver
 
 // StoreTemplate stores a workflow template
 func (ws *WorkflowStore) StoreTemplate(ctx context.Context, template *WorkflowTemplate) error {
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowTemplateNamespace,
 		Name:      template.ID,
@@ -260,10 +260,10 @@ func (ws *WorkflowStore) StoreTemplate(ctx context.Context, template *WorkflowTe
 		return fmt.Errorf("failed to marshal template: %w", err)
 	}
 
-	entry := &interfaces.ConfigEntry{
+	entry := &cfgconfig.ConfigEntry{
 		Key:    key,
 		Data:   data,
-		Format: interfaces.ConfigFormatYAML,
+		Format: cfgconfig.ConfigFormatYAML,
 		Metadata: map[string]interface{}{
 			"template_id":      template.ID,
 			"template_name":    template.Name,
@@ -281,7 +281,7 @@ func (ws *WorkflowStore) StoreTemplate(ctx context.Context, template *WorkflowTe
 
 // GetTemplate retrieves a workflow template
 func (ws *WorkflowStore) GetTemplate(ctx context.Context, id string, version SemanticVersion) (*WorkflowTemplate, error) {
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowTemplateNamespace,
 		Name:      id,
@@ -303,7 +303,7 @@ func (ws *WorkflowStore) GetTemplate(ctx context.Context, id string, version Sem
 
 // GetLatestTemplate retrieves the latest version of a template
 func (ws *WorkflowStore) GetLatestTemplate(ctx context.Context, id string) (*WorkflowTemplate, error) {
-	filter := &interfaces.ConfigFilter{
+	filter := &cfgconfig.ConfigFilter{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowTemplateNamespace,
 		Names:     []string{id},
@@ -331,7 +331,7 @@ func (ws *WorkflowStore) GetLatestTemplate(ctx context.Context, id string) (*Wor
 
 // ListTemplates lists all workflow templates
 func (ws *WorkflowStore) ListTemplates(ctx context.Context) ([]*WorkflowTemplate, error) {
-	filter := &interfaces.ConfigFilter{
+	filter := &cfgconfig.ConfigFilter{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowTemplateNamespace,
 		SortBy:    "updated_at",
@@ -369,7 +369,7 @@ func (ws *WorkflowStore) ListTemplates(ctx context.Context) ([]*WorkflowTemplate
 
 // StoreInstance stores a workflow template instance
 func (ws *WorkflowStore) StoreInstance(ctx context.Context, instance *TemplateInstance) error {
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowInstanceNamespace,
 		Name:      instance.ID,
@@ -380,10 +380,10 @@ func (ws *WorkflowStore) StoreInstance(ctx context.Context, instance *TemplateIn
 		return fmt.Errorf("failed to marshal instance: %w", err)
 	}
 
-	entry := &interfaces.ConfigEntry{
+	entry := &cfgconfig.ConfigEntry{
 		Key:    key,
 		Data:   data,
-		Format: interfaces.ConfigFormatJSON,
+		Format: cfgconfig.ConfigFormatJSON,
 		Metadata: map[string]interface{}{
 			"instance_id":   instance.ID,
 			"template_id":   instance.TemplateID,
@@ -399,7 +399,7 @@ func (ws *WorkflowStore) StoreInstance(ctx context.Context, instance *TemplateIn
 
 // GetInstance retrieves a workflow template instance
 func (ws *WorkflowStore) GetInstance(ctx context.Context, id string) (*TemplateInstance, error) {
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowInstanceNamespace,
 		Name:      id,
@@ -420,7 +420,7 @@ func (ws *WorkflowStore) GetInstance(ctx context.Context, id string) (*TemplateI
 
 // ListInstances lists all workflow template instances
 func (ws *WorkflowStore) ListInstances(ctx context.Context, templateID string) ([]*TemplateInstance, error) {
-	filter := &interfaces.ConfigFilter{
+	filter := &cfgconfig.ConfigFilter{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowInstanceNamespace,
 		SortBy:    "created_at",
@@ -452,7 +452,7 @@ func (ws *WorkflowStore) ListInstances(ctx context.Context, templateID string) (
 
 // GetWorkflowHistory returns the complete version history of a workflow
 func (ws *WorkflowStore) GetWorkflowHistory(ctx context.Context, name string, limit int) ([]*VersionedWorkflow, error) {
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  ws.tenantID,
 		Namespace: WorkflowNamespace,
 		Name:      name,

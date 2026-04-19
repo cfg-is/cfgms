@@ -7,7 +7,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // Well-known metadata keys used in TenantData.Metadata to declare config source routing.
@@ -59,7 +60,7 @@ type ConfigSourceInfo struct {
 	InheritedFrom string
 }
 
-// ConfigSourceRouter implements interfaces.ConfigStore and routes each config
+// ConfigSourceRouter implements cfgconfig.ConfigStore and routes each config
 // operation to the appropriate per-tenant store.
 //
 // Phase 1 behavior: all tenants route to the controller's default store.
@@ -72,15 +73,15 @@ type ConfigSourceInfo struct {
 //	InheritanceResolver → ConfigSourceRouter → ConfigStore (per-tenant)
 type ConfigSourceRouter struct {
 	// defaultStore is the controller's storage provider, used for all phase-1 routing.
-	defaultStore interfaces.ConfigStore
+	defaultStore cfgconfig.ConfigStore
 	// tenantStore resolves tenant metadata and hierarchy paths.
-	tenantStore interfaces.TenantStore
+	tenantStore business.TenantStore
 }
 
 // NewConfigSourceRouter creates a ConfigSourceRouter backed by defaultStore.
 // All config operations are forwarded to defaultStore until Phase 2 adds
 // external git backing stores.
-func NewConfigSourceRouter(defaultStore interfaces.ConfigStore, tenantStore interfaces.TenantStore) *ConfigSourceRouter {
+func NewConfigSourceRouter(defaultStore cfgconfig.ConfigStore, tenantStore business.TenantStore) *ConfigSourceRouter {
 	return &ConfigSourceRouter{
 		defaultStore: defaultStore,
 		tenantStore:  tenantStore,
@@ -146,40 +147,40 @@ func (r *ConfigSourceRouter) GetEffectiveConfigSource(ctx context.Context, tenan
 // storeFor returns the ConfigStore to use for the given tenantID.
 // In Phase 1 this always returns the default store.
 // Phase 2 will swap in a git-backed store when the effective source is "git".
-func (r *ConfigSourceRouter) storeFor(_ context.Context, _ string) interfaces.ConfigStore {
+func (r *ConfigSourceRouter) storeFor(_ context.Context, _ string) cfgconfig.ConfigStore {
 	// Phase 1: always use the default (controller) store.
 	return r.defaultStore
 }
 
 // -----------------------------------------------------------------------
-// interfaces.ConfigStore implementation — all methods delegate to storeFor.
+// cfgconfig.ConfigStore implementation — all methods delegate to storeFor.
 // -----------------------------------------------------------------------
 
-func (r *ConfigSourceRouter) StoreConfig(ctx context.Context, config *interfaces.ConfigEntry) error {
+func (r *ConfigSourceRouter) StoreConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
 	return r.storeFor(ctx, config.Key.TenantID).StoreConfig(ctx, config)
 }
 
-func (r *ConfigSourceRouter) GetConfig(ctx context.Context, key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
+func (r *ConfigSourceRouter) GetConfig(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	return r.storeFor(ctx, key.TenantID).GetConfig(ctx, key)
 }
 
-func (r *ConfigSourceRouter) DeleteConfig(ctx context.Context, key *interfaces.ConfigKey) error {
+func (r *ConfigSourceRouter) DeleteConfig(ctx context.Context, key *cfgconfig.ConfigKey) error {
 	return r.storeFor(ctx, key.TenantID).DeleteConfig(ctx, key)
 }
 
-func (r *ConfigSourceRouter) ListConfigs(ctx context.Context, filter *interfaces.ConfigFilter) ([]*interfaces.ConfigEntry, error) {
+func (r *ConfigSourceRouter) ListConfigs(ctx context.Context, filter *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
 	return r.storeFor(ctx, filter.TenantID).ListConfigs(ctx, filter)
 }
 
-func (r *ConfigSourceRouter) GetConfigHistory(ctx context.Context, key *interfaces.ConfigKey, limit int) ([]*interfaces.ConfigEntry, error) {
+func (r *ConfigSourceRouter) GetConfigHistory(ctx context.Context, key *cfgconfig.ConfigKey, limit int) ([]*cfgconfig.ConfigEntry, error) {
 	return r.storeFor(ctx, key.TenantID).GetConfigHistory(ctx, key, limit)
 }
 
-func (r *ConfigSourceRouter) GetConfigVersion(ctx context.Context, key *interfaces.ConfigKey, version int64) (*interfaces.ConfigEntry, error) {
+func (r *ConfigSourceRouter) GetConfigVersion(ctx context.Context, key *cfgconfig.ConfigKey, version int64) (*cfgconfig.ConfigEntry, error) {
 	return r.storeFor(ctx, key.TenantID).GetConfigVersion(ctx, key, version)
 }
 
-func (r *ConfigSourceRouter) StoreConfigBatch(ctx context.Context, configs []*interfaces.ConfigEntry) error {
+func (r *ConfigSourceRouter) StoreConfigBatch(ctx context.Context, configs []*cfgconfig.ConfigEntry) error {
 	if len(configs) == 0 {
 		return nil
 	}
@@ -187,18 +188,18 @@ func (r *ConfigSourceRouter) StoreConfigBatch(ctx context.Context, configs []*in
 	return r.storeFor(ctx, configs[0].Key.TenantID).StoreConfigBatch(ctx, configs)
 }
 
-func (r *ConfigSourceRouter) DeleteConfigBatch(ctx context.Context, keys []*interfaces.ConfigKey) error {
+func (r *ConfigSourceRouter) DeleteConfigBatch(ctx context.Context, keys []*cfgconfig.ConfigKey) error {
 	if len(keys) == 0 {
 		return nil
 	}
 	return r.storeFor(ctx, keys[0].TenantID).DeleteConfigBatch(ctx, keys)
 }
 
-func (r *ConfigSourceRouter) ResolveConfigWithInheritance(ctx context.Context, key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
+func (r *ConfigSourceRouter) ResolveConfigWithInheritance(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	return r.storeFor(ctx, key.TenantID).ResolveConfigWithInheritance(ctx, key)
 }
 
-func (r *ConfigSourceRouter) ValidateConfig(ctx context.Context, config *interfaces.ConfigEntry) error {
+func (r *ConfigSourceRouter) ValidateConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
 	tenantID := ""
 	if config.Key != nil {
 		tenantID = config.Key.TenantID
@@ -206,6 +207,6 @@ func (r *ConfigSourceRouter) ValidateConfig(ctx context.Context, config *interfa
 	return r.storeFor(ctx, tenantID).ValidateConfig(ctx, config)
 }
 
-func (r *ConfigSourceRouter) GetConfigStats(ctx context.Context) (*interfaces.ConfigStats, error) {
+func (r *ConfigSourceRouter) GetConfigStats(ctx context.Context) (*cfgconfig.ConfigStats, error) {
 	return r.defaultStore.GetConfigStats(ctx)
 }

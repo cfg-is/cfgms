@@ -16,7 +16,7 @@ import (
 
 	"github.com/lib/pq"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // DatabaseAuditStore implements AuditStore using PostgreSQL for persistence
@@ -101,7 +101,7 @@ func (s *DatabaseAuditStore) initializeSchema() error {
 }
 
 // StoreAuditEntry stores an audit entry in the database
-func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *interfaces.AuditEntry) error {
+func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *business.AuditEntry) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -125,10 +125,10 @@ func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *interfa
 		entry.Timestamp = time.Now()
 	}
 	if entry.Severity == "" {
-		entry.Severity = interfaces.AuditSeverityLow
+		entry.Severity = business.AuditSeverityLow
 	}
 	if entry.UserType == "" {
-		entry.UserType = interfaces.AuditUserTypeHuman
+		entry.UserType = business.AuditUserTypeHuman
 	}
 	if entry.Version == "" {
 		entry.Version = "1.0"
@@ -214,7 +214,7 @@ func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *interfa
 }
 
 // GetAuditEntry retrieves a specific audit entry by ID
-func (s *DatabaseAuditStore) GetAuditEntry(ctx context.Context, id string) (*interfaces.AuditEntry, error) {
+func (s *DatabaseAuditStore) GetAuditEntry(ctx context.Context, id string) (*business.AuditEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -232,7 +232,7 @@ func (s *DatabaseAuditStore) GetAuditEntry(ctx context.Context, id string) (*int
 	entry, err := s.scanAuditEntry(row)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, interfaces.ErrAuditNotFound
+			return nil, business.ErrAuditNotFound
 		}
 		return nil, fmt.Errorf("failed to get audit entry: %w", err)
 	}
@@ -241,7 +241,7 @@ func (s *DatabaseAuditStore) GetAuditEntry(ctx context.Context, id string) (*int
 }
 
 // ListAuditEntries lists audit entries matching the filter with optimized database queries
-func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *interfaces.AuditFilter) ([]*interfaces.AuditEntry, error) {
+func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *business.AuditFilter) ([]*business.AuditEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -267,7 +267,7 @@ func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *inter
 	}
 	defer func() { _ = rows.Close() }()
 
-	var entries []*interfaces.AuditEntry
+	var entries []*business.AuditEntry
 
 	for rows.Next() {
 		entry, err := s.scanAuditEntry(rows)
@@ -285,7 +285,7 @@ func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *inter
 }
 
 // StoreAuditBatch stores multiple audit entries efficiently in a single transaction
-func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*interfaces.AuditEntry) error {
+func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*business.AuditEntry) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -328,10 +328,10 @@ func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*int
 			entry.Timestamp = time.Now()
 		}
 		if entry.Severity == "" {
-			entry.Severity = interfaces.AuditSeverityLow
+			entry.Severity = business.AuditSeverityLow
 		}
 		if entry.UserType == "" {
-			entry.UserType = interfaces.AuditUserTypeHuman
+			entry.UserType = business.AuditUserTypeHuman
 		}
 		if entry.Version == "" {
 			entry.Version = "1.0"
@@ -407,8 +407,8 @@ func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*int
 }
 
 // GetAuditsByUser gets audit entries for a specific user
-func (s *DatabaseAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	filter := &interfaces.AuditFilter{
+func (s *DatabaseAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	filter := &business.AuditFilter{
 		UserIDs:   []string{userID},
 		TimeRange: timeRange,
 		SortBy:    "timestamp",
@@ -418,8 +418,8 @@ func (s *DatabaseAuditStore) GetAuditsByUser(ctx context.Context, userID string,
 }
 
 // GetAuditsByResource gets audit entries for a specific resource
-func (s *DatabaseAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	filter := &interfaces.AuditFilter{
+func (s *DatabaseAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	filter := &business.AuditFilter{
 		ResourceTypes: []string{resourceType},
 		ResourceIDs:   []string{resourceID},
 		TimeRange:     timeRange,
@@ -430,8 +430,8 @@ func (s *DatabaseAuditStore) GetAuditsByResource(ctx context.Context, resourceTy
 }
 
 // GetAuditsByAction gets audit entries for a specific action
-func (s *DatabaseAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	filter := &interfaces.AuditFilter{
+func (s *DatabaseAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	filter := &business.AuditFilter{
 		Actions:   []string{action},
 		TimeRange: timeRange,
 		SortBy:    "timestamp",
@@ -441,9 +441,9 @@ func (s *DatabaseAuditStore) GetAuditsByAction(ctx context.Context, action strin
 }
 
 // GetFailedActions gets recent failed actions for security monitoring
-func (s *DatabaseAuditStore) GetFailedActions(ctx context.Context, timeRange *interfaces.TimeRange, limit int) ([]*interfaces.AuditEntry, error) {
-	filter := &interfaces.AuditFilter{
-		Results:   []interfaces.AuditResult{interfaces.AuditResultFailure, interfaces.AuditResultError, interfaces.AuditResultDenied},
+func (s *DatabaseAuditStore) GetFailedActions(ctx context.Context, timeRange *business.TimeRange, limit int) ([]*business.AuditEntry, error) {
+	filter := &business.AuditFilter{
+		Results:   []business.AuditResult{business.AuditResultFailure, business.AuditResultError, business.AuditResultDenied},
 		TimeRange: timeRange,
 		Limit:     limit,
 		SortBy:    "timestamp",
@@ -453,11 +453,11 @@ func (s *DatabaseAuditStore) GetFailedActions(ctx context.Context, timeRange *in
 }
 
 // GetSuspiciousActivity gets suspicious activity for a tenant
-func (s *DatabaseAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	filter := &interfaces.AuditFilter{
+func (s *DatabaseAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	filter := &business.AuditFilter{
 		TenantID:   tenantID,
-		EventTypes: []interfaces.AuditEventType{interfaces.AuditEventSecurityEvent},
-		Severities: []interfaces.AuditSeverity{interfaces.AuditSeverityHigh, interfaces.AuditSeverityCritical},
+		EventTypes: []business.AuditEventType{business.AuditEventSecurityEvent},
+		Severities: []business.AuditSeverity{business.AuditSeverityHigh, business.AuditSeverityCritical},
 		TimeRange:  timeRange,
 		SortBy:     "timestamp",
 		Order:      "desc",
@@ -466,11 +466,11 @@ func (s *DatabaseAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID
 }
 
 // GetAuditStats returns statistics about stored audit entries using optimized database queries
-func (s *DatabaseAuditStore) GetAuditStats(ctx context.Context) (*interfaces.AuditStats, error) {
+func (s *DatabaseAuditStore) GetAuditStats(ctx context.Context) (*business.AuditStats, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
-	stats := &interfaces.AuditStats{
+	stats := &business.AuditStats{
 		EntriesByTenant:   make(map[string]int64),
 		EntriesByType:     make(map[string]int64),
 		EntriesByResult:   make(map[string]int64),
@@ -587,21 +587,21 @@ func (s *DatabaseAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate t
 // Helper methods
 
 // validateAuditEntry validates an audit entry
-func (s *DatabaseAuditStore) validateAuditEntry(entry *interfaces.AuditEntry) error {
+func (s *DatabaseAuditStore) validateAuditEntry(entry *business.AuditEntry) error {
 	if entry.TenantID == "" {
-		return interfaces.ErrTenantIDRequired
+		return business.ErrTenantIDRequired
 	}
 	if entry.UserID == "" {
-		return interfaces.ErrUserIDRequired
+		return business.ErrUserIDRequired
 	}
 	if entry.Action == "" {
-		return interfaces.ErrActionRequired
+		return business.ErrActionRequired
 	}
 	if entry.ResourceType == "" {
-		return interfaces.ErrResourceTypeRequired
+		return business.ErrResourceTypeRequired
 	}
 	if entry.ResourceID == "" {
-		return interfaces.ErrResourceIDRequired
+		return business.ErrResourceIDRequired
 	}
 	if entry.Source == "" {
 		return fmt.Errorf("audit entry source is required")
@@ -611,7 +611,7 @@ func (s *DatabaseAuditStore) validateAuditEntry(entry *interfaces.AuditEntry) er
 }
 
 // generateAuditID generates a unique ID for an audit entry
-func (s *DatabaseAuditStore) generateAuditID(entry *interfaces.AuditEntry) string {
+func (s *DatabaseAuditStore) generateAuditID(entry *business.AuditEntry) string {
 	// Create a deterministic ID based on entry contents and timestamp
 	data := fmt.Sprintf("%s-%s-%s-%s-%d",
 		entry.TenantID, entry.UserID, entry.Action, entry.ResourceID, time.Now().UnixNano())
@@ -624,8 +624,8 @@ func (s *DatabaseAuditStore) generateAuditID(entry *interfaces.AuditEntry) strin
 // scanAuditEntry scans an audit entry from a database row
 func (s *DatabaseAuditStore) scanAuditEntry(scanner interface {
 	Scan(dest ...interface{}) error
-}) (*interfaces.AuditEntry, error) {
-	entry := &interfaces.AuditEntry{}
+}) (*business.AuditEntry, error) {
+	entry := &business.AuditEntry{}
 	var eventTypeStr, userTypeStr, resultStr, severityStr string
 	var detailsJSON, changesJSON []byte
 	var tags pq.StringArray
@@ -666,10 +666,10 @@ func (s *DatabaseAuditStore) scanAuditEntry(scanner interface {
 	}
 
 	// Convert string fields to typed enums
-	entry.EventType = interfaces.AuditEventType(eventTypeStr)
-	entry.UserType = interfaces.AuditUserType(userTypeStr)
-	entry.Result = interfaces.AuditResult(resultStr)
-	entry.Severity = interfaces.AuditSeverity(severityStr)
+	entry.EventType = business.AuditEventType(eventTypeStr)
+	entry.UserType = business.AuditUserType(userTypeStr)
+	entry.Result = business.AuditResult(resultStr)
+	entry.Severity = business.AuditSeverity(severityStr)
 	entry.Tags = []string(tags)
 
 	// Convert nullable strings

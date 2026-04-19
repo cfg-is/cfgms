@@ -11,6 +11,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // Ensure OpenBaoSecretStore implements interfaces.LeasedSecret at compile time.
@@ -27,7 +28,7 @@ func (s *OpenBaoSecretStore) LeaseSecret(ctx context.Context, req *interfaces.Le
 		return nil, fmt.Errorf("lease request cannot be nil")
 	}
 	if req.TenantID == "" {
-		return nil, fmt.Errorf("TenantID is required: %w", interfaces.ErrTenantRequired)
+		return nil, fmt.Errorf("TenantID is required: %w", cfgconfig.ErrTenantRequired)
 	}
 	if req.Key == "" {
 		return nil, fmt.Errorf("secret key cannot be empty")

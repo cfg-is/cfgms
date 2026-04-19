@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// Package interfaces defines global storage contracts used by all CFGMS modules
-package interfaces
+// Package business defines business-data storage contracts for CFGMS
+// (tenants, RBAC, sessions, stewards, commands, registration tokens, audit).
+package business
 
 import (
 	"context"

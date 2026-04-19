@@ -19,6 +19,8 @@ import (
 	_ "modernc.org/sqlite" // Pure-Go SQLite driver (CGO-free)
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // Compile-time assertion that SQLiteProvider satisfies StorageProvider.
@@ -168,7 +170,7 @@ func openAndInit(path string) (*sql.DB, error) {
 // ---- Factory methods --------------------------------------------------------
 
 // CreateTenantStore returns a SQLite-backed TenantStore.
-func (p *SQLiteProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+func (p *SQLiteProvider) CreateTenantStore(config map[string]interface{}) (business.TenantStore, error) {
 	db, err := openAndInit(getPath(config))
 	if err != nil {
 		return nil, err
@@ -177,7 +179,7 @@ func (p *SQLiteProvider) CreateTenantStore(config map[string]interface{}) (inter
 }
 
 // CreateClientTenantStore returns a SQLite-backed ClientTenantStore with M365 extension columns.
-func (p *SQLiteProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
+func (p *SQLiteProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
 	db, err := openAndInit(getPath(config))
 	if err != nil {
 		return nil, err
@@ -186,7 +188,7 @@ func (p *SQLiteProvider) CreateClientTenantStore(config map[string]interface{}) 
 }
 
 // CreateAuditStore returns a SQLite-backed AuditStore (append-only).
-func (p *SQLiteProvider) CreateAuditStore(config map[string]interface{}) (interfaces.AuditStore, error) {
+func (p *SQLiteProvider) CreateAuditStore(config map[string]interface{}) (business.AuditStore, error) {
 	db, err := openAndInit(getPath(config))
 	if err != nil {
 		return nil, err
@@ -195,7 +197,7 @@ func (p *SQLiteProvider) CreateAuditStore(config map[string]interface{}) (interf
 }
 
 // CreateRBACStore returns a SQLite-backed RBACStore.
-func (p *SQLiteProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
+func (p *SQLiteProvider) CreateRBACStore(config map[string]interface{}) (business.RBACStore, error) {
 	db, err := openAndInit(getPath(config))
 	if err != nil {
 		return nil, err
@@ -204,7 +206,7 @@ func (p *SQLiteProvider) CreateRBACStore(config map[string]interface{}) (interfa
 }
 
 // CreateRegistrationTokenStore returns a SQLite-backed RegistrationTokenStore.
-func (p *SQLiteProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
+func (p *SQLiteProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	db, err := openAndInit(getPath(config))
 	if err != nil {
 		return nil, err
@@ -213,7 +215,7 @@ func (p *SQLiteProvider) CreateRegistrationTokenStore(config map[string]interfac
 }
 
 // CreateSessionStore returns a SQLite-backed SessionStore (durable Persistent=true sessions only).
-func (p *SQLiteProvider) CreateSessionStore(config map[string]interface{}) (interfaces.SessionStore, error) {
+func (p *SQLiteProvider) CreateSessionStore(config map[string]interface{}) (business.SessionStore, error) {
 	db, err := openAndInit(getPath(config))
 	if err != nil {
 		return nil, err
@@ -223,18 +225,12 @@ func (p *SQLiteProvider) CreateSessionStore(config map[string]interface{}) (inte
 
 // CreateConfigStore is not implemented by the SQLite provider.
 // Config data uses the flat-file provider (OSS) or PostgreSQL (commercial).
-func (p *SQLiteProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
-	return nil, interfaces.ErrNotSupported
-}
-
-// CreateRuntimeStore is not implemented by the SQLite provider.
-// Durable session state is provided by CreateSessionStore; ephemeral state belongs in pkg/cache.
-func (p *SQLiteProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
-	return nil, interfaces.ErrNotSupported
+func (p *SQLiteProvider) CreateConfigStore(config map[string]interface{}) (cfgconfig.ConfigStore, error) {
+	return nil, business.ErrNotSupported
 }
 
 // CreateStewardStore returns a SQLite-backed StewardStore for fleet registry persistence.
-func (p *SQLiteProvider) CreateStewardStore(config map[string]interface{}) (interfaces.StewardStore, error) {
+func (p *SQLiteProvider) CreateStewardStore(config map[string]interface{}) (business.StewardStore, error) {
 	db, err := openAndInit(getPath(config))
 	if err != nil {
 		return nil, err
@@ -243,7 +239,7 @@ func (p *SQLiteProvider) CreateStewardStore(config map[string]interface{}) (inte
 }
 
 // CreateCommandStore returns a SQLite-backed CommandStore for durable command dispatch state.
-func (p *SQLiteProvider) CreateCommandStore(config map[string]interface{}) (interfaces.CommandStore, error) {
+func (p *SQLiteProvider) CreateCommandStore(config map[string]interface{}) (business.CommandStore, error) {
 	db, err := openAndInit(getPath(config))
 	if err != nil {
 		return nil, err

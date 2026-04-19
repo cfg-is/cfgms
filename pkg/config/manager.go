@@ -13,17 +13,18 @@ import (
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // Manager handles all configuration operations using the ConfigStore interface
 // This is the Epic 6 compliant configuration manager that replaces in-memory storage
 type Manager struct {
-	configStore interfaces.ConfigStore
+	configStore cfgconfig.ConfigStore
 }
 
 // NewManager creates a new configuration manager with the provided ConfigStore
 // This follows the Epic 6 requirement of using only storage provider interfaces
-func NewManager(configStore interfaces.ConfigStore) *Manager {
+func NewManager(configStore cfgconfig.ConfigStore) *Manager {
 	return &Manager{
 		configStore: configStore,
 	}
@@ -49,14 +50,14 @@ func (m *Manager) StoreConfiguration(ctx context.Context, tenantID, stewardID st
 	checksum := fmt.Sprintf("%x", sha256.Sum256(configData))
 
 	// Create config entry
-	configEntry := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	configEntry := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  tenantID,
 			Namespace: "stewards",
 			Name:      stewardID,
 		},
 		Data:      configData,
-		Format:    interfaces.ConfigFormatYAML,
+		Format:    cfgconfig.ConfigFormatYAML,
 		Checksum:  checksum,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
@@ -73,7 +74,7 @@ func (m *Manager) StoreConfiguration(ctx context.Context, tenantID, stewardID st
 // GetConfiguration retrieves a configuration from persistent storage
 func (m *Manager) GetConfiguration(ctx context.Context, tenantID, stewardID string) (*stewardconfig.StewardConfig, error) {
 	// Create config key
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		Name:      stewardID,
@@ -104,7 +105,7 @@ func (m *Manager) GetConfiguration(ctx context.Context, tenantID, stewardID stri
 // This implements the multi-tenant configuration inheritance model
 func (m *Manager) GetConfigurationWithInheritance(ctx context.Context, tenantID, stewardID string) (*stewardconfig.StewardConfig, error) {
 	// Use storage provider's built-in inheritance resolution
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		Name:      stewardID,
@@ -126,7 +127,7 @@ func (m *Manager) GetConfigurationWithInheritance(ctx context.Context, tenantID,
 
 // DeleteConfiguration removes a steward configuration from persistent storage
 func (m *Manager) DeleteConfiguration(ctx context.Context, tenantID, stewardID string) error {
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		Name:      stewardID,
@@ -137,7 +138,7 @@ func (m *Manager) DeleteConfiguration(ctx context.Context, tenantID, stewardID s
 
 // ListConfigurations lists all configurations for a tenant
 func (m *Manager) ListConfigurations(ctx context.Context, tenantID string) ([]*ConfigurationSummary, error) {
-	filter := &interfaces.ConfigFilter{
+	filter := &cfgconfig.ConfigFilter{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		SortBy:    "updated_at",
@@ -169,7 +170,7 @@ func (m *Manager) ListConfigurations(ctx context.Context, tenantID string) ([]*C
 
 // GetConfigurationHistory retrieves version history for a configuration
 func (m *Manager) GetConfigurationHistory(ctx context.Context, tenantID, stewardID string, limit int) ([]*ConfigurationVersion, error) {
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		Name:      stewardID,
@@ -197,7 +198,7 @@ func (m *Manager) GetConfigurationHistory(ctx context.Context, tenantID, steward
 
 // GetConfigurationVersion retrieves a specific version of a configuration
 func (m *Manager) GetConfigurationVersion(ctx context.Context, tenantID, stewardID string, version int64) (*stewardconfig.StewardConfig, error) {
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		Name:      stewardID,
@@ -230,14 +231,14 @@ func (m *Manager) ValidateConfiguration(ctx context.Context, config *stewardconf
 		return fmt.Errorf("failed to marshal configuration for validation: %w", err)
 	}
 
-	tempEntry := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	tempEntry := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  "validation",
 			Namespace: "stewards",
 			Name:      "temp",
 		},
 		Data:   configData,
-		Format: interfaces.ConfigFormatYAML,
+		Format: cfgconfig.ConfigFormatYAML,
 	}
 
 	// Use storage provider's validation
@@ -246,7 +247,7 @@ func (m *Manager) ValidateConfiguration(ctx context.Context, config *stewardconf
 
 // BatchStoreConfigurations stores multiple configurations atomically
 func (m *Manager) BatchStoreConfigurations(ctx context.Context, configs []*BatchConfigurationEntry) error {
-	var configEntries []*interfaces.ConfigEntry
+	var configEntries []*cfgconfig.ConfigEntry
 
 	for _, batchEntry := range configs {
 		configData, err := yaml.Marshal(batchEntry.Config)
@@ -256,14 +257,14 @@ func (m *Manager) BatchStoreConfigurations(ctx context.Context, configs []*Batch
 
 		checksum := fmt.Sprintf("%x", sha256.Sum256(configData))
 
-		configEntry := &interfaces.ConfigEntry{
-			Key: &interfaces.ConfigKey{
+		configEntry := &cfgconfig.ConfigEntry{
+			Key: &cfgconfig.ConfigKey{
 				TenantID:  batchEntry.TenantID,
 				Namespace: "stewards",
 				Name:      batchEntry.StewardID,
 			},
 			Data:      configData,
-			Format:    interfaces.ConfigFormatYAML,
+			Format:    cfgconfig.ConfigFormatYAML,
 			Checksum:  checksum,
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
@@ -281,7 +282,7 @@ func (m *Manager) BatchStoreConfigurations(ctx context.Context, configs []*Batch
 }
 
 // GetConfigurationStats returns statistics about stored configurations
-func (m *Manager) GetConfigurationStats(ctx context.Context) (*interfaces.ConfigStats, error) {
+func (m *Manager) GetConfigurationStats(ctx context.Context) (*cfgconfig.ConfigStats, error) {
 	return m.configStore.GetConfigStats(ctx)
 }
 

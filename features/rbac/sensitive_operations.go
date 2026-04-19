@@ -9,7 +9,7 @@ import (
 	"fmt"
 
 	"github.com/cfgis/cfgms/pkg/audit"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 var (
@@ -116,7 +116,7 @@ func IsSensitiveOperation(opType SensitiveOperationType) bool {
 
 // AuditSensitiveOperation logs a sensitive operation with full context
 // M-AUTH-2: Comprehensive audit logging for sensitive admin operations
-func (m *Manager) AuditSensitiveOperation(ctx context.Context, opCtx *SensitiveOperationContext, result interfaces.AuditResult, operationErr error) {
+func (m *Manager) AuditSensitiveOperation(ctx context.Context, opCtx *SensitiveOperationContext, result business.AuditResult, operationErr error) {
 	if m.auditManager == nil {
 		return
 	}
@@ -135,7 +135,7 @@ func (m *Manager) AuditSensitiveOperation(ctx context.Context, opCtx *SensitiveO
 		Detail("operation_type", string(opCtx.OperationType)).
 		// M-AUTH-2: Mark as sensitive operation
 		Detail("security_classification", "sensitive_admin_operation").
-		Severity(interfaces.AuditSeverityCritical)
+		Severity(business.AuditSeverityCritical)
 
 	// M-AUTH-2: Include any additional metadata
 	for key, value := range opCtx.Metadata {

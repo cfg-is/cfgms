@@ -10,7 +10,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // HealthStatus represents the current health status of the steward
@@ -463,13 +463,13 @@ func (h *HealthMonitor) updateCertificateHealth() {
 // StewardHealthTracker tracks the fleet health state for the controller.
 // Durable fields are persisted via StewardStore; ephemeral HealthMetrics stay in-memory.
 type StewardHealthTracker struct {
-	store   interfaces.StewardStore
+	store   business.StewardStore
 	logger  logging.Logger
 	metrics sync.Map // map[stewardID string]*HealthMetrics
 }
 
 // NewStewardHealthTracker creates a StewardHealthTracker backed by the given store.
-func NewStewardHealthTracker(store interfaces.StewardStore, logger logging.Logger) *StewardHealthTracker {
+func NewStewardHealthTracker(store business.StewardStore, logger logging.Logger) *StewardHealthTracker {
 	return &StewardHealthTracker{
 		store:  store,
 		logger: logger,
@@ -477,7 +477,7 @@ func NewStewardHealthTracker(store interfaces.StewardStore, logger logging.Logge
 }
 
 // RegisterSteward persists a new steward record and initialises in-memory metrics.
-func (t *StewardHealthTracker) RegisterSteward(ctx context.Context, record *interfaces.StewardRecord) error {
+func (t *StewardHealthTracker) RegisterSteward(ctx context.Context, record *business.StewardRecord) error {
 	if err := t.store.RegisterSteward(ctx, record); err != nil {
 		return err
 	}
@@ -500,8 +500,8 @@ func (t *StewardHealthTracker) UpdateHeartbeat(ctx context.Context, stewardID st
 	}
 	// Promote registered → active on first heartbeat
 	rec, err := t.store.GetSteward(ctx, stewardID)
-	if err == nil && rec.Status == interfaces.StewardStatusRegistered {
-		if statusErr := t.store.UpdateStewardStatus(ctx, stewardID, interfaces.StewardStatusActive); statusErr != nil {
+	if err == nil && rec.Status == business.StewardStatusRegistered {
+		if statusErr := t.store.UpdateStewardStatus(ctx, stewardID, business.StewardStatusActive); statusErr != nil {
 			t.logger.Warn("Failed to promote steward to active",
 				"steward_id", logging.SanitizeLogValue(stewardID),
 				"error", statusErr)
@@ -520,7 +520,7 @@ func (t *StewardHealthTracker) UpdateHeartbeat(ctx context.Context, stewardID st
 // MarkLost marks a steward as lost (last_seen exceeded the configured TTL).
 func (t *StewardHealthTracker) MarkLost(ctx context.Context, stewardID string) error {
 	t.logger.Warn("Marking steward as lost", "steward_id", logging.SanitizeLogValue(stewardID))
-	return t.store.UpdateStewardStatus(ctx, stewardID, interfaces.StewardStatusLost)
+	return t.store.UpdateStewardStatus(ctx, stewardID, business.StewardStatusLost)
 }
 
 // DeregisterSteward marks a steward as deregistered. Records are retained for audit.
@@ -530,18 +530,18 @@ func (t *StewardHealthTracker) DeregisterSteward(ctx context.Context, stewardID 
 }
 
 // GetSteward returns the durable record for the given steward.
-func (t *StewardHealthTracker) GetSteward(ctx context.Context, stewardID string) (*interfaces.StewardRecord, error) {
+func (t *StewardHealthTracker) GetSteward(ctx context.Context, stewardID string) (*business.StewardRecord, error) {
 	return t.store.GetSteward(ctx, stewardID)
 }
 
 // ListStewards returns all steward records from the durable store.
-func (t *StewardHealthTracker) ListStewards(ctx context.Context) ([]*interfaces.StewardRecord, error) {
+func (t *StewardHealthTracker) ListStewards(ctx context.Context) ([]*business.StewardRecord, error) {
 	return t.store.ListStewards(ctx)
 }
 
 // ListActiveStewards returns stewards currently in the active state.
-func (t *StewardHealthTracker) ListActiveStewards(ctx context.Context) ([]*interfaces.StewardRecord, error) {
-	return t.store.ListStewardsByStatus(ctx, interfaces.StewardStatusActive)
+func (t *StewardHealthTracker) ListActiveStewards(ctx context.Context) ([]*business.StewardRecord, error) {
+	return t.store.ListStewardsByStatus(ctx, business.StewardStatusActive)
 }
 
 // GetEphemeralMetrics returns the in-memory HealthMetrics for a steward.

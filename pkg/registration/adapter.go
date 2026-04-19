@@ -5,18 +5,18 @@ package registration
 import (
 	"context"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// StorageAdapter adapts interfaces.RegistrationTokenStore to registration.Store
+// StorageAdapter adapts business.RegistrationTokenStore to registration.Store
 // This allows the registration system to use durable storage while maintaining
 // backward compatibility with the existing Store interface.
 type StorageAdapter struct {
-	store interfaces.RegistrationTokenStore
+	store business.RegistrationTokenStore
 }
 
 // NewStorageAdapter creates a new adapter that wraps a RegistrationTokenStore
-func NewStorageAdapter(store interfaces.RegistrationTokenStore) *StorageAdapter {
+func NewStorageAdapter(store business.RegistrationTokenStore) *StorageAdapter {
 	return &StorageAdapter{store: store}
 }
 
@@ -37,7 +37,7 @@ func (a *StorageAdapter) GetToken(ctx context.Context, tokenStr string) (*Token,
 
 // ListTokens lists all tokens for a tenant
 func (a *StorageAdapter) ListTokens(ctx context.Context, tenantID string) ([]*Token, error) {
-	filter := &interfaces.RegistrationTokenFilter{
+	filter := &business.RegistrationTokenFilter{
 		TenantID: tenantID,
 	}
 	dataList, err := a.store.ListTokens(ctx, filter)
@@ -64,8 +64,8 @@ func (a *StorageAdapter) DeleteToken(ctx context.Context, tokenStr string) error
 }
 
 // tokenToData converts a Token to RegistrationTokenData
-func tokenToData(token *Token) *interfaces.RegistrationTokenData {
-	return &interfaces.RegistrationTokenData{
+func tokenToData(token *Token) *business.RegistrationTokenData {
+	return &business.RegistrationTokenData{
 		Token:         token.Token,
 		TenantID:      token.TenantID,
 		ControllerURL: token.ControllerURL,
@@ -81,7 +81,7 @@ func tokenToData(token *Token) *interfaces.RegistrationTokenData {
 }
 
 // dataToToken converts a RegistrationTokenData to Token
-func dataToToken(data *interfaces.RegistrationTokenData) *Token {
+func dataToToken(data *business.RegistrationTokenData) *Token {
 	return &Token{
 		Token:         data.Token,
 		TenantID:      data.TenantID,

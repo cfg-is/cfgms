@@ -8,13 +8,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
 	_ "github.com/lib/pq" // PostgreSQL driver
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // DatabaseProvider implements the StorageProvider interface using PostgreSQL for persistence
@@ -59,7 +60,7 @@ func (p *DatabaseProvider) Available() (bool, error) {
 }
 
 // CreateClientTenantStore creates a database-based client tenant store
-func (p *DatabaseProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
+func (p *DatabaseProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)
 	if err != nil {
@@ -76,7 +77,7 @@ func (p *DatabaseProvider) CreateClientTenantStore(config map[string]interface{}
 }
 
 // CreateConfigStore creates a database-based configuration store
-func (p *DatabaseProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
+func (p *DatabaseProvider) CreateConfigStore(config map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)
 	if err != nil {
@@ -93,7 +94,7 @@ func (p *DatabaseProvider) CreateConfigStore(config map[string]interface{}) (int
 }
 
 // CreateAuditStore creates a database-based audit store
-func (p *DatabaseProvider) CreateAuditStore(config map[string]interface{}) (interfaces.AuditStore, error) {
+func (p *DatabaseProvider) CreateAuditStore(config map[string]interface{}) (business.AuditStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)
 	if err != nil {
@@ -109,46 +110,7 @@ func (p *DatabaseProvider) CreateAuditStore(config map[string]interface{}) (inte
 	return store, nil
 }
 
-// CreateRBACStore creates a database-based RBAC store
-func (p *DatabaseProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
-	dsn, err := p.getDSN(config)
-	if err != nil {
-		return nil, fmt.Errorf("invalid database configuration: %w", err)
-	}
-
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database connection: %w", err)
-	}
-
-	// Test the connection
-	if err := db.Ping(); err != nil {
-		if err := db.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-		return nil, fmt.Errorf("failed to connect to database: %w", err)
-	}
-
-	store := &DatabaseRuntimeStore{
-		db:             db,
-		tableName:      p.getTableName(config, "runtime_sessions"),
-		stateTableName: p.getTableName(config, "runtime_state"),
-	}
-
-	// Create tables if they don't exist
-	if err := store.createTables(); err != nil {
-		if err := db.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-		return nil, fmt.Errorf("failed to create runtime tables: %w", err)
-	}
-
-	return store, nil
-}
-
-func (p *DatabaseProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
+func (p *DatabaseProvider) CreateRBACStore(config map[string]interface{}) (business.RBACStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)
 	if err != nil {
@@ -164,7 +126,7 @@ func (p *DatabaseProvider) CreateRBACStore(config map[string]interface{}) (inter
 	return store, nil
 }
 
-func (p *DatabaseProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+func (p *DatabaseProvider) CreateTenantStore(config map[string]interface{}) (business.TenantStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)
 	if err != nil {
@@ -181,25 +143,24 @@ func (p *DatabaseProvider) CreateTenantStore(config map[string]interface{}) (int
 }
 
 // CreateSessionStore is not supported by the database provider in this release.
-// The database provider exposes session data via CreateRuntimeStore.
 // Use the SQLite provider for SessionStore, or extend this provider in a future story.
-func (p *DatabaseProvider) CreateSessionStore(config map[string]interface{}) (interfaces.SessionStore, error) {
-	return nil, interfaces.ErrNotSupported
+func (p *DatabaseProvider) CreateSessionStore(config map[string]interface{}) (business.SessionStore, error) {
+	return nil, business.ErrNotSupported
 }
 
 // CreateStewardStore is not supported by the database provider.
 // StewardStore is implemented by the flat-file and SQLite providers (Issue #663).
-func (p *DatabaseProvider) CreateStewardStore(config map[string]interface{}) (interfaces.StewardStore, error) {
-	return nil, interfaces.ErrNotSupported
+func (p *DatabaseProvider) CreateStewardStore(config map[string]interface{}) (business.StewardStore, error) {
+	return nil, business.ErrNotSupported
 }
 
 // CreateCommandStore is not supported by the database provider.
 // Command dispatch state belongs in the business-data tier (SQLite for OSS).
-func (p *DatabaseProvider) CreateCommandStore(config map[string]interface{}) (interfaces.CommandStore, error) {
-	return nil, interfaces.ErrNotSupported
+func (p *DatabaseProvider) CreateCommandStore(config map[string]interface{}) (business.CommandStore, error) {
+	return nil, business.ErrNotSupported
 }
 
-func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
+func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)
 	if err != nil {
@@ -263,39 +224,6 @@ func getBoolFromConfig(config map[string]interface{}, key string, defaultValue b
 		return val
 	}
 	return defaultValue
-}
-
-// getTableName returns the table name for the given key, with optional prefix
-func (p *DatabaseProvider) getTableName(config map[string]interface{}, defaultName string) string {
-	// Check for table prefix
-	prefix := getStringFromConfig(config, "table_prefix", "cfgms_")
-
-	// Check for custom table name
-	tableKey := defaultName + "_table"
-	if customName, ok := config[tableKey].(string); ok && customName != "" {
-		return p.validateTableName(prefix + customName)
-	}
-
-	return p.validateTableName(prefix + defaultName)
-}
-
-// validateTableName validates and sanitizes table names to prevent SQL injection
-func (p *DatabaseProvider) validateTableName(tableName string) string {
-	// Only allow alphanumeric characters and underscores
-	// This prevents SQL injection in table names
-	var sanitized strings.Builder
-	for _, r := range tableName {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
-			sanitized.WriteRune(r)
-		}
-	}
-
-	result := sanitized.String()
-	if result == "" {
-		return "cfgms_default" // fallback to safe default
-	}
-
-	return result
 }
 
 // Auto-register this provider (Salt-style)
@@ -385,7 +313,7 @@ func (s *DatabaseClientTenantStore) initializeSchema() error {
 }
 
 // StoreClientTenant stores a client tenant in the database
-func (s *DatabaseClientTenantStore) StoreClientTenant(client *interfaces.ClientTenant) error {
+func (s *DatabaseClientTenantStore) StoreClientTenant(client *business.ClientTenant) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -457,7 +385,7 @@ func (s *DatabaseClientTenantStore) StoreClientTenant(client *interfaces.ClientT
 }
 
 // GetClientTenant retrieves a client tenant by tenant ID
-func (s *DatabaseClientTenantStore) GetClientTenant(tenantID string) (*interfaces.ClientTenant, error) {
+func (s *DatabaseClientTenantStore) GetClientTenant(tenantID string) (*business.ClientTenant, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -471,7 +399,7 @@ func (s *DatabaseClientTenantStore) GetClientTenant(tenantID string) (*interface
 
 	row := s.db.QueryRowContext(ctx, query, tenantID)
 
-	client := &interfaces.ClientTenant{}
+	client := &business.ClientTenant{}
 	var statusStr string
 	var metadataJSON []byte
 
@@ -496,7 +424,7 @@ func (s *DatabaseClientTenantStore) GetClientTenant(tenantID string) (*interface
 		return nil, fmt.Errorf("failed to get client tenant: %w", err)
 	}
 
-	client.Status = interfaces.ClientTenantStatus(statusStr)
+	client.Status = business.ClientTenantStatus(statusStr)
 
 	if len(metadataJSON) > 0 {
 		metadata, err := deserializeMetadata(metadataJSON)
@@ -510,7 +438,7 @@ func (s *DatabaseClientTenantStore) GetClientTenant(tenantID string) (*interface
 }
 
 // GetClientTenantByIdentifier retrieves a client tenant by client identifier
-func (s *DatabaseClientTenantStore) GetClientTenantByIdentifier(clientIdentifier string) (*interfaces.ClientTenant, error) {
+func (s *DatabaseClientTenantStore) GetClientTenantByIdentifier(clientIdentifier string) (*business.ClientTenant, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -524,7 +452,7 @@ func (s *DatabaseClientTenantStore) GetClientTenantByIdentifier(clientIdentifier
 
 	row := s.db.QueryRowContext(ctx, query, clientIdentifier)
 
-	client := &interfaces.ClientTenant{}
+	client := &business.ClientTenant{}
 	var statusStr string
 	var metadataJSON []byte
 
@@ -549,7 +477,7 @@ func (s *DatabaseClientTenantStore) GetClientTenantByIdentifier(clientIdentifier
 		return nil, fmt.Errorf("failed to get client tenant by identifier: %w", err)
 	}
 
-	client.Status = interfaces.ClientTenantStatus(statusStr)
+	client.Status = business.ClientTenantStatus(statusStr)
 
 	if len(metadataJSON) > 0 {
 		metadata, err := deserializeMetadata(metadataJSON)
@@ -563,7 +491,7 @@ func (s *DatabaseClientTenantStore) GetClientTenantByIdentifier(clientIdentifier
 }
 
 // ListClientTenants lists client tenants by status
-func (s *DatabaseClientTenantStore) ListClientTenants(status interfaces.ClientTenantStatus) ([]*interfaces.ClientTenant, error) {
+func (s *DatabaseClientTenantStore) ListClientTenants(status business.ClientTenantStatus) ([]*business.ClientTenant, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -594,10 +522,10 @@ func (s *DatabaseClientTenantStore) ListClientTenants(status interfaces.ClientTe
 	}
 	defer func() { _ = rows.Close() }()
 
-	var clients []*interfaces.ClientTenant
+	var clients []*business.ClientTenant
 
 	for rows.Next() {
-		client := &interfaces.ClientTenant{}
+		client := &business.ClientTenant{}
 		var statusStr string
 		var metadataJSON []byte
 
@@ -619,7 +547,7 @@ func (s *DatabaseClientTenantStore) ListClientTenants(status interfaces.ClientTe
 			return nil, fmt.Errorf("failed to scan client tenant: %w", err)
 		}
 
-		client.Status = interfaces.ClientTenantStatus(statusStr)
+		client.Status = business.ClientTenantStatus(statusStr)
 
 		if len(metadataJSON) > 0 {
 			metadata, err := deserializeMetadata(metadataJSON)
@@ -640,7 +568,7 @@ func (s *DatabaseClientTenantStore) ListClientTenants(status interfaces.ClientTe
 }
 
 // UpdateClientTenantStatus updates the status of a client tenant
-func (s *DatabaseClientTenantStore) UpdateClientTenantStatus(tenantID string, status interfaces.ClientTenantStatus) error {
+func (s *DatabaseClientTenantStore) UpdateClientTenantStatus(tenantID string, status business.ClientTenantStatus) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -711,7 +639,7 @@ func (s *DatabaseClientTenantStore) DeleteClientTenant(tenantID string) error {
 }
 
 // StoreAdminConsentRequest stores an admin consent request
-func (s *DatabaseClientTenantStore) StoreAdminConsentRequest(request *interfaces.AdminConsentRequest) error {
+func (s *DatabaseClientTenantStore) StoreAdminConsentRequest(request *business.AdminConsentRequest) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -768,7 +696,7 @@ func (s *DatabaseClientTenantStore) StoreAdminConsentRequest(request *interfaces
 }
 
 // GetAdminConsentRequest retrieves an admin consent request by state
-func (s *DatabaseClientTenantStore) GetAdminConsentRequest(state string) (*interfaces.AdminConsentRequest, error) {
+func (s *DatabaseClientTenantStore) GetAdminConsentRequest(state string) (*business.AdminConsentRequest, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -782,7 +710,7 @@ func (s *DatabaseClientTenantStore) GetAdminConsentRequest(state string) (*inter
 
 	row := s.db.QueryRowContext(ctx, query, state)
 
-	request := &interfaces.AdminConsentRequest{}
+	request := &business.AdminConsentRequest{}
 	var metadataJSON []byte
 
 	err := row.Scan(

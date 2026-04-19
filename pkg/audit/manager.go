@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // SystemTenantID is the sentinel tenant ID used for controller-internal system events.
@@ -25,12 +25,12 @@ const SystemUserID = "system"
 
 // Manager provides centralized audit functionality using pluggable storage
 type Manager struct {
-	store  interfaces.AuditStore
+	store  business.AuditStore
 	source string // Component identifier for audit source
 }
 
 // NewManager creates a new audit manager with the specified storage backend
-func NewManager(store interfaces.AuditStore, source string) (*Manager, error) {
+func NewManager(store business.AuditStore, source string) (*Manager, error) {
 	if store == nil {
 		return nil, fmt.Errorf("audit manager requires non-nil audit store")
 	}
@@ -47,7 +47,7 @@ func NewManager(store interfaces.AuditStore, source string) (*Manager, error) {
 // RecordEvent records an audit event with automatic metadata generation
 func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) error {
 	// Build the complete audit entry
-	entry := &interfaces.AuditEntry{
+	entry := &business.AuditEntry{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
 		Source:    m.source,
@@ -71,10 +71,10 @@ func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) err
 
 // RecordBatch records multiple audit events atomically
 func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) error {
-	entries := make([]*interfaces.AuditEntry, len(events))
+	entries := make([]*business.AuditEntry, len(events))
 
 	for i, event := range events {
-		entry := &interfaces.AuditEntry{
+		entry := &business.AuditEntry{
 			ID:        uuid.New().String(),
 			Timestamp: time.Now().UTC(),
 			Source:    m.source,
@@ -95,63 +95,63 @@ func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) 
 }
 
 // GetEntry retrieves an audit entry by ID
-func (m *Manager) GetEntry(ctx context.Context, id string) (*interfaces.AuditEntry, error) {
+func (m *Manager) GetEntry(ctx context.Context, id string) (*business.AuditEntry, error) {
 	return m.store.GetAuditEntry(ctx, id)
 }
 
 // QueryEntries queries audit entries with specified filter
-func (m *Manager) QueryEntries(ctx context.Context, filter *interfaces.AuditFilter) ([]*interfaces.AuditEntry, error) {
+func (m *Manager) QueryEntries(ctx context.Context, filter *business.AuditFilter) ([]*business.AuditEntry, error) {
 	return m.store.ListAuditEntries(ctx, filter)
 }
 
 // GetUserAuditTrail gets audit trail for a specific user
-func (m *Manager) GetUserAuditTrail(ctx context.Context, userID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
+func (m *Manager) GetUserAuditTrail(ctx context.Context, userID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
 	return m.store.GetAuditsByUser(ctx, userID, timeRange)
 }
 
 // GetResourceAuditTrail gets audit trail for a specific resource
-func (m *Manager) GetResourceAuditTrail(ctx context.Context, resourceType, resourceID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
+func (m *Manager) GetResourceAuditTrail(ctx context.Context, resourceType, resourceID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
 	return m.store.GetAuditsByResource(ctx, resourceType, resourceID, timeRange)
 }
 
 // GetFailedActions retrieves recent failed actions for security monitoring
-func (m *Manager) GetFailedActions(ctx context.Context, timeRange *interfaces.TimeRange, limit int) ([]*interfaces.AuditEntry, error) {
+func (m *Manager) GetFailedActions(ctx context.Context, timeRange *business.TimeRange, limit int) ([]*business.AuditEntry, error) {
 	return m.store.GetFailedActions(ctx, timeRange, limit)
 }
 
 // GetSuspiciousActivity retrieves suspicious activity for a tenant
-func (m *Manager) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
+func (m *Manager) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
 	return m.store.GetSuspiciousActivity(ctx, tenantID, timeRange)
 }
 
 // GetStatistics retrieves audit statistics
-func (m *Manager) GetStatistics(ctx context.Context) (*interfaces.AuditStats, error) {
+func (m *Manager) GetStatistics(ctx context.Context) (*business.AuditStats, error) {
 	return m.store.GetAuditStats(ctx)
 }
 
 // validateEntry validates required fields in an audit entry
-func (m *Manager) validateEntry(entry *interfaces.AuditEntry) error {
+func (m *Manager) validateEntry(entry *business.AuditEntry) error {
 	if entry.TenantID == "" {
-		return interfaces.ErrTenantIDRequired
+		return business.ErrTenantIDRequired
 	}
 	if entry.UserID == "" {
-		return interfaces.ErrUserIDRequired
+		return business.ErrUserIDRequired
 	}
 	if entry.Action == "" {
-		return interfaces.ErrActionRequired
+		return business.ErrActionRequired
 	}
 	if entry.ResourceType == "" {
-		return interfaces.ErrResourceTypeRequired
+		return business.ErrResourceTypeRequired
 	}
 	if entry.ResourceID == "" {
-		return interfaces.ErrResourceIDRequired
+		return business.ErrResourceIDRequired
 	}
 
 	return nil
 }
 
 // generateChecksum generates a SHA256 checksum for audit integrity
-func (m *Manager) generateChecksum(entry *interfaces.AuditEntry) string {
+func (m *Manager) generateChecksum(entry *business.AuditEntry) string {
 	// Create a copy of the entry without the checksum field for hashing
 	temp := *entry
 	temp.Checksum = ""
@@ -175,7 +175,7 @@ func (m *Manager) generateChecksum(entry *interfaces.AuditEntry) string {
 }
 
 // VerifyIntegrity verifies the integrity checksum of an audit entry
-func (m *Manager) VerifyIntegrity(entry *interfaces.AuditEntry) bool {
+func (m *Manager) VerifyIntegrity(entry *business.AuditEntry) bool {
 	expectedChecksum := m.generateChecksum(entry)
 	return entry.Checksum == expectedChecksum
 }
@@ -183,15 +183,15 @@ func (m *Manager) VerifyIntegrity(entry *interfaces.AuditEntry) bool {
 // AuditEventBuilder provides a fluent interface for building audit events
 type AuditEventBuilder struct {
 	tenantID     string
-	eventType    interfaces.AuditEventType
+	eventType    business.AuditEventType
 	action       string
 	userID       string
-	userType     interfaces.AuditUserType
+	userType     business.AuditUserType
 	sessionID    string
 	resourceType string
 	resourceID   string
 	resourceName string
-	result       interfaces.AuditResult
+	result       business.AuditResult
 	errorCode    string
 	errorMessage string
 	requestID    string
@@ -200,17 +200,17 @@ type AuditEventBuilder struct {
 	method       string
 	path         string
 	details      map[string]interface{}
-	changes      *interfaces.AuditChanges
+	changes      *business.AuditChanges
 	tags         []string
-	severity     interfaces.AuditSeverity
+	severity     business.AuditSeverity
 }
 
 // NewEventBuilder creates a new audit event builder
 func NewEventBuilder() *AuditEventBuilder {
 	return &AuditEventBuilder{
-		userType: interfaces.AuditUserTypeSystem,
-		result:   interfaces.AuditResultSuccess,
-		severity: interfaces.AuditSeverityMedium,
+		userType: business.AuditUserTypeSystem,
+		result:   business.AuditResultSuccess,
+		severity: business.AuditSeverityMedium,
 		details:  make(map[string]interface{}),
 	}
 }
@@ -222,7 +222,7 @@ func (b *AuditEventBuilder) Tenant(tenantID string) *AuditEventBuilder {
 }
 
 // Type sets the event type
-func (b *AuditEventBuilder) Type(eventType interfaces.AuditEventType) *AuditEventBuilder {
+func (b *AuditEventBuilder) Type(eventType business.AuditEventType) *AuditEventBuilder {
 	b.eventType = eventType
 	return b
 }
@@ -234,7 +234,7 @@ func (b *AuditEventBuilder) Action(action string) *AuditEventBuilder {
 }
 
 // User sets the user information
-func (b *AuditEventBuilder) User(userID string, userType interfaces.AuditUserType) *AuditEventBuilder {
+func (b *AuditEventBuilder) User(userID string, userType business.AuditUserType) *AuditEventBuilder {
 	b.userID = userID
 	b.userType = userType
 	return b
@@ -255,7 +255,7 @@ func (b *AuditEventBuilder) Resource(resourceType, resourceID, resourceName stri
 }
 
 // Result sets the operation result
-func (b *AuditEventBuilder) Result(result interfaces.AuditResult) *AuditEventBuilder {
+func (b *AuditEventBuilder) Result(result business.AuditResult) *AuditEventBuilder {
 	b.result = result
 	return b
 }
@@ -264,7 +264,7 @@ func (b *AuditEventBuilder) Result(result interfaces.AuditResult) *AuditEventBui
 func (b *AuditEventBuilder) Error(code, message string) *AuditEventBuilder {
 	b.errorCode = code
 	b.errorMessage = message
-	b.result = interfaces.AuditResultError
+	b.result = business.AuditResultError
 	return b
 }
 
@@ -300,7 +300,7 @@ func (b *AuditEventBuilder) Details(details map[string]interface{}) *AuditEventB
 
 // Changes sets before/after change information
 func (b *AuditEventBuilder) Changes(before, after map[string]interface{}, fields []string) *AuditEventBuilder {
-	b.changes = &interfaces.AuditChanges{
+	b.changes = &business.AuditChanges{
 		Before: before,
 		After:  after,
 		Fields: fields,
@@ -321,13 +321,13 @@ func (b *AuditEventBuilder) Tags(tags []string) *AuditEventBuilder {
 }
 
 // Severity sets the event severity
-func (b *AuditEventBuilder) Severity(severity interfaces.AuditSeverity) *AuditEventBuilder {
+func (b *AuditEventBuilder) Severity(severity business.AuditSeverity) *AuditEventBuilder {
 	b.severity = severity
 	return b
 }
 
 // build applies the builder configuration to an audit entry
-func (b *AuditEventBuilder) build(entry *interfaces.AuditEntry) {
+func (b *AuditEventBuilder) build(entry *business.AuditEntry) {
 	entry.TenantID = b.tenantID
 	entry.EventType = b.eventType
 	entry.Action = b.action
@@ -354,70 +354,70 @@ func (b *AuditEventBuilder) build(entry *interfaces.AuditEntry) {
 // Predefined audit event builders for common operations
 
 // AuthenticationEvent creates an authentication event builder
-func AuthenticationEvent(tenantID, userID, action string, result interfaces.AuditResult) *AuditEventBuilder {
+func AuthenticationEvent(tenantID, userID, action string, result business.AuditResult) *AuditEventBuilder {
 	return NewEventBuilder().
 		Tenant(tenantID).
-		Type(interfaces.AuditEventAuthentication).
+		Type(business.AuditEventAuthentication).
 		Action(action).
-		User(userID, interfaces.AuditUserTypeHuman).
+		User(userID, business.AuditUserTypeHuman).
 		Resource("session", userID, "").
 		Result(result).
-		Severity(interfaces.AuditSeverityHigh)
+		Severity(business.AuditSeverityHigh)
 }
 
 // AuthorizationEvent creates an authorization event builder
-func AuthorizationEvent(tenantID, userID, resourceType, resourceID, action string, result interfaces.AuditResult) *AuditEventBuilder {
+func AuthorizationEvent(tenantID, userID, resourceType, resourceID, action string, result business.AuditResult) *AuditEventBuilder {
 	return NewEventBuilder().
 		Tenant(tenantID).
-		Type(interfaces.AuditEventAuthorization).
+		Type(business.AuditEventAuthorization).
 		Action(action).
-		User(userID, interfaces.AuditUserTypeHuman).
+		User(userID, business.AuditUserTypeHuman).
 		Resource(resourceType, resourceID, "").
 		Result(result).
-		Severity(interfaces.AuditSeverityHigh)
+		Severity(business.AuditSeverityHigh)
 }
 
 // ConfigurationEvent creates a configuration change event builder
 func ConfigurationEvent(tenantID, userID, resourceType, resourceID, resourceName, action string) *AuditEventBuilder {
 	return NewEventBuilder().
 		Tenant(tenantID).
-		Type(interfaces.AuditEventConfiguration).
+		Type(business.AuditEventConfiguration).
 		Action(action).
-		User(userID, interfaces.AuditUserTypeHuman).
+		User(userID, business.AuditUserTypeHuman).
 		Resource(resourceType, resourceID, resourceName).
-		Severity(interfaces.AuditSeverityMedium)
+		Severity(business.AuditSeverityMedium)
 }
 
 // UserManagementEvent creates a user management event builder
 func UserManagementEvent(tenantID, actorUserID, targetUserID, action string) *AuditEventBuilder {
 	return NewEventBuilder().
 		Tenant(tenantID).
-		Type(interfaces.AuditEventUserManagement).
+		Type(business.AuditEventUserManagement).
 		Action(action).
-		User(actorUserID, interfaces.AuditUserTypeHuman).
+		User(actorUserID, business.AuditUserTypeHuman).
 		Resource("user", targetUserID, "").
-		Severity(interfaces.AuditSeverityHigh)
+		Severity(business.AuditSeverityHigh)
 }
 
 // SystemAccessEvent creates a system access event builder
 func SystemAccessEvent(tenantID, userID, sessionID, action string) *AuditEventBuilder {
 	return NewEventBuilder().
 		Tenant(tenantID).
-		Type(interfaces.AuditEventSystemAccess).
+		Type(business.AuditEventSystemAccess).
 		Action(action).
-		User(userID, interfaces.AuditUserTypeHuman).
+		User(userID, business.AuditUserTypeHuman).
 		Session(sessionID).
 		Resource("terminal", sessionID, "").
-		Severity(interfaces.AuditSeverityMedium)
+		Severity(business.AuditSeverityMedium)
 }
 
 // SecurityEvent creates a security event builder
-func SecurityEvent(tenantID, userID, action, description string, severity interfaces.AuditSeverity) *AuditEventBuilder {
+func SecurityEvent(tenantID, userID, action, description string, severity business.AuditSeverity) *AuditEventBuilder {
 	return NewEventBuilder().
 		Tenant(tenantID).
-		Type(interfaces.AuditEventSecurityEvent).
+		Type(business.AuditEventSecurityEvent).
 		Action(action).
-		User(userID, interfaces.AuditUserTypeSystem).
+		User(userID, business.AuditUserTypeSystem).
 		Resource("security", userID, "").
 		Detail("description", description).
 		Severity(severity)
@@ -427,10 +427,10 @@ func SecurityEvent(tenantID, userID, action, description string, severity interf
 func SystemEvent(tenantID, action, description string) *AuditEventBuilder {
 	return NewEventBuilder().
 		Tenant(tenantID).
-		Type(interfaces.AuditEventSystemEvent).
+		Type(business.AuditEventSystemEvent).
 		Action(action).
-		User(SystemUserID, interfaces.AuditUserTypeSystem).
+		User(SystemUserID, business.AuditUserTypeSystem).
 		Resource("system", "controller", "").
 		Detail("description", description).
-		Severity(interfaces.AuditSeverityLow)
+		Severity(business.AuditSeverityLow)
 }

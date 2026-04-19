@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // VersionManager manages workflow versions and templates
@@ -17,7 +17,7 @@ type VersionManager struct {
 }
 
 // NewVersionManager creates a new version manager
-func NewVersionManager(configStore interfaces.ConfigStore, tenantID string) *VersionManager {
+func NewVersionManager(configStore cfgconfig.ConfigStore, tenantID string) *VersionManager {
 	return &VersionManager{
 		store:          NewWorkflowStore(configStore, tenantID),
 		templateEngine: NewTemplateEngine(),

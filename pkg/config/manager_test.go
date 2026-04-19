@@ -12,29 +12,29 @@ import (
 	"github.com/stretchr/testify/require"
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
-// MockConfigStore implements interfaces.ConfigStore for testing
+// MockConfigStore implements cfgconfig.ConfigStore for testing
 type MockConfigStore struct {
-	configs map[string]*interfaces.ConfigEntry
-	history map[string][]*interfaces.ConfigEntry
+	configs map[string]*cfgconfig.ConfigEntry
+	history map[string][]*cfgconfig.ConfigEntry
 }
 
 func NewMockConfigStore() *MockConfigStore {
 	return &MockConfigStore{
-		configs: make(map[string]*interfaces.ConfigEntry),
-		history: make(map[string][]*interfaces.ConfigEntry),
+		configs: make(map[string]*cfgconfig.ConfigEntry),
+		history: make(map[string][]*cfgconfig.ConfigEntry),
 	}
 }
 
-func (m *MockConfigStore) StoreConfig(ctx context.Context, config *interfaces.ConfigEntry) error {
+func (m *MockConfigStore) StoreConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
 	key := config.Key.String()
 
 	// Store current version in history
 	if existing, exists := m.configs[key]; exists {
 		if m.history[key] == nil {
-			m.history[key] = []*interfaces.ConfigEntry{}
+			m.history[key] = []*cfgconfig.ConfigEntry{}
 		}
 		m.history[key] = append(m.history[key], existing)
 	}
@@ -51,11 +51,11 @@ func (m *MockConfigStore) StoreConfig(ctx context.Context, config *interfaces.Co
 	return nil
 }
 
-func (m *MockConfigStore) GetConfig(ctx context.Context, key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
+func (m *MockConfigStore) GetConfig(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	keyStr := key.String()
 	config, exists := m.configs[keyStr]
 	if !exists {
-		return nil, &interfaces.ConfigValidationError{
+		return nil, &cfgconfig.ConfigValidationError{
 			Field:   "key",
 			Message: "configuration not found",
 			Code:    "CONFIG_NOT_FOUND",
@@ -67,15 +67,15 @@ func (m *MockConfigStore) GetConfig(ctx context.Context, key *interfaces.ConfigK
 	return &configCopy, nil
 }
 
-func (m *MockConfigStore) DeleteConfig(ctx context.Context, key *interfaces.ConfigKey) error {
+func (m *MockConfigStore) DeleteConfig(ctx context.Context, key *cfgconfig.ConfigKey) error {
 	keyStr := key.String()
 	delete(m.configs, keyStr)
 	delete(m.history, keyStr)
 	return nil
 }
 
-func (m *MockConfigStore) ListConfigs(ctx context.Context, filter *interfaces.ConfigFilter) ([]*interfaces.ConfigEntry, error) {
-	var results []*interfaces.ConfigEntry
+func (m *MockConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
+	var results []*cfgconfig.ConfigEntry
 
 	for _, config := range m.configs {
 		// Apply filtering
@@ -94,15 +94,15 @@ func (m *MockConfigStore) ListConfigs(ctx context.Context, filter *interfaces.Co
 	return results, nil
 }
 
-func (m *MockConfigStore) GetConfigHistory(ctx context.Context, key *interfaces.ConfigKey, limit int) ([]*interfaces.ConfigEntry, error) {
+func (m *MockConfigStore) GetConfigHistory(ctx context.Context, key *cfgconfig.ConfigKey, limit int) ([]*cfgconfig.ConfigEntry, error) {
 	keyStr := key.String()
 	history, exists := m.history[keyStr]
 	if !exists {
-		return []*interfaces.ConfigEntry{}, nil
+		return []*cfgconfig.ConfigEntry{}, nil
 	}
 
 	// Return most recent versions first
-	var results []*interfaces.ConfigEntry
+	var results []*cfgconfig.ConfigEntry
 	start := len(history) - limit
 	if start < 0 {
 		start = 0
@@ -116,11 +116,11 @@ func (m *MockConfigStore) GetConfigHistory(ctx context.Context, key *interfaces.
 	return results, nil
 }
 
-func (m *MockConfigStore) GetConfigVersion(ctx context.Context, key *interfaces.ConfigKey, version int64) (*interfaces.ConfigEntry, error) {
+func (m *MockConfigStore) GetConfigVersion(ctx context.Context, key *cfgconfig.ConfigKey, version int64) (*cfgconfig.ConfigEntry, error) {
 	keyStr := key.String()
 	history, exists := m.history[keyStr]
 	if !exists {
-		return nil, &interfaces.ConfigValidationError{
+		return nil, &cfgconfig.ConfigValidationError{
 			Field:   "version",
 			Message: "configuration history not found",
 			Code:    "HISTORY_NOT_FOUND",
@@ -135,14 +135,14 @@ func (m *MockConfigStore) GetConfigVersion(ctx context.Context, key *interfaces.
 		}
 	}
 
-	return nil, &interfaces.ConfigValidationError{
+	return nil, &cfgconfig.ConfigValidationError{
 		Field:   "version",
 		Message: "version not found",
 		Code:    "VERSION_NOT_FOUND",
 	}
 }
 
-func (m *MockConfigStore) StoreConfigBatch(ctx context.Context, configs []*interfaces.ConfigEntry) error {
+func (m *MockConfigStore) StoreConfigBatch(ctx context.Context, configs []*cfgconfig.ConfigEntry) error {
 	for _, config := range configs {
 		if err := m.StoreConfig(ctx, config); err != nil {
 			return err
@@ -151,7 +151,7 @@ func (m *MockConfigStore) StoreConfigBatch(ctx context.Context, configs []*inter
 	return nil
 }
 
-func (m *MockConfigStore) DeleteConfigBatch(ctx context.Context, keys []*interfaces.ConfigKey) error {
+func (m *MockConfigStore) DeleteConfigBatch(ctx context.Context, keys []*cfgconfig.ConfigKey) error {
 	for _, key := range keys {
 		if err := m.DeleteConfig(ctx, key); err != nil {
 			return err
@@ -160,14 +160,14 @@ func (m *MockConfigStore) DeleteConfigBatch(ctx context.Context, keys []*interfa
 	return nil
 }
 
-func (m *MockConfigStore) ResolveConfigWithInheritance(ctx context.Context, key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
+func (m *MockConfigStore) ResolveConfigWithInheritance(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	// Simplified inheritance - just return the direct config
 	return m.GetConfig(ctx, key)
 }
 
-func (m *MockConfigStore) ValidateConfig(ctx context.Context, config *interfaces.ConfigEntry) error {
+func (m *MockConfigStore) ValidateConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
 	if config.Key == nil {
-		return &interfaces.ConfigValidationError{
+		return &cfgconfig.ConfigValidationError{
 			Field:   "key",
 			Message: "key is required",
 			Code:    "KEY_REQUIRED",
@@ -176,7 +176,7 @@ func (m *MockConfigStore) ValidateConfig(ctx context.Context, config *interfaces
 	return nil
 }
 
-func (m *MockConfigStore) GetConfigStats(ctx context.Context) (*interfaces.ConfigStats, error) {
+func (m *MockConfigStore) GetConfigStats(ctx context.Context) (*cfgconfig.ConfigStats, error) {
 	totalConfigs := int64(len(m.configs))
 	totalSize := int64(0)
 
@@ -189,7 +189,7 @@ func (m *MockConfigStore) GetConfigStats(ctx context.Context) (*interfaces.Confi
 		averageSize = totalSize / totalConfigs
 	}
 
-	return &interfaces.ConfigStats{
+	return &cfgconfig.ConfigStats{
 		TotalConfigs: totalConfigs,
 		TotalSize:    totalSize,
 		AverageSize:  averageSize,

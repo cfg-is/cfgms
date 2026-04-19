@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // TestValidateSensitiveOperation tests validation of sensitive operations
@@ -166,7 +166,7 @@ func TestAuditSensitiveOperation(t *testing.T) {
 
 	// Should not panic with nil audit manager
 	require.NotPanics(t, func() {
-		manager.AuditSensitiveOperation(context.Background(), opCtx, interfaces.AuditResultSuccess, nil)
+		manager.AuditSensitiveOperation(context.Background(), opCtx, business.AuditResultSuccess, nil)
 	})
 }
 

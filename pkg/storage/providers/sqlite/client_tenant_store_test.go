@@ -10,11 +10,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
-func newClientTenantStore(t *testing.T) interfaces.ClientTenantStore {
+func newClientTenantStore(t *testing.T) business.ClientTenantStore {
 	t.Helper()
 	dir := t.TempDir()
 	p := sqlite.NewSQLiteProvider(dir)
@@ -27,13 +27,13 @@ func newClientTenantStore(t *testing.T) interfaces.ClientTenantStore {
 func TestClientTenantStore_StoreAndGet(t *testing.T) {
 	store := newClientTenantStore(t)
 
-	client := &interfaces.ClientTenant{
+	client := &business.ClientTenant{
 		TenantID:         "azure-tenant-001",
 		TenantName:       "Contoso Ltd",
 		DomainName:       "contoso.com",
 		AdminEmail:       "admin@contoso.com",
 		ConsentedAt:      time.Now().UTC().Truncate(time.Second),
-		Status:           interfaces.ClientTenantStatusActive,
+		Status:           business.ClientTenantStatusActive,
 		ClientIdentifier: "cfgms-contoso",
 		Metadata:         map[string]interface{}{"region": "us-east"},
 	}
@@ -58,13 +58,13 @@ func TestClientTenantStore_GetNotFound(t *testing.T) {
 func TestClientTenantStore_GetByIdentifier(t *testing.T) {
 	store := newClientTenantStore(t)
 
-	client := &interfaces.ClientTenant{
+	client := &business.ClientTenant{
 		TenantID:         "azure-tenant-002",
 		TenantName:       "Fabrikam",
 		DomainName:       "fabrikam.com",
 		AdminEmail:       "admin@fabrikam.com",
 		ConsentedAt:      time.Now().UTC(),
-		Status:           interfaces.ClientTenantStatusActive,
+		Status:           business.ClientTenantStatusActive,
 		ClientIdentifier: "cfgms-fabrikam",
 	}
 	require.NoError(t, store.StoreClientTenant(client))
@@ -78,13 +78,13 @@ func TestClientTenantStore_M365ExtensionFields(t *testing.T) {
 	store := newClientTenantStore(t)
 
 	// Store a client tenant with M365 extension fields embedded in Metadata
-	client := &interfaces.ClientTenant{
+	client := &business.ClientTenant{
 		TenantID:         "azure-m365",
 		TenantName:       "M365 Corp",
 		DomainName:       "m365corp.com",
 		AdminEmail:       "admin@m365corp.com",
 		ConsentedAt:      time.Now().UTC(),
-		Status:           interfaces.ClientTenantStatusActive,
+		Status:           business.ClientTenantStatusActive,
 		ClientIdentifier: "cfgms-m365",
 		Metadata: map[string]interface{}{
 			"m365_tenant_id":    "m365-tenant-uuid",
@@ -107,38 +107,38 @@ func TestClientTenantStore_M365ExtensionFields(t *testing.T) {
 func TestClientTenantStore_UpdateStatus(t *testing.T) {
 	store := newClientTenantStore(t)
 
-	client := &interfaces.ClientTenant{
+	client := &business.ClientTenant{
 		TenantID:         "azure-tenant-upd",
 		TenantName:       "UpdateTest",
 		DomainName:       "update.com",
 		AdminEmail:       "a@update.com",
 		ConsentedAt:      time.Now().UTC(),
-		Status:           interfaces.ClientTenantStatusPending,
+		Status:           business.ClientTenantStatusPending,
 		ClientIdentifier: "cfgms-upd",
 	}
 	require.NoError(t, store.StoreClientTenant(client))
-	require.NoError(t, store.UpdateClientTenantStatus("azure-tenant-upd", interfaces.ClientTenantStatusActive))
+	require.NoError(t, store.UpdateClientTenantStatus("azure-tenant-upd", business.ClientTenantStatusActive))
 
 	got, err := store.GetClientTenant("azure-tenant-upd")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.ClientTenantStatusActive, got.Status)
+	assert.Equal(t, business.ClientTenantStatusActive, got.Status)
 }
 
 func TestClientTenantStore_UpdateStatus_NotFound(t *testing.T) {
 	store := newClientTenantStore(t)
-	assert.Error(t, store.UpdateClientTenantStatus("nonexistent", interfaces.ClientTenantStatusActive))
+	assert.Error(t, store.UpdateClientTenantStatus("nonexistent", business.ClientTenantStatusActive))
 }
 
 func TestClientTenantStore_Delete(t *testing.T) {
 	store := newClientTenantStore(t)
 
-	client := &interfaces.ClientTenant{
+	client := &business.ClientTenant{
 		TenantID:         "azure-del",
 		TenantName:       "ToDelete",
 		DomainName:       "del.com",
 		AdminEmail:       "a@del.com",
 		ConsentedAt:      time.Now().UTC(),
-		Status:           interfaces.ClientTenantStatusActive,
+		Status:           business.ClientTenantStatusActive,
 		ClientIdentifier: "cfgms-del",
 	}
 	require.NoError(t, store.StoreClientTenant(client))
@@ -150,10 +150,10 @@ func TestClientTenantStore_Delete(t *testing.T) {
 func TestClientTenantStore_List(t *testing.T) {
 	store := newClientTenantStore(t)
 
-	for _, c := range []*interfaces.ClientTenant{
-		{TenantID: "az-1", TenantName: "A", DomainName: "a.com", AdminEmail: "x@a.com", ConsentedAt: time.Now().UTC(), Status: interfaces.ClientTenantStatusActive, ClientIdentifier: "ci-1"},
-		{TenantID: "az-2", TenantName: "B", DomainName: "b.com", AdminEmail: "x@b.com", ConsentedAt: time.Now().UTC(), Status: interfaces.ClientTenantStatusPending, ClientIdentifier: "ci-2"},
-		{TenantID: "az-3", TenantName: "C", DomainName: "c.com", AdminEmail: "x@c.com", ConsentedAt: time.Now().UTC(), Status: interfaces.ClientTenantStatusActive, ClientIdentifier: "ci-3"},
+	for _, c := range []*business.ClientTenant{
+		{TenantID: "az-1", TenantName: "A", DomainName: "a.com", AdminEmail: "x@a.com", ConsentedAt: time.Now().UTC(), Status: business.ClientTenantStatusActive, ClientIdentifier: "ci-1"},
+		{TenantID: "az-2", TenantName: "B", DomainName: "b.com", AdminEmail: "x@b.com", ConsentedAt: time.Now().UTC(), Status: business.ClientTenantStatusPending, ClientIdentifier: "ci-2"},
+		{TenantID: "az-3", TenantName: "C", DomainName: "c.com", AdminEmail: "x@c.com", ConsentedAt: time.Now().UTC(), Status: business.ClientTenantStatusActive, ClientIdentifier: "ci-3"},
 	} {
 		require.NoError(t, store.StoreClientTenant(c))
 	}
@@ -162,7 +162,7 @@ func TestClientTenantStore_List(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, all, 3)
 
-	active, err := store.ListClientTenants(interfaces.ClientTenantStatusActive)
+	active, err := store.ListClientTenants(business.ClientTenantStatusActive)
 	require.NoError(t, err)
 	assert.Len(t, active, 2)
 }
@@ -170,7 +170,7 @@ func TestClientTenantStore_List(t *testing.T) {
 func TestClientTenantStore_AdminConsentRequest(t *testing.T) {
 	store := newClientTenantStore(t)
 
-	req := &interfaces.AdminConsentRequest{
+	req := &business.AdminConsentRequest{
 		ClientIdentifier: "cfgms-consent",
 		ClientName:       "Consent Corp",
 		RequestedBy:      "msp@example.com",
@@ -193,7 +193,7 @@ func TestClientTenantStore_AdminConsentRequest(t *testing.T) {
 func TestClientTenantStore_AdminConsentRequest_Expired(t *testing.T) {
 	store := newClientTenantStore(t)
 
-	req := &interfaces.AdminConsentRequest{
+	req := &business.AdminConsentRequest{
 		ClientIdentifier: "cfgms-expired",
 		ClientName:       "Expired Corp",
 		RequestedBy:      "msp@example.com",

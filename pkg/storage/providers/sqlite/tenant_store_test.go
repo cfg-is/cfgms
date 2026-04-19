@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
-func newTenantStore(t *testing.T) interfaces.TenantStore {
+func newTenantStore(t *testing.T) business.TenantStore {
 	t.Helper()
 	dir := t.TempDir()
 	p := sqlite.NewSQLiteProvider(dir)
@@ -29,11 +29,11 @@ func TestTenantStore_CreateAndGet(t *testing.T) {
 	store := newTenantStore(t)
 	ctx := context.Background()
 
-	tenant := &interfaces.TenantData{
+	tenant := &business.TenantData{
 		ID:          "tenant-1",
 		Name:        "Acme Corp",
 		Description: "Test tenant",
-		Status:      interfaces.TenantStatusActive,
+		Status:      business.TenantStatusActive,
 		CreatedAt:   time.Now().UTC().Truncate(time.Second),
 		UpdatedAt:   time.Now().UTC().Truncate(time.Second),
 		Metadata:    map[string]string{"key": "value"},
@@ -62,28 +62,28 @@ func TestTenantStore_Update(t *testing.T) {
 	store := newTenantStore(t)
 	ctx := context.Background()
 
-	tenant := &interfaces.TenantData{
+	tenant := &business.TenantData{
 		ID:     "tenant-2",
 		Name:   "Original",
-		Status: interfaces.TenantStatusActive,
+		Status: business.TenantStatusActive,
 	}
 	require.NoError(t, store.CreateTenant(ctx, tenant))
 
 	tenant.Name = "Updated"
-	tenant.Status = interfaces.TenantStatusSuspended
+	tenant.Status = business.TenantStatusSuspended
 	require.NoError(t, store.UpdateTenant(ctx, tenant))
 
 	got, err := store.GetTenant(ctx, "tenant-2")
 	require.NoError(t, err)
 	assert.Equal(t, "Updated", got.Name)
-	assert.Equal(t, interfaces.TenantStatusSuspended, got.Status)
+	assert.Equal(t, business.TenantStatusSuspended, got.Status)
 }
 
 func TestTenantStore_UpdateNotFound(t *testing.T) {
 	store := newTenantStore(t)
 	ctx := context.Background()
 
-	err := store.UpdateTenant(ctx, &interfaces.TenantData{ID: "nonexistent", Name: "X"})
+	err := store.UpdateTenant(ctx, &business.TenantData{ID: "nonexistent", Name: "X"})
 	assert.Error(t, err)
 }
 
@@ -91,10 +91,10 @@ func TestTenantStore_Delete(t *testing.T) {
 	store := newTenantStore(t)
 	ctx := context.Background()
 
-	tenant := &interfaces.TenantData{
+	tenant := &business.TenantData{
 		ID:     "tenant-del",
 		Name:   "ToDelete",
-		Status: interfaces.TenantStatusActive,
+		Status: business.TenantStatusActive,
 	}
 	require.NoError(t, store.CreateTenant(ctx, tenant))
 	require.NoError(t, store.DeleteTenant(ctx, "tenant-del"))
@@ -114,10 +114,10 @@ func TestTenantStore_List(t *testing.T) {
 	store := newTenantStore(t)
 	ctx := context.Background()
 
-	for _, td := range []interfaces.TenantData{
-		{ID: "t-1", Name: "Alpha", Status: interfaces.TenantStatusActive},
-		{ID: "t-2", Name: "Beta", Status: interfaces.TenantStatusSuspended},
-		{ID: "t-3", Name: "Gamma", Status: interfaces.TenantStatusActive},
+	for _, td := range []business.TenantData{
+		{ID: "t-1", Name: "Alpha", Status: business.TenantStatusActive},
+		{ID: "t-2", Name: "Beta", Status: business.TenantStatusSuspended},
+		{ID: "t-3", Name: "Gamma", Status: business.TenantStatusActive},
 	} {
 		td := td
 		require.NoError(t, store.CreateTenant(ctx, &td))
@@ -127,7 +127,7 @@ func TestTenantStore_List(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, all, 3)
 
-	active, err := store.ListTenants(ctx, &interfaces.TenantFilter{Status: interfaces.TenantStatusActive})
+	active, err := store.ListTenants(ctx, &business.TenantFilter{Status: business.TenantStatusActive})
 	require.NoError(t, err)
 	assert.Len(t, active, 2)
 }
@@ -136,9 +136,9 @@ func TestTenantStore_Hierarchy(t *testing.T) {
 	store := newTenantStore(t)
 	ctx := context.Background()
 
-	root := &interfaces.TenantData{ID: "root", Name: "Root", Status: interfaces.TenantStatusActive}
-	child := &interfaces.TenantData{ID: "child", Name: "Child", ParentID: "root", Status: interfaces.TenantStatusActive}
-	grand := &interfaces.TenantData{ID: "grand", Name: "Grandchild", ParentID: "child", Status: interfaces.TenantStatusActive}
+	root := &business.TenantData{ID: "root", Name: "Root", Status: business.TenantStatusActive}
+	child := &business.TenantData{ID: "child", Name: "Child", ParentID: "root", Status: business.TenantStatusActive}
+	grand := &business.TenantData{ID: "grand", Name: "Grandchild", ParentID: "child", Status: business.TenantStatusActive}
 
 	require.NoError(t, store.CreateTenant(ctx, root))
 	require.NoError(t, store.CreateTenant(ctx, child))
@@ -175,8 +175,8 @@ func TestTenantStore_MultiTenantIsolation(t *testing.T) {
 	store := newTenantStore(t)
 	ctx := context.Background()
 
-	t1 := &interfaces.TenantData{ID: "msp-a", Name: "MSP A", Status: interfaces.TenantStatusActive}
-	t2 := &interfaces.TenantData{ID: "msp-b", Name: "MSP B", Status: interfaces.TenantStatusActive}
+	t1 := &business.TenantData{ID: "msp-a", Name: "MSP A", Status: business.TenantStatusActive}
+	t2 := &business.TenantData{ID: "msp-b", Name: "MSP B", Status: business.TenantStatusActive}
 
 	require.NoError(t, store.CreateTenant(ctx, t1))
 	require.NoError(t, store.CreateTenant(ctx, t2))

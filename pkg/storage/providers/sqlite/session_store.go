@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// SQLiteSessionStore implements interfaces.SessionStore using SQLite.
+// SQLiteSessionStore implements business.SessionStore using SQLite.
 // Only sessions with Persistent=true should be written here; ephemeral sessions
 // (Persistent=false) belong in pkg/cache.
 type SQLiteSessionStore struct {
@@ -34,7 +34,7 @@ func (s *SQLiteSessionStore) Close() error {
 
 // CreateSession inserts a new durable session. Only Persistent=true sessions may be stored here;
 // ephemeral sessions (Persistent=false) belong in pkg/cache.
-func (s *SQLiteSessionStore) CreateSession(ctx context.Context, session *interfaces.Session) error {
+func (s *SQLiteSessionStore) CreateSession(ctx context.Context, session *business.Session) error {
 	if session == nil {
 		return fmt.Errorf("session cannot be nil")
 	}
@@ -101,7 +101,7 @@ func (s *SQLiteSessionStore) CreateSession(ctx context.Context, session *interfa
 }
 
 // GetSession retrieves a session by ID.
-func (s *SQLiteSessionStore) GetSession(ctx context.Context, sessionID string) (*interfaces.Session, error) {
+func (s *SQLiteSessionStore) GetSession(ctx context.Context, sessionID string) (*business.Session, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT session_id, user_id, tenant_id, session_type,
 		       created_at, last_activity, expires_at, status, persistent,
@@ -112,7 +112,7 @@ func (s *SQLiteSessionStore) GetSession(ctx context.Context, sessionID string) (
 }
 
 // UpdateSession replaces all mutable fields of an existing session.
-func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, sessionID string, session *interfaces.Session) error {
+func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, sessionID string, session *business.Session) error {
 	if session == nil {
 		return fmt.Errorf("session cannot be nil")
 	}
@@ -190,7 +190,7 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, sessionID string
 }
 
 // ListSessions returns sessions matching the filter.
-func (s *SQLiteSessionStore) ListSessions(ctx context.Context, filter *interfaces.SessionFilter) ([]*interfaces.Session, error) {
+func (s *SQLiteSessionStore) ListSessions(ctx context.Context, filter *business.SessionFilter) ([]*business.Session, error) {
 	query, args := buildSessionQuery(filter)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -198,7 +198,7 @@ func (s *SQLiteSessionStore) ListSessions(ctx context.Context, filter *interface
 	}
 	defer func() { _ = rows.Close() }()
 
-	var sessions []*interfaces.Session
+	var sessions []*business.Session
 	for rows.Next() {
 		sess, err := scanSessionRow(rows)
 		if err != nil {
@@ -238,18 +238,18 @@ func (s *SQLiteSessionStore) CleanupExpiredSessions(ctx context.Context) (int, e
 }
 
 // GetSessionsByUser returns all sessions for a user.
-func (s *SQLiteSessionStore) GetSessionsByUser(ctx context.Context, userID string) ([]*interfaces.Session, error) {
-	return s.ListSessions(ctx, &interfaces.SessionFilter{UserID: userID})
+func (s *SQLiteSessionStore) GetSessionsByUser(ctx context.Context, userID string) ([]*business.Session, error) {
+	return s.ListSessions(ctx, &business.SessionFilter{UserID: userID})
 }
 
 // GetSessionsByTenant returns all sessions for a tenant.
-func (s *SQLiteSessionStore) GetSessionsByTenant(ctx context.Context, tenantID string) ([]*interfaces.Session, error) {
-	return s.ListSessions(ctx, &interfaces.SessionFilter{TenantID: tenantID})
+func (s *SQLiteSessionStore) GetSessionsByTenant(ctx context.Context, tenantID string) ([]*business.Session, error) {
+	return s.ListSessions(ctx, &business.SessionFilter{TenantID: tenantID})
 }
 
 // GetSessionsByType returns all sessions of a specific type.
-func (s *SQLiteSessionStore) GetSessionsByType(ctx context.Context, sessionType interfaces.SessionType) ([]*interfaces.Session, error) {
-	return s.ListSessions(ctx, &interfaces.SessionFilter{Type: sessionType})
+func (s *SQLiteSessionStore) GetSessionsByType(ctx context.Context, sessionType business.SessionType) ([]*business.Session, error) {
+	return s.ListSessions(ctx, &business.SessionFilter{Type: sessionType})
 }
 
 // GetActiveSessionsCount returns the number of non-expired active sessions.
@@ -257,7 +257,7 @@ func (s *SQLiteSessionStore) GetActiveSessionsCount(ctx context.Context) (int64,
 	var count int64
 	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM sessions WHERE status = ? AND expires_at > ?`,
-		string(interfaces.SessionStatusActive), formatTime(nowUTC()),
+		string(business.SessionStatusActive), formatTime(nowUTC()),
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to count active sessions: %w", err)
@@ -271,8 +271,8 @@ func (s *SQLiteSessionStore) HealthCheck(ctx context.Context) error {
 }
 
 // GetStats returns aggregate statistics about stored sessions.
-func (s *SQLiteSessionStore) GetStats(ctx context.Context) (*interfaces.RuntimeStoreStats, error) {
-	stats := &interfaces.RuntimeStoreStats{
+func (s *SQLiteSessionStore) GetStats(ctx context.Context) (*business.RuntimeStoreStats, error) {
+	stats := &business.RuntimeStoreStats{
 		SessionsByType:   make(map[string]int64),
 		SessionsByStatus: make(map[string]int64),
 	}
@@ -307,7 +307,7 @@ func (s *SQLiteSessionStore) GetStats(ctx context.Context) (*interfaces.RuntimeS
 		}
 	}
 
-	if v, ok := stats.SessionsByStatus[string(interfaces.SessionStatusActive)]; ok {
+	if v, ok := stats.SessionsByStatus[string(business.SessionStatusActive)]; ok {
 		stats.ActiveSessions = v
 	}
 
@@ -316,7 +316,7 @@ func (s *SQLiteSessionStore) GetStats(ctx context.Context) (*interfaces.RuntimeS
 
 // ---- helpers ----------------------------------------------------------------
 
-func buildSessionQuery(filter *interfaces.SessionFilter) (string, []interface{}) {
+func buildSessionQuery(filter *business.SessionFilter) (string, []interface{}) {
 	base := `SELECT session_id, user_id, tenant_id, session_type,
 	                created_at, last_activity, expires_at, status, persistent,
 	                client_info, metadata, session_data, security_context, compliance_flags,
@@ -371,8 +371,8 @@ func buildSessionQuery(filter *interfaces.SessionFilter) (string, []interface{})
 	return query, args
 }
 
-func scanSession(row *sql.Row) (*interfaces.Session, error) {
-	sess := &interfaces.Session{}
+func scanSession(row *sql.Row) (*business.Session, error) {
+	sess := &business.Session{}
 	var (
 		sessionTypeStr, statusStr                                   string
 		createdStr, lastActivityStr, expiresStr                     string
@@ -396,8 +396,8 @@ func scanSession(row *sql.Row) (*interfaces.Session, error) {
 		persistentInt, clientInfoStr, metaStr, sessionDataStr, secCtxStr, flagsStr, modifiedAt)
 }
 
-func scanSessionRow(rows *sql.Rows) (*interfaces.Session, error) {
-	sess := &interfaces.Session{}
+func scanSessionRow(rows *sql.Rows) (*business.Session, error) {
+	sess := &business.Session{}
 	var (
 		sessionTypeStr, statusStr                                   string
 		createdStr, lastActivityStr, expiresStr                     string
@@ -418,15 +418,15 @@ func scanSessionRow(rows *sql.Rows) (*interfaces.Session, error) {
 }
 
 func populateSession(
-	sess *interfaces.Session,
+	sess *business.Session,
 	sessionTypeStr, statusStr,
 	createdStr, lastActivityStr, expiresStr string,
 	persistentInt int,
 	clientInfoStr, metaStr, sessionDataStr, secCtxStr, flagsStr string,
 	modifiedAt sql.NullString,
-) (*interfaces.Session, error) {
-	sess.SessionType = interfaces.SessionType(sessionTypeStr)
-	sess.Status = interfaces.SessionStatus(statusStr)
+) (*business.Session, error) {
+	sess.SessionType = business.SessionType(sessionTypeStr)
+	sess.Status = business.SessionStatus(statusStr)
 	sess.CreatedAt = parseTime(createdStr)
 	sess.LastActivity = parseTime(lastActivityStr)
 	sess.ExpiresAt = parseTime(expiresStr)
@@ -435,7 +435,7 @@ func populateSession(
 
 	// ClientInfo
 	if clientInfoStr != "" && clientInfoStr != "{}" {
-		ci := &interfaces.ClientInfo{}
+		ci := &business.ClientInfo{}
 		if err := json.Unmarshal([]byte(clientInfoStr), ci); err == nil {
 			sess.ClientInfo = ci
 		}
@@ -466,7 +466,7 @@ func populateSession(
 	return sess, nil
 }
 
-func marshalClientInfo(ci *interfaces.ClientInfo) (string, error) {
+func marshalClientInfo(ci *business.ClientInfo) (string, error) {
 	if ci == nil {
 		return "{}", nil
 	}
@@ -500,4 +500,4 @@ func stringMapToInterface(m map[string]string) map[string]interface{} {
 }
 
 // ensure SQLiteSessionStore satisfies the interface at compile time
-var _ interfaces.SessionStore = (*SQLiteSessionStore)(nil)
+var _ business.SessionStore = (*SQLiteSessionStore)(nil)

@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // TestLease_StoreImplementsLeasedSecret verifies the compile-time interface assertion
@@ -82,7 +83,7 @@ func TestLease_LeaseSecret_EmptyTenantID(t *testing.T) {
 	})
 
 	require.Error(t, err)
-	assert.ErrorIs(t, err, interfaces.ErrTenantRequired)
+	assert.ErrorIs(t, err, cfgconfig.ErrTenantRequired)
 }
 
 // TestLease_LeaseSecret_EmptyKey verifies that an empty key is rejected.

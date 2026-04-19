@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 )
 
 const defaultContentType = "application/octet-stream"
@@ -36,7 +36,7 @@ func (p *FilesystemBlobProvider) Available() (bool, error) { return true, nil }
 
 // CreateBlobStore instantiates a FilesystemBlobStore rooted at the configured directory.
 // Config key: "root" (required) — absolute path to the storage root directory.
-func (p *FilesystemBlobProvider) CreateBlobStore(config map[string]interface{}) (interfaces.BlobStore, error) {
+func (p *FilesystemBlobProvider) CreateBlobStore(config map[string]interface{}) (blob.BlobStore, error) {
 	root, ok := config["root"].(string)
 	if !ok || root == "" {
 		return nil, fmt.Errorf("filesystem blob provider: config key 'root' is required and must be a non-empty string")
@@ -49,7 +49,7 @@ func (p *FilesystemBlobProvider) CreateBlobStore(config map[string]interface{}) 
 
 // init auto-registers the filesystem provider so callers need only blank-import this package.
 func init() {
-	interfaces.RegisterBlobProvider(&FilesystemBlobProvider{})
+	blob.RegisterBlobProvider(&FilesystemBlobProvider{})
 }
 
 // FilesystemBlobStore implements BlobStore backed by the local filesystem.
@@ -79,9 +79,9 @@ func validateKeyComponent(field, value string) error {
 }
 
 // validateKey validates all components of a BlobKey for path safety.
-func validateKey(key interfaces.BlobKey) error {
+func validateKey(key blob.BlobKey) error {
 	if key.TenantID == "" {
-		return interfaces.ErrBlobTenantRequired
+		return blob.ErrBlobTenantRequired
 	}
 	if err := validateKeyComponent("TenantID", key.TenantID); err != nil {
 		return err
@@ -95,18 +95,18 @@ func validateKey(key interfaces.BlobKey) error {
 	return nil
 }
 
-func (s *FilesystemBlobStore) blobPath(key interfaces.BlobKey) string {
+func (s *FilesystemBlobStore) blobPath(key blob.BlobKey) string {
 	return filepath.Join(s.root, key.TenantID, key.Namespace, key.Name)
 }
 
-func (s *FilesystemBlobStore) metaPath(key interfaces.BlobKey) string {
+func (s *FilesystemBlobStore) metaPath(key blob.BlobKey) string {
 	return s.blobPath(key) + ".meta.json"
 }
 
 // PutBlob writes a blob and its sidecar metadata file atomically.
 // Data is streamed via io.TeeReader; SHA-256 is computed during the write.
 // The blob file is written to a temp file and then renamed to prevent partial writes.
-func (s *FilesystemBlobStore) PutBlob(ctx context.Context, key interfaces.BlobKey, r io.Reader, meta interfaces.BlobMeta) error {
+func (s *FilesystemBlobStore) PutBlob(ctx context.Context, key blob.BlobKey, r io.Reader, meta blob.BlobMeta) error {
 	if err := validateKey(key); err != nil {
 		return err
 	}
@@ -177,33 +177,33 @@ func (s *FilesystemBlobStore) PutBlob(ctx context.Context, key interfaces.BlobKe
 // The reader wraps the file in a checksumVerifyingReader that computes SHA-256
 // during reads and returns ErrBlobChecksumMismatch on the final read if the
 // computed digest does not match the stored checksum.
-func (s *FilesystemBlobStore) GetBlob(ctx context.Context, key interfaces.BlobKey) (io.ReadCloser, interfaces.BlobMeta, error) {
+func (s *FilesystemBlobStore) GetBlob(ctx context.Context, key blob.BlobKey) (io.ReadCloser, blob.BlobMeta, error) {
 	if err := validateKey(key); err != nil {
-		return nil, interfaces.BlobMeta{}, err
+		return nil, blob.BlobMeta{}, err
 	}
 
 	metaBytes, err := os.ReadFile(s.metaPath(key))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, interfaces.BlobMeta{}, interfaces.ErrBlobNotFound
+			return nil, blob.BlobMeta{}, blob.ErrBlobNotFound
 		}
-		return nil, interfaces.BlobMeta{}, fmt.Errorf("blob get: failed to read metadata sidecar: %w", err)
+		return nil, blob.BlobMeta{}, fmt.Errorf("blob get: failed to read metadata sidecar: %w", err)
 	}
 
 	var sidecar blobMetaSidecar
 	if err := json.Unmarshal(metaBytes, &sidecar); err != nil {
-		return nil, interfaces.BlobMeta{}, fmt.Errorf("blob get: failed to parse metadata sidecar: %w", err)
+		return nil, blob.BlobMeta{}, fmt.Errorf("blob get: failed to parse metadata sidecar: %w", err)
 	}
 
 	f, err := os.Open(s.blobPath(key))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, interfaces.BlobMeta{}, interfaces.ErrBlobNotFound
+			return nil, blob.BlobMeta{}, blob.ErrBlobNotFound
 		}
-		return nil, interfaces.BlobMeta{}, fmt.Errorf("blob get: failed to open blob file: %w", err)
+		return nil, blob.BlobMeta{}, fmt.Errorf("blob get: failed to open blob file: %w", err)
 	}
 
-	blobMeta := interfaces.BlobMeta{
+	blobMeta := blob.BlobMeta{
 		ContentType: sidecar.ContentType,
 		Size:        sidecar.Size,
 		Checksum:    sidecar.Checksum,
@@ -220,7 +220,7 @@ func (s *FilesystemBlobStore) GetBlob(ctx context.Context, key interfaces.BlobKe
 
 // DeleteBlob removes both the blob file and its sidecar metadata.
 // Returns nil if neither file exists.
-func (s *FilesystemBlobStore) DeleteBlob(ctx context.Context, key interfaces.BlobKey) error {
+func (s *FilesystemBlobStore) DeleteBlob(ctx context.Context, key blob.BlobKey) error {
 	if err := validateKey(key); err != nil {
 		return err
 	}
@@ -237,9 +237,9 @@ func (s *FilesystemBlobStore) DeleteBlob(ctx context.Context, key interfaces.Blo
 // ListBlobs returns all blobs whose key matches the non-empty prefix fields.
 // TenantID must be set. If Namespace is set, only blobs in that namespace are returned.
 // If Name is set, only blobs whose Name has that prefix are returned.
-func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix interfaces.BlobKey) ([]interfaces.BlobInfo, error) {
+func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix blob.BlobKey) ([]blob.BlobInfo, error) {
 	if prefix.TenantID == "" {
-		return nil, interfaces.ErrBlobTenantRequired
+		return nil, blob.ErrBlobTenantRequired
 	}
 	if err := validateKeyComponent("TenantID", prefix.TenantID); err != nil {
 		return nil, err
@@ -253,7 +253,7 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix interfaces.B
 		searchDir = filepath.Join(searchDir, prefix.Namespace)
 	}
 
-	var results []interfaces.BlobInfo
+	var results []blob.BlobInfo
 
 	err := filepath.WalkDir(searchDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -287,7 +287,7 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix interfaces.B
 			return nil
 		}
 
-		key := interfaces.BlobKey{
+		key := blob.BlobKey{
 			TenantID:  parts[0],
 			Namespace: parts[1],
 			Name:      parts[2],
@@ -297,9 +297,9 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix interfaces.B
 			return nil
 		}
 
-		results = append(results, interfaces.BlobInfo{
+		results = append(results, blob.BlobInfo{
 			Key: key,
-			Meta: interfaces.BlobMeta{
+			Meta: blob.BlobMeta{
 				ContentType: sidecar.ContentType,
 				Size:        sidecar.Size,
 				Checksum:    sidecar.Checksum,
@@ -318,9 +318,9 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix interfaces.B
 
 // BlobExists reports whether a blob exists by checking for its sidecar metadata file.
 // Does not read the blob content.
-func (s *FilesystemBlobStore) BlobExists(ctx context.Context, key interfaces.BlobKey) (bool, error) {
+func (s *FilesystemBlobStore) BlobExists(ctx context.Context, key blob.BlobKey) (bool, error) {
 	if key.TenantID == "" {
-		return false, interfaces.ErrBlobTenantRequired
+		return false, blob.ErrBlobTenantRequired
 	}
 	if err := validateKeyComponent("TenantID", key.TenantID); err != nil {
 		return false, err
@@ -366,7 +366,7 @@ func (r *checksumVerifyingReader) Read(p []byte) (int, error) {
 	if err == io.EOF {
 		actual := hex.EncodeToString(r.hasher.Sum(nil))
 		if actual != r.expected {
-			return n, interfaces.ErrBlobChecksumMismatch
+			return n, blob.ErrBlobChecksumMismatch
 		}
 	}
 	return n, err

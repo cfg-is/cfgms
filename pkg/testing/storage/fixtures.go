@@ -18,6 +18,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
@@ -34,7 +35,7 @@ func isUnsupportedStoreError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, interfaces.ErrNotSupported) {
+	if errors.Is(err, business.ErrNotSupported) {
 		return true
 	}
 	return strings.Contains(err.Error(), "operation not supported")
@@ -313,18 +314,18 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 		}
 	})
 
-	t.Run(fmt.Sprintf("provider_%s_runtime_store", providerName), func(t *testing.T) {
-		store, err := provider.CreateRuntimeStore(testConfig.Config)
+	t.Run(fmt.Sprintf("provider_%s_session_store", providerName), func(t *testing.T) {
+		store, err := provider.CreateSessionStore(testConfig.Config)
 		if isUnsupportedStoreError(err) {
-			t.Skipf("provider %q does not implement RuntimeStore (ADR-003 tier boundary)", providerName)
+			t.Skipf("provider %q does not implement SessionStore (ADR-003 tier boundary)", providerName)
 			return
 		}
 		if err != nil && providerName == "database" {
 			requireInfrastructureOrSkip(t, err, "Database provider")
 			return
 		}
-		require.NoError(t, err, "RuntimeStore creation should succeed")
-		require.NotNil(t, store, "RuntimeStore should not be nil")
+		require.NoError(t, err, "SessionStore creation should succeed")
+		require.NotNil(t, store, "SessionStore should not be nil")
 
 		if closer, ok := store.(interface{ Close() error }); ok {
 			defer func() { _ = closer.Close() }()

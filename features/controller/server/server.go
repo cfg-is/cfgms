@@ -54,6 +54,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for OSS composite manager
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
@@ -598,7 +599,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 // cannot be created.
 func initializeGitSync(
 	dataDir string,
-	configStore interfaces.ConfigStore,
+	configStore cfgconfig.ConfigStore,
 	logger logging.Logger,
 ) (*gitsync.Syncer, *gitsync.WebhookHandler) {
 	workDir := filepath.Join(dataDir, ".gitsync", "repos")
@@ -726,7 +727,7 @@ func initializeWorkflowHandler(storageManager *interfaces.StorageManager, logger
 // workflowEngineAdapter implements trigger.WorkflowTrigger by delegating to the workflow engine.
 type workflowEngineAdapter struct {
 	engine      *workflow.Engine
-	configStore interfaces.ConfigStore
+	configStore cfgconfig.ConfigStore
 }
 
 func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *workflowtrigger.Trigger, data map[string]interface{}) (*workflowtrigger.WorkflowExecution, error) {

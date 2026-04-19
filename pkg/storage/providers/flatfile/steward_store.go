@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// FlatFileStewardStore implements interfaces.StewardStore using one JSON file per steward.
+// FlatFileStewardStore implements business.StewardStore using one JSON file per steward.
 //
 // File layout: <root>/stewards/<stewardID>.json
 //
@@ -54,7 +54,7 @@ func (s *FlatFileStewardStore) stewardPath(stewardID string) (string, error) {
 }
 
 // readSteward reads and unmarshals a steward record file. Must be called with at least a read lock.
-func (s *FlatFileStewardStore) readSteward(stewardID string) (*interfaces.StewardRecord, error) {
+func (s *FlatFileStewardStore) readSteward(stewardID string) (*business.StewardRecord, error) {
 	path, err := s.stewardPath(stewardID)
 	if err != nil {
 		return nil, err
@@ -63,11 +63,11 @@ func (s *FlatFileStewardStore) readSteward(stewardID string) (*interfaces.Stewar
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, interfaces.ErrStewardNotFound
+			return nil, business.ErrStewardNotFound
 		}
 		return nil, fmt.Errorf("flatfile: failed to read steward file: %w", err)
 	}
-	var record interfaces.StewardRecord
+	var record business.StewardRecord
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return nil, fmt.Errorf("flatfile: failed to unmarshal steward record: %w", err)
 	}
@@ -75,7 +75,7 @@ func (s *FlatFileStewardStore) readSteward(stewardID string) (*interfaces.Stewar
 }
 
 // writeSteward marshals and atomically writes a steward record. Must be called with a write lock.
-func (s *FlatFileStewardStore) writeSteward(record *interfaces.StewardRecord) error {
+func (s *FlatFileStewardStore) writeSteward(record *business.StewardRecord) error {
 	path, err := s.stewardPath(record.ID)
 	if err != nil {
 		return err
@@ -89,7 +89,7 @@ func (s *FlatFileStewardStore) writeSteward(record *interfaces.StewardRecord) er
 
 // RegisterSteward creates a new steward record. Returns ErrStewardAlreadyExists if a record
 // with the same ID already exists.
-func (s *FlatFileStewardStore) RegisterSteward(_ context.Context, record *interfaces.StewardRecord) error {
+func (s *FlatFileStewardStore) RegisterSteward(_ context.Context, record *business.StewardRecord) error {
 	if record == nil {
 		return fmt.Errorf("flatfile: record cannot be nil")
 	}
@@ -101,7 +101,7 @@ func (s *FlatFileStewardStore) RegisterSteward(_ context.Context, record *interf
 	defer s.mutex.Unlock()
 
 	if _, err := s.readSteward(record.ID); err == nil {
-		return interfaces.ErrStewardAlreadyExists
+		return business.ErrStewardAlreadyExists
 	}
 
 	now := time.Now().UTC()
@@ -109,7 +109,7 @@ func (s *FlatFileStewardStore) RegisterSteward(_ context.Context, record *interf
 	r.RegisteredAt = now
 	r.LastSeen = now
 	if r.Status == "" {
-		r.Status = interfaces.StewardStatusRegistered
+		r.Status = business.StewardStatusRegistered
 	}
 	return s.writeSteward(&r)
 }
@@ -130,7 +130,7 @@ func (s *FlatFileStewardStore) UpdateHeartbeat(_ context.Context, stewardID stri
 }
 
 // GetSteward retrieves the record for the given steward ID.
-func (s *FlatFileStewardStore) GetSteward(_ context.Context, stewardID string) (*interfaces.StewardRecord, error) {
+func (s *FlatFileStewardStore) GetSteward(_ context.Context, stewardID string) (*business.StewardRecord, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	return s.readSteward(stewardID)
@@ -138,14 +138,14 @@ func (s *FlatFileStewardStore) GetSteward(_ context.Context, stewardID string) (
 
 // ListStewards returns all steward records. Reads every file in the stewards directory.
 // For large fleets this is O(n); prefer the SQLite provider if query latency matters.
-func (s *FlatFileStewardStore) ListStewards(_ context.Context) ([]*interfaces.StewardRecord, error) {
+func (s *FlatFileStewardStore) ListStewards(_ context.Context) ([]*business.StewardRecord, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	return s.readAllStewards()
 }
 
 // readAllStewards reads all steward JSON files. Must be called with at least a read lock.
-func (s *FlatFileStewardStore) readAllStewards() ([]*interfaces.StewardRecord, error) {
+func (s *FlatFileStewardStore) readAllStewards() ([]*business.StewardRecord, error) {
 	dir := s.stewardDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -155,7 +155,7 @@ func (s *FlatFileStewardStore) readAllStewards() ([]*interfaces.StewardRecord, e
 		return nil, fmt.Errorf("flatfile: failed to read steward directory: %w", err)
 	}
 
-	var records []*interfaces.StewardRecord
+	var records []*business.StewardRecord
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -166,7 +166,7 @@ func (s *FlatFileStewardStore) readAllStewards() ([]*interfaces.StewardRecord, e
 		if err != nil {
 			continue // skip unreadable files
 		}
-		var record interfaces.StewardRecord
+		var record business.StewardRecord
 		if err := json.Unmarshal(raw, &record); err != nil {
 			continue // skip malformed files
 		}
@@ -176,7 +176,7 @@ func (s *FlatFileStewardStore) readAllStewards() ([]*interfaces.StewardRecord, e
 }
 
 // ListStewardsByStatus returns records with the given status.
-func (s *FlatFileStewardStore) ListStewardsByStatus(_ context.Context, status interfaces.StewardStatus) ([]*interfaces.StewardRecord, error) {
+func (s *FlatFileStewardStore) ListStewardsByStatus(_ context.Context, status business.StewardStatus) ([]*business.StewardRecord, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -184,7 +184,7 @@ func (s *FlatFileStewardStore) ListStewardsByStatus(_ context.Context, status in
 	if err != nil {
 		return nil, err
 	}
-	var filtered []*interfaces.StewardRecord
+	var filtered []*business.StewardRecord
 	for _, r := range all {
 		if r.Status == status {
 			filtered = append(filtered, r)
@@ -194,7 +194,7 @@ func (s *FlatFileStewardStore) ListStewardsByStatus(_ context.Context, status in
 }
 
 // UpdateStewardStatus updates the lifecycle status of the given steward.
-func (s *FlatFileStewardStore) UpdateStewardStatus(_ context.Context, stewardID string, status interfaces.StewardStatus) error {
+func (s *FlatFileStewardStore) UpdateStewardStatus(_ context.Context, stewardID string, status business.StewardStatus) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -209,11 +209,11 @@ func (s *FlatFileStewardStore) UpdateStewardStatus(_ context.Context, stewardID 
 
 // DeregisterSteward marks the steward as deregistered. Records are retained for audit.
 func (s *FlatFileStewardStore) DeregisterSteward(ctx context.Context, stewardID string) error {
-	return s.UpdateStewardStatus(ctx, stewardID, interfaces.StewardStatusDeregistered)
+	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)
 }
 
 // GetStewardsSeen returns all stewards whose last_seen time is after the given time.
-func (s *FlatFileStewardStore) GetStewardsSeen(_ context.Context, since time.Time) ([]*interfaces.StewardRecord, error) {
+func (s *FlatFileStewardStore) GetStewardsSeen(_ context.Context, since time.Time) ([]*business.StewardRecord, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -221,7 +221,7 @@ func (s *FlatFileStewardStore) GetStewardsSeen(_ context.Context, since time.Tim
 	if err != nil {
 		return nil, err
 	}
-	var result []*interfaces.StewardRecord
+	var result []*business.StewardRecord
 	for _, r := range all {
 		if r.LastSeen.After(since) {
 			result = append(result, r)
@@ -248,4 +248,4 @@ func (s *FlatFileStewardStore) Initialize(_ context.Context) error {
 func (s *FlatFileStewardStore) Close() error { return nil }
 
 // Compile-time assertion
-var _ interfaces.StewardStore = (*FlatFileStewardStore)(nil)
+var _ business.StewardStore = (*FlatFileStewardStore)(nil)

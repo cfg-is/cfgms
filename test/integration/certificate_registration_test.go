@@ -25,6 +25,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
@@ -42,7 +43,7 @@ type CertificateRegistrationTestSuite struct {
 	suite.Suite
 	tempDir                 string
 	certManager             *cert.Manager
-	tokenStore              interfaces.RegistrationTokenStore
+	tokenStore              business.RegistrationTokenStore
 	adapter                 *registration.StorageAdapter
 	certProvisioningService *service.CertificateProvisioningService
 	logger                  logging.Logger

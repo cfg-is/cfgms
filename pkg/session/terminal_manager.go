@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// Package session provides terminal session management using RuntimeStore
+// Package session provides terminal session management
 package session
 
 import (
@@ -11,7 +11,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/terminal"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // TerminalSessionManager manages terminal sessions using pluggable storage
@@ -81,7 +81,7 @@ func NewTerminalSessionManager(
 	return manager, nil
 }
 
-// CreateSession creates a new terminal session using RuntimeStore
+// CreateSession creates a new terminal session
 // Epic 6 Compliance: Only persistent sessions use durable storage (database/git)
 // Ephemeral sessions use memory storage and are lost on controller restart
 func (m *TerminalSessionManager) CreateSession(ctx context.Context, req *terminal.SessionRequest) (*terminal.Session, error) {
@@ -110,22 +110,22 @@ func (m *TerminalSessionManager) CreateSession(ctx context.Context, req *termina
 		}
 	}
 
-	// Create session in RuntimeStore
+	// Persist session in durable store
 	sessionReq := &TerminalSessionRequest{
 		SessionCreateRequest: SessionCreateRequest{
 			SessionID:   terminalSession.ID,
 			UserID:      req.UserID,
 			TenantID:    "default", // TODO: Extract from request or context
-			SessionType: interfaces.SessionTypeTerminal,
+			SessionType: business.SessionTypeTerminal,
 			Timeout:     m.config.SessionTimeout,
-			ClientInfo:  &interfaces.ClientInfo{
+			ClientInfo:  &business.ClientInfo{
 				// TODO: Extract from request context
 			},
 			Metadata: map[string]string{
 				"shell":      req.Shell,
 				"steward_id": req.StewardID,
 			},
-			SessionData: &interfaces.TerminalSessionData{
+			SessionData: &business.TerminalSessionData{
 				StewardID:        req.StewardID,
 				Shell:            req.Shell,
 				Cols:             req.Cols,
@@ -283,9 +283,9 @@ func (m *TerminalSessionManager) CleanupTimedOutSessions() {
 	defer cancel()
 
 	// Get list of expired sessions from unified manager
-	filter := &interfaces.SessionFilter{
-		Type:   interfaces.SessionTypeTerminal,
-		Status: interfaces.SessionStatusActive,
+	filter := &business.SessionFilter{
+		Type:   business.SessionTypeTerminal,
+		Status: business.SessionStatusActive,
 	}
 
 	sessions, err := m.sessionManager.ListSessions(ctx, filter)
@@ -365,9 +365,9 @@ func (m *TerminalSessionManager) Stop(ctx context.Context) error {
 
 // restoreActiveSessions restores active terminal sessions from storage on startup
 func (m *TerminalSessionManager) restoreActiveSessions(ctx context.Context) error {
-	filter := &interfaces.SessionFilter{
-		Type:   interfaces.SessionTypeTerminal,
-		Status: interfaces.SessionStatusActive,
+	filter := &business.SessionFilter{
+		Type:   business.SessionTypeTerminal,
+		Status: business.SessionStatusActive,
 	}
 
 	sessions, err := m.sessionManager.ListSessions(ctx, filter)
@@ -407,13 +407,13 @@ func (m *TerminalSessionManager) restoreActiveSessions(ctx context.Context) erro
 }
 
 // restoreTerminalSession converts a runtime session back to a terminal session
-func (m *TerminalSessionManager) restoreTerminalSession(runtimeSession *interfaces.Session) (*terminal.Session, error) {
+func (m *TerminalSessionManager) restoreTerminalSession(runtimeSession *business.Session) (*terminal.Session, error) {
 	// Extract terminal session data
-	terminalData, ok := runtimeSession.SessionData.(*interfaces.TerminalSessionData)
+	terminalData, ok := runtimeSession.SessionData.(*business.TerminalSessionData)
 	if !ok {
 		// Try to decode from interface{} if needed
 		if dataMap, ok := runtimeSession.SessionData.(map[string]interface{}); ok {
-			terminalData = &interfaces.TerminalSessionData{}
+			terminalData = &business.TerminalSessionData{}
 			if stewardID, ok := dataMap["steward_id"].(string); ok {
 				terminalData.StewardID = stewardID
 			}

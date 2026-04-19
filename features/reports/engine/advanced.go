@@ -16,7 +16,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
-	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // AdvancedEngine implements AdvancedReportEngine interface
@@ -590,7 +590,7 @@ func (e *AdvancedEngine) validateTenantAccess(ctx context.Context, tenantIDs []s
 	return nil
 }
 
-func (e *AdvancedEngine) getAuditDataForReport(ctx context.Context, req interfaces.AdvancedReportRequest) ([]storageInterfaces.AuditEntry, error) {
+func (e *AdvancedEngine) getAuditDataForReport(ctx context.Context, req interfaces.AdvancedReportRequest) ([]business.AuditEntry, error) {
 	query := interfaces.AuditDataQuery{
 		TimeRange: req.TimeRange,
 		TenantIDs: req.TenantIDs,
@@ -653,7 +653,7 @@ func (e *AdvancedEngine) generateRiskAssessment(ctx context.Context, report *int
 	if len(report.SecurityEvents) > 0 {
 		criticalEvents := 0
 		for _, event := range report.SecurityEvents {
-			if event.Severity == storageInterfaces.AuditSeverityCritical {
+			if event.Severity == business.AuditSeverityCritical {
 				criticalEvents++
 			}
 		}
@@ -823,13 +823,13 @@ func (e *AdvancedEngine) calculateSecurityScore(events []interfaces.SecurityEven
 		eventScore := 100.0
 
 		switch event.Severity {
-		case storageInterfaces.AuditSeverityCritical:
+		case business.AuditSeverityCritical:
 			eventScore = 0.0
-		case storageInterfaces.AuditSeverityHigh:
+		case business.AuditSeverityHigh:
 			eventScore = 25.0
-		case storageInterfaces.AuditSeverityMedium:
+		case business.AuditSeverityMedium:
 			eventScore = 60.0
-		case storageInterfaces.AuditSeverityLow:
+		case business.AuditSeverityLow:
 			eventScore = 85.0
 		}
 
@@ -846,7 +846,7 @@ func (e *AdvancedEngine) calculateSecurityScore(events []interfaces.SecurityEven
 func (e *AdvancedEngine) determineThreatLevel(securityScore float64, events []interfaces.SecurityEvent) string {
 	criticalEvents := 0
 	for _, event := range events {
-		if event.Severity == storageInterfaces.AuditSeverityCritical && !event.Resolved {
+		if event.Severity == business.AuditSeverityCritical && !event.Resolved {
 			criticalEvents++
 		}
 	}
@@ -874,7 +874,7 @@ func (e *AdvancedEngine) detectSecurityAnomalies(events []interfaces.SecurityEve
 					ID:          uuid.New().String(),
 					Type:        "high_failure_rate",
 					Description: fmt.Sprintf("User %s has unusually high failure rate: %.1f%%", activity.UserID, failureRate*100),
-					Severity:    storageInterfaces.AuditSeverityMedium,
+					Severity:    business.AuditSeverityMedium,
 					Confidence:  0.8,
 					UserID:      activity.UserID,
 					DetectedAt:  time.Now(),
@@ -921,7 +921,7 @@ func (e *AdvancedEngine) generateSecurityCharts(events []interfaces.SecurityEven
 
 	// Security events by severity
 	if len(events) > 0 {
-		severityCounts := make(map[storageInterfaces.AuditSeverity]int)
+		severityCounts := make(map[business.AuditSeverity]int)
 		for _, event := range events {
 			severityCounts[event.Severity]++
 		}

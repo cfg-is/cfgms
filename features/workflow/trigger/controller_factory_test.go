@@ -16,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
 	storageif "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
@@ -26,7 +27,7 @@ import (
 // package would create a circular dependency (controller/server → trigger → controller/server).
 type workflowEngineAdapter struct {
 	engine      *workflow.Engine
-	configStore storageif.ConfigStore
+	configStore cfgconfig.ConfigStore
 }
 
 func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *Trigger, data map[string]interface{}) (*WorkflowExecution, error) {

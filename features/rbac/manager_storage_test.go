@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
@@ -153,8 +154,8 @@ func TestNewManagerWithStorage(t *testing.T) {
 func TestNewManagerWithStorage_NilStorageHandling(t *testing.T) {
 	tests := []struct {
 		name              string
-		auditStore        interfaces.AuditStore
-		clientTenantStore interfaces.ClientTenantStore
+		auditStore        business.AuditStore
+		clientTenantStore business.ClientTenantStore
 		expectPanic       bool
 	}{
 		{
@@ -280,7 +281,7 @@ func TestManagerWithStorage_AuditTrail(t *testing.T) {
 
 	// TODO: Once audit integration is implemented, verify audit entries exist
 	// For now, this test establishes the structure for future audit validation
-	// auditEntries, err := storageManager.GetAuditStore().ListAuditEntries(ctx, &interfaces.AuditFilter{
+	// auditEntries, err := storageManager.GetAuditStore().ListAuditEntries(ctx, &business.AuditFilter{
 	// 	ResourceTypes: []string{"role"},
 	// 	Actions:       []string{"create"},
 	// })

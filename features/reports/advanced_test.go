@@ -14,12 +14,12 @@ import (
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
-	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import storage providers to register them
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	storageif "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
@@ -81,7 +81,7 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 
 	// Create audit components using git storage for testing
 	tmpDir := t.TempDir()
-	globalStorageManager, err := storageInterfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	globalStorageManager, err := storageif.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = globalStorageManager.Close() })
 
@@ -603,7 +603,7 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 
 	// Create audit components using git storage for testing
 	tmpDir := t.TempDir()
-	globalStorageManager, err := storageInterfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	globalStorageManager, err := storageif.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err, "Failed to create global storage manager")
 	t.Cleanup(func() { _ = globalStorageManager.Close() })
 

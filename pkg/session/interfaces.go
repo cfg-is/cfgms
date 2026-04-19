@@ -8,20 +8,20 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // SessionManager defines the unified interface for session management
 // This interface abstracts session operations across different storage backends
 type SessionManager interface {
 	// Session lifecycle
-	CreateSession(ctx context.Context, req *SessionCreateRequest) (*interfaces.Session, error)
-	GetSession(ctx context.Context, sessionID string) (*interfaces.Session, error)
-	UpdateSession(ctx context.Context, sessionID string, updates *SessionUpdateRequest) (*interfaces.Session, error)
+	CreateSession(ctx context.Context, req *SessionCreateRequest) (*business.Session, error)
+	GetSession(ctx context.Context, sessionID string) (*business.Session, error)
+	UpdateSession(ctx context.Context, sessionID string, updates *SessionUpdateRequest) (*business.Session, error)
 	TerminateSession(ctx context.Context, sessionID string, reason string) error
 
 	// Session queries
-	ListSessions(ctx context.Context, filter *interfaces.SessionFilter) ([]*interfaces.Session, error)
+	ListSessions(ctx context.Context, filter *business.SessionFilter) ([]*business.Session, error)
 	GetActiveSessionsCount(ctx context.Context) (int64, error)
 
 	// Session management
@@ -41,9 +41,9 @@ type SessionCreateRequest struct {
 	SessionID       string                 `json:"session_id"`
 	UserID          string                 `json:"user_id"`
 	TenantID        string                 `json:"tenant_id"`
-	SessionType     interfaces.SessionType `json:"session_type"`
+	SessionType     business.SessionType   `json:"session_type"`
 	Timeout         time.Duration          `json:"timeout"`
-	ClientInfo      *interfaces.ClientInfo `json:"client_info,omitempty"`
+	ClientInfo      *business.ClientInfo   `json:"client_info,omitempty"`
 	Metadata        map[string]string      `json:"metadata,omitempty"`
 	SessionData     interface{}            `json:"session_data,omitempty"`
 	SecurityContext map[string]interface{} `json:"security_context,omitempty"`
@@ -77,20 +77,20 @@ func (r *SessionCreateRequest) Validate() error {
 
 // SessionUpdateRequest contains parameters for updating an existing session
 type SessionUpdateRequest struct {
-	LastActivity *time.Time               `json:"last_activity,omitempty"`
-	ExpiresAt    *time.Time               `json:"expires_at,omitempty"`
-	Status       interfaces.SessionStatus `json:"status,omitempty"`
-	Metadata     map[string]string        `json:"metadata,omitempty"`
-	SessionData  interface{}              `json:"session_data,omitempty"`
-	ModifiedBy   string                   `json:"modified_by,omitempty"`
+	LastActivity *time.Time             `json:"last_activity,omitempty"`
+	ExpiresAt    *time.Time             `json:"expires_at,omitempty"`
+	Status       business.SessionStatus `json:"status,omitempty"`
+	Metadata     map[string]string      `json:"metadata,omitempty"`
+	SessionData  interface{}            `json:"session_data,omitempty"`
+	ModifiedBy   string                 `json:"modified_by,omitempty"`
 }
 
 // SessionManagerStats provides statistics across all session stores
 type SessionManagerStats struct {
-	EphemeralStats  *interfaces.RuntimeStoreStats `json:"ephemeral_stats,omitempty"`
-	PersistentStats *interfaces.RuntimeStoreStats `json:"persistent_stats,omitempty"`
-	TotalSessions   int64                         `json:"total_sessions"`
-	ActiveSessions  int64                         `json:"active_sessions"`
+	EphemeralStats  *business.RuntimeStoreStats `json:"ephemeral_stats,omitempty"`
+	PersistentStats *business.RuntimeStoreStats `json:"persistent_stats,omitempty"`
+	TotalSessions   int64                       `json:"total_sessions"`
+	ActiveSessions  int64                       `json:"active_sessions"`
 }
 
 // SessionManagerConfig contains configuration for session managers
@@ -123,9 +123,9 @@ func NewTerminalSessionRequest(sessionID, userID, tenantID, stewardID, shell str
 			SessionID:   sessionID,
 			UserID:      userID,
 			TenantID:    tenantID,
-			SessionType: interfaces.SessionTypeTerminal,
+			SessionType: business.SessionTypeTerminal,
 			Timeout:     30 * time.Minute, // Default terminal timeout
-			SessionData: &interfaces.TerminalSessionData{
+			SessionData: &business.TerminalSessionData{
 				StewardID: stewardID,
 				Shell:     shell,
 				Cols:      cols,
@@ -162,9 +162,9 @@ func NewJITSessionRequest(sessionID, userID, tenantID, requestID, targetID strin
 			SessionID:   sessionID,
 			UserID:      userID,
 			TenantID:    tenantID,
-			SessionType: interfaces.SessionTypeJIT,
+			SessionType: business.SessionTypeJIT,
 			Timeout:     duration,
-			SessionData: &interfaces.JITSessionData{
+			SessionData: &business.JITSessionData{
 				RequestID:      requestID,
 				TargetID:       targetID,
 				Permissions:    permissions,
@@ -202,9 +202,9 @@ func NewAPISessionRequest(sessionID, userID, tenantID, tokenHash string,
 			SessionID:   sessionID,
 			UserID:      userID,
 			TenantID:    tenantID,
-			SessionType: interfaces.SessionTypeAPI,
+			SessionType: business.SessionTypeAPI,
 			Timeout:     duration,
-			SessionData: &interfaces.APISessionData{
+			SessionData: &business.APISessionData{
 				TokenHash: tokenHash,
 				Scopes:    scopes,
 				UserAgent: userAgent,
@@ -236,9 +236,9 @@ func NewWebSocketSessionRequest(sessionID, userID, tenantID, connectionID string
 			SessionID:   sessionID,
 			UserID:      userID,
 			TenantID:    tenantID,
-			SessionType: interfaces.SessionTypeWebSocket,
+			SessionType: business.SessionTypeWebSocket,
 			Timeout:     2 * time.Hour, // WebSocket sessions can be long-lived
-			SessionData: &interfaces.WebSocketSessionData{
+			SessionData: &business.WebSocketSessionData{
 				ConnectionID:      connectionID,
 				Protocol:          protocol,
 				TerminalSessionID: terminalSessionID,

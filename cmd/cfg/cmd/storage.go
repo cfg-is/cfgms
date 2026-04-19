@@ -13,6 +13,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile target provider
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite target provider
 )
@@ -219,7 +221,7 @@ func migrateConfigStore(ctx context.Context, gitProvider interfaces.StorageProvi
 		return 0, fmt.Errorf("target config store not available")
 	}
 
-	entries, err := src.ListConfigs(ctx, &interfaces.ConfigFilter{})
+	entries, err := src.ListConfigs(ctx, &cfgconfig.ConfigFilter{})
 	if err != nil {
 		return 0, fmt.Errorf("failed to list configs from git: %w", err)
 	}
@@ -251,7 +253,7 @@ func migrateRegistrationTokenStore(ctx context.Context, gitProvider interfaces.S
 		return 0, fmt.Errorf("target registration token store not available")
 	}
 
-	tokens, err := src.ListTokens(ctx, &interfaces.RegistrationTokenFilter{})
+	tokens, err := src.ListTokens(ctx, &business.RegistrationTokenFilter{})
 	if err != nil {
 		return 0, fmt.Errorf("failed to list tokens from git: %w", err)
 	}
@@ -287,7 +289,7 @@ func migrateTenantStore(ctx context.Context, gitProvider interfaces.StorageProvi
 		}
 	}
 
-	tenants, err := src.ListTenants(ctx, &interfaces.TenantFilter{})
+	tenants, err := src.ListTenants(ctx, &business.TenantFilter{})
 	if err != nil {
 		return 0, fmt.Errorf("failed to list tenants from git: %w", err)
 	}

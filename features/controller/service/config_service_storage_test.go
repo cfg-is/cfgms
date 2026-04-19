@@ -16,13 +16,14 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import git storage provider for testing
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // createTestConfigStore creates a real git-backed ConfigStore for testing.
 // This follows the same pattern as createTestServiceV2 in config_service_test.go.
-func createTestConfigStore(t *testing.T) interfaces.ConfigStore {
+func createTestConfigStore(t *testing.T) cfgconfig.ConfigStore {
 	t.Helper()
 
 	tmpDir := t.TempDir()

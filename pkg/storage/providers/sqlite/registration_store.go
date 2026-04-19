@@ -8,10 +8,10 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// SQLiteRegistrationTokenStore implements interfaces.RegistrationTokenStore using SQLite.
+// SQLiteRegistrationTokenStore implements business.RegistrationTokenStore using SQLite.
 type SQLiteRegistrationTokenStore struct {
 	db *sql.DB
 }
@@ -30,7 +30,7 @@ func (s *SQLiteRegistrationTokenStore) Close() error {
 // SaveToken persists a registration token. Uses UPSERT semantics so that
 // subsequent calls with the same token update mutable state — required for
 // single-use enforcement (Story #299 parity with the database provider).
-func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *interfaces.RegistrationTokenData) error {
+func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *business.RegistrationTokenData) error {
 	if token == nil {
 		return fmt.Errorf("token cannot be nil")
 	}
@@ -75,7 +75,7 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *int
 }
 
 // GetToken retrieves a registration token by its token string.
-func (s *SQLiteRegistrationTokenStore) GetToken(ctx context.Context, tokenStr string) (*interfaces.RegistrationTokenData, error) {
+func (s *SQLiteRegistrationTokenStore) GetToken(ctx context.Context, tokenStr string) (*business.RegistrationTokenData, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT token, tenant_id, controller_url, group_name, created_at,
 		       expires_at, single_use, used_at, used_by, revoked, revoked_at
@@ -84,7 +84,7 @@ func (s *SQLiteRegistrationTokenStore) GetToken(ctx context.Context, tokenStr st
 }
 
 // UpdateToken replaces a registration token's mutable state.
-func (s *SQLiteRegistrationTokenStore) UpdateToken(ctx context.Context, token *interfaces.RegistrationTokenData) error {
+func (s *SQLiteRegistrationTokenStore) UpdateToken(ctx context.Context, token *business.RegistrationTokenData) error {
 	if token == nil {
 		return fmt.Errorf("token cannot be nil")
 	}
@@ -130,7 +130,7 @@ func (s *SQLiteRegistrationTokenStore) DeleteToken(ctx context.Context, tokenStr
 }
 
 // ListTokens returns registration tokens matching an optional filter.
-func (s *SQLiteRegistrationTokenStore) ListTokens(ctx context.Context, filter *interfaces.RegistrationTokenFilter) ([]*interfaces.RegistrationTokenData, error) {
+func (s *SQLiteRegistrationTokenStore) ListTokens(ctx context.Context, filter *business.RegistrationTokenFilter) ([]*business.RegistrationTokenData, error) {
 	query := `SELECT token, tenant_id, controller_url, group_name, created_at,
 	                 expires_at, single_use, used_at, used_by, revoked, revoked_at
 	          FROM registration_tokens WHERE 1=1`
@@ -170,7 +170,7 @@ func (s *SQLiteRegistrationTokenStore) ListTokens(ctx context.Context, filter *i
 	}
 	defer func() { _ = rows.Close() }()
 
-	var tokens []*interfaces.RegistrationTokenData
+	var tokens []*business.RegistrationTokenData
 	for rows.Next() {
 		t, err := scanTokenRow(rows)
 		if err != nil {
@@ -183,8 +183,8 @@ func (s *SQLiteRegistrationTokenStore) ListTokens(ctx context.Context, filter *i
 
 // ---- helpers ----------------------------------------------------------------
 
-func scanToken(row *sql.Row) (*interfaces.RegistrationTokenData, error) {
-	t := &interfaces.RegistrationTokenData{}
+func scanToken(row *sql.Row) (*business.RegistrationTokenData, error) {
+	t := &business.RegistrationTokenData{}
 	var createdStr string
 	var expiresAt, usedAt, revokedAt sql.NullString
 	var singleUse, revoked int
@@ -203,8 +203,8 @@ func scanToken(row *sql.Row) (*interfaces.RegistrationTokenData, error) {
 	return populateToken(t, createdStr, singleUse, revoked, expiresAt, usedAt, revokedAt)
 }
 
-func scanTokenRow(rows *sql.Rows) (*interfaces.RegistrationTokenData, error) {
-	t := &interfaces.RegistrationTokenData{}
+func scanTokenRow(rows *sql.Rows) (*business.RegistrationTokenData, error) {
+	t := &business.RegistrationTokenData{}
 	var createdStr string
 	var expiresAt, usedAt, revokedAt sql.NullString
 	var singleUse, revoked int
@@ -220,11 +220,11 @@ func scanTokenRow(rows *sql.Rows) (*interfaces.RegistrationTokenData, error) {
 }
 
 func populateToken(
-	t *interfaces.RegistrationTokenData,
+	t *business.RegistrationTokenData,
 	createdStr string,
 	singleUse, revoked int,
 	expiresAt, usedAt, revokedAt sql.NullString,
-) (*interfaces.RegistrationTokenData, error) {
+) (*business.RegistrationTokenData, error) {
 	t.CreatedAt = parseTime(createdStr)
 	t.SingleUse = singleUse != 0
 	t.Revoked = revoked != 0
@@ -235,4 +235,4 @@ func populateToken(
 }
 
 // ensure SQLiteRegistrationTokenStore satisfies the interface at compile time
-var _ interfaces.RegistrationTokenStore = (*SQLiteRegistrationTokenStore)(nil)
+var _ business.RegistrationTokenStore = (*SQLiteRegistrationTokenStore)(nil)

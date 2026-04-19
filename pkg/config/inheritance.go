@@ -12,16 +12,18 @@ import (
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // InheritanceResolver handles configuration inheritance across tenant hierarchy
 type InheritanceResolver struct {
-	configStore       interfaces.ConfigStore
-	clientTenantStore interfaces.ClientTenantStore
+	configStore       cfgconfig.ConfigStore
+	clientTenantStore business.ClientTenantStore
 }
 
 // NewInheritanceResolver creates a new inheritance resolver
-func NewInheritanceResolver(configStore interfaces.ConfigStore, clientTenantStore interfaces.ClientTenantStore) *InheritanceResolver {
+func NewInheritanceResolver(configStore cfgconfig.ConfigStore, clientTenantStore business.ClientTenantStore) *InheritanceResolver {
 	return &InheritanceResolver{
 		configStore:       configStore,
 		clientTenantStore: clientTenantStore,
@@ -127,7 +129,7 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 		return nil // Skip unknown levels
 	}
 
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: configNamespace,
 		Name:      configName,
@@ -163,7 +165,7 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 
 // applyDeviceConfiguration applies device-specific configuration
 func (ir *InheritanceResolver) applyDeviceConfiguration(ctx context.Context, effective *EffectiveConfiguration, tenantID, stewardID string) error {
-	configKey := &interfaces.ConfigKey{
+	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
 		Name:      stewardID,

@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// FlatFileAuditStore implements interfaces.AuditStore using append-only JSONL files.
+// FlatFileAuditStore implements business.AuditStore using append-only JSONL files.
 //
 // File layout: <root>/<tenantID>/audit/<YYYY-MM-DD>.jsonl
 //
@@ -69,21 +69,21 @@ func (s *FlatFileAuditStore) dailyFilePath(tenantID string, t time.Time) (string
 
 // StoreAuditEntry appends an immutable audit entry to the daily JSONL file.
 // Returns ErrImmutable if the entry's timestamp predates the retention period.
-func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *interfaces.AuditEntry) error {
+func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *business.AuditEntry) error {
 	if entry.TenantID == "" {
-		return interfaces.ErrTenantIDRequired
+		return business.ErrTenantIDRequired
 	}
 	if entry.UserID == "" {
-		return interfaces.ErrUserIDRequired
+		return business.ErrUserIDRequired
 	}
 	if entry.Action == "" {
-		return interfaces.ErrActionRequired
+		return business.ErrActionRequired
 	}
 	if entry.ResourceType == "" {
-		return interfaces.ErrResourceTypeRequired
+		return business.ErrResourceTypeRequired
 	}
 	if entry.ResourceID == "" {
-		return interfaces.ErrResourceIDRequired
+		return business.ErrResourceIDRequired
 	}
 
 	if entry.Timestamp.IsZero() {
@@ -127,7 +127,7 @@ func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *interfa
 }
 
 // StoreAuditBatch stores multiple audit entries, stopping on first error.
-func (s *FlatFileAuditStore) StoreAuditBatch(ctx context.Context, entries []*interfaces.AuditEntry) error {
+func (s *FlatFileAuditStore) StoreAuditBatch(ctx context.Context, entries []*business.AuditEntry) error {
 	for _, entry := range entries {
 		if err := s.StoreAuditEntry(ctx, entry); err != nil {
 			return fmt.Errorf("batch store failed for entry %q: %w", entry.ID, err)
@@ -137,11 +137,11 @@ func (s *FlatFileAuditStore) StoreAuditBatch(ctx context.Context, entries []*int
 }
 
 // GetAuditEntry retrieves an audit entry by ID, scanning daily JSONL files newest-first.
-func (s *FlatFileAuditStore) GetAuditEntry(ctx context.Context, id string) (*interfaces.AuditEntry, error) {
+func (s *FlatFileAuditStore) GetAuditEntry(ctx context.Context, id string) (*business.AuditEntry, error) {
 	tenantDirs, err := os.ReadDir(s.root)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, interfaces.ErrAuditNotFound
+			return nil, business.ErrAuditNotFound
 		}
 		return nil, fmt.Errorf("failed to read audit root: %w", err)
 	}
@@ -156,11 +156,11 @@ func (s *FlatFileAuditStore) GetAuditEntry(ctx context.Context, id string) (*int
 			return entry, nil
 		}
 	}
-	return nil, interfaces.ErrAuditNotFound
+	return nil, business.ErrAuditNotFound
 }
 
 // scanDirForID scans all JSONL files in auditDir for an entry matching id.
-func (s *FlatFileAuditStore) scanDirForID(auditDir, id string) (*interfaces.AuditEntry, error) {
+func (s *FlatFileAuditStore) scanDirForID(auditDir, id string) (*business.AuditEntry, error) {
 	files, err := os.ReadDir(auditDir)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read dir: %w", err)
@@ -180,11 +180,11 @@ func (s *FlatFileAuditStore) scanDirForID(auditDir, id string) (*interfaces.Audi
 			return entry, nil
 		}
 	}
-	return nil, interfaces.ErrAuditNotFound
+	return nil, business.ErrAuditNotFound
 }
 
 // scanFileForID scans a single JSONL file for an entry matching id.
-func (s *FlatFileAuditStore) scanFileForID(path, id string) (*interfaces.AuditEntry, error) {
+func (s *FlatFileAuditStore) scanFileForID(path, id string) (*business.AuditEntry, error) {
 	// #nosec G304 — path from trusted os.ReadDir rooted at s.root
 	f, err := os.Open(path)
 	if err != nil {
@@ -199,7 +199,7 @@ func (s *FlatFileAuditStore) scanFileForID(path, id string) (*interfaces.AuditEn
 		if len(line) == 0 {
 			continue
 		}
-		var entry interfaces.AuditEntry
+		var entry business.AuditEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
@@ -207,17 +207,17 @@ func (s *FlatFileAuditStore) scanFileForID(path, id string) (*interfaces.AuditEn
 			return &entry, nil
 		}
 	}
-	return nil, interfaces.ErrAuditNotFound
+	return nil, business.ErrAuditNotFound
 }
 
 // ListAuditEntries returns audit entries matching the filter.
-func (s *FlatFileAuditStore) ListAuditEntries(ctx context.Context, filter *interfaces.AuditFilter) ([]*interfaces.AuditEntry, error) {
+func (s *FlatFileAuditStore) ListAuditEntries(ctx context.Context, filter *business.AuditFilter) ([]*business.AuditEntry, error) {
 	tenantIDs, err := s.tenantIDsForFilter(filter)
 	if err != nil {
 		return nil, err
 	}
 
-	var results []*interfaces.AuditEntry
+	var results []*business.AuditEntry
 	for _, tenantID := range tenantIDs {
 		auditDir, err := s.auditDir(tenantID)
 		if err != nil {
@@ -246,7 +246,7 @@ func (s *FlatFileAuditStore) ListAuditEntries(ctx context.Context, filter *inter
 }
 
 // tenantIDsForFilter returns the list of tenant IDs to scan, based on the filter.
-func (s *FlatFileAuditStore) tenantIDsForFilter(filter *interfaces.AuditFilter) ([]string, error) {
+func (s *FlatFileAuditStore) tenantIDsForFilter(filter *business.AuditFilter) ([]string, error) {
 	if filter != nil && filter.TenantID != "" {
 		return []string{filter.TenantID}, nil
 	}
@@ -267,7 +267,7 @@ func (s *FlatFileAuditStore) tenantIDsForFilter(filter *interfaces.AuditFilter) 
 }
 
 // scanDirForEntries scans all JSONL files in auditDir matching the filter.
-func (s *FlatFileAuditStore) scanDirForEntries(auditDir string, filter *interfaces.AuditFilter) ([]*interfaces.AuditEntry, error) {
+func (s *FlatFileAuditStore) scanDirForEntries(auditDir string, filter *business.AuditFilter) ([]*business.AuditEntry, error) {
 	files, err := os.ReadDir(auditDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -276,7 +276,7 @@ func (s *FlatFileAuditStore) scanDirForEntries(auditDir string, filter *interfac
 		return nil, err
 	}
 
-	var results []*interfaces.AuditEntry
+	var results []*business.AuditEntry
 	for _, f := range files {
 		if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
 			continue
@@ -296,7 +296,7 @@ func (s *FlatFileAuditStore) scanDirForEntries(auditDir string, filter *interfac
 }
 
 // fileInTimeRange checks whether a YYYY-MM-DD.jsonl file may contain entries in tr.
-func fileInTimeRange(filename string, tr *interfaces.TimeRange) bool {
+func fileInTimeRange(filename string, tr *business.TimeRange) bool {
 	dateStr := strings.TrimSuffix(filename, ".jsonl")
 	fileDate, err := time.Parse("2006-01-02", dateStr)
 	if err != nil {
@@ -313,7 +313,7 @@ func fileInTimeRange(filename string, tr *interfaces.TimeRange) bool {
 }
 
 // readJSONLFile reads all entries from a JSONL file, applying the filter.
-func (s *FlatFileAuditStore) readJSONLFile(path string, filter *interfaces.AuditFilter) ([]*interfaces.AuditEntry, error) {
+func (s *FlatFileAuditStore) readJSONLFile(path string, filter *business.AuditFilter) ([]*business.AuditEntry, error) {
 	// #nosec G304 — path from trusted os.ReadDir rooted at s.root
 	f, err := os.Open(path)
 	if err != nil {
@@ -324,13 +324,13 @@ func (s *FlatFileAuditStore) readJSONLFile(path string, filter *interfaces.Audit
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	var results []*interfaces.AuditEntry
+	var results []*business.AuditEntry
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
 		}
-		var entry interfaces.AuditEntry
+		var entry business.AuditEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
@@ -342,7 +342,7 @@ func (s *FlatFileAuditStore) readJSONLFile(path string, filter *interfaces.Audit
 }
 
 // applyAuditFilter returns true if the entry matches all filter criteria.
-func applyAuditFilter(entry *interfaces.AuditEntry, filter *interfaces.AuditFilter) bool {
+func applyAuditFilter(entry *business.AuditEntry, filter *business.AuditFilter) bool {
 	if filter == nil {
 		return true
 	}
@@ -390,7 +390,7 @@ func applyAuditFilter(entry *interfaces.AuditEntry, filter *interfaces.AuditFilt
 }
 
 // paginateAudit applies offset and limit from the filter.
-func paginateAudit(results []*interfaces.AuditEntry, filter *interfaces.AuditFilter) []*interfaces.AuditEntry {
+func paginateAudit(results []*business.AuditEntry, filter *business.AuditFilter) []*business.AuditEntry {
 	if filter == nil {
 		return results
 	}
@@ -407,16 +407,16 @@ func paginateAudit(results []*interfaces.AuditEntry, filter *interfaces.AuditFil
 }
 
 // GetAuditsByUser retrieves audit entries for a specific user in the given time range.
-func (s *FlatFileAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return s.ListAuditEntries(ctx, &interfaces.AuditFilter{
+func (s *FlatFileAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
 		UserIDs:   []string{userID},
 		TimeRange: timeRange,
 	})
 }
 
 // GetAuditsByResource retrieves audit entries for a specific resource.
-func (s *FlatFileAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return s.ListAuditEntries(ctx, &interfaces.AuditFilter{
+func (s *FlatFileAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
 		ResourceTypes: []string{resourceType},
 		ResourceIDs:   []string{resourceID},
 		TimeRange:     timeRange,
@@ -424,20 +424,20 @@ func (s *FlatFileAuditStore) GetAuditsByResource(ctx context.Context, resourceTy
 }
 
 // GetAuditsByAction retrieves audit entries for a specific action.
-func (s *FlatFileAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return s.ListAuditEntries(ctx, &interfaces.AuditFilter{
+func (s *FlatFileAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
 		Actions:   []string{action},
 		TimeRange: timeRange,
 	})
 }
 
 // GetFailedActions retrieves audit entries with failure, error, or denied results.
-func (s *FlatFileAuditStore) GetFailedActions(ctx context.Context, timeRange *interfaces.TimeRange, limit int) ([]*interfaces.AuditEntry, error) {
-	return s.ListAuditEntries(ctx, &interfaces.AuditFilter{
-		Results: []interfaces.AuditResult{
-			interfaces.AuditResultFailure,
-			interfaces.AuditResultError,
-			interfaces.AuditResultDenied,
+func (s *FlatFileAuditStore) GetFailedActions(ctx context.Context, timeRange *business.TimeRange, limit int) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
+		Results: []business.AuditResult{
+			business.AuditResultFailure,
+			business.AuditResultError,
+			business.AuditResultDenied,
 		},
 		TimeRange: timeRange,
 		Limit:     limit,
@@ -445,20 +445,20 @@ func (s *FlatFileAuditStore) GetFailedActions(ctx context.Context, timeRange *in
 }
 
 // GetSuspiciousActivity retrieves high and critical severity entries for a tenant.
-func (s *FlatFileAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return s.ListAuditEntries(ctx, &interfaces.AuditFilter{
+func (s *FlatFileAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
 		TenantID: tenantID,
-		Severities: []interfaces.AuditSeverity{
-			interfaces.AuditSeverityHigh,
-			interfaces.AuditSeverityCritical,
+		Severities: []business.AuditSeverity{
+			business.AuditSeverityHigh,
+			business.AuditSeverityCritical,
 		},
 		TimeRange: timeRange,
 	})
 }
 
 // GetAuditStats scans all JSONL files and returns aggregate statistics.
-func (s *FlatFileAuditStore) GetAuditStats(ctx context.Context) (*interfaces.AuditStats, error) {
-	stats := &interfaces.AuditStats{
+func (s *FlatFileAuditStore) GetAuditStats(ctx context.Context) (*business.AuditStats, error) {
+	stats := &business.AuditStats{
 		EntriesByTenant:   make(map[string]int64),
 		EntriesByType:     make(map[string]int64),
 		EntriesByResult:   make(map[string]int64),
@@ -496,7 +496,7 @@ func (s *FlatFileAuditStore) GetAuditStats(ctx context.Context) (*interfaces.Aud
 			if len(line) == 0 {
 				continue
 			}
-			var entry interfaces.AuditEntry
+			var entry business.AuditEntry
 			if err := json.Unmarshal(line, &entry); err != nil {
 				continue
 			}
@@ -517,15 +517,15 @@ func (s *FlatFileAuditStore) GetAuditStats(ctx context.Context) (*interfaces.Aud
 			if entry.Timestamp.After(last30d) {
 				stats.EntriesLast30d++
 			}
-			if entry.Result == interfaces.AuditResultFailure ||
-				entry.Result == interfaces.AuditResultError ||
-				entry.Result == interfaces.AuditResultDenied {
+			if entry.Result == business.AuditResultFailure ||
+				entry.Result == business.AuditResultError ||
+				entry.Result == business.AuditResultDenied {
 				if entry.Timestamp.After(last24h) {
 					stats.FailedActionsLast24h++
 				}
 			}
-			if entry.Severity == interfaces.AuditSeverityHigh ||
-				entry.Severity == interfaces.AuditSeverityCritical {
+			if entry.Severity == business.AuditSeverityHigh ||
+				entry.Severity == business.AuditSeverityCritical {
 				stats.SuspiciousActivityCount++
 				if stats.LastSecurityIncident == nil || entry.Timestamp.After(*stats.LastSecurityIncident) {
 					t := entry.Timestamp
@@ -637,7 +637,7 @@ func (s *FlatFileAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate t
 	return count, nil
 }
 
-// Close satisfies interfaces.AuditStore. FlatFileAuditStore opens files
+// Close satisfies business.AuditStore. FlatFileAuditStore opens files
 // per-write, so there is no persistent handle to release.
 func (s *FlatFileAuditStore) Close() error {
 	return nil
@@ -645,7 +645,7 @@ func (s *FlatFileAuditStore) Close() error {
 
 // Helper functions for slice membership checks.
 
-func containsEventType(slice []interfaces.AuditEventType, v interfaces.AuditEventType) bool {
+func containsEventType(slice []business.AuditEventType, v business.AuditEventType) bool {
 	for _, s := range slice {
 		if s == v {
 			return true
@@ -654,7 +654,7 @@ func containsEventType(slice []interfaces.AuditEventType, v interfaces.AuditEven
 	return false
 }
 
-func containsUserType(slice []interfaces.AuditUserType, v interfaces.AuditUserType) bool {
+func containsUserType(slice []business.AuditUserType, v business.AuditUserType) bool {
 	for _, s := range slice {
 		if s == v {
 			return true
@@ -663,7 +663,7 @@ func containsUserType(slice []interfaces.AuditUserType, v interfaces.AuditUserTy
 	return false
 }
 
-func containsResult(slice []interfaces.AuditResult, v interfaces.AuditResult) bool {
+func containsResult(slice []business.AuditResult, v business.AuditResult) bool {
 	for _, s := range slice {
 		if s == v {
 			return true
@@ -672,7 +672,7 @@ func containsResult(slice []interfaces.AuditResult, v interfaces.AuditResult) bo
 	return false
 }
 
-func containsSeverity(slice []interfaces.AuditSeverity, v interfaces.AuditSeverity) bool {
+func containsSeverity(slice []business.AuditSeverity, v business.AuditSeverity) bool {
 	for _, s := range slice {
 		if s == v {
 			return true

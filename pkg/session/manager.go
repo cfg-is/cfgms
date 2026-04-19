@@ -10,15 +10,15 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // UnifiedSessionManager provides session management with pluggable storage backends
 // It supports both ephemeral (in-memory) and persistent (database/git) sessions
 type UnifiedSessionManager struct {
 	// Storage backends
-	ephemeralStore  interfaces.RuntimeStore // For ephemeral sessions (memory provider)
-	persistentStore interfaces.RuntimeStore // For persistent sessions (database provider)
+	ephemeralStore  business.SessionStore // For ephemeral sessions (memory provider)
+	persistentStore business.SessionStore // For persistent sessions (database provider)
 
 	// Configuration
 	config *Config
@@ -42,8 +42,8 @@ type Config struct {
 	CleanupInterval time.Duration `json:"cleanup_interval"`
 
 	// Persistence settings
-	PersistentSessionTypes []interfaces.SessionType `json:"persistent_session_types"`
-	ForcePersistenceForJIT bool                     `json:"force_persistence_for_jit"`
+	PersistentSessionTypes []business.SessionType `json:"persistent_session_types"`
+	ForcePersistenceForJIT bool                   `json:"force_persistence_for_jit"`
 
 	// Audit integration
 	EnableAuditTrail bool `json:"enable_audit_trail"`
@@ -52,19 +52,19 @@ type Config struct {
 // PersistenceRules defines which sessions should be stored persistently vs ephemeral
 type PersistenceRules struct {
 	// Session types that should always be persistent
-	PersistentTypes map[interfaces.SessionType]bool
+	PersistentTypes map[business.SessionType]bool
 
 	// JIT sessions are always persistent due to compliance requirements
 	PersistJIT bool
 
 	// Custom rule function for complex logic
-	CustomRule func(session *interfaces.Session) bool
+	CustomRule func(session *business.Session) bool
 }
 
 // NewUnifiedSessionManager creates a new unified session manager with pluggable storage
 func NewUnifiedSessionManager(
-	ephemeralStore interfaces.RuntimeStore,
-	persistentStore interfaces.RuntimeStore,
+	ephemeralStore business.SessionStore,
+	persistentStore business.SessionStore,
 	config *Config,
 	logger logging.Logger,
 ) (*UnifiedSessionManager, error) {
@@ -88,7 +88,7 @@ func NewUnifiedSessionManager(
 		logger:          logger,
 		stopCleanup:     make(chan struct{}),
 		persistenceRules: &PersistenceRules{
-			PersistentTypes: make(map[interfaces.SessionType]bool),
+			PersistentTypes: make(map[business.SessionType]bool),
 			PersistJIT:      true, // JIT sessions always persistent for compliance
 		},
 	}
@@ -112,14 +112,14 @@ func NewUnifiedSessionManager(
 }
 
 // CreateSession creates a new session using appropriate storage backend
-func (m *UnifiedSessionManager) CreateSession(ctx context.Context, req *SessionCreateRequest) (*interfaces.Session, error) {
+func (m *UnifiedSessionManager) CreateSession(ctx context.Context, req *SessionCreateRequest) (*business.Session, error) {
 	// Validate request
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid session request: %w", err)
 	}
 
 	// Create session object
-	session := &interfaces.Session{
+	session := &business.Session{
 		SessionID:       req.SessionID,
 		UserID:          req.UserID,
 		TenantID:        req.TenantID,
@@ -127,7 +127,7 @@ func (m *UnifiedSessionManager) CreateSession(ctx context.Context, req *SessionC
 		CreatedAt:       time.Now(),
 		LastActivity:    time.Now(),
 		ExpiresAt:       time.Now().Add(req.Timeout),
-		Status:          interfaces.SessionStatusActive,
+		Status:          business.SessionStatusActive,
 		ClientInfo:      req.ClientInfo,
 		Metadata:        req.Metadata,
 		SessionData:     req.SessionData,
@@ -164,7 +164,7 @@ func (m *UnifiedSessionManager) CreateSession(ctx context.Context, req *SessionC
 }
 
 // GetSession retrieves a session by ID from appropriate storage
-func (m *UnifiedSessionManager) GetSession(ctx context.Context, sessionID string) (*interfaces.Session, error) {
+func (m *UnifiedSessionManager) GetSession(ctx context.Context, sessionID string) (*business.Session, error) {
 	// Try ephemeral store first (faster lookup)
 	if session, err := m.ephemeralStore.GetSession(ctx, sessionID); err == nil {
 		return session, nil
@@ -181,7 +181,7 @@ func (m *UnifiedSessionManager) GetSession(ctx context.Context, sessionID string
 }
 
 // UpdateSession updates an existing session
-func (m *UnifiedSessionManager) UpdateSession(ctx context.Context, sessionID string, updates *SessionUpdateRequest) (*interfaces.Session, error) {
+func (m *UnifiedSessionManager) UpdateSession(ctx context.Context, sessionID string, updates *SessionUpdateRequest) (*business.Session, error) {
 	// Get current session to determine storage location
 	session, err := m.GetSession(ctx, sessionID)
 	if err != nil {
@@ -242,7 +242,7 @@ func (m *UnifiedSessionManager) TerminateSession(ctx context.Context, sessionID 
 	}
 
 	// Mark as terminated before deletion
-	session.Status = interfaces.SessionStatusTerminated
+	session.Status = business.SessionStatusTerminated
 	now := time.Now()
 	session.ModifiedAt = &now
 
@@ -270,8 +270,8 @@ func (m *UnifiedSessionManager) TerminateSession(ctx context.Context, sessionID 
 }
 
 // ListSessions returns sessions matching the filter across both stores
-func (m *UnifiedSessionManager) ListSessions(ctx context.Context, filter *interfaces.SessionFilter) ([]*interfaces.Session, error) {
-	var allSessions []*interfaces.Session
+func (m *UnifiedSessionManager) ListSessions(ctx context.Context, filter *business.SessionFilter) ([]*business.Session, error) {
+	var allSessions []*business.Session
 
 	// Get sessions from ephemeral store
 	ephemeralSessions, err := m.ephemeralStore.ListSessions(ctx, filter)
@@ -422,9 +422,9 @@ func (m *UnifiedSessionManager) Stop(ctx context.Context) error {
 // Helper methods
 
 // shouldBePersistent determines if a session should be stored persistently
-func (m *UnifiedSessionManager) shouldBePersistent(session *interfaces.Session) bool {
+func (m *UnifiedSessionManager) shouldBePersistent(session *business.Session) bool {
 	// JIT sessions are always persistent for compliance
-	if session.SessionType == interfaces.SessionTypeJIT {
+	if session.SessionType == business.SessionTypeJIT {
 		return true
 	}
 
@@ -443,7 +443,7 @@ func (m *UnifiedSessionManager) shouldBePersistent(session *interfaces.Session) 
 }
 
 // getStoreForSession returns the appropriate store for a session
-func (m *UnifiedSessionManager) getStoreForSession(session *interfaces.Session) interfaces.RuntimeStore {
+func (m *UnifiedSessionManager) getStoreForSession(session *business.Session) business.SessionStore {
 	if session.Persistent {
 		if m.persistentStore != nil {
 			return m.persistentStore
@@ -456,7 +456,7 @@ func (m *UnifiedSessionManager) getStoreForSession(session *interfaces.Session) 
 }
 
 // getStoreType returns a string description of the store type
-func (m *UnifiedSessionManager) getStoreType(store interfaces.RuntimeStore) string {
+func (m *UnifiedSessionManager) getStoreType(store business.SessionStore) string {
 	if store == m.ephemeralStore {
 		return "ephemeral"
 	}
@@ -494,8 +494,8 @@ func DefaultConfig() *Config {
 		DefaultSessionTimeout: 30 * time.Minute,
 		MaxSessions:           1000,
 		CleanupInterval:       5 * time.Minute,
-		PersistentSessionTypes: []interfaces.SessionType{
-			interfaces.SessionTypeJIT, // JIT sessions always persistent
+		PersistentSessionTypes: []business.SessionType{
+			business.SessionTypeJIT, // JIT sessions always persistent
 		},
 		ForcePersistenceForJIT: true,
 		EnableAuditTrail:       true,

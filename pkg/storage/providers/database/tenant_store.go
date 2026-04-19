@@ -12,7 +12,7 @@ import (
 
 	_ "github.com/lib/pq" // PostgreSQL driver
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // DatabaseTenantStore implements TenantStore using PostgreSQL for persistence
@@ -101,7 +101,7 @@ func (s *DatabaseTenantStore) Close() error {
 }
 
 // CreateTenant implements TenantStore.CreateTenant
-func (s *DatabaseTenantStore) CreateTenant(ctx context.Context, tenant *interfaces.TenantData) error {
+func (s *DatabaseTenantStore) CreateTenant(ctx context.Context, tenant *business.TenantData) error {
 	if tenant == nil {
 		return fmt.Errorf("tenant cannot be nil")
 	}
@@ -142,7 +142,7 @@ func (s *DatabaseTenantStore) CreateTenant(ctx context.Context, tenant *interfac
 }
 
 // GetTenant implements TenantStore.GetTenant
-func (s *DatabaseTenantStore) GetTenant(ctx context.Context, tenantID string) (*interfaces.TenantData, error) {
+func (s *DatabaseTenantStore) GetTenant(ctx context.Context, tenantID string) (*business.TenantData, error) {
 	if tenantID == "" {
 		return nil, fmt.Errorf("tenant ID cannot be empty")
 	}
@@ -156,7 +156,7 @@ func (s *DatabaseTenantStore) GetTenant(ctx context.Context, tenantID string) (*
 		WHERE id = $1
 	`
 
-	var tenant interfaces.TenantData
+	var tenant business.TenantData
 	var parentID sql.NullString
 	var metadataJSON []byte
 
@@ -188,7 +188,7 @@ func (s *DatabaseTenantStore) GetTenant(ctx context.Context, tenantID string) (*
 }
 
 // UpdateTenant implements TenantStore.UpdateTenant
-func (s *DatabaseTenantStore) UpdateTenant(ctx context.Context, tenant *interfaces.TenantData) error {
+func (s *DatabaseTenantStore) UpdateTenant(ctx context.Context, tenant *business.TenantData) error {
 	if tenant == nil {
 		return fmt.Errorf("tenant cannot be nil")
 	}
@@ -266,7 +266,7 @@ func (s *DatabaseTenantStore) DeleteTenant(ctx context.Context, tenantID string)
 }
 
 // ListTenants implements TenantStore.ListTenants
-func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *interfaces.TenantFilter) ([]*interfaces.TenantData, error) {
+func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *business.TenantFilter) ([]*business.TenantData, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -305,9 +305,9 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *interface
 	}
 	defer func() { _ = rows.Close() }()
 
-	var tenants []*interfaces.TenantData
+	var tenants []*business.TenantData
 	for rows.Next() {
-		var tenant interfaces.TenantData
+		var tenant business.TenantData
 		var parentID sql.NullString
 		var metadataJSON []byte
 
@@ -342,7 +342,7 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *interface
 }
 
 // GetTenantHierarchy implements TenantStore.GetTenantHierarchy
-func (s *DatabaseTenantStore) GetTenantHierarchy(ctx context.Context, tenantID string) (*interfaces.TenantHierarchy, error) {
+func (s *DatabaseTenantStore) GetTenantHierarchy(ctx context.Context, tenantID string) (*business.TenantHierarchy, error) {
 	if tenantID == "" {
 		return nil, fmt.Errorf("tenant ID cannot be empty")
 	}
@@ -364,7 +364,7 @@ func (s *DatabaseTenantStore) GetTenantHierarchy(ctx context.Context, tenantID s
 		childIDs[i] = child.ID
 	}
 
-	return &interfaces.TenantHierarchy{
+	return &business.TenantHierarchy{
 		TenantID: tenantID,
 		Path:     path,
 		Depth:    len(path) - 1,
@@ -373,8 +373,8 @@ func (s *DatabaseTenantStore) GetTenantHierarchy(ctx context.Context, tenantID s
 }
 
 // GetChildTenants implements TenantStore.GetChildTenants
-func (s *DatabaseTenantStore) GetChildTenants(ctx context.Context, parentID string) ([]*interfaces.TenantData, error) {
-	filter := &interfaces.TenantFilter{
+func (s *DatabaseTenantStore) GetChildTenants(ctx context.Context, parentID string) ([]*business.TenantData, error) {
+	filter := &business.TenantFilter{
 		ParentID: parentID,
 	}
 	return s.ListTenants(ctx, filter)
