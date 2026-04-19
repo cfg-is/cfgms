@@ -296,6 +296,16 @@ func (g *GlobalStorageAdapter) DeleteAdminConsentRequest(ctx context.Context, st
 	return g.store.DeleteAdminConsentRequest(state)
 }
 
+// Close releases the underlying sqlite DB handle. Required on Windows so that
+// test cleanup (t.TempDir RemoveAll) can delete the DB file — otherwise the
+// OS holds a mandatory lock and the cleanup fails the test.
+func (g *GlobalStorageAdapter) Close() error {
+	if g.store == nil {
+		return nil
+	}
+	return g.store.Close()
+}
+
 // Legacy functions removed - now using global plugin architecture
 // All storage creation goes through interfaces.CreateClientTenantStoreFromConfig
 
