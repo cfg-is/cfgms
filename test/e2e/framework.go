@@ -291,6 +291,9 @@ func (f *E2ETestFramework) initializeRBAC() error {
 	if err != nil {
 		return fmt.Errorf("failed to setup E2E storage: %w", err)
 	}
+	// Release the sqlite file handle during Cleanup; on Windows a held handle
+	// blocks RemoveAll on f.tempDir and surfaces as a TestE2EScenarios failure.
+	f.addCleanup(func() error { return storageManager.Close() })
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
