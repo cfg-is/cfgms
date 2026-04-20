@@ -98,7 +98,7 @@ All must pass before merge to `develop`:
 
 Docs-only PRs get instant green checks via stub jobs (<2 min merge path).
 
-**Branch protection config:** Squash merge only, no review requirements (solo-friendly), relaxed up-to-date policy (PRs don't need latest develop to merge).
+**Branch protection config:** Squash merge only, no review requirements (solo-friendly), strict up-to-date policy (PRs must be rebased to latest develop tip before merge is allowed — enforced by `strict_required_status_checks_policy: true` on the develop ruleset, enabled after PR #777).
 
 **Merging:** Interactive mode uses `gh pr merge --squash --auto` after `/pr-review` approval. Agent-dispatched PRs are auto-merged by the acceptance reviewer when there are zero findings. If the acceptance reviewer finds any issues (even low severity), it must post the concerns on the PR and tag it for manual `/pr-review` — no auto-merge with findings.
 

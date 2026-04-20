@@ -150,6 +150,25 @@ EOF
 )"
 ```
 
+### Keeping Your Branch Up to Date
+
+GitHub blocks the merge button if your branch is behind `develop`. This is enforced via `strict_required_status_checks_policy` on the develop ruleset (enabled after PR #777 broke develop by merging CI results validated against a stale base).
+
+When GitHub shows "This branch is out-of-date with the base branch":
+
+```bash
+# Rebase your branch onto the latest develop
+git fetch origin develop
+git rebase origin/develop
+
+# Push the rebased branch (force-with-lease is safe — it won't overwrite remote changes you haven't seen)
+git push --force-with-lease origin <your-branch>
+```
+
+After the push, GitHub will re-run all required CI checks against the updated branch. The merge button will unblock only when all checks pass on the rebased state.
+
+**Why rebase instead of merge?** Develop enforces squash-merge, so a merge commit on your feature branch adds noise and can cause confusion. Rebasing keeps history clean and ensures CI validates exactly what will land in develop.
+
 ### PR Merge Settings
 
 Merge methods are enforced by branch protection rulesets — GitHub only shows allowed options:
