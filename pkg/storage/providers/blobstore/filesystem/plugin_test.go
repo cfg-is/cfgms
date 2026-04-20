@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 )
 
 func newTestStore(t *testing.T) *FilesystemBlobStore {
@@ -22,8 +22,8 @@ func newTestStore(t *testing.T) *FilesystemBlobStore {
 	return &FilesystemBlobStore{root: t.TempDir()}
 }
 
-func testKey(name string) interfaces.BlobKey {
-	return interfaces.BlobKey{
+func testKey(name string) blob.BlobKey {
+	return blob.BlobKey{
 		TenantID:  "tenant-a",
 		Namespace: "installers",
 		Name:      name,
@@ -37,7 +37,7 @@ func TestFilesystemBlobStore_PutGetBlob(t *testing.T) {
 
 	content := []byte("hello blob world")
 	key := testKey("test.bin")
-	meta := interfaces.BlobMeta{
+	meta := blob.BlobMeta{
 		ContentType: "application/octet-stream",
 		Labels:      map[string]string{"env": "test"},
 	}
@@ -66,7 +66,7 @@ func TestFilesystemBlobStore_PutBlob_DefaultContentType(t *testing.T) {
 	ctx := context.Background()
 
 	key := testKey("notype.bin")
-	err := s.PutBlob(ctx, key, bytes.NewReader([]byte("data")), interfaces.BlobMeta{})
+	err := s.PutBlob(ctx, key, bytes.NewReader([]byte("data")), blob.BlobMeta{})
 	require.NoError(t, err)
 
 	rc, meta, err := s.GetBlob(ctx, key)
@@ -80,9 +80,9 @@ func TestFilesystemBlobStore_PutBlob_TenantRequired(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	key := interfaces.BlobKey{TenantID: "", Namespace: "ns", Name: "file.bin"}
-	err := s.PutBlob(ctx, key, bytes.NewReader([]byte("x")), interfaces.BlobMeta{})
-	assert.ErrorIs(t, err, interfaces.ErrBlobTenantRequired)
+	key := blob.BlobKey{TenantID: "", Namespace: "ns", Name: "file.bin"}
+	err := s.PutBlob(ctx, key, bytes.NewReader([]byte("x")), blob.BlobMeta{})
+	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
 }
 
 // TestFilesystemBlobStore_GetBlob_NotFound verifies ErrBlobNotFound on missing key.
@@ -91,7 +91,7 @@ func TestFilesystemBlobStore_GetBlob_NotFound(t *testing.T) {
 	ctx := context.Background()
 
 	_, _, err := s.GetBlob(ctx, testKey("missing.bin"))
-	assert.ErrorIs(t, err, interfaces.ErrBlobNotFound)
+	assert.ErrorIs(t, err, blob.ErrBlobNotFound)
 }
 
 // TestFilesystemBlobStore_GetBlob_TenantRequired checks that GetBlob also validates TenantID.
@@ -99,8 +99,8 @@ func TestFilesystemBlobStore_GetBlob_TenantRequired(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	_, _, err := s.GetBlob(ctx, interfaces.BlobKey{Namespace: "ns", Name: "f"})
-	assert.ErrorIs(t, err, interfaces.ErrBlobTenantRequired)
+	_, _, err := s.GetBlob(ctx, blob.BlobKey{Namespace: "ns", Name: "f"})
+	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
 }
 
 // TestFilesystemBlobStore_BlobExists verifies true for existing, false for missing.
@@ -114,7 +114,7 @@ func TestFilesystemBlobStore_BlobExists(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, exists)
 
-	err = s.PutBlob(ctx, key, bytes.NewReader([]byte("data")), interfaces.BlobMeta{})
+	err = s.PutBlob(ctx, key, bytes.NewReader([]byte("data")), blob.BlobMeta{})
 	require.NoError(t, err)
 
 	exists, err = s.BlobExists(ctx, key)
@@ -125,8 +125,8 @@ func TestFilesystemBlobStore_BlobExists(t *testing.T) {
 // TestFilesystemBlobStore_BlobExists_TenantRequired checks TenantID validation.
 func TestFilesystemBlobStore_BlobExists_TenantRequired(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.BlobExists(context.Background(), interfaces.BlobKey{Namespace: "ns", Name: "f"})
-	assert.ErrorIs(t, err, interfaces.ErrBlobTenantRequired)
+	_, err := s.BlobExists(context.Background(), blob.BlobKey{Namespace: "ns", Name: "f"})
+	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
 }
 
 // TestFilesystemBlobStore_DeleteBlob verifies delete and idempotency.
@@ -135,7 +135,7 @@ func TestFilesystemBlobStore_DeleteBlob(t *testing.T) {
 	ctx := context.Background()
 
 	key := testKey("del.bin")
-	err := s.PutBlob(ctx, key, bytes.NewReader([]byte("data")), interfaces.BlobMeta{})
+	err := s.PutBlob(ctx, key, bytes.NewReader([]byte("data")), blob.BlobMeta{})
 	require.NoError(t, err)
 
 	exists, err := s.BlobExists(ctx, key)
@@ -159,19 +159,19 @@ func TestFilesystemBlobStore_ListBlobs(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	blobs := []interfaces.BlobKey{
+	blobs := []blob.BlobKey{
 		{TenantID: "tenant-a", Namespace: "installers", Name: "agent-v1.pkg"},
 		{TenantID: "tenant-a", Namespace: "installers", Name: "agent-v2.pkg"},
 		{TenantID: "tenant-a", Namespace: "reports", Name: "report-2026.pdf"},
 		{TenantID: "tenant-b", Namespace: "installers", Name: "other.pkg"},
 	}
 	for _, k := range blobs {
-		err := s.PutBlob(ctx, k, bytes.NewReader([]byte("content")), interfaces.BlobMeta{})
+		err := s.PutBlob(ctx, k, bytes.NewReader([]byte("content")), blob.BlobMeta{})
 		require.NoError(t, err)
 	}
 
 	// List all blobs for tenant-a in installers namespace.
-	results, err := s.ListBlobs(ctx, interfaces.BlobKey{TenantID: "tenant-a", Namespace: "installers"})
+	results, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-a", Namespace: "installers"})
 	require.NoError(t, err)
 	assert.Len(t, results, 2)
 	names := make([]string, 0, len(results))
@@ -183,12 +183,12 @@ func TestFilesystemBlobStore_ListBlobs(t *testing.T) {
 	assert.ElementsMatch(t, []string{"agent-v1.pkg", "agent-v2.pkg"}, names)
 
 	// List all blobs for tenant-a (all namespaces).
-	all, err := s.ListBlobs(ctx, interfaces.BlobKey{TenantID: "tenant-a"})
+	all, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-a"})
 	require.NoError(t, err)
 	assert.Len(t, all, 3)
 
 	// List for tenant-b.
-	tb, err := s.ListBlobs(ctx, interfaces.BlobKey{TenantID: "tenant-b"})
+	tb, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-b"})
 	require.NoError(t, err)
 	assert.Len(t, tb, 1)
 }
@@ -198,7 +198,7 @@ func TestFilesystemBlobStore_ListBlobs_Empty(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	results, err := s.ListBlobs(ctx, interfaces.BlobKey{TenantID: "nobody"})
+	results, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: "nobody"})
 	require.NoError(t, err)
 	assert.Empty(t, results)
 }
@@ -206,8 +206,8 @@ func TestFilesystemBlobStore_ListBlobs_Empty(t *testing.T) {
 // TestFilesystemBlobStore_ListBlobs_TenantRequired checks TenantID validation.
 func TestFilesystemBlobStore_ListBlobs_TenantRequired(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.ListBlobs(context.Background(), interfaces.BlobKey{Namespace: "ns"})
-	assert.ErrorIs(t, err, interfaces.ErrBlobTenantRequired)
+	_, err := s.ListBlobs(context.Background(), blob.BlobKey{Namespace: "ns"})
+	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
 }
 
 // TestFilesystemBlobStore_ChecksumMismatch verifies that tampered blobs are detected.
@@ -217,7 +217,7 @@ func TestFilesystemBlobStore_ChecksumMismatch(t *testing.T) {
 
 	key := testKey("tampered.bin")
 	original := []byte("original content")
-	err := s.PutBlob(ctx, key, bytes.NewReader(original), interfaces.BlobMeta{})
+	err := s.PutBlob(ctx, key, bytes.NewReader(original), blob.BlobMeta{})
 	require.NoError(t, err)
 
 	// Tamper with the stored blob file directly.
@@ -231,7 +231,7 @@ func TestFilesystemBlobStore_ChecksumMismatch(t *testing.T) {
 
 	// Reading the tampered blob should return ErrBlobChecksumMismatch at EOF.
 	_, err = io.ReadAll(rc)
-	assert.ErrorIs(t, err, interfaces.ErrBlobChecksumMismatch)
+	assert.ErrorIs(t, err, blob.ErrBlobChecksumMismatch)
 }
 
 // TestFilesystemBlobStore_Overwrite verifies that PutBlob overwrites an existing blob.
@@ -240,10 +240,10 @@ func TestFilesystemBlobStore_Overwrite(t *testing.T) {
 	ctx := context.Background()
 
 	key := testKey("overwrite.bin")
-	err := s.PutBlob(ctx, key, bytes.NewReader([]byte("v1")), interfaces.BlobMeta{})
+	err := s.PutBlob(ctx, key, bytes.NewReader([]byte("v1")), blob.BlobMeta{})
 	require.NoError(t, err)
 
-	err = s.PutBlob(ctx, key, bytes.NewReader([]byte("v2 longer content")), interfaces.BlobMeta{})
+	err = s.PutBlob(ctx, key, bytes.NewReader([]byte("v2 longer content")), blob.BlobMeta{})
 	require.NoError(t, err)
 
 	rc, meta, err := s.GetBlob(ctx, key)
@@ -270,8 +270,8 @@ func TestFilesystemBlobStore_LargeBlob_Streaming(t *testing.T) {
 	// correctness check is that the full 10 MB is correctly written and read back.
 	src := &io.LimitedReader{R: zeroReader{}, N: blobSize}
 
-	key := interfaces.BlobKey{TenantID: "tenant-a", Namespace: "dna-snapshots", Name: "snapshot.bin"}
-	err := s.PutBlob(ctx, key, src, interfaces.BlobMeta{ContentType: "application/octet-stream"})
+	key := blob.BlobKey{TenantID: "tenant-a", Namespace: "dna-snapshots", Name: "snapshot.bin"}
+	err := s.PutBlob(ctx, key, src, blob.BlobMeta{ContentType: "application/octet-stream"})
 	require.NoError(t, err)
 
 	// Verify the LimitedReader was fully consumed (provider did not over-read).
@@ -346,7 +346,7 @@ func TestFilesystemBlobStore_CreatedAt(t *testing.T) {
 	ctx := context.Background()
 
 	before := time.Now().UTC().Add(-time.Second)
-	err := s.PutBlob(ctx, testKey("ts.bin"), bytes.NewReader([]byte("ts")), interfaces.BlobMeta{})
+	err := s.PutBlob(ctx, testKey("ts.bin"), bytes.NewReader([]byte("ts")), blob.BlobMeta{})
 	require.NoError(t, err)
 	after := time.Now().UTC().Add(time.Second)
 
@@ -368,7 +368,7 @@ func TestFilesystemBlobStore_Labels(t *testing.T) {
 		"os":      "linux",
 	}
 	key := testKey("labeled.bin")
-	err := s.PutBlob(ctx, key, bytes.NewReader([]byte("labeled content")), interfaces.BlobMeta{Labels: labels})
+	err := s.PutBlob(ctx, key, bytes.NewReader([]byte("labeled content")), blob.BlobMeta{Labels: labels})
 	require.NoError(t, err)
 
 	// Verify via GetBlob.
@@ -378,7 +378,7 @@ func TestFilesystemBlobStore_Labels(t *testing.T) {
 	assert.Equal(t, labels, meta.Labels)
 
 	// Verify via ListBlobs.
-	results, err := s.ListBlobs(ctx, interfaces.BlobKey{TenantID: "tenant-a", Namespace: "installers"})
+	results, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-a", Namespace: "installers"})
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, labels, results[0].Meta.Labels)
@@ -388,7 +388,7 @@ func TestFilesystemBlobStore_Labels(t *testing.T) {
 func TestBlobProviderRegistration(t *testing.T) {
 	// The init() function in plugin.go registers the provider automatically.
 	// Import the package (already done by being in the same test) and verify.
-	names := interfaces.GetRegisteredBlobProviderNames()
+	names := blob.GetRegisteredBlobProviderNames()
 	found := false
 	for _, n := range names {
 		if n == "filesystem" {
@@ -407,19 +407,19 @@ func TestFilesystemBlobStore_PathTraversal(t *testing.T) {
 
 	traversalKeys := []struct {
 		name string
-		key  interfaces.BlobKey
+		key  blob.BlobKey
 	}{
-		{"dotdot in namespace", interfaces.BlobKey{TenantID: "t", Namespace: "../etc", Name: "passwd"}},
-		{"dotdot in name", interfaces.BlobKey{TenantID: "t", Namespace: "ns", Name: "../secret"}},
-		{"dotdot in tenant", interfaces.BlobKey{TenantID: "../etc", Namespace: "ns", Name: "file"}},
-		{"slash in name", interfaces.BlobKey{TenantID: "t", Namespace: "ns", Name: "sub/file"}},
-		{"slash in tenant", interfaces.BlobKey{TenantID: "t/../../etc", Namespace: "ns", Name: "file"}},
+		{"dotdot in namespace", blob.BlobKey{TenantID: "t", Namespace: "../etc", Name: "passwd"}},
+		{"dotdot in name", blob.BlobKey{TenantID: "t", Namespace: "ns", Name: "../secret"}},
+		{"dotdot in tenant", blob.BlobKey{TenantID: "../etc", Namespace: "ns", Name: "file"}},
+		{"slash in name", blob.BlobKey{TenantID: "t", Namespace: "ns", Name: "sub/file"}},
+		{"slash in tenant", blob.BlobKey{TenantID: "t/../../etc", Namespace: "ns", Name: "file"}},
 	}
 
 	for _, tc := range traversalKeys {
 		tc := tc
 		t.Run(tc.name+"/PutBlob", func(t *testing.T) {
-			err := s.PutBlob(ctx, tc.key, bytes.NewReader([]byte("x")), interfaces.BlobMeta{})
+			err := s.PutBlob(ctx, tc.key, bytes.NewReader([]byte("x")), blob.BlobMeta{})
 			assert.Error(t, err, "PutBlob should reject path traversal in key component")
 		})
 		t.Run(tc.name+"/GetBlob", func(t *testing.T) {
@@ -438,11 +438,11 @@ func TestFilesystemBlobStore_PathTraversal(t *testing.T) {
 
 	// ListBlobs uses a prefix key — only TenantID and Namespace are validated.
 	t.Run("dotdot in tenant/ListBlobs", func(t *testing.T) {
-		_, err := s.ListBlobs(ctx, interfaces.BlobKey{TenantID: "../etc", Namespace: "ns"})
+		_, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: "../etc", Namespace: "ns"})
 		assert.Error(t, err, "ListBlobs should reject path traversal in TenantID")
 	})
 	t.Run("dotdot in namespace/ListBlobs", func(t *testing.T) {
-		_, err := s.ListBlobs(ctx, interfaces.BlobKey{TenantID: "t", Namespace: "../etc"})
+		_, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: "t", Namespace: "../etc"})
 		assert.Error(t, err, "ListBlobs should reject path traversal in Namespace")
 	})
 }

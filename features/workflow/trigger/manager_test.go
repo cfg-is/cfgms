@@ -12,6 +12,8 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // MockStorageProvider implements StorageProvider for testing
@@ -70,51 +72,46 @@ func (m *MockStorageProvider) Description() string {
 	return args.String(0)
 }
 
-func (m *MockStorageProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
+func (m *MockStorageProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
 	args := m.Called(config)
-	return args.Get(0).(interfaces.ClientTenantStore), args.Error(1)
+	return args.Get(0).(business.ClientTenantStore), args.Error(1)
 }
 
-func (m *MockStorageProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
+func (m *MockStorageProvider) CreateConfigStore(config map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	args := m.Called(config)
-	return args.Get(0).(interfaces.ConfigStore), args.Error(1)
+	return args.Get(0).(cfgconfig.ConfigStore), args.Error(1)
 }
 
-func (m *MockStorageProvider) CreateAuditStore(config map[string]interface{}) (interfaces.AuditStore, error) {
+func (m *MockStorageProvider) CreateAuditStore(config map[string]interface{}) (business.AuditStore, error) {
 	args := m.Called(config)
-	return args.Get(0).(interfaces.AuditStore), args.Error(1)
+	return args.Get(0).(business.AuditStore), args.Error(1)
 }
 
-func (m *MockStorageProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
+func (m *MockStorageProvider) CreateRBACStore(config map[string]interface{}) (business.RBACStore, error) {
 	args := m.Called(config)
-	return args.Get(0).(interfaces.RBACStore), args.Error(1)
+	return args.Get(0).(business.RBACStore), args.Error(1)
 }
 
-func (m *MockStorageProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
+func (m *MockStorageProvider) CreateTenantStore(config map[string]interface{}) (business.TenantStore, error) {
 	args := m.Called(config)
-	return args.Get(0).(interfaces.RuntimeStore), args.Error(1)
+	return args.Get(0).(business.TenantStore), args.Error(1)
 }
 
-func (m *MockStorageProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+func (m *MockStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	args := m.Called(config)
-	return args.Get(0).(interfaces.TenantStore), args.Error(1)
+	return args.Get(0).(business.RegistrationTokenStore), args.Error(1)
 }
 
-func (m *MockStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
-	args := m.Called(config)
-	return args.Get(0).(interfaces.RegistrationTokenStore), args.Error(1)
+func (m *MockStorageProvider) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
+	return nil, business.ErrNotSupported
 }
 
-func (m *MockStorageProvider) CreateSessionStore(_ map[string]interface{}) (interfaces.SessionStore, error) {
-	return nil, interfaces.ErrNotSupported
+func (m *MockStorageProvider) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
+	return nil, business.ErrNotSupported
 }
 
-func (m *MockStorageProvider) CreateStewardStore(_ map[string]interface{}) (interfaces.StewardStore, error) {
-	return nil, interfaces.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreateCommandStore(_ map[string]interface{}) (interfaces.CommandStore, error) {
-	return nil, interfaces.ErrNotSupported
+func (m *MockStorageProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
+	return nil, business.ErrNotSupported
 }
 
 func (m *MockStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {

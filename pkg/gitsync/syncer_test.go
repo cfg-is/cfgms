@@ -16,7 +16,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
 
@@ -136,14 +136,14 @@ func TestInitialSync(t *testing.T) {
 	err := syncer.TriggerSync(ctx, binding)
 	require.NoError(t, err)
 
-	entry, err := store.GetConfig(ctx, &interfaces.ConfigKey{
+	entry, err := store.GetConfig(ctx, &cfgconfig.ConfigKey{
 		TenantID:  "root/test-tenant",
 		Namespace: "policies",
 		Name:      "policy1",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "key: value\n", string(entry.Data))
-	assert.Equal(t, interfaces.ConfigFormatYAML, entry.Format)
+	assert.Equal(t, cfgconfig.ConfigFormatYAML, entry.Format)
 	assert.Equal(t, "git-sync", entry.CreatedBy)
 }
 
@@ -187,7 +187,7 @@ func TestIncrementalSync(t *testing.T) {
 	assert.NotEmpty(t, sha2.LastSyncedSHA)
 	assert.NotEqual(t, sha1.LastSyncedSHA, sha2.LastSyncedSHA, "SHA must advance on new commit")
 
-	entry, err := store.GetConfig(ctx, &interfaces.ConfigKey{
+	entry, err := store.GetConfig(ctx, &cfgconfig.ConfigKey{
 		TenantID:  "root/test-tenant",
 		Namespace: "policies",
 		Name:      "policy2",
@@ -219,7 +219,7 @@ func TestIdempotentSync(t *testing.T) {
 	// First sync: imports policy1 at version 1.
 	require.NoError(t, syncer.TriggerSync(ctx, binding))
 
-	entry, err := store.GetConfig(ctx, &interfaces.ConfigKey{
+	entry, err := store.GetConfig(ctx, &cfgconfig.ConfigKey{
 		TenantID:  "root/test-tenant",
 		Namespace: "policies",
 		Name:      "policy1",
@@ -230,7 +230,7 @@ func TestIdempotentSync(t *testing.T) {
 	// Second sync on the same commit: SHA unchanged → import skipped.
 	require.NoError(t, syncer.TriggerSync(ctx, binding))
 
-	entry2, err := store.GetConfig(ctx, &interfaces.ConfigKey{
+	entry2, err := store.GetConfig(ctx, &cfgconfig.ConfigKey{
 		TenantID:  "root/test-tenant",
 		Namespace: "policies",
 		Name:      "policy1",
@@ -275,7 +275,7 @@ func TestScopeIsolation(t *testing.T) {
 	err = syncer.TriggerSync(ctx, reachable)
 	require.NoError(t, err)
 
-	entry, err := store.GetConfig(ctx, &interfaces.ConfigKey{
+	entry, err := store.GetConfig(ctx, &cfgconfig.ConfigKey{
 		TenantID:  "root/good-tenant",
 		Namespace: "policies",
 		Name:      "policy1",
@@ -333,7 +333,7 @@ func TestPollingInterval(t *testing.T) {
 		t.Fatal("polling sync did not complete within 10 seconds")
 	}
 
-	entry, err := store.GetConfig(ctx, &interfaces.ConfigKey{
+	entry, err := store.GetConfig(ctx, &cfgconfig.ConfigKey{
 		TenantID:  "root/poll-tenant",
 		Namespace: "policies",
 		Name:      "policy1",
@@ -381,12 +381,12 @@ func TestJSONConfigImport(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, syncer.TriggerSync(ctx, binding))
 
-	entry, err := store.GetConfig(ctx, &interfaces.ConfigKey{
+	entry, err := store.GetConfig(ctx, &cfgconfig.ConfigKey{
 		TenantID:  "root/json-tenant",
 		Namespace: "settings",
 		Name:      "settings",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.ConfigFormatJSON, entry.Format)
+	assert.Equal(t, cfgconfig.ConfigFormatJSON, entry.Format)
 	assert.Contains(t, string(entry.Data), `"debug"`)
 }

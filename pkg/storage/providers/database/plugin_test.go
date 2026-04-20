@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
@@ -304,13 +305,13 @@ func TestDatabaseClientTenantStore_CRUD(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	// Create a test client tenant
-	tenant := &interfaces.ClientTenant{
+	tenant := &business.ClientTenant{
 		TenantID:         "test-tenant-123",
 		TenantName:       "Test Organization",
 		DomainName:       "test.com",
 		AdminEmail:       "admin@test.com",
 		ConsentedAt:      time.Now(),
-		Status:           interfaces.ClientTenantStatusActive,
+		Status:           business.ClientTenantStatusActive,
 		ClientIdentifier: "client-123",
 		Metadata: map[string]interface{}{
 			"region": "us-east-1",
@@ -341,21 +342,21 @@ func TestDatabaseClientTenantStore_CRUD(t *testing.T) {
 	assert.Len(t, allTenants, 1)
 
 	// Test List by status
-	activeTenants, err := store.ListClientTenants(interfaces.ClientTenantStatusActive)
+	activeTenants, err := store.ListClientTenants(business.ClientTenantStatusActive)
 	require.NoError(t, err)
 	assert.Len(t, activeTenants, 1)
 
-	pendingTenants, err := store.ListClientTenants(interfaces.ClientTenantStatusPending)
+	pendingTenants, err := store.ListClientTenants(business.ClientTenantStatusPending)
 	require.NoError(t, err)
 	assert.Len(t, pendingTenants, 0)
 
 	// Test Update status
-	err = store.UpdateClientTenantStatus("test-tenant-123", interfaces.ClientTenantStatusSuspended)
+	err = store.UpdateClientTenantStatus("test-tenant-123", business.ClientTenantStatusSuspended)
 	require.NoError(t, err)
 
 	updated, err := store.GetClientTenant("test-tenant-123")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.ClientTenantStatusSuspended, updated.Status)
+	assert.Equal(t, business.ClientTenantStatusSuspended, updated.Status)
 
 	// Test Delete
 	err = store.DeleteClientTenant("test-tenant-123")
@@ -378,7 +379,7 @@ func TestDatabaseClientTenantStore_AdminConsent(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	// Create a test admin consent request
-	request := &interfaces.AdminConsentRequest{
+	request := &business.AdminConsentRequest{
 		ClientIdentifier: "client-456",
 		ClientName:       "Test Client",
 		RequestedBy:      "admin@msp.com",
@@ -478,7 +479,7 @@ func TestDatabaseProvider_CreateCommandStoreReturnsErrNotSupported(t *testing.T)
 	store, err := provider.CreateCommandStore(map[string]interface{}{})
 	assert.Nil(t, store)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, interfaces.ErrNotSupported)
+	assert.ErrorIs(t, err, business.ErrNotSupported)
 }
 
 func TestUtilityFunctions(t *testing.T) {

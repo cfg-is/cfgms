@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
-func newRBACStore(t *testing.T) interfaces.RBACStore {
+func newRBACStore(t *testing.T) business.RBACStore {
 	t.Helper()
 	dir := t.TempDir()
 	p := sqlite.NewSQLiteProvider(dir)

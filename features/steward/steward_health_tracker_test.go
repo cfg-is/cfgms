@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
 
@@ -26,8 +26,8 @@ func newTestTracker(t *testing.T) *StewardHealthTracker {
 }
 
 // testRecord returns a minimal StewardRecord for use in tracker tests.
-func testRecord(id string) *interfaces.StewardRecord {
-	return &interfaces.StewardRecord{
+func testRecord(id string) *business.StewardRecord {
+	return &business.StewardRecord{
 		ID:       id,
 		Hostname: "host-" + id,
 		Platform: "linux",
@@ -54,7 +54,7 @@ func TestStewardHealthTracker_RegisterDuplicate(t *testing.T) {
 
 	require.NoError(t, tracker.RegisterSteward(ctx, testRecord("s-dup")))
 	err := tracker.RegisterSteward(ctx, testRecord("s-dup"))
-	assert.ErrorIs(t, err, interfaces.ErrStewardAlreadyExists)
+	assert.ErrorIs(t, err, business.ErrStewardAlreadyExists)
 }
 
 func TestStewardHealthTracker_UpdateHeartbeat_PromotesToActive(t *testing.T) {
@@ -66,14 +66,14 @@ func TestStewardHealthTracker_UpdateHeartbeat_PromotesToActive(t *testing.T) {
 	// On registration, status is "registered"
 	rec, err := tracker.GetSteward(ctx, "s-hb")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.StewardStatusRegistered, rec.Status)
+	assert.Equal(t, business.StewardStatusRegistered, rec.Status)
 
 	// After first heartbeat, status should be promoted to "active"
 	require.NoError(t, tracker.UpdateHeartbeat(ctx, "s-hb"))
 
 	rec, err = tracker.GetSteward(ctx, "s-hb")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.StewardStatusActive, rec.Status)
+	assert.Equal(t, business.StewardStatusActive, rec.Status)
 }
 
 func TestStewardHealthTracker_UpdateHeartbeat_UpdatesEphemeralMetrics(t *testing.T) {
@@ -93,7 +93,7 @@ func TestStewardHealthTracker_UpdateHeartbeat_UpdatesEphemeralMetrics(t *testing
 func TestStewardHealthTracker_UpdateHeartbeat_NotFound(t *testing.T) {
 	tracker := newTestTracker(t)
 	err := tracker.UpdateHeartbeat(context.Background(), "ghost")
-	assert.ErrorIs(t, err, interfaces.ErrStewardNotFound)
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
 
 func TestStewardHealthTracker_MarkLost(t *testing.T) {
@@ -105,7 +105,7 @@ func TestStewardHealthTracker_MarkLost(t *testing.T) {
 
 	rec, err := tracker.GetSteward(ctx, "s-lost")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.StewardStatusLost, rec.Status)
+	assert.Equal(t, business.StewardStatusLost, rec.Status)
 }
 
 func TestStewardHealthTracker_DeregisterSteward(t *testing.T) {
@@ -118,7 +118,7 @@ func TestStewardHealthTracker_DeregisterSteward(t *testing.T) {
 	rec, err := tracker.GetSteward(ctx, "s-dereg")
 	require.NoError(t, err)
 	// Record retained for audit, status changed
-	assert.Equal(t, interfaces.StewardStatusDeregistered, rec.Status)
+	assert.Equal(t, business.StewardStatusDeregistered, rec.Status)
 }
 
 func TestStewardHealthTracker_ListStewards(t *testing.T) {

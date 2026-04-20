@@ -17,14 +17,23 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
+// runtimeStateStore is a narrow interface for ephemeral key-value state operations.
+// pkg/cache.RuntimeCache satisfies this interface.
+type runtimeStateStore interface {
+	SetRuntimeState(ctx context.Context, key string, value interface{}) error
+	GetRuntimeState(ctx context.Context, key string) (interface{}, error)
+	DeleteRuntimeState(ctx context.Context, key string) error
+}
+
 // sessionSynchronizer implements SessionSynchronizer interface
 type sessionSynchronizer struct {
-	mu      sync.RWMutex
-	cfg     *SessionSyncConfig
-	logger  logging.Logger
-	storage *interfaces.StorageManager
-	manager *Manager // Reference to HA manager for node info
-	ctx     context.Context
+	mu         sync.RWMutex
+	cfg        *SessionSyncConfig
+	logger     logging.Logger
+	storage    *interfaces.StorageManager
+	stateStore runtimeStateStore // ephemeral state for HA session sync
+	manager    *Manager          // Reference to HA manager for node info
+	ctx        context.Context
 	cancel  context.CancelFunc
 	started bool
 
@@ -61,10 +70,18 @@ func NewSessionSynchronizer(cfg *SessionSyncConfig, logger logging.Logger, stora
 		}
 	}
 
+	var ss runtimeStateStore
+	if sessionStore := storage.GetSessionStore(); sessionStore != nil {
+		if rs, ok := sessionStore.(runtimeStateStore); ok {
+			ss = rs
+		}
+	}
+
 	return &sessionSynchronizer{
 		cfg:           cfg,
 		logger:        logger,
 		storage:       storage,
+		stateStore:    ss,
 		manager:       manager,
 		localSessions: make(map[string]*sessionState),
 	}, nil
@@ -372,27 +389,24 @@ func (s *sessionSynchronizer) performCleanup() {
 	}
 }
 
-// persistSessionState stores session state in persistent storage
+// persistSessionState stores session state in ephemeral state store
 func (s *sessionSynchronizer) persistSessionState(ctx context.Context, sessionState *sessionState) error {
-	store := s.storage.GetRuntimeStore()
-	if store == nil {
-		return fmt.Errorf("runtime store not available")
+	if s.stateStore == nil {
+		return fmt.Errorf("runtime state store not available")
 	}
 
 	key := fmt.Sprintf("session:%s", sessionState.SessionID)
-
-	return store.SetRuntimeState(ctx, key, sessionState)
+	return s.stateStore.SetRuntimeState(ctx, key, sessionState)
 }
 
-// loadSessionState loads session state from persistent storage
+// loadSessionState loads session state from ephemeral state store
 func (s *sessionSynchronizer) loadSessionState(ctx context.Context, sessionID string) (*sessionState, error) {
-	store := s.storage.GetRuntimeStore()
-	if store == nil {
-		return nil, fmt.Errorf("runtime store not available")
+	if s.stateStore == nil {
+		return nil, fmt.Errorf("runtime state store not available")
 	}
 
 	key := fmt.Sprintf("session:%s", sessionID)
-	data, err := store.GetRuntimeState(ctx, key)
+	data, err := s.stateStore.GetRuntimeState(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load session state: %w", err)
 	}
@@ -405,15 +419,14 @@ func (s *sessionSynchronizer) loadSessionState(ctx context.Context, sessionID st
 	return sessionState, nil
 }
 
-// removePersistedSessionState removes session state from persistent storage
+// removePersistedSessionState removes session state from ephemeral state store
 func (s *sessionSynchronizer) removePersistedSessionState(ctx context.Context, sessionID string) error {
-	store := s.storage.GetRuntimeStore()
-	if store == nil {
-		return fmt.Errorf("runtime store not available")
+	if s.stateStore == nil {
+		return fmt.Errorf("runtime state store not available")
 	}
 
 	key := fmt.Sprintf("session:%s", sessionID)
-	return store.DeleteRuntimeState(ctx, key)
+	return s.stateStore.DeleteRuntimeState(ctx, key)
 }
 
 // loadSessionsSince loads sessions updated since the given time

@@ -72,7 +72,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
-	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // AdvancedService provides comprehensive reporting capabilities integrating DNA and audit data
@@ -117,7 +117,7 @@ func NewAdvancedService(
 	storageManager *storage.Manager,
 	driftDetector drift.Detector,
 	auditManager *audit.Manager,
-	auditStore storageInterfaces.AuditStore,
+	auditStore business.AuditStore,
 	rbacManager *rbac.Manager,
 	cache interfaces.ReportCache,
 	logger logging.Logger,
@@ -157,7 +157,7 @@ func NewAdvancedServiceWithConfig(
 	storageManager *storage.Manager,
 	driftDetector drift.Detector,
 	auditManager *audit.Manager,
-	auditStore storageInterfaces.AuditStore,
+	auditStore business.AuditStore,
 	rbacManager *rbac.Manager,
 	cache interfaces.ReportCache,
 	config AdvancedServiceConfig,

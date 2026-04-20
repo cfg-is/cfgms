@@ -1,57 +1,62 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// Package interfaces defines the runtime storage interface for session and runtime state management
-package interfaces
+// Package business defines the SessionStore interface for durable session persistence.
+package business
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
 
-// RuntimeStore interface defines operations for session and runtime state storage
-// This interface supports both ephemeral (in-memory) and durable (persistent) storage
-// Only sessions marked as persistent need to survive controller restarts
-type RuntimeStore interface {
-	// Session Management
-	// Only sessions with Persistent=true need durable storage (git/database providers)
-	// Ephemeral sessions (Persistent=false) can use in-memory storage and be lost on restart
+// ErrNotSupported is returned when a provider does not implement a particular store type.
+var ErrNotSupported = errors.New("operation not supported by this provider")
+
+// ErrImmutable is returned when an attempt is made to modify or delete an immutable record.
+var ErrImmutable = errors.New("record is immutable and cannot be modified or deleted")
+
+// SessionStore defines storage interface for durable session data.
+// Only sessions with Persistent=true should be written here.
+// Ephemeral sessions (Persistent=false) belong in pkg/cache and are out of scope.
+//
+// Methods that manage ephemeral runtime state
+// (SetRuntimeState, GetRuntimeState, DeleteRuntimeState, ListRuntimeKeys)
+// are intentionally absent — those belong in pkg/cache.
+type SessionStore interface {
+	// Session CRUD
 	CreateSession(ctx context.Context, session *Session) error
 	GetSession(ctx context.Context, sessionID string) (*Session, error)
 	UpdateSession(ctx context.Context, sessionID string, session *Session) error
 	DeleteSession(ctx context.Context, sessionID string) error
 	ListSessions(ctx context.Context, filters *SessionFilter) ([]*Session, error)
 
-	// Session Lifecycle Management
+	// Session lifecycle
 	SetSessionTTL(ctx context.Context, sessionID string, ttl time.Duration) error
 	CleanupExpiredSessions(ctx context.Context) (int, error)
-	ListExpiredSessions(ctx context.Context, cutoff time.Time) ([]string, error)
 
-	// Runtime State Management (for application state, not configuration)
-	// Runtime state is typically ephemeral and does not need durable storage
-	// Only use durable storage if the state is critical for system recovery
-	SetRuntimeState(ctx context.Context, key string, value interface{}) error
-	GetRuntimeState(ctx context.Context, key string) (interface{}, error)
-	DeleteRuntimeState(ctx context.Context, key string) error
-	ListRuntimeKeys(ctx context.Context, prefix string) ([]string, error)
-
-	// Batch Operations for Performance
-	CreateSessionsBatch(ctx context.Context, sessions []*Session) error
-	DeleteSessionsBatch(ctx context.Context, sessionIDs []string) error
-
-	// Session Queries
+	// Session queries
 	GetSessionsByUser(ctx context.Context, userID string) ([]*Session, error)
 	GetSessionsByTenant(ctx context.Context, tenantID string) ([]*Session, error)
 	GetSessionsByType(ctx context.Context, sessionType SessionType) ([]*Session, error)
 	GetActiveSessionsCount(ctx context.Context) (int64, error)
 
-	// Health and Maintenance
+	// Health and diagnostics
 	HealthCheck(ctx context.Context) error
 	GetStats(ctx context.Context) (*RuntimeStoreStats, error)
-	Vacuum(ctx context.Context) error // Cleanup/optimize storage
+
+	// Lifecycle
+	Initialize(ctx context.Context) error
+	Close() error
 }
 
-// Session represents a session in the runtime storage system
+// SessionStoreProvider is an optional extension interface that providers implement
+// when they support durable session storage.
+type SessionStoreProvider interface {
+	CreateSessionStore(config map[string]interface{}) (SessionStore, error)
+}
+
+// Session represents a session in the session storage system
 type Session struct {
 	// Core session identity
 	SessionID   string      `json:"session_id"`
@@ -146,7 +151,8 @@ type SessionFilter struct {
 	ComplianceFlags []string `json:"compliance_flags,omitempty"`
 }
 
-// RuntimeStoreStats provides statistics about the runtime store
+// RuntimeStoreStats provides statistics about the session store.
+// The name is retained for compatibility but it reports session statistics only.
 type RuntimeStoreStats struct {
 	// Session statistics
 	TotalSessions    int64            `json:"total_sessions"`
@@ -155,7 +161,7 @@ type RuntimeStoreStats struct {
 	SessionsByType   map[string]int64 `json:"sessions_by_type"`
 	SessionsByStatus map[string]int64 `json:"sessions_by_status"`
 
-	// Runtime state statistics
+	// Runtime state statistics (unused post-ADR-003; retained for schema compatibility)
 	RuntimeStateKeys int64 `json:"runtime_state_keys"`
 	RuntimeStateSize int64 `json:"runtime_state_size_bytes"`
 

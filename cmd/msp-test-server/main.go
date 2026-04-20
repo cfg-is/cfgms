@@ -60,7 +60,7 @@ func main() {
 
 	// Create storage using git provider
 	config := &auth.ClientStoreConfig{Type: auth.ClientStoreGit}
-	clientStore, err := auth.NewClientTenantStore(config, nil)
+	clientStore, err := auth.NewClientTenantStore(config)
 	if err != nil {
 		log.Fatal("Failed to create client store:", err)
 	}
@@ -327,7 +327,7 @@ func main() {
 	})
 
 	http.HandleFunc("/list-clients", func(w http.ResponseWriter, r *http.Request) {
-		clients, err := clientStore.ListClientTenants(r.Context(), "")
+		clients, err := clientStore.ListClientTenants("")
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error: %v", err), http.StatusInternalServerError)
 			return

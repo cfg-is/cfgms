@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
 
@@ -25,20 +25,20 @@ func newTestAuditStore(t *testing.T) *flatfile.FlatFileAuditStore {
 }
 
 // minimalEntry returns a minimal valid AuditEntry with the given timestamp.
-func minimalEntry(id, tenantID string, ts time.Time) *interfaces.AuditEntry {
-	return &interfaces.AuditEntry{
+func minimalEntry(id, tenantID string, ts time.Time) *business.AuditEntry {
+	return &business.AuditEntry{
 		ID:           id,
 		TenantID:     tenantID,
 		Timestamp:    ts,
 		Action:       "read",
 		UserID:       "user1",
-		UserType:     interfaces.AuditUserTypeHuman,
+		UserType:     business.AuditUserTypeHuman,
 		ResourceType: "config",
 		ResourceID:   "cfg-1",
-		Result:       interfaces.AuditResultSuccess,
-		Severity:     interfaces.AuditSeverityLow,
+		Result:       business.AuditResultSuccess,
+		Severity:     business.AuditSeverityLow,
 		Source:       "test",
-		EventType:    interfaces.AuditEventDataAccess,
+		EventType:    business.AuditEventDataAccess,
 	}
 }
 
@@ -63,7 +63,7 @@ func TestGetAuditEntryNotFound(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := store.GetAuditEntry(ctx, "nonexistent")
-	assert.Equal(t, interfaces.ErrAuditNotFound, err)
+	assert.Equal(t, business.ErrAuditNotFound, err)
 }
 
 // TestStoreAuditEntryValidation verifies required field validation.
@@ -147,7 +147,7 @@ func TestListAuditEntries(t *testing.T) {
 	// Entry for a different tenant
 	require.NoError(t, store.StoreAuditEntry(ctx, minimalEntry("e-other", "t2", now)))
 
-	results, err := store.ListAuditEntries(ctx, &interfaces.AuditFilter{TenantID: "t1"})
+	results, err := store.ListAuditEntries(ctx, &business.AuditFilter{TenantID: "t1"})
 	require.NoError(t, err)
 	assert.Len(t, results, 3)
 }
@@ -165,9 +165,9 @@ func TestListAuditEntriesByTimeRange(t *testing.T) {
 
 	// Filter: only today
 	start := today.Add(-time.Minute)
-	results, err := store.ListAuditEntries(ctx, &interfaces.AuditFilter{
+	results, err := store.ListAuditEntries(ctx, &business.AuditFilter{
 		TenantID:  "t1",
-		TimeRange: &interfaces.TimeRange{Start: &start},
+		TimeRange: &business.TimeRange{Start: &start},
 	})
 	require.NoError(t, err)
 	require.Len(t, results, 1)
@@ -237,16 +237,16 @@ func TestGetFailedActions(t *testing.T) {
 	now := time.Now().UTC()
 
 	succeed := minimalEntry("s1", "t1", now)
-	succeed.Result = interfaces.AuditResultSuccess
+	succeed.Result = business.AuditResultSuccess
 
 	fail := minimalEntry("f1", "t1", now)
-	fail.Result = interfaces.AuditResultFailure
+	fail.Result = business.AuditResultFailure
 
 	errEntry := minimalEntry("e1", "t1", now)
-	errEntry.Result = interfaces.AuditResultError
+	errEntry.Result = business.AuditResultError
 
 	denied := minimalEntry("d1", "t1", now)
-	denied.Result = interfaces.AuditResultDenied
+	denied.Result = business.AuditResultDenied
 
 	require.NoError(t, store.StoreAuditEntry(ctx, succeed))
 	require.NoError(t, store.StoreAuditEntry(ctx, fail))
@@ -258,7 +258,7 @@ func TestGetFailedActions(t *testing.T) {
 	// All three failure variants must be returned; success must not be
 	assert.Len(t, results, 3, "expected failure, error, and denied entries")
 	for _, r := range results {
-		assert.NotEqual(t, interfaces.AuditResultSuccess, r.Result,
+		assert.NotEqual(t, business.AuditResultSuccess, r.Result,
 			"success entries must not appear in GetFailedActions")
 	}
 
@@ -279,13 +279,13 @@ func TestGetSuspiciousActivity(t *testing.T) {
 	now := time.Now().UTC()
 
 	low := minimalEntry("low-1", "t1", now)
-	low.Severity = interfaces.AuditSeverityLow
+	low.Severity = business.AuditSeverityLow
 
 	high := minimalEntry("high-1", "t1", now)
-	high.Severity = interfaces.AuditSeverityHigh
+	high.Severity = business.AuditSeverityHigh
 
 	crit := minimalEntry("crit-1", "t1", now)
-	crit.Severity = interfaces.AuditSeverityCritical
+	crit.Severity = business.AuditSeverityCritical
 
 	require.NoError(t, store.StoreAuditEntry(ctx, low))
 	require.NoError(t, store.StoreAuditEntry(ctx, high))
@@ -302,7 +302,7 @@ func TestStoreAuditBatch(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	entries := []*interfaces.AuditEntry{
+	entries := []*business.AuditEntry{
 		minimalEntry("b1", "t1", now),
 		minimalEntry("b2", "t1", now),
 		minimalEntry("b3", "t1", now),
@@ -322,7 +322,7 @@ func TestGetAuditStats(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	entries := []*interfaces.AuditEntry{
+	entries := []*business.AuditEntry{
 		minimalEntry("s1", "t1", now),
 		minimalEntry("s2", "t2", now),
 	}
@@ -348,7 +348,7 @@ func TestListAuditEntriesPagination(t *testing.T) {
 		require.NoError(t, store.StoreAuditEntry(ctx, e))
 	}
 
-	results, err := store.ListAuditEntries(ctx, &interfaces.AuditFilter{
+	results, err := store.ListAuditEntries(ctx, &business.AuditFilter{
 		TenantID: "t1",
 		Limit:    2,
 		Offset:   1,
@@ -439,7 +439,7 @@ func TestConcurrentAuditWrites(t *testing.T) {
 	}
 
 	// Verify all entries are readable and not corrupted
-	results, err := store.ListAuditEntries(ctx, &interfaces.AuditFilter{TenantID: "concurrent-tenant"})
+	results, err := store.ListAuditEntries(ctx, &business.AuditFilter{TenantID: "concurrent-tenant"})
 	require.NoError(t, err)
 	assert.Len(t, results, numGoroutines, "all concurrent entries must be persisted")
 
@@ -454,7 +454,7 @@ func TestListAuditEntriesEmptyStore(t *testing.T) {
 	store := newTestAuditStore(t)
 	ctx := context.Background()
 
-	results, err := store.ListAuditEntries(ctx, &interfaces.AuditFilter{TenantID: "t1"})
+	results, err := store.ListAuditEntries(ctx, &business.AuditFilter{TenantID: "t1"})
 	require.NoError(t, err)
 	assert.Empty(t, results)
 }

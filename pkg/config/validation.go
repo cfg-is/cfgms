@@ -11,16 +11,16 @@ import (
 	"gopkg.in/yaml.v3"
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // ValidationManager handles configuration validation before storage
 type ValidationManager struct {
-	configStore interfaces.ConfigStore
+	configStore cfgconfig.ConfigStore
 }
 
 // NewValidationManager creates a new validation manager
-func NewValidationManager(configStore interfaces.ConfigStore) *ValidationManager {
+func NewValidationManager(configStore cfgconfig.ConfigStore) *ValidationManager {
 	return &ValidationManager{
 		configStore: configStore,
 	}
@@ -383,7 +383,7 @@ func isValidErrorAction(action stewardconfig.ErrorAction, validActions []steward
 }
 
 // ValidateConfigurationEntry validates a configuration entry for storage
-func (vm *ValidationManager) ValidateConfigurationEntry(ctx context.Context, entry *interfaces.ConfigEntry) error {
+func (vm *ValidationManager) ValidateConfigurationEntry(ctx context.Context, entry *cfgconfig.ConfigEntry) error {
 	// Validate required fields
 	if entry.Key == nil {
 		return fmt.Errorf("configuration key is required")
@@ -406,12 +406,12 @@ func (vm *ValidationManager) ValidateConfigurationEntry(ctx context.Context, ent
 	}
 
 	// Validate format
-	if entry.Format != interfaces.ConfigFormatYAML && entry.Format != interfaces.ConfigFormatJSON {
+	if entry.Format != cfgconfig.ConfigFormatYAML && entry.Format != cfgconfig.ConfigFormatJSON {
 		return fmt.Errorf("invalid format: %s", entry.Format)
 	}
 
 	// Validate data format consistency
-	if entry.Format == interfaces.ConfigFormatYAML {
+	if entry.Format == cfgconfig.ConfigFormatYAML {
 		var temp interface{}
 		if err := yaml.Unmarshal(entry.Data, &temp); err != nil {
 			return fmt.Errorf("invalid YAML data: %w", err)

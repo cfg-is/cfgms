@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// SQLiteAuditStore implements interfaces.AuditStore using SQLite.
+// SQLiteAuditStore implements business.AuditStore using SQLite.
 // Entries are append-only: StoreAuditEntry returns ErrImmutable if an entry with the
 // same ID already exists. ArchiveAuditEntries and PurgeAuditEntries both return
 // ErrImmutable to enforce the immutability contract at the SQLite tier.
@@ -26,7 +26,7 @@ type SQLiteAuditStore struct {
 
 // StoreAuditEntry appends a single audit entry. The entry's checksum is computed and
 // set here if empty. Returns ErrImmutable if an entry with that ID already exists.
-func (s *SQLiteAuditStore) StoreAuditEntry(ctx context.Context, entry *interfaces.AuditEntry) error {
+func (s *SQLiteAuditStore) StoreAuditEntry(ctx context.Context, entry *business.AuditEntry) error {
 	if entry == nil {
 		return fmt.Errorf("audit entry cannot be nil")
 	}
@@ -91,7 +91,7 @@ func (s *SQLiteAuditStore) StoreAuditEntry(ctx context.Context, entry *interface
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return interfaces.ErrImmutable
+			return business.ErrImmutable
 		}
 		return fmt.Errorf("failed to store audit entry %s: %w", entry.ID, err)
 	}
@@ -99,7 +99,7 @@ func (s *SQLiteAuditStore) StoreAuditEntry(ctx context.Context, entry *interface
 }
 
 // GetAuditEntry retrieves a single audit entry by ID.
-func (s *SQLiteAuditStore) GetAuditEntry(ctx context.Context, id string) (*interfaces.AuditEntry, error) {
+func (s *SQLiteAuditStore) GetAuditEntry(ctx context.Context, id string) (*business.AuditEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 		       resource_type, resource_id, resource_name, result, error_code, error_message,
@@ -110,7 +110,7 @@ func (s *SQLiteAuditStore) GetAuditEntry(ctx context.Context, id string) (*inter
 }
 
 // ListAuditEntries returns audit entries matching the filter.
-func (s *SQLiteAuditStore) ListAuditEntries(ctx context.Context, filter *interfaces.AuditFilter) ([]*interfaces.AuditEntry, error) {
+func (s *SQLiteAuditStore) ListAuditEntries(ctx context.Context, filter *business.AuditFilter) ([]*business.AuditEntry, error) {
 	query, args := buildAuditQuery(filter)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -118,7 +118,7 @@ func (s *SQLiteAuditStore) ListAuditEntries(ctx context.Context, filter *interfa
 	}
 	defer func() { _ = rows.Close() }()
 
-	var entries []*interfaces.AuditEntry
+	var entries []*business.AuditEntry
 	for rows.Next() {
 		e, err := scanAuditRow(rows)
 		if err != nil {
@@ -130,7 +130,7 @@ func (s *SQLiteAuditStore) ListAuditEntries(ctx context.Context, filter *interfa
 }
 
 // StoreAuditBatch appends multiple entries in a single transaction.
-func (s *SQLiteAuditStore) StoreAuditBatch(ctx context.Context, entries []*interfaces.AuditEntry) error {
+func (s *SQLiteAuditStore) StoreAuditBatch(ctx context.Context, entries []*business.AuditEntry) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -146,16 +146,16 @@ func (s *SQLiteAuditStore) StoreAuditBatch(ctx context.Context, entries []*inter
 }
 
 // GetAuditsByUser returns audit entries for a specific user within an optional time range.
-func (s *SQLiteAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return s.ListAuditEntries(ctx, &interfaces.AuditFilter{
+func (s *SQLiteAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
 		UserIDs:   []string{userID},
 		TimeRange: timeRange,
 	})
 }
 
 // GetAuditsByResource returns audit entries for a specific resource.
-func (s *SQLiteAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return s.ListAuditEntries(ctx, &interfaces.AuditFilter{
+func (s *SQLiteAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
 		ResourceTypes: []string{resourceType},
 		ResourceIDs:   []string{resourceID},
 		TimeRange:     timeRange,
@@ -163,35 +163,35 @@ func (s *SQLiteAuditStore) GetAuditsByResource(ctx context.Context, resourceType
 }
 
 // GetAuditsByAction returns audit entries for a specific action.
-func (s *SQLiteAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return s.ListAuditEntries(ctx, &interfaces.AuditFilter{
+func (s *SQLiteAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
 		Actions:   []string{action},
 		TimeRange: timeRange,
 	})
 }
 
 // GetFailedActions returns the most recent failed audit entries.
-func (s *SQLiteAuditStore) GetFailedActions(ctx context.Context, timeRange *interfaces.TimeRange, limit int) ([]*interfaces.AuditEntry, error) {
-	return s.ListAuditEntries(ctx, &interfaces.AuditFilter{
-		Results:   []interfaces.AuditResult{interfaces.AuditResultFailure, interfaces.AuditResultError, interfaces.AuditResultDenied},
+func (s *SQLiteAuditStore) GetFailedActions(ctx context.Context, timeRange *business.TimeRange, limit int) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
+		Results:   []business.AuditResult{business.AuditResultFailure, business.AuditResultError, business.AuditResultDenied},
 		TimeRange: timeRange,
 		Limit:     limit,
 	})
 }
 
 // GetSuspiciousActivity returns high/critical severity security events for a tenant.
-func (s *SQLiteAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return s.ListAuditEntries(ctx, &interfaces.AuditFilter{
+func (s *SQLiteAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
 		TenantID:   tenantID,
-		EventTypes: []interfaces.AuditEventType{interfaces.AuditEventSecurityEvent},
-		Severities: []interfaces.AuditSeverity{interfaces.AuditSeverityHigh, interfaces.AuditSeverityCritical},
+		EventTypes: []business.AuditEventType{business.AuditEventSecurityEvent},
+		Severities: []business.AuditSeverity{business.AuditSeverityHigh, business.AuditSeverityCritical},
 		TimeRange:  timeRange,
 	})
 }
 
 // GetAuditStats returns aggregate statistics about stored audit entries.
-func (s *SQLiteAuditStore) GetAuditStats(ctx context.Context) (*interfaces.AuditStats, error) {
-	stats := &interfaces.AuditStats{
+func (s *SQLiteAuditStore) GetAuditStats(ctx context.Context) (*business.AuditStats, error) {
+	stats := &business.AuditStats{
 		EntriesByTenant:   make(map[string]int64),
 		EntriesByType:     make(map[string]int64),
 		EntriesByResult:   make(map[string]int64),
@@ -252,17 +252,17 @@ func (s *SQLiteAuditStore) Close() error {
 
 // ArchiveAuditEntries returns ErrImmutable — audit entries are immutable at this tier.
 func (s *SQLiteAuditStore) ArchiveAuditEntries(_ context.Context, _ time.Time) (int64, error) {
-	return 0, interfaces.ErrImmutable
+	return 0, business.ErrImmutable
 }
 
 // PurgeAuditEntries returns ErrImmutable — audit entries are immutable at this tier.
 func (s *SQLiteAuditStore) PurgeAuditEntries(_ context.Context, _ time.Time) (int64, error) {
-	return 0, interfaces.ErrImmutable
+	return 0, business.ErrImmutable
 }
 
 // ---- helpers ----------------------------------------------------------------
 
-func (s *SQLiteAuditStore) storeAuditEntryTx(ctx context.Context, tx *sql.Tx, entry *interfaces.AuditEntry) error {
+func (s *SQLiteAuditStore) storeAuditEntryTx(ctx context.Context, tx *sql.Tx, entry *business.AuditEntry) error {
 	if entry.Checksum == "" {
 		entry.Checksum = computeChecksum(entry)
 	}
@@ -300,14 +300,14 @@ func (s *SQLiteAuditStore) storeAuditEntryTx(ctx context.Context, tx *sql.Tx, en
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return interfaces.ErrImmutable
+			return business.ErrImmutable
 		}
 		return fmt.Errorf("failed to store audit entry %s in batch: %w", entry.ID, err)
 	}
 	return nil
 }
 
-func buildAuditQuery(filter *interfaces.AuditFilter) (string, []interface{}) {
+func buildAuditQuery(filter *business.AuditFilter) (string, []interface{}) {
 	base := `SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 	                resource_type, resource_id, resource_name, result, error_code, error_message,
 	                request_id, ip_address, user_agent, method, path,
@@ -420,8 +420,8 @@ func buildAuditQuery(filter *interfaces.AuditFilter) (string, []interface{}) {
 	return query, args
 }
 
-func scanAuditEntry(row *sql.Row) (*interfaces.AuditEntry, error) {
-	e := &interfaces.AuditEntry{}
+func scanAuditEntry(row *sql.Row) (*business.AuditEntry, error) {
+	e := &business.AuditEntry{}
 	var tsStr, detailsStr, changesStr, tagsStr string
 
 	err := row.Scan(
@@ -442,8 +442,8 @@ func scanAuditEntry(row *sql.Row) (*interfaces.AuditEntry, error) {
 	return populateAuditEntry(e, tsStr, detailsStr, changesStr, tagsStr)
 }
 
-func scanAuditRow(rows *sql.Rows) (*interfaces.AuditEntry, error) {
-	e := &interfaces.AuditEntry{}
+func scanAuditRow(rows *sql.Rows) (*business.AuditEntry, error) {
+	e := &business.AuditEntry{}
 	var tsStr, detailsStr, changesStr, tagsStr string
 
 	if err := rows.Scan(
@@ -460,7 +460,7 @@ func scanAuditRow(rows *sql.Rows) (*interfaces.AuditEntry, error) {
 	return populateAuditEntry(e, tsStr, detailsStr, changesStr, tagsStr)
 }
 
-func populateAuditEntry(e *interfaces.AuditEntry, tsStr, detailsStr, changesStr, tagsStr string) (*interfaces.AuditEntry, error) {
+func populateAuditEntry(e *business.AuditEntry, tsStr, detailsStr, changesStr, tagsStr string) (*business.AuditEntry, error) {
 	e.Timestamp = parseTime(tsStr)
 
 	details, err := unmarshalJSONMap(detailsStr)
@@ -470,7 +470,7 @@ func populateAuditEntry(e *interfaces.AuditEntry, tsStr, detailsStr, changesStr,
 	e.Details = details
 
 	if changesStr != "" && changesStr != "{}" {
-		var changes interfaces.AuditChanges
+		var changes business.AuditChanges
 		if err := json.Unmarshal([]byte(changesStr), &changes); err == nil {
 			e.Changes = &changes
 		}
@@ -485,7 +485,7 @@ func populateAuditEntry(e *interfaces.AuditEntry, tsStr, detailsStr, changesStr,
 	return e, nil
 }
 
-func computeChecksum(entry *interfaces.AuditEntry) string {
+func computeChecksum(entry *business.AuditEntry) string {
 	h := sha256.New()
 	// sha256.Hash.Write never returns an error; the return values are intentionally ignored.
 	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s",
@@ -495,4 +495,4 @@ func computeChecksum(entry *interfaces.AuditEntry) string {
 }
 
 // ensure SQLiteAuditStore satisfies the interface at compile time
-var _ interfaces.AuditStore = (*SQLiteAuditStore)(nil)
+var _ business.AuditStore = (*SQLiteAuditStore)(nil)

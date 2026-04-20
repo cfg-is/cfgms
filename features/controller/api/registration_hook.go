@@ -10,7 +10,7 @@ import (
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
-	storageif "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // ApprovalDecision represents the outcome of a registration approval evaluation.
@@ -83,14 +83,14 @@ func (*DefaultApprovalHook) Evaluate(_ context.Context, _ RegistrationInput) (Ap
 // variable provides a human-readable reason for audit logging.
 type WorkflowApprovalHook struct {
 	engine      *workflow.Engine
-	configStore storageif.ConfigStore
+	configStore cfgconfig.ConfigStore
 	logger      logging.Logger
 }
 
 // NewWorkflowApprovalHook creates a WorkflowApprovalHook.
 func NewWorkflowApprovalHook(
 	engine *workflow.Engine,
-	configStore storageif.ConfigStore,
+	configStore cfgconfig.ConfigStore,
 	logger logging.Logger,
 ) *WorkflowApprovalHook {
 	return &WorkflowApprovalHook{

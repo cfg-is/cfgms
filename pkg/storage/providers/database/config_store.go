@@ -14,7 +14,7 @@ import (
 
 	"github.com/lib/pq"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // DatabaseConfigStore implements ConfigStore using PostgreSQL for persistence
@@ -99,7 +99,7 @@ func (s *DatabaseConfigStore) initializeSchema() error {
 }
 
 // StoreConfig stores a configuration entry in the database with versioning and history tracking
-func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *interfaces.ConfigEntry) error {
+func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -121,7 +121,7 @@ func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *interface
 		config.CreatedAt = now
 	}
 	config.UpdatedAt = now
-	config.Format = interfaces.ConfigFormatYAML
+	config.Format = cfgconfig.ConfigFormatYAML
 
 	// Calculate checksum
 	hasher := sha256.New()
@@ -226,7 +226,7 @@ func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *interface
 }
 
 // GetConfig retrieves a configuration entry from the database
-func (s *DatabaseConfigStore) GetConfig(ctx context.Context, key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
+func (s *DatabaseConfigStore) GetConfig(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -236,7 +236,7 @@ func (s *DatabaseConfigStore) GetConfig(ctx context.Context, key *interfaces.Con
 // getConfigInternal retrieves a configuration entry (can be used within transactions)
 func (s *DatabaseConfigStore) getConfigInternal(ctx context.Context, querier interface {
 	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
-}, key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
+}, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	query := `
 		SELECT tenant_id, namespace, name, scope, version, format, data, checksum, metadata, tags, source, created_at, updated_at, created_by, updated_by
 		FROM configs
@@ -245,8 +245,8 @@ func (s *DatabaseConfigStore) getConfigInternal(ctx context.Context, querier int
 
 	row := querier.QueryRowContext(ctx, query, key.TenantID, key.Namespace, key.Name, key.Scope)
 
-	config := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{},
+	config := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{},
 	}
 	var formatStr string
 	var metadataJSON []byte
@@ -272,12 +272,12 @@ func (s *DatabaseConfigStore) getConfigInternal(ctx context.Context, querier int
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, interfaces.ErrConfigNotFound
+			return nil, cfgconfig.ErrConfigNotFound
 		}
 		return nil, fmt.Errorf("failed to get configuration: %w", err)
 	}
 
-	config.Format = interfaces.ConfigFormat(formatStr)
+	config.Format = cfgconfig.ConfigFormat(formatStr)
 	config.Tags = []string(tags)
 
 	if len(metadataJSON) > 0 {
@@ -292,7 +292,7 @@ func (s *DatabaseConfigStore) getConfigInternal(ctx context.Context, querier int
 }
 
 // DeleteConfig removes a configuration entry from the database
-func (s *DatabaseConfigStore) DeleteConfig(ctx context.Context, key *interfaces.ConfigKey) error {
+func (s *DatabaseConfigStore) DeleteConfig(ctx context.Context, key *cfgconfig.ConfigKey) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -323,7 +323,7 @@ func (s *DatabaseConfigStore) DeleteConfig(ctx context.Context, key *interfaces.
 	}
 
 	if rowsAffected == 0 {
-		return interfaces.ErrConfigNotFound
+		return cfgconfig.ErrConfigNotFound
 	}
 
 	// Store deletion in history
@@ -365,7 +365,7 @@ func (s *DatabaseConfigStore) DeleteConfig(ctx context.Context, key *interfaces.
 }
 
 // ListConfigs lists configuration entries matching the filter with optimized database queries
-func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *interfaces.ConfigFilter) ([]*interfaces.ConfigEntry, error) {
+func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -388,11 +388,11 @@ func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *interface
 	}
 	defer func() { _ = rows.Close() }()
 
-	var configs []*interfaces.ConfigEntry
+	var configs []*cfgconfig.ConfigEntry
 
 	for rows.Next() {
-		config := &interfaces.ConfigEntry{
-			Key: &interfaces.ConfigKey{},
+		config := &cfgconfig.ConfigEntry{
+			Key: &cfgconfig.ConfigKey{},
 		}
 		var formatStr string
 		var metadataJSON []byte
@@ -420,7 +420,7 @@ func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *interface
 			return nil, fmt.Errorf("failed to scan configuration: %w", err)
 		}
 
-		config.Format = interfaces.ConfigFormat(formatStr)
+		config.Format = cfgconfig.ConfigFormat(formatStr)
 		config.Tags = []string(tags)
 
 		if len(metadataJSON) > 0 {
@@ -442,7 +442,7 @@ func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *interface
 }
 
 // GetConfigHistory gets version history for a configuration using the history table
-func (s *DatabaseConfigStore) GetConfigHistory(ctx context.Context, key *interfaces.ConfigKey, limit int) ([]*interfaces.ConfigEntry, error) {
+func (s *DatabaseConfigStore) GetConfigHistory(ctx context.Context, key *cfgconfig.ConfigKey, limit int) ([]*cfgconfig.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -460,11 +460,11 @@ func (s *DatabaseConfigStore) GetConfigHistory(ctx context.Context, key *interfa
 	}
 	defer func() { _ = rows.Close() }()
 
-	var configs []*interfaces.ConfigEntry
+	var configs []*cfgconfig.ConfigEntry
 
 	for rows.Next() {
-		config := &interfaces.ConfigEntry{
-			Key: &interfaces.ConfigKey{},
+		config := &cfgconfig.ConfigEntry{
+			Key: &cfgconfig.ConfigKey{},
 		}
 		var formatStr string
 		var metadataJSON []byte
@@ -490,7 +490,7 @@ func (s *DatabaseConfigStore) GetConfigHistory(ctx context.Context, key *interfa
 			return nil, fmt.Errorf("failed to scan configuration history: %w", err)
 		}
 
-		config.Format = interfaces.ConfigFormat(formatStr)
+		config.Format = cfgconfig.ConfigFormat(formatStr)
 		config.Tags = []string(tags)
 
 		if len(metadataJSON) > 0 {
@@ -512,7 +512,7 @@ func (s *DatabaseConfigStore) GetConfigHistory(ctx context.Context, key *interfa
 }
 
 // GetConfigVersion gets a specific version of a configuration
-func (s *DatabaseConfigStore) GetConfigVersion(ctx context.Context, key *interfaces.ConfigKey, version int64) (*interfaces.ConfigEntry, error) {
+func (s *DatabaseConfigStore) GetConfigVersion(ctx context.Context, key *cfgconfig.ConfigKey, version int64) (*cfgconfig.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -524,8 +524,8 @@ func (s *DatabaseConfigStore) GetConfigVersion(ctx context.Context, key *interfa
 
 	row := s.db.QueryRowContext(ctx, query, key.TenantID, key.Namespace, key.Name, key.Scope, version)
 
-	config := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{},
+	config := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{},
 	}
 	var formatStr string
 	var metadataJSON []byte
@@ -549,12 +549,12 @@ func (s *DatabaseConfigStore) GetConfigVersion(ctx context.Context, key *interfa
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, interfaces.ErrConfigNotFound
+			return nil, cfgconfig.ErrConfigNotFound
 		}
 		return nil, fmt.Errorf("failed to get configuration version: %w", err)
 	}
 
-	config.Format = interfaces.ConfigFormat(formatStr)
+	config.Format = cfgconfig.ConfigFormat(formatStr)
 	config.Tags = []string(tags)
 
 	if len(metadataJSON) > 0 {
@@ -569,7 +569,7 @@ func (s *DatabaseConfigStore) GetConfigVersion(ctx context.Context, key *interfa
 }
 
 // StoreConfigBatch stores multiple configurations in a single transaction for performance
-func (s *DatabaseConfigStore) StoreConfigBatch(ctx context.Context, configs []*interfaces.ConfigEntry) error {
+func (s *DatabaseConfigStore) StoreConfigBatch(ctx context.Context, configs []*cfgconfig.ConfigEntry) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -596,7 +596,7 @@ func (s *DatabaseConfigStore) StoreConfigBatch(ctx context.Context, configs []*i
 }
 
 // DeleteConfigBatch deletes multiple configurations in a single transaction
-func (s *DatabaseConfigStore) DeleteConfigBatch(ctx context.Context, keys []*interfaces.ConfigKey) error {
+func (s *DatabaseConfigStore) DeleteConfigBatch(ctx context.Context, keys []*cfgconfig.ConfigKey) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -623,23 +623,23 @@ func (s *DatabaseConfigStore) DeleteConfigBatch(ctx context.Context, keys []*int
 }
 
 // ResolveConfigWithInheritance resolves configuration with inheritance (not implemented yet)
-func (s *DatabaseConfigStore) ResolveConfigWithInheritance(ctx context.Context, key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
+func (s *DatabaseConfigStore) ResolveConfigWithInheritance(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	// For now, just return the config without inheritance resolution
 	// Future implementation would handle hierarchical inheritance
 	return s.GetConfig(ctx, key)
 }
 
 // ValidateConfig validates a configuration entry
-func (s *DatabaseConfigStore) ValidateConfig(ctx context.Context, config *interfaces.ConfigEntry) error {
+func (s *DatabaseConfigStore) ValidateConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
 	return s.validateConfigEntry(config)
 }
 
 // GetConfigStats returns statistics about stored configurations using optimized queries
-func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.ConfigStats, error) {
+func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*cfgconfig.ConfigStats, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
-	stats := &interfaces.ConfigStats{
+	stats := &cfgconfig.ConfigStats{
 		ConfigsByTenant:    make(map[string]int64),
 		ConfigsByFormat:    make(map[string]int64),
 		ConfigsByNamespace: make(map[string]int64),
@@ -720,18 +720,18 @@ func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 // Helper methods
 
 // validateConfigEntry validates a configuration entry
-func (s *DatabaseConfigStore) validateConfigEntry(config *interfaces.ConfigEntry) error {
+func (s *DatabaseConfigStore) validateConfigEntry(config *cfgconfig.ConfigEntry) error {
 	if config.Key == nil {
-		return interfaces.ErrNameRequired
+		return cfgconfig.ErrNameRequired
 	}
 	if config.Key.TenantID == "" {
-		return interfaces.ErrTenantRequired
+		return cfgconfig.ErrTenantRequired
 	}
 	if config.Key.Namespace == "" {
-		return interfaces.ErrNamespaceRequired
+		return cfgconfig.ErrNamespaceRequired
 	}
 	if config.Key.Name == "" {
-		return interfaces.ErrNameRequired
+		return cfgconfig.ErrNameRequired
 	}
 	if len(config.Data) == 0 {
 		return fmt.Errorf("configuration data cannot be empty")
@@ -741,7 +741,7 @@ func (s *DatabaseConfigStore) validateConfigEntry(config *interfaces.ConfigEntry
 }
 
 // storeConfigInTransaction stores a config within an existing transaction
-func (s *DatabaseConfigStore) storeConfigInTransaction(ctx context.Context, tx *sql.Tx, config *interfaces.ConfigEntry) error {
+func (s *DatabaseConfigStore) storeConfigInTransaction(ctx context.Context, tx *sql.Tx, config *cfgconfig.ConfigEntry) error {
 	// Validate configuration
 	if err := s.validateConfigEntry(config); err != nil {
 		return err
@@ -753,7 +753,7 @@ func (s *DatabaseConfigStore) storeConfigInTransaction(ctx context.Context, tx *
 		config.CreatedAt = now
 	}
 	config.UpdatedAt = now
-	config.Format = interfaces.ConfigFormatYAML
+	config.Format = cfgconfig.ConfigFormatYAML
 
 	// Calculate checksum
 	hasher := sha256.New()
@@ -853,7 +853,7 @@ func (s *DatabaseConfigStore) storeConfigInTransaction(ctx context.Context, tx *
 }
 
 // deleteConfigInTransaction deletes a config within an existing transaction
-func (s *DatabaseConfigStore) deleteConfigInTransaction(ctx context.Context, tx *sql.Tx, key *interfaces.ConfigKey) error {
+func (s *DatabaseConfigStore) deleteConfigInTransaction(ctx context.Context, tx *sql.Tx, key *cfgconfig.ConfigKey) error {
 	// Get the configuration before deletion for history
 	existingConfig, err := s.getConfigInternal(ctx, tx, key)
 	if err != nil {
@@ -874,7 +874,7 @@ func (s *DatabaseConfigStore) deleteConfigInTransaction(ctx context.Context, tx 
 	}
 
 	if rowsAffected == 0 {
-		return interfaces.ErrConfigNotFound
+		return cfgconfig.ErrConfigNotFound
 	}
 
 	// Store deletion in history

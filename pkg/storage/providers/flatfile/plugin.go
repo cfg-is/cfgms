@@ -31,7 +31,7 @@
 // # Supported Stores
 //
 // This provider implements ConfigStore and AuditStore. All other store factory
-// methods (CreateRuntimeStore, CreateRBACStore, CreateTenantStore,
+// methods (CreateRBACStore, CreateTenantStore,
 // CreateRegistrationTokenStore, CreateClientTenantStore) return ErrNotSupported,
 // as these belong to the business-data tier (SQLite, sub-story C).
 package flatfile
@@ -42,6 +42,8 @@ import (
 	"os"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // ErrNotSupported is returned by store factory methods that are not implemented
@@ -119,7 +121,7 @@ func getRootFromConfig(config map[string]interface{}) (string, error) {
 
 // CreateConfigStore creates a flat-file-based configuration store.
 // Config map must contain "root" (string): the root directory for config files.
-func (p *FlatFileProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
+func (p *FlatFileProvider) CreateConfigStore(config map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	root, err := getRootFromConfig(config)
 	if err != nil {
 		return nil, err
@@ -133,7 +135,7 @@ func (p *FlatFileProvider) CreateConfigStore(config map[string]interface{}) (int
 
 // CreateAuditStore creates a flat-file-based audit store.
 // Config map must contain "root" (string). Optional: "max_retention_days" (int, default 90).
-func (p *FlatFileProvider) CreateAuditStore(config map[string]interface{}) (interfaces.AuditStore, error) {
+func (p *FlatFileProvider) CreateAuditStore(config map[string]interface{}) (business.AuditStore, error) {
 	root, err := getRootFromConfig(config)
 	if err != nil {
 		return nil, err
@@ -151,44 +153,38 @@ func (p *FlatFileProvider) CreateAuditStore(config map[string]interface{}) (inte
 
 // CreateClientTenantStore returns ErrNotSupported.
 // Client tenant data belongs in the business-data tier (SQLite / PostgreSQL).
-func (p *FlatFileProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
+func (p *FlatFileProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
 	return nil, ErrNotSupported
 }
 
 // CreateRBACStore returns ErrNotSupported.
 // RBAC data belongs in the business-data tier.
-func (p *FlatFileProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
-	return nil, ErrNotSupported
-}
-
-// CreateRuntimeStore returns ErrNotSupported.
-// Runtime state belongs in the business-data tier.
-func (p *FlatFileProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
+func (p *FlatFileProvider) CreateRBACStore(config map[string]interface{}) (business.RBACStore, error) {
 	return nil, ErrNotSupported
 }
 
 // CreateTenantStore returns ErrNotSupported.
 // Tenant data belongs in the business-data tier.
-func (p *FlatFileProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+func (p *FlatFileProvider) CreateTenantStore(config map[string]interface{}) (business.TenantStore, error) {
 	return nil, ErrNotSupported
 }
 
 // CreateRegistrationTokenStore returns ErrNotSupported.
 // Registration token data belongs in the business-data tier.
-func (p *FlatFileProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
+func (p *FlatFileProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	return nil, ErrNotSupported
 }
 
 // CreateSessionStore is not supported by the flatfile provider.
 // Use the SQLite provider for durable session storage.
-func (p *FlatFileProvider) CreateSessionStore(config map[string]interface{}) (interfaces.SessionStore, error) {
+func (p *FlatFileProvider) CreateSessionStore(config map[string]interface{}) (business.SessionStore, error) {
 	return nil, ErrNotSupported
 }
 
 // CreateStewardStore creates a flat-file-based StewardStore.
 // Config map must contain "root" (string): the root directory.
 // Steward records are stored as JSON files under <root>/stewards/.
-func (p *FlatFileProvider) CreateStewardStore(config map[string]interface{}) (interfaces.StewardStore, error) {
+func (p *FlatFileProvider) CreateStewardStore(config map[string]interface{}) (business.StewardStore, error) {
 	root, err := getRootFromConfig(config)
 	if err != nil {
 		return nil, err
@@ -202,7 +198,7 @@ func (p *FlatFileProvider) CreateStewardStore(config map[string]interface{}) (in
 
 // CreateCommandStore returns ErrNotSupported.
 // Command dispatch state belongs in the business-data tier (SQLite).
-func (p *FlatFileProvider) CreateCommandStore(config map[string]interface{}) (interfaces.CommandStore, error) {
+func (p *FlatFileProvider) CreateCommandStore(config map[string]interface{}) (business.CommandStore, error) {
 	return nil, ErrNotSupported
 }
 

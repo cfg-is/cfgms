@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // Clock abstracts time operations for deterministic testing of cache behavior.
@@ -95,7 +95,7 @@ type CacheStats struct {
 	ItemsExpired int64     // Total items expired during cleanup
 }
 
-// RuntimeCache implements RuntimeStore interface with MSP-scale features
+// RuntimeCache provides ephemeral session and runtime-state storage with MSP-scale features
 type RuntimeCache struct {
 	config       CacheConfig
 	sessions     map[string]*CacheEntry
@@ -126,12 +126,20 @@ func NewRuntimeCache(config CacheConfig) *RuntimeCache {
 	return cache
 }
 
-// Close stops the cleanup routine and releases resources
-func (c *RuntimeCache) Close() {
+// Close stops the cleanup routine and releases resources.
+// Returns nil to satisfy the SessionStore Close() error contract.
+func (c *RuntimeCache) Close() error {
 	if c.cleanupDone != nil {
 		close(c.stopCleanup)
 		c.cleanupDone.Wait()
 	}
+	return nil
+}
+
+// Initialize is a no-op for the in-memory runtime cache; it exists to satisfy
+// the business.SessionStore interface.
+func (c *RuntimeCache) Initialize(_ context.Context) error {
+	return nil
 }
 
 // startCleanupRoutine starts the background cleanup goroutine
@@ -239,10 +247,10 @@ func (c *RuntimeCache) GetCacheStats() CacheStats {
 	return stats
 }
 
-// Session Management Methods - implementing interfaces.RuntimeStore
+// Session Management Methods - satisfies business.SessionStore
 
 // CreateSession creates a new session
-func (c *RuntimeCache) CreateSession(ctx context.Context, session *interfaces.Session) error {
+func (c *RuntimeCache) CreateSession(ctx context.Context, session *business.Session) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -280,7 +288,7 @@ func (c *RuntimeCache) CreateSession(ctx context.Context, session *interfaces.Se
 }
 
 // GetSession retrieves a session by ID
-func (c *RuntimeCache) GetSession(ctx context.Context, sessionID string) (*interfaces.Session, error) {
+func (c *RuntimeCache) GetSession(ctx context.Context, sessionID string) (*business.Session, error) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
@@ -296,11 +304,11 @@ func (c *RuntimeCache) GetSession(ctx context.Context, sessionID string) (*inter
 	}
 
 	c.stats.Hits++
-	return entry.Value.(*interfaces.Session), nil
+	return entry.Value.(*business.Session), nil
 }
 
 // UpdateSession updates an existing session
-func (c *RuntimeCache) UpdateSession(ctx context.Context, sessionID string, session *interfaces.Session) error {
+func (c *RuntimeCache) UpdateSession(ctx context.Context, sessionID string, session *business.Session) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -350,18 +358,18 @@ func (c *RuntimeCache) DeleteSession(ctx context.Context, sessionID string) erro
 }
 
 // ListSessions returns sessions matching the filter
-func (c *RuntimeCache) ListSessions(ctx context.Context, filters *interfaces.SessionFilter) ([]*interfaces.Session, error) {
+func (c *RuntimeCache) ListSessions(ctx context.Context, filters *business.SessionFilter) ([]*business.Session, error) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
-	var result []*interfaces.Session
+	var result []*business.Session
 
 	for _, entry := range c.sessions {
 		if entry.IsExpired() {
 			continue
 		}
 
-		session := entry.Value.(*interfaces.Session)
+		session := entry.Value.(*business.Session)
 		if c.matchesFilter(session, filters) {
 			result = append(result, session)
 		}
@@ -382,7 +390,7 @@ func (c *RuntimeCache) SetSessionTTL(ctx context.Context, sessionID string, ttl 
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	session := entry.Value.(*interfaces.Session)
+	session := entry.Value.(*business.Session)
 	session.ExpiresAt = time.Now().Add(ttl)
 	entry.ExpiresAt = session.ExpiresAt
 
@@ -497,7 +505,7 @@ func (c *RuntimeCache) ListRuntimeKeys(ctx context.Context, prefix string) ([]st
 // Batch Operations
 
 // CreateSessionsBatch creates multiple sessions atomically
-func (c *RuntimeCache) CreateSessionsBatch(ctx context.Context, sessions []*interfaces.Session) error {
+func (c *RuntimeCache) CreateSessionsBatch(ctx context.Context, sessions []*business.Session) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -552,20 +560,20 @@ func (c *RuntimeCache) DeleteSessionsBatch(ctx context.Context, sessionIDs []str
 // Query Methods
 
 // GetSessionsByUser returns sessions for a specific user
-func (c *RuntimeCache) GetSessionsByUser(ctx context.Context, userID string) ([]*interfaces.Session, error) {
-	filter := &interfaces.SessionFilter{UserID: userID}
+func (c *RuntimeCache) GetSessionsByUser(ctx context.Context, userID string) ([]*business.Session, error) {
+	filter := &business.SessionFilter{UserID: userID}
 	return c.ListSessions(ctx, filter)
 }
 
 // GetSessionsByTenant returns sessions for a specific tenant
-func (c *RuntimeCache) GetSessionsByTenant(ctx context.Context, tenantID string) ([]*interfaces.Session, error) {
-	filter := &interfaces.SessionFilter{TenantID: tenantID}
+func (c *RuntimeCache) GetSessionsByTenant(ctx context.Context, tenantID string) ([]*business.Session, error) {
+	filter := &business.SessionFilter{TenantID: tenantID}
 	return c.ListSessions(ctx, filter)
 }
 
 // GetSessionsByType returns sessions of a specific type
-func (c *RuntimeCache) GetSessionsByType(ctx context.Context, sessionType interfaces.SessionType) ([]*interfaces.Session, error) {
-	filter := &interfaces.SessionFilter{Type: sessionType}
+func (c *RuntimeCache) GetSessionsByType(ctx context.Context, sessionType business.SessionType) ([]*business.Session, error) {
+	filter := &business.SessionFilter{Type: sessionType}
 	return c.ListSessions(ctx, filter)
 }
 
@@ -580,7 +588,7 @@ func (c *RuntimeCache) GetActiveSessionsCount(ctx context.Context) (int64, error
 			continue
 		}
 
-		session := entry.Value.(*interfaces.Session)
+		session := entry.Value.(*business.Session)
 		if session.IsActive() {
 			count++
 		}
@@ -597,11 +605,11 @@ func (c *RuntimeCache) HealthCheck(ctx context.Context) error {
 }
 
 // GetStats returns comprehensive runtime store statistics
-func (c *RuntimeCache) GetStats(ctx context.Context) (*interfaces.RuntimeStoreStats, error) {
+func (c *RuntimeCache) GetStats(ctx context.Context) (*business.RuntimeStoreStats, error) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
-	stats := &interfaces.RuntimeStoreStats{
+	stats := &business.RuntimeStoreStats{
 		TotalSessions:    int64(len(c.sessions)),
 		ActiveSessions:   0,
 		ExpiredSessions:  0,
@@ -618,7 +626,7 @@ func (c *RuntimeCache) GetStats(ctx context.Context) (*interfaces.RuntimeStoreSt
 			continue
 		}
 
-		session := entry.Value.(*interfaces.Session)
+		session := entry.Value.(*business.Session)
 		if session.IsActive() {
 			stats.ActiveSessions++
 		}
@@ -637,7 +645,7 @@ func (c *RuntimeCache) Vacuum(ctx context.Context) error {
 }
 
 // Helper method for filtering sessions
-func (c *RuntimeCache) matchesFilter(session *interfaces.Session, filter *interfaces.SessionFilter) bool {
+func (c *RuntimeCache) matchesFilter(session *business.Session, filter *business.SessionFilter) bool {
 	if filter == nil {
 		return true
 	}

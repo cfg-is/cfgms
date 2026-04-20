@@ -8,10 +8,10 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// SQLiteTenantStore implements interfaces.TenantStore using SQLite.
+// SQLiteTenantStore implements business.TenantStore using SQLite.
 type SQLiteTenantStore struct {
 	db *sql.DB
 }
@@ -28,7 +28,7 @@ func (s *SQLiteTenantStore) Close() error {
 }
 
 // CreateTenant persists a new tenant.
-func (s *SQLiteTenantStore) CreateTenant(ctx context.Context, tenant *interfaces.TenantData) error {
+func (s *SQLiteTenantStore) CreateTenant(ctx context.Context, tenant *business.TenantData) error {
 	if tenant == nil {
 		return fmt.Errorf("tenant cannot be nil")
 	}
@@ -68,7 +68,7 @@ func (s *SQLiteTenantStore) CreateTenant(ctx context.Context, tenant *interfaces
 }
 
 // GetTenant retrieves a tenant by ID.
-func (s *SQLiteTenantStore) GetTenant(ctx context.Context, tenantID string) (*interfaces.TenantData, error) {
+func (s *SQLiteTenantStore) GetTenant(ctx context.Context, tenantID string) (*business.TenantData, error) {
 	if tenantID == "" {
 		return nil, fmt.Errorf("tenant ID cannot be empty")
 	}
@@ -81,7 +81,7 @@ func (s *SQLiteTenantStore) GetTenant(ctx context.Context, tenantID string) (*in
 }
 
 // UpdateTenant replaces all mutable fields of an existing tenant.
-func (s *SQLiteTenantStore) UpdateTenant(ctx context.Context, tenant *interfaces.TenantData) error {
+func (s *SQLiteTenantStore) UpdateTenant(ctx context.Context, tenant *business.TenantData) error {
 	if tenant == nil {
 		return fmt.Errorf("tenant cannot be nil")
 	}
@@ -136,7 +136,7 @@ func (s *SQLiteTenantStore) DeleteTenant(ctx context.Context, tenantID string) e
 }
 
 // ListTenants returns tenants matching the optional filter.
-func (s *SQLiteTenantStore) ListTenants(ctx context.Context, filter *interfaces.TenantFilter) ([]*interfaces.TenantData, error) {
+func (s *SQLiteTenantStore) ListTenants(ctx context.Context, filter *business.TenantFilter) ([]*business.TenantData, error) {
 	query := `SELECT id, name, description, parent_id, metadata, status, created_at, updated_at FROM tenants WHERE 1=1`
 	args := []interface{}{}
 
@@ -163,7 +163,7 @@ func (s *SQLiteTenantStore) ListTenants(ctx context.Context, filter *interfaces.
 	}
 	defer func() { _ = rows.Close() }()
 
-	var tenants []*interfaces.TenantData
+	var tenants []*business.TenantData
 	for rows.Next() {
 		t, err := scanTenantRow(rows)
 		if err != nil {
@@ -175,7 +175,7 @@ func (s *SQLiteTenantStore) ListTenants(ctx context.Context, filter *interfaces.
 }
 
 // GetTenantHierarchy returns the hierarchy (path, depth, direct children) for a tenant.
-func (s *SQLiteTenantStore) GetTenantHierarchy(ctx context.Context, tenantID string) (*interfaces.TenantHierarchy, error) {
+func (s *SQLiteTenantStore) GetTenantHierarchy(ctx context.Context, tenantID string) (*business.TenantHierarchy, error) {
 	if tenantID == "" {
 		return nil, fmt.Errorf("tenant ID cannot be empty")
 	}
@@ -194,7 +194,7 @@ func (s *SQLiteTenantStore) GetTenantHierarchy(ctx context.Context, tenantID str
 		childIDs[i] = c.ID
 	}
 
-	return &interfaces.TenantHierarchy{
+	return &business.TenantHierarchy{
 		TenantID: tenantID,
 		Path:     path,
 		Depth:    len(path) - 1,
@@ -203,8 +203,8 @@ func (s *SQLiteTenantStore) GetTenantHierarchy(ctx context.Context, tenantID str
 }
 
 // GetChildTenants returns direct children of the given parent.
-func (s *SQLiteTenantStore) GetChildTenants(ctx context.Context, parentID string) ([]*interfaces.TenantData, error) {
-	return s.ListTenants(ctx, &interfaces.TenantFilter{ParentID: parentID})
+func (s *SQLiteTenantStore) GetChildTenants(ctx context.Context, parentID string) ([]*business.TenantData, error) {
+	return s.ListTenants(ctx, &business.TenantFilter{ParentID: parentID})
 }
 
 // GetTenantPath returns the path from root to the specified tenant (root first).
@@ -249,8 +249,8 @@ func (s *SQLiteTenantStore) IsTenantAncestor(ctx context.Context, ancestorID, de
 }
 
 // scanTenant scans a single Row (QueryRow) into a TenantData.
-func scanTenant(row *sql.Row) (*interfaces.TenantData, error) {
-	var t interfaces.TenantData
+func scanTenant(row *sql.Row) (*business.TenantData, error) {
+	var t business.TenantData
 	var parentID sql.NullString
 	var metaStr, statusStr, createdStr, updatedStr string
 
@@ -270,8 +270,8 @@ func scanTenant(row *sql.Row) (*interfaces.TenantData, error) {
 }
 
 // scanTenantRow scans a Rows (Query) into a TenantData.
-func scanTenantRow(rows *sql.Rows) (*interfaces.TenantData, error) {
-	var t interfaces.TenantData
+func scanTenantRow(rows *sql.Rows) (*business.TenantData, error) {
+	var t business.TenantData
 	var parentID sql.NullString
 	var metaStr, statusStr, createdStr, updatedStr string
 
@@ -286,11 +286,11 @@ func scanTenantRow(rows *sql.Rows) (*interfaces.TenantData, error) {
 	return populateTenant(&t, parentID, metaStr, statusStr, createdStr, updatedStr)
 }
 
-func populateTenant(t *interfaces.TenantData, parentID sql.NullString, metaStr, statusStr, createdStr, updatedStr string) (*interfaces.TenantData, error) {
+func populateTenant(t *business.TenantData, parentID sql.NullString, metaStr, statusStr, createdStr, updatedStr string) (*business.TenantData, error) {
 	if parentID.Valid {
 		t.ParentID = parentID.String
 	}
-	t.Status = interfaces.TenantStatus(statusStr)
+	t.Status = business.TenantStatus(statusStr)
 	t.CreatedAt = parseTime(createdStr)
 	t.UpdatedAt = parseTime(updatedStr)
 
@@ -312,4 +312,4 @@ func populateTenant(t *interfaces.TenantData, parentID sql.NullString, metaStr, 
 }
 
 // ensure SQLiteTenantStore satisfies the interface at compile time
-var _ interfaces.TenantStore = (*SQLiteTenantStore)(nil)
+var _ business.TenantStore = (*SQLiteTenantStore)(nil)

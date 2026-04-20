@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
-func newRegistrationStore(t *testing.T) interfaces.RegistrationTokenStore {
+func newRegistrationStore(t *testing.T) business.RegistrationTokenStore {
 	t.Helper()
 	dir := t.TempDir()
 	p := sqlite.NewSQLiteProvider(dir)
@@ -29,7 +29,7 @@ func TestRegistrationStore_SaveAndGet(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &interfaces.RegistrationTokenData{
+	token := &business.RegistrationTokenData{
 		Token:         "tok-abc123",
 		TenantID:      "tenant-1",
 		ControllerURL: "https://controller.example.com",
@@ -61,7 +61,7 @@ func TestRegistrationStore_Update(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &interfaces.RegistrationTokenData{
+	token := &business.RegistrationTokenData{
 		Token:         "tok-upd",
 		TenantID:      "tenant-1",
 		ControllerURL: "https://c.example.com",
@@ -87,7 +87,7 @@ func TestRegistrationStore_SaveToken_Upsert(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	tok := &interfaces.RegistrationTokenData{
+	tok := &business.RegistrationTokenData{
 		Token:         "tok-upsert",
 		TenantID:      "tenant-1",
 		ControllerURL: "https://c.example.com",
@@ -111,7 +111,7 @@ func TestRegistrationStore_Delete(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &interfaces.RegistrationTokenData{
+	token := &business.RegistrationTokenData{
 		Token:         "tok-del",
 		TenantID:      "tenant-1",
 		ControllerURL: "https://c.example.com",
@@ -135,13 +135,13 @@ func TestRegistrationStore_Expiry(t *testing.T) {
 	past := time.Now().UTC().Add(-1 * time.Hour)
 	future := time.Now().UTC().Add(1 * time.Hour)
 
-	expired := &interfaces.RegistrationTokenData{
+	expired := &business.RegistrationTokenData{
 		Token:         "tok-expired",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
 		ExpiresAt:     &past,
 	}
-	valid := &interfaces.RegistrationTokenData{
+	valid := &business.RegistrationTokenData{
 		Token:         "tok-valid",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
@@ -164,7 +164,7 @@ func TestRegistrationStore_Revoke(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &interfaces.RegistrationTokenData{
+	token := &business.RegistrationTokenData{
 		Token:         "tok-rev",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
@@ -183,7 +183,7 @@ func TestRegistrationStore_List(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	for _, tok := range []*interfaces.RegistrationTokenData{
+	for _, tok := range []*business.RegistrationTokenData{
 		{Token: "l-1", TenantID: "t-a", ControllerURL: "https://c.example.com", Group: "servers"},
 		{Token: "l-2", TenantID: "t-b", ControllerURL: "https://c.example.com", Group: "servers"},
 		{Token: "l-3", TenantID: "t-a", ControllerURL: "https://c.example.com", Group: "workstations"},
@@ -195,11 +195,11 @@ func TestRegistrationStore_List(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, all, 3)
 
-	byTenant, err := store.ListTokens(ctx, &interfaces.RegistrationTokenFilter{TenantID: "t-a"})
+	byTenant, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{TenantID: "t-a"})
 	require.NoError(t, err)
 	assert.Len(t, byTenant, 2)
 
-	byGroup, err := store.ListTokens(ctx, &interfaces.RegistrationTokenFilter{Group: "servers"})
+	byGroup, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{Group: "servers"})
 	require.NoError(t, err)
 	assert.Len(t, byGroup, 2)
 }
@@ -208,7 +208,7 @@ func TestRegistrationStore_ListUsedFilter(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	tok := &interfaces.RegistrationTokenData{
+	tok := &business.RegistrationTokenData{
 		Token:         "tok-used",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
@@ -218,7 +218,7 @@ func TestRegistrationStore_ListUsedFilter(t *testing.T) {
 	tok.MarkUsed("s-1")
 	require.NoError(t, store.UpdateToken(ctx, tok))
 
-	require.NoError(t, store.SaveToken(ctx, &interfaces.RegistrationTokenData{
+	require.NoError(t, store.SaveToken(ctx, &business.RegistrationTokenData{
 		Token:         "tok-unused",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
@@ -227,12 +227,12 @@ func TestRegistrationStore_ListUsedFilter(t *testing.T) {
 	trueVal := true
 	falseVal := false
 
-	used, err := store.ListTokens(ctx, &interfaces.RegistrationTokenFilter{Used: &trueVal})
+	used, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{Used: &trueVal})
 	require.NoError(t, err)
 	assert.Len(t, used, 1)
 	assert.Equal(t, "tok-used", used[0].Token)
 
-	unused, err := store.ListTokens(ctx, &interfaces.RegistrationTokenFilter{Used: &falseVal})
+	unused, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{Used: &falseVal})
 	require.NoError(t, err)
 	assert.Len(t, unused, 1)
 	assert.Equal(t, "tok-unused", unused[0].Token)

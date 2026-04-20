@@ -19,7 +19,7 @@ import (
 
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // Handler processes control plane commands from the controller.
@@ -40,7 +40,7 @@ type Handler struct {
 
 	// CommandStore for durable command dispatch state (Story #665).
 	// When nil the handler operates without persistence (in-memory only).
-	store interfaces.CommandStore
+	store business.CommandStore
 
 	// Execution tracking — holds only the CancelFunc for in-flight cancellation.
 	// Durable state (status, timestamps, result) lives in the CommandStore.
@@ -76,7 +76,7 @@ type Config struct {
 
 	// Store is the durable command dispatch state backend (Story #665).
 	// When nil, state transitions are not persisted across restarts.
-	Store interfaces.CommandStore
+	Store business.CommandStore
 }
 
 // New creates a new command handler and, when a CommandStore is configured,
@@ -123,14 +123,14 @@ func (h *Handler) Wait() {
 // sweepStaleExecutingCommands marks commands that were left in "executing" state
 // (from a crashed or restarted process) as "failed" with error "controller_restart".
 func (h *Handler) sweepStaleExecutingCommands(ctx context.Context) error {
-	stale, err := h.store.ListCommandsByStatus(ctx, interfaces.CommandStatusExecuting)
+	stale, err := h.store.ListCommandsByStatus(ctx, business.CommandStatusExecuting)
 	if err != nil {
 		return fmt.Errorf("listing stale executing commands: %w", err)
 	}
 
 	for _, cmd := range stale {
 		if err := h.store.UpdateCommandStatus(ctx, cmd.ID,
-			interfaces.CommandStatusFailed, nil, "controller_restart"); err != nil {
+			business.CommandStatusFailed, nil, "controller_restart"); err != nil {
 			h.logger.Error("Failed to mark stale command as failed",
 				"command_id", cmd.ID,
 				"error", err)
@@ -158,7 +158,7 @@ func (h *Handler) HandleCommand(ctx context.Context, cmd *cpTypes.Command) error
 
 	// Persist incoming command record (Story #665).
 	if h.store != nil {
-		record := &interfaces.CommandRecord{
+		record := &business.CommandRecord{
 			ID:        cmd.ID,
 			Type:      string(cmd.Type),
 			StewardID: h.stewardID, // raw value — SanitizeLogValue is for log output only
@@ -217,7 +217,7 @@ func (h *Handler) executeCommand(cmd *cpTypes.Command) {
 	// Transition to executing state in the store.
 	if h.store != nil {
 		if err := h.store.UpdateCommandStatus(ctx, cmd.ID,
-			interfaces.CommandStatusExecuting, nil, ""); err != nil {
+			business.CommandStatusExecuting, nil, ""); err != nil {
 			h.logger.Error("Failed to update command status to executing",
 				"command_id", cmd.ID,
 				"error", err)
@@ -242,7 +242,7 @@ func (h *Handler) executeCommand(cmd *cpTypes.Command) {
 			"type", cmd.Type)
 
 		if h.store != nil {
-			if err := h.store.UpdateCommandStatus(ctx, cmd.ID, interfaces.CommandStatusFailed, nil,
+			if err := h.store.UpdateCommandStatus(ctx, cmd.ID, business.CommandStatusFailed, nil,
 				fmt.Sprintf("no handler for command type: %s", cmd.Type)); err != nil {
 				h.logger.Error("Failed to update command status to failed (no handler)",
 					"command_id", cmd.ID,
@@ -277,7 +277,7 @@ func (h *Handler) executeCommand(cmd *cpTypes.Command) {
 
 		if h.store != nil {
 			if storeErr := h.store.UpdateCommandStatus(ctx, cmd.ID,
-				interfaces.CommandStatusFailed, nil, err.Error()); storeErr != nil {
+				business.CommandStatusFailed, nil, err.Error()); storeErr != nil {
 				h.logger.Error("Failed to update command status to failed",
 					"command_id", cmd.ID,
 					"error", storeErr)
@@ -308,7 +308,7 @@ func (h *Handler) executeCommand(cmd *cpTypes.Command) {
 			"execution_time_ms": executionTime.Milliseconds(),
 		}
 		if storeErr := h.store.UpdateCommandStatus(ctx, cmd.ID,
-			interfaces.CommandStatusCompleted, result, ""); storeErr != nil {
+			business.CommandStatusCompleted, result, ""); storeErr != nil {
 			h.logger.Error("Failed to update command status to completed",
 				"command_id", cmd.ID,
 				"error", storeErr)

@@ -14,7 +14,7 @@ import (
 
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // ---------------------------------------------------------------------------
@@ -25,8 +25,8 @@ import (
 // It is a real implementation — not a mock.
 type memCommandStore struct {
 	mu          sync.Mutex
-	records     map[string]*interfaces.CommandRecord
-	transitions map[string][]*interfaces.CommandTransition
+	records     map[string]*business.CommandRecord
+	transitions map[string][]*business.CommandTransition
 
 	// updateErr, if non-nil, is returned by UpdateCommandStatus calls.
 	// Used for error-path testing.
@@ -35,41 +35,41 @@ type memCommandStore struct {
 
 func newMemCommandStore() *memCommandStore {
 	return &memCommandStore{
-		records:     make(map[string]*interfaces.CommandRecord),
-		transitions: make(map[string][]*interfaces.CommandTransition),
+		records:     make(map[string]*business.CommandRecord),
+		transitions: make(map[string][]*business.CommandTransition),
 	}
 }
 
-func (m *memCommandStore) CreateCommandRecord(_ context.Context, rec *interfaces.CommandRecord) error {
+func (m *memCommandStore) CreateCommandRecord(_ context.Context, rec *business.CommandRecord) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if rec == nil {
 		return fmt.Errorf("record is nil")
 	}
 	if rec.ID == "" {
-		return interfaces.ErrCommandIDRequired
+		return business.ErrCommandIDRequired
 	}
 	if rec.StewardID == "" {
-		return interfaces.ErrCommandStewardIDRequired
+		return business.ErrCommandStewardIDRequired
 	}
 	if _, exists := m.records[rec.ID]; exists {
 		return fmt.Errorf("duplicate command ID: %s", rec.ID)
 	}
 	cp := *rec
-	cp.Status = interfaces.CommandStatusPending
+	cp.Status = business.CommandStatusPending
 	if cp.IssuedAt.IsZero() {
 		cp.IssuedAt = time.Now()
 	}
 	m.records[rec.ID] = &cp
-	m.transitions[rec.ID] = append(m.transitions[rec.ID], &interfaces.CommandTransition{
+	m.transitions[rec.ID] = append(m.transitions[rec.ID], &business.CommandTransition{
 		CommandID: rec.ID,
-		Status:    interfaces.CommandStatusPending,
+		Status:    business.CommandStatusPending,
 		Timestamp: cp.IssuedAt,
 	})
 	return nil
 }
 
-func (m *memCommandStore) UpdateCommandStatus(_ context.Context, id string, status interfaces.CommandStatus, result map[string]interface{}, errMsg string) error {
+func (m *memCommandStore) UpdateCommandStatus(_ context.Context, id string, status business.CommandStatus, result map[string]interface{}, errMsg string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.updateErr != nil {
@@ -77,19 +77,19 @@ func (m *memCommandStore) UpdateCommandStatus(_ context.Context, id string, stat
 	}
 	rec, ok := m.records[id]
 	if !ok {
-		return interfaces.ErrCommandNotFound
+		return business.ErrCommandNotFound
 	}
 	rec.Status = status
 	rec.ErrorMessage = errMsg
 	rec.Result = result
 	now := time.Now()
 	switch status {
-	case interfaces.CommandStatusExecuting:
+	case business.CommandStatusExecuting:
 		rec.StartedAt = &now
-	case interfaces.CommandStatusCompleted, interfaces.CommandStatusFailed, interfaces.CommandStatusCancelled:
+	case business.CommandStatusCompleted, business.CommandStatusFailed, business.CommandStatusCancelled:
 		rec.CompletedAt = &now
 	}
-	m.transitions[id] = append(m.transitions[id], &interfaces.CommandTransition{
+	m.transitions[id] = append(m.transitions[id], &business.CommandTransition{
 		CommandID:    id,
 		Status:       status,
 		Timestamp:    now,
@@ -98,21 +98,21 @@ func (m *memCommandStore) UpdateCommandStatus(_ context.Context, id string, stat
 	return nil
 }
 
-func (m *memCommandStore) GetCommandRecord(_ context.Context, id string) (*interfaces.CommandRecord, error) {
+func (m *memCommandStore) GetCommandRecord(_ context.Context, id string) (*business.CommandRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rec, ok := m.records[id]
 	if !ok {
-		return nil, interfaces.ErrCommandNotFound
+		return nil, business.ErrCommandNotFound
 	}
 	cp := *rec
 	return &cp, nil
 }
 
-func (m *memCommandStore) ListCommandRecords(_ context.Context, filter *interfaces.CommandFilter) ([]*interfaces.CommandRecord, error) {
+func (m *memCommandStore) ListCommandRecords(_ context.Context, filter *business.CommandFilter) ([]*business.CommandRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var out []*interfaces.CommandRecord
+	var out []*business.CommandRecord
 	for _, rec := range m.records {
 		if filter != nil {
 			if filter.Status != "" && rec.Status != filter.Status {
@@ -128,19 +128,19 @@ func (m *memCommandStore) ListCommandRecords(_ context.Context, filter *interfac
 	return out, nil
 }
 
-func (m *memCommandStore) ListCommandsByDevice(ctx context.Context, stewardID string) ([]*interfaces.CommandRecord, error) {
-	return m.ListCommandRecords(ctx, &interfaces.CommandFilter{StewardID: stewardID})
+func (m *memCommandStore) ListCommandsByDevice(ctx context.Context, stewardID string) ([]*business.CommandRecord, error) {
+	return m.ListCommandRecords(ctx, &business.CommandFilter{StewardID: stewardID})
 }
 
-func (m *memCommandStore) ListCommandsByStatus(ctx context.Context, status interfaces.CommandStatus) ([]*interfaces.CommandRecord, error) {
-	return m.ListCommandRecords(ctx, &interfaces.CommandFilter{Status: status})
+func (m *memCommandStore) ListCommandsByStatus(ctx context.Context, status business.CommandStatus) ([]*business.CommandRecord, error) {
+	return m.ListCommandRecords(ctx, &business.CommandFilter{Status: status})
 }
 
-func (m *memCommandStore) GetCommandAuditTrail(_ context.Context, commandID string) ([]*interfaces.CommandTransition, error) {
+func (m *memCommandStore) GetCommandAuditTrail(_ context.Context, commandID string) ([]*business.CommandTransition, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	transitions := m.transitions[commandID]
-	out := make([]*interfaces.CommandTransition, len(transitions))
+	out := make([]*business.CommandTransition, len(transitions))
 	copy(out, transitions)
 	return out, nil
 }
@@ -153,7 +153,7 @@ func (m *memCommandStore) HealthCheck(_ context.Context) error { return nil }
 func (m *memCommandStore) Close() error                        { return nil }
 
 // Compile-time assertion.
-var _ interfaces.CommandStore = (*memCommandStore)(nil)
+var _ business.CommandStore = (*memCommandStore)(nil)
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -166,7 +166,7 @@ func newTestLogger(t *testing.T) logging.Logger {
 
 func noopStatus(_ context.Context, _ *cpTypes.Event) {}
 
-func newTestHandler(t *testing.T, store interfaces.CommandStore) *Handler {
+func newTestHandler(t *testing.T, store business.CommandStore) *Handler {
 	t.Helper()
 	h, err := New(&Config{
 		StewardID: "steward-test",
@@ -236,14 +236,14 @@ func TestNew_SweepsStaleExecutingCommands(t *testing.T) {
 	ctx := context.Background()
 
 	// Pre-populate an executing record to simulate a crashed previous run.
-	rec := &interfaces.CommandRecord{
+	rec := &business.CommandRecord{
 		ID:        "stale-cmd",
 		Type:      "sync_config",
 		StewardID: "steward-test",
 	}
 	require.NoError(t, store.CreateCommandRecord(ctx, rec))
 	require.NoError(t, store.UpdateCommandStatus(ctx, "stale-cmd",
-		interfaces.CommandStatusExecuting, nil, ""))
+		business.CommandStatusExecuting, nil, ""))
 
 	// Creating the handler should trigger the startup sweep.
 	_, err := New(&Config{
@@ -256,7 +256,7 @@ func TestNew_SweepsStaleExecutingCommands(t *testing.T) {
 
 	got, err := store.GetCommandRecord(ctx, "stale-cmd")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.CommandStatusFailed, got.Status)
+	assert.Equal(t, business.CommandStatusFailed, got.Status)
 	assert.Equal(t, "controller_restart", got.ErrorMessage)
 }
 
@@ -282,7 +282,7 @@ func TestHandleCommand_PersistsRecord(t *testing.T) {
 
 	got, err := store.GetCommandRecord(ctx, "hc-001")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.CommandStatusCompleted, got.Status)
+	assert.Equal(t, business.CommandStatusCompleted, got.Status)
 }
 
 func TestHandleCommand_NoHandlerMarkedFailed(t *testing.T) {
@@ -297,7 +297,7 @@ func TestHandleCommand_NoHandlerMarkedFailed(t *testing.T) {
 
 	got, err := store.GetCommandRecord(ctx, "hc-002")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.CommandStatusFailed, got.Status)
+	assert.Equal(t, business.CommandStatusFailed, got.Status)
 }
 
 func TestHandleCommand_HandlerErrorMarkedFailed(t *testing.T) {
@@ -315,7 +315,7 @@ func TestHandleCommand_HandlerErrorMarkedFailed(t *testing.T) {
 
 	got, err := store.GetCommandRecord(ctx, "hc-003")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.CommandStatusFailed, got.Status)
+	assert.Equal(t, business.CommandStatusFailed, got.Status)
 	assert.Contains(t, got.ErrorMessage, "something went wrong")
 }
 

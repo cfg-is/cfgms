@@ -9,7 +9,8 @@ import (
 
 	"github.com/lib/pq"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // serializeMetadata converts a metadata map to JSON bytes
@@ -41,7 +42,7 @@ func deserializeMetadata(data []byte) (map[string]interface{}, error) {
 }
 
 // serializeAuditChanges converts AuditChanges to JSON for database storage
-func serializeAuditChanges(changes *interfaces.AuditChanges) ([]byte, error) {
+func serializeAuditChanges(changes *business.AuditChanges) ([]byte, error) {
 	if changes == nil {
 		return []byte("{}"), nil
 	}
@@ -55,12 +56,12 @@ func serializeAuditChanges(changes *interfaces.AuditChanges) ([]byte, error) {
 }
 
 // deserializeAuditChanges converts JSON to AuditChanges
-func deserializeAuditChanges(data []byte) (*interfaces.AuditChanges, error) {
+func deserializeAuditChanges(data []byte) (*business.AuditChanges, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
 
-	var changes interfaces.AuditChanges
+	var changes business.AuditChanges
 	if err := json.Unmarshal(data, &changes); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal audit changes: %w", err)
 	}
@@ -77,7 +78,7 @@ func convertNullString(s string) interface{} {
 }
 
 // buildAuditFilterQuery constructs a WHERE clause from AuditFilter
-func buildAuditFilterQuery(filter *interfaces.AuditFilter, args []interface{}) (string, []interface{}) {
+func buildAuditFilterQuery(filter *business.AuditFilter, args []interface{}) (string, []interface{}) {
 	if filter == nil {
 		return "", args
 	}
@@ -216,7 +217,7 @@ func joinConditions(conditions []string, separator string) string {
 }
 
 // buildOrderByClause constructs ORDER BY clause from filter
-func buildOrderByClause(filter *interfaces.AuditFilter) string {
+func buildOrderByClause(filter *business.AuditFilter) string {
 	if filter == nil || filter.SortBy == "" {
 		return "ORDER BY timestamp DESC" // Default sort
 	}
@@ -246,7 +247,7 @@ func buildOrderByClause(filter *interfaces.AuditFilter) string {
 }
 
 // buildLimitOffsetClause constructs LIMIT and OFFSET clause from filter
-func buildLimitOffsetClause(filter *interfaces.AuditFilter) string {
+func buildLimitOffsetClause(filter *business.AuditFilter) string {
 	if filter == nil {
 		return ""
 	}
@@ -263,7 +264,7 @@ func buildLimitOffsetClause(filter *interfaces.AuditFilter) string {
 }
 
 // buildConfigFilterQuery constructs a WHERE clause from ConfigFilter
-func buildConfigFilterQuery(filter *interfaces.ConfigFilter, args []interface{}) (string, []interface{}) {
+func buildConfigFilterQuery(filter *cfgconfig.ConfigFilter, args []interface{}) (string, []interface{}) {
 	if filter == nil {
 		return "", args
 	}
@@ -346,7 +347,7 @@ func buildConfigFilterQuery(filter *interfaces.ConfigFilter, args []interface{})
 }
 
 // buildConfigOrderByClause constructs ORDER BY clause for config filter
-func buildConfigOrderByClause(filter *interfaces.ConfigFilter) string {
+func buildConfigOrderByClause(filter *cfgconfig.ConfigFilter) string {
 	if filter == nil || filter.SortBy == "" {
 		return "ORDER BY updated_at DESC" // Default sort
 	}
@@ -376,7 +377,7 @@ func buildConfigOrderByClause(filter *interfaces.ConfigFilter) string {
 }
 
 // buildConfigLimitOffsetClause constructs LIMIT and OFFSET clause for config filter
-func buildConfigLimitOffsetClause(filter *interfaces.ConfigFilter) string {
+func buildConfigLimitOffsetClause(filter *cfgconfig.ConfigFilter) string {
 	if filter == nil {
 		return ""
 	}

@@ -12,67 +12,67 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
-// MockConfigStore implements interfaces.ConfigStore for testing
+// MockConfigStore implements cfgconfig.ConfigStore for testing
 type MockConfigStore struct {
 	mock.Mock
 }
 
-func (m *MockConfigStore) StoreConfig(ctx context.Context, config *interfaces.ConfigEntry) error {
+func (m *MockConfigStore) StoreConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
 	args := m.Called(ctx, config)
 	return args.Error(0)
 }
 
-func (m *MockConfigStore) GetConfig(ctx context.Context, key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
+func (m *MockConfigStore) GetConfig(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	args := m.Called(ctx, key)
-	return args.Get(0).(*interfaces.ConfigEntry), args.Error(1)
+	return args.Get(0).(*cfgconfig.ConfigEntry), args.Error(1)
 }
 
-func (m *MockConfigStore) DeleteConfig(ctx context.Context, key *interfaces.ConfigKey) error {
+func (m *MockConfigStore) DeleteConfig(ctx context.Context, key *cfgconfig.ConfigKey) error {
 	args := m.Called(ctx, key)
 	return args.Error(0)
 }
 
-func (m *MockConfigStore) ListConfigs(ctx context.Context, filter *interfaces.ConfigFilter) ([]*interfaces.ConfigEntry, error) {
+func (m *MockConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
 	args := m.Called(ctx, filter)
-	return args.Get(0).([]*interfaces.ConfigEntry), args.Error(1)
+	return args.Get(0).([]*cfgconfig.ConfigEntry), args.Error(1)
 }
 
-func (m *MockConfigStore) GetConfigHistory(ctx context.Context, key *interfaces.ConfigKey, limit int) ([]*interfaces.ConfigEntry, error) {
+func (m *MockConfigStore) GetConfigHistory(ctx context.Context, key *cfgconfig.ConfigKey, limit int) ([]*cfgconfig.ConfigEntry, error) {
 	args := m.Called(ctx, key, limit)
-	return args.Get(0).([]*interfaces.ConfigEntry), args.Error(1)
+	return args.Get(0).([]*cfgconfig.ConfigEntry), args.Error(1)
 }
 
-func (m *MockConfigStore) GetConfigVersion(ctx context.Context, key *interfaces.ConfigKey, version int64) (*interfaces.ConfigEntry, error) {
+func (m *MockConfigStore) GetConfigVersion(ctx context.Context, key *cfgconfig.ConfigKey, version int64) (*cfgconfig.ConfigEntry, error) {
 	args := m.Called(ctx, key, version)
-	return args.Get(0).(*interfaces.ConfigEntry), args.Error(1)
+	return args.Get(0).(*cfgconfig.ConfigEntry), args.Error(1)
 }
 
-func (m *MockConfigStore) StoreConfigBatch(ctx context.Context, configs []*interfaces.ConfigEntry) error {
+func (m *MockConfigStore) StoreConfigBatch(ctx context.Context, configs []*cfgconfig.ConfigEntry) error {
 	args := m.Called(ctx, configs)
 	return args.Error(0)
 }
 
-func (m *MockConfigStore) DeleteConfigBatch(ctx context.Context, keys []*interfaces.ConfigKey) error {
+func (m *MockConfigStore) DeleteConfigBatch(ctx context.Context, keys []*cfgconfig.ConfigKey) error {
 	args := m.Called(ctx, keys)
 	return args.Error(0)
 }
 
-func (m *MockConfigStore) ResolveConfigWithInheritance(ctx context.Context, key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
+func (m *MockConfigStore) ResolveConfigWithInheritance(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	args := m.Called(ctx, key)
-	return args.Get(0).(*interfaces.ConfigEntry), args.Error(1)
+	return args.Get(0).(*cfgconfig.ConfigEntry), args.Error(1)
 }
 
-func (m *MockConfigStore) ValidateConfig(ctx context.Context, config *interfaces.ConfigEntry) error {
+func (m *MockConfigStore) ValidateConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
 	args := m.Called(ctx, config)
 	return args.Error(0)
 }
 
-func (m *MockConfigStore) GetConfigStats(ctx context.Context) (*interfaces.ConfigStats, error) {
+func (m *MockConfigStore) GetConfigStats(ctx context.Context) (*cfgconfig.ConfigStats, error) {
 	args := m.Called(ctx)
-	return args.Get(0).(*interfaces.ConfigStats), args.Error(1)
+	return args.Get(0).(*cfgconfig.ConfigStats), args.Error(1)
 }
 
 func TestVersionManager_CreateWorkflow(t *testing.T) {
@@ -89,14 +89,14 @@ func TestVersionManager_CreateWorkflow(t *testing.T) {
 
 	t.Run("successful creation", func(t *testing.T) {
 		// Mock that workflow doesn't exist yet
-		mockStore.On("ListConfigs", ctx, mock.MatchedBy(func(filter *interfaces.ConfigFilter) bool {
+		mockStore.On("ListConfigs", ctx, mock.MatchedBy(func(filter *cfgconfig.ConfigFilter) bool {
 			return filter.Namespace == WorkflowNamespace &&
 				len(filter.Names) == 1 &&
 				filter.Names[0] == "test-workflow"
-		})).Return([]*interfaces.ConfigEntry{}, nil)
+		})).Return([]*cfgconfig.ConfigEntry{}, nil)
 
 		// Mock successful storage
-		mockStore.On("StoreConfig", ctx, mock.AnythingOfType("*interfaces.ConfigEntry")).Return(nil)
+		mockStore.On("StoreConfig", ctx, mock.AnythingOfType("*config.ConfigEntry")).Return(nil)
 
 		versionedWorkflow, err := vm.CreateWorkflow(ctx, workflow, "1.0.0")
 		require.NoError(t, err)
@@ -129,14 +129,14 @@ func TestVersionManager_CreateWorkflow(t *testing.T) {
 		existingEntry := createMockWorkflowEntry(existingWorkflow)
 
 		// Mock the ListWorkflowVersions call (used by GetLatestWorkflow)
-		mockStore.On("ListConfigs", ctx, mock.MatchedBy(func(filter *interfaces.ConfigFilter) bool {
+		mockStore.On("ListConfigs", ctx, mock.MatchedBy(func(filter *cfgconfig.ConfigFilter) bool {
 			return filter.Namespace == WorkflowNamespace &&
 				len(filter.Names) == 1 &&
 				filter.Names[0] == "test-workflow"
-		})).Return([]*interfaces.ConfigEntry{existingEntry}, nil)
+		})).Return([]*cfgconfig.ConfigEntry{existingEntry}, nil)
 
 		// Mock the GetWorkflow call (used by GetLatestWorkflow after ListWorkflowVersions)
-		mockStore.On("GetConfig", ctx, mock.MatchedBy(func(key *interfaces.ConfigKey) bool {
+		mockStore.On("GetConfig", ctx, mock.MatchedBy(func(key *cfgconfig.ConfigKey) bool {
 			return key.Namespace == WorkflowNamespace &&
 				key.Name == "test-workflow" &&
 				key.Scope == "1.0.0"
@@ -187,11 +187,11 @@ func TestVersionManager_UpdateWorkflow(t *testing.T) {
 	t.Run("successful update", func(t *testing.T) {
 		// Mock getting latest workflow
 		existingEntry := createMockWorkflowEntry(existingWorkflow)
-		mockStore.On("ListConfigs", ctx, mock.AnythingOfType("*interfaces.ConfigFilter")).Return([]*interfaces.ConfigEntry{existingEntry}, nil)
-		mockStore.On("GetConfig", ctx, mock.AnythingOfType("*interfaces.ConfigKey")).Return(existingEntry, nil)
+		mockStore.On("ListConfigs", ctx, mock.AnythingOfType("*config.ConfigFilter")).Return([]*cfgconfig.ConfigEntry{existingEntry}, nil)
+		mockStore.On("GetConfig", ctx, mock.AnythingOfType("*config.ConfigKey")).Return(existingEntry, nil)
 
 		// Mock successful storage
-		mockStore.On("StoreConfig", ctx, mock.AnythingOfType("*interfaces.ConfigEntry")).Return(nil)
+		mockStore.On("StoreConfig", ctx, mock.AnythingOfType("*config.ConfigEntry")).Return(nil)
 
 		versionedWorkflow, err := vm.UpdateWorkflow(ctx, "test-workflow", updatedWorkflow, "1.1.0", changes)
 		require.NoError(t, err)
@@ -210,8 +210,8 @@ func TestVersionManager_UpdateWorkflow(t *testing.T) {
 		mockStore.ExpectedCalls = nil
 
 		existingEntry := createMockWorkflowEntry(existingWorkflow)
-		mockStore.On("ListConfigs", ctx, mock.AnythingOfType("*interfaces.ConfigFilter")).Return([]*interfaces.ConfigEntry{existingEntry}, nil)
-		mockStore.On("GetConfig", ctx, mock.AnythingOfType("*interfaces.ConfigKey")).Return(existingEntry, nil)
+		mockStore.On("ListConfigs", ctx, mock.AnythingOfType("*config.ConfigFilter")).Return([]*cfgconfig.ConfigEntry{existingEntry}, nil)
+		mockStore.On("GetConfig", ctx, mock.AnythingOfType("*config.ConfigKey")).Return(existingEntry, nil)
 
 		_, err := vm.UpdateWorkflow(ctx, "test-workflow", updatedWorkflow, "0.9.0", changes)
 		assert.Error(t, err)
@@ -236,7 +236,7 @@ func TestVersionManager_GetWorkflow(t *testing.T) {
 
 	t.Run("get specific version", func(t *testing.T) {
 		entry := createMockWorkflowEntry(workflow)
-		mockStore.On("GetConfig", ctx, mock.MatchedBy(func(key *interfaces.ConfigKey) bool {
+		mockStore.On("GetConfig", ctx, mock.MatchedBy(func(key *cfgconfig.ConfigKey) bool {
 			return key.Name == "test-workflow" && key.Scope == "1.2.3"
 		})).Return(entry, nil)
 
@@ -253,8 +253,8 @@ func TestVersionManager_GetWorkflow(t *testing.T) {
 		mockStore.ExpectedCalls = nil
 
 		entry := createMockWorkflowEntry(workflow)
-		mockStore.On("ListConfigs", ctx, mock.AnythingOfType("*interfaces.ConfigFilter")).Return([]*interfaces.ConfigEntry{entry}, nil)
-		mockStore.On("GetConfig", ctx, mock.AnythingOfType("*interfaces.ConfigKey")).Return(entry, nil)
+		mockStore.On("ListConfigs", ctx, mock.AnythingOfType("*config.ConfigFilter")).Return([]*cfgconfig.ConfigEntry{entry}, nil)
+		mockStore.On("GetConfig", ctx, mock.AnythingOfType("*config.ConfigKey")).Return(entry, nil)
 
 		result, err := vm.GetWorkflow(ctx, "test-workflow", "latest")
 		require.NoError(t, err)
@@ -290,12 +290,12 @@ func TestVersionManager_ForkWorkflow(t *testing.T) {
 	t.Run("successful fork", func(t *testing.T) {
 		// Mock getting source workflow
 		sourceEntry := createMockWorkflowEntry(originalWorkflow)
-		mockStore.On("GetConfig", ctx, mock.MatchedBy(func(key *interfaces.ConfigKey) bool {
+		mockStore.On("GetConfig", ctx, mock.MatchedBy(func(key *cfgconfig.ConfigKey) bool {
 			return key.Scope == "1.0.0"
 		})).Return(sourceEntry, nil)
 
 		// Mock storing forked workflow
-		mockStore.On("StoreConfig", ctx, mock.AnythingOfType("*interfaces.ConfigEntry")).Return(nil)
+		mockStore.On("StoreConfig", ctx, mock.AnythingOfType("*config.ConfigEntry")).Return(nil)
 
 		forked, err := vm.ForkWorkflow(ctx, "test-workflow", "1.0.0", "1.1.0")
 		require.NoError(t, err)
@@ -338,7 +338,7 @@ func TestVersionManager_Templates(t *testing.T) {
 	}
 
 	t.Run("create template", func(t *testing.T) {
-		mockStore.On("StoreConfig", ctx, mock.AnythingOfType("*interfaces.ConfigEntry")).Return(nil)
+		mockStore.On("StoreConfig", ctx, mock.AnythingOfType("*config.ConfigEntry")).Return(nil)
 
 		err := vm.CreateTemplate(ctx, template)
 		require.NoError(t, err)
@@ -351,7 +351,7 @@ func TestVersionManager_Templates(t *testing.T) {
 		mockStore.ExpectedCalls = nil
 
 		templateEntry := createMockTemplateEntry(template)
-		mockStore.On("GetConfig", ctx, mock.MatchedBy(func(key *interfaces.ConfigKey) bool {
+		mockStore.On("GetConfig", ctx, mock.MatchedBy(func(key *cfgconfig.ConfigKey) bool {
 			return key.Namespace == WorkflowTemplateNamespace && key.Name == "test-template"
 		})).Return(templateEntry, nil)
 
@@ -368,8 +368,8 @@ func TestVersionManager_Templates(t *testing.T) {
 		mockStore.ExpectedCalls = nil
 
 		templateEntry := createMockTemplateEntry(template)
-		mockStore.On("ListConfigs", ctx, mock.AnythingOfType("*interfaces.ConfigFilter")).Return([]*interfaces.ConfigEntry{templateEntry}, nil)
-		mockStore.On("StoreConfig", ctx, mock.AnythingOfType("*interfaces.ConfigEntry")).Return(nil)
+		mockStore.On("ListConfigs", ctx, mock.AnythingOfType("*config.ConfigFilter")).Return([]*cfgconfig.ConfigEntry{templateEntry}, nil)
+		mockStore.On("StoreConfig", ctx, mock.AnythingOfType("*config.ConfigEntry")).Return(nil)
 
 		parameters := map[string]interface{}{
 			"name": "my-workflow",
@@ -413,12 +413,12 @@ func TestVersionManager_FindCompatibleWorkflows(t *testing.T) {
 		},
 	}
 
-	entries := make([]*interfaces.ConfigEntry, len(workflows))
+	entries := make([]*cfgconfig.ConfigEntry, len(workflows))
 	for i, wf := range workflows {
 		entries[i] = createMockWorkflowEntry(wf)
 	}
 
-	mockStore.On("ListConfigs", ctx, mock.AnythingOfType("*interfaces.ConfigFilter")).Return(entries, nil)
+	mockStore.On("ListConfigs", ctx, mock.AnythingOfType("*config.ConfigFilter")).Return(entries, nil)
 
 	t.Run("find compatible versions", func(t *testing.T) {
 		compatible, err := vm.FindCompatibleWorkflows(ctx, "test-workflow", ">=1.0.0,<2.0.0")
@@ -442,36 +442,36 @@ func TestVersionManager_FindCompatibleWorkflows(t *testing.T) {
 
 // Helper functions for creating mock entries
 
-func createMockWorkflowEntry(workflow *VersionedWorkflow) *interfaces.ConfigEntry {
+func createMockWorkflowEntry(workflow *VersionedWorkflow) *cfgconfig.ConfigEntry {
 	data, _ := yaml.Marshal(workflow)
 
-	return &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	return &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  "tenant1",
 			Namespace: WorkflowNamespace,
 			Name:      workflow.Name,
 			Scope:     workflow.SemanticVersion.String(),
 		},
 		Data:      data,
-		Format:    interfaces.ConfigFormatYAML,
+		Format:    cfgconfig.ConfigFormatYAML,
 		Version:   1,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
 }
 
-func createMockTemplateEntry(template *WorkflowTemplate) *interfaces.ConfigEntry {
+func createMockTemplateEntry(template *WorkflowTemplate) *cfgconfig.ConfigEntry {
 	data, _ := yaml.Marshal(template)
 
-	return &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	return &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  "tenant1",
 			Namespace: WorkflowTemplateNamespace,
 			Name:      template.ID,
 			Scope:     template.Version.String(),
 		},
 		Data:      data,
-		Format:    interfaces.ConfigFormatYAML,
+		Format:    cfgconfig.ConfigFormatYAML,
 		Version:   1,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),

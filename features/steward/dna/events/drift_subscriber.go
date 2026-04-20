@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // DriftDetector defines the interface for drift detection.
@@ -26,17 +27,11 @@ type DriftEvent struct {
 	Changes  interface{} `json:"changes"`
 }
 
-// StorageManager defines the interface for DNA storage access.
-// This avoids circular imports by defining just what we need.
-type StorageManager interface {
-	GetHistory(ctx context.Context, deviceID string, options interface{}) (interface{}, error)
-}
-
 // driftSubscriber implements EventSubscriber for drift detection.
 type driftSubscriber struct {
 	logger   logging.Logger
 	detector DriftDetector
-	storage  StorageManager
+	storage  business.DNAHistoryStore
 	config   *DriftSubscriberConfig
 	stats    *DriftSubscriberStats
 }
@@ -69,7 +64,7 @@ type DriftSubscriberStats struct {
 }
 
 // NewDriftSubscriber creates a new drift detection event subscriber.
-func NewDriftSubscriber(detector DriftDetector, storage StorageManager, config *DriftSubscriberConfig, logger logging.Logger) EventSubscriber {
+func NewDriftSubscriber(detector DriftDetector, storage business.DNAHistoryStore, config *DriftSubscriberConfig, logger logging.Logger) EventSubscriber {
 	if config == nil {
 		config = DefaultDriftSubscriberConfig()
 	}

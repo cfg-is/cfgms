@@ -11,21 +11,21 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // Test helper functions
 
-func createTestSession(sessionID, userID, tenantID string) *interfaces.Session {
-	return &interfaces.Session{
+func createTestSession(sessionID, userID, tenantID string) *business.Session {
+	return &business.Session{
 		SessionID:    sessionID,
 		UserID:       userID,
 		TenantID:     tenantID,
-		SessionType:  interfaces.SessionTypeTerminal,
+		SessionType:  business.SessionTypeTerminal,
 		CreatedAt:    time.Now(),
 		LastActivity: time.Now(),
 		ExpiresAt:    time.Now().Add(1 * time.Hour),
-		Status:       interfaces.SessionStatusActive,
+		Status:       business.SessionStatusActive,
 	}
 }
 
@@ -39,7 +39,7 @@ func TestNewRuntimeCache(t *testing.T) {
 	}
 
 	cache := NewRuntimeCache(config)
-	defer cache.Close()
+	defer func() { _ = cache.Close() }()
 
 	assert.Equal(t, config.Name, cache.config.Name)
 	assert.Equal(t, config.MaxSessions, cache.config.MaxSessions)
@@ -88,7 +88,7 @@ func TestSessionOperations(t *testing.T) {
 	config := DefaultCacheConfig()
 	config.CleanupInterval = 0 // Disable background cleanup for testing
 	cache := NewRuntimeCache(config)
-	defer cache.Close()
+	defer func() { _ = cache.Close() }()
 
 	ctx := context.Background()
 	session := createTestSession("session1", "user1", "tenant1")
@@ -126,14 +126,14 @@ func TestSessionOperations(t *testing.T) {
 
 	t.Run("UpdateSession", func(t *testing.T) {
 		updatedSession := createTestSession("session1", "user1", "tenant1")
-		updatedSession.Status = interfaces.SessionStatusInactive
+		updatedSession.Status = business.SessionStatusInactive
 
 		err := cache.UpdateSession(ctx, "session1", updatedSession)
 		require.NoError(t, err)
 
 		retrieved, err := cache.GetSession(ctx, "session1")
 		require.NoError(t, err)
-		assert.Equal(t, interfaces.SessionStatusInactive, retrieved.Status)
+		assert.Equal(t, business.SessionStatusInactive, retrieved.Status)
 	})
 
 	t.Run("DeleteSession", func(t *testing.T) {
@@ -150,7 +150,7 @@ func TestSessionTTL(t *testing.T) {
 	config := DefaultCacheConfig()
 	config.CleanupInterval = 0
 	cache := NewRuntimeCache(config)
-	defer cache.Close()
+	defer func() { _ = cache.Close() }()
 
 	ctx := context.Background()
 	session := createTestSession("session1", "user1", "tenant1")
@@ -178,7 +178,7 @@ func TestSessionExpiration(t *testing.T) {
 	config.DefaultTTL = 10 * time.Millisecond
 	config.CleanupInterval = 0
 	cache := NewRuntimeCache(config)
-	defer cache.Close()
+	defer func() { _ = cache.Close() }()
 
 	ctx := context.Background()
 	session := createTestSession("session1", "user1", "tenant1")
@@ -202,7 +202,7 @@ func TestSessionExpiration(t *testing.T) {
 		cleanupConfig := DefaultCacheConfig()
 		cleanupConfig.CleanupInterval = 0
 		cleanupCache := NewRuntimeCache(cleanupConfig)
-		defer cleanupCache.Close()
+		defer func() { _ = cleanupCache.Close() }()
 
 		// Create two explicitly expired sessions for testing
 		now := time.Now()
@@ -236,7 +236,7 @@ func TestRuntimeStateOperations(t *testing.T) {
 	config := DefaultCacheConfig()
 	config.CleanupInterval = 0
 	cache := NewRuntimeCache(config)
-	defer cache.Close()
+	defer func() { _ = cache.Close() }()
 
 	ctx := context.Background()
 
@@ -294,12 +294,12 @@ func TestBatchOperations(t *testing.T) {
 	config := DefaultCacheConfig()
 	config.CleanupInterval = 0
 	cache := NewRuntimeCache(config)
-	defer cache.Close()
+	defer func() { _ = cache.Close() }()
 
 	ctx := context.Background()
 
 	t.Run("CreateSessionsBatch", func(t *testing.T) {
-		sessions := []*interfaces.Session{
+		sessions := []*business.Session{
 			createTestSession("batch1", "user1", "tenant1"),
 			createTestSession("batch2", "user2", "tenant1"),
 			createTestSession("batch3", "user1", "tenant2"),
@@ -340,18 +340,18 @@ func TestQueryMethods(t *testing.T) {
 	config := DefaultCacheConfig()
 	config.CleanupInterval = 0
 	cache := NewRuntimeCache(config)
-	defer cache.Close()
+	defer func() { _ = cache.Close() }()
 
 	ctx := context.Background()
 
 	// Create test sessions
-	sessions := []*interfaces.Session{
+	sessions := []*business.Session{
 		createTestSession("s1", "user1", "tenant1"),
 		createTestSession("s2", "user1", "tenant2"),
 		createTestSession("s3", "user2", "tenant1"),
 	}
-	sessions[1].SessionType = interfaces.SessionTypeAPI
-	sessions[2].Status = interfaces.SessionStatusInactive
+	sessions[1].SessionType = business.SessionTypeAPI
+	sessions[2].Status = business.SessionStatusInactive
 
 	for _, session := range sessions {
 		err := cache.CreateSession(ctx, session)
@@ -371,11 +371,11 @@ func TestQueryMethods(t *testing.T) {
 	})
 
 	t.Run("GetSessionsByType", func(t *testing.T) {
-		terminalSessions, err := cache.GetSessionsByType(ctx, interfaces.SessionTypeTerminal)
+		terminalSessions, err := cache.GetSessionsByType(ctx, business.SessionTypeTerminal)
 		require.NoError(t, err)
 		assert.Equal(t, 2, len(terminalSessions))
 
-		apiSessions, err := cache.GetSessionsByType(ctx, interfaces.SessionTypeAPI)
+		apiSessions, err := cache.GetSessionsByType(ctx, business.SessionTypeAPI)
 		require.NoError(t, err)
 		assert.Equal(t, 1, len(apiSessions))
 	})
@@ -396,7 +396,7 @@ func TestSizeLimits(t *testing.T) {
 		CleanupInterval: 0,
 	}
 	cache := NewRuntimeCache(config)
-	defer cache.Close()
+	defer func() { _ = cache.Close() }()
 
 	ctx := context.Background()
 
@@ -432,7 +432,7 @@ func TestHealthAndStats(t *testing.T) {
 	config := DefaultCacheConfig()
 	config.CleanupInterval = 0
 	cache := NewRuntimeCache(config)
-	defer cache.Close()
+	defer func() { _ = cache.Close() }()
 
 	ctx := context.Background()
 
@@ -455,8 +455,8 @@ func TestHealthAndStats(t *testing.T) {
 		assert.Equal(t, int64(1), stats.TotalSessions)
 		assert.Equal(t, int64(1), stats.ActiveSessions)
 		assert.Equal(t, int64(1), stats.RuntimeStateKeys)
-		assert.Contains(t, stats.SessionsByType, string(interfaces.SessionTypeTerminal))
-		assert.Contains(t, stats.SessionsByStatus, string(interfaces.SessionStatusActive))
+		assert.Contains(t, stats.SessionsByType, string(business.SessionTypeTerminal))
+		assert.Contains(t, stats.SessionsByStatus, string(business.SessionStatusActive))
 	})
 
 	t.Run("Vacuum", func(t *testing.T) {
@@ -486,7 +486,7 @@ func TestBackgroundCleanup(t *testing.T) {
 		CleanupInterval: 20 * time.Millisecond,
 	}
 	cache := NewRuntimeCache(config)
-	defer cache.Close()
+	defer func() { _ = cache.Close() }()
 
 	ctx := context.Background()
 
@@ -520,7 +520,7 @@ func TestConcurrency(t *testing.T) {
 	config := DefaultCacheConfig()
 	config.CleanupInterval = 0
 	cache := NewRuntimeCache(config)
-	defer cache.Close()
+	defer func() { _ = cache.Close() }()
 
 	ctx := context.Background()
 

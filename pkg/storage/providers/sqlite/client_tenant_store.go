@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// SQLiteClientTenantStore implements interfaces.ClientTenantStore using SQLite.
+// SQLiteClientTenantStore implements business.ClientTenantStore using SQLite.
 // It includes nullable M365 extension columns to round-trip M365 consent fields
 // without requiring the separate M365ClientTenantStore interface (ADR-003 §2).
 type SQLiteClientTenantStore struct {
@@ -20,7 +20,7 @@ type SQLiteClientTenantStore struct {
 }
 
 // StoreClientTenant inserts or replaces a client tenant record.
-func (s *SQLiteClientTenantStore) StoreClientTenant(client *interfaces.ClientTenant) error {
+func (s *SQLiteClientTenantStore) StoreClientTenant(client *business.ClientTenant) error {
 	if client == nil {
 		return fmt.Errorf("client tenant cannot be nil")
 	}
@@ -100,7 +100,7 @@ func (s *SQLiteClientTenantStore) StoreClientTenant(client *interfaces.ClientTen
 }
 
 // GetClientTenant retrieves a client tenant by Azure AD tenant ID.
-func (s *SQLiteClientTenantStore) GetClientTenant(tenantID string) (*interfaces.ClientTenant, error) {
+func (s *SQLiteClientTenantStore) GetClientTenant(tenantID string) (*business.ClientTenant, error) {
 	ctx := context.Background()
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, tenant_name, domain_name, admin_email, consented_at,
@@ -112,7 +112,7 @@ func (s *SQLiteClientTenantStore) GetClientTenant(tenantID string) (*interfaces.
 }
 
 // GetClientTenantByIdentifier retrieves a client tenant by its CFGMS internal identifier.
-func (s *SQLiteClientTenantStore) GetClientTenantByIdentifier(clientIdentifier string) (*interfaces.ClientTenant, error) {
+func (s *SQLiteClientTenantStore) GetClientTenantByIdentifier(clientIdentifier string) (*business.ClientTenant, error) {
 	ctx := context.Background()
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, tenant_name, domain_name, admin_email, consented_at,
@@ -124,7 +124,7 @@ func (s *SQLiteClientTenantStore) GetClientTenantByIdentifier(clientIdentifier s
 }
 
 // ListClientTenants returns all client tenants, optionally filtered by status.
-func (s *SQLiteClientTenantStore) ListClientTenants(status interfaces.ClientTenantStatus) ([]*interfaces.ClientTenant, error) {
+func (s *SQLiteClientTenantStore) ListClientTenants(status business.ClientTenantStatus) ([]*business.ClientTenant, error) {
 	ctx := context.Background()
 
 	var (
@@ -151,7 +151,7 @@ func (s *SQLiteClientTenantStore) ListClientTenants(status interfaces.ClientTena
 	}
 	defer func() { _ = rows.Close() }()
 
-	var clients []*interfaces.ClientTenant
+	var clients []*business.ClientTenant
 	for rows.Next() {
 		c, err := scanClientTenantRow(rows)
 		if err != nil {
@@ -163,7 +163,7 @@ func (s *SQLiteClientTenantStore) ListClientTenants(status interfaces.ClientTena
 }
 
 // UpdateClientTenantStatus updates only the status and updated_at fields of a client tenant.
-func (s *SQLiteClientTenantStore) UpdateClientTenantStatus(tenantID string, status interfaces.ClientTenantStatus) error {
+func (s *SQLiteClientTenantStore) UpdateClientTenantStatus(tenantID string, status business.ClientTenantStatus) error {
 	ctx := context.Background()
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE client_tenants SET status = ?, updated_at = ? WHERE tenant_id = ?`,
@@ -193,7 +193,7 @@ func (s *SQLiteClientTenantStore) DeleteClientTenant(tenantID string) error {
 }
 
 // StoreAdminConsentRequest persists an admin consent request (upsert on state).
-func (s *SQLiteClientTenantStore) StoreAdminConsentRequest(request *interfaces.AdminConsentRequest) error {
+func (s *SQLiteClientTenantStore) StoreAdminConsentRequest(request *business.AdminConsentRequest) error {
 	if request == nil {
 		return fmt.Errorf("admin consent request cannot be nil")
 	}
@@ -232,13 +232,13 @@ func (s *SQLiteClientTenantStore) StoreAdminConsentRequest(request *interfaces.A
 }
 
 // GetAdminConsentRequest retrieves an admin consent request by OAuth2 state token.
-func (s *SQLiteClientTenantStore) GetAdminConsentRequest(state string) (*interfaces.AdminConsentRequest, error) {
+func (s *SQLiteClientTenantStore) GetAdminConsentRequest(state string) (*business.AdminConsentRequest, error) {
 	ctx := context.Background()
 	row := s.db.QueryRowContext(ctx, `
 		SELECT state, client_identifier, client_name, requested_by, expires_at, created_at, metadata
 		FROM admin_consent_requests WHERE state = ?`, state)
 
-	req := &interfaces.AdminConsentRequest{}
+	req := &business.AdminConsentRequest{}
 	var expiresStr, createdStr, metaStr string
 
 	if err := row.Scan(
@@ -283,8 +283,8 @@ func (s *SQLiteClientTenantStore) DeleteAdminConsentRequest(state string) error 
 
 // ---- helpers ----------------------------------------------------------------
 
-func scanClientTenant(row *sql.Row) (*interfaces.ClientTenant, error) {
-	c := &interfaces.ClientTenant{}
+func scanClientTenant(row *sql.Row) (*business.ClientTenant, error) {
+	c := &business.ClientTenant{}
 	var (
 		statusStr, consentedStr, createdStr, updatedStr, metaStr  string
 		m365TenantID, m365AdminEmail, m365ConsentedAt, m365Status sql.NullString
@@ -305,8 +305,8 @@ func scanClientTenant(row *sql.Row) (*interfaces.ClientTenant, error) {
 		m365TenantID, m365AdminEmail, m365ConsentedAt, m365Status)
 }
 
-func scanClientTenantRow(rows *sql.Rows) (*interfaces.ClientTenant, error) {
-	c := &interfaces.ClientTenant{}
+func scanClientTenantRow(rows *sql.Rows) (*business.ClientTenant, error) {
+	c := &business.ClientTenant{}
 	var (
 		statusStr, consentedStr, createdStr, updatedStr, metaStr  string
 		m365TenantID, m365AdminEmail, m365ConsentedAt, m365Status sql.NullString
@@ -325,11 +325,11 @@ func scanClientTenantRow(rows *sql.Rows) (*interfaces.ClientTenant, error) {
 }
 
 func populateClientTenant(
-	c *interfaces.ClientTenant,
+	c *business.ClientTenant,
 	statusStr, consentedStr, createdStr, updatedStr, metaStr string,
 	m365TenantID, m365AdminEmail, m365ConsentedAt, m365Status sql.NullString,
-) (*interfaces.ClientTenant, error) {
-	c.Status = interfaces.ClientTenantStatus(statusStr)
+) (*business.ClientTenant, error) {
+	c.Status = business.ClientTenantStatus(statusStr)
 	c.ConsentedAt = parseTime(consentedStr)
 	c.CreatedAt = parseTime(createdStr)
 	c.UpdatedAt = parseTime(updatedStr)
@@ -366,4 +366,4 @@ func (s *SQLiteClientTenantStore) Close() error {
 }
 
 // ensure SQLiteClientTenantStore satisfies the interface at compile time
-var _ interfaces.ClientTenantStore = (*SQLiteClientTenantStore)(nil)
+var _ business.ClientTenantStore = (*SQLiteClientTenantStore)(nil)

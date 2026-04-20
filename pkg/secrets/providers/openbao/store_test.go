@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // testStore creates a store connected to the docker-compose openbao-test instance.
@@ -110,7 +111,7 @@ func TestStore_StoreSecret_EmptyTenantID(t *testing.T) {
 		Value: "value",
 	})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, interfaces.ErrTenantRequired)
+	assert.ErrorIs(t, err, cfgconfig.ErrTenantRequired)
 }
 
 func TestStore_GetSecret_NotFound(t *testing.T) {

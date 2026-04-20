@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
@@ -52,9 +53,9 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		require.NoError(t, err)
 
 		// Query the audit store to verify the audit event was recorded
-		auditFilter := &interfaces.AuditFilter{
+		auditFilter := &business.AuditFilter{
 			TenantID:      "test-tenant",
-			EventTypes:    []interfaces.AuditEventType{interfaces.AuditEventUserManagement},
+			EventTypes:    []business.AuditEventType{business.AuditEventUserManagement},
 			Actions:       []string{"create_role"},
 			ResourceTypes: []string{"role"},
 			ResourceIDs:   []string{"test-role-audit"},
@@ -67,12 +68,12 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 
 		entry := auditEntries[0]
 		assert.Equal(t, "test-tenant", entry.TenantID)
-		assert.Equal(t, interfaces.AuditEventUserManagement, entry.EventType)
+		assert.Equal(t, business.AuditEventUserManagement, entry.EventType)
 		assert.Equal(t, "create_role", entry.Action)
 		assert.Equal(t, "role", entry.ResourceType)
 		assert.Equal(t, "test-role-audit", entry.ResourceID)
-		assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
-		assert.Equal(t, interfaces.AuditSeverityHigh, entry.Severity)
+		assert.Equal(t, business.AuditResultSuccess, entry.Result)
+		assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 		assert.Equal(t, "rbac", entry.Source)
 
 		// Verify audit integrity
@@ -105,9 +106,9 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		require.NoError(t, err)
 
 		// Query audit entries for the update
-		auditFilter := &interfaces.AuditFilter{
+		auditFilter := &business.AuditFilter{
 			TenantID:      "test-tenant",
-			EventTypes:    []interfaces.AuditEventType{interfaces.AuditEventUserManagement},
+			EventTypes:    []business.AuditEventType{business.AuditEventUserManagement},
 			Actions:       []string{"update_role"},
 			ResourceTypes: []string{"role"},
 			ResourceIDs:   []string{"test-role-update-audit"},
@@ -120,7 +121,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 
 		entry := auditEntries[0]
 		assert.Equal(t, "update_role", entry.Action)
-		assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
+		assert.Equal(t, business.AuditResultSuccess, entry.Result)
 
 		// Verify change tracking is present
 		assert.NotNil(t, entry.Changes, "Should have change tracking information")
@@ -151,9 +152,9 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		require.NoError(t, err)
 
 		// Query audit entries for the deletion
-		auditFilter := &interfaces.AuditFilter{
+		auditFilter := &business.AuditFilter{
 			TenantID:      "test-tenant",
-			EventTypes:    []interfaces.AuditEventType{interfaces.AuditEventUserManagement},
+			EventTypes:    []business.AuditEventType{business.AuditEventUserManagement},
 			Actions:       []string{"delete_role"},
 			ResourceTypes: []string{"role"},
 			ResourceIDs:   []string{"test-role-delete-audit"},
@@ -166,8 +167,8 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 
 		entry := auditEntries[0]
 		assert.Equal(t, "delete_role", entry.Action)
-		assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
-		assert.Equal(t, interfaces.AuditSeverityCritical, entry.Severity, "Role deletion should be critical severity")
+		assert.Equal(t, business.AuditResultSuccess, entry.Result)
+		assert.Equal(t, business.AuditSeverityCritical, entry.Severity, "Role deletion should be critical severity")
 
 		// Verify deleted role information is captured
 		assert.Contains(t, entry.Details, "deleted_permissions")
@@ -214,9 +215,9 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		require.NoError(t, err)
 
 		// Query audit entries for the revocation
-		auditFilter := &interfaces.AuditFilter{
+		auditFilter := &business.AuditFilter{
 			TenantID:      "test-tenant",
-			EventTypes:    []interfaces.AuditEventType{interfaces.AuditEventUserManagement},
+			EventTypes:    []business.AuditEventType{business.AuditEventUserManagement},
 			Actions:       []string{"revoke_role"},
 			ResourceTypes: []string{"role_assignment"},
 			Limit:         10,
@@ -229,8 +230,8 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		entry := auditEntries[0]
 		assert.Equal(t, "revoke_role", entry.Action)
 		assert.Equal(t, "test-user-revoke", entry.UserID)
-		assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
-		assert.Equal(t, interfaces.AuditSeverityHigh, entry.Severity)
+		assert.Equal(t, business.AuditResultSuccess, entry.Result)
+		assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 
 		// Verify revocation details
 		assert.Contains(t, entry.Details, "revoked_role")
@@ -251,11 +252,11 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		// This should fail, but let's check if we still get an audit event
 
 		// Query for any audit entries with error result
-		auditFilter := &interfaces.AuditFilter{
+		auditFilter := &business.AuditFilter{
 			TenantID:   "test-tenant",
-			EventTypes: []interfaces.AuditEventType{interfaces.AuditEventUserManagement},
+			EventTypes: []business.AuditEventType{business.AuditEventUserManagement},
 			Actions:    []string{"create_role"},
-			Results:    []interfaces.AuditResult{interfaces.AuditResultError},
+			Results:    []business.AuditResult{business.AuditResultError},
 			Limit:      10,
 		}
 
@@ -266,7 +267,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 
 		// If there are error entries, verify they have proper error information
 		for _, entry := range auditEntries {
-			assert.Equal(t, interfaces.AuditResultError, entry.Result)
+			assert.Equal(t, business.AuditResultError, entry.Result)
 			assert.NotEmpty(t, entry.ErrorCode)
 			assert.NotEmpty(t, entry.ErrorMessage)
 		}
@@ -274,9 +275,9 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 
 	t.Run("Audit entries maintain integrity", func(t *testing.T) {
 		// Query all audit entries we've created
-		auditFilter := &interfaces.AuditFilter{
+		auditFilter := &business.AuditFilter{
 			TenantID:   "test-tenant",
-			EventTypes: []interfaces.AuditEventType{interfaces.AuditEventUserManagement},
+			EventTypes: []business.AuditEventType{business.AuditEventUserManagement},
 			Limit:      100,
 		}
 

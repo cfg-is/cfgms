@@ -15,6 +15,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // OpenBaoSecretStore implements interfaces.SecretStore using OpenBao KV v2.
@@ -50,7 +51,7 @@ func (s *OpenBaoSecretStore) StoreSecret(ctx context.Context, req *interfaces.Se
 		return fmt.Errorf("secret key cannot be empty")
 	}
 	if req.TenantID == "" {
-		return fmt.Errorf("TenantID is required: %w", interfaces.ErrTenantRequired)
+		return fmt.Errorf("TenantID is required: %w", cfgconfig.ErrTenantRequired)
 	}
 
 	path := s.kvPath(req.TenantID, req.Key)

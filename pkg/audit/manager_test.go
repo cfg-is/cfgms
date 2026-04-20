@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	// Import storage providers to register them
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,12 +35,12 @@ func newTestManager(t *testing.T, source string) *Manager {
 func TestNewManager(t *testing.T) {
 	tests := []struct {
 		name         string
-		setupStorage func(t *testing.T) (interfaces.AuditStore, error)
+		setupStorage func(t *testing.T) (business.AuditStore, error)
 		wantErr      bool
 	}{
 		{
 			name: "with git storage provider",
-			setupStorage: func(t *testing.T) (interfaces.AuditStore, error) {
+			setupStorage: func(t *testing.T) (business.AuditStore, error) {
 				tmpDir := t.TempDir()
 				storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 				if err != nil {
@@ -79,7 +80,7 @@ func TestNewManager_ErrorConditions(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		store  interfaces.AuditStore
+		store  business.AuditStore
 		source string
 	}{
 		{
@@ -110,12 +111,12 @@ func TestManager_RecordEvent(t *testing.T) {
 
 	event := NewEventBuilder().
 		Tenant("test-tenant").
-		Type(interfaces.AuditEventConfiguration).
+		Type(business.AuditEventConfiguration).
 		Action("test_action").
-		User("test-user", interfaces.AuditUserTypeHuman).
+		User("test-user", business.AuditUserTypeHuman).
 		Resource("test_resource", "test-id", "Test Resource").
 		Detail("test_key", "test_value").
-		Severity(interfaces.AuditSeverityMedium)
+		Severity(business.AuditSeverityMedium)
 
 	err := manager.RecordEvent(ctx, event)
 	assert.NoError(t, err)
@@ -129,18 +130,18 @@ func TestManager_RecordBatch(t *testing.T) {
 	events := []*AuditEventBuilder{
 		NewEventBuilder().
 			Tenant("test-tenant").
-			Type(interfaces.AuditEventAuthentication).
+			Type(business.AuditEventAuthentication).
 			Action("login").
-			User("user1", interfaces.AuditUserTypeHuman).
+			User("user1", business.AuditUserTypeHuman).
 			Resource("session", "session1", "").
-			Severity(interfaces.AuditSeverityHigh),
+			Severity(business.AuditSeverityHigh),
 		NewEventBuilder().
 			Tenant("test-tenant").
-			Type(interfaces.AuditEventConfiguration).
+			Type(business.AuditEventConfiguration).
 			Action("config_update").
-			User("user2", interfaces.AuditUserTypeHuman).
+			User("user2", business.AuditUserTypeHuman).
 			Resource("config", "config1", "Test Config").
-			Severity(interfaces.AuditSeverityMedium),
+			Severity(business.AuditSeverityMedium),
 	}
 
 	err := manager.RecordBatch(ctx, events)
@@ -160,38 +161,38 @@ func TestManager_ValidationErrors(t *testing.T) {
 		{
 			name: "missing tenant ID",
 			event: NewEventBuilder().
-				Type(interfaces.AuditEventConfiguration).
+				Type(business.AuditEventConfiguration).
 				Action("test_action").
-				User("test-user", interfaces.AuditUserTypeHuman).
+				User("test-user", business.AuditUserTypeHuman).
 				Resource("test_resource", "test-id", ""),
-			expectedError: interfaces.ErrTenantIDRequired,
+			expectedError: business.ErrTenantIDRequired,
 		},
 		{
 			name: "missing user ID",
 			event: NewEventBuilder().
 				Tenant("test-tenant").
-				Type(interfaces.AuditEventConfiguration).
+				Type(business.AuditEventConfiguration).
 				Action("test_action").
 				Resource("test_resource", "test-id", ""),
-			expectedError: interfaces.ErrUserIDRequired,
+			expectedError: business.ErrUserIDRequired,
 		},
 		{
 			name: "missing action",
 			event: NewEventBuilder().
 				Tenant("test-tenant").
-				Type(interfaces.AuditEventConfiguration).
-				User("test-user", interfaces.AuditUserTypeHuman).
+				Type(business.AuditEventConfiguration).
+				User("test-user", business.AuditUserTypeHuman).
 				Resource("test_resource", "test-id", ""),
-			expectedError: interfaces.ErrActionRequired,
+			expectedError: business.ErrActionRequired,
 		},
 		{
 			name: "missing resource type",
 			event: NewEventBuilder().
 				Tenant("test-tenant").
-				Type(interfaces.AuditEventConfiguration).
+				Type(business.AuditEventConfiguration).
 				Action("test_action").
-				User("test-user", interfaces.AuditUserTypeHuman),
-			expectedError: interfaces.ErrResourceTypeRequired,
+				User("test-user", business.AuditUserTypeHuman),
+			expectedError: business.ErrResourceTypeRequired,
 		},
 	}
 
@@ -208,32 +209,32 @@ func TestManager_ValidationErrors(t *testing.T) {
 func TestAuditEventBuilder(t *testing.T) {
 	event := NewEventBuilder().
 		Tenant("test-tenant").
-		Type(interfaces.AuditEventAuthentication).
+		Type(business.AuditEventAuthentication).
 		Action("login").
-		User("test-user", interfaces.AuditUserTypeHuman).
+		User("test-user", business.AuditUserTypeHuman).
 		Session("session123").
 		Resource("session", "session123", "User Session").
-		Result(interfaces.AuditResultSuccess).
+		Result(business.AuditResultSuccess).
 		Request("req123", "POST", "/api/login", "192.168.1.1", "TestAgent/1.0").
 		Detail("login_method", "password").
 		Detail("mfa_used", true).
 		Tag("security").
 		Tag("authentication").
-		Severity(interfaces.AuditSeverityHigh)
+		Severity(business.AuditSeverityHigh)
 
-	entry := &interfaces.AuditEntry{}
+	entry := &business.AuditEntry{}
 	event.build(entry)
 
 	assert.Equal(t, "test-tenant", entry.TenantID)
-	assert.Equal(t, interfaces.AuditEventAuthentication, entry.EventType)
+	assert.Equal(t, business.AuditEventAuthentication, entry.EventType)
 	assert.Equal(t, "login", entry.Action)
 	assert.Equal(t, "test-user", entry.UserID)
-	assert.Equal(t, interfaces.AuditUserTypeHuman, entry.UserType)
+	assert.Equal(t, business.AuditUserTypeHuman, entry.UserType)
 	assert.Equal(t, "session123", entry.SessionID)
 	assert.Equal(t, "session", entry.ResourceType)
 	assert.Equal(t, "session123", entry.ResourceID)
 	assert.Equal(t, "User Session", entry.ResourceName)
-	assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
+	assert.Equal(t, business.AuditResultSuccess, entry.Result)
 	assert.Equal(t, "req123", entry.RequestID)
 	assert.Equal(t, "POST", entry.Method)
 	assert.Equal(t, "/api/login", entry.Path)
@@ -243,86 +244,86 @@ func TestAuditEventBuilder(t *testing.T) {
 	assert.Equal(t, true, entry.Details["mfa_used"])
 	assert.Contains(t, entry.Tags, "security")
 	assert.Contains(t, entry.Tags, "authentication")
-	assert.Equal(t, interfaces.AuditSeverityHigh, entry.Severity)
+	assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 }
 
 // TestPredefinedEventBuilders tests predefined event builder functions
 func TestPredefinedEventBuilders(t *testing.T) {
 	t.Run("AuthenticationEvent", func(t *testing.T) {
-		event := AuthenticationEvent("tenant1", "user1", "login", interfaces.AuditResultSuccess)
-		entry := &interfaces.AuditEntry{}
+		event := AuthenticationEvent("tenant1", "user1", "login", business.AuditResultSuccess)
+		entry := &business.AuditEntry{}
 		event.build(entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
-		assert.Equal(t, interfaces.AuditEventAuthentication, entry.EventType)
+		assert.Equal(t, business.AuditEventAuthentication, entry.EventType)
 		assert.Equal(t, "login", entry.Action)
 		assert.Equal(t, "user1", entry.UserID)
-		assert.Equal(t, interfaces.AuditUserTypeHuman, entry.UserType)
+		assert.Equal(t, business.AuditUserTypeHuman, entry.UserType)
 		assert.Equal(t, "session", entry.ResourceType)
 		assert.Equal(t, "user1", entry.ResourceID)
-		assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
-		assert.Equal(t, interfaces.AuditSeverityHigh, entry.Severity)
+		assert.Equal(t, business.AuditResultSuccess, entry.Result)
+		assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 	})
 
 	t.Run("AuthorizationEvent", func(t *testing.T) {
-		event := AuthorizationEvent("tenant1", "user1", "config", "config1", "read", interfaces.AuditResultDenied)
-		entry := &interfaces.AuditEntry{}
+		event := AuthorizationEvent("tenant1", "user1", "config", "config1", "read", business.AuditResultDenied)
+		entry := &business.AuditEntry{}
 		event.build(entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
-		assert.Equal(t, interfaces.AuditEventAuthorization, entry.EventType)
+		assert.Equal(t, business.AuditEventAuthorization, entry.EventType)
 		assert.Equal(t, "read", entry.Action)
 		assert.Equal(t, "user1", entry.UserID)
 		assert.Equal(t, "config", entry.ResourceType)
 		assert.Equal(t, "config1", entry.ResourceID)
-		assert.Equal(t, interfaces.AuditResultDenied, entry.Result)
-		assert.Equal(t, interfaces.AuditSeverityHigh, entry.Severity)
+		assert.Equal(t, business.AuditResultDenied, entry.Result)
+		assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 	})
 
 	t.Run("ConfigurationEvent", func(t *testing.T) {
 		event := ConfigurationEvent("tenant1", "user1", "steward_config", "steward1", "Config1", "update")
-		entry := &interfaces.AuditEntry{}
+		entry := &business.AuditEntry{}
 		event.build(entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
-		assert.Equal(t, interfaces.AuditEventConfiguration, entry.EventType)
+		assert.Equal(t, business.AuditEventConfiguration, entry.EventType)
 		assert.Equal(t, "update", entry.Action)
 		assert.Equal(t, "user1", entry.UserID)
 		assert.Equal(t, "steward_config", entry.ResourceType)
 		assert.Equal(t, "steward1", entry.ResourceID)
 		assert.Equal(t, "Config1", entry.ResourceName)
-		assert.Equal(t, interfaces.AuditSeverityMedium, entry.Severity)
+		assert.Equal(t, business.AuditSeverityMedium, entry.Severity)
 	})
 
 	t.Run("SystemEvent", func(t *testing.T) {
 		event := SystemEvent("tenant1", "startup", "System started successfully")
-		entry := &interfaces.AuditEntry{}
+		entry := &business.AuditEntry{}
 		event.build(entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
-		assert.Equal(t, interfaces.AuditEventSystemEvent, entry.EventType)
+		assert.Equal(t, business.AuditEventSystemEvent, entry.EventType)
 		assert.Equal(t, "startup", entry.Action)
 		assert.Equal(t, SystemUserID, entry.UserID)
-		assert.Equal(t, interfaces.AuditUserTypeSystem, entry.UserType)
+		assert.Equal(t, business.AuditUserTypeSystem, entry.UserType)
 		assert.Equal(t, "system", entry.ResourceType)
 		assert.Equal(t, "controller", entry.ResourceID)
 		assert.Equal(t, "System started successfully", entry.Details["description"])
-		assert.Equal(t, interfaces.AuditSeverityLow, entry.Severity)
+		assert.Equal(t, business.AuditSeverityLow, entry.Severity)
 	})
 
 	t.Run("SecurityEvent", func(t *testing.T) {
-		event := SecurityEvent("tenant1", "user1", "intrusion_detected", "Multiple failed login attempts", interfaces.AuditSeverityCritical)
-		entry := &interfaces.AuditEntry{}
+		event := SecurityEvent("tenant1", "user1", "intrusion_detected", "Multiple failed login attempts", business.AuditSeverityCritical)
+		entry := &business.AuditEntry{}
 		event.build(entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
-		assert.Equal(t, interfaces.AuditEventSecurityEvent, entry.EventType)
+		assert.Equal(t, business.AuditEventSecurityEvent, entry.EventType)
 		assert.Equal(t, "intrusion_detected", entry.Action)
 		assert.Equal(t, "user1", entry.UserID)
 		assert.Equal(t, "security", entry.ResourceType)
 		assert.Equal(t, "user1", entry.ResourceID)
 		assert.Equal(t, "Multiple failed login attempts", entry.Details["description"])
-		assert.Equal(t, interfaces.AuditSeverityCritical, entry.Severity)
+		assert.Equal(t, business.AuditSeverityCritical, entry.Severity)
 	})
 }
 
@@ -332,7 +333,7 @@ func TestAuthenticationEvent_Persists(t *testing.T) {
 	manager := newTestManager(t, "controller")
 	ctx := context.Background()
 
-	event := AuthenticationEvent("tenant1", "user1", "login", interfaces.AuditResultSuccess)
+	event := AuthenticationEvent("tenant1", "user1", "login", business.AuditResultSuccess)
 	err := manager.RecordEvent(ctx, event)
 	assert.NoError(t, err, "AuthenticationEvent must not return a validation error")
 }
@@ -354,7 +355,7 @@ func TestSecurityEvent_Persists(t *testing.T) {
 	manager := newTestManager(t, "controller")
 	ctx := context.Background()
 
-	event := SecurityEvent(SystemTenantID, SystemUserID, "brute_force_detected", "Multiple failed auth attempts", interfaces.AuditSeverityHigh)
+	event := SecurityEvent(SystemTenantID, SystemUserID, "brute_force_detected", "Multiple failed auth attempts", business.AuditSeverityHigh)
 	err := manager.RecordEvent(ctx, event)
 	assert.NoError(t, err, "SecurityEvent must not return a validation error")
 }
@@ -363,18 +364,18 @@ func TestSecurityEvent_Persists(t *testing.T) {
 func TestManager_IntegrityVerification(t *testing.T) {
 	manager := newTestManager(t, "test")
 
-	entry := &interfaces.AuditEntry{
+	entry := &business.AuditEntry{
 		ID:           "test-id",
 		TenantID:     "test-tenant",
 		Timestamp:    time.Now().UTC(),
-		EventType:    interfaces.AuditEventConfiguration,
+		EventType:    business.AuditEventConfiguration,
 		Action:       "test_action",
 		UserID:       "test-user",
-		UserType:     interfaces.AuditUserTypeHuman,
+		UserType:     business.AuditUserTypeHuman,
 		ResourceType: "test_resource",
 		ResourceID:   "test-id",
-		Result:       interfaces.AuditResultSuccess,
-		Severity:     interfaces.AuditSeverityMedium,
+		Result:       business.AuditResultSuccess,
+		Severity:     business.AuditSeverityMedium,
 		Source:       "test",
 		Version:      "1.0",
 	}

@@ -10,7 +10,7 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac/memory"
 	"github.com/cfgis/cfgms/pkg/audit"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // Manager provides a complete RBAC implementation with advanced features
@@ -18,9 +18,9 @@ type Manager struct {
 	store *memory.Store
 
 	// Pluggable storage interfaces (when using NewManagerWithStorage)
-	auditStore          interfaces.AuditStore
-	clientTenantStore   interfaces.ClientTenantStore
-	rbacStore           interfaces.RBACStore
+	auditStore          business.AuditStore
+	clientTenantStore   business.ClientTenantStore
+	rbacStore           business.RBACStore
 	usePluggableStorage bool
 	auditManager        *audit.Manager
 
@@ -52,7 +52,7 @@ type Manager struct {
 
 // NewManagerWithStorage creates a new RBAC manager with pluggable storage interfaces
 // This is the recommended constructor for production deployments with configurable storage backends
-func NewManagerWithStorage(auditStore interfaces.AuditStore, clientTenantStore interfaces.ClientTenantStore, rbacStore interfaces.RBACStore) *Manager {
+func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore business.ClientTenantStore, rbacStore business.RBACStore) *Manager {
 	if auditStore == nil || clientTenantStore == nil || rbacStore == nil {
 		panic("NewManagerWithStorage requires non-nil storage interfaces")
 	}
@@ -301,10 +301,10 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 			if m.auditManager != nil {
 				event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
 					Resource("role", role.Id, role.Name).
-					Result(interfaces.AuditResultError).
+					Result(business.AuditResultError).
 					Error("RBAC_PARENT_ROLE_NOT_FOUND", fmt.Sprintf("parent role %s not found: %v", role.ParentRoleId, err)).
 					Detail("parent_role_id", role.ParentRoleId).
-					Severity(interfaces.AuditSeverityCritical)
+					Severity(business.AuditSeverityCritical)
 				_ = m.auditManager.RecordEvent(ctx, event)
 			}
 			return fmt.Errorf("parent role %s not found: %w", role.ParentRoleId, err)
@@ -319,13 +319,13 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 			if m.auditManager != nil {
 				event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
 					Resource("role", role.Id, role.Name).
-					Result(interfaces.AuditResultError).
+					Result(business.AuditResultError).
 					Error("RBAC_CROSS_TENANT_INHERITANCE_BLOCKED", errMsg).
 					Detail("child_tenant", role.TenantId).
 					Detail("parent_tenant", parentRole.TenantId).
 					Detail("parent_role_id", role.ParentRoleId).
 					Detail("security_finding", "M-TENANT-2").
-					Severity(interfaces.AuditSeverityCritical)
+					Severity(business.AuditSeverityCritical)
 				_ = m.auditManager.RecordEvent(ctx, event)
 			}
 
@@ -340,9 +340,9 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 		if m.auditManager != nil {
 			event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
 				Resource("role", role.Id, role.Name).
-				Result(interfaces.AuditResultError).
+				Result(business.AuditResultError).
 				Error("RBAC_CREATE_ROLE_FAILED", err.Error()).
-				Severity(interfaces.AuditSeverityHigh)
+				Severity(business.AuditSeverityHigh)
 			_ = m.auditManager.RecordEvent(ctx, event)
 		}
 		return err
@@ -358,9 +358,9 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 			if m.auditManager != nil {
 				event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
 					Resource("role", role.Id, role.Name).
-					Result(interfaces.AuditResultError).
+					Result(business.AuditResultError).
 					Error("RBAC_CREATE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
-					Severity(interfaces.AuditSeverityHigh)
+					Severity(business.AuditSeverityHigh)
 				_ = m.auditManager.RecordEvent(ctx, event)
 			}
 			return fmt.Errorf("failed to persist role: %w", persistErr)
@@ -371,10 +371,10 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 	if m.auditManager != nil {
 		event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
 			Resource("role", role.Id, role.Name).
-			Result(interfaces.AuditResultSuccess).
+			Result(business.AuditResultSuccess).
 			Detail("role_permissions", len(role.PermissionIds)).
 			Detail("role_description", role.Description).
-			Severity(interfaces.AuditSeverityHigh)
+			Severity(business.AuditSeverityHigh)
 		_ = m.auditManager.RecordEvent(ctx, event)
 	}
 
@@ -403,9 +403,9 @@ func (m *Manager) UpdateRole(ctx context.Context, role *common.Role) error {
 		if m.auditManager != nil {
 			event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "update_role").
 				Resource("role", role.Id, role.Name).
-				Result(interfaces.AuditResultError).
+				Result(business.AuditResultError).
 				Error("RBAC_UPDATE_ROLE_FAILED", err.Error()).
-				Severity(interfaces.AuditSeverityHigh)
+				Severity(business.AuditSeverityHigh)
 			_ = m.auditManager.RecordEvent(ctx, event)
 		}
 		return err
@@ -418,9 +418,9 @@ func (m *Manager) UpdateRole(ctx context.Context, role *common.Role) error {
 			if m.auditManager != nil {
 				event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "update_role").
 					Resource("role", role.Id, role.Name).
-					Result(interfaces.AuditResultError).
+					Result(business.AuditResultError).
 					Error("RBAC_UPDATE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
-					Severity(interfaces.AuditSeverityHigh)
+					Severity(business.AuditSeverityHigh)
 				_ = m.auditManager.RecordEvent(ctx, event)
 			}
 			return fmt.Errorf("failed to persist role update: %w", persistErr)
@@ -431,9 +431,9 @@ func (m *Manager) UpdateRole(ctx context.Context, role *common.Role) error {
 	if m.auditManager != nil {
 		event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "update_role").
 			Resource("role", role.Id, role.Name).
-			Result(interfaces.AuditResultSuccess).
+			Result(business.AuditResultSuccess).
 			Detail("role_permissions", len(role.PermissionIds)).
-			Severity(interfaces.AuditSeverityHigh)
+			Severity(business.AuditSeverityHigh)
 
 		// Add change tracking if we have the old role
 		if oldRole != nil {
@@ -496,7 +496,7 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 
 	// M-AUTH-2: Require justification for role deletion
 	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
-		m.AuditSensitiveOperation(ctx, opCtx, interfaces.AuditResultError, validateErr)
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
 		return validateErr
 	}
 
@@ -514,9 +514,9 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 
 			event := audit.UserManagementEvent(tenantID, "system", id, "delete_role").
 				Resource("role", id, roleName).
-				Result(interfaces.AuditResultError).
+				Result(business.AuditResultError).
 				Error("RBAC_DELETE_ROLE_FAILED", err.Error()).
-				Severity(interfaces.AuditSeverityCritical)
+				Severity(business.AuditSeverityCritical)
 			_ = m.auditManager.RecordEvent(ctx, event)
 		}
 		return err
@@ -536,9 +536,9 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 
 				event := audit.UserManagementEvent(tenantID, "system", id, "delete_role").
 					Resource("role", id, roleName).
-					Result(interfaces.AuditResultError).
+					Result(business.AuditResultError).
 					Error("RBAC_DELETE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
-					Severity(interfaces.AuditSeverityCritical)
+					Severity(business.AuditSeverityCritical)
 				_ = m.auditManager.RecordEvent(ctx, event)
 			}
 			return fmt.Errorf("failed to persist role deletion: %w", persistErr)
@@ -557,8 +557,8 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 
 		event := audit.UserManagementEvent(tenantID, "system", id, "delete_role").
 			Resource("role", id, roleName).
-			Result(interfaces.AuditResultSuccess).
-			Severity(interfaces.AuditSeverityCritical) // Role deletion is critical
+			Result(business.AuditResultSuccess).
+			Severity(business.AuditSeverityCritical) // Role deletion is critical
 
 		if deletedRole != nil {
 			event = event.Detail("deleted_permissions", len(deletedRole.PermissionIds)).
@@ -628,11 +628,11 @@ func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID st
 		if m.auditManager != nil {
 			event := audit.UserManagementEvent(tenantID, subjectID, subjectID, "revoke_role").
 				Resource("role_assignment", roleID, "").
-				Result(interfaces.AuditResultError).
+				Result(business.AuditResultError).
 				Error("RBAC_REVOKE_ROLE_FAILED", err.Error()).
 				Detail("revoked_role", roleID).
 				Detail("subject_id", subjectID).
-				Severity(interfaces.AuditSeverityHigh)
+				Severity(business.AuditSeverityHigh)
 			_ = m.auditManager.RecordEvent(ctx, event)
 		}
 		return err
@@ -645,11 +645,11 @@ func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID st
 			if m.auditManager != nil {
 				event := audit.UserManagementEvent(tenantID, subjectID, subjectID, "revoke_role").
 					Resource("role_assignment", roleID, "").
-					Result(interfaces.AuditResultError).
+					Result(business.AuditResultError).
 					Error("RBAC_REVOKE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
 					Detail("revoked_role", roleID).
 					Detail("subject_id", subjectID).
-					Severity(interfaces.AuditSeverityHigh)
+					Severity(business.AuditSeverityHigh)
 				_ = m.auditManager.RecordEvent(ctx, event)
 			}
 			return fmt.Errorf("failed to persist role revocation: %w", persistErr)
@@ -660,10 +660,10 @@ func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID st
 	if m.auditManager != nil {
 		event := audit.UserManagementEvent(tenantID, subjectID, subjectID, "revoke_role").
 			Resource("role_assignment", roleID, "").
-			Result(interfaces.AuditResultSuccess).
+			Result(business.AuditResultSuccess).
 			Detail("revoked_role", roleID).
 			Detail("subject_id", subjectID).
-			Severity(interfaces.AuditSeverityHigh)
+			Severity(business.AuditSeverityHigh)
 		_ = m.auditManager.RecordEvent(ctx, event)
 	}
 
@@ -1014,7 +1014,7 @@ func (m *Manager) GetStore() *memory.Store {
 	return m.store
 }
 
-func (m *Manager) GetRBACStore() interfaces.RBACStore {
+func (m *Manager) GetRBACStore() business.RBACStore {
 	return m.rbacStore
 }
 

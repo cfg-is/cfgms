@@ -3,33 +3,43 @@
 package auth
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"time"
+
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// MemoryClientTenantStore provides an in-memory implementation of ClientTenantStore
-// ⚠️ TEST ONLY: This implementation is for testing purposes only and should NEVER be used in production.
+// Compile-time assertion that MemoryClientTenantStore satisfies the canonical
+// business.ClientTenantStore contract.
+var _ business.ClientTenantStore = (*MemoryClientTenantStore)(nil)
+
+// MemoryClientTenantStore provides an in-memory implementation of business.ClientTenantStore
+// TEST ONLY: This implementation is for testing purposes only and should NEVER be used in production.
 // For production deployments, use StorageClientTenantStoreAdapter with pkg/storage providers.
 // Story #274: This is a test-only implementation that should be migrated to storage-backed stores.
 type MemoryClientTenantStore struct {
 	// Client tenant storage
-	clientTenants      map[string]*ClientTenant // tenantID -> ClientTenant
-	clientTenantsByID  map[string]*ClientTenant // clientIdentifier -> ClientTenant
+	clientTenants      map[string]*business.ClientTenant // tenantID -> ClientTenant
+	clientTenantsByID  map[string]*business.ClientTenant // clientIdentifier -> ClientTenant
 	clientTenantsMutex sync.RWMutex
 
 	// Admin consent request storage
-	adminConsentRequests map[string]*AdminConsentRequest // state -> AdminConsentRequest
+	adminConsentRequests map[string]*business.AdminConsentRequest // state -> AdminConsentRequest
 	consentRequestsMutex sync.RWMutex
+
+	// Cleanup goroutine control
+	stopCleanup chan struct{}
+	stopOnce    sync.Once
 }
 
 // NewMemoryClientTenantStore creates a new in-memory client tenant store
 func NewMemoryClientTenantStore() *MemoryClientTenantStore {
 	store := &MemoryClientTenantStore{
-		clientTenants:        make(map[string]*ClientTenant),
-		clientTenantsByID:    make(map[string]*ClientTenant),
-		adminConsentRequests: make(map[string]*AdminConsentRequest),
+		clientTenants:        make(map[string]*business.ClientTenant),
+		clientTenantsByID:    make(map[string]*business.ClientTenant),
+		adminConsentRequests: make(map[string]*business.AdminConsentRequest),
+		stopCleanup:          make(chan struct{}),
 	}
 
 	// Start cleanup goroutine for expired requests
@@ -41,7 +51,7 @@ func NewMemoryClientTenantStore() *MemoryClientTenantStore {
 // Client tenant management
 
 // StoreClientTenant stores a client tenant
-func (s *MemoryClientTenantStore) StoreClientTenant(ctx context.Context, client *ClientTenant) error {
+func (s *MemoryClientTenantStore) StoreClientTenant(client *business.ClientTenant) error {
 	s.clientTenantsMutex.Lock()
 	defer s.clientTenantsMutex.Unlock()
 
@@ -56,7 +66,7 @@ func (s *MemoryClientTenantStore) StoreClientTenant(ctx context.Context, client 
 }
 
 // GetClientTenant retrieves a client tenant by tenant ID
-func (s *MemoryClientTenantStore) GetClientTenant(ctx context.Context, tenantID string) (*ClientTenant, error) {
+func (s *MemoryClientTenantStore) GetClientTenant(tenantID string) (*business.ClientTenant, error) {
 	s.clientTenantsMutex.RLock()
 	defer s.clientTenantsMutex.RUnlock()
 
@@ -71,7 +81,7 @@ func (s *MemoryClientTenantStore) GetClientTenant(ctx context.Context, tenantID 
 }
 
 // GetClientTenantByIdentifier retrieves a client tenant by client identifier
-func (s *MemoryClientTenantStore) GetClientTenantByIdentifier(ctx context.Context, clientIdentifier string) (*ClientTenant, error) {
+func (s *MemoryClientTenantStore) GetClientTenantByIdentifier(clientIdentifier string) (*business.ClientTenant, error) {
 	s.clientTenantsMutex.RLock()
 	defer s.clientTenantsMutex.RUnlock()
 
@@ -86,11 +96,11 @@ func (s *MemoryClientTenantStore) GetClientTenantByIdentifier(ctx context.Contex
 }
 
 // ListClientTenants returns all client tenants, optionally filtered by status
-func (s *MemoryClientTenantStore) ListClientTenants(ctx context.Context, status ClientTenantStatus) ([]*ClientTenant, error) {
+func (s *MemoryClientTenantStore) ListClientTenants(status business.ClientTenantStatus) ([]*business.ClientTenant, error) {
 	s.clientTenantsMutex.RLock()
 	defer s.clientTenantsMutex.RUnlock()
 
-	var clients []*ClientTenant
+	var clients []*business.ClientTenant
 
 	for _, client := range s.clientTenants {
 		// Filter by status if specified
@@ -107,7 +117,7 @@ func (s *MemoryClientTenantStore) ListClientTenants(ctx context.Context, status 
 }
 
 // UpdateClientTenantStatus updates the status of a client tenant
-func (s *MemoryClientTenantStore) UpdateClientTenantStatus(ctx context.Context, tenantID string, status ClientTenantStatus) error {
+func (s *MemoryClientTenantStore) UpdateClientTenantStatus(tenantID string, status business.ClientTenantStatus) error {
 	s.clientTenantsMutex.Lock()
 	defer s.clientTenantsMutex.Unlock()
 
@@ -124,7 +134,7 @@ func (s *MemoryClientTenantStore) UpdateClientTenantStatus(ctx context.Context, 
 }
 
 // DeleteClientTenant removes a client tenant
-func (s *MemoryClientTenantStore) DeleteClientTenant(ctx context.Context, tenantID string) error {
+func (s *MemoryClientTenantStore) DeleteClientTenant(tenantID string) error {
 	s.clientTenantsMutex.Lock()
 	defer s.clientTenantsMutex.Unlock()
 
@@ -143,7 +153,7 @@ func (s *MemoryClientTenantStore) DeleteClientTenant(ctx context.Context, tenant
 // Admin consent request management
 
 // StoreAdminConsentRequest stores an admin consent request
-func (s *MemoryClientTenantStore) StoreAdminConsentRequest(ctx context.Context, request *AdminConsentRequest) error {
+func (s *MemoryClientTenantStore) StoreAdminConsentRequest(request *business.AdminConsentRequest) error {
 	s.consentRequestsMutex.Lock()
 	defer s.consentRequestsMutex.Unlock()
 
@@ -152,7 +162,7 @@ func (s *MemoryClientTenantStore) StoreAdminConsentRequest(ctx context.Context, 
 }
 
 // GetAdminConsentRequest retrieves an admin consent request by state
-func (s *MemoryClientTenantStore) GetAdminConsentRequest(ctx context.Context, state string) (*AdminConsentRequest, error) {
+func (s *MemoryClientTenantStore) GetAdminConsentRequest(state string) (*business.AdminConsentRequest, error) {
 	s.consentRequestsMutex.RLock()
 	defer s.consentRequestsMutex.RUnlock()
 
@@ -172,11 +182,22 @@ func (s *MemoryClientTenantStore) GetAdminConsentRequest(ctx context.Context, st
 }
 
 // DeleteAdminConsentRequest removes an admin consent request
-func (s *MemoryClientTenantStore) DeleteAdminConsentRequest(ctx context.Context, state string) error {
+func (s *MemoryClientTenantStore) DeleteAdminConsentRequest(state string) error {
 	s.consentRequestsMutex.Lock()
 	defer s.consentRequestsMutex.Unlock()
 
 	delete(s.adminConsentRequests, state)
+	return nil
+}
+
+// Close stops the background cleanup goroutine and releases any held resources.
+// Required by business.ClientTenantStore — memory-only implementation has no
+// OS handles to release, but we must terminate the cleanup goroutine so test
+// binaries can exit cleanly.
+func (s *MemoryClientTenantStore) Close() error {
+	s.stopOnce.Do(func() {
+		close(s.stopCleanup)
+	})
 	return nil
 }
 
@@ -190,7 +211,7 @@ func (s *MemoryClientTenantStore) GetStats() map[string]interface{} {
 	defer s.consentRequestsMutex.RUnlock()
 
 	// Count by status
-	statusCounts := make(map[ClientTenantStatus]int)
+	statusCounts := make(map[business.ClientTenantStatus]int)
 	for _, client := range s.clientTenants {
 		statusCounts[client.Status]++
 	}
@@ -226,17 +247,22 @@ func (s *MemoryClientTenantStore) cleanupExpiredRequests() {
 	ticker := time.NewTicker(5 * time.Minute) // Cleanup every 5 minutes
 	defer ticker.Stop()
 
-	for range ticker.C {
-		s.CleanupExpiredRequests()
+	for {
+		select {
+		case <-ticker.C:
+			s.CleanupExpiredRequests()
+		case <-s.stopCleanup:
+			return
+		}
 	}
 }
 
 // GetClientTenantsByStatus returns clients filtered by status with additional filtering options
-func (s *MemoryClientTenantStore) GetClientTenantsByStatus(status ClientTenantStatus, limit int) ([]*ClientTenant, error) {
+func (s *MemoryClientTenantStore) GetClientTenantsByStatus(status business.ClientTenantStatus, limit int) ([]*business.ClientTenant, error) {
 	s.clientTenantsMutex.RLock()
 	defer s.clientTenantsMutex.RUnlock()
 
-	var clients []*ClientTenant
+	var clients []*business.ClientTenant
 	count := 0
 
 	for _, client := range s.clientTenants {
@@ -283,11 +309,11 @@ func (s *MemoryClientTenantStore) UpdateClientTenantMetadata(tenantID string, me
 }
 
 // Search functionality for development/debugging
-func (s *MemoryClientTenantStore) SearchClientTenants(query string) ([]*ClientTenant, error) {
+func (s *MemoryClientTenantStore) SearchClientTenants(query string) ([]*business.ClientTenant, error) {
 	s.clientTenantsMutex.RLock()
 	defer s.clientTenantsMutex.RUnlock()
 
-	var results []*ClientTenant
+	var results []*business.ClientTenant
 
 	for _, client := range s.clientTenants {
 		// Simple search in tenant name, domain name, and client identifier

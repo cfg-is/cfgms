@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // newTestCommandStore opens an in-memory SQLite CommandStore for tests.
@@ -23,8 +23,8 @@ func newTestCommandStore(t *testing.T) *SQLiteCommandStore {
 }
 
 // testCommandRecord returns a CommandRecord with sensible defaults.
-func testCommandRecord(id string) *interfaces.CommandRecord {
-	return &interfaces.CommandRecord{
+func testCommandRecord(id string) *business.CommandRecord {
+	return &business.CommandRecord{
 		ID:        id,
 		Type:      "sync_config",
 		StewardID: "steward-001",
@@ -53,7 +53,7 @@ func TestSQLiteCommandStore_CreateAndGet(t *testing.T) {
 	assert.Equal(t, "sync_config", got.Type)
 	assert.Equal(t, "steward-001", got.StewardID)
 	assert.Equal(t, "tenant-001", got.TenantID)
-	assert.Equal(t, interfaces.CommandStatusPending, got.Status)
+	assert.Equal(t, business.CommandStatusPending, got.Status)
 	assert.Equal(t, "admin@example.com", got.IssuedBy)
 	assert.Nil(t, got.StartedAt)
 	assert.Nil(t, got.CompletedAt)
@@ -68,16 +68,16 @@ func TestSQLiteCommandStore_LifecycleAuditTrail(t *testing.T) {
 	require.NoError(t, store.CreateCommandRecord(ctx, rec))
 
 	require.NoError(t, store.UpdateCommandStatus(ctx, "cmd-lifecycle",
-		interfaces.CommandStatusExecuting, nil, ""))
+		business.CommandStatusExecuting, nil, ""))
 
 	result := map[string]interface{}{"exit_code": float64(0)}
 	require.NoError(t, store.UpdateCommandStatus(ctx, "cmd-lifecycle",
-		interfaces.CommandStatusCompleted, result, ""))
+		business.CommandStatusCompleted, result, ""))
 
 	// Verify final state.
 	got, err := store.GetCommandRecord(ctx, "cmd-lifecycle")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.CommandStatusCompleted, got.Status)
+	assert.Equal(t, business.CommandStatusCompleted, got.Status)
 	assert.NotNil(t, got.StartedAt)
 	assert.NotNil(t, got.CompletedAt)
 
@@ -85,9 +85,9 @@ func TestSQLiteCommandStore_LifecycleAuditTrail(t *testing.T) {
 	trail, err := store.GetCommandAuditTrail(ctx, "cmd-lifecycle")
 	require.NoError(t, err)
 	require.Len(t, trail, 3)
-	assert.Equal(t, interfaces.CommandStatusPending, trail[0].Status)
-	assert.Equal(t, interfaces.CommandStatusExecuting, trail[1].Status)
-	assert.Equal(t, interfaces.CommandStatusCompleted, trail[2].Status)
+	assert.Equal(t, business.CommandStatusPending, trail[0].Status)
+	assert.Equal(t, business.CommandStatusExecuting, trail[1].Status)
+	assert.Equal(t, business.CommandStatusCompleted, trail[2].Status)
 
 	// Timestamps must be non-zero and in chronological order.
 	assert.False(t, trail[0].Timestamp.IsZero())
@@ -113,25 +113,25 @@ func TestSQLiteCommandStore_RestartSweep(t *testing.T) {
 	rec := testCommandRecord("cmd-restart")
 	require.NoError(t, store1.CreateCommandRecord(ctx, rec))
 	require.NoError(t, store1.UpdateCommandStatus(ctx, "cmd-restart",
-		interfaces.CommandStatusExecuting, nil, ""))
+		business.CommandStatusExecuting, nil, ""))
 
 	// Simulate restart: new store instance on the same DB.
 	store2 := &SQLiteCommandStore{db: db}
 
 	// Startup sweep: flip all "executing" records to "failed" with controller_restart reason.
-	executing, err := store2.ListCommandsByStatus(ctx, interfaces.CommandStatusExecuting)
+	executing, err := store2.ListCommandsByStatus(ctx, business.CommandStatusExecuting)
 	require.NoError(t, err)
 	require.Len(t, executing, 1)
 
 	for _, cmd := range executing {
 		err = store2.UpdateCommandStatus(ctx, cmd.ID,
-			interfaces.CommandStatusFailed, nil, "controller_restart")
+			business.CommandStatusFailed, nil, "controller_restart")
 		require.NoError(t, err)
 	}
 
 	got, err := store2.GetCommandRecord(ctx, "cmd-restart")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.CommandStatusFailed, got.Status)
+	assert.Equal(t, business.CommandStatusFailed, got.Status)
 	assert.Equal(t, "controller_restart", got.ErrorMessage)
 }
 
@@ -165,14 +165,14 @@ func TestSQLiteCommandStore_ListCommandsByStatus(t *testing.T) {
 
 	require.NoError(t, store.CreateCommandRecord(ctx, testCommandRecord("s1")))
 	require.NoError(t, store.CreateCommandRecord(ctx, testCommandRecord("s2")))
-	require.NoError(t, store.UpdateCommandStatus(ctx, "s1", interfaces.CommandStatusExecuting, nil, ""))
+	require.NoError(t, store.UpdateCommandStatus(ctx, "s1", business.CommandStatusExecuting, nil, ""))
 
-	pending, err := store.ListCommandsByStatus(ctx, interfaces.CommandStatusPending)
+	pending, err := store.ListCommandsByStatus(ctx, business.CommandStatusPending)
 	require.NoError(t, err)
 	assert.Len(t, pending, 1)
 	assert.Equal(t, "s2", pending[0].ID)
 
-	executing, err := store.ListCommandsByStatus(ctx, interfaces.CommandStatusExecuting)
+	executing, err := store.ListCommandsByStatus(ctx, business.CommandStatusExecuting)
 	require.NoError(t, err)
 	assert.Len(t, executing, 1)
 	assert.Equal(t, "s1", executing[0].ID)
@@ -189,7 +189,7 @@ func TestSQLiteCommandStore_ListCommandRecords_Filter(t *testing.T) {
 	require.NoError(t, store.CreateCommandRecord(ctx, r1))
 	require.NoError(t, store.CreateCommandRecord(ctx, r2))
 
-	results, err := store.ListCommandRecords(ctx, &interfaces.CommandFilter{TenantID: "tenant-A"})
+	results, err := store.ListCommandRecords(ctx, &business.CommandFilter{TenantID: "tenant-A"})
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, "f1", results[0].ID)
@@ -208,19 +208,19 @@ func TestSQLiteCommandStore_PurgeExpiredRecords(t *testing.T) {
 	old.IssuedAt = time.Now().Add(-48 * time.Hour)
 	require.NoError(t, store.CreateCommandRecord(ctx, old))
 	require.NoError(t, store.UpdateCommandStatus(ctx, "old-completed",
-		interfaces.CommandStatusCompleted, nil, ""))
+		business.CommandStatusCompleted, nil, ""))
 
 	recent := testCommandRecord("recent-completed")
 	recent.IssuedAt = time.Now().Add(-1 * time.Hour)
 	require.NoError(t, store.CreateCommandRecord(ctx, recent))
 	require.NoError(t, store.UpdateCommandStatus(ctx, "recent-completed",
-		interfaces.CommandStatusCompleted, nil, ""))
+		business.CommandStatusCompleted, nil, ""))
 
 	still := testCommandRecord("still-executing")
 	still.IssuedAt = time.Now().Add(-48 * time.Hour)
 	require.NoError(t, store.CreateCommandRecord(ctx, still))
 	require.NoError(t, store.UpdateCommandStatus(ctx, "still-executing",
-		interfaces.CommandStatusExecuting, nil, ""))
+		business.CommandStatusExecuting, nil, ""))
 
 	// Purge records older than 24 hours.
 	cutoff := time.Now().Add(-24 * time.Hour)
@@ -279,14 +279,14 @@ func TestSQLiteCommandStore_GetRecord_NotFound(t *testing.T) {
 func TestSQLiteCommandStore_UpdateStatus_NotFound(t *testing.T) {
 	store := newTestCommandStore(t)
 	ctx := context.Background()
-	err := store.UpdateCommandStatus(ctx, "nonexistent", interfaces.CommandStatusCompleted, nil, "")
+	err := store.UpdateCommandStatus(ctx, "nonexistent", business.CommandStatusCompleted, nil, "")
 	require.Error(t, err)
 }
 
 func TestSQLiteCommandStore_UpdateStatus_EmptyID(t *testing.T) {
 	store := newTestCommandStore(t)
 	ctx := context.Background()
-	err := store.UpdateCommandStatus(ctx, "", interfaces.CommandStatusCompleted, nil, "")
+	err := store.UpdateCommandStatus(ctx, "", business.CommandStatusCompleted, nil, "")
 	require.Error(t, err)
 }
 

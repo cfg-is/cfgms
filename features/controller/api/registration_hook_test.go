@@ -24,12 +24,13 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Auto-register git storage provider
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // newTestApprovalHook builds a WorkflowApprovalHook backed by real git storage and workflow engine.
-func newTestApprovalHook(t *testing.T) (*WorkflowApprovalHook, interfaces.ConfigStore) {
+func newTestApprovalHook(t *testing.T) (*WorkflowApprovalHook, cfgconfig.ConfigStore) {
 	t.Helper()
 
 	tmpDir := t.TempDir()
@@ -65,7 +66,7 @@ func sampleInput() RegistrationInput {
 
 // storeApprovalWorkflow stores a workflow with the given variables under the well-known name,
 // scoped to the test tenant ID used by sampleInput().
-func storeApprovalWorkflow(t *testing.T, configStore interfaces.ConfigStore, variables map[string]interface{}) {
+func storeApprovalWorkflow(t *testing.T, configStore cfgconfig.ConfigStore, variables map[string]interface{}) {
 	t.Helper()
 
 	// Minimal steps list — always include a noop sequential so the engine has something to run.

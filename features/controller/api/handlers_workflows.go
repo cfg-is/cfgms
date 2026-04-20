@@ -15,14 +15,14 @@ import (
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/logging"
-	storageif "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // WorkflowHandler handles workflow and trigger REST API requests.
 // It bridges the controller REST layer with the workflow engine and trigger manager.
 type WorkflowHandler struct {
 	engine         *workflow.Engine
-	configStore    storageif.ConfigStore
+	configStore    cfgconfig.ConfigStore
 	triggerManager trigger.TriggerManager
 	triggerAPI     *trigger.APIHandler
 	logger         logging.Logger
@@ -32,7 +32,7 @@ type WorkflowHandler struct {
 // NewWorkflowHandler creates a new WorkflowHandler.
 func NewWorkflowHandler(
 	engine *workflow.Engine,
-	configStore storageif.ConfigStore,
+	configStore cfgconfig.ConfigStore,
 	triggerManager trigger.TriggerManager,
 	logger logging.Logger,
 ) *WorkflowHandler {

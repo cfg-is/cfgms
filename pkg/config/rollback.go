@@ -12,16 +12,17 @@ import (
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // RollbackManager handles configuration rollback operations
 type RollbackManager struct {
-	configStore interfaces.ConfigStore
+	configStore cfgconfig.ConfigStore
 	manager     *Manager
 }
 
 // NewRollbackManager creates a new rollback manager
-func NewRollbackManager(configStore interfaces.ConfigStore) *RollbackManager {
+func NewRollbackManager(configStore cfgconfig.ConfigStore) *RollbackManager {
 	return &RollbackManager{
 		configStore: configStore,
 		manager:     NewManager(configStore),
@@ -332,7 +333,7 @@ func (rm *RollbackManager) GetRollbackHistory(ctx context.Context, tenantID, ste
 	// For now, we'll store rollback history as configs in a special namespace
 	// In a full implementation, this might use a dedicated audit store
 
-	filter := &interfaces.ConfigFilter{
+	filter := &cfgconfig.ConfigFilter{
 		TenantID:  tenantID,
 		Namespace: "rollback-history",
 		Names:     []string{stewardID},
@@ -364,14 +365,14 @@ func (rm *RollbackManager) storeRollbackHistory(ctx context.Context, rollbackHis
 		return fmt.Errorf("failed to marshal rollback history: %w", err)
 	}
 
-	configEntry := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	configEntry := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  rollbackHistory.TenantID,
 			Namespace: "rollback-history",
 			Name:      rollbackHistory.StewardID,
 		},
 		Data:      historyData,
-		Format:    interfaces.ConfigFormatYAML,
+		Format:    cfgconfig.ConfigFormatYAML,
 		CreatedAt: rollbackHistory.ExecutedAt,
 		UpdatedAt: rollbackHistory.ExecutedAt,
 		CreatedBy: rollbackHistory.ExecutedBy,

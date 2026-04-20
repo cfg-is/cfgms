@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 func TestDatabaseConfigStore_CRUD(t *testing.T) {
@@ -30,8 +30,8 @@ func TestDatabaseConfigStore_CRUD(t *testing.T) {
 	ctx := context.Background()
 
 	// Create test configuration
-	config := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	config := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  "tenant-123",
 			Namespace: "templates",
 			Name:      "firewall",
@@ -92,7 +92,7 @@ func TestDatabaseConfigStore_CRUD(t *testing.T) {
 	// Verify deletion
 	_, err = store.GetConfig(ctx, config.Key)
 	assert.Error(t, err)
-	assert.Equal(t, interfaces.ErrConfigNotFound, err)
+	assert.Equal(t, cfgconfig.ErrConfigNotFound, err)
 }
 
 func TestDatabaseConfigStore_ListConfigs(t *testing.T) {
@@ -110,9 +110,9 @@ func TestDatabaseConfigStore_ListConfigs(t *testing.T) {
 	ctx := context.Background()
 
 	// Create multiple test configurations
-	configs := []*interfaces.ConfigEntry{
+	configs := []*cfgconfig.ConfigEntry{
 		{
-			Key: &interfaces.ConfigKey{
+			Key: &cfgconfig.ConfigKey{
 				TenantID:  "tenant-a",
 				Namespace: "templates",
 				Name:      "firewall",
@@ -122,7 +122,7 @@ func TestDatabaseConfigStore_ListConfigs(t *testing.T) {
 			Tags:      []string{"security", "firewall"},
 		},
 		{
-			Key: &interfaces.ConfigKey{
+			Key: &cfgconfig.ConfigKey{
 				TenantID:  "tenant-a",
 				Namespace: "certificates",
 				Name:      "ssl-cert",
@@ -132,7 +132,7 @@ func TestDatabaseConfigStore_ListConfigs(t *testing.T) {
 			Tags:      []string{"security", "ssl"},
 		},
 		{
-			Key: &interfaces.ConfigKey{
+			Key: &cfgconfig.ConfigKey{
 				TenantID:  "tenant-b",
 				Namespace: "templates",
 				Name:      "firewall",
@@ -155,7 +155,7 @@ func TestDatabaseConfigStore_ListConfigs(t *testing.T) {
 	assert.Len(t, allConfigs, 3)
 
 	// Test filter by tenant
-	tenantAFilter := &interfaces.ConfigFilter{
+	tenantAFilter := &cfgconfig.ConfigFilter{
 		TenantID: "tenant-a",
 	}
 	tenantAConfigs, err := store.ListConfigs(ctx, tenantAFilter)
@@ -163,7 +163,7 @@ func TestDatabaseConfigStore_ListConfigs(t *testing.T) {
 	assert.Len(t, tenantAConfigs, 2)
 
 	// Test filter by namespace
-	templatesFilter := &interfaces.ConfigFilter{
+	templatesFilter := &cfgconfig.ConfigFilter{
 		Namespace: "templates",
 	}
 	templateConfigs, err := store.ListConfigs(ctx, templatesFilter)
@@ -171,7 +171,7 @@ func TestDatabaseConfigStore_ListConfigs(t *testing.T) {
 	assert.Len(t, templateConfigs, 2)
 
 	// Test filter by tags
-	firewallTagFilter := &interfaces.ConfigFilter{
+	firewallTagFilter := &cfgconfig.ConfigFilter{
 		Tags: []string{"firewall"},
 	}
 	firewallConfigs, err := store.ListConfigs(ctx, firewallTagFilter)
@@ -179,7 +179,7 @@ func TestDatabaseConfigStore_ListConfigs(t *testing.T) {
 	assert.Len(t, firewallConfigs, 2)
 
 	// Test combined filters
-	combinedFilter := &interfaces.ConfigFilter{
+	combinedFilter := &cfgconfig.ConfigFilter{
 		TenantID:  "tenant-a",
 		Namespace: "templates",
 	}
@@ -189,7 +189,7 @@ func TestDatabaseConfigStore_ListConfigs(t *testing.T) {
 	assert.Equal(t, "firewall", combinedConfigs[0].Key.Name)
 
 	// Test pagination
-	paginatedFilter := &interfaces.ConfigFilter{
+	paginatedFilter := &cfgconfig.ConfigFilter{
 		Limit:  2,
 		Offset: 0,
 	}
@@ -203,7 +203,7 @@ func TestDatabaseConfigStore_ListConfigs(t *testing.T) {
 	assert.Len(t, page2, 1)
 
 	// Test sorting
-	sortedFilter := &interfaces.ConfigFilter{
+	sortedFilter := &cfgconfig.ConfigFilter{
 		SortBy: "name",
 		Order:  "asc",
 	}
@@ -229,14 +229,14 @@ func TestDatabaseConfigStore_VersionHistory(t *testing.T) {
 
 	ctx := context.Background()
 
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  "tenant-version",
 		Namespace: "templates",
 		Name:      "test-config",
 	}
 
 	// Create initial version
-	config := &interfaces.ConfigEntry{
+	config := &cfgconfig.ConfigEntry{
 		Key:  key,
 		Data: []byte("version 1 data"),
 	}
@@ -282,7 +282,7 @@ func TestDatabaseConfigStore_VersionHistory(t *testing.T) {
 	// Test non-existent version
 	_, err = store.GetConfigVersion(ctx, key, 999)
 	assert.Error(t, err)
-	assert.Equal(t, interfaces.ErrConfigNotFound, err)
+	assert.Equal(t, cfgconfig.ErrConfigNotFound, err)
 }
 
 func TestDatabaseConfigStore_BatchOperations(t *testing.T) {
@@ -300,9 +300,9 @@ func TestDatabaseConfigStore_BatchOperations(t *testing.T) {
 	ctx := context.Background()
 
 	// Create batch of configurations
-	configs := []*interfaces.ConfigEntry{
+	configs := []*cfgconfig.ConfigEntry{
 		{
-			Key: &interfaces.ConfigKey{
+			Key: &cfgconfig.ConfigKey{
 				TenantID:  "batch-tenant",
 				Namespace: "batch",
 				Name:      "config-1",
@@ -310,7 +310,7 @@ func TestDatabaseConfigStore_BatchOperations(t *testing.T) {
 			Data: []byte("batch config 1"),
 		},
 		{
-			Key: &interfaces.ConfigKey{
+			Key: &cfgconfig.ConfigKey{
 				TenantID:  "batch-tenant",
 				Namespace: "batch",
 				Name:      "config-2",
@@ -318,7 +318,7 @@ func TestDatabaseConfigStore_BatchOperations(t *testing.T) {
 			Data: []byte("batch config 2"),
 		},
 		{
-			Key: &interfaces.ConfigKey{
+			Key: &cfgconfig.ConfigKey{
 				TenantID:  "batch-tenant",
 				Namespace: "batch",
 				Name:      "config-3",
@@ -340,7 +340,7 @@ func TestDatabaseConfigStore_BatchOperations(t *testing.T) {
 	}
 
 	// Test DeleteConfigBatch
-	keys := make([]*interfaces.ConfigKey, len(configs))
+	keys := make([]*cfgconfig.ConfigKey, len(configs))
 	for i, config := range configs {
 		keys[i] = config.Key
 	}
@@ -352,7 +352,7 @@ func TestDatabaseConfigStore_BatchOperations(t *testing.T) {
 	for _, key := range keys {
 		_, err := store.GetConfig(ctx, key)
 		assert.Error(t, err)
-		assert.Equal(t, interfaces.ErrConfigNotFound, err)
+		assert.Equal(t, cfgconfig.ErrConfigNotFound, err)
 	}
 }
 
@@ -371,9 +371,9 @@ func TestDatabaseConfigStore_Statistics(t *testing.T) {
 	ctx := context.Background()
 
 	// Create test configurations with different attributes
-	configs := []*interfaces.ConfigEntry{
+	configs := []*cfgconfig.ConfigEntry{
 		{
-			Key: &interfaces.ConfigKey{
+			Key: &cfgconfig.ConfigKey{
 				TenantID:  "stats-tenant-a",
 				Namespace: "templates",
 				Name:      "config-1",
@@ -382,7 +382,7 @@ func TestDatabaseConfigStore_Statistics(t *testing.T) {
 			CreatedBy: "user1",
 		},
 		{
-			Key: &interfaces.ConfigKey{
+			Key: &cfgconfig.ConfigKey{
 				TenantID:  "stats-tenant-a",
 				Namespace: "certificates",
 				Name:      "config-2",
@@ -391,7 +391,7 @@ func TestDatabaseConfigStore_Statistics(t *testing.T) {
 			CreatedBy: "user2",
 		},
 		{
-			Key: &interfaces.ConfigKey{
+			Key: &cfgconfig.ConfigKey{
 				TenantID:  "stats-tenant-b",
 				Namespace: "templates",
 				Name:      "config-3",
@@ -447,42 +447,42 @@ func TestDatabaseConfigStore_Validation(t *testing.T) {
 	// Test validation errors
 	tests := []struct {
 		name        string
-		config      *interfaces.ConfigEntry
+		config      *cfgconfig.ConfigEntry
 		expectedErr error
 	}{
 		{
 			name:        "nil key",
-			config:      &interfaces.ConfigEntry{Key: nil, Data: []byte("data")},
-			expectedErr: interfaces.ErrNameRequired,
+			config:      &cfgconfig.ConfigEntry{Key: nil, Data: []byte("data")},
+			expectedErr: cfgconfig.ErrNameRequired,
 		},
 		{
 			name: "empty tenant ID",
-			config: &interfaces.ConfigEntry{
-				Key:  &interfaces.ConfigKey{TenantID: "", Namespace: "ns", Name: "name"},
+			config: &cfgconfig.ConfigEntry{
+				Key:  &cfgconfig.ConfigKey{TenantID: "", Namespace: "ns", Name: "name"},
 				Data: []byte("data"),
 			},
-			expectedErr: interfaces.ErrTenantRequired,
+			expectedErr: cfgconfig.ErrTenantRequired,
 		},
 		{
 			name: "empty namespace",
-			config: &interfaces.ConfigEntry{
-				Key:  &interfaces.ConfigKey{TenantID: "tenant", Namespace: "", Name: "name"},
+			config: &cfgconfig.ConfigEntry{
+				Key:  &cfgconfig.ConfigKey{TenantID: "tenant", Namespace: "", Name: "name"},
 				Data: []byte("data"),
 			},
-			expectedErr: interfaces.ErrNamespaceRequired,
+			expectedErr: cfgconfig.ErrNamespaceRequired,
 		},
 		{
 			name: "empty name",
-			config: &interfaces.ConfigEntry{
-				Key:  &interfaces.ConfigKey{TenantID: "tenant", Namespace: "ns", Name: ""},
+			config: &cfgconfig.ConfigEntry{
+				Key:  &cfgconfig.ConfigKey{TenantID: "tenant", Namespace: "ns", Name: ""},
 				Data: []byte("data"),
 			},
-			expectedErr: interfaces.ErrNameRequired,
+			expectedErr: cfgconfig.ErrNameRequired,
 		},
 		{
 			name: "empty data",
-			config: &interfaces.ConfigEntry{
-				Key:  &interfaces.ConfigKey{TenantID: "tenant", Namespace: "ns", Name: "name"},
+			config: &cfgconfig.ConfigEntry{
+				Key:  &cfgconfig.ConfigKey{TenantID: "tenant", Namespace: "ns", Name: "name"},
 				Data: []byte{},
 			},
 			expectedErr: nil, // Should have a specific error for empty data
@@ -527,8 +527,8 @@ func TestDatabaseConfigStore_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			defer func() { done <- true }()
 
-			config := &interfaces.ConfigEntry{
-				Key: &interfaces.ConfigKey{
+			config := &cfgconfig.ConfigEntry{
+				Key: &cfgconfig.ConfigKey{
 					TenantID:  "concurrent-tenant",
 					Namespace: "test",
 					Name:      fmt.Sprintf("config-%d", id),
@@ -547,7 +547,7 @@ func TestDatabaseConfigStore_ConcurrentAccess(t *testing.T) {
 	}
 
 	// Verify all configurations were stored
-	filter := &interfaces.ConfigFilter{
+	filter := &cfgconfig.ConfigFilter{
 		TenantID:  "concurrent-tenant",
 		Namespace: "test",
 	}
@@ -609,8 +609,8 @@ func BenchmarkDatabaseConfigStore_StoreConfig(b *testing.B) {
 
 	ctx := context.Background()
 
-	config := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	config := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  "bench-tenant",
 			Namespace: "bench",
 			Name:      "config",
@@ -644,13 +644,13 @@ func BenchmarkDatabaseConfigStore_GetConfig(b *testing.B) {
 	ctx := context.Background()
 
 	// Setup test data
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  "bench-tenant",
 		Namespace: "bench",
 		Name:      "config",
 	}
 
-	config := &interfaces.ConfigEntry{
+	config := &cfgconfig.ConfigEntry{
 		Key:  key,
 		Data: []byte("benchmark config data"),
 	}
@@ -684,8 +684,8 @@ func BenchmarkDatabaseConfigStore_ListConfigs(b *testing.B) {
 
 	// Setup test data
 	for i := 0; i < 100; i++ {
-		config := &interfaces.ConfigEntry{
-			Key: &interfaces.ConfigKey{
+		config := &cfgconfig.ConfigEntry{
+			Key: &cfgconfig.ConfigKey{
 				TenantID:  "bench-tenant",
 				Namespace: "bench",
 				Name:      fmt.Sprintf("config-%d", i),
@@ -696,7 +696,7 @@ func BenchmarkDatabaseConfigStore_ListConfigs(b *testing.B) {
 		require.NoError(b, err)
 	}
 
-	filter := &interfaces.ConfigFilter{
+	filter := &cfgconfig.ConfigFilter{
 		TenantID: "bench-tenant",
 		Limit:    50,
 	}

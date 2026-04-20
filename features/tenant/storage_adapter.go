@@ -6,35 +6,35 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// StorageAdapter adapts pkg/storage/interfaces.TenantStore to features/tenant.Store
+// StorageAdapter adapts pkg/storage/business.TenantStore to features/tenant.Store
 // This allows the tenant management features to use the global storage provider system
 type StorageAdapter struct {
-	store interfaces.TenantStore
+	store business.TenantStore
 }
 
 // NewStorageAdapter creates a new storage adapter
-func NewStorageAdapter(store interfaces.TenantStore) Store {
+func NewStorageAdapter(store business.TenantStore) Store {
 	return &StorageAdapter{
 		store: store,
 	}
 }
 
-// convertTenantToStorage converts features/tenant.Tenant to interfaces.TenantData
-func convertTenantToStorage(t *Tenant) *interfaces.TenantData {
+// convertTenantToStorage converts features/tenant.Tenant to business.TenantData
+func convertTenantToStorage(t *Tenant) *business.TenantData {
 	if t == nil {
 		return nil
 	}
 
 	// Convert status - map TenantStatusInactive to TenantStatusDeleted
-	status := interfaces.TenantStatus(t.Status)
+	status := business.TenantStatus(t.Status)
 	if t.Status == TenantStatusInactive {
-		status = interfaces.TenantStatusDeleted
+		status = business.TenantStatusDeleted
 	}
 
-	return &interfaces.TenantData{
+	return &business.TenantData{
 		ID:          t.ID,
 		Name:        t.Name,
 		Description: t.Description,
@@ -46,15 +46,15 @@ func convertTenantToStorage(t *Tenant) *interfaces.TenantData {
 	}
 }
 
-// convertTenantFromStorage converts interfaces.TenantData to features/tenant.Tenant
-func convertTenantFromStorage(t *interfaces.TenantData) *Tenant {
+// convertTenantFromStorage converts business.TenantData to features/tenant.Tenant
+func convertTenantFromStorage(t *business.TenantData) *Tenant {
 	if t == nil {
 		return nil
 	}
 
 	// Convert status - map TenantStatusDeleted to TenantStatusInactive
 	status := TenantStatus(t.Status)
-	if t.Status == interfaces.TenantStatusDeleted {
+	if t.Status == business.TenantStatusDeleted {
 		status = TenantStatusInactive
 	}
 
@@ -70,27 +70,27 @@ func convertTenantFromStorage(t *interfaces.TenantData) *Tenant {
 	}
 }
 
-// convertFilterToStorage converts features/tenant.TenantFilter to interfaces.TenantFilter
-func convertFilterToStorage(f *TenantFilter) *interfaces.TenantFilter {
+// convertFilterToStorage converts features/tenant.TenantFilter to business.TenantFilter
+func convertFilterToStorage(f *TenantFilter) *business.TenantFilter {
 	if f == nil {
 		return nil
 	}
 
 	// Convert status - map TenantStatusInactive to TenantStatusDeleted
-	status := interfaces.TenantStatus(f.Status)
+	status := business.TenantStatus(f.Status)
 	if f.Status == TenantStatusInactive {
-		status = interfaces.TenantStatusDeleted
+		status = business.TenantStatusDeleted
 	}
 
-	return &interfaces.TenantFilter{
+	return &business.TenantFilter{
 		ParentID: f.ParentID,
 		Status:   status,
 		Name:     f.Name,
 	}
 }
 
-// convertHierarchyFromStorage converts interfaces.TenantHierarchy to features/tenant.TenantHierarchy
-func convertHierarchyFromStorage(h *interfaces.TenantHierarchy) *TenantHierarchy {
+// convertHierarchyFromStorage converts business.TenantHierarchy to features/tenant.TenantHierarchy
+func convertHierarchyFromStorage(h *business.TenantHierarchy) *TenantHierarchy {
 	if h == nil {
 		return nil
 	}

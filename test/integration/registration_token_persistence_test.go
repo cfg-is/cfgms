@@ -16,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // TestRegistrationTokenPersistence_AcrossRestart validates that registration tokens
@@ -167,7 +168,7 @@ func TestRegistrationTokenPersistence_TokenExpiration(t *testing.T) {
 	now := time.Now()
 	pastExpiry := now.Add(-1 * time.Hour)
 
-	expiredToken := &interfaces.RegistrationTokenData{
+	expiredToken := &business.RegistrationTokenData{
 		Token:     "cfgms_reg_expired_test",
 		TenantID:  "tenant-expiry",
 		CreatedAt: now.Add(-2 * time.Hour),

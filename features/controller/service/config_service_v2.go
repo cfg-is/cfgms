@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // ConfigurationServiceV2 implements Epic 6 compliant Configuration service
@@ -386,6 +387,6 @@ func (s *ConfigurationServiceV2) extractTenantID(ctx context.Context) string {
 }
 
 // GetStorageStats returns storage statistics
-func (s *ConfigurationServiceV2) GetStorageStats(ctx context.Context) (*interfaces.ConfigStats, error) {
+func (s *ConfigurationServiceV2) GetStorageStats(ctx context.Context) (*cfgconfig.ConfigStats, error) {
 	return s.configManager.GetConfigurationStats(ctx)
 }
