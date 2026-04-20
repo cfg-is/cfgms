@@ -406,7 +406,7 @@ func (b *AuditEventBuilder) build(entry *business.AuditEntry) {
 	entry.Path = b.path
 	entry.Details = redactMap(b.details)
 	if b.changes != nil {
-		entry.Changes = &interfaces.AuditChanges{
+		entry.Changes = &business.AuditChanges{
 			Before: redactMap(b.changes.Before),
 			After:  redactMap(b.changes.After),
 			Fields: b.changes.Fields,
