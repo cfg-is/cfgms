@@ -488,6 +488,11 @@ func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	}
 }
 
+// GetRouter returns the HTTP router for testing purposes.
+func (s *Server) GetRouter() http.Handler {
+	return s.router
+}
+
 // SetApprovalHook replaces the registration approval hook (Issue #422).
 // Called during server startup when a workflow engine is available.
 func (s *Server) SetApprovalHook(hook RegistrationApprovalHook) {
