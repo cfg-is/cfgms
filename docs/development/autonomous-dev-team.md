@@ -95,6 +95,18 @@ The **Acceptance Reviewer** checks each PR against the story's acceptance criter
 
 The PM only sees PRs that agents failed to get right after two attempts. For those, the PM provides guidance (updated story spec, clarification, or direct code fix) and the cycle restarts.
 
+#### FIFO Review Order
+
+When multiple PRs are ready for acceptance review simultaneously, the PO processes them in **FIFO order** (oldest PR first, by `createdAt` timestamp ascending). This policy minimizes rebase churn:
+
+- The oldest PR was based on the earliest develop snapshot and has the fewest accumulated conflicts.
+- Once it merges, the next-oldest PR only needs to rebase against one new commit, not an arbitrary set.
+- Reviewing in arbitrary or reverse order causes a cascade: PR-B merges first → PR-A needs rebase against PR-B → PR-C also needs rebase → churn compounds.
+
+PRs are processed **serially** — one acceptance reviewer at a time — so that each subsequent review is against an up-to-date develop tip. A PR held due to a file conflict gate does **not** block strictly-younger PRs that don't share the conflicting files; those skip ahead in the queue.
+
+This policy was adopted after PRs #770–772 and #777 landed out-of-order in close succession, leaving #777 stale by 4 merges and triggering hotfix #785.
+
 ### 5. Completion
 
 Merged PRs auto-close their story issues. The PO tracks epic completion via GitHub sub-issue progress and surfaces the next action.
