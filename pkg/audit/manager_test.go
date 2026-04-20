@@ -7,21 +7,12 @@ import (
 	"testing"
 	"time"
 
-<<<<<<< HEAD
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 
-=======
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
->>>>>>> 588859d (controller: remove nine debug fmt.Printf lines (Issue #789))
 	// Import storage providers to register them
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
