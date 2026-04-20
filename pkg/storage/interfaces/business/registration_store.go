@@ -5,8 +5,12 @@ package business
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrTokenAlreadyUsed is returned when a single-use token has already been consumed.
+var ErrTokenAlreadyUsed = errors.New("registration token already used")
 
 // RegistrationTokenStore defines storage interface for CFGMS registration token persistence
 // All registration token modules use this interface - storage provider is chosen by controller
@@ -17,6 +21,10 @@ type RegistrationTokenStore interface {
 	UpdateToken(ctx context.Context, token *RegistrationTokenData) error
 	DeleteToken(ctx context.Context, tokenStr string) error
 	ListTokens(ctx context.Context, filter *RegistrationTokenFilter) ([]*RegistrationTokenData, error)
+
+	// ConsumeToken atomically validates and marks a token as used in a single operation.
+	// For single-use tokens, returns ErrTokenAlreadyUsed if already consumed.
+	ConsumeToken(ctx context.Context, tokenStr, stewardID string) error
 
 	// Initialize and cleanup
 	Initialize(ctx context.Context) error

@@ -7,13 +7,15 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // SQLiteRegistrationTokenStore implements business.RegistrationTokenStore using SQLite.
 type SQLiteRegistrationTokenStore struct {
-	db *sql.DB
+	db        *sql.DB
+	consumeMu sync.Mutex // serializes ConsumeToken to prevent SQLITE_BUSY under high concurrency
 }
 
 // Initialize is a no-op; schema is applied in openAndInit.
@@ -179,6 +181,64 @@ func (s *SQLiteRegistrationTokenStore) ListTokens(ctx context.Context, filter *b
 		tokens = append(tokens, t)
 	}
 	return tokens, rows.Err()
+}
+
+// ConsumeToken atomically validates and marks a single-use token as used via a single UPDATE
+// with a WHERE guard. If rows-affected == 0 for a single-use token, a follow-up SELECT
+// distinguishes "not found" from "already used" to return the correct error.
+// The consumeMu mutex serializes callers within the same process because the pure-Go SQLite
+// driver does not reliably propagate busy_timeout across all pool connections.
+func (s *SQLiteRegistrationTokenStore) ConsumeToken(ctx context.Context, tokenStr, stewardID string) error {
+	s.consumeMu.Lock()
+	defer s.consumeMu.Unlock()
+
+	now := formatTime(nowUTC())
+
+	// Attempt atomic mark-used for single-use tokens that are still unused.
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE registration_tokens
+		SET used_at = ?, used_by = ?
+		WHERE token = ? AND single_use = 1 AND used_at IS NULL AND revoked = 0`,
+		now, stewardID, tokenStr,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to consume registration token: %w", err)
+	}
+
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		return nil
+	}
+
+	// Rows-affected == 0: either not found, already used, revoked, or multi-use. Inspect.
+	data, err := s.GetToken(ctx, tokenStr)
+	if err != nil {
+		// Token genuinely does not exist.
+		return fmt.Errorf("token not found")
+	}
+
+	if data.Revoked {
+		return fmt.Errorf("token is revoked")
+	}
+
+	if data.SingleUse && data.UsedAt != nil {
+		return business.ErrTokenAlreadyUsed
+	}
+
+	// Multi-use token or expired — validate then mark used unconditionally.
+	if !data.IsValid() {
+		return fmt.Errorf("token is not valid")
+	}
+
+	// Multi-use: mark used (tracks last consumer; non-blocking for concurrent callers).
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE registration_tokens SET used_at = ?, used_by = ? WHERE token = ?`,
+		now, stewardID, tokenStr,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to mark multi-use token as used: %w", err)
+	}
+	return nil
 }
 
 // ---- helpers ----------------------------------------------------------------

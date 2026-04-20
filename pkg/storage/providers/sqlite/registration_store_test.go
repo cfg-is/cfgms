@@ -5,6 +5,8 @@ package sqlite_test
 import (
 	"context"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -236,4 +238,112 @@ func TestRegistrationStore_ListUsedFilter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, unused, 1)
 	assert.Equal(t, "tok-unused", unused[0].Token)
+}
+
+func TestRegistrationStore_ConsumeToken_SingleUse(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	token := &interfaces.RegistrationTokenData{
+		Token:         "tok-consume-single",
+		TenantID:      "t",
+		ControllerURL: "https://c.example.com",
+		SingleUse:     true,
+	}
+	require.NoError(t, store.SaveToken(ctx, token))
+
+	// First consume must succeed.
+	require.NoError(t, store.ConsumeToken(ctx, "tok-consume-single", "steward-1"))
+
+	// Second consume must return ErrTokenAlreadyUsed.
+	err := store.ConsumeToken(ctx, "tok-consume-single", "steward-2")
+	require.ErrorIs(t, err, interfaces.ErrTokenAlreadyUsed)
+}
+
+func TestRegistrationStore_ConsumeToken_MultiUse(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	token := &interfaces.RegistrationTokenData{
+		Token:         "tok-consume-multi",
+		TenantID:      "t",
+		ControllerURL: "https://c.example.com",
+		SingleUse:     false,
+	}
+	require.NoError(t, store.SaveToken(ctx, token))
+
+	require.NoError(t, store.ConsumeToken(ctx, "tok-consume-multi", "steward-1"))
+	require.NoError(t, store.ConsumeToken(ctx, "tok-consume-multi", "steward-2"))
+}
+
+func TestRegistrationStore_ConsumeToken_NotFound(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	err := store.ConsumeToken(ctx, "nonexistent-tok", "steward-1")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, interfaces.ErrTokenAlreadyUsed)
+}
+
+func TestRegistrationStore_ConsumeToken_Revoked(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	token := &interfaces.RegistrationTokenData{
+		Token:         "tok-consume-revoked",
+		TenantID:      "t",
+		ControllerURL: "https://c.example.com",
+		SingleUse:     true,
+	}
+	require.NoError(t, store.SaveToken(ctx, token))
+	token.Revoke()
+	require.NoError(t, store.UpdateToken(ctx, token))
+
+	err := store.ConsumeToken(ctx, "tok-consume-revoked", "steward-1")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, interfaces.ErrTokenAlreadyUsed)
+}
+
+func TestRegistrationStore_ConsumeToken_Race(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	token := &interfaces.RegistrationTokenData{
+		Token:         "tok-race",
+		TenantID:      "t",
+		ControllerURL: "https://c.example.com",
+		SingleUse:     true,
+	}
+	require.NoError(t, store.SaveToken(ctx, token))
+
+	const goroutines = 50
+	var (
+		successCount atomic.Int32
+		alreadyUsed  atomic.Int32
+		wg           sync.WaitGroup
+		start        = make(chan struct{})
+	)
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			err := store.ConsumeToken(ctx, "tok-race", "steward-"+string(rune('A'+id)))
+			switch err {
+			case nil:
+				successCount.Add(1)
+			case interfaces.ErrTokenAlreadyUsed:
+				alreadyUsed.Add(1)
+			default:
+				t.Errorf("goroutine %d: unexpected error: %v", id, err)
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	assert.Equal(t, int32(1), successCount.Load(), "exactly one goroutine must succeed")
+	assert.Equal(t, int32(goroutines-1), alreadyUsed.Load(), "all others must get ErrTokenAlreadyUsed")
 }

@@ -383,6 +383,74 @@ func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter 
 	return tokens, nil
 }
 
+// ConsumeToken atomically validates and marks a single-use token as used via a single UPDATE
+// with a WHERE guard. For single-use tokens that were already consumed, returns ErrTokenAlreadyUsed.
+func (s *DatabaseRegistrationTokenStore) ConsumeToken(ctx context.Context, tokenStr, stewardID string) error {
+	now := time.Now().UTC()
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// Atomic mark-used for single-use tokens that are still unused and not revoked.
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE cfgms_registration_tokens
+		SET used_at = $1, used_by = $2
+		WHERE token = $3 AND single_use = true AND used_at IS NULL AND revoked = false`,
+		now, stewardID, tokenStr,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to consume registration token: %w", err)
+	}
+
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		return nil
+	}
+
+	// Rows-affected == 0: inspect to determine why.
+	var token business.RegistrationTokenData
+	var expiresAt, usedAt, revokedAt sql.NullTime
+	var group, usedBy sql.NullString
+	err = s.db.QueryRowContext(ctx, `
+		SELECT token, single_use, used_at, revoked, expires_at, group_name, used_by, revoked_at
+		FROM cfgms_registration_tokens WHERE token = $1`, tokenStr).Scan(
+		&token.Token, &token.SingleUse, &usedAt, &token.Revoked,
+		&expiresAt, &group, &usedBy, &revokedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("token not found")
+		}
+		return fmt.Errorf("failed to inspect registration token: %w", err)
+	}
+	if usedAt.Valid {
+		token.UsedAt = &usedAt.Time
+	}
+	if expiresAt.Valid {
+		token.ExpiresAt = &expiresAt.Time
+	}
+
+	if token.Revoked {
+		return fmt.Errorf("token is revoked")
+	}
+	if token.SingleUse && token.UsedAt != nil {
+		return business.ErrTokenAlreadyUsed
+	}
+	if !token.IsValid() {
+		return fmt.Errorf("token is not valid")
+	}
+
+	// Multi-use token: mark used.
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE cfgms_registration_tokens SET used_at = $1, used_by = $2 WHERE token = $3`,
+		now, stewardID, tokenStr,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to mark multi-use token as used: %w", err)
+	}
+	return nil
+}
+
 // nullTimeOrNil converts a *time.Time pointer to sql.NullTime
 func nullTimeOrNil(t *time.Time) sql.NullTime {
 	if t == nil {

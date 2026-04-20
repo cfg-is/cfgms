@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // Store defines the interface for registration token storage.
@@ -24,6 +26,10 @@ type Store interface {
 
 	// DeleteToken deletes a token
 	DeleteToken(ctx context.Context, tokenStr string) error
+
+	// ConsumeToken atomically validates and marks a token as used in a single operation.
+	// For single-use tokens, returns business.ErrTokenAlreadyUsed if already consumed.
+	ConsumeToken(ctx context.Context, tokenStr, stewardID string) error
 }
 
 // MemoryStore is an in-memory implementation of Store (for development/testing).
@@ -95,5 +101,33 @@ func (s *MemoryStore) DeleteToken(ctx context.Context, tokenStr string) error {
 	defer s.mu.Unlock()
 
 	delete(s.tokens, tokenStr)
+	return nil
+}
+
+// ConsumeToken atomically validates and marks a token as used under a single write lock,
+// preventing TOCTOU races when multiple callers attempt to consume the same single-use token.
+func (s *MemoryStore) ConsumeToken(ctx context.Context, tokenStr, stewardID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	token, exists := s.tokens[tokenStr]
+	if !exists {
+		return fmt.Errorf("token not found")
+	}
+
+	if token.Revoked {
+		return fmt.Errorf("token is revoked")
+	}
+
+	if !token.IsValid() {
+		// Distinguish already-used single-use tokens from expired tokens.
+		if token.SingleUse && token.UsedAt != nil {
+			return business.ErrTokenAlreadyUsed
+		}
+		return fmt.Errorf("token is not valid")
+	}
+
+	token.MarkUsed(stewardID)
+	s.tokens[tokenStr] = token
 	return nil
 }

@@ -63,6 +63,11 @@ func (a *StorageAdapter) DeleteToken(ctx context.Context, tokenStr string) error
 	return a.store.DeleteToken(ctx, tokenStr)
 }
 
+// ConsumeToken atomically validates and marks a token as used, delegating to the storage provider.
+func (a *StorageAdapter) ConsumeToken(ctx context.Context, tokenStr, stewardID string) error {
+	return a.store.ConsumeToken(ctx, tokenStr, stewardID)
+}
+
 // tokenToData converts a Token to RegistrationTokenData
 func tokenToData(token *Token) *business.RegistrationTokenData {
 	return &business.RegistrationTokenData{
