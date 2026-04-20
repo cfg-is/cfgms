@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
@@ -196,7 +197,7 @@ func TestStorageAdapter_ConsumeToken_Race(t *testing.T) {
 			switch err {
 			case nil:
 				successCount.Add(1)
-			case interfaces.ErrTokenAlreadyUsed:
+			case business.ErrTokenAlreadyUsed:
 				alreadyUsed.Add(1)
 			default:
 				t.Errorf("goroutine %d: unexpected error: %v", id, err)

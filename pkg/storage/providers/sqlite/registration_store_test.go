@@ -244,7 +244,7 @@ func TestRegistrationStore_ConsumeToken_SingleUse(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &interfaces.RegistrationTokenData{
+	token := &business.RegistrationTokenData{
 		Token:         "tok-consume-single",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
@@ -257,14 +257,14 @@ func TestRegistrationStore_ConsumeToken_SingleUse(t *testing.T) {
 
 	// Second consume must return ErrTokenAlreadyUsed.
 	err := store.ConsumeToken(ctx, "tok-consume-single", "steward-2")
-	require.ErrorIs(t, err, interfaces.ErrTokenAlreadyUsed)
+	require.ErrorIs(t, err, business.ErrTokenAlreadyUsed)
 }
 
 func TestRegistrationStore_ConsumeToken_MultiUse(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &interfaces.RegistrationTokenData{
+	token := &business.RegistrationTokenData{
 		Token:         "tok-consume-multi",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
@@ -282,14 +282,14 @@ func TestRegistrationStore_ConsumeToken_NotFound(t *testing.T) {
 
 	err := store.ConsumeToken(ctx, "nonexistent-tok", "steward-1")
 	require.Error(t, err)
-	require.NotErrorIs(t, err, interfaces.ErrTokenAlreadyUsed)
+	require.NotErrorIs(t, err, business.ErrTokenAlreadyUsed)
 }
 
 func TestRegistrationStore_ConsumeToken_Revoked(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &interfaces.RegistrationTokenData{
+	token := &business.RegistrationTokenData{
 		Token:         "tok-consume-revoked",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
@@ -301,14 +301,14 @@ func TestRegistrationStore_ConsumeToken_Revoked(t *testing.T) {
 
 	err := store.ConsumeToken(ctx, "tok-consume-revoked", "steward-1")
 	require.Error(t, err)
-	require.NotErrorIs(t, err, interfaces.ErrTokenAlreadyUsed)
+	require.NotErrorIs(t, err, business.ErrTokenAlreadyUsed)
 }
 
 func TestRegistrationStore_ConsumeToken_Race(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &interfaces.RegistrationTokenData{
+	token := &business.RegistrationTokenData{
 		Token:         "tok-race",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
@@ -333,7 +333,7 @@ func TestRegistrationStore_ConsumeToken_Race(t *testing.T) {
 			switch err {
 			case nil:
 				successCount.Add(1)
-			case interfaces.ErrTokenAlreadyUsed:
+			case business.ErrTokenAlreadyUsed:
 				alreadyUsed.Add(1)
 			default:
 				t.Errorf("goroutine %d: unexpected error: %v", id, err)

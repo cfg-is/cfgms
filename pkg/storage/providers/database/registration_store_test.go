@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 func newTestRegistrationStore(t *testing.T) *DatabaseRegistrationTokenStore {
@@ -29,7 +29,7 @@ func TestDatabaseRegistrationStore_ConsumeToken_SingleUse(t *testing.T) {
 	store := newTestRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &interfaces.RegistrationTokenData{
+	token := &business.RegistrationTokenData{
 		Token:         "db-tok-consume-single",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
@@ -43,14 +43,14 @@ func TestDatabaseRegistrationStore_ConsumeToken_SingleUse(t *testing.T) {
 
 	// Second consume must return ErrTokenAlreadyUsed.
 	err := store.ConsumeToken(ctx, "db-tok-consume-single", "steward-2")
-	require.ErrorIs(t, err, interfaces.ErrTokenAlreadyUsed)
+	require.ErrorIs(t, err, business.ErrTokenAlreadyUsed)
 }
 
 func TestDatabaseRegistrationStore_ConsumeToken_MultiUse(t *testing.T) {
 	store := newTestRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &interfaces.RegistrationTokenData{
+	token := &business.RegistrationTokenData{
 		Token:         "db-tok-consume-multi",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
@@ -70,14 +70,14 @@ func TestDatabaseRegistrationStore_ConsumeToken_NotFound(t *testing.T) {
 
 	err := store.ConsumeToken(ctx, "db-nonexistent", "steward-1")
 	require.Error(t, err)
-	require.NotErrorIs(t, err, interfaces.ErrTokenAlreadyUsed)
+	require.NotErrorIs(t, err, business.ErrTokenAlreadyUsed)
 }
 
 func TestDatabaseRegistrationStore_ConsumeToken_Revoked(t *testing.T) {
 	store := newTestRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &interfaces.RegistrationTokenData{
+	token := &business.RegistrationTokenData{
 		Token:         "db-tok-revoked",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
@@ -90,14 +90,14 @@ func TestDatabaseRegistrationStore_ConsumeToken_Revoked(t *testing.T) {
 
 	err := store.ConsumeToken(ctx, "db-tok-revoked", "steward-1")
 	require.Error(t, err)
-	require.NotErrorIs(t, err, interfaces.ErrTokenAlreadyUsed)
+	require.NotErrorIs(t, err, business.ErrTokenAlreadyUsed)
 }
 
 func TestDatabaseRegistrationStore_ConsumeToken_Race(t *testing.T) {
 	store := newTestRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &interfaces.RegistrationTokenData{
+	token := &business.RegistrationTokenData{
 		Token:         "db-tok-race",
 		TenantID:      "t",
 		ControllerURL: "https://c.example.com",
@@ -123,7 +123,7 @@ func TestDatabaseRegistrationStore_ConsumeToken_Race(t *testing.T) {
 			switch err {
 			case nil:
 				successCount.Add(1)
-			case interfaces.ErrTokenAlreadyUsed:
+			case business.ErrTokenAlreadyUsed:
 				alreadyUsed.Add(1)
 			default:
 				t.Errorf("goroutine %d: unexpected error: %v", id, err)

@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 func TestMemoryStore_ConsumeToken_SingleUse_Race(t *testing.T) {
@@ -44,7 +44,7 @@ func TestMemoryStore_ConsumeToken_SingleUse_Race(t *testing.T) {
 			switch err {
 			case nil:
 				successCount.Add(1)
-			case interfaces.ErrTokenAlreadyUsed:
+			case business.ErrTokenAlreadyUsed:
 				alreadyUsed.Add(1)
 			default:
 				t.Errorf("goroutine %d: unexpected error: %v", id, err)
@@ -82,7 +82,7 @@ func TestMemoryStore_ConsumeToken_TokenNotFound(t *testing.T) {
 
 	err := store.ConsumeToken(ctx, "nonexistent", "steward-1")
 	require.Error(t, err)
-	assert.NotEqual(t, interfaces.ErrTokenAlreadyUsed, err)
+	assert.NotEqual(t, business.ErrTokenAlreadyUsed, err)
 }
 
 func TestMemoryStore_ConsumeToken_RevokedToken(t *testing.T) {
@@ -100,7 +100,7 @@ func TestMemoryStore_ConsumeToken_RevokedToken(t *testing.T) {
 
 	err := store.ConsumeToken(ctx, "revoked-token", "steward-1")
 	require.Error(t, err)
-	assert.NotEqual(t, interfaces.ErrTokenAlreadyUsed, err)
+	assert.NotEqual(t, business.ErrTokenAlreadyUsed, err)
 }
 
 func TestMemoryStore_ConsumeToken_ExpiredToken(t *testing.T) {
@@ -119,5 +119,5 @@ func TestMemoryStore_ConsumeToken_ExpiredToken(t *testing.T) {
 
 	err := store.ConsumeToken(ctx, "expired-token", "steward-1")
 	require.Error(t, err)
-	assert.NotEqual(t, interfaces.ErrTokenAlreadyUsed, err)
+	assert.NotEqual(t, business.ErrTokenAlreadyUsed, err)
 }
