@@ -177,6 +177,214 @@ test_executable_permissions() {
     done
 }
 
+
+# Test 8: create-clone deletes stale remote branch before cloning
+test_create_clone_stale_branch_deletion() {
+    log_test "Testing create-clone deletes stale remote branch..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local remote_dir="${tmp_dir}/remote.git"
+    local host_dir="${tmp_dir}/host"
+    local worktree_dir="${tmp_dir}/worktrees"
+    local story_num="99997"
+    local branch_name="feature/story-${story_num}-agent"
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    # Create a bare "remote" repo with a develop branch
+    git init --bare -b develop "$remote_dir" >/dev/null 2>&1
+    git init -b develop "$host_dir" >/dev/null 2>&1
+    git -C "$host_dir" config user.email "test@test.com"
+    git -C "$host_dir" config user.name "Test"
+    git -C "$host_dir" remote add origin "$remote_dir"
+    git -C "$host_dir" commit --allow-empty -m "initial commit" >/dev/null 2>&1
+    git -C "$host_dir" push origin develop >/dev/null 2>&1
+
+    # Create a stale feature branch on the remote with a marker commit
+    git -C "$host_dir" checkout -b "$branch_name" >/dev/null 2>&1
+    git -C "$host_dir" commit --allow-empty -m "stale marker commit" >/dev/null 2>&1
+    local marker_sha
+    marker_sha=$(git -C "$host_dir" rev-parse HEAD)
+    git -C "$host_dir" push origin "$branch_name" >/dev/null 2>&1
+    git -C "$host_dir" checkout develop >/dev/null 2>&1
+
+    mkdir -p "$worktree_dir"
+
+    local output
+    output=$(CFGMS_TEST_REPO_ROOT="$host_dir" CFGMS_TEST_WORKTREE_BASE="$worktree_dir"         bash "$dispatch_script" create-clone "$story_num" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "create-clone: Command failed (exit ${exit_code}): ${output}"
+        rm -rf "$tmp_dir"
+        return
+    fi
+
+    # Log line must appear for dispatch trail visibility
+    if echo "$output" | grep -q "Cleaning stale remote branch: ${branch_name}"; then
+        log_pass "create-clone: Logs 'Cleaning stale remote branch' message"
+    else
+        log_fail "create-clone: Missing 'Cleaning stale remote branch' log line"
+    fi
+
+    # Stale branch must be gone from remote
+    if ! git -C "$host_dir" ls-remote --heads origin "$branch_name" | grep -q .; then
+        log_pass "create-clone: Stale remote branch deleted before cloning"
+    else
+        log_fail "create-clone: Stale remote branch still exists after create-clone"
+    fi
+
+    # New clone HEAD must match develop on remote (not the stale marker commit)
+    local clone_head develop_sha
+    clone_head=$(git -C "$worktree_dir/story-${story_num}" rev-parse HEAD 2>/dev/null || echo "missing")
+    develop_sha=$(git -C "$remote_dir" rev-parse develop 2>/dev/null || echo "unknown")
+    if [[ "$clone_head" == "$develop_sha" && "$clone_head" != "$marker_sha" ]]; then
+        log_pass "create-clone: New branch based on develop HEAD, not stale marker commit"
+    else
+        log_fail "create-clone: New branch HEAD (${clone_head}) does not match develop (${develop_sha})"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+# Test 9: create-clone --keep-remote preserves existing remote branch
+test_create_clone_keep_remote() {
+    log_test "Testing create-clone --keep-remote preserves stale remote branch..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local remote_dir="${tmp_dir}/remote.git"
+    local host_dir="${tmp_dir}/host"
+    local worktree_dir="${tmp_dir}/worktrees"
+    local story_num="99998"
+    local branch_name="feature/story-${story_num}-agent"
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    # Create a bare "remote" repo with a develop branch
+    git init --bare -b develop "$remote_dir" >/dev/null 2>&1
+    git init -b develop "$host_dir" >/dev/null 2>&1
+    git -C "$host_dir" config user.email "test@test.com"
+    git -C "$host_dir" config user.name "Test"
+    git -C "$host_dir" remote add origin "$remote_dir"
+    git -C "$host_dir" commit --allow-empty -m "initial commit" >/dev/null 2>&1
+    git -C "$host_dir" push origin develop >/dev/null 2>&1
+
+    # Create a stale feature branch on the remote
+    git -C "$host_dir" checkout -b "$branch_name" >/dev/null 2>&1
+    git -C "$host_dir" commit --allow-empty -m "stale marker commit" >/dev/null 2>&1
+    local stale_sha
+    stale_sha=$(git -C "$host_dir" rev-parse HEAD)
+    git -C "$host_dir" push origin "$branch_name" >/dev/null 2>&1
+    git -C "$host_dir" checkout develop >/dev/null 2>&1
+
+    mkdir -p "$worktree_dir"
+
+    local output
+    output=$(CFGMS_TEST_REPO_ROOT="$host_dir" CFGMS_TEST_WORKTREE_BASE="$worktree_dir"         bash "$dispatch_script" create-clone --keep-remote "$story_num" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "create-clone --keep-remote: Command failed (exit ${exit_code}): ${output}"
+        rm -rf "$tmp_dir"
+        return
+    fi
+
+    # Remote branch must still exist
+    if git -C "$host_dir" ls-remote --heads origin "$branch_name" | grep -q .; then
+        log_pass "create-clone --keep-remote: Stale remote branch preserved"
+    else
+        log_fail "create-clone --keep-remote: Stale remote branch was deleted (should be preserved)"
+    fi
+
+    # Remote branch must still point at the stale commit
+    local remote_branch_sha
+    remote_branch_sha=$(git -C "$remote_dir" rev-parse "$branch_name" 2>/dev/null || echo "missing")
+    if [[ "$remote_branch_sha" == "$stale_sha" ]]; then
+        log_pass "create-clone --keep-remote: Remote branch still points at original stale commit"
+    else
+        log_fail "create-clone --keep-remote: Remote branch SHA changed (expected ${stale_sha}, got ${remote_branch_sha})"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+
+# Test 10: create-clone exits 1 when stale branch deletion fails (no silent proceed)
+test_create_clone_deletion_failure() {
+    log_test "Testing create-clone exits 1 when stale branch deletion fails..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local remote_dir="${tmp_dir}/remote.git"
+    local host_dir="${tmp_dir}/host"
+    local worktree_dir="${tmp_dir}/worktrees"
+    local story_num="99996"
+    local branch_name="feature/story-${story_num}-agent"
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    # Create a bare "remote" repo with a develop branch
+    git init --bare -b develop "$remote_dir" >/dev/null 2>&1
+    git init -b develop "$host_dir" >/dev/null 2>&1
+    git -C "$host_dir" config user.email "test@test.com"
+    git -C "$host_dir" config user.name "Test"
+    git -C "$host_dir" remote add origin "$remote_dir"
+    git -C "$host_dir" commit --allow-empty -m "initial commit" >/dev/null 2>&1
+    git -C "$host_dir" push origin develop >/dev/null 2>&1
+
+    # Create a stale feature branch on the remote
+    git -C "$host_dir" checkout -b "$branch_name" >/dev/null 2>&1
+    git -C "$host_dir" commit --allow-empty -m "stale marker commit" >/dev/null 2>&1
+    git -C "$host_dir" push origin "$branch_name" >/dev/null 2>&1
+    git -C "$host_dir" checkout develop >/dev/null 2>&1
+
+    # Install a pre-receive hook that rejects branch deletions — simulates a
+    # protected branch or insufficient permissions on the remote.
+    mkdir -p "${remote_dir}/hooks"
+    cat > "${remote_dir}/hooks/pre-receive" << 'HOOKEOF'
+#!/bin/bash
+while read old_sha new_sha ref; do
+    if [[ "$new_sha" == "0000000000000000000000000000000000000000" ]]; then
+        echo "ERROR: Branch deletion rejected (protected branch)" >&2
+        exit 1
+    fi
+done
+HOOKEOF
+    chmod +x "${remote_dir}/hooks/pre-receive"
+
+    mkdir -p "$worktree_dir"
+
+    local output exit_code=0
+    # Use || to prevent set -e from aborting the test on expected non-zero exit
+    output=$(CFGMS_TEST_REPO_ROOT="$host_dir" CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+        bash "$dispatch_script" create-clone "$story_num" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_pass "create-clone: Exits non-zero when stale branch deletion fails"
+    else
+        log_fail "create-clone: Should have failed when branch deletion is rejected (exit was 0)"
+    fi
+
+    if echo "$output" | grep -q "ERROR:"; then
+        log_pass "create-clone: Prints ERROR message when deletion fails"
+    else
+        log_fail "create-clone: Missing ERROR message when deletion fails (output: ${output})"
+    fi
+
+    # Clone directory must NOT exist — script must not proceed after deletion failure
+    local clone_dir="${worktree_dir}/story-${story_num}"
+    if [[ ! -d "$clone_dir" ]]; then
+        log_pass "create-clone: Clone directory not created when deletion fails (no partial state)"
+    else
+        log_fail "create-clone: Clone directory was created despite deletion failure"
+        rm -rf "$clone_dir"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
 # Main execution
 echo "🔍 Script Validation Test Suite"
 echo "================================"
@@ -196,6 +404,13 @@ test_wait_for_services
 echo ""
 test_executable_permissions
 
+echo ""
+test_create_clone_stale_branch_deletion
+echo ""
+test_create_clone_keep_remote
+echo ""
+test_create_clone_deletion_failure
+echo ""
 echo ""
 echo "📊 Test Summary"
 echo "==============="
