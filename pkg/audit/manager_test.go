@@ -485,19 +485,19 @@ func TestRecordEvent_RedactsDetails(t *testing.T) {
 
 	event := NewEventBuilder().
 		Tenant("test-tenant").
-		Type(interfaces.AuditEventConfiguration).
+		Type(business.AuditEventConfiguration).
 		Action("test_action").
-		User("test-user", interfaces.AuditUserTypeHuman).
+		User("test-user", business.AuditUserTypeHuman).
 		Resource("test_resource", "test-id", "Test Resource").
 		Detail("password", "hunter2").
 		Detail("api_key", "secret-key-value").
 		Detail("user_count", 5).
-		Severity(interfaces.AuditSeverityMedium)
+		Severity(business.AuditSeverityMedium)
 
 	err := manager.RecordEvent(ctx, event)
 	require.NoError(t, err)
 
-	entries, err := manager.QueryEntries(ctx, &interfaces.AuditFilter{
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
 		TenantID: "test-tenant",
 	})
 	require.NoError(t, err)
@@ -527,17 +527,17 @@ func TestChanges_Redacted(t *testing.T) {
 
 	event := NewEventBuilder().
 		Tenant("test-tenant").
-		Type(interfaces.AuditEventConfiguration).
+		Type(business.AuditEventConfiguration).
 		Action("update_credentials").
-		User("admin", interfaces.AuditUserTypeHuman).
+		User("admin", business.AuditUserTypeHuman).
 		Resource("user", "alice", "Alice").
 		Changes(before, after, []string{"password", "username", "token"}).
-		Severity(interfaces.AuditSeverityHigh)
+		Severity(business.AuditSeverityHigh)
 
 	err := manager.RecordEvent(ctx, event)
 	require.NoError(t, err)
 
-	entries, err := manager.QueryEntries(ctx, &interfaces.AuditFilter{
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
 		TenantID: "test-tenant",
 	})
 	require.NoError(t, err)
@@ -568,17 +568,17 @@ func TestRecordEvent_RedactsErrorMessage(t *testing.T) {
 
 	event := NewEventBuilder().
 		Tenant("test-tenant").
-		Type(interfaces.AuditEventAuthentication).
+		Type(business.AuditEventAuthentication).
 		Action("login").
-		User("user1", interfaces.AuditUserTypeHuman).
+		User("user1", business.AuditUserTypeHuman).
 		Resource("session", "user1", "").
 		Error("AUTH_FAILED", "login failed: password=hunter2, username=alice").
-		Severity(interfaces.AuditSeverityHigh)
+		Severity(business.AuditSeverityHigh)
 
 	err := manager.RecordEvent(ctx, event)
 	require.NoError(t, err)
 
-	entries, err := manager.QueryEntries(ctx, &interfaces.AuditFilter{
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
 		TenantID: "test-tenant",
 	})
 	require.NoError(t, err)
