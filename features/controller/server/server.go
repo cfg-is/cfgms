@@ -981,13 +981,19 @@ func (s *Server) Stop() error {
 		}
 	}
 
-	// Record system shutdown audit event
+	// Record system shutdown audit event then flush the audit queue before
+	// tearing down storage so in-flight entries reach the store.
 	if s.auditManager != nil {
 		ctx := context.Background()
 		// TODO(#751): controller identity as a real tenant — replace audit.SystemTenantID with proper identity.
 		event := audit.SystemEvent(audit.SystemTenantID, "controller_stop", "Controller server shutting down")
 		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
 			s.logger.Warn("Failed to record shutdown audit event", "error", err)
+		}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stopCancel()
+		if err := s.auditManager.Stop(stopCtx); err != nil {
+			s.logger.Warn("Failed to flush audit queue on shutdown", "error", err)
 		}
 	}
 
