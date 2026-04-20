@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -83,13 +85,51 @@ const SystemTenantID = "system"
 // TODO(#751): controller identity as a real tenant — replace with proper user identity.
 const SystemUserID = "system"
 
-// Manager provides centralized audit functionality using pluggable storage
+// defaultQueueCapacity bounds the internal write queue so that a slow or stalled
+// audit store cannot grow memory without bound. When the queue is full, new
+// entries are dropped with a warning log — audit recording MUST NOT block
+// application code paths.
+const defaultQueueCapacity = 1024
+
+// Manager provides centralized audit functionality using pluggable storage.
+//
+// Internally, Manager owns a bounded write queue and a background drain goroutine.
+// RecordEvent / RecordBatch enqueue entries; the drain goroutine writes them to
+// the configured business.AuditStore. Flush provides a synchronous rendezvous for
+// callers (such as server shutdown) that need to guarantee in-flight events have
+// reached the store. Stop is Flush followed by a one-shot shutdown of the drain
+// goroutine and is safe to call multiple times.
 type Manager struct {
 	store  business.AuditStore
 	source string // Component identifier for audit source
+
+	// queue is the bounded write channel feeding the drain goroutine. Entries
+	// that cannot be enqueued within a non-blocking send are dropped (logged).
+	queue chan *business.AuditEntry
+
+	// flushReq / flushAck implement a channel-based rendezvous with drainLoop.
+	// A caller sends an ack-channel on flushReq, drainLoop empties the queue
+	// and closes the ack-channel to signal completion.
+	flushReq chan chan struct{}
+
+	// stop signals drainLoop to exit after draining remaining entries.
+	stop chan struct{}
+
+	// done is closed by drainLoop when it has exited. Stop waits on this to
+	// guarantee the goroutine has returned before returning.
+	done chan struct{}
+
+	// stopOnce guarantees Stop is idempotent.
+	stopOnce sync.Once
+
+	// logger is used for internal diagnostics (queue full, drain errors).
+	logger *slog.Logger
 }
 
-// NewManager creates a new audit manager with the specified storage backend
+// NewManager creates a new audit manager with the specified storage backend.
+// It starts a background drain goroutine that writes queued entries to the
+// store. Callers MUST call Stop (or Flush before process exit) to guarantee
+// in-flight entries reach durable storage.
 func NewManager(store business.AuditStore, source string) (*Manager, error) {
 	if store == nil {
 		return nil, fmt.Errorf("audit manager requires non-nil audit store")
@@ -98,15 +138,113 @@ func NewManager(store business.AuditStore, source string) (*Manager, error) {
 		return nil, fmt.Errorf("audit manager requires non-empty source identifier")
 	}
 
-	return &Manager{
-		store:  store,
-		source: source,
-	}, nil
+	m := &Manager{
+		store:    store,
+		source:   source,
+		queue:    make(chan *business.AuditEntry, defaultQueueCapacity),
+		flushReq: make(chan chan struct{}),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+		logger:   slog.Default().With("component", "audit", "source", source),
+	}
+
+	go m.drainLoop()
+
+	return m, nil
 }
 
-// RecordEvent records an audit event with automatic metadata generation
+// drainLoop pulls queued entries and writes them to the store. It serves flush
+// requests by draining all currently queued entries and closing the ack channel.
+// On stop, it drains remaining entries and exits.
+func (m *Manager) drainLoop() {
+	defer close(m.done)
+
+	for {
+		select {
+		case entry := <-m.queue:
+			m.writeEntry(entry)
+
+		case ack := <-m.flushReq:
+			// Drain every entry currently in the queue. New entries that arrive
+			// after we read the current length are not part of this flush — the
+			// flush guarantees entries enqueued before the Flush call reach the
+			// store, not entries enqueued concurrently after it.
+			m.drainRemaining()
+			close(ack)
+
+		case <-m.stop:
+			// Drain anything still in the queue before exiting so Stop provides
+			// the same shutdown guarantee as Flush.
+			m.drainRemaining()
+			return
+		}
+	}
+}
+
+// drainRemaining writes every entry currently in the queue to the store. It is
+// called from drainLoop in response to Flush or Stop. It does not wait for new
+// entries — it snapshots the current queue length and drains exactly that many.
+func (m *Manager) drainRemaining() {
+	for {
+		select {
+		case entry := <-m.queue:
+			m.writeEntry(entry)
+		default:
+			return
+		}
+	}
+}
+
+// writeEntry persists a single entry to the underlying store. Errors are logged
+// but do not stop the drain loop — audit writes must be best-effort rather than
+// fatal to the process.
+func (m *Manager) writeEntry(entry *business.AuditEntry) {
+	// Use a background context so a caller-cancelled context (e.g., a short
+	// request ctx) cannot abort an in-flight audit write. The queue has already
+	// accepted responsibility for the entry.
+	if err := m.store.StoreAuditEntry(context.Background(), entry); err != nil {
+		m.logger.Warn("audit write failed",
+			"error", err,
+			"entry_id", entry.ID,
+			"action", entry.Action,
+			"resource_type", entry.ResourceType,
+		)
+	}
+}
+
+// enqueue attempts a non-blocking send on the queue. Returns nil on success or
+// an error if the manager is stopped or the queue is full. On queue full, the
+// entry is dropped with a warning log so that application code is never blocked
+// by a slow audit store.
+func (m *Manager) enqueue(entry *business.AuditEntry) error {
+	select {
+	case <-m.stop:
+		return fmt.Errorf("audit manager is stopped")
+	default:
+	}
+
+	select {
+	case m.queue <- entry:
+		return nil
+	case <-m.stop:
+		return fmt.Errorf("audit manager is stopped")
+	default:
+		// Queue is full — drop the entry and log a warning. Dropping is
+		// intentional: audit recording MUST NOT stall caller goroutines.
+		m.logger.Warn("audit queue full, dropping entry",
+			"entry_id", entry.ID,
+			"action", entry.Action,
+			"resource_type", entry.ResourceType,
+			"queue_capacity", defaultQueueCapacity,
+		)
+		return fmt.Errorf("audit queue full (capacity=%d): entry dropped", defaultQueueCapacity)
+	}
+}
+
+// RecordEvent records an audit event with automatic metadata generation.
+// The event is enqueued for asynchronous write; use Flush to wait for
+// pending events to reach the store.
 func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) error {
-	// Build the complete audit entry
 	entry := &business.AuditEntry{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
@@ -114,22 +252,22 @@ func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) err
 		Version:   "1.0",
 	}
 
-	// Apply the builder to the entry
 	event.build(entry)
 
-	// Validate required fields
 	if err := m.validateEntry(entry); err != nil {
 		return fmt.Errorf("audit validation failed: %w", err)
 	}
 
-	// Generate integrity checksum
 	entry.Checksum = m.generateChecksum(entry)
 
-	// Store the audit entry
-	return m.store.StoreAuditEntry(ctx, entry)
+	return m.enqueue(entry)
 }
 
-// RecordBatch records multiple audit events atomically
+// RecordBatch records multiple audit events. Each event is enqueued individually;
+// batch atomicity at the store level is NOT preserved — the drain loop writes
+// entries one at a time. This is a deliberate trade-off for shutdown guarantees
+// and bounded memory. Callers requiring strict batch atomicity should call the
+// store directly.
 func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) error {
 	entries := make([]*business.AuditEntry, len(events))
 
@@ -151,7 +289,83 @@ func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) 
 		entries[i] = entry
 	}
 
-	return m.store.StoreAuditBatch(ctx, entries)
+	// Enqueue in order so the drain loop preserves batch ordering.
+	for i, entry := range entries {
+		if err := m.enqueue(entry); err != nil {
+			return fmt.Errorf("failed to enqueue entry %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// Flush blocks until every entry enqueued before this call has been written to
+// the store, or ctx is cancelled, or the manager is stopped. It does not close
+// the queue — subsequent RecordEvent calls continue to work.
+//
+// Flush is safe to call concurrently with RecordEvent; entries enqueued after
+// the Flush request is observed by drainLoop are NOT guaranteed to be part of
+// this flush (but will be part of a later Flush or Stop).
+func (m *Manager) Flush(ctx context.Context) error {
+	// If the manager is already stopped, the queue has already been drained
+	// as part of Stop. Return nil (Flush semantics satisfied trivially).
+	select {
+	case <-m.done:
+		return nil
+	default:
+	}
+
+	ack := make(chan struct{})
+
+	// Send the flush request. If the manager stops while we're waiting, bail out.
+	select {
+	case m.flushReq <- ack:
+	case <-m.done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("audit flush cancelled while submitting request: %w", ctx.Err())
+	}
+
+	// Wait for drainLoop to confirm the flush completed.
+	select {
+	case <-ack:
+		return nil
+	case <-m.done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("audit flush timed out waiting for drain: %w", ctx.Err())
+	}
+}
+
+// Stop flushes pending entries and shuts down the drain goroutine. It is
+// idempotent — repeated calls return nil immediately. Callers should call Stop
+// during graceful shutdown to guarantee audit durability.
+//
+// If ctx is cancelled before the flush completes, Stop returns the context
+// error but still signals the drain goroutine to exit. The goroutine will
+// continue draining the queue in the background on a best-effort basis.
+func (m *Manager) Stop(ctx context.Context) error {
+	var flushErr error
+
+	m.stopOnce.Do(func() {
+		// Attempt a pre-stop flush so callers get synchronous durability.
+		flushErr = m.Flush(ctx)
+
+		// Signal drainLoop to exit. It will drain any remaining queued entries
+		// before returning.
+		close(m.stop)
+
+		// Wait for drainLoop to return so subsequent callers don't race with
+		// in-flight writes. Respect ctx so Stop cannot hang indefinitely.
+		select {
+		case <-m.done:
+		case <-ctx.Done():
+			if flushErr == nil {
+				flushErr = fmt.Errorf("audit stop timed out waiting for drain goroutine: %w", ctx.Err())
+			}
+		}
+	})
+
+	return flushErr
 }
 
 // GetEntry retrieves an audit entry by ID

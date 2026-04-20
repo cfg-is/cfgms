@@ -105,6 +105,65 @@ audit.RedactedKeys = append(audit.RedactedKeys, "msp_license_key")
 | `ErrorMessage` | Yes | `key=value` pairs where key matches deny-list |
 | Integer/bool values | No | Only string values are replaced |
 
+## Shutdown Guarantee (Issue #764)
+
+`Manager` owns an internal bounded write queue and a background drain goroutine.
+Calls to `RecordEvent` / `RecordBatch` enqueue entries; the drain goroutine writes
+them to the underlying `business.AuditStore`. Two methods are provided for
+callers that need synchronous durability:
+
+| Method | Semantics |
+|---|---|
+| `Flush(ctx) error` | Blocks until every entry enqueued **before** this call has been written to the store, or `ctx` is cancelled. Does not close the queue — subsequent `RecordEvent` calls continue to work. |
+| `Stop(ctx) error` | `Flush` followed by a one-shot shutdown of the drain goroutine. Idempotent via `sync.Once` — repeated calls return `nil`. After `Stop`, `RecordEvent` returns an error. |
+
+### Typical Shutdown Pattern
+
+```go
+// On graceful shutdown of the owning component:
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
+// Record the final shutdown event, then drain + stop.
+_ = auditManager.RecordEvent(ctx, audit.SystemEvent(audit.SystemTenantID, "stop", "shutting down"))
+if err := auditManager.Stop(ctx); err != nil {
+    logger.Warn("audit manager stop returned an error", "error", err)
+}
+```
+
+`Stop` must be called **before** the underlying storage manager is closed so
+pending entries can still reach disk.
+
+### Queue Capacity and Drop Behaviour
+
+The queue has a fixed capacity of `1024` entries (internal constant
+`defaultQueueCapacity`). When the queue is full, `RecordEvent` **does not
+block** — instead it drops the entry and emits a `slog.Warn` log containing the
+entry ID, action, and resource type. Dropping is intentional: audit recording
+must never stall caller goroutines, and a sustained queue-full condition
+indicates a slow or stalled storage backend that should be investigated via the
+warning logs.
+
+`RecordEvent` returns an error for both the queue-full case and the
+post-`Stop` case. Production callers MUST handle the error (typically by
+logging a warning) rather than discarding it with `_ =`.
+
+### Flush Ordering Semantics
+
+`Flush` uses a channel-based rendezvous with the drain goroutine. Entries
+enqueued **before** the `Flush` call is observed by the drain goroutine are
+guaranteed to be written before `Flush` returns. Entries enqueued
+**concurrently** (after `Flush` acquired the rendezvous slot) are NOT part of
+this flush but will be part of a later `Flush` or `Stop`.
+
+### Caller Obligations
+
+- Every owner of a `Manager` must call `Stop` during graceful shutdown.
+- Every production caller of `RecordEvent` must handle the returned error
+  (log it; do not silently discard with `_ =`).
+- Tests that query the store immediately after `RecordEvent` must call
+  `Flush` first, because writes are now asynchronous.
+
 ## Compliance Reporting
 
 Compliance report generation is handled by `features/reports/`, not by this package.

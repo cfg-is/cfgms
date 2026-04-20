@@ -88,6 +88,11 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 	auditStore := globalStorageManager.GetAuditStore()
 	auditManager, err := audit.NewManager(auditStore, "test-reports")
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		_ = auditManager.Stop(stopCtx)
+	})
 
 	rbacManager := rbac.NewManagerWithStorage(
 		auditStore,
@@ -610,6 +615,11 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 	auditStore := globalStorageManager.GetAuditStore()
 	auditManager, err := audit.NewManager(auditStore, "test-reports")
 	require.NoError(t, err, "Failed to create audit manager")
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		_ = auditManager.Stop(stopCtx)
+	})
 
 	// Create RBAC manager
 	rbacManager := rbac.NewManagerWithStorage(

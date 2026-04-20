@@ -981,14 +981,23 @@ func (s *Server) Stop() error {
 		}
 	}
 
-	// Record system shutdown audit event
+	// Record system shutdown audit event, then drain the audit write queue and
+	// stop the background drain goroutine. Stop must run BEFORE the underlying
+	// storage manager is closed so pending entries can still reach disk.
+	// Issue #764: audit writes are now asynchronous via an internal queue —
+	// Stop provides the shutdown guarantee that previously relied on synchronous
+	// store calls.
 	if s.auditManager != nil {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		// TODO(#751): controller identity as a real tenant — replace audit.SystemTenantID with proper identity.
 		event := audit.SystemEvent(audit.SystemTenantID, "controller_stop", "Controller server shutting down")
 		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
 			s.logger.Warn("Failed to record shutdown audit event", "error", err)
 		}
+		if err := s.auditManager.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop audit manager", "error", err)
+		}
+		cancel()
 	}
 
 	// Stop control plane provider (Story #363)
