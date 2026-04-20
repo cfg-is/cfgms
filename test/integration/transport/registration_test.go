@@ -110,7 +110,7 @@ func (s *RegistrationTestSuite) TestSingleUseToken() {
 	s.NoError(err)
 	defer func() { _ = resp2.Body.Close() }()
 
-	s.Equal(http.StatusUnauthorized, resp2.StatusCode, "Second registration with single-use token should fail")
+	s.Equal(http.StatusConflict, resp2.StatusCode, "Second registration with single-use token should be rejected with 409 Conflict (token already consumed)")
 }
 
 // TestStewardIDUniqueness tests that each registration produces a unique steward ID.

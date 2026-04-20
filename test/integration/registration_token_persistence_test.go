@@ -5,18 +5,31 @@
 package integration
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	controllerapi "github.com/cfgis/cfgms/features/controller/api"
+	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestRegistrationTokenPersistence_AcrossRestart validates that registration tokens
@@ -282,4 +295,127 @@ func TestRegistrationTokenPersistence_DeletePersists(t *testing.T) {
 	_, err = adapter2.GetToken(ctx, "cfgms_reg_delete_test")
 	assert.Error(t, err, "Deleted token should not exist after reload")
 	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestConcurrentRegistration_SingleUseToken_ExactlyOneSucceeds validates that two
+// concurrent HTTP POST /api/v1/register requests with the same single-use token
+// produce exactly one 200 OK and one 409 Conflict against a real Server backed
+// by SQLite storage. This proves the TOCTOU race fixed in Issue #774 holds under
+// real concurrent HTTP load.
+func TestConcurrentRegistration_SingleUseToken_ExactlyOneSucceeds(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "reg-concurrent-*")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	ctx := context.Background()
+
+	// Build storage manager (RBAC + tenant)
+	storageManager, err := interfaces.CreateOSSStorageManager(
+		tempDir+"/flatfile",
+		tempDir+"/cfgms.db",
+	)
+	require.NoError(t, err)
+	defer func() { _ = storageManager.Close() }()
+
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacManager.Initialize(ctx))
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+
+	// Build cert manager so handleRegister can reach the 200 path
+	certMgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: tempDir + "/certs",
+		CAConfig: &cert.CAConfig{
+			Organization: "Test CFGMS Concurrent",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+
+	// Build SQLite-backed registration token store
+	regTokenStore, err := interfaces.CreateRegistrationTokenStoreFromConfig(
+		"sqlite",
+		map[string]interface{}{"path": tempDir + "/tokens.db"},
+	)
+	require.NoError(t, err)
+	defer func() { _ = regTokenStore.Close() }()
+	require.NoError(t, regTokenStore.Initialize(ctx))
+
+	tokenStore := registration.NewStorageAdapter(regTokenStore)
+
+	// Build minimal controller services
+	logger := logging.NewNoopLogger()
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+
+	controllerService := service.NewControllerService(logger)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	server, err := controllerapi.New(
+		cfg, logger, controllerService, configService, nil, rbacService,
+		certMgr, tenantManager, rbacManager,
+		nil, nil, nil, nil,
+		tokenStore,
+		"",
+		nil,
+	)
+	require.NoError(t, err)
+
+	// Seed a single-use token
+	tok := &registration.Token{
+		Token:         "cfgms_reg_concurrent_integ_test",
+		TenantID:      "integ-tenant",
+		ControllerURL: "grpc://controller:7443",
+		SingleUse:     true,
+	}
+	require.NoError(t, tokenStore.SaveToken(ctx, tok))
+
+	// Serve over a real HTTP test server
+	ts := httptest.NewServer(server.GetRouter())
+	defer ts.Close()
+
+	type result struct{ code int }
+	results := make([]result, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			body, _ := json.Marshal(map[string]string{"token": "cfgms_reg_concurrent_integ_test"})
+			resp, postErr := ts.Client().Post(
+				ts.URL+"/api/v1/register",
+				"application/json",
+				bytes.NewReader(body),
+			)
+			if postErr != nil {
+				return
+			}
+			defer resp.Body.Close()
+			results[idx] = result{code: resp.StatusCode}
+		}(i)
+	}
+	wg.Wait()
+
+	codes := []int{results[0].code, results[1].code}
+	assert.Contains(t, codes, http.StatusOK, "exactly one goroutine must succeed with 200")
+	assert.Contains(t, codes, http.StatusConflict, "exactly one goroutine must get 409")
+
+	okCount, conflictCount := 0, 0
+	for _, r := range results {
+		switch r.code {
+		case http.StatusOK:
+			okCount++
+		case http.StatusConflict:
+			conflictCount++
+		}
+	}
+	assert.Equal(t, 1, okCount, "exactly one 200")
+	assert.Equal(t, 1, conflictCount, "exactly one 409")
 }
