@@ -4,7 +4,8 @@ package registration
 
 import (
 	"context"
-	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,14 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
-	// Create temporary directory for test
-	tempDir, err := os.MkdirTemp("", "adapter-test-*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	tempDir := t.TempDir()
 
 	// Create sqlite registration token store
 	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
@@ -141,10 +140,7 @@ func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
 }
 
 func TestStorageAdapter_InterfaceCompliance(t *testing.T) {
-	// Create temporary directory for test
-	tempDir, err := os.MkdirTemp("", "adapter-interface-test-*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	tempDir := t.TempDir()
 
 	// Create sqlite registration token store
 	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
@@ -159,4 +155,59 @@ func TestStorageAdapter_InterfaceCompliance(t *testing.T) {
 
 	// Verify adapter implements Store interface
 	var _ Store = adapter
+}
+
+func TestStorageAdapter_ConsumeToken_Race(t *testing.T) {
+	tempDir := t.TempDir()
+
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
+		"sqlite",
+		map[string]interface{}{"path": tempDir + "/tokens.db"},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	require.NoError(t, store.Initialize(ctx))
+
+	adapter := NewStorageAdapter(store)
+
+	token := &Token{
+		Token:     "sqlite-race-token",
+		TenantID:  "tenant-race",
+		SingleUse: true,
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, adapter.SaveToken(ctx, token))
+
+	const goroutines = 50
+	var (
+		successCount atomic.Int32
+		alreadyUsed  atomic.Int32
+		wg           sync.WaitGroup
+		start        = make(chan struct{})
+	)
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			err := adapter.ConsumeToken(ctx, "sqlite-race-token", "steward-"+string(rune('A'+id)))
+			switch err {
+			case nil:
+				successCount.Add(1)
+			case business.ErrTokenAlreadyUsed:
+				alreadyUsed.Add(1)
+			default:
+				t.Errorf("goroutine %d: unexpected error: %v", id, err)
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	assert.Equal(t, int32(1), successCount.Load(), "exactly one goroutine must succeed")
+	assert.Equal(t, int32(goroutines-1), alreadyUsed.Load(), "all others must get ErrTokenAlreadyUsed")
 }

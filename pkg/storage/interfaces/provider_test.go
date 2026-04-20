@@ -309,6 +309,9 @@ func (m *MockRegistrationTokenStore) DeleteToken(_ context.Context, _ string) er
 func (m *MockRegistrationTokenStore) ListTokens(_ context.Context, _ *business.RegistrationTokenFilter) ([]*business.RegistrationTokenData, error) {
 	return nil, nil
 }
+func (m *MockRegistrationTokenStore) ConsumeToken(_ context.Context, _, _ string) error {
+	return nil
+}
 func (m *MockRegistrationTokenStore) Initialize(_ context.Context) error { return nil }
 func (m *MockRegistrationTokenStore) Close() error                       { return nil }
 
