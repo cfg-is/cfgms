@@ -131,7 +131,7 @@ The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for
 - Automatic version history. (`GetConfigHistory` returns the current version only. Use git-sync if you want PR-based change management.)
 - Replication. (Use PostgreSQL if you need HA.)
 - Arbitration. (Single-writer; not safe for multiple controllers to share the same root.)
-- Business-data stores (`RBACStore`, `TenantStore`, `RuntimeStore`, etc.) — these belong in SQLite/PostgreSQL.
+- Business-data stores (`RBACStore`, `TenantStore`, `SessionStore`, etc.) — these belong in SQLite/PostgreSQL.
 
 **Registration**: The provider auto-registers on import via `init()`. A blank import is sufficient:
 
@@ -198,7 +198,7 @@ pkg/storage/interfaces/
 
 **`ClientTenantStore` is unified.** The former `M365ClientTenantStore` folds in. Provider-specific data (M365 consent state, AD domain binding, Intune enrollment) is carried as extension fields so that a single endpoint or user can be correlated across steward, Intune, and AD.
 
-Current layout is flat (`audit_store.go`, `config_store.go`, `rbac_store.go`, …). Reorganization is tracked by a sub-story under the ADR-003 epic; see [`pkg/storage/interfaces/README.md`](../../pkg/storage/interfaces/README.md) for the current → target mapping.
+Interfaces are organized into five sub-packages under `pkg/storage/interfaces/`: `business/`, `config/`, `blob/`, `secrets/`, and `timeseries/`. See [`pkg/storage/interfaces/README.md`](../../pkg/storage/interfaces/README.md) for the layout and import paths.
 
 ## Configuration Example
 
@@ -366,7 +366,7 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 
 **Fleet tracker**: `features/steward/StewardHealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`) in-memory via a `sync.Map`.
 
-`SessionStore` is implemented in story #662. It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` and `RuntimeStore` interfaces return `ErrNotSupported` from the SQLite provider — config storage targets the flat-file provider (OSS) and PostgreSQL (commercial).
+`SessionStore` is implemented in story #662. It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` interface returns `ErrNotSupported` from the SQLite provider — config storage targets the flat-file provider (OSS) and PostgreSQL (commercial).
 
 ### CommandStore (Issue #665)
 
