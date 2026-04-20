@@ -8,14 +8,21 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// defaultQueueCapacity is the bounded capacity of the internal write queue.
+// When the queue is full, RecordEvent logs a warning and drops the entry rather
+// than blocking the caller — audit must never stall application code.
+const defaultQueueCapacity = 1024
 
 // RedactedKeys is the deny-list of lower-cased key substrings that trigger value redaction
 // in Details, Changes.Before, Changes.After, and ErrorMessage.
@@ -83,13 +90,22 @@ const SystemTenantID = "system"
 // TODO(#751): controller identity as a real tenant — replace with proper user identity.
 const SystemUserID = "system"
 
-// Manager provides centralized audit functionality using pluggable storage
+// Manager provides centralized audit functionality using pluggable storage.
+// Events are enqueued into an internal bounded write queue and drained by a
+// background goroutine, ensuring callers are never blocked by slow storage I/O.
+// Call Stop(ctx) during shutdown to guarantee all in-flight events reach the store.
 type Manager struct {
-	store  business.AuditStore
-	source string // Component identifier for audit source
+	store     business.AuditStore
+	source    string
+	queue     chan *business.AuditEntry
+	flushCh   chan chan struct{}
+	stopCh    chan struct{}
+	drainDone chan struct{}
+	stopOnce  sync.Once
 }
 
-// NewManager creates a new audit manager with the specified storage backend
+// NewManager creates a new audit manager with the specified storage backend and
+// starts the background drain goroutine. Call Stop(ctx) to flush and shut down.
 func NewManager(store business.AuditStore, source string) (*Manager, error) {
 	if store == nil {
 		return nil, fmt.Errorf("audit manager requires non-nil audit store")
@@ -98,15 +114,87 @@ func NewManager(store business.AuditStore, source string) (*Manager, error) {
 		return nil, fmt.Errorf("audit manager requires non-empty source identifier")
 	}
 
-	return &Manager{
-		store:  store,
-		source: source,
-	}, nil
+	m := &Manager{
+		store:     store,
+		source:    source,
+		queue:     make(chan *business.AuditEntry, defaultQueueCapacity),
+		flushCh:   make(chan chan struct{}, 1),
+		stopCh:    make(chan struct{}),
+		drainDone: make(chan struct{}),
+	}
+	go m.drainLoop()
+	return m, nil
 }
 
-// RecordEvent records an audit event with automatic metadata generation
-func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) error {
-	// Build the complete audit entry
+// drainLoop runs in the background, storing entries from the queue one at a time.
+func (m *Manager) drainLoop() {
+	defer close(m.drainDone)
+	for {
+		select {
+		case entry := <-m.queue:
+			if err := m.store.StoreAuditEntry(context.Background(), entry); err != nil {
+				slog.Warn("audit: failed to store entry", "source", m.source, "error", err)
+			}
+		case ackCh := <-m.flushCh:
+			m.drainRemaining()
+			close(ackCh)
+		case <-m.stopCh:
+			m.drainRemaining()
+			return
+		}
+	}
+}
+
+// drainRemaining empties the queue synchronously; called during flush and stop.
+func (m *Manager) drainRemaining() {
+	for {
+		select {
+		case entry := <-m.queue:
+			if err := m.store.StoreAuditEntry(context.Background(), entry); err != nil {
+				slog.Warn("audit: failed to store entry", "source", m.source, "error", err)
+			}
+		default:
+			return
+		}
+	}
+}
+
+// Flush blocks until all entries currently in the write queue have been stored,
+// or until ctx is cancelled. It is safe to call Flush concurrently with RecordEvent.
+func (m *Manager) Flush(ctx context.Context) error {
+	ackCh := make(chan struct{})
+	select {
+	case m.flushCh <- ackCh:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-ackCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Stop flushes all in-flight events and shuts down the background drain goroutine.
+// Stop is idempotent — safe to call multiple times.
+func (m *Manager) Stop(ctx context.Context) error {
+	var stopErr error
+	m.stopOnce.Do(func() {
+		if err := m.Flush(ctx); err != nil {
+			stopErr = err
+		}
+		close(m.stopCh)
+		<-m.drainDone
+	})
+	return stopErr
+}
+
+// RecordEvent validates and enqueues an audit event for asynchronous storage.
+// Validation (field checks, redaction, checksum) runs synchronously so callers
+// receive validation errors immediately. If the write queue is full, the entry is
+// dropped with a warning log rather than blocking the caller.
+func (m *Manager) RecordEvent(_ context.Context, event *AuditEventBuilder) error {
 	entry := &business.AuditEntry{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
@@ -114,25 +202,27 @@ func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) err
 		Version:   "1.0",
 	}
 
-	// Apply the builder to the entry
 	event.build(entry)
 
-	// Validate required fields
 	if err := m.validateEntry(entry); err != nil {
 		return fmt.Errorf("audit validation failed: %w", err)
 	}
 
-	// Generate integrity checksum
 	entry.Checksum = m.generateChecksum(entry)
 
-	// Store the audit entry
-	return m.store.StoreAuditEntry(ctx, entry)
+	select {
+	case m.queue <- entry:
+	default:
+		slog.Warn("audit: write queue full, dropping entry",
+			"source", m.source, "action", entry.Action, "capacity", defaultQueueCapacity)
+	}
+	return nil
 }
 
-// RecordBatch records multiple audit events atomically
-func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) error {
-	entries := make([]*business.AuditEntry, len(events))
-
+// RecordBatch validates and enqueues multiple audit events individually.
+// Each entry is enqueued separately; batch is no longer guaranteed to be atomic
+// with respect to store transactions (entries reach the store via the drain loop).
+func (m *Manager) RecordBatch(_ context.Context, events []*AuditEventBuilder) error {
 	for i, event := range events {
 		entry := &business.AuditEntry{
 			ID:        uuid.New().String(),
@@ -148,10 +238,15 @@ func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) 
 		}
 
 		entry.Checksum = m.generateChecksum(entry)
-		entries[i] = entry
-	}
 
-	return m.store.StoreAuditBatch(ctx, entries)
+		select {
+		case m.queue <- entry:
+		default:
+			slog.Warn("audit: write queue full, dropping batch entry",
+				"source", m.source, "index", i, "capacity", defaultQueueCapacity)
+		}
+	}
+	return nil
 }
 
 // GetEntry retrieves an audit entry by ID

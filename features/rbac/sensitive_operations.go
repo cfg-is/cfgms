@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/cfgis/cfgms/pkg/audit"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -148,7 +149,9 @@ func (m *Manager) AuditSensitiveOperation(ctx context.Context, opCtx *SensitiveO
 	}
 
 	// Record the audit event
-	_ = m.auditManager.RecordEvent(ctx, event)
+	if err := m.auditManager.RecordEvent(ctx, event); err != nil {
+		slog.Warn("rbac: failed to record sensitive operation audit event", "error", err)
+	}
 }
 
 // GetSensitiveOperationJustification retrieves justification from context

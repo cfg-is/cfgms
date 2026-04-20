@@ -4,21 +4,22 @@ package audit
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	// Import storage providers to register them
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // newTestManager creates a real audit manager backed by OSS storage in a temp dir.
+// It registers a cleanup that calls Stop to flush in-flight events before teardown.
 func newTestManager(t *testing.T, source string) *Manager {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -28,6 +29,7 @@ func newTestManager(t *testing.T, source string) *Manager {
 
 	m, err := NewManager(storageManager.GetAuditStore(), source)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = m.Stop(context.Background()) })
 	return m
 }
 
@@ -104,7 +106,7 @@ func TestNewManager_ErrorConditions(t *testing.T) {
 	}
 }
 
-// TestManager_RecordEvent tests basic event recording
+// TestManager_RecordEvent tests basic event recording and verifies the entry reaches the store.
 func TestManager_RecordEvent(t *testing.T) {
 	manager := newTestManager(t, "test")
 	ctx := context.Background()
@@ -120,9 +122,14 @@ func TestManager_RecordEvent(t *testing.T) {
 
 	err := manager.RecordEvent(ctx, event)
 	assert.NoError(t, err)
+
+	require.NoError(t, manager.Flush(ctx))
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "recorded event must reach the store after Flush")
 }
 
-// TestManager_RecordBatch tests batch event recording
+// TestManager_RecordBatch tests batch event recording and verifies all entries reach the store.
 func TestManager_RecordBatch(t *testing.T) {
 	manager := newTestManager(t, "test")
 	ctx := context.Background()
@@ -146,6 +153,11 @@ func TestManager_RecordBatch(t *testing.T) {
 
 	err := manager.RecordBatch(ctx, events)
 	assert.NoError(t, err)
+
+	require.NoError(t, manager.Flush(ctx))
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+	assert.Len(t, entries, 2, "all batch events must reach the store after Flush")
 }
 
 // TestManager_ValidationErrors tests validation error handling
@@ -496,6 +508,7 @@ func TestRecordEvent_RedactsDetails(t *testing.T) {
 
 	err := manager.RecordEvent(ctx, event)
 	require.NoError(t, err)
+	require.NoError(t, manager.Flush(ctx))
 
 	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
 		TenantID: "test-tenant",
@@ -536,6 +549,7 @@ func TestChanges_Redacted(t *testing.T) {
 
 	err := manager.RecordEvent(ctx, event)
 	require.NoError(t, err)
+	require.NoError(t, manager.Flush(ctx))
 
 	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
 		TenantID: "test-tenant",
@@ -577,6 +591,7 @@ func TestRecordEvent_RedactsErrorMessage(t *testing.T) {
 
 	err := manager.RecordEvent(ctx, event)
 	require.NoError(t, err)
+	require.NoError(t, manager.Flush(ctx))
 
 	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
 		TenantID: "test-tenant",
@@ -587,6 +602,112 @@ func TestRecordEvent_RedactsErrorMessage(t *testing.T) {
 	assert.NotContains(t, entries[0].ErrorMessage, "hunter2", "raw secret must not appear in stored ErrorMessage")
 	assert.Contains(t, entries[0].ErrorMessage, "password=[REDACTED]", "password value must be replaced with [REDACTED]")
 	assert.Contains(t, entries[0].ErrorMessage, "username=alice", "non-sensitive key=value must be preserved")
+}
+
+// TestManager_Flush verifies that after Flush returns, all previously recorded
+// events are queryable from the real store.
+func TestManager_Flush(t *testing.T) {
+	manager := newTestManager(t, "test")
+	ctx := context.Background()
+	const n = 20
+
+	for i := 0; i < n; i++ {
+		event := NewEventBuilder().
+			Tenant("flush-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("flush_action").
+			User("test-user", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityLow)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+
+	require.NoError(t, manager.Flush(ctx), "Flush must not return an error")
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{TenantID: "flush-tenant"})
+	require.NoError(t, err)
+	assert.Len(t, entries, n, "all %d events must be queryable after Flush", n)
+}
+
+// TestManager_ShutdownOrderGuarantee verifies that Stop waits for all queued events
+// to be stored before returning — entries must not be dropped on shutdown.
+func TestManager_ShutdownOrderGuarantee(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	manager, err := NewManager(storageManager.GetAuditStore(), "shutdown-test")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	const n = 50
+	for i := 0; i < n; i++ {
+		event := NewEventBuilder().
+			Tenant("shutdown-tenant").
+			Type(business.AuditEventSystemEvent).
+			Action("shutdown_action").
+			User(SystemUserID, business.AuditUserTypeSystem).
+			Resource("system", fmt.Sprintf("node-%d", i), "").
+			Severity(business.AuditSeverityLow)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+
+	// Stop flushes in-flight entries before closing the drain goroutine.
+	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Stop(stopCtx), "Stop must not return an error")
+
+	// All entries must be in the store — none dropped.
+	entries, err := manager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "shutdown-tenant"})
+	require.NoError(t, err)
+	assert.Len(t, entries, n, "Stop must guarantee all %d events are stored before returning", n)
+}
+
+// TestManager_QueueFullDrop verifies that RecordEvent drops entries without blocking
+// when the write queue is at capacity, and returns nil rather than an error.
+func TestManager_QueueFullDrop(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	manager, err := NewManager(storageManager.GetAuditStore(), "test")
+	require.NoError(t, err)
+
+	// Stop the drain goroutine so the queue cannot be emptied.
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Stop(stopCtx))
+
+	// Fill the queue to capacity by writing directly to the internal channel.
+	// This is white-box access allowed because the test is in package audit.
+	for i := 0; i < defaultQueueCapacity; i++ {
+		manager.queue <- &business.AuditEntry{ID: fmt.Sprintf("dummy-%d", i)}
+	}
+
+	ctx := context.Background()
+	event := NewEventBuilder().
+		Tenant("drop-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("drop_action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("resource", "drop-id", "").
+		Severity(business.AuditSeverityLow)
+
+	// RecordEvent must not block and must return nil (drop is logged, not an error).
+	err = manager.RecordEvent(ctx, event)
+	assert.NoError(t, err, "queue-full drop must not return an error to the caller")
+	assert.Equal(t, defaultQueueCapacity, len(manager.queue),
+		"queue must remain at capacity — dropped entry must not have been added")
+}
+
+// TestManager_StopIdempotent verifies that calling Stop twice does not panic or error.
+func TestManager_StopIdempotent(t *testing.T) {
+	manager := newTestManager(t, "test")
+	ctx := context.Background()
+	require.NoError(t, manager.Stop(ctx))
+	require.NoError(t, manager.Stop(ctx), "second Stop call must be a safe no-op")
 }
 
 // TestManager_IntegrityVerification tests audit integrity verification

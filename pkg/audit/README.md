@@ -105,6 +105,44 @@ audit.RedactedKeys = append(audit.RedactedKeys, "msp_license_key")
 | `ErrorMessage` | Yes | `key=value` pairs where key matches deny-list |
 | Integer/bool values | No | Only string values are replaced |
 
+## Shutdown Guarantee
+
+`pkg/audit.Manager` maintains an internal bounded write queue (`defaultQueueCapacity = 1024` entries). Events are enqueued by `RecordEvent` and `RecordBatch` in the caller's goroutine, then drained to the store by a single background goroutine. This keeps the caller non-blocking even when the store is slow.
+
+### Flush and Stop
+
+```go
+// Flush blocks until all queued entries have been written to the store.
+// Use this when you need to read back entries immediately after recording them.
+if err := auditManager.Flush(ctx); err != nil {
+    logger.Warn("audit flush interrupted", "error", err)
+}
+
+// Stop flushes in-flight entries and then shuts down the drain goroutine.
+// Call Stop in server.Stop() before closing the storage manager.
+if err := auditManager.Stop(ctx); err != nil {
+    logger.Warn("audit stop failed", "error", err)
+}
+```
+
+`Stop` is idempotent — safe to call multiple times. The second call is a no-op.
+
+### Queue-Full Behaviour
+
+When the queue is full (1024 entries buffered), `RecordEvent` **drops the entry and logs a warning** rather than blocking the caller. Audit must never stall application code. If you observe drop warnings in production, increase the `defaultQueueCapacity` constant in `pkg/audit/manager.go`.
+
+### Shutdown Sequence
+
+The correct shutdown order in `server.Stop()` is:
+
+1. Record the shutdown audit event (`RecordEvent`)
+2. Stop other subsystems that may emit audit events
+3. **Call `auditManager.Stop(ctx)`** — flushes all in-flight events
+4. Close the storage manager
+
+`auditManager.Stop` must run before the storage manager is closed so that draining
+entries have a live store to write to.
+
 ## Compliance Reporting
 
 Compliance report generation is handled by `features/reports/`, not by this package.

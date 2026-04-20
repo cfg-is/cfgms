@@ -1035,6 +1035,15 @@ func (s *Server) Stop() error {
 		}
 	}
 
+	// Flush audit manager before closing storage so all in-flight events reach the store.
+	if s.auditManager != nil {
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer flushCancel()
+		if err := s.auditManager.Stop(flushCtx); err != nil {
+			s.logger.Warn("Failed to flush audit manager on shutdown", "error", err)
+		}
+	}
+
 	// Close DNA storage manager (releases SQLite DB file handles)
 	if s.dnaStorageManager != nil {
 		if err := s.dnaStorageManager.Close(); err != nil {

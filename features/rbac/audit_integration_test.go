@@ -62,6 +62,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 			Limit:         10,
 		}
 
+		require.NoError(t, manager.auditManager.Flush(ctx))
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		require.Len(t, auditEntries, 1, "Should have exactly one audit entry for role creation")
@@ -115,6 +116,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 			Limit:         10,
 		}
 
+		require.NoError(t, manager.auditManager.Flush(ctx))
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		require.Len(t, auditEntries, 1, "Should have exactly one audit entry for role update")
@@ -161,6 +163,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 			Limit:         10,
 		}
 
+		require.NoError(t, manager.auditManager.Flush(ctx))
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		require.Len(t, auditEntries, 1, "Should have exactly one audit entry for role deletion")
@@ -223,6 +226,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 			Limit:         10,
 		}
 
+		require.NoError(t, manager.auditManager.Flush(ctx))
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		require.Len(t, auditEntries, 1, "Should have exactly one audit entry for role revocation")
@@ -262,6 +266,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 
 		// Note: This test depends on whether the underlying store validates the role
 		// If validation passes through, we won't get an error audit event
+		require.NoError(t, manager.auditManager.Flush(ctx))
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 
@@ -281,6 +286,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 			Limit:      100,
 		}
 
+		require.NoError(t, manager.auditManager.Flush(ctx))
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		assert.NotEmpty(t, auditEntries, "Should have audit entries from previous tests")
