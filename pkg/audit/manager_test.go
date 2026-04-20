@@ -7,12 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	// Import storage providers to register them
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+
+	// Import storage providers to register them
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"

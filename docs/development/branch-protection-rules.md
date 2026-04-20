@@ -80,15 +80,19 @@ CFGMS uses GitHub Rulesets to protect branches in a GitFlow-style branching mode
 | Require approval of most recent push | ✅ Yes | Prevent last-minute self-approval |
 | Require conversation resolution | ✅ Yes | All PR comments must be resolved |
 | Status checks required | ✅ Yes | CI checks must pass |
+| Require branch up to date | ✅ Enabled | Prevent merging PRs with CI run against stale develop base |
 
-### Required Status Checks (4 total)
+### Required Status Checks (5 total)
 
 - `unit-tests` - Core functionality validation
 - `integration-tests` - Fast comprehensive + production-critical tests
 - `Build Gate` - Cross-platform compilation + Docker integration tests
 - `security-deployment-gate` - Security vulnerability blocking
+- `Controller Integration Tests (Linux)` - Controller integration test suite
 
-**Rationale**: Direct required checks pattern (Story #322) replaced the previous 10-check approach. These 4 checks cover unit tests, integration tests, cross-platform builds, and security scanning. Production-specific gates (`production-risk-assessment`, `integration-test-gate`) are excluded to allow faster iteration.
+**Rationale**: Direct required checks pattern (Story #322) replaced the previous 10-check approach. These checks cover unit tests, integration tests, cross-platform builds, and security scanning. Production-specific gates (`production-risk-assessment`, `integration-test-gate`) are excluded to allow faster iteration.
+
+**Strict up-to-date requirement**: Enabled after PR #777 broke develop because CI ran against a pre-#772 base; strict mode (`strict_required_status_checks_policy: true`) forces developers to rebase their branch to the latest develop tip and re-run all required checks before merge is allowed. This eliminates the failure mode where a PR's CI passes against a stale base but would fail against current develop.
 
 ---
 
