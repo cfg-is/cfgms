@@ -7,7 +7,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,13 +26,32 @@ const SystemTenantID = "system"
 // TODO(#751): controller identity as a real tenant — replace with proper user identity.
 const SystemUserID = "system"
 
+// defaultQueueCapacity is the bounded capacity of the internal write queue.
+// When the queue is full, RecordEvent logs a warning and drops the entry rather
+// than blocking the caller — audit must not stall application code.
+const defaultQueueCapacity = 1024
+
+// errQueueFull is returned when the audit queue has no remaining capacity.
+var errQueueFull = errors.New("audit queue full: entry dropped")
+
+// errManagerStopped is returned when RecordEvent is called after Stop.
+var errManagerStopped = errors.New("audit manager stopped")
+
 // Manager provides centralized audit functionality using pluggable storage
 type Manager struct {
 	store  interfaces.AuditStore
-	source string // Component identifier for audit source
+	source string
+	logger *slog.Logger
+
+	queue     chan *interfaces.AuditEntry
+	flushCh   chan chan struct{}
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	drainDone chan struct{}
 }
 
-// NewManager creates a new audit manager with the specified storage backend
+// NewManager creates a new audit manager with the specified storage backend.
+// A background drain goroutine is started; call Stop to shut it down cleanly.
 func NewManager(store interfaces.AuditStore, source string) (*Manager, error) {
 	if store == nil {
 		return nil, fmt.Errorf("audit manager requires non-nil audit store")
@@ -38,15 +60,111 @@ func NewManager(store interfaces.AuditStore, source string) (*Manager, error) {
 		return nil, fmt.Errorf("audit manager requires non-empty source identifier")
 	}
 
-	return &Manager{
-		store:  store,
-		source: source,
-	}, nil
+	m := &Manager{
+		store:     store,
+		source:    source,
+		logger:    slog.Default(),
+		queue:     make(chan *interfaces.AuditEntry, defaultQueueCapacity),
+		flushCh:   make(chan chan struct{}),
+		stopCh:    make(chan struct{}),
+		drainDone: make(chan struct{}),
+	}
+
+	go m.drainLoop()
+
+	return m, nil
 }
 
-// RecordEvent records an audit event with automatic metadata generation
+// drainLoop reads entries from the queue and stores them one at a time.
+// On a flush request it drains all pending entries before acknowledging.
+// On stop it drains remaining entries then exits.
+func (m *Manager) drainLoop() {
+	defer close(m.drainDone)
+
+	storeEntry := func(entry *interfaces.AuditEntry) {
+		ctx := context.Background()
+		if err := m.store.StoreAuditEntry(ctx, entry); err != nil {
+			m.logger.Warn("audit: failed to store entry", "error", err, "id", entry.ID)
+		}
+	}
+
+	drainQueue := func() {
+		for {
+			select {
+			case entry := <-m.queue:
+				storeEntry(entry)
+			default:
+				return
+			}
+		}
+	}
+
+	for {
+		select {
+		case entry := <-m.queue:
+			storeEntry(entry)
+
+		case ack := <-m.flushCh:
+			// Drain all entries currently queued before acknowledging.
+			drainQueue()
+			close(ack)
+
+		case <-m.stopCh:
+			// Drain any entries that arrived between the last Flush and Stop.
+			drainQueue()
+			return
+		}
+	}
+}
+
+// Flush waits until all entries enqueued before this call have been stored.
+// Returns ctx.Err() if the context is cancelled before draining completes.
+func (m *Manager) Flush(ctx context.Context) error {
+	ack := make(chan struct{})
+	select {
+	case m.flushCh <- ack:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-ack:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Stop flushes all queued entries and shuts down the drain goroutine.
+// Stop is idempotent and safe to call multiple times.
+func (m *Manager) Stop(ctx context.Context) error {
+	var firstErr error
+	m.stopOnce.Do(func() {
+		if err := m.Flush(ctx); err != nil {
+			firstErr = err
+		}
+		close(m.stopCh)
+		select {
+		case <-m.drainDone:
+		case <-ctx.Done():
+			if firstErr == nil {
+				firstErr = ctx.Err()
+			}
+		}
+	})
+	return firstErr
+}
+
+// RecordEvent records an audit event with automatic metadata generation.
+// The entry is validated synchronously, then enqueued for async storage.
+// If the queue is full the entry is dropped and errQueueFull is returned.
 func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) error {
-	// Build the complete audit entry
+	// Check if the manager has been stopped.
+	select {
+	case <-m.stopCh:
+		return errManagerStopped
+	default:
+	}
+
 	entry := &interfaces.AuditEntry{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
@@ -54,25 +172,35 @@ func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) err
 		Version:   "1.0",
 	}
 
-	// Apply the builder to the entry
 	event.build(entry)
 
-	// Validate required fields
 	if err := m.validateEntry(entry); err != nil {
 		return fmt.Errorf("audit validation failed: %w", err)
 	}
 
-	// Generate integrity checksum
 	entry.Checksum = m.generateChecksum(entry)
 
-	// Store the audit entry
-	return m.store.StoreAuditEntry(ctx, entry)
+	select {
+	case m.queue <- entry:
+		return nil
+	default:
+		m.logger.Warn("audit queue full: dropping entry", "id", entry.ID, "action", entry.Action, "source", m.source)
+		return errQueueFull
+	}
 }
 
-// RecordBatch records multiple audit events atomically
+// RecordBatch records multiple audit events. Each entry is enqueued individually;
+// batch delivery is no longer atomic with respect to store transactions.
+// Returns an error listing how many entries were dropped if the queue is full.
 func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) error {
-	entries := make([]*interfaces.AuditEntry, len(events))
+	// Check if the manager has been stopped.
+	select {
+	case <-m.stopCh:
+		return errManagerStopped
+	default:
+	}
 
+	dropped := 0
 	for i, event := range events {
 		entry := &interfaces.AuditEntry{
 			ID:        uuid.New().String(),
@@ -88,10 +216,19 @@ func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) 
 		}
 
 		entry.Checksum = m.generateChecksum(entry)
-		entries[i] = entry
+
+		select {
+		case m.queue <- entry:
+		default:
+			m.logger.Warn("audit queue full: dropping batch entry", "id", entry.ID, "action", entry.Action, "source", m.source)
+			dropped++
+		}
 	}
 
-	return m.store.StoreAuditBatch(ctx, entries)
+	if dropped > 0 {
+		return fmt.Errorf("audit queue full: %d of %d batch entries dropped", dropped, len(events))
+	}
+	return nil
 }
 
 // GetEntry retrieves an audit entry by ID

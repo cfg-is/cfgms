@@ -48,6 +48,41 @@ if err := auditManager.RecordEvent(ctx, event); err != nil {
 
 `SecurityEvent` uses `userID` as both the user and the `ResourceID`, satisfying validation.
 
+## Shutdown Guarantee
+
+`Manager` has an internal bounded write queue (`defaultQueueCapacity = 1024`) and a background drain goroutine started by `NewManager`. All `RecordEvent` and `RecordBatch` calls enqueue entries for async storage rather than writing synchronously. Two methods guarantee emission completeness during shutdown:
+
+### `Flush(ctx context.Context) error`
+
+Waits until all entries enqueued **before** the call have been persisted. Returns `ctx.Err()` if the context expires before draining completes. Callers should use a generous timeout (e.g. 10 s) to allow the drain loop to finish writing.
+
+```go
+flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+if err := auditManager.Flush(flushCtx); err != nil {
+    logger.Warn("audit Flush timed out", "error", err)
+}
+```
+
+### `Stop(ctx context.Context) error`
+
+Calls `Flush` then shuts down the drain goroutine. **Must be called before the storage backend is closed** so in-flight entries are not lost. `Stop` is idempotent — safe to call multiple times.
+
+```go
+// In shutdown path, before closing the storage manager:
+stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+if err := auditManager.Stop(stopCtx); err != nil {
+    logger.Warn("audit Stop error", "error", err)
+}
+```
+
+### Queue-full behaviour
+
+When the queue is at capacity, `RecordEvent` logs a warning via `slog.Default()` and returns `errQueueFull` — **it does not block the caller**. This is an intentional design choice: audit must never stall application code. The `defaultQueueCapacity = 1024` constant is defined in `manager.go` and easy to tune.
+
+Storage errors (e.g. the underlying store returning an error) are logged by the drain goroutine but do not propagate back to the original caller, because the write is asynchronous.
+
 ## Compliance Reporting
 
 Compliance report generation is handled by `features/reports/`, not by this package.

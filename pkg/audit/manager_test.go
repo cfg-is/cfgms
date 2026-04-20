@@ -4,6 +4,7 @@ package audit
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 )
 
 // newTestManager creates a real audit manager backed by OSS storage in a temp dir.
+// It registers a cleanup to call Stop so background goroutines do not leak.
 func newTestManager(t *testing.T, source string) *Manager {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -27,7 +29,56 @@ func newTestManager(t *testing.T, source string) *Manager {
 
 	m, err := NewManager(storageManager.GetAuditStore(), source)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.Stop(ctx)
+	})
 	return m
+}
+
+// slowAuditStore wraps a real AuditStore and adds a configurable delay to
+// StoreAuditEntry so tests can verify Flush waits for completion.
+type slowAuditStore struct {
+	interfaces.AuditStore
+	delay time.Duration
+	mu    sync.Mutex
+	count int
+}
+
+func (s *slowAuditStore) StoreAuditEntry(ctx context.Context, entry *interfaces.AuditEntry) error {
+	time.Sleep(s.delay)
+	err := s.AuditStore.StoreAuditEntry(ctx, entry)
+	if err == nil {
+		s.mu.Lock()
+		s.count++
+		s.mu.Unlock()
+	}
+	return err
+}
+
+func (s *slowAuditStore) stored() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count
+}
+
+// holdAuditStore blocks every StoreAuditEntry call until release is closed.
+// ready receives a signal when the first call blocks, allowing the test to
+// deterministically fill the queue before releasing.
+type holdAuditStore struct {
+	interfaces.AuditStore
+	ready   chan struct{}
+	release chan struct{}
+}
+
+func (s *holdAuditStore) StoreAuditEntry(ctx context.Context, entry *interfaces.AuditEntry) error {
+	select {
+	case s.ready <- struct{}{}:
+	default:
+	}
+	<-s.release
+	return s.AuditStore.StoreAuditEntry(ctx, entry)
 }
 
 // TestNewManager tests audit manager creation
@@ -389,4 +440,160 @@ func TestManager_IntegrityVerification(t *testing.T) {
 
 	entry.Action = originalAction
 	assert.True(t, manager.VerifyIntegrity(entry))
+}
+
+// TestManager_Flush verifies that after Flush returns, all previously recorded
+// events are queryable from the real store.
+func TestManager_Flush(t *testing.T) {
+	manager := newTestManager(t, "test-flush")
+	ctx := context.Background()
+
+	const n = 20
+	for i := 0; i < n; i++ {
+		event := NewEventBuilder().
+			Tenant("test-tenant").
+			Type(interfaces.AuditEventConfiguration).
+			Action("flush_test").
+			User("test-user", interfaces.AuditUserTypeHuman).
+			Resource("resource", "res-id", "Res")
+		err := manager.RecordEvent(ctx, event)
+		require.NoError(t, err)
+	}
+
+	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Flush(flushCtx), "Flush must not return error")
+
+	entries, err := manager.QueryEntries(ctx, &interfaces.AuditFilter{Actions: []string{"flush_test"}})
+	require.NoError(t, err)
+	assert.Len(t, entries, n, "all %d events must be in the store after Flush", n)
+}
+
+// TestManager_ShutdownOrderGuarantee verifies that Flush waits for a slow store
+// to finish writing before returning, rather than dropping in-flight entries.
+func TestManager_ShutdownOrderGuarantee(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	slow := &slowAuditStore{
+		AuditStore: storageManager.GetAuditStore(),
+		delay:      20 * time.Millisecond,
+	}
+
+	manager, err := NewManager(slow, "test-slow")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = manager.Stop(ctx)
+	})
+
+	ctx := context.Background()
+	const n = 5
+	for i := 0; i < n; i++ {
+		event := NewEventBuilder().
+			Tenant("test-tenant").
+			Type(interfaces.AuditEventConfiguration).
+			Action("slow_test").
+			User("test-user", interfaces.AuditUserTypeHuman).
+			Resource("resource", "res-id", "Res")
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+
+	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Flush(flushCtx))
+
+	// After Flush returns, all entries must have been persisted.
+	assert.Equal(t, n, slow.stored(), "Flush must wait for all slow-store writes to complete")
+}
+
+// TestManager_StopIsIdempotent verifies that calling Stop multiple times is safe.
+func TestManager_StopIsIdempotent(t *testing.T) {
+	manager := newTestManager(t, "test-idempotent")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	require.NoError(t, manager.Stop(ctx))
+	require.NoError(t, manager.Stop(ctx)) // second call must not panic or error
+}
+
+// TestManager_RecordEventAfterStop verifies that RecordEvent returns an error
+// when called after the manager has been stopped.
+func TestManager_RecordEventAfterStop(t *testing.T) {
+	manager := newTestManager(t, "test-after-stop")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	require.NoError(t, manager.Stop(ctx))
+
+	event := NewEventBuilder().
+		Tenant("test-tenant").
+		Type(interfaces.AuditEventConfiguration).
+		Action("post_stop").
+		User("test-user", interfaces.AuditUserTypeHuman).
+		Resource("resource", "res-id", "Res")
+	err := manager.RecordEvent(context.Background(), event)
+	assert.ErrorIs(t, err, errManagerStopped)
+}
+
+// TestManager_QueueFull verifies that RecordEvent returns errQueueFull when the
+// internal write queue is at capacity, without blocking the caller.
+func TestManager_QueueFull(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+
+	release := make(chan struct{})
+	hold := &holdAuditStore{
+		AuditStore: storageManager.GetAuditStore(),
+		ready:      make(chan struct{}, 1),
+		release:    release,
+	}
+
+	manager, err := NewManager(hold, "test-full")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Unblock store so Stop/Flush can complete.
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Stop(ctx)
+		_ = storageManager.Close()
+	})
+
+	ctx := context.Background()
+	newEvent := func() *AuditEventBuilder {
+		return NewEventBuilder().
+			Tenant("test-tenant").
+			Type(interfaces.AuditEventConfiguration).
+			Action("queue_full_test").
+			User("test-user", interfaces.AuditUserTypeHuman).
+			Resource("resource", "res-id", "Res")
+	}
+
+	// The drain loop takes the first entry and blocks inside StoreAuditEntry.
+	require.NoError(t, manager.RecordEvent(ctx, newEvent()))
+
+	// Wait until the drain loop is confirmed blocked.
+	select {
+	case <-hold.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drain loop did not block within timeout")
+	}
+
+	// Fill the queue buffer to capacity — all enqueues must succeed.
+	for i := 0; i < defaultQueueCapacity; i++ {
+		require.NoError(t, manager.RecordEvent(ctx, newEvent()), "entry %d must fit in queue", i)
+	}
+
+	// The next entry overflows the queue and must return errQueueFull.
+	err = manager.RecordEvent(ctx, newEvent())
+	assert.ErrorIs(t, err, errQueueFull, "RecordEvent must return errQueueFull when queue is full")
 }
