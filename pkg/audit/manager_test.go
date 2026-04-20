@@ -360,6 +360,235 @@ func TestSecurityEvent_Persists(t *testing.T) {
 	assert.NoError(t, err, "SecurityEvent must not return a validation error")
 }
 
+// TestRedactMap verifies that redactMap replaces sensitive key values with [REDACTED]
+// and leaves innocuous keys unchanged.
+func TestRedactMap(t *testing.T) {
+	input := map[string]interface{}{
+		"password":    "hunter2",
+		"api_token":   "tok_abc123",
+		"some_secret": "s3cr3t",
+		"user_count":  42,
+		"enabled":     true,
+		"username":    "alice",
+	}
+
+	result := redactMap(input)
+
+	assert.Equal(t, "[REDACTED]", result["password"], "password should be redacted")
+	assert.Equal(t, "[REDACTED]", result["api_token"], "api_token should be redacted")
+	assert.Equal(t, "[REDACTED]", result["some_secret"], "some_secret should be redacted")
+	assert.Equal(t, 42, result["user_count"], "user_count should not be redacted")
+	assert.Equal(t, true, result["enabled"], "bool values should not be redacted")
+	assert.Equal(t, "alice", result["username"], "username should not be redacted")
+
+	// Verify original map is not mutated
+	assert.Equal(t, "hunter2", input["password"], "original map must not be mutated")
+}
+
+// TestRedactMap_NilAndEmpty verifies edge cases for redactMap.
+func TestRedactMap_NilAndEmpty(t *testing.T) {
+	assert.Nil(t, redactMap(nil))
+	assert.Empty(t, redactMap(map[string]interface{}{}))
+}
+
+// TestRedactMap_CaseInsensitive verifies that key matching is case-insensitive.
+func TestRedactMap_CaseInsensitive(t *testing.T) {
+	input := map[string]interface{}{
+		"Password":     "secret1",
+		"API_KEY":      "secret2",
+		"X-Auth-Token": "secret3",
+		"Username":     "alice",
+	}
+
+	result := redactMap(input)
+
+	assert.Equal(t, "[REDACTED]", result["Password"], "Password (mixed case) should be redacted")
+	assert.Equal(t, "[REDACTED]", result["API_KEY"], "API_KEY (uppercase) should be redacted")
+	assert.Equal(t, "[REDACTED]", result["X-Auth-Token"], "X-Auth-Token should be redacted")
+	assert.Equal(t, "alice", result["Username"], "Username should not be redacted")
+}
+
+// TestRedactMap_NonStringOnSensitiveKey verifies that non-string values under sensitive keys
+// pass through unredacted (only string values are replaced).
+func TestRedactMap_NonStringOnSensitiveKey(t *testing.T) {
+	input := map[string]interface{}{
+		"password":    12345,
+		"token_count": true,
+		"auth_level":  3.14,
+	}
+
+	result := redactMap(input)
+
+	// Non-string values pass through — only string values are candidates for redaction
+	assert.Equal(t, 12345, result["password"], "integer under sensitive key must pass through")
+	assert.Equal(t, true, result["token_count"], "bool under sensitive key must pass through")
+	assert.Equal(t, 3.14, result["auth_level"], "float under sensitive key must pass through")
+}
+
+// TestRedactErrorMessage verifies the direct output of redactErrorMessage.
+func TestRedactErrorMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		contains []string
+		absent   []string
+	}{
+		{
+			name:     "empty string",
+			input:    "",
+			contains: []string{},
+			absent:   []string{},
+		},
+		{
+			name:     "no sensitive key=value",
+			input:    "login failed: username=alice, attempts=3",
+			contains: []string{"username=alice", "attempts=3"},
+			absent:   []string{"[REDACTED]"},
+		},
+		{
+			name:     "single sensitive key=value",
+			input:    "login failed: password=hunter2, username=alice",
+			contains: []string{"password=[REDACTED]", "username=alice"},
+			absent:   []string{"hunter2"},
+		},
+		{
+			name:     "multiple sensitive key=value pairs",
+			input:    "error: token=abc123, api_key=xyz789, user=bob",
+			contains: []string{"token=[REDACTED]", "api_key=[REDACTED]", "user=bob"},
+			absent:   []string{"abc123", "xyz789"},
+		},
+		{
+			name:     "case-insensitive key matching",
+			input:    "auth error: PASSWORD=secret, user=alice",
+			contains: []string{"PASSWORD=[REDACTED]", "user=alice"},
+			absent:   []string{"secret"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := redactErrorMessage(tt.input)
+			for _, s := range tt.contains {
+				assert.Contains(t, result, s, "result should contain %q", s)
+			}
+			for _, s := range tt.absent {
+				assert.NotContains(t, result, s, "result must not contain %q", s)
+			}
+		})
+	}
+}
+
+// TestRecordEvent_RedactsDetails verifies that Detail("password", ...) is stored as [REDACTED].
+func TestRecordEvent_RedactsDetails(t *testing.T) {
+	manager := newTestManager(t, "test")
+	ctx := context.Background()
+
+	event := NewEventBuilder().
+		Tenant("test-tenant").
+		Type(interfaces.AuditEventConfiguration).
+		Action("test_action").
+		User("test-user", interfaces.AuditUserTypeHuman).
+		Resource("test_resource", "test-id", "Test Resource").
+		Detail("password", "hunter2").
+		Detail("api_key", "secret-key-value").
+		Detail("user_count", 5).
+		Severity(interfaces.AuditSeverityMedium)
+
+	err := manager.RecordEvent(ctx, event)
+	require.NoError(t, err)
+
+	entries, err := manager.QueryEntries(ctx, &interfaces.AuditFilter{
+		TenantID: "test-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	assert.Equal(t, "[REDACTED]", entries[0].Details["password"], "password must be redacted in stored entry")
+	assert.Equal(t, "[REDACTED]", entries[0].Details["api_key"], "api_key must be redacted in stored entry")
+	// Storage round-trips through JSON, so integers deserialize as float64
+	assert.EqualValues(t, 5, entries[0].Details["user_count"], "non-sensitive int must be stored as-is")
+}
+
+// TestChanges_Redacted verifies that Changes Before/After maps have sensitive keys redacted.
+func TestChanges_Redacted(t *testing.T) {
+	manager := newTestManager(t, "test")
+	ctx := context.Background()
+
+	before := map[string]interface{}{
+		"password": "old-password",
+		"username": "alice",
+		"token":    "old-token",
+	}
+	after := map[string]interface{}{
+		"password": "new-password",
+		"username": "alice",
+		"token":    "new-token",
+	}
+
+	event := NewEventBuilder().
+		Tenant("test-tenant").
+		Type(interfaces.AuditEventConfiguration).
+		Action("update_credentials").
+		User("admin", interfaces.AuditUserTypeHuman).
+		Resource("user", "alice", "Alice").
+		Changes(before, after, []string{"password", "username", "token"}).
+		Severity(interfaces.AuditSeverityHigh)
+
+	err := manager.RecordEvent(ctx, event)
+	require.NoError(t, err)
+
+	entries, err := manager.QueryEntries(ctx, &interfaces.AuditFilter{
+		TenantID: "test-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	require.NotNil(t, entries[0].Changes)
+	assert.Equal(t, "[REDACTED]", entries[0].Changes.Before["password"], "Before.password must be redacted")
+	assert.Equal(t, "[REDACTED]", entries[0].Changes.Before["token"], "Before.token must be redacted")
+	assert.Equal(t, "alice", entries[0].Changes.Before["username"], "Before.username must not be redacted")
+	assert.Equal(t, "[REDACTED]", entries[0].Changes.After["password"], "After.password must be redacted")
+	assert.Equal(t, "[REDACTED]", entries[0].Changes.After["token"], "After.token must be redacted")
+	assert.Equal(t, "alice", entries[0].Changes.After["username"], "After.username must not be redacted")
+
+	// Field names are not redacted, only values
+	assert.Contains(t, entries[0].Changes.Fields, "password", "field names must not be redacted")
+	assert.Contains(t, entries[0].Changes.Fields, "token", "field names must not be redacted")
+
+	// Verify original maps are not mutated
+	assert.Equal(t, "old-password", before["password"], "original before map must not be mutated")
+	assert.Equal(t, "new-password", after["password"], "original after map must not be mutated")
+}
+
+// TestRecordEvent_RedactsErrorMessage verifies that error messages containing key=value
+// patterns with sensitive key names have the value portion redacted.
+func TestRecordEvent_RedactsErrorMessage(t *testing.T) {
+	manager := newTestManager(t, "test")
+	ctx := context.Background()
+
+	event := NewEventBuilder().
+		Tenant("test-tenant").
+		Type(interfaces.AuditEventAuthentication).
+		Action("login").
+		User("user1", interfaces.AuditUserTypeHuman).
+		Resource("session", "user1", "").
+		Error("AUTH_FAILED", "login failed: password=hunter2, username=alice").
+		Severity(interfaces.AuditSeverityHigh)
+
+	err := manager.RecordEvent(ctx, event)
+	require.NoError(t, err)
+
+	entries, err := manager.QueryEntries(ctx, &interfaces.AuditFilter{
+		TenantID: "test-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	assert.NotContains(t, entries[0].ErrorMessage, "hunter2", "raw secret must not appear in stored ErrorMessage")
+	assert.Contains(t, entries[0].ErrorMessage, "password=[REDACTED]", "password value must be replaced with [REDACTED]")
+	assert.Contains(t, entries[0].ErrorMessage, "username=alice", "non-sensitive key=value must be preserved")
+}
+
 // TestManager_IntegrityVerification tests audit integrity verification
 func TestManager_IntegrityVerification(t *testing.T) {
 	manager := newTestManager(t, "test")

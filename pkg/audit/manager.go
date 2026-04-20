@@ -8,12 +8,72 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// RedactedKeys is the deny-list of lower-cased key substrings that trigger value redaction
+// in Details, Changes.Before, Changes.After, and ErrorMessage.
+// Callers may append domain-specific terms before the first call to RecordEvent.
+// Note: appending after NewManager is called is not goroutine-safe.
+var RedactedKeys = []string{
+	"password",
+	"secret",
+	"token",
+	"api_key",
+	"apikey",
+	"credential",
+	"private_key",
+	"access_key",
+	"auth",
+}
+
+// redactedValue is the placeholder used in place of sensitive values.
+const redactedValue = "[REDACTED]"
+
+// errorMessageRedactPattern matches key=value pairs where the key contains a sensitive substring.
+var errorMessageRedactPattern = regexp.MustCompile(
+	`(?i)(\w*(?:password|secret|token|api_key|apikey|credential|private_key|access_key|auth)\w*=)([^\s,]+)`,
+)
+
+// redactMap returns a copy of m with string values replaced by [REDACTED] when the
+// lowercased key contains any substring from RedactedKeys. Non-string values are copied as-is.
+// Returns nil when m is nil.
+func redactMap(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		lower := strings.ToLower(k)
+		sensitive := false
+		for _, deny := range RedactedKeys {
+			if strings.Contains(lower, deny) {
+				sensitive = true
+				break
+			}
+		}
+		if sensitive {
+			if _, isStr := v.(string); isStr {
+				out[k] = redactedValue
+				continue
+			}
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// redactErrorMessage replaces the value portion of key=value pairs in msg where the key
+// matches a sensitive substring from RedactedKeys.
+func redactErrorMessage(msg string) string {
+	return errorMessageRedactPattern.ReplaceAllString(msg, "${1}"+redactedValue)
+}
 
 // SystemTenantID is the sentinel tenant ID used for controller-internal system events.
 // TODO(#751): controller identity as a real tenant — replace with proper tenant identity.
@@ -339,14 +399,20 @@ func (b *AuditEventBuilder) build(entry *business.AuditEntry) {
 	entry.ResourceName = b.resourceName
 	entry.Result = b.result
 	entry.ErrorCode = b.errorCode
-	entry.ErrorMessage = b.errorMessage
 	entry.RequestID = b.requestID
 	entry.IPAddress = b.ipAddress
 	entry.UserAgent = b.userAgent
 	entry.Method = b.method
 	entry.Path = b.path
-	entry.Details = b.details
-	entry.Changes = b.changes
+	entry.Details = redactMap(b.details)
+	if b.changes != nil {
+		entry.Changes = &interfaces.AuditChanges{
+			Before: redactMap(b.changes.Before),
+			After:  redactMap(b.changes.After),
+			Fields: b.changes.Fields,
+		}
+	}
+	entry.ErrorMessage = redactErrorMessage(b.errorMessage)
 	entry.Tags = b.tags
 	entry.Severity = b.severity
 }
