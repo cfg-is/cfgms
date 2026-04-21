@@ -498,7 +498,6 @@ services:
         STEWARD_CONTROLLER_URL: "https://controller-standalone:9080"
     environment:
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_STANDALONE}"
-      CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
       # gRPC transport uses TLS auto-negotiated via registration response (no static cert paths needed)
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
@@ -538,7 +537,6 @@ services:
     environment:
       CFGMS_TENANT_ID: "tenant1"  # Story 12.5: Tenant isolation
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_TENANT1}"
-      CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
@@ -564,7 +562,6 @@ services:
     environment:
       CFGMS_TENANT_ID: "tenant2"  # Story 12.5: Tenant isolation
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_TENANT2}"
-      CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
@@ -590,7 +587,6 @@ services:
     environment:
       CFGMS_TENANT_ID: "tenant3"  # Story 12.5: Tenant isolation
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_TENANT3}"
-      CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"

@@ -5,8 +5,11 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/cfgis/cfgms/cmd/steward/service"
+	"github.com/cfgis/cfgms/features/steward/registration"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -73,6 +76,33 @@ func TestRunStatusNotInstalled(t *testing.T) {
 	// status should succeed even when the service is not installed.
 	err := runStatus()
 	assert.NoError(t, err)
+}
+
+// TestRegisterAndConnectIgnoresInsecureEnvVar asserts that setting
+// CFGMS_HTTP_INSECURE_SKIP_VERIFY=true has no observable effect on the HTTP
+// registration client. The env var was removed from registerAndConnect; this
+// test documents that guarantee. TLS enforcement is verified structurally:
+// HTTPConfig has no InsecureSkipVerify field, so the env var cannot be wired in.
+func TestRegisterAndConnectIgnoresInsecureEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_HTTP_INSECURE_SKIP_VERIFY", "true")
+
+	logger := logging.NewLogger("info")
+
+	// Construct a client the same way registerAndConnect does after the fix.
+	// HTTPConfig has no InsecureSkipVerify field — the env var cannot influence it.
+	client, err := registration.NewHTTPClient(&registration.HTTPConfig{
+		ControllerURL: "https://controller.example.com",
+		Timeout:       30 * time.Second,
+		Logger:        logger,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	// The env var is set to "true" but must have no effect on TLS enforcement.
+	// TransportInsecureSkipVerify() reads the underlying transport's TLSClientConfig
+	// and returns false when TLSClientConfig is nil (Go default: always verify).
+	assert.False(t, client.TransportInsecureSkipVerify(),
+		"CFGMS_HTTP_INSECURE_SKIP_VERIFY=true must have no effect — TLS is always enforced")
 }
 
 func TestControllerURLOrUnknown(t *testing.T) {

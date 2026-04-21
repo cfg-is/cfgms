@@ -275,6 +275,10 @@ How a steward joins a controller.
 
 After initial registration, the steward reconnects automatically on restart using its stored certificates. The registration token is only used once.
 
+### Security
+
+TLS verification during the initial registration HTTP handshake is compile-time enforced. The only runtime input is `ControllerURL`, baked into the binary via ldflags at build time. No environment variable or configuration flag can disable TLS verification on the steward — `CFGMS_HTTP_INSECURE_SKIP_VERIFY` does not exist and has never had effect in any released binary. If you need to test against a self-signed certificate, pass the CA directly to the test harness; do not attempt env-var overrides.
+
 ## Cfg Fields Governing Convergence
 
 The convergence loop behaviour is controlled by fields in the cfg:

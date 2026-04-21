@@ -464,17 +464,10 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 			"See docs/deployment/ for build instructions")
 	}
 
-	insecureSkipVerify := false
-	if skipVerify := os.Getenv("CFGMS_HTTP_INSECURE_SKIP_VERIFY"); skipVerify == "true" {
-		insecureSkipVerify = true
-		logger.Warn("HTTP TLS verification disabled (test mode only)")
-	}
-
 	httpClient, err := registration.NewHTTPClient(&registration.HTTPConfig{
-		ControllerURL:      controllerURL,
-		Timeout:            30 * time.Second,
-		InsecureSkipVerify: insecureSkipVerify,
-		Logger:             logger,
+		ControllerURL: controllerURL,
+		Timeout:       30 * time.Second,
+		Logger:        logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP registration client: %w", err)
