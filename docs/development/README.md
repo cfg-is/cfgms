@@ -18,6 +18,7 @@ This directory contains detailed development guides, standards, and workflows fo
 - [Story Checklist](story-checklist.md) - Complete checklist for implementing stories
 - [PR Review Methodology](pr-review-methodology.md) - 5-phase structured PR review process
 - [Git Workflow](git-workflow.md) - GitFlow branching strategy and commit guidelines
+- [Merge Protocol](merge-protocol.md) - Cross-cutting PR detection, rebase procedure, and merge serialization
 - [Commands Reference](commands-reference.md) - All available make commands and utilities
 
 ### Development Guides

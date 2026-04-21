@@ -252,6 +252,7 @@ Ask: "Does this work within a single tenant tree, or require awareness of multip
 - [PR Review Methodology](docs/development/pr-review-methodology.md)
 - [Commands Reference](docs/development/commands-reference.md)
 - [Git Workflow](docs/development/git-workflow.md)
+- [Merge Protocol](docs/development/merge-protocol.md)
 - [Architecture](docs/architecture/)
 - [Roadmap](docs/product/roadmap.md)
 
