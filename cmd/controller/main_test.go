@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/cfgis/cfgms/cmd/controller/service"
+	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -124,6 +125,38 @@ func TestRunControllerNoDebugOutput(t *testing.T) {
 
 	assert.NotContains(t, buf.String(), "[DEBUG]",
 		"runController must not write [DEBUG] output to stdout")
+}
+
+// TestGetLogProviderConfigTimescaleMissingPassword verifies that getLogProviderConfig
+// returns a non-nil error when the timescale provider is configured but
+// CFGMS_TIMESCALE_PASSWORD is not set.
+func TestGetLogProviderConfigTimescaleMissingPassword(t *testing.T) {
+	t.Setenv("CFGMS_TIMESCALE_PASSWORD", "")
+	cfg := &config.Config{
+		Logging: &config.LoggingConfig{
+			Provider: "timescale",
+		},
+	}
+	result, err := getLogProviderConfig(cfg)
+	require.Error(t, err, "expected error when CFGMS_TIMESCALE_PASSWORD is unset")
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "CFGMS_TIMESCALE_PASSWORD")
+}
+
+// TestGetLogProviderConfigTimescaleWithPassword verifies that getLogProviderConfig
+// returns a nil error and a map containing the "password" key when
+// CFGMS_TIMESCALE_PASSWORD is set.
+func TestGetLogProviderConfigTimescaleWithPassword(t *testing.T) {
+	t.Setenv("CFGMS_TIMESCALE_PASSWORD", "secret123")
+	cfg := &config.Config{
+		Logging: &config.LoggingConfig{
+			Provider: "timescale",
+		},
+	}
+	result, err := getLogProviderConfig(cfg)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "secret123", result["password"])
 }
 
 // TestSignalHandling is implemented in platform-specific files:
