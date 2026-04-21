@@ -4,7 +4,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -87,6 +86,10 @@ func runController(configPath string, initMode bool) error {
 			"then update your configuration to use 'flatfile' or 'database'")
 	}
 
+	logProviderConfig, err := getLogProviderConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to build log provider config: %w", err)
+	}
 	loggingConfig := &logging.LoggingConfig{
 		Provider:          getLogProvider(cfg),
 		Level:             strings.ToUpper(cfg.LogLevel),
@@ -99,7 +102,7 @@ func runController(configPath string, initMode bool) error {
 		BatchSize:         100,
 		FlushInterval:     5 * time.Second,
 		RetentionDays:     90,
-		Config:            getLogProviderConfig(cfg),
+		Config:            logProviderConfig,
 	}
 
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
@@ -264,12 +267,16 @@ func runInstall(configPath string) error {
 
 	if caPath != "" && !initialization.IsInitialized(caPath) {
 		fmt.Println("Controller not yet initialized — running --init...")
+		logProviderConfig, err := getLogProviderConfig(cfg)
+		if err != nil {
+			return fmt.Errorf("failed to build log provider config: %w", err)
+		}
 		loggingConfig := &logging.LoggingConfig{
 			Provider:    getLogProvider(cfg),
 			Level:       "INFO",
 			ServiceName: "controller",
 			Component:   "install",
-			Config:      getLogProviderConfig(cfg),
+			Config:      logProviderConfig,
 		}
 		if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
 			return fmt.Errorf("failed to initialize logging: %w", err)
@@ -381,9 +388,9 @@ func getLogProvider(cfg *config.Config) string {
 }
 
 // getLogProviderConfig creates provider-specific configuration.
-func getLogProviderConfig(cfg *config.Config) map[string]interface{} {
+func getLogProviderConfig(cfg *config.Config) (map[string]interface{}, error) {
 	if cfg.Logging != nil && cfg.Logging.Config != nil && len(cfg.Logging.Config) > 0 {
-		return cfg.Logging.Config
+		return cfg.Logging.Config, nil
 	}
 
 	provider := getLogProvider(cfg)
@@ -392,9 +399,9 @@ func getLogProviderConfig(cfg *config.Config) map[string]interface{} {
 	case "timescale":
 		password := os.Getenv("CFGMS_TIMESCALE_PASSWORD")
 		if password == "" {
-			log.Fatal("FATAL: CFGMS_TIMESCALE_PASSWORD environment variable is required when using " +
-				"timescale logging provider. Set this variable or configure logging.config.password " +
-				"in the config file. See QUICK_START.md for configuration examples.")
+			return nil, fmt.Errorf("CFGMS_TIMESCALE_PASSWORD environment variable is required when " +
+				"using timescale logging provider; configure logging.config.password in the config " +
+				"file or set CFGMS_TIMESCALE_PASSWORD (see QUICK_START.md for examples)")
 		}
 		host := os.Getenv("CFGMS_TIMESCALE_HOST")
 		if host == "" {
@@ -423,7 +430,7 @@ func getLogProviderConfig(cfg *config.Config) map[string]interface{} {
 			"username": username,
 			"password": password,
 			"ssl_mode": sslMode,
-		}
+		}, nil
 
 	default:
 		return map[string]interface{}{
@@ -431,6 +438,6 @@ func getLogProviderConfig(cfg *config.Config) map[string]interface{} {
 			"max_file_size":    int64(100 * 1024 * 1024),
 			"max_files":        10,
 			"compress_rotated": true,
-		}
+		}, nil
 	}
 }
