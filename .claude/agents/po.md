@@ -278,8 +278,20 @@ gh pr list --repo cfg-is/cfgms --search "head:feature/story-<NUM>" --json number
 ./.claude/scripts/agent-dispatch.sh launch-generic cfg-agent-pr-fix-<PR_NUM> <clone_dir> --fix-pr <PR_NUM>
 ```
 
-**Step 5 — QA pass (Acceptance Reviewer):**
-Find agent PRs (branch `feature/story-*`) without Acceptance Reviewer comment. For each, extract the story number from the branch name and use the **Agent tool** (not Bash) to spawn the Acceptance Reviewer: subagent_type `acceptance-reviewer`, prompt `"Review agent PR. pr:<PR_NUM> story:<STORY_NUM>"`, mode `auto`. Launch multiple reviewers in parallel when there are multiple PRs to review.
+**Step 5 — QA pass (Acceptance Reviewer) — FIFO order:**
+Find agent PRs (branch `feature/story-*`) without Acceptance Reviewer comment, sorted by creation timestamp ascending (oldest first). FIFO order minimizes rebase churn: the oldest PR was based on the earliest develop snapshot, so it has the fewest accumulated conflicts. Once it lands, the next-oldest only needs to rebase against one new merge instead of an arbitrary set.
+
+```bash
+gh pr list --repo cfg-is/cfgms --search "head:feature/story-" --state open \
+  --json number,headRefName,createdAt,comments \
+  --jq '[.[] | select(.comments | map(.author.login) | contains(["acceptance-reviewer"]) | not)] | sort_by(.createdAt)'
+```
+
+Process PRs **serially in FIFO order** (do not spawn reviewers in parallel — parallel spawn creates a race where two reviewers both decide to auto-merge PRs that conflict with each other). For each PR in ascending `createdAt` order:
+
+1. **Dependency/conflict check**: If this PR shares files with a currently-merging or in-progress PR that is *older*, skip it and continue to the next PR in the queue. A PR held for a conflict gate does **not** block strictly-younger PRs from being reviewed if they don't share that dependency.
+2. **Spawn Acceptance Reviewer**: Use the **Agent tool** (not Bash): subagent_type `acceptance-reviewer`, prompt `"Review agent PR. pr:<PR_NUM> story:<STORY_NUM>"`, mode `auto`.
+3. **Wait for the reviewer to complete** before spawning the next one. This ensures merges happen in FIFO order and the next PR in the queue is reviewed against an up-to-date develop.
 
 The Acceptance Reviewer (`.claude/agents/acceptance-reviewer.md`) verifies CI, checks acceptance criteria against the diff, and renders a verdict:
 - Zero findings: auto-merge via `gh pr merge --squash --auto`, clean up container/worktree
