@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
@@ -44,7 +45,8 @@ func (c *controlledConsumeStore) ConsumeToken(ctx context.Context, tokenStr, ste
 
 // newHandleRegisterServer creates a minimal server for handleRegister unit tests.
 // Pass a non-nil certMgr only when you need the handler to reach cert generation (200 path).
-func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMgr *cert.Manager) *Server {
+// Returns the server and the audit manager so tests can Flush and query audit entries.
+func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMgr *cert.Manager) (*Server, *audit.Manager) {
 	t.Helper()
 
 	cfg := config.DefaultConfig()
@@ -71,6 +73,10 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 	rbacService := service.NewRBACService(rbacManager)
 
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
 	server, err := New(
 		cfg, logger, controllerService, configService, nil, rbacService,
 		certMgr, tenantManager, rbacManager,
@@ -78,9 +84,10 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 		tokenStore,
 		"",
 		nil,
+		auditMgr,
 	)
 	require.NoError(t, err)
-	return server
+	return server, auditMgr
 }
 
 // newTestCertManager creates a real cert manager backed by a temp dir.
@@ -110,7 +117,7 @@ func postRegister(server *Server, token string) *httptest.ResponseRecorder {
 
 func TestHandleRegister_AlreadyUsedSingleUseToken_Returns409(t *testing.T) {
 	tokenStore := registration.NewMemoryStore()
-	server := newHandleRegisterServer(t, tokenStore, nil)
+	server, auditMgr := newHandleRegisterServer(t, tokenStore, nil)
 
 	usedAt := time.Now().Add(-time.Hour)
 	tok := &registration.Token{
@@ -127,11 +134,23 @@ func TestHandleRegister_AlreadyUsedSingleUseToken_Returns409(t *testing.T) {
 
 	assert.Equal(t, http.StatusConflict, rec.Code)
 	assert.Contains(t, rec.Body.String(), "already been used")
+
+	// Verify audit entry was recorded for the rejected registration
+	require.NoError(t, auditMgr.Flush(context.Background()))
+	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{
+		TenantID: "test-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "registration_rejected", entries[0].Action)
+	assert.Equal(t, string(business.AuditResultFailure), string(entries[0].Result))
+	assert.Equal(t, string(business.AuditEventSecurityEvent), string(entries[0].EventType))
+	assert.Equal(t, "test-tenant", entries[0].TenantID)
 }
 
 func TestHandleRegister_RevokedToken_Returns401(t *testing.T) {
 	tokenStore := registration.NewMemoryStore()
-	server := newHandleRegisterServer(t, tokenStore, nil)
+	server, auditMgr := newHandleRegisterServer(t, tokenStore, nil)
 
 	revokedAt := time.Now().Add(-time.Hour)
 	tok := &registration.Token{
@@ -147,11 +166,19 @@ func TestHandleRegister_RevokedToken_Returns401(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Contains(t, rec.Body.String(), "revoked")
+
+	require.NoError(t, auditMgr.Flush(context.Background()))
+	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "registration_rejected", entries[0].Action)
+	assert.Equal(t, string(business.AuditResultFailure), string(entries[0].Result))
+	assert.Equal(t, string(business.AuditEventSecurityEvent), string(entries[0].EventType))
 }
 
 func TestHandleRegister_ExpiredToken_Returns401(t *testing.T) {
 	tokenStore := registration.NewMemoryStore()
-	server := newHandleRegisterServer(t, tokenStore, nil)
+	server, auditMgr := newHandleRegisterServer(t, tokenStore, nil)
 
 	pastExpiry := time.Now().Add(-time.Hour)
 	tok := &registration.Token{
@@ -166,6 +193,14 @@ func TestHandleRegister_ExpiredToken_Returns401(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Contains(t, rec.Body.String(), "expired")
+
+	require.NoError(t, auditMgr.Flush(context.Background()))
+	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "registration_rejected", entries[0].Action)
+	assert.Equal(t, string(business.AuditResultFailure), string(entries[0].Result))
+	assert.Equal(t, string(business.AuditEventSecurityEvent), string(entries[0].EventType))
 }
 
 func TestHandleRegister_StoreError_Returns500(t *testing.T) {
@@ -174,7 +209,7 @@ func TestHandleRegister_StoreError_Returns500(t *testing.T) {
 		MemoryStore: registration.NewMemoryStore(),
 		consumeErr:  storeErr,
 	}
-	server := newHandleRegisterServer(t, tokenStore, nil)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
 
 	tok := &registration.Token{
 		Token:         "cfgms_reg_store_err_token",
@@ -192,7 +227,7 @@ func TestHandleRegister_StoreError_Returns500(t *testing.T) {
 func TestHandleRegister_ValidSingleUseToken_Returns200ThenSubsequent409(t *testing.T) {
 	tokenStore := registration.NewMemoryStore()
 	certMgr := newTestCertManager(t)
-	server := newHandleRegisterServer(t, tokenStore, certMgr)
+	server, auditMgr := newHandleRegisterServer(t, tokenStore, certMgr)
 
 	tok := &registration.Token{
 		Token:         "cfgms_reg_singleuse_valid",
@@ -211,6 +246,18 @@ func TestHandleRegister_ValidSingleUseToken_Returns200ThenSubsequent409(t *testi
 	assert.NotEmpty(t, resp.StewardID)
 	assert.Equal(t, "test-tenant", resp.TenantID)
 
+	// Verify audit entry for successful registration
+	require.NoError(t, auditMgr.Flush(context.Background()))
+	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{
+		TenantID: "test-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "steward_registered", entries[0].Action)
+	assert.Equal(t, string(business.AuditResultSuccess), string(entries[0].Result))
+	assert.Equal(t, string(business.AuditEventAuthentication), string(entries[0].EventType))
+	assert.Equal(t, "test-tenant", entries[0].TenantID)
+
 	// Second request with same token must be rejected as already used
 	rec2 := postRegister(server, "cfgms_reg_singleuse_valid")
 	assert.Equal(t, http.StatusConflict, rec2.Code)
@@ -219,7 +266,7 @@ func TestHandleRegister_ValidSingleUseToken_Returns200ThenSubsequent409(t *testi
 func TestHandleRegister_ValidMultiUseToken_AllowsTwoRegistrations(t *testing.T) {
 	tokenStore := registration.NewMemoryStore()
 	certMgr := newTestCertManager(t)
-	server := newHandleRegisterServer(t, tokenStore, certMgr)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
 
 	tok := &registration.Token{
 		Token:         "cfgms_reg_multiuse_valid",
@@ -247,7 +294,7 @@ func TestHandleRegister_ConsumeToken_NoSaveTokenCall(t *testing.T) {
 	// We use the real MemoryStore and verify token state after registration.
 	tokenStore := registration.NewMemoryStore()
 	certMgr := newTestCertManager(t)
-	server := newHandleRegisterServer(t, tokenStore, certMgr)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
 
 	tok := &registration.Token{
 		Token:         "cfgms_reg_nosave_check",
@@ -270,7 +317,7 @@ func TestHandleRegister_ConsumeToken_NoSaveTokenCall(t *testing.T) {
 func TestHandleRegister_ConcurrentSingleUseToken_ExactlyOneSucceeds(t *testing.T) {
 	tokenStore := registration.NewMemoryStore()
 	certMgr := newTestCertManager(t)
-	server := newHandleRegisterServer(t, tokenStore, certMgr)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
 
 	tok := &registration.Token{
 		Token:         "cfgms_reg_concurrent_token",
@@ -330,7 +377,7 @@ func TestHandleRegister_ErrTokenAlreadyUsed_IsDistinctFrom500(t *testing.T) {
 		MemoryStore: registration.NewMemoryStore(),
 		consumeErr:  business.ErrTokenAlreadyUsed,
 	}
-	server := newHandleRegisterServer(t, tokenStore, nil)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
 
 	tok := &registration.Token{
 		Token:         "cfgms_reg_sentinel_test",

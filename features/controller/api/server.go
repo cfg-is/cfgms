@@ -27,6 +27,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac/authdefense"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgmonitoring "github.com/cfgis/cfgms/pkg/monitoring"
@@ -68,6 +69,7 @@ type Server struct {
 	approvalHook            RegistrationApprovalHook       // Issue #422: Registration approval hook
 	fleetQuery              fleet.FleetQuery               // Issue #603: Single query path for device filtering
 	gitSyncWebhookHandler   http.Handler                   // Issue #666: git-sync webhook endpoint (optional)
+	auditManager            *audit.Manager                 // Issue #775: registration audit events
 }
 
 // APIKey represents an API key for external authentication
@@ -123,6 +125,7 @@ func New(
 	registrationTokenStore registration.Store,
 	signerCertSerial string, // Story #378: Serial of cert used for config signing
 	healthCollector *health.Collector, // Story #417: CFGMS health monitoring
+	auditManager *audit.Manager, // Issue #775: registration audit events
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -155,6 +158,7 @@ func New(
 		secretStore:             secretStore,                         // M-AUTH-1: Central secrets provider
 		registeredStewards:      make(map[string]*RegisteredSteward), // In-memory steward registry
 		approvalHook:            &DefaultApprovalHook{},              // Issue #422: accept-all default
+		auditManager:            auditManager,                        // Issue #775: registration audit events
 	}
 
 	// Story #380: Initialize three-tier auth defense system
