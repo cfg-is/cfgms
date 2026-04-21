@@ -80,7 +80,7 @@ CFGMS uses GitHub Rulesets to protect branches in a GitFlow-style branching mode
 | Require approval of most recent push | ✅ Yes | Prevent last-minute self-approval |
 | Require conversation resolution | ✅ Yes | All PR comments must be resolved |
 | Status checks required | ✅ Yes | CI checks must pass |
-| Require branch up to date | ✅ Enabled | Prevent merging PRs with CI run against stale develop base |
+| Merge queue | ✅ Enabled | Serialized merge with post-rebase validation (replaces strict mode) |
 
 ### Required Status Checks (5 total)
 
@@ -92,7 +92,26 @@ CFGMS uses GitHub Rulesets to protect branches in a GitFlow-style branching mode
 
 **Rationale**: Direct required checks pattern (Story #322) replaced the previous 10-check approach. These checks cover unit tests, integration tests, cross-platform builds, and security scanning. Production-specific gates (`production-risk-assessment`, `integration-test-gate`) are excluded to allow faster iteration.
 
-**Strict up-to-date requirement**: Enabled after PR #777 broke develop because CI ran against a pre-#772 base; strict mode (`strict_required_status_checks_policy: true`) forces developers to rebase their branch to the latest develop tip and re-run all required checks before merge is allowed. This eliminates the failure mode where a PR's CI passes against a stale base but would fail against current develop.
+### Merge Queue
+
+Enabled in Story #801. The merge queue replaces the previous `strict_required_status_checks_policy` (strict mode, enabled in #793).
+
+**How it works:**
+1. A PR marked for merge enters a serial queue
+2. GitHub creates a temporary merge-queue branch: current develop tip + the PR's changes
+3. All 5 required checks run against that combined (post-rebase) state
+4. If checks pass, the PR is squash-merged into develop
+5. If checks fail, the PR is ejected from the queue and the author is notified
+
+**Configuration** (Ruleset 11647684):
+- Merge method: squash (preserves commit convention)
+- Max entries to merge: 1 (serial — prevents ordering bugs like #785)
+- Check response timeout: 60 minutes
+- Grouping strategy: ALLGREEN (each PR must pass individually)
+
+**Why merge queue instead of strict mode**: Strict mode required every PR author/agent to manually rebase before merge, which was manual work that compounded across the autonomous pipeline. Merge queues perform the rebase and re-validation automatically, eliminating that work for the ~80% of PRs with no genuine content conflict.
+
+**Manual rebases are still needed** for genuine content conflicts (estimated ~20% of cases). A rebase is required only when `git merge` would produce a conflict that GitHub cannot auto-resolve.
 
 ---
 

@@ -98,9 +98,9 @@ All must pass before merge to `develop`:
 
 Docs-only PRs get instant green checks via stub jobs (<2 min merge path).
 
-**Branch protection config:** Squash merge only, no review requirements (solo-friendly), strict up-to-date policy (PRs must be rebased to latest develop tip before merge is allowed — enforced by `strict_required_status_checks_policy: true` on the develop ruleset, enabled after PR #777).
+**Branch protection config:** Squash merge only, no review requirements (solo-friendly), merge queue enabled on develop (Story #801) — the queue auto-rebases each PR against current develop tip and re-runs all required checks before merging. Manual rebase is only needed for genuine content conflicts.
 
-**Merging:** Interactive mode uses `gh pr merge --squash --auto` after `/pr-review` approval. Agent-dispatched PRs are auto-merged by the acceptance reviewer when there are zero findings. If the acceptance reviewer finds any issues (even low severity), it must post the concerns on the PR and tag it for manual `/pr-review` — no auto-merge with findings.
+**Merging:** PRs merge via the GitHub merge queue. Interactive mode: use `gh pr merge --squash` after `/pr-review` approval (the queue handles rebase + re-validation). Agent-dispatched PRs: acceptance reviewer uses `gh pr merge --squash` to enqueue when there are zero findings. If the acceptance reviewer finds any issues (even low severity), it must post the concerns on the PR and tag it for manual `/pr-review` — no auto-merge with findings.
 
 **`make test-complete` coverage:**
 - All pre-commit validation, fast comprehensive tests, production-critical tests

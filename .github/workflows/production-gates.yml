@@ -12,6 +12,7 @@ on:
       - 'LICENSE'
       - '.gitignore'
       - '.editorconfig'
+  merge_group:
   push:
     branches:
       - main  # Run on main for production deployment validation and production-readiness-validation (load testing, benchmarks)

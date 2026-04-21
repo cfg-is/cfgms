@@ -18,6 +18,7 @@ on:
       - 'docs/**'
       - '*.md'
       - '.claude/**'
+  merge_group:
   workflow_dispatch:
 
 env:
@@ -229,7 +230,7 @@ jobs:
   unit-tests:
     name: unit-tests
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - name: Docs-only PR validation
         run: |
@@ -240,7 +241,7 @@ jobs:
   security-deployment-gate:
     name: security-deployment-gate
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - name: Docs-only security validation
         run: |
@@ -251,7 +252,7 @@ jobs:
   build-gate:
     name: Build Gate
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - name: Docs-only build validation
         run: |
@@ -262,7 +263,7 @@ jobs:
   integration-tests:
     name: integration-tests
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - name: Docs-only integration test validation
         run: |
@@ -273,7 +274,7 @@ jobs:
   integration-tests-controller:
     name: Controller Integration Tests (Linux)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - name: Docs-only controller integration test validation
         run: |

@@ -103,11 +103,11 @@ Classify each finding by severity:
 
 ### Zero Findings (PASS)
 
-Auto-merge the PR and clean up:
+Enqueue the PR for merge and clean up:
 
 ```bash
-# Auto-merge
-gh pr merge <PR_NUM> --repo cfg-is/cfgms --squash --auto
+# Enqueue for merge — the merge queue handles rebase + re-validation automatically
+gh pr merge <PR_NUM> --repo cfg-is/cfgms --squash
 
 # Extract story number from branch for cleanup
 # Branch pattern: feature/story-<NUM>-*
@@ -177,6 +177,6 @@ If there are zero findings, the Findings table should say "None" and the Accepta
 - Never merge a PR with failing CI checks — CI is a hard gate
 - Never skip acceptance criteria verification — every checkbox must be checked against the diff
 - The fix cycle gets exactly one attempt. First failure = `pipeline:fix`. Second failure = `pipeline:blocked`. No third attempt.
-- Auto-merge uses `--squash --auto` — consistent with project merge strategy
+- Merge enqueue uses `--squash` — merge queue handles the rest (rebase + re-validation + actual merge)
 - Clean up agent container/worktree on auto-merge — the agent infrastructure is no longer needed
 - If the PR targets `main` instead of `develop`, this is a BLOCKING workflow violation. Report it and do not merge.
