@@ -36,7 +36,7 @@ This document defines standards and best practices for GitHub Actions workflows 
 **Configuration**:
 - No review requirements (solo-friendly)
 - Squash merge only
-- Strict up-to-date branch enforcement
+- Merge queue enabled (Story #801) — replaces strict up-to-date enforcement; queue auto-rebases and re-validates before merge
 - No admin bypass needed (tests provide sufficient protection)
 
 ### Main Branch

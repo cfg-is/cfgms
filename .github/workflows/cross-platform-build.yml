@@ -12,6 +12,7 @@ on:
       - 'LICENSE'
       - '.gitignore'
       - '.editorconfig'
+  merge_group:
   workflow_dispatch:
 
 env:
