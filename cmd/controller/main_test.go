@@ -4,12 +4,15 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/cfgis/cfgms/cmd/controller/service"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -162,3 +165,54 @@ func TestGetLogProviderConfigTimescaleWithPassword(t *testing.T) {
 // TestSignalHandling is implemented in platform-specific files:
 // - main_test_unix.go for Unix systems (uses syscall.Kill)
 // - main_test_windows.go for Windows (uses channel-based simulation)
+
+// fakeServer is a test stub satisfying the Server interface.
+type fakeServer struct {
+	startErr  error
+	stopErr   error
+	mu        sync.Mutex
+	stopCalls int
+}
+
+func (f *fakeServer) Start() error { return f.startErr }
+
+func (f *fakeServer) Stop() error {
+	f.mu.Lock()
+	f.stopCalls++
+	f.mu.Unlock()
+	return f.stopErr
+}
+
+func (f *fakeServer) StopCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stopCalls
+}
+
+// TestRunControllerStartFailureCallsStop verifies that when srv.Start() returns
+// an error, runControllerServer calls srv.Stop() before returning a non-nil error.
+func TestRunControllerStartFailureCallsStop(t *testing.T) {
+	startErr := errors.New("start failed")
+	stub := &fakeServer{startErr: startErr}
+	logger := logging.NewNoopLogger()
+	sigChan := make(chan os.Signal, 1)
+
+	err := runControllerServer(stub, logger, sigChan)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "start failed")
+	assert.Equal(t, 1, stub.StopCallCount(), "srv.Stop() must be called exactly once after Start() error")
+}
+
+// TestRunControllerCleanExitCallsStop verifies that when srv.Start() returns nil
+// (clean exit), runControllerServer still calls srv.Stop() and returns nil.
+func TestRunControllerCleanExitCallsStop(t *testing.T) {
+	stub := &fakeServer{startErr: nil}
+	logger := logging.NewNoopLogger()
+	sigChan := make(chan os.Signal, 1)
+
+	err := runControllerServer(stub, logger, sigChan)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, stub.StopCallCount(), "srv.Stop() must be called exactly once after clean Start() exit")
+}

@@ -72,6 +72,12 @@ Entry paths:
 	return root
 }
 
+// Server defines the lifecycle interface for the controller server.
+type Server interface {
+	Start() error
+	Stop() error
+}
+
 // runController starts the controller server (or runs --init and exits).
 func runController(configPath string, initMode bool) error {
 	cfg, err := config.LoadWithPath(configPath)
@@ -142,28 +148,47 @@ func runController(configPath string, initMode bool) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	return runControllerServer(srv, logger, sigChan)
+}
+
+// runControllerServer manages the server lifecycle with proper cleanup on both
+// signal-triggered shutdown and clean/error exit from srv.Start().
+func runControllerServer(srv Server, logger logging.Logger, sigChan <-chan os.Signal) error {
+	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.Start(); err != nil {
-			logger.Fatal("Controller server failed",
-				"operation", "server_run",
-				"error", err.Error())
-		}
+		errCh <- srv.Start()
 	}()
 
-	sig := <-sigChan
-	logger.Info("Received signal, shutting down controller...",
-		"operation", "server_shutdown",
-		"signal", sig.String())
+	var runErr error
+	select {
+	case sig := <-sigChan:
+		logger.Info("Received signal, shutting down controller...",
+			"operation", "server_shutdown",
+			"signal", sig.String())
+	case runErr = <-errCh:
+		if runErr != nil {
+			logger.Error("Controller server failed",
+				"operation", "server_run",
+				"error", runErr.Error())
+		} else {
+			logger.Info("Controller server exited cleanly",
+				"operation", "server_run")
+		}
+	}
 
-	if err := srv.Stop(); err != nil {
+	if stopErr := srv.Stop(); stopErr != nil {
 		logger.Error("Error during controller shutdown",
 			"operation", "server_shutdown",
-			"error", err.Error())
+			"error", stopErr.Error())
 	}
 
 	logger.Info("Controller shutdown completed",
 		"operation", "server_shutdown",
 		"status", "completed")
+
+	if runErr != nil {
+		return fmt.Errorf("controller server failed: %w", runErr)
+	}
 	return nil
 }
 
