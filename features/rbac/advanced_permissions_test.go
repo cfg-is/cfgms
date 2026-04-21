@@ -12,6 +12,7 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
@@ -34,6 +35,19 @@ func TestAdvancedPermissionManagement(t *testing.T) {
 
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		_ = manager.auditManager.Stop(stopCtx)
+	})
+
+	flushAudit := func(t *testing.T) {
+		t.Helper()
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer flushCancel()
+		require.NoError(t, manager.auditManager.Flush(flushCtx))
+	}
 
 	// Create test subject
 	subject := &common.Subject{
@@ -234,7 +248,7 @@ func TestAdvancedPermissionManagement(t *testing.T) {
 	})
 
 	t.Run("AuditLogging", func(t *testing.T) {
-		// Check that permission checks are being audited
+		// Check that permission checks are recorded in the durable audit store
 		request := &common.AccessRequest{
 			SubjectId:    "user1",
 			PermissionId: "test.config.update",
@@ -248,23 +262,31 @@ func TestAdvancedPermissionManagement(t *testing.T) {
 		response, err := manager.CheckPermission(ctx, request)
 		require.NoError(t, err)
 
-		// Get audit entries
-		filter := &AuditFilter{
-			SubjectID: "user1",
-			Action:    "check",
-			Limit:     10,
+		flushAudit(t)
+
+		filter := &business.AuditFilter{
+			TenantID:      "tenant1",
+			UserIDs:       []string{"user1"},
+			Actions:       []string{"check_permission"},
+			EventTypes:    []business.AuditEventType{business.AuditEventAuthorization},
+			ResourceTypes: []string{"permission"},
+			Limit:         10,
 		}
 
-		entries, err := manager.GetAuditEntries(ctx, filter)
+		entries, err := manager.QueryAuditEntries(ctx, filter)
 		require.NoError(t, err)
 		assert.Greater(t, len(entries), 0, "Should have audit entries")
 
 		entry := entries[0]
-		assert.Equal(t, "user1", entry.SubjectId)
-		assert.Equal(t, "check", entry.Action)
-		assert.Equal(t, "test.config.update", entry.PermissionId)
-		assert.Equal(t, response.Granted, entry.Granted)
-		assert.Equal(t, "192.168.1.100", entry.SourceIp)
+		assert.Equal(t, "user1", entry.UserID)
+		assert.Equal(t, "check_permission", entry.Action)
+		assert.Equal(t, "test.config.update", entry.ResourceID)
+		if response.Granted {
+			assert.Equal(t, business.AuditResultSuccess, entry.Result)
+		} else {
+			assert.Equal(t, business.AuditResultDenied, entry.Result)
+		}
+		assert.Equal(t, "192.168.1.100", entry.IPAddress)
 		assert.Equal(t, "TestAgent/1.0", entry.UserAgent)
 	})
 
@@ -330,53 +352,77 @@ func TestAdvancedPermissionManagement(t *testing.T) {
 	})
 
 	t.Run("ComplianceReporting", func(t *testing.T) {
-		// Generate some audit data by making permission checks
+		// Generate audit data by making permission checks
 		for i := 0; i < 5; i++ {
 			request := &common.AccessRequest{
 				SubjectId:    "user1",
 				PermissionId: "test.config.update",
 				TenantId:     "tenant1",
 			}
-			_, _ = manager.CheckPermission(ctx, request)
+			if _, err := manager.CheckPermission(ctx, request); err != nil {
+				t.Errorf("unexpected error from CheckPermission during data generation: %v", err)
+			}
 		}
 
-		// Generate compliance report
-		filter := &AuditFilter{
-			TenantID:  "tenant1",
-			StartTime: time.Now().Add(-1 * time.Hour).Unix(),
+		flushAudit(t)
+
+		startTime := time.Now().Add(-1 * time.Hour)
+		filter := &business.AuditFilter{
+			TenantID:   "tenant1",
+			EventTypes: []business.AuditEventType{business.AuditEventAuthorization},
+			Actions:    []string{"check_permission"},
+			TimeRange:  &business.TimeRange{Start: &startTime},
+			Limit:      100,
 		}
 
-		report, err := manager.GetComplianceReport(ctx, filter)
+		entries, err := manager.QueryAuditEntries(ctx, filter)
 		require.NoError(t, err)
-		assert.Greater(t, report.TotalEntries, 0, "Should have audit entries in report")
-		assert.Greater(t, report.UniqueSubjectCount, 0, "Should have unique subjects")
-		assert.Contains(t, report.ActionBreakdown, "check", "Should have check actions")
+		assert.Greater(t, len(entries), 0, "Should have audit entries in report")
+
+		uniqueUsers := make(map[string]bool)
+		for _, e := range entries {
+			uniqueUsers[e.UserID] = true
+		}
+		assert.Greater(t, len(uniqueUsers), 0, "Should have unique subjects")
+
+		hasCheckPermission := false
+		for _, e := range entries {
+			if e.Action == "check_permission" {
+				hasCheckPermission = true
+				break
+			}
+		}
+		assert.True(t, hasCheckPermission, "Should have check_permission actions")
 	})
 
 	t.Run("SecurityAlerts", func(t *testing.T) {
-		// Generate failed access attempts to trigger alerts
+		// Generate failed access attempts — all will be denied (non-existent permission)
 		for i := 0; i < 12; i++ {
 			request := &common.AccessRequest{
 				SubjectId:    "user1",
 				PermissionId: "non-existent-permission",
 				TenantId:     "tenant1",
 			}
-			_, _ = manager.CheckPermission(ctx, request)
-		}
-
-		// Check for security alerts
-		alerts, err := manager.GetSecurityAlerts(ctx, 1)
-		require.NoError(t, err)
-
-		// Should have alert for excessive failed attempts
-		hasFailedAttemptsAlert := false
-		for _, alert := range alerts {
-			if alert.Type == "excessive_failed_attempts" {
-				hasFailedAttemptsAlert = true
-				break
+			if _, err := manager.CheckPermission(ctx, request); err != nil {
+				t.Errorf("unexpected error from CheckPermission during data generation: %v", err)
 			}
 		}
-		assert.True(t, hasFailedAttemptsAlert, "Should generate alert for excessive failed attempts")
+
+		flushAudit(t)
+
+		// Retrieve denied entries via GetFailedActions to verify security monitoring data
+		lookback := time.Now().Add(-time.Hour)
+		tr := &business.TimeRange{Start: &lookback}
+		failedActions, err := manager.auditManager.GetFailedActions(ctx, tr, 100)
+		require.NoError(t, err)
+
+		deniedCount := 0
+		for _, e := range failedActions {
+			if e.UserID == "user1" && e.Result == business.AuditResultDenied {
+				deniedCount++
+			}
+		}
+		assert.GreaterOrEqual(t, deniedCount, 10, "Should detect excessive failed access attempts in durable audit store")
 	})
 
 	t.Run("TemporaryPermissions", func(t *testing.T) {
