@@ -113,6 +113,8 @@ Enabled in Story #801. The merge queue replaces the previous `strict_required_st
 
 **Manual rebases are still needed** for genuine content conflicts (estimated ~20% of cases). A rebase is required only when `git merge` would produce a conflict that GitHub cannot auto-resolve.
 
+**Post-merge sanity catch**: `.github/workflows/develop-sanity.yml` runs `go build ./...` on every push to develop (i.e., after every squash-merge). If the build fails it automatically opens a `pipeline:incident` issue linking to the failed run. This is a complementary catch mechanism for the residual cases not covered by pre-merge validation — it does not replace the required status checks above.
+
 ---
 
 ## Release Branches (`release/*`)
