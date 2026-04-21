@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 
 	// Auto-register git storage provider
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -336,6 +337,16 @@ func TestHandleRegister_HookRejects_Returns403(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"reject decision must produce 403 Forbidden")
+
+	// Verify audit entry for hook-rejected registration
+	require.NotNil(t, server.auditManager, "audit manager must be wired by setupTestServerWithTokenStore")
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "registration_rejected", entries[0].Action)
+	assert.Equal(t, string(business.AuditResultDenied), string(entries[0].Result))
+	assert.Equal(t, string(business.AuditEventSecurityEvent), string(entries[0].EventType))
 }
 
 // TestHandleRegister_HookError_FailsOpen verifies that when the approval hook returns an

@@ -515,6 +515,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		regStore,         // registrationTokenStore
 		signerCertSerial, // Story #378: signer cert serial for registration
 		healthCollector,  // Story #417: CFGMS health monitoring
+		auditManager,     // Issue #775: registration audit events
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)

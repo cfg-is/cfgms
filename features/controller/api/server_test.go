@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
@@ -59,6 +60,11 @@ func setupTestServer(t *testing.T) *Server {
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 	rbacService := service.NewRBACService(rbacManager)
 
+	// Create audit manager backed by the SQLite audit store
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
 	// Create REST API server
 	server, err := New(
 		cfg,
@@ -70,13 +76,14 @@ func setupTestServer(t *testing.T) *Server {
 		nil, // No cert manager for basic tests
 		tenantManager,
 		rbacManager,
-		nil, // No system monitor for basic tests
-		nil, // No platform monitor for basic tests
-		nil, // No tracer for basic tests
-		nil, // No HA manager for basic tests
-		nil, // No registration token store for basic tests
-		"",  // No signer cert serial for basic tests
-		nil, // No health collector for basic tests
+		nil,      // No system monitor for basic tests
+		nil,      // No platform monitor for basic tests
+		nil,      // No tracer for basic tests
+		nil,      // No HA manager for basic tests
+		nil,      // No registration token store for basic tests
+		"",       // No signer cert serial for basic tests
+		nil,      // No health collector for basic tests
+		auditMgr, // Issue #775: registration audit events
 	)
 	require.NoError(t, err)
 
@@ -738,8 +745,8 @@ func TestEphemeralAPIKeys(t *testing.T) {
 	})
 
 	t.Run("automatic cleanup removes expired keys", func(t *testing.T) {
-		// Create a key that expires in 1 second
-		ephemeralKey := NewEphemeralTestKey(t, server, []string{"test"}, "test", 1*time.Second)
+		// Create a key then backdate its expiry so cleanup runs without sleeping
+		ephemeralKey := NewEphemeralTestKey(t, server, []string{"test"}, "test", time.Hour)
 
 		// Verify key exists
 		server.mu.RLock()
@@ -747,8 +754,11 @@ func TestEphemeralAPIKeys(t *testing.T) {
 		server.mu.RUnlock()
 		require.True(t, exists, "Key should exist initially")
 
-		// Wait for key to expire
-		time.Sleep(2 * time.Second)
+		// Backdate the expiry to the past so cleanupExpiredAPIKeys treats it as expired
+		pastTime := time.Now().Add(-time.Hour)
+		server.mu.Lock()
+		server.apiKeys[ephemeralKey].ExpiresAt = &pastTime
+		server.mu.Unlock()
 
 		// Manually trigger cleanup (normally happens every 10 minutes)
 		server.cleanupExpiredAPIKeys()
@@ -841,10 +851,14 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 	rbacService := service.NewRBACService(rbacManager)
 
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
 	server, err := New(
 		cfg, logger, controllerService, configService,
 		nil, rbacService, nil, tenantManager, rbacManager,
-		nil, nil, nil, nil, nil, "", nil,
+		nil, nil, nil, nil, nil, "", nil, auditMgr,
 	)
 	require.NoError(t, err)
 

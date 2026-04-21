@@ -102,6 +102,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		srv.GetRegistrationTokenStore(), // registrationTokenStore - wired for gRPC transport mode
 		srv.GetSignerCertSerial(),       // Story #378: signer cert serial for registration
 		nil,                             // healthCollector - wired in server.New() for gRPC transport mode
+		nil,                             // auditManager - not wired in this construction path
 	)
 	if err != nil {
 		return nil, err

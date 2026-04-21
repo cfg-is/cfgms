@@ -18,6 +18,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -75,6 +76,11 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 	rbacService := service.NewRBACService(rbacManager)
 
+	// Create audit manager backed by the SQLite audit store
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
 	// Create REST API server with token store
 	server, err := New(
 		cfg,
@@ -91,8 +97,9 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 		nil, // No tracer for basic tests
 		nil, // No HA manager for basic tests
 		tokenStore,
-		"",  // No signer cert serial for basic tests
-		nil, // No health collector for basic tests
+		"",       // No signer cert serial for basic tests
+		nil,      // No health collector for basic tests
+		auditMgr, // Issue #775: registration audit events
 	)
 	require.NoError(t, err)
 

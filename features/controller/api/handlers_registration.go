@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -87,6 +89,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	token, err := s.registrationTokenStore.GetToken(r.Context(), req.Token)
 	if err != nil {
 		s.logger.Warn("Invalid registration token", "error", err)
+		s.emitRegistrationAudit(r.Context(), req.Token, "unknown", "unknown",
+			business.AuditEventSecurityEvent, "registration_rejected",
+			business.AuditResultFailure, business.AuditSeverityCritical, nil)
 		http.Error(w, "Invalid or expired registration token", http.StatusUnauthorized)
 		return
 	}
@@ -94,6 +99,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Check if token is revoked
 	if token.Revoked {
 		s.logger.Warn("Attempted use of revoked token", "token", req.Token)
+		s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, "unknown",
+			business.AuditEventSecurityEvent, "registration_rejected",
+			business.AuditResultFailure, business.AuditSeverityCritical, nil)
 		http.Error(w, "Registration token has been revoked", http.StatusUnauthorized)
 		return
 	}
@@ -101,6 +109,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Check if token is expired
 	if token.ExpiresAt != nil && token.ExpiresAt.Before(time.Now()) {
 		s.logger.Warn("Attempted use of expired token", "token", req.Token, "expired_at", token.ExpiresAt)
+		s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, "unknown",
+			business.AuditEventSecurityEvent, "registration_rejected",
+			business.AuditResultFailure, business.AuditSeverityCritical, nil)
 		http.Error(w, "Registration token has expired", http.StatusUnauthorized)
 		return
 	}
@@ -115,6 +126,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, business.ErrTokenAlreadyUsed) {
 			s.logger.Warn("Single-use token already consumed",
 				"token_prefix", req.Token[:min(len(req.Token), 6)])
+			s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
+				business.AuditEventSecurityEvent, "registration_rejected",
+				business.AuditResultFailure, business.AuditSeverityCritical, nil)
 			http.Error(w, "Registration token has already been used", http.StatusConflict)
 			return
 		}
@@ -144,6 +158,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 				s.logger.Warn("Registration rejected by approval workflow",
 					"tenant_id", token.TenantID,
 					"reason", logging.SanitizeLogValue(reason))
+				s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
+					business.AuditEventSecurityEvent, "registration_rejected",
+					business.AuditResultDenied, business.AuditSeverityCritical, nil)
 				http.Error(w, "Registration rejected", http.StatusForbidden)
 				return
 			case DecisionQuarantine:
@@ -275,6 +292,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
+	// Emit success audit event before writing the response
+	successAction := "steward_registered"
+	var successExtras map[string]interface{}
+	if quarantined {
+		successAction = "registration_quarantined"
+		successExtras = map[string]interface{}{"quarantined": true}
+	}
+	s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
+		business.AuditEventAuthentication, successAction,
+		business.AuditResultSuccess, business.AuditSeverityHigh, successExtras)
+
 	// Return response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -332,6 +360,38 @@ func extractSourceIP(r *http.Request) string {
 		return addr[:idx]
 	}
 	return addr
+}
+
+// emitRegistrationAudit records a registration audit event. It is a no-op when auditManager is nil.
+// Errors are logged at Warn and do not affect the caller's control flow.
+func (s *Server) emitRegistrationAudit(
+	ctx context.Context,
+	tokenStr, tenantID, stewardID string,
+	eventType business.AuditEventType,
+	action string,
+	result business.AuditResult,
+	severity business.AuditSeverity,
+	extras map[string]interface{},
+) {
+	if s.auditManager == nil {
+		return
+	}
+	tokenPrefix := tokenStr[:min(len(tokenStr), 6)]
+	b := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(eventType).
+		Action(action).
+		User(stewardID, business.AuditUserTypeSystem).
+		Resource("steward", stewardID, "").
+		Result(result).
+		Severity(severity).
+		Detail("token_prefix", tokenPrefix)
+	for k, v := range extras {
+		b = b.Detail(k, v)
+	}
+	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+		s.logger.Warn("Failed to emit registration audit event", "error", err, "action", action)
+	}
 }
 
 // Helper function to get minimum of two integers
