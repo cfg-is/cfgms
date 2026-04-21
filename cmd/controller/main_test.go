@@ -3,6 +3,9 @@
 package main
 
 import (
+	"bytes"
+	"io"
+	"os"
 	"testing"
 
 	"github.com/cfgis/cfgms/cmd/controller/service"
@@ -87,6 +90,40 @@ func TestUninstallCommandHasPurgeFlag(t *testing.T) {
 	flag := cmd.Flags().Lookup("purge")
 	require.NotNil(t, flag, "uninstall command must have --purge flag")
 	assert.Equal(t, "false", flag.DefValue)
+}
+
+// TestRunControllerNoDebugPrints asserts that no "[DEBUG] main.go:" lines exist
+// in the main.go source file, preventing debug scaffolding from being re-introduced.
+func TestRunControllerNoDebugPrints(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "should be able to read main.go source")
+	assert.NotContains(t, string(src), "[DEBUG] main.go:",
+		"main.go must not contain debug fmt.Printf lines with [DEBUG] main.go: prefix")
+}
+
+// TestRunControllerNoDebugOutput verifies that runController does not write any
+// [DEBUG] text to stdout. runController fails fast on a missing config path,
+// which is sufficient to cover the early-path debug prints that were removed.
+func TestRunControllerNoDebugOutput(t *testing.T) {
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	old := os.Stdout
+	os.Stdout = w
+
+	// Fails immediately at config load — no server is started.
+	err = runController("/nonexistent/config/path/does-not-exist", false)
+	require.Error(t, err, "runController must fail when config path does not exist")
+
+	require.NoError(t, w.Close())
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	_, err = io.Copy(&buf, r)
+	require.NoError(t, err)
+
+	assert.NotContains(t, buf.String(), "[DEBUG]",
+		"runController must not write [DEBUG] output to stdout")
 }
 
 // TestSignalHandling is implemented in platform-specific files:

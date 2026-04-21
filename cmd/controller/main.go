@@ -75,13 +75,10 @@ Entry paths:
 
 // runController starts the controller server (or runs --init and exits).
 func runController(configPath string, initMode bool) error {
-	fmt.Printf("[DEBUG] main.go: Controller main() function started\n")
 	cfg, err := config.LoadWithPath(configPath)
 	if err != nil {
-		fmt.Printf("[DEBUG] main.go: Failed to load config: %v\n", err)
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
-	fmt.Printf("[DEBUG] main.go: Configuration loaded successfully\n")
 
 	// Guard: reject deprecated git provider before any initialization
 	if cfg.Storage != nil && cfg.Storage.Provider == "git" {
@@ -134,26 +131,20 @@ func runController(configPath string, initMode bool) error {
 		return fmt.Errorf("failed to create controller server: %w", err)
 	}
 
-	fmt.Printf("[DEBUG] main.go: Server created successfully, about to start\n")
 	logger.Info("Starting controller server",
 		"operation", "server_start",
 		"log_provider", loggingConfig.Provider,
 		"service_name", "controller")
 
-	fmt.Printf("[DEBUG] main.go: Setting up signal handling\n")
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	fmt.Printf("[DEBUG] main.go: Launching Start() goroutine\n")
 	go func() {
-		fmt.Printf("[DEBUG] main.go: Inside goroutine, about to call srv.Start()\n")
 		if err := srv.Start(); err != nil {
-			fmt.Printf("[DEBUG] main.go: srv.Start() returned error: %v\n", err)
 			logger.Fatal("Controller server failed",
 				"operation", "server_run",
 				"error", err.Error())
 		}
-		fmt.Printf("[DEBUG] main.go: srv.Start() completed successfully\n")
 	}()
 
 	sig := <-sigChan
