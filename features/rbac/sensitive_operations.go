@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/cfgis/cfgms/pkg/audit"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -147,8 +148,14 @@ func (m *Manager) AuditSensitiveOperation(ctx context.Context, opCtx *SensitiveO
 		event = event.Error("SENSITIVE_OPERATION_FAILED", operationErr.Error())
 	}
 
-	// Record the audit event
-	_ = m.auditManager.RecordEvent(ctx, event)
+	// Record the audit event. Issue #764: surface queue-full / manager-stopped
+	// errors via the operator log instead of silently discarding them.
+	if err := m.auditManager.RecordEvent(ctx, event); err != nil {
+		slog.Warn("rbac: failed to record sensitive-operation audit event",
+			"error", err,
+			"operation_type", string(opCtx.OperationType),
+		)
+	}
 }
 
 // GetSensitiveOperationJustification retrieves justification from context

@@ -6,12 +6,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac/memory"
 	"github.com/cfgis/cfgms/pkg/audit"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// Issue #764: audit queue write errors (queue full / manager stopped) are now
+// logged via slog.Warn at each call site instead of being discarded with
+// `_ = m.auditManager.RecordEvent(...)`. Audit recording remains best-effort —
+// failures never interrupt the caller.
 
 // Manager provides a complete RBAC implementation with advanced features
 type Manager struct {
@@ -305,7 +311,9 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 					Error("RBAC_PARENT_ROLE_NOT_FOUND", fmt.Sprintf("parent role %s not found: %v", role.ParentRoleId, err)).
 					Detail("parent_role_id", role.ParentRoleId).
 					Severity(business.AuditSeverityCritical)
-				_ = m.auditManager.RecordEvent(ctx, event)
+				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+					slog.Warn("rbac: failed to record audit event", "error", auditErr)
+				}
 			}
 			return fmt.Errorf("parent role %s not found: %w", role.ParentRoleId, err)
 		}
@@ -326,7 +334,9 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 					Detail("parent_role_id", role.ParentRoleId).
 					Detail("security_finding", "M-TENANT-2").
 					Severity(business.AuditSeverityCritical)
-				_ = m.auditManager.RecordEvent(ctx, event)
+				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+					slog.Warn("rbac: failed to record audit event", "error", auditErr)
+				}
 			}
 
 			return errors.New(errMsg)
@@ -343,7 +353,9 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 				Result(business.AuditResultError).
 				Error("RBAC_CREATE_ROLE_FAILED", err.Error()).
 				Severity(business.AuditSeverityHigh)
-			_ = m.auditManager.RecordEvent(ctx, event)
+			if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+				slog.Warn("rbac: failed to record audit event", "error", auditErr)
+			}
 		}
 		return err
 	}
@@ -361,7 +373,9 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 					Result(business.AuditResultError).
 					Error("RBAC_CREATE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
 					Severity(business.AuditSeverityHigh)
-				_ = m.auditManager.RecordEvent(ctx, event)
+				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+					slog.Warn("rbac: failed to record audit event", "error", auditErr)
+				}
 			}
 			return fmt.Errorf("failed to persist role: %w", persistErr)
 		}
@@ -375,7 +389,9 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 			Detail("role_permissions", len(role.PermissionIds)).
 			Detail("role_description", role.Description).
 			Severity(business.AuditSeverityHigh)
-		_ = m.auditManager.RecordEvent(ctx, event)
+		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+			slog.Warn("rbac: failed to record audit event", "error", auditErr)
+		}
 	}
 
 	return nil
@@ -406,7 +422,9 @@ func (m *Manager) UpdateRole(ctx context.Context, role *common.Role) error {
 				Result(business.AuditResultError).
 				Error("RBAC_UPDATE_ROLE_FAILED", err.Error()).
 				Severity(business.AuditSeverityHigh)
-			_ = m.auditManager.RecordEvent(ctx, event)
+			if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+				slog.Warn("rbac: failed to record audit event", "error", auditErr)
+			}
 		}
 		return err
 	}
@@ -421,7 +439,9 @@ func (m *Manager) UpdateRole(ctx context.Context, role *common.Role) error {
 					Result(business.AuditResultError).
 					Error("RBAC_UPDATE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
 					Severity(business.AuditSeverityHigh)
-				_ = m.auditManager.RecordEvent(ctx, event)
+				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+					slog.Warn("rbac: failed to record audit event", "error", auditErr)
+				}
 			}
 			return fmt.Errorf("failed to persist role update: %w", persistErr)
 		}
@@ -466,7 +486,9 @@ func (m *Manager) UpdateRole(ctx context.Context, role *common.Role) error {
 			}
 		}
 
-		_ = m.auditManager.RecordEvent(ctx, event)
+		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+			slog.Warn("rbac: failed to record audit event", "error", auditErr)
+		}
 	}
 
 	return nil
@@ -517,7 +539,9 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 				Result(business.AuditResultError).
 				Error("RBAC_DELETE_ROLE_FAILED", err.Error()).
 				Severity(business.AuditSeverityCritical)
-			_ = m.auditManager.RecordEvent(ctx, event)
+			if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+				slog.Warn("rbac: failed to record audit event", "error", auditErr)
+			}
 		}
 		return err
 	}
@@ -539,7 +563,9 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 					Result(business.AuditResultError).
 					Error("RBAC_DELETE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
 					Severity(business.AuditSeverityCritical)
-				_ = m.auditManager.RecordEvent(ctx, event)
+				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+					slog.Warn("rbac: failed to record audit event", "error", auditErr)
+				}
 			}
 			return fmt.Errorf("failed to persist role deletion: %w", persistErr)
 		}
@@ -565,7 +591,9 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 				Detail("role_description", deletedRole.Description)
 		}
 
-		_ = m.auditManager.RecordEvent(ctx, event)
+		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+			slog.Warn("rbac: failed to record audit event", "error", auditErr)
+		}
 	}
 
 	return nil
@@ -633,7 +661,9 @@ func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID st
 				Detail("revoked_role", roleID).
 				Detail("subject_id", subjectID).
 				Severity(business.AuditSeverityHigh)
-			_ = m.auditManager.RecordEvent(ctx, event)
+			if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+				slog.Warn("rbac: failed to record audit event", "error", auditErr)
+			}
 		}
 		return err
 	}
@@ -650,7 +680,9 @@ func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID st
 					Detail("revoked_role", roleID).
 					Detail("subject_id", subjectID).
 					Severity(business.AuditSeverityHigh)
-				_ = m.auditManager.RecordEvent(ctx, event)
+				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+					slog.Warn("rbac: failed to record audit event", "error", auditErr)
+				}
 			}
 			return fmt.Errorf("failed to persist role revocation: %w", persistErr)
 		}
@@ -664,7 +696,9 @@ func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID st
 			Detail("revoked_role", roleID).
 			Detail("subject_id", subjectID).
 			Severity(business.AuditSeverityHigh)
-		_ = m.auditManager.RecordEvent(ctx, event)
+		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+			slog.Warn("rbac: failed to record audit event", "error", auditErr)
+		}
 	}
 
 	return nil

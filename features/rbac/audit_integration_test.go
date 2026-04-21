@@ -5,6 +5,7 @@ package rbac
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -39,6 +40,21 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
+	// Issue #764: audit writes are now asynchronous. Tests that query the audit
+	// store must Flush first to guarantee pending entries have landed.
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		_ = manager.auditManager.Stop(stopCtx)
+	})
+
+	flushAudit := func(t *testing.T) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, manager.auditManager.Flush(ctx))
+	}
+
 	t.Run("CreateRole generates audit event", func(t *testing.T) {
 		role := &common.Role{
 			Id:            "test-role-audit",
@@ -62,6 +78,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 			Limit:         10,
 		}
 
+		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		require.Len(t, auditEntries, 1, "Should have exactly one audit entry for role creation")
@@ -115,6 +132,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 			Limit:         10,
 		}
 
+		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		require.Len(t, auditEntries, 1, "Should have exactly one audit entry for role update")
@@ -161,6 +179,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 			Limit:         10,
 		}
 
+		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		require.Len(t, auditEntries, 1, "Should have exactly one audit entry for role deletion")
@@ -223,6 +242,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 			Limit:         10,
 		}
 
+		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		require.Len(t, auditEntries, 1, "Should have exactly one audit entry for role revocation")
@@ -262,6 +282,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 
 		// Note: This test depends on whether the underlying store validates the role
 		// If validation passes through, we won't get an error audit event
+		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 
@@ -281,6 +302,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 			Limit:      100,
 		}
 
+		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		assert.NotEmpty(t, auditEntries, "Should have audit entries from previous tests")
