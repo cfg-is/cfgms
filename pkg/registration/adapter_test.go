@@ -140,21 +140,54 @@ func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
 }
 
 func TestStorageAdapter_InterfaceCompliance(t *testing.T) {
-	tempDir := t.TempDir()
-
-	// Create sqlite registration token store
 	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
 		"sqlite",
-		map[string]interface{}{"path": tempDir + "/tokens.db"},
+		map[string]interface{}{"path": t.TempDir() + "/tokens.db"},
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 
-	// Create adapter
+	ctx := context.Background()
+	require.NoError(t, store.Initialize(ctx))
+
 	adapter := NewStorageAdapter(store)
 
-	// Verify adapter implements Store interface
-	var _ Store = adapter
+	expiresAt := time.Now().Add(24 * time.Hour)
+	usedAt := time.Now().Add(1 * time.Hour)
+	revokedAt := time.Now().Add(2 * time.Hour)
+
+	original := &Token{
+		Token:         "compliance-test-token",
+		TenantID:      "tenant-compliance",
+		ControllerURL: "grpc://controller.example.com:7443",
+		Group:         "compliance-group",
+		CreatedAt:     time.Now().Truncate(time.Second),
+		ExpiresAt:     &expiresAt,
+		SingleUse:     true,
+		UsedAt:        &usedAt,
+		UsedBy:        "steward-compliance-001",
+		Revoked:       true,
+		RevokedAt:     &revokedAt,
+	}
+
+	require.NoError(t, adapter.SaveToken(ctx, original))
+
+	retrieved, err := adapter.GetToken(ctx, original.Token)
+	require.NoError(t, err)
+
+	assert.Equal(t, original.Token, retrieved.Token)
+	assert.Equal(t, original.TenantID, retrieved.TenantID)
+	assert.Equal(t, original.ControllerURL, retrieved.ControllerURL)
+	assert.Equal(t, original.Group, retrieved.Group)
+	assert.Equal(t, original.SingleUse, retrieved.SingleUse)
+	assert.Equal(t, original.UsedBy, retrieved.UsedBy)
+	assert.Equal(t, original.Revoked, retrieved.Revoked)
+	require.NotNil(t, retrieved.ExpiresAt)
+	assert.Equal(t, original.ExpiresAt.UTC(), retrieved.ExpiresAt.UTC())
+	require.NotNil(t, retrieved.UsedAt)
+	assert.Equal(t, original.UsedAt.UTC(), retrieved.UsedAt.UTC())
+	require.NotNil(t, retrieved.RevokedAt)
+	assert.Equal(t, original.RevokedAt.UTC(), retrieved.RevokedAt.UTC())
 }
 
 func TestStorageAdapter_ConsumeToken_Race(t *testing.T) {

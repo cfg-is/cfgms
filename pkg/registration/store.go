@@ -32,21 +32,21 @@ type Store interface {
 	ConsumeToken(ctx context.Context, tokenStr, stewardID string) error
 }
 
-// MemoryStore is an in-memory implementation of Store (for development/testing).
-type MemoryStore struct {
+// memoryStore is an in-memory implementation of Store (for package-level tests only).
+type memoryStore struct {
 	mu     sync.RWMutex
 	tokens map[string]*Token
 }
 
-// NewMemoryStore creates a new in-memory token store.
-func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{
+// newMemoryStore creates a new in-memory token store.
+func newMemoryStore() *memoryStore {
+	return &memoryStore{
 		tokens: make(map[string]*Token),
 	}
 }
 
 // SaveToken saves a registration token.
-func (s *MemoryStore) SaveToken(ctx context.Context, token *Token) error {
+func (s *memoryStore) SaveToken(ctx context.Context, token *Token) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -55,7 +55,7 @@ func (s *MemoryStore) SaveToken(ctx context.Context, token *Token) error {
 }
 
 // GetToken retrieves a token by its token string.
-func (s *MemoryStore) GetToken(ctx context.Context, tokenStr string) (*Token, error) {
+func (s *memoryStore) GetToken(ctx context.Context, tokenStr string) (*Token, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -68,7 +68,7 @@ func (s *MemoryStore) GetToken(ctx context.Context, tokenStr string) (*Token, er
 }
 
 // ListTokens lists all tokens for a tenant.
-func (s *MemoryStore) ListTokens(ctx context.Context, tenantID string) ([]*Token, error) {
+func (s *memoryStore) ListTokens(ctx context.Context, tenantID string) ([]*Token, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -83,7 +83,7 @@ func (s *MemoryStore) ListTokens(ctx context.Context, tenantID string) ([]*Token
 }
 
 // UpdateToken updates an existing token.
-func (s *MemoryStore) UpdateToken(ctx context.Context, token *Token) error {
+func (s *memoryStore) UpdateToken(ctx context.Context, token *Token) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -96,7 +96,7 @@ func (s *MemoryStore) UpdateToken(ctx context.Context, token *Token) error {
 }
 
 // DeleteToken deletes a token.
-func (s *MemoryStore) DeleteToken(ctx context.Context, tokenStr string) error {
+func (s *memoryStore) DeleteToken(ctx context.Context, tokenStr string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -106,7 +106,7 @@ func (s *MemoryStore) DeleteToken(ctx context.Context, tokenStr string) error {
 
 // ConsumeToken atomically validates and marks a token as used under a single write lock,
 // preventing TOCTOU races when multiple callers attempt to consume the same single-use token.
-func (s *MemoryStore) ConsumeToken(ctx context.Context, tokenStr, stewardID string) error {
+func (s *memoryStore) ConsumeToken(ctx context.Context, tokenStr, stewardID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

@@ -12,15 +12,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/registration"
 )
 
-// TokenCreateRequest represents the request body for creating a registration token
-type TokenCreateRequest struct {
-	TenantID      string `json:"tenant_id"`
-	ControllerURL string `json:"controller_url"`
-	Group         string `json:"group,omitempty"`
-	ExpiresIn     string `json:"expires_in,omitempty"`
-	SingleUse     bool   `json:"single_use,omitempty"`
-}
-
 // TokenResponse represents a registration token in API responses
 type TokenResponse struct {
 	Token         string  `json:"token"`
@@ -50,7 +41,7 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 	}
 
 	// Parse request body
-	var req TokenCreateRequest
+	var req registration.TokenCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logger.Warn("Failed to parse token create request", "error", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -75,15 +66,7 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 	}
 
 	// Create token using registration package
-	tokenReq := &registration.TokenCreateRequest{
-		TenantID:      req.TenantID,
-		ControllerURL: req.ControllerURL,
-		Group:         req.Group,
-		ExpiresIn:     req.ExpiresIn,
-		SingleUse:     req.SingleUse,
-	}
-
-	token, err := registration.CreateToken(tokenReq)
+	token, err := registration.CreateToken(&req)
 	if err != nil {
 		s.logger.Error("Failed to create registration token", "error", err)
 		http.Error(w, "Failed to create token", http.StatusInternalServerError)
