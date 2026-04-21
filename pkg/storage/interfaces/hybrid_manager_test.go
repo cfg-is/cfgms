@@ -536,6 +536,14 @@ func (s *mockAuditStore) PurgeAuditEntries(_ context.Context, _ time.Time) (int6
 	return 0, nil
 }
 
+// GetLastAuditEntry returns nil to satisfy the AuditStore interface. This stub
+// exists because importing a real provider here would create a circular dependency:
+// interfaces_test → pkg/storage/providers/flatfile → pkg/storage/interfaces.
+// Chain integrity is tested end-to-end in pkg/audit/manager_test.go.
+func (s *mockAuditStore) GetLastAuditEntry(_ context.Context, _ string) (*business.AuditEntry, error) {
+	return nil, nil
+}
+
 func (s *mockAuditStore) Close() error {
 	return nil
 }

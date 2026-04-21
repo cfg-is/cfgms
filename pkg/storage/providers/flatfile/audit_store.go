@@ -406,6 +406,46 @@ func paginateAudit(results []*business.AuditEntry, filter *business.AuditFilter)
 	return results
 }
 
+// GetLastAuditEntry returns the entry with the highest SequenceNumber for tenantID,
+// or nil if no entries exist for that tenant. This is O(N) across the tenant's audit
+// files, which is acceptable for the OSS/testing use case.
+func (s *FlatFileAuditStore) GetLastAuditEntry(ctx context.Context, tenantID string) (*business.AuditEntry, error) {
+	auditDir, err := s.auditDir(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid tenant ID: %w", err)
+	}
+
+	files, err := os.ReadDir(auditDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read audit dir: %w", err)
+	}
+
+	// Scan newest files first — most likely to contain the highest sequence number.
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Name() > files[j].Name()
+	})
+
+	var last *business.AuditEntry
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+			continue
+		}
+		entries, err := s.readJSONLFile(filepath.Join(auditDir, f.Name()), nil)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if last == nil || e.SequenceNumber > last.SequenceNumber {
+				last = e
+			}
+		}
+	}
+	return last, nil
+}
+
 // GetAuditsByUser retrieves audit entries for a specific user in the given time range.
 func (s *FlatFileAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
 	return s.ListAuditEntries(ctx, &business.AuditFilter{

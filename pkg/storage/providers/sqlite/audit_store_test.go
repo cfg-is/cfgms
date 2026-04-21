@@ -178,3 +178,67 @@ func TestAuditStore_GetFailedActions(t *testing.T) {
 	require.Len(t, results, 1)
 	assert.Equal(t, business.AuditResultFailure, results[0].Result)
 }
+
+func TestAuditStore_GetLastAuditEntry_Empty(t *testing.T) {
+	store := newAuditStore(t)
+	ctx := context.Background()
+
+	last, err := store.GetLastAuditEntry(ctx, "no-such-tenant")
+	require.NoError(t, err)
+	assert.Nil(t, last, "empty store must return nil, nil")
+}
+
+func TestAuditStore_GetLastAuditEntry_Single(t *testing.T) {
+	store := newAuditStore(t)
+	ctx := context.Background()
+
+	e := sampleAuditEntry("single-1")
+	e.SequenceNumber = 1
+	require.NoError(t, store.StoreAuditEntry(ctx, e))
+
+	last, err := store.GetLastAuditEntry(ctx, e.TenantID)
+	require.NoError(t, err)
+	require.NotNil(t, last)
+	assert.Equal(t, e.ID, last.ID)
+	assert.Equal(t, uint64(1), last.SequenceNumber)
+}
+
+func TestAuditStore_GetLastAuditEntry_ReturnsHighestSequence(t *testing.T) {
+	store := newAuditStore(t)
+	ctx := context.Background()
+
+	for i := uint64(1); i <= 3; i++ {
+		e := sampleAuditEntry(string(rune('a' + i - 1)))
+		e.SequenceNumber = i
+		require.NoError(t, store.StoreAuditEntry(ctx, e))
+	}
+
+	last, err := store.GetLastAuditEntry(ctx, "tenant-audit")
+	require.NoError(t, err)
+	require.NotNil(t, last)
+	assert.Equal(t, uint64(3), last.SequenceNumber, "must return entry with highest sequence_number")
+}
+
+func TestAuditStore_GetLastAuditEntry_TenantIsolation(t *testing.T) {
+	store := newAuditStore(t)
+	ctx := context.Background()
+
+	e1 := sampleAuditEntry("t1-1")
+	e1.TenantID = "tenant-a"
+	e1.SequenceNumber = 5
+	e2 := sampleAuditEntry("t2-1")
+	e2.TenantID = "tenant-b"
+	e2.SequenceNumber = 1
+	require.NoError(t, store.StoreAuditEntry(ctx, e1))
+	require.NoError(t, store.StoreAuditEntry(ctx, e2))
+
+	lastA, err := store.GetLastAuditEntry(ctx, "tenant-a")
+	require.NoError(t, err)
+	require.NotNil(t, lastA)
+	assert.Equal(t, uint64(5), lastA.SequenceNumber)
+
+	lastB, err := store.GetLastAuditEntry(ctx, "tenant-b")
+	require.NoError(t, err)
+	require.NotNil(t, lastB)
+	assert.Equal(t, uint64(1), lastB.SequenceNumber)
+}

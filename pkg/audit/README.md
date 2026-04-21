@@ -164,6 +164,62 @@ this flush but will be part of a later `Flush` or `Stop`.
 - Tests that query the store immediately after `RecordEvent` must call
   `Flush` first, because writes are now asynchronous.
 
+## Tamper-Evidence
+
+Every audit entry carries two chain integrity fields:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `SequenceNumber` | `uint64` | Monotonically increasing per-tenant counter, assigned by the drain goroutine before persisting |
+| `PreviousChecksum` | `string` | HMAC-SHA256 checksum of the immediately preceding entry for the same tenant |
+
+Together these fields form a **keyed hash chain**: to tamper with, delete, or reorder any entry without detection, an attacker would need to recompute every subsequent entry's checksum using the HMAC key — a key that is never stored alongside the audit log.
+
+### HMAC Key
+
+The signing key is sourced from `pkg/secrets` when a `SecretStore` is wired via `WithSecretsStore(store)`. The key name is `"audit/hmac-key"`. If the key does not exist it is generated and stored automatically.
+
+When no secrets store is provided (the default in testing and OSS deployments without key management), a random 32-byte key is generated in-process at startup. Per-entry integrity is preserved within that process run; cross-restart verification requires a persistent key via `WithSecretsStore`.
+
+```go
+// Production: wire persistent HMAC key
+auditManager, err := audit.NewManager(store, "controller",
+    audit.WithSecretsStore(secretsStore))
+
+// Development / testing: ephemeral in-process key (default)
+auditManager, err := audit.NewManager(store, "controller")
+```
+
+### VerifyChain
+
+`VerifyChain` is a pure in-memory function — it does not re-read from the store. Callers are responsible for providing a complete, sorted slice:
+
+```go
+entries, err := auditManager.QueryEntries(ctx, &business.AuditFilter{
+    TenantID: tenantID,
+    Order:    "asc",
+})
+// ...
+breaks := auditManager.VerifyChain(entries)
+for _, b := range breaks {
+    log.Printf("chain break at seq=%d entry=%s: %s", b.SequenceNumber, b.EntryID, b.Reason)
+}
+```
+
+`VerifyChain` reports three violation types:
+
+| Reason prefix | Description |
+|---|---|
+| `checksum mismatch` | An entry's fields were modified after it was written |
+| `previous_checksum mismatch` | An entry does not link to the entry that preceded it |
+| `sequence gap` | One or more entries are missing between two consecutive entries in the slice |
+
+Entries with `SequenceNumber == 0` are pre-chain legacy entries (written before Issue #767) and are silently skipped.
+
+### Limitations
+
+The HMAC chain provides **detection** of undetected single-row deletion or reordering by an outsider who lacks the HMAC key. It does **not** prevent a sufficiently privileged storage administrator who also possesses the HMAC key from recomputing all checksums after modification — in that case the attack would be undetectable at the chain level. This is an inherent limitation of keyed hash chains; a Merkle tree anchored to an external immutable record would be required for stronger guarantees.
+
 ## Compliance Reporting
 
 Compliance report generation is handled by `features/reports/`, not by this package.

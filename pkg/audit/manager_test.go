@@ -4,7 +4,10 @@ package audit
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	secretsInterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 
@@ -21,6 +25,62 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
+
+// testSecretStore is a minimal in-memory implementation of secretsInterfaces.SecretStore
+// used to test WithSecretsStore wiring without requiring an external secrets backend.
+// This is not a mock of CFGMS business functionality — it is a test double for the
+// infrastructure boundary at pkg/secrets/interfaces.SecretStore.
+type testSecretStore struct {
+	secrets  map[string]string
+	storeErr error
+}
+
+func newTestSecretStore() *testSecretStore {
+	return &testSecretStore{secrets: make(map[string]string)}
+}
+
+func (s *testSecretStore) StoreSecret(_ context.Context, req *secretsInterfaces.SecretRequest) error {
+	if s.storeErr != nil {
+		return s.storeErr
+	}
+	s.secrets[req.Key] = req.Value
+	return nil
+}
+
+func (s *testSecretStore) GetSecret(_ context.Context, key string) (*secretsInterfaces.Secret, error) {
+	v, ok := s.secrets[key]
+	if !ok {
+		return nil, errors.New("not found")
+	}
+	return &secretsInterfaces.Secret{Key: key, Value: v}, nil
+}
+
+func (s *testSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
+func (s *testSecretStore) ListSecrets(_ context.Context, _ *secretsInterfaces.SecretFilter) ([]*secretsInterfaces.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *testSecretStore) GetSecrets(_ context.Context, _ []string) (map[string]*secretsInterfaces.Secret, error) {
+	return nil, nil
+}
+func (s *testSecretStore) StoreSecrets(_ context.Context, _ map[string]*secretsInterfaces.SecretRequest) error {
+	return nil
+}
+func (s *testSecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsInterfaces.Secret, error) {
+	return nil, nil
+}
+func (s *testSecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsInterfaces.SecretVersion, error) {
+	return nil, nil
+}
+func (s *testSecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsInterfaces.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *testSecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+func (s *testSecretStore) RotateSecret(_ context.Context, _ string, _ string) error { return nil }
+func (s *testSecretStore) ExpireSecret(_ context.Context, _ string) error           { return nil }
+func (s *testSecretStore) HealthCheck(_ context.Context) error                      { return nil }
+func (s *testSecretStore) Close() error                                             { return nil }
 
 // newTestManager creates a real audit manager backed by OSS storage in a temp dir.
 // The returned manager's drain goroutine is stopped via t.Cleanup so callers do
@@ -99,6 +159,9 @@ func (s *slowAuditStore) ArchiveAuditEntries(ctx context.Context, before time.Ti
 }
 func (s *slowAuditStore) PurgeAuditEntries(ctx context.Context, before time.Time) (int64, error) {
 	return s.inner.PurgeAuditEntries(ctx, before)
+}
+func (s *slowAuditStore) GetLastAuditEntry(ctx context.Context, tenantID string) (*business.AuditEntry, error) {
+	return s.inner.GetLastAuditEntry(ctx, tenantID)
 }
 func (s *slowAuditStore) Close() error { return s.inner.Close() }
 
@@ -678,10 +741,13 @@ func TestRecordEvent_RedactsErrorMessage(t *testing.T) {
 	assert.Contains(t, entries[0].ErrorMessage, "username=alice", "non-sensitive key=value must be preserved")
 }
 
-// TestManager_IntegrityVerification tests audit integrity verification
+// TestManager_IntegrityVerification tests audit integrity verification and
+// asserts that chain fields are populated on stored entries.
 func TestManager_IntegrityVerification(t *testing.T) {
 	manager := newTestManager(t, "test")
+	ctx := context.Background()
 
+	// Part 1: direct checksum round-trip (SequenceNumber 0 — pre-chain style).
 	entry := &business.AuditEntry{
 		ID:           "test-id",
 		TenantID:     "test-tenant",
@@ -697,9 +763,7 @@ func TestManager_IntegrityVerification(t *testing.T) {
 		Source:       "test",
 		Version:      "1.0",
 	}
-
 	entry.Checksum = manager.generateChecksum(entry)
-
 	assert.True(t, manager.VerifyIntegrity(entry))
 
 	originalAction := entry.Action
@@ -708,6 +772,275 @@ func TestManager_IntegrityVerification(t *testing.T) {
 
 	entry.Action = originalAction
 	assert.True(t, manager.VerifyIntegrity(entry))
+
+	// Part 2: record two events via the manager and verify chain fields on the second.
+	event1 := NewEventBuilder().
+		Tenant("integrity-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("first_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-1", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, manager.RecordEvent(ctx, event1))
+
+	event2 := NewEventBuilder().
+		Tenant("integrity-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("second_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-2", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, manager.RecordEvent(ctx, event2))
+
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "integrity-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+
+	assert.Greater(t, entries[0].SequenceNumber, uint64(0), "first entry must have SequenceNumber > 0")
+	assert.Greater(t, entries[1].SequenceNumber, uint64(0), "second entry must have SequenceNumber > 0")
+	assert.NotEmpty(t, entries[1].PreviousChecksum, "second entry must have PreviousChecksum set")
+	assert.Equal(t, entries[0].Checksum, entries[1].PreviousChecksum,
+		"second entry PreviousChecksum must equal first entry Checksum")
+}
+
+// TestChain_MonotonicSequence records 5 events for the same tenant and asserts
+// that the stored entries have SequenceNumbers 1 through 5 in order.
+func TestChain_MonotonicSequence(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		event := NewEventBuilder().
+			Tenant("seq-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("seq_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "seq-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 5, "expected 5 stored entries")
+
+	for i, e := range entries {
+		assert.Equal(t, uint64(i+1), e.SequenceNumber,
+			"entry[%d] must have SequenceNumber %d", i, i+1)
+	}
+}
+
+// TestChain_PreviousChecksumLinked records 5 events and asserts that each
+// entry's PreviousChecksum equals the Checksum of the preceding entry.
+func TestChain_PreviousChecksumLinked(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		event := NewEventBuilder().
+			Tenant("link-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("link_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "link-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 5)
+
+	// First entry starts the chain with empty PreviousChecksum.
+	assert.Empty(t, entries[0].PreviousChecksum, "first entry must have empty PreviousChecksum")
+
+	for i := 1; i < len(entries); i++ {
+		assert.Equal(t, entries[i-1].Checksum, entries[i].PreviousChecksum,
+			"entry[%d].PreviousChecksum must equal entry[%d].Checksum", i, i-1)
+	}
+}
+
+// TestVerifyChain_DetectsTampering records 3 entries, then tampers with the
+// middle entry's Action field in-memory and verifies VerifyChain reports a
+// ChainBreak for it.
+func TestVerifyChain_DetectsTampering(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		event := NewEventBuilder().
+			Tenant("tamper-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("original_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "tamper-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+
+	// Tamper with entry[1] in-memory — do not write back to the store.
+	entries[1].Action = "tampered_action"
+
+	breaks := manager.VerifyChain(entries)
+	require.NotEmpty(t, breaks, "VerifyChain must report a break for tampered entry")
+
+	found := false
+	for _, b := range breaks {
+		if b.SequenceNumber == entries[1].SequenceNumber {
+			found = true
+			assert.Contains(t, b.Reason, "checksum mismatch")
+		}
+	}
+	assert.True(t, found, "ChainBreak must reference the tampered entry's SequenceNumber")
+}
+
+// TestVerifyChain_Empty verifies that VerifyChain on an empty or nil slice
+// returns no breaks.
+func TestVerifyChain_Empty(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	assert.Empty(t, manager.VerifyChain(nil), "nil slice must produce no breaks")
+	assert.Empty(t, manager.VerifyChain([]*business.AuditEntry{}), "empty slice must produce no breaks")
+}
+
+// TestVerifyChain_SingleEntry verifies that a single valid entry with
+// PreviousChecksum=="" passes verification.
+func TestVerifyChain_SingleEntry(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	event := NewEventBuilder().
+		Tenant("single-chain-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("single_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-1", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, manager.RecordEvent(ctx, event))
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "single-chain-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	breaks := manager.VerifyChain(entries)
+	assert.Empty(t, breaks, "single valid entry must produce no chain breaks")
+}
+
+// TestVerifyChain_DetectsPreviousChecksumMismatch verifies that an entry whose
+// PreviousChecksum does not link to the prior entry's Checksum is detected —
+// even when the entry's own checksum is intact (e.g., an entry is replaced
+// wholesale by a valid-checksum entry that does not belong in this chain).
+func TestVerifyChain_DetectsPreviousChecksumMismatch(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		event := NewEventBuilder().
+			Tenant("prev-mismatch-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("pm_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "prev-mismatch-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+
+	// Replace entry[1]'s PreviousChecksum with a bogus value, leaving the
+	// entry's own Checksum intact (to isolate the PreviousChecksum path).
+	// This simulates an attacker replacing the entry with a forged one that
+	// has a valid self-checksum but wrong chain linkage.
+	modifiedEntry := *entries[1]
+	modifiedEntry.PreviousChecksum = "00000000000000000000000000000000000000000000000000000000000000"
+	// Update the checksum so the self-checksum still matches, isolating the chain-linkage check.
+	modifiedEntry.Checksum = manager.generateChecksum(&modifiedEntry)
+	modifiedSlice := []*business.AuditEntry{entries[0], &modifiedEntry, entries[2]}
+
+	breaks := manager.VerifyChain(modifiedSlice)
+	require.NotEmpty(t, breaks, "VerifyChain must report a break for PreviousChecksum mismatch")
+
+	found := false
+	for _, b := range breaks {
+		if b.SequenceNumber == modifiedEntry.SequenceNumber && strings.Contains(b.Reason, "previous_checksum mismatch") {
+			found = true
+		}
+	}
+	assert.True(t, found, "ChainBreak must reference the entry with wrong PreviousChecksum")
+}
+
+// TestVerifyChain_DetectsDeletion passes a slice missing the entry with
+// SequenceNumber 2 (simulating deletion) and asserts a gap is reported.
+func TestVerifyChain_DetectsDeletion(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		event := NewEventBuilder().
+			Tenant("gap-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("gap_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "gap-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+
+	// Remove the middle entry to simulate deletion.
+	withGap := []*business.AuditEntry{entries[0], entries[2]}
+
+	breaks := manager.VerifyChain(withGap)
+	require.NotEmpty(t, breaks, "VerifyChain must report a break for the missing entry")
+
+	// At least one break must be a sequence gap referencing the entry after the deletion.
+	foundGap := false
+	for _, b := range breaks {
+		if b.SequenceNumber == entries[2].SequenceNumber && strings.Contains(b.Reason, "sequence gap") {
+			foundGap = true
+		}
+	}
+	assert.True(t, foundGap, "ChainBreak must report a sequence gap for the entry after the deletion")
 }
 
 // TestManager_Flush verifies that after RecordEvent returns successfully and
@@ -956,4 +1289,81 @@ func TestManager_FlushRespectsContextCancellation(t *testing.T) {
 	err = manager.Flush(ctx)
 	require.Error(t, err, "Flush must return when context is cancelled")
 	assert.Contains(t, err.Error(), "context")
+}
+
+// TestWithSecretsStore_LoadsExistingKey verifies that WithSecretsStore loads a
+// pre-existing HMAC key from the secrets store rather than generating a new one.
+func TestWithSecretsStore_LoadsExistingKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	// Pre-populate a known 32-byte key.
+	knownKey := make([]byte, 32)
+	for i := range knownKey {
+		knownKey[i] = byte(i + 1)
+	}
+	ss := newTestSecretStore()
+	ss.secrets["audit/hmac-key"] = hex.EncodeToString(knownKey)
+
+	m, err := NewManager(storageManager.GetAuditStore(), "test-src", WithSecretsStore(ss))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.Stop(ctx)
+	})
+
+	assert.Equal(t, knownKey, m.hmacKey, "manager must load the pre-existing HMAC key")
+}
+
+// TestWithSecretsStore_GeneratesAndPersistsKey verifies that when no key exists
+// in the secrets store, WithSecretsStore generates a new key and persists it.
+func TestWithSecretsStore_GeneratesAndPersistsKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	ss := newTestSecretStore() // empty store — no pre-existing key
+
+	m, err := NewManager(storageManager.GetAuditStore(), "test-src", WithSecretsStore(ss))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.Stop(ctx)
+	})
+
+	require.Len(t, m.hmacKey, 32, "must generate a 32-byte HMAC key")
+
+	// Key must have been persisted to the secrets store.
+	stored, ok := ss.secrets["audit/hmac-key"]
+	require.True(t, ok, "generated key must be persisted to secrets store")
+	raw, decErr := hex.DecodeString(stored)
+	require.NoError(t, decErr)
+	assert.Equal(t, m.hmacKey, raw, "persisted key must match Manager's in-memory key")
+}
+
+// TestWithSecretsStore_StoreFailureFallsBack verifies that when StoreSecret
+// fails, the Manager still starts and uses a generated in-process key.
+func TestWithSecretsStore_StoreFailureFallsBack(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	ss := newTestSecretStore()
+	ss.storeErr = errors.New("backend unavailable")
+
+	m, err := NewManager(storageManager.GetAuditStore(), "test-src", WithSecretsStore(ss))
+	require.NoError(t, err, "Manager must start even when StoreSecret fails")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.Stop(ctx)
+	})
+
+	require.Len(t, m.hmacKey, 32, "must have a 32-byte in-process fallback key")
 }

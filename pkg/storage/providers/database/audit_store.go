@@ -134,14 +134,19 @@ func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *busines
 		entry.Version = "1.0"
 	}
 
-	// Calculate checksum for integrity
-	entryJSON, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("failed to marshal audit entry: %w", err)
+	// Preserve the Manager-computed HMAC-SHA256 checksum when present.
+	// Only compute a fallback checksum for entries written directly (outside Manager),
+	// where no HMAC key is available. Overwriting a Manager-set checksum would
+	// corrupt the hash chain stored by the audit.Manager drain goroutine.
+	if entry.Checksum == "" {
+		entryJSON, err := json.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf("failed to marshal audit entry for checksum: %w", err)
+		}
+		hasher := sha256.New()
+		hasher.Write(entryJSON)
+		entry.Checksum = hex.EncodeToString(hasher.Sum(nil))
 	}
-	hasher := sha256.New()
-	hasher.Write(entryJSON)
-	entry.Checksum = hex.EncodeToString(hasher.Sum(nil))
 
 	// Serialize complex fields
 	detailsJSON, err := serializeMetadata(entry.Details)
@@ -166,9 +171,9 @@ func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *busines
 			id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 			resource_type, resource_id, resource_name, result, error_code, error_message,
 			request_id, ip_address, user_agent, method, path, details, changes, tags,
-			severity, source, version, checksum
+			severity, source, version, checksum, sequence_number, previous_checksum
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
 		)
 	`
 
@@ -199,6 +204,8 @@ func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *busines
 		entry.Source,
 		entry.Version,
 		entry.Checksum,
+		entry.SequenceNumber,
+		entry.PreviousChecksum,
 	)
 
 	if err != nil {
@@ -222,7 +229,7 @@ func (s *DatabaseAuditStore) GetAuditEntry(ctx context.Context, id string) (*bus
 		SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 			   resource_type, resource_id, resource_name, result, error_code, error_message,
 			   request_id, ip_address, user_agent, method, path, details, changes, tags,
-			   severity, source, version, checksum
+			   severity, source, version, checksum, sequence_number, previous_checksum
 		FROM audit_entries
 		WHERE id = $1
 	`
@@ -250,7 +257,7 @@ func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *busin
 		SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 			   resource_type, resource_id, resource_name, result, error_code, error_message,
 			   request_id, ip_address, user_agent, method, path, details, changes, tags,
-			   severity, source, version, checksum
+			   severity, source, version, checksum, sequence_number, previous_checksum
 		FROM audit_entries
 	`
 
@@ -302,9 +309,9 @@ func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*bus
 			id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 			resource_type, resource_id, resource_name, result, error_code, error_message,
 			request_id, ip_address, user_agent, method, path, details, changes, tags,
-			severity, source, version, checksum
+			severity, source, version, checksum, sequence_number, previous_checksum
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
 		)
 	`
 
@@ -337,14 +344,16 @@ func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*bus
 			entry.Version = "1.0"
 		}
 
-		// Calculate checksum
-		entryJSON, err := json.Marshal(entry)
-		if err != nil {
-			return fmt.Errorf("failed to marshal audit entry: %w", err)
+		// Preserve Manager-computed HMAC checksum; compute fallback only for direct writes.
+		if entry.Checksum == "" {
+			entryJSON, err := json.Marshal(entry)
+			if err != nil {
+				return fmt.Errorf("failed to marshal audit entry for checksum: %w", err)
+			}
+			hasher := sha256.New()
+			hasher.Write(entryJSON)
+			entry.Checksum = hex.EncodeToString(hasher.Sum(nil))
 		}
-		hasher := sha256.New()
-		hasher.Write(entryJSON)
-		entry.Checksum = hex.EncodeToString(hasher.Sum(nil))
 
 		// Serialize complex fields
 		detailsJSON, err := serializeMetadata(entry.Details)
@@ -391,6 +400,8 @@ func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*bus
 			entry.Source,
 			entry.Version,
 			entry.Checksum,
+			entry.SequenceNumber,
+			entry.PreviousChecksum,
 		)
 
 		if err != nil {
@@ -550,6 +561,33 @@ func (s *DatabaseAuditStore) GetAuditStats(ctx context.Context) (*business.Audit
 	return stats, nil
 }
 
+// GetLastAuditEntry returns the entry with the highest sequence_number for tenantID,
+// or nil if no entries exist for that tenant.
+func (s *DatabaseAuditStore) GetLastAuditEntry(ctx context.Context, tenantID string) (*business.AuditEntry, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	query := `
+		SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
+			   resource_type, resource_id, resource_name, result, error_code, error_message,
+			   request_id, ip_address, user_agent, method, path, details, changes, tags,
+			   severity, source, version, checksum, sequence_number, previous_checksum
+		FROM audit_entries
+		WHERE tenant_id = $1
+		ORDER BY sequence_number DESC
+		LIMIT 1
+	`
+	row := s.db.QueryRowContext(ctx, query, tenantID)
+	entry, err := s.scanAuditEntry(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get last audit entry: %w", err)
+	}
+	return entry, nil
+}
+
 // ArchiveAuditEntries archives old audit entries (for compliance, implement as needed)
 func (s *DatabaseAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
 	// For PostgreSQL, this could move entries to an archive table or partition
@@ -659,6 +697,8 @@ func (s *DatabaseAuditStore) scanAuditEntry(scanner interface {
 		&entry.Source,
 		&entry.Version,
 		&entry.Checksum,
+		&entry.SequenceNumber,
+		&entry.PreviousChecksum,
 	)
 
 	if err != nil {
