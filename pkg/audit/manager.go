@@ -5,17 +5,21 @@ package audit
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
+	secretsInterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -91,6 +95,13 @@ const SystemUserID = "system"
 // application code paths.
 const defaultQueueCapacity = 1024
 
+// ChainBreak describes a single integrity violation found by VerifyChain.
+type ChainBreak struct {
+	EntryID        string
+	SequenceNumber uint64
+	Reason         string
+}
+
 // Manager provides centralized audit functionality using pluggable storage.
 //
 // Internally, Manager owns a bounded write queue and a background drain goroutine.
@@ -102,6 +113,10 @@ const defaultQueueCapacity = 1024
 type Manager struct {
 	store  business.AuditStore
 	source string // Component identifier for audit source
+
+	// hmacKey is used for HMAC-SHA256 checksum generation. Generated randomly
+	// at startup unless a secrets store is provided.
+	hmacKey []byte
 
 	// queue is the bounded write channel feeding the drain goroutine. Entries
 	// that cannot be enqueued within a non-blocking send are dropped (logged).
@@ -126,11 +141,53 @@ type Manager struct {
 	logger *slog.Logger
 }
 
+// managerOption is a functional option for NewManager.
+type managerOption func(*Manager, context.Context) error
+
+// WithSecretsStore configures the Manager to load its HMAC signing key from
+// the provided secrets store (key name: "audit/hmac-key"). If the key does not
+// exist it is generated and stored. When not provided, a random in-process key
+// is used instead — per-entry integrity is preserved within the process run but
+// the key is not durable across restarts.
+func WithSecretsStore(store secretsInterfaces.SecretStore) managerOption {
+	return func(m *Manager, ctx context.Context) error {
+		const keyName = "audit/hmac-key"
+		secret, err := store.GetSecret(ctx, keyName)
+		if err == nil && secret != nil && len(secret.Value) > 0 {
+			raw, decodeErr := hex.DecodeString(secret.Value)
+			if decodeErr == nil && len(raw) == 32 {
+				m.hmacKey = raw
+				return nil
+			}
+		}
+		// Key absent or undecodable — generate and persist.
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return fmt.Errorf("failed to generate audit HMAC key: %w", err)
+		}
+		if err := store.StoreSecret(ctx, &secretsInterfaces.SecretRequest{
+			Key:         keyName,
+			Value:       hex.EncodeToString(key),
+			Description: "HMAC signing key for audit chain integrity",
+		}); err != nil {
+			m.logger.Warn("failed to persist audit HMAC key; using in-process key",
+				"error", err)
+		}
+		m.hmacKey = key
+		return nil
+	}
+}
+
 // NewManager creates a new audit manager with the specified storage backend.
 // It starts a background drain goroutine that writes queued entries to the
 // store. Callers MUST call Stop (or Flush before process exit) to guarantee
 // in-flight entries reach durable storage.
-func NewManager(store business.AuditStore, source string) (*Manager, error) {
+//
+// Optional functional options (e.g. WithSecretsStore) may be passed to
+// configure persistent HMAC key storage. Without options a random 32-byte
+// in-process key is generated — per-entry integrity is preserved within the
+// process run but the key is not durable across restarts.
+func NewManager(store business.AuditStore, source string, opts ...managerOption) (*Manager, error) {
 	if store == nil {
 		return nil, fmt.Errorf("audit manager requires non-nil audit store")
 	}
@@ -146,6 +203,23 @@ func NewManager(store business.AuditStore, source string) (*Manager, error) {
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 		logger:   slog.Default().With("component", "audit", "source", source),
+	}
+
+	ctx := context.Background()
+	for _, opt := range opts {
+		if err := opt(m, ctx); err != nil {
+			return nil, fmt.Errorf("audit manager option failed: %w", err)
+		}
+	}
+
+	// Fall back to random in-process key if no persistent key was provided.
+	if m.hmacKey == nil {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, fmt.Errorf("failed to generate audit HMAC key: %w", err)
+		}
+		m.hmacKey = key
+		m.logger.Warn("audit HMAC key is ephemeral; use WithSecretsStore for cross-restart integrity")
 	}
 
 	go m.drainLoop()
@@ -195,14 +269,35 @@ func (m *Manager) drainRemaining() {
 	}
 }
 
-// writeEntry persists a single entry to the underlying store. Errors are logged
-// but do not stop the drain loop — audit writes must be best-effort rather than
-// fatal to the process.
+// writeEntry assigns chain fields and persists a single entry to the underlying
+// store. Called exclusively from the drain goroutine so sequence numbers are
+// assigned in-order without database-side sequences. Errors are logged but do
+// not stop the drain loop.
 func (m *Manager) writeEntry(entry *business.AuditEntry) {
-	// Use a background context so a caller-cancelled context (e.g., a short
-	// request ctx) cannot abort an in-flight audit write. The queue has already
-	// accepted responsibility for the entry.
-	if err := m.store.StoreAuditEntry(context.Background(), entry); err != nil {
+	ctx := context.Background()
+
+	// Assign sequence number and previous checksum from the last stored entry
+	// for this tenant. Because writeEntry is called only from the single drain
+	// goroutine, no concurrent writer can interleave here.
+	last, err := m.store.GetLastAuditEntry(ctx, entry.TenantID)
+	if err != nil {
+		m.logger.Warn("failed to fetch last audit entry for chain linking; using sequence 1",
+			"error", err,
+			"tenant_id", entry.TenantID,
+		)
+		entry.SequenceNumber = 1
+		entry.PreviousChecksum = ""
+	} else if last == nil || last.SequenceNumber == 0 {
+		entry.SequenceNumber = 1
+		entry.PreviousChecksum = ""
+	} else {
+		entry.SequenceNumber = last.SequenceNumber + 1
+		entry.PreviousChecksum = last.Checksum
+	}
+
+	entry.Checksum = m.generateChecksum(entry)
+
+	if err := m.store.StoreAuditEntry(ctx, entry); err != nil {
 		m.logger.Warn("audit write failed",
 			"error", err,
 			"entry_id", entry.ID,
@@ -258,8 +353,6 @@ func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) err
 		return fmt.Errorf("audit validation failed: %w", err)
 	}
 
-	entry.Checksum = m.generateChecksum(entry)
-
 	return m.enqueue(entry)
 }
 
@@ -285,7 +378,6 @@ func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) 
 			return fmt.Errorf("audit validation failed for entry %d: %w", i, err)
 		}
 
-		entry.Checksum = m.generateChecksum(entry)
 		entries[i] = entry
 	}
 
@@ -424,34 +516,95 @@ func (m *Manager) validateEntry(entry *business.AuditEntry) error {
 	return nil
 }
 
-// generateChecksum generates a SHA256 checksum for audit integrity
+// generateChecksum computes an HMAC-SHA256 over the entry's core fields plus
+// its chain fields (SequenceNumber and PreviousChecksum). The HMAC key is the
+// Manager's per-instance or secrets-backed key. Callers must set SequenceNumber
+// and PreviousChecksum on the entry before calling generateChecksum.
 func (m *Manager) generateChecksum(entry *business.AuditEntry) string {
-	// Create a copy of the entry without the checksum field for hashing
-	temp := *entry
-	temp.Checksum = ""
-
-	// Create a stable representation for hashing using only immutable core fields
-	// Note: We use Unix timestamp to avoid precision issues with time formatting
-	hashInput := fmt.Sprintf("%s|%s|%d|%s|%s|%s|%s|%s|%s",
-		temp.ID,
-		temp.TenantID,
-		temp.Timestamp.Unix(), // Use Unix timestamp for consistency
-		temp.EventType,
-		temp.Action,
-		temp.UserID,
-		temp.ResourceType,
-		temp.ResourceID,
-		temp.Result,
+	hashInput := fmt.Sprintf("%s|%s|%d|%s|%s|%s|%s|%s|%s|%d|%s",
+		entry.ID,
+		entry.TenantID,
+		entry.Timestamp.Unix(),
+		entry.EventType,
+		entry.Action,
+		entry.UserID,
+		entry.ResourceType,
+		entry.ResourceID,
+		entry.Result,
+		entry.SequenceNumber,
+		entry.PreviousChecksum,
 	)
 
-	hash := sha256.Sum256([]byte(hashInput))
-	return hex.EncodeToString(hash[:])
+	mac := hmac.New(sha256.New, m.hmacKey)
+	_, _ = mac.Write([]byte(hashInput))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// VerifyIntegrity verifies the integrity checksum of an audit entry
+// VerifyChain walks entries (which must be sorted ascending by SequenceNumber)
+// and reports every integrity violation as a ChainBreak. It is a pure in-memory
+// operation — callers are responsible for providing a complete, sorted slice.
+//
+// The following violations are detected:
+//   - Checksum mismatch (tampering of an entry's fields)
+//   - PreviousChecksum mismatch (entry does not link to the prior entry)
+//   - Sequence gap (a sequence number is missing between two consecutive entries)
+//
+// Entries with SequenceNumber == 0 are pre-chain legacy entries and are skipped.
+func (m *Manager) VerifyChain(entries []*business.AuditEntry) []ChainBreak {
+	// Sort a working copy by SequenceNumber ascending so callers don't have to.
+	sorted := make([]*business.AuditEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].SequenceNumber < sorted[j].SequenceNumber
+	})
+
+	var breaks []ChainBreak
+	var prev *business.AuditEntry
+
+	for _, e := range sorted {
+		if e.SequenceNumber == 0 {
+			// Pre-chain legacy entry — skip without reporting a break.
+			continue
+		}
+
+		// Detect sequence gap.
+		if prev != nil && e.SequenceNumber != prev.SequenceNumber+1 {
+			breaks = append(breaks, ChainBreak{
+				EntryID:        e.ID,
+				SequenceNumber: e.SequenceNumber,
+				Reason: fmt.Sprintf("sequence gap: expected %d, got %d",
+					prev.SequenceNumber+1, e.SequenceNumber),
+			})
+		}
+
+		// Detect PreviousChecksum mismatch.
+		if prev != nil && e.PreviousChecksum != prev.Checksum {
+			breaks = append(breaks, ChainBreak{
+				EntryID:        e.ID,
+				SequenceNumber: e.SequenceNumber,
+				Reason: fmt.Sprintf("previous_checksum mismatch: expected %q, got %q",
+					prev.Checksum, e.PreviousChecksum),
+			})
+		}
+
+		// Detect checksum tampering by recomputing.
+		expected := m.generateChecksum(e)
+		if e.Checksum != expected {
+			breaks = append(breaks, ChainBreak{
+				EntryID:        e.ID,
+				SequenceNumber: e.SequenceNumber,
+				Reason:         "checksum mismatch: entry fields have been tampered with",
+			})
+		}
+
+		prev = e
+	}
+	return breaks
+}
+
+// VerifyIntegrity verifies the HMAC-SHA256 checksum of a single audit entry.
 func (m *Manager) VerifyIntegrity(entry *business.AuditEntry) bool {
-	expectedChecksum := m.generateChecksum(entry)
-	return entry.Checksum == expectedChecksum
+	return entry.Checksum == m.generateChecksum(entry)
 }
 
 // AuditEventBuilder provides a fluent interface for building audit events

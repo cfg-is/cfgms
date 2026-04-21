@@ -60,8 +60,9 @@ func (s *SQLiteAuditStore) StoreAuditEntry(ctx context.Context, entry *business.
 			(id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 			 resource_type, resource_id, resource_name, result, error_code, error_message,
 			 request_id, ip_address, user_agent, method, path,
-			 details, changes, tags, severity, source, version, checksum)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			 details, changes, tags, severity, source, version, checksum,
+			 sequence_number, previous_checksum)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		entry.ID,
 		entry.TenantID,
 		formatTime(entry.Timestamp),
@@ -88,6 +89,8 @@ func (s *SQLiteAuditStore) StoreAuditEntry(ctx context.Context, entry *business.
 		entry.Source,
 		entry.Version,
 		entry.Checksum,
+		entry.SequenceNumber,
+		entry.PreviousChecksum,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -104,9 +107,33 @@ func (s *SQLiteAuditStore) GetAuditEntry(ctx context.Context, id string) (*busin
 		SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 		       resource_type, resource_id, resource_name, result, error_code, error_message,
 		       request_id, ip_address, user_agent, method, path,
-		       details, changes, tags, severity, source, version, checksum
+		       details, changes, tags, severity, source, version, checksum,
+		       sequence_number, previous_checksum
 		FROM audit_entries WHERE id = ?`, id)
 	return scanAuditEntry(row)
+}
+
+// GetLastAuditEntry returns the most recently written entry for tenantID by sequence_number,
+// or nil if no entries exist for that tenant.
+func (s *SQLiteAuditStore) GetLastAuditEntry(ctx context.Context, tenantID string) (*business.AuditEntry, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
+		       resource_type, resource_id, resource_name, result, error_code, error_message,
+		       request_id, ip_address, user_agent, method, path,
+		       details, changes, tags, severity, source, version, checksum,
+		       sequence_number, previous_checksum
+		FROM audit_entries
+		WHERE tenant_id = ?
+		ORDER BY sequence_number DESC
+		LIMIT 1`, tenantID)
+	entry, err := scanAuditEntry(row)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return entry, nil
 }
 
 // ListAuditEntries returns audit entries matching the filter.
@@ -288,8 +315,9 @@ func (s *SQLiteAuditStore) storeAuditEntryTx(ctx context.Context, tx *sql.Tx, en
 			(id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 			 resource_type, resource_id, resource_name, result, error_code, error_message,
 			 request_id, ip_address, user_agent, method, path,
-			 details, changes, tags, severity, source, version, checksum)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			 details, changes, tags, severity, source, version, checksum,
+			 sequence_number, previous_checksum)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		entry.ID, entry.TenantID, formatTime(entry.Timestamp),
 		string(entry.EventType), entry.Action, entry.UserID, string(entry.UserType), entry.SessionID,
 		entry.ResourceType, entry.ResourceID, entry.ResourceName,
@@ -297,6 +325,7 @@ func (s *SQLiteAuditStore) storeAuditEntryTx(ctx context.Context, tx *sql.Tx, en
 		entry.RequestID, entry.IPAddress, entry.UserAgent, entry.Method, entry.Path,
 		details, changesJSON, tags,
 		string(entry.Severity), entry.Source, entry.Version, entry.Checksum,
+		entry.SequenceNumber, entry.PreviousChecksum,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -311,7 +340,8 @@ func buildAuditQuery(filter *business.AuditFilter) (string, []interface{}) {
 	base := `SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 	                resource_type, resource_id, resource_name, result, error_code, error_message,
 	                request_id, ip_address, user_agent, method, path,
-	                details, changes, tags, severity, source, version, checksum
+	                details, changes, tags, severity, source, version, checksum,
+	                sequence_number, previous_checksum
 	         FROM audit_entries`
 
 	if filter == nil {
@@ -432,6 +462,7 @@ func scanAuditEntry(row *sql.Row) (*business.AuditEntry, error) {
 		&e.RequestID, &e.IPAddress, &e.UserAgent, &e.Method, &e.Path,
 		&detailsStr, &changesStr, &tagsStr,
 		&e.Severity, &e.Source, &e.Version, &e.Checksum,
+		&e.SequenceNumber, &e.PreviousChecksum,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("audit entry not found")
@@ -454,6 +485,7 @@ func scanAuditRow(rows *sql.Rows) (*business.AuditEntry, error) {
 		&e.RequestID, &e.IPAddress, &e.UserAgent, &e.Method, &e.Path,
 		&detailsStr, &changesStr, &tagsStr,
 		&e.Severity, &e.Source, &e.Version, &e.Checksum,
+		&e.SequenceNumber, &e.PreviousChecksum,
 	); err != nil {
 		return nil, fmt.Errorf("failed to scan audit row: %w", err)
 	}

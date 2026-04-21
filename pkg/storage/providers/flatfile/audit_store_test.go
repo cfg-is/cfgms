@@ -471,3 +471,73 @@ func TestAuditDefaultTimestamp(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, got.Timestamp.IsZero(), "timestamp must be set automatically")
 }
+
+// TestGetLastAuditEntry_Empty verifies that an empty store returns nil, nil.
+func TestGetLastAuditEntry_Empty(t *testing.T) {
+	store := newTestAuditStore(t)
+	ctx := context.Background()
+
+	last, err := store.GetLastAuditEntry(ctx, "no-such-tenant")
+	require.NoError(t, err)
+	assert.Nil(t, last, "empty store must return nil, nil")
+}
+
+// TestGetLastAuditEntry_Single verifies that a single entry is returned.
+func TestGetLastAuditEntry_Single(t *testing.T) {
+	store := newTestAuditStore(t)
+	ctx := context.Background()
+
+	e := minimalEntry("last-1", "tenant-last", time.Now().UTC())
+	e.SequenceNumber = 1
+	require.NoError(t, store.StoreAuditEntry(ctx, e))
+
+	last, err := store.GetLastAuditEntry(ctx, "tenant-last")
+	require.NoError(t, err)
+	require.NotNil(t, last)
+	assert.Equal(t, "last-1", last.ID)
+	assert.Equal(t, uint64(1), last.SequenceNumber)
+}
+
+// TestGetLastAuditEntry_ReturnsHighestSequence verifies that the entry with
+// the highest SequenceNumber is returned when multiple entries exist.
+func TestGetLastAuditEntry_ReturnsHighestSequence(t *testing.T) {
+	store := newTestAuditStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	for i := uint64(1); i <= 3; i++ {
+		e := minimalEntry(fmt.Sprintf("seq-%d", i), "tenant-seq", now)
+		e.SequenceNumber = i
+		require.NoError(t, store.StoreAuditEntry(ctx, e))
+	}
+
+	last, err := store.GetLastAuditEntry(ctx, "tenant-seq")
+	require.NoError(t, err)
+	require.NotNil(t, last)
+	assert.Equal(t, uint64(3), last.SequenceNumber, "must return entry with highest sequence_number")
+}
+
+// TestGetLastAuditEntry_TenantIsolation verifies that entries from different
+// tenants do not bleed across tenant boundaries.
+func TestGetLastAuditEntry_TenantIsolation(t *testing.T) {
+	store := newTestAuditStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	ea := minimalEntry("ta-1", "tenant-a", now)
+	ea.SequenceNumber = 5
+	eb := minimalEntry("tb-1", "tenant-b", now)
+	eb.SequenceNumber = 1
+	require.NoError(t, store.StoreAuditEntry(ctx, ea))
+	require.NoError(t, store.StoreAuditEntry(ctx, eb))
+
+	lastA, err := store.GetLastAuditEntry(ctx, "tenant-a")
+	require.NoError(t, err)
+	require.NotNil(t, lastA)
+	assert.Equal(t, uint64(5), lastA.SequenceNumber)
+
+	lastB, err := store.GetLastAuditEntry(ctx, "tenant-b")
+	require.NoError(t, err)
+	require.NotNil(t, lastB)
+	assert.Equal(t, uint64(1), lastB.SequenceNumber)
+}

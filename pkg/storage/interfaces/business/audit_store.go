@@ -31,6 +31,9 @@ type AuditStore interface {
 	// Statistics and health
 	GetAuditStats(ctx context.Context) (*AuditStats, error)
 
+	// Chain integrity
+	GetLastAuditEntry(ctx context.Context, tenantID string) (*AuditEntry, error)
+
 	// Retention and archival (implementation dependent)
 	ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error)
 	PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error)
@@ -76,7 +79,11 @@ type AuditEntry struct {
 	// System metadata
 	Source   string `json:"source"`            // Component that generated the audit
 	Version  string `json:"version,omitempty"` // Schema version
-	Checksum string `json:"checksum"`          // SHA256 for integrity
+	Checksum string `json:"checksum"`          // HMAC-SHA256 for integrity
+
+	// Chain integrity fields (Issue #767)
+	SequenceNumber   uint64 `json:"sequence_number"`             // Monotonically increasing per-tenant counter
+	PreviousChecksum string `json:"previous_checksum,omitempty"` // Checksum of the preceding entry for this tenant
 }
 
 // AuditEventType categorizes types of audit events

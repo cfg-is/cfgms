@@ -224,7 +224,9 @@ func (s DatabaseSchemas) CreateAuditEntriesTable(ctx context.Context, db *sql.DB
 			severity VARCHAR(20) NOT NULL DEFAULT 'low',
 			source VARCHAR(100) NOT NULL,
 			version VARCHAR(20) DEFAULT '1.0',
-			checksum VARCHAR(64) NOT NULL
+			checksum VARCHAR(64) NOT NULL,
+			sequence_number BIGINT NOT NULL DEFAULT 0,
+			previous_checksum VARCHAR(64) NOT NULL DEFAULT ''
 		);
 	`
 
