@@ -160,6 +160,15 @@ gh issue edit 123 --body "$(gh issue view 123 --json body -q .body)\n\n## CI Fai
 /dispatch 123           # re-dispatch with updated context
 ```
 
+> **Stale remote branch cleanup:** When re-dispatching, `create-clone` automatically detects and
+> force-deletes the old `feature/story-N-agent` remote branch before creating a fresh one. This
+> prevents the new container from pushing on top of stale history and causing tangled merge commits.
+> The dispatch log will show `Cleaning stale remote branch: feature/story-N-agent` when this happens.
+>
+> To preserve the old branch for forensic investigation, pass `--keep-remote` to `create-clone`
+> (or use `/dispatch --keep-remote N` if the skill exposes it). Be aware that with `--keep-remote`
+> the new container's eventual push will conflict with the preserved branch.
+
 ### Option 3: Fix in interactive session on agent branch
 
 ```bash
