@@ -94,6 +94,8 @@ CFGMS uses GitHub Rulesets to protect branches in a GitFlow-style branching mode
 
 **Strict up-to-date requirement**: Enabled after PR #777 broke develop because CI ran against a pre-#772 base; strict mode (`strict_required_status_checks_policy: true`) forces developers to rebase their branch to the latest develop tip and re-run all required checks before merge is allowed. This eliminates the failure mode where a PR's CI passes against a stale base but would fail against current develop.
 
+**Post-merge sanity catch**: `.github/workflows/develop-sanity.yml` runs `go build ./...` on every push to develop (i.e., after every squash-merge). If the build fails it automatically opens a `pipeline:incident` issue linking to the failed run. This is a complementary catch mechanism for the residual cases not covered by pre-merge validation — it does not replace the required status checks above.
+
 ---
 
 ## Release Branches (`release/*`)

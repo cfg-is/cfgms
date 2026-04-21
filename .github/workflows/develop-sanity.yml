@@ -1,0 +1,93 @@
+name: Develop Branch Sanity
+
+on:
+  push:
+    branches:
+      - develop
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  GO_VERSION: '1.25.9'
+
+jobs:
+  build-sanity:
+    name: Post-merge build check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build
+        id: build
+        run: |
+          DELIM=$(openssl rand -hex 16)
+          BUILD_OUTPUT=$(go build ./... 2>&1)
+          BUILD_EXIT=$?
+          echo "output<<${DELIM}" >> $GITHUB_OUTPUT
+          echo "$BUILD_OUTPUT" >> $GITHUB_OUTPUT
+          echo "${DELIM}" >> $GITHUB_OUTPUT
+          exit $BUILD_EXIT
+        continue-on-error: true
+
+      - name: Create incident issue on build failure
+        if: steps.build.outcome == 'failure'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          BUILD_OUTPUT: ${{ steps.build.outputs.output }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = context.sha;
+            const shortSha = sha.substring(0, 7);
+            const actor = context.actor;
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            const buildOutput = process.env.BUILD_OUTPUT || '(no output captured)';
+
+            // Ensure pipeline:incident label exists
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: 'pipeline:incident' });
+            } catch (e) {
+              if (e.status === 404) {
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name: 'pipeline:incident',
+                  color: 'E11D48',
+                  description: 'Develop branch is broken — requires immediate hotfix'
+                });
+              }
+            }
+
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title: `develop build broken after merge — ${shortSha}`,
+              labels: ['pipeline:incident', 'bug'],
+              body: [
+                '## Develop Build Failure',
+                '',
+                `**Commit**: ${sha}`,
+                `**Merged by**: @${actor}`,
+                `**Actions run**: ${runUrl}`,
+                '',
+                '## Build Output',
+                '```',
+                buildOutput,
+                '```',
+                '',
+                '## Resolution',
+                'Fix the build on a feature branch, open a PR targeting `develop`, and close this issue when the build is green.'
+              ].join('\n')
+            });
+
+      - name: Fail job if build failed
+        if: steps.build.outcome == 'failure'
+        run: exit 1
