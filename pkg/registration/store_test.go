@@ -16,7 +16,7 @@ import (
 )
 
 func TestMemoryStore_ConsumeToken_SingleUse_Race(t *testing.T) {
-	store := NewMemoryStore()
+	store := newMemoryStore()
 	ctx := context.Background()
 
 	token := &Token{
@@ -60,7 +60,7 @@ func TestMemoryStore_ConsumeToken_SingleUse_Race(t *testing.T) {
 }
 
 func TestMemoryStore_ConsumeToken_MultiUse(t *testing.T) {
-	store := NewMemoryStore()
+	store := newMemoryStore()
 	ctx := context.Background()
 
 	token := &Token{
@@ -77,7 +77,7 @@ func TestMemoryStore_ConsumeToken_MultiUse(t *testing.T) {
 }
 
 func TestMemoryStore_ConsumeToken_TokenNotFound(t *testing.T) {
-	store := NewMemoryStore()
+	store := newMemoryStore()
 	ctx := context.Background()
 
 	err := store.ConsumeToken(ctx, "nonexistent", "steward-1")
@@ -86,7 +86,7 @@ func TestMemoryStore_ConsumeToken_TokenNotFound(t *testing.T) {
 }
 
 func TestMemoryStore_ConsumeToken_RevokedToken(t *testing.T) {
-	store := NewMemoryStore()
+	store := newMemoryStore()
 	ctx := context.Background()
 
 	token := &Token{
@@ -104,7 +104,7 @@ func TestMemoryStore_ConsumeToken_RevokedToken(t *testing.T) {
 }
 
 func TestMemoryStore_ConsumeToken_ExpiredToken(t *testing.T) {
-	store := NewMemoryStore()
+	store := newMemoryStore()
 	ctx := context.Background()
 
 	past := time.Now().Add(-time.Hour)

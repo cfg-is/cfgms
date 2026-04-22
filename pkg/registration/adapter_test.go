@@ -142,7 +142,6 @@ func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
 func TestStorageAdapter_InterfaceCompliance(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Create sqlite registration token store
 	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
 		"sqlite",
 		map[string]interface{}{"path": tempDir + "/tokens.db"},
@@ -150,11 +149,41 @@ func TestStorageAdapter_InterfaceCompliance(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 
-	// Create adapter
+	ctx := context.Background()
+	require.NoError(t, store.Initialize(ctx))
+
 	adapter := NewStorageAdapter(store)
 
-	// Verify adapter implements Store interface
-	var _ Store = adapter
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	expiresAt := now.Add(24 * time.Hour)
+	original := &Token{
+		Token:         "compliance-test-token",
+		TenantID:      "tenant-compliance",
+		ControllerURL: "grpc://localhost:7443",
+		Group:         "compliance-group",
+		CreatedAt:     now,
+		ExpiresAt:     &expiresAt,
+		SingleUse:     true,
+		Revoked:       false,
+	}
+
+	require.NoError(t, adapter.SaveToken(ctx, original))
+
+	got, err := adapter.GetToken(ctx, original.Token)
+	require.NoError(t, err)
+
+	assert.Equal(t, original.Token, got.Token)
+	assert.Equal(t, original.TenantID, got.TenantID)
+	assert.Equal(t, original.ControllerURL, got.ControllerURL)
+	assert.Equal(t, original.Group, got.Group)
+	assert.WithinDuration(t, original.CreatedAt, got.CreatedAt, time.Second)
+	require.NotNil(t, got.ExpiresAt)
+	assert.WithinDuration(t, *original.ExpiresAt, *got.ExpiresAt, time.Second)
+	assert.Equal(t, original.SingleUse, got.SingleUse)
+	assert.Nil(t, got.UsedAt)
+	assert.Empty(t, got.UsedBy)
+	assert.Equal(t, original.Revoked, got.Revoked)
+	assert.Nil(t, got.RevokedAt)
 }
 
 func TestStorageAdapter_ConsumeToken_Race(t *testing.T) {

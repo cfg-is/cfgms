@@ -113,7 +113,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 	apiKey := NewTestKey(t, server, []string{"registration:create-token"})
 
 	t.Run("successful token creation", func(t *testing.T) {
-		reqBody := TokenCreateRequest{
+		reqBody := registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
 			ControllerURL: "grpc://controller.example.com:7443",
 			Group:         "production",
@@ -147,7 +147,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 	})
 
 	t.Run("single-use token creation", func(t *testing.T) {
-		reqBody := TokenCreateRequest{
+		reqBody := registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
 			ControllerURL: "grpc://controller.example.com:7443",
 			SingleUse:     true,
@@ -173,7 +173,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 	})
 
 	t.Run("missing tenant_id returns error", func(t *testing.T) {
-		reqBody := TokenCreateRequest{
+		reqBody := registration.TokenCreateRequest{
 			ControllerURL: "grpc://controller.example.com:7443",
 		}
 
@@ -192,7 +192,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 	})
 
 	t.Run("missing controller_url returns error", func(t *testing.T) {
-		reqBody := TokenCreateRequest{
+		reqBody := registration.TokenCreateRequest{
 			TenantID: "test-tenant",
 		}
 
@@ -222,7 +222,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 	})
 
 	t.Run("unauthorized without API key", func(t *testing.T) {
-		reqBody := TokenCreateRequest{
+		reqBody := registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
 			ControllerURL: "grpc://controller.example.com:7443",
 		}
@@ -243,7 +243,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 		// Create key with wrong permission
 		wrongKey := NewTestKey(t, server, []string{"steward:list"})
 
-		reqBody := TokenCreateRequest{
+		reqBody := registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
 			ControllerURL: "grpc://controller.example.com:7443",
 		}
@@ -535,7 +535,7 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 
 	// 1. Create a token
 	t.Run("1_create_token", func(t *testing.T) {
-		reqBody := TokenCreateRequest{
+		reqBody := registration.TokenCreateRequest{
 			TenantID:      "crud-test-tenant",
 			ControllerURL: "grpc://controller.example.com:7443",
 			Group:         "crud-test-group",

@@ -95,30 +95,3 @@ type TokenCreateRequest struct {
 	// SingleUse indicates if token can only be used once
 	SingleUse bool `json:"single_use"`
 }
-
-// TokenValidationRequest represents a request to validate a registration token.
-type TokenValidationRequest struct {
-	// Token is the token string to validate
-	Token string `json:"token"`
-
-	// StewardID is the steward requesting validation
-	StewardID string `json:"steward_id"`
-}
-
-// TokenValidationResponse represents the response from token validation.
-type TokenValidationResponse struct {
-	// Valid indicates if token is valid
-	Valid bool `json:"valid"`
-
-	// TenantID from the token (if valid)
-	TenantID string `json:"tenant_id,omitempty"`
-
-	// ControllerURL from the token (if valid)
-	ControllerURL string `json:"controller_url,omitempty"`
-
-	// Group from the token (if valid)
-	Group string `json:"group,omitempty"`
-
-	// Reason for invalidity (if not valid)
-	Reason string `json:"reason,omitempty"`
-}
