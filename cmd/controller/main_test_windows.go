@@ -6,35 +6,72 @@ package main
 
 import (
 	"os"
-	"os/signal"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
+// blockingServer is a Server whose Start() blocks until Stop() is called.
+// This allows signal-path tests to exercise the signal branch of
+// runControllerServer without a race between signal delivery and Start() return.
+type blockingServer struct {
+	mu        sync.Mutex
+	stopCalls int
+	done      chan struct{}
+}
+
+func newBlockingServer() *blockingServer {
+	return &blockingServer{done: make(chan struct{})}
+}
+
+func (b *blockingServer) Start() error {
+	<-b.done
+	return nil
+}
+
+func (b *blockingServer) Stop() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.stopCalls++
+	if b.stopCalls == 1 {
+		close(b.done)
+	}
+	return nil
+}
+
+func (b *blockingServer) StopCallCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stopCalls
+}
+
+// TestSignalHandling verifies that runControllerServer shuts down when a signal
+// arrives on sigChan, calls srv.Stop() exactly once, and returns nil.
+// On Windows there is no syscall.Kill equivalent, so we test via the sigChan
+// seam directly — the OS signal wiring is tested by the integration build.
 func TestSignalHandling(t *testing.T) {
-	done := make(chan struct{})
+	srv := newBlockingServer()
+	logger := logging.NewNoopLogger()
+	sigChan := make(chan os.Signal, 1)
 
+	// Pre-buffer the signal so runControllerServer's select fires the signal
+	// path before srv.Start() can return on its own.
+	sigChan <- os.Interrupt
+
+	result := make(chan error, 1)
 	go func() {
-		// On Windows we test with os.Interrupt (no syscall.Kill equivalent).
-		// The channel is buffered so the send below does not block regardless of
-		// receive timing — no sleep needed.
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, os.Interrupt)
-
-		// Send directly to the buffered channel; this is deterministic and races-free.
-		sigChan <- os.Interrupt
-
-		sig := <-sigChan
-		assert.Equal(t, os.Interrupt, sig)
-		close(done)
+		result <- runControllerServer(srv, logger, sigChan)
 	}()
 
 	select {
-	case <-done:
-		// Test completed successfully
+	case err := <-result:
+		require.NoError(t, err)
+		assert.Equal(t, 1, srv.StopCallCount(), "srv.Stop() must be called exactly once on signal")
 	case <-time.After(1 * time.Second):
-		t.Fatal("Test timed out")
+		t.Fatal("TestSignalHandling timed out — runControllerServer did not return after signal")
 	}
 }
