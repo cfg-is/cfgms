@@ -100,6 +100,11 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 		globalStorageManager.GetRBACStore(),
 	)
 	require.NotNil(t, rbacManager)
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.FlushAudit(flushCtx)
+	})
 
 	reportCache := cache.NewMemoryCache()
 
@@ -628,6 +633,11 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 		globalStorageManager.GetRBACStore(),
 	)
 	require.NotNil(t, rbacManager, "Failed to create RBAC manager")
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.FlushAudit(flushCtx)
+	})
 
 	// Create real report cache
 	reportCache := cache.NewMemoryCache()

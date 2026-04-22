@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,6 +36,12 @@ func TestRBACService_Integration(t *testing.T) {
 
 	err = rbacManager.Initialize(ctx)
 	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.FlushAudit(flushCtx)
+	})
 
 	tenantID := "test-tenant"
 	err = rbacManager.CreateTenantDefaultRoles(ctx, tenantID)

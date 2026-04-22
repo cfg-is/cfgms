@@ -49,6 +49,11 @@ func setupTestServer(t *testing.T) *Server {
 	)
 	err = rbacManager.Initialize(context.Background())
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.FlushAudit(flushCtx)
+	})
 
 	// Initialize tenant management with durable storage (git-backed)
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
@@ -833,6 +838,11 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	)
 	err = rbacManager.Initialize(context.Background())
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.FlushAudit(flushCtx)
+	})
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)

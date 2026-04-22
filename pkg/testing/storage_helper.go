@@ -44,7 +44,12 @@ func SetupTestStorage(t *testing.T) *interfaces.StorageManager {
 	return storageManager
 }
 
-// SetupTestRBACManager creates an RBAC manager with git storage for testing
+// SetupTestRBACManager creates an RBAC manager with git storage for testing.
+//
+// A FlushAudit cleanup is registered so pending async audit writes land before
+// SetupTestStorage closes the storage manager and t.TempDir removes the flatfile
+// directory. Without this flush, the cleanup races with audit writes and fails
+// with "directory not empty" on Linux or held-handle errors on Windows.
 func SetupTestRBACManager(t *testing.T) *rbac.Manager {
 	storageManager := SetupTestStorage(t)
 
@@ -54,12 +59,18 @@ func SetupTestRBACManager(t *testing.T) *rbac.Manager {
 		storageManager.GetRBACStore(),
 	)
 
-	// Initialize with default permissions and roles
 	ctx := context.Background()
-
 	if err := manager.Initialize(ctx); err != nil {
 		t.Fatalf("Failed to initialize test RBAC manager: %v", err)
 	}
+
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := manager.FlushAudit(flushCtx); err != nil {
+			t.Logf("SetupTestRBACManager cleanup: FlushAudit error: %v", err)
+		}
+	})
 
 	return manager
 }
