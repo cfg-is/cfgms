@@ -142,28 +142,56 @@ func runController(configPath string, initMode bool) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	return runControllerServer(srv, sigChan)
+}
+
+// controllerServer is the interface used by runControllerServer so that tests
+// can inject a fake without depending on the real server implementation.
+type controllerServer interface {
+	Start() error
+	Stop() error
+}
+
+// runControllerServer blocks until a signal arrives on sigChan or Start()
+// returns a non-nil error. It always calls Stop() before returning.
+func runControllerServer(srv controllerServer, sigChan <-chan os.Signal) error {
+	logger := logging.ForComponent("controller")
+
+	errCh := make(chan error, 1)
 	go func() {
 		if err := srv.Start(); err != nil {
-			logger.Fatal("Controller server failed",
-				"operation", "server_run",
-				"error", err.Error())
+			errCh <- err
 		}
+		// nil return from Start() means services launched successfully;
+		// goroutine exits silently and errCh stays empty so the main
+		// goroutine continues waiting for sigChan.
 	}()
 
-	sig := <-sigChan
-	logger.Info("Received signal, shutting down controller...",
-		"operation", "server_shutdown",
-		"signal", sig.String())
+	var runErr error
+	select {
+	case sig := <-sigChan:
+		logger.Info("Received signal, shutting down controller...",
+			"operation", "server_shutdown",
+			"signal", sig.String())
+	case runErr = <-errCh:
+		logger.Error("Controller server failed",
+			"operation", "server_run",
+			"error", runErr.Error())
+	}
 
-	if err := srv.Stop(); err != nil {
+	if stopErr := srv.Stop(); stopErr != nil {
 		logger.Error("Error during controller shutdown",
 			"operation", "server_shutdown",
-			"error", err.Error())
+			"error", stopErr.Error())
 	}
 
 	logger.Info("Controller shutdown completed",
 		"operation", "server_shutdown",
 		"status", "completed")
+
+	if runErr != nil {
+		return fmt.Errorf("controller server failed: %w", runErr)
+	}
 	return nil
 }
 
