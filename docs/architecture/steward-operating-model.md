@@ -275,6 +275,20 @@ How a steward joins a controller.
 
 After initial registration, the steward reconnects automatically on restart using its stored certificates. The registration token is only used once.
 
+### Bootstrap TLS Trust
+
+The initial registration call is an HTTPS request to a controller whose TLS certificate is signed by a CA the steward has never seen. By default the steward validates against system root CAs. For MSPs that deploy controllers with a private CA (self-signed or internal PKI), set:
+
+```
+CFGMS_HTTP_CA_CERT_PATH=/path/to/controller-ca.crt
+```
+
+The steward loads the PEM-encoded CA certificate at startup and uses it exclusively to verify the controller's TLS certificate during registration. Once registration succeeds, all subsequent communication uses the mTLS certificates issued by the controller — the CA cert file is not needed again.
+
+The controller writes its CA certificate to `<CFGMS_CERT_PATH>/ca/ca.crt` on first boot. In Docker or containerised deployments, mount the controller's cert volume read-only into each steward container and point `CFGMS_HTTP_CA_CERT_PATH` at the mounted path.
+
+TLS verification is always enforced. There is no environment variable to disable it.
+
 ## Cfg Fields Governing Convergence
 
 The convergence loop behaviour is controlled by fields in the cfg:

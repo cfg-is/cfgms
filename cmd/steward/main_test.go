@@ -5,8 +5,10 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/cfgis/cfgms/cmd/steward/service"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -73,6 +75,25 @@ func TestRunStatusNotInstalled(t *testing.T) {
 	// status should succeed even when the service is not installed.
 	err := runStatus()
 	assert.NoError(t, err)
+}
+
+func TestBuildHTTPConfig(t *testing.T) {
+	logger := logging.NewLogger("debug")
+
+	t.Run("empty CFGMS_HTTP_CA_CERT_PATH produces empty CACertPath", func(t *testing.T) {
+		t.Setenv("CFGMS_HTTP_CA_CERT_PATH", "")
+		cfg := buildHTTPConfig("https://controller.example.com", 30*time.Second, logger)
+		require.NotNil(t, cfg)
+		assert.Equal(t, "https://controller.example.com", cfg.ControllerURL)
+		assert.Equal(t, "", cfg.CACertPath)
+	})
+
+	t.Run("CFGMS_HTTP_CA_CERT_PATH is forwarded to HTTPConfig.CACertPath", func(t *testing.T) {
+		t.Setenv("CFGMS_HTTP_CA_CERT_PATH", "/etc/cfgms/ca.crt")
+		cfg := buildHTTPConfig("https://controller.example.com", 30*time.Second, logger)
+		require.NotNil(t, cfg)
+		assert.Equal(t, "/etc/cfgms/ca.crt", cfg.CACertPath)
+	})
 }
 
 func TestControllerURLOrUnknown(t *testing.T) {

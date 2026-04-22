@@ -10,8 +10,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -56,10 +59,12 @@ type HTTPClient struct {
 
 // HTTPConfig holds configuration for HTTP registration
 type HTTPConfig struct {
-	ControllerURL      string
-	Timeout            time.Duration
-	InsecureSkipVerify bool // Skip TLS verification (test mode only)
-	Logger             logging.Logger
+	ControllerURL string
+	Timeout       time.Duration
+	// CACertPath is the optional path to a PEM-encoded CA certificate used to verify
+	// the controller's TLS certificate during registration. When empty, system root CAs are used.
+	CACertPath string
+	Logger     logging.Logger
 }
 
 // NewHTTPClient creates a new HTTP-based registration client
@@ -76,12 +81,23 @@ func NewHTTPClient(cfg *HTTPConfig) (*HTTPClient, error) {
 		timeout = 30 * time.Second
 	}
 
-	// Configure TLS if needed (test mode support)
 	transport := &http.Transport{}
-	if cfg.InsecureSkipVerify {
-		transport.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: true, // #nosec G402 - Test mode only, controlled by explicit configuration
+	if cfg.CACertPath != "" {
+		caPEM, err := os.ReadFile(cfg.CACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA cert from %q: %w", cfg.CACertPath, err)
 		}
+
+		parsed, err := url.Parse(cfg.ControllerURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse controller URL: %w", err)
+		}
+
+		tlsCfg, err := cert.CreateClientTLSConfig(nil, nil, caPEM, parsed.Hostname(), tls.VersionTLS12)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create TLS config from CA cert: %w", err)
+		}
+		transport.TLSClientConfig = tlsCfg
 	}
 
 	return &HTTPClient{

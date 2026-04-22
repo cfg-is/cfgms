@@ -451,6 +451,17 @@ func runInteractive() error {
 	}
 }
 
+// buildHTTPConfig constructs an HTTPConfig from environment variables and the provided arguments.
+// CFGMS_HTTP_CA_CERT_PATH, when set, is used to verify the controller's TLS certificate during registration.
+func buildHTTPConfig(controllerURL string, timeout time.Duration, logger logging.Logger) *registration.HTTPConfig {
+	return &registration.HTTPConfig{
+		ControllerURL: controllerURL,
+		Timeout:       timeout,
+		CACertPath:    os.Getenv("CFGMS_HTTP_CA_CERT_PATH"),
+		Logger:        logger,
+	}
+}
+
 // registerAndConnect registers the steward using HTTP REST API
 // and then establishes gRPC-over-QUIC connections for ongoing communication.
 // Both control plane and data plane use the transport_address from the registration response.
@@ -464,18 +475,7 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 			"See docs/deployment/ for build instructions")
 	}
 
-	insecureSkipVerify := false
-	if skipVerify := os.Getenv("CFGMS_HTTP_INSECURE_SKIP_VERIFY"); skipVerify == "true" {
-		insecureSkipVerify = true
-		logger.Warn("HTTP TLS verification disabled (test mode only)")
-	}
-
-	httpClient, err := registration.NewHTTPClient(&registration.HTTPConfig{
-		ControllerURL:      controllerURL,
-		Timeout:            30 * time.Second,
-		InsecureSkipVerify: insecureSkipVerify,
-		Logger:             logger,
-	})
+	httpClient, err := registration.NewHTTPClient(buildHTTPConfig(controllerURL, 30*time.Second, logger))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP registration client: %w", err)
 	}
