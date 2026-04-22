@@ -4,9 +4,12 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/cfgis/cfgms/cmd/controller/service"
 	"github.com/cfgis/cfgms/features/controller/config"
@@ -162,3 +165,118 @@ func TestGetLogProviderConfigTimescaleWithPassword(t *testing.T) {
 // TestSignalHandling is implemented in platform-specific files:
 // - main_test_unix.go for Unix systems (uses syscall.Kill)
 // - main_test_windows.go for Windows (uses channel-based simulation)
+
+// fakeServer is a test double for the controllerServer interface defined in
+// main.go. It does NOT mock any CFGMS business-logic component; it models
+// the OS-process lifecycle boundary (Start/Stop) with controllable return
+// values so that runControllerServer's goroutine-supervision logic can be
+// tested without requiring a full TLS+storage+gRPC stack.
+type fakeServer struct {
+	startErr   error
+	stopErr    error
+	startBlock chan struct{} // nil means return immediately
+	startDone  chan struct{} // closed when Start() returns
+	stopCalled chan struct{}
+}
+
+func newFakeServer(startErr error, block bool) *fakeServer {
+	f := &fakeServer{
+		startErr:   startErr,
+		startDone:  make(chan struct{}),
+		stopCalled: make(chan struct{}, 1),
+	}
+	if block {
+		f.startBlock = make(chan struct{})
+	}
+	return f
+}
+
+func (f *fakeServer) Start() error {
+	defer close(f.startDone)
+	if f.startBlock != nil {
+		<-f.startBlock
+	}
+	return f.startErr
+}
+
+func (f *fakeServer) Stop() error {
+	f.stopCalled <- struct{}{}
+	return f.stopErr
+}
+
+// TestRunControllerStartFailureCallsStop verifies that when Start() returns an
+// error, runControllerServer calls Stop() and returns a wrapped non-nil error.
+func TestRunControllerStartFailureCallsStop(t *testing.T) {
+	srv := newFakeServer(fmt.Errorf("boom"), false)
+	sigChan := make(chan os.Signal, 1)
+
+	err := runControllerServer(srv, sigChan)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "boom")
+	assert.Len(t, srv.stopCalled, 1, "Stop() must be called exactly once on Start() error")
+}
+
+// TestRunControllerServerIgnoresNilStart is the regression test for PR #815:
+// when Start() returns nil (non-blocking success), runControllerServer must NOT
+// return — it must keep waiting for sigChan. We verify this by confirming the
+// function is still blocked after a short delay, then unblock it via sigChan.
+func TestRunControllerServerIgnoresNilStart(t *testing.T) {
+	srv := newFakeServer(nil, false) // Start() returns nil immediately
+	sigChan := make(chan os.Signal, 1)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runControllerServer(srv, sigChan)
+	}()
+
+	// Confirm runControllerServer has NOT returned ~50 ms after Start() returned nil.
+	select {
+	case got := <-done:
+		t.Fatalf("runControllerServer returned early (runErr=%v) — nil Start() must not unblock it", got)
+	case <-time.After(50 * time.Millisecond):
+		// Still blocked — correct behaviour.
+	}
+
+	// Now send a signal to trigger clean shutdown.
+	sigChan <- os.Interrupt
+
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("runControllerServer did not unblock after signal")
+	}
+	assert.Len(t, srv.stopCalled, 1, "Stop() must be called exactly once")
+}
+
+// TestRunControllerSignalPath verifies that a signal on sigChan causes
+// runControllerServer to call Stop() and return nil.
+func TestRunControllerSignalPath(t *testing.T) {
+	srv := newFakeServer(nil, true) // Start() blocks until Stop path closes startBlock
+	sigChan := make(chan os.Signal, 1)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runControllerServer(srv, sigChan)
+	}()
+
+	// Unblock Start() so it can return nil; then wait for the goroutine to
+	// actually return before sending the signal — no sleep needed.
+	close(srv.startBlock)
+	select {
+	case <-srv.startDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start() goroutine did not return within timeout")
+	}
+
+	sigChan <- syscall.SIGTERM
+
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("runControllerServer did not return after signal")
+	}
+	assert.Len(t, srv.stopCalled, 1, "Stop() must be called exactly once")
+}
