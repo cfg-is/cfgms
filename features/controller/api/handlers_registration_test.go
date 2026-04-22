@@ -30,9 +30,22 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
-// controlledConsumeStore wraps MemoryStore and injects a fixed error from ConsumeToken.
+// newTestRegistrationStore creates a real SQLite-backed registration.Store for handler tests.
+func newTestRegistrationStore(t *testing.T) registration.Store {
+	t.Helper()
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
+		"sqlite",
+		map[string]interface{}{"path": t.TempDir() + "/tokens.db"},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.NoError(t, store.Initialize(context.Background()))
+	return registration.NewStorageAdapter(store)
+}
+
+// controlledConsumeStore wraps a registration.Store and injects a fixed error from ConsumeToken.
 type controlledConsumeStore struct {
-	*registration.MemoryStore
+	registration.Store
 	consumeErr error
 }
 
@@ -40,7 +53,7 @@ func (c *controlledConsumeStore) ConsumeToken(ctx context.Context, tokenStr, ste
 	if c.consumeErr != nil {
 		return c.consumeErr
 	}
-	return c.MemoryStore.ConsumeToken(ctx, tokenStr, stewardID)
+	return c.Store.ConsumeToken(ctx, tokenStr, stewardID)
 }
 
 // newHandleRegisterServer creates a minimal server for handleRegister unit tests.
@@ -116,7 +129,7 @@ func postRegister(server *Server, token string) *httptest.ResponseRecorder {
 }
 
 func TestHandleRegister_AlreadyUsedSingleUseToken_Returns409(t *testing.T) {
-	tokenStore := registration.NewMemoryStore()
+	tokenStore := newTestRegistrationStore(t)
 	server, auditMgr := newHandleRegisterServer(t, tokenStore, nil)
 
 	usedAt := time.Now().Add(-time.Hour)
@@ -149,7 +162,7 @@ func TestHandleRegister_AlreadyUsedSingleUseToken_Returns409(t *testing.T) {
 }
 
 func TestHandleRegister_RevokedToken_Returns401(t *testing.T) {
-	tokenStore := registration.NewMemoryStore()
+	tokenStore := newTestRegistrationStore(t)
 	server, auditMgr := newHandleRegisterServer(t, tokenStore, nil)
 
 	revokedAt := time.Now().Add(-time.Hour)
@@ -177,7 +190,7 @@ func TestHandleRegister_RevokedToken_Returns401(t *testing.T) {
 }
 
 func TestHandleRegister_ExpiredToken_Returns401(t *testing.T) {
-	tokenStore := registration.NewMemoryStore()
+	tokenStore := newTestRegistrationStore(t)
 	server, auditMgr := newHandleRegisterServer(t, tokenStore, nil)
 
 	pastExpiry := time.Now().Add(-time.Hour)
@@ -206,8 +219,8 @@ func TestHandleRegister_ExpiredToken_Returns401(t *testing.T) {
 func TestHandleRegister_StoreError_Returns500(t *testing.T) {
 	storeErr := fmt.Errorf("failed to persist token state: %w", fmt.Errorf("connection refused"))
 	tokenStore := &controlledConsumeStore{
-		MemoryStore: registration.NewMemoryStore(),
-		consumeErr:  storeErr,
+		Store: newTestRegistrationStore(t),
+		consumeErr:   storeErr,
 	}
 	server, _ := newHandleRegisterServer(t, tokenStore, nil)
 
@@ -225,7 +238,7 @@ func TestHandleRegister_StoreError_Returns500(t *testing.T) {
 }
 
 func TestHandleRegister_ValidSingleUseToken_Returns200ThenSubsequent409(t *testing.T) {
-	tokenStore := registration.NewMemoryStore()
+	tokenStore := newTestRegistrationStore(t)
 	certMgr := newTestCertManager(t)
 	server, auditMgr := newHandleRegisterServer(t, tokenStore, certMgr)
 
@@ -264,7 +277,7 @@ func TestHandleRegister_ValidSingleUseToken_Returns200ThenSubsequent409(t *testi
 }
 
 func TestHandleRegister_ValidMultiUseToken_AllowsTwoRegistrations(t *testing.T) {
-	tokenStore := registration.NewMemoryStore()
+	tokenStore := newTestRegistrationStore(t)
 	certMgr := newTestCertManager(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
 
@@ -292,7 +305,7 @@ func TestHandleRegister_ValidMultiUseToken_AllowsTwoRegistrations(t *testing.T) 
 func TestHandleRegister_ConsumeToken_NoSaveTokenCall(t *testing.T) {
 	// Verify that a successful registration does NOT call SaveToken (ConsumeToken handles it).
 	// We use the real MemoryStore and verify token state after registration.
-	tokenStore := registration.NewMemoryStore()
+	tokenStore := newTestRegistrationStore(t)
 	certMgr := newTestCertManager(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
 
@@ -315,7 +328,7 @@ func TestHandleRegister_ConsumeToken_NoSaveTokenCall(t *testing.T) {
 }
 
 func TestHandleRegister_ConcurrentSingleUseToken_ExactlyOneSucceeds(t *testing.T) {
-	tokenStore := registration.NewMemoryStore()
+	tokenStore := newTestRegistrationStore(t)
 	certMgr := newTestCertManager(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
 
@@ -374,8 +387,8 @@ func TestHandleRegister_ConcurrentSingleUseToken_ExactlyOneSucceeds(t *testing.T
 func TestHandleRegister_ErrTokenAlreadyUsed_IsDistinctFrom500(t *testing.T) {
 	// This test uses the sentinel directly to confirm the error distinction matters.
 	tokenStore := &controlledConsumeStore{
-		MemoryStore: registration.NewMemoryStore(),
-		consumeErr:  business.ErrTokenAlreadyUsed,
+		Store: newTestRegistrationStore(t),
+		consumeErr:   business.ErrTokenAlreadyUsed,
 	}
 	server, _ := newHandleRegisterServer(t, tokenStore, nil)
 
