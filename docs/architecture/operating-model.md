@@ -114,8 +114,6 @@ Controller                              Steward
 
 Both planes use the unified **gRPC-over-QUIC** transport (port 4433, mTLS). All controller-steward communication flows over a single multiplexed QUIC connection with distinct gRPC services for control and data operations.
 
-Security boundaries, attack scenarios, and deliberate out-of-scope decisions for the control plane (including the rationale for not implementing per-message signing or replay protection in the current release) are documented in [controlplane-threat-model.md](controlplane-threat-model.md).
-
 The controller can tell a steward to sync its cfg immediately (e.g., after an admin pushes a change). But the steward also re-checks on its own schedule. The command is an optimization, not a dependency.
 
 ### Outpost (Future)

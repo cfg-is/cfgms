@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-
-// Security model: these message types carry no per-message signatures or replay-
-// protection fields. That decision is deliberate and PO-ratified — see
-// docs/architecture/controlplane-threat-model.md for attack scenarios and rationale.
-
 // Package types provides message types for the control plane communication layer.
 //
 // This package defines semantic message types for controller-steward communication,
