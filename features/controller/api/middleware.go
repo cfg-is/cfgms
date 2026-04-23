@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/ctxkeys"
@@ -387,7 +388,7 @@ func (s *Server) buildPermissionID(resourceType, action string) string {
 
 // generateRequestID generates a unique request ID for tracing
 func (s *Server) generateRequestID() string {
-	return time.Now().Format("20060102150405.999999999")
+	return uuid.New().String()
 }
 
 // writeAuthorizationError writes an authorization error response with decision metadata
@@ -445,10 +446,6 @@ func (s *Server) auditAuthorizationDecision(r *http.Request, decision *Authoriza
 		s.logger.Warn("Authorization audit - access denied", auditFields)
 	}
 
-	// If RBAC manager supports audit trail, also log there
-	if s.rbacManager != nil {
-		s.auditToRBACManager(decision, r)
-	}
 }
 
 // getRequestID extracts or generates a request ID for audit correlation
@@ -519,13 +516,3 @@ func (s *Server) hasAPIKeyPermission(apiKey *APIKey, permissionID string) bool {
 	return false
 }
 
-// auditToRBACManager sends audit information to RBAC manager if supported
-func (s *Server) auditToRBACManager(decision *AuthorizationDecision, r *http.Request) {
-	// This would integrate with the RBAC manager's audit trail
-	// For now, we'll just log that we would send it
-	s.logger.Debug("Would audit to RBAC manager",
-		"subject_id", decision.SubjectID,
-		"decision", decision.Decision,
-		"resource", decision.Resource,
-	)
-}
