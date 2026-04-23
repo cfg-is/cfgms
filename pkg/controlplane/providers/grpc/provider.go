@@ -22,6 +22,7 @@ import (
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 	quicgo "github.com/quic-go/quic-go"
@@ -994,13 +995,26 @@ type transportServer struct {
 	provider *Provider
 }
 
+// Register handles steward registration. The authenticated peer CN from the mTLS
+// handshake is the authoritative steward identity. If the request carries a non-empty
+// ClientId it must exactly match the peer CN; a mismatched ClientId returns
+// PermissionDenied. An empty ClientId is accepted and the steward ID is derived
+// from the cert CN. Missing or invalid peer TLS info returns Unauthenticated.
 func (s *transportServer) Register(ctx context.Context, req *controllerpb.RegisterRequest) (*controllerpb.RegisterResponse, error) {
-	// Extract steward identity from the request
-	stewardID := req.GetCredentials().GetClientId()
-	if stewardID == "" {
-		return nil, status.Error(codes.InvalidArgument, "client_id is required in credentials")
+	cnStewardID, err := extractStewardIDFromPeer(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "failed to extract steward identity from peer certificate: %v", err)
 	}
 
+	reqStewardID := req.GetCredentials().GetClientId()
+	if reqStewardID != "" && reqStewardID != cnStewardID {
+		s.provider.logger.Warn("steward ID mismatch: client_id does not match peer CN",
+			"req_steward_id", logging.SanitizeLogValue(reqStewardID),
+			"cn_steward_id", logging.SanitizeLogValue(cnStewardID))
+		return nil, status.Errorf(codes.PermissionDenied, "client_id %q does not match authenticated peer CN %q", reqStewardID, cnStewardID)
+	}
+
+	stewardID := cnStewardID
 	s.provider.logger.Info("steward registered", "steward_id", stewardID, "version", req.GetVersion())
 
 	return &controllerpb.RegisterResponse{
