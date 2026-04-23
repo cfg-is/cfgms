@@ -6,7 +6,6 @@ import (
 	"context"
 	"sync"
 
-	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/directory"
 	"github.com/cfgis/cfgms/features/controller/server"
@@ -41,11 +40,8 @@ type Controller struct {
 	// Module registry
 	modules map[string]Module
 
-	// gRPC server for steward communication
+	// gRPC server for steward communication (owns the canonical api.Server)
 	server *server.Server
-
-	// REST API server for external HTTP access
-	apiServer *api.Server
 
 	// Directory service for unified directory operations
 	directoryService directory.Service
@@ -84,30 +80,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		return nil, err
 	}
 
-	// Create the REST API server
-	apiSrv, err := api.New(
-		cfg,
-		logger,
-		srv.GetControllerService(),
-		srv.GetConfigurationService(),
-		srv.GetCertificateProvisioningService(),
-		srv.GetRBACService(),
-		srv.GetCertificateManager(),
-		srv.GetTenantManager(),
-		srv.GetRBACManager(),
-		nil,                             // systemMonitor - will be integrated in Phase 5
-		nil,                             // platformMonitor - will be integrated in this story completion
-		nil,                             // tracer - will be integrated in Phase 5
-		srv.GetHAManager(),              // HA manager
-		srv.GetRegistrationTokenStore(), // registrationTokenStore - wired for gRPC transport mode
-		srv.GetSignerCertSerial(),       // Story #378: signer cert serial for registration
-		nil,                             // healthCollector - wired in server.New() for gRPC transport mode
-		nil,                             // auditManager - not wired in this construction path
-	)
-	if err != nil {
-		return nil, err
-	}
-
 	// Create the directory service
 	dirService := directory.NewDirectoryService(logger)
 
@@ -116,7 +88,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		logger:           logger,
 		modules:          make(map[string]Module),
 		server:           srv,
-		apiServer:        apiSrv,
 		directoryService: dirService,
 		shutdown:         make(chan struct{}),
 	}
@@ -138,17 +109,10 @@ func (c *Controller) Start(ctx context.Context) error {
 
 	c.logger.Info("Starting controller")
 
-	// Start the gRPC server
+	// Start the gRPC+HTTP server (server.Server owns the canonical api.Server)
 	if err := c.server.Start(); err != nil {
-		c.logger.Error("Failed to start gRPC server", "error", err)
+		c.logger.Error("Failed to start server", "error", err)
 		return err
-	}
-
-	// Start the REST API server
-	if err := c.apiServer.Start(); err != nil {
-		c.logger.Error("Failed to start REST API server", "error", err)
-		// Don't fail completely if REST API fails to start
-		c.logger.Warn("Controller running without REST API server")
 	}
 
 	c.running = true
@@ -172,13 +136,7 @@ func (c *Controller) Stop(ctx context.Context) error {
 func (c *Controller) stopLocked() error {
 	c.logger.Info("Stopping controller")
 
-	// Stop the REST API server
-	if err := c.apiServer.Stop(); err != nil {
-		c.logger.Error("Failed to stop REST API server", "error", err)
-		// Continue stopping other services
-	}
-
-	// Stop the gRPC server
+	// Stop the gRPC+HTTP server (server.Server owns the canonical api.Server)
 	if err := c.server.Stop(); err != nil {
 		c.logger.Error("Failed to stop gRPC server", "error", err)
 		return err
@@ -245,11 +203,18 @@ func (c *Controller) GetConfigurationService() *service.ConfigurationServiceV2 {
 	return c.server.GetConfigurationService()
 }
 
-// GetListenAddr returns the actual listen address after binding
+// GetListenAddr returns the gRPC transport listen address after binding.
 func (c *Controller) GetListenAddr() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.server.GetListenAddr()
+}
+
+// GetHTTPListenAddr returns the HTTP API server listen address after binding.
+func (c *Controller) GetHTTPListenAddr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.server.GetHTTPListenAddr()
 }
 
 // GetDirectoryService returns the directory service instance

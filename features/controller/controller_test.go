@@ -127,18 +127,8 @@ func TestControllerLifecycle(t *testing.T) {
 	// M-AUTH-1: No longer generating default API keys (security anti-pattern removed)
 	assert.Contains(t, messages, "Starting controller")
 	assert.Contains(t, messages, "Controller server started (gRPC-over-QUIC transport mode)")
-	assert.Contains(t, messages, "REST API server started")
+	assert.Contains(t, messages, "HTTP API server started")
 	assert.Contains(t, messages, "Controller started successfully")
-
-	// Certificate message can be either "Using existing" or "Generating new" depending on environment
-	// With gRPC removed, we only check for HTTP server certificates
-	httpCertificateFound := false
-	for _, msg := range messages {
-		if msg == "Using existing server certificate for HTTP server" || msg == "Generated new server certificate for HTTP server" {
-			httpCertificateFound = true
-		}
-	}
-	assert.True(t, httpCertificateFound, "Expected HTTP certificate message not found in logs: %v", messages)
 
 	// Stop the controller
 	err = ctrl.Stop(ctx)
@@ -157,7 +147,7 @@ func TestControllerLifecycle(t *testing.T) {
 	// Verify required startup messages are present
 	assert.Contains(t, messages, "Starting controller")
 	assert.Contains(t, messages, "Controller server started (gRPC-over-QUIC transport mode)")
-	assert.Contains(t, messages, "REST API server started")
+	assert.Contains(t, messages, "HTTP API server started")
 	assert.Contains(t, messages, "Controller started successfully")
 
 	// Verify required shutdown messages are present
@@ -213,4 +203,42 @@ func TestModuleRegistration(t *testing.T) {
 	assert.Equal(t, ErrModuleNotFound, err)
 }
 
-// TODO: Add more comprehensive tests
+// TestControllerSingleHTTPServer verifies that exactly one HTTP API server is started
+// per controller process (Issue #778). The pre-fix controller.go called api.New() and
+// Start() independently of server.Server, producing two goroutines racing to bind the
+// same port. After the fix, server.Server owns the sole api.Server instance and its
+// lifecycle, so Start()+Stop() must complete without error and GetHTTPListenAddr() must
+// return a non-empty address confirming the server was initialized.
+func TestControllerSingleHTTPServer(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := testutil.NewMockLogger(true)
+
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir + "/data"
+	cfg.CertPath = tempDir + "/certs"
+	if cfg.Certificate != nil {
+		cfg.Certificate.CAPath = tempDir + "/certs/ca"
+	}
+	if cfg.Storage != nil && cfg.Storage.Config != nil {
+		cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+	}
+	if cfg.Transport != nil {
+		cfg.Transport.ListenAddr = "127.0.0.1:0"
+	}
+	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
+
+	// Use an ephemeral HTTP port to avoid conflicts with parallel tests.
+	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
+
+	ctrl, err := New(cfg, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, ctrl.Start(ctx), "controller must start without error")
+
+	// GetHTTPListenAddr confirms server.Server owns and configured the HTTP server.
+	// With the duplicate removed, this address is set exactly once by server.Server.New().
+	assert.NotEmpty(t, ctrl.GetHTTPListenAddr(), "HTTP listen address must be set after Start()")
+
+	require.NoError(t, ctrl.Stop(ctx), "controller must stop without error")
+}

@@ -1154,6 +1154,16 @@ func (s *Server) GetRegistrationTokenStore() pkgRegistration.Store {
 	return s.registrationTokenStore
 }
 
+// GetHTTPListenAddr returns the HTTP API server's listen address after binding.
+func (s *Server) GetHTTPListenAddr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.httpServer != nil {
+		return s.httpServer.GetListenAddr()
+	}
+	return ""
+}
+
 // loadExistingCertificateManager loads the certificate manager from an existing CA.
 // Unlike the old initializeCertificateManager, this never creates a new CA — that
 // responsibility belongs to `controller --init` (initialization.Run).

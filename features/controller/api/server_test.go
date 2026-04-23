@@ -1094,6 +1094,25 @@ func TestTenantContextPropagation(t *testing.T) {
 	assert.Equal(t, "test-steward-1", data["steward_id"])
 }
 
+// TestAPIServerStartStop verifies that a standalone api.Server created via api.New() can
+// start and stop cleanly. This exercises the same lifecycle path used by server.Server
+// (Issue #778): after removing the duplicate api.New() from controller.go, server.Server
+// is the sole owner of the api.Server instance and its Start/Stop lifecycle.
+func TestAPIServerStartStop(t *testing.T) {
+	// Use an ephemeral HTTP port so the test never conflicts with other tests or processes.
+	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
+
+	server := setupTestServer(t)
+
+	err := server.Start()
+	require.NoError(t, err, "api.Server.Start() must return no error")
+
+	// Stop() calls http.Server.Shutdown() which drains in-flight requests and returns
+	// cleanly even if ListenAndServe hasn't bound yet — no sleep required.
+	err = server.Stop()
+	assert.NoError(t, err, "api.Server.Stop() must return no error")
+}
+
 // TestTenantContextKeyType verifies that ctxkeys.TenantID can be retrieved from a context
 // that was populated using the same key — confirming the type identity that was broken before.
 func TestTenantContextKeyType(t *testing.T) {
