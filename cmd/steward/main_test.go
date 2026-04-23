@@ -37,18 +37,18 @@ func TestBuildRootCommand(t *testing.T) {
 func TestBuildRootCommandFlags(t *testing.T) {
 	cmd := buildRootCommand()
 
-	for _, name := range []string{"config", "mode", "log-level", "log-provider", "regtoken"} {
+	for _, name := range []string{"config", "mode", "regtoken"} {
 		flag := cmd.Flags().Lookup(name)
 		assert.NotNil(t, flag, "expected flag %q to be registered", name)
 	}
 
-	// Verify defaults.
-	assert.Equal(t, "info", cmd.Flags().Lookup("log-level").DefValue)
-	assert.Equal(t, "file", cmd.Flags().Lookup("log-provider").DefValue)
+	// log-level and log-provider must not be registered as CLI flags.
+	assert.Nil(t, cmd.Flags().Lookup("log-level"), "log-level flag must not be registered")
+	assert.Nil(t, cmd.Flags().Lookup("log-provider"), "log-provider flag must not be registered")
 }
 
 func TestRunInstallRequiresToken(t *testing.T) {
-	err := runInstall("", "info", "file")
+	err := runInstall("")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--regtoken is required")
 }
@@ -57,7 +57,7 @@ func TestRunInstallRequiresElevation(t *testing.T) {
 	if isElevated() {
 		t.Skip("test requires non-elevated process — running as root")
 	}
-	err := runInstall("tok_test_abc123", "info", "file")
+	err := runInstall("tok_test_abc123")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "elevated privileges")
 }
@@ -106,4 +106,30 @@ func TestControllerURLOrUnknown(t *testing.T) {
 
 	ControllerURL = "https://ctrl.example.com"
 	assert.Equal(t, "https://ctrl.example.com", controllerURLOrUnknown())
+}
+
+func TestLogLevelFromEnv(t *testing.T) {
+	tests := []struct {
+		env      string
+		expected string
+	}{
+		{"", "INFO"},
+		{"invalid", "INFO"},
+		{"info", "INFO"},
+		{"INFO", "INFO"},
+		{"debug", "DEBUG"},
+		{"DEBUG", "DEBUG"},
+		{"warn", "WARN"},
+		{"WARN", "WARN"},
+		{"error", "ERROR"},
+		{"ERROR", "ERROR"},
+		{"verbose", "INFO"},
+	}
+
+	for _, tc := range tests {
+		t.Run("env="+tc.env, func(t *testing.T) {
+			t.Setenv("CFGMS_LOG_LEVEL", tc.env)
+			assert.Equal(t, tc.expected, logLevelFromEnv())
+		})
+	}
 }

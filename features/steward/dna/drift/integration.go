@@ -9,13 +9,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // DNADriftIntegrator provides integration between drift detection and DNA storage.
 type DNADriftIntegrator struct {
-	storage      *storage.Manager
+	storage      DNAStorage
 	driftService *DriftService
 	logger       logging.Logger
 	config       *IntegrationConfig
@@ -43,7 +42,7 @@ type IntegrationConfig struct {
 
 // NewDNADriftIntegrator creates a new integrator for DNA storage and drift detection.
 func NewDNADriftIntegrator(
-	storageManager *storage.Manager,
+	storageManager DNAStorage,
 	driftService *DriftService,
 	config *IntegrationConfig,
 	logger logging.Logger,
@@ -163,12 +162,13 @@ func (di *DNADriftIntegrator) DetectDriftForAllDevices(ctx context.Context) (map
 }
 
 // GetDriftHistory retrieves drift events for a device within a time range.
-func (di *DNADriftIntegrator) GetDriftHistory(ctx context.Context, deviceID string, timeRange *storage.TimeRange) ([]*DriftEvent, error) {
+func (di *DNADriftIntegrator) GetDriftHistory(ctx context.Context, deviceID string, timeRange *DNAHistoryQuery) ([]*DriftEvent, error) {
 	// This would typically query a separate drift events storage
 	// For now, we'll reconstruct events from DNA history
 
-	options := &storage.QueryOptions{
-		TimeRange:   timeRange,
+	options := &DNAHistoryQuery{
+		StartTime:   timeRange.StartTime,
+		EndTime:     timeRange.EndTime,
 		IncludeData: true,
 		Limit:       100, // Reasonable limit for drift analysis
 	}
@@ -252,15 +252,13 @@ func (di *DNADriftIntegrator) StartAutoDetection(ctx context.Context) error {
 
 // Private methods
 
-func (di *DNADriftIntegrator) getPreviousDNAForComparison(ctx context.Context, deviceID string) (*storage.DNARecord, error) {
+func (di *DNADriftIntegrator) getPreviousDNAForComparison(ctx context.Context, deviceID string) (*DNAStorageRecord, error) {
 	// Get DNA from the comparison window ago
 	comparisonTime := time.Now().Add(-di.config.ComparisonWindow)
 
-	options := &storage.QueryOptions{
-		TimeRange: &storage.TimeRange{
-			Start: comparisonTime.Add(-time.Minute), // Small window around comparison time
-			End:   comparisonTime.Add(time.Minute),
-		},
+	options := &DNAHistoryQuery{
+		StartTime:   comparisonTime.Add(-time.Minute),
+		EndTime:     comparisonTime.Add(time.Minute),
 		Limit:       1,
 		IncludeData: true,
 	}
@@ -272,10 +270,8 @@ func (di *DNADriftIntegrator) getPreviousDNAForComparison(ctx context.Context, d
 
 	if len(history.Records) == 0 {
 		// Try getting the most recent record before comparison time
-		options.TimeRange = &storage.TimeRange{
-			Start: time.Time{}, // Beginning of time
-			End:   comparisonTime,
-		}
+		options.StartTime = time.Time{}
+		options.EndTime = comparisonTime
 
 		history, err = di.storage.GetHistory(ctx, deviceID, options)
 		if err != nil {

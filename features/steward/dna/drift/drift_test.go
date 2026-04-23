@@ -4,6 +4,7 @@ package drift
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -26,8 +27,55 @@ func createTestDNA(id string, attributes map[string]string) *commonpb.DNA {
 }
 
 func createTestLogger() logging.Logger {
-	// Return nil logger for tests - will be handled by the code
-	return nil
+	return logging.NewLogger("debug")
+}
+
+// testDNAStorage is a real in-memory DNAStorage implementation for tests.
+// It satisfies the DNAStorage interface without mocking.
+type testDNAStorage struct {
+	current map[string]*DNAStorageRecord
+	history map[string][]*DNAStorageRecord
+}
+
+func newTestDNAStorage() *testDNAStorage {
+	return &testDNAStorage{
+		current: make(map[string]*DNAStorageRecord),
+		history: make(map[string][]*DNAStorageRecord),
+	}
+}
+
+func (s *testDNAStorage) store(deviceID string, dna *commonpb.DNA) {
+	r := &DNAStorageRecord{
+		DeviceID: deviceID,
+		DNA:      dna,
+		StoredAt: time.Now(),
+		Version:  int64(len(s.history[deviceID]) + 1),
+	}
+	s.current[deviceID] = r
+	s.history[deviceID] = append(s.history[deviceID], r)
+}
+
+func (s *testDNAStorage) GetCurrent(_ context.Context, deviceID string) (*DNAStorageRecord, error) {
+	r, ok := s.current[deviceID]
+	if !ok {
+		return nil, fmt.Errorf("no record for device %s", deviceID)
+	}
+	return r, nil
+}
+
+func (s *testDNAStorage) GetHistory(_ context.Context, deviceID string, opts *DNAHistoryQuery) (*DNAHistoryResult, error) {
+	all := s.history[deviceID]
+	var filtered []*DNAStorageRecord
+	for _, r := range all {
+		if (opts.StartTime.IsZero() || !r.StoredAt.Before(opts.StartTime)) &&
+			(opts.EndTime.IsZero() || !r.StoredAt.After(opts.EndTime)) {
+			filtered = append(filtered, r)
+		}
+	}
+	if opts.Limit > 0 && len(filtered) > opts.Limit {
+		filtered = filtered[:opts.Limit]
+	}
+	return &DNAHistoryResult{Records: filtered}, nil
 }
 
 // Detector Tests
@@ -602,55 +650,52 @@ func TestRuleEngine_TestRule(t *testing.T) {
 
 func TestMonitor_AddRemoveDevice(t *testing.T) {
 	config := DefaultMonitorConfig()
-	detector, _ := NewDetector(DefaultDetectorConfig(), createTestLogger())
-	// Note: In real implementation, would need actual storage.Manager
-	// For testing, would use mock
-	monitor := &monitor{
-		logger:           createTestLogger(),
-		config:           config,
-		detector:         detector,
-		monitoredDevices: make(map[string]*DeviceMonitorInfo),
-		stats:            &MonitorStats{},
-	}
+	detector, err := NewDetector(DefaultDetectorConfig(), createTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = detector.Close() })
 
-	// Add device
-	err := monitor.AddDevice("device1")
+	mon, err := NewMonitor(config, detector, newTestDNAStorage(), createTestLogger())
 	require.NoError(t, err)
 
-	devices := monitor.GetMonitoredDevices()
+	// Add device
+	err = mon.AddDevice("device1")
+	require.NoError(t, err)
+
+	devices := mon.GetMonitoredDevices()
 	assert.Contains(t, devices, "device1")
 
 	// Remove device
-	err = monitor.RemoveDevice("device1")
+	err = mon.RemoveDevice("device1")
 	require.NoError(t, err)
 
-	devices = monitor.GetMonitoredDevices()
+	devices = mon.GetMonitoredDevices()
 	assert.NotContains(t, devices, "device1")
 }
 
 func TestMonitor_SetInterval(t *testing.T) {
 	config := DefaultMonitorConfig()
-	monitor := &monitor{
-		logger:       createTestLogger(),
-		config:       config,
-		scanInterval: config.DefaultScanInterval,
-		stats:        &MonitorStats{},
-	}
+	detector, err := NewDetector(DefaultDetectorConfig(), createTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = detector.Close() })
+
+	mon, err := NewMonitor(config, detector, newTestDNAStorage(), createTestLogger())
+	require.NoError(t, err)
 
 	// Set valid interval
 	newInterval := 2 * time.Minute
-	monitor.SetInterval(newInterval)
-	assert.Equal(t, newInterval, monitor.scanInterval)
+	mon.SetInterval(newInterval)
+	m := mon.(*monitor)
+	assert.Equal(t, newInterval, m.scanInterval)
 
 	// Set interval too small (should be clamped to minimum)
 	tooSmall := 30 * time.Second
-	monitor.SetInterval(tooSmall)
-	assert.Equal(t, config.MinScanInterval, monitor.scanInterval)
+	mon.SetInterval(tooSmall)
+	assert.Equal(t, config.MinScanInterval, m.scanInterval)
 
 	// Set interval too large (should be clamped to maximum)
 	tooLarge := 2 * time.Hour
-	monitor.SetInterval(tooLarge)
-	assert.Equal(t, config.MaxScanInterval, monitor.scanInterval)
+	mon.SetInterval(tooLarge)
+	assert.Equal(t, config.MaxScanInterval, m.scanInterval)
 }
 
 // Configuration Tests
@@ -838,4 +883,113 @@ func BenchmarkFilter_FilterEvents(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// Constructor error path tests
+
+func TestNewMonitor_NilDetectorReturnsError(t *testing.T) {
+	_, err := NewMonitor(DefaultMonitorConfig(), nil, newTestDNAStorage(), createTestLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "detector is required")
+}
+
+func TestNewMonitor_NilStorageReturnsError(t *testing.T) {
+	detector, err := NewDetector(DefaultDetectorConfig(), createTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = detector.Close() })
+
+	_, err = NewMonitor(DefaultMonitorConfig(), detector, nil, createTestLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "storage manager is required")
+}
+
+func TestNewMonitor_ValidParameters(t *testing.T) {
+	detector, err := NewDetector(DefaultDetectorConfig(), createTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = detector.Close() })
+
+	mon, err := NewMonitor(DefaultMonitorConfig(), detector, newTestDNAStorage(), createTestLogger())
+	require.NoError(t, err)
+	assert.NotNil(t, mon)
+}
+
+func TestNewEventMonitor_NilDetectorReturnsError(t *testing.T) {
+	_, err := NewEventMonitor(DefaultEventMonitorConfig(), nil, newTestDNAStorage(), createTestLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "detector is required")
+}
+
+func TestNewEventMonitor_NilStorageReturnsError(t *testing.T) {
+	detector, err := NewDetector(DefaultDetectorConfig(), createTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = detector.Close() })
+
+	_, err = NewEventMonitor(DefaultEventMonitorConfig(), detector, nil, createTestLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "storage manager is required")
+}
+
+func TestNewEventMonitor_ValidParameters(t *testing.T) {
+	detector, err := NewDetector(DefaultDetectorConfig(), createTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = detector.Close() })
+
+	mon, err := NewEventMonitor(DefaultEventMonitorConfig(), detector, newTestDNAStorage(), createTestLogger())
+	require.NoError(t, err)
+	assert.NotNil(t, mon)
+}
+
+func TestNewDNADriftIntegrator_NilStorageReturnsError(t *testing.T) {
+	service, err := NewDriftService(DefaultDetectorConfig(), nil, nil, DefaultMonitorConfig(), createTestLogger())
+	require.NoError(t, err)
+
+	_, err = NewDNADriftIntegrator(nil, service, DefaultIntegrationConfig(), createTestLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "storage manager is required")
+}
+
+func TestNewDNADriftIntegrator_NilServiceReturnsError(t *testing.T) {
+	_, err := NewDNADriftIntegrator(newTestDNAStorage(), nil, DefaultIntegrationConfig(), createTestLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "drift service is required")
+}
+
+func TestNewDNADriftIntegrator_DefaultConfig(t *testing.T) {
+	service, err := NewDriftService(DefaultDetectorConfig(), nil, nil, DefaultMonitorConfig(), createTestLogger())
+	require.NoError(t, err)
+
+	integrator, err := NewDNADriftIntegrator(newTestDNAStorage(), service, nil, createTestLogger())
+	require.NoError(t, err)
+	assert.NotNil(t, integrator)
+}
+
+// testDNAStorage contract tests
+
+func TestTestDNAStorage_GetCurrentReturnsErrorForUnknownDevice(t *testing.T) {
+	store := newTestDNAStorage()
+	_, err := store.GetCurrent(context.Background(), "unknown-device")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no record for device")
+}
+
+func TestTestDNAStorage_GetCurrentReturnsStoredRecord(t *testing.T) {
+	store := newTestDNAStorage()
+	dna := createTestDNA("dev1", map[string]string{"hostname": "srv1"})
+	store.store("dev1", dna)
+
+	rec, err := store.GetCurrent(context.Background(), "dev1")
+	require.NoError(t, err)
+	assert.Equal(t, "dev1", rec.DeviceID)
+	assert.Equal(t, dna, rec.DNA)
+}
+
+func TestTestDNAStorage_GetHistoryReturnsFilteredRecords(t *testing.T) {
+	store := newTestDNAStorage()
+	dna := createTestDNA("dev1", map[string]string{"x": "1"})
+	store.store("dev1", dna)
+	store.store("dev1", dna)
+
+	result, err := store.GetHistory(context.Background(), "dev1", &DNAHistoryQuery{Limit: 1})
+	require.NoError(t, err)
+	assert.Len(t, result.Records, 1)
 }

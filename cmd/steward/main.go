@@ -24,10 +24,6 @@ import (
 
 	// Import logging providers to register them
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
-	_ "github.com/cfgis/cfgms/pkg/logging/providers/timescale"
-
-	// Import storage providers to register them
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 
 	// Import secrets providers to register them
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
@@ -55,11 +51,9 @@ func main() {
 // buildRootCommand constructs the cobra command tree for cfgms-steward.
 func buildRootCommand() *cobra.Command {
 	var (
-		configPath  string
-		opMode      string
-		logLevel    string
-		logProvider string
-		regToken    string
+		configPath string
+		opMode     string
+		regToken   string
 	)
 
 	root := &cobra.Command{
@@ -77,15 +71,13 @@ Entry paths:
 		// SilenceUsage prevents cobra printing usage on every error.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRootCommand(cmd, regToken, configPath, opMode, logLevel, logProvider)
+			return runRootCommand(cmd, regToken, configPath, opMode)
 		},
 	}
 
 	// Flags used by the root command (foreground run mode).
 	root.Flags().StringVar(&configPath, "config", "", "Path to configuration file (enables standalone mode)")
 	root.Flags().StringVar(&opMode, "mode", "", "Operation mode: 'standalone' or 'controller'")
-	root.Flags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
-	root.Flags().StringVar(&logProvider, "log-provider", "file", "Logging provider: file, timescale")
 	root.Flags().StringVar(&regToken, "regtoken", "", "Registration token for controller registration")
 
 	// Subcommands.
@@ -100,10 +92,10 @@ Entry paths:
 
 // runRootCommand implements the default (foreground) run behaviour.
 // When no meaningful flags are provided it enters interactive mode.
-func runRootCommand(cmd *cobra.Command, regToken, configPath, opMode, logLevel, logProvider string) error {
+func runRootCommand(cmd *cobra.Command, regToken, configPath, opMode string) error {
 	// Interactive mode: no flags set and no subcommand selected.
 	noFlags := regToken == "" && configPath == "" && opMode == ""
-	if noFlags && !cmd.Flags().Changed("log-level") && !cmd.Flags().Changed("log-provider") {
+	if noFlags {
 		return runInteractive()
 	}
 
@@ -117,17 +109,23 @@ func runRootCommand(cmd *cobra.Command, regToken, configPath, opMode, logLevel, 
 		cancel()
 	}()
 
-	return runSteward(ctx, regToken, configPath, opMode, logLevel, logProvider)
+	return runSteward(ctx, regToken, configPath, opMode)
 }
 
 // runSteward starts the steward with the given configuration and blocks until
 // ctx is cancelled. It is called from both the root cobra command and the
 // Windows service handler.
-func runSteward(ctx context.Context, regToken, configPath, opMode, logLevel, logProvider string) error {
-	// Initialize global logging provider
+func runSteward(ctx context.Context, regToken, configPath, opMode string) error {
+	// Initialize global logging provider. File is the only supported provider
+	// for the steward binary. Log level is read from CFGMS_LOG_LEVEL (default INFO).
+	logDir := os.Getenv("CFGMS_LOG_DIR")
+	if logDir == "" {
+		logDir = "/tmp/cfgms"
+		log.Printf("WARNING: Using /tmp/cfgms for logs — set CFGMS_LOG_DIR for production deployments")
+	}
 	loggingConfig := &logging.LoggingConfig{
-		Provider:          logProvider,
-		Level:             strings.ToUpper(logLevel),
+		Provider:          "file",
+		Level:             logLevelFromEnv(),
 		ServiceName:       "steward",
 		Component:         "main",
 		TenantIsolation:   true,
@@ -137,16 +135,9 @@ func runSteward(ctx context.Context, regToken, configPath, opMode, logLevel, log
 		BatchSize:         100,
 		FlushInterval:     5 * time.Second,
 		RetentionDays:     30,
-		Config:            make(map[string]interface{}),
-	}
-
-	if logProvider == "file" {
-		logDir := os.Getenv("CFGMS_LOG_DIR")
-		if logDir == "" {
-			logDir = "/tmp/cfgms"
-			log.Printf("WARNING: Using /tmp/cfgms for logs — set CFGMS_LOG_DIR for production deployments")
-		}
-		loggingConfig.Config["directory"] = logDir
+		Config: map[string]interface{}{
+			"directory": logDir,
+		},
 	}
 
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
@@ -241,11 +232,7 @@ func runSteward(ctx context.Context, regToken, configPath, opMode, logLevel, log
 
 // buildInstallCommand builds the `cfgms-steward install` subcommand.
 func buildInstallCommand() *cobra.Command {
-	var (
-		regToken    string
-		logLevel    string
-		logProvider string
-	)
+	var regToken string
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -261,13 +248,11 @@ Platforms:
 Requires elevated privileges (Administrator on Windows, root on Linux/macOS).
 Install is idempotent: running it again updates the binary and restarts the service.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall(regToken, logLevel, logProvider)
+			return runInstall(regToken)
 		},
 	}
 
 	cmd.Flags().StringVar(&regToken, "regtoken", "", "Registration token (required)")
-	cmd.Flags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
-	cmd.Flags().StringVar(&logProvider, "log-provider", "file", "Logging provider: file, timescale")
 	_ = cmd.MarkFlagRequired("regtoken")
 
 	return cmd
@@ -307,7 +292,7 @@ func buildStatusCommand() *cobra.Command {
 }
 
 // runInstall performs the install operation for the current platform.
-func runInstall(regToken, logLevel, logProvider string) error {
+func runInstall(regToken string) error {
 	if regToken == "" {
 		return fmt.Errorf("--regtoken is required for install")
 	}
@@ -429,7 +414,7 @@ func runInteractive() error {
 
 	switch choice {
 	case "1":
-		return runInstall(token, "info", "file")
+		return runInstall(token)
 	case "2":
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -442,12 +427,24 @@ func runInteractive() error {
 		}()
 
 		fmt.Println("Running in foreground. Press Ctrl+C to stop.")
-		return runSteward(ctx, token, "", "", "info", "file")
+		return runSteward(ctx, token, "", "")
 	case "3", "":
 		fmt.Println("Exiting.")
 		return nil
 	default:
 		return fmt.Errorf("invalid choice %q — enter 1, 2, or 3", choice)
+	}
+}
+
+// logLevelFromEnv reads CFGMS_LOG_LEVEL and returns the uppercased level string.
+// Accepts debug, info, warn, error (case-insensitive). Returns "INFO" for empty
+// or unrecognised values.
+func logLevelFromEnv() string {
+	switch strings.ToLower(os.Getenv("CFGMS_LOG_LEVEL")) {
+	case "debug", "info", "warn", "error":
+		return strings.ToUpper(os.Getenv("CFGMS_LOG_LEVEL"))
+	default:
+		return "INFO"
 	}
 }
 

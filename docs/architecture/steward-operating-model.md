@@ -236,6 +236,14 @@ If the controller connection is lost, the steward continues converging on schedu
 
 The `--regtoken` flag establishes the controller channel — it does not change the steward's fundamental convergence behaviour.
 
+## Logging
+
+The steward writes structured logs using the file logging provider. This is the only supported logging provider for the steward binary — the timescale (database) provider is a controller-only feature.
+
+Log level is controlled by the `CFGMS_LOG_LEVEL` environment variable (default `INFO`). Accepted values are `debug`, `info`, `warn`, and `error` (case-insensitive). Invalid or empty values fall back to `INFO`.
+
+Log directory is controlled by `CFGMS_LOG_DIR` (default `/tmp/cfgms` with a warning; set this for production deployments).
+
 ## Controller-Connected Capabilities
 
 These behaviors require an active controller connection and are not available in standalone mode.
