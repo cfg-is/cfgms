@@ -17,19 +17,27 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/features/controller/ctxkeys"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // handleListAPIKeys handles GET /api/v1/api-keys
-// M-AUTH-1: List API keys from central secret store
+// M-AUTH-1: List API keys from central secret store, filtered to the authenticated tenant
 func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
-	// M-AUTH-1: For now, list ALL API keys across all tenants from memory cache
-	// TODO: Add proper tenant filtering based on RBAC permissions
+	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	apiKeys := make([]APIKeyInfo, 0, len(s.apiKeys))
+	apiKeys := make([]APIKeyInfo, 0)
 	for _, key := range s.apiKeys {
+		if key.TenantID != tenantID {
+			continue
+		}
 		apiKeys = append(apiKeys, APIKeyInfo{
 			ID:          key.ID,
 			Name:        key.Name,
