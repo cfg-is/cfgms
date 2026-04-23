@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/steward/dna/events"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -20,7 +19,7 @@ type eventMonitor struct {
 	logger   logging.Logger
 	config   *EventMonitorConfig
 	detector Detector
-	storage  *storage.Manager
+	storage  DNAStorage
 
 	// Event system
 	eventPublisher  events.EventPublisher
@@ -113,7 +112,7 @@ type EventMonitorStats struct {
 }
 
 // NewEventMonitor creates a new event-driven drift monitoring service.
-func NewEventMonitor(config *EventMonitorConfig, detector Detector, storage *storage.Manager, logger logging.Logger) (Monitor, error) {
+func NewEventMonitor(config *EventMonitorConfig, detector Detector, storage DNAStorage, logger logging.Logger) (Monitor, error) {
 	if config == nil {
 		config = DefaultEventMonitorConfig()
 	}

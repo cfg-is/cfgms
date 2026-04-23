@@ -8,10 +8,10 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -20,7 +20,7 @@ type monitor struct {
 	logger   logging.Logger
 	config   *MonitorConfig
 	detector Detector
-	storage  *storage.Manager
+	storage  DNAStorage
 
 	// Monitoring state
 	running          bool
@@ -131,7 +131,7 @@ const (
 )
 
 // NewMonitor creates a new drift monitoring service.
-func NewMonitor(config *MonitorConfig, detector Detector, storage *storage.Manager, logger logging.Logger) (Monitor, error) {
+func NewMonitor(config *MonitorConfig, detector Detector, storage DNAStorage, logger logging.Logger) (Monitor, error) {
 	if config == nil {
 		config = DefaultMonitorConfig()
 	}
@@ -469,12 +469,12 @@ func (m *monitor) performParallelScan(ctx context.Context, devices []string) int
 
 	semaphore := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
-	scannedCount := 0
+	var scannedCount atomic.Int64
 
 	for _, deviceID := range devices {
 		select {
 		case <-ctx.Done():
-			return scannedCount
+			return int(scannedCount.Load())
 		case semaphore <- struct{}{}:
 			wg.Add(1)
 			go func(devID string) {
@@ -482,14 +482,14 @@ func (m *monitor) performParallelScan(ctx context.Context, devices []string) int
 				defer func() { <-semaphore }()
 
 				if m.scanDevice(ctx, devID) {
-					scannedCount++
+					scannedCount.Add(1)
 				}
 			}(deviceID)
 		}
 	}
 
 	wg.Wait()
-	return scannedCount
+	return int(scannedCount.Load())
 }
 
 func (m *monitor) performSequentialScan(ctx context.Context, devices []string) int {
@@ -582,11 +582,9 @@ func (m *monitor) getCurrentDNA(ctx context.Context, deviceID string) (*commonpb
 
 func (m *monitor) getPreviousDNA(ctx context.Context, deviceID string) (*commonpb.DNA, error) {
 	// Get DNA from comparison window ago
-	options := &storage.QueryOptions{
-		TimeRange: &storage.TimeRange{
-			Start: time.Now().Add(-m.config.ComparisonWindow),
-			End:   time.Now().Add(-m.config.ComparisonWindow + time.Minute), // Small window
-		},
+	options := &DNAHistoryQuery{
+		StartTime:   time.Now().Add(-m.config.ComparisonWindow),
+		EndTime:     time.Now().Add(-m.config.ComparisonWindow + time.Minute),
 		Limit:       1,
 		IncludeData: true,
 	}
