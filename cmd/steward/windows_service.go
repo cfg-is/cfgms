@@ -59,7 +59,6 @@ func (h *stewardServiceHandler) Execute(
 	flags := pflag.NewFlagSet("steward-service", pflag.ContinueOnError)
 	regToken := flags.String("regtoken", "", "registration token")
 	configPath := flags.String("config", "", "config path")
-	opMode := flags.String("mode", "", "operation mode")
 	// Ignore unknown flags (e.g. subcommand names) so the service can start even
 	// if the arg list changes between versions.
 	flags.ParseErrorsAllowlist.UnknownFlags = true
@@ -70,7 +69,7 @@ func (h *stewardServiceHandler) Execute(
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runSteward(ctx, *regToken, *configPath, *opMode)
+		errCh <- runSteward(ctx, *regToken, *configPath)
 	}()
 
 	status <- svc.Status{
