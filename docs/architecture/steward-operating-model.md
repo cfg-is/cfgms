@@ -236,6 +236,19 @@ If the controller connection is lost, the steward continues converging on schedu
 
 The `--regtoken` flag establishes the controller channel — it does not change the steward's fundamental convergence behaviour.
 
+## Entry Paths
+
+The steward binary supports four entry paths:
+
+| Invocation | Mode | Description |
+|------------|------|-------------|
+| `cfgms-steward --regtoken TOKEN` | Controller-connected (foreground) | Registers with the controller via HTTP REST API, receives mTLS certificates, then establishes a gRPC-over-QUIC transport connection. Registration is called on every invocation — there is no stored-certificate resume path. |
+| `cfgms-steward --config path.cfg` | Standalone (foreground) | Loads cfg from the specified local file. No controller connection is established. All convergence, DNA, health, and local logging operate as normal. |
+| `cfgms-steward install --regtoken TOKEN` | Controller-connected (service) | Installs the steward as a native OS service (systemd on Linux, SCM on Windows, launchd on macOS) and starts it. |
+| `cfgms-steward` (no arguments) | Interactive | Prompts for a registration token, then presents a menu: [1] Install as service, [2] Run once in foreground, [3] Exit. |
+
+When both `--regtoken` and `--config` are supplied, the `--regtoken` path takes precedence and `--config` is ignored.
+
 ## Logging
 
 The steward writes structured logs using the file logging provider. This is the only supported logging provider for the steward binary — the timescale (database) provider is a controller-only feature.
@@ -281,7 +294,7 @@ How a steward joins a controller.
 6. Steward checks for a cfg from the controller
 7. Normal operation begins
 
-After initial registration, the steward reconnects automatically on restart using its stored certificates. The registration token is only used once.
+The `--regtoken` flag must be supplied each time the steward starts — there is no stored-certificate resume path in the current implementation. Every invocation re-registers via HTTP and receives fresh mTLS certificates from the controller.
 
 ### Bootstrap TLS Trust
 
