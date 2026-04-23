@@ -309,3 +309,51 @@ func TestHandleListStewards_NoMatch_ReturnsEmptyArray(t *testing.T) {
 	assert.NotNil(t, resp.Data)
 	assert.Empty(t, resp.Data)
 }
+
+// TestHandleListStewards_HTTPRegisteredSteward_AppearsInList verifies that a steward
+// registered via the HTTP path (RegisterSteward on ControllerService) appears in the
+// list response.
+func TestHandleListStewards_HTTPRegisteredSteward_AppearsInList(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	// Simulate HTTP registration writing into the single authoritative registry
+	require.NoError(t, server.controllerService.RegisterSteward("http-steward-1", "test-tenant", "addr-1", "registered"))
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 1)
+	assert.Equal(t, "http-steward-1", resp.Data[0].ID)
+	assert.Equal(t, "registered", resp.Data[0].Status)
+}
+
+// TestHandleListStewards_HTTPRegistration_NoDuplicates verifies that registering the same
+// steward ID twice produces exactly one entry in the list.
+func TestHandleListStewards_HTTPRegistration_NoDuplicates(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	require.NoError(t, server.controllerService.RegisterSteward("dup-steward", "test-tenant", "addr-1", "registered"))
+	require.NoError(t, server.controllerService.RegisterSteward("dup-steward", "test-tenant", "addr-2", "quarantined"))
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Len(t, resp.Data, 1, "duplicate steward ID should produce exactly one entry")
+	assert.Equal(t, "quarantined", resp.Data[0].Status)
+}

@@ -76,7 +76,6 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	stewards := s.controllerService.GetAllStewards()
 
 	stewardList := make([]StewardInfo, 0, len(stewards))
-	seenStewards := make(map[string]bool)
 
 	for _, steward := range stewards {
 		info := StewardInfo{
@@ -98,22 +97,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		}
 
 		stewardList = append(stewardList, info)
-		seenStewards[steward.ID] = true
 	}
-
-	s.mu.RLock()
-	for stewardID, registered := range s.registeredStewards {
-		if !seenStewards[stewardID] {
-			info := StewardInfo{
-				ID:          stewardID,
-				Status:      registered.Status,
-				ConnectedAt: registered.RegisteredAt,
-				LastSeen:    registered.LastHeartbeat,
-			}
-			stewardList = append(stewardList, info)
-		}
-	}
-	s.mu.RUnlock()
 
 	s.logger.Info("Listed stewards", "count", len(stewardList))
 	s.writeSuccessResponse(w, stewardList)

@@ -276,21 +276,18 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		resp.Quarantined = true
 	}
 
-	// Store registered steward in memory for API queries
+	// Register steward in the single authoritative registry
 	initialStatus := "registered" // Initial status before first heartbeat
 	if quarantined {
 		initialStatus = "quarantined"
 	}
-	s.mu.Lock()
-	s.registeredStewards[stewardID] = &RegisteredSteward{
-		StewardID:        stewardID,
-		TenantID:         token.TenantID,
-		Group:            token.Group,
-		RegisteredAt:     time.Now(),
-		Status:           initialStatus,
-		TransportAddress: resp.TransportAddress,
+	// A registry write failure is non-fatal: the steward already has valid certificates and
+	// will re-appear in the registry on its first heartbeat. Blocking the response here would
+	// leave the steward with credentials it cannot use and no way to recover without re-registering.
+	if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, resp.TransportAddress, initialStatus); err != nil {
+		s.logger.Error("Failed to register steward in controller service",
+			"steward_id", stewardID, "error", err)
 	}
-	s.mu.Unlock()
 
 	// Emit success audit event before writing the response
 	successAction := "steward_registered"
