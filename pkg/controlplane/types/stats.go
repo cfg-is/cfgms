@@ -44,6 +44,10 @@ type ControlPlaneStats struct {
 	// Message delivery failures
 	DeliveryFailures int64 `json:"delivery_failures"`
 
+	// IdentityMismatches counts ControlChannel messages whose payload StewardID
+	// disagreed with the mTLS-authenticated CN and were rejected without dispatch.
+	IdentityMismatches int64 `json:"identity_mismatches"`
+
 	// Average message latency (if measurable)
 	AvgLatency time.Duration `json:"avg_latency,omitempty"`
 
