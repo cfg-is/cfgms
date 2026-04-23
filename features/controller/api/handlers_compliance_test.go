@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,20 +25,11 @@ func TestHandleGetStewardCompliance(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, rec.Code)
 	})
 
-	t.Run("registered steward online returns compliant", func(t *testing.T) {
+	t.Run("online steward returns compliant", func(t *testing.T) {
 		server := setupTestServer(t)
 		apiKey := NewTestKey(t, server, []string{"steward:read-compliance"})
 
-		now := time.Now().UTC()
-		server.mu.Lock()
-		server.registeredStewards["steward-1"] = &RegisteredSteward{
-			StewardID:     "steward-1",
-			TenantID:      "tenant-1",
-			RegisteredAt:  now.Add(-1 * time.Hour),
-			LastHeartbeat: now.Add(-10 * time.Second),
-			Status:        "online",
-		}
-		server.mu.Unlock()
+		require.NoError(t, server.controllerService.RegisterSteward("steward-1", "tenant-1", "addr-1", "online"))
 
 		req := httptest.NewRequest("GET", "/api/v1/stewards/steward-1/compliance", nil)
 		req.Header.Set("X-API-Key", apiKey)
@@ -56,20 +46,11 @@ func TestHandleGetStewardCompliance(t *testing.T) {
 		assert.Equal(t, "info", resp.AlertLevel)
 	})
 
-	t.Run("registered steward offline returns critical", func(t *testing.T) {
+	t.Run("offline steward returns critical", func(t *testing.T) {
 		server := setupTestServer(t)
 		apiKey := NewTestKey(t, server, []string{"steward:read-compliance"})
 
-		now := time.Now().UTC()
-		server.mu.Lock()
-		server.registeredStewards["steward-1"] = &RegisteredSteward{
-			StewardID:     "steward-1",
-			TenantID:      "tenant-1",
-			RegisteredAt:  now.Add(-1 * time.Hour),
-			LastHeartbeat: now.Add(-10 * time.Minute),
-			Status:        "offline",
-		}
-		server.mu.Unlock()
+		require.NoError(t, server.controllerService.RegisterSteward("steward-1", "tenant-1", "addr-1", "offline"))
 
 		req := httptest.NewRequest("GET", "/api/v1/stewards/steward-1/compliance", nil)
 		req.Header.Set("X-API-Key", apiKey)
@@ -85,20 +66,11 @@ func TestHandleGetStewardCompliance(t *testing.T) {
 		assert.Equal(t, "critical", resp.AlertLevel)
 	})
 
-	t.Run("zero LastHeartbeat falls back to RegisteredAt", func(t *testing.T) {
+	t.Run("registered steward returns compliant with non-zero last_checked", func(t *testing.T) {
 		server := setupTestServer(t)
 		apiKey := NewTestKey(t, server, []string{"steward:read-compliance"})
 
-		registeredAt := time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC)
-		server.mu.Lock()
-		server.registeredStewards["steward-1"] = &RegisteredSteward{
-			StewardID:    "steward-1",
-			TenantID:     "tenant-1",
-			RegisteredAt: registeredAt,
-			// LastHeartbeat is zero value
-			Status: "online",
-		}
-		server.mu.Unlock()
+		require.NoError(t, server.controllerService.RegisterSteward("steward-1", "tenant-1", "addr-1", "registered"))
 
 		req := httptest.NewRequest("GET", "/api/v1/stewards/steward-1/compliance", nil)
 		req.Header.Set("X-API-Key", apiKey)
@@ -110,7 +82,8 @@ func TestHandleGetStewardCompliance(t *testing.T) {
 		var resp ComplianceStatusResponse
 		err := json.NewDecoder(rec.Body).Decode(&resp)
 		require.NoError(t, err)
-		assert.Equal(t, registeredAt.Format(time.RFC3339), resp.LastChecked)
+		assert.Equal(t, "compliant", resp.Status)
+		assert.NotEmpty(t, resp.LastChecked)
 	})
 }
 
@@ -127,21 +100,11 @@ func TestHandleGetStewardComplianceReport(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, rec.Code)
 	})
 
-	t.Run("registered steward with heartbeat returns report", func(t *testing.T) {
+	t.Run("online steward returns compliant report", func(t *testing.T) {
 		server := setupTestServer(t)
 		apiKey := NewTestKey(t, server, []string{"steward:read-compliance"})
 
-		now := time.Now().UTC()
-		heartbeat := now.Add(-5 * time.Minute)
-		server.mu.Lock()
-		server.registeredStewards["steward-1"] = &RegisteredSteward{
-			StewardID:     "steward-1",
-			TenantID:      "tenant-1",
-			RegisteredAt:  now.Add(-1 * time.Hour),
-			LastHeartbeat: heartbeat,
-			Status:        "online",
-		}
-		server.mu.Unlock()
+		require.NoError(t, server.controllerService.RegisterSteward("steward-1", "tenant-1", "addr-1", "online"))
 
 		req := httptest.NewRequest("GET", "/api/v1/stewards/steward-1/compliance/report", nil)
 		req.Header.Set("X-API-Key", apiKey)
@@ -155,24 +118,15 @@ func TestHandleGetStewardComplianceReport(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "steward-1", resp.DeviceID)
 		assert.Equal(t, "compliant", resp.Status)
-		assert.Equal(t, heartbeat.Format(time.RFC3339), resp.LastPatchDate)
+		assert.NotEmpty(t, resp.LastPatchDate)
 		assert.NotEmpty(t, resp.ReportGeneratedAt)
 	})
 
-	t.Run("zero LastHeartbeat falls back to RegisteredAt", func(t *testing.T) {
+	t.Run("registered steward returns non-zero last_patch_date", func(t *testing.T) {
 		server := setupTestServer(t)
 		apiKey := NewTestKey(t, server, []string{"steward:read-compliance"})
 
-		registeredAt := time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC)
-		server.mu.Lock()
-		server.registeredStewards["steward-1"] = &RegisteredSteward{
-			StewardID:    "steward-1",
-			TenantID:     "tenant-1",
-			RegisteredAt: registeredAt,
-			// LastHeartbeat is zero value
-			Status: "online",
-		}
-		server.mu.Unlock()
+		require.NoError(t, server.controllerService.RegisterSteward("steward-1", "tenant-1", "addr-1", "registered"))
 
 		req := httptest.NewRequest("GET", "/api/v1/stewards/steward-1/compliance/report", nil)
 		req.Header.Set("X-API-Key", apiKey)
@@ -184,23 +138,14 @@ func TestHandleGetStewardComplianceReport(t *testing.T) {
 		var resp ComplianceReportResponse
 		err := json.NewDecoder(rec.Body).Decode(&resp)
 		require.NoError(t, err)
-		assert.Equal(t, registeredAt.Format(time.RFC3339), resp.LastPatchDate)
+		assert.NotEmpty(t, resp.LastPatchDate)
 	})
 
 	t.Run("offline steward returns critical status", func(t *testing.T) {
 		server := setupTestServer(t)
 		apiKey := NewTestKey(t, server, []string{"steward:read-compliance"})
 
-		now := time.Now().UTC()
-		server.mu.Lock()
-		server.registeredStewards["steward-1"] = &RegisteredSteward{
-			StewardID:     "steward-1",
-			TenantID:      "tenant-1",
-			RegisteredAt:  now.Add(-1 * time.Hour),
-			LastHeartbeat: now.Add(-10 * time.Minute),
-			Status:        "offline",
-		}
-		server.mu.Unlock()
+		require.NoError(t, server.controllerService.RegisterSteward("steward-1", "tenant-1", "addr-1", "offline"))
 
 		req := httptest.NewRequest("GET", "/api/v1/stewards/steward-1/compliance/report", nil)
 		req.Header.Set("X-API-Key", apiKey)
@@ -242,25 +187,10 @@ func TestHandleGetComplianceSummary(t *testing.T) {
 		server := setupTestServer(t)
 		apiKey := NewTestKey(t, server, []string{"compliance:read-summary"})
 
-		now := time.Now().UTC()
-		server.mu.Lock()
-		server.registeredStewards["s1"] = &RegisteredSteward{
-			StewardID: "s1", TenantID: "tenant-1", Status: "online",
-			RegisteredAt: now, LastHeartbeat: now,
-		}
-		server.registeredStewards["s2"] = &RegisteredSteward{
-			StewardID: "s2", TenantID: "tenant-1", Status: "offline",
-			RegisteredAt: now, LastHeartbeat: now,
-		}
-		server.registeredStewards["s3"] = &RegisteredSteward{
-			StewardID: "s3", TenantID: "tenant-2", Status: "online",
-			RegisteredAt: now, LastHeartbeat: now,
-		}
-		server.registeredStewards["s4"] = &RegisteredSteward{
-			StewardID: "s4", TenantID: "tenant-2", Status: "unknown",
-			RegisteredAt: now, LastHeartbeat: now,
-		}
-		server.mu.Unlock()
+		require.NoError(t, server.controllerService.RegisterSteward("s1", "tenant-1", "addr-1", "online"))
+		require.NoError(t, server.controllerService.RegisterSteward("s2", "tenant-1", "addr-2", "offline"))
+		require.NoError(t, server.controllerService.RegisterSteward("s3", "tenant-2", "addr-3", "online"))
+		require.NoError(t, server.controllerService.RegisterSteward("s4", "tenant-2", "addr-4", "unknown"))
 
 		req := httptest.NewRequest("GET", "/api/v1/compliance/summary", nil)
 		req.Header.Set("X-API-Key", apiKey)
@@ -283,17 +213,8 @@ func TestHandleGetComplianceSummary(t *testing.T) {
 		server := setupTestServer(t)
 		apiKey := NewTestKey(t, server, []string{"compliance:read-summary"})
 
-		now := time.Now().UTC()
-		server.mu.Lock()
-		server.registeredStewards["s1"] = &RegisteredSteward{
-			StewardID: "s1", TenantID: "tenant-1", Status: "online",
-			RegisteredAt: now, LastHeartbeat: now,
-		}
-		server.registeredStewards["s2"] = &RegisteredSteward{
-			StewardID: "s2", TenantID: "tenant-2", Status: "online",
-			RegisteredAt: now, LastHeartbeat: now,
-		}
-		server.mu.Unlock()
+		require.NoError(t, server.controllerService.RegisterSteward("s1", "tenant-1", "addr-1", "online"))
+		require.NoError(t, server.controllerService.RegisterSteward("s2", "tenant-2", "addr-2", "online"))
 
 		req := httptest.NewRequest("GET", "/api/v1/compliance/summary?tenant_id=tenant-1", nil)
 		req.Header.Set("X-API-Key", apiKey)
@@ -315,13 +236,7 @@ func TestHandleGetComplianceSummary(t *testing.T) {
 		server := setupTestServer(t)
 		apiKey := NewTestKey(t, server, []string{"compliance:read-summary"})
 
-		now := time.Now().UTC()
-		server.mu.Lock()
-		server.registeredStewards["s1"] = &RegisteredSteward{
-			StewardID: "s1", TenantID: "tenant-1", Status: "online",
-			RegisteredAt: now, LastHeartbeat: now,
-		}
-		server.mu.Unlock()
+		require.NoError(t, server.controllerService.RegisterSteward("s1", "tenant-1", "addr-1", "online"))
 
 		req := httptest.NewRequest("GET", "/api/v1/compliance/summary?tenant_id=nonexistent", nil)
 		req.Header.Set("X-API-Key", apiKey)

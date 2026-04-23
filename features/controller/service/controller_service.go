@@ -364,6 +364,21 @@ func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool
 	return info, exists
 }
 
+// RegisterSteward records or updates a steward that registered via the HTTP path.
+// It is idempotent: calling it twice with the same stewardID overwrites the entry.
+func (s *ControllerService) RegisterSteward(stewardID, tenantID, transportAddr, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stewards[stewardID] = &StewardInfo{
+		ID:            stewardID,
+		TenantID:      tenantID,
+		LastHeartbeat: time.Now(),
+		Status:        status,
+		Metrics:       make(map[string]string),
+	}
+	return nil
+}
+
 // GetAllStewards returns a list of all registered stewards
 func (s *ControllerService) GetAllStewards() []*StewardInfo {
 	s.mu.RLock()

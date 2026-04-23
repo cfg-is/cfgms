@@ -109,43 +109,25 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Look up steward status from registered stewards
-	s.mu.RLock()
-	registered, exists := s.registeredStewards[stewardID]
-	s.mu.RUnlock()
-
 	// Derive compliance status from steward connection status
 	complianceStatus := "compliant"
 	alertLevel := "info"
 	daysUntilBreach := 0
 	var lastChecked string
 
-	if exists {
-		if registered.LastHeartbeat.IsZero() {
-			lastChecked = registered.RegisteredAt.UTC().Format(time.RFC3339)
-		} else {
-			lastChecked = registered.LastHeartbeat.UTC().Format(time.RFC3339)
-		}
-		switch registered.Status {
-		case "offline":
-			complianceStatus = "critical"
-			alertLevel = "critical"
-		case "unknown":
-			complianceStatus = "warning"
-			alertLevel = "warning"
-		}
-	} else {
-		// Check active stewards via controller service
-		if stewardInfo, found := s.controllerService.GetStewardInfo(stewardID); found {
-			lastChecked = stewardInfo.LastHeartbeat.UTC().Format(time.RFC3339)
-			if stewardInfo.Status != "online" {
-				complianceStatus = "warning"
-				alertLevel = "warning"
-			}
-		} else {
-			http.Error(w, "steward not found", http.StatusNotFound)
-			return
-		}
+	stewardInfo, found := s.controllerService.GetStewardInfo(stewardID)
+	if !found {
+		http.Error(w, "steward not found", http.StatusNotFound)
+		return
+	}
+	lastChecked = stewardInfo.LastHeartbeat.UTC().Format(time.RFC3339)
+	switch stewardInfo.Status {
+	case "offline":
+		complianceStatus = "critical"
+		alertLevel = "critical"
+	case "unknown", "quarantined":
+		complianceStatus = "warning"
+		alertLevel = "warning"
 	}
 
 	response := ComplianceStatusResponse{
@@ -215,38 +197,21 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 		return
 	}
 
-	// Look up steward from registered stewards or active controller service
-	s.mu.RLock()
-	registered, exists := s.registeredStewards[stewardID]
-	s.mu.RUnlock()
-
 	complianceStatus := "compliant"
 	reportGeneratedAt := time.Now().UTC().Format(time.RFC3339)
 	lastPatchDate := ""
 
-	if exists {
-		if registered.LastHeartbeat.IsZero() {
-			lastPatchDate = registered.RegisteredAt.UTC().Format(time.RFC3339)
-		} else {
-			lastPatchDate = registered.LastHeartbeat.UTC().Format(time.RFC3339)
-		}
-		switch registered.Status {
-		case "offline":
-			complianceStatus = "critical"
-		case "unknown":
-			complianceStatus = "warning"
-		}
-	} else {
-		// Check active stewards via controller service
-		if stewardInfo, found := s.controllerService.GetStewardInfo(stewardID); found {
-			lastPatchDate = stewardInfo.LastHeartbeat.UTC().Format(time.RFC3339)
-			if stewardInfo.Status != "online" {
-				complianceStatus = "warning"
-			}
-		} else {
-			http.Error(w, "steward not found", http.StatusNotFound)
-			return
-		}
+	stewardInfo, found := s.controllerService.GetStewardInfo(stewardID)
+	if !found {
+		http.Error(w, "steward not found", http.StatusNotFound)
+		return
+	}
+	lastPatchDate = stewardInfo.LastHeartbeat.UTC().Format(time.RFC3339)
+	switch stewardInfo.Status {
+	case "offline":
+		complianceStatus = "critical"
+	case "unknown", "quarantined":
+		complianceStatus = "warning"
 	}
 
 	// Return real steward data; patch details require patch module integration
@@ -311,10 +276,9 @@ func (s *Server) handleGetComplianceSummary(w http.ResponseWriter, r *http.Reque
 	// Get optional tenant_id filter from query params
 	tenantID := r.URL.Query().Get("tenant_id")
 
-	// Build compliance summary from registered stewards
-	s.mu.RLock()
+	// Build compliance summary from the single authoritative steward registry
 	tenantStats := make(map[string]*TenantComplianceStatus)
-	for stewardID, st := range s.registeredStewards {
+	for _, st := range s.controllerService.GetAllStewards() {
 		if tenantID != "" && st.TenantID != tenantID {
 			continue
 		}
@@ -335,9 +299,7 @@ func (s *Server) handleGetComplianceSummary(w http.ResponseWriter, r *http.Reque
 		default:
 			tcs.WarningDevices++
 		}
-		_ = stewardID // used as map key above
 	}
-	s.mu.RUnlock()
 
 	// Aggregate totals
 	totalDevices := 0

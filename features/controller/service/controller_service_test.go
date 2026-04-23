@@ -236,8 +236,6 @@ func TestDNASurvivesControllerRestart(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, commonpb.Status_OK, resp.Code)
 
-	// Wait for async write to complete
-
 	// --- Session 2: new service instance, same storage (simulates restart) ---
 	svc2 := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
 	require.NoError(t, svc2.LoadFromStorage(ctx))
@@ -259,4 +257,50 @@ func TestLoadFromStorage_NilStorage(t *testing.T) {
 	// LoadFromStorage with no storage should be a no-op, not a panic
 	err := svc.LoadFromStorage(context.Background())
 	require.NoError(t, err)
+}
+
+func TestRegisterSteward_Idempotent(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+
+	require.NoError(t, svc.RegisterSteward("steward-1", "tenant-a", "addr-1", "registered"))
+
+	// Second call with same ID overwrites (idempotent)
+	require.NoError(t, svc.RegisterSteward("steward-1", "tenant-a", "addr-2", "quarantined"))
+
+	all := svc.GetAllStewards()
+	assert.Len(t, all, 1)
+	assert.Equal(t, "quarantined", all[0].Status)
+}
+
+func TestRegisterSteward_MultipleStewards(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+
+	require.NoError(t, svc.RegisterSteward("steward-1", "tenant-a", "addr-1", "registered"))
+	require.NoError(t, svc.RegisterSteward("steward-2", "tenant-b", "addr-2", "registered"))
+
+	all := svc.GetAllStewards()
+	assert.Len(t, all, 2)
+
+	ids := make(map[string]bool)
+	for _, s := range all {
+		ids[s.ID] = true
+	}
+	assert.True(t, ids["steward-1"])
+	assert.True(t, ids["steward-2"])
+}
+
+func TestRegisterSteward_FieldsPopulated(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+
+	before := time.Now()
+	require.NoError(t, svc.RegisterSteward("steward-1", "tenant-x", "addr-1", "registered"))
+	after := time.Now()
+
+	info, ok := svc.GetStewardInfo("steward-1")
+	require.True(t, ok)
+	assert.Equal(t, "steward-1", info.ID)
+	assert.Equal(t, "tenant-x", info.TenantID)
+	assert.Equal(t, "registered", info.Status)
+	assert.True(t, !info.LastHeartbeat.Before(before))
+	assert.True(t, !info.LastHeartbeat.After(after))
 }

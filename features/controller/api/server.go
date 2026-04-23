@@ -59,7 +59,6 @@ type Server struct {
 	apiKeys                 map[string]*APIKey             // In-memory cache for fast lookup
 	secretStore             secretsif.SecretStore          // M-AUTH-1: Central secrets provider for API keys
 	registrationTokenStore  registration.Store             // Registration token store for steward registration
-	registeredStewards      map[string]*RegisteredSteward  // In-memory store for registered stewards
 	corsConfig              *CORSConfig                    // CORS configuration
 	signerCertSerial        string                         // Story #378: Serial of cert used for config signing
 	authDefense             *authdefense.AuthDefenseSystem // Story #380: Three-tier auth defense
@@ -81,17 +80,6 @@ type APIKey struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	TenantID    string     `json:"tenant_id"`
-}
-
-// RegisteredSteward represents a steward that has registered with the controller
-type RegisteredSteward struct {
-	StewardID        string    `json:"steward_id"`
-	TenantID         string    `json:"tenant_id"`
-	Group            string    `json:"group"`
-	RegisteredAt     time.Time `json:"registered_at"`
-	LastHeartbeat    time.Time `json:"last_heartbeat,omitempty"`
-	Status           string    `json:"status"` // online, offline, unknown
-	TransportAddress string    `json:"transport_address,omitempty"`
 }
 
 // ServerConfig contains configuration for the REST API server
@@ -153,12 +141,11 @@ func New(
 		tracer:                  tracer,
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
-		signerCertSerial:        signerCertSerial,                    // Story #378: For registration handler
-		apiKeys:                 make(map[string]*APIKey),            // In-memory cache
-		secretStore:             secretStore,                         // M-AUTH-1: Central secrets provider
-		registeredStewards:      make(map[string]*RegisteredSteward), // In-memory steward registry
-		approvalHook:            &DefaultApprovalHook{},              // Issue #422: accept-all default
-		auditManager:            auditManager,                        // Issue #775: registration audit events
+		signerCertSerial:        signerCertSerial,         // Story #378: For registration handler
+		apiKeys:                 make(map[string]*APIKey), // In-memory cache
+		secretStore:             secretStore,              // M-AUTH-1: Central secrets provider
+		approvalHook:            &DefaultApprovalHook{},   // Issue #422: accept-all default
+		auditManager:            auditManager,             // Issue #775: registration audit events
 	}
 
 	// Story #380: Initialize three-tier auth defense system
