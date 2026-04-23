@@ -22,6 +22,7 @@ import (
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 	quicgo "github.com/quic-go/quic-go"
@@ -994,13 +995,30 @@ type transportServer struct {
 	provider *Provider
 }
 
+// Register authenticates a steward and establishes identity.
+//
+// CN enforcement contract: the steward ID is always derived from the authenticated
+// peer certificate CN. If the request carries a non-empty client_id it must equal
+// the CN; any mismatch is rejected with PermissionDenied. An empty client_id is
+// accepted — the CN is used as the authoritative identity in that case.
+// Requests with no peer or TLS info are rejected with Unauthenticated.
 func (s *transportServer) Register(ctx context.Context, req *controllerpb.RegisterRequest) (*controllerpb.RegisterResponse, error) {
-	// Extract steward identity from the request
-	stewardID := req.GetCredentials().GetClientId()
-	if stewardID == "" {
-		return nil, status.Error(codes.InvalidArgument, "client_id is required in credentials")
+	cnStewardID, err := extractStewardIDFromPeer(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "failed to extract steward identity from peer certificate: %v", err)
 	}
 
+	reqStewardID := req.GetCredentials().GetClientId()
+	if reqStewardID != "" && reqStewardID != cnStewardID {
+		s.provider.logger.Warn("Register rejected: client_id mismatch",
+			"req_client_id", logging.SanitizeLogValue(reqStewardID),
+			"peer_cn", logging.SanitizeLogValue(cnStewardID),
+		)
+		return nil, status.Errorf(codes.PermissionDenied, "client_id %q does not match authenticated peer CN %q", reqStewardID, cnStewardID)
+	}
+
+	// Use the authenticated CN as the authoritative steward ID.
+	stewardID := cnStewardID
 	s.provider.logger.Info("steward registered", "steward_id", stewardID, "version", req.GetVersion())
 
 	return &controllerpb.RegisterResponse{
