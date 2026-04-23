@@ -4,6 +4,9 @@
 package main
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -132,4 +135,45 @@ func TestLogLevelFromEnv(t *testing.T) {
 			assert.Equal(t, tc.expected, logLevelFromEnv())
 		})
 	}
+}
+
+// TestStandaloneStartErrorPropagatesToRunSteward verifies that setup failures
+// in standalone mode are returned as errors rather than triggering os.Exit via
+// logger.Fatal. The errCh pattern ensures errors from s.Start are returned to
+// the cobra RunE handler for a clean process exit.
+func TestStandaloneStartErrorPropagatesToRunSteward(t *testing.T) {
+	t.Setenv("CFGMS_LOG_DIR", t.TempDir())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := runSteward(ctx, "", "/nonexistent/path/steward.cfg", "standalone")
+	require.Error(t, err, "runSteward must return an error when standalone setup fails")
+	assert.Contains(t, err.Error(), "failed to create standalone steward",
+		"error must propagate from NewStandalone rather than being swallowed")
+}
+
+// TestStandaloneContextCanceledIsNotError verifies that a context.Canceled
+// error from s.Start is filtered and does not cause runSteward to return an
+// error. Cancellation is the normal shutdown path triggered by OS signals.
+func TestStandaloneContextCanceledIsNotError(t *testing.T) {
+	logDir := t.TempDir()
+	t.Setenv("CFGMS_LOG_DIR", logDir)
+
+	// Write a minimal valid standalone config so NewStandalone succeeds.
+	configFile := filepath.Join(t.TempDir(), "steward.cfg")
+	configData := `steward:
+  id: test-steward-shutdown
+  mode: standalone
+
+resources: []
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	// Cancel the context immediately so s.Start returns context.Canceled right away.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := runSteward(ctx, "", configFile, "standalone")
+	assert.NoError(t, err, "context.Canceled from s.Start must not be returned as an error from runSteward")
 }

@@ -183,7 +183,9 @@ func runSteward(ctx context.Context, regToken, configPath, opMode string) error 
 		logger.Info("Shutdown signal received, disconnecting...",
 			"operation", "steward_shutdown")
 
-		if err := transportCl.Disconnect(context.Background()); err != nil {
+		disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer disconnectCancel()
+		if err := transportCl.Disconnect(disconnectCtx); err != nil {
 			logger.Error("Error during transport disconnect",
 				"operation", "transport_disconnect",
 				"error", err.Error())
@@ -213,17 +215,23 @@ func runSteward(ctx context.Context, regToken, configPath, opMode string) error 
 		return fmt.Errorf("standalone mode requires --config flag; for controller mode use --regtoken")
 	}
 
+	errCh := make(chan error, 1)
 	go func() {
-		if err := s.Start(ctx); err != nil {
-			logger.Fatal("Steward failed", "operation", "steward_run", "error", err.Error())
-		}
+		errCh <- s.Start(ctx)
 	}()
 
 	<-ctx.Done()
 	logger.Info("Shutdown signal received", "operation", "steward_shutdown")
 
-	if err := s.Stop(context.Background()); err != nil {
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer stopCancel()
+	if err := s.Stop(stopCtx); err != nil {
 		logger.Error("Error during shutdown", "operation", "steward_shutdown", "error", err.Error())
+	}
+
+	if startErr := <-errCh; startErr != nil && startErr != context.Canceled {
+		logger.Error("Steward start failed", "operation", "steward_run", "error", startErr.Error())
+		return fmt.Errorf("steward start failed: %w", startErr)
 	}
 
 	logger.Info("Steward shutdown completed", "operation", "steward_shutdown", "status", "completed")
