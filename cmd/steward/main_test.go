@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -132,4 +133,34 @@ func TestLogLevelFromEnv(t *testing.T) {
 			assert.Equal(t, tc.expected, logLevelFromEnv())
 		})
 	}
+}
+
+// TestStandaloneStartErrorPropagatesToRunSteward verifies that startup errors in
+// standalone mode are returned as errors from runSteward rather than terminating
+// the process via logger.Fatal / os.Exit. Uses a non-existent config path to
+// trigger a known-bad startup error from steward.NewStandalone.
+func TestStandaloneStartErrorPropagatesToRunSteward(t *testing.T) {
+	t.Setenv("CFGMS_LOG_DIR", t.TempDir())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := runSteward(ctx, "", "/nonexistent/cfgms-config-does-not-exist.yaml", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to create standalone steward")
+}
+
+// TestRunStewardStandaloneRequiresConfig verifies that standalone mode without a
+// config path returns an error rather than panicking or calling os.Exit.
+func TestRunStewardStandaloneRequiresConfig(t *testing.T) {
+	t.Setenv("CFGMS_LOG_DIR", t.TempDir())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// opMode="standalone" with empty configPath — no config file found in search
+	// paths in a temp environment, so NewStandalone returns an error that must be
+	// propagated rather than swallowed.
+	err := runSteward(ctx, "", "", "standalone")
+	require.Error(t, err)
 }
