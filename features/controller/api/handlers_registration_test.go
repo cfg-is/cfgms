@@ -78,6 +78,11 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.FlushAudit(flushCtx)
+	})
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)

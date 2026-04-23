@@ -36,6 +36,12 @@ func setupTestRBACManager(t *testing.T) *rbac.Manager {
 	err = manager.Initialize(context.Background())
 	require.NoError(t, err)
 
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.FlushAudit(flushCtx)
+	})
+
 	return manager
 }
 

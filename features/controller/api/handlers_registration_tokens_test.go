@@ -52,6 +52,11 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	)
 	err = rbacManager.Initialize(context.Background())
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.FlushAudit(flushCtx)
+	})
 
 	// Initialize tenant management with durable storage
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())

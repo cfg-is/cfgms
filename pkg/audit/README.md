@@ -226,3 +226,63 @@ Compliance report generation is handled by `features/reports/`, not by this pack
 `pkg/audit` does not contain a `ComplianceReporter`; that symbol was removed in
 Issue #766 because the implementation was dead code with XSS and CSV-injection
 vulnerabilities. Use `features/reports/` for all compliance reporting needs.
+
+## RBAC Permission Events
+
+RBAC permission-check, grant, revoke, and delegate operations are recorded as
+`AuditEventAuthorization` entries via `features/rbac.Manager`. Each entry has:
+
+| `AuditEntry` field | Value |
+|---|---|
+| `EventType` | `AuditEventAuthorization` |
+| `ResourceType` | `"permission"` |
+| `ResourceID` | The permission ID being checked or granted |
+| `UserID` | The subject (user/service) whose access is being evaluated |
+| `Action` | `"check_permission"`, `"grant_permission"`, `"revoke_permission"`, or `"delegate_permission"` |
+| `Result` | `AuditResultSuccess` (granted), `AuditResultDenied` (denied), `AuditResultError` (system error) |
+| `IPAddress` | Source IP from the access request context, if provided |
+| `UserAgent` | User agent from the access request context, if provided |
+| `Details["reason"]` | Human-readable reason for the decision (check events) |
+| `Details["granted_by"]` | Actor who performed the grant (grant events) |
+| `Source` | `"rbac"` |
+
+### Querying RBAC Permission Events
+
+Use `rbac.Manager.QueryAuditEntries` (which delegates to `Manager.QueryEntries`) to
+retrieve permission events from the durable store:
+
+```go
+filter := &business.AuditFilter{
+    TenantID:      tenantID,
+    UserIDs:       []string{subjectID},
+    EventTypes:    []business.AuditEventType{business.AuditEventAuthorization},
+    Actions:       []string{"check_permission"},
+    ResourceTypes: []string{"permission"},
+    TimeRange:     &business.TimeRange{Start: &startTime},
+    Limit:         100,
+}
+entries, err := rbacManager.QueryAuditEntries(ctx, filter)
+```
+
+For security monitoring (excessive denials), use `Manager.GetFailedActions`:
+
+```go
+tr := &business.TimeRange{Start: &lookback}
+failedActions, err := rbacManager.AuditManager().GetFailedActions(ctx, tr, 100)
+```
+
+### Migration from rbac.AuditLogger (Issue #768)
+
+The former `rbac.AuditLogger` in-memory store and its associated types
+(`rbac.AuditFilter`, `rbac.ComplianceReport`, `rbac.SecurityAlert`) were deleted in
+Issue #768. All permission-check audit events now flow through `pkg/audit.Manager`
+backed by durable storage and survive process restarts.
+
+| Old API | Replacement |
+|---|---|
+| `rbac.NewAuditLogger()` | Built into `rbac.NewManagerWithStorage` — no separate construction needed |
+| `auditLogger.LogPermissionCheck(...)` | Called automatically inside `rbac.Manager.CheckPermission` |
+| `manager.GetAuditEntries(ctx, &rbac.AuditFilter{...})` | `manager.QueryAuditEntries(ctx, &business.AuditFilter{...})` |
+| `manager.GetComplianceReport(ctx, filter)` | Query `QueryAuditEntries` and compute stats; or use `features/reports/` |
+| `manager.GetSecurityAlerts(ctx, hours)` | `manager.QueryAuditEntries` with `Results: []business.AuditResult{business.AuditResultDenied}` |
+| `manager.ExportAuditLog(ctx, filter, "csv")` | Use `features/reports/` (CSV injection-safe exporter) |

@@ -303,6 +303,14 @@ func (f *E2ETestFramework) initializeRBAC() error {
 	if err := rbacManager.Initialize(f.ctx); err != nil {
 		return fmt.Errorf("failed to initialize RBAC: %w", err)
 	}
+	// Flush pending audit writes before storageManager.Close() to avoid racing
+	// async writes against flatfile directory cleanup (registered before Close
+	// so addCleanup LIFO runs Flush first).
+	f.addCleanup(func() error {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return rbacManager.FlushAudit(flushCtx)
+	})
 
 	// Create test tenants and users
 	if err := f.createTestTenants(); err != nil {

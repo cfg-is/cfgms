@@ -5,11 +5,14 @@ package rbac
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac/zerotrust"
+	"github.com/cfgis/cfgms/pkg/audit"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // ZeroTrustMode defines how zero-trust policies are applied with RBAC
@@ -38,7 +41,7 @@ type AdvancedAuthEngine struct {
 	conditionEngine   *ConditionEngine
 	scopeEngine       *ScopeEngine
 	delegationManager *DelegationManager
-	auditLogger       *AuditLogger
+	auditManager      *audit.Manager
 
 	// Zero-trust policy integration
 	zeroTrustEngine  *zerotrust.ZeroTrustPolicyEngine
@@ -60,7 +63,7 @@ func NewAdvancedAuthEngine(
 		conditionEngine:   NewConditionEngine(),
 		scopeEngine:       NewScopeEngine(),
 		delegationManager: NewDelegationManager(nil), // Will be set via SetRBACManager
-		auditLogger:       NewAuditLogger(),
+		auditManager:      nil,                       // Set via SetAuditManager from parent Manager
 
 		// Zero-trust defaults
 		zeroTrustEngine:  nil, // Will be set via SetZeroTrustEngine
@@ -79,9 +82,9 @@ func (a *AdvancedAuthEngine) SetDelegationManager(delegationManager *DelegationM
 	a.delegationManager = delegationManager
 }
 
-// SetAuditLogger sets a specific audit logger instance
-func (a *AdvancedAuthEngine) SetAuditLogger(auditLogger *AuditLogger) {
-	a.auditLogger = auditLogger
+// SetAuditManager sets the audit manager for recording permission events to durable storage.
+func (a *AdvancedAuthEngine) SetAuditManager(am *audit.Manager) {
+	a.auditManager = am
 }
 
 // SetZeroTrustEngine configures zero-trust policy integration
@@ -127,7 +130,7 @@ func (a *AdvancedAuthEngine) CheckPermission(ctx context.Context, request *commo
 			Granted: false,
 			Reason:  fmt.Sprintf("Error checking base permissions: %v", err),
 		}
-		_ = a.auditLogger.LogPermissionCheck(ctx, request, errorResponse, sourceIP, userAgent)
+		a.recordPermissionCheck(ctx, request, business.AuditResultError, errorResponse.Reason, sourceIP, userAgent)
 		return errorResponse, err
 	}
 
@@ -142,7 +145,7 @@ func (a *AdvancedAuthEngine) CheckPermission(ctx context.Context, request *commo
 				Granted: false,
 				Reason:  fmt.Sprintf("Error checking delegated permissions: %v", err),
 			}
-			_ = a.auditLogger.LogPermissionCheck(ctx, request, errorResponse, sourceIP, userAgent)
+			a.recordPermissionCheck(ctx, request, business.AuditResultError, errorResponse.Reason, sourceIP, userAgent)
 			return errorResponse, err
 		}
 	}
@@ -167,7 +170,7 @@ func (a *AdvancedAuthEngine) CheckPermission(ctx context.Context, request *commo
 				Granted: false,
 				Reason:  fmt.Sprintf("Error evaluating zero-trust policies: %v", err),
 			}
-			_ = a.auditLogger.LogPermissionCheck(ctx, request, errorResponse, sourceIP, userAgent)
+			a.recordPermissionCheck(ctx, request, business.AuditResultError, errorResponse.Reason, sourceIP, userAgent)
 			return errorResponse, err
 		}
 		finalResponse = zeroTrustResponse
@@ -184,9 +187,27 @@ func (a *AdvancedAuthEngine) CheckPermission(ctx context.Context, request *commo
 		}
 	}
 
-	// Step 4: Log the final decision
-	_ = a.auditLogger.LogPermissionCheck(ctx, request, finalResponse, sourceIP, userAgent)
+	// Step 4: Log the final decision to durable audit store
+	result := business.AuditResultDenied
+	if finalResponse.Granted {
+		result = business.AuditResultSuccess
+	}
+	a.recordPermissionCheck(ctx, request, result, finalResponse.Reason, sourceIP, userAgent)
 	return finalResponse, nil
+}
+
+// recordPermissionCheck emits a check_permission audit event to the durable store.
+// It is a no-op when auditManager is nil.
+func (a *AdvancedAuthEngine) recordPermissionCheck(ctx context.Context, request *common.AccessRequest, result business.AuditResult, reason, sourceIP, userAgent string) {
+	if a.auditManager == nil {
+		return
+	}
+	if err := a.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		request.TenantId, request.SubjectId, "permission", request.PermissionId,
+		"check_permission", result,
+	).Request("", "", "", sourceIP, userAgent).Detail("reason", reason)); err != nil {
+		slog.Warn("failed to record permission check audit event", "error", err)
+	}
 }
 
 // CheckConditionalPermission checks a conditional permission with context evaluation
@@ -309,11 +330,6 @@ func (a *AdvancedAuthEngine) GetEffectivePermissions(ctx context.Context, subjec
 	return a.GetSubjectPermissions(ctx, subjectID, tenantID)
 }
 
-// GetAuditLogger returns the audit logger for external access
-func (a *AdvancedAuthEngine) GetAuditLogger() *AuditLogger {
-	return a.auditLogger
-}
-
 // GetDelegationManager returns the delegation manager for external access
 func (a *AdvancedAuthEngine) GetDelegationManager() *DelegationManager {
 	return a.delegationManager
@@ -346,14 +362,17 @@ func (a *AdvancedAuthEngine) CreateTemporaryPermission(ctx context.Context, req 
 		GrantedAt:    req.GrantedAt,
 	}
 
-	// Log the temporary permission grant
-	context := map[string]string{
-		"type":       "temporary",
-		"expires_at": fmt.Sprintf("%d", req.ExpiresAt),
-		"granted_by": req.GrantedBy,
+	// Record the temporary permission grant in the durable audit store
+	if a.auditManager != nil {
+		if err := a.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+			req.TenantID, req.SubjectID, "permission", req.PermissionID,
+			"grant_permission", business.AuditResultSuccess,
+		).Detail("granted_by", req.GrantedBy).
+			Detail("type", "temporary").
+			Detail("expires_at", fmt.Sprintf("%d", req.ExpiresAt))); err != nil {
+			slog.Warn("failed to record permission grant audit event", "error", err)
+		}
 	}
-
-	_ = a.auditLogger.LogPermissionGrant(ctx, req.SubjectID, req.PermissionID, req.ResourceID, req.TenantID, req.GrantedBy, context)
 
 	return conditionalPerm, nil
 }

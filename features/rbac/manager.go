@@ -34,7 +34,6 @@ type Manager struct {
 	advancedEngine          *AdvancedAuthEngine
 	hierarchyEngine         *HierarchyEngine
 	delegationManager       *DelegationManager
-	auditLogger             *AuditLogger
 	templateManager         *TemplateManager
 	escalationPreventionMgr *EscalationPreventionManager
 }
@@ -90,8 +89,7 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 
 	// Initialize advanced components
 	advancedEngine := NewAdvancedAuthEngine(ephemeralStore, ephemeralStore, ephemeralStore, ephemeralStore)
-	delegationManager := NewDelegationManager(manager) // Pass manager for RBAC operations
-	auditLogger := NewAuditLogger()
+	delegationManager := NewDelegationManager(manager)                 // Pass manager for RBAC operations
 	templateManager := NewTemplateManager(manager)                     // Pass manager for template operations
 	escalationPreventionMgr := NewEscalationPreventionManager(manager) // Pass manager for privilege escalation protection
 
@@ -101,13 +99,12 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 	// Update manager with advanced components
 	manager.advancedEngine = advancedEngine
 	manager.delegationManager = delegationManager
-	manager.auditLogger = auditLogger
 	manager.templateManager = templateManager
 	manager.escalationPreventionMgr = escalationPreventionMgr
 
-	// Share the same delegation manager and audit logger instances
+	// Wire the durable audit manager into the advanced engine
 	advancedEngine.SetDelegationManager(delegationManager)
-	advancedEngine.SetAuditLogger(auditLogger)
+	advancedEngine.SetAuditManager(manager.auditManager)
 
 	return manager
 }
@@ -976,19 +973,16 @@ func (m *Manager) CreateTemporaryPermission(ctx context.Context, req *TemporaryP
 	return m.advancedEngine.CreateTemporaryPermission(ctx, req)
 }
 
-// GetAuditEntries retrieves audit entries with filtering
-func (m *Manager) GetAuditEntries(ctx context.Context, filter *AuditFilter) ([]*common.PermissionAuditEntry, error) {
-	return m.auditLogger.GetAuditEntries(ctx, filter)
+// QueryAuditEntries queries the durable audit store for RBAC permission events.
+// Use business.AuditFilter to filter by tenant, user, action, event type, and time range.
+func (m *Manager) QueryAuditEntries(ctx context.Context, filter *business.AuditFilter) ([]*business.AuditEntry, error) {
+	return m.auditManager.QueryEntries(ctx, filter)
 }
 
-// GetComplianceReport generates a compliance report
-func (m *Manager) GetComplianceReport(ctx context.Context, filter *AuditFilter) (*ComplianceReport, error) {
-	return m.auditLogger.GetComplianceReport(ctx, filter)
-}
-
-// GetSecurityAlerts identifies potential security issues
-func (m *Manager) GetSecurityAlerts(ctx context.Context, lookbackHours int) ([]*SecurityAlert, error) {
-	return m.auditLogger.GetSecurityAlerts(ctx, lookbackHours)
+// FlushAudit blocks until all pending RBAC audit events have been written to durable storage.
+// Call this in tests before querying the audit store to guarantee in-flight async writes have landed.
+func (m *Manager) FlushAudit(ctx context.Context) error {
+	return m.auditManager.Flush(ctx)
 }
 
 // CreateTemplate creates a new permission template
@@ -1014,11 +1008,6 @@ func (m *Manager) GetTemplatesByCategory(ctx context.Context, tenantID string) (
 // GetDelegationStats returns delegation statistics for a tenant
 func (m *Manager) GetDelegationStats(ctx context.Context, tenantID string) (*DelegationStats, error) {
 	return m.delegationManager.GetDelegationStats(ctx, tenantID)
-}
-
-// ExportAuditLog exports audit entries in various formats
-func (m *Manager) ExportAuditLog(ctx context.Context, filter *AuditFilter, format string) ([]byte, error) {
-	return m.auditLogger.ExportAuditLog(ctx, filter, format)
 }
 
 // CleanupExpiredDelegations removes expired delegations
