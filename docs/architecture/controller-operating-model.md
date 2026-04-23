@@ -71,7 +71,7 @@ After initialization, the controller starts normally. If required infrastructure
 5. **Start transport server** — Unified gRPC-over-QUIC server for all controller-steward communication (port 4433, mTLS). Serves both control plane (heartbeats, commands, status) and data plane (cfg delivery, DNA sync, bulk transfers) over multiplexed QUIC streams
 7. **Start services** — Heartbeat monitoring, command publisher, registration handler, tenant manager
 8. **Start HA** (if clustered) — Join Raft cluster, participate in leader election
-9. **Start REST API** — HTTP server for administration (port 9080)
+9. **Start REST API** — HTTP server for administration (port 9080). Owned exclusively by `server.Server` (`httpServer` field); `controller.go` does not create a second instance
 10. **Start workflow engine** — Begin processing scheduled and queued workflows
 
 **Failure modes on startup:**
