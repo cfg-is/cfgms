@@ -162,6 +162,74 @@ func TestGetLogProviderConfigTimescaleWithPassword(t *testing.T) {
 	assert.Equal(t, "secret123", result["password"])
 }
 
+// TestBuildLoggingConfigFieldsComplete asserts that buildLoggingConfig populates
+// all required fields for a config with LogLevel = "debug" and no timescale provider.
+func TestBuildLoggingConfigFieldsComplete(t *testing.T) {
+	cfg := &config.Config{
+		LogLevel: "debug",
+	}
+	lc, err := buildLoggingConfig(cfg, "test")
+	require.NoError(t, err)
+	require.NotNil(t, lc)
+
+	assert.Equal(t, "DEBUG", lc.Level, "Level must be uppercased from cfg.LogLevel")
+	assert.True(t, lc.TenantIsolation, "TenantIsolation must be true")
+	assert.True(t, lc.EnableCorrelation, "EnableCorrelation must be true")
+	assert.True(t, lc.EnableTracing, "EnableTracing must be true")
+	assert.True(t, lc.AsyncWrites, "AsyncWrites must be true")
+	assert.Equal(t, 100, lc.BatchSize, "BatchSize must be 100")
+	assert.Equal(t, 5*time.Second, lc.FlushInterval, "FlushInterval must be 5s")
+	assert.Equal(t, 90, lc.RetentionDays, "RetentionDays must be 90")
+	assert.Equal(t, "test", lc.Component, "Component must match argument")
+}
+
+// TestRunInstallLoggingConfigMatchesRunController asserts that buildLoggingConfig
+// produces equivalent field values for install and main paths given identical config.
+func TestRunInstallLoggingConfigMatchesRunController(t *testing.T) {
+	cfg := &config.Config{
+		LogLevel: "info",
+	}
+
+	mainCfg, err := buildLoggingConfig(cfg, "main")
+	require.NoError(t, err)
+
+	installCfg, err := buildLoggingConfig(cfg, "install")
+	require.NoError(t, err)
+
+	assert.Equal(t, mainCfg.Level, installCfg.Level)
+	assert.Equal(t, mainCfg.TenantIsolation, installCfg.TenantIsolation)
+	assert.Equal(t, mainCfg.EnableCorrelation, installCfg.EnableCorrelation)
+	assert.Equal(t, mainCfg.EnableTracing, installCfg.EnableTracing)
+	assert.Equal(t, mainCfg.AsyncWrites, installCfg.AsyncWrites)
+	assert.Equal(t, mainCfg.BatchSize, installCfg.BatchSize)
+	assert.Equal(t, mainCfg.FlushInterval, installCfg.FlushInterval)
+	assert.Equal(t, mainCfg.RetentionDays, installCfg.RetentionDays)
+}
+
+// TestResolveInstallCAPathNilCertificateErrors asserts that resolveInstallCAPath
+// returns a clear error when cfg.Certificate is nil and initialization is needed.
+func TestResolveInstallCAPathNilCertificateErrors(t *testing.T) {
+	cfg := &config.Config{}
+	_, err := resolveInstallCAPath(cfg, "/etc/cfgms/controller.cfg")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "certificate configuration is required for initialization")
+	assert.Contains(t, err.Error(), "/etc/cfgms/controller.cfg")
+}
+
+// TestResolveInstallCAPathWithCertificate asserts that resolveInstallCAPath
+// returns the CA path without error when cfg.Certificate is set.
+func TestResolveInstallCAPathWithCertificate(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Certificate: &config.CertificateConfig{
+			CAPath: dir,
+		},
+	}
+	caPath, err := resolveInstallCAPath(cfg, "/etc/cfgms/controller.cfg")
+	require.NoError(t, err)
+	assert.Equal(t, dir, caPath)
+}
+
 // TestSignalHandling is implemented in platform-specific files:
 // - main_test_unix.go for Unix systems (uses syscall.Kill)
 // - main_test_windows.go for Windows (uses channel-based simulation)

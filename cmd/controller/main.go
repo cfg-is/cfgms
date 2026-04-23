@@ -86,23 +86,9 @@ func runController(configPath string, initMode bool) error {
 			"then update your configuration to use 'flatfile' or 'database'")
 	}
 
-	logProviderConfig, err := getLogProviderConfig(cfg)
+	loggingConfig, err := buildLoggingConfig(cfg, "main")
 	if err != nil {
-		return fmt.Errorf("failed to build log provider config: %w", err)
-	}
-	loggingConfig := &logging.LoggingConfig{
-		Provider:          getLogProvider(cfg),
-		Level:             strings.ToUpper(cfg.LogLevel),
-		ServiceName:       "controller",
-		Component:         "main",
-		TenantIsolation:   true,
-		EnableCorrelation: true,
-		EnableTracing:     true,
-		AsyncWrites:       true,
-		BatchSize:         100,
-		FlushInterval:     5 * time.Second,
-		RetentionDays:     90,
-		Config:            logProviderConfig,
+		return err
 	}
 
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
@@ -288,23 +274,16 @@ func runInstall(configPath string) error {
 		return fmt.Errorf("failed to load configuration from %s: %w", configPath, err)
 	}
 
-	caPath := ""
-	if cfg.Certificate != nil {
-		caPath = cfg.Certificate.CAPath
+	caPath, err := resolveInstallCAPath(cfg, configPath)
+	if err != nil {
+		return err
 	}
 
-	if caPath != "" && !initialization.IsInitialized(caPath) {
+	if !initialization.IsInitialized(caPath) {
 		fmt.Println("Controller not yet initialized — running --init...")
-		logProviderConfig, err := getLogProviderConfig(cfg)
+		loggingConfig, err := buildLoggingConfig(cfg, "install")
 		if err != nil {
-			return fmt.Errorf("failed to build log provider config: %w", err)
-		}
-		loggingConfig := &logging.LoggingConfig{
-			Provider:    getLogProvider(cfg),
-			Level:       "INFO",
-			ServiceName: "controller",
-			Component:   "install",
-			Config:      logProviderConfig,
+			return fmt.Errorf("failed to initialize logging: %w", err)
 		}
 		if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
 			return fmt.Errorf("failed to initialize logging: %w", err)
@@ -405,6 +384,41 @@ func caFingerprintFromConfig(configPath string) string {
 	}
 
 	return marker.CAFingerprint
+}
+
+// resolveInstallCAPath extracts the CA path from the config, returning an error
+// when the certificate configuration is absent. The prior silent-skip when
+// cfg.Certificate is nil is replaced by an explicit failure so the operator
+// gets a clear actionable message.
+func resolveInstallCAPath(cfg *config.Config, configPath string) (string, error) {
+	if cfg.Certificate == nil {
+		return "", fmt.Errorf("certificate configuration is required for initialization; set certificate.ca_path in %s", configPath)
+	}
+	return cfg.Certificate.CAPath, nil
+}
+
+// buildLoggingConfig constructs a complete LoggingConfig for the given component.
+// All fields are set identically regardless of call site so runController and
+// runInstall share the same logging shape.
+func buildLoggingConfig(cfg *config.Config, component string) (*logging.LoggingConfig, error) {
+	logProviderConfig, err := getLogProviderConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build log provider config: %w", err)
+	}
+	return &logging.LoggingConfig{
+		Provider:          getLogProvider(cfg),
+		Level:             strings.ToUpper(cfg.LogLevel),
+		ServiceName:       "controller",
+		Component:         component,
+		TenantIsolation:   true,
+		EnableCorrelation: true,
+		EnableTracing:     true,
+		AsyncWrites:       true,
+		BatchSize:         100,
+		FlushInterval:     5 * time.Second,
+		RetentionDays:     90,
+		Config:            logProviderConfig,
+	}, nil
 }
 
 // getLogProvider determines the logging provider from configuration.
