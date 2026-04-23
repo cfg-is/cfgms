@@ -219,8 +219,8 @@ func TestHandleRegister_ExpiredToken_Returns401(t *testing.T) {
 func TestHandleRegister_StoreError_Returns500(t *testing.T) {
 	storeErr := fmt.Errorf("failed to persist token state: %w", fmt.Errorf("connection refused"))
 	tokenStore := &controlledConsumeStore{
-		Store: newTestRegistrationStore(t),
-		consumeErr:   storeErr,
+		Store:      newTestRegistrationStore(t),
+		consumeErr: storeErr,
 	}
 	server, _ := newHandleRegisterServer(t, tokenStore, nil)
 
@@ -387,8 +387,8 @@ func TestHandleRegister_ConcurrentSingleUseToken_ExactlyOneSucceeds(t *testing.T
 func TestHandleRegister_ErrTokenAlreadyUsed_IsDistinctFrom500(t *testing.T) {
 	// This test uses the sentinel directly to confirm the error distinction matters.
 	tokenStore := &controlledConsumeStore{
-		Store: newTestRegistrationStore(t),
-		consumeErr:   business.ErrTokenAlreadyUsed,
+		Store:      newTestRegistrationStore(t),
+		consumeErr: business.ErrTokenAlreadyUsed,
 	}
 	server, _ := newHandleRegisterServer(t, tokenStore, nil)
 
