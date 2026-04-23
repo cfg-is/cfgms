@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
+//
+// Security model: these message types carry no per-message signatures or replay
+// counters — authentication is enforced at the mTLS session boundary via CN-binding.
+// See docs/architecture/controlplane-threat-model.md for the full threat model and
+// the rationale for keeping signing/replay-protection out of scope.
+//
 // Package types provides message types for the control plane communication layer.
 //
 // This package defines semantic message types for controller-steward communication,

@@ -116,6 +116,8 @@ Both planes use the unified **gRPC-over-QUIC** transport (port 4433, mTLS). All 
 
 The controller can tell a steward to sync its cfg immediately (e.g., after an admin pushes a change). But the steward also re-checks on its own schedule. The command is an optimization, not a dependency.
 
+**Security model:** Authentication is enforced at the mTLS session boundary. Each steward presents a certificate with its ID in the CN field; the controller enforces CN-binding so a steward can only act as itself. Per-message signing and replay-protection (nonce / monotonic sequence) are explicitly out of scope for the current release — see [controlplane-threat-model.md](controlplane-threat-model.md) for the full threat model, attack scenarios, and rationale.
+
 ### Outpost (Future)
 
 Regional infrastructure component deployed at site level. Two roles:
