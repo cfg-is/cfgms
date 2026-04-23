@@ -287,6 +287,22 @@ func (s *Server) setupRouter() {
 	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "update-role")(http.HandlerFunc(s.handleUpdateRole))).Methods("PUT")
 	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "delete-role")(http.HandlerFunc(s.handleDeleteRole))).Methods("DELETE")
 
+	// Subjects
+	rbac.Handle("/subjects", s.requirePermission("rbac", "list-subjects")(http.HandlerFunc(s.handleListSubjects))).Methods("GET")
+	rbac.Handle("/subjects", s.requirePermission("rbac", "create-subject")(http.HandlerFunc(s.handleCreateSubject))).Methods("POST")
+	rbac.Handle("/subjects/{id}", s.requirePermission("rbac", "read-subject")(http.HandlerFunc(s.handleGetSubject))).Methods("GET")
+	rbac.Handle("/subjects/{id}", s.requirePermission("rbac", "update-subject")(http.HandlerFunc(s.handleUpdateSubject))).Methods("PUT")
+	rbac.Handle("/subjects/{id}", s.requirePermission("rbac", "delete-subject")(http.HandlerFunc(s.handleDeleteSubject))).Methods("DELETE")
+
+	// Role assignments
+	rbac.Handle("/subjects/{id}/roles", s.requirePermission("rbac", "read-assignments")(http.HandlerFunc(s.handleGetSubjectRoles))).Methods("GET")
+	rbac.Handle("/subjects/{id}/roles", s.requirePermission("rbac", "assign-role")(http.HandlerFunc(s.handleAssignRole))).Methods("POST")
+	rbac.Handle("/subjects/{id}/roles/{role_id}", s.requirePermission("rbac", "revoke-role")(http.HandlerFunc(s.handleRevokeRole))).Methods("DELETE")
+
+	// Permission checking
+	rbac.Handle("/subjects/{id}/permissions", s.requirePermission("rbac", "read-permissions")(http.HandlerFunc(s.handleGetSubjectPermissions))).Methods("GET")
+	rbac.Handle("/check", s.requirePermission("rbac", "check-permission")(http.HandlerFunc(s.handleCheckPermission))).Methods("POST")
+
 	// API key management endpoints (for managing API keys themselves)
 	apiKeys := api.PathPrefix("/api-keys").Subrouter()
 	apiKeys.Handle("", s.requirePermission("api-key", "list")(http.HandlerFunc(s.handleListAPIKeys))).Methods("GET")
