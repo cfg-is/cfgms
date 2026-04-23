@@ -12,6 +12,7 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/controller/ctxkeys"
 )
 
 // handleListPermissions handles GET /api/v1/rbac/permissions
@@ -99,8 +100,12 @@ func (s *Server) handleListRoles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get tenant_id filter from query params
-	tenantID := r.URL.Query().Get("tenant_id")
+	// Read tenant from authenticated context — never from query params (tenant scoping security)
+	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return
+	}
 
 	// Create gRPC request
 	req := &controller.ListRolesRequest{
