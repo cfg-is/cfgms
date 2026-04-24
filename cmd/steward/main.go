@@ -52,7 +52,6 @@ func main() {
 func buildRootCommand() *cobra.Command {
 	var (
 		configPath string
-		opMode     string
 		regToken   string
 	)
 
@@ -71,13 +70,12 @@ Entry paths:
 		// SilenceUsage prevents cobra printing usage on every error.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRootCommand(cmd, regToken, configPath, opMode)
+			return runRootCommand(cmd, regToken, configPath)
 		},
 	}
 
 	// Flags used by the root command (foreground run mode).
 	root.Flags().StringVar(&configPath, "config", "", "Path to configuration file (enables standalone mode)")
-	root.Flags().StringVar(&opMode, "mode", "", "Operation mode: 'standalone' or 'controller'")
 	root.Flags().StringVar(&regToken, "regtoken", "", "Registration token for controller registration")
 
 	// Subcommands.
@@ -92,9 +90,9 @@ Entry paths:
 
 // runRootCommand implements the default (foreground) run behaviour.
 // When no meaningful flags are provided it enters interactive mode.
-func runRootCommand(cmd *cobra.Command, regToken, configPath, opMode string) error {
+func runRootCommand(cmd *cobra.Command, regToken, configPath string) error {
 	// Interactive mode: no flags set and no subcommand selected.
-	noFlags := regToken == "" && configPath == "" && opMode == ""
+	noFlags := regToken == "" && configPath == ""
 	if noFlags {
 		return runInteractive()
 	}
@@ -109,13 +107,13 @@ func runRootCommand(cmd *cobra.Command, regToken, configPath, opMode string) err
 		cancel()
 	}()
 
-	return runSteward(ctx, regToken, configPath, opMode)
+	return runSteward(ctx, regToken, configPath)
 }
 
 // runSteward starts the steward with the given configuration and blocks until
 // ctx is cancelled. It is called from both the root cobra command and the
 // Windows service handler.
-func runSteward(ctx context.Context, regToken, configPath, opMode string) error {
+func runSteward(ctx context.Context, regToken, configPath string) error {
 	// Initialize global logging provider. File is the only supported provider
 	// for the steward binary. Log level is read from CFGMS_LOG_LEVEL (default INFO).
 	logDir := os.Getenv("CFGMS_LOG_DIR")
@@ -195,46 +193,42 @@ func runSteward(ctx context.Context, regToken, configPath, opMode string) error 
 		return nil
 	}
 
-	// Standalone or legacy controller mode.
-	useStandalone := configPath != "" || opMode == "standalone"
-
-	var s *steward.Steward
-	var err error
-
-	legacyLogger := logging.GetLogger()
+	// Standalone mode: --config was provided.
+	useStandalone := configPath != ""
 	if useStandalone {
-		s, err = steward.NewStandalone(configPath, legacyLogger)
+		legacyLogger := logging.GetLogger()
+		s, err := steward.NewStandalone(configPath, legacyLogger)
 		if err != nil {
 			return fmt.Errorf("failed to create standalone steward: %w", err)
 		}
 		logger.Info("Starting steward in standalone mode",
 			"operation", "steward_start", "mode", "standalone", "config_path", configPath)
-	} else {
-		// Legacy controller mode was removed in Story #198.
-		// Controller-connected stewards use --regtoken (gRPC transport) handled above.
-		return fmt.Errorf("standalone mode requires --config flag; for controller mode use --regtoken")
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- s.Start(ctx)
+		}()
+
+		<-ctx.Done()
+		logger.Info("Shutdown signal received", "operation", "steward_shutdown")
+
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer stopCancel()
+		if stopErr := s.Stop(stopCtx); stopErr != nil {
+			logger.Error("Error during shutdown", "operation", "steward_shutdown", "error", stopErr.Error())
+		}
+
+		if startErr := <-errCh; startErr != nil && startErr != context.Canceled {
+			logger.Error("Steward start failed", "operation", "steward_run", "error", startErr.Error())
+			return fmt.Errorf("steward start failed: %w", startErr)
+		}
+
+		logger.Info("Steward shutdown completed", "operation", "steward_shutdown", "status", "completed")
+		return nil
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- s.Start(ctx)
-	}()
-
-	<-ctx.Done()
-	logger.Info("Shutdown signal received", "operation", "steward_shutdown")
-
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer stopCancel()
-	if err := s.Stop(stopCtx); err != nil {
-		logger.Error("Error during shutdown", "operation", "steward_shutdown", "error", err.Error())
-	}
-
-	if startErr := <-errCh; startErr != nil && startErr != context.Canceled {
-		logger.Error("Steward start failed", "operation", "steward_run", "error", startErr.Error())
-		return fmt.Errorf("steward start failed: %w", startErr)
-	}
-
-	logger.Info("Steward shutdown completed", "operation", "steward_shutdown", "status", "completed")
+	// Structurally unreachable: runRootCommand's noFlags guard prevents calling
+	// runSteward with both regToken and configPath empty.
 	return nil
 }
 
@@ -435,7 +429,7 @@ func runInteractive() error {
 		}()
 
 		fmt.Println("Running in foreground. Press Ctrl+C to stop.")
-		return runSteward(ctx, token, "", "")
+		return runSteward(ctx, token, "")
 	case "3", "":
 		fmt.Println("Exiting.")
 		return nil

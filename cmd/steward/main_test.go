@@ -38,7 +38,7 @@ func TestBuildRootCommand(t *testing.T) {
 func TestBuildRootCommandFlags(t *testing.T) {
 	cmd := buildRootCommand()
 
-	for _, name := range []string{"config", "mode", "regtoken"} {
+	for _, name := range []string{"config", "regtoken"} {
 		flag := cmd.Flags().Lookup(name)
 		assert.NotNil(t, flag, "expected flag %q to be registered", name)
 	}
@@ -46,6 +46,11 @@ func TestBuildRootCommandFlags(t *testing.T) {
 	// log-level and log-provider must not be registered as CLI flags.
 	assert.Nil(t, cmd.Flags().Lookup("log-level"), "log-level flag must not be registered")
 	assert.Nil(t, cmd.Flags().Lookup("log-provider"), "log-provider flag must not be registered")
+}
+
+func TestBuildRootCommandNoModeFlag(t *testing.T) {
+	cmd := buildRootCommand()
+	assert.Nil(t, cmd.Flags().Lookup("mode"), "mode flag must not be registered")
 }
 
 func TestRunInstallRequiresToken(t *testing.T) {
@@ -145,22 +150,7 @@ func TestStandaloneStartErrorPropagatesToRunSteward(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := runSteward(ctx, "", "/nonexistent/cfgms-config-does-not-exist.yaml", "")
+	err := runSteward(ctx, "", "/nonexistent/cfgms-config-does-not-exist.yaml")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to create standalone steward")
-}
-
-// TestRunStewardStandaloneRequiresConfig verifies that standalone mode without a
-// config path returns an error rather than panicking or calling os.Exit.
-func TestRunStewardStandaloneRequiresConfig(t *testing.T) {
-	t.Setenv("CFGMS_LOG_DIR", t.TempDir())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// opMode="standalone" with empty configPath — no config file found in search
-	// paths in a temp environment, so NewStandalone returns an error that must be
-	// propagated rather than swallowed.
-	err := runSteward(ctx, "", "", "standalone")
-	require.Error(t, err)
 }
