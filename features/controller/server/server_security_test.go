@@ -37,8 +37,12 @@ func createTestStorageConfig(tempDir, suffix string) *config.StorageConfig {
 	}
 }
 
-// createDockerTestStorageConfig creates storage configs for Docker-based testing
-func createDockerTestStorageConfig(provider string) *config.StorageConfig {
+// createDockerTestStorageConfig creates storage configs for Docker-based testing.
+// For non-database providers, the flatfile+sqlite paths are scoped to t.TempDir()
+// so each test gets a fresh directory and no state persists in /tmp across runs —
+// stale on-disk schemas had previously broken tests after audit_entries migrations.
+func createDockerTestStorageConfig(t *testing.T, provider string) *config.StorageConfig {
+	t.Helper()
 	switch provider {
 	case "database":
 		return &config.StorageConfig{
@@ -53,7 +57,7 @@ func createDockerTestStorageConfig(provider string) *config.StorageConfig {
 			},
 		}
 	default:
-		return createTestStorageConfig(os.TempDir(), provider)
+		return createTestStorageConfig(t.TempDir(), provider)
 	}
 }
 
@@ -221,7 +225,7 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 
 				// Use Docker test configuration if available, otherwise fall back to local test
 				if isDockerTestEnvironment() {
-					storageConfig = createDockerTestStorageConfig(providerInfo.Name)
+					storageConfig = createDockerTestStorageConfig(t, providerInfo.Name)
 					t.Logf("Using Docker test configuration for provider '%s'", providerInfo.Name)
 				} else {
 					// For local testing, use appropriate configuration per provider
