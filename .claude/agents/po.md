@@ -215,21 +215,38 @@ Analyze pipeline state and recommend the single most valuable action.
 
 ## 4. Pipeline Cycle
 
-Run the full autonomous pipeline cycle once. Use when the founder says "cron", "run cycle", "run pipeline", or via `/loop 1h /po cron`.
+Run the full autonomous pipeline cycle once. Use when the founder says "cron", "run cycle", "run pipeline", or via `/loop 20m /po cron`.
 
 This runs **locally** with full Docker access for dispatch and fix cycles. The remote `po-cron` trigger runs the same logic but creates `pipeline:blocked` for Docker-dependent steps (3 and 4) since it has no Docker access.
 
-### 4.0 Pre-Flight: Idle Check
+### Helper scripts (prefer these — one approval per action, no `/tmp` writes)
 
-Before running the cycle, check for actionable work. Run all queries in parallel:
+- `./.claude/scripts/po-act.sh <subcommand>` — every common action is a one-liner:
+  - `preflight` — gather state; writes `~/.cache/cfgms-po/preflight.json`, prints summary
+  - `state [jq_filter]` — read cached state with optional jq filter
+  - `dispatch <STORY>` — check-conflicts + clone + launch + label swap
+  - `dispatch-fix <PR>` — clean stale container + clone-pr + launch-generic
+  - `close-merged <ISSUE> <PR>` — close + clear stale `agent:*` labels (for PRs that missed `Fixes #NNN`)
+  - `enqueue <PR>` / `dequeue <PR>` — merge queue management
+  - `diagnose <PR>` — extract FAIL/panic lines from failed CI jobs
+  - `rerun <PR> [comment]` — rerun failed jobs, optionally post audit comment
+  - `log <ISSUE> <text>` — post timestamped session log (stdin if text is `-`)
+  - `merge-queue` — queue state as JSON
+  - `block <ISSUE> <reason>` — escalate to founder with `pipeline:blocked`
+- `./.claude/scripts/po-cycle-preflight.py` — the underlying preflight (called by `po-act.sh preflight`). Accepts `--stdout` for raw JSON or `--path` for the cache path.
+- `./.claude/scripts/agent-dispatch.sh` — lower-level primitives (called by `po-act.sh`)
+
+### 4.0 Pre-Flight
+
 ```bash
-gh issue list --repo cfg-is/cfgms --label "pipeline:epic" --state open --json number,title
-gh issue list --repo cfg-is/cfgms --label "pipeline:draft" --state open --json number,title
-gh issue list --repo cfg-is/cfgms --label "agent:ready" --state open --json number,title
-gh issue list --repo cfg-is/cfgms --label "pipeline:fix" --state open --json number,title
-gh pr list --repo cfg-is/cfgms --search "head:feature/story-" --state open --json number,title,headRefName
+./.claude/scripts/po-act.sh preflight
 ```
-If ALL queries return empty: report "No actionable work — skipping cycle" and exit.
+
+Emits a compact summary (counts, running containers, merge queue, recommendations). Full JSON cached at `~/.cache/cfgms-po/preflight.json` for further `po-act.sh state '.some.jq.filter'` queries.
+
+If `.counts.ready == 0` AND `.counts.open_pr == 0` AND `.pipeline_state.fix_cycle | length == 0`: report "No actionable work — skipping cycle" and exit.
+
+The preflight handles all label queries, PR CI summaries, merge queue state, and dispatch/review recommendations in one ~3-second call. Read `dispatch_recommendations` and `review_recommendations` to decide actions. Raw section text (`deps_raw`, `files_raw`) is included so the LLM can override any recommendation.
 
 ### 4.1 Processing Order
 
@@ -255,28 +272,19 @@ The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency orderin
 **Step 3 — Dispatch:**
 Find `agent:ready` issues without `agent:in-progress`. Before dispatching, check for file conflicts with in-flight agents:
 
-1. **Dependency gate:** Extract `## Dependencies` from the story body. For each referenced issue number (`#NNN`), check its state:
-   ```bash
-   gh issue view <DEP_NUM> --repo cfg-is/cfgms --json state -q .state
-   ```
-   If ANY dependency is not `CLOSED`, **skip dispatch** — leave the story as `agent:ready`. It will be picked up in a future cycle after the dependency merges and closes.
-2. **File conflict gate:** Extract `## Files In Scope` from the story body. For each `agent:in-progress` story, extract the same section. If any ready story shares files with an in-progress story, **skip dispatch** — leave it as `agent:ready` until the conflicting story merges.
+Both gates are computed by the preflight script (`dispatch_recommendations` with `action: "dispatch"` vs `"hold"` and a `reason` string). Trust its recommendation by default, override only if `parse_warnings` are non-empty on the story.
 
-For stories that pass conflict checks:
+For each story the preflight recommends dispatching:
 ```bash
-./.claude/scripts/agent-dispatch.sh check-conflicts <NUM>
-./.claude/scripts/agent-dispatch.sh create-clone <NUM>
-./.claude/scripts/agent-dispatch.sh launch <NUM>
-gh issue edit <NUM> --remove-label "agent:ready" --add-label "agent:in-progress"
+./.claude/scripts/po-act.sh dispatch <NUM>
 ```
 
 **Step 4 — Fix cycle:**
-Find stories with `pipeline:fix` label. Dispatch fix agent via:
+For each `pipeline:fix` story, find its PR and dispatch the fix agent in one call:
 ```bash
-gh pr list --repo cfg-is/cfgms --search "head:feature/story-<NUM>" --json number -q '.[0].number'
-./.claude/scripts/agent-dispatch.sh create-clone-pr <PR_NUM>
-./.claude/scripts/agent-dispatch.sh launch-generic cfg-agent-pr-fix-<PR_NUM> <clone_dir> --fix-pr <PR_NUM>
+./.claude/scripts/po-act.sh dispatch-fix <PR_NUM>
 ```
+This cleans any stale container from a prior failed attempt, re-clones, and launches.
 
 **Step 5 — QA pass (Acceptance Reviewer) — FIFO order:**
 Find agent PRs (branch `feature/story-*`) without Acceptance Reviewer comment, sorted by creation timestamp ascending (oldest first). FIFO order minimizes rebase churn: the oldest PR was based on the earliest develop snapshot, so it has the fewest accumulated conflicts. Once it lands, the next-oldest only needs to rebase against one new merge instead of an arbitrary set.
@@ -294,7 +302,7 @@ Process PRs **serially in FIFO order** (do not spawn reviewers in parallel — p
 3. **Wait for the reviewer to complete** before spawning the next one. This ensures merges happen in FIFO order and the next PR in the queue is reviewed against an up-to-date develop.
 
 The Acceptance Reviewer (`.claude/agents/acceptance-reviewer.md`) verifies CI, checks acceptance criteria against the diff, and renders a verdict:
-- Zero findings: auto-merge via `gh pr merge --squash --auto`, clean up container/worktree
+- Zero findings: enqueue via `gh pr merge <PR_NUM> --squash` (merge queue handles rebase + re-validation), clean up container/worktree
 - Any findings (first review): apply `pipeline:fix` to story, post review comment on PR
 - Any findings (second review): apply `pipeline:blocked`, assign to founder
 
