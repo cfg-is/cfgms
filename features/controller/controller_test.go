@@ -48,8 +48,12 @@ func TestControllerCreation(t *testing.T) {
 				if tt.cfg.Certificate != nil {
 					tt.cfg.Certificate.CAPath = tempDir + "/certs/ca"
 				}
-				if tt.cfg.Storage != nil && tt.cfg.Storage.Config != nil {
-					tt.cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+				if tt.cfg.Storage != nil {
+					tt.cfg.Storage.FlatfileRoot = tempDir + "/flatfile"
+					tt.cfg.Storage.SQLitePath = tempDir + "/cfgms.db"
+					if tt.cfg.Storage.Config != nil {
+						tt.cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+					}
 				}
 				// Pre-initialize if cert management is enabled (Story #410)
 				if tt.cfg.Certificate != nil && tt.cfg.Certificate.EnableCertManagement {
@@ -85,8 +89,12 @@ func TestControllerLifecycle(t *testing.T) {
 	if cfg.Certificate != nil {
 		cfg.Certificate.CAPath = tempDir + "/certs/ca"
 	}
-	if cfg.Storage != nil && cfg.Storage.Config != nil {
-		cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+	if cfg.Storage != nil {
+		cfg.Storage.FlatfileRoot = tempDir + "/flatfile"
+		cfg.Storage.SQLitePath = tempDir + "/cfgms.db"
+		if cfg.Storage.Config != nil {
+			cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+		}
 	}
 
 	// Pre-initialize (Story #410: controller requires explicit init)
@@ -167,8 +175,12 @@ func TestModuleRegistration(t *testing.T) {
 	if cfg.Certificate != nil {
 		cfg.Certificate.CAPath = tempDir + "/certs/ca"
 	}
-	if cfg.Storage != nil && cfg.Storage.Config != nil {
-		cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+	if cfg.Storage != nil {
+		cfg.Storage.FlatfileRoot = tempDir + "/flatfile"
+		cfg.Storage.SQLitePath = tempDir + "/cfgms.db"
+		if cfg.Storage.Config != nil {
+			cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+		}
 	}
 	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
 	ctrl, err := New(cfg, logger)
@@ -219,8 +231,12 @@ func TestControllerSingleHTTPServer(t *testing.T) {
 	if cfg.Certificate != nil {
 		cfg.Certificate.CAPath = tempDir + "/certs/ca"
 	}
-	if cfg.Storage != nil && cfg.Storage.Config != nil {
-		cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+	if cfg.Storage != nil {
+		cfg.Storage.FlatfileRoot = tempDir + "/flatfile"
+		cfg.Storage.SQLitePath = tempDir + "/cfgms.db"
+		if cfg.Storage.Config != nil {
+			cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+		}
 	}
 	if cfg.Transport != nil {
 		cfg.Transport.ListenAddr = "127.0.0.1:0"

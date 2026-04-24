@@ -277,12 +277,12 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		require.Contains(t, err.Error(), "not found")
 
 		auditFilter := &business.AuditFilter{
-			TenantID:      "test-tenant",
-			EventTypes:    []business.AuditEventType{business.AuditEventUserManagement},
-			Actions:       []string{"create_role"},
-			Results:       []business.AuditResult{business.AuditResultError},
-			ResourceIDs:   []string{"test-role-parent-missing"},
-			Limit:         10,
+			TenantID:    "test-tenant",
+			EventTypes:  []business.AuditEventType{business.AuditEventUserManagement},
+			Actions:     []string{"create_role"},
+			Results:     []business.AuditResult{business.AuditResultError},
+			ResourceIDs: []string{"test-role-parent-missing"},
+			Limit:       10,
 		}
 
 		flushAudit(t)
