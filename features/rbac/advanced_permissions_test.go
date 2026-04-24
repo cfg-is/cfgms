@@ -39,7 +39,7 @@ func TestAdvancedPermissionManagement(t *testing.T) {
 	t.Cleanup(func() {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stopCancel()
-		_ = manager.auditManager.Stop(stopCtx)
+		_ = manager.Close(stopCtx)
 	})
 
 	flushAudit := func(t *testing.T) {

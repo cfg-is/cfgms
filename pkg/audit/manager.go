@@ -429,8 +429,12 @@ func (m *Manager) Flush(ctx context.Context) error {
 }
 
 // Stop flushes pending entries and shuts down the drain goroutine. It is
-// idempotent — repeated calls return nil immediately. Callers should call Stop
-// during graceful shutdown to guarantee audit durability.
+// idempotent — repeated calls return nil immediately.
+//
+// Callers MUST call Stop before closing the backing store or removing the
+// directory that backs it (e.g. t.TempDir()). The drain goroutine writes
+// entries into the store until Stop returns; failing to call Stop first races
+// with filesystem cleanup and produces "directory not empty" errors.
 //
 // If ctx is cancelled before the flush completes, Stop returns the context
 // error but still signals the drain goroutine to exit. The goroutine will

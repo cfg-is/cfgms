@@ -985,6 +985,19 @@ func (m *Manager) FlushAudit(ctx context.Context) error {
 	return m.auditManager.Flush(ctx)
 }
 
+// Close stops the internal audit drain goroutine and waits for all pending
+// audit events to reach durable storage. Callers MUST call Close before
+// closing the underlying storage stores or removing the backing directory
+// (e.g. t.TempDir()); the drain goroutine writes entries until Close returns,
+// and failing to call it first races with filesystem cleanup. Repeated calls
+// return nil immediately (idempotent).
+func (m *Manager) Close(ctx context.Context) error {
+	if m.auditManager != nil {
+		return m.auditManager.Stop(ctx)
+	}
+	return nil
+}
+
 // CreateTemplate creates a new permission template
 func (m *Manager) CreateTemplate(ctx context.Context, req *TemplateCreateRequest) (*common.PermissionTemplate, error) {
 	return m.templateManager.CreateTemplate(ctx, req)

@@ -29,6 +29,7 @@ func TestManager_Initialize(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -69,6 +70,7 @@ func TestManager_CreateTenantDefaultRoles(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -108,6 +110,7 @@ func TestManager_SubjectManagement(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -171,6 +174,7 @@ func TestManager_RoleAssignment(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -235,6 +239,7 @@ func TestManager_PermissionChecking(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -321,6 +326,7 @@ func TestManager_SystemAdminPermissions(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -386,6 +392,7 @@ func TestManager_CreateStewardSubject(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -444,6 +451,7 @@ func TestManager_InactiveSubjectPermissions(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -486,4 +494,62 @@ func TestManager_InactiveSubjectPermissions(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, response.Granted)
 	assert.Contains(t, response.Reason, "inactive")
+}
+
+func TestManager_Close(t *testing.T) {
+	t.Run("returns nil and stops audit drain goroutine", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = storageManager.Close() })
+
+		manager := NewManagerWithStorage(
+			storageManager.GetAuditStore(),
+			storageManager.GetClientTenantStore(),
+			storageManager.GetRBACStore(),
+		)
+		t.Cleanup(func() { _ = manager.Close(context.Background()) })
+
+		err = manager.Close(context.Background())
+		require.NoError(t, err)
+	})
+
+	t.Run("idempotent — second call returns nil", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = storageManager.Close() })
+
+		manager := NewManagerWithStorage(
+			storageManager.GetAuditStore(),
+			storageManager.GetClientTenantStore(),
+			storageManager.GetRBACStore(),
+		)
+		t.Cleanup(func() { _ = manager.Close(context.Background()) })
+
+		require.NoError(t, manager.Close(context.Background()))
+		require.NoError(t, manager.Close(context.Background()))
+	})
+
+	t.Run("nil auditManager guard returns nil without panic", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = storageManager.Close() })
+
+		manager := NewManagerWithStorage(
+			storageManager.GetAuditStore(),
+			storageManager.GetClientTenantStore(),
+			storageManager.GetRBACStore(),
+		)
+		// Simulate an edge-case where auditManager was cleared.
+		savedAudit := manager.auditManager
+		manager.auditManager = nil
+		t.Cleanup(func() {
+			manager.auditManager = savedAudit
+			_ = manager.Close(context.Background())
+		})
+
+		require.NoError(t, manager.Close(context.Background()))
+	})
 }

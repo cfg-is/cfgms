@@ -42,10 +42,12 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 
 	// Issue #764: audit writes are now asynchronous. Tests that query the audit
 	// store must Flush first to guarantee pending entries have landed.
+	// Issue #848: Close must be registered after storageManager.Close so it runs
+	// first (LIFO), stopping the drain goroutine before the store is closed.
 	t.Cleanup(func() {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stopCancel()
-		_ = manager.auditManager.Stop(stopCtx)
+		_ = manager.Close(stopCtx)
 	})
 
 	flushAudit := func(t *testing.T) {
@@ -333,6 +335,12 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 		storageManager.GetRBACStore(),
 	)
 	require.NotNil(t, manager)
+	// Issue #848: registered after storageManager.Close so it runs first (LIFO).
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		_ = manager.Close(stopCtx)
+	})
 
 	ctx := context.Background()
 	err = manager.Initialize(ctx)
@@ -377,6 +385,12 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 			storageManager.GetClientTenantStore(),
 			storageManager.GetRBACStore(),
 		)
+		// Issue #848: registered after storageManager.Close so it runs first (LIFO).
+		t.Cleanup(func() {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stopCancel()
+			_ = manager.Close(stopCtx)
+		})
 		err = manager.Initialize(ctx)
 		require.NoError(t, err)
 

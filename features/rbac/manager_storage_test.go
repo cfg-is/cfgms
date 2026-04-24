@@ -64,6 +64,7 @@ func TestNewManagerWithStorage(t *testing.T) {
 				storageManager.GetRBACStore(),
 			)
 			require.NotNil(t, manager)
+			t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 			// Verify manager initializes correctly with pluggable storage
 			ctx := context.Background()
@@ -194,6 +195,7 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 		storageManager.GetRBACStore(),
 	)
 	require.NotNil(t, manager)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	ctx := context.Background()
 	err = manager.Initialize(ctx)
@@ -263,6 +265,7 @@ func TestManagerWithStorage_AuditTrail(t *testing.T) {
 		storageManager.GetRBACStore(),
 	)
 	require.NotNil(t, manager)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	ctx := context.Background()
 	err = manager.Initialize(ctx)

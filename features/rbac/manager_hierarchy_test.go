@@ -29,6 +29,7 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	// Initialize manager
@@ -166,6 +167,7 @@ func TestManager_GetRoleHierarchy(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	// Initialize and set up test hierarchy
@@ -256,6 +258,7 @@ func TestManager_SetAndRemoveRoleParent(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -326,6 +329,7 @@ func TestManager_ComputeRolePermissions(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -395,6 +399,7 @@ func TestManager_ValidateHierarchyOperation(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
