@@ -31,6 +31,11 @@ func TestAdvancedPermissionManagement(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)

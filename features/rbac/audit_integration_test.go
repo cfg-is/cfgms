@@ -33,6 +33,11 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	require.NotNil(t, manager)
 	require.NotNil(t, manager.auditManager)
 
@@ -332,6 +337,11 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	require.NotNil(t, manager)
 
 	ctx := context.Background()
@@ -377,6 +387,11 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 			storageManager.GetClientTenantStore(),
 			storageManager.GetRBACStore(),
 		)
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = manager.Close(ctx)
+		})
 		err = manager.Initialize(ctx)
 		require.NoError(t, err)
 

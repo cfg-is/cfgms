@@ -5,6 +5,7 @@ package rbac
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,6 +30,11 @@ func TestManager_Initialize(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -69,6 +75,11 @@ func TestManager_CreateTenantDefaultRoles(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -108,6 +119,11 @@ func TestManager_SubjectManagement(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -171,6 +187,11 @@ func TestManager_RoleAssignment(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -235,6 +256,11 @@ func TestManager_PermissionChecking(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -321,6 +347,11 @@ func TestManager_SystemAdminPermissions(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -386,6 +417,11 @@ func TestManager_CreateStewardSubject(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -444,6 +480,11 @@ func TestManager_InactiveSubjectPermissions(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)

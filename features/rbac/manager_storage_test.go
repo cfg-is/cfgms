@@ -5,6 +5,7 @@ package rbac
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -63,6 +64,11 @@ func TestNewManagerWithStorage(t *testing.T) {
 				storageManager.GetClientTenantStore(),
 				storageManager.GetRBACStore(),
 			)
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = manager.Close(ctx)
+			})
 			require.NotNil(t, manager)
 
 			// Verify manager initializes correctly with pluggable storage
@@ -193,6 +199,11 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	require.NotNil(t, manager)
 
 	ctx := context.Background()
@@ -262,6 +273,11 @@ func TestManagerWithStorage_AuditTrail(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	require.NotNil(t, manager)
 
 	ctx := context.Background()
