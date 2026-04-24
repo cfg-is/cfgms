@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 const currentSchemaVersion = 1
@@ -14,6 +15,40 @@ const currentSchemaVersion = 1
 // initializeSchema creates all tables and tracks schema version.
 // It is safe to call multiple times (all statements use IF NOT EXISTS).
 func initializeSchema(ctx context.Context, db *sql.DB) error {
+	// Back-fill columns that were added to existing CREATE TABLE IF NOT
+	// EXISTS blocks in later revisions. `CREATE TABLE IF NOT EXISTS` is
+	// a no-op when the table already exists, so a pre-existing sqlite
+	// file created before a column was introduced would cause the
+	// subsequent `CREATE INDEX ... ON table(col)` to fail with
+	// "no such column: col" (issue #849).
+	//
+	// We run the ALTERs before the statements block so the index
+	// creation below sees the column regardless of whether the table
+	// was freshly created or inherited from an older build.
+	backfills := []struct {
+		table  string
+		column string
+		ddl    string
+	}{
+		{"audit_entries", "sequence_number", `ALTER TABLE audit_entries ADD COLUMN sequence_number INTEGER NOT NULL DEFAULT 0`},
+		{"audit_entries", "previous_checksum", `ALTER TABLE audit_entries ADD COLUMN previous_checksum TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, b := range backfills {
+		ok, err := tableExists(ctx, db, b.table)
+		if err != nil {
+			return fmt.Errorf("schema back-fill probe for %s: %w", b.table, err)
+		}
+		if !ok {
+			continue
+		}
+		// SQLite < 3.35 has no ADD COLUMN IF NOT EXISTS, so we swallow
+		// the "duplicate column name" error instead of probing via
+		// PRAGMA for every column we might need to add.
+		if _, err := db.ExecContext(ctx, b.ddl); err != nil && !isDuplicateColumnErr(err) {
+			return fmt.Errorf("schema back-fill for %s.%s failed: %w", b.table, b.column, err)
+		}
+	}
+
 	statements := []string{
 		// Schema version tracking
 		`CREATE TABLE IF NOT EXISTS schema_version (
@@ -276,6 +311,36 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 	}
 
 	return nil
+}
+
+// tableExists reports whether a table with the given name is present in
+// the sqlite database. Used to gate ALTER TABLE back-fills so we don't
+// error out on a fresh database where the CREATE TABLE below will emit
+// the full schema.
+func tableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, name,
+	).Scan(&n); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// isDuplicateColumnErr reports whether err is the SQLite "duplicate column
+// name" error emitted by ALTER TABLE ADD COLUMN when the column already
+// exists. Matching on the error message keeps the check driver-agnostic;
+// both mattn/go-sqlite3 and modernc.org/sqlite surface the string.
+func isDuplicateColumnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "duplicate column name") ||
+		strings.Contains(msg, "already exists")
 }
 
 func recordSchemaVersion(ctx context.Context, db *sql.DB) error {
