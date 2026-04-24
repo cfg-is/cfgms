@@ -109,6 +109,23 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 	return manager
 }
 
+// Close flushes pending audit entries and stops the audit drain goroutine.
+// It is idempotent via the underlying audit.Manager's stopOnce.
+//
+// Callers that construct a Manager and back it with per-test temporary storage
+// (e.g., via `t.TempDir()`) MUST register a t.Cleanup that calls Close before
+// the temp directory is removed. Without this, the audit drain goroutine may
+// still be writing files when `TempDir` RemoveAll runs, producing flaky
+// "directory not empty" cleanup errors on slower filesystems (macOS, Windows).
+//
+// Returns nil if no audit manager was configured.
+func (m *Manager) Close(ctx context.Context) error {
+	if m.auditManager == nil {
+		return nil
+	}
+	return m.auditManager.Stop(ctx)
+}
+
 // Initialize sets up the RBAC system with default roles and permissions
 func (m *Manager) Initialize(ctx context.Context) error {
 	if err := m.store.Initialize(ctx); err != nil {

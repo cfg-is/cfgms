@@ -5,6 +5,7 @@ package rbac
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -13,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
@@ -21,21 +21,14 @@ import (
 
 // TestNewManagerWithStorage tests the new constructor that accepts storage interfaces
 func TestNewManagerWithStorage(t *testing.T) {
+	// The database provider is exercised by its own provider-specific tests
+	// under pkg/storage/providers/database/. This test covers the OSS
+	// flatfile+sqlite composite path that the controller actually uses.
 	tests := []struct {
 		name         string
 		setupStorage func(t *testing.T) (*interfaces.StorageManager, error)
 		wantErr      bool
 	}{
-		{
-			name: "with database storage provider (if configured)",
-			setupStorage: func(t *testing.T) (*interfaces.StorageManager, error) {
-				// Skip database tests for now due to configuration complexity
-				// In production, database provider will be properly configured
-				t.Skip("database provider requires complex configuration - skipping for basic test")
-				return nil, nil
-			},
-			wantErr: false,
-		},
 		{
 			name: "with flatfile+sqlite storage provider",
 			setupStorage: func(t *testing.T) (*interfaces.StorageManager, error) {
@@ -63,6 +56,11 @@ func TestNewManagerWithStorage(t *testing.T) {
 				storageManager.GetClientTenantStore(),
 				storageManager.GetRBACStore(),
 			)
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = manager.Close(ctx)
+			})
 			require.NotNil(t, manager)
 
 			// Verify manager initializes correctly with pluggable storage
@@ -150,34 +148,13 @@ func TestNewManagerWithStorage(t *testing.T) {
 // deliberately removed to eliminate package-level storage mechanisms
 // All RBAC managers now require explicit storage configuration via NewManagerWithStorage()
 
-// TestNewManagerWithStorage_NilStorageHandling tests error handling for nil storage interfaces
+// TestNewManagerWithStorage_NilStorageHandling verifies that NewManagerWithStorage
+// panics when any required store is nil. All three stores (audit, clientTenant,
+// rbac) are required — passing nil for any of them is a programmer error.
 func TestNewManagerWithStorage_NilStorageHandling(t *testing.T) {
-	tests := []struct {
-		name              string
-		auditStore        business.AuditStore
-		clientTenantStore business.ClientTenantStore
-		expectPanic       bool
-	}{
-		{
-			name:              "nil audit store",
-			auditStore:        nil,
-			clientTenantStore: nil,
-			expectPanic:       true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.expectPanic {
-				assert.Panics(t, func() {
-					NewManagerWithStorage(tt.auditStore, tt.clientTenantStore, nil)
-				})
-			} else {
-				manager := NewManagerWithStorage(tt.auditStore, tt.clientTenantStore, nil)
-				assert.NotNil(t, manager)
-			}
-		})
-	}
+	assert.Panics(t, func() {
+		NewManagerWithStorage(nil, nil, nil)
+	}, "NewManagerWithStorage must panic when all stores are nil")
 }
 
 // TestManagerWithStorage_TenantIsolation tests that tenant isolation works correctly with pluggable storage
@@ -193,6 +170,11 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	require.NotNil(t, manager)
 
 	ctx := context.Background()
@@ -262,6 +244,11 @@ func TestManagerWithStorage_AuditTrail(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	require.NotNil(t, manager)
 
 	ctx := context.Background()

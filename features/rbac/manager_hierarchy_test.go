@@ -5,6 +5,7 @@ package rbac
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,6 +30,11 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	// Initialize manager
@@ -166,6 +172,11 @@ func TestManager_GetRoleHierarchy(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	// Initialize and set up test hierarchy
@@ -256,6 +267,11 @@ func TestManager_SetAndRemoveRoleParent(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -326,6 +342,11 @@ func TestManager_ComputeRolePermissions(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -395,6 +416,11 @@ func TestManager_ValidateHierarchyOperation(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
