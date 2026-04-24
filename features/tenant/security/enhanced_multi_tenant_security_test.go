@@ -558,6 +558,7 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 			ResourceID:   "patient-data/records",
 			Context: map[string]string{
 				"mfa_verified": "true",
+				"encrypted":    "true",
 			},
 			Permissions: []string{"patient_read"},
 		}

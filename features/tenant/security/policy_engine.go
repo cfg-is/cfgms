@@ -5,6 +5,7 @@ package security
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -317,9 +318,10 @@ func (tspe *TenantSecurityPolicyEngine) CreateSecurityPolicy(ctx context.Context
 		return fmt.Errorf("invalid security policy: %w", err)
 	}
 
-	// Generate ID if not provided
+	// Generate ID if not provided. Use nanosecond precision to ensure uniqueness
+	// even when two policies for the same tenant are created within the same second.
 	if policy.ID == "" {
-		policy.ID = fmt.Sprintf("policy-%s-%d", policy.TenantID, time.Now().Unix())
+		policy.ID = fmt.Sprintf("policy-%s-%d", policy.TenantID, time.Now().UnixNano())
 	}
 
 	// Set timestamps
@@ -393,13 +395,28 @@ func (tspe *TenantSecurityPolicyEngine) evaluateTenantSecurityPolicy(ctx context
 		AppliedRules:   []string{},
 	}
 
-	// Get tenant policy
-	var tenantPolicy *TenantSecurityPolicy
+	// Collect all active policies for this tenant, then select the most recently
+	// created one. Without sorting, Go map iteration is randomized, which causes
+	// non-deterministic policy selection when multiple active policies exist for
+	// the same tenant (e.g. a HIPAA policy created in an earlier test phase and
+	// an E2E policy created in a later phase both targeting client-healthcare).
+	var matchingPolicies []*TenantSecurityPolicy
 	for _, policy := range tspe.policies {
 		if policy.TenantID == request.TenantID && policy.Status == PolicyStatusActive {
-			tenantPolicy = policy
-			break
+			matchingPolicies = append(matchingPolicies, policy)
 		}
+	}
+	// SliceStable with an ID tiebreaker ensures a fully deterministic order
+	// even if two policies share an identical nanosecond CreatedAt timestamp.
+	sort.SliceStable(matchingPolicies, func(i, j int) bool {
+		if matchingPolicies[i].CreatedAt.Equal(matchingPolicies[j].CreatedAt) {
+			return matchingPolicies[i].ID > matchingPolicies[j].ID
+		}
+		return matchingPolicies[i].CreatedAt.After(matchingPolicies[j].CreatedAt)
+	})
+	var tenantPolicy *TenantSecurityPolicy
+	if len(matchingPolicies) > 0 {
+		tenantPolicy = matchingPolicies[0]
 	}
 
 	if tenantPolicy == nil {
