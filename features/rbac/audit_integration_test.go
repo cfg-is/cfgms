@@ -46,13 +46,8 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Issue #764: audit writes are now asynchronous. Tests that query the audit
-	// store must Flush first to guarantee pending entries have landed.
-	t.Cleanup(func() {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stopCancel()
-		_ = manager.auditManager.Stop(stopCtx)
-	})
-
+	// store must Flush first to guarantee pending entries have landed. Drain
+	// shutdown is handled by manager.Close cleanup registered above (Issue #848).
 	flushAudit := func(t *testing.T) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -266,37 +261,39 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 	})
 
 	t.Run("Failed operations generate error audit events", func(t *testing.T) {
-		// Try to create a role with invalid data (empty ID)
+		// Use a case that deterministically fails at the manager level:
+		// a role claiming a non-existent parent triggers the explicit error
+		// path in Manager.CreateRole (RBAC_PARENT_ROLE_NOT_FOUND), which
+		// synchronously emits an error audit event.
 		invalidRole := &common.Role{
-			Id:       "", // Invalid - empty ID
-			Name:     "Invalid Role",
-			TenantId: "test-tenant",
+			Id:           "test-role-parent-missing",
+			Name:         "Role with missing parent",
+			TenantId:     "test-tenant",
+			ParentRoleId: "does-not-exist",
 		}
 
-		_ = manager.CreateRole(ctx, invalidRole)
-		// This should fail, but let's check if we still get an audit event
+		err := manager.CreateRole(ctx, invalidRole)
+		require.Error(t, err, "CreateRole must return an error when parent role does not exist")
+		require.Contains(t, err.Error(), "not found")
 
-		// Query for any audit entries with error result
 		auditFilter := &business.AuditFilter{
-			TenantID:   "test-tenant",
-			EventTypes: []business.AuditEventType{business.AuditEventUserManagement},
-			Actions:    []string{"create_role"},
-			Results:    []business.AuditResult{business.AuditResultError},
-			Limit:      10,
+			TenantID:      "test-tenant",
+			EventTypes:    []business.AuditEventType{business.AuditEventUserManagement},
+			Actions:       []string{"create_role"},
+			Results:       []business.AuditResult{business.AuditResultError},
+			ResourceIDs:   []string{"test-role-parent-missing"},
+			Limit:         10,
 		}
 
-		// Note: This test depends on whether the underlying store validates the role
-		// If validation passes through, we won't get an error audit event
 		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
+		require.Len(t, auditEntries, 1, "failed CreateRole must produce exactly one error audit entry")
 
-		// If there are error entries, verify they have proper error information
-		for _, entry := range auditEntries {
-			assert.Equal(t, business.AuditResultError, entry.Result)
-			assert.NotEmpty(t, entry.ErrorCode)
-			assert.NotEmpty(t, entry.ErrorMessage)
-		}
+		entry := auditEntries[0]
+		assert.Equal(t, business.AuditResultError, entry.Result)
+		assert.Equal(t, "RBAC_PARENT_ROLE_NOT_FOUND", entry.ErrorCode)
+		assert.NotEmpty(t, entry.ErrorMessage)
 	})
 
 	t.Run("Audit entries maintain integrity", func(t *testing.T) {
