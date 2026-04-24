@@ -81,6 +81,7 @@ func newMultiStewardEnv(t *testing.T) *multiStewardEnv {
 // payload StewardID matching the authenticated CN is dispatched normally and
 // does not increment IdentityMismatches.
 func TestControlChannel_Event_MatchingStewardID(t *testing.T) {
+	t.Parallel()
 	env := newMultiStewardEnv(t)
 
 	received := make(chan *types.Event, 1)
@@ -115,6 +116,7 @@ func TestControlChannel_Event_MatchingStewardID(t *testing.T) {
 // with an empty payload StewardID is stamped with the authenticated CN before
 // dispatch, and IdentityMismatches is not incremented.
 func TestControlChannel_Event_EmptyStewardIDGetsCNStamped(t *testing.T) {
+	t.Parallel()
 	env := newMultiStewardEnv(t)
 
 	received := make(chan *types.Event, 1)
@@ -149,6 +151,7 @@ func TestControlChannel_Event_EmptyStewardIDGetsCNStamped(t *testing.T) {
 // payload StewardID disagrees with the authenticated CN is rejected (not
 // dispatched) and increments IdentityMismatches.
 func TestControlChannel_Event_MismatchedStewardID(t *testing.T) {
+	t.Parallel()
 	env := newMultiStewardEnv(t)
 
 	dispatched := make(chan *types.Event, 5)
@@ -182,6 +185,7 @@ func TestControlChannel_Event_MismatchedStewardID(t *testing.T) {
 // TestControlChannel_Heartbeat_MatchingStewardID verifies that a Heartbeat with
 // a matching payload StewardID is dispatched and does not increment mismatches.
 func TestControlChannel_Heartbeat_MatchingStewardID(t *testing.T) {
+	t.Parallel()
 	env := newMultiStewardEnv(t)
 
 	received := make(chan *types.Heartbeat, 1)
@@ -213,6 +217,7 @@ func TestControlChannel_Heartbeat_MatchingStewardID(t *testing.T) {
 // TestControlChannel_Heartbeat_EmptyStewardIDGetsCNStamped verifies that a
 // Heartbeat with an empty payload StewardID is stamped with the authenticated CN.
 func TestControlChannel_Heartbeat_EmptyStewardIDGetsCNStamped(t *testing.T) {
+	t.Parallel()
 	env := newMultiStewardEnv(t)
 
 	received := make(chan *types.Heartbeat, 1)
@@ -244,6 +249,7 @@ func TestControlChannel_Heartbeat_EmptyStewardIDGetsCNStamped(t *testing.T) {
 // TestControlChannel_Heartbeat_MismatchedStewardID verifies that a Heartbeat
 // whose payload StewardID disagrees with the CN is rejected and counted.
 func TestControlChannel_Heartbeat_MismatchedStewardID(t *testing.T) {
+	t.Parallel()
 	env := newMultiStewardEnv(t)
 
 	dispatched := make(chan *types.Heartbeat, 5)
@@ -273,6 +279,7 @@ func TestControlChannel_Heartbeat_MismatchedStewardID(t *testing.T) {
 // TestControlChannel_Response_MatchingStewardID verifies that a Response with a
 // matching payload StewardID is dispatched normally.
 func TestControlChannel_Response_MatchingStewardID(t *testing.T) {
+	t.Parallel()
 	env := newMultiStewardEnv(t)
 
 	// Subscribe to commands and reply so SendResponse is triggered via the
@@ -324,6 +331,7 @@ func TestControlChannel_Response_MatchingStewardID(t *testing.T) {
 // TestControlChannel_Response_EmptyStewardIDGetsCNStamped verifies that a
 // Response with an empty payload StewardID is stamped with the CN.
 func TestControlChannel_Response_EmptyStewardIDGetsCNStamped(t *testing.T) {
+	t.Parallel()
 	env := newMultiStewardEnv(t)
 
 	cmdID := "resp-empty-cmd"
@@ -374,6 +382,7 @@ func TestControlChannel_Response_EmptyStewardIDGetsCNStamped(t *testing.T) {
 // TestControlChannel_Response_MismatchedStewardID verifies that a Response whose
 // payload StewardID disagrees with the CN is rejected and counted.
 func TestControlChannel_Response_MismatchedStewardID(t *testing.T) {
+	t.Parallel()
 	env := newMultiStewardEnv(t)
 
 	cmdID := "resp-mismatch-cmd"
@@ -425,6 +434,7 @@ func TestControlChannel_Response_MismatchedStewardID(t *testing.T) {
 // TestControlChannel_IdentityMismatches_MultipleRejections verifies that after
 // N mismatches, GetStats returns IdentityMismatches == N (tested for N=1 and N=3).
 func TestControlChannel_IdentityMismatches_MultipleRejections(t *testing.T) {
+	t.Parallel()
 	env := newMultiStewardEnv(t)
 
 	dispatched := make(chan *types.Event, 10)
@@ -462,6 +472,7 @@ func TestControlChannel_IdentityMismatches_MultipleRejections(t *testing.T) {
 // TestControlChannel_StreamRemainsOpenAfterMismatch verifies that the stream is
 // not torn down after a single mismatch — a subsequent valid message is dispatched.
 func TestControlChannel_StreamRemainsOpenAfterMismatch(t *testing.T) {
+	t.Parallel()
 	env := newMultiStewardEnv(t)
 
 	dispatched := make(chan *types.Event, 5)
