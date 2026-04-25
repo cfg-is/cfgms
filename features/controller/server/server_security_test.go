@@ -178,6 +178,13 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, server)
+				if server != nil {
+					t.Cleanup(func() {
+						if err := server.Stop(); err != nil {
+							t.Errorf("server.Stop: %v", err)
+						}
+					})
+				}
 
 				// Verify security components are initialized
 				assert.NotNil(t, server.rbacManager)
@@ -269,6 +276,11 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 				assert.NotNil(t, server, "Server should be created with valid provider '%s'", providerInfo.Name)
 
 				if server != nil {
+					t.Cleanup(func() {
+						if err := server.Stop(); err != nil {
+							t.Errorf("server.Stop: %v", err)
+						}
+					})
 					// Verify all storage interfaces are properly initialized
 					assert.NotNil(t, server.rbacManager, "RBAC manager should be initialized with provider '%s'", providerInfo.Name)
 					assert.NotNil(t, server.tenantManager, "Tenant manager should be initialized with provider '%s'", providerInfo.Name)
@@ -427,6 +439,11 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server, err := New(tt.config, logger)
 			require.NoError(t, err)
+			t.Cleanup(func() {
+				if err := server.Stop(); err != nil {
+					t.Errorf("server.Stop: %v", err)
+				}
+			})
 
 			// Run security checks
 			for _, check := range tt.securityChecks {
@@ -583,6 +600,13 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			} else {
 				assert.NoError(t, err, tt.description)
 				assert.NotNil(t, server)
+				if server != nil {
+					t.Cleanup(func() {
+						if err := server.Stop(); err != nil {
+							t.Errorf("server.Stop: %v", err)
+						}
+					})
+				}
 
 				// Validate security components are still initialized
 				assert.NotNil(t, server.rbacManager)
@@ -637,6 +661,7 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 	// Collect results
 	successCount := 0
 	errorCount := 0
+	var createdServers []*Server
 
 	for i := 0; i < numConcurrent; i++ {
 		select {
@@ -644,6 +669,7 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 			assert.NotNil(t, server)
 			assert.NotNil(t, server.rbacManager)
 			successCount++
+			createdServers = append(createdServers, server)
 		case err := <-errors:
 			t.Errorf("Unexpected error in concurrent server creation: %v", err)
 			errorCount++
@@ -654,6 +680,15 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 
 	assert.Equal(t, numConcurrent, successCount)
 	assert.Equal(t, 0, errorCount)
+
+	// Stop all successfully created servers to prevent goroutine leaks.
+	t.Cleanup(func() {
+		for i, s := range createdServers {
+			if err := s.Stop(); err != nil {
+				t.Errorf("server[%d].Stop(): %v", i, err)
+			}
+		}
+	})
 }
 
 func TestServer_RBAC_SecurityIntegration(t *testing.T) {
@@ -676,6 +711,11 @@ func TestServer_RBAC_SecurityIntegration(t *testing.T) {
 	server, err := New(config, logger)
 	require.NoError(t, err)
 	require.NotNil(t, server)
+	t.Cleanup(func() {
+		if err := server.Stop(); err != nil {
+			t.Errorf("server.Stop: %v", err)
+		}
+	})
 
 	// Verify RBAC integration
 	assert.NotNil(t, server.rbacManager)
@@ -744,6 +784,13 @@ func TestServer_NetworkSecurity_And_Binding(t *testing.T) {
 			} else {
 				assert.NoError(t, err, tt.description)
 				assert.NotNil(t, server)
+				if server != nil {
+					t.Cleanup(func() {
+						if err := server.Stop(); err != nil {
+							t.Errorf("server.Stop: %v", err)
+						}
+					})
+				}
 			}
 		})
 	}
@@ -842,6 +889,11 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 			server, err := New(cfg, logger)
 			require.NoError(t, err)
 			require.NotNil(t, server)
+			t.Cleanup(func() {
+				if err := server.Stop(); err != nil {
+					t.Errorf("server.Stop: %v", err)
+				}
+			})
 
 			// Run security checks
 			for _, check := range tt.securityChecks {
@@ -901,10 +953,20 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 	server1, err := New(config1, logger)
 	require.NoError(t, err)
 	require.NotNil(t, server1)
+	t.Cleanup(func() {
+		if err := server1.Stop(); err != nil {
+			t.Errorf("server1.Stop: %v", err)
+		}
+	})
 
 	server2, err := New(config2, logger)
 	require.NoError(t, err)
 	require.NotNil(t, server2)
+	t.Cleanup(func() {
+		if err := server2.Stop(); err != nil {
+			t.Errorf("server2.Stop: %v", err)
+		}
+	})
 
 	// Verify isolation
 	assert.NotEqual(t, server1.cfg.DataDir, server2.cfg.DataDir,
@@ -940,6 +1002,11 @@ func TestServer_DataDirectorySecurity(t *testing.T) {
 	server, err := New(config, logger)
 	require.NoError(t, err)
 	require.NotNil(t, server)
+	t.Cleanup(func() {
+		if err := server.Stop(); err != nil {
+			t.Errorf("server.Stop: %v", err)
+		}
+	})
 
 	// Verify data directory configuration is preserved
 	assert.Equal(t, tempDir, server.cfg.DataDir)
@@ -1018,6 +1085,13 @@ func TestServer_New_LegacyCompatibility(t *testing.T) {
 	srv, err := New(cfg, logger)
 	assert.NoError(t, err, "Server should start with legacy CA (auto-creates marker)")
 	assert.NotNil(t, srv)
+	if srv != nil {
+		t.Cleanup(func() {
+			if err := srv.Stop(); err != nil {
+				t.Errorf("srv.Stop: %v", err)
+			}
+		})
+	}
 
 	// Verify marker was created
 	assert.True(t, initialization.IsInitialized(certDir), "Marker should be auto-created for legacy CA")

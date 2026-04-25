@@ -51,9 +51,9 @@ func setupTestServer(t *testing.T) *Server {
 	err = rbacManager.Initialize(context.Background())
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = rbacManager.FlushAudit(flushCtx)
+		_ = rbacManager.Close(closeCtx)
 	})
 
 	// Initialize tenant management with durable storage (git-backed)
@@ -91,6 +91,13 @@ func setupTestServer(t *testing.T) *Server {
 		auditMgr, // Issue #775: registration audit events
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
+	})
 
 	return server
 }
@@ -849,9 +856,9 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	err = rbacManager.Initialize(context.Background())
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = rbacManager.FlushAudit(flushCtx)
+		_ = rbacManager.Close(closeCtx)
 	})
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
@@ -871,6 +878,13 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 		nil, nil, nil, nil, nil, "", nil, auditMgr,
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
+	})
 
 	return server
 }
@@ -1111,6 +1125,47 @@ func TestAPIServerStartStop(t *testing.T) {
 	// cleanly even if ListenAndServe hasn't bound yet — no sleep required.
 	err = server.Stop()
 	assert.NoError(t, err, "api.Server.Stop() must return no error")
+}
+
+// TestServerClose_Idempotent verifies the Close contract: calling Close more than once
+// must not panic and must return nil on every call (Issue #862).
+func TestServerClose_Idempotent(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	err := server.Close(ctx)
+	assert.NoError(t, err, "first Close must succeed")
+
+	// Second call must be a no-op: no panic, no error.
+	err = server.Close(ctx)
+	assert.NoError(t, err, "second Close must be idempotent and return nil")
+
+	// Third call via Stop (which delegates to Close) must also be safe.
+	err = server.Stop()
+	assert.NoError(t, err, "Stop after Close must be idempotent")
+}
+
+// TestServerClose_CancelledContext verifies that Close with an already-cancelled
+// context does not panic and returns a wrapped context.Canceled error or nil
+// (non-deterministic: the cleanup goroutine may exit before the select checks ctx.Done).
+// What matters is that the server is safely stopped in either case (Issue #862).
+func TestServerClose_CancelledContext(t *testing.T) {
+	server := setupTestServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately before calling Close
+
+	err := server.Close(ctx)
+	// Either nil (goroutine exited via stopCleanup before ctx.Done) or context.Canceled.
+	if err != nil {
+		assert.ErrorIs(t, err, context.Canceled,
+			"non-nil error must wrap context.Canceled, got: %v", err)
+	}
+
+	// Server must be fully stopped regardless of which select arm won.
+	// A subsequent close with a valid context must be a no-op.
+	err2 := server.Close(context.Background())
+	assert.NoError(t, err2, "subsequent Close after cancelled-context Close must be idempotent")
 }
 
 // TestTenantContextKeyType verifies that ctxkeys.TenantID can be retrieved from a context
