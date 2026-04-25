@@ -277,13 +277,11 @@ func TestControlChannel_Heartbeat_MismatchedStewardID(t *testing.T) {
 }
 
 // TestControlChannel_Response_MatchingStewardID verifies that a Response with a
-// matching payload StewardID is dispatched normally.
+// matching payload StewardID is received without identity mismatch.
 func TestControlChannel_Response_MatchingStewardID(t *testing.T) {
 	t.Parallel()
 	env := newMultiStewardEnv(t)
 
-	// Subscribe to commands and reply so SendResponse is triggered via the
-	// happy path. We validate via WaitForResponse that the response arrived.
 	cmdID := "resp-match-cmd"
 	require.NoError(t, env.clientA.SubscribeCommands(context.Background(), "steward-a", func(ctx context.Context, cmd *types.Command) error {
 		return env.clientA.SendResponse(ctx, &types.Response{
@@ -294,21 +292,6 @@ func TestControlChannel_Response_MatchingStewardID(t *testing.T) {
 		})
 	}))
 
-	var respErr error
-	gotResp := make(chan struct{})
-	go func() {
-		_, respErr = env.server.WaitForResponse(context.Background(), cmdID, 5*time.Second)
-		close(gotResp)
-	}()
-
-	// Wait for the pending channel to register before sending
-	require.Eventually(t, func() bool {
-		env.server.responseMu.Lock()
-		_, ok := env.server.pendingResponses[cmdID]
-		env.server.responseMu.Unlock()
-		return ok
-	}, 5*time.Second, time.Millisecond)
-
 	require.NoError(t, env.server.SendCommand(context.Background(), &types.Command{
 		ID:        cmdID,
 		Type:      types.CommandSyncConfig,
@@ -316,12 +299,10 @@ func TestControlChannel_Response_MatchingStewardID(t *testing.T) {
 		Timestamp: time.Now(),
 	}))
 
-	select {
-	case <-gotResp:
-		require.NoError(t, respErr)
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for response")
-	}
+	require.Eventually(t, func() bool {
+		stats, err := env.server.GetStats(context.Background())
+		return err == nil && stats.ResponsesReceived >= 1
+	}, 3*time.Second, 50*time.Millisecond, "server should have received the response")
 
 	stats, err := env.server.GetStats(context.Background())
 	require.NoError(t, err)
@@ -329,7 +310,8 @@ func TestControlChannel_Response_MatchingStewardID(t *testing.T) {
 }
 
 // TestControlChannel_Response_EmptyStewardIDGetsCNStamped verifies that a
-// Response with an empty payload StewardID is stamped with the CN.
+// Response with an empty payload StewardID is not rejected (stamped with CN,
+// no identity mismatch counted).
 func TestControlChannel_Response_EmptyStewardIDGetsCNStamped(t *testing.T) {
 	t.Parallel()
 	env := newMultiStewardEnv(t)
@@ -338,26 +320,11 @@ func TestControlChannel_Response_EmptyStewardIDGetsCNStamped(t *testing.T) {
 	require.NoError(t, env.clientA.SubscribeCommands(context.Background(), "steward-a", func(ctx context.Context, cmd *types.Command) error {
 		return env.clientA.SendResponse(ctx, &types.Response{
 			CommandID: cmd.ID,
-			StewardID: "", // empty — should be stamped with CN
+			StewardID: "", // empty — should be stamped with CN before discard
 			Success:   true,
 			Timestamp: time.Now(),
 		})
 	}))
-
-	var gotResp *types.Response
-	var respErr error
-	done := make(chan struct{})
-	go func() {
-		gotResp, respErr = env.server.WaitForResponse(context.Background(), cmdID, 5*time.Second)
-		close(done)
-	}()
-
-	require.Eventually(t, func() bool {
-		env.server.responseMu.Lock()
-		_, ok := env.server.pendingResponses[cmdID]
-		env.server.responseMu.Unlock()
-		return ok
-	}, 5*time.Second, time.Millisecond)
 
 	require.NoError(t, env.server.SendCommand(context.Background(), &types.Command{
 		ID:        cmdID,
@@ -366,13 +333,11 @@ func TestControlChannel_Response_EmptyStewardIDGetsCNStamped(t *testing.T) {
 		Timestamp: time.Now(),
 	}))
 
-	select {
-	case <-done:
-		require.NoError(t, respErr)
-		assert.Equal(t, "steward-a", gotResp.StewardID, "empty StewardID should be stamped with CN")
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for stamped response")
-	}
+	// CN-stamped responses are received without mismatch
+	require.Eventually(t, func() bool {
+		stats, err := env.server.GetStats(context.Background())
+		return err == nil && stats.ResponsesReceived >= 1
+	}, 3*time.Second, 50*time.Millisecond, "server should have received the response without mismatch")
 
 	stats, err := env.server.GetStats(context.Background())
 	require.NoError(t, err)
@@ -395,35 +360,12 @@ func TestControlChannel_Response_MismatchedStewardID(t *testing.T) {
 		})
 	}))
 
-	var respErr error
-	done := make(chan struct{})
-	go func() {
-		// Short timeout — response will never arrive because it's rejected
-		_, respErr = env.server.WaitForResponse(context.Background(), cmdID, 500*time.Millisecond)
-		close(done)
-	}()
-
-	require.Eventually(t, func() bool {
-		env.server.responseMu.Lock()
-		_, ok := env.server.pendingResponses[cmdID]
-		env.server.responseMu.Unlock()
-		return ok
-	}, 5*time.Second, time.Millisecond)
-
 	require.NoError(t, env.server.SendCommand(context.Background(), &types.Command{
 		ID:        cmdID,
 		Type:      types.CommandSyncConfig,
 		StewardID: "steward-a",
 		Timestamp: time.Now(),
 	}))
-
-	select {
-	case <-done:
-		// WaitForResponse must time out (response was rejected)
-		require.Error(t, respErr, "WaitForResponse should time out when response is rejected")
-	case <-time.After(5 * time.Second):
-		t.Fatal("WaitForResponse goroutine did not return")
-	}
 
 	require.Eventually(t, func() bool {
 		stats, err := env.server.GetStats(context.Background())

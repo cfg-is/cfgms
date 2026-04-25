@@ -58,12 +58,6 @@ func (p *testControlPlane) SubscribeHeartbeats(_ context.Context, handler cpinte
 	p.heartbeatHandler = handler
 	return nil
 }
-func (p *testControlPlane) SendResponse(_ context.Context, _ *controlplaneTypes.Response) error {
-	return nil
-}
-func (p *testControlPlane) WaitForResponse(_ context.Context, _ string, _ time.Duration) (*controlplaneTypes.Response, error) {
-	return nil, nil
-}
 func (p *testControlPlane) GetStats(_ context.Context) (*controlplaneTypes.ControlPlaneStats, error) {
 	return &controlplaneTypes.ControlPlaneStats{}, nil
 }

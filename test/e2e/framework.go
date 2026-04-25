@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneGRPC "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
@@ -45,7 +44,7 @@ type RegisteredSteward struct {
 	StewardID        string
 	TenantID         string
 	Group            string
-	ControlPlane     controlplaneInterfaces.ControlPlaneProvider
+	ControlPlane     *controlplaneGRPC.Provider
 	TransportAddress string
 	ControllerURL    string
 	ClientCert       string

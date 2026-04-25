@@ -62,10 +62,6 @@ func (n *noopControlPlane) SendHeartbeat(_ context.Context, _ *cpTypes.Heartbeat
 func (n *noopControlPlane) SubscribeHeartbeats(_ context.Context, _ controlplaneInterfaces.HeartbeatHandler) error {
 	return nil
 }
-func (n *noopControlPlane) SendResponse(_ context.Context, _ *cpTypes.Response) error { return nil }
-func (n *noopControlPlane) WaitForResponse(_ context.Context, _ string, _ time.Duration) (*cpTypes.Response, error) {
-	return nil, nil
-}
 func (n *noopControlPlane) GetStats(_ context.Context) (*cpTypes.ControlPlaneStats, error) {
 	return &cpTypes.ControlPlaneStats{}, nil
 }
