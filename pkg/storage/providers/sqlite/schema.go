@@ -11,9 +11,85 @@ import (
 
 const currentSchemaVersion = 1
 
+// tableExists reports whether the named table is present in the SQLite catalog.
+func tableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	var count int
+	err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name,
+	).Scan(&count)
+	return count > 0, err
+}
+
+// columnExists reports whether the named column is present in the named table.
+// SQLite PRAGMA statements do not support parameter binding, so the caller
+// must pass only hard-coded, trusted table/column names — never user input.
+func columnExists(ctx context.Context, db *sql.DB, table, column string) (found bool, retErr error) {
+	// #nosec G202 -- PRAGMA does not support ? binding; caller passes only literals.
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		if err := rows.Close(); err != nil && retErr == nil {
+			retErr = err
+		}
+	}()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// backfillAuditEntries adds sequence_number and previous_checksum to a
+// pre-existing audit_entries table that was created without those columns.
+// Fresh databases (table absent) are skipped. Column-existence is checked
+// via PRAGMA before each ALTER TABLE so the pass is fully idempotent without
+// relying on driver-specific error message text.
+func backfillAuditEntries(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "audit_entries")
+	if err != nil {
+		return fmt.Errorf("sqlite: back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	type col struct {
+		name string
+		ddl  string
+	}
+	for _, c := range []col{
+		{"sequence_number", `ALTER TABLE audit_entries ADD COLUMN sequence_number   INTEGER NOT NULL DEFAULT 0`},
+		{"previous_checksum", `ALTER TABLE audit_entries ADD COLUMN previous_checksum TEXT    NOT NULL DEFAULT ''`},
+	} {
+		present, err := columnExists(ctx, db, "audit_entries", c.name)
+		if err != nil {
+			return fmt.Errorf("sqlite: back-fill column probe failed (%s): %w", c.name, err)
+		}
+		if present {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("sqlite: audit_entries back-fill failed: %w\nSQL: %s", err, c.ddl)
+		}
+	}
+	return nil
+}
+
 // initializeSchema creates all tables and tracks schema version.
 // It is safe to call multiple times (all statements use IF NOT EXISTS).
 func initializeSchema(ctx context.Context, db *sql.DB) error {
+	if err := backfillAuditEntries(ctx, db); err != nil {
+		return err
+	}
+
 	statements := []string{
 		// Schema version tracking
 		`CREATE TABLE IF NOT EXISTS schema_version (
