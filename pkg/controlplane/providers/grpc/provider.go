@@ -22,6 +22,7 @@ import (
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 	quicgo "github.com/quic-go/quic-go"
@@ -108,6 +109,7 @@ type Provider struct {
 	responsesReceived  atomic.Int64
 	deliveryFailures   atomic.Int64
 	reconnectAttempts  atomic.Int64
+	identityMismatches atomic.Int64
 
 	// Connection timestamps (protected by mu)
 	lastConnectedAt    time.Time
@@ -880,6 +882,7 @@ func (p *Provider) GetStats(ctx context.Context) (*types.ControlPlaneStats, erro
 		ResponsesSent:      p.responsesSent.Load(),
 		ResponsesReceived:  p.responsesReceived.Load(),
 		DeliveryFailures:   p.deliveryFailures.Load(),
+		IdentityMismatches: p.identityMismatches.Load(),
 		ProviderMetrics:    make(map[string]interface{}),
 	}
 
@@ -1048,7 +1051,10 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 
 	s.provider.logger.Info("steward connected to ControlChannel", "steward_id", stewardID, "remote_addr", p.Addr.String())
 
-	// Receive loop: read messages from steward and dispatch
+	// Receive loop: authenticated-CN-wins contract — the mTLS peer CN is the
+	// authoritative steward identity. Empty payload StewardIDs are stamped with
+	// the CN; mismatched payload StewardIDs are rejected and counted without
+	// tearing down the stream (misconfiguration tolerance per Issue #828).
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
@@ -1061,14 +1067,41 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 		switch payload := msg.GetPayload().(type) {
 		case *transportpb.ControlMessage_Event:
 			event := eventFromProto(payload.Event)
+			if event.StewardID == "" {
+				event.StewardID = stewardID
+			} else if event.StewardID != stewardID {
+				s.provider.logger.Warn("controlchannel event stewardID mismatch",
+					"authenticated_cn", logging.SanitizeLogValue(stewardID),
+					"payload_steward_id", logging.SanitizeLogValue(event.StewardID))
+				s.provider.identityMismatches.Add(1)
+				continue
+			}
 			s.provider.dispatchEvent(event)
 
 		case *transportpb.ControlMessage_Heartbeat:
 			hb := heartbeatFromProto(payload.Heartbeat)
+			if hb.StewardID == "" {
+				hb.StewardID = stewardID
+			} else if hb.StewardID != stewardID {
+				s.provider.logger.Warn("controlchannel heartbeat stewardID mismatch",
+					"authenticated_cn", logging.SanitizeLogValue(stewardID),
+					"payload_steward_id", logging.SanitizeLogValue(hb.StewardID))
+				s.provider.identityMismatches.Add(1)
+				continue
+			}
 			s.provider.dispatchHeartbeat(hb)
 
 		case *transportpb.ControlMessage_Response:
 			resp := responseFromProto(payload.Response)
+			if resp.StewardID == "" {
+				resp.StewardID = stewardID
+			} else if resp.StewardID != stewardID {
+				s.provider.logger.Warn("controlchannel response stewardID mismatch",
+					"authenticated_cn", logging.SanitizeLogValue(stewardID),
+					"payload_steward_id", logging.SanitizeLogValue(resp.StewardID))
+				s.provider.identityMismatches.Add(1)
+				continue
+			}
 			s.provider.dispatchResponse(resp)
 		}
 	}
