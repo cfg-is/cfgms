@@ -5,6 +5,8 @@ package security
 import (
 	"context"
 	"fmt"
+	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -204,7 +206,12 @@ func (ctav *CrossTenantAccessValidator) ValidateCrossTenantAccess(ctx context.Co
 
 		// Check resource filters
 		if len(policy.ResourceFilters) > 0 {
-			if !ctav.validateResourceFilters(policy.ResourceFilters, request.ResourceID) {
+			allowed, err := ctav.validateResourceFilters(policy.ResourceFilters, request.ResourceID)
+			if err != nil {
+				violations = append(violations, fmt.Sprintf("Policy %s resource pattern error: %s", policy.ID, err.Error()))
+				continue
+			}
+			if !allowed {
 				violations = append(violations, fmt.Sprintf("Policy %s resource filter does not match", policy.ID))
 				continue
 			}
@@ -307,6 +314,15 @@ func (ctav *CrossTenantAccessValidator) validateAccessPolicy(ctx context.Context
 func (ctav *CrossTenantAccessValidator) validateTimeRestrictions(restrictions *TimeRestriction) error {
 	now := time.Now()
 
+	// Apply configured timezone; fall back to UTC when unset.
+	if restrictions.Timezone != "" {
+		loc, err := time.LoadLocation(restrictions.Timezone)
+		if err != nil {
+			return fmt.Errorf("invalid timezone %q: %w", restrictions.Timezone, err)
+		}
+		now = now.In(loc)
+	}
+
 	// Check day of week
 	if len(restrictions.AllowedDaysOfWeek) > 0 {
 		currentDay := int(now.Weekday())
@@ -327,7 +343,11 @@ func (ctav *CrossTenantAccessValidator) validateTimeRestrictions(restrictions *T
 		currentTime := now.Format("15:04")
 		allowed := false
 		for _, timeRange := range restrictions.AllowedTimeRanges {
-			if ctav.isTimeInRange(currentTime, timeRange) {
+			inRange, err := ctav.isTimeInRange(currentTime, timeRange)
+			if err != nil {
+				return fmt.Errorf("invalid time range configuration %q: %w", timeRange, err)
+			}
+			if inRange {
 				allowed = true
 				break
 			}
@@ -340,22 +360,26 @@ func (ctav *CrossTenantAccessValidator) validateTimeRestrictions(restrictions *T
 	return nil
 }
 
-// validateResourceFilters validates resource access filters
-func (ctav *CrossTenantAccessValidator) validateResourceFilters(filters []ResourceFilter, resourceID string) bool {
+// validateResourceFilters validates resource access filters.
+// Returns (false, error) when a pattern is syntactically invalid.
+func (ctav *CrossTenantAccessValidator) validateResourceFilters(filters []ResourceFilter, resourceID string) (bool, error) {
 	for _, filter := range filters {
 		for _, pattern := range filter.Patterns {
-			matches := ctav.matchResourcePattern(resourceID, pattern)
+			matches, err := ctav.matchResourcePattern(resourceID, pattern)
+			if err != nil {
+				return false, fmt.Errorf("invalid resource pattern %q: %w", pattern, err)
+			}
 
 			if filter.Type == "include" && matches {
-				return true
+				return true, nil
 			} else if filter.Type == "exclude" && matches {
-				return false
+				return false, nil
 			}
 		}
 	}
 
 	// If no include filters matched and no exclude filters matched, allow by default
-	return true
+	return true, nil
 }
 
 // validateAccessConditions validates additional access conditions
@@ -381,25 +405,74 @@ func (ctav *CrossTenantAccessValidator) validateAccessConditions(conditions []Ac
 			}
 		case "contains":
 			if len(condition.Values) == 0 {
-				return fmt.Errorf("condition %s failed: no values specified", condition.Type)
+				return fmt.Errorf("condition %q on field %q: no values specified", condition.Operator, condition.Type)
 			}
-			// For simplicity, just check if any value is contained in the context value
-			// In production, this would be more sophisticated
+			matched := false
+			for _, v := range condition.Values {
+				if strings.Contains(contextValue, v) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return fmt.Errorf("condition %q on field %q failed: value %q does not contain any of %v", condition.Operator, condition.Type, contextValue, condition.Values)
+			}
 		}
 	}
 
 	return nil
 }
 
-// Helper methods
-func (ctav *CrossTenantAccessValidator) isTimeInRange(currentTime, timeRange string) bool {
-	// Simplified implementation - in production, use proper time parsing
-	return true
+// isTimeInRange reports whether currentTime (format "HH:MM" 24-hour) falls within
+// timeRange (format "HH:MM-HH:MM" 24-hour). When end < start the range is treated
+// as crossing midnight (e.g. "22:00-06:00" includes 23:30 and 03:00).
+// Returns (false, error) when either argument cannot be parsed.
+func (ctav *CrossTenantAccessValidator) isTimeInRange(currentTime, timeRange string) (bool, error) {
+	startStr, endStr, found := strings.Cut(timeRange, "-")
+	if !found {
+		return false, fmt.Errorf("invalid time range %q: expected HH:MM-HH:MM", timeRange)
+	}
+
+	const layout = "15:04"
+	start, err := time.Parse(layout, startStr)
+	if err != nil {
+		return false, fmt.Errorf("invalid start time in range %q: %w", timeRange, err)
+	}
+	end, err := time.Parse(layout, endStr)
+	if err != nil {
+		return false, fmt.Errorf("invalid end time in range %q: %w", timeRange, err)
+	}
+	current, err := time.Parse(layout, currentTime)
+	if err != nil {
+		return false, fmt.Errorf("invalid current time %q: %w", currentTime, err)
+	}
+
+	startMin := start.Hour()*60 + start.Minute()
+	endMin := end.Hour()*60 + end.Minute()
+	curMin := current.Hour()*60 + current.Minute()
+
+	if startMin <= endMin {
+		// Normal same-day range
+		return curMin >= startMin && curMin <= endMin, nil
+	}
+	// Overnight range crosses midnight
+	return curMin >= startMin || curMin <= endMin, nil
 }
 
-func (ctav *CrossTenantAccessValidator) matchResourcePattern(resourceID, pattern string) bool {
-	// Simplified pattern matching - in production, use proper glob/regex matching
-	return true
+// matchResourcePattern reports whether resourceID matches pattern using path.Match
+// semantics. The wildcard * matches any sequence of non-separator characters and does
+// NOT cross a path separator (/). Uses path.Match (not filepath.Match) so that /
+// is always the separator regardless of OS. Returns (false, error) for syntactically
+// invalid patterns.
+func (ctav *CrossTenantAccessValidator) matchResourcePattern(resourceID, pattern string) (bool, error) {
+	if pattern == "" {
+		return false, fmt.Errorf("empty resource pattern")
+	}
+	matched, err := path.Match(pattern, resourceID)
+	if err != nil {
+		return false, fmt.Errorf("invalid resource pattern %q: %w", pattern, err)
+	}
+	return matched, nil
 }
 
 // CrossTenantAccessRequest represents a request for cross-tenant access validation
