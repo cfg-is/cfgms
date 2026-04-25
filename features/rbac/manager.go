@@ -652,6 +652,62 @@ func (m *Manager) DeleteSubject(ctx context.Context, id string) error {
 	return m.store.DeleteSubject(ctx, id)
 }
 
+// ListAllSubjects returns all subjects scoped to a tenant, across all subject types.
+func (m *Manager) ListAllSubjects(ctx context.Context, tenantID string) ([]*common.Subject, error) {
+	return m.store.ListSubjects(ctx, tenantID, common.SubjectType_SUBJECT_TYPE_UNSPECIFIED)
+}
+
+// DeleteSubjectsByTenant removes all subjects scoped to a tenant.
+// Failures on individual deletes are logged and the loop continues (best-effort).
+func (m *Manager) DeleteSubjectsByTenant(ctx context.Context, tenantID string) error {
+	if tenantID == "" {
+		return fmt.Errorf("tenantID must not be empty")
+	}
+	subjects, err := m.ListAllSubjects(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to list subjects for tenant %s: %w", tenantID, err)
+	}
+	for _, subject := range subjects {
+		if delErr := m.DeleteSubject(ctx, subject.Id); delErr != nil {
+			slog.Warn("rbac: failed to delete subject during tenant cascade cleanup",
+				"tenant_id", tenantID,
+				"subject_id", subject.Id,
+				"error", delErr,
+			)
+		}
+	}
+	return nil
+}
+
+// DeleteRolesByTenant removes all non-system roles scoped to a tenant.
+// System roles are global and are never touched by this operation.
+// Failures on individual deletes are logged and the loop continues (best-effort).
+// The context is enriched with a cascade justification required by the M-AUTH-2 sensitive-operation gate.
+func (m *Manager) DeleteRolesByTenant(ctx context.Context, tenantID string) error {
+	if tenantID == "" {
+		return fmt.Errorf("tenantID must not be empty")
+	}
+	roles, err := m.ListRoles(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to list roles for tenant %s: %w", tenantID, err)
+	}
+	ctxWithJustification := WithSensitiveOperationJustification(ctx, "tenant deletion cascade: removing all roles scoped to deleted tenant")
+	for _, role := range roles {
+		// ListRoles includes system roles; never delete those during tenant cleanup.
+		if role.IsSystemRole || role.TenantId != tenantID {
+			continue
+		}
+		if delErr := m.DeleteRole(ctxWithJustification, role.Id); delErr != nil {
+			slog.Warn("rbac: failed to delete role during tenant cascade cleanup",
+				"tenant_id", tenantID,
+				"role_id", role.Id,
+				"error", delErr,
+			)
+		}
+	}
+	return nil
+}
+
 func (m *Manager) GetSubjectRoles(ctx context.Context, subjectID string, tenantID string) ([]*common.Role, error) {
 	return m.store.GetSubjectRoles(ctx, subjectID, tenantID)
 }
