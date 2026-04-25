@@ -413,8 +413,11 @@ func TestRapidDisconnectReconnectCycles(t *testing.T) {
 		}, 30*time.Second, 100*time.Millisecond, "should reconnect after cycle %d", i)
 	}
 
-	// Should have exactly one registry entry (no duplicates)
-	_, ok := reg.Get("steward-rapid")
-	assert.True(t, ok, "steward should be registered")
-	assert.Equal(t, 1, reg.Count(), "should have exactly one registry entry, not duplicates")
+	// Should have exactly one registry entry (no duplicates).
+	// Both conditions are checked atomically inside the closure to avoid a
+	// TOCTOU window between two separate Eventually calls.
+	require.Eventually(t, func() bool {
+		_, ok := reg.Get("steward-rapid")
+		return ok && reg.Count() == 1
+	}, 5*time.Second, 10*time.Millisecond, "steward should be registered with no duplicates")
 }
