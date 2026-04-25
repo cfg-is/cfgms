@@ -16,7 +16,7 @@ import (
 )
 
 func TestBreachDetector_RecordAccess(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -101,7 +101,7 @@ func TestBreachDetector_RecordAccess(t *testing.T) {
 }
 
 func TestBreachDetector_VolumeSpike(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -163,7 +163,7 @@ func TestBreachDetector_VolumeSpike(t *testing.T) {
 }
 
 func TestBreachDetector_FailedLoginDetection(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -210,7 +210,7 @@ func TestBreachDetector_FailedLoginDetection(t *testing.T) {
 }
 
 func TestBreachDetector_NewLocationDetection(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -271,7 +271,7 @@ func TestBreachDetector_NewLocationDetection(t *testing.T) {
 }
 
 func TestBreachDetector_TimePatternDetection(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -329,7 +329,7 @@ func TestBreachDetector_TimePatternDetection(t *testing.T) {
 }
 
 func TestBreachDetector_CredentialStuffingPattern(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -371,7 +371,7 @@ func TestBreachDetector_CredentialStuffingPattern(t *testing.T) {
 }
 
 func TestBreachDetector_AccountTakeoverPattern(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -464,7 +464,7 @@ func TestBreachDetector_AccountTakeoverPattern(t *testing.T) {
 }
 
 func TestBreachDetector_DataExfiltrationPattern(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -524,7 +524,7 @@ func TestBreachDetector_DataExfiltrationPattern(t *testing.T) {
 }
 
 func TestBreachDetector_BotActivityPattern(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -587,7 +587,7 @@ func TestBreachDetector_RiskScoreCalculation(t *testing.T) {
 		t.Skip("Skipping flaky async timing test on Windows in CI")
 	}
 
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -650,7 +650,7 @@ func TestBreachDetector_RiskScoreCalculation(t *testing.T) {
 }
 
 func TestBreachDetector_AlertCallback(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -705,7 +705,7 @@ func TestBreachDetector_AlertCallback(t *testing.T) {
 }
 
 func TestBreachDetector_BaselineEstablishment(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -762,7 +762,7 @@ func TestBreachDetector_BaselineEstablishment(t *testing.T) {
 }
 
 func TestBreachDetector_DeviceFingerprinting(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -808,7 +808,7 @@ func TestBreachDetector_DeviceFingerprinting(t *testing.T) {
 }
 
 func TestBreachDetector_TimePatternAnalysis(t *testing.T) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(t)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
@@ -863,7 +863,7 @@ func TestBreachDetector_TimePatternAnalysis(t *testing.T) {
 
 // Benchmark tests for performance validation
 func BenchmarkBreachDetector_RecordAccess(b *testing.B) {
-	auditLogger := NewTenantSecurityAuditLogger()
+	auditLogger := newTestAuditLogger(b)
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}

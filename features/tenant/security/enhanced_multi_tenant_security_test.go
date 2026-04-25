@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import storage providers for testing
@@ -29,7 +30,14 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, nil)
-	isolationEngine := NewTenantIsolationEngine(tenantManager)
+	securityAuditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "tenant-security-enhanced")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_ = securityAuditMgr.Stop(stopCtx)
+	})
+	isolationEngine := NewTenantIsolationEngine(tenantManager, securityAuditMgr)
 	// Get the audit logger from the isolation engine to ensure we query the same logger that receives events
 	auditLogger := isolationEngine.GetAuditLogger()
 	policyEngine := NewTenantSecurityPolicyEngine(tenantManager, auditLogger, isolationEngine)

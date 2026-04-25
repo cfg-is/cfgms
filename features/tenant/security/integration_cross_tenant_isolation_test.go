@@ -16,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import storage providers for testing
@@ -49,8 +50,15 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
-	auditLogger := NewTenantSecurityAuditLogger()
-	isolationEngine := NewTenantIsolationEngine(tenantManager)
+	securityAuditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "tenant-security-integration")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = securityAuditMgr.Stop(stopCtx)
+	})
+	auditLogger := NewTenantSecurityAuditLogger(securityAuditMgr)
+	isolationEngine := NewTenantIsolationEngine(tenantManager, securityAuditMgr)
 
 	// Create comprehensive tenant hierarchy for integration testing
 	err = setupRealTenantHierarchy(t, ctx, tenantStore, tenantManager)

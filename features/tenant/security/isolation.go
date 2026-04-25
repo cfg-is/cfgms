@@ -11,6 +11,7 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 )
 
 // TenantIsolationEngine enforces strict tenant data isolation
@@ -123,13 +124,14 @@ type TenantAccessResponse struct {
 	ValidationTime time.Time        `json:"validation_time"`
 }
 
-// NewTenantIsolationEngine creates a new tenant isolation engine
-func NewTenantIsolationEngine(tenantManager *tenant.Manager) *TenantIsolationEngine {
+// NewTenantIsolationEngine creates a new tenant isolation engine.
+// auditManager is required; panics on nil (forwarded to NewTenantSecurityAuditLogger).
+func NewTenantIsolationEngine(tenantManager *tenant.Manager, auditManager *audit.Manager) *TenantIsolationEngine {
 	return &TenantIsolationEngine{
 		tenantManager:     tenantManager,
 		isolationRules:    make(map[string]*IsolationRule),
 		accessValidator:   NewCrossTenantAccessValidator(),
-		auditLogger:       NewTenantSecurityAuditLogger(),
+		auditLogger:       NewTenantSecurityAuditLogger(auditManager),
 		vulnerabilities:   make(map[string][]Vulnerability),
 		remediationPlans:  make(map[string]*RemediationPlan),
 		zeroTrustProfiles: make(map[string]*ZeroTrustProfile),
