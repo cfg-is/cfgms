@@ -271,6 +271,34 @@ tr := &business.TimeRange{Start: &lookback}
 failedActions, err := rbacManager.AuditManager().GetFailedActions(ctx, tr, 100)
 ```
 
+## Secret Manager Events (Issue #864)
+
+Secret store, retrieve, rotate, and delete operations in `features/tenant/security.TenantSecretManager`
+are recorded via `pkg/audit.Manager`. Each entry has:
+
+| `AuditEntry` field | Value |
+|---|---|
+| `EventType` | `AuditEventDataModification` (store/rotate/delete) or `AuditEventDataAccess` (retrieve) |
+| `ResourceType` | `"secret"` |
+| `ResourceID` | The secret ID |
+| `UserID` | `SystemUserID` (`"system"`) — operations are initiated by the secret manager itself |
+| `Action` | `"secret.store"`, `"secret.retrieve"`, `"secret.rotate"`, or `"secret.delete"` |
+| `Result` | `AuditResultSuccess` on success; `AuditResultError` on failure |
+| `ErrorCode` | `"SECRET_OP_FAILED"` when result is `AuditResultError` |
+| `Severity` | `AuditSeverityHigh` — all secret operations are sensitive |
+| `Source` | `"tenant_secret_manager"` |
+
+### Migration from TenantSecretAuditEntry (Issue #864)
+
+The former `TenantSecretAuditEntry` was constructed in `auditSecretOperation` and discarded
+(`_ = entry`). All secret-operation audit events now flow through `pkg/audit.Manager` backed
+by durable storage and survive process restarts.
+
+| Old behaviour | Replacement |
+|---|---|
+| `auditSecretOperation` building a local struct and discarding it | `auditManager.RecordEvent` routes the event to the durable audit store |
+| `TenantSecretAuditEntry` struct (still present for in-memory use) | Central `AuditEntry` in the durable store, queryable via `Manager.QueryEntries` |
+
 ### Migration from rbac.AuditLogger (Issue #768)
 
 The former `rbac.AuditLogger` in-memory store and its associated types

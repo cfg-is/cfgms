@@ -9,6 +9,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 func TestTenantSecretManager_StoreSecret(t *testing.T) {
@@ -25,7 +31,7 @@ func TestTenantSecretManager_StoreSecret(t *testing.T) {
 		},
 	}
 
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -149,7 +155,7 @@ func TestTenantSecretManager_RetrieveSecret(t *testing.T) {
 		},
 	}
 
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -205,7 +211,7 @@ func TestTenantSecretManager_EncryptDecryptCycle(t *testing.T) {
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil)
 	ctx := context.Background()
 
 	// Test data
@@ -246,7 +252,7 @@ func TestTenantSecretManager_KeyRotation(t *testing.T) {
 		},
 	}
 
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil)
 	ctx := context.Background()
 
 	tenantID := "test-tenant-id"
@@ -276,7 +282,7 @@ func TestTenantSecretManager_KeyRotationNeeded(t *testing.T) {
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil)
 	ctx := context.Background()
 
 	tenantID := "test-tenant-123"
@@ -330,7 +336,7 @@ func TestTenantSecretManager_DeleteSecret(t *testing.T) {
 		},
 	}
 
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -393,7 +399,7 @@ func TestTenantSecretManager_ListSecrets(t *testing.T) {
 		},
 	}
 
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -455,7 +461,7 @@ func TestTenantSecretManager_ValidateSecretRequest(t *testing.T) {
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil)
 
 	tests := []struct {
 		name    string
@@ -524,7 +530,7 @@ func TestTenantSecretManager_GenerateSecretID(t *testing.T) {
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil)
 
 	// Generate multiple IDs and ensure they are unique
 	ids := make(map[string]bool)
@@ -542,15 +548,22 @@ func BenchmarkTenantSecretManager_EncryptData(b *testing.B) {
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil)
 	ctx := context.Background()
 
-	key, _ := tsm.getTenantEncryptionKey(ctx, "bench-tenant")
+	key, err := tsm.getTenantEncryptionKey(ctx, "bench-tenant")
+	if err != nil {
+		b.Fatal(err)
+	}
 	data := []byte("benchmark-secret-data-for-encryption-testing")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = tsm.encryptData(data, key)
+		out, err := tsm.encryptData(data, key)
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = out
 	}
 }
 
@@ -558,15 +571,200 @@ func BenchmarkTenantSecretManager_DecryptData(b *testing.B) {
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil)
 	ctx := context.Background()
 
-	key, _ := tsm.getTenantEncryptionKey(ctx, "bench-tenant")
+	key, err := tsm.getTenantEncryptionKey(ctx, "bench-tenant")
+	if err != nil {
+		b.Fatal(err)
+	}
 	data := []byte("benchmark-secret-data-for-decryption-testing")
-	encryptedData, _ := tsm.encryptData(data, key)
+	encryptedData, err := tsm.encryptData(data, key)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = tsm.decryptData(encryptedData, key)
+		out, err := tsm.decryptData(encryptedData, key)
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = out
 	}
+}
+
+// TestTenantSecretManager_AuditIntegration verifies that secret operations produce
+// durable audit entries in the central pkg/audit.Manager store.
+func TestTenantSecretManager_AuditIntegration(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "tenant_secret_manager")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = auditMgr.Stop(ctx)
+	})
+
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
+	isolationEngine := &TenantIsolationEngine{
+		isolationRules: map[string]*IsolationRule{
+			tenantID: {
+				TenantID: tenantID,
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: true,
+				},
+			},
+			"unauthorized-tenant": {
+				TenantID: "unauthorized-tenant",
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: false,
+					RestrictedResources:  []string{"secrets"},
+				},
+			},
+		},
+	}
+
+	tsm := NewTenantSecretManager(isolationEngine, auditMgr)
+	ctx := context.Background()
+
+	flushAudit := func(t *testing.T) {
+		t.Helper()
+		fCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		require.NoError(t, auditMgr.Flush(fCtx))
+	}
+
+	t.Run("StoreSecret produces audit entry with correct fields", func(t *testing.T) {
+		resp, err := tsm.StoreSecret(ctx, &SecretRequest{
+			TenantID:   tenantID,
+			Name:       "audit-test-key",
+			SecretType: SecretTypeAPIKey,
+			Data:       []byte("super-secret-value"),
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp.Error)
+		secretID := resp.Secret.ID
+
+		flushAudit(t)
+		entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+			TenantID:      tenantID,
+			Actions:       []string{"secret.store"},
+			ResourceTypes: []string{"secret"},
+			ResourceIDs:   []string{secretID},
+			Limit:         10,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+
+		e := entries[0]
+		assert.Equal(t, tenantID, e.TenantID)
+		assert.Equal(t, "secret.store", e.Action)
+		assert.Equal(t, "secret", e.ResourceType)
+		assert.Equal(t, secretID, e.ResourceID)
+		assert.Equal(t, business.AuditResultSuccess, e.Result)
+		assert.Equal(t, "tenant_secret_manager", e.Source)
+	})
+
+	t.Run("RetrieveSecret produces audit entry with correct fields", func(t *testing.T) {
+		secretID := "retrieve-audit-test"
+		_, err := tsm.RetrieveSecret(ctx, tenantID, secretID)
+		require.NoError(t, err)
+
+		flushAudit(t)
+		entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+			TenantID:      tenantID,
+			Actions:       []string{"secret.retrieve"},
+			ResourceTypes: []string{"secret"},
+			ResourceIDs:   []string{secretID},
+			Limit:         10,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+
+		e := entries[0]
+		assert.Equal(t, tenantID, e.TenantID)
+		assert.Equal(t, "secret.retrieve", e.Action)
+		assert.Equal(t, "secret", e.ResourceType)
+		assert.Equal(t, secretID, e.ResourceID)
+		assert.Equal(t, business.AuditResultSuccess, e.Result)
+	})
+
+	t.Run("RotateSecret produces audit entry with correct fields", func(t *testing.T) {
+		secretID := "rotate-audit-test"
+		_, err := tsm.RotateSecret(ctx, tenantID, secretID, []byte("new-rotated-value"))
+		require.NoError(t, err)
+
+		flushAudit(t)
+		entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+			TenantID:      tenantID,
+			Actions:       []string{"secret.rotate"},
+			ResourceTypes: []string{"secret"},
+			ResourceIDs:   []string{secretID},
+			Limit:         10,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+
+		e := entries[0]
+		assert.Equal(t, tenantID, e.TenantID)
+		assert.Equal(t, "secret.rotate", e.Action)
+		assert.Equal(t, "secret", e.ResourceType)
+		assert.Equal(t, secretID, e.ResourceID)
+		assert.Equal(t, business.AuditResultSuccess, e.Result)
+	})
+
+	t.Run("Failed RetrieveSecret produces error audit entry", func(t *testing.T) {
+		secretID := "denied-retrieve-test"
+		resp, err := tsm.RetrieveSecret(ctx, "unauthorized-tenant", secretID)
+		require.NoError(t, err)
+		assert.NotEmpty(t, resp.Error)
+
+		flushAudit(t)
+		entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+			TenantID:      "unauthorized-tenant",
+			Actions:       []string{"secret.retrieve"},
+			ResourceTypes: []string{"secret"},
+			ResourceIDs:   []string{secretID},
+			Results:       []business.AuditResult{business.AuditResultError},
+			Limit:         10,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+
+		e := entries[0]
+		assert.Equal(t, "unauthorized-tenant", e.TenantID)
+		assert.Equal(t, business.AuditResultError, e.Result)
+		assert.Equal(t, "SECRET_OP_FAILED", e.ErrorCode)
+	})
+
+	t.Run("DeleteSecret produces audit entry with correct fields", func(t *testing.T) {
+		secretID := "delete-audit-test"
+		err := tsm.DeleteSecret(ctx, tenantID, secretID)
+		require.NoError(t, err)
+
+		flushAudit(t)
+		entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+			TenantID:      tenantID,
+			Actions:       []string{"secret.delete"},
+			ResourceTypes: []string{"secret"},
+			ResourceIDs:   []string{secretID},
+			Limit:         10,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+
+		e := entries[0]
+		assert.Equal(t, tenantID, e.TenantID)
+		assert.Equal(t, "secret.delete", e.Action)
+		assert.Equal(t, "secret", e.ResourceType)
+		assert.Equal(t, secretID, e.ResourceID)
+		assert.Equal(t, business.AuditResultSuccess, e.Result)
+	})
 }

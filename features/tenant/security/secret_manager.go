@@ -11,10 +11,13 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/security"
+	"github.com/cfgis/cfgms/pkg/audit"
+	pkgsecurity "github.com/cfgis/cfgms/pkg/security"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // TenantSecretManager provides encrypted storage and management of tenant-specific secrets
@@ -22,7 +25,9 @@ type TenantSecretManager struct {
 	isolationEngine *TenantIsolationEngine
 	keyCache        map[string]*tenantEncryptionKey
 	keyMutex        sync.RWMutex
-	validator       *security.Validator
+	validator       *pkgsecurity.Validator
+	auditManager    *audit.Manager
+	logger          *slog.Logger
 }
 
 // tenantEncryptionKey represents an encryption key for a specific tenant
@@ -98,13 +103,17 @@ type TenantSecretAuditEntry struct {
 	UserAgent string    `json:"user_agent,omitempty"`
 }
 
-// NewTenantSecretManager creates a new tenant secret manager
-func NewTenantSecretManager(isolationEngine *TenantIsolationEngine) *TenantSecretManager {
+// NewTenantSecretManager creates a new tenant secret manager.
+// auditManager may be nil, in which case secret operations are not persisted
+// to the durable audit store (observable via a log warning on each operation).
+func NewTenantSecretManager(isolationEngine *TenantIsolationEngine, auditManager *audit.Manager) *TenantSecretManager {
 	return &TenantSecretManager{
 		isolationEngine: isolationEngine,
 		keyCache:        make(map[string]*tenantEncryptionKey),
 		keyMutex:        sync.RWMutex{},
-		validator:       security.NewValidator(),
+		validator:       pkgsecurity.NewValidator(),
+		auditManager:    auditManager,
+		logger:          slog.Default().With("component", "tenant_secret_manager"),
 	}
 }
 
@@ -398,7 +407,7 @@ func (tsm *TenantSecretManager) decryptData(encryptedData string, key *tenantEnc
 
 // validateSecretRequest validates a secret storage request
 func (tsm *TenantSecretManager) validateSecretRequest(request *SecretRequest) error {
-	result := &security.ValidationResult{Valid: true}
+	result := &pkgsecurity.ValidationResult{Valid: true}
 
 	// Validate tenant ID
 	tsm.validator.ValidateString(result, "tenant_id", request.TenantID, "required", "uuid")
@@ -463,20 +472,43 @@ func (tsm *TenantSecretManager) generateSecretID() string {
 	return fmt.Sprintf("secret_%x", hash[:16])
 }
 
-// auditSecretOperation logs secret management operations for audit purposes
+// auditSecretOperation routes secret management operations through the central audit manager.
+// Audit failures are logged but never propagate to the caller — secret operations must not
+// be blocked by a slow or unavailable audit store.
 func (tsm *TenantSecretManager) auditSecretOperation(ctx context.Context, tenantID, secretID, operation string, success bool, errorMsg string) {
-	entry := &TenantSecretAuditEntry{
-		ID:        tsm.generateSecretID(),
-		TenantID:  tenantID,
-		SecretID:  secretID,
-		Operation: operation,
-		Success:   success,
-		Error:     errorMsg,
-		Timestamp: time.Now(),
+	if tsm.auditManager == nil {
+		tsm.logger.Warn("audit manager not configured; secret operation not persisted to audit store",
+			"tenant_id", tenantID,
+			"operation", operation,
+		)
+		return
 	}
 
-	// In real implementation, this would be sent to audit logging system
-	_ = entry
+	eventType := business.AuditEventDataModification
+	if operation == "retrieve" {
+		eventType = business.AuditEventDataAccess
+	}
+
+	event := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(eventType).
+		Action("secret."+operation).
+		User(audit.SystemUserID, business.AuditUserTypeSystem).
+		Resource("secret", secretID, "").
+		Severity(business.AuditSeverityHigh)
+
+	if !success && errorMsg != "" {
+		event = event.Error("SECRET_OP_FAILED", errorMsg)
+	}
+
+	if err := tsm.auditManager.RecordEvent(ctx, event); err != nil {
+		tsm.logger.Warn("failed to record secret operation audit event",
+			"error", err,
+			"tenant_id", tenantID,
+			"operation", operation,
+			"secret_id", secretID,
+		)
+	}
 }
 
 // ListSecrets returns a list of secrets for a tenant (metadata only, no secret data)
