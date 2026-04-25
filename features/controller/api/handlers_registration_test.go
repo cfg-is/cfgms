@@ -58,14 +58,20 @@ func (c *controlledConsumeStore) ConsumeToken(ctx context.Context, tokenStr, ste
 
 // newHandleRegisterServer creates a minimal server for handleRegister unit tests.
 // Pass a non-nil certMgr only when you need the handler to reach cert generation (200 path).
+// Pass a non-nil logger to capture log output in tests; defaults to NoopLogger.
 // Returns the server and the audit manager so tests can Flush and query audit entries.
-func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMgr *cert.Manager) (*Server, *audit.Manager) {
+func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMgr *cert.Manager, loggers ...logging.Logger) (*Server, *audit.Manager) {
 	t.Helper()
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
 
-	logger := logging.NewNoopLogger()
+	var logger logging.Logger
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	} else {
+		logger = logging.NewNoopLogger()
+	}
 	tempDir := t.TempDir()
 
 	storageManager, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
@@ -455,10 +461,8 @@ func (l *kvCapturingLogger) warnKVContains(v string) bool {
 // warn path logs only a truncated token_prefix (max 8 chars) and never the full token value.
 func TestHandleRegister_RevokedToken_LogsTokenPrefixNotFullToken(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
-	server, _ := newHandleRegisterServer(t, tokenStore, nil)
-
 	capLogger := &kvCapturingLogger{}
-	server.logger = capLogger
+	server, _ := newHandleRegisterServer(t, tokenStore, nil, capLogger)
 
 	fullToken := "cfgms_reg_revoked_loggingtest_12345"
 	revokedAt := time.Now().Add(-time.Hour)
@@ -488,10 +492,8 @@ func TestHandleRegister_RevokedToken_LogsTokenPrefixNotFullToken(t *testing.T) {
 // warn path logs only a truncated token_prefix (max 8 chars) and never the full token value.
 func TestHandleRegister_ExpiredToken_LogsTokenPrefixNotFullToken(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
-	server, _ := newHandleRegisterServer(t, tokenStore, nil)
-
 	capLogger := &kvCapturingLogger{}
-	server.logger = capLogger
+	server, _ := newHandleRegisterServer(t, tokenStore, nil, capLogger)
 
 	fullToken := "cfgms_reg_expired_loggingtest_12345"
 	pastExpiry := time.Now().Add(-time.Hour)

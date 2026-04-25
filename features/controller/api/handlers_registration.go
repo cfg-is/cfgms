@@ -98,7 +98,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Check if token is revoked
 	if token.Revoked {
-		s.logger.Warn("Attempted use of revoked token", "token_prefix", req.Token[:min(len(req.Token), 8)])
+		s.logger.Warn("Attempted use of revoked token", "token_prefix", logging.SanitizeLogValue(req.Token[:min(len(req.Token), 8)]))
 		s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, "unknown",
 			business.AuditEventSecurityEvent, "registration_rejected",
 			business.AuditResultFailure, business.AuditSeverityCritical, nil)
@@ -108,7 +108,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Check if token is expired
 	if token.ExpiresAt != nil && token.ExpiresAt.Before(time.Now()) {
-		s.logger.Warn("Attempted use of expired token", "token_prefix", req.Token[:min(len(req.Token), 8)], "expired_at", token.ExpiresAt)
+		s.logger.Warn("Attempted use of expired token", "token_prefix", logging.SanitizeLogValue(req.Token[:min(len(req.Token), 8)]), "expired_at", token.ExpiresAt)
 		s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, "unknown",
 			business.AuditEventSecurityEvent, "registration_rejected",
 			business.AuditResultFailure, business.AuditSeverityCritical, nil)
