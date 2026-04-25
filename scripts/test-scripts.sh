@@ -385,6 +385,70 @@ HOOKEOF
     rm -rf "$tmp_dir"
 }
 
+# Test 11: create-clone refuses dispatch when an open PR already fixes the issue
+test_create_clone_duplicate_pr_gate() {
+    log_test "Testing create-clone refuses dispatch when open PR already fixes the issue..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local remote_dir="${tmp_dir}/remote.git"
+    local host_dir="${tmp_dir}/host"
+    local worktree_dir="${tmp_dir}/worktrees"
+    local story_num="99995"
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    git init --bare -b develop "$remote_dir" >/dev/null 2>&1
+    git init -b develop "$host_dir" >/dev/null 2>&1
+    git -C "$host_dir" config user.email "test@test.com"
+    git -C "$host_dir" config user.name "Test"
+    git -C "$host_dir" remote add origin "$remote_dir"
+    git -C "$host_dir" commit --allow-empty -m "initial commit" >/dev/null 2>&1
+    git -C "$host_dir" push origin develop >/dev/null 2>&1
+
+    mkdir -p "$worktree_dir"
+
+    # Canned "open PR 777 fixes 99995" — gate must refuse and exit 2
+    local mock_output="OPEN_PR_EXISTS:${story_num}:777:duplicate work for issue ${story_num}"
+    local output exit_code=0
+    output=$(CFGMS_TEST_REPO_ROOT="$host_dir" CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+        CFGMS_TEST_MOCK_EXISTING_PRS="$mock_output" \
+        bash "$dispatch_script" create-clone "$story_num" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "create-clone: Exits 2 when open PR already references the issue"
+    else
+        log_fail "create-clone: Expected exit 2 when duplicate PR exists, got ${exit_code} (output: ${output})"
+    fi
+
+    if echo "$output" | grep -q "Open PR(s) already reference issue #${story_num}"; then
+        log_pass "create-clone: Prints clear duplicate-PR refusal message"
+    else
+        log_fail "create-clone: Missing duplicate-PR refusal message (output: ${output})"
+    fi
+
+    if [[ ! -d "${worktree_dir}/story-${story_num}" ]]; then
+        log_pass "create-clone: Clone directory not created when duplicate PR gate trips"
+    else
+        log_fail "create-clone: Clone directory was created despite duplicate PR gate"
+        rm -rf "${worktree_dir}/story-${story_num}"
+    fi
+
+    # --allow-duplicate-pr override must bypass the gate and proceed with the clone
+    exit_code=0
+    output=$(CFGMS_TEST_REPO_ROOT="$host_dir" CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+        CFGMS_TEST_MOCK_EXISTING_PRS="$mock_output" \
+        bash "$dispatch_script" create-clone --allow-duplicate-pr "$story_num" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "create-clone --allow-duplicate-pr: Overrides gate and proceeds"
+    else
+        log_fail "create-clone --allow-duplicate-pr: Should succeed despite open PR (exit ${exit_code}, output: ${output})"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
 # Main execution
 echo "🔍 Script Validation Test Suite"
 echo "================================"
@@ -410,6 +474,8 @@ echo ""
 test_create_clone_keep_remote
 echo ""
 test_create_clone_deletion_failure
+echo ""
+test_create_clone_duplicate_pr_gate
 echo ""
 echo ""
 echo "📊 Test Summary"
