@@ -528,3 +528,143 @@ func TestManager_InactiveSubjectPermissions(t *testing.T) {
 	assert.False(t, response.Granted)
 	assert.Contains(t, response.Reason, "inactive")
 }
+
+func TestManager_ListAllSubjects(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
+	ctx := context.Background()
+
+	require.NoError(t, manager.Initialize(ctx))
+
+	tenantID := "list-all-subjects-tenant"
+
+	subjects := []*common.Subject{
+		{Id: "user-1", Type: common.SubjectType_SUBJECT_TYPE_USER, TenantId: tenantID, IsActive: true},
+		{Id: "svc-1", Type: common.SubjectType_SUBJECT_TYPE_SERVICE, TenantId: tenantID, IsActive: true},
+		{Id: "steward-1", Type: common.SubjectType_SUBJECT_TYPE_STEWARD, TenantId: tenantID, IsActive: true},
+		{Id: "other-tenant-user", Type: common.SubjectType_SUBJECT_TYPE_USER, TenantId: "other-tenant", IsActive: true},
+	}
+	for _, s := range subjects {
+		require.NoError(t, manager.CreateSubject(ctx, s))
+	}
+
+	all, err := manager.ListAllSubjects(ctx, tenantID)
+	require.NoError(t, err)
+	assert.Len(t, all, 3, "expected only subjects scoped to the tenant")
+
+	ids := make([]string, len(all))
+	for i, s := range all {
+		ids[i] = s.Id
+	}
+	assert.ElementsMatch(t, []string{"user-1", "svc-1", "steward-1"}, ids)
+}
+
+func TestManager_DeleteSubjectsByTenant(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
+	ctx := context.Background()
+
+	require.NoError(t, manager.Initialize(ctx))
+
+	tenantID := "delete-subjects-tenant"
+	otherTenantID := "other-tenant"
+
+	for _, s := range []*common.Subject{
+		{Id: "subj-a", Type: common.SubjectType_SUBJECT_TYPE_USER, TenantId: tenantID, IsActive: true},
+		{Id: "subj-b", Type: common.SubjectType_SUBJECT_TYPE_SERVICE, TenantId: tenantID, IsActive: true},
+		{Id: "subj-other", Type: common.SubjectType_SUBJECT_TYPE_USER, TenantId: otherTenantID, IsActive: true},
+	} {
+		require.NoError(t, manager.CreateSubject(ctx, s))
+	}
+
+	err = manager.DeleteSubjectsByTenant(ctx, tenantID)
+	require.NoError(t, err)
+
+	remaining, err := manager.ListAllSubjects(ctx, tenantID)
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "expected no subjects for deleted tenant")
+
+	// Other tenant's subjects must be untouched
+	others, err := manager.ListAllSubjects(ctx, otherTenantID)
+	require.NoError(t, err)
+	assert.Len(t, others, 1)
+}
+
+func TestManager_DeleteRolesByTenant(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
+	ctx := context.Background()
+
+	require.NoError(t, manager.Initialize(ctx))
+
+	tenantID := "delete-roles-tenant"
+	otherTenantID := "other-roles-tenant"
+
+	for _, r := range []*common.Role{
+		{Id: tenantID + ".role-a", Name: "Role A", TenantId: tenantID},
+		{Id: tenantID + ".role-b", Name: "Role B", TenantId: tenantID},
+		{Id: otherTenantID + ".role-x", Name: "Role X", TenantId: otherTenantID},
+	} {
+		require.NoError(t, manager.CreateRole(ctx, r))
+	}
+
+	err = manager.DeleteRolesByTenant(ctx, tenantID)
+	require.NoError(t, err)
+
+	// ListRoles includes system roles; verify only tenant-scoped roles are gone
+	all, err := manager.ListRoles(ctx, tenantID)
+	require.NoError(t, err)
+	for _, r := range all {
+		assert.NotEqual(t, tenantID, r.TenantId, "tenant-scoped role should have been deleted: %s", r.Id)
+	}
+
+	// Verify individual roles are gone
+	_, err = manager.GetRole(ctx, tenantID+".role-a")
+	assert.Error(t, err, "role-a should not exist after DeleteRolesByTenant")
+	_, err = manager.GetRole(ctx, tenantID+".role-b")
+	assert.Error(t, err, "role-b should not exist after DeleteRolesByTenant")
+
+	// Other tenant's role must be untouched
+	otherRole, err := manager.GetRole(ctx, otherTenantID+".role-x")
+	require.NoError(t, err)
+	assert.Equal(t, otherTenantID, otherRole.TenantId)
+}

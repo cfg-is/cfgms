@@ -12,8 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgmstesting "github.com/cfgis/cfgms/pkg/testing"
 
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
@@ -517,4 +519,98 @@ func TestManager_IsTenantAncestor(t *testing.T) {
 	isAncestor, err = manager.IsTenantAncestor(ctx, child.ID, parent.ID)
 	require.NoError(t, err)
 	assert.False(t, isAncestor)
+}
+
+// setupRealTenantManager creates a Manager backed by real SQLite storage for cascade tests.
+func setupRealTenantManager(t *testing.T, rbacManager *rbac.Manager) *Manager {
+	t.Helper()
+	storageManager := cfgmstesting.SetupTestStorage(t)
+	tenantStore := NewStorageAdapter(storageManager.GetTenantStore())
+	return NewManager(tenantStore, rbacManager)
+}
+
+func TestDeleteTenant_CascadesRBACCleanup(t *testing.T) {
+	rbacManager := cfgmstesting.SetupTestRBACManager(t)
+	manager := setupRealTenantManager(t, rbacManager)
+	ctx := context.Background()
+
+	// Create a tenant — this also calls CreateTenantDefaultRoles (in-memory only)
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "RBACCleanupTenant"})
+	require.NoError(t, err)
+	tenantID := tenant.ID
+
+	// Explicitly create a persisted role and two subjects for this tenant
+	role := &common.Role{
+		Id:       tenantID + ".custom-role",
+		Name:     "Custom Role",
+		TenantId: tenantID,
+	}
+	require.NoError(t, rbacManager.CreateRole(ctx, role))
+
+	for _, s := range []*common.Subject{
+		{Id: "user-" + tenantID, Type: common.SubjectType_SUBJECT_TYPE_USER, TenantId: tenantID, IsActive: true},
+		{Id: "svc-" + tenantID, Type: common.SubjectType_SUBJECT_TYPE_SERVICE, TenantId: tenantID, IsActive: true},
+	} {
+		require.NoError(t, rbacManager.CreateSubject(ctx, s))
+	}
+
+	// Verify the persisted role and subjects exist before deletion
+	_, err = rbacManager.GetRole(ctx, role.Id)
+	require.NoError(t, err, "custom role must exist before deletion")
+
+	subjectsBefore, err := rbacManager.ListAllSubjects(ctx, tenantID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, subjectsBefore, "expected subjects before tenant deletion")
+
+	// Delete the tenant — must cascade RBAC cleanup
+	require.NoError(t, manager.DeleteTenant(ctx, tenantID))
+
+	// Persisted role must be gone
+	_, err = rbacManager.GetRole(ctx, role.Id)
+	assert.Error(t, err, "custom role should not exist after tenant deletion")
+
+	// No subjects must remain for this tenant
+	subjectsAfter, err := rbacManager.ListAllSubjects(ctx, tenantID)
+	require.NoError(t, err)
+	assert.Empty(t, subjectsAfter, "expected no subjects after tenant deletion")
+
+	// No tenant-scoped roles must remain (ListRoles also returns system roles; skip those)
+	rolesAfter, err := rbacManager.ListRoles(ctx, tenantID)
+	require.NoError(t, err)
+	for _, r := range rolesAfter {
+		assert.NotEqual(t, tenantID, r.TenantId, "tenant-scoped role should have been deleted: %s", r.Id)
+	}
+}
+
+func TestDeleteTenant_CascadesRBACCleanup_NilRBACManager(t *testing.T) {
+	// Manager with nil rbacManager — must not panic, must succeed
+	manager := setupRealTenantManager(t, nil)
+	ctx := context.Background()
+
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "NoRBACTenant"})
+	require.NoError(t, err)
+
+	require.NoError(t, manager.DeleteTenant(ctx, tenant.ID))
+}
+
+// TestDeleteTenant_CascadesRBACCleanup_PartialFailureContinues verifies that
+// DeleteTenant returns nil even when individual RBAC cascade deletions encounter
+// errors. CreateTenant loads default tenant roles into the in-memory RBAC store
+// without persisting them to durable storage. The cascade deletes them from
+// in-memory but the durable delete fails; the warning is logged and the tenant
+// deletion proceeds successfully.
+func TestDeleteTenant_CascadesRBACCleanup_PartialFailureContinues(t *testing.T) {
+	rbacManager := cfgmstesting.SetupTestRBACManager(t)
+	manager := setupRealTenantManager(t, rbacManager)
+	ctx := context.Background()
+
+	// CreateTenant triggers CreateTenantDefaultRoles which loads roles into the
+	// in-memory store only (not the durable RBAC store). The cascade will
+	// encounter "role not found" errors from the durable layer — those must be
+	// logged as warnings, not returned as failures.
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "PartialFailureTenant"})
+	require.NoError(t, err)
+
+	// DeleteTenant must return nil despite individual cascade errors
+	require.NoError(t, manager.DeleteTenant(ctx, tenant.ID))
 }

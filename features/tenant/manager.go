@@ -5,6 +5,7 @@ package tenant
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"time"
 
@@ -108,6 +109,24 @@ func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
 	}
 	if len(children) > 0 {
 		return ErrTenantHasChildren
+	}
+
+	// Cascade RBAC cleanup: remove subjects then roles scoped to this tenant.
+	// Subjects first — they reference roles. Both loops are best-effort: a single
+	// child failure is logged and the cascade continues rather than aborting.
+	if m.rbacManager != nil {
+		if err := m.rbacManager.DeleteSubjectsByTenant(ctx, tenantID); err != nil {
+			slog.Warn("tenant: failed to list subjects for RBAC cascade cleanup",
+				"tenant_id", tenantID,
+				"error", err,
+			)
+		}
+		if err := m.rbacManager.DeleteRolesByTenant(ctx, tenantID); err != nil {
+			slog.Warn("tenant: failed to list roles for RBAC cascade cleanup",
+				"tenant_id", tenantID,
+				"error", err,
+			)
+		}
 	}
 
 	// Delete the tenant (soft delete)
