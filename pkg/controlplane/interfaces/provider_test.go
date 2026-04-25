@@ -5,7 +5,6 @@ package interfaces
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/stretchr/testify/assert"
@@ -76,14 +75,6 @@ func (m *mockProvider) SendHeartbeat(ctx context.Context, heartbeat *types.Heart
 
 func (m *mockProvider) SubscribeHeartbeats(ctx context.Context, handler HeartbeatHandler) error {
 	return nil
-}
-
-func (m *mockProvider) SendResponse(ctx context.Context, response *types.Response) error {
-	return nil
-}
-
-func (m *mockProvider) WaitForResponse(ctx context.Context, commandID string, timeout time.Duration) (*types.Response, error) {
-	return nil, nil
 }
 
 func (m *mockProvider) GetStats(ctx context.Context) (*types.ControlPlaneStats, error) {

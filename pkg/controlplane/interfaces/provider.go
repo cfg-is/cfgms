@@ -8,7 +8,6 @@ package interfaces
 
 import (
 	"context"
-	"time"
 
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 )
@@ -18,6 +17,8 @@ import (
 // The control plane is responsible for command/event/heartbeat communication
 // between controllers and stewards. It provides semantic methods that hide
 // transport-specific details like topics, QoS levels, and subscriptions.
+// SendResponse is not part of this interface — it lives on the concrete
+// *grpc.Provider to prevent cross-steward response injection (epic #747).
 //
 // Implementations must be thread-safe and support concurrent operations.
 type ControlPlaneProvider interface {
@@ -106,22 +107,6 @@ type ControlPlaneProvider interface {
 	// The handler is called for each heartbeat received. Use this to
 	// detect steward connectivity and health status changes.
 	SubscribeHeartbeats(ctx context.Context, handler HeartbeatHandler) error
-
-	// =================================================================
-	// Responses (Steward → Controller, synchronous acknowledgment)
-	// =================================================================
-
-	// SendResponse sends a command response/acknowledgment (steward-side)
-	//
-	// Responses provide immediate feedback about command acceptance/rejection,
-	// distinct from Events which provide asynchronous progress updates.
-	SendResponse(ctx context.Context, response *types.Response) error
-
-	// WaitForResponse waits for a command response with timeout (controller-side)
-	//
-	// Blocks until a response is received for the given commandID or the
-	// context/timeout expires. Returns error if timeout occurs.
-	WaitForResponse(ctx context.Context, commandID string, timeout time.Duration) (*types.Response, error)
 
 	// =================================================================
 	// Status & Monitoring

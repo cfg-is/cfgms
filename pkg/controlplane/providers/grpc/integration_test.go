@@ -242,66 +242,6 @@ func TestStewardSendsHeartbeat_ControllerReceives(t *testing.T) {
 	}
 }
 
-func TestWaitForResponse(t *testing.T) {
-	env := newTestEnv(t, "steward-resp-test")
-
-	// Subscribe to commands so the steward can respond
-	err := env.client.SubscribeCommands(context.Background(), "steward-resp-test", func(ctx context.Context, cmd *types.Command) error {
-		// Send response back
-		return env.client.SendResponse(ctx, &types.Response{
-			CommandID: cmd.ID,
-			StewardID: "steward-resp-test",
-			Success:   true,
-			Message:   "done",
-			Timestamp: time.Now(),
-		})
-	})
-	require.NoError(t, err)
-
-	// Start waiting for response in background
-	var resp *types.Response
-	var respErr error
-	done := make(chan struct{})
-	go func() {
-		resp, respErr = env.server.WaitForResponse(context.Background(), "cmd-resp-001", 5*time.Second)
-		close(done)
-	}()
-
-	// Wait for the pending response channel to be registered before sending
-	require.Eventually(t, func() bool {
-		env.server.responseMu.Lock()
-		_, ok := env.server.pendingResponses["cmd-resp-001"]
-		env.server.responseMu.Unlock()
-		return ok
-	}, 5*time.Second, time.Millisecond)
-
-	err = env.server.SendCommand(context.Background(), &types.Command{
-		ID:        "cmd-resp-001",
-		Type:      types.CommandSyncConfig,
-		StewardID: "steward-resp-test",
-		Timestamp: time.Now(),
-	})
-	require.NoError(t, err)
-
-	select {
-	case <-done:
-		require.NoError(t, respErr)
-		assert.Equal(t, "cmd-resp-001", resp.CommandID)
-		assert.True(t, resp.Success)
-		assert.Equal(t, "done", resp.Message)
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for response")
-	}
-}
-
-func TestWaitForResponse_Timeout(t *testing.T) {
-	env := newTestEnv(t, "steward-timeout-test")
-
-	_, err := env.server.WaitForResponse(context.Background(), "nonexistent-cmd", 100*time.Millisecond)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "timeout")
-}
-
 func TestEventFilter(t *testing.T) {
 	env := newTestEnv(t, "steward-filter-test")
 
@@ -642,9 +582,6 @@ func TestModeValidation(t *testing.T) {
 	assert.Error(t, err)
 
 	err = client.SubscribeHeartbeats(context.Background(), nil)
-	assert.Error(t, err)
-
-	_, err = client.WaitForResponse(context.Background(), "x", time.Second)
 	assert.Error(t, err)
 
 	// Client-only methods fail in server mode

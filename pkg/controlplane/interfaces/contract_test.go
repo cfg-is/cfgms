@@ -72,15 +72,6 @@ func RunCPContractTests(t *testing.T, factory CPProviderFactory) {
 	t.Run("FanOutPartialFailure", func(t *testing.T) {
 		testCPFanOutPartialFailure(t, factory)
 	})
-	t.Run("RequestResponse", func(t *testing.T) {
-		testCPRequestResponse(t, factory)
-	})
-	t.Run("ResponseTimeout", func(t *testing.T) {
-		testCPResponseTimeout(t, factory)
-	})
-	t.Run("ResponseContextCancellation", func(t *testing.T) {
-		testCPResponseContextCancellation(t, factory)
-	})
 	t.Run("EventFilteringByType", func(t *testing.T) {
 		testCPEventFilteringByType(t, factory)
 	})
@@ -279,97 +270,6 @@ func testCPFanOutPartialFailure(t *testing.T, factory CPProviderFactory) {
 	require.NoError(t, err)
 	assert.Contains(t, result.Succeeded, "contract-steward-0")
 	assert.Contains(t, result.Failed, "steward-never-connected")
-}
-
-// testCPRequestResponse verifies server sends a command, steward responds,
-// and server receives the response via WaitForResponse.
-func testCPRequestResponse(t *testing.T, factory CPProviderFactory) {
-	t.Helper()
-	server, clients, cleanup := factory(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	client := clients["contract-steward-0"]
-
-	// Subscribe to commands so the client can respond
-	require.NoError(t, client.SubscribeCommands(ctx, "contract-steward-0", func(ctx context.Context, cmd *cptypes.Command) error {
-		return client.SendResponse(ctx, &cptypes.Response{
-			CommandID: cmd.ID,
-			StewardID: "contract-steward-0",
-			Success:   true,
-			Message:   "ack",
-			Timestamp: time.Now(),
-		})
-	}))
-
-	var resp *cptypes.Response
-	var respErr error
-	done := make(chan struct{})
-
-	go func() {
-		resp, respErr = server.WaitForResponse(ctx, "contract-cmd-resp", 10*time.Second)
-		close(done)
-	}()
-
-	// Give WaitForResponse time to register its pending channel
-	time.Sleep(50 * time.Millisecond)
-
-	require.NoError(t, server.SendCommand(ctx, &cptypes.Command{
-		ID:        "contract-cmd-resp",
-		Type:      cptypes.CommandSyncConfig,
-		StewardID: "contract-steward-0",
-		Timestamp: time.Now(),
-	}))
-
-	select {
-	case <-done:
-		require.NoError(t, respErr)
-		require.NotNil(t, resp)
-		assert.Equal(t, "contract-cmd-resp", resp.CommandID)
-		assert.True(t, resp.Success)
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for request-response")
-	}
-}
-
-// testCPResponseTimeout verifies WaitForResponse returns an error when no
-// response arrives within the timeout.
-func testCPResponseTimeout(t *testing.T, factory CPProviderFactory) {
-	t.Helper()
-	server, _, cleanup := factory(t)
-	defer cleanup()
-
-	_, err := server.WaitForResponse(context.Background(), "nonexistent-cmd", 100*time.Millisecond)
-	require.Error(t, err)
-	// The error should mention timeout or context — implementation defined, just verify non-nil
-	assert.NotEmpty(t, err.Error())
-}
-
-// testCPResponseContextCancellation verifies WaitForResponse respects context
-// cancellation.
-func testCPResponseContextCancellation(t *testing.T, factory CPProviderFactory) {
-	t.Helper()
-	server, _, cleanup := factory(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	done := make(chan error, 1)
-	go func() {
-		_, err := server.WaitForResponse(ctx, "contract-cmd-ctx-cancel", 30*time.Second)
-		done <- err
-	}()
-
-	// Give WaitForResponse time to register its pending channel
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-
-	select {
-	case err := <-done:
-		require.Error(t, err)
-	case <-time.After(3 * time.Second):
-		t.Fatal("WaitForResponse did not respect context cancellation")
-	}
 }
 
 // testCPEventFilteringByType verifies the server only delivers events that
@@ -681,13 +581,6 @@ func testCPSendDuringDisconnection(t *testing.T, factory CPProviderFactory) {
 		Timestamp: time.Now(),
 	})
 	require.Error(t, err, "SendHeartbeat must fail when disconnected")
-
-	err = client.SendResponse(ctx, &cptypes.Response{
-		CommandID: "cmd-1",
-		StewardID: "contract-steward-0",
-		Timestamp: time.Now(),
-	})
-	require.Error(t, err, "SendResponse must fail when disconnected")
 }
 
 // testCPMalformedMessageHandling verifies the provider does not panic when
@@ -712,10 +605,6 @@ func testCPMalformedMessageHandling(t *testing.T, factory CPProviderFactory) {
 	assert.NotPanics(t, func() {
 		_ = client.SendHeartbeat(ctx, nil)
 	}, "SendHeartbeat with nil heartbeat must not panic")
-
-	assert.NotPanics(t, func() {
-		_ = client.SendResponse(ctx, nil)
-	}, "SendResponse with nil response must not panic")
 }
 
 // =============================================================================

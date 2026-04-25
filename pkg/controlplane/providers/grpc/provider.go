@@ -90,10 +90,6 @@ type Provider struct {
 	eventHandlers     []eventSubscription
 	heartbeatHandlers []interfaces.HeartbeatHandler
 
-	// Response tracking (server mode: WaitForResponse)
-	pendingResponses map[string]chan *types.Response
-	responseMu       sync.Mutex
-
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -130,7 +126,6 @@ func New(mode Mode) *Provider {
 		mode:              mode,
 		eventHandlers:     []eventSubscription{},
 		heartbeatHandlers: []interfaces.HeartbeatHandler{},
-		pendingResponses:  make(map[string]chan *types.Response),
 		logger:            slog.Default(),
 	}
 }
@@ -756,8 +751,6 @@ func (p *Provider) SubscribeHeartbeats(ctx context.Context, handler interfaces.H
 	return nil
 }
 
-// --- Responses ---
-
 func (p *Provider) SendResponse(ctx context.Context, response *types.Response) error {
 	if p.mode != ModeClient {
 		return fmt.Errorf("SendResponse is only available in client mode")
@@ -781,51 +774,6 @@ func (p *Provider) SendResponse(ctx context.Context, response *types.Response) e
 
 	p.responsesSent.Add(1)
 	return nil
-}
-
-func (p *Provider) WaitForResponse(ctx context.Context, commandID string, timeout time.Duration) (*types.Response, error) {
-	if p.mode != ModeServer {
-		return nil, fmt.Errorf("WaitForResponse is only available in server mode")
-	}
-
-	ch := make(chan *types.Response, 1)
-
-	p.responseMu.Lock()
-	p.pendingResponses[commandID] = ch
-	p.responseMu.Unlock()
-
-	defer func() {
-		p.responseMu.Lock()
-		delete(p.pendingResponses, commandID)
-		p.responseMu.Unlock()
-	}()
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	select {
-	case resp := <-ch:
-		p.responsesReceived.Add(1)
-		return resp, nil
-	case <-timer.C:
-		return nil, fmt.Errorf("timeout waiting for response to command %s", commandID)
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-// dispatchResponse routes an incoming response to a waiting WaitForResponse call.
-func (p *Provider) dispatchResponse(resp *types.Response) {
-	p.responseMu.Lock()
-	ch, ok := p.pendingResponses[resp.CommandID]
-	p.responseMu.Unlock()
-
-	if ok {
-		select {
-		case ch <- resp:
-		default:
-		}
-	}
 }
 
 // dispatchEvent routes an incoming event to matching event handlers.
@@ -1102,7 +1050,14 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 				s.provider.identityMismatches.Add(1)
 				continue
 			}
-			s.provider.dispatchResponse(resp)
+			// Response handling is currently receive-only — no controller logic
+			// awaits responses. See epic #747 for the rationale (WaitForResponse
+			// had zero callers). If sync-ack becomes a product need, reinstate a
+			// per-(CN, CommandID)-scoped waiter with a ceiling at that time.
+			s.provider.responsesReceived.Add(1)
+			s.provider.logger.Debug("controlchannel response received",
+				"command_id", logging.SanitizeLogValue(resp.CommandID),
+				"steward_id", logging.SanitizeLogValue(resp.StewardID))
 		}
 	}
 }
