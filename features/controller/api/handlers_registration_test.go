@@ -85,9 +85,9 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))
 	t.Cleanup(func() {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = rbacManager.FlushAudit(flushCtx)
+		_ = rbacManager.Close(closeCtx)
 	})
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
@@ -111,6 +111,13 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 		auditMgr,
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
+	})
 	return server, auditMgr
 }
 

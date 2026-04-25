@@ -53,9 +53,9 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	err = rbacManager.Initialize(context.Background())
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = rbacManager.FlushAudit(flushCtx)
+		_ = rbacManager.Close(closeCtx)
 	})
 
 	// Initialize tenant management with durable storage
@@ -107,6 +107,13 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 		auditMgr, // Issue #775: registration audit events
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
+	})
 
 	return server, tokenStore
 }

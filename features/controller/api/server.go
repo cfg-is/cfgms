@@ -69,6 +69,9 @@ type Server struct {
 	fleetQuery              fleet.FleetQuery               // Issue #603: Single query path for device filtering
 	gitSyncWebhookHandler   http.Handler                   // Issue #666: git-sync webhook endpoint (optional)
 	auditManager            *audit.Manager                 // Issue #775: registration audit events
+	stopCleanup             chan struct{}                  // signals startAPIKeyCleanup to exit
+	cleanupDone             chan struct{}                  // closed when cleanup goroutine exits
+	closeOnce               sync.Once                      // idempotent Close
 }
 
 // APIKey represents an API key for external authentication
@@ -146,6 +149,8 @@ func New(
 		secretStore:             secretStore,              // M-AUTH-1: Central secrets provider
 		approvalHook:            &DefaultApprovalHook{},   // Issue #422: accept-all default
 		auditManager:            auditManager,             // Issue #775: registration audit events
+		stopCleanup:             make(chan struct{}),
+		cleanupDone:             make(chan struct{}),
 	}
 
 	// Story #380: Initialize three-tier auth defense system
@@ -429,29 +434,59 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Stop gracefully shuts down the HTTP server
-func (s *Server) Stop() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.logger.Info("Shutting down REST API server")
-
-	// Story #380: Stop auth defense system
-	if s.authDefense != nil {
-		s.authDefense.Stop()
-	}
-
-	if s.httpServer != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := s.httpServer.Shutdown(ctx); err != nil {
-			s.logger.Error("Failed to shutdown HTTP server gracefully", "error", err)
-			return err
+// Close gracefully stops all background goroutines owned by this Server and
+// shuts down the HTTP listener. It is safe to call more than once (idempotent).
+func (s *Server) Close(ctx context.Context) error {
+	var firstErr error
+	s.closeOnce.Do(func() {
+		// Signal the cleanup goroutine to exit — do this before acquiring s.mu
+		// to avoid deadlock: cleanupExpiredAPIKeys also holds s.mu.
+		close(s.stopCleanup)
+		select {
+		case <-s.cleanupDone:
+		case <-ctx.Done():
+			firstErr = fmt.Errorf("api server close: timed out waiting for cleanup goroutine: %w", ctx.Err())
 		}
-	}
 
-	return nil
+		// Stop audit manager before closing the HTTP server so that any
+		// in-flight audit writes can still reach storage.
+		if s.auditManager != nil {
+			if err := s.auditManager.Stop(ctx); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		// Story #380: Stop auth defense system
+		if s.authDefense != nil {
+			s.authDefense.Stop()
+		}
+
+		// M-AUTH-1: Close secret store to stop its internal cache cleanup goroutine.
+		if s.secretStore != nil {
+			if err := s.secretStore.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+
+		if s.httpServer != nil {
+			if err := s.httpServer.Shutdown(ctx); err != nil && firstErr == nil {
+				s.logger.Error("Failed to shutdown HTTP server gracefully", "error", err)
+				firstErr = err
+			}
+		}
+	})
+	return firstErr
+}
+
+// Stop gracefully shuts down the HTTP server. Prefer Close when a context is available.
+func (s *Server) Stop() error {
+	s.logger.Info("Shutting down REST API server")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.Close(ctx)
 }
 
 // SetRollbackManager sets the rollback manager for rollback API routes (Story #416)
@@ -702,16 +737,23 @@ func (s *Server) GetListenAddr() string {
 	return s.getHTTPListenAddr()
 }
 
-// startAPIKeyCleanup starts a background goroutine to clean up expired API keys
+// startAPIKeyCleanup starts a background goroutine to clean up expired API keys.
+// The goroutine exits when Close is called.
 func (s *Server) startAPIKeyCleanup() {
 	go func() {
-		ticker := time.NewTicker(10 * time.Minute) // Clean up every 10 minutes
+		defer close(s.cleanupDone)
+		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 
 		s.logger.Info("Started API key cleanup background process", "interval", "10 minutes")
 
-		for range ticker.C {
-			s.cleanupExpiredAPIKeys()
+		for {
+			select {
+			case <-s.stopCleanup:
+				return
+			case <-ticker.C:
+				s.cleanupExpiredAPIKeys()
+			}
 		}
 	}()
 }
