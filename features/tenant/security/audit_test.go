@@ -33,7 +33,11 @@ func newTestAuditManager(tb testing.TB) *audit.Manager {
 	mgr, err := audit.NewManager(sm.GetAuditStore(), "tenant-security-test")
 	require.NoError(tb, err)
 	tb.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 30s gives the drain goroutine enough time to flush queued entries on
+		// slow CI runners (Windows especially). The flatfile store performs a
+		// sequential GetLastAuditEntry scan per entry — for tests that write
+		// 1000+ entries this can take well over 5 s on Windows CI.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_ = mgr.Stop(ctx)
 	})

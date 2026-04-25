@@ -43,7 +43,9 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 	err = rbacManager.Initialize(ctx)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 30s allows the rbac drain goroutine to finish on slow Windows CI
+		// runners (concurrent load test writes ~300 entries sharing one store).
+		flushCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_ = rbacManager.FlushAudit(flushCtx)
 	})
@@ -53,7 +55,9 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 	securityAuditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "tenant-security-integration")
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 30s — same reasoning as FlushAudit above; both managers share the
+		// same flatfile store and their drains are serialised by its mutex.
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_ = securityAuditMgr.Stop(stopCtx)
 	})

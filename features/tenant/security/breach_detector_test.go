@@ -614,7 +614,14 @@ func TestBreachDetector_RiskScoreCalculation(t *testing.T) {
 	riskScore := bd.GetTenantRiskScore(tenantID)
 	assert.LessOrEqual(t, riskScore, 0.3)
 
-	// Add suspicious activity
+	// Add suspicious activity.
+	// Use a fixed base time so all event timestamps are exactly 1 minute apart
+	// regardless of goroutine scheduling jitter. isBotActivityPattern computes
+	// interval variance; if time.Now() is called fresh each iteration the ms-
+	// level jitter introduced by the audit manager's background goroutine can
+	// inflate the squared-nanosecond variance above the 5-second threshold and
+	// cause the bot-activity breach indicator to not fire.
+	baseTime := time.Now()
 	for i := 0; i < 15; i++ {
 		suspiciousEvent := &AccessEvent{
 			ID:        fmt.Sprintf("suspicious-event-%d", i),
@@ -623,7 +630,7 @@ func TestBreachDetector_RiskScoreCalculation(t *testing.T) {
 			Resource:  "/auth/login",
 			SourceIP:  fmt.Sprintf("10.0.0.%d", i+1),
 			UserAgent: "Attacker-Bot/1.0",
-			Timestamp: time.Now().Add(time.Duration(i) * time.Minute),
+			Timestamp: baseTime.Add(time.Duration(i) * time.Minute),
 			Success:   false,
 		}
 		err := bd.RecordAccess(ctx, suspiciousEvent)
@@ -634,18 +641,14 @@ func TestBreachDetector_RiskScoreCalculation(t *testing.T) {
 	riskScore = bd.GetTenantRiskScore(tenantID)
 	assert.GreaterOrEqual(t, riskScore, 0.5)
 
-	// Verify we can get active breach indicators (with retry for async processing)
-	// Windows can be significantly slower at processing breach detection events
-	// due to scheduler behavior and async breach indicator analysis
+	// Breach detection in RecordAccess is synchronous; indicators are set before
+	// RecordAccess returns. Eventually is retained as a belt-and-suspenders guard
+	// with a generous timeout that accommodates any slow CI environment.
 	var indicators []*BreachIndicator
-	timeout := 2 * time.Second
-	if runtime.GOOS == "windows" {
-		timeout = 10 * time.Second // Windows needs significantly more time for async processing
-	}
 	require.Eventually(t, func() bool {
 		indicators = bd.GetActiveBreachIndicators(tenantID)
 		return len(indicators) > 0
-	}, timeout, 50*time.Millisecond, "Should have active breach indicators after recording suspicious events")
+	}, 10*time.Second, 50*time.Millisecond, "Should have active breach indicators after recording suspicious events")
 	assert.NotEmpty(t, indicators)
 }
 
