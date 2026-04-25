@@ -5,7 +5,7 @@ package security
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -459,14 +459,16 @@ func (ctav *CrossTenantAccessValidator) isTimeInRange(currentTime, timeRange str
 	return curMin >= startMin || curMin <= endMin, nil
 }
 
-// matchResourcePattern reports whether resourceID matches pattern using filepath.Match
+// matchResourcePattern reports whether resourceID matches pattern using path.Match
 // semantics. The wildcard * matches any sequence of non-separator characters and does
-// NOT cross a path separator (/). Returns (false, error) for syntactically invalid patterns.
+// NOT cross a path separator (/). Uses path.Match (not filepath.Match) so that /
+// is always the separator regardless of OS. Returns (false, error) for syntactically
+// invalid patterns.
 func (ctav *CrossTenantAccessValidator) matchResourcePattern(resourceID, pattern string) (bool, error) {
 	if pattern == "" {
 		return false, fmt.Errorf("empty resource pattern")
 	}
-	matched, err := filepath.Match(pattern, resourceID)
+	matched, err := path.Match(pattern, resourceID)
 	if err != nil {
 		return false, fmt.Errorf("invalid resource pattern %q: %w", pattern, err)
 	}

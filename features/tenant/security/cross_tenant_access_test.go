@@ -166,7 +166,7 @@ func TestIsTimeInRange(t *testing.T) {
 	}
 }
 
-// TestMatchResourcePattern covers filepath.Match-based glob pattern evaluation.
+// TestMatchResourcePattern covers path.Match-based glob pattern evaluation.
 func TestMatchResourcePattern(t *testing.T) {
 	v := NewCrossTenantAccessValidator()
 
