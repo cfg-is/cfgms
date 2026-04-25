@@ -58,14 +58,20 @@ func (c *controlledConsumeStore) ConsumeToken(ctx context.Context, tokenStr, ste
 
 // newHandleRegisterServer creates a minimal server for handleRegister unit tests.
 // Pass a non-nil certMgr only when you need the handler to reach cert generation (200 path).
+// Pass a non-nil logger to capture log output in tests; defaults to NoopLogger.
 // Returns the server and the audit manager so tests can Flush and query audit entries.
-func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMgr *cert.Manager) (*Server, *audit.Manager) {
+func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMgr *cert.Manager, loggers ...logging.Logger) (*Server, *audit.Manager) {
 	t.Helper()
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
 
-	logger := logging.NewNoopLogger()
+	var logger logging.Logger
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	} else {
+		logger = logging.NewNoopLogger()
+	}
 	tempDir := t.TempDir()
 
 	storageManager, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
@@ -407,4 +413,105 @@ func TestHandleRegister_ErrTokenAlreadyUsed_IsDistinctFrom500(t *testing.T) {
 
 	rec := postRegister(server, "cfgms_reg_sentinel_test")
 	assert.Equal(t, http.StatusConflict, rec.Code, "ErrTokenAlreadyUsed must map to 409 not 500")
+}
+
+// kvCapturingLogger captures both Warn message and key-value pairs for security assertions.
+// It is not a mock — it satisfies logging.Logger via embedding NoopLogger while recording
+// the key-value arguments so tests can verify sensitive fields are absent or truncated.
+type kvCapturingLogger struct {
+	logging.NoopLogger
+	mu      sync.Mutex
+	entries []kvLogEntry
+}
+
+type kvLogEntry struct {
+	msg string
+	kvs []interface{}
+}
+
+func (l *kvCapturingLogger) Warn(msg string, kvs ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kvcopy := make([]interface{}, len(kvs))
+	copy(kvcopy, kvs)
+	l.entries = append(l.entries, kvLogEntry{msg: msg, kvs: kvcopy})
+}
+
+func (l *kvCapturingLogger) warnEntries() []kvLogEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]kvLogEntry, len(l.entries))
+	copy(out, l.entries)
+	return out
+}
+
+// warnKVContains checks whether any warn entry has a kv value that equals v.
+func (l *kvCapturingLogger) warnKVContains(v string) bool {
+	for _, entry := range l.warnEntries() {
+		for i := 1; i < len(entry.kvs); i += 2 {
+			if s, ok := entry.kvs[i].(string); ok && s == v {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestHandleRegister_RevokedToken_LogsTokenPrefixNotFullToken verifies that the revoked-token
+// warn path logs only a truncated token_prefix (max 8 chars) and never the full token value.
+func TestHandleRegister_RevokedToken_LogsTokenPrefixNotFullToken(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	capLogger := &kvCapturingLogger{}
+	server, _ := newHandleRegisterServer(t, tokenStore, nil, capLogger)
+
+	fullToken := "cfgms_reg_revoked_loggingtest_12345"
+	revokedAt := time.Now().Add(-time.Hour)
+	tok := &registration.Token{
+		Token:         fullToken,
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+		Revoked:       true,
+		RevokedAt:     &revokedAt,
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, fullToken)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// The full token must not appear in any warn kv value.
+	assert.False(t, capLogger.warnKVContains(fullToken),
+		"full token must not be logged in the revoked-token path")
+
+	// A truncated prefix must be present (at most 8 chars).
+	expectedPrefix := fullToken[:8]
+	assert.True(t, capLogger.warnKVContains(expectedPrefix),
+		"token_prefix (first 8 chars) must be logged in the revoked-token path")
+}
+
+// TestHandleRegister_ExpiredToken_LogsTokenPrefixNotFullToken verifies that the expired-token
+// warn path logs only a truncated token_prefix (max 8 chars) and never the full token value.
+func TestHandleRegister_ExpiredToken_LogsTokenPrefixNotFullToken(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	capLogger := &kvCapturingLogger{}
+	server, _ := newHandleRegisterServer(t, tokenStore, nil, capLogger)
+
+	fullToken := "cfgms_reg_expired_loggingtest_12345"
+	pastExpiry := time.Now().Add(-time.Hour)
+	tok := &registration.Token{
+		Token:         fullToken,
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+		ExpiresAt:     &pastExpiry,
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, fullToken)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	assert.False(t, capLogger.warnKVContains(fullToken),
+		"full token must not be logged in the expired-token path")
+
+	expectedPrefix := fullToken[:8]
+	assert.True(t, capLogger.warnKVContains(expectedPrefix),
+		"token_prefix (first 8 chars) must be logged in the expired-token path")
 }
