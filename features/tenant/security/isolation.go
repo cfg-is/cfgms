@@ -5,6 +5,7 @@ package security
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -464,25 +465,19 @@ func (tie *TenantIsolationEngine) isAccessLevelSufficient(maxLevel, requestedLev
 	return levels[maxLevel] >= levels[requestedLevel]
 }
 
-// isIPInRange checks if an IP address is within a CIDR range
+// isIPInRange returns true iff ip is a valid IP and cidrRange is a valid CIDR
+// and the IP falls within the network, per RFC 4632 / RFC 4291 semantics.
+// Returns false (no panic) when either argument is empty or malformed.
 func (tie *TenantIsolationEngine) isIPInRange(ip, cidrRange string) bool {
-	// Simplified CIDR matching for test purposes
-	// In production, use net.ParseCIDR and proper subnet matching
-
-	if cidrRange == "0.0.0.0/0" {
-		return true // Match all IPs
+	_, ipNet, err := net.ParseCIDR(cidrRange)
+	if err != nil {
+		return false
 	}
-
-	if cidrRange == "192.168.1.0/24" {
-		return strings.HasPrefix(ip, "192.168.1.")
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return false
 	}
-
-	if cidrRange == "10.0.0.0/8" {
-		return strings.HasPrefix(ip, "10.")
-	}
-
-	// Exact match
-	return ip == cidrRange
+	return ipNet.Contains(parsedIP)
 }
 
 // getDefaultIsolationRule returns a default isolation rule for a tenant
