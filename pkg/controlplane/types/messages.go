@@ -19,20 +19,6 @@ const (
 
 	// CommandSyncDNA requests DNA synchronization via data plane
 	CommandSyncDNA CommandType = "sync_dna"
-
-	// Deprecated: CommandConnectDataPlane is no longer used — CP and DP share
-	// the same gRPC-over-QUIC connection (Story #515). Retained for backward
-	// compatibility with older stewards.
-	CommandConnectDataPlane CommandType = "connect_dataplane"
-
-	// CommandValidateConfig requests configuration validation (dry-run)
-	CommandValidateConfig CommandType = "validate_config"
-
-	// CommandExecuteTask requests execution of a specific task
-	CommandExecuteTask CommandType = "execute_task"
-
-	// CommandShutdown requests graceful shutdown
-	CommandShutdown CommandType = "shutdown"
 )
 
 // Command represents a command sent from controller to steward.
@@ -57,9 +43,6 @@ type Command struct {
 
 	// Params contains command-specific parameters
 	Params map[string]interface{} `json:"params,omitempty"`
-
-	// Priority allows prioritization (0 = normal, higher = more urgent)
-	Priority int `json:"priority,omitempty"`
 }
 
 // EventType defines the type of event being reported.

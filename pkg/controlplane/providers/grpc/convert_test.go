@@ -28,18 +28,16 @@ func TestCommandRoundTrip(t *testing.T) {
 				TenantID:  "tenant-1",
 				Timestamp: now,
 				Params: map[string]interface{}{
-					"version":  "1.2.3",
-					"priority": float64(10),
-					"nested":   map[string]interface{}{"key": "val"},
+					"version": "1.2.3",
+					"nested":  map[string]interface{}{"key": "val"},
 				},
-				Priority: 5,
 			},
 		},
 		{
 			name: "minimal command",
 			cmd: &types.Command{
 				ID:        "cmd-456",
-				Type:      types.CommandShutdown,
+				Type:      types.CommandSyncDNA,
 				Timestamp: now,
 			},
 		},
@@ -47,7 +45,7 @@ func TestCommandRoundTrip(t *testing.T) {
 			name: "nil params",
 			cmd: &types.Command{
 				ID:        "cmd-789",
-				Type:      types.CommandExecuteTask,
+				Type:      types.CommandSyncConfig,
 				StewardID: "steward-2",
 				Timestamp: now,
 			},
@@ -67,7 +65,6 @@ func TestCommandRoundTrip(t *testing.T) {
 			assert.Equal(t, tt.cmd.StewardID, result.StewardID)
 			assert.Equal(t, tt.cmd.TenantID, result.TenantID)
 			assert.Equal(t, tt.cmd.Timestamp.UTC(), result.Timestamp.UTC())
-			assert.Equal(t, tt.cmd.Priority, result.Priority)
 
 			if tt.cmd.Params != nil {
 				require.NotNil(t, result.Params)
@@ -91,10 +88,6 @@ func TestCommandTypeRoundTrip(t *testing.T) {
 	allTypes := []types.CommandType{
 		types.CommandSyncConfig,
 		types.CommandSyncDNA,
-		types.CommandConnectDataPlane, //nolint:staticcheck // backward compat
-		types.CommandValidateConfig,
-		types.CommandExecuteTask,
-		types.CommandShutdown,
 	}
 	for _, ct := range allTypes {
 		t.Run(string(ct), func(t *testing.T) {

@@ -161,7 +161,6 @@ func TestControllerSendsCommand_StewardReceives(t *testing.T) {
 		Type:      types.CommandSyncConfig,
 		StewardID: "steward-cmd-test",
 		Timestamp: time.Now().Truncate(time.Microsecond),
-		Priority:  3,
 		Params:    map[string]interface{}{"version": "1.0"},
 	}
 
@@ -173,7 +172,6 @@ func TestControllerSendsCommand_StewardReceives(t *testing.T) {
 		assert.Equal(t, cmd.ID, got.ID)
 		assert.Equal(t, cmd.Type, got.Type)
 		assert.Equal(t, cmd.StewardID, got.StewardID)
-		assert.Equal(t, cmd.Priority, got.Priority)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for command")
 	}
