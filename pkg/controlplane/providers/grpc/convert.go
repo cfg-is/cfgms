@@ -16,23 +16,19 @@ import (
 // --- Command conversion ---
 
 // commandTypeToProto maps semantic CommandType to proto enum.
+// The proto enum retains COMMAND_TYPE_CONNECT_DATAPLANE, COMMAND_TYPE_VALIDATE_CONFIG,
+// COMMAND_TYPE_EXECUTE_TASK, and COMMAND_TYPE_SHUTDOWN for wire compatibility with older
+// stewards. The corresponding Go constants were removed (Issue #831); unknown types received
+// over the wire map to the zero value and are ignored by handlers.
 var commandTypeToProto = map[types.CommandType]transportpb.CommandType{
-	types.CommandSyncConfig:       transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG,
-	types.CommandSyncDNA:          transportpb.CommandType_COMMAND_TYPE_SYNC_DNA,
-	types.CommandConnectDataPlane: transportpb.CommandType_COMMAND_TYPE_CONNECT_DATAPLANE, //nolint:staticcheck // backward compat
-	types.CommandValidateConfig:   transportpb.CommandType_COMMAND_TYPE_VALIDATE_CONFIG,
-	types.CommandExecuteTask:      transportpb.CommandType_COMMAND_TYPE_EXECUTE_TASK,
-	types.CommandShutdown:         transportpb.CommandType_COMMAND_TYPE_SHUTDOWN,
+	types.CommandSyncConfig: transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG,
+	types.CommandSyncDNA:    transportpb.CommandType_COMMAND_TYPE_SYNC_DNA,
 }
 
 // protoToCommandType maps proto enum to semantic CommandType.
 var protoToCommandType = map[transportpb.CommandType]types.CommandType{
-	transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG:       types.CommandSyncConfig,
-	transportpb.CommandType_COMMAND_TYPE_SYNC_DNA:          types.CommandSyncDNA,
-	transportpb.CommandType_COMMAND_TYPE_CONNECT_DATAPLANE: types.CommandConnectDataPlane, //nolint:staticcheck // backward compat
-	transportpb.CommandType_COMMAND_TYPE_VALIDATE_CONFIG:   types.CommandValidateConfig,
-	transportpb.CommandType_COMMAND_TYPE_EXECUTE_TASK:      types.CommandExecuteTask,
-	transportpb.CommandType_COMMAND_TYPE_SHUTDOWN:          types.CommandShutdown,
+	transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG: types.CommandSyncConfig,
+	transportpb.CommandType_COMMAND_TYPE_SYNC_DNA:    types.CommandSyncDNA,
 }
 
 func commandToProto(cmd *types.Command) *transportpb.Command {
@@ -45,7 +41,6 @@ func commandToProto(cmd *types.Command) *transportpb.Command {
 		StewardId: cmd.StewardID,
 		TenantId:  cmd.TenantID,
 		Timestamp: timestamppb.New(cmd.Timestamp),
-		Priority:  int32(cmd.Priority),
 	}
 	if len(cmd.Params) > 0 {
 		pb.Params = interfaceMapToStringMap(cmd.Params)
@@ -63,7 +58,6 @@ func commandFromProto(pb *transportpb.Command) *types.Command {
 		StewardID: pb.GetStewardId(),
 		TenantID:  pb.GetTenantId(),
 		Timestamp: protoTimestampToTime(pb.GetTimestamp()),
-		Priority:  int(pb.GetPriority()),
 	}
 	if len(pb.GetParams()) > 0 {
 		cmd.Params = stringMapToInterfaceMap(pb.GetParams())

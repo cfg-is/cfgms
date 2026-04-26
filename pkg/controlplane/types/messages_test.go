@@ -27,14 +27,13 @@ func TestCommand_Marshaling(t *testing.T) {
 				Params: map[string]interface{}{
 					"version": "1.0.0",
 				},
-				Priority: 5,
 			},
 		},
 		{
 			name: "broadcast command without steward ID",
 			cmd: &Command{
 				ID:        "cmd-456",
-				Type:      CommandExecuteTask,
+				Type:      CommandSyncDNA,
 				TenantID:  "tenant-2",
 				Timestamp: time.Now(),
 				Params: map[string]interface{}{
@@ -46,7 +45,7 @@ func TestCommand_Marshaling(t *testing.T) {
 			name: "minimal command",
 			cmd: &Command{
 				ID:        "cmd-789",
-				Type:      CommandShutdown,
+				Type:      CommandSyncConfig,
 				Timestamp: time.Now(),
 			},
 		},
@@ -69,7 +68,6 @@ func TestCommand_Marshaling(t *testing.T) {
 			assert.Equal(t, tt.cmd.Type, decoded.Type)
 			assert.Equal(t, tt.cmd.StewardID, decoded.StewardID)
 			assert.Equal(t, tt.cmd.TenantID, decoded.TenantID)
-			assert.Equal(t, tt.cmd.Priority, decoded.Priority)
 		})
 	}
 }
@@ -297,10 +295,6 @@ func TestCommandTypes(t *testing.T) {
 	types := []CommandType{
 		CommandSyncConfig,
 		CommandSyncDNA,
-		CommandConnectDataPlane,
-		CommandValidateConfig,
-		CommandExecuteTask,
-		CommandShutdown,
 	}
 
 	seen := make(map[CommandType]bool)
