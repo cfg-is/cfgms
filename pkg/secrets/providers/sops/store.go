@@ -187,7 +187,7 @@ func (s *SOPSSecretStore) getSecretWithTenant(ctx context.Context, tenantID, key
 	configEntry, err := s.configStore.GetConfig(ctx, configKey)
 	if err != nil {
 		if err == cfgconfig.ErrConfigNotFound {
-			return nil, fmt.Errorf("secret not found: %s", key)
+			return nil, fmt.Errorf("secret not found: %s: %w", key, secretsif.ErrSecretNotFound)
 		}
 		return nil, fmt.Errorf("failed to retrieve secret: %w", err)
 	}

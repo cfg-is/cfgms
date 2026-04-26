@@ -128,7 +128,7 @@ func (s *StewardSecretStore) GetSecret(_ context.Context, key string) (*interfac
 
 	entry, exists := s.index.Entries[key]
 	if !exists {
-		return nil, fmt.Errorf("secret not found: %s", key)
+		return nil, fmt.Errorf("secret not found: %s: %w", key, interfaces.ErrSecretNotFound)
 	}
 
 	// Check expiration

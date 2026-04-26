@@ -13,6 +13,9 @@ import (
 // ErrTenantRequired is returned when TenantID is empty in a multi-tenant context.
 var ErrTenantRequired = errors.New("TenantID is required for multi-tenant secret operations")
 
+// ErrSecretNotFound is returned when a requested secret key does not exist in the store.
+var ErrSecretNotFound = errors.New("secret not found")
+
 // SecretStore defines the interface for storing and retrieving secrets
 // All implementations MUST encrypt secrets at rest - no cleartext storage allowed
 type SecretStore interface {

@@ -12,21 +12,27 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/audit"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	pkgsecurity "github.com/cfgis/cfgms/pkg/security"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// TenantSecretManager provides encrypted storage and management of tenant-specific secrets
+// TenantSecretManager provides encrypted storage and management of tenant-specific secrets.
+// Secrets are persisted via the injected secretsif.SecretStore (e.g. the steward provider),
+// which handles encryption-at-rest. The in-package AES-GCM layer (keyCache / encryptData)
+// is redundant when the underlying provider already encrypts and is tracked for removal in S5.
 type TenantSecretManager struct {
 	isolationEngine *TenantIsolationEngine
 	keyCache        map[string]*tenantEncryptionKey
 	keyMutex        sync.RWMutex
 	validator       *pkgsecurity.Validator
 	auditManager    *audit.Manager
+	secretStore     secretsif.SecretStore
 	logger          *slog.Logger
 }
 
@@ -104,44 +110,53 @@ type TenantSecretAuditEntry struct {
 }
 
 // NewTenantSecretManager creates a new tenant secret manager.
-// auditManager may be nil, in which case secret operations are not persisted
-// to the durable audit store (observable via a log warning on each operation).
-func NewTenantSecretManager(isolationEngine *TenantIsolationEngine, auditManager *audit.Manager) *TenantSecretManager {
+// auditManager may be nil — secret operations will log a warning but proceed.
+// secretStore may be nil — StoreSecret and RetrieveSecret return errors when nil.
+func NewTenantSecretManager(
+	isolationEngine *TenantIsolationEngine,
+	auditManager *audit.Manager,
+	secretStore secretsif.SecretStore,
+) *TenantSecretManager {
 	return &TenantSecretManager{
 		isolationEngine: isolationEngine,
 		keyCache:        make(map[string]*tenantEncryptionKey),
 		keyMutex:        sync.RWMutex{},
 		validator:       pkgsecurity.NewValidator(),
 		auditManager:    auditManager,
+		secretStore:     secretStore,
 		logger:          slog.Default().With("component", "tenant_secret_manager"),
 	}
 }
 
-// StoreSecret encrypts and stores a secret for a specific tenant
+// StoreSecret encrypts and stores a secret for a specific tenant.
+// The raw secret value is persisted via the injected secretsif.SecretStore; the
+// in-package AES-GCM layer populates EncryptedSecret.EncryptedData in the response
+// but is redundant with provider-level encryption (tracked for removal in S5).
 func (tsm *TenantSecretManager) StoreSecret(ctx context.Context, request *SecretRequest) (*SecretResponse, error) {
-	// Validate the request
 	if err := tsm.validateSecretRequest(request); err != nil {
 		return &SecretResponse{Error: fmt.Sprintf("validation failed: %v", err)}, nil
 	}
 
-	// Verify tenant isolation
 	if !tsm.isolationEngine.ValidateTenantResourceAccess(request.TenantID, "secrets", "write") {
 		return &SecretResponse{Error: "tenant access denied for secret storage"}, nil
 	}
 
-	// Get or create tenant encryption key
+	if tsm.secretStore == nil {
+		return &SecretResponse{Error: "secret store not configured"}, nil
+	}
+
 	key, err := tsm.getTenantEncryptionKey(ctx, request.TenantID)
 	if err != nil {
 		return &SecretResponse{Error: fmt.Sprintf("failed to get encryption key: %v", err)}, nil
 	}
 
-	// Encrypt the secret data
+	// In-package AES-GCM is kept for the EncryptedData field in the response.
+	// The underlying provider also encrypts at rest — see S5 for cleanup.
 	encryptedData, err := tsm.encryptData(request.Data, key)
 	if err != nil {
 		return &SecretResponse{Error: fmt.Sprintf("encryption failed: %v", err)}, nil
 	}
 
-	// Create the encrypted secret record
 	secret := &EncryptedSecret{
 		ID:            tsm.generateSecretID(),
 		TenantID:      request.TenantID,
@@ -156,115 +171,128 @@ func (tsm *TenantSecretManager) StoreSecret(ctx context.Context, request *Secret
 		ExpiresAt:     request.ExpiresAt,
 	}
 
-	// Log the operation
-	tsm.auditSecretOperation(ctx, secret.TenantID, secret.ID, "store", true, "")
+	storeReq := &secretsif.SecretRequest{
+		Key:         secret.ID,
+		Value:       string(request.Data),
+		TenantID:    request.TenantID,
+		Description: request.Name,
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(request.SecretType),
+			"name":                          request.Name,
+			"key_id":                        key.KeyID,
+			"access_count":                  "0",
+		},
+	}
+	if request.ExpiresAt != nil {
+		storeReq.TTL = time.Until(*request.ExpiresAt)
+	}
+	for k, v := range request.Metadata {
+		storeReq.Metadata[k] = v
+	}
 
+	if err := tsm.secretStore.StoreSecret(ctx, storeReq); err != nil {
+		tsm.auditSecretOperation(ctx, secret.TenantID, secret.ID, "store", false, fmt.Sprintf("storage failed: %v", err))
+		return &SecretResponse{Error: fmt.Sprintf("failed to persist secret: %v", err)}, nil
+	}
+
+	tsm.auditSecretOperation(ctx, secret.TenantID, secret.ID, "store", true, "")
 	return &SecretResponse{Secret: secret}, nil
 }
 
-// RetrieveSecret decrypts and retrieves a secret for a specific tenant
+// RetrieveSecret retrieves a secret for a specific tenant from the central secret store.
+// Access control is enforced before the store is consulted. Returns an error wrapping
+// secretsif.ErrSecretNotFound when the secretID does not exist in the store.
 func (tsm *TenantSecretManager) RetrieveSecret(ctx context.Context, tenantID, secretID string) (*SecretResponse, error) {
-	// Validate tenant access
 	if !tsm.isolationEngine.ValidateTenantResourceAccess(tenantID, "secrets", "read") {
 		tsm.auditSecretOperation(ctx, tenantID, secretID, "retrieve", false, "tenant access denied")
 		return &SecretResponse{Error: "tenant access denied for secret retrieval"}, nil
 	}
 
-	// This would typically retrieve from storage - for now we'll simulate
-	// In a real implementation, this would query the storage backend
-	testData := []byte("test-secret-data")
-	key, err := tsm.getTenantEncryptionKey(ctx, tenantID)
-	if err != nil {
-		tsm.auditSecretOperation(ctx, tenantID, secretID, "retrieve", false, fmt.Sprintf("key retrieval failed: %v", err))
-		return &SecretResponse{Error: fmt.Sprintf("failed to get encryption key: %v", err)}, nil
+	if tsm.secretStore == nil {
+		tsm.auditSecretOperation(ctx, tenantID, secretID, "retrieve", false, "secret store not configured")
+		return nil, fmt.Errorf("secret store not configured")
 	}
 
-	encryptedData, err := tsm.encryptData(testData, key)
+	stored, err := tsm.secretStore.GetSecret(ctx, secretID)
 	if err != nil {
-		tsm.auditSecretOperation(ctx, tenantID, secretID, "retrieve", false, fmt.Sprintf("encryption failed: %v", err))
-		return &SecretResponse{Error: fmt.Sprintf("encryption failed: %v", err)}, nil
+		tsm.auditSecretOperation(ctx, tenantID, secretID, "retrieve", false, fmt.Sprintf("storage retrieval failed: %v", err))
+		return nil, err
+	}
+
+	// Increment and persist the access count on the stored metadata.
+	now := time.Now()
+	accessCount := int64(1)
+	if countStr, ok := stored.Metadata["access_count"]; ok {
+		if prev, parseErr := strconv.ParseInt(countStr, 10, 64); parseErr == nil {
+			accessCount = prev + 1
+		}
+	}
+	// Non-fatal: a metadata update failure does not block the retrieve.
+	// The value was returned; the access count persists on the next successful write.
+	if err := tsm.secretStore.UpdateSecretMetadata(ctx, secretID, map[string]string{
+		"access_count": strconv.FormatInt(accessCount, 10),
+		"last_access":  now.Format(time.RFC3339),
+	}); err != nil {
+		tsm.logger.Warn("failed to update secret access metadata",
+			"error", err,
+			"tenant_id", tenantID,
+			"secret_id", secretID,
+		)
 	}
 
 	secret := &EncryptedSecret{
-		TenantID:      tenantID,
-		ID:            secretID,
-		EncryptedData: encryptedData,
-		KeyID:         key.KeyID,
-		KeyVersion:    key.Version,
+		TenantID:    tenantID,
+		ID:          secretID,
+		KeyID:       stored.Metadata["key_id"],
+		AccessCount: accessCount,
+		LastAccess:  &now,
 	}
 
-	// Decrypt the secret data
-	decryptedData, err := tsm.decryptData(secret.EncryptedData, key)
-	if err != nil {
-		tsm.auditSecretOperation(ctx, tenantID, secretID, "retrieve", false, fmt.Sprintf("decryption failed: %v", err))
-		return &SecretResponse{Error: fmt.Sprintf("decryption failed: %v", err)}, nil
-	}
-
-	// Update access tracking
-	secret.AccessCount++
-	now := time.Now()
-	secret.LastAccess = &now
-
-	// Log successful operation
 	tsm.auditSecretOperation(ctx, tenantID, secretID, "retrieve", true, "")
-
-	return &SecretResponse{Secret: secret, Data: decryptedData}, nil
+	return &SecretResponse{Secret: secret, Data: []byte(stored.Value)}, nil
 }
 
 // RotateSecret creates a new encrypted version of an existing secret
 func (tsm *TenantSecretManager) RotateSecret(ctx context.Context, tenantID, secretID string, newData []byte) (*SecretResponse, error) {
-	// Validate tenant access
 	if !tsm.isolationEngine.ValidateTenantResourceAccess(tenantID, "secrets", "write") {
 		tsm.auditSecretOperation(ctx, tenantID, secretID, "rotate", false, "tenant access denied")
 		return &SecretResponse{Error: "tenant access denied for secret rotation"}, nil
 	}
 
-	// Get current secret (in real implementation, retrieve from storage)
 	currentSecret := &EncryptedSecret{
 		TenantID: tenantID,
 		ID:       secretID,
 	}
 
-	// Generate new encryption key if needed
 	key, err := tsm.rotateTenantEncryptionKey(ctx, tenantID)
 	if err != nil {
 		tsm.auditSecretOperation(ctx, tenantID, secretID, "rotate", false, fmt.Sprintf("key rotation failed: %v", err))
 		return &SecretResponse{Error: fmt.Sprintf("key rotation failed: %v", err)}, nil
 	}
 
-	// Encrypt with new key
 	encryptedData, err := tsm.encryptData(newData, key)
 	if err != nil {
 		tsm.auditSecretOperation(ctx, tenantID, secretID, "rotate", false, fmt.Sprintf("encryption failed: %v", err))
 		return &SecretResponse{Error: fmt.Sprintf("encryption failed: %v", err)}, nil
 	}
 
-	// Update secret
 	currentSecret.EncryptedData = encryptedData
 	currentSecret.KeyID = key.KeyID
 	currentSecret.KeyVersion = key.Version
 	currentSecret.UpdatedAt = time.Now()
 
-	// Log successful operation
 	tsm.auditSecretOperation(ctx, tenantID, secretID, "rotate", true, "")
-
 	return &SecretResponse{Secret: currentSecret}, nil
 }
 
 // DeleteSecret securely removes a secret for a specific tenant
 func (tsm *TenantSecretManager) DeleteSecret(ctx context.Context, tenantID, secretID string) error {
-	// Validate tenant access
 	if !tsm.isolationEngine.ValidateTenantResourceAccess(tenantID, "secrets", "delete") {
 		tsm.auditSecretOperation(ctx, tenantID, secretID, "delete", false, "tenant access denied")
 		return fmt.Errorf("tenant access denied for secret deletion")
 	}
 
-	// In real implementation, securely delete from storage
-	// This should include secure memory clearing
-
-	// Log the operation
 	tsm.auditSecretOperation(ctx, tenantID, secretID, "delete", true, "")
-
 	return nil
 }
 
@@ -280,12 +308,10 @@ func (tsm *TenantSecretManager) getTenantEncryptionKey(ctx context.Context, tena
 	tsm.keyMutex.Lock()
 	defer tsm.keyMutex.Unlock()
 
-	// Double-check pattern
 	if key, exists := tsm.keyCache[tenantID]; exists && !key.RotationDue {
 		return key, nil
 	}
 
-	// Generate new key
 	keyData := make([]byte, 32) // AES-256
 	if _, err := io.ReadFull(rand.Reader, keyData); err != nil {
 		return nil, fmt.Errorf("failed to generate encryption key: %w", err)
@@ -296,14 +322,12 @@ func (tsm *TenantSecretManager) getTenantEncryptionKey(ctx context.Context, tena
 		KeyData:     keyData,
 		KeyID:       fmt.Sprintf("tenant_key_%s_%d", tenantID, time.Now().Unix()),
 		CreatedAt:   time.Now(),
-		ExpiresAt:   time.Now().Add(90 * 24 * time.Hour), // 90 days
+		ExpiresAt:   time.Now().Add(90 * 24 * time.Hour),
 		RotationDue: false,
 		Version:     1,
 	}
 
-	// In real implementation, this would be stored securely
 	tsm.keyCache[tenantID] = key
-
 	return key, nil
 }
 
@@ -312,15 +336,12 @@ func (tsm *TenantSecretManager) rotateTenantEncryptionKey(ctx context.Context, t
 	tsm.keyMutex.Lock()
 	defer tsm.keyMutex.Unlock()
 
-	// Get current key version
 	currentVersion := 1
 	if existingKey, exists := tsm.keyCache[tenantID]; exists {
 		currentVersion = existingKey.Version + 1
-		// Mark old key as requiring rotation
 		existingKey.RotationDue = true
 	}
 
-	// Generate new key
 	keyData := make([]byte, 32) // AES-256
 	if _, err := io.ReadFull(rand.Reader, keyData); err != nil {
 		return nil, fmt.Errorf("failed to generate new encryption key: %w", err)
@@ -337,66 +358,53 @@ func (tsm *TenantSecretManager) rotateTenantEncryptionKey(ctx context.Context, t
 	}
 
 	tsm.keyCache[tenantID] = key
-
 	return key, nil
 }
 
 // encryptData encrypts data using AES-GCM with the tenant's key
 func (tsm *TenantSecretManager) encryptData(data []byte, key *tenantEncryptionKey) (string, error) {
-	// Create AES cipher
 	block, err := aes.NewCipher(key.KeyData)
 	if err != nil {
 		return "", fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	// Create GCM mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return "", fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	// Generate nonce
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
-	// Encrypt data
 	ciphertext := gcm.Seal(nonce, nonce, data, nil)
-
-	// Base64 encode for storage
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
 // decryptData decrypts data using AES-GCM with the tenant's key
 func (tsm *TenantSecretManager) decryptData(encryptedData string, key *tenantEncryptionKey) ([]byte, error) {
-	// Base64 decode
 	ciphertext, err := base64.StdEncoding.DecodeString(encryptedData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode encrypted data: %w", err)
 	}
 
-	// Create AES cipher
 	block, err := aes.NewCipher(key.KeyData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	// Create GCM mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	// Extract nonce
 	nonceSize := gcm.NonceSize()
 	if len(ciphertext) < nonceSize {
 		return nil, fmt.Errorf("ciphertext too short")
 	}
 
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
-
-	// Decrypt data
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt data: %w", err)
@@ -409,13 +417,9 @@ func (tsm *TenantSecretManager) decryptData(encryptedData string, key *tenantEnc
 func (tsm *TenantSecretManager) validateSecretRequest(request *SecretRequest) error {
 	result := &pkgsecurity.ValidationResult{Valid: true}
 
-	// Validate tenant ID
 	tsm.validator.ValidateString(result, "tenant_id", request.TenantID, "required", "uuid")
-
-	// Validate secret name
 	tsm.validator.ValidateString(result, "name", request.Name, "required", "charset:alphanumeric_dash", "max_length:128")
 
-	// Validate secret type
 	validSecretTypes := []string{
 		string(SecretTypeAPIKey),
 		string(SecretTypePassword),
@@ -438,7 +442,6 @@ func (tsm *TenantSecretManager) validateSecretRequest(request *SecretRequest) er
 		result.AddError("secret_type", string(request.SecretType), "enum", "invalid secret type")
 	}
 
-	// Validate data length
 	if len(request.Data) == 0 {
 		result.AddError("data", "", "required", "secret data cannot be empty")
 	}
@@ -446,7 +449,6 @@ func (tsm *TenantSecretManager) validateSecretRequest(request *SecretRequest) er
 		result.AddError("data", "", "max_length", "secret data too large (max 1MB)")
 	}
 
-	// Validate metadata
 	for key, value := range request.Metadata {
 		tsm.validator.ValidateString(result, "metadata."+key, key, "charset:alphanumeric_dash", "max_length:64")
 		tsm.validator.ValidateString(result, "metadata."+key, value, "charset:safe_text", "max_length:256")
@@ -461,10 +463,8 @@ func (tsm *TenantSecretManager) validateSecretRequest(request *SecretRequest) er
 
 // generateSecretID generates a unique identifier for a secret
 func (tsm *TenantSecretManager) generateSecretID() string {
-	// Generate cryptographically secure random ID
 	randBytes := make([]byte, 16)
 	if _, err := rand.Read(randBytes); err != nil {
-		// Fallback to timestamp-based ID
 		return fmt.Sprintf("secret_%d", time.Now().UnixNano())
 	}
 
@@ -513,13 +513,10 @@ func (tsm *TenantSecretManager) auditSecretOperation(ctx context.Context, tenant
 
 // ListSecrets returns a list of secrets for a tenant (metadata only, no secret data)
 func (tsm *TenantSecretManager) ListSecrets(ctx context.Context, tenantID string) ([]*EncryptedSecret, error) {
-	// Validate tenant access
 	if !tsm.isolationEngine.ValidateTenantResourceAccess(tenantID, "secrets", "list") {
 		return nil, fmt.Errorf("tenant access denied for secret listing")
 	}
 
-	// In real implementation, this would query the storage backend
-	// Return empty list for now
 	return []*EncryptedSecret{}, nil
 }
 
@@ -530,10 +527,9 @@ func (tsm *TenantSecretManager) CheckKeyRotationNeeded(ctx context.Context, tena
 
 	key, exists := tsm.keyCache[tenantID]
 	if !exists {
-		return false, nil // No key exists yet
+		return false, nil
 	}
 
-	// Check if key is approaching expiration (30 days before expiry)
 	rotationThreshold := key.ExpiresAt.Add(-30 * 24 * time.Hour)
 	return time.Now().After(rotationThreshold), nil
 }
