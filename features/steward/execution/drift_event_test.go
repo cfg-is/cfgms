@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/factory"
@@ -244,16 +243,15 @@ func TestExecuteConfiguration_DriftHandlerCalledForDriftingResources(t *testing.
 	assert.Equal(t, 2, report.TotalResources)
 }
 
-// TestExecuteResource_ErrModuleNotReady_ProceedsToSet verifies that when a module's Get()
-// returns ErrModuleNotReady, the engine:
-//  1. Does NOT treat it as a resource failure
-//  2. Sets DriftDetected = true (drift assumed)
-//  3. Calls Set() to apply the desired state
-//  4. Reports StatusSuccess after successful Set+Verify
-//
-// The directory module is the canonical module that returns ErrModuleNotReady from Get()
-// before any Set() call (because it requires AllowedBasePath via Set first).
-func TestExecuteResource_ErrModuleNotReady_ProceedsToSet(t *testing.T) {
+// TestExecuteResource_Configurable_DirectoryModule_EndToEnd verifies that the directory
+// module, which implements modules.Configurable, works correctly through the execution
+// engine's Get→Compare→Set→Verify cycle:
+//  1. The engine calls Configure(desiredState) to establish the AllowedBasePath boundary
+//  2. Get() succeeds and returns "absent" state (directory does not yet exist)
+//  3. Compare detects drift (absent vs desired present state)
+//  4. Set() creates the directory
+//  5. Verify confirms the directory exists
+func TestExecuteResource_Configurable_DirectoryModule_EndToEnd(t *testing.T) {
 	base := t.TempDir()
 	targetPath := filepath.Join(base, "engine-created-dir")
 
@@ -273,30 +271,28 @@ func TestExecuteResource_ErrModuleNotReady_ProceedsToSet(t *testing.T) {
 		Config: map[string]interface{}{
 			"allowed_base_path": base,
 			"path":              targetPath,
+			"permissions":       493, // 0755 octal — absent dir has no permissions, so drift is detected
 		},
 	}
 
 	ctx := context.Background()
 	result := engine.ExecuteResource(ctx, resource)
 
-	assert.Equal(t, StatusSuccess, result.Status, "ErrModuleNotReady from Get() must not fail the resource")
-	assert.True(t, result.DriftDetected, "drift must be assumed when module was not ready")
-	assert.True(t, result.ChangesApplied, "Set() must be called when ErrModuleNotReady is returned")
+	assert.Equal(t, StatusSuccess, result.Status, "directory module must succeed end-to-end via Configure→Get→Compare→Set→Verify")
+	assert.True(t, result.DriftDetected, "drift must be detected when directory does not yet exist")
+	assert.True(t, result.ChangesApplied, "Set() must be called when drift is detected")
 	assert.Empty(t, result.Error, "no error should be recorded on success")
 
-	// Verify the directory was actually created on disk (proves Set() ran)
+	// Verify the directory was actually created on disk
 	info, statErr := os.Stat(targetPath)
 	require.NoError(t, statErr, "directory must exist after successful execution")
 	assert.True(t, info.IsDir(), "path must be a directory")
 }
 
-// TestExecuteResource_NonModuleNotReadyGetError_PropagatesFailure verifies that when
-// Get() returns an error that is NOT ErrModuleNotReady, the engine propagates the failure
-// (i.e., the ErrModuleNotReady bypass does not swallow genuine errors).
-//
-// The file module returns modules.ErrInvalidResourceID from Get() when resourceID is "".
-// This error is not ErrModuleNotReady, so the engine must report StatusFailed.
-func TestExecuteResource_NonModuleNotReadyGetError_PropagatesFailure(t *testing.T) {
+// TestExecuteResource_MissingAllowedBasePath_FailsConfigure verifies that when a
+// Configurable module (file or directory) is given a config without allowed_base_path,
+// the engine reports StatusFailed from the Configure step — not from Get or Set.
+func TestExecuteResource_MissingAllowedBasePath_FailsConfigure(t *testing.T) {
 	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{
 		ModuleLoadFailure: config.ActionContinue,
@@ -307,24 +303,19 @@ func TestExecuteResource_NonModuleNotReadyGetError_PropagatesFailure(t *testing.
 	logger := logging.NewLogger("info")
 	engine := New(moduleFactory, comparator, errorConfig, logger)
 
-	// No "path" in Config and empty Name → getResourceIdentifier returns "".
-	// file.Get("") returns modules.ErrInvalidResourceID which is not ErrModuleNotReady.
+	// No allowed_base_path → Configure() returns ErrAllowedBasePathRequired.
 	resource := config.ResourceConfig{
-		Name:   "",
+		Name:   "no-base-path",
 		Module: "file",
 		Config: map[string]interface{}{
-			"content": "should not matter",
+			"content": "should not reach OS",
 		},
 	}
 
 	ctx := context.Background()
 	result := engine.ExecuteResource(ctx, resource)
 
-	assert.Equal(t, StatusFailed, result.Status, "non-ErrModuleNotReady Get() error must propagate as failure")
-	assert.Contains(t, result.Error, "failed to get current state", "error detail must identify Get() as the source")
-	assert.False(t, result.ChangesApplied, "Set() must not be called when Get() fails with a real error")
-	// Verify the error was NOT silently reclassified as ErrModuleNotReady — the bypass must
-	// only fire when errors.Is(err, ErrModuleNotReady) is true.
-	assert.NotContains(t, result.Error, modules.ErrModuleNotReady.Error(),
-		"ErrModuleNotReady message must not appear in the error: the bypass must not have fired")
+	assert.Equal(t, StatusFailed, result.Status, "missing allowed_base_path must fail at Configure step")
+	assert.Contains(t, result.Error, "failed to configure module", "error must identify Configure as the source")
+	assert.False(t, result.ChangesApplied, "Set() must not be called when Configure fails")
 }

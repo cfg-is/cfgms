@@ -63,9 +63,11 @@ This prevents `path` values containing `../` sequences (or equivalent) from reac
 
 `validate()` checks `allowed_base_path` **before** `path`. If `allowed_base_path` is missing or relative, `ErrAllowedBasePathRequired` is returned immediately, and `path` is never evaluated.
 
-### What happens on `Get()` before `Set()`
+### Initialization via `Configure()`
 
-`configuredBasePath` has no default value. If `Get()` is called before a successful `Set()`, the module returns `ErrAllowedBasePathRequired` wrapped with `ErrModuleNotReady`. The execution engine detects `ErrModuleNotReady` and skips the diff step, proceeding directly to `Set()`.
+`directoryModule` implements the `modules.Configurable` interface. The execution engine calls `Configure(desiredState)` before the `Get→Compare→Set→Verify` cycle begins. `Configure()` extracts `allowed_base_path` from the desired config and stores it in `configuredBasePath`, allowing `Get()` to validate resource paths before any `Set()` has run.
+
+If `Configure()` is never called (or returns an error), `configuredBasePath` is empty and `Get()` returns `ErrAllowedBasePathRequired`. The engine surfaces this as a module configuration failure and does not proceed to `Set()`.
 
 ## YAML Examples
 

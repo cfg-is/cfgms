@@ -109,17 +109,15 @@ func TestDirectoryModule_Set_EmptyAllowedBasePath(t *testing.T) {
 	}
 }
 
-// TestDirectoryModule_Get_BeforeSet verifies Get returns both ErrAllowedBasePathRequired and
-// ErrModuleNotReady when configuredBasePath has never been populated. The ErrModuleNotReady
-// sentinel is what the execution engine checks to skip Compare and proceed to Set().
+// TestDirectoryModule_Get_BeforeSet verifies Get returns ErrAllowedBasePathRequired when
+// configuredBasePath has never been populated (i.e., Configure was never called).
+// The execution engine calls Configure(desiredState) before Get() for Configurable modules,
+// so this error only fires if Configure is bypassed or returns an error.
 func TestDirectoryModule_Get_BeforeSet(t *testing.T) {
 	m := New()
 	_, err := m.Get(context.Background(), "/some/path")
 	if !errors.Is(err, ErrAllowedBasePathRequired) {
-		t.Errorf("Get() before Set() = %v, want errors.Is(err, ErrAllowedBasePathRequired) true", err)
-	}
-	if !errors.Is(err, modules.ErrModuleNotReady) {
-		t.Errorf("Get() before Set() = %v, want errors.Is(err, ErrModuleNotReady) true", err)
+		t.Errorf("Get() before Configure() = %v, want errors.Is(err, ErrAllowedBasePathRequired) true", err)
 	}
 }
 

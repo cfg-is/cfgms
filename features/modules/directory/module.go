@@ -31,6 +31,23 @@ func New() modules.Module {
 	return &directoryModule{}
 }
 
+// Configure extracts AllowedBasePath from the operator config so that Get() can
+// validate paths before any Set() has been called.
+// This implements modules.Configurable and is called by the execution engine
+// before the Get→Compare→Set→Verify cycle begins.
+func (m *directoryModule) Configure(config modules.ConfigState) error {
+	if config == nil {
+		return ErrAllowedBasePathRequired
+	}
+	configMap := config.AsMap()
+	basePath, _ := configMap["allowed_base_path"].(string)
+	if basePath == "" || !filepath.IsAbs(basePath) {
+		return ErrAllowedBasePathRequired
+	}
+	m.configuredBasePath = basePath
+	return nil
+}
+
 // directoryConfig represents the configuration for a directory
 type directoryConfig struct {
 	AllowedBasePath string `yaml:"allowed_base_path"`     // Security boundary for all OS calls
@@ -344,9 +361,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 // This allows the execution engine to detect that the directory needs to be created.
 func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	if m.configuredBasePath == "" {
-		// Wrap both so the execution engine can detect ErrModuleNotReady to skip Compare
-		// and proceed to Set(), while callers can still check for ErrAllowedBasePathRequired.
-		return nil, fmt.Errorf("%w: %w", modules.ErrModuleNotReady, ErrAllowedBasePathRequired)
+		return nil, ErrAllowedBasePathRequired
 	}
 
 	// NOTE: symlink escapes outside AllowedBasePath are not blocked by ValidateAndCleanPath
