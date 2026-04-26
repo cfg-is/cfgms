@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -265,14 +266,19 @@ func TestExecuteResource_Configurable_DirectoryModule_EndToEnd(t *testing.T) {
 	logger := logging.NewLogger("info")
 	engine := New(moduleFactory, comparator, errorConfig, logger)
 
+	cfgMap := map[string]interface{}{
+		"allowed_base_path": base,
+		"path":              targetPath,
+	}
+	if runtime.GOOS != "windows" {
+		// 0755 octal. Windows rejects unix-style permissions (NTFS uses ACLs); see directory/module.go.
+		cfgMap["permissions"] = 493
+	}
+
 	resource := config.ResourceConfig{
 		Name:   "test-dir",
 		Module: "directory",
-		Config: map[string]interface{}{
-			"allowed_base_path": base,
-			"path":              targetPath,
-			"permissions":       493, // 0755 octal — absent dir has no permissions, so drift is detected
-		},
+		Config: cfgMap,
 	}
 
 	ctx := context.Background()
