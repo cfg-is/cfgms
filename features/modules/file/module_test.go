@@ -54,8 +54,9 @@ func getTestUser(t *testing.T) (string, string) {
 }
 
 // testFileConfigYAML returns a file config YAML string appropriate for the platform.
+// basePath is the AllowedBasePath that constrains all OS calls; it must be an absolute path.
 // On Windows, omits permissions since NTFS does not support Unix permission bits.
-func testFileConfigYAML(content, owner, group string) string {
+func testFileConfigYAML(content, owner, group, basePath string) string {
 	cfg := `content: "` + content + `"`
 	if platformSupportsPermissions() {
 		cfg += "\npermissions: 420"
@@ -65,6 +66,9 @@ func testFileConfigYAML(content, owner, group string) string {
 	}
 	if group != "" {
 		cfg += "\ngroup: " + group
+	}
+	if basePath != "" {
+		cfg += "\nallowed_base_path: " + basePath
 	}
 	return cfg
 }
@@ -87,7 +91,7 @@ func TestFileModule(t *testing.T) {
 	}{
 		{
 			name:       "Create new file",
-			configData: testFileConfigYAML(testContent, "", ""),
+			configData: testFileConfigYAML(testContent, "", "", tempDir),
 			cleanup: func() error {
 				return os.Remove(testFile)
 			},
@@ -95,7 +99,7 @@ func TestFileModule(t *testing.T) {
 		},
 		{
 			name:       "Create file with ownership",
-			configData: testFileConfigYAML(testContent, testUser, testGroup),
+			configData: testFileConfigYAML(testContent, testUser, testGroup, tempDir),
 			cleanup: func() error {
 				return os.Remove(testFile)
 			},
@@ -103,25 +107,23 @@ func TestFileModule(t *testing.T) {
 		},
 		{
 			name: "Invalid content (empty)",
-			configData: `content: ""
-permissions: 420`,
+			configData: "content: \"\"\npermissions: 420\nallowed_base_path: " + tempDir,
 			// On Windows, permissions error fires before content validation
 			wantErr: true,
 		},
 		{
-			name: "Invalid permissions",
-			configData: `content: "` + testContent + `"
-permissions: 9999`,
-			wantErr: true,
+			name:       "Invalid permissions",
+			configData: "content: \"" + testContent + "\"\npermissions: 9999\nallowed_base_path: " + tempDir,
+			wantErr:    true,
 		},
 		{
 			name:       "Invalid owner",
-			configData: testFileConfigYAML(testContent, "nonexistentuser", ""),
+			configData: testFileConfigYAML(testContent, "nonexistentuser", "", tempDir),
 			wantErr:    true,
 		},
 		{
 			name:       "Invalid group",
-			configData: testFileConfigYAML(testContent, "", "nonexistentgroup"),
+			configData: testFileConfigYAML(testContent, "", "nonexistentgroup", tempDir),
 			// Windows doesn't have Unix groups, so this won't error on Windows
 			wantErr: runtime.GOOS != "windows",
 		},
@@ -186,7 +188,7 @@ func TestFileModule_EdgeCases(t *testing.T) {
 	module := New()
 
 	// Test with empty resource ID
-	configData := testFileConfigYAML("test content", "", "")
+	configData := testFileConfigYAML("test content", "", "", tempDir)
 	configState := createConfigFromYAML(configData)
 
 	err := module.Set(context.Background(), "", configState)
@@ -194,8 +196,16 @@ func TestFileModule_EdgeCases(t *testing.T) {
 		t.Error("Set() with empty resource ID should fail")
 	}
 
+	// Set up configuredBasePath by calling Set with absent state for a non-existent file.
+	// os.Remove on a missing file returns ErrNotExist, which Set treats as success.
+	absConfigState := createConfigFromYAML("state: absent\nallowed_base_path: " + tempDir)
+	nonExistentFile := filepath.Join(tempDir, "nonexistent.txt")
+	if err := module.Set(context.Background(), nonExistentFile, absConfigState); err != nil {
+		t.Fatalf("Set() with absent state on non-existent file should not error: %v", err)
+	}
+
 	// Test Get with non-existent file - should return State: "absent"
-	state, err := module.Get(context.Background(), filepath.Join(tempDir, "nonexistent.txt"))
+	state, err := module.Get(context.Background(), nonExistentFile)
 	if err != nil {
 		t.Errorf("Get() with non-existent file should not error: %v", err)
 	}
@@ -204,7 +214,7 @@ func TestFileModule_EdgeCases(t *testing.T) {
 	}
 
 	// Test file creation and verification
-	verifyConfig := `content: "test content for verification"`
+	verifyConfig := "content: \"test content for verification\"\nallowed_base_path: " + tempDir
 	if platformSupportsPermissions() {
 		verifyConfig += "\npermissions: 493"
 	}
@@ -248,12 +258,100 @@ func TestFileModule_PermissionsRejectedOnWindows(t *testing.T) {
 	testFile := filepath.Join(tempDir, "test.txt")
 	module := New()
 
-	configData := `content: "test content"
-permissions: 420`
+	configData := "content: \"test content\"\npermissions: 420\nallowed_base_path: " + tempDir
 	configState := createConfigFromYAML(configData)
 
 	err := module.Set(context.Background(), testFile, configState)
 	if err == nil {
 		t.Error("Set() with Unix permissions on Windows should fail")
 	}
+}
+
+func TestFileModule_Security(t *testing.T) {
+	tempDir := t.TempDir()
+
+	t.Run("Validate rejects empty AllowedBasePath", func(t *testing.T) {
+		cfg := &FileConfig{
+			State:           "present",
+			Content:         "test",
+			AllowedBasePath: "",
+		}
+		err := cfg.Validate()
+		if err != ErrAllowedBasePathRequired {
+			t.Errorf("Validate() with empty AllowedBasePath: got %v, want ErrAllowedBasePathRequired", err)
+		}
+	})
+
+	t.Run("Validate rejects relative AllowedBasePath", func(t *testing.T) {
+		cfg := &FileConfig{
+			State:           "present",
+			Content:         "test",
+			AllowedBasePath: "relative/path",
+		}
+		err := cfg.Validate()
+		if err != ErrAllowedBasePathRequired {
+			t.Errorf("Validate() with relative AllowedBasePath: got %v, want ErrAllowedBasePathRequired", err)
+		}
+	})
+
+	t.Run("Set rejects missing AllowedBasePath before any OS call", func(t *testing.T) {
+		module := New()
+		testFile := filepath.Join(tempDir, "should-not-be-created.txt")
+		configState := createConfigFromYAML("content: \"test\"\nstate: present")
+		err := module.Set(context.Background(), testFile, configState)
+		if err != ErrAllowedBasePathRequired {
+			t.Errorf("Set() with missing AllowedBasePath: got %v, want ErrAllowedBasePathRequired", err)
+		}
+		// File must not have been created
+		if _, statErr := os.Stat(testFile); !os.IsNotExist(statErr) {
+			t.Error("Set() with missing AllowedBasePath must not create any file")
+		}
+	})
+
+	t.Run("Get before Set returns ErrAllowedBasePathRequired", func(t *testing.T) {
+		module := New()
+		testFile := filepath.Join(tempDir, "any.txt")
+		_, err := module.Get(context.Background(), testFile)
+		if err != ErrAllowedBasePathRequired {
+			t.Errorf("Get() before Set(): got %v, want ErrAllowedBasePathRequired", err)
+		}
+	})
+
+	t.Run("Path traversal rejected", func(t *testing.T) {
+		module := New()
+		// filepath.Join cleans the path but keeps the traversal semantics before ValidateAndCleanPath resolves it
+		traversalPath := tempDir + "/../secret.txt"
+		configState := createConfigFromYAML("content: \"evil\"\nallowed_base_path: " + tempDir)
+		err := module.Set(context.Background(), traversalPath, configState)
+		if err == nil {
+			t.Error("Set() with path traversal should fail")
+		}
+	})
+
+	t.Run("Valid path within base succeeds end-to-end", func(t *testing.T) {
+		module := New()
+		testFile := filepath.Join(tempDir, "valid.txt")
+		configYAML := "content: \"valid content\"\nallowed_base_path: " + tempDir
+		if platformSupportsPermissions() {
+			configYAML += "\npermissions: 420"
+		}
+		configState := createConfigFromYAML(configYAML)
+
+		if err := module.Set(context.Background(), testFile, configState); err != nil {
+			t.Fatalf("Set() with valid path failed: %v", err)
+		}
+
+		state, err := module.Get(context.Background(), testFile)
+		if err != nil {
+			t.Fatalf("Get() with valid path failed: %v", err)
+		}
+
+		fileState, ok := state.(*FileConfig)
+		if !ok {
+			t.Fatal("Get() did not return *FileConfig")
+		}
+		if fileState.Content != "valid content" {
+			t.Errorf("Content mismatch: got %q, want %q", fileState.Content, "valid content")
+		}
+	})
 }
