@@ -15,8 +15,9 @@ import (
 
 // firewallModule implements the Module interface for firewall management
 type firewallModule struct {
-	mu    sync.RWMutex
-	rules map[string]firewallConfig
+	mu       sync.RWMutex
+	rules    map[string]firewallConfig
+	executor firewallExecutor
 	// Embed default logging support for automatic injection capability
 	modules.DefaultLoggingSupport
 }
@@ -24,7 +25,8 @@ type firewallModule struct {
 // New creates a new instance of the Firewall module
 func New() modules.Module {
 	return &firewallModule{
-		rules: make(map[string]firewallConfig),
+		rules:    make(map[string]firewallConfig),
+		executor: newExecutor(),
 	}
 }
 
@@ -32,6 +34,7 @@ func New() modules.Module {
 type firewallConfig struct {
 	Name        string `yaml:"name"`
 	Action      string `yaml:"action"`
+	Direction   string `yaml:"direction"`
 	Protocol    string `yaml:"protocol,omitempty"`
 	Service     string `yaml:"service,omitempty"`
 	Port        int    `yaml:"port,omitempty"`
@@ -40,6 +43,9 @@ type firewallConfig struct {
 	Destination string `yaml:"destination"`
 	Description string `yaml:"description,omitempty"`
 	Enabled     bool   `yaml:"enabled,omitempty"`
+	// State signals the desired lifecycle: "present" (default) creates/updates;
+	// "absent" deletes the rule. Not stored in m.rules after application.
+	State string `yaml:"state,omitempty"`
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
@@ -47,6 +53,7 @@ func (c *firewallConfig) AsMap() map[string]interface{} {
 	result := map[string]interface{}{
 		"name":        c.Name,
 		"action":      c.Action,
+		"direction":   c.Direction,
 		"source":      c.Source,
 		"destination": c.Destination,
 		"enabled":     c.Enabled,
@@ -66,6 +73,9 @@ func (c *firewallConfig) AsMap() map[string]interface{} {
 	}
 	if c.Description != "" {
 		result["description"] = c.Description
+	}
+	if c.State != "" {
+		result["state"] = c.State
 	}
 
 	return result
@@ -88,7 +98,7 @@ func (c *firewallConfig) Validate() error {
 
 // GetManagedFields returns the list of fields this configuration manages
 func (c *firewallConfig) GetManagedFields() []string {
-	fields := []string{"name", "action", "source", "destination", "enabled"}
+	fields := []string{"name", "action", "direction", "source", "destination", "enabled"}
 
 	if c.Protocol != "" {
 		fields = append(fields, "protocol")
@@ -114,6 +124,14 @@ func (c *firewallConfig) validate() error {
 	// Validate name
 	if c.Name == "" {
 		return ErrInvalidName
+	}
+
+	// Validate direction — chain selection is explicit, never inferred from addresses
+	switch c.Direction {
+	case "input", "output", "forward":
+		// valid
+	default:
+		return ErrInvalidDirection
 	}
 
 	// Validate action
@@ -176,7 +194,9 @@ func isValidIPOrCIDR(s string) bool {
 	return net.ParseIP(s) != nil
 }
 
-// Set creates or updates a firewall rule according to the configuration
+// Set creates, updates, or deletes a firewall rule according to the configuration.
+// Write-through cache semantics: the OS executor is called first; m.rules is
+// updated only on executor success.
 func (m *firewallModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	if config == nil {
 		return ErrInvalidName // reuse existing error for invalid input
@@ -191,6 +211,9 @@ func (m *firewallModule) Set(ctx context.Context, resourceID string, config modu
 	}
 	if action, ok := configMap["action"].(string); ok {
 		firewallConf.Action = action
+	}
+	if direction, ok := configMap["direction"].(string); ok {
+		firewallConf.Direction = direction
 	}
 	if protocol, ok := configMap["protocol"].(string); ok {
 		firewallConf.Protocol = protocol
@@ -223,13 +246,36 @@ func (m *firewallModule) Set(ctx context.Context, resourceID string, config modu
 	if enabled, ok := configMap["enabled"].(bool); ok {
 		firewallConf.Enabled = enabled
 	}
+	if state, ok := configMap["state"].(string); ok {
+		firewallConf.State = state
+	}
 
-	// Validate configuration
+	// Handle deletion path
+	if firewallConf.State == "absent" {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		rule, ok := m.rules[resourceID]
+		if !ok {
+			return ErrRuleNotFound
+		}
+		if err := m.executor.deleteRule(rule); err != nil {
+			return err
+		}
+		delete(m.rules, resourceID)
+		return nil
+	}
+
+	// Validate configuration before applying
 	if err := firewallConf.validate(); err != nil {
 		return err
 	}
 
-	// Store the rule
+	// Write-through: apply to OS first, update cache only on success
+	if err := m.executor.applyRule(*firewallConf); err != nil {
+		return err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.rules[resourceID] = *firewallConf
@@ -237,18 +283,26 @@ func (m *firewallModule) Set(ctx context.Context, resourceID string, config modu
 	return nil
 }
 
-// Get retrieves the current configuration of a firewall rule
+// Get retrieves the current configuration of a firewall rule.
+// It consults the OS executor first: if the rule is absent from the OS,
+// ErrRuleNotFound is returned regardless of m.rules contents.
 func (m *firewallModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	// Get the rule
-	rule, exists := m.rules[resourceID]
+	exists, err := m.executor.ruleExists(resourceID)
+	if err != nil {
+		return nil, err
+	}
 	if !exists {
 		return nil, ErrRuleNotFound
 	}
 
-	// Return a copy of the rule as ConfigState
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	rule, ok := m.rules[resourceID]
+	if !ok {
+		return nil, ErrRuleNotFound
+	}
+
 	ruleCopy := rule
 	return &ruleCopy, nil
 }
