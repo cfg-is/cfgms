@@ -3,6 +3,8 @@
 package file
 
 import (
+	"path/filepath"
+
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -10,11 +12,12 @@ import (
 
 // FileConfig represents the configuration for a file resource
 type FileConfig struct {
-	State       string `yaml:"state"`                 // "present" or "absent"
-	Content     string `yaml:"content,omitempty"`     // File content (required when state is "present")
-	Permissions int    `yaml:"permissions,omitempty"` // File permissions (e.g., 0644)
-	Owner       string `yaml:"owner,omitempty"`       // File owner
-	Group       string `yaml:"group,omitempty"`       // File group
+	State           string `yaml:"state"`                 // "present" or "absent"
+	Content         string `yaml:"content,omitempty"`     // File content (required when state is "present")
+	Permissions     int    `yaml:"permissions,omitempty"` // File permissions (e.g., 0644)
+	Owner           string `yaml:"owner,omitempty"`       // File owner
+	Group           string `yaml:"group,omitempty"`       // File group
+	AllowedBasePath string `yaml:"allowed_base_path"`     // Required: absolute base path constraining all OS calls
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
@@ -27,6 +30,9 @@ func (c *FileConfig) AsMap() map[string]interface{} {
 	} else {
 		result["state"] = "present" // Default to present
 	}
+
+	// Always include the required security base path
+	result["allowed_base_path"] = c.AllowedBasePath
 
 	// Only include content/permissions for present state
 	if c.State != "absent" {
@@ -56,6 +62,11 @@ func (c *FileConfig) FromYAML(data []byte) error {
 
 // Validate ensures the configuration is valid
 func (c *FileConfig) Validate() error {
+	// AllowedBasePath is required and must be an absolute path for all states.
+	if c.AllowedBasePath == "" || !filepath.IsAbs(c.AllowedBasePath) {
+		return ErrAllowedBasePathRequired
+	}
+
 	// State "absent" doesn't require content or permissions
 	if c.State == "absent" {
 		return nil

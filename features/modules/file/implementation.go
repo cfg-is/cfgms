@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// #nosec G304 - File module requires file system access for configuration management
 package file
 
 import (
@@ -8,22 +7,44 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"path/filepath"
 	"runtime"
 	"strconv"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // fileModule implements the Module interface for file management
 type fileModule struct {
 	// Embed default logging support for automatic injection capability
 	modules.DefaultLoggingSupport
+	// configuredBasePath is populated by Set() from the operator's AllowedBasePath YAML field.
+	// It has no default — Get() returns ErrAllowedBasePathRequired until Set() is called.
+	configuredBasePath string
 }
 
 // New creates a new instance of the file module
 func New() modules.Module {
 	return &fileModule{}
+}
+
+// Configure extracts AllowedBasePath from the operator config so that Get() can
+// safely read the current resource state before Set() is called.
+// This implements modules.Configurable and is called by the execution engine
+// before the Get→Compare→Set→Verify cycle begins.
+func (m *fileModule) Configure(config modules.ConfigState) error {
+	if config == nil {
+		return ErrAllowedBasePathRequired
+	}
+	configMap := config.AsMap()
+	basePath, _ := configMap["allowed_base_path"].(string)
+	if basePath == "" || !filepath.IsAbs(basePath) {
+		return ErrAllowedBasePathRequired
+	}
+	m.configuredBasePath = basePath
+	return nil
 }
 
 // Get returns the current configuration of the file.
@@ -35,7 +56,18 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 		return nil, modules.ErrInvalidResourceID
 	}
 
-	info, err := os.Stat(resourceID)
+	if m.configuredBasePath == "" {
+		return nil, ErrAllowedBasePathRequired
+	}
+
+	// NOTE: symlink escapes not blocked by ValidateAndCleanPath
+	cleanPath, err := security.ValidateAndCleanPath(m.configuredBasePath, resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	// #nosec G304 -- path validated by security.ValidateAndCleanPath above
+	info, err := os.Stat(cleanPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// File doesn't exist - return state: absent
@@ -46,7 +78,8 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 		return nil, err
 	}
 
-	content, err := os.ReadFile(resourceID)
+	// NOTE: symlink escapes not blocked by ValidateAndCleanPath
+	content, err := security.SecureReadFile(m.configuredBasePath, resourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -58,11 +91,12 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 	}
 
 	config := &FileConfig{
-		State:       "present",
-		Content:     string(content),
-		Permissions: getFilePermissions(info),
-		Owner:       owner,
-		Group:       group,
+		State:           "present",
+		Content:         string(content),
+		Permissions:     getFilePermissions(info),
+		Owner:           owner,
+		Group:           group,
+		AllowedBasePath: m.configuredBasePath,
 	}
 
 	return config, nil
@@ -116,10 +150,26 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 	if group, ok := configMap["group"].(string); ok {
 		fileConfig.Group = group
 	}
+	if basePath, ok := configMap["allowed_base_path"].(string); ok {
+		fileConfig.AllowedBasePath = basePath
+	}
+
+	// AllowedBasePath must be validated before any OS call, including os.Remove in the absent branch.
+	if fileConfig.AllowedBasePath == "" || !filepath.IsAbs(fileConfig.AllowedBasePath) {
+		return ErrAllowedBasePathRequired
+	}
+
+	// NOTE: symlink escapes not blocked by ValidateAndCleanPath
+	cleanPath, err := security.ValidateAndCleanPath(fileConfig.AllowedBasePath, resourceID)
+	if err != nil {
+		return err
+	}
+	m.configuredBasePath = fileConfig.AllowedBasePath
 
 	// Handle state: absent - delete the file
 	if fileConfig.State == "absent" {
-		if err := os.Remove(resourceID); err != nil {
+		// #nosec G304 -- path validated by security.ValidateAndCleanPath above
+		if err := os.Remove(cleanPath); err != nil {
 			if os.IsNotExist(err) {
 				// File already doesn't exist - desired state achieved
 				logger.InfoCtx(ctx, "File already absent",
@@ -167,7 +217,8 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 	if fileConfig.Permissions < 0 || fileConfig.Permissions > 0777 {
 		return modules.ErrInvalidInput
 	}
-	if err := os.WriteFile(resourceID, []byte(fileConfig.Content), os.FileMode(fileConfig.Permissions)); err != nil {
+	// NOTE: symlink escapes not blocked by ValidateAndCleanPath
+	if err := security.SecureWriteFileWithPerms(fileConfig.AllowedBasePath, resourceID, []byte(fileConfig.Content), os.FileMode(fileConfig.Permissions)); err != nil {
 		return err
 	}
 
@@ -182,18 +233,27 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 				if err != nil {
 					return err
 				}
-				uid, _ = strconv.Atoi(userInfo.Uid)
+				parsedUID, err := strconv.Atoi(userInfo.Uid)
+				if err != nil {
+					return fmt.Errorf("failed to parse UID %q: %w", userInfo.Uid, err)
+				}
+				uid = parsedUID
 			}
 			if fileConfig.Group != "" {
 				groupInfo, err := user.LookupGroup(fileConfig.Group)
 				if err != nil {
 					return err
 				}
-				gid, _ = strconv.Atoi(groupInfo.Gid)
+				parsedGID, err := strconv.Atoi(groupInfo.Gid)
+				if err != nil {
+					return fmt.Errorf("failed to parse GID %q: %w", groupInfo.Gid, err)
+				}
+				gid = parsedGID
 			}
 
 			// Change owner and group
-			if err := os.Chown(resourceID, uid, gid); err != nil {
+			// #nosec G304 -- path validated by security.ValidateAndCleanPath above
+			if err := os.Chown(cleanPath, uid, gid); err != nil {
 				return err
 			}
 		case "windows":
