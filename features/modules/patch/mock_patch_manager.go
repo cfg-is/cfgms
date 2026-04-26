@@ -102,7 +102,8 @@ func (m *MockPatchManager) getAvailablePatchesInternal(patchType string) []Patch
 		if patchType == "all" ||
 			(patchType == "security" && patch.Category == "security") ||
 			(patchType == "critical" && patch.Severity == "critical") ||
-			(patchType == "kernel" && strings.Contains(strings.ToLower(patch.Title), "kernel")) {
+			(patchType == "kernel" && strings.Contains(strings.ToLower(patch.Title), "kernel")) ||
+			(patchType == "feature-update" && patch.Category == "feature-update") {
 			filtered = append(filtered, patch)
 		}
 	}

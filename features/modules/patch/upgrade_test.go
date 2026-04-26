@@ -645,3 +645,60 @@ func TestUpgradeManager_PerformUpgrade_BlockedByMaintenanceWindow(t *testing.T) 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot upgrade now")
 }
+
+func TestConfig_Validate_FeatureUpdate(t *testing.T) {
+	config := &patch.Config{PatchType: "feature-update"}
+	err := config.Validate()
+	assert.NoError(t, err, "feature-update must be accepted by Config.validate()")
+}
+
+func TestConfig_Validate_RejectsUnknownPatchType(t *testing.T) {
+	unknownTypes := []string{"major-update", "optional", "driver", ""}
+	for _, pt := range unknownTypes {
+		config := &patch.Config{PatchType: pt}
+		err := config.Validate()
+		assert.ErrorIs(t, err, patch.ErrInvalidPatchType,
+			"patch type %q must be rejected by Config.validate()", pt)
+	}
+}
+
+func TestUpgradeManager_PerformUpgrade_NoErrInvalidPatchType(t *testing.T) {
+	mockManager := patch.NewMockPatchManager()
+	// Add a feature-update patch so InstallPatches has real work to do, making
+	// the state change verifiable and proving the full installation path ran.
+	mockManager.AddAvailablePatch(patch.PatchInfo{
+		ID:             "FU-2024-001",
+		Title:          "Windows 11 Feature Update",
+		Category:       "feature-update",
+		Severity:       "unspecified",
+		RebootRequired: true,
+	})
+
+	patchModule, err := patch.NewPatchModule(mockManager)
+	require.NoError(t, err)
+
+	requirements := patch.DefaultWindows11Requirements()
+	checker := patch.NewCompatibilityChecker(requirements)
+
+	policy := patch.DefaultUpgradePolicy()
+	policy.Enabled = true
+	policy.BlockIncompatible = false
+	policy.TestMode = false
+
+	upgradeManager := patch.NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
+
+	dna := createCompatibleDNA()
+	ctx := context.Background()
+
+	err = upgradeManager.PerformUpgrade(ctx, dna)
+	require.NotErrorIs(t, err, patch.ErrInvalidPatchType,
+		"PerformUpgrade must not return ErrInvalidPatchType for feature-update")
+	require.NoError(t, err, "PerformUpgrade should succeed when feature-update is a valid patch type")
+
+	// Verify the installation path was exercised: the feature-update patch has
+	// RebootRequired=true, so a successful install sets the reboot-required flag.
+	rebootRequired, checkErr := mockManager.CheckRebootRequired(ctx)
+	require.NoError(t, checkErr)
+	assert.True(t, rebootRequired,
+		"feature-update patch install must set reboot-required flag, confirming the install path ran")
+}

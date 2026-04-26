@@ -71,7 +71,10 @@ func (w *WindowsUpdateManager) ListAvailablePatches(ctx context.Context, patchTy
 	defer searcher.Clear()
 
 	// Build search criteria based on patch type
-	criteria := w.buildSearchCriteria(patchType)
+	criteria, err := w.buildSearchCriteria(patchType)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported patch type %q: %w", patchType, err)
+	}
 
 	// Search for updates
 	searchResult, err := oleutil.CallMethod(searcher.ToIDispatch(), "Search", criteria)
@@ -174,7 +177,10 @@ func (w *WindowsUpdateManager) InstallPatches(ctx context.Context, config *Confi
 	defer searcher.Clear()
 
 	// Build search criteria
-	criteria := w.buildSearchCriteria(config.PatchType)
+	criteria, err := w.buildSearchCriteria(config.PatchType)
+	if err != nil {
+		return fmt.Errorf("unsupported patch type %q: %w", config.PatchType, err)
+	}
 
 	// Search for updates
 	searchResult, err := oleutil.CallMethod(searcher.ToIDispatch(), "Search", criteria)
@@ -340,27 +346,43 @@ func (w *WindowsUpdateManager) Name() string {
 	return "Windows Update"
 }
 
-// IsValidPatchType checks if the given patch type is valid for Windows
+// IsValidPatchType checks if the given patch type is valid for Windows.
+// "feature-update" is registered as a recognized type so module-level validation
+// accepts it; however, buildSearchCriteria returns an explicit error for it until
+// windowsUpgradeCategoryGUID is confirmed from Microsoft documentation. Callers
+// that proceed to InstallPatches or ListAvailablePatches will receive that error.
 func (w *WindowsUpdateManager) IsValidPatchType(patchType string) bool {
 	validTypes := map[string]bool{
-		"security": true,
-		"critical": true,
-		"all":      true,
+		"security":       true,
+		"critical":       true,
+		"all":            true,
+		"feature-update": true,
 	}
 	return validTypes[patchType]
 }
 
-// buildSearchCriteria builds Windows Update search criteria based on patch type
-func (w *WindowsUpdateManager) buildSearchCriteria(patchType string) string {
+// windowsUpgradeCategoryGUID is the Windows Update category GUID for the "Windows Upgrades" category.
+// This value must be confirmed from Microsoft WUA SDK documentation before use.
+// Left empty to trigger the explicit-error fallback until an authoritative source is cited in the PR.
+const windowsUpgradeCategoryGUID = ""
+
+// buildSearchCriteria builds Windows Update search criteria based on patch type.
+// Returns an error for patch types that require an unconfirmed category GUID.
+func (w *WindowsUpdateManager) buildSearchCriteria(patchType string) (string, error) {
 	switch patchType {
 	case "security":
-		return "IsInstalled=0 AND Type='Software' AND CategoryIDs contains '0FA1201D-4330-4FA8-8AE9-B877473B6441'"
+		return "IsInstalled=0 AND Type='Software' AND CategoryIDs contains '0FA1201D-4330-4FA8-8AE9-B877473B6441'", nil
 	case "critical":
-		return "IsInstalled=0 AND Type='Software' AND MsrcSeverity='Critical'"
+		return "IsInstalled=0 AND Type='Software' AND MsrcSeverity='Critical'", nil
 	case "all":
-		return "IsInstalled=0 AND Type='Software'"
+		return "IsInstalled=0 AND Type='Software'", nil
+	case "feature-update":
+		if windowsUpgradeCategoryGUID == "" {
+			return "", fmt.Errorf("feature updates require Windows Update for Business or the Media Creation Tool — not supported by this implementation")
+		}
+		return fmt.Sprintf("IsInstalled=0 AND Type='Software' AND CategoryIDs contains '%s'", windowsUpgradeCategoryGUID), nil
 	default:
-		return "IsInstalled=0 AND Type='Software'"
+		return "IsInstalled=0 AND Type='Software'", nil
 	}
 }
 
