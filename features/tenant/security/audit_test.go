@@ -5,6 +5,7 @@ package security
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -49,6 +50,21 @@ func newTestAuditManager(tb testing.TB) *audit.Manager {
 func newTestAuditLogger(tb testing.TB) *TenantSecurityAuditLogger {
 	tb.Helper()
 	return NewTenantSecurityAuditLogger(newTestAuditManager(tb))
+}
+
+// newTenantSecurityAuditLoggerWithCap creates a logger with a custom in-memory cap.
+// Use this in cap-eviction and FIFO tests to avoid writing thousands of durable entries
+// on slow platforms (Windows CI): a small cap like 10–12 exercises the same eviction
+// logic as cap=1000 but with far fewer flatfile writes.
+func newTenantSecurityAuditLoggerWithCap(tb testing.TB, cap int) *TenantSecurityAuditLogger {
+	tb.Helper()
+	mgr := newTestAuditManager(tb)
+	return &TenantSecurityAuditLogger{
+		auditManager: mgr,
+		entries:      make([]TenantSecurityAuditEntry, 0, cap),
+		cap:          cap,
+		logger:       slog.Default(),
+	}
 }
 
 // TestTenantSecurityAuditLogger_ForwardsToAuditManager verifies that each of the
@@ -259,12 +275,17 @@ func TestTenantSecurityAuditLogger_CapEviction(t *testing.T) {
 
 // TestTenantSecurityAuditLogger_FIFOEvictionOrder verifies that after cap eviction
 // the oldest entries are dropped and the newest are retained.
+//
+// Uses a small cap (10) so only 60 entries reach the durable store.  Writing 1050
+// entries on Windows CI caused the flatfile drain goroutine to exceed its 30-second
+// Stop timeout, leaving file handles open and failing TempDir cleanup.
 func TestTenantSecurityAuditLogger_FIFOEvictionOrder(t *testing.T) {
 	ctx := context.Background()
-	const cap = defaultInMemoryAuditCap
-	writeCount := cap + 50
+	const smallCap = 10
+	const extraWrites = 50
+	writeCount := smallCap + extraWrites
 
-	logger := newTestAuditLogger(t)
+	logger := newTenantSecurityAuditLoggerWithCap(t, smallCap)
 
 	for i := 0; i < writeCount; i++ {
 		err := logger.LogPolicyViolation(ctx,
@@ -282,13 +303,13 @@ func TestTenantSecurityAuditLogger_FIFOEvictionOrder(t *testing.T) {
 	copy(entries, logger.entries)
 	logger.mutex.RUnlock()
 
-	require.Equal(t, cap, len(entries))
+	require.Equal(t, smallCap, len(entries))
 
-	// The first retained entry should reference subject-50 (oldest 50 were evicted).
+	// The first retained entry should reference policy-50 (oldest 50 were evicted).
 	assert.Contains(t, entries[0].Details["policy_id"], "policy-50",
-		"oldest 50 entries should have been evicted; first retained entry should be policy-50")
+		"oldest %d entries should have been evicted; first retained entry should be policy-50", extraWrites)
 	// The last entry should be the most recently written.
-	assert.Contains(t, entries[cap-1].Details["policy_id"], fmt.Sprintf("policy-%d", writeCount-1),
+	assert.Contains(t, entries[smallCap-1].Details["policy_id"], fmt.Sprintf("policy-%d", writeCount-1),
 		"last in-memory entry should be the most recently written")
 }
 
@@ -317,36 +338,41 @@ func TestTenantSecurityAuditLogger_AuditFailurePreservesInMemory(t *testing.T) {
 
 // TestTenantSecurityAuditLogger_CapAppliesToAllSixMethods verifies that the cap is
 // enforced uniformly across all six Log* methods including the two vulnerability methods.
+//
+// Uses a small cap (12, divisible by 6) so only 22 entries reach the durable store.
+// Writing 1010 entries on Windows CI caused the same flatfile-drain timeout issue as
+// TestTenantSecurityAuditLogger_FIFOEvictionOrder.
 func TestTenantSecurityAuditLogger_CapAppliesToAllSixMethods(t *testing.T) {
 	ctx := context.Background()
-	logger := newTestAuditLogger(t)
+	const smallCap = 12 // divisible by 6 — every method gets at least two writes
+	logger := newTenantSecurityAuditLoggerWithCap(t, smallCap)
 
-	// Write entries via all six methods to exceed the cap.
-	for i := 0; i < defaultInMemoryAuditCap+10; i++ {
+	// Write smallCap+10 entries via all six methods to exceed the cap.
+	for i := 0; i < smallCap+10; i++ {
 		switch i % 6 {
 		case 0:
-			_ = logger.LogPolicyViolation(ctx, "t", "s", fmt.Sprintf("p-%d", i), "v", nil)
+			require.NoError(t, logger.LogPolicyViolation(ctx, "t", "s", fmt.Sprintf("p-%d", i), "v", nil))
 		case 1:
-			_ = logger.LogComplianceViolation(ctx, "t", "HIPAA", "req", fmt.Sprintf("v-%d", i))
+			require.NoError(t, logger.LogComplianceViolation(ctx, "t", "HIPAA", "req", fmt.Sprintf("v-%d", i)))
 		case 2:
-			_ = logger.LogAccessAttempt(ctx, &TenantAccessRequest{
+			require.NoError(t, logger.LogAccessAttempt(ctx, &TenantAccessRequest{
 				SubjectID: "s", SubjectTenantID: "t", TargetTenantID: "t",
 				Context: map[string]string{},
-			}, &TenantAccessResponse{Granted: true})
+			}, &TenantAccessResponse{Granted: true}))
 		case 3:
-			_ = logger.LogIsolationRuleChange(ctx, "update", "t",
+			require.NoError(t, logger.LogIsolationRuleChange(ctx, "update", "t",
 				&IsolationRule{TenantID: "t", ComplianceLevel: ComplianceLevelBasic,
-					DataResidency: DataResidencyRule{EncryptionLevel: "standard"}}, nil)
+					DataResidency: DataResidencyRule{EncryptionLevel: "standard"}}, nil))
 		case 4:
-			_ = logger.LogVulnerabilityStatusChange(ctx, fmt.Sprintf("vuln-%d", i), "t", "open")
+			require.NoError(t, logger.LogVulnerabilityStatusChange(ctx, fmt.Sprintf("vuln-%d", i), "t", "open"))
 		case 5:
-			_ = logger.LogRemediationAction(ctx, fmt.Sprintf("vuln-%d", i), "patch")
+			require.NoError(t, logger.LogRemediationAction(ctx, fmt.Sprintf("vuln-%d", i), "patch"))
 		}
 	}
 
 	logger.mutex.RLock()
 	n := len(logger.entries)
 	logger.mutex.RUnlock()
-	assert.Equal(t, defaultInMemoryAuditCap, n,
+	assert.Equal(t, smallCap, n,
 		"cap must apply uniformly across all six Log* methods")
 }
