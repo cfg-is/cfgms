@@ -314,3 +314,50 @@ backed by durable storage and survive process restarts.
 | `manager.GetComplianceReport(ctx, filter)` | Query `QueryAuditEntries` and compute stats; or use `features/reports/` |
 | `manager.GetSecurityAlerts(ctx, hours)` | `manager.QueryAuditEntries` with `Results: []business.AuditResult{business.AuditResultDenied}` |
 | `manager.ExportAuditLog(ctx, filter, "csv")` | Use `features/reports/` (CSV injection-safe exporter) |
+
+## Tenant Security Audit Events (Issue #865)
+
+The four core security log methods in `features/tenant/security.TenantSecurityAuditLogger`
+forward events to `pkg/audit.Manager` for durable storage in addition to the in-memory window.
+Two methods (`LogVulnerabilityStatusChange`, `LogRemediationAction`) remain in-memory only
+and are not forwarded (deferred to a follow-up story).
+
+| Method | `Action` | `ResourceType` | `ResourceID` | `Result` |
+|---|---|---|---|---|
+| `LogIsolationRuleChange` | `"tenant.isolation.rule_change"` | `"isolation_rule"` | tenant ID | `AuditResultSuccess` |
+| `LogAccessAttempt` | `"tenant.access.attempt"` | `"tenant_access"` | `request.SubjectID` | `AuditResultSuccess` (granted) / `AuditResultDenied` (denied) |
+| `LogPolicyViolation` | `"tenant.policy.violation"` | `"policy"` | policy ID | `AuditResultError` |
+| `LogComplianceViolation` | `"tenant.compliance.violation"` | `"compliance_framework"` | framework name | `AuditResultError` |
+
+Additional `Details` fields per method:
+
+| Method | `Details` keys |
+|---|---|
+| `LogIsolationRuleChange` | `change_type`, `old_rule`, `new_rule` |
+| `LogAccessAttempt` | `granted`, `reason` |
+| `LogPolicyViolation` | `violation`, plus all keys from the caller-provided `context` map |
+| `LogComplianceViolation` | `requirement`, `violation` |
+
+`LogIsolationRuleChange` and `LogComplianceViolation` set `UserID` to `SystemUserID` (`"system"`);
+`LogAccessAttempt` and `LogPolicyViolation` set `UserID` to the subject's ID.
+
+Audit failures (`RecordEvent` returns error) are logged via `slog.Warn` but do not prevent
+the in-memory append — the in-memory window remains observable even when durable storage is unavailable.
+
+### In-Memory Cap
+
+The in-memory entry window is capped at 1000 entries with FIFO eviction. All six `Log*` methods
+share the `addEntry` path and count toward the cap, including the two deferred methods.
+The cap applies only to the in-memory window; the durable store retains all forwarded entries.
+
+### Querying Tenant Security Audit Events
+
+```go
+filter := &business.AuditFilter{
+    TenantID:      tenantID,
+    ResourceTypes: []string{"isolation_rule", "tenant_access", "policy", "compliance_framework"},
+    TimeRange:     &business.TimeRange{Start: &startTime},
+    Limit:         100,
+}
+entries, err := auditManager.QueryEntries(ctx, filter)
+```

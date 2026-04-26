@@ -5,14 +5,25 @@ package security
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/audit"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// TenantSecurityAuditLogger handles security-related audit logging for multi-tenant operations
+const defaultInMemoryAuditCap = 1000
+
+// TenantSecurityAuditLogger handles security-related audit logging for multi-tenant operations.
+// All four core security methods forward events to pkg/audit.Manager for durable storage.
+// An in-memory slice is maintained as a query window (capped at cap entries, FIFO eviction).
 type TenantSecurityAuditLogger struct {
-	entries []TenantSecurityAuditEntry
-	mutex   sync.RWMutex
+	auditManager *audit.Manager
+	entries      []TenantSecurityAuditEntry
+	cap          int
+	mutex        sync.RWMutex
+	logger       *slog.Logger
 }
 
 // TenantSecurityAuditEntry represents a single tenant security audit entry
@@ -67,16 +78,48 @@ type ComplianceAuditInfo struct {
 	RetentionPeriod      int      `json:"retention_period,omitempty"` // Days
 }
 
-// NewTenantSecurityAuditLogger creates a new tenant security audit logger
-func NewTenantSecurityAuditLogger() *TenantSecurityAuditLogger {
-	return &TenantSecurityAuditLogger{
-		entries: make([]TenantSecurityAuditEntry, 0),
-		mutex:   sync.RWMutex{},
+// NewTenantSecurityAuditLogger creates a new tenant security audit logger.
+// auditManager is required; panics on nil.
+func NewTenantSecurityAuditLogger(auditManager *audit.Manager) *TenantSecurityAuditLogger {
+	if auditManager == nil {
+		panic("NewTenantSecurityAuditLogger requires non-nil audit.Manager")
 	}
+	return &TenantSecurityAuditLogger{
+		auditManager: auditManager,
+		entries:      make([]TenantSecurityAuditEntry, 0, defaultInMemoryAuditCap),
+		cap:          defaultInMemoryAuditCap,
+		logger:       slog.Default(),
+	}
+}
+
+// resultFromGranted maps an access-granted boolean to an AuditResult.
+func resultFromGranted(granted bool) business.AuditResult {
+	if granted {
+		return business.AuditResultSuccess
+	}
+	return business.AuditResultDenied
 }
 
 // LogIsolationRuleChange logs changes to tenant isolation rules
 func (tsal *TenantSecurityAuditLogger) LogIsolationRuleChange(ctx context.Context, action, tenantID string, newRule, oldRule *IsolationRule) error {
+	ruleID := tenantID
+	if newRule != nil {
+		ruleID = newRule.TenantID
+	}
+	builder := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Action("tenant.isolation.rule_change").
+		Resource("isolation_rule", ruleID, "").
+		Result(business.AuditResultSuccess).
+		User(audit.SystemUserID, business.AuditUserTypeSystem).
+		Detail("change_type", action).
+		Detail("old_rule", oldRule).
+		Detail("new_rule", newRule)
+
+	if err := tsal.auditManager.RecordEvent(ctx, builder); err != nil {
+		tsal.logger.Warn("failed to record isolation rule change in audit manager", "error", err)
+	}
+
 	entry := TenantSecurityAuditEntry{
 		ID:        fmt.Sprintf("isolation-%d", time.Now().UnixNano()),
 		Timestamp: time.Now(),
@@ -111,6 +154,19 @@ func (tsal *TenantSecurityAuditLogger) LogIsolationRuleChange(ctx context.Contex
 
 // LogAccessAttempt logs tenant access attempts with security context
 func (tsal *TenantSecurityAuditLogger) LogAccessAttempt(ctx context.Context, request *TenantAccessRequest, response *TenantAccessResponse) error {
+	builder := audit.NewEventBuilder().
+		Tenant(request.TargetTenantID).
+		Action("tenant.access.attempt").
+		Resource("tenant_access", request.SubjectID, "").
+		Result(resultFromGranted(response.Granted)).
+		User(request.SubjectID, business.AuditUserTypeHuman).
+		Detail("granted", response.Granted).
+		Detail("reason", response.Reason)
+
+	if err := tsal.auditManager.RecordEvent(ctx, builder); err != nil {
+		tsal.logger.Warn("failed to record access attempt in audit manager", "error", err)
+	}
+
 	severity := AuditSeverityInfo
 	if !response.Granted {
 		severity = AuditSeverityWarning
@@ -153,6 +209,19 @@ func (tsal *TenantSecurityAuditLogger) LogAccessAttempt(ctx context.Context, req
 
 // LogPolicyViolation logs security policy violations
 func (tsal *TenantSecurityAuditLogger) LogPolicyViolation(ctx context.Context, tenantID, subjectID, policyID, violation string, context map[string]interface{}) error {
+	builder := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Action("tenant.policy.violation").
+		Resource("policy", policyID, "").
+		Result(business.AuditResultError).
+		User(subjectID, business.AuditUserTypeHuman).
+		Detail("violation", violation).
+		Details(context)
+
+	if err := tsal.auditManager.RecordEvent(ctx, builder); err != nil {
+		tsal.logger.Warn("failed to record policy violation in audit manager", "error", err)
+	}
+
 	entry := TenantSecurityAuditEntry{
 		ID:        fmt.Sprintf("violation-%d", time.Now().UnixNano()),
 		Timestamp: time.Now(),
@@ -174,6 +243,19 @@ func (tsal *TenantSecurityAuditLogger) LogPolicyViolation(ctx context.Context, t
 
 // LogComplianceViolation logs compliance-related violations
 func (tsal *TenantSecurityAuditLogger) LogComplianceViolation(ctx context.Context, tenantID, framework, requirement, violation string) error {
+	builder := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Action("tenant.compliance.violation").
+		Resource("compliance_framework", framework, "").
+		Result(business.AuditResultError).
+		User(audit.SystemUserID, business.AuditUserTypeSystem).
+		Detail("requirement", requirement).
+		Detail("violation", violation)
+
+	if err := tsal.auditManager.RecordEvent(ctx, builder); err != nil {
+		tsal.logger.Warn("failed to record compliance violation in audit manager", "error", err)
+	}
+
 	entry := TenantSecurityAuditEntry{
 		ID:        fmt.Sprintf("compliance-%d", time.Now().UnixNano()),
 		Timestamp: time.Now(),
@@ -316,11 +398,16 @@ func (tsal *TenantSecurityAuditLogger) GetSecurityReport(ctx context.Context, te
 	return report, nil
 }
 
-// addEntry adds a new audit entry
+// addEntry appends an entry to the in-memory window, evicting the oldest entries
+// (FIFO) if the window has reached its cap.
 func (tsal *TenantSecurityAuditLogger) addEntry(entry TenantSecurityAuditEntry) error {
 	tsal.mutex.Lock()
 	defer tsal.mutex.Unlock()
 
+	if len(tsal.entries) >= tsal.cap {
+		overflow := len(tsal.entries) - tsal.cap + 1
+		tsal.entries = tsal.entries[overflow:]
+	}
 	tsal.entries = append(tsal.entries, entry)
 	return nil
 }

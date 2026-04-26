@@ -16,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import storage providers for testing
@@ -42,15 +43,26 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 	err = rbacManager.Initialize(ctx)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 30s allows the rbac drain goroutine to finish on slow Windows CI
+		// runners (concurrent load test writes ~300 entries sharing one store).
+		flushCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_ = rbacManager.FlushAudit(flushCtx)
 	})
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
-	auditLogger := NewTenantSecurityAuditLogger()
-	isolationEngine := NewTenantIsolationEngine(tenantManager)
+	securityAuditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "tenant-security-integration")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// 30s — same reasoning as FlushAudit above; both managers share the
+		// same flatfile store and their drains are serialised by its mutex.
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = securityAuditMgr.Stop(stopCtx)
+	})
+	auditLogger := NewTenantSecurityAuditLogger(securityAuditMgr)
+	isolationEngine := NewTenantIsolationEngine(tenantManager, securityAuditMgr)
 
 	// Create comprehensive tenant hierarchy for integration testing
 	err = setupRealTenantHierarchy(t, ctx, tenantStore, tenantManager)
