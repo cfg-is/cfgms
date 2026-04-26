@@ -23,17 +23,20 @@ import (
 // Always includes "state": "present" so the genericConfigState comparator has a
 // managed field to compare (path is excluded as an identifier field).
 func testFileConfig(path, content string) string {
+	dir := filepath.ToSlash(filepath.Dir(path))
 	if runtime.GOOS == "windows" {
 		return `{
         "state": "present",
         "path": "` + filepath.ToSlash(path) + `",
-        "content": "` + content + `"
+        "content": "` + content + `",
+        "allowed_base_path": "` + dir + `"
       }`
 	}
 	return `{
         "path": "` + filepath.ToSlash(path) + `",
         "content": "` + content + `",
-        "permissions": 420
+        "permissions": 420,
+        "allowed_base_path": "` + dir + `"
       }`
 }
 
@@ -266,7 +269,8 @@ func TestExecutor_ApplyConfiguration_PermissionsRejectedOnWindows(t *testing.T) 
       "config": {
         "path": "` + filepath.ToSlash(filepath.Join(tempDir, "rejected.txt")) + `",
         "content": "should fail on Windows\n",
-        "permissions": 420
+        "permissions": 420,
+        "allowed_base_path": "` + filepath.ToSlash(tempDir) + `"
       }
     }
   ]

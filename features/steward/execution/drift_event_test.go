@@ -93,9 +93,10 @@ func TestExecuteResource_DriftHandlerCalledOnDrift(t *testing.T) {
 		Name:   "test-file",
 		Module: "file",
 		Config: map[string]interface{}{
-			"path":    filePath,
-			"state":   "present",
-			"content": "desired content",
+			"path":              filePath,
+			"state":             "present",
+			"content":           "desired content",
+			"allowed_base_path": dir,
 		},
 	}
 
@@ -139,9 +140,10 @@ func TestExecuteResource_DriftHandlerNotCalledWhenNoDrift(t *testing.T) {
 		Name:   "test-file",
 		Module: "file",
 		Config: map[string]interface{}{
-			"path":    filePath,
-			"state":   "present",
-			"content": "desired content",
+			"path":              filePath,
+			"state":             "present",
+			"content":           "desired content",
+			"allowed_base_path": dir,
 		},
 	}
 
@@ -214,18 +216,20 @@ func TestExecuteConfiguration_DriftHandlerCalledForDriftingResources(t *testing.
 				Name:   "file1",
 				Module: "file",
 				Config: map[string]interface{}{
-					"path":    filePath1,
-					"state":   "present",
-					"content": "desired content",
+					"path":              filePath1,
+					"state":             "present",
+					"content":           "desired content",
+					"allowed_base_path": dir,
 				},
 			},
 			{
 				Name:   "file2",
 				Module: "file",
 				Config: map[string]interface{}{
-					"path":    filePath2,
-					"state":   "present",
-					"content": "correct content",
+					"path":              filePath2,
+					"state":             "present",
+					"content":           "correct content",
+					"allowed_base_path": dir,
 				},
 			},
 		},

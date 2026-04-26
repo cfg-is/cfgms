@@ -206,6 +206,17 @@ func (e *ExecutionEngine) ExecuteResource(ctx context.Context, resource config.R
 		return result
 	}
 
+	// If the module requires initialization before Get() (e.g., file module needs
+	// AllowedBasePath to validate paths before reading), configure it now.
+	if configurable, ok := module.(modules.Configurable); ok {
+		if err := configurable.Configure(desiredState); err != nil {
+			result.Error = fmt.Sprintf("failed to configure module: %v", err)
+			result.ExecutionTime = time.Since(startTime)
+			e.handleResourceError(resource, err)
+			return result
+		}
+	}
+
 	// Get current state using the appropriate resource identifier
 	currentState, err := module.Get(ctx, resourceID)
 	if err != nil {

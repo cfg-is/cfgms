@@ -12,12 +12,12 @@ import (
 
 // FileConfig represents the configuration for a file resource
 type FileConfig struct {
-	State           string `yaml:"state"`                    // "present" or "absent"
-	Content         string `yaml:"content,omitempty"`        // File content (required when state is "present")
-	Permissions     int    `yaml:"permissions,omitempty"`    // File permissions (e.g., 0644)
-	Owner           string `yaml:"owner,omitempty"`          // File owner
-	Group           string `yaml:"group,omitempty"`          // File group
-	AllowedBasePath string `yaml:"allowed_base_path"`        // Required: absolute base path constraining all OS calls
+	State           string `yaml:"state"`                 // "present" or "absent"
+	Content         string `yaml:"content,omitempty"`     // File content (required when state is "present")
+	Permissions     int    `yaml:"permissions,omitempty"` // File permissions (e.g., 0644)
+	Owner           string `yaml:"owner,omitempty"`       // File owner
+	Group           string `yaml:"group,omitempty"`       // File group
+	AllowedBasePath string `yaml:"allowed_base_path"`     // Required: absolute base path constraining all OS calls
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison

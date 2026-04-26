@@ -33,6 +33,15 @@ type ConfigState interface {
 	GetManagedFields() []string
 }
 
+// Configurable is implemented by modules that require initialization from
+// operator config before Get() can safely read the current resource state.
+// The execution engine calls Configure(desiredState) before Get() when the
+// module implements this interface, allowing security boundaries to be
+// established without modifying any files.
+type Configurable interface {
+	Configure(config ConfigState) error
+}
+
 // Monitor interface for modules that support real-time monitoring (optional)
 type Monitor interface {
 	// Monitor watches for changes to a resource and triggers events

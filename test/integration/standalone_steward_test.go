@@ -93,6 +93,7 @@ resources:
         No controller, no network, no complexity!
       state: present
       mode: "0644"
+      allowed_base_path: ` + s.tempDir + `
 
   # Create a directory
   - name: test-directory
@@ -109,6 +110,7 @@ resources:
       path: ` + infoFile + `
       content: "CFGMS standalone mode is working!"
       state: present
+      allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)
 	require.NoError(s.T(), err, "Should write config file")
@@ -172,6 +174,7 @@ resources:
       path: ` + testFile + `
       content: "Initial content"
       state: present
+      allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(initialConfig), 0644)
 	require.NoError(s.T(), err)
@@ -199,6 +202,7 @@ resources:
       path: ` + testFile + `
       content: "Updated content! CFGMS detects changes."
       state: present
+      allowed_base_path: ` + s.tempDir + `
 `
 	err = os.WriteFile(s.configPath, []byte(updatedConfig), 0644)
 	require.NoError(s.T(), err)
@@ -234,6 +238,7 @@ resources:
     config:
       path: ` + testFile + `
       state: absent
+      allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)
 	require.NoError(s.T(), err)
@@ -294,6 +299,7 @@ resources:
         }
       state: present
       mode: "0644"
+      allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)
 	require.NoError(s.T(), err)
@@ -331,6 +337,7 @@ resources:
       path: ` + testFile + `
       content: "` + expectedContent + `"
       state: present
+      allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)
 	require.NoError(s.T(), err)
@@ -368,6 +375,7 @@ resources:
       path: ` + testFile + `
       content: "Created via ExecuteConfiguration"
       state: present
+      allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)
 	require.NoError(s.T(), err)
@@ -408,6 +416,7 @@ resources:
       path: /tmp/test.txt
       content: "test"
       state: present
+      allowed_base_path: /tmp
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)
 	require.NoError(s.T(), err)

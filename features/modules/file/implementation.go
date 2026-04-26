@@ -30,6 +30,23 @@ func New() modules.Module {
 	return &fileModule{}
 }
 
+// Configure extracts AllowedBasePath from the operator config so that Get() can
+// safely read the current resource state before Set() is called.
+// This implements modules.Configurable and is called by the execution engine
+// before the Get→Compare→Set→Verify cycle begins.
+func (m *fileModule) Configure(config modules.ConfigState) error {
+	if config == nil {
+		return ErrAllowedBasePathRequired
+	}
+	configMap := config.AsMap()
+	basePath, _ := configMap["allowed_base_path"].(string)
+	if basePath == "" || !filepath.IsAbs(basePath) {
+		return ErrAllowedBasePathRequired
+	}
+	m.configuredBasePath = basePath
+	return nil
+}
+
 // Get returns the current configuration of the file.
 //
 // If the file does not exist, returns a FileConfig with State: "absent".
@@ -216,14 +233,22 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 				if err != nil {
 					return err
 				}
-				uid, _ = strconv.Atoi(userInfo.Uid)
+				parsedUID, err := strconv.Atoi(userInfo.Uid)
+				if err != nil {
+					return fmt.Errorf("failed to parse UID %q: %w", userInfo.Uid, err)
+				}
+				uid = parsedUID
 			}
 			if fileConfig.Group != "" {
 				groupInfo, err := user.LookupGroup(fileConfig.Group)
 				if err != nil {
 					return err
 				}
-				gid, _ = strconv.Atoi(groupInfo.Gid)
+				parsedGID, err := strconv.Atoi(groupInfo.Gid)
+				if err != nil {
+					return fmt.Errorf("failed to parse GID %q: %w", groupInfo.Gid, err)
+				}
+				gid = parsedGID
 			}
 
 			// Change owner and group

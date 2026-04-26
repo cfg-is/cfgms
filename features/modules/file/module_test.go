@@ -4,6 +4,7 @@ package file
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -48,7 +49,7 @@ func getTestUser(t *testing.T) (string, string) {
 		}
 		return currentUser.Username, "Users" // Common Windows group
 	default:
-		t.Skipf("Unsupported platform: %s", runtime.GOOS)
+		t.Fatalf("Unsupported platform for file module test: %s", runtime.GOOS)
 		return "", ""
 	}
 }
@@ -106,10 +107,9 @@ func TestFileModule(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "Invalid content (empty)",
-			configData: "content: \"\"\npermissions: 420\nallowed_base_path: " + tempDir,
-			// On Windows, permissions error fires before content validation
-			wantErr: true,
+			name:       "Invalid content (empty)",
+			configData: "content: \"\"\nallowed_base_path: " + tempDir,
+			wantErr:    true,
 		},
 		{
 			name:       "Invalid permissions",
@@ -154,19 +154,13 @@ func TestFileModule(t *testing.T) {
 				return
 			}
 
-			// Test Set
-			if configState == nil && !tt.wantErr {
-				t.Errorf("configState is nil but test should not expect error")
-				return
-			}
-
 			err := module.Set(context.Background(), testFile, configState)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Set() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
-			// Test Get
+			// Test Get — verify the round-trip, not just absence of error
 			if !tt.wantErr {
 				config, err := module.Get(context.Background(), testFile)
 				if err != nil {
@@ -174,7 +168,20 @@ func TestFileModule(t *testing.T) {
 					return
 				}
 				if config == nil {
-					t.Error("Get() returned nil config")
+					t.Fatal("Get() returned nil config")
+				}
+				fileState, ok := config.(*FileConfig)
+				if !ok {
+					t.Fatalf("Get() returned %T, want *FileConfig", config)
+				}
+				if fileState.State != "present" {
+					t.Errorf("Get() State = %q, want %q", fileState.State, "present")
+				}
+				if fileState.Content != testContent {
+					t.Errorf("Get() Content = %q, want %q", fileState.Content, testContent)
+				}
+				if fileState.AllowedBasePath != tempDir {
+					t.Errorf("Get() AllowedBasePath = %q, want %q", fileState.AllowedBasePath, tempDir)
 				}
 			}
 		})
@@ -209,8 +216,15 @@ func TestFileModule_EdgeCases(t *testing.T) {
 	if err != nil {
 		t.Errorf("Get() with non-existent file should not error: %v", err)
 	}
-	if fileState, ok := state.(*FileConfig); !ok || fileState.State != "absent" {
-		t.Error("Get() with non-existent file should return State: 'absent'")
+	if state == nil {
+		t.Fatal("Get() should not return nil state for non-existent file")
+	}
+	fileState, ok := state.(*FileConfig)
+	if !ok {
+		t.Fatalf("Get() should return *FileConfig, got %T", state)
+	}
+	if fileState.State != "absent" {
+		t.Errorf("Get() State = %q, want %q", fileState.State, "absent")
 	}
 
 	// Test file creation and verification
@@ -319,12 +333,48 @@ func TestFileModule_Security(t *testing.T) {
 
 	t.Run("Path traversal rejected", func(t *testing.T) {
 		module := New()
-		// filepath.Join cleans the path but keeps the traversal semantics before ValidateAndCleanPath resolves it
 		traversalPath := tempDir + "/../secret.txt"
 		configState := createConfigFromYAML("content: \"evil\"\nallowed_base_path: " + tempDir)
 		err := module.Set(context.Background(), traversalPath, configState)
 		if err == nil {
 			t.Error("Set() with path traversal should fail")
+		}
+		// Must be a traversal error, not the unrelated ErrAllowedBasePathRequired
+		if errors.Is(err, ErrAllowedBasePathRequired) {
+			t.Errorf("Set() with path traversal should fail with traversal error, not ErrAllowedBasePathRequired: %v", err)
+		}
+	})
+
+	t.Run("Configure with valid AllowedBasePath enables Get", func(t *testing.T) {
+		module := New()
+		configurable, ok := module.(modules.Configurable)
+		if !ok {
+			t.Fatal("file module must implement modules.Configurable")
+		}
+		if err := configurable.Configure(createConfigFromYAML("allowed_base_path: " + tempDir)); err != nil {
+			t.Fatalf("Configure() with valid path failed: %v", err)
+		}
+		// After Configure, Get should work for a non-existent file (returns absent)
+		testFile := filepath.Join(tempDir, "configured-get.txt")
+		state, err := module.Get(context.Background(), testFile)
+		if err != nil {
+			t.Fatalf("Get() after Configure() failed: %v", err)
+		}
+		fileState, ok := state.(*FileConfig)
+		if !ok || fileState.State != "absent" {
+			t.Error("Get() after Configure() should return absent state for non-existent file")
+		}
+	})
+
+	t.Run("Configure with missing AllowedBasePath returns ErrAllowedBasePathRequired", func(t *testing.T) {
+		module := New()
+		configurable, ok := module.(modules.Configurable)
+		if !ok {
+			t.Fatal("file module must implement modules.Configurable")
+		}
+		err := configurable.Configure(createConfigFromYAML("content: \"test\""))
+		if err != ErrAllowedBasePathRequired {
+			t.Errorf("Configure() with missing AllowedBasePath: got %v, want ErrAllowedBasePathRequired", err)
 		}
 	})
 
@@ -352,6 +402,9 @@ func TestFileModule_Security(t *testing.T) {
 		}
 		if fileState.Content != "valid content" {
 			t.Errorf("Content mismatch: got %q, want %q", fileState.Content, "valid content")
+		}
+		if fileState.AllowedBasePath != tempDir {
+			t.Errorf("AllowedBasePath mismatch: got %q, want %q", fileState.AllowedBasePath, tempDir)
 		}
 	})
 }
