@@ -36,7 +36,7 @@ The CFGMS Controller is designed for infrastructure deployment:
 - **Process Management**: Full Unix process control and monitoring
 - **File System**: POSIX-compliant file and directory management with ownership/permissions
 - **Network**: Native network interface and routing table access
-- **Security**: User/group management, SSH key handling, firewall configuration
+- **Security**: User/group management, SSH key handling, firewall configuration (iptables — Linux only; Windows/macOS not yet implemented)
 
 #### Windows
 
