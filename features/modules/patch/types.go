@@ -15,10 +15,11 @@ import (
 var (
 	// Valid patch types
 	validPatchTypes = map[string]bool{
-		"security": true,
-		"all":      true,
-		"kernel":   true,
-		"critical": true,
+		"security":       true,
+		"all":            true,
+		"kernel":         true,
+		"critical":       true,
+		"feature-update": true,
 	}
 
 	// Maintenance window format validation (e.g., "sunday_3am", "daily_2am", "monthly_first_sunday_3am")
@@ -59,7 +60,7 @@ type PatchInfo struct {
 // Config represents the patch management configuration
 type Config struct {
 	// Core patch configuration
-	PatchType      string   `yaml:"patch_type"`      // "security", "all", "kernel", "critical"
+	PatchType      string   `yaml:"patch_type"`      // "security", "all", "kernel", "critical", "feature-update"
 	AutoReboot     bool     `yaml:"auto_reboot"`     // Automatically reboot if required
 	IncludePatches []string `yaml:"include_patches"` // Specific patches to include
 	ExcludePatches []string `yaml:"exclude_patches"` // Specific patches to exclude

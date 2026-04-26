@@ -154,6 +154,37 @@ func TestWindowsUpdateManager_GetLastPatchDate(t *testing.T) {
 		"Last patch date should be in the past or zero")
 }
 
+// TestWindowsUpdateManager_FeatureUpdate_ReturnsExplicitError documents the failure contract:
+// InstallPatches and ListAvailablePatches with "feature-update" must return an explicit,
+// descriptive error (not silently fall through to "install all software") until
+// windowsUpgradeCategoryGUID is populated from a confirmed Microsoft source.
+func TestWindowsUpdateManager_FeatureUpdate_ReturnsExplicitError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Windows Update test in short mode")
+	}
+
+	manager, err := patch.NewWindowsUpdateManager()
+	require.NoError(t, err)
+	defer manager.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// InstallPatches must return an explicit error, not silently install all software.
+	installErr := manager.InstallPatches(ctx, &patch.Config{PatchType: "feature-update"})
+	require.Error(t, installErr,
+		"InstallPatches with feature-update must return an error until windowsUpgradeCategoryGUID is confirmed")
+	assert.Contains(t, installErr.Error(), "not supported by this implementation",
+		"error must be descriptive, not a generic WUA failure")
+
+	// ListAvailablePatches must similarly return an explicit error.
+	_, listErr := manager.ListAvailablePatches(ctx, "feature-update")
+	require.Error(t, listErr,
+		"ListAvailablePatches with feature-update must return an error until windowsUpgradeCategoryGUID is confirmed")
+	assert.Contains(t, listErr.Error(), "not supported by this implementation",
+		"error must be descriptive, not a generic WUA failure")
+}
+
 // TestWindowsUpdateManager_InstallPatches_TestMode tests patch installation in test mode
 func TestWindowsUpdateManager_InstallPatches_TestMode(t *testing.T) {
 	if testing.Short() {
@@ -184,19 +215,20 @@ func TestWindowsUpdateManager_BuildSearchCriteria(t *testing.T) {
 		t.Skip("Skipping Windows Update test in short mode")
 	}
 
-	// This tests the internal search criteria logic
-	// Note: This function may need to be exported for testing or we test it indirectly
+	// This tests the internal search criteria logic indirectly via ListAvailablePatches.
 
 	tests := []struct {
 		name          string
 		patchType     string
-		shouldFind    bool // Whether we expect to find patches
-		mayFailSearch bool // Search criteria may not be supported by Windows Update API
+		expectError   bool
+		errorContains string
 	}{
-		{"All patches", "all", true, false},
-		{"Security only", "security", true, false},
-		{"Critical only", "critical", true, true}, // MsrcSeverity filter not supported in search criteria
-		{"Optional updates", "optional", false, false}, // May not always have optional updates
+		{"All patches", "all", false, ""},
+		{"Security only", "security", false, ""},
+		{"Critical only", "critical", false, ""},
+		{"Optional updates", "optional", false, ""},
+		// feature-update always returns an error until windowsUpgradeCategoryGUID is confirmed.
+		{"Feature update", "feature-update", true, "not supported by this implementation"},
 	}
 
 	for _, tt := range tests {
@@ -207,19 +239,23 @@ func TestWindowsUpdateManager_BuildSearchCriteria(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
+
 			patches, err := manager.ListAvailablePatches(ctx, tt.patchType)
 
-			if tt.mayFailSearch && err != nil {
-				t.Skipf("Search criteria not supported by Windows Update API: %v", err)
+			if tt.expectError {
+				require.Error(t, err, "patch type %q must return an error", tt.patchType)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
 				return
 			}
 
-			require.NoError(t, err, "Should list patches for type: %s", tt.patchType)
-
-			if tt.shouldFind {
-				// We don't assert length > 0 because system might be fully patched
-				assert.NotNil(t, patches, "Patches list should not be nil")
+			assert.NoError(t, err, "Should list patches for type: %s", tt.patchType)
+			if err != nil {
+				return
 			}
+			// We don't assert length > 0 because the system might be fully patched.
+			assert.NotNil(t, patches, "Patches list should not be nil for type: %s", tt.patchType)
 		})
 	}
 }
