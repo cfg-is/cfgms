@@ -34,10 +34,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func init() {
-	interfaces.RegisterProvider(New(ModeServer))
-}
-
 // Mode defines the provider operating mode.
 type Mode string
 
@@ -53,9 +49,8 @@ const (
 type Provider struct {
 	mu sync.RWMutex
 
-	name        string
-	description string
-	mode        Mode
+	name string
+	mode Mode
 
 	// Server-side components
 	grpcServer    *grpc.Server
@@ -122,7 +117,6 @@ type eventSubscription struct {
 func New(mode Mode) *Provider {
 	return &Provider{
 		name:              "grpc",
-		description:       "gRPC-over-QUIC control plane provider",
 		mode:              mode,
 		eventHandlers:     []eventSubscription{},
 		heartbeatHandlers: []interfaces.HeartbeatHandler{},
@@ -130,8 +124,7 @@ func New(mode Mode) *Provider {
 	}
 }
 
-func (p *Provider) Name() string        { return p.name }
-func (p *Provider) Description() string { return p.description }
+func (p *Provider) Name() string { return p.name }
 
 // Initialize configures the provider.
 //
@@ -863,26 +856,6 @@ func (p *Provider) GetStats(ctx context.Context) (*types.ControlPlaneStats, erro
 	}
 
 	return stats, nil
-}
-
-func (p *Provider) Available() (bool, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	switch p.mode {
-	case ModeServer:
-		if p.addr == "" || p.tlsConfig == nil {
-			return false, fmt.Errorf("server mode requires addr and tls_config")
-		}
-		return true, nil
-	case ModeClient:
-		if p.addr == "" || p.tlsConfig == nil || p.stewardID == "" {
-			return false, fmt.Errorf("client mode requires addr, tls_config, and steward_id")
-		}
-		return true, nil
-	default:
-		return false, fmt.Errorf("provider not initialized")
-	}
 }
 
 func (p *Provider) IsConnected() bool {

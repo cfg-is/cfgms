@@ -360,10 +360,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 
 		// Initialize CP provider (shared gRPC server created fresh in Start)
-		controlPlane = controlplaneInterfaces.GetProvider("grpc")
-		if controlPlane == nil {
-			return nil, fmt.Errorf("gRPC control plane provider not registered")
-		}
+		controlPlane = grpcCP.New(grpcCP.ModeServer)
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
 			"mode":       "server",
 			"addr":       cfg.Transport.ListenAddr,

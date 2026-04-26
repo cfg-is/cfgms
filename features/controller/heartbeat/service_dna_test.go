@@ -27,10 +27,8 @@ type testControlPlane struct {
 	heartbeatHandler func(context.Context, *controlplaneTypes.Heartbeat) error
 }
 
-func (p *testControlPlane) Name() string             { return "test" }
-func (p *testControlPlane) Description() string      { return "test control plane" }
-func (p *testControlPlane) IsConnected() bool        { return true }
-func (p *testControlPlane) Available() (bool, error) { return true, nil }
+func (p *testControlPlane) Name() string      { return "test" }
+func (p *testControlPlane) IsConnected() bool { return true }
 func (p *testControlPlane) Initialize(_ context.Context, _ map[string]interface{}) error {
 	return nil
 }

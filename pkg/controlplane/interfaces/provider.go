@@ -25,9 +25,6 @@ type ControlPlaneProvider interface {
 	// Name returns the provider name (e.g., "grpc", "websocket")
 	Name() string
 
-	// Description returns a human-readable description
-	Description() string
-
 	// Initialize configures the provider with implementation-specific settings
 	//
 	// The config map contains provider-specific configuration. Common keys:
@@ -115,12 +112,6 @@ type ControlPlaneProvider interface {
 	// GetStats returns provider operational statistics
 	GetStats(ctx context.Context) (*types.ControlPlaneStats, error)
 
-	// Available checks if the provider can be started
-	//
-	// Returns false and an error if prerequisites are missing (e.g.,
-	// certificates, broker connectivity, configuration).
-	Available() (bool, error)
-
 	// IsConnected reports connection status
 	//
 	// For server-side: true if accepting connections
@@ -144,34 +135,3 @@ type EventHandler func(ctx context.Context, event *types.Event) error
 //
 // Heartbeats allow monitoring of steward connectivity and health status.
 type HeartbeatHandler func(ctx context.Context, heartbeat *types.Heartbeat) error
-
-// ProviderRegistry manages control plane provider registration and discovery.
-var providerRegistry = make(map[string]ControlPlaneProvider)
-
-// RegisterProvider registers a control plane provider implementation.
-//
-// This should be called from init() functions in provider packages.
-// Panics if a provider with the same name is already registered.
-func RegisterProvider(provider ControlPlaneProvider) {
-	name := provider.Name()
-	if _, exists := providerRegistry[name]; exists {
-		panic("control plane provider already registered: " + name)
-	}
-	providerRegistry[name] = provider
-}
-
-// GetProvider retrieves a registered provider by name.
-//
-// Returns nil if no provider with that name exists.
-func GetProvider(name string) ControlPlaneProvider {
-	return providerRegistry[name]
-}
-
-// GetAvailableProviders returns all registered provider names.
-func GetAvailableProviders() []string {
-	names := make([]string, 0, len(providerRegistry))
-	for name := range providerRegistry {
-		names = append(names, name)
-	}
-	return names
-}

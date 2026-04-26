@@ -30,7 +30,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // Register gRPC control plane provider
+	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider
@@ -252,10 +252,7 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 		c.logger.Info("Initializing gRPC control plane provider",
 			"addr", transportAddress, "steward_id", stewardID)
 
-		provider := controlplaneInterfaces.GetProvider("grpc")
-		if provider == nil {
-			return fmt.Errorf("gRPC control plane provider not registered")
-		}
+		provider := grpcCP.New(grpcCP.ModeClient)
 
 		providerCfg := map[string]interface{}{
 			"mode":       "client",
