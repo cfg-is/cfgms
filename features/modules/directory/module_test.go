@@ -109,13 +109,17 @@ func TestDirectoryModule_Set_EmptyAllowedBasePath(t *testing.T) {
 	}
 }
 
-// TestDirectoryModule_Get_BeforeSet verifies Get returns ErrAllowedBasePathRequired when
-// configuredBasePath has never been populated.
+// TestDirectoryModule_Get_BeforeSet verifies Get returns both ErrAllowedBasePathRequired and
+// ErrModuleNotReady when configuredBasePath has never been populated. The ErrModuleNotReady
+// sentinel is what the execution engine checks to skip Compare and proceed to Set().
 func TestDirectoryModule_Get_BeforeSet(t *testing.T) {
 	m := New()
 	_, err := m.Get(context.Background(), "/some/path")
 	if !errors.Is(err, ErrAllowedBasePathRequired) {
-		t.Errorf("Get() before Set() = %v, want ErrAllowedBasePathRequired", err)
+		t.Errorf("Get() before Set() = %v, want errors.Is(err, ErrAllowedBasePathRequired) true", err)
+	}
+	if !errors.Is(err, modules.ErrModuleNotReady) {
+		t.Errorf("Get() before Set() = %v, want errors.Is(err, ErrModuleNotReady) true", err)
 	}
 }
 
@@ -298,41 +302,43 @@ func TestDirectoryModule_EdgeCases(t *testing.T) {
 		}
 	}()
 
-	module := New()
-
 	// Test with existing file (not directory)
-	filePath := filepath.Join(tempDir, "testfile")
-	if err := os.WriteFile(filePath, []byte("test"), 0644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	configData := testDirConfigYAML(tempDir, filePath, "", "", "")
-
-	// Should fail because path exists but is not a directory
-	configState := createConfigFromYAML(configData)
-	err = module.Set(context.Background(), filePath, configState)
-	if err != ErrNotADirectory {
-		t.Errorf("Set() with existing file error = %v, want %v", err, ErrNotADirectory)
-	}
+	// Each scenario gets its own module instance to prevent configuredBasePath state
+	// leakage between test cases (same isolation pattern as TestDirectoryModule).
+	t.Run("path is existing file not directory", func(t *testing.T) {
+		filePath := filepath.Join(tempDir, "testfile")
+		if err := os.WriteFile(filePath, []byte("test"), 0644); err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
+		configData := testDirConfigYAML(tempDir, filePath, "", "", "")
+		configState := createConfigFromYAML(configData)
+		err := New().Set(context.Background(), filePath, configState)
+		if err != ErrNotADirectory {
+			t.Errorf("Set() with existing file error = %v, want %v", err, ErrNotADirectory)
+		}
+	})
 
 	// Test with non-existent parent directory and recursive=false
-	nonExistentPath := filepath.Join(tempDir, "nonexistent", "dir")
-	configData = testDirConfigYAML(tempDir, nonExistentPath, "", "", "recursive: false")
-
-	configState = createConfigFromYAML(configData)
-	err = module.Set(context.Background(), nonExistentPath, configState)
-	if err == nil {
-		t.Error("Set() with non-existent parent and recursive=false should fail")
-	}
+	t.Run("non-existent parent recursive=false", func(t *testing.T) {
+		nonExistentPath := filepath.Join(tempDir, "nonexistent", "dir")
+		configData := testDirConfigYAML(tempDir, nonExistentPath, "", "", "recursive: false")
+		configState := createConfigFromYAML(configData)
+		err := New().Set(context.Background(), nonExistentPath, configState)
+		if err == nil {
+			t.Error("Set() with non-existent parent and recursive=false should fail")
+		}
+	})
 
 	// Test with non-existent parent directory and recursive=true
-	configData = testDirConfigYAML(tempDir, nonExistentPath, "", "", "recursive: true")
-
-	configState = createConfigFromYAML(configData)
-	err = module.Set(context.Background(), nonExistentPath, configState)
-	if err != nil {
-		t.Errorf("Set() with non-existent parent and recursive=true error = %v", err)
-	}
+	t.Run("non-existent parent recursive=true", func(t *testing.T) {
+		nonExistentPath := filepath.Join(tempDir, "nonexistent", "dir")
+		configData := testDirConfigYAML(tempDir, nonExistentPath, "", "", "recursive: true")
+		configState := createConfigFromYAML(configData)
+		err := New().Set(context.Background(), nonExistentPath, configState)
+		if err != nil {
+			t.Errorf("Set() with non-existent parent and recursive=true error = %v", err)
+		}
+	})
 }
 
 func TestDirectoryModule_PermissionsRejectedOnWindows(t *testing.T) {

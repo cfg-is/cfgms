@@ -11,4 +11,8 @@ var (
 	ErrInvalidInput = errors.New("invalid input")
 	// ErrUnsupportedPlatform is returned when a feature is not supported on the current platform
 	ErrUnsupportedPlatform = errors.New("unsupported platform")
+	// ErrModuleNotReady is returned by Get() when a module requires configuration via Set()
+	// before it can read current state. The execution engine treats this as "current state
+	// unknown" and proceeds directly to Set() to apply the desired state.
+	ErrModuleNotReady = errors.New("module not ready: call Set() first to configure this module")
 )

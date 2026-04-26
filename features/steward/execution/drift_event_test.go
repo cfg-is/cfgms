@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/factory"
@@ -241,4 +242,89 @@ func TestExecuteConfiguration_DriftHandlerCalledForDriftingResources(t *testing.
 	// file1 drifted (handler called), file2 did not
 	assert.Equal(t, int32(1), atomic.LoadInt32(&driftCallCount), "drift handler should be called only for drifted resources")
 	assert.Equal(t, 2, report.TotalResources)
+}
+
+// TestExecuteResource_ErrModuleNotReady_ProceedsToSet verifies that when a module's Get()
+// returns ErrModuleNotReady, the engine:
+//  1. Does NOT treat it as a resource failure
+//  2. Sets DriftDetected = true (drift assumed)
+//  3. Calls Set() to apply the desired state
+//  4. Reports StatusSuccess after successful Set+Verify
+//
+// The directory module is the canonical module that returns ErrModuleNotReady from Get()
+// before any Set() call (because it requires AllowedBasePath via Set first).
+func TestExecuteResource_ErrModuleNotReady_ProceedsToSet(t *testing.T) {
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "engine-created-dir")
+
+	registry := discovery.ModuleRegistry{}
+	errorConfig := config.ErrorHandlingConfig{
+		ModuleLoadFailure: config.ActionContinue,
+		ResourceFailure:   config.ActionWarn,
+	}
+	moduleFactory := factory.New(registry, errorConfig)
+	comparator := stewardtesting.NewStateComparator()
+	logger := logging.NewLogger("info")
+	engine := New(moduleFactory, comparator, errorConfig, logger)
+
+	resource := config.ResourceConfig{
+		Name:   "test-dir",
+		Module: "directory",
+		Config: map[string]interface{}{
+			"allowed_base_path": base,
+			"path":              targetPath,
+		},
+	}
+
+	ctx := context.Background()
+	result := engine.ExecuteResource(ctx, resource)
+
+	assert.Equal(t, StatusSuccess, result.Status, "ErrModuleNotReady from Get() must not fail the resource")
+	assert.True(t, result.DriftDetected, "drift must be assumed when module was not ready")
+	assert.True(t, result.ChangesApplied, "Set() must be called when ErrModuleNotReady is returned")
+	assert.Empty(t, result.Error, "no error should be recorded on success")
+
+	// Verify the directory was actually created on disk (proves Set() ran)
+	info, statErr := os.Stat(targetPath)
+	require.NoError(t, statErr, "directory must exist after successful execution")
+	assert.True(t, info.IsDir(), "path must be a directory")
+}
+
+// TestExecuteResource_NonModuleNotReadyGetError_PropagatesFailure verifies that when
+// Get() returns an error that is NOT ErrModuleNotReady, the engine propagates the failure
+// (i.e., the ErrModuleNotReady bypass does not swallow genuine errors).
+//
+// The file module returns modules.ErrInvalidResourceID from Get() when resourceID is "".
+// This error is not ErrModuleNotReady, so the engine must report StatusFailed.
+func TestExecuteResource_NonModuleNotReadyGetError_PropagatesFailure(t *testing.T) {
+	registry := discovery.ModuleRegistry{}
+	errorConfig := config.ErrorHandlingConfig{
+		ModuleLoadFailure: config.ActionContinue,
+		ResourceFailure:   config.ActionWarn,
+	}
+	moduleFactory := factory.New(registry, errorConfig)
+	comparator := stewardtesting.NewStateComparator()
+	logger := logging.NewLogger("info")
+	engine := New(moduleFactory, comparator, errorConfig, logger)
+
+	// No "path" in Config and empty Name → getResourceIdentifier returns "".
+	// file.Get("") returns modules.ErrInvalidResourceID which is not ErrModuleNotReady.
+	resource := config.ResourceConfig{
+		Name:   "",
+		Module: "file",
+		Config: map[string]interface{}{
+			"content": "should not matter",
+		},
+	}
+
+	ctx := context.Background()
+	result := engine.ExecuteResource(ctx, resource)
+
+	assert.Equal(t, StatusFailed, result.Status, "non-ErrModuleNotReady Get() error must propagate as failure")
+	assert.Contains(t, result.Error, "failed to get current state", "error detail must identify Get() as the source")
+	assert.False(t, result.ChangesApplied, "Set() must not be called when Get() fails with a real error")
+	// Verify the error was NOT silently reclassified as ErrModuleNotReady — the bypass must
+	// only fire when errors.Is(err, ErrModuleNotReady) is true.
+	assert.NotContains(t, result.Error, modules.ErrModuleNotReady.Error(),
+		"ErrModuleNotReady message must not appear in the error: the bypass must not have fired")
 }

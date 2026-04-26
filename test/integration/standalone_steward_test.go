@@ -99,6 +99,7 @@ resources:
   - name: test-directory
     module: directory
     config:
+      allowed_base_path: ` + s.tempDir + `
       path: ` + testDir + `
       state: present
       mode: "0755"
@@ -275,6 +276,7 @@ resources:
   - name: base-directory
     module: directory
     config:
+      allowed_base_path: ` + s.tempDir + `
       path: ` + baseDir + `
       state: present
       mode: "0755"
@@ -283,6 +285,7 @@ resources:
   - name: data-directory
     module: directory
     config:
+      allowed_base_path: ` + baseDir + `
       path: ` + dataDir + `
       state: present
       mode: "0755"

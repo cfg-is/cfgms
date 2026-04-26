@@ -33,13 +33,13 @@ func New() modules.Module {
 
 // directoryConfig represents the configuration for a directory
 type directoryConfig struct {
-	AllowedBasePath string `yaml:"allowed_base_path"`             // Security boundary for all OS calls
-	State           string `yaml:"state"`                         // "present" or "absent"
-	Path            string `yaml:"path"`                          // Directory path
-	Permissions     int    `yaml:"permissions,omitempty"`         // Directory permissions (e.g., 0755)
-	Owner           string `yaml:"owner,omitempty"`               // Directory owner
-	Group           string `yaml:"group,omitempty"`               // Directory group
-	Recursive       bool   `yaml:"recursive,omitempty"`           // Create parent directories if needed
+	AllowedBasePath string `yaml:"allowed_base_path"`     // Security boundary for all OS calls
+	State           string `yaml:"state"`                 // "present" or "absent"
+	Path            string `yaml:"path"`                  // Directory path
+	Permissions     int    `yaml:"permissions,omitempty"` // Directory permissions (e.g., 0755)
+	Owner           string `yaml:"owner,omitempty"`       // Directory owner
+	Group           string `yaml:"group,omitempty"`       // Directory group
+	Recursive       bool   `yaml:"recursive,omitempty"`   // Create parent directories if needed
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
@@ -344,7 +344,9 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 // This allows the execution engine to detect that the directory needs to be created.
 func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	if m.configuredBasePath == "" {
-		return nil, ErrAllowedBasePathRequired
+		// Wrap both so the execution engine can detect ErrModuleNotReady to skip Compare
+		// and proceed to Set(), while callers can still check for ErrAllowedBasePathRequired.
+		return nil, fmt.Errorf("%w: %w", modules.ErrModuleNotReady, ErrAllowedBasePathRequired)
 	}
 
 	// NOTE: symlink escapes outside AllowedBasePath are not blocked by ValidateAndCleanPath
