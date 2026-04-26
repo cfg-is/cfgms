@@ -40,8 +40,7 @@ func makeTestEvent(id string, eventType cpTypes.EventType) *cpTypes.Event {
 // Embed in test-specific providers to override only the methods you need.
 type noopControlPlane struct{}
 
-func (n *noopControlPlane) Name() string        { return "noop" }
-func (n *noopControlPlane) Description() string { return "noop test provider" }
+func (n *noopControlPlane) Name() string { return "noop" }
 func (n *noopControlPlane) Initialize(_ context.Context, _ map[string]interface{}) error {
 	return nil
 }
@@ -65,8 +64,7 @@ func (n *noopControlPlane) SubscribeHeartbeats(_ context.Context, _ controlplane
 func (n *noopControlPlane) GetStats(_ context.Context) (*cpTypes.ControlPlaneStats, error) {
 	return &cpTypes.ControlPlaneStats{}, nil
 }
-func (n *noopControlPlane) Available() (bool, error) { return true, nil }
-func (n *noopControlPlane) IsConnected() bool        { return false }
+func (n *noopControlPlane) IsConnected() bool { return false }
 
 // failingControlPlane always returns publishErr from PublishEvent.
 type failingControlPlane struct {

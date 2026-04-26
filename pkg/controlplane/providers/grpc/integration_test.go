@@ -12,7 +12,6 @@ import (
 	"time"
 
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
-	"github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
@@ -541,25 +540,6 @@ func TestStatsTracking(t *testing.T) {
 	assert.Equal(t, int64(1), clientStats.EventsPublished)
 	assert.Equal(t, int64(1), clientStats.HeartbeatsSent)
 	assert.Equal(t, int64(1), clientStats.CommandsReceived)
-}
-
-func TestProviderRegistration(t *testing.T) {
-	provider := interfaces.GetProvider("grpc")
-	require.NotNil(t, provider)
-	assert.Equal(t, "grpc", provider.Name())
-}
-
-func TestAvailable(t *testing.T) {
-	p := New(ModeServer)
-	ok, err := p.Available()
-	assert.False(t, ok)
-	assert.Error(t, err)
-
-	p.addr = ":50051"
-	p.tlsConfig = &tls.Config{}
-	ok, err = p.Available()
-	assert.True(t, ok)
-	assert.NoError(t, err)
 }
 
 func TestModeValidation(t *testing.T) {
