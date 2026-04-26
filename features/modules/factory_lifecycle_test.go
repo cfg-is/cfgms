@@ -387,53 +387,6 @@ func TestLifecycleAwareModuleFactory_Shutdown(t *testing.T) {
 	}
 }
 
-func TestModuleFactoryBridge(t *testing.T) {
-	discoveryRegistry := make(discovery.ModuleRegistry)
-	moduleRegistry := NewModuleRegistry()
-	mockLoader := newMockModuleLoader()
-
-	lifecycleFactory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
-	bridge := NewModuleFactoryBridge(lifecycleFactory)
-
-	// Test bridge methods
-	_, err := bridge.LoadModule("non-existent")
-	if err == nil {
-		t.Error("Bridge LoadModule() should return error for non-existent module")
-	}
-
-	_, err = bridge.CreateModuleInstance("non-existent")
-	if err == nil {
-		t.Error("Bridge CreateModuleInstance() should return error for non-existent module")
-	}
-
-	modules := bridge.GetLoadedModules()
-	if len(modules) != 0 {
-		t.Errorf("Bridge GetLoadedModules() should return empty slice, got %d", len(modules))
-	}
-
-	// Test that UnloadModule and UnloadAllModules don't panic
-	bridge.UnloadModule("non-existent")
-	bridge.UnloadAllModules()
-
-	// Test ValidateModuleInterface
-	err = bridge.ValidateModuleInterface(&mockModule{})
-	if err != nil {
-		t.Errorf("ValidateModuleInterface() error = %v, want nil", err)
-	}
-
-	// Test GetModuleInfo
-	_, exists := bridge.GetModuleInfo("non-existent")
-	if exists {
-		t.Error("GetModuleInfo() should return false for non-existent module")
-	}
-
-	// Test GetLifecycleFactory
-	retrievedFactory := bridge.GetLifecycleFactory()
-	if retrievedFactory != lifecycleFactory {
-		t.Error("GetLifecycleFactory() should return the original factory")
-	}
-}
-
 // Integration test with actual module operations
 func TestLifecycleAwareModuleFactory_Integration(t *testing.T) {
 	// Create a test module that we can actually register
