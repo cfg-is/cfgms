@@ -78,20 +78,23 @@ transport:
 | `pkg/quic/client`          | (removed — use `pkg/dataplane/interfaces`) |
 | `pkg/quic/session`         | (removed — use `pkg/dataplane/interfaces`) |
 
-## Provider Registration Pattern
+## Provider Construction Pattern
 
-Both control plane and data plane use auto-registration via blank imports:
+Both control plane and data plane use direct construction — the provider registry was removed in Story #832:
 
 ```go
-// In your main or init code, register providers:
 import (
-    _ "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // Register gRPC
-    _ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc"    // Register gRPC
+    cpgrpc "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
+    dpgrpc "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc"
 )
 
-// Then retrieve via registry:
-cp := cpInterfaces.GetProvider("grpc")
-dp := dpInterfaces.GetProvider("grpc")
+// Controller side (server mode):
+cp := cpgrpc.New(cpgrpc.ModeServer)
+dp := dpgrpc.New(dpgrpc.ModeServer)
+
+// Steward side (client mode):
+cp := cpgrpc.New(cpgrpc.ModeClient)
+dp := dpgrpc.New(dpgrpc.ModeClient)
 ```
 
 ## Related Documentation

@@ -78,32 +78,32 @@ func (m *testProvider) GetStats(ctx context.Context) (*types.ControlPlaneStats, 
 }
 
 func TestProviderLifecycle(t *testing.T) {
-	mock := newTestProvider("lifecycle-test")
+	provider := newTestProvider("lifecycle-test")
 
 	// Initial state
-	assert.False(t, mock.initialized)
-	assert.False(t, mock.started)
-	assert.False(t, mock.connected)
+	assert.False(t, provider.initialized)
+	assert.False(t, provider.started)
+	assert.False(t, provider.connected)
 
 	// Initialize
 	ctx := context.Background()
-	err := mock.Initialize(ctx, nil)
+	err := provider.Initialize(ctx, nil)
 	require.NoError(t, err)
-	assert.True(t, mock.initialized)
+	assert.True(t, provider.initialized)
 
 	// Start
-	err = mock.Start(ctx)
+	err = provider.Start(ctx)
 	require.NoError(t, err)
-	assert.True(t, mock.started)
-	assert.True(t, mock.connected)
-	assert.True(t, mock.IsConnected())
+	assert.True(t, provider.started)
+	assert.True(t, provider.connected)
+	assert.True(t, provider.IsConnected())
 
 	// Stop
-	err = mock.Stop(ctx)
+	err = provider.Stop(ctx)
 	require.NoError(t, err)
-	assert.False(t, mock.started)
-	assert.False(t, mock.connected)
-	assert.False(t, mock.IsConnected())
+	assert.False(t, provider.started)
+	assert.False(t, provider.connected)
+	assert.False(t, provider.IsConnected())
 }
 
 func TestCommandHandler(t *testing.T) {
