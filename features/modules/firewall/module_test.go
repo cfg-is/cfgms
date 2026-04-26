@@ -64,10 +64,13 @@ func newTestModule(exec *testFirewallExecutor) *firewallModule {
 	}
 }
 
-// createConfigFromYAML creates a firewallConfig from YAML string
-func createConfigFromYAML(yamlData string) modules.ConfigState {
+// createConfigFromYAML creates a firewallConfig from YAML string.
+// It calls t.Fatalf on parse error so callers surface the actual YAML error.
+func createConfigFromYAML(t testing.TB, yamlData string) modules.ConfigState {
+	t.Helper()
 	var config firewallConfig
 	if err := yaml.Unmarshal([]byte(yamlData), &config); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v\nInput: %s", err, yamlData)
 		return nil
 	}
 	return &config
@@ -261,11 +264,7 @@ enabled: true
 			exec := newTestExecutor()
 			module := newTestModule(exec)
 
-			configState := createConfigFromYAML(tt.configData)
-			if configState == nil && !tt.wantErr {
-				t.Errorf("Failed to create config from YAML: %s", tt.configData)
-				return
-			}
+			configState := createConfigFromYAML(t, tt.configData)
 
 			err := module.Set(context.Background(), tt.resourceID, configState)
 			if (err != nil) != tt.wantErr {
@@ -315,10 +314,7 @@ destination: 10.0.0.0/24
 description: Test HTTPS rule
 enabled: true
 `
-	configState := createConfigFromYAML(configData)
-	if configState == nil {
-		t.Fatal("Failed to create config from YAML")
-	}
+	configState := createConfigFromYAML(t, configData)
 
 	err = module.Set(context.Background(), "test-rule", configState)
 	if err != nil {
@@ -354,7 +350,7 @@ func TestSet_InvokesApplyRule(t *testing.T) {
 	exec := newTestExecutor()
 	module := newTestModule(exec)
 
-	configState := createConfigFromYAML(`
+	configState := createConfigFromYAML(t, `
 name: http-rule
 action: allow
 direction: input
@@ -364,9 +360,6 @@ source: 0.0.0.0/0
 destination: 10.0.0.0/24
 enabled: true
 `)
-	if configState == nil {
-		t.Fatal("failed to parse config YAML")
-	}
 
 	if err := module.Set(context.Background(), "http-rule", configState); err != nil {
 		t.Fatalf("Set() unexpected error: %v", err)
@@ -410,7 +403,7 @@ func TestSet_InvalidDirection_DoesNotCallApplyRule(t *testing.T) {
 	exec := newTestExecutor()
 	module := newTestModule(exec)
 
-	configState := createConfigFromYAML(`
+	configState := createConfigFromYAML(t, `
 name: bad-dir
 action: allow
 direction: sideways
@@ -420,9 +413,6 @@ source: 0.0.0.0/0
 destination: 10.0.0.0/24
 enabled: true
 `)
-	if configState == nil {
-		t.Fatal("failed to parse config YAML")
-	}
 
 	err := module.Set(context.Background(), "bad-dir", configState)
 	if !errors.Is(err, ErrInvalidDirection) {
@@ -440,7 +430,7 @@ func TestSet_ExecutorFailure_DoesNotUpdateRules(t *testing.T) {
 	exec.applyErr = errors.New("iptables: permission denied")
 	module := newTestModule(exec)
 
-	configState := createConfigFromYAML(`
+	configState := createConfigFromYAML(t, `
 name: fail-rule
 action: allow
 direction: output
@@ -450,9 +440,6 @@ source: 10.0.0.1
 destination: 8.8.8.8
 enabled: true
 `)
-	if configState == nil {
-		t.Fatal("failed to parse config YAML")
-	}
 
 	err := module.Set(context.Background(), "fail-rule", configState)
 	if err == nil {
@@ -475,7 +462,7 @@ func TestSet_AbsentState_DeletesRule(t *testing.T) {
 	module := newTestModule(exec)
 
 	// First, create a rule
-	configState := createConfigFromYAML(`
+	configState := createConfigFromYAML(t, `
 name: temp-rule
 action: allow
 direction: forward
@@ -485,9 +472,6 @@ source: 192.168.0.0/24
 destination: 10.0.0.0/24
 enabled: true
 `)
-	if configState == nil {
-		t.Fatal("failed to parse create config YAML")
-	}
 	if err := module.Set(context.Background(), "temp-rule", configState); err != nil {
 		t.Fatalf("Set() create failed: %v", err)
 	}
