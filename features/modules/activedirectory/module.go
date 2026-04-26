@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // ADModuleConfig represents the configuration for the system-context AD module
@@ -245,6 +247,22 @@ type DomainInfo struct {
 	NetBIOSName      string `json:"netbios_name"`
 }
 
+// objectIDPattern accepts SAM account names, UPNs, and GUIDs; rejects raw DNs and shell metacharacters.
+var objectIDPattern = regexp.MustCompile(`^[a-zA-Z0-9._@\-]+$`)
+
+// validateObjectID rejects any objectID containing characters outside the strict allowlist before
+// interpolation into PowerShell scripts, preventing command injection.
+func validateObjectID(objectID string) error {
+	matched, err := security.MatchStringWithTimeout(objectIDPattern, objectID)
+	if err != nil {
+		return fmt.Errorf("invalid objectID %q: validation error: %w", objectID, err)
+	}
+	if !matched {
+		return fmt.Errorf("invalid objectID %q: must match [a-zA-Z0-9._@-]+ (SAM account names, UPNs, and GUIDs only)", objectID)
+	}
+	return nil
+}
+
 // activeDirectoryModule implements the Module interface for local Active Directory management
 // using Windows system context and native AD APIs
 type activeDirectoryModule struct {
@@ -430,6 +448,10 @@ func (m *activeDirectoryModule) getSystemStatus(ctx context.Context) (modules.Co
 
 // queryADObjectSystem queries AD objects using Windows system context
 func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectType, objectID string) (modules.ConfigState, error) {
+	if err := validateObjectID(objectID); err != nil {
+		return nil, err
+	}
+
 	m.updateStats(true)
 	startTime := time.Now()
 
