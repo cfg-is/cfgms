@@ -15,9 +15,8 @@ import (
 var _ business.ClientTenantStore = (*MemoryClientTenantStore)(nil)
 
 // MemoryClientTenantStore provides an in-memory implementation of business.ClientTenantStore
-// TEST ONLY: This implementation is for testing purposes only and should NEVER be used in production.
-// For production deployments, use StorageClientTenantStoreAdapter with pkg/storage providers.
-// Story #274: This is a test-only implementation that should be migrated to storage-backed stores.
+// for use in tests only. For production deployments, use StorageClientTenantStoreAdapter
+// with pkg/storage providers.
 type MemoryClientTenantStore struct {
 	// Client tenant storage
 	clientTenants      map[string]*business.ClientTenant // tenantID -> ClientTenant
@@ -352,8 +351,7 @@ func containsIgnoreCase(s, substr string) bool {
 
 // Simple lowercase conversion (basic implementation)
 func stringToLower(s string) string {
-	// This is a simplified implementation for the memory store
-	// In production, use strings.ToLower()
+	// ASCII-only lowercase; sufficient for the identifiers this store searches.
 	result := make([]byte, len(s))
 	for i, r := range []byte(s) {
 		if r >= 'A' && r <= 'Z' {
