@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -241,4 +242,93 @@ func TestExecuteConfiguration_DriftHandlerCalledForDriftingResources(t *testing.
 	// file1 drifted (handler called), file2 did not
 	assert.Equal(t, int32(1), atomic.LoadInt32(&driftCallCount), "drift handler should be called only for drifted resources")
 	assert.Equal(t, 2, report.TotalResources)
+}
+
+// TestExecuteResource_Configurable_DirectoryModule_EndToEnd verifies that the directory
+// module, which implements modules.Configurable, works correctly through the execution
+// engine's Get→Compare→Set→Verify cycle:
+//  1. The engine calls Configure(desiredState) to establish the AllowedBasePath boundary
+//  2. Get() succeeds and returns "absent" state (directory does not yet exist)
+//  3. Compare detects drift (absent vs desired present state)
+//  4. Set() creates the directory
+//  5. Verify confirms the directory exists
+func TestExecuteResource_Configurable_DirectoryModule_EndToEnd(t *testing.T) {
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "engine-created-dir")
+
+	registry := discovery.ModuleRegistry{}
+	errorConfig := config.ErrorHandlingConfig{
+		ModuleLoadFailure: config.ActionContinue,
+		ResourceFailure:   config.ActionWarn,
+	}
+	moduleFactory := factory.New(registry, errorConfig)
+	comparator := stewardtesting.NewStateComparator()
+	logger := logging.NewLogger("info")
+	engine := New(moduleFactory, comparator, errorConfig, logger)
+
+	// Drift signal differs by platform:
+	//   - On Linux/macOS: "permissions: 0755" creates drift vs the absent dir's zero-permissions state.
+	//   - On Windows: the directory module rejects unix-style permissions (NTFS uses ACLs;
+	//     see features/modules/directory/module.go:218-220), so use "state: present" as the
+	//     explicit drift signal instead.
+	// Mirrors the existing testDirConfig() helper at executor_test.go:48-62.
+	cfgMap := map[string]interface{}{
+		"allowed_base_path": base,
+		"path":              targetPath,
+	}
+	if runtime.GOOS == "windows" {
+		cfgMap["state"] = "present"
+	} else {
+		cfgMap["permissions"] = 493 // 0755 octal
+	}
+
+	resource := config.ResourceConfig{
+		Name:   "test-dir",
+		Module: "directory",
+		Config: cfgMap,
+	}
+
+	ctx := context.Background()
+	result := engine.ExecuteResource(ctx, resource)
+
+	assert.Equal(t, StatusSuccess, result.Status, "directory module must succeed end-to-end via Configure→Get→Compare→Set→Verify")
+	assert.True(t, result.DriftDetected, "drift must be detected when directory does not yet exist")
+	assert.True(t, result.ChangesApplied, "Set() must be called when drift is detected")
+	assert.Empty(t, result.Error, "no error should be recorded on success")
+
+	// Verify the directory was actually created on disk
+	info, statErr := os.Stat(targetPath)
+	require.NoError(t, statErr, "directory must exist after successful execution")
+	assert.True(t, info.IsDir(), "path must be a directory")
+}
+
+// TestExecuteResource_MissingAllowedBasePath_FailsConfigure verifies that when a
+// Configurable module (file or directory) is given a config without allowed_base_path,
+// the engine reports StatusFailed from the Configure step — not from Get or Set.
+func TestExecuteResource_MissingAllowedBasePath_FailsConfigure(t *testing.T) {
+	registry := discovery.ModuleRegistry{}
+	errorConfig := config.ErrorHandlingConfig{
+		ModuleLoadFailure: config.ActionContinue,
+		ResourceFailure:   config.ActionWarn,
+	}
+	moduleFactory := factory.New(registry, errorConfig)
+	comparator := stewardtesting.NewStateComparator()
+	logger := logging.NewLogger("info")
+	engine := New(moduleFactory, comparator, errorConfig, logger)
+
+	// No allowed_base_path → Configure() returns ErrAllowedBasePathRequired.
+	resource := config.ResourceConfig{
+		Name:   "no-base-path",
+		Module: "file",
+		Config: map[string]interface{}{
+			"content": "should not reach OS",
+		},
+	}
+
+	ctx := context.Background()
+	result := engine.ExecuteResource(ctx, resource)
+
+	assert.Equal(t, StatusFailed, result.Status, "missing allowed_base_path must fail at Configure step")
+	assert.Contains(t, result.Error, "failed to configure module", "error must identify Configure as the source")
+	assert.False(t, result.ChangesApplied, "Set() must not be called when Configure fails")
 }

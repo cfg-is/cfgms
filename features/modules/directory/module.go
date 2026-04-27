@@ -14,12 +14,16 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // directoryModule implements the Module interface for directory management
 type directoryModule struct {
 	// Embed default logging support for automatic injection capability
 	modules.DefaultLoggingSupport
+	// configuredBasePath is populated only after a successful Set(); no default value.
+	// Get() returns ErrAllowedBasePathRequired if this is empty.
+	configuredBasePath string
 }
 
 // New creates a new instance of the Directory module
@@ -27,19 +31,39 @@ func New() modules.Module {
 	return &directoryModule{}
 }
 
+// Configure extracts AllowedBasePath from the operator config so that Get() can
+// validate paths before any Set() has been called.
+// This implements modules.Configurable and is called by the execution engine
+// before the Get→Compare→Set→Verify cycle begins.
+func (m *directoryModule) Configure(config modules.ConfigState) error {
+	if config == nil {
+		return ErrAllowedBasePathRequired
+	}
+	configMap := config.AsMap()
+	basePath, _ := configMap["allowed_base_path"].(string)
+	if basePath == "" || !filepath.IsAbs(basePath) {
+		return ErrAllowedBasePathRequired
+	}
+	m.configuredBasePath = basePath
+	return nil
+}
+
 // directoryConfig represents the configuration for a directory
 type directoryConfig struct {
-	State       string `yaml:"state"`                 // "present" or "absent"
-	Path        string `yaml:"path"`                  // Directory path
-	Permissions int    `yaml:"permissions,omitempty"` // Directory permissions (e.g., 0755)
-	Owner       string `yaml:"owner,omitempty"`       // Directory owner
-	Group       string `yaml:"group,omitempty"`       // Directory group
-	Recursive   bool   `yaml:"recursive,omitempty"`   // Create parent directories if needed
+	AllowedBasePath string `yaml:"allowed_base_path"`     // Security boundary for all OS calls
+	State           string `yaml:"state"`                 // "present" or "absent"
+	Path            string `yaml:"path"`                  // Directory path
+	Permissions     int    `yaml:"permissions,omitempty"` // Directory permissions (e.g., 0755)
+	Owner           string `yaml:"owner,omitempty"`       // Directory owner
+	Group           string `yaml:"group,omitempty"`       // Directory group
+	Recursive       bool   `yaml:"recursive,omitempty"`   // Create parent directories if needed
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
 func (c *directoryConfig) AsMap() map[string]interface{} {
 	result := map[string]interface{}{}
+
+	result["allowed_base_path"] = c.AllowedBasePath
 
 	// Always include state
 	if c.State != "" {
@@ -104,6 +128,12 @@ func (c *directoryConfig) GetManagedFields() []string {
 
 // validateConfig checks if the configuration is valid
 func (c *directoryConfig) validate() error {
+	// AllowedBasePath must be set and absolute — checked before Path to surface the
+	// security boundary error first.
+	if c.AllowedBasePath == "" || !filepath.IsAbs(c.AllowedBasePath) {
+		return ErrAllowedBasePathRequired
+	}
+
 	// Validate path is always required
 	if c.Path == "" {
 		return ErrInvalidPath
@@ -150,10 +180,14 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		"resource_id", resourceID,
 		"tenant_id", tenantID,
 		"resource_type", "directory")
-	// Convert ConfigState to directoryConfig
+
+	// Step 1: Extract config from configMap (populates AllowedBasePath and other fields)
 	configMap := config.AsMap()
 	dirConfig := &directoryConfig{}
 
+	if allowedBasePath, ok := configMap["allowed_base_path"].(string); ok {
+		dirConfig.AllowedBasePath = allowedBasePath
+	}
 	if path, ok := configMap["path"].(string); ok {
 		dirConfig.Path = path
 	}
@@ -180,7 +214,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		dirConfig.Recursive = recursive
 	}
 
-	// Platform-specific permissions handling
+	// Step 2: Platform-specific permissions handling (must remain before validate)
 	if !platformSupportsPermissions() && dirConfig.Permissions != 0 {
 		return fmt.Errorf("unix-style permissions are not supported on this platform (NTFS uses ACLs); remove the permissions field from your configuration")
 	}
@@ -190,7 +224,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		dirConfig.Permissions = int(defaultDirectoryMode())
 	}
 
-	// Validate configuration
+	// Step 3: Validate configuration — return on any error, storing nothing in m
 	if err := dirConfig.validate(); err != nil {
 		logger.ErrorCtx(ctx, "Directory configuration validation failed",
 			"operation", "directory_set",
@@ -202,33 +236,51 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		return err
 	}
 
+	// Step 4: Validate path is within AllowedBasePath — return on any error, storing nothing in m
+	// NOTE: symlink escapes outside AllowedBasePath are not blocked by ValidateAndCleanPath
+	cleanPath, err := security.ValidateAndCleanPath(dirConfig.AllowedBasePath, dirConfig.Path)
+	if err != nil {
+		logger.ErrorCtx(ctx, "Directory path traversal check failed",
+			"operation", "directory_set",
+			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "directory",
+			"error_code", "PATH_TRAVERSAL_DETECTED",
+			"error_details", err.Error())
+		return fmt.Errorf("path security check failed: %w", err)
+	}
+
+	// Step 5: Store configuredBasePath only after both validate() and ValidateAndCleanPath succeed
+	m.configuredBasePath = dirConfig.AllowedBasePath
+
+	// Step 6: Use cleanPath for ALL OS calls — no raw dirConfig.Path reaches any OS call
+
 	// Check if path exists and is a directory
-	info, err := os.Stat(dirConfig.Path)
+	info, err := os.Stat(cleanPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("failed to stat path: %w", err)
 		}
 		// Path doesn't exist, create it
-		// Validate permissions are within os.FileMode range
-		// Validate and safely convert permissions to os.FileMode
 		if dirConfig.Permissions < 0 || dirConfig.Permissions > 0777 {
 			return modules.ErrInvalidInput
 		}
 		fileMode := os.FileMode(dirConfig.Permissions) // Safe: bounds validated above
 
 		if dirConfig.Recursive {
-			if err := os.MkdirAll(dirConfig.Path, fileMode); err != nil {
+			if err := os.MkdirAll(cleanPath, fileMode); err != nil {
 				return fmt.Errorf("failed to create directory: %w", err)
 			}
 		} else {
-			parent := filepath.Dir(dirConfig.Path)
+			// NOTE: symlink escapes outside AllowedBasePath are not blocked by ValidateAndCleanPath
+			parent := filepath.Dir(cleanPath)
 			if _, err := os.Stat(parent); err != nil {
 				if os.IsNotExist(err) {
 					return ErrRecursiveRequired
 				}
 				return fmt.Errorf("failed to stat parent directory: %w", err)
 			}
-			if err := os.Mkdir(dirConfig.Path, fileMode); err != nil {
+			if err := os.Mkdir(cleanPath, fileMode); err != nil {
 				return fmt.Errorf("failed to create directory: %w", err)
 			}
 		}
@@ -238,12 +290,11 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 
 	// Set permissions (only meaningful on platforms that support Unix permission bits)
 	if platformSupportsPermissions() {
-		// Validate permissions are within os.FileMode range (check again for existing directories)
 		if dirConfig.Permissions < 0 || dirConfig.Permissions > 0777 {
 			return modules.ErrInvalidInput
 		}
 		fileMode := os.FileMode(dirConfig.Permissions) // Safe: bounds validated above
-		if err := os.Chmod(dirConfig.Path, fileMode); err != nil {
+		if err := os.Chmod(cleanPath, fileMode); err != nil {
 			return fmt.Errorf("failed to set permissions: %w", err)
 		}
 	}
@@ -256,7 +307,10 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 			if err != nil {
 				return ErrInvalidOwner
 			}
-			uid, _ = strconv.Atoi(u.Uid)
+			uid, err = strconv.Atoi(u.Uid)
+			if err != nil {
+				return fmt.Errorf("failed to parse uid for owner %q: %w", dirConfig.Owner, err)
+			}
 		} else {
 			uid = -1
 		}
@@ -266,19 +320,22 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 			if err != nil {
 				return ErrInvalidGroup
 			}
-			gid, _ = strconv.Atoi(g.Gid)
+			gid, err = strconv.Atoi(g.Gid)
+			if err != nil {
+				return fmt.Errorf("failed to parse gid for group %q: %w", dirConfig.Group, err)
+			}
 		} else {
 			gid = -1
 		}
 
-		if err := os.Chown(dirConfig.Path, uid, gid); err != nil {
+		if err := os.Chown(cleanPath, uid, gid); err != nil {
 			logger.ErrorCtx(ctx, "Failed to set directory ownership",
 				"operation", "directory_set",
 				"resource_id", resourceID,
 				"tenant_id", tenantID,
 				"resource_type", "directory",
 				"error_code", "OWNERSHIP_FAILED",
-				"path", dirConfig.Path,
+				"path", cleanPath,
 				"owner", dirConfig.Owner,
 				"group", dirConfig.Group,
 				"error_details", err.Error())
@@ -291,7 +348,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		"resource_id", resourceID,
 		"tenant_id", tenantID,
 		"resource_type", "directory",
-		"path", dirConfig.Path,
+		"path", cleanPath,
 		"permissions", fmt.Sprintf("0%o", dirConfig.Permissions),
 		"status", "completed")
 
@@ -303,13 +360,24 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 // If the directory does not exist, returns a directoryConfig with State: "absent".
 // This allows the execution engine to detect that the directory needs to be created.
 func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
-	info, err := os.Stat(resourceID)
+	if m.configuredBasePath == "" {
+		return nil, ErrAllowedBasePathRequired
+	}
+
+	// NOTE: symlink escapes outside AllowedBasePath are not blocked by ValidateAndCleanPath
+	cleanPath, err := security.ValidateAndCleanPath(m.configuredBasePath, resourceID)
+	if err != nil {
+		return nil, fmt.Errorf("path security check failed: %w", err)
+	}
+
+	info, err := os.Stat(cleanPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Directory doesn't exist - return state: absent
 			return &directoryConfig{
-				State: "absent",
-				Path:  resourceID,
+				AllowedBasePath: m.configuredBasePath,
+				State:           "absent",
+				Path:            resourceID,
 			}, nil
 		}
 		return nil, fmt.Errorf("failed to stat directory: %w", err)
@@ -328,11 +396,12 @@ func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.C
 	}
 
 	config := &directoryConfig{
-		State:       "present",
-		Path:        resourceID,
-		Permissions: perms,
-		Owner:       ownerName,
-		Group:       groupName,
+		AllowedBasePath: m.configuredBasePath,
+		State:           "present",
+		Path:            resourceID,
+		Permissions:     perms,
+		Owner:           ownerName,
+		Group:           groupName,
 	}
 
 	return config, nil

@@ -44,14 +44,18 @@ func testFileConfig(path, content string) string {
 // On Unix, includes permissions (0755 = 493 decimal). On Windows, omits permissions.
 // Always includes "state": "present" so the genericConfigState comparator has a
 // managed field to compare (path is excluded as an identifier field).
+// allowed_base_path is set to the parent of path to satisfy the mandatory security boundary.
 func testDirConfig(path string) string {
+	parent := filepath.ToSlash(filepath.Dir(path))
 	if runtime.GOOS == "windows" {
 		return `{
         "state": "present",
+        "allowed_base_path": "` + parent + `",
         "path": "` + filepath.ToSlash(path) + `"
       }`
 	}
 	return `{
+        "allowed_base_path": "` + parent + `",
         "path": "` + filepath.ToSlash(path) + `",
         "permissions": 493
       }`
