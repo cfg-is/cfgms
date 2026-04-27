@@ -266,13 +266,20 @@ func TestExecuteResource_Configurable_DirectoryModule_EndToEnd(t *testing.T) {
 	logger := logging.NewLogger("info")
 	engine := New(moduleFactory, comparator, errorConfig, logger)
 
+	// Drift signal differs by platform:
+	//   - On Linux/macOS: "permissions: 0755" creates drift vs the absent dir's zero-permissions state.
+	//   - On Windows: the directory module rejects unix-style permissions (NTFS uses ACLs;
+	//     see features/modules/directory/module.go:218-220), so use "state: present" as the
+	//     explicit drift signal instead.
+	// Mirrors the existing testDirConfig() helper at executor_test.go:48-62.
 	cfgMap := map[string]interface{}{
 		"allowed_base_path": base,
 		"path":              targetPath,
 	}
-	if runtime.GOOS != "windows" {
-		// 0755 octal. Windows rejects unix-style permissions (NTFS uses ACLs); see directory/module.go.
-		cfgMap["permissions"] = 493
+	if runtime.GOOS == "windows" {
+		cfgMap["state"] = "present"
+	} else {
+		cfgMap["permissions"] = 493 // 0755 octal
 	}
 
 	resource := config.ResourceConfig{
