@@ -495,9 +495,12 @@ func (s *Session) AcceptStream(_ context.Context) (interfaces.Stream, types.Stre
 
 // --- Session Management ---
 
-// Close gracefully closes the session.
+// Close gracefully closes the session and removes it from the provider's sessions map.
 func (s *Session) Close(_ context.Context) error {
 	s.closed.Store(true)
+	s.provider.mu.Lock()
+	delete(s.provider.sessions, s.id)
+	s.provider.mu.Unlock()
 	return nil
 }
 

@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -301,4 +303,99 @@ func TestChunksToDNATransfer_EmptyChunks(t *testing.T) {
 func TestChunksToBulkTransfer_EmptyChunks(t *testing.T) {
 	_, err := chunksToBulkTransfer(nil)
 	require.Error(t, err)
+}
+
+// TestSession_Close_RemovesFromProviderMap verifies that Close removes the session
+// from the provider's sessions map, preventing unbounded map growth.
+func TestSession_Close_RemovesFromProviderMap(t *testing.T) {
+	p := New()
+
+	const n = 5
+	sessions := make([]*Session, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("session-%d", i)
+		s := &Session{
+			id:       id,
+			mode:     "client",
+			provider: p,
+		}
+		p.mu.Lock()
+		p.sessions[id] = s
+		p.mu.Unlock()
+		sessions[i] = s
+	}
+
+	p.mu.RLock()
+	assert.Equal(t, n, len(p.sessions), "sessions should be in map before close")
+	p.mu.RUnlock()
+
+	for _, s := range sessions {
+		require.NoError(t, s.Close(context.Background()))
+	}
+
+	p.mu.RLock()
+	assert.Equal(t, 0, len(p.sessions), "sessions map should be empty after all closed")
+	p.mu.RUnlock()
+}
+
+// TestSession_Close_Twice_NoPanic verifies that calling Close twice does not panic.
+func TestSession_Close_Twice_NoPanic(t *testing.T) {
+	p := New()
+	s := &Session{
+		id:       "double-close-session",
+		mode:     "client",
+		provider: p,
+	}
+	p.mu.Lock()
+	p.sessions[s.id] = s
+	p.mu.Unlock()
+
+	require.NoError(t, s.Close(context.Background()))
+	require.NoError(t, s.Close(context.Background()))
+
+	p.mu.RLock()
+	assert.Equal(t, 0, len(p.sessions))
+	p.mu.RUnlock()
+}
+
+// TestSession_Close_Concurrent verifies that concurrent Close calls do not data-race.
+// Runs N goroutines each calling Close() on a distinct session that shares a single
+// provider — exercises the mutex in Close() under go test -race.
+func TestSession_Close_Concurrent(t *testing.T) {
+	p := New()
+
+	const n = 20
+	sessions := make([]*Session, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("concurrent-session-%d", i)
+		s := &Session{
+			id:       id,
+			mode:     "client",
+			provider: p,
+		}
+		p.mu.Lock()
+		p.sessions[id] = s
+		p.mu.Unlock()
+		sessions[i] = s
+	}
+
+	errCh := make(chan error, n)
+	var wg sync.WaitGroup
+	for _, s := range sessions {
+		wg.Add(1)
+		go func(s *Session) {
+			defer wg.Done()
+			errCh <- s.Close(context.Background())
+		}(s)
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		require.NoError(t, err)
+	}
+
+	p.mu.RLock()
+	assert.Equal(t, 0, len(p.sessions), "all sessions must be removed from map after concurrent closes")
+	p.mu.RUnlock()
 }
