@@ -11,6 +11,10 @@ import (
 	"io"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
@@ -19,6 +23,8 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
+	transportauth "github.com/cfgis/cfgms/pkg/transport/auth"
+	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
 
 // ConfigSyncStreamID is the stream ID for configuration synchronization.
@@ -198,6 +204,31 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 	h.logger.Info("Handling gRPC config sync request",
 		"steward_id", stewardID,
 		"current_version", req.GetCurrentVersion())
+
+	// Validate steward ID against the mTLS peer CN to close the steward-impersonation gap.
+	// Try the fast-path first (identity already extracted by auth interceptor), then fall
+	// back to raw peer extraction for callers that bypass the interceptor chain.
+	var peerID string
+	if identity, ok := transportauth.StewardIDFromContext(ctx); ok {
+		peerID = identity.StewardID
+	} else {
+		p, ok := peer.FromContext(ctx)
+		if !ok {
+			return status.Error(codes.Unauthenticated, "mTLS certificate required")
+		}
+		tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+		if !ok {
+			return status.Error(codes.Unauthenticated, "mTLS certificate required")
+		}
+		id, err := quictransport.PeerStewardID(tlsInfo.State)
+		if err != nil {
+			return status.Error(codes.Unauthenticated, "mTLS certificate required")
+		}
+		peerID = id
+	}
+	if stewardID != peerID {
+		return status.Error(codes.PermissionDenied, "steward ID mismatch")
+	}
 
 	// Get configuration from service
 	configReq := &controller.ConfigRequest{
