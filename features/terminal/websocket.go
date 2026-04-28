@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -17,31 +19,56 @@ import (
 
 // DefaultWebSocketHandler implements WebSocket handling for terminal sessions
 type DefaultWebSocketHandler struct {
-	upgrader       websocket.Upgrader
-	sessionManager SessionManager
-	logger         logging.Logger
+	upgrader        websocket.Upgrader
+	sessionManager  SessionManager
+	logger          logging.Logger
+	originAllowlist []string
 }
 
-// NewWebSocketHandler creates a new WebSocket handler
-func NewWebSocketHandler(sessionManager SessionManager, logger logging.Logger) (*DefaultWebSocketHandler, error) {
+// NewWebSocketHandler creates a new WebSocket handler. originAllowlist contains
+// additional allowed Origin hosts beyond same-origin; nil/empty means same-origin only.
+func NewWebSocketHandler(sessionManager SessionManager, logger logging.Logger, originAllowlist []string) (*DefaultWebSocketHandler, error) {
 	if sessionManager == nil {
 		return nil, fmt.Errorf("session manager cannot be nil")
 	}
 
 	handler := &DefaultWebSocketHandler{
-		upgrader: websocket.Upgrader{
-			ReadBufferSize:  1024,
-			WriteBufferSize: 1024,
-			CheckOrigin: func(r *http.Request) bool {
-				// In production, implement proper origin checking
-				return true
-			},
+		sessionManager:  sessionManager,
+		logger:          logger,
+		originAllowlist: originAllowlist,
+	}
+
+	handler.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			return sameOriginOrAllowed(r, handler.originAllowlist)
 		},
-		sessionManager: sessionManager,
-		logger:         logger,
 	}
 
 	return handler, nil
+}
+
+// sameOriginOrAllowed returns true when the request's Origin host matches r.Host
+// or appears in the provided allowlist. An absent or unparseable Origin is rejected.
+func sameOriginOrAllowed(r *http.Request, allowlist []string) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	for _, allowed := range allowlist {
+		if strings.EqualFold(u.Host, allowed) {
+			return true
+		}
+	}
+	return false
 }
 
 // HandleWebSocket handles WebSocket connections for terminal sessions

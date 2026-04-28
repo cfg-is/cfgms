@@ -116,7 +116,16 @@ PrivilegeEscalation     -> Suspicious activity
 - Compressed storage with optional encryption
 - Multi-format export (JSON, CSV, PDF)
 
-### 5. mTLS Integration (`auth_integration.go`)
+### 5. WebSocket Origin Enforcement (`websocket.go`)
+
+**Same-Origin Policy:**
+The WebSocket upgrader enforces origin validation on every upgrade request. Connections are accepted only when the `Origin` header host matches `r.Host` (same-origin) or appears in the configured `originAllowlist`. Requests with a missing or unparseable `Origin` header are rejected with HTTP 403.
+
+- Default allowlist: empty (same-origin only)
+- Allowlist is a constructor parameter: `NewWebSocketHandler(sessionManager, logger, originAllowlist)`
+- The allowlist is sourced from controller configuration; the terminal feature does not read config directly
+
+### 6. mTLS Integration (`auth_integration.go`)
 
 **Certificate-Based Authentication:**
 - Client certificate requirement for terminal access
@@ -134,7 +143,7 @@ PrivilegeEscalation     -> Suspicious activity
 **Session Token Security:**
 ```go
 type SessionToken struct {
-    Token           string      // Cryptographically secure token
+    Token           string      // 32-byte crypto/rand, base64url-encoded (44 chars)
     ClientIP        string      // Bound IP address
     TLSFingerprint  string      // TLS connection fingerprint
     CertificateHash string      // Client certificate hash
@@ -142,6 +151,8 @@ type SessionToken struct {
     LastRotated     time.Time   // Last rotation time
 }
 ```
+
+Token generation uses `crypto/rand.Read` over 32 bytes (256 bits of entropy), base64-URL-encoded. `time.Now()`, `os.Getpid()`, and formatted strings are not used in the token generation path.
 
 ## Security Controls Configuration
 
