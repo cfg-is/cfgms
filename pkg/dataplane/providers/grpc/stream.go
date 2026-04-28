@@ -13,9 +13,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/dataplane/types"
 )
 
-// chunkSize is the maximum bytes per gRPC chunk (64 KB).
-const chunkSize = 64 * 1024
-
 // isEOF reports whether err signals end-of-stream from a gRPC Recv call.
 func isEOF(err error) bool {
 	return err == io.EOF
@@ -45,14 +42,14 @@ func configTransferToChunks(cfg *types.ConfigTransfer) ([]*transportpb.ConfigChu
 		}}, nil
 	}
 
-	total := (len(data) + chunkSize - 1) / chunkSize
+	total := (len(data) + types.DefaultChunkSize - 1) / types.DefaultChunkSize
 	if total > math.MaxInt32 {
 		return nil, fmt.Errorf("config data too large to chunk: %d chunks exceeds int32 limit", total)
 	}
 	chunks := make([]*transportpb.ConfigChunk, 0, total)
 	for i := 0; i < total; i++ {
-		start := i * chunkSize
-		end := start + chunkSize
+		start := i * types.DefaultChunkSize
+		end := start + types.DefaultChunkSize
 		if end > len(data) {
 			end = len(data)
 		}
@@ -69,20 +66,35 @@ func configTransferToChunks(cfg *types.ConfigTransfer) ([]*transportpb.ConfigChu
 
 // chunksToConfigTransfer reassembles chunks into a ConfigTransfer.
 //
-// Chunks are sorted by index before reassembly; a nil or empty slice returns
-// an error.
+// Validation: non-empty list, chunk count matches TotalChunks, contiguous
+// sequence (0..N-1), assembled payload ≤ maxRecvMsgSize (8 MB).
 func chunksToConfigTransfer(chunks []*transportpb.ConfigChunk) (*types.ConfigTransfer, error) {
 	if len(chunks) == 0 {
-		return nil, fmt.Errorf("no chunks to reassemble")
+		return nil, ErrEmptyChunkList
 	}
 
 	sort.Slice(chunks, func(i, j int) bool {
 		return chunks[i].ChunkIndex < chunks[j].ChunkIndex
 	})
 
+	if len(chunks) != int(chunks[0].TotalChunks) {
+		return nil, fmt.Errorf("got %d chunks, TotalChunks=%d: %w",
+			len(chunks), chunks[0].TotalChunks, ErrChunkCountMismatch)
+	}
+
+	for i, c := range chunks {
+		if c.ChunkIndex != int32(i) { //nolint:gosec // G115: i bounded by TotalChunks check above (≤ math.MaxInt32)
+			return nil, fmt.Errorf("position %d has index %d: %w", i, c.ChunkIndex, ErrChunkSequenceGap)
+		}
+	}
+
 	var data []byte
 	for _, c := range chunks {
 		data = append(data, c.Data...)
+	}
+
+	if len(data) > maxRecvMsgSize {
+		return nil, fmt.Errorf("%d bytes: %w", len(data), ErrPayloadTooLarge)
 	}
 
 	if len(data) == 0 {
@@ -121,14 +133,14 @@ func dnaTransferToChunks(dna *types.DNATransfer) ([]*transportpb.DNAChunk, error
 		}}, nil
 	}
 
-	total := (len(data) + chunkSize - 1) / chunkSize
+	total := (len(data) + types.DefaultChunkSize - 1) / types.DefaultChunkSize
 	if total > math.MaxInt32 {
 		return nil, fmt.Errorf("DNA data too large to chunk: %d chunks exceeds int32 limit", total)
 	}
 	chunks := make([]*transportpb.DNAChunk, 0, total)
 	for i := 0; i < total; i++ {
-		start := i * chunkSize
-		end := start + chunkSize
+		start := i * types.DefaultChunkSize
+		end := start + types.DefaultChunkSize
 		if end > len(data) {
 			end = len(data)
 		}
@@ -145,18 +157,36 @@ func dnaTransferToChunks(dna *types.DNATransfer) ([]*transportpb.DNAChunk, error
 }
 
 // chunksToDNATransfer reassembles DNA chunks into a DNATransfer.
+//
+// Validation: non-empty list, chunk count matches TotalChunks, contiguous
+// sequence (0..N-1), assembled payload ≤ maxRecvMsgSize (8 MB).
 func chunksToDNATransfer(chunks []*transportpb.DNAChunk) (*types.DNATransfer, error) {
 	if len(chunks) == 0 {
-		return nil, fmt.Errorf("no chunks to reassemble")
+		return nil, ErrEmptyChunkList
 	}
 
 	sort.Slice(chunks, func(i, j int) bool {
 		return chunks[i].ChunkIndex < chunks[j].ChunkIndex
 	})
 
+	if len(chunks) != int(chunks[0].TotalChunks) {
+		return nil, fmt.Errorf("got %d chunks, TotalChunks=%d: %w",
+			len(chunks), chunks[0].TotalChunks, ErrChunkCountMismatch)
+	}
+
+	for i, c := range chunks {
+		if c.ChunkIndex != int32(i) { //nolint:gosec // G115: i bounded by TotalChunks check above (≤ math.MaxInt32)
+			return nil, fmt.Errorf("position %d has index %d: %w", i, c.ChunkIndex, ErrChunkSequenceGap)
+		}
+	}
+
 	var data []byte
 	for _, c := range chunks {
 		data = append(data, c.Data...)
+	}
+
+	if len(data) > maxRecvMsgSize {
+		return nil, fmt.Errorf("%d bytes: %w", len(data), ErrPayloadTooLarge)
 	}
 
 	if len(data) == 0 {
@@ -194,11 +224,15 @@ func bulkTransferToChunks(bulk *types.BulkTransfer) ([]*transportpb.BulkChunk, e
 		}}, nil
 	}
 
-	total := (len(data) + chunkSize - 1) / chunkSize
+	if len(data) > math.MaxInt32 {
+		return nil, fmt.Errorf("bulk data too large to chunk: %d bytes exceeds int32 limit", len(data))
+	}
+
+	total := (len(data) + types.DefaultChunkSize - 1) / types.DefaultChunkSize
 	chunks := make([]*transportpb.BulkChunk, 0, total)
 	for i := 0; i < total; i++ {
-		start := i * chunkSize
-		end := start + chunkSize
+		start := i * types.DefaultChunkSize
+		end := start + types.DefaultChunkSize
 		if end > len(data) {
 			end = len(data)
 		}
@@ -216,18 +250,35 @@ func bulkTransferToChunks(bulk *types.BulkTransfer) ([]*transportpb.BulkChunk, e
 }
 
 // chunksToBulkTransfer reassembles bulk chunks into a BulkTransfer.
+//
+// Validation: non-empty list, contiguous offsets (no gaps or duplicates),
+// assembled payload ≤ maxRecvMsgSize (8 MB), assembled size matches TotalSize.
 func chunksToBulkTransfer(chunks []*transportpb.BulkChunk) (*types.BulkTransfer, error) {
 	if len(chunks) == 0 {
-		return nil, fmt.Errorf("no chunks to reassemble")
+		return nil, ErrEmptyChunkList
 	}
 
 	sort.Slice(chunks, func(i, j int) bool {
 		return chunks[i].Offset < chunks[j].Offset
 	})
 
+	// Verify offset contiguity: each chunk must start exactly where the previous ended.
+	var accumulated int64
+	for i, c := range chunks {
+		if c.Offset != accumulated {
+			return nil, fmt.Errorf("position %d: offset %d, expected %d: %w",
+				i, c.Offset, accumulated, ErrChunkSequenceGap)
+		}
+		accumulated += int64(len(c.Data))
+	}
+
 	var data []byte
 	for _, c := range chunks {
 		data = append(data, c.Data...)
+	}
+
+	if len(data) > maxRecvMsgSize {
+		return nil, fmt.Errorf("%d bytes: %w", len(data), ErrPayloadTooLarge)
 	}
 
 	if len(data) == 0 {
@@ -235,6 +286,11 @@ func chunksToBulkTransfer(chunks []*transportpb.BulkChunk) (*types.BulkTransfer,
 			ID:       chunks[0].TransferId,
 			Metadata: chunks[0].Metadata,
 		}, nil
+	}
+
+	if int64(len(data)) != chunks[0].TotalSize {
+		return nil, fmt.Errorf("assembled %d bytes, TotalSize=%d: %w",
+			len(data), chunks[0].TotalSize, ErrTotalSizeMismatch)
 	}
 
 	var bulk types.BulkTransfer

@@ -27,6 +27,12 @@ const (
 	StreamCustom StreamType = "custom"
 )
 
+// DefaultChunkSize is the maximum bytes per gRPC chunk (64 KB).
+//
+// Authoritative location — importable by both pkg/ and features/ code without
+// creating a concrete-provider import dependency.
+const DefaultChunkSize = 64 * 1024
+
 // ConfigTransfer represents a configuration data transfer.
 //
 // Configuration transfers include tenant-specific configuration data,

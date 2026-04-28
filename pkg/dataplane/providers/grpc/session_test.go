@@ -127,11 +127,11 @@ func TestConfigTransferToChunks(t *testing.T) {
 		assert.Equal(t, int32(len(chunks)), c.TotalChunks)
 		assert.Equal(t, "cfg-test", c.ConfigId)
 		assert.Equal(t, "2.0.0", c.Version)
-		assert.LessOrEqual(t, len(c.Data), chunkSize, "chunk %d exceeds max size", i)
+		assert.LessOrEqual(t, len(c.Data), types.DefaultChunkSize, "chunk %d exceeds max size", i)
 	}
-	// Last chunk must be smaller or equal to chunkSize
+	// Last chunk must be smaller or equal to DefaultChunkSize
 	lastChunk := chunks[len(chunks)-1]
-	assert.LessOrEqual(t, len(lastChunk.Data), chunkSize)
+	assert.LessOrEqual(t, len(lastChunk.Data), types.DefaultChunkSize)
 }
 
 // TestChunksToConfigTransfer verifies chunks reassemble to the original config.
@@ -177,7 +177,7 @@ func TestDNATransferToChunks(t *testing.T) {
 		assert.Equal(t, int32(i), c.ChunkIndex)
 		assert.Equal(t, "steward-3", c.StewardId)
 		assert.Equal(t, "tenant-3", c.TenantId)
-		assert.LessOrEqual(t, len(c.Data), chunkSize)
+		assert.LessOrEqual(t, len(c.Data), types.DefaultChunkSize)
 	}
 }
 
@@ -201,7 +201,7 @@ func TestBulkTransferToChunks(t *testing.T) {
 
 	for i, c := range chunks {
 		assert.Equal(t, "bulk-test", c.TransferId)
-		assert.LessOrEqual(t, len(c.Data), chunkSize, "chunk %d too large", i)
+		assert.LessOrEqual(t, len(c.Data), types.DefaultChunkSize, "chunk %d too large", i)
 	}
 	// Last chunk must have is_last = true
 	assert.True(t, chunks[len(chunks)-1].IsLast)
@@ -287,22 +287,25 @@ func TestChunkRoundTrip_EmptyData(t *testing.T) {
 	assert.Equal(t, "0.0.1", got.Version)
 }
 
-// TestChunksToConfigTransfer_EmptyChunks verifies an error on empty chunk slice.
+// TestChunksToConfigTransfer_EmptyChunks verifies the specific sentinel error on empty chunk slice.
 func TestChunksToConfigTransfer_EmptyChunks(t *testing.T) {
 	_, err := chunksToConfigTransfer(nil)
 	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrEmptyChunkList)
 }
 
-// TestChunksToDNATransfer_EmptyChunks verifies an error on empty chunk slice.
+// TestChunksToDNATransfer_EmptyChunks verifies the specific sentinel error on empty chunk slice.
 func TestChunksToDNATransfer_EmptyChunks(t *testing.T) {
 	_, err := chunksToDNATransfer(nil)
 	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrEmptyChunkList)
 }
 
-// TestChunksToBulkTransfer_EmptyChunks verifies an error on empty chunk slice.
+// TestChunksToBulkTransfer_EmptyChunks verifies the specific sentinel error on empty chunk slice.
 func TestChunksToBulkTransfer_EmptyChunks(t *testing.T) {
 	_, err := chunksToBulkTransfer(nil)
 	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrEmptyChunkList)
 }
 
 // TestSession_Close_RemovesFromProviderMap verifies that Close removes the session
