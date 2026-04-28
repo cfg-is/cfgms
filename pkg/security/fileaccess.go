@@ -16,6 +16,7 @@
 package security
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,10 +99,14 @@ func SecureOpenFile(basePath, userPath string, flag int, perm os.FileMode) (*os.
 // This function:
 // 1. Cleans the user path using filepath.Clean()
 // 2. Resolves both paths to absolute paths
-// 3. Ensures the resolved user path is within the base directory
-// 4. Returns the validated absolute path
+// 3. Eval-symlinks the base path so all containment comparisons use canonical paths
+// 4. Performs a containment check using filepath.Rel (not strings.HasPrefix) to
+//    prevent sibling-prefix attacks (e.g. /base_extra/secret incorrectly matching /base)
+// 5. Resolves symlinks in the user path; for non-existent targets, walks up to the
+//    deepest existing ancestor, eval-symlinks it, and re-joins the non-existing remainder
+// 6. Re-validates containment after symlink resolution to block symlink-escape attacks
 //
-// This prevents directory traversal attacks (e.g., "../../../etc/passwd").
+// Returns the validated, canonicalized absolute path.
 func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 	if basePath == "" {
 		return "", fmt.Errorf("base path cannot be empty")
@@ -110,50 +115,77 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 		return "", fmt.Errorf("user path cannot be empty")
 	}
 
-	// Clean the user-provided path to resolve . and .. elements
 	cleanUserPath := filepath.Clean(userPath)
 
-	// Convert both paths to absolute paths
 	absBasePath, err := filepath.Abs(basePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve base path: %w", err)
 	}
+	// Eval-symlink base so comparisons are against canonical paths.
+	// Without this, a symlinked base would make the containment check unreliable.
+	absBasePath, err = filepath.EvalSymlinks(absBasePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve base path symlinks: %w", err)
+	}
 
-	// Handle relative vs absolute user paths
 	var absUserPath string
 	if filepath.IsAbs(cleanUserPath) {
-		// User provided absolute path - use it directly
 		absUserPath = cleanUserPath
 	} else {
-		// User provided relative path - join with base path
 		absUserPath = filepath.Join(absBasePath, cleanUserPath)
 	}
 
-	// Resolve any remaining symlinks or path elements
-	absUserPath, err = filepath.Abs(absUserPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve user path: %w", err)
+	// Initial containment check using filepath.Rel to prevent sibling-prefix attacks.
+	if err := containmentCheck(absBasePath, absUserPath, userPath); err != nil {
+		return "", err
 	}
 
-	// Ensure the resolved path is within the base directory
-	if !strings.HasPrefix(absUserPath, absBasePath) {
-		return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, basePath)
+	// Resolve symlinks in the user path, with fallback for non-existent targets.
+	resolved, resolveErr := filepath.EvalSymlinks(absUserPath)
+	if resolveErr == nil {
+		absUserPath = resolved
+	} else if errors.Is(resolveErr, os.ErrNotExist) {
+		// Non-existent target: walk up to the deepest existing ancestor,
+		// eval-symlink it, then re-join the non-existing tail components.
+		// This handles paths like "newdir/newfile.txt" where the parent dirs
+		// don't yet exist, and also catches ancestors that are malicious symlinks.
+		parent := absUserPath
+		var tail []string
+		for {
+			if _, statErr := os.Stat(parent); statErr == nil {
+				break
+			}
+			tail = append([]string{filepath.Base(parent)}, tail...)
+			next := filepath.Dir(parent)
+			if next == parent {
+				return "", fmt.Errorf("failed to resolve any ancestor of %s", userPath)
+			}
+			parent = next
+		}
+		resolvedParent, resolveParentErr := filepath.EvalSymlinks(parent)
+		if resolveParentErr != nil {
+			return "", fmt.Errorf("failed to resolve parent: %w", resolveParentErr)
+		}
+		absUserPath = filepath.Join(append([]string{resolvedParent}, tail...)...)
+	} else {
+		return "", fmt.Errorf("failed to evaluate symlinks: %w", resolveErr)
+	}
+
+	// Post-eval containment check: symlink resolution may have moved the path outside base.
+	if err := containmentCheck(absBasePath, absUserPath, userPath); err != nil {
+		return "", err
 	}
 
 	return absUserPath, nil
 }
 
-// SecureMkdirAll creates directories with secure permissions (0750).
-//
-// This is a secure wrapper around os.MkdirAll with default secure permissions.
-func SecureMkdirAll(path string) error {
-	return os.MkdirAll(path, 0750)
-}
-
-// IsPathWithinBase checks if a user path would be within the base directory without file operations.
-//
-// This is useful for validation without performing actual file system operations.
-func IsPathWithinBase(basePath, userPath string) bool {
-	_, err := ValidateAndCleanPath(basePath, userPath)
-	return err == nil
+// containmentCheck verifies that absUserPath is within absBasePath using filepath.Rel.
+// filepath.Rel (not strings.HasPrefix) correctly rejects sibling-prefix attacks where a
+// path like /base_extra/secret would falsely pass a HasPrefix("/base") check.
+func containmentCheck(absBasePath, absUserPath, userPath string) error {
+	rel, err := filepath.Rel(absBasePath, absUserPath)
+	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
+	}
+	return nil
 }
