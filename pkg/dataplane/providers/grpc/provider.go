@@ -259,9 +259,10 @@ func (p *Provider) Stop(ctx context.Context) error {
 		return nil
 	}
 
-	// Close all sessions
+	// Mark all sessions closed; the map is replaced below.
+	// Session.Close() acquires p.mu, so we cannot call it while holding the lock.
 	for _, s := range p.sessions {
-		_ = s.Close(ctx)
+		s.closed.Store(true)
 	}
 	p.sessions = make(map[string]*Session)
 
