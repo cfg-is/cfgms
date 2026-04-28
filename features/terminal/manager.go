@@ -202,51 +202,29 @@ func (m *DefaultSessionManager) cleanupRoutine() {
 	}
 }
 
-// CleanupTimedOutSessions removes sessions that have timed out
+// CleanupTimedOutSessions removes sessions that have timed out.
+// The lock is released before any blocking operation: TerminateSession acquires
+// its own lock, so holding m.mu during that call would deadlock.
 func (m *DefaultSessionManager) CleanupTimedOutSessions() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	timedOutSessions := make([]string, 0)
-
-	for sessionID, session := range m.sessions {
-		if session.IsTimedOut(m.config.SessionTimeout) {
-			timedOutSessions = append(timedOutSessions, sessionID)
+	timedOut := make([]string, 0)
+	for id, sess := range m.sessions {
+		if sess.IsTimedOut(m.config.SessionTimeout) {
+			timedOut = append(timedOut, id)
 		}
 	}
+	m.mu.Unlock()
 
-	// Clean up timed-out sessions
-	for _, sessionID := range timedOutSessions {
-		session := m.sessions[sessionID]
-
-		// Close the session
+	for _, id := range timedOut {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := session.Close(ctx); err != nil {
-			m.logger.Warn("Error closing timed-out session", "session_id", sessionID, "error", err)
+		if err := m.TerminateSession(ctx, id); err != nil {
+			m.logger.Warn("Failed to terminate timed-out session", "session_id", id, "error", err)
 		}
 		cancel()
-
-		// End recording if available
-		if m.recorder != nil {
-			if recorder, ok := m.recorder.(*DefaultSessionRecorder); ok {
-				if err := recorder.EndRecording(sessionID); err != nil {
-					m.logger.Warn("Failed to end recording for timed-out session", "session_id", sessionID, "error", err)
-				}
-			}
-		}
-
-		// Remove from active sessions
-		delete(m.sessions, sessionID)
-
-		m.logger.Info("Session timed out and cleaned up",
-			"session_id", sessionID,
-			"timeout", m.config.SessionTimeout)
 	}
 
-	if len(timedOutSessions) > 0 {
-		m.logger.Info("Cleaned up timed-out sessions",
-			"count", len(timedOutSessions),
-			"active_sessions", len(m.sessions))
+	if len(timedOut) > 0 {
+		m.logger.Info("Cleaned up timed-out sessions", "count", len(timedOut))
 	}
 }
 

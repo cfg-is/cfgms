@@ -4,6 +4,8 @@ package terminal
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/terminal/shell"
+	"github.com/cfgis/cfgms/pkg/logging"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -220,6 +223,196 @@ func TestMaxSessionsLimit(t *testing.T) {
 	_, err = manager.CreateSession(ctx, sessionReq)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "maximum number of sessions")
+}
+
+// TestCleanupTimedOutSessions_AllSessionsCleaned verifies that all 10 timed-out
+// sessions are torn down by CleanupTimedOutSessions.
+func TestCleanupTimedOutSessions_AllSessionsCleaned(t *testing.T) {
+	config := &Config{
+		SessionTimeout: 10 * time.Millisecond,
+		MaxSessions:    100,
+		RecordSessions: false,
+	}
+
+	manager, err := NewSessionManager(config, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	const sessionCount = 10
+	sessionIDs := make([]string, sessionCount)
+
+	for i := 0; i < sessionCount; i++ {
+		req := &SessionRequest{
+			StewardID: fmt.Sprintf("steward-%d", i),
+			UserID:    fmt.Sprintf("user-%d", i),
+			Shell:     shell.GetDefaultShell(),
+			Cols:      80,
+			Rows:      24,
+		}
+		sess, err := manager.CreateSession(ctx, req)
+		require.NoError(t, err)
+		sessionIDs[i] = sess.ID
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	manager.(*DefaultSessionManager).CleanupTimedOutSessions()
+
+	for _, id := range sessionIDs {
+		_, err := manager.GetSession(id)
+		assert.Error(t, err, "timed-out session %s should be removed", id)
+	}
+}
+
+// TestCleanupTimedOutSessions_ContinuesAfterPerSessionError verifies that a
+// per-session TerminateSession failure is logged as a warning and does not
+// abort the remaining sessions in the batch.
+//
+// Two concurrent CleanupTimedOutSessions calls both collect the same session IDs
+// (under lock, before any termination). When both loops then call TerminateSession
+// concurrently, the second caller encounters "session not found" for sessions the
+// first already removed — these must be warned and skipped, not panicked or aborted.
+func TestCleanupTimedOutSessions_ContinuesAfterPerSessionError(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	config := &Config{
+		SessionTimeout: 1 * time.Millisecond,
+		MaxSessions:    100,
+		RecordSessions: false,
+	}
+
+	manager, err := NewSessionManager(config, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	const sessionCount = 10
+	sessionIDs := make([]string, sessionCount)
+
+	for i := 0; i < sessionCount; i++ {
+		req := &SessionRequest{
+			StewardID: fmt.Sprintf("steward-%d", i),
+			UserID:    fmt.Sprintf("user-%d", i),
+			Shell:     shell.GetDefaultShell(),
+			Cols:      80,
+			Rows:      24,
+		}
+		sess, err := manager.CreateSession(ctx, req)
+		require.NoError(t, err)
+		sessionIDs[i] = sess.ID
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	defaultManager := manager.(*DefaultSessionManager)
+
+	// Both goroutines collect identical ID slices (both under lock, before any
+	// termination has started). Their termination loops then race; the second
+	// caller gets "session not found" for sessions the first already deleted.
+	var ready sync.WaitGroup
+	ready.Add(2)
+	var done sync.WaitGroup
+	done.Add(2)
+	go func() {
+		defer done.Done()
+		ready.Done()
+		ready.Wait()
+		defaultManager.CleanupTimedOutSessions()
+	}()
+	go func() {
+		defer done.Done()
+		ready.Done()
+		ready.Wait()
+		defaultManager.CleanupTimedOutSessions()
+	}()
+	done.Wait()
+
+	// All sessions must be terminated regardless of which goroutine did the work.
+	for _, id := range sessionIDs {
+		_, err := manager.GetSession(id)
+		assert.Error(t, err, "session %s must be terminated", id)
+	}
+
+	// At least some warn logs must have been emitted for the "session not found"
+	// errors encountered by the goroutine that lost the race on each session.
+	warnLogs := logger.GetLogs("warn")
+	assert.NotEmpty(t, warnLogs, "warn logs should have been emitted for sessions that could not be found by the second cleanup")
+}
+
+// TestCleanupTimedOutSessions_GetSessionDuringCleanup verifies that the lock is
+// released before TerminateSession is called, allowing concurrent read operations.
+//
+// Because TerminateSession itself acquires m.mu.Lock(), if CleanupTimedOutSessions
+// held the lock during TerminateSession it would deadlock. Non-completion within 5 s
+// is treated as a deadlock.
+func TestCleanupTimedOutSessions_GetSessionDuringCleanup(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	config := &Config{
+		SessionTimeout: 1 * time.Millisecond,
+		MaxSessions:    100,
+		RecordSessions: false,
+	}
+
+	manager, err := NewSessionManager(config, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	timedOutReq := &SessionRequest{
+		StewardID: "steward-timed-out",
+		UserID:    "user-timed-out",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	}
+	timedOutSession, err := manager.CreateSession(ctx, timedOutReq)
+	require.NoError(t, err)
+
+	activeReq := &SessionRequest{
+		StewardID: "steward-active",
+		UserID:    "user-active",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	}
+	activeSession, err := manager.CreateSession(ctx, activeReq)
+	require.NoError(t, err)
+	_ = timedOutSession
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Bump the active session's LastActivity so it is NOT timed out.
+	activeSession.UpdateActivity()
+
+	defaultManager := manager.(*DefaultSessionManager)
+
+	done := make(chan struct{})
+	go func() {
+		defaultManager.CleanupTimedOutSessions()
+		close(done)
+	}()
+
+	// GetSession (RLock) must succeed; if the write lock were held for the full
+	// cleanup it would block until cleanup finishes (or deadlock if TerminateSession
+	// is called while the lock is held).
+	retrieved, err := manager.GetSession(activeSession.ID)
+	assert.NoError(t, err, "GetSession must not block while CleanupTimedOutSessions is in its termination loop")
+	assert.Equal(t, activeSession.ID, retrieved.ID)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CleanupTimedOutSessions deadlocked — m.mu was not released before calling TerminateSession")
+	}
+
+	_, err = manager.GetSession(timedOutSession.ID)
+	assert.Error(t, err, "timed-out session should have been removed")
+
+	_, err = manager.GetSession(activeSession.ID)
+	assert.NoError(t, err, "active session should still exist")
+
+	err = manager.TerminateSession(ctx, activeSession.ID)
+	require.NoError(t, err)
 }
 
 func TestSessionRecording(t *testing.T) {
