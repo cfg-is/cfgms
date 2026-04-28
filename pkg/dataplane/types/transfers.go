@@ -13,6 +13,11 @@ import (
 // StreamType identifies the purpose of a raw stream.
 type StreamType string
 
+// DefaultChunkSize is the maximum bytes per gRPC data-plane chunk (64 KB).
+// Both stream.go and config_handler.go import this constant from the types
+// package so the concrete grpc provider is never imported by feature code.
+const DefaultChunkSize = 64 * 1024
+
 const (
 	// StreamConfig indicates a configuration transfer stream
 	StreamConfig StreamType = "config"
