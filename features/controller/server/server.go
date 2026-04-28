@@ -49,7 +49,7 @@ import (
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // gRPC control plane provider
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider
+	dataplaneGRPC "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider; exported for ServerOptions
 	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
@@ -795,7 +795,9 @@ func (s *Server) Start() error {
 
 		// Create fresh shared gRPC server + QUIC listener per Start() cycle.
 		// grpc.Server is not reusable after Stop(), so we create a new one each time.
-		s.grpcServer = grpc.NewServer(grpc.Creds(quictransport.TransportCredentials()))
+		s.grpcServer = grpc.NewServer(
+			append([]grpc.ServerOption{grpc.Creds(quictransport.TransportCredentials())}, dataplaneGRPC.ServerOptions()...)...,
+		)
 		ql, err := quictransport.Listen(s.cfg.Transport.ListenAddr, grpcTLSConfig, nil)
 		if err != nil {
 			return fmt.Errorf("failed to start shared QUIC listener: %w", err)

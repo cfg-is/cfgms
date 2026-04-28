@@ -34,4 +34,22 @@
 //
 // OpenStream and AcceptStream are not supported by this provider. Use the
 // typed transfer methods (SendConfig, SendDNA, SendBulk) instead.
+//
+// # DoS Limits
+//
+// Every gRPC server created by this package enforces the following limits to
+// prevent a malicious steward from OOM-ing the controller:
+//
+//   - MaxRecvMsgSize: 8 MB — a single inbound gRPC message larger than this
+//     is rejected with codes.ResourceExhausted. The 64 KB chunk size used by
+//     the transfer helpers keeps normal traffic well within the limit.
+//   - MaxSendMsgSize: 8 MB — symmetric cap on outbound messages.
+//   - MaxConcurrentStreams: 100 — limits active gRPC streams per connection,
+//     preventing stream-flood attacks from overwhelming the server.
+//   - KeepaliveParams: ping every 30 s, close if no ACK within 60 s.
+//   - KeepaliveEnforcementPolicy: clients must wait at least 10 s between pings.
+//
+// Constants are defined in limits.go. Both call sites (provider.go startServer
+// and features/controller/server/server.go Start) use the shared ServerOptions()
+// helper so the limits stay in sync.
 package grpc

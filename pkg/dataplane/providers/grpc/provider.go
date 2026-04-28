@@ -206,7 +206,7 @@ func (p *Provider) startServer() error {
 		p.listenAddr = ql.Addr().String() // capture actual port if ":0"
 
 		p.grpcServer = grpc.NewServer(
-			grpc.Creds(quictransport.TransportCredentials()),
+			append([]grpc.ServerOption{grpc.Creds(quictransport.TransportCredentials())}, ServerOptions()...)...,
 		)
 		transportpb.RegisterStewardTransportServer(p.grpcServer, p.handler)
 
