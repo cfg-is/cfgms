@@ -11,12 +11,16 @@ import (
 	"testing"
 	"time"
 
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/dataplane/types"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // integrationEnv holds a matched server + client provider pair for integration tests.
@@ -338,4 +342,90 @@ func TestGRPC_ConcurrentTransfers(t *testing.T) {
 	mu.Lock()
 	assert.Len(t, completedIDs, numTransfers, "all concurrent transfers should complete")
 	mu.Unlock()
+}
+
+// TestGRPC_OversizedMessageRejected verifies that a single gRPC message larger
+// than maxRecvMsgSize (8 MB) is rejected by the server with codes.ResourceExhausted.
+//
+// The test bypasses the 64 KB chunk helper to send a raw 9 MB DNAChunk directly.
+// The server's MaxRecvMsgSize option must reject the message before it reaches
+// application code.
+func TestGRPC_OversizedMessageRejected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping QUIC integration test in short mode — requires UDP buffer allocation")
+	}
+
+	serverTLS, clientTLS := newTestTLSConfigs(t)
+
+	sp := New()
+	err := sp.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"listen_addr": "127.0.0.1:0",
+		"tls_config":  serverTLS,
+	})
+	require.NoError(t, err)
+
+	err = sp.Start(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sp.Stop(context.Background()) })
+
+	listenAddr := sp.ListenAddr()
+
+	// Pre-allocate a server session so the handler queue is serviced.
+	serverSess, err := sp.AcceptConnection(context.Background())
+	require.NoError(t, err)
+
+	// Drain incoming DNA in the background. ReceiveDNA calls Recv() on the stream,
+	// which triggers the server's MaxRecvMsgSize check and fails for the 9 MB chunk.
+	var serverErr error
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, serverErr = serverSess.ReceiveDNA(ctx)
+	}()
+
+	// Allow the server goroutine to block on the handler queue before the client sends.
+	time.Sleep(20 * time.Millisecond)
+
+	// Create a raw gRPC client with the default 2 GB send limit so it can
+	// transmit a message that exceeds the server's 8 MB receive limit.
+	dialer := quictransport.NewDialer(clientTLS, nil)
+	conn, err := grpc.NewClient(
+		listenAddr,
+		grpc.WithContextDialer(dialer),
+		grpc.WithTransportCredentials(quictransport.TransportCredentials()),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := transportpb.NewStewardTransportClient(conn)
+
+	stream, err := client.SyncDNA(context.Background())
+	require.NoError(t, err)
+
+	// 9 MB > maxRecvMsgSize (8 MB): the server must reject this message.
+	oversizedData := bytes.Repeat([]byte("X"), 9*1024*1024)
+	chunk := &transportpb.DNAChunk{
+		StewardId:   "dos-test-steward",
+		TenantId:    "dos-test-tenant",
+		Data:        oversizedData,
+		ChunkIndex:  0,
+		TotalChunks: 1,
+	}
+
+	sendErr := stream.Send(chunk)
+	if sendErr == nil {
+		_, sendErr = stream.CloseAndRecv()
+	}
+
+	<-serverDone
+
+	// Both sides must observe a failure: the server because Recv() hit the size
+	// limit, and the client because the server returned an error status.
+	require.Error(t, serverErr, "server-side ReceiveDNA must fail for an oversized message")
+	require.Error(t, sendErr, "client must receive an error when the server rejects an oversized message")
+	assert.Equal(t, codes.ResourceExhausted, status.Code(sendErr),
+		"oversized message must yield codes.ResourceExhausted")
 }
