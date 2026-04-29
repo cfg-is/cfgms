@@ -7,7 +7,11 @@
 package types
 
 import (
+	"encoding/json"
+	"fmt"
 	"time"
+
+	"github.com/cfgis/cfgms/features/config/signature"
 )
 
 // CommandType defines the type of command being sent.
@@ -225,6 +229,81 @@ type ConfigStatusReport struct {
 
 	// ExecutionTimeMs is how long the configuration took to apply (milliseconds)
 	ExecutionTimeMs int64 `json:"execution_time_ms,omitempty"`
+}
+
+// SignedCommand wraps a Command with a cryptographic signature for authenticated delivery.
+//
+// The Signature field contains the signature over CommandSigningBytes(Command, rawParams).
+// The inner Command stays a pure value type; the wire envelope is SignedCommand.
+// Verification happens in the steward handler before dispatch.
+type SignedCommand struct {
+	// Command is the inner command value.
+	Command Command `json:"command"`
+
+	// Signature is the cryptographic signature over CommandSigningBytes(Command, rawParams).
+	// Nil when the controller is not configured with a signer (unsecured mode).
+	Signature *signature.ConfigSignature `json:"signature,omitempty"`
+
+	// RawParams holds the proto-wire string map of Command.Params, populated only
+	// by the gRPC transport on receive. Used for signature verification to avoid
+	// round-trip type mutations from stringMapToInterfaceMap.
+	// Never transmitted on the wire or serialised to JSON.
+	RawParams map[string]string `json:"-"`
+}
+
+// commandSigningPayload is the stable canonical form used when signing/verifying commands.
+// Using map[string]string for Params avoids mutations from JSON-decoding proto string values,
+// and UTC normalisation avoids timezone-dependent JSON output.
+type commandSigningPayload struct {
+	ID        string            `json:"id"`
+	Type      CommandType       `json:"type"`
+	StewardID string            `json:"steward_id,omitempty"`
+	TenantID  string            `json:"tenant_id,omitempty"`
+	Timestamp time.Time         `json:"timestamp"`
+	Params    map[string]string `json:"params,omitempty"`
+}
+
+// InterfaceParamsToStringMap converts map[string]interface{} command params to the
+// proto-wire-stable map[string]string form. String values are stored as-is; other
+// values are JSON-encoded to strings. This is identical to what the gRPC transport
+// does in interfaceMapToStringMap, so signing with this form matches the wire form.
+func InterfaceParamsToStringMap(m map[string]interface{}) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(m))
+	for k, v := range m {
+		if s, ok := v.(string); ok {
+			result[k] = s
+		} else {
+			data, err := json.Marshal(v)
+			if err != nil {
+				result[k] = fmt.Sprintf("%v", v)
+			} else {
+				result[k] = string(data)
+			}
+		}
+	}
+	return result
+}
+
+// CommandSigningBytes returns the canonical JSON bytes for signing or verifying a Command.
+//
+// rawParams must be the proto-wire string map of cmd.Params — either the map produced
+// by the gRPC transport on receive (RawParams field of SignedCommand), or the result of
+// InterfaceParamsToStringMap(cmd.Params) on the originating side. Using this canonical
+// form ensures that both the signer (controller) and verifier (steward) produce identical
+// bytes regardless of JSON-decode type coercions and timezone differences.
+func CommandSigningBytes(cmd *Command, rawParams map[string]string) ([]byte, error) {
+	payload := commandSigningPayload{
+		ID:        cmd.ID,
+		Type:      cmd.Type,
+		StewardID: cmd.StewardID,
+		TenantID:  cmd.TenantID,
+		Timestamp: cmd.Timestamp.UTC(),
+		Params:    rawParams,
+	}
+	return json.Marshal(payload)
 }
 
 // FanOutResult reports per-steward delivery status from a FanOutCommand.

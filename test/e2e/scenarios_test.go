@@ -868,14 +868,14 @@ func (s *E2ETestSuite) TestTransportCommandResponse() {
 
 		// Step 2: Set up steward to respond to commands via gRPC control plane
 		commandReceived := make(chan string, 1)
-		if err := registered.ControlPlane.SubscribeCommands(context.Background(), registered.StewardID, func(ctx context.Context, cmd *controlplaneTypes.Command) error {
-			s.T().Logf("Steward received command: id=%s type=%s", cmd.ID, string(cmd.Type))
+		if err := registered.ControlPlane.SubscribeCommands(context.Background(), registered.StewardID, func(ctx context.Context, sc *controlplaneTypes.SignedCommand) error {
+			s.T().Logf("Steward received command: id=%s type=%s", sc.Command.ID, string(sc.Command.Type))
 			select {
-			case commandReceived <- cmd.ID:
+			case commandReceived <- sc.Command.ID:
 			default:
 			}
 			return registered.ControlPlane.SendResponse(ctx, &controlplaneTypes.Response{
-				CommandID: cmd.ID,
+				CommandID: sc.Command.ID,
 				StewardID: registered.StewardID,
 				Success:   true,
 				Message:   "success",

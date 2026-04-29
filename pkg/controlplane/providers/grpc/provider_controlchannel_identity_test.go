@@ -283,21 +283,21 @@ func TestControlChannel_Response_MatchingStewardID(t *testing.T) {
 	env := newMultiStewardEnv(t)
 
 	cmdID := "resp-match-cmd"
-	require.NoError(t, env.clientA.SubscribeCommands(context.Background(), "steward-a", func(ctx context.Context, cmd *types.Command) error {
+	require.NoError(t, env.clientA.SubscribeCommands(context.Background(), "steward-a", func(ctx context.Context, sc *types.SignedCommand) error {
 		return env.clientA.SendResponse(ctx, &types.Response{
-			CommandID: cmd.ID,
+			CommandID: sc.Command.ID,
 			StewardID: "steward-a",
 			Success:   true,
 			Timestamp: time.Now(),
 		})
 	}))
 
-	require.NoError(t, env.server.SendCommand(context.Background(), &types.Command{
+	require.NoError(t, env.server.SendCommand(context.Background(), &types.SignedCommand{Command: types.Command{
 		ID:        cmdID,
 		Type:      types.CommandSyncConfig,
 		StewardID: "steward-a",
 		Timestamp: time.Now(),
-	}))
+	}}))
 
 	require.Eventually(t, func() bool {
 		stats, err := env.server.GetStats(context.Background())
@@ -317,21 +317,21 @@ func TestControlChannel_Response_EmptyStewardIDGetsCNStamped(t *testing.T) {
 	env := newMultiStewardEnv(t)
 
 	cmdID := "resp-empty-cmd"
-	require.NoError(t, env.clientA.SubscribeCommands(context.Background(), "steward-a", func(ctx context.Context, cmd *types.Command) error {
+	require.NoError(t, env.clientA.SubscribeCommands(context.Background(), "steward-a", func(ctx context.Context, sc *types.SignedCommand) error {
 		return env.clientA.SendResponse(ctx, &types.Response{
-			CommandID: cmd.ID,
+			CommandID: sc.Command.ID,
 			StewardID: "", // empty — should be stamped with CN before discard
 			Success:   true,
 			Timestamp: time.Now(),
 		})
 	}))
 
-	require.NoError(t, env.server.SendCommand(context.Background(), &types.Command{
+	require.NoError(t, env.server.SendCommand(context.Background(), &types.SignedCommand{Command: types.Command{
 		ID:        cmdID,
 		Type:      types.CommandSyncConfig,
 		StewardID: "steward-a",
 		Timestamp: time.Now(),
-	}))
+	}}))
 
 	// CN-stamped responses are received without mismatch
 	require.Eventually(t, func() bool {
@@ -351,21 +351,21 @@ func TestControlChannel_Response_MismatchedStewardID(t *testing.T) {
 	env := newMultiStewardEnv(t)
 
 	cmdID := "resp-mismatch-cmd"
-	require.NoError(t, env.clientA.SubscribeCommands(context.Background(), "steward-a", func(ctx context.Context, cmd *types.Command) error {
+	require.NoError(t, env.clientA.SubscribeCommands(context.Background(), "steward-a", func(ctx context.Context, sc *types.SignedCommand) error {
 		return env.clientA.SendResponse(ctx, &types.Response{
-			CommandID: cmd.ID,
+			CommandID: sc.Command.ID,
 			StewardID: "steward-b", // CN is steward-a — mismatch
 			Success:   true,
 			Timestamp: time.Now(),
 		})
 	}))
 
-	require.NoError(t, env.server.SendCommand(context.Background(), &types.Command{
+	require.NoError(t, env.server.SendCommand(context.Background(), &types.SignedCommand{Command: types.Command{
 		ID:        cmdID,
 		Type:      types.CommandSyncConfig,
 		StewardID: "steward-a",
 		Timestamp: time.Now(),
-	}))
+	}}))
 
 	require.Eventually(t, func() bool {
 		stats, err := env.server.GetStats(context.Background())

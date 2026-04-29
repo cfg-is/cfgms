@@ -100,8 +100,8 @@ func RunCPContractTests(t *testing.T, factory CPProviderFactory) {
 
 // --- Contract Implementations ---
 
-// testCPCommandDelivery verifies server sends a command to a specific steward
-// and that steward receives it with fields intact.
+// testCPCommandDelivery verifies server sends a signed command to a specific steward
+// and that steward receives it with inner Command fields intact.
 func testCPCommandDelivery(t *testing.T, factory CPProviderFactory) {
 	t.Helper()
 	server, clients, cleanup := factory(t)
@@ -110,26 +110,28 @@ func testCPCommandDelivery(t *testing.T, factory CPProviderFactory) {
 	ctx := context.Background()
 	client := clients["contract-steward-0"]
 
-	received := make(chan *cptypes.Command, 1)
-	require.NoError(t, client.SubscribeCommands(ctx, "contract-steward-0", func(_ context.Context, cmd *cptypes.Command) error {
-		received <- cmd
+	received := make(chan *cptypes.SignedCommand, 1)
+	require.NoError(t, client.SubscribeCommands(ctx, "contract-steward-0", func(_ context.Context, sc *cptypes.SignedCommand) error {
+		received <- sc
 		return nil
 	}))
 
-	cmd := &cptypes.Command{
-		ID:        "contract-cmd-delivery",
-		Type:      cptypes.CommandSyncConfig,
-		StewardID: "contract-steward-0",
-		Timestamp: time.Now().Truncate(time.Microsecond),
-		Params:    map[string]interface{}{"version": "1.0"},
+	sc := &cptypes.SignedCommand{
+		Command: cptypes.Command{
+			ID:        "contract-cmd-delivery",
+			Type:      cptypes.CommandSyncConfig,
+			StewardID: "contract-steward-0",
+			Timestamp: time.Now().Truncate(time.Microsecond),
+			Params:    map[string]interface{}{"version": "1.0"},
+		},
 	}
-	require.NoError(t, server.SendCommand(ctx, cmd))
+	require.NoError(t, server.SendCommand(ctx, sc))
 
 	select {
 	case got := <-received:
-		assert.Equal(t, cmd.ID, got.ID)
-		assert.Equal(t, cmd.Type, got.Type)
-		assert.Equal(t, cmd.StewardID, got.StewardID)
+		assert.Equal(t, sc.Command.ID, got.Command.ID)
+		assert.Equal(t, sc.Command.Type, got.Command.Type)
+		assert.Equal(t, sc.Command.StewardID, got.Command.StewardID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for command delivery")
 	}
@@ -205,7 +207,7 @@ func testCPHeartbeatDelivery(t *testing.T, factory CPProviderFactory) {
 	}
 }
 
-// testCPFanOutCommand verifies server sends a command to all N stewards and
+// testCPFanOutCommand verifies server sends a signed command to all N stewards and
 // all receive it.
 func testCPFanOutCommand(t *testing.T, factory CPProviderFactory) {
 	t.Helper()
@@ -214,23 +216,25 @@ func testCPFanOutCommand(t *testing.T, factory CPProviderFactory) {
 
 	ctx := context.Background()
 
-	received := make(map[string]chan *cptypes.Command)
+	received := make(map[string]chan *cptypes.SignedCommand)
 	for _, id := range cpContractStewardIDs {
 		id := id
-		ch := make(chan *cptypes.Command, 1)
+		ch := make(chan *cptypes.SignedCommand, 1)
 		received[id] = ch
-		require.NoError(t, clients[id].SubscribeCommands(ctx, id, func(_ context.Context, cmd *cptypes.Command) error {
-			ch <- cmd
+		require.NoError(t, clients[id].SubscribeCommands(ctx, id, func(_ context.Context, sc *cptypes.SignedCommand) error {
+			ch <- sc
 			return nil
 		}))
 	}
 
-	cmd := &cptypes.Command{
-		ID:        "contract-cmd-fanout",
-		Type:      cptypes.CommandSyncDNA,
-		Timestamp: time.Now(),
+	sc := &cptypes.SignedCommand{
+		Command: cptypes.Command{
+			ID:        "contract-cmd-fanout",
+			Type:      cptypes.CommandSyncDNA,
+			Timestamp: time.Now(),
+		},
 	}
-	result, err := server.FanOutCommand(ctx, cmd, cpContractStewardIDs)
+	result, err := server.FanOutCommand(ctx, sc, cpContractStewardIDs)
 	require.NoError(t, err)
 	assert.Len(t, result.Succeeded, len(cpContractStewardIDs))
 	assert.Empty(t, result.Failed)
@@ -238,7 +242,7 @@ func testCPFanOutCommand(t *testing.T, factory CPProviderFactory) {
 	for _, id := range cpContractStewardIDs {
 		select {
 		case got := <-received[id]:
-			assert.Equal(t, cmd.ID, got.ID)
+			assert.Equal(t, sc.Command.ID, got.Command.ID)
 		case <-time.After(5 * time.Second):
 			t.Fatalf("steward %s did not receive fan-out command", id)
 		}
@@ -254,14 +258,16 @@ func testCPFanOutPartialFailure(t *testing.T, factory CPProviderFactory) {
 
 	ctx := context.Background()
 
-	cmd := &cptypes.Command{
-		ID:        "contract-cmd-partial",
-		Type:      cptypes.CommandSyncConfig,
-		Timestamp: time.Now(),
+	sc := &cptypes.SignedCommand{
+		Command: cptypes.Command{
+			ID:        "contract-cmd-partial",
+			Type:      cptypes.CommandSyncConfig,
+			Timestamp: time.Now(),
+		},
 	}
 
 	// Fan-out to one connected steward and one that never connected
-	result, err := server.FanOutCommand(ctx, cmd, []string{
+	result, err := server.FanOutCommand(ctx, sc, []string{
 		"contract-steward-0",
 		"steward-never-connected",
 	})
@@ -405,8 +411,8 @@ func testCPMultipleHeartbeatHandlers(t *testing.T, factory CPProviderFactory) {
 	}
 }
 
-// testCPMultiTenantIsolation verifies that a command sent to steward A is not
-// delivered to steward B.
+// testCPMultiTenantIsolation verifies that a signed command sent to steward A is
+// not delivered to steward B.
 func testCPMultiTenantIsolation(t *testing.T, factory CPProviderFactory) {
 	t.Helper()
 	server, clients, cleanup := factory(t)
@@ -414,32 +420,34 @@ func testCPMultiTenantIsolation(t *testing.T, factory CPProviderFactory) {
 
 	ctx := context.Background()
 
-	receivedA := make(chan *cptypes.Command, 1)
-	receivedB := make(chan *cptypes.Command, 1)
+	receivedA := make(chan *cptypes.SignedCommand, 1)
+	receivedB := make(chan *cptypes.SignedCommand, 1)
 
 	require.NoError(t, clients["contract-steward-0"].SubscribeCommands(ctx, "contract-steward-0",
-		func(_ context.Context, cmd *cptypes.Command) error {
-			receivedA <- cmd
+		func(_ context.Context, sc *cptypes.SignedCommand) error {
+			receivedA <- sc
 			return nil
 		}))
 	require.NoError(t, clients["contract-steward-1"].SubscribeCommands(ctx, "contract-steward-1",
-		func(_ context.Context, cmd *cptypes.Command) error {
-			receivedB <- cmd
+		func(_ context.Context, sc *cptypes.SignedCommand) error {
+			receivedB <- sc
 			return nil
 		}))
 
 	// Send command only to steward-0
-	require.NoError(t, server.SendCommand(ctx, &cptypes.Command{
-		ID:        "contract-cmd-isolation",
-		Type:      cptypes.CommandSyncConfig,
-		StewardID: "contract-steward-0",
-		Timestamp: time.Now(),
+	require.NoError(t, server.SendCommand(ctx, &cptypes.SignedCommand{
+		Command: cptypes.Command{
+			ID:        "contract-cmd-isolation",
+			Type:      cptypes.CommandSyncConfig,
+			StewardID: "contract-steward-0",
+			Timestamp: time.Now(),
+		},
 	}))
 
 	// steward-0 must receive
 	select {
 	case got := <-receivedA:
-		assert.Equal(t, "contract-cmd-isolation", got.ID)
+		assert.Equal(t, "contract-cmd-isolation", got.Command.ID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("steward-0 did not receive its command")
 	}
@@ -467,11 +475,13 @@ func testCPDisconnectCleanup(t *testing.T, factory CPProviderFactory) {
 
 	// Server should eventually reflect disconnection
 	require.Eventually(t, func() bool {
-		err := server.SendCommand(ctx, &cptypes.Command{
-			ID:        "contract-cmd-after-disconnect",
-			Type:      cptypes.CommandSyncConfig,
-			StewardID: "contract-steward-0",
-			Timestamp: time.Now(),
+		err := server.SendCommand(ctx, &cptypes.SignedCommand{
+			Command: cptypes.Command{
+				ID:        "contract-cmd-after-disconnect",
+				Type:      cptypes.CommandSyncConfig,
+				StewardID: "contract-steward-0",
+				Timestamp: time.Now(),
+			},
 		})
 		return err != nil
 	}, 5*time.Second, 50*time.Millisecond,
@@ -491,15 +501,17 @@ func testCPStatsTracking(t *testing.T, factory CPProviderFactory) {
 	// Register handlers so dispatched messages are counted
 	require.NoError(t, server.SubscribeEvents(ctx, nil, func(_ context.Context, _ *cptypes.Event) error { return nil }))
 	require.NoError(t, server.SubscribeHeartbeats(ctx, func(_ context.Context, _ *cptypes.Heartbeat) error { return nil }))
-	require.NoError(t, client.SubscribeCommands(ctx, "contract-steward-0", func(_ context.Context, _ *cptypes.Command) error { return nil }))
+	require.NoError(t, client.SubscribeCommands(ctx, "contract-steward-0", func(_ context.Context, _ *cptypes.SignedCommand) error { return nil }))
 
 	now := time.Now()
 
-	require.NoError(t, server.SendCommand(ctx, &cptypes.Command{
-		ID:        "contract-cmd-stats",
-		Type:      cptypes.CommandSyncConfig,
-		StewardID: "contract-steward-0",
-		Timestamp: now,
+	require.NoError(t, server.SendCommand(ctx, &cptypes.SignedCommand{
+		Command: cptypes.Command{
+			ID:        "contract-cmd-stats",
+			Type:      cptypes.CommandSyncConfig,
+			StewardID: "contract-steward-0",
+			Timestamp: now,
+		},
 	}))
 	require.NoError(t, client.PublishEvent(ctx, &cptypes.Event{
 		ID:        "contract-evt-stats",
@@ -594,7 +606,7 @@ func testCPMalformedMessageHandling(t *testing.T, factory CPProviderFactory) {
 	// nil messages — must not panic (may return error or no-op)
 	assert.NotPanics(t, func() {
 		_ = server.SendCommand(ctx, nil)
-	}, "SendCommand with nil command must not panic")
+	}, "SendCommand with nil SignedCommand must not panic")
 
 	assert.NotPanics(t, func() {
 		_ = client.PublishEvent(ctx, nil)

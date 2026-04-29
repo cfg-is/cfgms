@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -166,6 +168,7 @@ func newTestLogger(t *testing.T) logging.Logger {
 
 func noopStatus(_ context.Context, _ *cpTypes.Event) {}
 
+// newTestHandler builds a Handler with no signature verifier (verification skipped).
 func newTestHandler(t *testing.T, store business.CommandStore) *Handler {
 	t.Helper()
 	h, err := New(&Config{
@@ -178,14 +181,78 @@ func newTestHandler(t *testing.T, store business.CommandStore) *Handler {
 	return h
 }
 
-func testCommand(id string, cmdType cpTypes.CommandType) *cpTypes.Command {
-	return &cpTypes.Command{
-		ID:        id,
-		Type:      cmdType,
-		StewardID: "steward-test",
-		Timestamp: time.Now(),
-		Params:    map[string]interface{}{},
+// newTestSignerVerifier returns a real Signer + Verifier pair backed by a fresh
+// in-process CA. No mocks — real cryptographic operations.
+func newTestSignerVerifier(t *testing.T) (signature.Signer, signature.Verifier) {
+	t.Helper()
+	ca, err := cert.NewCA(&cert.CAConfig{
+		Organization: "CFGMS Test",
+		Country:      "US",
+		ValidityDays: 1,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+	require.NoError(t, ca.Initialize(nil))
+
+	sc, err := ca.GenerateServerCertificate(&cert.ServerCertConfig{
+		CommonName:   "controller.test",
+		DNSNames:     []string{"controller.test"},
+		ValidityDays: 1,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+
+	signer, err := signature.NewSigner(&signature.SignerConfig{
+		PrivateKeyPEM:  sc.PrivateKeyPEM,
+		CertificatePEM: sc.CertificatePEM,
+	})
+	require.NoError(t, err)
+
+	verifier, err := signature.NewVerifier(&signature.VerifierConfig{
+		CertificatePEM: sc.CertificatePEM,
+	})
+	require.NoError(t, err)
+
+	return signer, verifier
+}
+
+// newTestHandlerWithVerifier builds a Handler with a real Verifier.
+func newTestHandlerWithVerifier(t *testing.T, store business.CommandStore, verifier signature.Verifier) *Handler {
+	t.Helper()
+	h, err := New(&Config{
+		StewardID:    "steward-test",
+		OnStatus:     noopStatus,
+		Logger:       newTestLogger(t),
+		Store:        store,
+		Verifier:     verifier,
+		ReplayWindow: 5 * time.Minute,
+	})
+	require.NoError(t, err)
+	return h
+}
+
+// testSignedCommand builds a SignedCommand with no signature (used when verifier is nil).
+func testSignedCommand(id string, cmdType cpTypes.CommandType) *cpTypes.SignedCommand {
+	return &cpTypes.SignedCommand{
+		Command: cpTypes.Command{
+			ID:        id,
+			Type:      cmdType,
+			StewardID: "steward-test",
+			Timestamp: time.Now(),
+			Params:    map[string]interface{}{},
+		},
 	}
+}
+
+// signTestCommand signs cmd with signer using the canonical signing form.
+func signTestCommand(t *testing.T, signer signature.Signer, cmd *cpTypes.Command) *cpTypes.SignedCommand {
+	t.Helper()
+	rawParams := cpTypes.InterfaceParamsToStringMap(cmd.Params)
+	cmdBytes, err := cpTypes.CommandSigningBytes(cmd, rawParams)
+	require.NoError(t, err)
+	sig, err := signer.Sign(cmdBytes)
+	require.NoError(t, err)
+	return &cpTypes.SignedCommand{Command: *cmd, Signature: sig}
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +328,7 @@ func TestNew_SweepsStaleExecutingCommands(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// HandleCommand / executeCommand tests
+// HandleCommand / executeCommand tests (no verifier — skip signature check)
 // Use h.Wait() for deterministic synchronization — no time.Sleep.
 // ---------------------------------------------------------------------------
 
@@ -270,15 +337,14 @@ func TestHandleCommand_PersistsRecord(t *testing.T) {
 	h := newTestHandler(t, store)
 	ctx := context.Background()
 
-	cmd := testCommand("hc-001", cpTypes.CommandSyncConfig)
+	sc := testSignedCommand("hc-001", cpTypes.CommandSyncConfig)
 
-	// Register a no-op handler so execution succeeds.
 	h.RegisterHandler(cpTypes.CommandSyncConfig, func(ctx context.Context, c *cpTypes.Command) error {
 		return nil
 	})
 
-	require.NoError(t, h.HandleCommand(ctx, cmd))
-	h.Wait() // synchronise with the goroutine
+	require.NoError(t, h.HandleCommand(ctx, sc))
+	h.Wait()
 
 	got, err := store.GetCommandRecord(ctx, "hc-001")
 	require.NoError(t, err)
@@ -290,9 +356,8 @@ func TestHandleCommand_NoHandlerMarkedFailed(t *testing.T) {
 	h := newTestHandler(t, store)
 	ctx := context.Background()
 
-	cmd := testCommand("hc-002", cpTypes.CommandSyncConfig)
-	// No handler registered — should fail.
-	require.NoError(t, h.HandleCommand(ctx, cmd))
+	sc := testSignedCommand("hc-002", cpTypes.CommandSyncConfig)
+	require.NoError(t, h.HandleCommand(ctx, sc))
 	h.Wait()
 
 	got, err := store.GetCommandRecord(ctx, "hc-002")
@@ -309,8 +374,8 @@ func TestHandleCommand_HandlerErrorMarkedFailed(t *testing.T) {
 		return fmt.Errorf("something went wrong")
 	})
 
-	cmd := testCommand("hc-003", cpTypes.CommandSyncConfig)
-	require.NoError(t, h.HandleCommand(ctx, cmd))
+	sc := testSignedCommand("hc-003", cpTypes.CommandSyncConfig)
+	require.NoError(t, h.HandleCommand(ctx, sc))
 	h.Wait()
 
 	got, err := store.GetCommandRecord(ctx, "hc-003")
@@ -321,12 +386,10 @@ func TestHandleCommand_HandlerErrorMarkedFailed(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // UpdateCommandStatus error-path tests
-// Verifies the handler does not panic or swallow store errors silently.
 // ---------------------------------------------------------------------------
 
 func TestHandleCommand_StoreUpdateErrorOnExecuting_DoesNotPanic(t *testing.T) {
 	store := newMemCommandStore()
-	// Inject a store error — UpdateCommandStatus will fail after CreateCommandRecord succeeds.
 	store.updateErr = fmt.Errorf("store unavailable")
 
 	h := newTestHandler(t, store)
@@ -336,9 +399,9 @@ func TestHandleCommand_StoreUpdateErrorOnExecuting_DoesNotPanic(t *testing.T) {
 		return nil
 	})
 
-	cmd := testCommand("err-001", cpTypes.CommandSyncConfig)
-	require.NoError(t, h.HandleCommand(ctx, cmd))
-	h.Wait() // must not panic even when store returns errors
+	sc := testSignedCommand("err-001", cpTypes.CommandSyncConfig)
+	require.NoError(t, h.HandleCommand(ctx, sc))
+	h.Wait()
 }
 
 func TestHandleCommand_StoreUpdateErrorOnFailed_DoesNotPanic(t *testing.T) {
@@ -347,9 +410,8 @@ func TestHandleCommand_StoreUpdateErrorOnFailed_DoesNotPanic(t *testing.T) {
 
 	h := newTestHandler(t, store)
 	ctx := context.Background()
-	// No handler registered; will try to write "failed" to store.
-	cmd := testCommand("err-002", cpTypes.CommandSyncConfig)
-	require.NoError(t, h.HandleCommand(ctx, cmd))
+	sc := testSignedCommand("err-002", cpTypes.CommandSyncConfig)
+	require.NoError(t, h.HandleCommand(ctx, sc))
 	h.Wait()
 }
 
@@ -364,8 +426,8 @@ func TestHandleCommand_StoreUpdateErrorOnCompleted_DoesNotPanic(t *testing.T) {
 		return nil
 	})
 
-	cmd := testCommand("err-003", cpTypes.CommandSyncConfig)
-	require.NoError(t, h.HandleCommand(ctx, cmd))
+	sc := testSignedCommand("err-003", cpTypes.CommandSyncConfig)
+	require.NoError(t, h.HandleCommand(ctx, sc))
 	h.Wait()
 }
 
@@ -374,13 +436,9 @@ func TestHandleCommand_StoreUpdateErrorOnCompleted_DoesNotPanic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExecutionContext_CancelFuncIsInvokable(t *testing.T) {
-	// Verify that an executionContext's Cancel function can be invoked and cancels
-	// a context derived from context.WithCancel. This tests the actual runtime
-	// behaviour of the cancel mechanism, not struct field layout.
 	ctx, cancel := context.WithCancel(context.Background())
 	ec := &executionContext{Cancel: cancel}
 
-	// The context should not be cancelled yet.
 	select {
 	case <-ctx.Done():
 		t.Fatal("context should not be done before Cancel() is called")
@@ -389,7 +447,6 @@ func TestExecutionContext_CancelFuncIsInvokable(t *testing.T) {
 
 	ec.Cancel()
 
-	// After Cancel(), the context must be done.
 	select {
 	case <-ctx.Done():
 		// expected
@@ -399,23 +456,86 @@ func TestExecutionContext_CancelFuncIsInvokable(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// CancelCommand / GetExecutingCommands
+// Story #919: Authentication rejection path tests
 // ---------------------------------------------------------------------------
 
-func TestCancelCommand_NotFound(t *testing.T) {
+func TestHandleCommand_NilSignedCommand_ReturnsErrUnauthenticated(t *testing.T) {
 	h := newTestHandler(t, nil)
-	err := h.CancelCommand("nonexistent")
-	require.Error(t, err)
+	ctx := context.Background()
+	err := h.HandleCommand(ctx, nil)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
 }
 
-func TestGetExecutingCommands_Empty(t *testing.T) {
-	h := newTestHandler(t, nil)
-	cmds := h.GetExecutingCommands()
-	assert.Empty(t, cmds)
+func TestHandleCommand_VerifierSet_MissingSignature_ReturnsErrUnauthenticated(t *testing.T) {
+	_, verifier := newTestSignerVerifier(t)
+	h := newTestHandlerWithVerifier(t, nil, verifier)
+	ctx := context.Background()
+
+	sc := &cpTypes.SignedCommand{
+		Command: cpTypes.Command{
+			ID:        "auth-001",
+			Type:      cpTypes.CommandSyncConfig,
+			StewardID: "steward-test",
+			Timestamp: time.Now(),
+		},
+		Signature: nil,
+	}
+	err := h.HandleCommand(ctx, sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
 }
 
-func TestHandleCommand_NilStore_StillWorks(t *testing.T) {
-	// When store is nil the handler must operate normally without panicking.
+func TestHandleCommand_VerifierSet_BadSignature_ReturnsErrUnauthenticated(t *testing.T) {
+	signer, verifier := newTestSignerVerifier(t)
+	h := newTestHandlerWithVerifier(t, nil, verifier)
+	ctx := context.Background()
+
+	cmd := &cpTypes.Command{
+		ID:        "auth-002",
+		Type:      cpTypes.CommandSyncConfig,
+		StewardID: "steward-test",
+		Timestamp: time.Now(),
+	}
+	sc := signTestCommand(t, signer, cmd)
+	// Corrupt the signature bytes.
+	sc.Signature.Signature = "AAAAAAAAAA=="
+
+	err := h.HandleCommand(ctx, sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+}
+
+func TestHandleCommand_WrongStewardID_ReturnsErrWrongSteward(t *testing.T) {
+	h := newTestHandler(t, nil)
+	ctx := context.Background()
+
+	sc := &cpTypes.SignedCommand{
+		Command: cpTypes.Command{
+			ID:        "auth-003",
+			Type:      cpTypes.CommandSyncConfig,
+			StewardID: "other-steward", // mismatch with handler's "steward-test"
+			Timestamp: time.Now(),
+		},
+	}
+	err := h.HandleCommand(ctx, sc)
+	require.ErrorIs(t, err, ErrWrongSteward)
+}
+
+func TestHandleCommand_ExpiredTimestamp_ReturnsErrCommandReplay(t *testing.T) {
+	h := newTestHandler(t, nil) // replayWindow defaults to 5 min
+	ctx := context.Background()
+
+	sc := &cpTypes.SignedCommand{
+		Command: cpTypes.Command{
+			ID:        "auth-004",
+			Type:      cpTypes.CommandSyncConfig,
+			StewardID: "steward-test",
+			Timestamp: time.Now().Add(-10 * time.Minute), // 10 min > 5 min window
+		},
+	}
+	err := h.HandleCommand(ctx, sc)
+	require.ErrorIs(t, err, ErrCommandReplay)
+}
+
+func TestHandleCommand_DuplicateID_ReturnsErrCommandReplay(t *testing.T) {
 	h := newTestHandler(t, nil)
 	ctx := context.Background()
 
@@ -423,7 +543,81 @@ func TestHandleCommand_NilStore_StillWorks(t *testing.T) {
 		return nil
 	})
 
-	cmd := testCommand("no-store-001", cpTypes.CommandSyncConfig)
-	require.NoError(t, h.HandleCommand(ctx, cmd))
-	h.Wait() // deterministic synchronization — no panic
+	sc := testSignedCommand("dup-001", cpTypes.CommandSyncConfig)
+
+	// First delivery succeeds.
+	require.NoError(t, h.HandleCommand(ctx, sc))
+	h.Wait()
+
+	// Second delivery of same ID is a replay.
+	err := h.HandleCommand(ctx, sc)
+	require.ErrorIs(t, err, ErrCommandReplay)
+}
+
+func TestHandleCommand_ParamsTooLarge_ReturnsErrParamsTooLarge(t *testing.T) {
+	h, err := New(&Config{
+		StewardID:      "steward-test",
+		OnStatus:       noopStatus,
+		Logger:         newTestLogger(t),
+		MaxParamsBytes: 16, // tiny limit for testing
+	})
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	sc := &cpTypes.SignedCommand{
+		Command: cpTypes.Command{
+			ID:        "big-001",
+			Type:      cpTypes.CommandSyncConfig,
+			StewardID: "steward-test",
+			Timestamp: time.Now(),
+			Params: map[string]interface{}{
+				"data": "this-string-is-definitely-longer-than-16-bytes",
+			},
+		},
+	}
+	handlerErr := h.HandleCommand(ctx, sc)
+	require.ErrorIs(t, handlerErr, ErrParamsTooLarge)
+}
+
+func TestHandleCommand_ValidSignedCommand_Dispatches(t *testing.T) {
+	signer, verifier := newTestSignerVerifier(t)
+	h := newTestHandlerWithVerifier(t, nil, verifier)
+	ctx := context.Background()
+
+	dispatched := make(chan struct{}, 1)
+	h.RegisterHandler(cpTypes.CommandSyncConfig, func(ctx context.Context, c *cpTypes.Command) error {
+		dispatched <- struct{}{}
+		return nil
+	})
+
+	cmd := &cpTypes.Command{
+		ID:        "valid-001",
+		Type:      cpTypes.CommandSyncConfig,
+		StewardID: "steward-test",
+		Timestamp: time.Now(),
+	}
+	sc := signTestCommand(t, signer, cmd)
+
+	require.NoError(t, h.HandleCommand(ctx, sc))
+	h.Wait()
+
+	select {
+	case <-dispatched:
+		// expected
+	case <-time.After(time.Second):
+		t.Fatal("handler was not dispatched for a valid signed command")
+	}
+}
+
+func TestHandleCommand_NilStore_StillWorks(t *testing.T) {
+	h := newTestHandler(t, nil)
+	ctx := context.Background()
+
+	h.RegisterHandler(cpTypes.CommandSyncConfig, func(ctx context.Context, c *cpTypes.Command) error {
+		return nil
+	})
+
+	sc := testSignedCommand("no-store-001", cpTypes.CommandSyncConfig)
+	require.NoError(t, h.HandleCommand(ctx, sc))
+	h.Wait()
 }

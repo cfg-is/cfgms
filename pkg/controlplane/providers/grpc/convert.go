@@ -9,9 +9,15 @@ import (
 	"time"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// sigParamKey is the reserved params key used to carry the signature through
+// the existing proto Command.params wire field without requiring a proto change.
+// Two leading underscores prevent collision with user-defined command params.
+const sigParamKey = "__sig"
 
 // --- Command conversion ---
 
@@ -63,6 +69,80 @@ func commandFromProto(pb *transportpb.Command) *types.Command {
 		cmd.Params = stringMapToInterfaceMap(pb.GetParams())
 	}
 	return cmd
+}
+
+// signedCommandToProto serialises a SignedCommand to the wire proto Command.
+//
+// The signature (when present) is JSON-encoded and embedded in the proto params
+// map under sigParamKey so no proto schema change is required.
+func signedCommandToProto(sc *types.SignedCommand) *transportpb.Command {
+	if sc == nil {
+		return nil
+	}
+	pb := commandToProto(&sc.Command)
+	if pb == nil {
+		return nil
+	}
+	if sc.Signature != nil {
+		sigJSON, err := json.Marshal(sc.Signature)
+		if err == nil {
+			if pb.Params == nil {
+				pb.Params = make(map[string]string)
+			}
+			pb.Params[sigParamKey] = string(sigJSON)
+		}
+	}
+	return pb
+}
+
+// signedCommandFromProto reconstructs a SignedCommand from the wire proto Command.
+//
+// It extracts the signature from the reserved sigParamKey entry (if present)
+// and strips that key from the params so it does not appear in Command.Params.
+func signedCommandFromProto(pb *transportpb.Command) *types.SignedCommand {
+	if pb == nil {
+		return nil
+	}
+
+	var sig *signature.ConfigSignature
+	filteredParams := make(map[string]string, len(pb.GetParams()))
+	for k, v := range pb.GetParams() {
+		if k == sigParamKey {
+			var s signature.ConfigSignature
+			if err := json.Unmarshal([]byte(v), &s); err == nil {
+				sig = &s
+			}
+			continue
+		}
+		filteredParams[k] = v
+	}
+
+	// Rebuild the proto Command without the sig key so commandFromProto sees
+	// only the real user params.
+	pbClean := &transportpb.Command{
+		Id:        pb.GetId(),
+		Type:      pb.GetType(),
+		StewardId: pb.GetStewardId(),
+		TenantId:  pb.GetTenantId(),
+		Timestamp: pb.GetTimestamp(),
+		Params:    filteredParams,
+	}
+	cmd := commandFromProto(pbClean)
+	if cmd == nil {
+		return nil
+	}
+	sc := &types.SignedCommand{
+		Command:   *cmd,
+		Signature: sig,
+	}
+	// Preserve the proto-wire string map for signature verification. The handler
+	// must verify against this form, not cmd.Params, because stringMapToInterfaceMap
+	// JSON-decodes numeric-looking strings (e.g. "1.0" → float64) making the bytes
+	// differ from what the controller signed.
+	if len(filteredParams) > 0 {
+		sc.RawParams = filteredParams
+	}
+	return sc
 }
 
 // --- Event conversion ---

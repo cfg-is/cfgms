@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/cmd/steward/service"
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/version"
@@ -493,14 +494,26 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		"group", regResp.Group,
 		"transport_address", regResp.TransportAddress)
 
+	// Optionally load the local steward config to apply custom replay window and
+	// params-size limits. If no config file is found (the common case when the
+	// steward is purely controller-managed), defaults apply in commands.Handler.
+	var commandReplayWindow time.Duration
+	var commandMaxParamsBytes int
+	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
+		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
+		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
+	}
+
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
-		ControllerURL:     regResp.TransportAddress,
-		RegistrationToken: token,
-		CACertPEM:         regResp.CACert,
-		ClientCertPEM:     regResp.ClientCert,
-		ClientKeyPEM:      regResp.ClientKey,
-		ServerCertPEM:     regResp.ServerCert,
-		Logger:            logger,
+		ControllerURL:               regResp.TransportAddress,
+		RegistrationToken:           token,
+		CACertPEM:                   regResp.CACert,
+		ClientCertPEM:               regResp.ClientCert,
+		ClientKeyPEM:                regResp.ClientKey,
+		ServerCertPEM:               regResp.ServerCert,
+		SignedCommandReplayWindow:   commandReplayWindow,
+		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
+		Logger:                      logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transport client: %w", err)

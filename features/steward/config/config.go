@@ -159,6 +159,17 @@ type StewardSettings struct {
 	// ScriptSigning configures script signing policy, trust modes, and trusted key allowlist.
 	// Child tenants inherit this config and may only tighten (not loosen) the policy.
 	ScriptSigning ScriptSigningConfig `yaml:"script_signing,omitempty"`
+
+	// SignedCommandReplayWindow is the maximum age of an accepted command timestamp.
+	// Commands with a Timestamp older than this window are rejected as potential replays.
+	// Shorter windows enforce stricter freshness; longer windows tolerate clock skew.
+	// Defaults to 5 minutes when zero.
+	SignedCommandReplayWindow time.Duration `yaml:"signed_command_replay_window,omitempty"`
+
+	// SignedCommandMaxParamsBytes is the maximum JSON-serialized size of Command.Params
+	// in bytes. Commands whose Params serialise to more than this limit are rejected
+	// before dispatch. Defaults to 65536 (64 KiB) when zero.
+	SignedCommandMaxParamsBytes int `yaml:"signed_command_max_params_bytes,omitempty"`
 }
 
 // SecretsConfig defines configuration for steward-side secret storage.

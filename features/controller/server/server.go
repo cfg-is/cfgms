@@ -351,6 +351,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var controlPlane controlplaneInterfaces.ControlPlaneProvider
 	var heartbeatService *heartbeat.Service
 	var commandPublisher *commands.Publisher
+	// hoistedSigner and hoistedSignerCertSerial are set inside the transport block and
+	// re-used by the data plane config handler so both consumers share the same key.
+	var hoistedSigner signature.Signer
+	var hoistedSignerCertSerial string
 	if cfg.Transport != nil && certManager != nil {
 		logger.Info("Initializing gRPC control plane provider...", "addr", cfg.Transport.ListenAddr)
 
@@ -390,16 +394,51 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 		logger.Info("Heartbeat monitoring service initialized successfully")
 
-		// Initialize command publisher (Story #198, Story #363, Story #514)
+		// Story #919: Hoist signer construction so both the command publisher and the
+		// config handler share the same signer instance. This must happen before the
+		// publisher is created so the publisher can sign commands on transmission.
+		//
+		// In separated mode: use CertificateTypeConfigSigning (dedicated signing cert)
+		// In unified mode: use CertificateTypeServer (backward compatible)
+		if certManager != nil {
+			signerCertType := cert.CertificateTypeServer
+			if cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture() {
+				signerCertType = cert.CertificateTypeConfigSigning
+			}
+			signerCerts, scErr := certManager.GetCertificatesByType(signerCertType)
+			if scErr == nil && len(signerCerts) > 0 {
+				hoistedSignerCertSerial = signerCerts[0].SerialNumber
+				certPEM, keyPEM, exportErr := certManager.ExportCertificate(hoistedSignerCertSerial, true)
+				if exportErr == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
+					var signerErr error
+					hoistedSigner, signerErr = signature.NewSigner(&signature.SignerConfig{
+						PrivateKeyPEM:  keyPEM,
+						CertificatePEM: certPEM,
+					})
+					if signerErr != nil {
+						logger.Warn("Failed to create config signer", "error", signerErr)
+					} else {
+						logger.Info("Config signer initialized successfully",
+							"algorithm", hoistedSigner.Algorithm(),
+							"fingerprint", hoistedSigner.KeyFingerprint(),
+							"cert_serial", hoistedSignerCertSerial,
+							"cert_type", signerCertType.String())
+					}
+				}
+			}
+		}
+
+		// Initialize command publisher (Story #198, Story #363, Story #514, Story #919)
 		logger.Info("Initializing command publisher...")
 		commandPublisher, err = commands.New(&commands.Config{
 			ControlPlane: controlPlane,
+			Signer:       hoistedSigner,
 			Logger:       logger,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)
 		}
-		logger.Info("Command publisher initialized successfully")
+		logger.Info("Command publisher initialized successfully", "signing_enabled", hoistedSigner != nil)
 	} else {
 		logger.Warn("Transport config not set — gRPC control plane disabled")
 	}
@@ -424,44 +463,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 
 	// Initialize config handler for data plane configuration sync (Story #362)
+	// Re-uses the hoisted signer so both config and command signing use the same key.
 	var configHandler *controllerTransport.ConfigHandler
 	var signerCertSerial string // Story #378: Track cert serial for registration handler
 	if dataPlane != nil {
-		// Create signer from certificate for config signing (Story #315, #377)
-		// In separated mode: use CertificateTypeConfigSigning (dedicated signing cert)
-		// In unified mode: use CertificateTypeServer (backward compatible)
-		var signer signature.Signer
-		if certManager != nil {
-			signerCertType := cert.CertificateTypeServer
-			if cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture() {
-				signerCertType = cert.CertificateTypeConfigSigning
-			}
-
-			signerCerts, err := certManager.GetCertificatesByType(signerCertType)
-			if err == nil && len(signerCerts) > 0 {
-				signerCertSerial = signerCerts[0].SerialNumber
-				certPEM, keyPEM, err := certManager.ExportCertificate(signerCertSerial, true)
-				if err == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
-					signer, err = signature.NewSigner(&signature.SignerConfig{
-						PrivateKeyPEM:  keyPEM,
-						CertificatePEM: certPEM,
-					})
-					if err != nil {
-						logger.Warn("Failed to create config signer", "error", err)
-					} else {
-						logger.Info("Config signer initialized successfully",
-							"algorithm", signer.Algorithm(),
-							"fingerprint", signer.KeyFingerprint(),
-							"cert_serial", signerCertSerial,
-							"cert_type", signerCertType.String())
-					}
-				}
-			}
-		}
-
-		// Create config handler with signer (signs configs if signer available)
-		configHandler = controllerTransport.NewConfigHandler(configService, logger, signer)
-		logger.Debug("Config handler initialized for data plane", "signing_enabled", signer != nil)
+		// Use the signer hoisted above (nil when certManager absent or export failed).
+		signerCertSerial = hoistedSignerCertSerial
+		configHandler = controllerTransport.NewConfigHandler(configService, logger, hoistedSigner)
+		logger.Debug("Config handler initialized for data plane", "signing_enabled", hoistedSigner != nil)
 	}
 
 	// Initialize health collectors (Story #417, #517)

@@ -44,10 +44,10 @@ func (n *noopControlPlane) Name() string { return "noop" }
 func (n *noopControlPlane) Initialize(_ context.Context, _ map[string]interface{}) error {
 	return nil
 }
-func (n *noopControlPlane) Start(_ context.Context) error                           { return nil }
-func (n *noopControlPlane) Stop(_ context.Context) error                            { return nil }
-func (n *noopControlPlane) SendCommand(_ context.Context, _ *cpTypes.Command) error { return nil }
-func (n *noopControlPlane) FanOutCommand(_ context.Context, _ *cpTypes.Command, ids []string) (*cpTypes.FanOutResult, error) {
+func (n *noopControlPlane) Start(_ context.Context) error                                 { return nil }
+func (n *noopControlPlane) Stop(_ context.Context) error                                  { return nil }
+func (n *noopControlPlane) SendCommand(_ context.Context, _ *cpTypes.SignedCommand) error { return nil }
+func (n *noopControlPlane) FanOutCommand(_ context.Context, _ *cpTypes.SignedCommand, ids []string) (*cpTypes.FanOutResult, error) {
 	return &cpTypes.FanOutResult{Succeeded: ids, Failed: make(map[string]error)}, nil
 }
 func (n *noopControlPlane) SubscribeCommands(_ context.Context, _ string, _ controlplaneInterfaces.CommandHandler) error {

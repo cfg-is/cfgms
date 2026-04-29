@@ -9,14 +9,19 @@
 // executing/completed/failed status survives a process restart. The in-memory
 // executing map retains only the context.CancelFunc needed for in-flight
 // cancellation; all durable state is in the store.
+//
+// Story #919: Commands are authenticated before dispatch. Every SignedCommand
+// is verified for signature, replay, StewardID, and Params size.
 package commands
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/features/config/signature"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -49,6 +54,22 @@ type Handler struct {
 	// wg tracks in-flight executeCommand goroutines to support graceful shutdown
 	// and deterministic test synchronization.
 	wg sync.WaitGroup
+
+	// Story #919: command authentication fields.
+
+	// verifier validates the cryptographic signature on each SignedCommand.
+	// When nil, signature verification is skipped (unsecured/transitional mode).
+	verifier signature.Verifier
+
+	// replayWindow is the maximum age of a command timestamp before it is
+	// rejected as a potential replay.
+	replayWindow time.Duration
+
+	// replayCache detects duplicate command IDs within the replay window.
+	replayCache *ttlReplayCache
+
+	// maxParamsBytes is the maximum allowed JSON-serialized size of Command.Params.
+	maxParamsBytes int
 }
 
 // CommandFunc is a function that handles a specific command type.
@@ -77,7 +98,24 @@ type Config struct {
 	// Store is the durable command dispatch state backend (Story #665).
 	// When nil, state transitions are not persisted across restarts.
 	Store business.CommandStore
+
+	// Verifier validates command signatures (Story #919).
+	// When nil, signature verification is skipped.
+	Verifier signature.Verifier
+
+	// ReplayWindow is the maximum age of an accepted command timestamp.
+	// Defaults to 5 minutes when zero.
+	ReplayWindow time.Duration
+
+	// MaxParamsBytes is the maximum JSON-serialized size of Command.Params.
+	// Defaults to 65536 (64 KiB) when zero.
+	MaxParamsBytes int
 }
+
+const (
+	defaultReplayWindow  = 5 * time.Minute
+	defaultMaxParamBytes = 64 * 1024
+)
 
 // New creates a new command handler and, when a CommandStore is configured,
 // sweeps any commands left in "executing" state from a previous run and marks
@@ -93,13 +131,26 @@ func New(cfg *Config) (*Handler, error) {
 		return nil, fmt.Errorf("logger is required")
 	}
 
+	replayWindow := cfg.ReplayWindow
+	if replayWindow == 0 {
+		replayWindow = defaultReplayWindow
+	}
+	maxParamsBytes := cfg.MaxParamsBytes
+	if maxParamsBytes == 0 {
+		maxParamsBytes = defaultMaxParamBytes
+	}
+
 	h := &Handler{
-		stewardID: cfg.StewardID,
-		handlers:  make(map[cpTypes.CommandType]CommandFunc),
-		onStatus:  cfg.OnStatus,
-		logger:    cfg.Logger,
-		store:     cfg.Store,
-		executing: make(map[string]*executionContext),
+		stewardID:      cfg.StewardID,
+		handlers:       make(map[cpTypes.CommandType]CommandFunc),
+		onStatus:       cfg.OnStatus,
+		logger:         cfg.Logger,
+		store:          cfg.Store,
+		executing:      make(map[string]*executionContext),
+		verifier:       cfg.Verifier,
+		replayWindow:   replayWindow,
+		replayCache:    newReplayCache(replayWindow),
+		maxParamsBytes: maxParamsBytes,
 	}
 
 	// Startup sweep: flip stale "executing" records from a previous run to "failed".
@@ -150,10 +201,68 @@ func (h *Handler) RegisterHandler(cmdType cpTypes.CommandType, handler CommandFu
 	h.logger.Info("Registered command handler", "type", cmdType)
 }
 
-// HandleCommand processes an incoming control plane command.
-// Story #363: Now receives a pre-deserialized command from the ControlPlaneProvider
-// instead of raw topic/payload from the transport layer.
-func (h *Handler) HandleCommand(ctx context.Context, cmd *cpTypes.Command) error {
+// HandleCommand processes an incoming signed command from the controller.
+//
+// Story #919: Before dispatching, the command is authenticated:
+//  1. Signature is verified against CommandSigningBytes(cmd, rawParams) when a verifier is configured.
+//  2. signed.Command.StewardID must match this handler's steward identity.
+//  3. signed.Command.Timestamp must be within the configured replay window.
+//  4. signed.Command.ID must not already be present in the replay cache (dedup).
+//  5. json.Marshal(signed.Command.Params) must not exceed maxParamsBytes.
+func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedCommand) error {
+	if signed == nil {
+		return ErrUnauthenticatedCommand
+	}
+
+	cmd := &signed.Command
+
+	// 1. Signature verification (only when a verifier is configured).
+	if h.verifier != nil {
+		if signed.Signature == nil {
+			return ErrUnauthenticatedCommand
+		}
+		// Use the proto-wire string map (RawParams) when available so the canonical
+		// bytes match what the controller signed. Fall back to InterfaceParamsToStringMap
+		// for commands created without a proto round-trip (e.g. tests).
+		rawParams := signed.RawParams
+		if rawParams == nil {
+			rawParams = cpTypes.InterfaceParamsToStringMap(cmd.Params)
+		}
+		cmdBytes, err := cpTypes.CommandSigningBytes(cmd, rawParams)
+		if err != nil {
+			return fmt.Errorf("marshal command for verification: %w", err)
+		}
+		if err := h.verifier.Verify(cmdBytes, signed.Signature); err != nil {
+			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
+		}
+	}
+
+	// 2. StewardID match.
+	if cmd.StewardID != h.stewardID {
+		return ErrWrongSteward
+	}
+
+	// 3. Timestamp freshness.
+	if time.Since(cmd.Timestamp) > h.replayWindow {
+		return ErrCommandReplay
+	}
+
+	// 4. Replay deduplication.
+	if !h.replayCache.Add(cmd.ID) {
+		return ErrCommandReplay
+	}
+
+	// 5. Params size bound.
+	if len(cmd.Params) > 0 {
+		paramBytes, err := json.Marshal(cmd.Params)
+		if err != nil {
+			return fmt.Errorf("%w: invalid params", ErrParamsTooLarge)
+		}
+		if len(paramBytes) > h.maxParamsBytes {
+			return ErrParamsTooLarge
+		}
+	}
+
 	h.logger.Debug("Received command", "id", cmd.ID, "type", cmd.Type)
 
 	// Persist incoming command record (Story #665).
@@ -332,33 +441,4 @@ func (h *Handler) sendStatus(ctx context.Context, event *cpTypes.Event) {
 	if h.onStatus != nil {
 		h.onStatus(ctx, event)
 	}
-}
-
-// CancelCommand cancels a running command by its ID.
-func (h *Handler) CancelCommand(commandID string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	exec, exists := h.executing[commandID]
-	if !exists {
-		return fmt.Errorf("command not found or already completed: %s", commandID)
-	}
-
-	exec.Cancel()
-	h.logger.Info("Command cancelled", "command_id", commandID)
-
-	return nil
-}
-
-// GetExecutingCommands returns a list of currently executing command IDs.
-func (h *Handler) GetExecutingCommands() []string {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
-	commands := make([]string, 0, len(h.executing))
-	for cmdID := range h.executing {
-		commands = append(commands, cmdID)
-	}
-
-	return commands
 }
