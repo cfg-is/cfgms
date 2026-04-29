@@ -383,4 +383,3 @@ type SecurityAlert struct {
 	Timestamp   time.Time              `json:"timestamp"`
 	ActionTaken string                 `json:"action_taken"`
 }
-
