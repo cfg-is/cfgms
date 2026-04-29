@@ -5,7 +5,6 @@ package terminal
 import (
 	"context"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -269,10 +268,10 @@ func TestCleanupTimedOutSessions_AllSessionsCleaned(t *testing.T) {
 // per-session TerminateSession failure is logged as a warning and does not
 // abort the remaining sessions in the batch.
 //
-// Two concurrent CleanupTimedOutSessions calls both collect the same session IDs
-// (under lock, before any termination). When both loops then call TerminateSession
-// concurrently, the second caller encounters "session not found" for sessions the
-// first already removed — these must be warned and skipped, not panicked or aborted.
+// afterCollectHook pre-terminates every timed-out session before the
+// CleanupTimedOutSessions termination loop runs. The loop then gets
+// "session not found" for each ID, which must produce a warn log and
+// continue — not panic or abort.
 func TestCleanupTimedOutSessions_ContinuesAfterPerSessionError(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &Config{
@@ -306,37 +305,29 @@ func TestCleanupTimedOutSessions_ContinuesAfterPerSessionError(t *testing.T) {
 
 	defaultManager := manager.(*DefaultSessionManager)
 
-	// Both goroutines collect identical ID slices (both under lock, before any
-	// termination has started). Their termination loops then race; the second
-	// caller gets "session not found" for sessions the first already deleted.
-	var ready sync.WaitGroup
-	ready.Add(2)
-	var done sync.WaitGroup
-	done.Add(2)
-	go func() {
-		defer done.Done()
-		ready.Done()
-		ready.Wait()
-		defaultManager.CleanupTimedOutSessions()
-	}()
-	go func() {
-		defer done.Done()
-		ready.Done()
-		ready.Wait()
-		defaultManager.CleanupTimedOutSessions()
-	}()
-	done.Wait()
+	// Install a hook that terminates every collected session before the
+	// termination loop begins. This guarantees the loop sees "session not
+	// found" for all IDs in a deterministic, race-free way.
+	defaultManager.afterCollectHook = func(ids []string) {
+		hookCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, id := range ids {
+			_ = defaultManager.TerminateSession(hookCtx, id)
+		}
+	}
 
-	// All sessions must be terminated regardless of which goroutine did the work.
+	defaultManager.CleanupTimedOutSessions()
+
+	// All sessions must be gone (pre-terminated by the hook).
 	for _, id := range sessionIDs {
 		_, err := manager.GetSession(id)
 		assert.Error(t, err, "session %s must be terminated", id)
 	}
 
-	// At least some warn logs must have been emitted for the "session not found"
-	// errors encountered by the goroutine that lost the race on each session.
+	// The termination loop must have logged a warning for each "session not
+	// found" error instead of aborting.
 	warnLogs := logger.GetLogs("warn")
-	assert.NotEmpty(t, warnLogs, "warn logs should have been emitted for sessions that could not be found by the second cleanup")
+	assert.NotEmpty(t, warnLogs, "warn logs should have been emitted for sessions that could not be found")
 }
 
 // TestCleanupTimedOutSessions_GetSessionDuringCleanup verifies that the lock is
@@ -377,7 +368,6 @@ func TestCleanupTimedOutSessions_GetSessionDuringCleanup(t *testing.T) {
 	}
 	activeSession, err := manager.CreateSession(ctx, activeReq)
 	require.NoError(t, err)
-	_ = timedOutSession
 
 	time.Sleep(10 * time.Millisecond)
 

@@ -20,6 +20,10 @@ type DefaultSessionManager struct {
 	recorder  Recorder
 	cleanupCh chan string
 	stopCh    chan struct{}
+	// afterCollectHook, if non-nil, is called after the timed-out ID slice is
+	// collected and m.mu is released, but before the termination loop begins.
+	// Used in tests to inject deterministic race conditions.
+	afterCollectHook func(ids []string)
 }
 
 // NewSessionManager creates a new session manager
@@ -214,6 +218,10 @@ func (m *DefaultSessionManager) CleanupTimedOutSessions() {
 		}
 	}
 	m.mu.Unlock()
+
+	if m.afterCollectHook != nil {
+		m.afterCollectHook(timedOut)
+	}
 
 	for _, id := range timedOut {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
