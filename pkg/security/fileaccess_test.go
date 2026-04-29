@@ -141,16 +141,15 @@ func TestValidateAndCleanPathSiblingPrefix(t *testing.T) {
 
 // TestValidateAndCleanPathSymlinks covers symlink-specific acceptance criteria.
 func TestValidateAndCleanPathSymlinks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink tests require Unix")
-	}
-
 	t.Run("symlink_escape_rejected", func(t *testing.T) {
 		base := t.TempDir()
 		// Symlink inside base pointing to a file outside base.
 		outside := filepath.Dir(base)
 		link := filepath.Join(base, "link")
 		if err := os.Symlink(filepath.Join(outside, "outside_file"), link); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+			}
 			t.Fatalf("failed to create symlink: %v", err)
 		}
 		// Create the target so EvalSymlinks can resolve it.
@@ -175,6 +174,9 @@ func TestValidateAndCleanPathSymlinks(t *testing.T) {
 		}
 		link := filepath.Join(base, "a")
 		if err := os.Symlink(target, link); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+			}
 			t.Fatalf("failed to create internal symlink: %v", err)
 		}
 
@@ -183,12 +185,18 @@ func TestValidateAndCleanPathSymlinks(t *testing.T) {
 			t.Fatalf("unexpected error for internal symlink: %v", err)
 		}
 		// Result must be the resolved canonical target within base.
-		evalBase, _ := filepath.EvalSymlinks(base)
+		evalBase, evalErr := filepath.EvalSymlinks(base)
+		if evalErr != nil {
+			t.Fatalf("failed to eval-symlink base: %v", evalErr)
+		}
 		if !strings.HasPrefix(result, evalBase) {
 			t.Errorf("expected result within base %s, got %s", evalBase, result)
 		}
 		// Result should resolve to the target, not the symlink name.
-		evalTarget, _ := filepath.EvalSymlinks(target)
+		evalTarget, evalTargetErr := filepath.EvalSymlinks(target)
+		if evalTargetErr != nil {
+			t.Fatalf("failed to eval-symlink target: %v", evalTargetErr)
+		}
 		if result != evalTarget {
 			t.Errorf("expected resolved target %s, got %s", evalTarget, result)
 		}
@@ -201,7 +209,10 @@ func TestValidateAndCleanPathSymlinks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error for non-existent file with safe parent: %v", err)
 		}
-		evalBase, _ := filepath.EvalSymlinks(base)
+		evalBase, evalErr := filepath.EvalSymlinks(base)
+		if evalErr != nil {
+			t.Fatalf("failed to eval-symlink base: %v", evalErr)
+		}
 		if !strings.HasPrefix(result, evalBase) {
 			t.Errorf("expected result within base %s, got %s", evalBase, result)
 		}
@@ -217,6 +228,9 @@ func TestValidateAndCleanPathSymlinks(t *testing.T) {
 		// Symlink inside base pointing to the outside directory.
 		evil := filepath.Join(base, "evil")
 		if err := os.Symlink(outside, evil); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+			}
 			t.Fatalf("failed to create malicious symlink: %v", err)
 		}
 
