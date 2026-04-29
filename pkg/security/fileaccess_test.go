@@ -104,14 +104,145 @@ func TestValidateAndCleanPath(t *testing.T) {
 				if !filepath.IsAbs(result) {
 					t.Errorf("Result should be absolute path, got %s", result)
 				}
-				// Verify result is within base directory
-				absBase, _ := filepath.Abs(tt.basePath)
-				if !strings.HasPrefix(result, absBase) {
-					t.Errorf("Result %s is not within base directory %s", result, absBase)
+				// Verify result is within base directory using eval-symlinked base
+				evalBase, evalErr := filepath.EvalSymlinks(tt.basePath)
+				if evalErr != nil {
+					t.Fatalf("Failed to eval-symlink base: %v", evalErr)
+				}
+				if !strings.HasPrefix(result, evalBase) {
+					t.Errorf("Result %s is not within base directory %s", result, evalBase)
 				}
 			}
 		})
 	}
+}
+
+// TestValidateAndCleanPathSiblingPrefix verifies that a path sharing a string prefix with
+// basePath but outside it (e.g. /base_extra vs /base) is correctly rejected.
+func TestValidateAndCleanPathSiblingPrefix(t *testing.T) {
+	parent := t.TempDir()
+	base := filepath.Join(parent, "testbase")
+	sibling := filepath.Join(parent, "testbase_sibling")
+	if err := os.MkdirAll(base, 0750); err != nil {
+		t.Fatalf("failed to create base dir: %v", err)
+	}
+	if err := os.MkdirAll(sibling, 0750); err != nil {
+		t.Fatalf("failed to create sibling dir: %v", err)
+	}
+
+	_, err := ValidateAndCleanPath(base, filepath.Join(sibling, "secret"))
+	if err == nil {
+		t.Fatal("expected error for sibling-prefix traversal, got nil")
+	}
+	if !strings.Contains(err.Error(), "path traversal attempt detected") {
+		t.Errorf("expected 'path traversal attempt detected' in error, got: %v", err)
+	}
+}
+
+// TestValidateAndCleanPathSymlinks covers symlink-specific acceptance criteria.
+func TestValidateAndCleanPathSymlinks(t *testing.T) {
+	t.Run("symlink_escape_rejected", func(t *testing.T) {
+		base := t.TempDir()
+		// Symlink inside base pointing to a file outside base.
+		outside := filepath.Dir(base)
+		link := filepath.Join(base, "link")
+		if err := os.Symlink(filepath.Join(outside, "outside_file"), link); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+			}
+			t.Fatalf("failed to create symlink: %v", err)
+		}
+		// Create the target so EvalSymlinks can resolve it.
+		if err := os.WriteFile(filepath.Join(outside, "outside_file"), []byte("x"), 0600); err != nil {
+			t.Fatalf("failed to create outside file: %v", err)
+		}
+
+		_, err := ValidateAndCleanPath(base, "link")
+		if err == nil {
+			t.Fatal("expected error for symlink escape, got nil")
+		}
+		if !strings.Contains(err.Error(), "path traversal attempt detected") {
+			t.Errorf("expected 'path traversal attempt detected' in error, got: %v", err)
+		}
+	})
+
+	t.Run("internal_symlink_accepted", func(t *testing.T) {
+		base := t.TempDir()
+		target := filepath.Join(base, "b")
+		if err := os.MkdirAll(target, 0750); err != nil {
+			t.Fatalf("failed to create target dir: %v", err)
+		}
+		link := filepath.Join(base, "a")
+		if err := os.Symlink(target, link); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+			}
+			t.Fatalf("failed to create internal symlink: %v", err)
+		}
+
+		result, err := ValidateAndCleanPath(base, "a")
+		if err != nil {
+			t.Fatalf("unexpected error for internal symlink: %v", err)
+		}
+		// Result must be the resolved canonical target within base.
+		evalBase, evalErr := filepath.EvalSymlinks(base)
+		if evalErr != nil {
+			t.Fatalf("failed to eval-symlink base: %v", evalErr)
+		}
+		if !strings.HasPrefix(result, evalBase) {
+			t.Errorf("expected result within base %s, got %s", evalBase, result)
+		}
+		// Result should resolve to the target, not the symlink name.
+		evalTarget, evalTargetErr := filepath.EvalSymlinks(target)
+		if evalTargetErr != nil {
+			t.Fatalf("failed to eval-symlink target: %v", evalTargetErr)
+		}
+		if result != evalTarget {
+			t.Errorf("expected resolved target %s, got %s", evalTarget, result)
+		}
+	})
+
+	t.Run("nonexistent_with_safe_parent", func(t *testing.T) {
+		base := t.TempDir()
+
+		result, err := ValidateAndCleanPath(base, "newfile.txt")
+		if err != nil {
+			t.Fatalf("unexpected error for non-existent file with safe parent: %v", err)
+		}
+		evalBase, evalErr := filepath.EvalSymlinks(base)
+		if evalErr != nil {
+			t.Fatalf("failed to eval-symlink base: %v", evalErr)
+		}
+		if !strings.HasPrefix(result, evalBase) {
+			t.Errorf("expected result within base %s, got %s", evalBase, result)
+		}
+		if filepath.Base(result) != "newfile.txt" {
+			t.Errorf("expected filename 'newfile.txt' preserved, got %s", filepath.Base(result))
+		}
+	})
+
+	t.Run("nonexistent_with_malicious_ancestor_symlink", func(t *testing.T) {
+		base := t.TempDir()
+		outside := t.TempDir() // sibling directory — guaranteed outside base
+
+		// Symlink inside base pointing to the outside directory.
+		evil := filepath.Join(base, "evil")
+		if err := os.Symlink(outside, evil); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+			}
+			t.Fatalf("failed to create malicious symlink: %v", err)
+		}
+
+		// Access a non-existent file through the malicious symlink.
+		_, err := ValidateAndCleanPath(base, "evil/nonexistent")
+		if err == nil {
+			t.Fatal("expected error for path through malicious ancestor symlink, got nil")
+		}
+		if !strings.Contains(err.Error(), "path traversal attempt detected") {
+			t.Errorf("expected 'path traversal attempt detected' in error, got: %v", err)
+		}
+	})
 }
 
 func TestSecureWriteFile(t *testing.T) {
@@ -248,45 +379,6 @@ func TestSecureWriteFileWithPerms(t *testing.T) {
 	})
 }
 
-func TestIsPathWithinBase(t *testing.T) {
-	tempDir := t.TempDir()
-
-	tests := []struct {
-		name     string
-		basePath string
-		userPath string
-		expected bool
-	}{
-		{
-			name:     "valid path within base",
-			basePath: tempDir,
-			userPath: "subdir/file.txt",
-			expected: true,
-		},
-		{
-			name:     "traversal attempt",
-			basePath: tempDir,
-			userPath: "../../../etc/passwd",
-			expected: false,
-		},
-		{
-			name:     "empty paths",
-			basePath: "",
-			userPath: "",
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := IsPathWithinBase(tt.basePath, tt.userPath)
-			if result != tt.expected {
-				t.Errorf("Expected %v, got %v", tt.expected, result)
-			}
-		})
-	}
-}
-
 // Story #253: Additional tests for 90%+ coverage
 
 func TestSecureOpenFile(t *testing.T) {
@@ -367,81 +459,6 @@ func TestSecureOpenFile(t *testing.T) {
 		// Should be a file system error from os.OpenFile
 		if strings.Contains(err.Error(), "path validation") {
 			t.Errorf("Should be file system error, not path validation, got %v", err)
-		}
-	})
-}
-
-func TestSecureMkdirAll(t *testing.T) {
-	tempDir := t.TempDir()
-
-	t.Run("create single directory", func(t *testing.T) {
-		dirPath := filepath.Join(tempDir, "testdir")
-		err := SecureMkdirAll(dirPath)
-		if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
-		}
-
-		// Verify directory was created
-		info, err := os.Stat(dirPath)
-		if err != nil {
-			t.Fatalf("Failed to stat directory: %v", err)
-		}
-
-		if !info.IsDir() {
-			t.Error("Expected a directory")
-		}
-
-		// Verify permissions are 0750 (Unix only - Windows uses ACLs)
-		if runtime.GOOS != "windows" {
-			if info.Mode().Perm() != 0750 {
-				t.Errorf("Expected directory permissions 0750, got %o", info.Mode().Perm())
-			}
-		}
-	})
-
-	t.Run("create nested directories", func(t *testing.T) {
-		dirPath := filepath.Join(tempDir, "parent", "child", "grandchild")
-		err := SecureMkdirAll(dirPath)
-		if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
-		}
-
-		// Verify all directories were created
-		info, err := os.Stat(dirPath)
-		if err != nil {
-			t.Fatalf("Failed to stat directory: %v", err)
-		}
-
-		if !info.IsDir() {
-			t.Error("Expected a directory")
-		}
-
-		// Verify parent directory also has correct permissions (Unix only - Windows uses ACLs)
-		if runtime.GOOS != "windows" {
-			parentInfo, err := os.Stat(filepath.Join(tempDir, "parent"))
-			if err != nil {
-				t.Fatalf("Failed to stat parent directory: %v", err)
-			}
-
-			if parentInfo.Mode().Perm() != 0750 {
-				t.Errorf("Expected parent directory permissions 0750, got %o", parentInfo.Mode().Perm())
-			}
-		}
-	})
-
-	t.Run("idempotent - no error if directory exists", func(t *testing.T) {
-		dirPath := filepath.Join(tempDir, "existing")
-
-		// Create once
-		err := SecureMkdirAll(dirPath)
-		if err != nil {
-			t.Fatalf("First creation failed: %v", err)
-		}
-
-		// Create again - should not error
-		err = SecureMkdirAll(dirPath)
-		if err != nil {
-			t.Errorf("Expected no error for existing directory, got %v", err)
 		}
 	})
 }
