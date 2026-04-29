@@ -4,7 +4,9 @@ package security
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"regexp"
@@ -18,10 +20,12 @@ import (
 // Validator provides comprehensive input validation for security-sensitive data
 type Validator struct {
 	// Configuration
-	maxStringLength    int
-	maxSliceLength     int
-	allowedCharsets    map[string]*regexp.Regexp
-	prohibitedPatterns []*regexp.Regexp
+	maxStringLength     int
+	maxSliceLength      int
+	maxJSONDepth        int
+	maxJSONStringLength int
+	allowedCharsets     map[string]*regexp.Regexp
+	prohibitedPatterns  []*regexp.Regexp
 	// M-INPUT-2: Regex matcher with timeout protection (security audit finding)
 	regexMatcher     *RegexMatcher
 	dnsLookupTimeout time.Duration
@@ -70,9 +74,11 @@ func (vr *ValidationResult) AddErrorf(field, value, rule, format string, args ..
 // NewValidator creates a new validator with secure defaults
 func NewValidator() *Validator {
 	v := &Validator{
-		maxStringLength: 4096, // 4KB max string length
-		maxSliceLength:  1000, // Max 1000 items in arrays/slices
-		allowedCharsets: make(map[string]*regexp.Regexp),
+		maxStringLength:     4096, // 4KB max string length
+		maxSliceLength:      1000, // Max 1000 items in arrays/slices
+		maxJSONDepth:        10,
+		maxJSONStringLength: 1000,
+		allowedCharsets:     make(map[string]*regexp.Regexp),
 		prohibitedPatterns: []*regexp.Regexp{
 			// Common injection patterns
 			regexp.MustCompile(`(?i)(script|javascript|vbscript|onload|onerror|onclick)`),
@@ -379,7 +385,10 @@ func containsFold(slice []string, s string) bool {
 	return false
 }
 
-// ValidateJSON validates JSON content for safety
+// ValidateJSON validates JSON content for safety, tracking structural depth via
+// json.Decoder token walking. String literals containing bracket characters do
+// not contribute to depth. Per-string length is measured against the
+// post-unescape decoded rune count.
 func (v *Validator) ValidateJSON(result *ValidationResult, field, value string, rules ...string) {
 	if value == "" && v.hasRule(rules, "required") {
 		result.AddError(field, value, "required", "field is required")
@@ -390,29 +399,33 @@ func (v *Validator) ValidateJSON(result *ValidationResult, field, value string, 
 		return
 	}
 
-	// Check for deeply nested structures (potential DoS)
+	dec := json.NewDecoder(strings.NewReader(value))
 	depth := 0
-	maxDepth := 10
-	for _, char := range value {
-		switch char {
-		case '{', '[':
-			depth++
-			if depth > maxDepth {
-				result.AddError(field, "", "max_depth", "JSON structure too deeply nested")
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			result.AddError(field, "", "json_syntax", "invalid JSON: "+err.Error())
+			return
+		}
+		switch t := tok.(type) {
+		case json.Delim:
+			if t == '{' || t == '[' {
+				depth++
+				if depth > v.maxJSONDepth {
+					result.AddError(field, "", "max_depth", "JSON structure too deeply nested")
+					return
+				}
+			} else {
+				depth--
+			}
+		case string:
+			if utf8.RuneCountInString(t) > v.maxJSONStringLength {
+				result.AddError(field, "", "json_string_length", "JSON contains oversized string values")
 				return
 			}
-		case '}', ']':
-			depth--
-		}
-	}
-
-	// Check for excessive string lengths in JSON
-	stringPattern := regexp.MustCompile(`"([^"\\]|\\.)*"`)
-	matches := stringPattern.FindAllString(value, -1)
-	for _, match := range matches {
-		if len(match) > 1000 { // Max 1KB per JSON string
-			result.AddError(field, "", "json_string_length", "JSON contains oversized string values")
-			return
 		}
 	}
 }

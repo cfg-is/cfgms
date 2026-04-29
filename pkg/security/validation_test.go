@@ -5,6 +5,7 @@ package security
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -567,10 +568,32 @@ func TestValidator_ValidateJSON(t *testing.T) {
 		{
 			name:    "JSON with oversized string",
 			field:   "data",
-			value:   `{"key": "` + string(make([]byte, 1001)) + `"}`,
+			value:   `{"key": "` + strings.Repeat("a", 1001) + `"}`,
 			rules:   []string{},
 			wantErr: true,
 			errRule: "json_string_length",
+		},
+		{
+			name:    "brackets inside string do not count as depth",
+			field:   "data",
+			value:   `{"k":"[[[[[[[[[[["}`,
+			rules:   []string{},
+			wantErr: false,
+		},
+		{
+			name:    "close brace inside string does not affect depth",
+			field:   "data",
+			value:   `{"k":"}"}`,
+			rules:   []string{},
+			wantErr: false,
+		},
+		{
+			name:    "malformed JSON fails with json_syntax",
+			field:   "data",
+			value:   `{key: "value"}`,
+			rules:   []string{},
+			wantErr: true,
+			errRule: "json_syntax",
 		},
 	}
 
