@@ -151,6 +151,17 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 		// eval-symlink it, then re-join the non-existing tail components.
 		// This handles paths like "newdir/newfile.txt" where the parent dirs
 		// don't yet exist, and also catches ancestors that are malicious symlinks.
+		//
+		// Preliminary raw containment check before any filesystem probing:
+		// if the unresolved absUserPath is already outside absBasePath (e.g. the
+		// user supplied an absolute path like /etc/passwd), reject immediately
+		// without calling os.Stat on user-controlled data outside the base.
+		// This check uses string-level path arithmetic only — symlink resolution
+		// happens after we confirm the path is structurally within the base.
+		rawRel, rawRelErr := filepath.Rel(absBasePath, absUserPath)
+		if rawRelErr != nil || strings.HasPrefix(rawRel, "..") || filepath.IsAbs(rawRel) {
+			return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
+		}
 		parent := absUserPath
 		var tail []string
 		for {
