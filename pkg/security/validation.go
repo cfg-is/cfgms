@@ -3,11 +3,14 @@
 package security
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -20,7 +23,11 @@ type Validator struct {
 	allowedCharsets    map[string]*regexp.Regexp
 	prohibitedPatterns []*regexp.Regexp
 	// M-INPUT-2: Regex matcher with timeout protection (security audit finding)
-	regexMatcher *RegexMatcher
+	regexMatcher     *RegexMatcher
+	dnsLookupTimeout time.Duration
+	// dnsLookup overrides the DNS resolver used by ValidateURL. When nil,
+	// net.DefaultResolver.LookupIPAddr is used. Set in tests only.
+	dnsLookup func(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
 // ValidationError represents a validation failure with context
@@ -94,6 +101,7 @@ func NewValidator() *Validator {
 
 	// M-INPUT-2: Initialize regex matcher with timeout protection (security audit finding)
 	v.regexMatcher = NewRegexMatcher(DefaultRegexTimeout)
+	v.dnsLookupTimeout = 5 * time.Second
 
 	return v
 }
@@ -289,7 +297,13 @@ func (v *Validator) ValidateIPAddress(result *ValidationResult, field, value str
 	}
 }
 
-// ValidateURL validates a URL with security checks
+// ValidateURL validates a URL with security checks.
+// All valid URLs are subject to SSRF protection: the resolved hostname must not
+// be loopback, private, link-local, or unspecified. Use the "allow_host:<hostname>"
+// rule to bypass IP-class rejection for an explicitly trusted hostname.
+//
+// The rules parameter must only contain developer-controlled values. Never
+// populate rules from user-supplied input, as allow_host: is an unconditional bypass.
 func (v *Validator) ValidateURL(result *ValidationResult, field, value string, rules ...string) {
 	if value == "" && v.hasRule(rules, "required") {
 		result.AddError(field, value, "required", "field is required")
@@ -300,32 +314,69 @@ func (v *Validator) ValidateURL(result *ValidationResult, field, value string, r
 		return
 	}
 
-	// M-INPUT-2: Basic URL format check with timeout protection (security audit finding)
-	urlPattern := regexp.MustCompile(`^https?://[a-zA-Z0-9.-]+[a-zA-Z0-9]+(:[0-9]+)?(/[a-zA-Z0-9\-._~:/?#[\]@!$&'()*+,;=%]*)?$`)
-	matched, err := v.regexMatcher.MatchStringWithTimeout(urlPattern, value)
-	if err != nil {
-		result.AddError(field, value, "security_timeout", "regex validation timeout")
-		return
-	}
-	if !matched {
-		result.AddError(field, value, "url", "invalid URL format")
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		result.AddError(field, "", "url", "invalid URL format")
 		return
 	}
 
-	if v.hasRule(rules, "https_only") {
-		if !strings.HasPrefix(value, "https://") {
-			result.AddError(field, value, "https_only", "only HTTPS URLs allowed")
-			return
-		}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		result.AddError(field, "", "url", "only http/https schemes allowed")
+		return
 	}
 
-	// Check for prohibited URL components
-	if strings.Contains(value, "localhost") || strings.Contains(value, "127.0.0.1") {
-		if v.hasRule(rules, "no_localhost") {
-			result.AddError(field, value, "no_localhost", "localhost URLs not allowed")
+	if v.hasRule(rules, "https_only") && u.Scheme != "https" {
+		result.AddError(field, "", "https_only", "only HTTPS URLs allowed")
+		return
+	}
+
+	host := u.Hostname()
+	allowed := v.getAllowedHosts(rules)
+	if !containsFold(allowed, host) {
+		ctx, cancel := context.WithTimeout(context.Background(), v.dnsLookupTimeout)
+		defer cancel()
+		lookup := v.dnsLookup
+		if lookup == nil {
+			lookup = net.DefaultResolver.LookupIPAddr
+		}
+		ips, err := lookup(ctx, host)
+		if err != nil {
+			result.AddError(field, "", "url", "hostname resolution failed")
 			return
 		}
+		if len(ips) == 0 {
+			result.AddError(field, "", "url", "hostname resolved to no addresses")
+			return
+		}
+		for _, ipa := range ips {
+			ip := ipa.IP
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+				result.AddError(field, "", "ssrf", "URL resolves to disallowed IP class")
+				return
+			}
+		}
 	}
+}
+
+// getAllowedHosts collects all "allow_host:<hostname>" values from rules.
+func (v *Validator) getAllowedHosts(rules []string) []string {
+	var hosts []string
+	for _, rule := range rules {
+		if strings.HasPrefix(rule, "allow_host:") {
+			hosts = append(hosts, strings.TrimPrefix(rule, "allow_host:"))
+		}
+	}
+	return hosts
+}
+
+// containsFold reports whether slice contains s using case-insensitive comparison.
+func containsFold(slice []string, s string) bool {
+	for _, item := range slice {
+		if strings.EqualFold(item, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateJSON validates JSON content for safety

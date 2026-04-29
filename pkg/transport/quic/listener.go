@@ -26,11 +26,18 @@ import (
 //     to survive transient network blips while still detecting genuinely dead connections
 //     well before the controller's heartbeat timeout (default 15s detection + this).
 //
-// Both values can be overridden by passing a custom *quic.Config to Listen/Dial.
+//   - HandshakeIdleTimeout 30s: quic-go defaults to 5s, which is too aggressive for
+//     macOS CI environments under load (many rapid UDP socket open/close cycles exhaust
+//     the kernel socket buffer, causing handshakes to stall). 30s matches the typical
+//     TLS handshake timeout used by HTTP/2 clients and is still well within acceptable
+//     connection-establishment latency for a management plane.
+//
+// All values can be overridden by passing a custom *quic.Config to Listen/Dial.
 func defaultQuicConfig() *quicgo.Config {
 	return &quicgo.Config{
-		MaxIdleTimeout:  90 * time.Second,
-		KeepAlivePeriod: 25 * time.Second,
+		MaxIdleTimeout:       90 * time.Second,
+		KeepAlivePeriod:      25 * time.Second,
+		HandshakeIdleTimeout: 30 * time.Second,
 	}
 }
 
@@ -60,7 +67,7 @@ var _ net.Listener = (*Listener)(nil)
 //
 // tlsConfig must have NextProtos set to a value agreed with the client.
 // If quicConfig is nil, sensible defaults (MaxIdleTimeout: 90s,
-// KeepAlivePeriod: 25s) are used. See defaultQuicConfig for rationale.
+// KeepAlivePeriod: 25s, HandshakeIdleTimeout: 30s) are used. See defaultQuicConfig for rationale.
 func Listen(addr string, tlsConfig *tls.Config, quicConfig *quicgo.Config) (*Listener, error) {
 	ql, err := quicgo.ListenAddr(addr, tlsConfig, mergeQuicConfig(quicConfig))
 	if err != nil {

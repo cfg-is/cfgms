@@ -3,7 +3,10 @@
 package security
 
 import (
+	"context"
+	"net"
 	"testing"
+	"time"
 )
 
 func TestValidator_ValidateString(t *testing.T) {
@@ -297,14 +300,14 @@ func TestValidator_ValidateURL(t *testing.T) {
 		{
 			name:    "valid HTTP URL",
 			field:   "url",
-			value:   "http://example.com",
+			value:   "http://1.1.1.1/",
 			rules:   []string{},
 			wantErr: false,
 		},
 		{
 			name:    "valid HTTPS URL",
 			field:   "url",
-			value:   "https://example.com/path?query=value",
+			value:   "https://8.8.8.8/path?query=value",
 			rules:   []string{},
 			wantErr: false,
 		},
@@ -319,18 +322,10 @@ func TestValidator_ValidateURL(t *testing.T) {
 		{
 			name:    "HTTP not allowed",
 			field:   "url",
-			value:   "http://example.com",
+			value:   "http://1.1.1.1/",
 			rules:   []string{"https_only"},
 			wantErr: true,
 			errRule: "https_only",
-		},
-		{
-			name:    "localhost not allowed",
-			field:   "url",
-			value:   "https://localhost:8080",
-			rules:   []string{"no_localhost"},
-			wantErr: true,
-			errRule: "no_localhost",
 		},
 	}
 
@@ -347,6 +342,197 @@ func TestValidator_ValidateURL(t *testing.T) {
 			}
 			if tt.wantErr && len(result.Errors) > 0 && result.Errors[0].Rule != tt.errRule {
 				t.Errorf("expected error rule %s, got %s", tt.errRule, result.Errors[0].Rule)
+			}
+		})
+	}
+}
+
+func TestValidator_ValidateURL_SSRF(t *testing.T) {
+	validator := NewValidator()
+
+	// All of these must be rejected regardless of which rule fires (ssrf or url).
+	alwaysReject := []struct {
+		name  string
+		value string
+	}{
+		{"loopback IPv4", "http://127.0.0.1/"},
+		{"loopback localhost", "http://localhost/"},
+		{"loopback IPv6", "http://[::1]/"},
+		{"unspecified IPv4", "http://0.0.0.0/"},
+		{"unspecified IPv6", "http://[::]/"},
+		{"link-local metadata endpoint", "http://169.254.169.254/"},
+		{"private RFC1918 class C", "http://192.168.1.1/"},
+		{"private RFC1918 class A", "http://10.0.0.1/"},
+		{"private RFC1918 class B", "http://172.16.0.1/"},
+		{"IPv4-mapped IPv6 loopback", "http://[::ffff:127.0.0.1]/"},
+	}
+	for _, tt := range alwaysReject {
+		t.Run(tt.name, func(t *testing.T) {
+			result := &ValidationResult{Valid: true}
+			validator.ValidateURL(result, "url", tt.value)
+			if result.Valid {
+				t.Errorf("%s: expected SSRF rejection but URL was accepted", tt.value)
+			}
+		})
+	}
+
+	// Decimal and hex IP notation: must be rejected; the firing rule (url vs ssrf) is platform-dependent.
+	for _, value := range []string{"http://2130706433/", "http://0x7f000001/"} {
+		t.Run("numeric notation "+value, func(t *testing.T) {
+			result := &ValidationResult{Valid: true}
+			validator.ValidateURL(result, "url", value)
+			if result.Valid {
+				t.Errorf("%s: expected rejection but URL was accepted", value)
+			}
+		})
+	}
+
+	// allow_host bypasses IP-class rejection for the named host.
+	t.Run("allow_host bypasses SSRF check", func(t *testing.T) {
+		result := &ValidationResult{Valid: true}
+		validator.ValidateURL(result, "url", "http://dev.local/", "allow_host:dev.local")
+		if !result.Valid {
+			t.Errorf("allow_host:dev.local should bypass SSRF check, got errors: %v", result.Errors)
+		}
+	})
+
+	// allow_host matching is case-insensitive.
+	t.Run("allow_host case-insensitive", func(t *testing.T) {
+		result := &ValidationResult{Valid: true}
+		validator.ValidateURL(result, "url", "http://Dev.Local/", "allow_host:dev.local")
+		if !result.Valid {
+			t.Errorf("allow_host case-insensitive match failed, got errors: %v", result.Errors)
+		}
+	})
+}
+
+func TestValidator_ValidateURL_DNSTimeout(t *testing.T) {
+	t.Run("default dnsLookupTimeout is 5s", func(t *testing.T) {
+		v := NewValidator()
+		if v.dnsLookupTimeout != 5*time.Second {
+			t.Errorf("expected dnsLookupTimeout 5s, got %s", v.dnsLookupTimeout)
+		}
+	})
+
+	t.Run("DNS failure rejects URL with url rule", func(t *testing.T) {
+		v := NewValidator()
+		v.dnsLookupTimeout = 1 * time.Millisecond
+		result := &ValidationResult{Valid: true}
+		v.ValidateURL(result, "url", "http://cfgms-test-nonexistent.invalid/")
+		if result.Valid {
+			t.Error("expected DNS failure to reject URL")
+		}
+		if len(result.Errors) == 0 || result.Errors[0].Rule != "url" {
+			t.Errorf("expected rule 'url', got errors: %v", result.Errors)
+		}
+	})
+
+	// dnsLookupTimeout is enforced: a DNS lookup that hangs longer than the
+	// configured timeout must be interrupted and the URL rejected.
+	t.Run("dnsLookupTimeout interrupts hanging DNS lookup", func(t *testing.T) {
+		v := NewValidator()
+		v.dnsLookupTimeout = 50 * time.Millisecond
+		// Inject a lookup that blocks until context deadline fires.
+		v.dnsLookup = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(5 * time.Second):
+				return nil, nil
+			}
+		}
+		result := &ValidationResult{Valid: true}
+		v.ValidateURL(result, "url", "http://cfgms-test-timeout.example/")
+		if result.Valid {
+			t.Error("expected DNS timeout to reject URL")
+		}
+		if len(result.Errors) == 0 || result.Errors[0].Rule != "url" {
+			t.Errorf("expected rule 'url', got errors: %v", result.Errors)
+		}
+	})
+
+	// A successful DNS lookup that returns zero IP addresses must be rejected.
+	// This prevents a silent SSRF bypass when a resolver returns NOERROR with no records.
+	t.Run("zero IPs returned by DNS rejects URL", func(t *testing.T) {
+		v := NewValidator()
+		v.dnsLookup = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+			return nil, nil // no addresses, no error
+		}
+		result := &ValidationResult{Valid: true}
+		v.ValidateURL(result, "url", "http://cfgms-test-zero-ips.example/")
+		if result.Valid {
+			t.Error("expected zero-IPs response to reject URL")
+		}
+		if len(result.Errors) == 0 || result.Errors[0].Rule != "url" {
+			t.Errorf("expected rule 'url', got errors: %v", result.Errors)
+		}
+	})
+
+	// allow_host: is an unconditional bypass — it skips DNS lookup and IP-class
+	// checks for the named host. The rules parameter must only contain
+	// developer-controlled values; user-supplied input must never flow into rules.
+	t.Run("allow_host with loopback IP literal is explicit bypass", func(t *testing.T) {
+		v := NewValidator()
+		result := &ValidationResult{Valid: true}
+		v.ValidateURL(result, "url", "http://127.0.0.1/", "allow_host:127.0.0.1")
+		if !result.Valid {
+			t.Errorf("allow_host:127.0.0.1 is an explicit trust bypass and must be accepted: %v", result.Errors)
+		}
+	})
+}
+
+func TestValidator_getAllowedHosts(t *testing.T) {
+	v := NewValidator()
+
+	tests := []struct {
+		name  string
+		rules []string
+		want  []string
+	}{
+		{"nil rules", nil, nil},
+		{"no allow_host rules", []string{"required", "https_only"}, nil},
+		{"single allow_host", []string{"allow_host:example.com"}, []string{"example.com"}},
+		{"multiple allow_host", []string{"allow_host:a.com", "allow_host:b.com"}, []string{"a.com", "b.com"}},
+		{"mixed rules", []string{"required", "allow_host:foo.internal", "https_only"}, []string{"foo.internal"}},
+		{"empty value after prefix", []string{"allow_host:"}, []string{""}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := v.getAllowedHosts(tt.rules)
+			if len(got) != len(tt.want) {
+				t.Fatalf("getAllowedHosts(%v) = %v, want %v", tt.rules, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("getAllowedHosts[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestContainsFold(t *testing.T) {
+	tests := []struct {
+		name  string
+		slice []string
+		s     string
+		want  bool
+	}{
+		{"empty slice", nil, "foo", false},
+		{"exact match", []string{"foo", "bar"}, "foo", true},
+		{"case-insensitive match upper in slice", []string{"FOO", "bar"}, "foo", true},
+		{"case-insensitive match upper in target", []string{"foo"}, "FOO", true},
+		{"no match", []string{"foo", "bar"}, "baz", false},
+		{"empty string in slice", []string{""}, "", true},
+		{"empty string not in slice", []string{"foo"}, "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := containsFold(tt.slice, tt.s)
+			if got != tt.want {
+				t.Errorf("containsFold(%v, %q) = %v, want %v", tt.slice, tt.s, got, tt.want)
 			}
 		})
 	}
@@ -924,22 +1110,14 @@ func TestValidator_ValidateURL_EdgeCases(t *testing.T) {
 		{
 			name:    "HTTPS URL with https_only passes",
 			field:   "url",
-			value:   "https://example.com",
+			value:   "https://8.8.8.8",
 			rules:   []string{"https_only"},
 			wantErr: false,
 		},
 		{
-			name:    "127.0.0.1 with no_localhost",
-			field:   "url",
-			value:   "https://127.0.0.1:8080",
-			rules:   []string{"no_localhost"},
-			wantErr: true,
-			errRule: "no_localhost",
-		},
-		{
 			name:    "URL with port",
 			field:   "url",
-			value:   "https://example.com:8443/path",
+			value:   "https://8.8.8.8:8443/path",
 			rules:   []string{},
 			wantErr: false,
 		},
