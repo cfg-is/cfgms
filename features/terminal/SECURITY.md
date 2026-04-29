@@ -296,6 +296,81 @@ The terminal security implementation meets various compliance requirements:
 - **Webhook Notifications**: Custom alert handling
 - **Email/SMS Alerts**: Multi-channel notification system
 
+## Session Recording Integrity
+
+Session recordings carry per-event HMAC-SHA256 chain integrity (Story #910).
+
+### File Format
+
+Each event is written in a binary length-prefixed frame:
+
+```
+[4 bytes: content length][N bytes: event content][32 bytes: HMAC-SHA256]
+```
+
+Compression (gzip) is applied per-event before framing. The HMAC is computed
+over the post-compression bytes that land on disk, binding integrity to the
+exact bytes stored.
+
+### Chain Construction
+
+Each HMAC binds the current event to its sequence position and the previous
+event's checksum:
+
+```
+HMAC-SHA256(key, sequence_bytes || previous_checksum || content)
+```
+
+- `sequence` starts at 1 and increments by 1 per event.
+- `previous_checksum` for the first event is the all-zero 32-byte slice.
+- Any reordering or insertion of events breaks the chain.
+
+### Metadata Anchors
+
+At `EndRecording`, a JSON sidecar file (`<sessionID>.rec.meta`) is written
+with:
+
+```json
+{
+  "session_id": "...",
+  "first_checksum": "<hex>",
+  "last_checksum":  "<hex>",
+  "event_count":    1234,
+  "started_at":     "...",
+  "ended_at":       "..."
+}
+```
+
+`first_checksum` and `last_checksum` are the HMACs of the first and last
+events. Comparing these against a fresh walk of the file detects both
+content tampering and metadata tampering.
+
+### HMAC Key Management
+
+The HMAC key for recordings is stored at secrets slot
+`terminal/recording-hmac-key` (separate from `audit/hmac-key`). A 32-byte
+random key is generated on first boot via `crypto/rand` and persisted via
+`pkg/secrets`. Without a secrets store the key is ephemeral — per-event
+integrity is maintained within the process run, but cross-restart
+verification requires `WithSecretsStore`.
+
+### Verification
+
+`DefaultSessionRecorder.VerifyRecording(sessionID)` walks the `.rec` file
+event by event, recomputes each HMAC, and confirms the accumulated
+first/last checksums against the metadata. It returns `(false, error)` if:
+
+- Metadata file is missing or unparseable.
+- Any event's HMAC does not match (content has been altered).
+- The total event count differs from metadata.
+- The computed first or last checksum diverges from the stored anchor.
+
+### Legacy File Cleanup
+
+On `NewSessionRecorder`, any `.rec` file whose sidecar lacks
+`first_checksum` (written before Story #910) is deleted and an `Info` log
+entry is emitted. Pre-production only — no in-flight recordings to preserve.
+
 ## Future Enhancements
 
 1. **Machine Learning**: AI-powered anomaly detection

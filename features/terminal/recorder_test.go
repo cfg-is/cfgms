@@ -3,6 +3,8 @@
 package terminal
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -397,5 +399,144 @@ func TestRecordingCleanup(t *testing.T) {
 
 	if err := recorder.Close(); err != nil {
 		t.Logf("Failed to close recorder: %v", err)
+	}
+}
+
+func TestHMACChainRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := testutil.NewMockLogger(true)
+
+	for _, compression := range []bool{false, true} {
+		name := "without-compression"
+		if compression {
+			name = "with-compression"
+		}
+		t.Run(name, func(t *testing.T) {
+			config := &RecorderConfig{
+				StoragePath:    tmpDir,
+				MaxRecordingMB: 100,
+				Compression:    compression,
+			}
+			recorder, err := NewSessionRecorder(config, logger)
+			require.NoError(t, err)
+
+			sessionID := "hmac-roundtrip-" + name
+			eventContent := []byte("test event data for HMAC chain integrity verification")
+
+			for i := 0; i < 100; i++ {
+				require.NoError(t, recorder.RecordData(sessionID, eventContent, DataDirectionInput))
+			}
+			require.NoError(t, recorder.EndRecording(sessionID))
+
+			ok, err := recorder.VerifyRecording(sessionID)
+			assert.NoError(t, err)
+			assert.True(t, ok, "untampered recording must pass verification")
+		})
+	}
+}
+
+func TestHMACChainTamperDetection(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := testutil.NewMockLogger(true)
+	config := &RecorderConfig{
+		StoragePath:    tmpDir,
+		MaxRecordingMB: 100,
+		Compression:    false, // uncompressed so byte positions are predictable
+	}
+
+	recorder, err := NewSessionRecorder(config, logger)
+	require.NoError(t, err)
+
+	sessionID := "hmac-tamper-session"
+	// 100 bytes per event so offset 50 is firmly inside first event content
+	eventContent := make([]byte, 100)
+	for i := range eventContent {
+		eventContent[i] = byte(i)
+	}
+
+	for i := 0; i < 100; i++ {
+		require.NoError(t, recorder.RecordData(sessionID, eventContent, DataDirectionInput))
+	}
+	require.NoError(t, recorder.EndRecording(sessionID))
+
+	// Mutate byte 50: first frame layout is [4-byte len][100-byte content][32-byte HMAC]
+	// byte 50 is at offset 50-4=46 within content → clearly inside the content region
+	recPath := filepath.Join(tmpDir, sessionID+".rec")
+	raw, err := os.ReadFile(recPath)
+	require.NoError(t, err)
+	raw[50] ^= 0xFF
+	require.NoError(t, os.WriteFile(recPath, raw, 0600))
+
+	ok, _ := recorder.VerifyRecording(sessionID)
+	assert.False(t, ok, "tampered recording must fail verification")
+}
+
+func TestHMACChainMissingMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := testutil.NewMockLogger(true)
+	config := &RecorderConfig{
+		StoragePath:    tmpDir,
+		MaxRecordingMB: 100,
+		Compression:    false,
+	}
+
+	recorder, err := NewSessionRecorder(config, logger)
+	require.NoError(t, err)
+
+	sessionID := "hmac-missing-meta-session"
+	for i := 0; i < 100; i++ {
+		require.NoError(t, recorder.RecordData(sessionID, []byte("event data"), DataDirectionInput))
+	}
+	require.NoError(t, recorder.EndRecording(sessionID))
+
+	// Remove metadata so VerifyRecording cannot read chain anchors
+	metaPath := filepath.Join(tmpDir, sessionID+".rec.meta")
+	require.NoError(t, os.Remove(metaPath))
+
+	ok, err := recorder.VerifyRecording(sessionID)
+	assert.False(t, ok, "recording without metadata must fail verification")
+	assert.Error(t, err, "missing metadata must return an error")
+}
+
+func TestGetRecordingNewFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := testutil.NewMockLogger(true)
+
+	for _, compression := range []bool{false, true} {
+		name := "uncompressed"
+		if compression {
+			name = "compressed"
+		}
+		t.Run(name, func(t *testing.T) {
+			config := &RecorderConfig{
+				StoragePath:    tmpDir,
+				MaxRecordingMB: 100,
+				Compression:    compression,
+			}
+			recorder, err := NewSessionRecorder(config, logger)
+			require.NoError(t, err)
+
+			sessionID := "get-recording-format-" + name
+			parts := [][]byte{
+				[]byte("first event content"),
+				[]byte("second event content"),
+				[]byte("third event content"),
+			}
+			for _, p := range parts {
+				require.NoError(t, recorder.RecordData(sessionID, p, DataDirectionInput))
+			}
+			require.NoError(t, recorder.EndRecording(sessionID))
+
+			recording, err := recorder.GetRecording(sessionID)
+			require.NoError(t, err)
+			require.NotNil(t, recording)
+
+			// GetRecording must return only the raw content bytes — no length prefixes or HMACs
+			expected := append([]byte(nil), parts[0]...)
+			expected = append(expected, parts[1]...)
+			expected = append(expected, parts[2]...)
+			assert.Equal(t, expected, recording.Data, "content bytes must match exactly without framing")
+			assert.Equal(t, 3, len(recording.Events), "event count must match")
+		})
 	}
 }
