@@ -171,8 +171,10 @@ func TestSessionTimeout(t *testing.T) {
 	session, err := manager.CreateSession(ctx, sessionReq)
 	require.NoError(t, err)
 
-	// Wait for timeout plus cleanup cycle
-	time.Sleep(200 * time.Millisecond)
+	// Poll until the session has actually timed out before triggering cleanup.
+	require.Eventually(t, func() bool {
+		return session.IsTimedOut(config.SessionTimeout)
+	}, time.Second, time.Millisecond)
 
 	// Manually trigger cleanup to ensure it runs in test
 	defaultManager := manager.(*DefaultSessionManager)
@@ -239,7 +241,7 @@ func TestCleanupTimedOutSessions_AllSessionsCleaned(t *testing.T) {
 	ctx := context.Background()
 
 	const sessionCount = 10
-	sessionIDs := make([]string, sessionCount)
+	sessions := make([]*Session, sessionCount)
 
 	for i := 0; i < sessionCount; i++ {
 		req := &SessionRequest{
@@ -251,16 +253,25 @@ func TestCleanupTimedOutSessions_AllSessionsCleaned(t *testing.T) {
 		}
 		sess, err := manager.CreateSession(ctx, req)
 		require.NoError(t, err)
-		sessionIDs[i] = sess.ID
+		sessions[i] = sess
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	// Poll until every session has timed out. Sessions are created sequentially,
+	// so the last one timed out means all have; checking all is unambiguous.
+	require.Eventually(t, func() bool {
+		for _, sess := range sessions {
+			if !sess.IsTimedOut(config.SessionTimeout) {
+				return false
+			}
+		}
+		return true
+	}, time.Second, time.Millisecond)
 
 	manager.(*DefaultSessionManager).CleanupTimedOutSessions()
 
-	for _, id := range sessionIDs {
-		_, err := manager.GetSession(id)
-		assert.Error(t, err, "timed-out session %s should be removed", id)
+	for _, sess := range sessions {
+		_, err := manager.GetSession(sess.ID)
+		assert.Error(t, err, "timed-out session %s should be removed", sess.ID)
 	}
 }
 
@@ -286,7 +297,7 @@ func TestCleanupTimedOutSessions_ContinuesAfterPerSessionError(t *testing.T) {
 	ctx := context.Background()
 
 	const sessionCount = 10
-	sessionIDs := make([]string, sessionCount)
+	sessions := make([]*Session, sessionCount)
 
 	for i := 0; i < sessionCount; i++ {
 		req := &SessionRequest{
@@ -298,30 +309,42 @@ func TestCleanupTimedOutSessions_ContinuesAfterPerSessionError(t *testing.T) {
 		}
 		sess, err := manager.CreateSession(ctx, req)
 		require.NoError(t, err)
-		sessionIDs[i] = sess.ID
+		sessions[i] = sess
 	}
 
-	time.Sleep(10 * time.Millisecond)
+	// Poll until all sessions have timed out before installing the hook and triggering cleanup.
+	require.Eventually(t, func() bool {
+		for _, sess := range sessions {
+			if !sess.IsTimedOut(config.SessionTimeout) {
+				return false
+			}
+		}
+		return true
+	}, time.Second, time.Millisecond)
 
 	defaultManager := manager.(*DefaultSessionManager)
 
 	// Install a hook that terminates every collected session before the
 	// termination loop begins. This guarantees the loop sees "session not
 	// found" for all IDs in a deterministic, race-free way.
+	//
+	// The hook runs synchronously on the test goroutine (CleanupTimedOutSessions
+	// is called directly below), so require.NoError is safe.
 	defaultManager.afterCollectHook = func(ids []string) {
 		hookCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, id := range ids {
-			_ = defaultManager.TerminateSession(hookCtx, id)
+			require.NoError(t, defaultManager.TerminateSession(hookCtx, id),
+				"hook: pre-termination of session %s must succeed", id)
 		}
 	}
 
 	defaultManager.CleanupTimedOutSessions()
 
 	// All sessions must be gone (pre-terminated by the hook).
-	for _, id := range sessionIDs {
-		_, err := manager.GetSession(id)
-		assert.Error(t, err, "session %s must be terminated", id)
+	for _, sess := range sessions {
+		_, err := manager.GetSession(sess.ID)
+		assert.Error(t, err, "session %s must be terminated", sess.ID)
 	}
 
 	// The termination loop must have logged a warning for each "session not
@@ -333,18 +356,17 @@ func TestCleanupTimedOutSessions_ContinuesAfterPerSessionError(t *testing.T) {
 // TestCleanupTimedOutSessions_GetSessionDuringCleanup verifies that the lock is
 // released before TerminateSession is called, allowing concurrent read operations.
 //
-// Because TerminateSession itself acquires m.mu.Lock(), if CleanupTimedOutSessions
-// held the lock during TerminateSession it would deadlock. Non-completion within 5 s
-// is treated as a deadlock.
+// The afterCollectHook acts as a rendezvous: it signals when m.mu has been released
+// and blocks until GetSession has confirmed concurrent access, proving the lock is
+// not held during the termination loop.
 func TestCleanupTimedOutSessions_GetSessionDuringCleanup(t *testing.T) {
-	logger := testutil.NewMockLogger(true)
 	config := &Config{
 		SessionTimeout: 1 * time.Millisecond,
 		MaxSessions:    100,
 		RecordSessions: false,
 	}
 
-	manager, err := NewSessionManager(config, logger)
+	manager, err := NewSessionManager(config, logging.NewNoopLogger())
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -369,12 +391,24 @@ func TestCleanupTimedOutSessions_GetSessionDuringCleanup(t *testing.T) {
 	activeSession, err := manager.CreateSession(ctx, activeReq)
 	require.NoError(t, err)
 
-	time.Sleep(10 * time.Millisecond)
+	// Poll until the timed-out session has actually timed out.
+	require.Eventually(t, func() bool {
+		return timedOutSession.IsTimedOut(config.SessionTimeout)
+	}, time.Second, time.Millisecond)
 
 	// Bump the active session's LastActivity so it is NOT timed out.
 	activeSession.UpdateActivity()
 
 	defaultManager := manager.(*DefaultSessionManager)
+
+	// hookReached is closed when cleanup has released m.mu and entered the hook.
+	// hookDone is closed by the test goroutine to let cleanup proceed to TerminateSession.
+	hookReached := make(chan struct{})
+	hookDone := make(chan struct{})
+	defaultManager.afterCollectHook = func(_ []string) {
+		close(hookReached)
+		<-hookDone
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -382,12 +416,21 @@ func TestCleanupTimedOutSessions_GetSessionDuringCleanup(t *testing.T) {
 		close(done)
 	}()
 
-	// GetSession (RLock) must succeed; if the write lock were held for the full
-	// cleanup it would block until cleanup finishes (or deadlock if TerminateSession
-	// is called while the lock is held).
+	// Wait until cleanup has released m.mu and is blocked in the hook.
+	select {
+	case <-hookReached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup goroutine never released m.mu (hook not called within 5s)")
+	}
+
+	// GetSession (RLock) must succeed while the cleanup goroutine holds no lock.
+	// If m.mu were still held this would block indefinitely.
 	retrieved, err := manager.GetSession(activeSession.ID)
-	assert.NoError(t, err, "GetSession must not block while CleanupTimedOutSessions is in its termination loop")
+	assert.NoError(t, err, "GetSession must succeed while CleanupTimedOutSessions is in its termination loop")
 	assert.Equal(t, activeSession.ID, retrieved.ID)
+
+	// Unblock the cleanup goroutine so it can call TerminateSession.
+	close(hookDone)
 
 	select {
 	case <-done:
