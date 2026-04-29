@@ -73,6 +73,7 @@ func (c *DefaultCollector) Start(ctx context.Context) error {
 
 	c.ctx, c.cancelFunc = context.WithCancel(ctx)
 	c.started = true
+	c.wg.Add(1) // increment before unlock so Stop()'s wg.Wait() sees the goroutine
 	c.mu.Unlock()
 
 	// Collect initial metrics synchronously to ensure data is available immediately
@@ -80,8 +81,7 @@ func (c *DefaultCollector) Start(ctx context.Context) error {
 		fmt.Printf("[PERF] Warning: initial metric collection failed: %v\n", err)
 	}
 
-	// Start collection goroutine for periodic updates
-	c.wg.Add(1)
+	// Start collection goroutine for periodic updates (wg already incremented above)
 	go c.collectionLoop()
 
 	return nil
