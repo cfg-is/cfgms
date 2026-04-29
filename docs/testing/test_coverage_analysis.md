@@ -49,7 +49,6 @@ While our test suite covers core functionality well, there are significant gaps 
   - features/validation          67.6%
   - features/templates           55.2%
   - features/terminal            50.8%
-  - features/steward/dna/events  72.8%
 ```
 
 #### 🟠 **MODERATE Coverage (30-50%)**

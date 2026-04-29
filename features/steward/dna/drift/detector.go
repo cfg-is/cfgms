@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -20,12 +21,10 @@ import (
 
 // detector implements the Detector interface for DNA drift detection.
 type detector struct {
-	logger     logging.Logger
-	config     *DetectorConfig
-	rules      []*DriftRule
-	filter     Filter
-	ruleEngine RuleEngine
-	stats      *DetectorStats
+	logger  logging.Logger
+	config  *DetectorConfig
+	stats   *DetectorStats
+	statsMu sync.RWMutex
 }
 
 // DetectorConfig defines configuration for drift detection.
@@ -66,47 +65,10 @@ func NewDetector(config *DetectorConfig, logger logging.Logger) (Detector, error
 	d := &detector{
 		logger: logger,
 		config: config,
-		rules:  make([]*DriftRule, 0),
 		stats: &DetectorStats{
 			RulesTriggered: make(map[string]int64),
 		},
 	}
-
-	// Initialize filter
-	filterConfig := &FilterConfig{
-		EnableSmartFiltering:    true,
-		FalsePositiveThreshold:  config.ConfidenceThreshold,
-		EnableTemporalFiltering: true,
-		TemporalWindow:          24 * time.Hour,
-		MinChangeInterval:       5 * time.Minute,
-		IgnorePercentageChanges: true,
-		PercentageThreshold:     5.0,
-		IgnoreTemporaryFiles:    true,
-		IgnoreLogRotation:       true,
-		IgnorePatterns:          config.IgnoredAttributes,
-		VolatileAttributes:      config.IgnoredAttributes,
-		MaxFilterTime:           10 * time.Second,
-	}
-	filter, err := NewFilter(filterConfig, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize filter: %w", err)
-	}
-	d.filter = filter
-
-	// Initialize rule engine
-	ruleEngineConfig := &RuleEngineConfig{
-		MaxRuleEvaluationTime:  30 * time.Second,
-		EnableParallelRuleEval: true,
-		MaxConcurrentRules:     10,
-		MaxRulesPerEngine:      100,
-		EnableRuleValidation:   true,
-		EnableDetailedStats:    true,
-	}
-	ruleEngine, err := NewRuleEngine(ruleEngineConfig, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize rule engine: %w", err)
-	}
-	d.ruleEngine = ruleEngine
 
 	if logger != nil {
 		logger.Info("Drift detector initialized",
@@ -122,7 +84,6 @@ func NewDetector(config *DetectorConfig, logger logging.Logger) (Detector, error
 func (d *detector) DetectDrift(ctx context.Context, previous, current *commonpb.DNA) ([]*DriftEvent, error) {
 	startTime := time.Now()
 
-	// Validate inputs
 	if previous == nil || current == nil {
 		return nil, fmt.Errorf("both previous and current DNA must be provided")
 	}
@@ -131,7 +92,6 @@ func (d *detector) DetectDrift(ctx context.Context, previous, current *commonpb.
 		return nil, fmt.Errorf("DNA IDs must match for comparison")
 	}
 
-	// Check for timeout
 	if d.config.MaxComparisonTime > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, d.config.MaxComparisonTime)
@@ -145,70 +105,32 @@ func (d *detector) DetectDrift(ctx context.Context, previous, current *commonpb.
 			"current_attributes", len(current.Attributes))
 	}
 
-	// Perform diff analysis
 	changes, err := d.analyzeDNAChanges(ctx, previous, current)
 	if err != nil {
 		return nil, fmt.Errorf("failed to analyze DNA changes: %w", err)
 	}
 
-	// Generate drift events from changes
 	events, err := d.generateDriftEvents(ctx, previous, current, changes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate drift events: %w", err)
 	}
 
-	// Apply filtering to reduce false positives
-	filteredEvents, err := d.filter.FilterEvents(ctx, events)
-	if err != nil {
-		if d.logger != nil {
-			d.logger.Error("Failed to filter drift events", "error", err)
-		}
-		filteredEvents = events // Use unfiltered events as fallback
-	}
-
-	// Apply rules to events
-	finalEvents := make([]*DriftEvent, 0, len(filteredEvents))
-	for _, event := range filteredEvents {
-		result, err := d.ruleEngine.EvaluateRules(ctx, event)
-		if err != nil {
-			if d.logger != nil {
-				d.logger.Error("Failed to evaluate rules for event", "error", err, "event_id", event.ID)
-			}
-			finalEvents = append(finalEvents, event)
-			continue
-		}
-
-		if result.Matched {
-			// Update event based on rule result
-			event.RulesTriggered = append(event.RulesTriggered, result.RuleID)
-			event.Confidence = result.Confidence
-			finalEvents = append(finalEvents, event)
-
-			// Update rule statistics
-			d.stats.RulesTriggered[result.RuleID]++
-		}
-	}
-
-	// Update statistics
-	d.updateStats(startTime, changes, finalEvents)
+	d.updateStats(startTime, changes, events)
 
 	if d.logger != nil {
 		d.logger.Debug("Drift detection completed",
 			"device_id", previous.Id,
 			"changes_detected", len(changes),
 			"events_generated", len(events),
-			"events_after_filter", len(filteredEvents),
-			"final_events", len(finalEvents),
 			"detection_time", time.Since(startTime))
 	}
 
-	return finalEvents, nil
+	return events, nil
 }
 
 // DetectDriftBatch processes multiple DNA comparisons efficiently.
 func (d *detector) DetectDriftBatch(ctx context.Context, comparisons []*DNAComparison) ([]*DriftEvent, error) {
 	if !d.config.EnableBatchMode {
-		// Process individually
 		var allEvents []*DriftEvent
 		for _, comp := range comparisons {
 			events, err := d.DetectDrift(ctx, comp.Previous, comp.Current)
@@ -223,7 +145,6 @@ func (d *detector) DetectDriftBatch(ctx context.Context, comparisons []*DNACompa
 		return allEvents, nil
 	}
 
-	// Process in batches
 	batchSize := d.config.BatchSize
 	if batchSize <= 0 {
 		batchSize = 10
@@ -236,8 +157,7 @@ func (d *detector) DetectDriftBatch(ctx context.Context, comparisons []*DNACompa
 			end = len(comparisons)
 		}
 
-		batch := comparisons[i:end]
-		for _, comp := range batch {
+		for _, comp := range comparisons[i:end] {
 			events, err := d.DetectDrift(ctx, comp.Previous, comp.Current)
 			if err != nil {
 				if d.logger != nil {
@@ -248,7 +168,6 @@ func (d *detector) DetectDriftBatch(ctx context.Context, comparisons []*DNACompa
 			allEvents = append(allEvents, events...)
 		}
 
-		// Check for context cancellation
 		select {
 		case <-ctx.Done():
 			return allEvents, ctx.Err()
@@ -259,32 +178,10 @@ func (d *detector) DetectDriftBatch(ctx context.Context, comparisons []*DNACompa
 	return allEvents, nil
 }
 
-// ValidateRules validates drift detection rules configuration.
-func (d *detector) ValidateRules(rules []*DriftRule) error {
-	for _, rule := range rules {
-		if err := d.validateRule(rule); err != nil {
-			return fmt.Errorf("invalid rule %s: %w", rule.ID, err)
-		}
-	}
-	return nil
-}
-
-// UpdateRules updates the active drift detection rules.
-func (d *detector) UpdateRules(rules []*DriftRule) error {
-	if err := d.ValidateRules(rules); err != nil {
-		return err
-	}
-
-	d.rules = make([]*DriftRule, len(rules))
-	copy(d.rules, rules)
-
-	// Update rule engine
-	return d.ruleEngine.AddRule(nil) // Bulk update would be implemented
-}
-
 // GetStats returns drift detection statistics.
 func (d *detector) GetStats() *DetectorStats {
-	// Return a copy to avoid race conditions
+	d.statsMu.RLock()
+	defer d.statsMu.RUnlock()
 	stats := *d.stats
 	stats.RulesTriggered = make(map[string]int64)
 	for k, v := range d.stats.RulesTriggered {
@@ -298,25 +195,6 @@ func (d *detector) Close() error {
 	if d.logger != nil {
 		d.logger.Info("Closing drift detector")
 	}
-
-	var errs []error
-
-	if d.filter != nil {
-		if err := d.filter.(interface{ Close() error }).Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close filter: %w", err))
-		}
-	}
-
-	if d.ruleEngine != nil {
-		if err := d.ruleEngine.(interface{ Close() error }).Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close rule engine: %w", err))
-		}
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("errors closing detector: %v", errs)
-	}
-
 	return nil
 }
 
@@ -324,7 +202,6 @@ func (d *detector) Close() error {
 func (d *detector) analyzeDNAChanges(ctx context.Context, previous, current *commonpb.DNA) ([]*AttributeChange, error) {
 	var changes []*AttributeChange
 
-	// Get all unique attributes
 	allAttributes := make(map[string]bool)
 	for attr := range previous.Attributes {
 		allAttributes[attr] = true
@@ -333,7 +210,6 @@ func (d *detector) analyzeDNAChanges(ctx context.Context, previous, current *com
 		allAttributes[attr] = true
 	}
 
-	// Analyze each attribute
 	for attribute := range allAttributes {
 		select {
 		case <-ctx.Done():
@@ -341,7 +217,6 @@ func (d *detector) analyzeDNAChanges(ctx context.Context, previous, current *com
 		default:
 		}
 
-		// Skip ignored attributes
 		if d.isIgnoredAttribute(attribute) {
 			continue
 		}
@@ -353,7 +228,6 @@ func (d *detector) analyzeDNAChanges(ctx context.Context, previous, current *com
 
 		switch {
 		case !prevExists && currExists:
-			// New attribute added
 			change = &AttributeChange{
 				Attribute:     attribute,
 				PreviousValue: "",
@@ -365,7 +239,6 @@ func (d *detector) analyzeDNAChanges(ctx context.Context, previous, current *com
 			}
 
 		case prevExists && !currExists:
-			// Attribute removed
 			change = &AttributeChange{
 				Attribute:     attribute,
 				PreviousValue: prevValue,
@@ -377,7 +250,6 @@ func (d *detector) analyzeDNAChanges(ctx context.Context, previous, current *com
 			}
 
 		case prevExists && currExists && prevValue != currValue:
-			// Attribute modified
 			change = &AttributeChange{
 				Attribute:     attribute,
 				PreviousValue: prevValue,
@@ -394,7 +266,6 @@ func (d *detector) analyzeDNAChanges(ctx context.Context, previous, current *com
 		}
 	}
 
-	// Sort changes by severity and attribute name
 	sort.Slice(changes, func(i, j int) bool {
 		if changes[i].Severity != changes[j].Severity {
 			return d.severityWeight(changes[i].Severity) > d.severityWeight(changes[j].Severity)
@@ -411,7 +282,6 @@ func (d *detector) generateDriftEvents(ctx context.Context, previous, current *c
 		return nil, nil
 	}
 
-	// Group changes by category and severity for logical event creation
 	eventGroups := d.groupChanges(changes)
 
 	var events []*DriftEvent
@@ -428,14 +298,13 @@ func (d *detector) generateDriftEvents(ctx context.Context, previous, current *c
 				ChangeCount:   len(severityChanges),
 				PreviousDNA:   previous,
 				CurrentDNA:    current,
-				DetectionTime: time.Since(time.Now()), // Will be updated by caller
+				DetectionTime: time.Since(time.Now()),
 				Confidence:    d.calculateConfidence(severityChanges),
 				RiskScore:     d.calculateRiskScore(severityChanges),
 				Impact:        d.calculateImpact(severityChanges),
 				Status:        StatusNew,
 			}
 
-			// Generate human-readable title and description
 			event.Title, event.Description = d.generateEventDescription(event)
 
 			events = append(events, event)
@@ -444,8 +313,6 @@ func (d *detector) generateDriftEvents(ctx context.Context, previous, current *c
 
 	return events, nil
 }
-
-// Helper methods
 
 func (d *detector) isIgnoredAttribute(attribute string) bool {
 	for _, ignored := range d.config.IgnoredAttributes {
@@ -457,26 +324,22 @@ func (d *detector) isIgnoredAttribute(attribute string) bool {
 }
 
 func (d *detector) categorizeSeverity(attribute, prevValue, currValue string) DriftSeverity {
-	// Check if it's a critical attribute
 	for _, critical := range d.config.CriticalAttributes {
 		if matched, _ := regexp.MatchString(critical, attribute); matched {
 			return SeverityCritical
 		}
 	}
 
-	// Check if it's a security attribute
 	for _, security := range d.config.SecurityAttributes {
 		if matched, _ := regexp.MatchString(security, attribute); matched {
 			return SeverityCritical
 		}
 	}
 
-	// Special cases for known critical changes
 	if d.isCriticalChange(attribute, prevValue, currValue) {
 		return SeverityCritical
 	}
 
-	// Default severity based on attribute category
 	category := d.categorizeAttribute(attribute)
 	switch category {
 	case "security":
@@ -493,7 +356,6 @@ func (d *detector) categorizeSeverity(attribute, prevValue, currValue string) Dr
 func (d *detector) categorizeAttribute(attribute string) string {
 	attributeLower := strings.ToLower(attribute)
 
-	// Security-related attributes
 	securityKeywords := []string{"password", "key", "cert", "auth", "security", "firewall", "permission", "user", "group"}
 	for _, keyword := range securityKeywords {
 		if strings.Contains(attributeLower, keyword) {
@@ -501,7 +363,6 @@ func (d *detector) categorizeAttribute(attribute string) string {
 		}
 	}
 
-	// Hardware-related attributes
 	hardwareKeywords := []string{"cpu", "memory", "disk", "hardware", "arch", "motherboard", "bios"}
 	for _, keyword := range hardwareKeywords {
 		if strings.Contains(attributeLower, keyword) {
@@ -509,7 +370,6 @@ func (d *detector) categorizeAttribute(attribute string) string {
 		}
 	}
 
-	// Network-related attributes
 	networkKeywords := []string{"ip", "mac", "network", "interface", "route", "dns", "hostname"}
 	for _, keyword := range networkKeywords {
 		if strings.Contains(attributeLower, keyword) {
@@ -517,7 +377,6 @@ func (d *detector) categorizeAttribute(attribute string) string {
 		}
 	}
 
-	// Software-related attributes
 	softwareKeywords := []string{"software", "package", "service", "process", "os", "kernel", "version"}
 	for _, keyword := range softwareKeywords {
 		if strings.Contains(attributeLower, keyword) {
@@ -574,7 +433,6 @@ func (d *detector) assessImpact(attribute, prevValue, currValue string, changeTy
 }
 
 func (d *detector) isCriticalChange(attribute, prevValue, currValue string) bool {
-	// Define patterns for critical changes
 	criticalPatterns := map[string][]string{
 		"firewall":   {"enabled", "disabled", "active", "inactive"},
 		"security":   {"on", "off", "enabled", "disabled"},
@@ -629,8 +487,7 @@ func (d *detector) calculateConfidence(changes []*AttributeChange) float64 {
 		return 0.0
 	}
 
-	// Base confidence on the number and severity of changes
-	confidence := 0.5 // Base confidence
+	confidence := 0.5
 
 	criticalCount := 0
 	warningCount := 0
@@ -644,11 +501,9 @@ func (d *detector) calculateConfidence(changes []*AttributeChange) float64 {
 		}
 	}
 
-	// Increase confidence based on critical changes
 	confidence += float64(criticalCount) * 0.3
 	confidence += float64(warningCount) * 0.1
 
-	// Cap at 1.0
 	if confidence > 1.0 {
 		confidence = 1.0
 	}
@@ -673,13 +528,11 @@ func (d *detector) calculateRiskScore(changes []*AttributeChange) float64 {
 			riskScore += 0.1
 		}
 
-		// Additional risk for security-related changes
 		if change.Category == "security" {
 			riskScore += 0.3
 		}
 	}
 
-	// Normalize to 0-1 range
 	maxPossibleRisk := float64(len(changes)) * 1.1
 	if maxPossibleRisk > 0 {
 		riskScore = riskScore / maxPossibleRisk
@@ -713,11 +566,7 @@ func (d *detector) calculateImpact(changes []*AttributeChange) DriftImpact {
 		return ImpactHigh
 	}
 
-	if warningCount >= 3 {
-		return ImpactMedium
-	}
-
-	if warningCount > 0 || len(changes) >= 5 {
+	if warningCount >= 3 || warningCount > 0 || len(changes) >= 5 {
 		return ImpactMedium
 	}
 
@@ -729,7 +578,6 @@ func (d *detector) generateEventDescription(event *DriftEvent) (string, string) 
 	category := string(event.Category)
 	severity := string(event.Severity)
 
-	// Generate title
 	severityTitle := severity
 	if severity != "" {
 		runes := []rune(severity)
@@ -739,15 +587,12 @@ func (d *detector) generateEventDescription(event *DriftEvent) (string, string) 
 	title := fmt.Sprintf("%s %s drift detected (%d changes)",
 		severityTitle, category, changeCount)
 
-	// Generate description
 	var descriptionParts []string
 
-	// Summary
 	descriptionParts = append(descriptionParts,
 		fmt.Sprintf("Detected %d %s configuration changes on device %s",
 			changeCount, category, event.DeviceID))
 
-	// List key changes (up to 5)
 	maxListed := 5
 	if changeCount > 0 {
 		descriptionParts = append(descriptionParts, "\nKey changes:")
@@ -767,7 +612,6 @@ func (d *detector) generateEventDescription(event *DriftEvent) (string, string) 
 		}
 	}
 
-	// Risk assessment
 	descriptionParts = append(descriptionParts,
 		fmt.Sprintf("\nRisk Score: %.2f | Confidence: %.2f | Impact: %s",
 			event.RiskScore, event.Confidence, event.Impact))
@@ -790,33 +634,10 @@ func (d *detector) severityWeight(severity DriftSeverity) int {
 	}
 }
 
-func (d *detector) validateRule(rule *DriftRule) error {
-	if rule.ID == "" {
-		return fmt.Errorf("rule ID is required")
-	}
-
-	if rule.Name == "" {
-		return fmt.Errorf("rule name is required")
-	}
-
-	if len(rule.Conditions) == 0 {
-		return fmt.Errorf("at least one condition is required")
-	}
-
-	for i, condition := range rule.Conditions {
-		if condition.Type == "" {
-			return fmt.Errorf("condition %d: type is required", i)
-		}
-
-		if condition.Operator == "" {
-			return fmt.Errorf("condition %d: operator is required", i)
-		}
-	}
-
-	return nil
-}
-
 func (d *detector) updateStats(startTime time.Time, changes []*AttributeChange, events []*DriftEvent) {
+	d.statsMu.Lock()
+	defer d.statsMu.Unlock()
+
 	d.stats.TotalComparisons++
 	d.stats.AverageDetectionTime = time.Since(startTime)
 
