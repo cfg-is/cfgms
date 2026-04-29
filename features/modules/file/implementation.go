@@ -60,7 +60,6 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 		return nil, ErrAllowedBasePathRequired
 	}
 
-	// NOTE: symlink escapes not blocked by ValidateAndCleanPath
 	cleanPath, err := security.ValidateAndCleanPath(m.configuredBasePath, resourceID)
 	if err != nil {
 		return nil, err
@@ -78,7 +77,6 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 		return nil, err
 	}
 
-	// NOTE: symlink escapes not blocked by ValidateAndCleanPath
 	content, err := security.SecureReadFile(m.configuredBasePath, resourceID)
 	if err != nil {
 		return nil, err
@@ -159,7 +157,6 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 		return ErrAllowedBasePathRequired
 	}
 
-	// NOTE: symlink escapes not blocked by ValidateAndCleanPath
 	cleanPath, err := security.ValidateAndCleanPath(fileConfig.AllowedBasePath, resourceID)
 	if err != nil {
 		return err
@@ -217,7 +214,6 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 	if fileConfig.Permissions < 0 || fileConfig.Permissions > 0777 {
 		return modules.ErrInvalidInput
 	}
-	// NOTE: symlink escapes not blocked by ValidateAndCleanPath
 	if err := security.SecureWriteFileWithPerms(fileConfig.AllowedBasePath, resourceID, []byte(fileConfig.Content), os.FileMode(fileConfig.Permissions)); err != nil {
 		return err
 	}
