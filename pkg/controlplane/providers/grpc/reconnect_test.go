@@ -14,6 +14,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
+	quicgo "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -63,6 +64,14 @@ func TestMain(m *testing.M) {
 		max:        200 * time.Millisecond,
 		multiplier: 2.0,
 		jitter:     0.1,
+	}
+	// Use short QUIC timeouts so server failures are detected quickly on loaded
+	// CI machines even when CONNECTION_CLOSE frames are delayed by goroutine
+	// scheduling under the race detector. KeepAlivePeriod keeps established
+	// connections alive; MaxIdleTimeout bounds worst-case failure detection.
+	testQUICConfig = &quicgo.Config{
+		MaxIdleTimeout:  3 * time.Second,
+		KeepAlivePeriod: 200 * time.Millisecond,
 	}
 	os.Exit(m.Run())
 }
@@ -176,11 +185,13 @@ func TestStopDuringReconnection(t *testing.T) {
 	// Kill server to trigger reconnection
 	forceStopServer(server)
 
-	// Wait for client to enter reconnecting state
+	// Wait for client to enter reconnecting state. Use 15s to accommodate
+	// loaded CI machines where goroutine scheduling under the race detector
+	// can delay QUIC disconnect propagation beyond the default 5s budget.
 	require.Eventually(t, func() bool {
 		s := client.getState()
 		return s == StateReconnecting || s == StateDisconnected
-	}, 5*time.Second, 10*time.Millisecond)
+	}, 15*time.Second, 10*time.Millisecond)
 
 	// Stop the client during reconnection — should not hang or leak goroutines
 	done := make(chan struct{})

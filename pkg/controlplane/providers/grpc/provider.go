@@ -255,6 +255,9 @@ func (p *Provider) Start(ctx context.Context) error {
 
 // quicConfig returns a *quicgo.Config with any user overrides, or nil for defaults.
 func (p *Provider) quicConfig() *quicgo.Config {
+	if testQUICConfig != nil {
+		return testQUICConfig
+	}
 	if p.keepalivePeriod == 0 && p.idleTimeout == 0 {
 		return nil // use QUIC transport defaults
 	}
@@ -419,6 +422,13 @@ func (p *Provider) clientReceiveLoop() {
 // testBackoffOverride allows tests to use shorter backoff intervals.
 // Only set from test code via the unexported field.
 var testBackoffOverride *backoff
+
+// testQUICConfig allows tests to override the QUIC configuration.
+// Setting a short MaxIdleTimeout and KeepAlivePeriod ensures that
+// server failures are detected quickly on loaded CI machines even
+// when CONNECTION_CLOSE frames are delayed by goroutine scheduling.
+// Only set from test code via the unexported field.
+var testQUICConfig *quicgo.Config
 
 // reconnectLoop attempts to re-establish the ControlChannel with exponential backoff.
 // It runs until either a connection is established or the provider context is cancelled.
