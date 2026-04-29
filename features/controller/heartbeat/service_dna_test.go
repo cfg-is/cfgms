@@ -34,10 +34,10 @@ func (p *testControlPlane) Initialize(_ context.Context, _ map[string]interface{
 }
 func (p *testControlPlane) Start(_ context.Context) error { return nil }
 func (p *testControlPlane) Stop(_ context.Context) error  { return nil }
-func (p *testControlPlane) SendCommand(_ context.Context, _ *controlplaneTypes.Command) error {
+func (p *testControlPlane) SendCommand(_ context.Context, _ *controlplaneTypes.SignedCommand) error {
 	return nil
 }
-func (p *testControlPlane) FanOutCommand(_ context.Context, _ *controlplaneTypes.Command, ids []string) (*controlplaneTypes.FanOutResult, error) {
+func (p *testControlPlane) FanOutCommand(_ context.Context, _ *controlplaneTypes.SignedCommand, ids []string) (*controlplaneTypes.FanOutResult, error) {
 	return &controlplaneTypes.FanOutResult{Succeeded: ids, Failed: map[string]error{}}, nil
 }
 func (p *testControlPlane) SubscribeCommands(_ context.Context, _ string, _ cpinterfaces.CommandHandler) error {

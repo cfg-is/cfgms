@@ -45,11 +45,11 @@ func (m *testProvider) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (m *testProvider) SendCommand(ctx context.Context, cmd *types.Command) error {
+func (m *testProvider) SendCommand(ctx context.Context, cmd *types.SignedCommand) error {
 	return nil
 }
 
-func (m *testProvider) FanOutCommand(ctx context.Context, cmd *types.Command, stewardIDs []string) (*types.FanOutResult, error) {
+func (m *testProvider) FanOutCommand(ctx context.Context, cmd *types.SignedCommand, stewardIDs []string) (*types.FanOutResult, error) {
 	return &types.FanOutResult{Succeeded: stewardIDs, Failed: make(map[string]error)}, nil
 }
 
@@ -107,17 +107,17 @@ func TestProviderLifecycle(t *testing.T) {
 }
 
 func TestCommandHandler(t *testing.T) {
-	// Verify CommandHandler signature
-	var handler CommandHandler = func(ctx context.Context, cmd *types.Command) error {
+	// Verify CommandHandler signature accepts SignedCommand
+	var handler CommandHandler = func(ctx context.Context, sc *types.SignedCommand) error {
 		assert.NotNil(t, ctx)
-		assert.NotNil(t, cmd)
+		assert.NotNil(t, sc)
 		return nil
 	}
 
 	// Call handler
 	ctx := context.Background()
-	cmd := &types.Command{ID: "test-cmd", Type: types.CommandSyncConfig}
-	err := handler(ctx, cmd)
+	sc := &types.SignedCommand{Command: types.Command{ID: "test-cmd", Type: types.CommandSyncConfig}}
+	err := handler(ctx, sc)
 	assert.NoError(t, err)
 }
 

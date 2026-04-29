@@ -624,11 +624,11 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 	f.logger.Info("gRPC control plane connected", "steward_id", regResp.StewardID)
 
 	// Step 7: Subscribe to commands
-	if err := controlPlane.SubscribeCommands(f.ctx, regResp.StewardID, func(ctx context.Context, cmd *controlplaneTypes.Command) error {
+	if err := controlPlane.SubscribeCommands(f.ctx, regResp.StewardID, func(ctx context.Context, sc *controlplaneTypes.SignedCommand) error {
 		f.logger.Info("Received command",
 			"steward_id", regResp.StewardID,
-			"command_id", cmd.ID,
-			"type", string(cmd.Type))
+			"command_id", sc.Command.ID,
+			"type", string(sc.Command.Type))
 		return nil
 	}); err != nil {
 		_ = controlPlane.Stop(f.ctx)

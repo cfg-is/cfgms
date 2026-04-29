@@ -148,29 +148,31 @@ func newTestTLSConfigs(t *testing.T, stewardID string) (serverTLS, clientTLS *tl
 func TestControllerSendsCommand_StewardReceives(t *testing.T) {
 	env := newTestEnv(t, "steward-cmd-test")
 
-	received := make(chan *types.Command, 1)
-	err := env.client.SubscribeCommands(context.Background(), "steward-cmd-test", func(ctx context.Context, cmd *types.Command) error {
-		received <- cmd
+	received := make(chan *types.SignedCommand, 1)
+	err := env.client.SubscribeCommands(context.Background(), "steward-cmd-test", func(ctx context.Context, sc *types.SignedCommand) error {
+		received <- sc
 		return nil
 	})
 	require.NoError(t, err)
 
-	cmd := &types.Command{
-		ID:        "cmd-001",
-		Type:      types.CommandSyncConfig,
-		StewardID: "steward-cmd-test",
-		Timestamp: time.Now().Truncate(time.Microsecond),
-		Params:    map[string]interface{}{"version": "1.0"},
+	sc := &types.SignedCommand{
+		Command: types.Command{
+			ID:        "cmd-001",
+			Type:      types.CommandSyncConfig,
+			StewardID: "steward-cmd-test",
+			Timestamp: time.Now().Truncate(time.Microsecond),
+			Params:    map[string]interface{}{"version": "1.0"},
+		},
 	}
 
-	err = env.server.SendCommand(context.Background(), cmd)
+	err = env.server.SendCommand(context.Background(), sc)
 	require.NoError(t, err)
 
 	select {
 	case got := <-received:
-		assert.Equal(t, cmd.ID, got.ID)
-		assert.Equal(t, cmd.Type, got.Type)
-		assert.Equal(t, cmd.StewardID, got.StewardID)
+		assert.Equal(t, sc.Command.ID, got.Command.ID)
+		assert.Equal(t, sc.Command.Type, got.Command.Type)
+		assert.Equal(t, sc.Command.StewardID, got.Command.StewardID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for command")
 	}
@@ -306,7 +308,7 @@ func TestFanOutCommand(t *testing.T) {
 	listenAddr := server.listener.Addr().String()
 
 	// Connect two stewards
-	received := make(map[string]chan *types.Command)
+	received := make(map[string]chan *types.SignedCommand)
 	stewardIDs := []string{"steward-fan-1", "steward-fan-2"}
 
 	for _, id := range stewardIDs {
@@ -321,12 +323,12 @@ func TestFanOutCommand(t *testing.T) {
 		require.NoError(t, client.Start(context.Background()))
 		t.Cleanup(func() { _ = client.Stop(context.Background()) })
 
-		ch := make(chan *types.Command, 1)
+		ch := make(chan *types.SignedCommand, 1)
 		received[id] = ch
 		id := id
 		cmdCh := ch // capture for closure to avoid concurrent map read
-		require.NoError(t, client.SubscribeCommands(context.Background(), id, func(ctx context.Context, cmd *types.Command) error {
-			cmdCh <- cmd
+		require.NoError(t, client.SubscribeCommands(context.Background(), id, func(ctx context.Context, sc *types.SignedCommand) error {
+			cmdCh <- sc
 			return nil
 		}))
 	}
@@ -334,13 +336,15 @@ func TestFanOutCommand(t *testing.T) {
 	// Wait for both stewards to register
 	require.Eventually(t, func() bool { return reg.Count() == 2 }, 5*time.Second, 10*time.Millisecond)
 
-	cmd := &types.Command{
-		ID:        "cmd-fan",
-		Type:      types.CommandSyncDNA,
-		Timestamp: time.Now(),
+	sc := &types.SignedCommand{
+		Command: types.Command{
+			ID:        "cmd-fan",
+			Type:      types.CommandSyncDNA,
+			Timestamp: time.Now(),
+		},
 	}
 
-	result, err := server.FanOutCommand(context.Background(), cmd, stewardIDs)
+	result, err := server.FanOutCommand(context.Background(), sc, stewardIDs)
 	require.NoError(t, err)
 	assert.Len(t, result.Succeeded, 2)
 	assert.Empty(t, result.Failed)
@@ -349,7 +353,7 @@ func TestFanOutCommand(t *testing.T) {
 	for _, id := range stewardIDs {
 		select {
 		case got := <-received[id]:
-			assert.Equal(t, "cmd-fan", got.ID)
+			assert.Equal(t, "cmd-fan", got.Command.ID)
 		case <-time.After(5 * time.Second):
 			t.Fatalf("steward %s did not receive fan-out command", id)
 		}
@@ -359,14 +363,16 @@ func TestFanOutCommand(t *testing.T) {
 func TestFanOutCommand_PartialFailure(t *testing.T) {
 	env := newTestEnv(t, "steward-fan-partial")
 
-	cmd := &types.Command{
-		ID:        "cmd-partial",
-		Type:      types.CommandSyncConfig,
-		Timestamp: time.Now(),
+	sc := &types.SignedCommand{
+		Command: types.Command{
+			ID:        "cmd-partial",
+			Type:      types.CommandSyncConfig,
+			Timestamp: time.Now(),
+		},
 	}
 
 	// Fan-out to one connected and one disconnected steward
-	result, err := env.server.FanOutCommand(context.Background(), cmd, []string{
+	result, err := env.server.FanOutCommand(context.Background(), sc, []string{
 		"steward-fan-partial",
 		"steward-not-connected",
 	})
@@ -418,11 +424,13 @@ func TestDisconnectCleansUpRegistry(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "steward should be unregistered after disconnect")
 
 	// SendCommand to the disconnected steward should return an error
-	err = server.SendCommand(context.Background(), &types.Command{
-		ID:        "cmd-after-disconnect",
-		Type:      types.CommandSyncConfig,
-		StewardID: "steward-disconnect",
-		Timestamp: time.Now(),
+	err = server.SendCommand(context.Background(), &types.SignedCommand{
+		Command: types.Command{
+			ID:        "cmd-after-disconnect",
+			Type:      types.CommandSyncConfig,
+			StewardID: "steward-disconnect",
+			Timestamp: time.Now(),
+		},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not connected")
@@ -500,15 +508,17 @@ func TestStatsTracking(t *testing.T) {
 	require.NoError(t, env.server.SubscribeHeartbeats(context.Background(), func(ctx context.Context, hb *types.Heartbeat) error {
 		return nil
 	}))
-	require.NoError(t, env.client.SubscribeCommands(context.Background(), "steward-stats-test", func(ctx context.Context, cmd *types.Command) error {
+	require.NoError(t, env.client.SubscribeCommands(context.Background(), "steward-stats-test", func(ctx context.Context, sc *types.SignedCommand) error {
 		return nil
 	}))
 
 	now := time.Now()
 
 	// Send one of each message type
-	require.NoError(t, env.server.SendCommand(context.Background(), &types.Command{
-		ID: "cmd-stats", Type: types.CommandSyncConfig, StewardID: "steward-stats-test", Timestamp: now,
+	require.NoError(t, env.server.SendCommand(context.Background(), &types.SignedCommand{
+		Command: types.Command{
+			ID: "cmd-stats", Type: types.CommandSyncConfig, StewardID: "steward-stats-test", Timestamp: now,
+		},
 	}))
 	require.NoError(t, env.client.PublishEvent(context.Background(), &types.Event{
 		ID: "evt-stats", Type: types.EventConfigApplied, StewardID: "steward-stats-test", Timestamp: now, Severity: "info",
@@ -549,11 +559,11 @@ func TestModeValidation(t *testing.T) {
 	client.addr = "localhost:50051"
 	client.tlsConfig = &tls.Config{}
 
-	err := client.SendCommand(context.Background(), &types.Command{})
+	err := client.SendCommand(context.Background(), &types.SignedCommand{})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "server mode")
 
-	_, err = client.FanOutCommand(context.Background(), &types.Command{}, []string{"a"})
+	_, err = client.FanOutCommand(context.Background(), &types.SignedCommand{}, []string{"a"})
 	assert.Error(t, err)
 
 	err = client.SubscribeEvents(context.Background(), nil, nil)

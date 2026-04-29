@@ -270,14 +270,14 @@ func TestSyncDNAHandler_SendsFullDNAOverDataPlane(t *testing.T) {
 	handler, err := c.setupCommandHandler(context.Background(), "steward-1")
 	require.NoError(t, err)
 
-	cmd := &cpTypes.Command{
+	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
 		ID:        "cmd-sync-dna-1",
 		Type:      cpTypes.CommandSyncDNA,
 		StewardID: "steward-1",
 		TenantID:  "tenant-1",
 		Timestamp: time.Now(),
 		Params:    map[string]interface{}{},
-	}
+	}}
 	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
 
 	// HandleCommand dispatches the handler in a goroutine. The handler only does

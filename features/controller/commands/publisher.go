@@ -4,6 +4,9 @@
 //
 // This package implements the command publisher that sends commands
 // to stewards via the ControlPlaneProvider abstraction (Story #198, Story #363).
+//
+// Story #919: Commands are now wrapped in SignedCommand before transmission.
+// Every PublishCommand call signs the inner Command with the configured Signer.
 package commands
 
 import (
@@ -14,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/cfgis/cfgms/features/config/signature"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -25,6 +29,10 @@ type Publisher struct {
 
 	// Control plane provider for command publishing (Story #363)
 	controlPlane controlplaneInterfaces.ControlPlaneProvider
+
+	// signer signs commands before transmission (Story #919).
+	// When nil commands are sent without a signature (unsecured/transitional mode).
+	signer signature.Signer
 
 	// Command tracking
 	pending map[string]*pendingCommand
@@ -50,6 +58,10 @@ type Config struct {
 	// ControlPlane is the control plane provider for command publishing (Story #363)
 	ControlPlane controlplaneInterfaces.ControlPlaneProvider
 
+	// Signer signs each command before transmission (Story #919).
+	// When nil, commands are sent unsigned.
+	Signer signature.Signer
+
 	// Logger for command logging
 	Logger logging.Logger
 }
@@ -65,18 +77,39 @@ func New(cfg *Config) (*Publisher, error) {
 
 	return &Publisher{
 		controlPlane: cfg.ControlPlane,
+		signer:       cfg.Signer,
 		pending:      make(map[string]*pendingCommand),
 		logger:       cfg.Logger,
 	}, nil
 }
 
+// signCommand wraps cmd in a SignedCommand, signing it when a signer is available.
+func (p *Publisher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
+	sc := &controlplaneTypes.SignedCommand{Command: *cmd}
+	if p.signer == nil {
+		return sc, nil
+	}
+	// Sign the canonical form (string params + UTC timestamp) that survives the
+	// proto round-trip without type mutations. See CommandSigningBytes for details.
+	rawParams := controlplaneTypes.InterfaceParamsToStringMap(cmd.Params)
+	cmdBytes, err := controlplaneTypes.CommandSigningBytes(cmd, rawParams)
+	if err != nil {
+		return nil, fmt.Errorf("marshal command for signing: %w", err)
+	}
+	sig, err := p.signer.Sign(cmdBytes)
+	if err != nil {
+		return nil, fmt.Errorf("sign command: %w", err)
+	}
+	sc.Signature = sig
+	return sc, nil
+}
+
 // PublishCommand publishes a command to a specific steward.
 // Story #363: Uses ControlPlaneProvider.SendCommand() for delivery.
+// Story #919: Signs the command before transmission.
 func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdType controlplaneTypes.CommandType, params map[string]interface{}) (string, error) {
-	// Generate unique command ID
 	commandID := uuid.New().String()
 
-	// Create command message using control plane types
 	cmd := &controlplaneTypes.Command{
 		ID:        commandID,
 		Type:      cmdType,
@@ -85,15 +118,20 @@ func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdTyp
 		Params:    params,
 	}
 
-	// Send via control plane provider (publishes to cfgms/commands/{stewardID})
-	if err := p.controlPlane.SendCommand(ctx, cmd); err != nil {
+	sc, err := p.signCommand(cmd)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign command: %w", err)
+	}
+
+	if err := p.controlPlane.SendCommand(ctx, sc); err != nil {
 		return "", fmt.Errorf("failed to send command: %w", err)
 	}
 
 	p.logger.Info("Sent command to steward",
 		"command_id", commandID,
 		"steward_id", stewardID,
-		"type", cmdType)
+		"type", cmdType,
+		"signed", sc.Signature != nil)
 
 	return commandID, nil
 }

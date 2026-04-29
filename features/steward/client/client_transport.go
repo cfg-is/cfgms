@@ -332,8 +332,8 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 
 	// Subscribe to commands via gRPC control plane provider
 	c.logger.Info("Subscribing to commands", "steward_id", stewardID)
-	if err := controlPlane.SubscribeCommands(ctx, stewardID, func(ctx context.Context, cmd *cpTypes.Command) error {
-		return cmdHandler.HandleCommand(ctx, cmd)
+	if err := controlPlane.SubscribeCommands(ctx, stewardID, func(ctx context.Context, sc *cpTypes.SignedCommand) error {
+		return cmdHandler.HandleCommand(ctx, sc)
 	}); err != nil {
 		return fmt.Errorf("failed to subscribe to commands: %w", err)
 	}
@@ -365,11 +365,18 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		}
 	}
 
-	// Create command handler
+	// Create command handler with the same verifier used for config signature
+	// verification (Story #919). Replay window and params limit are read from
+	// the steward config when available; defaults apply otherwise.
+	c.mu.RLock()
+	verifier := c.configVerifier
+	c.mu.RUnlock()
+
 	handler, err := commands.New(&commands.Config{
 		StewardID: stewardID,
 		OnStatus:  statusCallback,
 		Logger:    c.logger,
+		Verifier:  verifier,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create command handler: %w", err)

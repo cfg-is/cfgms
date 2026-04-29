@@ -50,13 +50,17 @@ type ControlPlaneProvider interface {
 	// Commands (Controller → Steward)
 	// =================================================================
 
-	// SendCommand sends a command to a specific steward
+	// SendCommand sends a signed command to a specific steward.
+	//
+	// The cmd envelope must already be signed by the controller before calling
+	// this method. The transport layer carries the signature intact; verification
+	// is performed by the steward handler on receipt.
 	//
 	// Returns an error if the command cannot be delivered. Does not wait
-	// for command execution - use SubscribeEvents to receive completion events.
-	SendCommand(ctx context.Context, cmd *types.Command) error
+	// for command execution — use SubscribeEvents to receive completion events.
+	SendCommand(ctx context.Context, cmd *types.SignedCommand) error
 
-	// FanOutCommand sends a command to a specific list of stewards.
+	// FanOutCommand sends a signed command to a specific list of stewards.
 	//
 	// The caller is responsible for resolving target steward IDs (by tenant,
 	// search results, online status, etc.). The transport layer delivers to
@@ -65,7 +69,7 @@ type ControlPlaneProvider interface {
 	// Returns FanOutResult with per-steward delivery status. The error return
 	// is for systemic failures (provider not started, etc.), not per-steward
 	// delivery failures which are reported in FanOutResult.Failed.
-	FanOutCommand(ctx context.Context, cmd *types.Command, stewardIDs []string) (*types.FanOutResult, error)
+	FanOutCommand(ctx context.Context, cmd *types.SignedCommand, stewardIDs []string) (*types.FanOutResult, error)
 
 	// SubscribeCommands subscribes to commands (steward-side)
 	//
@@ -119,11 +123,13 @@ type ControlPlaneProvider interface {
 	IsConnected() bool
 }
 
-// CommandHandler is called when a command is received (steward-side).
+// CommandHandler is called when a signed command is received (steward-side).
 //
-// The handler should process the command and publish events/responses
-// to notify the controller of progress and completion.
-type CommandHandler func(ctx context.Context, cmd *types.Command) error
+// The handler receives the full SignedCommand envelope so that it can verify
+// the signature and metadata (StewardID, replay window) before dispatching.
+// The handler should publish events/responses to notify the controller of
+// progress and completion.
+type CommandHandler func(ctx context.Context, cmd *types.SignedCommand) error
 
 // EventHandler is called when an event is received (controller-side).
 //

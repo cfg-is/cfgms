@@ -398,7 +398,7 @@ func (p *Provider) clientReceiveLoop() {
 
 		switch payload := msg.GetPayload().(type) {
 		case *transportpb.ControlMessage_Command:
-			cmd := commandFromProto(payload.Command)
+			sc := signedCommandFromProto(payload.Command)
 			p.commandsReceived.Add(1)
 
 			p.mu.RLock()
@@ -407,8 +407,8 @@ func (p *Provider) clientReceiveLoop() {
 
 			if handler != nil {
 				go func() {
-					if err := handler(p.ctx, cmd); err != nil {
-						p.logger.Error("command handler error", "command_id", cmd.ID, "error", err)
+					if err := handler(p.ctx, sc); err != nil {
+						p.logger.Error("command handler error", "command_id", sc.Command.ID, "error", err)
 					}
 				}()
 			}
@@ -585,7 +585,7 @@ func (p *Provider) stopClient() error {
 
 // --- Commands (Controller → Steward) ---
 
-func (p *Provider) SendCommand(ctx context.Context, cmd *types.Command) error {
+func (p *Provider) SendCommand(ctx context.Context, cmd *types.SignedCommand) error {
 	if p.mode != ModeServer {
 		return fmt.Errorf("SendCommand is only available in server mode")
 	}
@@ -593,26 +593,26 @@ func (p *Provider) SendCommand(ctx context.Context, cmd *types.Command) error {
 		return fmt.Errorf("SendCommand: command must not be nil")
 	}
 
-	conn, ok := p.registry.Get(cmd.StewardID)
+	conn, ok := p.registry.Get(cmd.Command.StewardID)
 	if !ok {
 		p.deliveryFailures.Add(1)
-		return fmt.Errorf("steward %s not connected", cmd.StewardID)
+		return fmt.Errorf("steward %s not connected", cmd.Command.StewardID)
 	}
 
 	msg := &transportpb.ControlMessage{
-		Payload: &transportpb.ControlMessage_Command{Command: commandToProto(cmd)},
+		Payload: &transportpb.ControlMessage_Command{Command: signedCommandToProto(cmd)},
 	}
 
 	if err := conn.Send(msg); err != nil {
 		p.deliveryFailures.Add(1)
-		return fmt.Errorf("failed to send command to steward %s: %w", cmd.StewardID, err)
+		return fmt.Errorf("failed to send command to steward %s: %w", cmd.Command.StewardID, err)
 	}
 
 	p.commandsSent.Add(1)
 	return nil
 }
 
-func (p *Provider) FanOutCommand(ctx context.Context, cmd *types.Command, stewardIDs []string) (*types.FanOutResult, error) {
+func (p *Provider) FanOutCommand(ctx context.Context, cmd *types.SignedCommand, stewardIDs []string) (*types.FanOutResult, error) {
 	if p.mode != ModeServer {
 		return nil, fmt.Errorf("FanOutCommand is only available in server mode")
 	}
@@ -625,7 +625,7 @@ func (p *Provider) FanOutCommand(ctx context.Context, cmd *types.Command, stewar
 	}
 
 	msg := &transportpb.ControlMessage{
-		Payload: &transportpb.ControlMessage_Command{Command: commandToProto(cmd)},
+		Payload: &transportpb.ControlMessage_Command{Command: signedCommandToProto(cmd)},
 	}
 
 	conns := p.registry.GetMany(stewardIDs)

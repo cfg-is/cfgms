@@ -84,7 +84,7 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	listenAddr := server.listener.Addr().String()
 
 	// Set up command handler before connecting — handler survives reconnection
-	received := make(chan *types.Command, 1)
+	received := make(chan *types.SignedCommand, 1)
 
 	client := New(ModeClient)
 	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
@@ -93,8 +93,8 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 		"tls_config": tc.clientTLSConfig(t, "steward-reconnect"),
 		"steward_id": "steward-reconnect",
 	}))
-	require.NoError(t, client.SubscribeCommands(context.Background(), "steward-reconnect", func(ctx context.Context, cmd *types.Command) error {
-		received <- cmd
+	require.NoError(t, client.SubscribeCommands(context.Background(), "steward-reconnect", func(ctx context.Context, sc *types.SignedCommand) error {
+		received <- sc
 		return nil
 	}))
 	require.NoError(t, client.Start(context.Background()))
@@ -129,16 +129,16 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "steward should be re-registered")
 
 	// Verify commands work after reconnect
-	require.NoError(t, server2.SendCommand(context.Background(), &types.Command{
+	require.NoError(t, server2.SendCommand(context.Background(), &types.SignedCommand{Command: types.Command{
 		ID:        "cmd-after-reconnect",
 		Type:      types.CommandSyncConfig,
 		StewardID: "steward-reconnect",
 		Timestamp: time.Now(),
-	}))
+	}}))
 
 	select {
 	case got := <-received:
-		assert.Equal(t, "cmd-after-reconnect", got.ID)
+		assert.Equal(t, "cmd-after-reconnect", got.Command.ID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for command after reconnect")
 	}
