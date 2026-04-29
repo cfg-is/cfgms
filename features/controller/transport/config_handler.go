@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -22,6 +23,7 @@ import (
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/service"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
+	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	transportauth "github.com/cfgis/cfgms/pkg/transport/auth"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
@@ -31,9 +33,6 @@ import (
 // Client-initiated bidirectional streams use IDs 0, 4, 8, 12... (multiples of 4)
 // Stream 0 is handshake, so first data stream is 4.
 const ConfigSyncStreamID = 4
-
-// chunkSize is the maximum payload per ConfigChunk (64 KB).
-const chunkSize = 64 * 1024
 
 // ConfigHandler handles configuration sync over data plane streams.
 type ConfigHandler struct {
@@ -276,22 +275,25 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 	}
 
 	// Chunk and stream
-	totalChunks := (len(configBytes) + chunkSize - 1) / chunkSize
+	totalChunks := (len(configBytes) + dataplaneTypes.DefaultChunkSize - 1) / dataplaneTypes.DefaultChunkSize
 	if totalChunks == 0 {
 		totalChunks = 1
 	}
+	if totalChunks > math.MaxInt32 {
+		return status.Error(codes.ResourceExhausted, "configuration too large to stream")
+	}
 
 	for i := 0; i < totalChunks; i++ {
-		start := i * chunkSize
-		end := start + chunkSize
+		start := i * dataplaneTypes.DefaultChunkSize
+		end := start + dataplaneTypes.DefaultChunkSize
 		if end > len(configBytes) {
 			end = len(configBytes)
 		}
 
 		chunk := &transportpb.ConfigChunk{
 			Data:        configBytes[start:end],
-			ChunkIndex:  int32(i),
-			TotalChunks: int32(totalChunks),
+			ChunkIndex:  int32(i),           //nolint:gosec // G115: bounded by totalChunks > math.MaxInt32 check above
+			TotalChunks: int32(totalChunks), //nolint:gosec // G115: bounded by totalChunks > math.MaxInt32 check above
 			Version:     configResp.Version,
 		}
 
