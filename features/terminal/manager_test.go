@@ -4,6 +4,7 @@ package terminal
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/terminal/shell"
+	"github.com/cfgis/cfgms/pkg/logging"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -169,8 +171,10 @@ func TestSessionTimeout(t *testing.T) {
 	session, err := manager.CreateSession(ctx, sessionReq)
 	require.NoError(t, err)
 
-	// Wait for timeout plus cleanup cycle
-	time.Sleep(200 * time.Millisecond)
+	// Poll until the session has actually timed out before triggering cleanup.
+	require.Eventually(t, func() bool {
+		return session.IsTimedOut(config.SessionTimeout)
+	}, time.Second, time.Millisecond)
 
 	// Manually trigger cleanup to ensure it runs in test
 	defaultManager := manager.(*DefaultSessionManager)
@@ -220,6 +224,228 @@ func TestMaxSessionsLimit(t *testing.T) {
 	_, err = manager.CreateSession(ctx, sessionReq)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "maximum number of sessions")
+}
+
+// TestCleanupTimedOutSessions_AllSessionsCleaned verifies that all 10 timed-out
+// sessions are torn down by CleanupTimedOutSessions.
+func TestCleanupTimedOutSessions_AllSessionsCleaned(t *testing.T) {
+	config := &Config{
+		SessionTimeout: 10 * time.Millisecond,
+		MaxSessions:    100,
+		RecordSessions: false,
+	}
+
+	manager, err := NewSessionManager(config, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	const sessionCount = 10
+	sessions := make([]*Session, sessionCount)
+
+	for i := 0; i < sessionCount; i++ {
+		req := &SessionRequest{
+			StewardID: fmt.Sprintf("steward-%d", i),
+			UserID:    fmt.Sprintf("user-%d", i),
+			Shell:     shell.GetDefaultShell(),
+			Cols:      80,
+			Rows:      24,
+		}
+		sess, err := manager.CreateSession(ctx, req)
+		require.NoError(t, err)
+		sessions[i] = sess
+	}
+
+	// Poll until every session has timed out. Sessions are created sequentially,
+	// so the last one timed out means all have; checking all is unambiguous.
+	require.Eventually(t, func() bool {
+		for _, sess := range sessions {
+			if !sess.IsTimedOut(config.SessionTimeout) {
+				return false
+			}
+		}
+		return true
+	}, time.Second, time.Millisecond)
+
+	manager.(*DefaultSessionManager).CleanupTimedOutSessions()
+
+	for _, sess := range sessions {
+		_, err := manager.GetSession(sess.ID)
+		assert.Error(t, err, "timed-out session %s should be removed", sess.ID)
+	}
+}
+
+// TestCleanupTimedOutSessions_ContinuesAfterPerSessionError verifies that a
+// per-session TerminateSession failure is logged as a warning and does not
+// abort the remaining sessions in the batch.
+//
+// afterCollectHook pre-terminates every timed-out session before the
+// CleanupTimedOutSessions termination loop runs. The loop then gets
+// "session not found" for each ID, which must produce a warn log and
+// continue — not panic or abort.
+func TestCleanupTimedOutSessions_ContinuesAfterPerSessionError(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	config := &Config{
+		SessionTimeout: 1 * time.Millisecond,
+		MaxSessions:    100,
+		RecordSessions: false,
+	}
+
+	manager, err := NewSessionManager(config, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	const sessionCount = 10
+	sessions := make([]*Session, sessionCount)
+
+	for i := 0; i < sessionCount; i++ {
+		req := &SessionRequest{
+			StewardID: fmt.Sprintf("steward-%d", i),
+			UserID:    fmt.Sprintf("user-%d", i),
+			Shell:     shell.GetDefaultShell(),
+			Cols:      80,
+			Rows:      24,
+		}
+		sess, err := manager.CreateSession(ctx, req)
+		require.NoError(t, err)
+		sessions[i] = sess
+	}
+
+	// Poll until all sessions have timed out before installing the hook and triggering cleanup.
+	require.Eventually(t, func() bool {
+		for _, sess := range sessions {
+			if !sess.IsTimedOut(config.SessionTimeout) {
+				return false
+			}
+		}
+		return true
+	}, time.Second, time.Millisecond)
+
+	defaultManager := manager.(*DefaultSessionManager)
+
+	// Install a hook that terminates every collected session before the
+	// termination loop begins. This guarantees the loop sees "session not
+	// found" for all IDs in a deterministic, race-free way.
+	//
+	// The hook runs synchronously on the test goroutine (CleanupTimedOutSessions
+	// is called directly below), so require.NoError is safe.
+	defaultManager.afterCollectHook = func(ids []string) {
+		hookCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, id := range ids {
+			require.NoError(t, defaultManager.TerminateSession(hookCtx, id),
+				"hook: pre-termination of session %s must succeed", id)
+		}
+	}
+
+	defaultManager.CleanupTimedOutSessions()
+
+	// All sessions must be gone (pre-terminated by the hook).
+	for _, sess := range sessions {
+		_, err := manager.GetSession(sess.ID)
+		assert.Error(t, err, "session %s must be terminated", sess.ID)
+	}
+
+	// The termination loop must have logged a warning for each "session not
+	// found" error instead of aborting.
+	warnLogs := logger.GetLogs("warn")
+	assert.NotEmpty(t, warnLogs, "warn logs should have been emitted for sessions that could not be found")
+}
+
+// TestCleanupTimedOutSessions_GetSessionDuringCleanup verifies that the lock is
+// released before TerminateSession is called, allowing concurrent read operations.
+//
+// The afterCollectHook acts as a rendezvous: it signals when m.mu has been released
+// and blocks until GetSession has confirmed concurrent access, proving the lock is
+// not held during the termination loop.
+func TestCleanupTimedOutSessions_GetSessionDuringCleanup(t *testing.T) {
+	config := &Config{
+		SessionTimeout: 1 * time.Millisecond,
+		MaxSessions:    100,
+		RecordSessions: false,
+	}
+
+	manager, err := NewSessionManager(config, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	timedOutReq := &SessionRequest{
+		StewardID: "steward-timed-out",
+		UserID:    "user-timed-out",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	}
+	timedOutSession, err := manager.CreateSession(ctx, timedOutReq)
+	require.NoError(t, err)
+
+	activeReq := &SessionRequest{
+		StewardID: "steward-active",
+		UserID:    "user-active",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	}
+	activeSession, err := manager.CreateSession(ctx, activeReq)
+	require.NoError(t, err)
+
+	// Poll until the timed-out session has actually timed out.
+	require.Eventually(t, func() bool {
+		return timedOutSession.IsTimedOut(config.SessionTimeout)
+	}, time.Second, time.Millisecond)
+
+	// Bump the active session's LastActivity so it is NOT timed out.
+	activeSession.UpdateActivity()
+
+	defaultManager := manager.(*DefaultSessionManager)
+
+	// hookReached is closed when cleanup has released m.mu and entered the hook.
+	// hookDone is closed by the test goroutine to let cleanup proceed to TerminateSession.
+	hookReached := make(chan struct{})
+	hookDone := make(chan struct{})
+	defaultManager.afterCollectHook = func(_ []string) {
+		close(hookReached)
+		<-hookDone
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defaultManager.CleanupTimedOutSessions()
+		close(done)
+	}()
+
+	// Wait until cleanup has released m.mu and is blocked in the hook.
+	select {
+	case <-hookReached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup goroutine never released m.mu (hook not called within 5s)")
+	}
+
+	// GetSession (RLock) must succeed while the cleanup goroutine holds no lock.
+	// If m.mu were still held this would block indefinitely.
+	retrieved, err := manager.GetSession(activeSession.ID)
+	assert.NoError(t, err, "GetSession must succeed while CleanupTimedOutSessions is in its termination loop")
+	assert.Equal(t, activeSession.ID, retrieved.ID)
+
+	// Unblock the cleanup goroutine so it can call TerminateSession.
+	close(hookDone)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CleanupTimedOutSessions deadlocked — m.mu was not released before calling TerminateSession")
+	}
+
+	_, err = manager.GetSession(timedOutSession.ID)
+	assert.Error(t, err, "timed-out session should have been removed")
+
+	_, err = manager.GetSession(activeSession.ID)
+	assert.NoError(t, err, "active session should still exist")
+
+	err = manager.TerminateSession(ctx, activeSession.ID)
+	require.NoError(t, err)
 }
 
 func TestSessionRecording(t *testing.T) {

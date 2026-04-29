@@ -46,13 +46,17 @@ func restartServerAndRepoint(t *testing.T, client *Provider, tc *testCA, reg reg
 // forceStopServer forcefully kills a gRPC server without waiting for streams to finish.
 // GracefulStop() hangs on long-lived ControlChannel streams; this is needed for
 // reconnection tests that simulate server crashes.
-// Listener is closed first to release the UDP socket, then gRPC is force-stopped.
+//
+// gRPC is stopped before the listener so that Stop() can send stream RST frames to
+// clients over the still-open QUIC connections. Closing the listener first tears down
+// the underlying UDP socket, preventing gRPC from notifying clients and causing them
+// to wait for the QUIC idle timeout (~90 s) instead of detecting the failure immediately.
 func forceStopServer(s *Provider) {
-	if s.listener != nil {
-		_ = s.listener.Close()
-	}
 	if s.grpcServer != nil {
 		s.grpcServer.Stop()
+	}
+	if s.listener != nil {
+		_ = s.listener.Close()
 	}
 }
 
