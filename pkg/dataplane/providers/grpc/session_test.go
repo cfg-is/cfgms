@@ -38,27 +38,6 @@ func TestSession_PeerID(t *testing.T) {
 	assert.Equal(t, "test-peer", s.PeerID())
 }
 
-// TestSession_OpenStream_NotSupported verifies a clear error is returned.
-func TestSession_OpenStream_NotSupported(t *testing.T) {
-	s := makeTestSession("client")
-	stream, err := s.OpenStream(context.Background(), types.StreamConfig)
-	assert.Nil(t, stream)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gRPC provider does not support raw streams")
-	assert.Contains(t, err.Error(), "SendConfig")
-}
-
-// TestSession_AcceptStream_NotSupported verifies a clear error is returned.
-func TestSession_AcceptStream_NotSupported(t *testing.T) {
-	s := makeTestSession("server")
-	stream, streamType, err := s.AcceptStream(context.Background())
-	assert.Nil(t, stream)
-	assert.Empty(t, streamType)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gRPC provider does not support raw streams")
-	assert.Contains(t, err.Error(), "ReceiveConfig")
-}
-
 // TestSession_Close verifies Close marks the session as closed.
 func TestSession_Close(t *testing.T) {
 	s := makeTestSession("client")

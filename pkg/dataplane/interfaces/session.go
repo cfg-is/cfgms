@@ -5,16 +5,14 @@ package interfaces
 
 import (
 	"context"
-	"io"
 
 	"github.com/cfgis/cfgms/pkg/dataplane/types"
 )
 
 // DataPlaneSession represents an established data plane connection.
 //
-// Sessions provide high-level transfer operations (config, DNA, bulk data)
-// as well as low-level stream access for extensibility. All methods are
-// thread-safe and can be called concurrently.
+// Sessions provide high-level transfer operations (config, DNA, bulk data).
+// All methods are thread-safe and can be called concurrently.
 type DataPlaneSession interface {
 	// =================================================================
 	// Identification
@@ -78,22 +76,6 @@ type DataPlaneSession interface {
 	ReceiveBulk(ctx context.Context) (*types.BulkTransfer, error)
 
 	// =================================================================
-	// Raw Streams (Extensibility)
-	// =================================================================
-
-	// OpenStream opens a new bidirectional stream of the specified type
-	//
-	// Streams provide lower-level access for custom protocols or
-	// operations not covered by the high-level transfer methods.
-	OpenStream(ctx context.Context, streamType types.StreamType) (Stream, error)
-
-	// AcceptStream accepts an incoming stream from the peer
-	//
-	// Blocks until a stream is opened by the peer or context is canceled.
-	// Returns the stream and its type.
-	AcceptStream(ctx context.Context) (Stream, types.StreamType, error)
-
-	// =================================================================
 	// Session Management
 	// =================================================================
 
@@ -111,21 +93,4 @@ type DataPlaneSession interface {
 
 	// RemoteAddr returns the peer's network address
 	RemoteAddr() string
-}
-
-// Stream represents a low-level bidirectional stream within a session.
-//
-// Streams implement io.ReadWriteCloser for maximum flexibility while
-// providing additional metadata and control methods.
-type Stream interface {
-	io.ReadWriteCloser
-
-	// ID returns the stream identifier
-	ID() uint64
-
-	// Type returns the stream type
-	Type() types.StreamType
-
-	// SetDeadline sets read and write deadlines
-	SetDeadline(deadline context.Context) error
 }

@@ -142,28 +142,6 @@ func (m *mockSession) ReceiveBulk(ctx context.Context) (*types.BulkTransfer, err
 	}, nil
 }
 
-func (m *mockSession) OpenStream(ctx context.Context, streamType types.StreamType) (Stream, error) {
-	return &mockStream{id: 1, streamType: streamType}, nil
-}
-
-func (m *mockSession) AcceptStream(ctx context.Context) (Stream, types.StreamType, error) {
-	return &mockStream{id: 2, streamType: types.StreamConfig}, types.StreamConfig, nil
-}
-
-// mockStream is a test implementation of Stream
-type mockStream struct {
-	id         uint64
-	streamType types.StreamType
-	closed     bool
-}
-
-func (m *mockStream) Read(p []byte) (n int, err error)           { return 0, nil }
-func (m *mockStream) Write(p []byte) (n int, err error)          { return len(p), nil }
-func (m *mockStream) Close() error                               { m.closed = true; return nil }
-func (m *mockStream) ID() uint64                                 { return m.id }
-func (m *mockStream) Type() types.StreamType                     { return m.streamType }
-func (m *mockStream) SetDeadline(deadline context.Context) error { return nil }
-
 func TestProviderRegistration(t *testing.T) {
 	// Clear registry for test isolation
 	providerRegistry = make(map[string]DataPlaneProvider)
@@ -357,25 +335,6 @@ func TestSessionBulkTransfer(t *testing.T) {
 	assert.Equal(t, int64(1024), received.TotalSize)  // Mock returns 1024
 }
 
-func TestSessionStreams(t *testing.T) {
-	session := &mockSession{id: "test-session", peerID: "test-peer"}
-	ctx := context.Background()
-
-	// Test open stream
-	stream, err := session.OpenStream(ctx, types.StreamConfig)
-	require.NoError(t, err)
-	assert.NotNil(t, stream)
-	assert.Equal(t, uint64(1), stream.ID())
-	assert.Equal(t, types.StreamConfig, stream.Type())
-
-	// Test accept stream
-	acceptedStream, streamType, err := session.AcceptStream(ctx)
-	require.NoError(t, err)
-	assert.NotNil(t, acceptedStream)
-	assert.Equal(t, types.StreamConfig, streamType)
-	assert.Equal(t, uint64(2), acceptedStream.ID())
-}
-
 func TestSessionLifecycle(t *testing.T) {
 	session := &mockSession{id: "test-session", peerID: "test-peer"}
 	ctx := context.Background()
@@ -389,36 +348,3 @@ func TestSessionLifecycle(t *testing.T) {
 	assert.True(t, session.IsClosed())
 }
 
-func TestStreamOperations(t *testing.T) {
-	stream := &mockStream{id: 1, streamType: types.StreamDNA}
-
-	// Test read
-	buf := make([]byte, 10)
-	n, err := stream.Read(buf)
-	require.NoError(t, err)
-	assert.Equal(t, 0, n) // Mock returns 0
-
-	// Test write
-	data := []byte("test data")
-	n, err = stream.Write(data)
-	require.NoError(t, err)
-	assert.Equal(t, len(data), n)
-
-	// Test properties
-	assert.Equal(t, uint64(1), stream.ID())
-	assert.Equal(t, types.StreamDNA, stream.Type())
-
-	// Test close
-	err = stream.Close()
-	require.NoError(t, err)
-	assert.True(t, stream.closed)
-}
-
-func TestStreamDeadline(t *testing.T) {
-	stream := &mockStream{id: 1, streamType: types.StreamConfig}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	err := stream.SetDeadline(ctx)
-	require.NoError(t, err)
-}

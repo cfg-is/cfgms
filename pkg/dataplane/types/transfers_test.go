@@ -11,25 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestStreamType(t *testing.T) {
-	tests := []struct {
-		name       string
-		streamType StreamType
-		expected   string
-	}{
-		{"Config", StreamConfig, "config"},
-		{"DNA", StreamDNA, "dna"},
-		{"Bulk", StreamBulk, "bulk"},
-		{"Custom", StreamCustom, "custom"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, string(tt.streamType))
-		})
-	}
-}
-
 func TestConfigTransferSerialization(t *testing.T) {
 	original := &ConfigTransfer{
 		ID:        "config-123",
