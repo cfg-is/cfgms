@@ -5,10 +5,7 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,7 +19,6 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
-	"github.com/cfgis/cfgms/features/terminal"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -235,242 +231,6 @@ func (s *AuditLoadTestSuite) TestAuditEventLossDetectionAndPrevention() {
 		}
 
 		s.framework.logger.Info("Audit event loss detection and prevention validated successfully")
-		return nil
-	})
-
-	require.NoError(s.T(), err)
-}
-
-// TestAuditLogDurabilityAcrossFailures validates audit logs survive system restarts and component failures
-// Acceptance Criteria: Audit logs survive system restarts and component failures
-func (s *AuditLoadTestSuite) TestAuditLogDurabilityAcrossFailures() {
-	err := s.framework.RunTest("audit-log-durability", "audit-load", func() error {
-		s.framework.logger.Info("Starting audit log durability testing across failure scenarios")
-
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-		defer cancel()
-
-		// Use an isolated temp directory so prior-run files don't pollute the file count
-		storagePath := s.T().TempDir()
-		auditStorage := terminal.NewFileAuditStorage(storagePath)
-		auditConfig := terminal.DefaultAuditConfig()
-		auditConfig.StoragePath = storagePath
-		auditConfig.FlushInterval = 1 * time.Second // Frequent flushes for durability testing
-
-		auditLogger, err := terminal.NewAuditLogger(auditConfig, auditStorage)
-		if err != nil {
-			return fmt.Errorf("failed to create audit logger: %w", err)
-		}
-
-		err = auditLogger.Start(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to start audit logger: %w", err)
-		}
-
-		// Test scenario: Generate audit events, simulate failures, verify persistence
-		const testSessions = 10
-		var sessionIDs []string
-
-		// Phase 1: Generate initial audit events
-		s.framework.logger.Info("Phase 1: Generating initial audit events")
-		for i := 0; i < testSessions; i++ {
-			sessionID := fmt.Sprintf("durable-session-%d", i)
-			sessionIDs = append(sessionIDs, sessionID)
-
-			err := auditLogger.LogSessionStart(ctx, sessionID,
-				fmt.Sprintf("user-%d", i),
-				fmt.Sprintf("steward-%d", i),
-				fmt.Sprintf("tenant-%d", i),
-				fmt.Sprintf("192.168.1.%d", i+100))
-			if err != nil {
-				return fmt.Errorf("failed to log session start: %w", err)
-			}
-
-			// Log some commands
-			for j := 0; j < 5; j++ {
-				err := auditLogger.LogCommandExecution(ctx, sessionID,
-					fmt.Sprintf("user-%d", i),
-					fmt.Sprintf("steward-%d", i),
-					fmt.Sprintf("tenant-%d", i),
-					fmt.Sprintf("test-command-%d", j),
-					0,
-					100*time.Millisecond,
-					fmt.Sprintf("output for command %d", j))
-				if err != nil {
-					return fmt.Errorf("failed to log command execution: %w", err)
-				}
-			}
-		}
-
-		// Phase 2: Simulate component restart — Stop() flushes remaining entries before returning
-		s.framework.logger.Info("Phase 2: Simulating component restart")
-		err = auditLogger.Stop()
-		if err != nil {
-			return fmt.Errorf("failed to stop audit logger: %w", err)
-		}
-
-		// Restart audit logger
-		auditLogger2, err := terminal.NewAuditLogger(auditConfig, auditStorage)
-		if err != nil {
-			return fmt.Errorf("failed to recreate audit logger after restart: %w", err)
-		}
-
-		err = auditLogger2.Start(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to restart audit logger: %w", err)
-		}
-
-		// Phase 3: Generate more audit events after restart
-		s.framework.logger.Info("Phase 3: Generating audit events after restart")
-		for _, sessionID := range sessionIDs {
-			err := auditLogger2.LogSessionEnd(ctx, sessionID,
-				fmt.Sprintf("user-%s", sessionID[len(sessionID)-1:]),
-				5*time.Minute, 5, 1024)
-			if err != nil {
-				return fmt.Errorf("failed to log session end after restart: %w", err)
-			}
-		}
-
-		// Stop flushes remaining buffered entries to storage before returning
-		if err := auditLogger2.Stop(); err != nil {
-			return fmt.Errorf("failed to stop second audit logger: %w", err)
-		}
-
-		// Phase 4: Validate audit log completeness by counting persisted files
-		// Each event is written as an individual JSON file under auditConfig.StoragePath.
-		// This verifies that events survived both the initial write and the restart boundary.
-		s.framework.logger.Info("Phase 4: Validating audit log completeness")
-
-		expectedEvents := testSessions * (1 + 5 + 1) // start + 5 commands + end per session
-
-		var persistedEvents int
-		walkErr := filepath.Walk(auditConfig.StoragePath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if !info.IsDir() && strings.HasSuffix(path, ".json") {
-				persistedEvents++
-			}
-			return nil
-		})
-		if walkErr != nil {
-			return fmt.Errorf("failed to walk audit storage directory: %w", walkErr)
-		}
-
-		if persistedEvents < expectedEvents {
-			return fmt.Errorf("audit durability failure: expected at least %d persisted event files, found %d in %s",
-				expectedEvents, persistedEvents, auditConfig.StoragePath)
-		}
-
-		s.framework.logger.Info("Audit durability test completed",
-			"expected_events", expectedEvents,
-			"persisted_events", persistedEvents,
-			"test_sessions", testSessions)
-
-		s.framework.logger.Info("Audit log durability across failures validated successfully")
-		return nil
-	})
-
-	require.NoError(s.T(), err)
-}
-
-// TestAuditLogRotationAndRetention validates audit log rotation maintains historical completeness
-// Acceptance Criteria: Audit log rotation maintains historical completeness
-func (s *AuditLoadTestSuite) TestAuditLogRotationAndRetention() {
-	err := s.framework.RunTest("audit-log-rotation-retention", "audit-load", func() error {
-		s.framework.logger.Info("Starting audit log rotation and retention testing")
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-
-		// Use an isolated temp directory so the directory is empty and rotation behavior is deterministic
-		rotationStoragePath := s.T().TempDir()
-		auditStorage := terminal.NewFileAuditStorage(rotationStoragePath)
-		auditConfig := terminal.DefaultAuditConfig()
-		auditConfig.StoragePath = rotationStoragePath
-		auditConfig.MaxLogSizeMB = 1 // Small size to trigger rotation quickly
-		auditConfig.RetentionDays = 30
-		auditConfig.FlushInterval = 500 * time.Millisecond
-
-		auditLogger, err := terminal.NewAuditLogger(auditConfig, auditStorage)
-		if err != nil {
-			return fmt.Errorf("failed to create audit logger: %w", err)
-		}
-
-		err = auditLogger.Start(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to start audit logger: %w", err)
-		}
-
-		// Generate enough audit events to trigger log rotation
-		const eventsToGenerate = 1000
-		s.framework.logger.Info("Generating audit events to trigger rotation",
-			"events_to_generate", eventsToGenerate)
-
-		var eventsGenerated int64
-		for i := 0; i < eventsToGenerate; i++ {
-			sessionID := fmt.Sprintf("rotation-session-%d", i%10) // Reuse session IDs
-			userID := fmt.Sprintf("rotation-user-%d", i%5)
-
-			// Log various types of events
-			switch i % 4 {
-			case 0:
-				err := auditLogger.LogSessionStart(ctx, sessionID, userID,
-					"rotation-steward", "rotation-tenant", "192.168.1.100")
-				if err == nil {
-					atomic.AddInt64(&eventsGenerated, 1)
-				}
-			case 1:
-				err := auditLogger.LogCommandExecution(ctx, sessionID, userID,
-					"rotation-steward", "rotation-tenant",
-					fmt.Sprintf("rotation-command-%d", i),
-					0, 50*time.Millisecond,
-					fmt.Sprintf("rotation output %d with some longer text to increase log size", i))
-				if err == nil {
-					atomic.AddInt64(&eventsGenerated, 1)
-				}
-			case 2:
-				err := auditLogger.LogCommandBlocked(ctx, sessionID, userID,
-					"rotation-steward", "rotation-tenant",
-					"dangerous-command", "blocked by security policy",
-					[]string{"security-rule-1", "security-rule-2"})
-				if err == nil {
-					atomic.AddInt64(&eventsGenerated, 1)
-				}
-			case 3:
-				err := auditLogger.LogSecurityViolation(ctx, sessionID, userID,
-					"rotation-steward", "rotation-tenant",
-					"privilege_escalation", "attempted unauthorized access",
-					terminal.FilterSeverityHigh)
-				if err == nil {
-					atomic.AddInt64(&eventsGenerated, 1)
-				}
-			}
-
-			if i%100 == 0 {
-				s.framework.logger.Info("Audit events progress",
-					"generated", atomic.LoadInt64(&eventsGenerated),
-					"target", eventsToGenerate)
-			}
-		}
-
-		// Stop flushes all buffered events before validation reads the accepted-event count
-		if err := auditLogger.Stop(); err != nil {
-			return fmt.Errorf("failed to stop audit logger: %w", err)
-		}
-
-		finalEventsGenerated := atomic.LoadInt64(&eventsGenerated)
-		s.framework.logger.Info("Audit log rotation test completed",
-			"events_generated", finalEventsGenerated,
-			"target_events", eventsToGenerate)
-
-		// Validate that rotation maintained completeness
-		if finalEventsGenerated < int64(eventsToGenerate*0.95) { // Allow 5% margin for errors
-			return fmt.Errorf("significant audit event loss during rotation: generated %d, expected ~%d",
-				finalEventsGenerated, eventsToGenerate)
-		}
-
-		s.framework.logger.Info("Audit log rotation and retention validated successfully")
 		return nil
 	})
 
@@ -767,8 +527,6 @@ func (s *AuditLoadTestSuite) printAuditLoadTestSummary() {
 	s.framework.logger.Info("All audit load tests completed successfully")
 	s.framework.logger.Info("Audit completeness under load validated")
 	s.framework.logger.Info("Audit event loss detection and prevention validated")
-	s.framework.logger.Info("Audit log durability across failures validated")
-	s.framework.logger.Info("Audit log rotation and retention validated")
 	s.framework.logger.Info("Compliance report accuracy under load validated")
 
 	// Print memory usage

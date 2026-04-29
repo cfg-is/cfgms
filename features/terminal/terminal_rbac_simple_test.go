@@ -3,14 +3,12 @@
 package terminal
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/features/terminal/shell"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -306,21 +304,4 @@ func TestTerminalRBACSecurityReview(t *testing.T) {
 			assert.True(t, found, "Permission %s should be defined", expectedPerm)
 		}
 	})
-}
-
-// SimpleRBACMock provides minimal RBAC interface for basic testing
-type SimpleRBACMock struct{}
-
-func (m *SimpleRBACMock) CheckPermission(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
-	return &common.AccessResponse{
-		Granted: true,
-		Reason:  "Mock always allows",
-	}, nil
-}
-
-func (m *SimpleRBACMock) GetSubjectPermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
-	return []*common.Permission{
-		{Id: "terminal.session.create", Name: "Create Terminal Session"},
-		{Id: "terminal.execute", Name: "Execute Terminal Commands"},
-	}, nil
 }
