@@ -273,9 +273,8 @@ func TestChunkRoundTrip_EmptyData(t *testing.T) {
 	// Marshal empty cfg → JSON has other fields but Data is empty
 	data, err := json.Marshal(cfg)
 	require.NoError(t, err)
-	// The JSON will be non-empty because the struct has other fields.
-	// configTransferToChunks will produce at least 1 chunk.
-	_ = data
+	// The JSON is non-empty because the struct has ID and Version set.
+	assert.NotEmpty(t, data)
 
 	chunks, err := configTransferToChunks(cfg)
 	require.NoError(t, err)
