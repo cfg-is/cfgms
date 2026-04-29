@@ -3,6 +3,8 @@
 package security
 
 import (
+	"context"
+	"net"
 	"testing"
 	"time"
 )
@@ -425,9 +427,50 @@ func TestValidator_ValidateURL_DNSTimeout(t *testing.T) {
 		}
 	})
 
+	// dnsLookupTimeout is enforced: a DNS lookup that hangs longer than the
+	// configured timeout must be interrupted and the URL rejected.
+	t.Run("dnsLookupTimeout interrupts hanging DNS lookup", func(t *testing.T) {
+		v := NewValidator()
+		v.dnsLookupTimeout = 50 * time.Millisecond
+		// Inject a lookup that blocks until context deadline fires.
+		v.dnsLookup = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(5 * time.Second):
+				return nil, nil
+			}
+		}
+		result := &ValidationResult{Valid: true}
+		v.ValidateURL(result, "url", "http://cfgms-test-timeout.example/")
+		if result.Valid {
+			t.Error("expected DNS timeout to reject URL")
+		}
+		if len(result.Errors) == 0 || result.Errors[0].Rule != "url" {
+			t.Errorf("expected rule 'url', got errors: %v", result.Errors)
+		}
+	})
+
+	// A successful DNS lookup that returns zero IP addresses must be rejected.
+	// This prevents a silent SSRF bypass when a resolver returns NOERROR with no records.
+	t.Run("zero IPs returned by DNS rejects URL", func(t *testing.T) {
+		v := NewValidator()
+		v.dnsLookup = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+			return nil, nil // no addresses, no error
+		}
+		result := &ValidationResult{Valid: true}
+		v.ValidateURL(result, "url", "http://cfgms-test-zero-ips.example/")
+		if result.Valid {
+			t.Error("expected zero-IPs response to reject URL")
+		}
+		if len(result.Errors) == 0 || result.Errors[0].Rule != "url" {
+			t.Errorf("expected rule 'url', got errors: %v", result.Errors)
+		}
+	})
+
 	// allow_host: is an unconditional bypass — it skips DNS lookup and IP-class
-	// checks for the named host. Callers must never include private or loopback
-	// IP literals in allow_host entries in production code paths.
+	// checks for the named host. The rules parameter must only contain
+	// developer-controlled values; user-supplied input must never flow into rules.
 	t.Run("allow_host with loopback IP literal is explicit bypass", func(t *testing.T) {
 		v := NewValidator()
 		result := &ValidationResult{Valid: true}

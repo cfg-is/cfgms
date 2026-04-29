@@ -25,6 +25,9 @@ type Validator struct {
 	// M-INPUT-2: Regex matcher with timeout protection (security audit finding)
 	regexMatcher     *RegexMatcher
 	dnsLookupTimeout time.Duration
+	// dnsLookup overrides the DNS resolver used by ValidateURL. When nil,
+	// net.DefaultResolver.LookupIPAddr is used. Set in tests only.
+	dnsLookup func(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
 // ValidationError represents a validation failure with context
@@ -298,6 +301,9 @@ func (v *Validator) ValidateIPAddress(result *ValidationResult, field, value str
 // All valid URLs are subject to SSRF protection: the resolved hostname must not
 // be loopback, private, link-local, or unspecified. Use the "allow_host:<hostname>"
 // rule to bypass IP-class rejection for an explicitly trusted hostname.
+//
+// The rules parameter must only contain developer-controlled values. Never
+// populate rules from user-supplied input, as allow_host: is an unconditional bypass.
 func (v *Validator) ValidateURL(result *ValidationResult, field, value string, rules ...string) {
 	if value == "" && v.hasRule(rules, "required") {
 		result.AddError(field, value, "required", "field is required")
@@ -329,9 +335,17 @@ func (v *Validator) ValidateURL(result *ValidationResult, field, value string, r
 	if !containsFold(allowed, host) {
 		ctx, cancel := context.WithTimeout(context.Background(), v.dnsLookupTimeout)
 		defer cancel()
-		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		lookup := v.dnsLookup
+		if lookup == nil {
+			lookup = net.DefaultResolver.LookupIPAddr
+		}
+		ips, err := lookup(ctx, host)
 		if err != nil {
 			result.AddError(field, "", "url", "hostname resolution failed")
+			return
+		}
+		if len(ips) == 0 {
+			result.AddError(field, "", "url", "hostname resolved to no addresses")
 			return
 		}
 		for _, ipa := range ips {
