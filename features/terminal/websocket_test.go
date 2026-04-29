@@ -411,7 +411,9 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		headers := http.Header{"Origin": {server.URL}}
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
 		require.NoError(t, err, "same-origin request must be accepted")
-		_ = conn.Close()
+		if err := conn.Close(); err != nil {
+			t.Logf("Failed to close connection: %v", err)
+		}
 	})
 
 	t.Run("cross_origin_rejected", func(t *testing.T) {
@@ -441,7 +443,9 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		headers := http.Header{"Origin": {"http://trusted.example.com"}}
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
 		require.NoError(t, err, "allowlist-matched origin must be accepted")
-		_ = conn.Close()
+		if err := conn.Close(); err != nil {
+			t.Logf("Failed to close connection: %v", err)
+		}
 	})
 
 	t.Run("empty_origin_rejected", func(t *testing.T) {
