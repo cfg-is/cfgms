@@ -23,10 +23,13 @@ func TestReplayCache_AddDuplicateWithinWindow_ReturnsFalse(t *testing.T) {
 }
 
 func TestReplayCache_AddExpiredID_ReturnsTrue(t *testing.T) {
-	// Use a tiny TTL so the entry expires immediately.
-	c := newReplayCache(time.Millisecond)
-	require.True(t, c.Add("cmd-exp"))
-	time.Sleep(10 * time.Millisecond)
+	// Inject a past timestamp directly to avoid time.Sleep races under -race / load.
+	ttl := 5 * time.Minute
+	c := newReplayCache(ttl)
+	c.mu.Lock()
+	c.entries["cmd-exp"] = time.Now().Add(-ttl - time.Second)
+	c.order = append(c.order, "cmd-exp")
+	c.mu.Unlock()
 	assert.True(t, c.Add("cmd-exp"), "ID added after TTL expiry must return true (not a replay)")
 }
 
@@ -53,9 +56,13 @@ func TestReplayCache_MultipleDistinctIDs_AllAccepted(t *testing.T) {
 }
 
 func TestReplayCache_EvictExpiredOnAdd(t *testing.T) {
-	c := newReplayCache(10 * time.Millisecond)
-	require.True(t, c.Add("old"))
-	time.Sleep(20 * time.Millisecond)
+	// Inject an expired entry directly to avoid time.Sleep races under -race / load.
+	ttl := 5 * time.Minute
+	c := newReplayCache(ttl)
+	c.mu.Lock()
+	c.entries["old"] = time.Now().Add(-ttl - time.Second)
+	c.order = append(c.order, "old")
+	c.mu.Unlock()
 
 	// Adding a new entry triggers eviction of the expired "old" entry.
 	require.True(t, c.Add("new"))

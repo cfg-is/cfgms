@@ -77,6 +77,10 @@ type TransportClient struct {
 	// Configuration signature verifier
 	configVerifier signature.Verifier
 
+	// Command authentication settings (Story #919)
+	commandReplayWindow   time.Duration
+	commandMaxParamsBytes int
+
 	// Last configuration received from the controller (for scheduled re-convergence)
 	lastConfigYAML    []byte
 	lastConfigMu      sync.RWMutex
@@ -153,6 +157,15 @@ type TransportConfig struct {
 	// before being discarded. Defaults to 24 hours.
 	MaxQueueAge time.Duration
 
+	// SignedCommandReplayWindow is the maximum age of an accepted command timestamp.
+	// Commands older than this are rejected as potential replays.
+	// Zero means the commands.Handler default (5 minutes) applies.
+	SignedCommandReplayWindow time.Duration
+
+	// SignedCommandMaxParamsBytes is the maximum JSON-serialized size of Command.Params.
+	// Zero means the commands.Handler default (65536 bytes) applies.
+	SignedCommandMaxParamsBytes int
+
 	// Logger for client logging
 	Logger logging.Logger
 }
@@ -183,19 +196,21 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	}
 
 	c := &TransportClient{
-		heartbeatInterval: heartbeatInterval,
-		heartbeatStop:     make(chan struct{}),
-		convergenceStop:   make(chan struct{}),
-		convergeInterval:  30 * time.Minute,
-		transportAddress:  cfg.ControllerURL,
-		certPath:          cfg.TLSCertPath,
-		caCertPEM:         cfg.CACertPEM,
-		clientCertPEM:     cfg.ClientCertPEM,
-		clientKeyPEM:      cfg.ClientKeyPEM,
-		serverCertPEM:     cfg.ServerCertPEM,
-		signingCertPEM:    cfg.SigningCertPEM,
-		offlineQueue:      offlineQueue,
-		logger:            cfg.Logger,
+		heartbeatInterval:     heartbeatInterval,
+		heartbeatStop:         make(chan struct{}),
+		convergenceStop:       make(chan struct{}),
+		convergeInterval:      30 * time.Minute,
+		transportAddress:      cfg.ControllerURL,
+		certPath:              cfg.TLSCertPath,
+		caCertPEM:             cfg.CACertPEM,
+		clientCertPEM:         cfg.ClientCertPEM,
+		clientKeyPEM:          cfg.ClientKeyPEM,
+		serverCertPEM:         cfg.ServerCertPEM,
+		signingCertPEM:        cfg.SigningCertPEM,
+		offlineQueue:          offlineQueue,
+		commandReplayWindow:   cfg.SignedCommandReplayWindow,
+		commandMaxParamsBytes: cfg.SignedCommandMaxParamsBytes,
+		logger:                cfg.Logger,
 	}
 
 	return c, nil
@@ -366,17 +381,19 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	}
 
 	// Create command handler with the same verifier used for config signature
-	// verification (Story #919). Replay window and params limit are read from
-	// the steward config when available; defaults apply otherwise.
+	// verification (Story #919). Replay window and params limit come from the
+	// steward config (via TransportConfig); zero values use handler defaults.
 	c.mu.RLock()
 	verifier := c.configVerifier
 	c.mu.RUnlock()
 
 	handler, err := commands.New(&commands.Config{
-		StewardID: stewardID,
-		OnStatus:  statusCallback,
-		Logger:    c.logger,
-		Verifier:  verifier,
+		StewardID:      stewardID,
+		OnStatus:       statusCallback,
+		Logger:         c.logger,
+		Verifier:       verifier,
+		ReplayWindow:   c.commandReplayWindow,
+		MaxParamsBytes: c.commandMaxParamsBytes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create command handler: %w", err)
