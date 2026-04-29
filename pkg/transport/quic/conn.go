@@ -49,9 +49,12 @@ func (c *Conn) Write(b []byte) (int, error) {
 	return c.stream.Write(b)
 }
 
-// Close closes the QUIC stream.
+// Close closes the underlying QUIC connection, which sends a CONNECTION_CLOSE
+// frame to the peer and immediately terminates all streams on the connection.
+// Closing the connection (rather than just the stream) ensures the peer detects
+// the disconnection without waiting for QUIC idle timeout (90 s by default).
 func (c *Conn) Close() error {
-	return c.stream.Close()
+	return c.quicConn.CloseWithError(0, "")
 }
 
 // LocalAddr returns the local QUIC connection address.

@@ -66,6 +66,23 @@ func TestConn_Addresses(t *testing.T) {
 	assert.Equal(t, "quic", serverConn.RemoteAddr().Network())
 }
 
+// TestConn_Close_PropagatesDisconnect verifies that calling Close on one end
+// sends a QUIC CONNECTION_CLOSE frame that causes the peer's Read to return
+// an error immediately, rather than waiting for the 90-second idle timeout.
+func TestConn_Close_PropagatesDisconnect(t *testing.T) {
+	tlsPair := newTestTLSPair(t)
+	serverConn, clientConn := dialPair(t, tlsPair)
+
+	// Set a read deadline so the test fails fast if propagation is broken.
+	require.NoError(t, serverConn.SetReadDeadline(time.Now().Add(2*time.Second)))
+
+	require.NoError(t, clientConn.Close())
+
+	buf := make([]byte, 16)
+	_, err := serverConn.Read(buf)
+	assert.Error(t, err, "server Read should return error after client Close")
+}
+
 // TestConn_Deadlines verifies that deadline methods propagate to the stream
 // without returning errors under normal conditions.
 func TestConn_Deadlines(t *testing.T) {
