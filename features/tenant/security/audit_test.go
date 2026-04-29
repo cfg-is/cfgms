@@ -258,7 +258,9 @@ func TestTenantSecurityAuditLogger_CapEviction(t *testing.T) {
 		"in-memory window should be capped at %d after %d writes", defaultInMemoryAuditCap, writeCount)
 
 	// Durable store must contain all 1100 entries.
-	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// Use a 60-second timeout to match mid-batch flushes; macOS CI flatfile I/O
+	// is slow enough that 10 seconds is insufficient for this volume.
+	flushCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	require.NoError(t, auditMgr.Flush(flushCtx))
 

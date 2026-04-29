@@ -117,11 +117,6 @@ func computeEventChecksum(key []byte, sequence int64, previous []byte, content [
 	return mac.Sum(nil)
 }
 
-// verifyEventChecksum recomputes and does a constant-time comparison.
-func verifyEventChecksum(key []byte, sequence int64, previous []byte, content []byte, expected []byte) bool {
-	return hmac.Equal(computeEventChecksum(key, sequence, previous, content), expected)
-}
-
 // NewSessionRecorder creates a new session recorder. Legacy .rec files without
 // HMAC chain metadata are removed at startup.
 func NewSessionRecorder(config *RecorderConfig, logger logging.Logger, opts ...RecorderOption) (*DefaultSessionRecorder, error) {
