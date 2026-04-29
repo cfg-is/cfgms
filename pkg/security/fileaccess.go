@@ -97,14 +97,20 @@ func SecureOpenFile(basePath, userPath string, flag int, perm os.FileMode) (*os.
 // ValidateAndCleanPath validates a user-provided path against a base directory.
 //
 // This function:
-// 1. Cleans the user path using filepath.Clean()
-// 2. Resolves both paths to absolute paths
-// 3. Eval-symlinks the base path so all containment comparisons use canonical paths
-// 4. Performs a containment check using filepath.Rel (not strings.HasPrefix) to
-//    prevent sibling-prefix attacks (e.g. /base_extra/secret incorrectly matching /base)
-// 5. Resolves symlinks in the user path; for non-existent targets, walks up to the
-//    deepest existing ancestor, eval-symlinks it, and re-joins the non-existing remainder
-// 6. Re-validates containment after symlink resolution to block symlink-escape attacks
+//  1. Cleans the user path using filepath.Clean()
+//  2. Resolves both paths to absolute paths
+//  3. Eval-symlinks the base path so all containment comparisons use canonical paths
+//  4. Resolves symlinks in the user path; for non-existent targets, walks up to the
+//     deepest existing ancestor, eval-symlinks it, and re-joins the non-existing remainder
+//  5. Validates containment after symlink resolution using filepath.Rel (not strings.HasPrefix)
+//     to prevent sibling-prefix attacks (e.g. /base_extra/secret incorrectly matching /base)
+//     and symlink-escape attacks
+//
+// Symlink resolution of the user path happens before containment checks so that both
+// the base and user path use canonical filesystem paths. On macOS /tmp is a symlink to
+// /private/tmp; on Windows short path forms (RUNNER~1) differ from long forms. Without
+// resolving the user path first, comparing against an already-resolved base would produce
+// false "path traversal" errors for valid paths.
 //
 // Returns the validated, canonicalized absolute path.
 func ValidateAndCleanPath(basePath, userPath string) (string, error) {
@@ -135,12 +141,8 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 		absUserPath = filepath.Join(absBasePath, cleanUserPath)
 	}
 
-	// Initial containment check using filepath.Rel to prevent sibling-prefix attacks.
-	if err := containmentCheck(absBasePath, absUserPath, userPath); err != nil {
-		return "", err
-	}
-
 	// Resolve symlinks in the user path, with fallback for non-existent targets.
+	// This must happen before the containment check so both paths are in canonical form.
 	resolved, resolveErr := filepath.EvalSymlinks(absUserPath)
 	if resolveErr == nil {
 		absUserPath = resolved
@@ -171,7 +173,8 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 		return "", fmt.Errorf("failed to evaluate symlinks: %w", resolveErr)
 	}
 
-	// Post-eval containment check: symlink resolution may have moved the path outside base.
+	// Containment check after full symlink resolution prevents both sibling-prefix
+	// and symlink-escape attacks using canonical paths for both sides.
 	if err := containmentCheck(absBasePath, absUserPath, userPath); err != nil {
 		return "", err
 	}
