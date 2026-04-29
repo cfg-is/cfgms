@@ -8,7 +8,6 @@ package client
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -60,12 +59,6 @@ func (s *testDataPlaneSession) SendBulk(_ context.Context, _ *dpTypes.BulkTransf
 }
 func (s *testDataPlaneSession) ReceiveBulk(_ context.Context) (*dpTypes.BulkTransfer, error) {
 	return nil, nil
-}
-func (s *testDataPlaneSession) OpenStream(_ context.Context, _ dpTypes.StreamType) (dataplaneInterfaces.Stream, error) {
-	return nil, fmt.Errorf("testDataPlaneSession: OpenStream not implemented")
-}
-func (s *testDataPlaneSession) AcceptStream(_ context.Context) (dataplaneInterfaces.Stream, dpTypes.StreamType, error) {
-	return nil, "", fmt.Errorf("testDataPlaneSession: AcceptStream not implemented")
 }
 
 func newTestLogger(t *testing.T) logging.Logger {

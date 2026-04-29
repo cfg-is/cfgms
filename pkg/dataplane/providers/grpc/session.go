@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
-	"github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/dataplane/types"
 	"google.golang.org/grpc"
 )
@@ -477,20 +476,6 @@ func (s *Session) serverReceiveBulk(ctx context.Context) (*types.BulkTransfer, e
 	case <-s.handler.done:
 		return nil, fmt.Errorf("server shutting down")
 	}
-}
-
-// --- Raw Streams (not supported) ---
-
-// OpenStream is not supported by the gRPC provider.
-// Use the typed transfer methods (SendConfig, SendDNA, SendBulk) instead.
-func (s *Session) OpenStream(_ context.Context, _ types.StreamType) (interfaces.Stream, error) {
-	return nil, fmt.Errorf("gRPC provider does not support raw streams: use SendConfig, SendDNA, or SendBulk instead")
-}
-
-// AcceptStream is not supported by the gRPC provider.
-// Use the typed transfer methods (ReceiveConfig, ReceiveDNA, ReceiveBulk) instead.
-func (s *Session) AcceptStream(_ context.Context) (interfaces.Stream, types.StreamType, error) {
-	return nil, "", fmt.Errorf("gRPC provider does not support raw streams: use ReceiveConfig, ReceiveDNA, or ReceiveBulk instead")
 }
 
 // --- Session Management ---

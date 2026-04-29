@@ -30,11 +30,6 @@
 // Data is chunked at 64 KB boundaries for streaming. Transfer structs are
 // JSON-serialised before chunking so all metadata fields are preserved.
 //
-// # Raw Streams
-//
-// OpenStream and AcceptStream are not supported by this provider. Use the
-// typed transfer methods (SendConfig, SendDNA, SendBulk) instead.
-//
 // # DoS Limits
 //
 // Every gRPC server created by this package enforces the following limits to

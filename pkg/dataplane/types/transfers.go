@@ -10,23 +10,6 @@ import (
 	"time"
 )
 
-// StreamType identifies the purpose of a raw stream.
-type StreamType string
-
-const (
-	// StreamConfig indicates a configuration transfer stream
-	StreamConfig StreamType = "config"
-
-	// StreamDNA indicates a DNA transfer stream
-	StreamDNA StreamType = "dna"
-
-	// StreamBulk indicates a bulk data transfer stream
-	StreamBulk StreamType = "bulk"
-
-	// StreamCustom indicates a custom application-specific stream
-	StreamCustom StreamType = "custom"
-)
-
 // DefaultChunkSize is the maximum bytes per gRPC chunk (64 KB).
 //
 // Authoritative location — importable by both pkg/ and features/ code without
