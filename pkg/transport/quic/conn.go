@@ -49,9 +49,17 @@ func (c *Conn) Write(b []byte) (int, error) {
 	return c.stream.Write(b)
 }
 
-// Close closes the QUIC stream.
+// Close closes the QUIC stream and the underlying QUIC connection.
+//
+// Both the stream write half (STREAM_FIN) and the QUIC connection
+// (CONNECTION_CLOSE with application error code 0) are closed. Closing at
+// the connection level ensures the peer receives an immediate signal even
+// after the QUIC listener is closed. Without this, gRPC's transport closes
+// only the stream write half, and the peer must wait for the QUIC idle
+// timeout (~90s) to detect the disconnect.
 func (c *Conn) Close() error {
-	return c.stream.Close()
+	_ = c.stream.Close()
+	return c.quicConn.CloseWithError(0, "")
 }
 
 // LocalAddr returns the local QUIC connection address.
