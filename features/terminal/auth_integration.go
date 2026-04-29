@@ -4,11 +4,12 @@ package terminal
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -268,7 +269,13 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 	}
 
 	// Generate session token with anti-hijacking properties
-	sessionToken := atm.generateSessionToken(session.ID, userID, r, clientCert)
+	sessionToken, err := atm.generateSessionToken(session.ID, userID, r, clientCert)
+	if err != nil {
+		return &AuthenticationResult{
+			Success:      false,
+			ErrorMessage: fmt.Sprintf("Failed to generate session token: %v", err),
+		}, nil
+	}
 
 	// Store session token
 	atm.tokenMutex.Lock()
@@ -520,10 +527,15 @@ func (atm *AuthenticatedTerminalManager) getActiveSessionCount(userID string) in
 	return count
 }
 
-func (atm *AuthenticatedTerminalManager) generateSessionToken(sessionID, userID string, r *http.Request, cert *x509.Certificate) *SessionToken {
+func (atm *AuthenticatedTerminalManager) generateSessionToken(sessionID, userID string, r *http.Request, cert *x509.Certificate) (*SessionToken, error) {
+	tokenStr, err := generateSecureToken()
+	if err != nil {
+		return nil, err
+	}
+
 	now := time.Now()
 	token := &SessionToken{
-		Token:         generateSecureToken(),
+		Token:         tokenStr,
 		SessionID:     sessionID,
 		UserID:        userID,
 		IssuedAt:      now,
@@ -544,7 +556,7 @@ func (atm *AuthenticatedTerminalManager) generateSessionToken(sessionID, userID 
 		token.CertificateHash = fmt.Sprintf("%x", cert.Raw)
 	}
 
-	return token
+	return token, nil
 }
 
 func (atm *AuthenticatedTerminalManager) getClientIP(r *http.Request) string {
@@ -627,9 +639,12 @@ func (atm *AuthenticatedTerminalManager) rotateTokensIfNeeded() {
 	}
 }
 
-func generateSecureToken() string {
-	// In a real implementation, this would use cryptographically secure random generation
-	return fmt.Sprintf("terminal_token_%d_%d", time.Now().UnixNano(), os.Getpid())
+func generateSecureToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("token generation failed: %w", err)
+	}
+	return base64.URLEncoding.EncodeToString(buf), nil
 }
 
 // DefaultAuthConfig returns default authentication configuration

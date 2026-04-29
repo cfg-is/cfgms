@@ -3,6 +3,7 @@
 package terminal
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -60,7 +61,7 @@ func TestWebSocketHandlerCreation(t *testing.T) {
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
 
-	handler, err := NewWebSocketHandler(manager, logger)
+	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, handler)
 }
@@ -76,7 +77,7 @@ func TestWebSocketUpgrade(t *testing.T) {
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
 
-	handler, err := NewWebSocketHandler(manager, logger)
+	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
 
 	// Create test server
@@ -89,7 +90,8 @@ func TestWebSocketUpgrade(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
 	// Test WebSocket connection (use platform-appropriate shell)
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), nil)
+	headers := http.Header{"Origin": {server.URL}}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), headers)
 	require.NoError(t, err)
 	defer func() {
 		if err := conn.Close(); err != nil {
@@ -116,7 +118,7 @@ func TestWebSocketMessageHandling(t *testing.T) {
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
 
-	handler, err := NewWebSocketHandler(manager, logger)
+	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
 
 	// Create test server
@@ -128,7 +130,8 @@ func TestWebSocketMessageHandling(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
 	// Connect to WebSocket (use platform-appropriate shell)
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), nil)
+	headers := http.Header{"Origin": {server.URL}}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), headers)
 	require.NoError(t, err)
 	defer func() {
 		if err := conn.Close(); err != nil {
@@ -169,7 +172,7 @@ func TestWebSocketAuthentication(t *testing.T) {
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
 
-	handler, err := NewWebSocketHandler(manager, logger)
+	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -214,8 +217,9 @@ func TestWebSocketAuthentication(t *testing.T) {
 
 			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + tt.queryPath
 
-			// Attempt WebSocket connection
-			conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+			// Set same-origin header so the upgrader passes origin validation
+			headers := http.Header{"Origin": {server.URL}}
+			conn, resp, err := websocket.DefaultDialer.Dial(wsURL, headers)
 
 			if tt.wantStatus == http.StatusSwitchingProtocols {
 				require.NoError(t, err)
@@ -243,7 +247,7 @@ func TestWebSocketBidirectionalCommunication(t *testing.T) {
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
 
-	handler, err := NewWebSocketHandler(manager, logger)
+	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
 
 	// Create test server
@@ -255,7 +259,8 @@ func TestWebSocketBidirectionalCommunication(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
 	// Connect to WebSocket (use platform-appropriate shell)
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), nil)
+	headers := http.Header{"Origin": {server.URL}}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), headers)
 	require.NoError(t, err)
 	defer func() {
 		if err := conn.Close(); err != nil {
@@ -297,7 +302,7 @@ func TestWebSocketSessionCleanup(t *testing.T) {
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
 
-	handler, err := NewWebSocketHandler(manager, logger)
+	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
 
 	// Create test server
@@ -309,7 +314,8 @@ func TestWebSocketSessionCleanup(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
 	// Connect to WebSocket (use platform-appropriate shell)
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), nil)
+	headers := http.Header{"Origin": {server.URL}}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), headers)
 	require.NoError(t, err)
 
 	// Wait for session to be created (session creation is asynchronous)
@@ -339,7 +345,7 @@ func TestWebSocketConcurrentConnections(t *testing.T) {
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
 
-	handler, err := NewWebSocketHandler(manager, logger)
+	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
 
 	// Create test server
@@ -352,10 +358,11 @@ func TestWebSocketConcurrentConnections(t *testing.T) {
 
 	// Create multiple concurrent connections (use platform-appropriate shell)
 	connections := make([]*websocket.Conn, 3)
+	headers := http.Header{"Origin": {server.URL}}
 	for i := 0; i < 3; i++ {
 		conn, _, err := websocket.DefaultDialer.Dial(
 			wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(),
-			nil,
+			headers,
 		)
 		require.NoError(t, err)
 		connections[i] = conn
@@ -377,4 +384,104 @@ func TestWebSocketConcurrentConnections(t *testing.T) {
 
 	// Wait for all sessions to be cleaned up (cleanup is asynchronous)
 	waitForSessionCleanup(t, manager, 0)
+}
+
+// TestWebSocketOriginCheck verifies the origin enforcement logic.
+func TestWebSocketOriginCheck(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	config := &Config{
+		SessionTimeout: 30 * time.Minute,
+		MaxSessions:    100,
+		RecordSessions: true,
+	}
+
+	manager, err := NewSessionManager(config, logger)
+	require.NoError(t, err)
+
+	const queryParams = "?steward_id=test-steward&user_id=test-user&shell=bash"
+
+	t.Run("same_origin_accepted", func(t *testing.T) {
+		handler, err := NewWebSocketHandler(manager, logger, nil)
+		require.NoError(t, err)
+
+		server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+		defer server.Close()
+
+		wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + queryParams
+		headers := http.Header{"Origin": {server.URL}}
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+		require.NoError(t, err, "same-origin request must be accepted")
+		if err := conn.Close(); err != nil {
+			t.Logf("Failed to close connection: %v", err)
+		}
+	})
+
+	t.Run("cross_origin_rejected", func(t *testing.T) {
+		handler, err := NewWebSocketHandler(manager, logger, nil)
+		require.NoError(t, err)
+
+		server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+		defer server.Close()
+
+		wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + queryParams
+		headers := http.Header{"Origin": {"http://evil.example.com"}}
+		_, resp, err := websocket.DefaultDialer.Dial(wsURL, headers)
+		require.Error(t, err, "cross-origin request must be rejected")
+		require.NotNil(t, resp)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
+
+	t.Run("allowlist_origin_accepted", func(t *testing.T) {
+		allowlist := []string{"trusted.example.com"}
+		handler, err := NewWebSocketHandler(manager, logger, allowlist)
+		require.NoError(t, err)
+
+		server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+		defer server.Close()
+
+		wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + queryParams
+		headers := http.Header{"Origin": {"http://trusted.example.com"}}
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+		require.NoError(t, err, "allowlist-matched origin must be accepted")
+		if err := conn.Close(); err != nil {
+			t.Logf("Failed to close connection: %v", err)
+		}
+	})
+
+	t.Run("empty_origin_rejected", func(t *testing.T) {
+		handler, err := NewWebSocketHandler(manager, logger, nil)
+		require.NoError(t, err)
+
+		server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+		defer server.Close()
+
+		wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + queryParams
+		// No Origin header
+		_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		require.Error(t, err, "missing Origin header must be rejected")
+		require.NotNil(t, resp)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
+}
+
+// TestGenerateSecureToken verifies the token is cryptographically random and properly encoded.
+func TestGenerateSecureToken(t *testing.T) {
+	token, err := generateSecureToken()
+	require.NoError(t, err)
+	assert.NotEmpty(t, token)
+
+	// Must decode as valid base64url
+	decoded, err := base64.URLEncoding.DecodeString(token)
+	require.NoError(t, err, "token must be valid base64url-encoded")
+
+	// 32 bytes of entropy → 44-char base64 with padding (or 43 without)
+	assert.Equal(t, 32, len(decoded), "decoded token must be 32 bytes")
+
+	// Two consecutive tokens must differ
+	token2, err := generateSecureToken()
+	require.NoError(t, err)
+	assert.NotEqual(t, token, token2, "tokens must be unique")
+
+	// Must not contain time or PID markers from the old format
+	assert.NotContains(t, token, "terminal_token_")
 }
