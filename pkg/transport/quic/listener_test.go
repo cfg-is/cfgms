@@ -17,6 +17,27 @@ func TestListener_ImplementsNetListener(t *testing.T) {
 	var _ net.Listener = (*Listener)(nil)
 }
 
+// TestDefaultQuicConfig_TunedValues guards the intentional tuning decisions in
+// defaultQuicConfig so that future refactors cannot silently regress them.
+//
+// HandshakeIdleTimeout 30s: quic-go defaults to 5s, which is too aggressive for
+// macOS CI after many rapid socket open/close cycles (e.g. reconnect test suites).
+// This value was deliberately increased; any change must be reviewed against
+// macOS CI timing and documented.
+func TestDefaultQuicConfig_TunedValues(t *testing.T) {
+	cfg := defaultQuicConfig()
+
+	if cfg.MaxIdleTimeout != 90*time.Second {
+		t.Errorf("MaxIdleTimeout: want 90s, got %s (see Story #504 keepalive rationale)", cfg.MaxIdleTimeout)
+	}
+	if cfg.KeepAlivePeriod != 25*time.Second {
+		t.Errorf("KeepAlivePeriod: want 25s, got %s (see Story #504 keepalive rationale)", cfg.KeepAlivePeriod)
+	}
+	if cfg.HandshakeIdleTimeout != 30*time.Second {
+		t.Errorf("HandshakeIdleTimeout: want 30s, got %s (quic-go default 5s is too short for macOS CI under load)", cfg.HandshakeIdleTimeout)
+	}
+}
+
 // TestListener_AcceptAndClose verifies that Accept returns a valid net.Conn
 // with correct address fields.
 func TestListener_AcceptAndClose(t *testing.T) {
