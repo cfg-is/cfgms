@@ -361,28 +361,6 @@ func (cf *CommandFilter) handleAuditCommand(event *CommandAuditEvent) error {
 	return nil
 }
 
-// StreamInterceptor provides real-time command interception for streaming data
-type StreamInterceptor struct {
-	validator       *SecurityValidator
-	securityContext *SessionSecurityContext
-
-	// Stream processing
-	inputProcessor  *CommandProcessor
-	outputProcessor *OutputProcessor
-
-	// Security events
-	auditChannel chan<- *CommandAuditEvent
-	alertChannel chan<- *SecurityAlert
-}
-
-// CommandProcessor processes command streams and extracts complete commands
-type CommandProcessor struct {
-}
-
-// OutputProcessor processes output streams for sensitive data detection
-type OutputProcessor struct {
-}
-
 // SensitiveDataRule defines patterns for detecting sensitive data in output
 type SensitiveDataRule struct {
 	ID          string `json:"id"`
@@ -406,33 +384,3 @@ type SecurityAlert struct {
 	ActionTaken string                 `json:"action_taken"`
 }
 
-// NewStreamInterceptor creates a new stream interceptor for real-time processing
-func NewStreamInterceptor(
-	validator *SecurityValidator,
-	context *SessionSecurityContext,
-	auditChan chan<- *CommandAuditEvent,
-	alertChan chan<- *SecurityAlert,
-) *StreamInterceptor {
-	return &StreamInterceptor{
-		validator:       validator,
-		securityContext: context,
-		auditChannel:    auditChan,
-		alertChannel:    alertChan,
-		inputProcessor:  &CommandProcessor{},
-		outputProcessor: &OutputProcessor{},
-	}
-}
-
-// ProcessInput processes input stream and returns filtered data
-func (si *StreamInterceptor) ProcessInput(ctx context.Context, data []byte) ([]byte, error) {
-	// Implementation would process streaming input data
-	// This is a placeholder for the streaming command processing logic
-	return data, nil
-}
-
-// ProcessOutput processes output stream and returns filtered data
-func (si *StreamInterceptor) ProcessOutput(ctx context.Context, data []byte) ([]byte, error) {
-	// Implementation would process streaming output data
-	// This is a placeholder for the streaming output processing logic
-	return data, nil
-}

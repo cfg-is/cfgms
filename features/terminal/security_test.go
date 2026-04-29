@@ -537,51 +537,6 @@ func TestSessionMonitor_ThreatLevelCalculation(t *testing.T) {
 	})
 }
 
-func TestAuditLogger_IntegrityProtection(t *testing.T) {
-	config := DefaultAuditConfig()
-	config.StoragePath = t.TempDir()
-	config.IntegrityChecking = true
-	config.HMACEnabled = true
-	config.ChainHashing = true
-
-	storage := NewFileAuditStorage(config.StoragePath)
-	logger, err := NewAuditLogger(config, storage)
-	require.NoError(t, err)
-
-	ctx := context.Background()
-	err = logger.Start(ctx)
-	require.NoError(t, err)
-	defer func() {
-		if err := logger.Stop(); err != nil {
-			t.Logf("Failed to stop logger: %v", err)
-		}
-	}()
-
-	// Test logging and integrity verification
-	t.Run("Log entry with integrity protection", func(t *testing.T) {
-		err := logger.LogCommandExecution(ctx, "session1", "user1", "steward1", "tenant1",
-			"ls -la", 0, time.Second, "file1\nfile2\n")
-		assert.NoError(t, err)
-
-		// Allow some time for processing
-		time.Sleep(100 * time.Millisecond)
-	})
-
-	t.Run("Log security violation", func(t *testing.T) {
-		err := logger.LogSecurityViolation(ctx, "session1", "user1", "steward1", "tenant1",
-			"command_blocked", "Dangerous command blocked", FilterSeverityCritical)
-		assert.NoError(t, err)
-
-		time.Sleep(100 * time.Millisecond)
-	})
-
-	t.Run("Verify integrity of audit entries", func(t *testing.T) {
-		// In a real implementation, we would retrieve entries and verify their integrity
-		// This test verifies that the integrity protection mechanisms are working
-		assert.NotEmpty(t, logger.integrityChecker.hashChain)
-	})
-}
-
 func TestCommandInterceptor_InputFiltering(t *testing.T) {
 	mockRBAC := &MockRBACManager{}
 	validator := NewSecurityValidator(mockRBAC)

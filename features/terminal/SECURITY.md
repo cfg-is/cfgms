@@ -93,28 +93,28 @@ SSH/Remote access         -> AUDIT (Medium)
 - Integration with external SIEM systems
 - Escalation procedures for critical threats
 
-### 4. Audit Logging System (`audit.go`)
+### 4. Audit Logging System (`pkg/audit.Manager`)
 
-**Tamper-Proof Logging:**
-- HMAC-based integrity protection
-- Cryptographic hash chaining
-- Sequential audit entry numbering
-- Content-addressable storage
+Terminal audit events are routed through the central `pkg/audit.Manager` provider
+rather than a terminal-specific logger. This gives all terminal audit events the same
+chain integrity, HMAC signing, and pluggable storage as every other CFGMS component.
 
-**Comprehensive Audit Events:**
-```go
-SessionStart/End          -> User access tracking
-CommandExecuted          -> Full command history
-CommandBlocked           -> Security violations
-SecurityViolation        -> Threat detection
-PrivilegeEscalation     -> Suspicious activity
-```
+**Event Routing:**
+- Security violations → `audit.NewEventBuilder().Action("terminal.<violation_type>")`
+- Session start/end → `Action("terminal.session.start")` / `Action("terminal.session.end")`
+- Command authorization → `Action("terminal.command_authorized")` / `Action("terminal.command_authorization_denied")`
+- JIT access → `Action("terminal.jit_access_attempt")` / `Action("terminal.jit_access_failure")`
+- Permission revocation → `Action("terminal.permission_revocation_termination")`
+
+**Integrity:**
+- HMAC-SHA256 chain managed by `pkg/audit.Manager` (key at `audit/hmac-key`)
+- Sequential entry numbering across all components sharing the same store
+- Per-entry checksum computed by the drain goroutine before storage
 
 **Audit Features:**
 - Immutable log entries with integrity verification
-- Configurable retention policies (default 90 days)
-- Compressed storage with optional encryption
-- Multi-format export (JSON, CSV, PDF)
+- Pluggable storage backend (configured at controller bootstrap)
+- Bounded write queue prevents terminal code from blocking on a slow audit store
 
 ### 5. WebSocket Origin Enforcement (`websocket.go`)
 
@@ -261,9 +261,6 @@ TestCommandInterceptor_InputFiltering()
 
 // Session Monitoring Tests
 TestSessionMonitor_ThreatLevelCalculation()
-
-// Audit System Tests
-TestAuditLogger_IntegrityProtection()
 
 // Performance Tests
 BenchmarkCommandValidation()

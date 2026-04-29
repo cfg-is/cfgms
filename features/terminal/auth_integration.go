@@ -17,7 +17,9 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/continuous"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // AuthenticatedTerminalManager manages terminal sessions with mTLS authentication and continuous authorization
@@ -26,7 +28,7 @@ type AuthenticatedTerminalManager struct {
 	rbacManager          rbac.RBACManager
 	certValidator        *cert.Validator
 	securityValidator    *SecurityValidator
-	auditLogger          *AuditLogger
+	auditManager         *audit.Manager
 	sessionMonitor       *SessionMonitor
 	continuousAuthEngine *continuous.ContinuousAuthorizationEngine
 
@@ -139,6 +141,7 @@ func NewAuthenticatedTerminalManager(
 	baseManager SessionManager,
 	rbacManager rbac.RBACManager,
 	certValidator *cert.Validator,
+	auditManager *audit.Manager,
 	config *AuthConfig,
 ) (*AuthenticatedTerminalManager, error) {
 	if config == nil {
@@ -146,11 +149,6 @@ func NewAuthenticatedTerminalManager(
 	}
 
 	securityValidator := NewSecurityValidator(rbacManager)
-	auditLogger, err := NewAuditLogger(DefaultAuditConfig(), NewFileAuditStorage("/var/log/cfgms/terminal-audit"))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create audit logger: %w", err)
-	}
-
 	sessionMonitor := NewSessionMonitor(securityValidator, DefaultMonitorConfig())
 
 	manager := &AuthenticatedTerminalManager{
@@ -158,7 +156,7 @@ func NewAuthenticatedTerminalManager(
 		rbacManager:          rbacManager,
 		certValidator:        certValidator,
 		securityValidator:    securityValidator,
-		auditLogger:          auditLogger,
+		auditManager:         auditManager,
 		sessionMonitor:       sessionMonitor,
 		continuousAuthEngine: nil, // Will be set when enabled
 		sessionTokens:        make(map[string]*SessionToken),
@@ -168,10 +166,6 @@ func NewAuthenticatedTerminalManager(
 
 	// Start background services
 	ctx := context.Background()
-	if err := auditLogger.Start(ctx); err != nil {
-		// Log error but continue - audit failures shouldn't block auth
-		_ = err // Explicitly ignore audit startup errors
-	}
 	if err := sessionMonitor.Start(ctx); err != nil {
 		// Log error but continue - monitoring failures shouldn't block auth
 		_ = err // Explicitly ignore monitoring startup errors
@@ -214,11 +208,24 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 	// Validate session request against RBAC
 	securityContext, err := atm.securityValidator.ValidateSessionAccess(ctx, userID, req.StewardID, tenantID)
 	if err != nil {
-		if logErr := atm.auditLogger.LogSecurityViolation(ctx, "", userID, req.StewardID, tenantID,
-			"terminal_access_denied", err.Error(), FilterSeverityHigh); logErr != nil {
-			// Log error but continue - audit failures shouldn't block auth decision
-			_ = logErr // Explicitly ignore audit failures for resilience
+		resourceID := req.StewardID
+		if resourceID == "" {
+			resourceID = userID
 		}
+		_ = atm.auditManager.RecordEvent(ctx,
+			audit.NewEventBuilder().
+				Tenant(tenantID).
+				Type(business.AuditEventSecurityEvent).
+				Action("terminal.terminal_access_denied").
+				User(userID, business.AuditUserTypeHuman).
+				Resource("terminal", resourceID, "").
+				Result(business.AuditResultDenied).
+				Severity(business.AuditSeverityHigh).
+				Details(map[string]interface{}{
+					"violation_type": "terminal_access_denied",
+					"details":        err.Error(),
+				}),
+		)
 
 		return &AuthenticationResult{
 			Success:      false,
@@ -238,11 +245,24 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 	// Validate time-based access if enabled
 	if atm.config.TimeBasedAccess {
 		if !atm.isAccessAllowedAtTime(time.Now(), restrictions) {
-			if logErr := atm.auditLogger.LogSecurityViolation(ctx, "", userID, req.StewardID, tenantID,
-				"time_based_access_violation", "Access attempted outside allowed hours", FilterSeverityMedium); logErr != nil {
-				// Log error but continue - audit failures shouldn't block auth decision
-				_ = logErr // Explicitly ignore audit failures for resilience
+			resourceID := req.StewardID
+			if resourceID == "" {
+				resourceID = userID
 			}
+			_ = atm.auditManager.RecordEvent(ctx,
+				audit.NewEventBuilder().
+					Tenant(tenantID).
+					Type(business.AuditEventSecurityEvent).
+					Action("terminal.time_based_access_violation").
+					User(userID, business.AuditUserTypeHuman).
+					Resource("terminal", resourceID, "").
+					Result(business.AuditResultDenied).
+					Severity(business.AuditSeverityMedium).
+					Details(map[string]interface{}{
+						"violation_type": "time_based_access_violation",
+						"details":        "Access attempted outside allowed hours",
+					}),
+			)
 
 			return &AuthenticationResult{
 				Success:      false,
@@ -293,19 +313,48 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 	if atm.continuousAuthConfig.EnableContinuousAuth && atm.continuousAuthEngine != nil {
 		if regErr := atm.RegisterSessionForContinuousAuth(ctx, session.ID, userID, tenantID, "terminal"); regErr != nil {
 			// Log error but don't fail authentication
-			if logErr := atm.auditLogger.LogSecurityViolation(ctx, session.ID, userID, req.StewardID, tenantID,
-				"continuous_auth_registration_failed", fmt.Sprintf("Failed to register session for continuous auth: %v", regErr), FilterSeverityMedium); logErr != nil {
-				_ = logErr
+			resourceID := req.StewardID
+			if resourceID == "" {
+				resourceID = userID
 			}
+			_ = atm.auditManager.RecordEvent(ctx,
+				audit.NewEventBuilder().
+					Tenant(tenantID).
+					Type(business.AuditEventSecurityEvent).
+					Action("terminal.continuous_auth_registration_failed").
+					User(userID, business.AuditUserTypeHuman).
+					Session(session.ID).
+					Resource("terminal", resourceID, "").
+					Result(business.AuditResultError).
+					Severity(business.AuditSeverityMedium).
+					Details(map[string]interface{}{
+						"violation_type": "continuous_auth_registration_failed",
+						"details":        fmt.Sprintf("Failed to register session for continuous auth: %v", regErr),
+					}),
+			)
 		}
 	}
 
 	// Log successful authentication
 	clientIP := atm.getClientIP(r)
-	if logErr := atm.auditLogger.LogSessionStart(ctx, session.ID, userID, req.StewardID, tenantID, clientIP); logErr != nil {
-		// Log error but continue - audit failures shouldn't prevent successful auth
-		_ = logErr // Explicitly ignore audit failures for resilience
+	resourceID := req.StewardID
+	if resourceID == "" {
+		resourceID = userID
 	}
+	_ = atm.auditManager.RecordEvent(ctx,
+		audit.NewEventBuilder().
+			Tenant(tenantID).
+			Type(business.AuditEventSystemAccess).
+			Action("terminal.session.start").
+			User(userID, business.AuditUserTypeHuman).
+			Session(session.ID).
+			Resource("terminal", resourceID, "").
+			Result(business.AuditResultSuccess).
+			Severity(business.AuditSeverityMedium).
+			Details(map[string]interface{}{
+				"client_ip": clientIP,
+			}),
+	)
 
 	return &AuthenticationResult{
 		Success:         true,
@@ -343,11 +392,21 @@ func (atm *AuthenticatedTerminalManager) ValidateSessionToken(ctx context.Contex
 	if atm.config.IPBindingEnabled {
 		clientIP := atm.getClientIP(r)
 		if token.ClientIP != clientIP {
-			if logErr := atm.auditLogger.LogSecurityViolation(ctx, token.SessionID, token.UserID, "", "",
-				"session_hijack_attempt", fmt.Sprintf("IP address mismatch: expected %s, got %s", token.ClientIP, clientIP), FilterSeverityCritical); logErr != nil {
-				// Log error but continue - audit failures shouldn't prevent security action
-				_ = logErr // Explicitly ignore audit failures for resilience
-			}
+			_ = atm.auditManager.RecordEvent(ctx,
+				audit.NewEventBuilder().
+					Tenant(extractTenantID(token)).
+					Type(business.AuditEventSecurityEvent).
+					Action("terminal.session_hijack_attempt").
+					User(token.UserID, business.AuditUserTypeHuman).
+					Session(token.SessionID).
+					Resource("session", token.SessionID, "").
+					Result(business.AuditResultDenied).
+					Severity(business.AuditSeverityCritical).
+					Details(map[string]interface{}{
+						"violation_type": "session_hijack_attempt",
+						"details":        fmt.Sprintf("IP address mismatch: expected %s, got %s", token.ClientIP, clientIP),
+					}),
+			)
 
 			atm.invalidateToken(token.Token)
 			return nil, fmt.Errorf("session hijacking detected: IP address mismatch")
@@ -358,11 +417,21 @@ func (atm *AuthenticatedTerminalManager) ValidateSessionToken(ctx context.Contex
 	if atm.config.TLSFingerprintCheck && r.TLS != nil {
 		currentFingerprint := atm.generateTLSFingerprint(r.TLS)
 		if token.TLSFingerprint != currentFingerprint {
-			if err := atm.auditLogger.LogSecurityViolation(ctx, token.SessionID, token.UserID, "", "",
-				"session_hijack_attempt", "TLS fingerprint mismatch", FilterSeverityCritical); err != nil {
-				// Log error but continue with security response
-				_ = err // Explicitly ignore audit failures for resilience
-			}
+			_ = atm.auditManager.RecordEvent(ctx,
+				audit.NewEventBuilder().
+					Tenant(extractTenantID(token)).
+					Type(business.AuditEventSecurityEvent).
+					Action("terminal.session_hijack_attempt").
+					User(token.UserID, business.AuditUserTypeHuman).
+					Session(token.SessionID).
+					Resource("session", token.SessionID, "").
+					Result(business.AuditResultDenied).
+					Severity(business.AuditSeverityCritical).
+					Details(map[string]interface{}{
+						"violation_type": "session_hijack_attempt",
+						"details":        "TLS fingerprint mismatch",
+					}),
+			)
 
 			atm.invalidateToken(token.Token)
 			return nil, fmt.Errorf("session hijacking detected: TLS fingerprint mismatch")
@@ -379,10 +448,13 @@ func (atm *AuthenticatedTerminalManager) ValidateSessionToken(ctx context.Contex
 
 // TerminateSession securely terminates a terminal session
 func (atm *AuthenticatedTerminalManager) TerminateSession(ctx context.Context, sessionID string, reason string) error {
-	// Find and invalidate session token
+	// Find and invalidate session token; capture user/tenant before deletion for audit
+	var terminatedUserID, terminatedTenantID string
 	atm.tokenMutex.Lock()
 	for tokenString, token := range atm.sessionTokens {
 		if token.SessionID == sessionID {
+			terminatedUserID = token.UserID
+			terminatedTenantID = extractTenantID(token)
 			delete(atm.sessionTokens, tokenString)
 			break
 		}
@@ -406,11 +478,29 @@ func (atm *AuthenticatedTerminalManager) TerminateSession(ctx context.Context, s
 		return fmt.Errorf("failed to terminate session: %w", err)
 	}
 
-	// Log session termination
-	if logErr := atm.auditLogger.LogSessionEnd(ctx, sessionID, "", 0, 0, 0); logErr != nil { // TODO: Get actual metrics
-		// Log error but continue - audit failures shouldn't prevent termination
-		_ = logErr // Explicitly ignore audit failures for resilience
+	// Log session termination; fall back to system identity when token was not found
+	userID := terminatedUserID
+	if userID == "" {
+		userID = audit.SystemUserID
 	}
+	tenantID := terminatedTenantID
+	if tenantID == "" {
+		tenantID = audit.SystemTenantID
+	}
+	_ = atm.auditManager.RecordEvent(ctx,
+		audit.NewEventBuilder().
+			Tenant(tenantID).
+			Type(business.AuditEventSystemAccess).
+			Action("terminal.session.end").
+			User(userID, business.AuditUserTypeHuman).
+			Session(sessionID).
+			Resource("session", sessionID, "").
+			Result(business.AuditResultSuccess).
+			Severity(business.AuditSeverityMedium).
+			Details(map[string]interface{}{
+				"reason": reason,
+			}),
+	)
 
 	return nil
 }
@@ -742,13 +832,21 @@ func (atm *AuthenticatedTerminalManager) AuthorizeCommand(ctx context.Context, s
 
 	// Check authorization latency against SLA
 	if authLatency.Milliseconds() > int64(atm.continuousAuthConfig.MaxAuthLatencyMs) {
-		// Log performance violation but don't fail the request
-		if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", "",
-			"authorization_latency_sla_violation",
-			fmt.Sprintf("Authorization latency %v exceeds SLA %dms", authLatency, atm.continuousAuthConfig.MaxAuthLatencyMs),
-			FilterSeverityMedium); logErr != nil {
-			_ = logErr // Ignore audit failures
-		}
+		_ = atm.auditManager.RecordEvent(ctx,
+			audit.NewEventBuilder().
+				Tenant(extractTenantID(token)).
+				Type(business.AuditEventSecurityEvent).
+				Action("terminal.authorization_latency_sla_violation").
+				User(token.UserID, business.AuditUserTypeHuman).
+				Session(sessionID).
+				Resource("session", sessionID, "").
+				Result(business.AuditResultSuccess).
+				Severity(business.AuditSeverityMedium).
+				Details(map[string]interface{}{
+					"violation_type": "authorization_latency_sla_violation",
+					"details":        fmt.Sprintf("Authorization latency %v exceeds SLA %dms", authLatency, atm.continuousAuthConfig.MaxAuthLatencyMs),
+				}),
+		)
 	}
 
 	if err != nil {
@@ -756,10 +854,21 @@ func (atm *AuthenticatedTerminalManager) AuthorizeCommand(ctx context.Context, s
 		switch atm.continuousAuthConfig.ContinuousAuthFallback {
 		case "allow":
 			// Allow command execution but log the issue
-			if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", "",
-				"continuous_auth_failure_fallback_allow", fmt.Sprintf("Continuous auth failed: %v", err), FilterSeverityHigh); logErr != nil {
-				_ = logErr // Ignore audit failures
-			}
+			_ = atm.auditManager.RecordEvent(ctx,
+				audit.NewEventBuilder().
+					Tenant(extractTenantID(token)).
+					Type(business.AuditEventSecurityEvent).
+					Action("terminal.continuous_auth_failure_fallback_allow").
+					User(token.UserID, business.AuditUserTypeHuman).
+					Session(sessionID).
+					Resource("session", sessionID, "").
+					Result(business.AuditResultError).
+					Severity(business.AuditSeverityHigh).
+					Details(map[string]interface{}{
+						"violation_type": "continuous_auth_failure_fallback_allow",
+						"details":        fmt.Sprintf("Continuous auth failed: %v", err),
+					}),
+			)
 			return &continuous.ContinuousAuthResponse{
 				AccessResponse: &common.AccessResponse{
 					Granted: true,
@@ -778,17 +887,37 @@ func (atm *AuthenticatedTerminalManager) AuthorizeCommand(ctx context.Context, s
 
 	// Log successful authorization for audit
 	if response.AccessResponse.Granted {
-		// Log successful authorization (using existing audit method)
-		if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", "",
-			"command_authorized", fmt.Sprintf("Command authorized: %s, latency: %v", command, authLatency), FilterSeverityLow); logErr != nil {
-			_ = logErr // Ignore audit failures
-		}
+		_ = atm.auditManager.RecordEvent(ctx,
+			audit.NewEventBuilder().
+				Tenant(extractTenantID(token)).
+				Type(business.AuditEventSystemAccess).
+				Action("terminal.command_authorized").
+				User(token.UserID, business.AuditUserTypeHuman).
+				Session(sessionID).
+				Resource("session", sessionID, "").
+				Result(business.AuditResultSuccess).
+				Severity(business.AuditSeverityLow).
+				Details(map[string]interface{}{
+					"command": command,
+					"latency": authLatency.String(),
+				}),
+		)
 	} else {
-		// Log denied command
-		if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", "",
-			"command_authorization_denied", fmt.Sprintf("Command denied: %s, Reason: %s", command, response.AccessResponse.Reason), FilterSeverityMedium); logErr != nil {
-			_ = logErr // Ignore audit failures
-		}
+		_ = atm.auditManager.RecordEvent(ctx,
+			audit.NewEventBuilder().
+				Tenant(extractTenantID(token)).
+				Type(business.AuditEventAuthorization).
+				Action("terminal.command_authorization_denied").
+				User(token.UserID, business.AuditUserTypeHuman).
+				Session(sessionID).
+				Resource("session", sessionID, "").
+				Result(business.AuditResultDenied).
+				Severity(business.AuditSeverityMedium).
+				Details(map[string]interface{}{
+					"command": command,
+					"reason":  response.AccessResponse.Reason,
+				}),
+		)
 	}
 
 	return response, nil
@@ -970,16 +1099,35 @@ func (atm *AuthenticatedTerminalManager) HandlePermissionRevocation(ctx context.
 	propagationTime := time.Since(startTime)
 
 	// Terminate sessions that no longer have required permissions
+	resourceID := userID
+	if resourceID == "" {
+		resourceID = audit.SystemUserID
+	}
+	effectiveTenantID := tenantID
+	if effectiveTenantID == "" {
+		effectiveTenantID = audit.SystemTenantID
+	}
 	for _, token := range activeSessions {
 		// Check if session requires the revoked permissions
 		if atm.sessionRequiresPermissions(token, permissions) {
 			// Schedule session for termination
 			terminationReason := fmt.Sprintf("Permission revoked: %s", strings.Join(permissions, ", "))
 
-			if logErr := atm.auditLogger.LogSecurityViolation(ctx, token.SessionID, userID, "", tenantID,
-				"permission_revocation_termination", terminationReason, FilterSeverityCritical); logErr != nil {
-				_ = logErr // Ignore audit failures for resilience
-			}
+			_ = atm.auditManager.RecordEvent(ctx,
+				audit.NewEventBuilder().
+					Tenant(effectiveTenantID).
+					Type(business.AuditEventSecurityEvent).
+					Action("terminal.permission_revocation_termination").
+					User(userID, business.AuditUserTypeHuman).
+					Session(token.SessionID).
+					Resource("session", token.SessionID, "").
+					Result(business.AuditResultDenied).
+					Severity(business.AuditSeverityCritical).
+					Details(map[string]interface{}{
+						"violation_type": "permission_revocation_termination",
+						"details":        terminationReason,
+					}),
+			)
 
 			// Terminate the session
 			if termErr := atm.TerminateSession(ctx, token.SessionID, terminationReason); termErr != nil {
@@ -990,12 +1138,20 @@ func (atm *AuthenticatedTerminalManager) HandlePermissionRevocation(ctx context.
 	}
 
 	// Log successful permission revocation
-	if logErr := atm.auditLogger.LogSecurityViolation(ctx, "", userID, "", tenantID,
-		"permission_revocation_completed",
-		fmt.Sprintf("Revoked permissions %s, propagation time: %v", strings.Join(permissions, ", "), propagationTime),
-		FilterSeverityHigh); logErr != nil {
-		_ = logErr // Ignore audit failures for resilience
-	}
+	_ = atm.auditManager.RecordEvent(ctx,
+		audit.NewEventBuilder().
+			Tenant(effectiveTenantID).
+			Type(business.AuditEventSecurityEvent).
+			Action("terminal.permission_revocation_completed").
+			User(userID, business.AuditUserTypeHuman).
+			Resource("user", resourceID, "").
+			Result(business.AuditResultSuccess).
+			Severity(business.AuditSeverityHigh).
+			Details(map[string]interface{}{
+				"permissions":      strings.Join(permissions, ", "),
+				"propagation_time": propagationTime.String(),
+			}),
+	)
 
 	return nil
 }
@@ -1058,19 +1214,41 @@ func (atm *AuthenticatedTerminalManager) EnhanceJITIntegration(ctx context.Conte
 	authLatency := time.Since(authStart)
 
 	// Log JIT access attempt
-	if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", extractTenantID(token),
-		"jit_access_attempt",
-		fmt.Sprintf("Command: %s, Result: %t, Latency: %v", command, response != nil && response.AccessResponse.Granted, authLatency),
-		FilterSeverityMedium); logErr != nil {
-		_ = logErr // Ignore audit failures for resilience
-	}
+	granted := response != nil && response.AccessResponse.Granted
+	_ = atm.auditManager.RecordEvent(ctx,
+		audit.NewEventBuilder().
+			Tenant(extractTenantID(token)).
+			Type(business.AuditEventSystemAccess).
+			Action("terminal.jit_access_attempt").
+			User(token.UserID, business.AuditUserTypeHuman).
+			Session(sessionID).
+			Resource("session", sessionID, "").
+			Result(business.AuditResultSuccess).
+			Severity(business.AuditSeverityMedium).
+			Details(map[string]interface{}{
+				"command": command,
+				"granted": granted,
+				"latency": authLatency.String(),
+			}),
+	)
 
 	if err != nil {
 		// Log JIT failure
-		if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", extractTenantID(token),
-			"jit_access_failure", fmt.Sprintf("JIT authorization failed: %v", err), FilterSeverityHigh); logErr != nil {
-			_ = logErr
-		}
+		_ = atm.auditManager.RecordEvent(ctx,
+			audit.NewEventBuilder().
+				Tenant(extractTenantID(token)).
+				Type(business.AuditEventSecurityEvent).
+				Action("terminal.jit_access_failure").
+				User(token.UserID, business.AuditUserTypeHuman).
+				Session(sessionID).
+				Resource("session", sessionID, "").
+				Result(business.AuditResultError).
+				Severity(business.AuditSeverityHigh).
+				Details(map[string]interface{}{
+					"command": command,
+					"details": fmt.Sprintf("JIT authorization failed: %v", err),
+				}),
+		)
 		return nil, fmt.Errorf("JIT authorization failed: %w", err)
 	}
 
@@ -1099,10 +1277,20 @@ func (atm *AuthenticatedTerminalManager) RegisterSessionForContinuousAuth(ctx co
 	}
 
 	// Log successful registration
-	if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, userID, "", tenantID,
-		"continuous_auth_registration", "Session registered for continuous authorization monitoring", FilterSeverityLow); logErr != nil {
-		_ = logErr // Ignore audit failures for resilience
-	}
+	_ = atm.auditManager.RecordEvent(ctx,
+		audit.NewEventBuilder().
+			Tenant(tenantID).
+			Type(business.AuditEventSystemAccess).
+			Action("terminal.continuous_auth_registration").
+			User(userID, business.AuditUserTypeHuman).
+			Session(sessionID).
+			Resource("session", sessionID, "").
+			Result(business.AuditResultSuccess).
+			Severity(business.AuditSeverityLow).
+			Details(map[string]interface{}{
+				"session_type": sessionType,
+			}),
+	)
 
 	return nil
 }
