@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -47,6 +48,7 @@ type MultiTenantManager struct {
 
 	// Cache of tenant discovery results to avoid repeated API calls
 	tenantCache map[string]*TenantDiscoveryResult
+	cacheMu     sync.RWMutex
 	cacheExpiry time.Duration
 }
 
@@ -238,7 +240,9 @@ func (mtm *MultiTenantManager) CompleteAdminConsent(ctx context.Context, provide
 	}
 
 	// Cache the discovery result
+	mtm.cacheMu.Lock()
 	mtm.tenantCache[provider] = discoveryResult
+	mtm.cacheMu.Unlock()
 
 	return nil
 }
@@ -338,7 +342,9 @@ func (mtm *MultiTenantManager) RefreshTenantDiscovery(ctx context.Context, provi
 	}
 
 	// Update cache
+	mtm.cacheMu.Lock()
 	mtm.tenantCache[provider] = discoveryResult
+	mtm.cacheMu.Unlock()
 
 	return nil
 }
@@ -367,7 +373,9 @@ func (mtm *MultiTenantManager) RevokeConsent(ctx context.Context, provider strin
 	}
 
 	// Clear cache
+	mtm.cacheMu.Lock()
 	delete(mtm.tenantCache, provider)
+	mtm.cacheMu.Unlock()
 
 	return nil
 }
