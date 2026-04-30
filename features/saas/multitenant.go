@@ -16,7 +16,7 @@
 //
 // Usage Example:
 //
-//	manager := NewMultiTenantManager(credStore, httpClient)
+//	manager := NewMultiTenantManager(credStore, NewInMemoryConsentStore(), httpClient)
 //
 //	// Start admin consent flow
 //	consentURL, err := manager.StartAdminConsent(ctx, "microsoft", config)
@@ -41,6 +41,7 @@ import (
 // MultiTenantManager handles multi-tenant OAuth2 consent flows and token management
 type MultiTenantManager struct {
 	credStore    CredentialStore
+	consentStore ConsentStore
 	httpClient   *http.Client
 	oauth2Client OAuth2Client
 
@@ -49,10 +50,13 @@ type MultiTenantManager struct {
 	cacheExpiry time.Duration
 }
 
-// NewMultiTenantManager creates a new multi-tenant manager
-func NewMultiTenantManager(credStore CredentialStore, httpClient *http.Client) *MultiTenantManager {
+// NewMultiTenantManager creates a new multi-tenant manager.
+// consentStore persists admin-consent state; pass NewInMemoryConsentStore() for
+// pre-production use until a durable implementation is available.
+func NewMultiTenantManager(credStore CredentialStore, consentStore ConsentStore, httpClient *http.Client) *MultiTenantManager {
 	return &MultiTenantManager{
 		credStore:    credStore,
+		consentStore: consentStore,
 		httpClient:   httpClient,
 		oauth2Client: NewOAuth2Client(httpClient),
 		tenantCache:  make(map[string]*TenantDiscoveryResult),
@@ -187,7 +191,7 @@ func (mtm *MultiTenantManager) StartAdminConsent(ctx context.Context, provider s
 		ConsentFlow:     flow,
 	}
 
-	if err := mtm.storeConsentStatus(provider, status); err != nil {
+	if err := mtm.consentStore.StoreConsent(provider, status); err != nil {
 		return "", fmt.Errorf("failed to store consent status: %w", err)
 	}
 
@@ -196,13 +200,12 @@ func (mtm *MultiTenantManager) StartAdminConsent(ctx context.Context, provider s
 
 // CompleteAdminConsent completes the admin consent flow and discovers tenants
 func (mtm *MultiTenantManager) CompleteAdminConsent(ctx context.Context, provider, authCode string) error {
-	// Get stored consent status
-	status, err := mtm.getConsentStatus(provider)
+	status, err := mtm.consentStore.GetConsent(provider)
 	if err != nil {
 		return fmt.Errorf("failed to get consent status: %w", err)
 	}
 
-	if status.ConsentFlow == nil {
+	if status == nil || status.ConsentFlow == nil {
 		return fmt.Errorf("no active consent flow found for provider %s", provider)
 	}
 
@@ -230,7 +233,7 @@ func (mtm *MultiTenantManager) CompleteAdminConsent(ctx context.Context, provide
 	status.AccessibleTenants = discoveryResult.Tenants
 	status.ConsentFlow = nil // Clear the flow as it's complete
 
-	if err := mtm.storeConsentStatus(provider, status); err != nil {
+	if err := mtm.consentStore.StoreConsent(provider, status); err != nil {
 		return fmt.Errorf("failed to update consent status: %w", err)
 	}
 
@@ -242,13 +245,12 @@ func (mtm *MultiTenantManager) CompleteAdminConsent(ctx context.Context, provide
 
 // GetTenantToken retrieves a valid access token for a specific tenant
 func (mtm *MultiTenantManager) GetTenantToken(ctx context.Context, provider, tenantID string) (*TokenSet, error) {
-	// Check if admin consent has been granted
-	status, err := mtm.getConsentStatus(provider)
+	status, err := mtm.consentStore.GetConsent(provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get consent status: %w", err)
 	}
 
-	if !status.HasAdminConsent {
+	if status == nil || !status.HasAdminConsent {
 		return nil, fmt.Errorf("admin consent not granted for provider %s", provider)
 	}
 
@@ -274,12 +276,12 @@ func (mtm *MultiTenantManager) GetTenantToken(ctx context.Context, provider, ten
 
 // ListAccessibleTenants returns all tenants accessible by the provider
 func (mtm *MultiTenantManager) ListAccessibleTenants(ctx context.Context, provider string) ([]TenantInfo, error) {
-	status, err := mtm.getConsentStatus(provider)
+	status, err := mtm.consentStore.GetConsent(provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get consent status: %w", err)
 	}
 
-	if !status.HasAdminConsent {
+	if status == nil || !status.HasAdminConsent {
 		return nil, fmt.Errorf("admin consent not granted for provider %s", provider)
 	}
 
@@ -292,7 +294,13 @@ func (mtm *MultiTenantManager) ListAccessibleTenants(ctx context.Context, provid
 			}
 		} else {
 			// Get updated status after refresh
-			status, _ = mtm.getConsentStatus(provider)
+			refreshed, refreshErr := mtm.consentStore.GetConsent(provider)
+			if refreshErr != nil {
+				return nil, fmt.Errorf("failed to read updated consent status: %w", refreshErr)
+			}
+			if refreshed != nil {
+				status = refreshed
+			}
 		}
 	}
 
@@ -314,15 +322,18 @@ func (mtm *MultiTenantManager) RefreshTenantDiscovery(ctx context.Context, provi
 	}
 
 	// Update consent status
-	status, err := mtm.getConsentStatus(provider)
+	status, err := mtm.consentStore.GetConsent(provider)
 	if err != nil {
 		return fmt.Errorf("failed to get consent status: %w", err)
+	}
+	if status == nil {
+		status = &ConsentStatus{Provider: provider}
 	}
 
 	status.LastTenantDiscovery = time.Now()
 	status.AccessibleTenants = discoveryResult.Tenants
 
-	if err := mtm.storeConsentStatus(provider, status); err != nil {
+	if err := mtm.consentStore.StoreConsent(provider, status); err != nil {
 		return fmt.Errorf("failed to update consent status: %w", err)
 	}
 
@@ -334,29 +345,25 @@ func (mtm *MultiTenantManager) RefreshTenantDiscovery(ctx context.Context, provi
 
 // RevokeConsent revokes admin consent and cleans up all tenant tokens
 func (mtm *MultiTenantManager) RevokeConsent(ctx context.Context, provider string) error {
-	status, err := mtm.getConsentStatus(provider)
+	status, err := mtm.consentStore.GetConsent(provider)
 	if err != nil {
 		return fmt.Errorf("failed to get consent status: %w", err)
 	}
 
 	// Clean up all tenant-specific tokens
-	for _, tenant := range status.AccessibleTenants {
-		tenantKey := mtm.getTenantKey(provider, tenant.TenantID)
-		_ = mtm.credStore.DeleteTokenSet(tenantKey) // Ignore errors for cleanup
+	if status != nil {
+		for _, tenant := range status.AccessibleTenants {
+			tenantKey := mtm.getTenantKey(provider, tenant.TenantID)
+			_ = mtm.credStore.DeleteTokenSet(tenantKey) // Ignore errors for cleanup
+		}
 	}
 
 	// Clean up base provider token
 	_ = mtm.credStore.DeleteTokenSet(provider)
 
-	// Reset consent status
-	status.HasAdminConsent = false
-	status.ConsentGrantedAt = time.Time{}
-	status.LastTenantDiscovery = time.Time{}
-	status.AccessibleTenants = nil
-	status.ConsentFlow = nil
-
-	if err := mtm.storeConsentStatus(provider, status); err != nil {
-		return fmt.Errorf("failed to reset consent status: %w", err)
+	// Delete consent status
+	if err := mtm.consentStore.DeleteConsent(provider); err != nil {
+		return fmt.Errorf("failed to delete consent status: %w", err)
 	}
 
 	// Clear cache
@@ -365,79 +372,24 @@ func (mtm *MultiTenantManager) RevokeConsent(ctx context.Context, provider strin
 	return nil
 }
 
-// GetConsentStatus returns the current consent status for a provider
+// GetConsentStatus returns the current consent status for a provider.
+// Returns a default empty ConsentStatus (HasAdminConsent: false) when no
+// consent has been stored yet.
 func (mtm *MultiTenantManager) GetConsentStatus(ctx context.Context, provider string) (*ConsentStatus, error) {
-	return mtm.getConsentStatus(provider)
+	status, err := mtm.consentStore.GetConsent(provider)
+	if err != nil {
+		return nil, err
+	}
+	if status == nil {
+		return &ConsentStatus{Provider: provider, HasAdminConsent: false}, nil
+	}
+	return status, nil
 }
 
 // Private helper methods
 
 func (mtm *MultiTenantManager) getTenantKey(provider, tenantID string) string {
 	return fmt.Sprintf("%s:tenant:%s", provider, tenantID)
-}
-
-func (mtm *MultiTenantManager) getConsentStatusKey(provider string) string {
-	return fmt.Sprintf("%s:consent_status", provider)
-}
-
-func (mtm *MultiTenantManager) storeConsentStatus(provider string, status *ConsentStatus) error {
-	// This is a simplified implementation - in practice, you'd want proper serialization
-	// For now, store as client secret (this could be improved with dedicated consent storage)
-	key := mtm.getConsentStatusKey(provider)
-
-	// Include more detailed status information
-	flowInfo := "none"
-	if status.ConsentFlow != nil {
-		flowInfo = "active"
-	}
-
-	data := fmt.Sprintf("consent_granted:%t;tenants:%d;flow:%s",
-		status.HasAdminConsent, len(status.AccessibleTenants), flowInfo)
-	return mtm.credStore.StoreClientSecret(key, data)
-}
-
-func (mtm *MultiTenantManager) getConsentStatus(provider string) (*ConsentStatus, error) {
-	// This is a simplified implementation - in practice, you'd want proper deserialization
-	key := mtm.getConsentStatusKey(provider)
-	data, err := mtm.credStore.GetClientSecret(key)
-
-	if err != nil {
-		// Return default status if not found
-		return &ConsentStatus{
-			Provider:        provider,
-			HasAdminConsent: false,
-		}, nil
-	}
-
-	status := &ConsentStatus{
-		Provider: provider,
-	}
-
-	// Parse the simple status data format
-	if strings.Contains(data, "consent_granted:true") {
-		status.HasAdminConsent = true
-		status.ConsentGrantedAt = time.Now().Add(-24 * time.Hour) // Mock: granted yesterday
-		status.AccessibleTenants = []TenantInfo{
-			{
-				TenantID:    "tenant-1",
-				DisplayName: "Customer Tenant 1",
-				Domain:      "customer1.onmicrosoft.com",
-				HasAccess:   true,
-			},
-		}
-	}
-
-	// Check if there's an active flow
-	if strings.Contains(data, "flow:active") {
-		status.ConsentFlow = &OAuth2Flow{
-			AuthURL:   "https://test-auth-url.com",
-			State:     "test-state",
-			Created:   time.Now(),
-			ExpiresAt: time.Now().Add(10 * time.Minute),
-		}
-	}
-
-	return status, nil
 }
 
 func (mtm *MultiTenantManager) isTenantAccessible(status *ConsentStatus, tenantID string) bool {

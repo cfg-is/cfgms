@@ -17,7 +17,8 @@ import (
 
 // Mock implementations for testing
 
-// MockCredentialStore implements CredentialStore for testing
+// MockCredentialStore implements CredentialStore for testing token and client-secret
+// operations. It must NOT be used for consent state — use InMemoryConsentStore instead.
 type MockCredentialStore struct {
 	tokens  map[string]*TokenSet
 	secrets map[string]string
@@ -63,7 +64,9 @@ func (m *MockCredentialStore) IsAvailable() bool {
 	return true
 }
 
-// MockOAuth2Client implements OAuth2Client for testing
+// MockOAuth2Client implements OAuth2Client for testing.
+// Uses testify/mock because OAuth2Client is a features/saas-local interface,
+// not a pkg/ central provider — the mock carve-out in the story applies.
 type MockOAuth2Client struct {
 	mock.Mock
 }
@@ -130,8 +133,9 @@ func TestMultiTenantManager_StartAdminConsent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			credStore := NewMockCredentialStore()
+			consentStore := NewInMemoryConsentStore()
 			httpClient := &http.Client{}
-			mtm := NewMultiTenantManager(credStore, httpClient)
+			mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
 
 			// Mock OAuth2Client
 			mockOAuth2 := &MockOAuth2Client{}
@@ -167,8 +171,9 @@ func TestMultiTenantManager_StartAdminConsent(t *testing.T) {
 
 func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
 	credStore := NewMockCredentialStore()
+	consentStore := NewInMemoryConsentStore()
 	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, httpClient)
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
 
 	// Set up mock OAuth2 client
 	mockOAuth2 := &MockOAuth2Client{}
@@ -178,7 +183,7 @@ func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
 	provider := "microsoft"
 	authCode := "test-auth-code"
 
-	// First, start a consent flow to set up state
+	// First, start a consent flow to set up state in the ConsentStore.
 	config := &MultiTenantConfig{
 		OAuth2Config: OAuth2Config{
 			ClientID:     "test-client-id",
@@ -202,14 +207,10 @@ func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
 	_, err := mtm.StartAdminConsent(ctx, provider, config)
 	require.NoError(t, err)
 
-	// Store the flow state using the simplified format to match the complete consent expectation
-	err = credStore.StoreClientSecret(mtm.getConsentStatusKey(provider), "consent_granted:false;tenants:0;flow:active")
-	require.NoError(t, err)
+	// StartAdminConsent stored the consent status (with ConsentFlow) in consentStore.
+	// CompleteAdminConsent reads it back from there — no manual setup needed.
 
-	// Now test completing the consent
 	err = mtm.CompleteAdminConsent(ctx, provider, authCode)
-
-	// Since we have mock implementations, this should succeed
 	assert.NoError(t, err)
 
 	// Verify consent status was updated
@@ -220,15 +221,23 @@ func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
 
 func TestMultiTenantManager_GetTenantToken(t *testing.T) {
 	credStore := NewMockCredentialStore()
+	consentStore := NewInMemoryConsentStore()
 	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, httpClient)
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
 
 	ctx := context.Background()
 	provider := "microsoft"
-	tenantID := "tenant-1" // Use the default tenant ID from the mock
+	tenantID := "tenant-1"
 
-	// Set up consent status to simulate successful consent - store it using the simplified format
-	err := credStore.StoreClientSecret(mtm.getConsentStatusKey(provider), "consent_granted:true;tenants:1")
+	// Store real consent status with explicit accessible tenants.
+	err := consentStore.StoreConsent(provider, &ConsentStatus{
+		Provider:         provider,
+		HasAdminConsent:  true,
+		ConsentGrantedAt: time.Now(),
+		AccessibleTenants: []TenantInfo{
+			{TenantID: tenantID, HasAccess: true},
+		},
+	})
 	require.NoError(t, err)
 
 	// Store a valid token for the tenant
@@ -250,8 +259,9 @@ func TestMultiTenantManager_GetTenantToken(t *testing.T) {
 
 func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
 	credStore := NewMockCredentialStore()
+	consentStore := NewInMemoryConsentStore()
 	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, httpClient)
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -271,7 +281,7 @@ func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
 		},
 	}
 
-	err := mtm.storeConsentStatus(provider, status)
+	err := consentStore.StoreConsent(provider, status)
 	require.NoError(t, err)
 
 	// Test getting token for inaccessible tenant
@@ -283,39 +293,48 @@ func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
 
 func TestMultiTenantManager_ListAccessibleTenants(t *testing.T) {
 	credStore := NewMockCredentialStore()
+	consentStore := NewInMemoryConsentStore()
 	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, httpClient)
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
 
 	ctx := context.Background()
 	provider := "microsoft"
 
-	// Set up consent status using the simplified format - this will return the mock tenant
-	err := credStore.StoreClientSecret(mtm.getConsentStatusKey(provider), "consent_granted:true;tenants:1;flow:none")
+	// Store explicit consent status with known tenants.
+	// LastTenantDiscovery is set to now so the cache-expiry check does not
+	// trigger a RefreshTenantDiscovery call, keeping the test self-contained.
+	expectedTenants := []TenantInfo{
+		{
+			TenantID:    "explicit-tenant-alpha",
+			DisplayName: "Alpha Tenant",
+			Domain:      "alpha.onmicrosoft.com",
+			HasAccess:   true,
+		},
+	}
+	err := consentStore.StoreConsent(provider, &ConsentStatus{
+		Provider:            provider,
+		HasAdminConsent:     true,
+		ConsentGrantedAt:    time.Now(),
+		LastTenantDiscovery: time.Now(),
+		AccessibleTenants:   expectedTenants,
+	})
 	require.NoError(t, err)
 
-	// Test listing tenants
 	tenants, err := mtm.ListAccessibleTenants(ctx, provider)
 	assert.NoError(t, err)
-	assert.Len(t, tenants, 1)
+	require.Len(t, tenants, 1)
 
-	// Verify the tenant data matches what the mock implementation returns
-	expectedTenant := TenantInfo{
-		TenantID:    "tenant-1",
-		DisplayName: "Customer Tenant 1",
-		Domain:      "customer1.onmicrosoft.com",
-		HasAccess:   true,
-	}
-
-	assert.Equal(t, expectedTenant.TenantID, tenants[0].TenantID)
-	assert.Equal(t, expectedTenant.DisplayName, tenants[0].DisplayName)
-	assert.Equal(t, expectedTenant.Domain, tenants[0].Domain)
-	assert.Equal(t, expectedTenant.HasAccess, tenants[0].HasAccess)
+	assert.Equal(t, expectedTenants[0].TenantID, tenants[0].TenantID)
+	assert.Equal(t, expectedTenants[0].DisplayName, tenants[0].DisplayName)
+	assert.Equal(t, expectedTenants[0].Domain, tenants[0].Domain)
+	assert.Equal(t, expectedTenants[0].HasAccess, tenants[0].HasAccess)
 }
 
 func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 	credStore := NewMockCredentialStore()
+	consentStore := NewInMemoryConsentStore()
 	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, httpClient)
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -333,7 +352,7 @@ func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 		},
 	}
 
-	err := mtm.storeConsentStatus(provider, status)
+	err := consentStore.StoreConsent(provider, status)
 	require.NoError(t, err)
 
 	// Store some tenant tokens
@@ -353,7 +372,7 @@ func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 	err = mtm.RevokeConsent(ctx, provider)
 	assert.NoError(t, err)
 
-	// Verify consent status was reset
+	// Verify consent status was reset (GetConsentStatus returns default when deleted)
 	newStatus, err := mtm.GetConsentStatus(ctx, provider)
 	assert.NoError(t, err)
 	assert.False(t, newStatus.HasAdminConsent)
@@ -428,17 +447,24 @@ func TestMicrosoftMultiTenantProvider_CreateInTenant(t *testing.T) {
 	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
 
 	ctx := context.Background()
-	tenantID := "tenant-1" // Use the mock tenant ID
+	tenantID := "tenant-1"
 	resourceType := "users"
 	data := map[string]interface{}{
 		"displayName":       "John Doe",
 		"userPrincipalName": "john@test.com",
 	}
 
-	// Set up consent status using the simplified format that matches the mock
-	err := credStore.StoreClientSecret(
-		provider.multiTenantManager.getConsentStatusKey(provider.GetInfo().Name),
-		"consent_granted:true;tenants:1;flow:none")
+	// Store real consent status via the provider's consentStore.
+	err := provider.multiTenantManager.consentStore.StoreConsent(
+		provider.GetInfo().Name,
+		&ConsentStatus{
+			Provider:         provider.GetInfo().Name,
+			HasAdminConsent:  true,
+			ConsentGrantedAt: time.Now(),
+			AccessibleTenants: []TenantInfo{
+				{TenantID: tenantID, HasAccess: true},
+			},
+		})
 	require.NoError(t, err)
 
 	tenantKey := provider.multiTenantManager.getTenantKey(provider.GetInfo().Name, tenantID)
@@ -612,8 +638,9 @@ func TestTenantOnboardingWorkflow_ValidateRequest(t *testing.T) {
 
 func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
 	credStore := NewMockCredentialStore()
+	consentStore := NewInMemoryConsentStore()
 	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, httpClient)
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -631,7 +658,9 @@ func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
 		},
 	}
 
-	_ = mtm.storeConsentStatus(provider, status)
+	if err := consentStore.StoreConsent(provider, status); err != nil {
+		b.Fatal(err)
+	}
 
 	tenantKey := mtm.getTenantKey(provider, tenantID)
 	validToken := &TokenSet{
@@ -639,7 +668,9 @@ func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
 		TokenType:   "Bearer",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
 	}
-	_ = credStore.StoreTokenSet(tenantKey, validToken)
+	if err := credStore.StoreTokenSet(tenantKey, validToken); err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 
@@ -672,7 +703,9 @@ func BenchmarkMicrosoftMultiTenantProvider_CreateInTenant(b *testing.B) {
 		},
 	}
 
-	_ = provider.multiTenantManager.storeConsentStatus(provider.GetInfo().Name, status)
+	if err := provider.multiTenantManager.consentStore.StoreConsent(provider.GetInfo().Name, status); err != nil {
+		b.Fatal(err)
+	}
 
 	tenantKey := provider.multiTenantManager.getTenantKey(provider.GetInfo().Name, tenantID)
 	validToken := &TokenSet{
@@ -680,7 +713,9 @@ func BenchmarkMicrosoftMultiTenantProvider_CreateInTenant(b *testing.B) {
 		TokenType:   "Bearer",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
 	}
-	_ = credStore.StoreTokenSet(tenantKey, validToken)
+	if err := credStore.StoreTokenSet(tenantKey, validToken); err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 
