@@ -53,65 +53,49 @@ func TestValidator_ValidateString(t *testing.T) {
 			errRule: "required",
 		},
 		{
-			name:    "injection pattern detected",
-			field:   "test",
-			value:   "hello<script>alert('xss')</script>",
-			rules:   []string{},
-			wantErr: true,
-			errRule: "security",
-		},
-		{
-			name:    "SQL injection pattern detected",
-			field:   "test",
-			value:   "'; DROP TABLE users; --",
-			rules:   []string{},
-			wantErr: true,
-			errRule: "security",
-		},
-		{
-			name:    "valid email",
+			name:    "valid email via charset",
 			field:   "email",
 			value:   "user@example.com",
-			rules:   []string{"email"},
+			rules:   []string{"charset:email"},
 			wantErr: false,
 		},
 		{
-			name:    "invalid email",
+			name:    "invalid email via charset",
 			field:   "email",
 			value:   "not-an-email",
-			rules:   []string{"email"},
+			rules:   []string{"charset:email"},
 			wantErr: true,
-			errRule: "email",
+			errRule: "charset",
 		},
 		{
-			name:    "valid UUID",
+			name:    "valid UUID via charset",
 			field:   "id",
 			value:   "550e8400-e29b-41d4-a716-446655440000",
-			rules:   []string{"uuid"},
+			rules:   []string{"charset:uuid"},
 			wantErr: false,
 		},
 		{
-			name:    "invalid UUID",
+			name:    "invalid UUID via charset",
 			field:   "id",
 			value:   "not-a-uuid",
-			rules:   []string{"uuid"},
+			rules:   []string{"charset:uuid"},
 			wantErr: true,
-			errRule: "uuid",
+			errRule: "charset",
 		},
 		{
-			name:    "valid hostname",
+			name:    "valid hostname via charset",
 			field:   "host",
 			value:   "example.com",
-			rules:   []string{"hostname"},
+			rules:   []string{"charset:hostname"},
 			wantErr: false,
 		},
 		{
-			name:    "invalid hostname",
+			name:    "invalid hostname via charset",
 			field:   "host",
 			value:   "invalid..hostname",
-			rules:   []string{"hostname"},
+			rules:   []string{"charset:hostname"},
 			wantErr: true,
-			errRule: "hostname",
+			errRule: "charset",
 		},
 		{
 			name:    "control characters",
@@ -189,6 +173,36 @@ func TestValidator_ValidateInteger(t *testing.T) {
 			rules:   []string{"max:65535"},
 			wantErr: true,
 			errRule: "max",
+		},
+		{
+			name:    "min:0 accepts zero",
+			field:   "count",
+			value:   0,
+			rules:   []string{"min:0"},
+			wantErr: false,
+		},
+		{
+			name:    "min:0 rejects negative",
+			field:   "count",
+			value:   -1,
+			rules:   []string{"min:0"},
+			wantErr: true,
+			errRule: "min",
+		},
+		{
+			name:    "max:0 rejects positive",
+			field:   "count",
+			value:   1,
+			rules:   []string{"max:0"},
+			wantErr: true,
+			errRule: "max",
+		},
+		{
+			name:    "max:0 accepts zero",
+			field:   "count",
+			value:   0,
+			rules:   []string{"max:0"},
+			wantErr: false,
 		},
 	}
 
@@ -282,6 +296,38 @@ func TestValidator_ValidateIPAddress(t *testing.T) {
 			}
 			if tt.wantErr && len(result.Errors) > 0 && result.Errors[0].Rule != tt.errRule {
 				t.Errorf("expected error rule %s, got %s", tt.errRule, result.Errors[0].Rule)
+			}
+		})
+	}
+}
+
+// TestValidator_ValidateIPAddress_ValueRedacted verifies that ValidationError.Value
+// is always "" for IP address validation errors (F12 redaction).
+func TestValidator_ValidateIPAddress_ValueRedacted(t *testing.T) {
+	validator := NewValidator()
+
+	cases := []struct {
+		name  string
+		value string
+		rules []string
+	}{
+		{"invalid IP", "300.300.300.300", nil},
+		{"private IP rejected", "192.168.1.1", []string{"no_private"}},
+		{"loopback rejected", "127.0.0.1", []string{"no_loopback"}},
+		{"IPv6 rejected by ipv4_only", "2001:db8::1", []string{"ipv4_only"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := &ValidationResult{Valid: true}
+			validator.ValidateIPAddress(result, "ip", tc.value, tc.rules...)
+			if result.Valid {
+				t.Fatal("expected validation failure")
+			}
+			for _, e := range result.Errors {
+				if e.Value != "" {
+					t.Errorf("ValidationError.Value must be empty (redacted), got %q", e.Value)
+				}
 			}
 		})
 	}
@@ -645,13 +691,6 @@ func TestEnhancedValidator_ValidateWithContext(t *testing.T) {
 			wantErr: true,
 			errRule: "tenant_scope",
 		},
-		{
-			name:    "rate limit abuse detection",
-			field:   "data",
-			value:   string(make([]byte, 101)), // More than 100 chars of repeated pattern
-			rules:   []string{"rate_limit"},
-			wantErr: false, // Our simple pattern detection won't trigger on random bytes
-		},
 	}
 
 	for _, tt := range tests {
@@ -718,7 +757,7 @@ func TestValidationError_Error(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			errStr := tt.err.Error()
 			for _, substr := range tt.contains {
-				if !contains(errStr, substr) {
+				if !strings.Contains(errStr, substr) {
 					t.Errorf("expected error to contain '%s', got '%s'", substr, errStr)
 				}
 			}
@@ -896,36 +935,9 @@ func TestValidator_ValidateString_EdgeCases(t *testing.T) {
 			rules:   []string{"charset:base64"},
 			wantErr: false,
 		},
-		// Path traversal detection
+		// Unicode handling — no charset rule means no rejection
 		{
-			name:    "path traversal ../",
-			field:   "path",
-			value:   "../../../etc/passwd",
-			rules:   []string{},
-			wantErr: true,
-			errRule: "security",
-		},
-		// Command injection
-		{
-			name:    "command injection &&",
-			field:   "input",
-			value:   "test && cat /etc/passwd",
-			rules:   []string{},
-			wantErr: true,
-			errRule: "security",
-		},
-		// LDAP injection
-		{
-			name:    "LDAP injection",
-			field:   "ldap",
-			value:   "admin*)(|(objectclass=*)",
-			rules:   []string{},
-			wantErr: true,
-			errRule: "security",
-		},
-		// Unicode handling
-		{
-			name:    "valid unicode",
+			name:    "valid unicode no charset",
 			field:   "text",
 			value:   "こんにちは世界",
 			rules:   []string{},
@@ -938,15 +950,6 @@ func TestValidator_ValidateString_EdgeCases(t *testing.T) {
 			value:   "line1\tcolumn2\nline2",
 			rules:   []string{"no_control_chars"},
 			wantErr: false,
-		},
-		// XSS via expression
-		{
-			name:    "XSS expression",
-			field:   "input",
-			value:   "expression(alert('xss'))",
-			rules:   []string{},
-			wantErr: true,
-			errRule: "security",
 		},
 		// Unknown charset (should pass, no validation)
 		{
@@ -987,13 +990,13 @@ func TestValidator_ValidateInteger_EdgeCases(t *testing.T) {
 		wantErr bool
 		errRule string
 	}{
+		// zero is a valid integer value; callers that need "non-zero" use min:1 or positive
 		{
-			name:    "required zero",
+			name:    "zero is valid with no rules",
 			field:   "count",
 			value:   0,
-			rules:   []string{"required"},
-			wantErr: true,
-			errRule: "required",
+			rules:   []string{},
+			wantErr: false,
 		},
 		{
 			name:    "zero positive check",
@@ -1239,194 +1242,30 @@ func TestEnhancedValidator_NilContext(t *testing.T) {
 	}
 }
 
-func TestEnhancedValidator_RateLimitAbuse(t *testing.T) {
-	ctx := &SecurityContext{
-		UserID:   "user123",
-		TenantID: "tenant456",
-	}
-	validator := NewEnhancedValidator(ctx)
-
-	// Create an abusive pattern (101+ chars of repeated 'a')
-	abusePattern := ""
-	for i := 0; i < 101; i++ {
-		abusePattern += "a"
-	}
-
-	result := &ValidationResult{Valid: true}
-	validator.ValidateWithContext(result, "data", abusePattern, "rate_limit")
-
-	// The rate limit check should detect the abuse pattern
-	if result.Valid {
-		t.Error("expected rate limit abuse to be detected")
-	}
-}
-
-func TestValidator_getRuleString(t *testing.T) {
-	validator := NewValidator()
+// TestValidator_hasRuleWithValue verifies the hasRuleWithValue helper used by
+// ValidateInteger to distinguish "rule not present" from "rule present with value 0".
+func TestValidator_hasRuleWithValue(t *testing.T) {
+	v := NewValidator()
 
 	tests := []struct {
-		name     string
-		rules    []string
-		prefix   string
-		expected string
+		name   string
+		rules  []string
+		prefix string
+		want   bool
 	}{
-		{
-			name:     "found rule",
-			rules:    []string{"charset:alphanumeric", "required"},
-			prefix:   "charset",
-			expected: "alphanumeric",
-		},
-		{
-			name:     "not found",
-			rules:    []string{"required", "min_length:5"},
-			prefix:   "charset",
-			expected: "",
-		},
-		{
-			name:     "empty rules",
-			rules:    []string{},
-			prefix:   "charset",
-			expected: "",
-		},
+		{"present with value", []string{"min:0"}, "min", true},
+		{"present with non-zero value", []string{"min:5"}, "min", true},
+		{"not present", []string{"positive"}, "min", false},
+		{"empty rules", nil, "min", false},
+		{"different prefix present", []string{"max:10"}, "min", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := validator.getRuleString(tt.rules, tt.prefix)
-			if result != tt.expected {
-				t.Errorf("expected '%s', got '%s'", tt.expected, result)
+			got := v.hasRuleWithValue(tt.rules, tt.prefix)
+			if got != tt.want {
+				t.Errorf("hasRuleWithValue(%v, %q) = %v, want %v", tt.rules, tt.prefix, got, tt.want)
 			}
 		})
 	}
-}
-
-func TestValidator_getRuleInt(t *testing.T) {
-	validator := NewValidator()
-
-	tests := []struct {
-		name     string
-		rules    []string
-		prefix   string
-		expected int
-	}{
-		{
-			name:     "found valid int",
-			rules:    []string{"min_length:10"},
-			prefix:   "min_length",
-			expected: 10,
-		},
-		{
-			name:     "not found",
-			rules:    []string{"required"},
-			prefix:   "min_length",
-			expected: 0,
-		},
-		{
-			name:     "invalid int format",
-			rules:    []string{"min_length:invalid"},
-			prefix:   "min_length",
-			expected: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := validator.getRuleInt(tt.rules, tt.prefix)
-			if result != tt.expected {
-				t.Errorf("expected %d, got %d", tt.expected, result)
-			}
-		})
-	}
-}
-
-func TestValidator_getRuleInt64(t *testing.T) {
-	validator := NewValidator()
-
-	tests := []struct {
-		name     string
-		rules    []string
-		prefix   string
-		expected int64
-	}{
-		{
-			name:     "found valid int64",
-			rules:    []string{"max:9223372036854775807"},
-			prefix:   "max",
-			expected: 9223372036854775807,
-		},
-		{
-			name:     "not found",
-			rules:    []string{"required"},
-			prefix:   "max",
-			expected: 0,
-		},
-		{
-			name:     "invalid int64 format",
-			rules:    []string{"max:invalid"},
-			prefix:   "max",
-			expected: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := validator.getRuleInt64(tt.rules, tt.prefix)
-			if result != tt.expected {
-				t.Errorf("expected %d, got %d", tt.expected, result)
-			}
-		})
-	}
-}
-
-func TestValidator_hasRule(t *testing.T) {
-	validator := NewValidator()
-
-	tests := []struct {
-		name     string
-		rules    []string
-		rule     string
-		expected bool
-	}{
-		{
-			name:     "found",
-			rules:    []string{"required", "email"},
-			rule:     "required",
-			expected: true,
-		},
-		{
-			name:     "not found",
-			rules:    []string{"required", "email"},
-			rule:     "uuid",
-			expected: false,
-		},
-		{
-			name:     "empty rules",
-			rules:    []string{},
-			rule:     "required",
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := validator.hasRule(tt.rules, tt.rule)
-			if result != tt.expected {
-				t.Errorf("expected %v, got %v", tt.expected, result)
-			}
-		})
-	}
-}
-
-// Helper function for string contains check
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

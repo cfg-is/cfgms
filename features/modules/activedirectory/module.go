@@ -17,7 +17,6 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // ADModuleConfig represents the configuration for the system-context AD module
@@ -253,11 +252,7 @@ var objectIDPattern = regexp.MustCompile(`^[a-zA-Z0-9._@\-]+$`)
 // validateObjectID rejects any objectID containing characters outside the strict allowlist before
 // interpolation into PowerShell scripts, preventing command injection.
 func validateObjectID(objectID string) error {
-	matched, err := security.MatchStringWithTimeout(objectIDPattern, objectID)
-	if err != nil {
-		return fmt.Errorf("invalid objectID %q: validation error: %w", objectID, err)
-	}
-	if !matched {
+	if !objectIDPattern.MatchString(objectID) {
 		return fmt.Errorf("invalid objectID %q: must match [a-zA-Z0-9._@-]+ (SAM account names, UPNs, and GUIDs only)", objectID)
 	}
 	return nil
