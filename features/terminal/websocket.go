@@ -14,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -73,6 +74,12 @@ func sameOriginOrAllowed(r *http.Request, allowlist []string) bool {
 
 // HandleWebSocket handles WebSocket connections for terminal sessions
 func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Check origin before parsing parameters so a bad origin returns 403, not 400.
+	if !sameOriginOrAllowed(r, h.originAllowlist) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	// Extract session parameters from query string
 	sessionReq, err := h.parseSessionRequest(r)
 	if err != nil {
@@ -176,7 +183,13 @@ func (h *DefaultWebSocketHandler) parseSessionRequest(r *http.Request) (*Session
 		env["TERM"] = "xterm-256color"
 	}
 
+	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if tenantID == "" {
+		return nil, fmt.Errorf("tenant ID not found in request context")
+	}
+
 	return &SessionRequest{
+		TenantID:  tenantID,
 		StewardID: stewardID,
 		UserID:    userID,
 		Shell:     shell,

@@ -14,7 +14,7 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
-	"github.com/cfgis/cfgms/features/controller/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // createRoleForTenant creates a role for a specific tenant via the RBAC service.

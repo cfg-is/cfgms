@@ -6,6 +6,8 @@ This document describes the comprehensive security controls implemented for CFGM
 
 The terminal security system provides granular access controls, command filtering, real-time session monitoring, and tamper-proof audit logging for all terminal sessions. It integrates with the existing mTLS authentication framework and implements multiple layers of security controls.
 
+**Tenant scoping is enforced at session creation.** `DefaultSessionManager.CreateSession` rejects any `SessionRequest` with an empty `TenantID` — sessions cannot be created without a tenant ID. The WebSocket handler reads the tenant from `r.Context().Value(ctxkeys.TenantID)` (populated by the auth middleware) and returns HTTP 400 if it is absent.
+
 ## Security Architecture
 
 ### Multi-Layer Security Model

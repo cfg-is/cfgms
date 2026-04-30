@@ -17,8 +17,6 @@ This directory contains **Central Providers** - shared packages that provide cro
   - `cert`: Internal CA, Let's Encrypt, HashiCorp Vault, external PKI
   - `cache`: Memory, Redis, Memcached, Hazelcast
   - `telemetry`: OpenTelemetry, Datadog, New Relic, Prometheus
-  - `session`: Memory, Redis, Database, JWT-stateless
-
 - **CFGMS characteristics favor pluggable**:
   - Multi-tenant SaaS (different backends per tenant)
   - Commercial/Open Source split (easy feature gating)
@@ -47,7 +45,7 @@ pkg/{name}/             → Direct provider (single implementation)
 **Direct Providers** (no `interfaces/` subdirectory):
 - Single implementation
 - Direct import by business logic
-- Examples: `cert`, `telemetry`, `cache`, `session`
+- Examples: `cert`, `telemetry`, `cache`, `ctxkeys`
 
 **Not Central Providers**:
 - `config`, `testing`, `testutil`, `version` - utility packages
@@ -88,7 +86,6 @@ Ask these questions in order:
 - `cert` → Could support: Internal CA, Let's Encrypt, Vault, external PKI
 - `cache` → Could support: Memory, Redis, Memcached
 - `telemetry` → Could support: OpenTelemetry, Datadog, New Relic
-- `session` → Could support: Memory, Redis, Database, JWT-stateless
 
 Migration not required immediately, but when adding second implementation or during major refactoring.
 

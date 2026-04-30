@@ -113,8 +113,7 @@ func (s *SyntheticMonitoringSuite) TearDownSuite() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := s.terminalManager.(*terminal.DefaultSessionManager).Stop(ctx); err != nil {
-			// Log error but continue cleanup - best effort cleanup
-			_ = err
+			s.T().Logf("Warning: failed to stop terminal manager during cleanup: %v", err)
 		}
 	}
 
@@ -304,6 +303,7 @@ func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
 
 			// Create test session using gRPC-connected steward
 			req := &terminal.SessionRequest{
+				TenantID:  tenantID,
 				StewardID: registered.StewardID,
 				UserID:    fmt.Sprintf("synthetic-user-%d", sessionCount),
 				Shell:     "bash",
@@ -344,8 +344,7 @@ func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
 
 				// Clean up session
 				if err := s.terminalManager.TerminateSession(ctx, session.ID); err != nil {
-					// Log error but continue test
-					_ = err
+					s.T().Logf("Warning: failed to terminate session %s: %v", session.ID, err)
 				}
 			}
 
@@ -613,10 +612,8 @@ func (s *SyntheticMonitoringSuite) performComponentHealthChecks() map[string]str
 
 	// Check terminal manager health
 	if s.terminalManager != nil {
-		activeSessions := s.terminalManager.GetActiveSessions()
-		if len(activeSessions) >= 0 { // Always true, but validates the call works
-			componentHealth["terminal-manager"] = "healthy"
-		}
+		s.terminalManager.GetActiveSessions() // Verifies manager responds to health queries.
+		componentHealth["terminal-manager"] = "healthy"
 	} else {
 		componentHealth["terminal-manager"] = "unhealthy"
 	}
