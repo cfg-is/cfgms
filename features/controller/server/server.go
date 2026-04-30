@@ -1394,3 +1394,15 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 
 	return nil
 }
+
+// GetTransportListenAddr returns the actual QUIC transport listen address after binding.
+// Unlike GetListenAddr (which returns the configured address), this returns the OS-assigned
+// address when port 0 is configured, making it safe for dynamic-port integration tests.
+func (s *Server) GetTransportListenAddr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.quicListener != nil {
+		return s.quicListener.Addr().String()
+	}
+	return s.cfg.Transport.ListenAddr
+}

@@ -15,27 +15,29 @@ import (
 	"github.com/cfgis/cfgms/features/controller"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/initialization"
-	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/pkg/cert"
+	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	testpkg "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// TestEnv provides a test environment for integration testing
+// TestEnv provides a test environment for integration testing.
+// Controller-connected tests use TransportClient directly (production-mirroring pattern).
+// For steward convergence-loop testing, build a *steward.Steward via steward.NewStandalone().
 type TestEnv struct {
 	T                    *testing.T
 	TempDir              string
 	Logger               *testpkg.MockLogger
 	Controller           *controller.Controller
 	ControllerCfg        *config.Config
-	Steward              *steward.Steward
-	StewardCfg           *steward.Config
+	TransportClient      *client.TransportClient
 	CertManager          *cert.Manager
 	ctx                  context.Context
 	cancel               context.CancelFunc
 	useDockerController  bool   // If true, connect to Docker controller instead of in-process
 	dockerControllerAddr string // Address of Docker controller (e.g., "localhost:50054")
 	registrationToken    string // Registration token for testing
+	certStoragePath      string // Certificate storage path used for TransportClient TLS
 }
 
 // NewTestEnvWithDocker creates a test environment that connects to Docker controller
@@ -193,39 +195,9 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		t.Logf("Note: Client certificate generation failed: %v (may already exist)", err)
 	}
 
-	stewardCfg := &steward.Config{
-		ControllerAddr: controllerCfg.ListenAddr,
-		CertPath:       certStoragePath, // Legacy cert path for backward compatibility
-		DataDir:        filepath.Join(tempDir, "steward-data"),
-		LogLevel:       "debug",
-		ID:             "test-steward",
-		Certificate: &steward.CertificateConfig{
-			EnableCertManagement: false, // Disable cert management for steward in tests - uses controller's certs
-			CertStoragePath:      certStoragePath,
-			RenewalThresholdDays: 30,
-			Provisioning: &steward.ProvisioningConfig{
-				EnableAutoProvisioning: false, // Disable for tests
-				ProvisioningEndpoint:   "/api/v1/certificates/provision",
-				ValidityDays:           365,
-				Organization:           "CFGMS Test Stewards",
-			},
-		},
-	}
-
-	// Create steward data directory
-	err = os.MkdirAll(stewardCfg.DataDir, 0755)
-	require.NoError(t, err)
-
-	// Create steward using gRPC transport testing mode
-	s, err := steward.NewForControllerTesting(stewardCfg, logger)
-	require.NoError(t, err)
-
 	// Create simple registration token for testing
 	// Format: cfgms_reg_{tenant_id}_{steward_id}_{random}
 	regToken := "cfgms_reg_test_tenant_test_steward_12345"
-
-	// Transport client for steward will be set up during Start()
-	// once we have the actual controller address
 
 	return &TestEnv{
 		T:                 t,
@@ -233,61 +205,65 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		Logger:            logger,
 		Controller:        ctrl,
 		ControllerCfg:     controllerCfg,
-		Steward:           s,
-		StewardCfg:        stewardCfg,
 		CertManager:       certManager,
 		ctx:               ctx,
 		cancel:            cancel,
 		registrationToken: regToken,
+		certStoragePath:   certStoragePath,
 	}
 }
 
-// Start starts the controller and steward in the test environment
+// Start starts the controller and creates the transport client.
+// Mirrors the production pattern in cmd/steward/main.go: controller-connected
+// operation uses client.NewTransportClient directly.
 func (e *TestEnv) Start() {
 	var quicAddr string
 
 	if e.useDockerController {
 		// Using Docker controller - use docker gRPC transport address (port 4436)
 		quicAddr = "localhost:4436"
-		e.StewardCfg.ControllerAddr = e.dockerControllerAddr
 	} else {
 		// Start the in-process controller
 		if err := e.Controller.Start(e.ctx); err != nil {
 			e.T.Fatalf("Failed to start controller: %v", err)
 		}
 
-		// Get actual controller addresses
-		controllerAddr := e.Controller.GetListenAddr()
-		e.StewardCfg.ControllerAddr = controllerAddr
-
-		// gRPC transport address (controller listens on fixed port 4433)
-		quicAddr = "localhost:4433"
+		// Get actual QUIC transport address (may be OS-assigned if port 0 is configured)
+		quicAddr = e.Controller.GetTransportListenAddr()
 	}
 
-	// Create transport client for steward — uses gRPC-over-QUIC transport address.
+	// Get CA cert PEM from cert manager so the transport client can verify the
+	// controller's server certificate (issued by the same CA).
+	caCertPEM, caErr := e.CertManager.GetCACertificate()
+	if caErr != nil {
+		e.T.Logf("Warning: Could not get CA cert for transport client TLS: %v", caErr)
+	}
+
+	// Create transport client — mirrors cmd/steward/main.go production pattern.
 	// Pass the CertManager from the test environment so on-demand cert loading is
 	// exercised in integration tests (Issue #920).
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
 		ControllerURL:     quicAddr,
 		RegistrationToken: e.registrationToken,
-		TLSCertPath:       e.StewardCfg.CertPath,
+		TLSCertPath:       e.certStoragePath,
+		CACertPEM:         string(caCertPEM),
 		CertManager:       e.CertManager,
 		Logger:            e.Logger,
 	})
 	if err != nil {
 		e.T.Fatalf("Failed to create transport client: %v", err)
 	}
+	e.TransportClient = transportClient
 
-	// For integration tests, skip registration and directly set steward ID
-	// This avoids needing the full registration service to be running
-	// The client will be configured when we call Connect() in the steward Start() method
+	// Set steward ID before connecting — Connect() requires this to subscribe to commands.
+	// In production this is set after HTTP registration; for integration tests we use the
+	// test steward ID derived from the registration token (format: cfgms_reg_{tenant}_{steward}_{rand}).
+	transportClient.SetStewardID("test-steward")
 
-	// Inject transport client into steward for testing
-	e.Steward.SetTransportClientForTesting(transportClient)
-
-	// Start the steward (will use injected transport client)
-	if err := e.Steward.Start(e.ctx); err != nil {
-		e.T.Logf("Warning: Steward start returned error (may be expected for testing): %v", err)
+	// Attempt to connect — failure is expected in some test configurations where
+	// the QUIC transport listener is not yet accepting (logged as warning, not fatal).
+	if err := transportClient.Connect(e.ctx); err != nil {
+		e.T.Logf("Warning: Transport connect returned error (may be expected for testing): %v", err)
 	}
 
 	// Wait for components to initialize
@@ -298,10 +274,20 @@ func (e *TestEnv) Start() {
 	}
 }
 
-// Stop stops the controller and steward in the test environment
+// Stop stops the transport client and controller in the test environment
 func (e *TestEnv) Stop() {
-	// Stop the steward
-	_ = e.Steward.Stop(e.ctx)
+	// Disconnect transport client if started
+	if e.TransportClient != nil {
+		_ = e.TransportClient.Disconnect(e.ctx)
+		e.TransportClient = nil
+	}
+
+	// Stop global data plane provider to allow subsequent Connect() calls in the same process.
+	// The gRPC data plane provider is a process-level singleton; Disconnect() closes the session
+	// but leaves the provider in "started" state — Stop() resets it for re-use.
+	if dpProvider := dataplaneInterfaces.GetProvider("grpc"); dpProvider != nil {
+		_ = dpProvider.Stop(e.ctx)
+	}
 
 	// Only stop controller if it's in-process (not Docker)
 	if !e.useDockerController && e.Controller != nil {
@@ -385,11 +371,3 @@ func (e *TestEnv) GenerateNewClientCertificate(clientID string) (*cert.Certifica
 func (e *TestEnv) GetCertificateInfo(certType cert.CertificateType) ([]*cert.CertificateInfo, error) {
 	return e.CertManager.GetCertificatesByType(certType)
 }
-
-// CreateStewardClient is OBSOLETE - removed as part of Story #198 (transport migration)
-// The old gRPC client.Client no longer exists. Use client.NewTransportClient() instead.
-// Tests using this method need to be updated for gRPC transport architecture.
-// func (e *TestEnv) CreateStewardClient() (*client.Client, error) {
-// 	actualAddr := e.Controller.GetListenAddr()
-// 	return client.New(actualAddr, e.CertManager.GetStoragePath(), e.Logger)
-// }
