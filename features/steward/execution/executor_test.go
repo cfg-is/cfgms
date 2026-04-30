@@ -69,7 +69,8 @@ func TestNewExecutor(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.NotNil(t, executor)
-	assert.NotNil(t, executor.engine)
+	assert.NotNil(t, executor.factory)
+	assert.NotNil(t, executor.comparator)
 }
 
 func TestNewExecutor_RequiresLogger(t *testing.T) {
@@ -86,7 +87,7 @@ func TestExecutor_AllSevenModulesAvailable(t *testing.T) {
 	// All 7 built-in modules must be loadable via the factory
 	modules := []string{"file", "directory", "script", "firewall", "package", "patch", "acme"}
 	for _, name := range modules {
-		mod, err := executor.engine.factory.LoadModule(name)
+		mod, err := executor.factory.LoadModule(name)
 		assert.NoError(t, err, "module %q should be loadable", name)
 		assert.NotNil(t, mod, "module %q should not be nil", name)
 	}
@@ -184,7 +185,10 @@ func TestExecutor_ApplyConfiguration_WithErrors(t *testing.T) {
 }`
 
 	ctx := context.Background()
-	report, _ := executor.ApplyConfiguration(ctx, []byte(configJSON), "v1.0-fail")
+	// Resource execution failures are reported via report.Status, not returned as error.
+	// ApplyConfiguration only returns a non-nil error for config parsing failures.
+	report, applyErr := executor.ApplyConfiguration(ctx, []byte(configJSON), "v1.0-fail")
+	require.NoError(t, applyErr, "resource execution failures must not surface as error return")
 
 	require.NotNil(t, report, "report should not be nil even with errors")
 	assert.Equal(t, "ERROR", report.Status, "overall status should be ERROR")
@@ -281,7 +285,9 @@ func TestExecutor_ApplyConfiguration_PermissionsRejectedOnWindows(t *testing.T) 
 }`
 
 	ctx := context.Background()
-	report, _ := executor.ApplyConfiguration(ctx, []byte(configJSON), "v1.0")
+	// Resource execution failures are reported via report.Status, not returned as error.
+	report, applyErr := executor.ApplyConfiguration(ctx, []byte(configJSON), "v1.0")
+	require.NoError(t, applyErr, "resource execution failures must not surface as error return")
 	require.NotNil(t, report)
 	assert.Equal(t, "ERROR", report.Status)
 

@@ -3,31 +3,14 @@
 package factory
 
 import (
-	"context"
 	"testing"
 
-	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/features/modules/file"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 )
-
-// mockModule implements the Module interface for testing
-type mockModule struct {
-	mock.Mock
-}
-
-func (m *mockModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
-	args := m.Called(ctx, resourceID)
-	return args.Get(0).(modules.ConfigState), args.Error(1)
-}
-
-func (m *mockModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
-	args := m.Called(ctx, resourceID, config)
-	return args.Error(0)
-}
 
 func TestNew(t *testing.T) {
 	registry := discovery.ModuleRegistry{
@@ -52,7 +35,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestValidateModuleInterface(t *testing.T) {
-	factory := &ModuleFactory{}
+	f := &ModuleFactory{}
 
 	tests := []struct {
 		name    string
@@ -61,7 +44,7 @@ func TestValidateModuleInterface(t *testing.T) {
 	}{
 		{
 			name:    "valid module interface",
-			module:  &mockModule{},
+			module:  file.New(),
 			wantErr: false,
 		},
 		{
@@ -78,7 +61,7 @@ func TestValidateModuleInterface(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := factory.ValidateModuleInterface(tt.module)
+			err := f.ValidateModuleInterface(tt.module)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -122,6 +105,14 @@ func TestCreateModuleInstance(t *testing.T) {
 			expectModule: false,
 			expectErr:    false,
 		},
+		{
+			name:         "built-in file module loads successfully",
+			moduleName:   "file",
+			registry:     discovery.ModuleRegistry{},
+			errorAction:  config.ActionFail,
+			expectModule: true,
+			expectErr:    false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -155,17 +146,19 @@ func TestGetLoadedModules(t *testing.T) {
 	factory := New(registry, errorConfig)
 
 	// Initially empty
-	modules := factory.GetLoadedModules()
-	assert.Len(t, modules, 0)
+	loaded := factory.GetLoadedModules()
+	assert.Len(t, loaded, 0)
 
-	// Add some instances manually for testing
-	factory.instances["module1"] = &mockModule{}
-	factory.instances["module2"] = &mockModule{}
+	// Load real built-in modules via the factory
+	_, err := factory.LoadModule("file")
+	assert.NoError(t, err)
+	_, err = factory.LoadModule("directory")
+	assert.NoError(t, err)
 
-	modules = factory.GetLoadedModules()
-	assert.Len(t, modules, 2)
-	assert.Contains(t, modules, "module1")
-	assert.Contains(t, modules, "module2")
+	loaded = factory.GetLoadedModules()
+	assert.Len(t, loaded, 2)
+	assert.Contains(t, loaded, "file")
+	assert.Contains(t, loaded, "directory")
 }
 
 func TestUnloadModule(t *testing.T) {
@@ -173,12 +166,12 @@ func TestUnloadModule(t *testing.T) {
 	errorConfig := config.ErrorHandlingConfig{}
 	factory := New(registry, errorConfig)
 
-	// Add module instance
-	factory.instances["test-module"] = &mockModule{}
+	// Load a real module
+	_, err := factory.LoadModule("file")
+	assert.NoError(t, err)
 	assert.Len(t, factory.instances, 1)
 
-	// Unload module
-	factory.UnloadModule("test-module")
+	factory.UnloadModule("file")
 	assert.Len(t, factory.instances, 0)
 }
 
@@ -187,13 +180,13 @@ func TestUnloadAllModules(t *testing.T) {
 	errorConfig := config.ErrorHandlingConfig{}
 	factory := New(registry, errorConfig)
 
-	// Add multiple module instances
-	factory.instances["module1"] = &mockModule{}
-	factory.instances["module2"] = &mockModule{}
-	factory.instances["module3"] = &mockModule{}
+	// Load multiple real built-in modules
+	for _, name := range []string{"file", "directory", "script"} {
+		_, err := factory.LoadModule(name)
+		assert.NoError(t, err)
+	}
 	assert.Len(t, factory.instances, 3)
 
-	// Unload all modules
 	factory.UnloadAllModules()
 	assert.Len(t, factory.instances, 0)
 }
@@ -220,4 +213,13 @@ func TestGetModuleInfo(t *testing.T) {
 	// Test non-existent module
 	_, exists = factory.GetModuleInfo("non-existent")
 	assert.False(t, exists)
+}
+
+func TestAllSevenBuiltinModulesLoad(t *testing.T) {
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail})
+	for _, name := range []string{"acme", "directory", "file", "firewall", "package", "patch", "script"} {
+		mod, err := factory.LoadModule(name)
+		assert.NoError(t, err, "built-in module %q must load without error", name)
+		assert.NotNil(t, mod, "built-in module %q must not be nil", name)
+	}
 }

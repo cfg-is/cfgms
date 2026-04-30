@@ -426,40 +426,6 @@ func (c *Collector) generateSystemID(attributes map[string]string) string {
 	return fmt.Sprintf("%x", hash[:8])
 }
 
-// RefreshDNA collects fresh DNA information.
-//
-// This is a convenience method that calls Collect() to get fresh system information.
-// It's useful for periodic DNA updates where some attributes may have changed.
-func (c *Collector) RefreshDNA(ctx context.Context) (*commonpb.DNA, error) {
-	return c.Collect(ctx)
-}
-
-// CompareDNA compares two DNA structures and returns true if they represent the same system.
-//
-// This method compares the system IDs and key hardware characteristics to determine
-// if two DNA structures represent the same physical system.
-func CompareDNA(dna1, dna2 *commonpb.DNA) bool {
-	if dna1 == nil || dna2 == nil {
-		return false
-	}
-
-	// Primary comparison: system ID
-	if dna1.Id != dna2.Id {
-		return false
-	}
-
-	// Secondary comparison: key hardware characteristics
-	keyAttributes := []string{"primary_mac", "hostname", "cpu_count", "arch"}
-
-	for _, attr := range keyAttributes {
-		if dna1.Attributes[attr] != dna2.Attributes[attr] {
-			return false
-		}
-	}
-
-	return true
-}
-
 // generateSyncFingerprint creates a fingerprint for sync verification.
 //
 // This combines the system ID, number of attributes, and config hash into a single
@@ -478,21 +444,6 @@ func (c *Collector) generateSyncFingerprint(systemID string, attributes map[stri
 
 	// Return first 12 characters for compact representation
 	return fmt.Sprintf("%x", hash[:6])
-}
-
-// UpdateSyncMetadata updates the sync-related fields in DNA.
-//
-// This should be called by the steward when configuration changes or when
-// sync verification needs to be updated.
-func (c *Collector) UpdateSyncMetadata(dna *commonpb.DNA, configHash string) {
-	if dna == nil {
-		return
-	}
-
-	dna.ConfigHash = configHash
-	dna.LastSyncTime = timestamppb.New(time.Now())
-	dna.AttributeCount = c.safeInt32(len(dna.Attributes)) // Safe conversion with bounds validation
-	dna.SyncFingerprint = c.generateSyncFingerprint(dna.Id, dna.Attributes, configHash)
 }
 
 // ComputeHash computes a deterministic SHA-256 hash of the given DNA attributes.
