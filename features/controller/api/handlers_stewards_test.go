@@ -16,8 +16,8 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
-	"github.com/cfgis/cfgms/features/controller/ctxkeys"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // ---- buildFleetFilter unit tests (no server required) ----

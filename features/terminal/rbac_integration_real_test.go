@@ -87,6 +87,7 @@ func TestTerminalRBACIntegrationReal(t *testing.T) {
 		// Test terminal session creation with real session management
 		defaultShell := shell.GetDefaultShell()
 		req := &SessionRequest{
+			TenantID:  "test-tenant",
 			StewardID: "test-steward",
 			UserID:    "test-user",
 			Shell:     defaultShell,

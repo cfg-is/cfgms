@@ -72,6 +72,10 @@ func NewSessionManager(config *Config, logger logging.Logger) (SessionManager, e
 
 // CreateSession creates a new terminal session
 func (m *DefaultSessionManager) CreateSession(ctx context.Context, req *SessionRequest) (*Session, error) {
+	if req.TenantID == "" {
+		return nil, fmt.Errorf("tenant ID required for terminal session creation")
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

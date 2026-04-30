@@ -40,6 +40,7 @@ type TerminalMessage struct {
 
 // SessionRequest represents a request to create a new terminal session
 type SessionRequest struct {
+	TenantID  string            `json:"tenant_id"`
 	StewardID string            `json:"steward_id"`
 	UserID    string            `json:"user_id"`
 	Shell     string            `json:"shell"`
@@ -135,16 +136,6 @@ type Recorder interface {
 // WebSocketHandler interface defines WebSocket handling operations
 type WebSocketHandler interface {
 	HandleWebSocket(w http.ResponseWriter, r *http.Request)
-}
-
-// ShellExecutor interface defines shell execution operations
-type ShellExecutor interface {
-	Start(ctx context.Context, session *Session) error
-	WriteData(ctx context.Context, data []byte) error
-	Resize(ctx context.Context, cols, rows int) error
-	Close(ctx context.Context) error
-	OutputChannel() <-chan []byte
-	ErrorChannel() <-chan error
 }
 
 // SupportedShells contains the list of supported shell types

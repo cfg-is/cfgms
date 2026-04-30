@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/controller/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // callHandleListAPIKeys calls handleListAPIKeys directly with the given context tenant.

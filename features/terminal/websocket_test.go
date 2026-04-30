@@ -3,6 +3,7 @@
 package terminal
 
 import (
+	"context"
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
@@ -15,8 +16,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// withTestTenant wraps an http.Handler to inject a test tenant ID into the request context.
+func withTestTenant(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), ctxkeys.TenantID, "test-tenant")
+		h.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
 
 // getTestShell returns the appropriate shell for the current platform
 func getTestShell() string {
@@ -80,8 +90,8 @@ func TestWebSocketUpgrade(t *testing.T) {
 	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
 
-	// Create test server
-	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+	// Create test server with tenant middleware
+	server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
 	defer func() {
 		server.Close() // Test server close doesn't return error
 	}()
@@ -121,8 +131,8 @@ func TestWebSocketMessageHandling(t *testing.T) {
 	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
 
-	// Create test server
-	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+	// Create test server with tenant middleware
+	server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
 	defer func() {
 		server.Close() // Test server close doesn't return error
 	}()
@@ -205,12 +215,24 @@ func TestWebSocketAuthentication(t *testing.T) {
 			queryPath:  "",
 			wantStatus: http.StatusBadRequest,
 		},
+		{
+			// All query params valid, but auth middleware has not set TenantID in context.
+			name:       "missing tenant in context",
+			queryPath:  "?steward_id=test-steward&user_id=test-user&shell=bash",
+			wantStatus: http.StatusBadRequest,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// "valid parameters" requires the tenant ID to be present in context.
+			var srv http.Handler = http.HandlerFunc(handler.HandleWebSocket)
+			if tt.wantStatus == http.StatusSwitchingProtocols {
+				srv = withTestTenant(srv)
+			}
+
 			// Create test server
-			server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+			server := httptest.NewServer(srv)
 			defer func() {
 				server.Close() // Test server close doesn't return error
 			}()
@@ -250,8 +272,8 @@ func TestWebSocketBidirectionalCommunication(t *testing.T) {
 	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
 
-	// Create test server
-	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+	// Create test server with tenant middleware
+	server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
 	defer func() {
 		server.Close() // Test server close doesn't return error
 	}()
@@ -305,8 +327,8 @@ func TestWebSocketSessionCleanup(t *testing.T) {
 	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
 
-	// Create test server
-	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+	// Create test server with tenant middleware
+	server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
 	defer func() {
 		server.Close() // Test server close doesn't return error
 	}()
@@ -348,8 +370,8 @@ func TestWebSocketConcurrentConnections(t *testing.T) {
 	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
 
-	// Create test server
-	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+	// Create test server with tenant middleware
+	server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
 	defer func() {
 		server.Close() // Test server close doesn't return error
 	}()
@@ -404,7 +426,7 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		handler, err := NewWebSocketHandler(manager, logger, nil)
 		require.NoError(t, err)
 
-		server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+		server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
 		defer server.Close()
 
 		wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + queryParams
@@ -436,7 +458,7 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		handler, err := NewWebSocketHandler(manager, logger, allowlist)
 		require.NoError(t, err)
 
-		server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+		server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
 		defer server.Close()
 
 		wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + queryParams

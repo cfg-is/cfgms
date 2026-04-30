@@ -79,6 +79,7 @@ func TestSessionLifecycle(t *testing.T) {
 
 	// Test session creation
 	sessionReq := &SessionRequest{
+		TenantID:  "test-tenant",
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
 		Shell:     shell.GetDefaultShell(),
@@ -124,6 +125,7 @@ func TestSessionConcurrency(t *testing.T) {
 	sessions := make([]*Session, 3)
 	for i := 0; i < 3; i++ {
 		sessionReq := &SessionRequest{
+			TenantID:  "test-tenant",
 			StewardID: "test-steward-001",
 			UserID:    "test-user",
 			Shell:     shell.GetDefaultShell(),
@@ -161,6 +163,7 @@ func TestSessionTimeout(t *testing.T) {
 	ctx := context.Background()
 
 	sessionReq := &SessionRequest{
+		TenantID:  "test-tenant",
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
 		Shell:     shell.GetDefaultShell(),
@@ -201,6 +204,7 @@ func TestMaxSessionsLimit(t *testing.T) {
 	// Create sessions up to the limit
 	for i := 0; i < 2; i++ {
 		sessionReq := &SessionRequest{
+			TenantID:  "test-tenant",
 			StewardID: "test-steward-001",
 			UserID:    "test-user",
 			Shell:     shell.GetDefaultShell(),
@@ -214,6 +218,7 @@ func TestMaxSessionsLimit(t *testing.T) {
 
 	// Attempt to create one more session should fail
 	sessionReq := &SessionRequest{
+		TenantID:  "test-tenant",
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
 		Shell:     shell.GetDefaultShell(),
@@ -245,6 +250,7 @@ func TestCleanupTimedOutSessions_AllSessionsCleaned(t *testing.T) {
 
 	for i := 0; i < sessionCount; i++ {
 		req := &SessionRequest{
+			TenantID:  "test-tenant",
 			StewardID: fmt.Sprintf("steward-%d", i),
 			UserID:    fmt.Sprintf("user-%d", i),
 			Shell:     shell.GetDefaultShell(),
@@ -301,6 +307,7 @@ func TestCleanupTimedOutSessions_ContinuesAfterPerSessionError(t *testing.T) {
 
 	for i := 0; i < sessionCount; i++ {
 		req := &SessionRequest{
+			TenantID:  "test-tenant",
 			StewardID: fmt.Sprintf("steward-%d", i),
 			UserID:    fmt.Sprintf("user-%d", i),
 			Shell:     shell.GetDefaultShell(),
@@ -372,6 +379,7 @@ func TestCleanupTimedOutSessions_GetSessionDuringCleanup(t *testing.T) {
 	ctx := context.Background()
 
 	timedOutReq := &SessionRequest{
+		TenantID:  "test-tenant",
 		StewardID: "steward-timed-out",
 		UserID:    "user-timed-out",
 		Shell:     shell.GetDefaultShell(),
@@ -382,6 +390,7 @@ func TestCleanupTimedOutSessions_GetSessionDuringCleanup(t *testing.T) {
 	require.NoError(t, err)
 
 	activeReq := &SessionRequest{
+		TenantID:  "test-tenant",
 		StewardID: "steward-active",
 		UserID:    "user-active",
 		Shell:     shell.GetDefaultShell(),
@@ -462,6 +471,7 @@ func TestSessionRecording(t *testing.T) {
 	ctx := context.Background()
 
 	sessionReq := &SessionRequest{
+		TenantID:  "test-tenant",
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
 		Shell:     shell.GetDefaultShell(),
@@ -486,4 +496,51 @@ func TestSessionRecording(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, recording)
 	assert.Contains(t, string(recording.Data), "hello world")
+}
+
+func TestCreateSession_TenantIDRequired(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	config := &Config{
+		SessionTimeout: 30 * time.Minute,
+		MaxSessions:    100,
+		RecordSessions: false,
+	}
+
+	manager, err := NewSessionManager(config, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	t.Run("empty TenantID returns error", func(t *testing.T) {
+		req := &SessionRequest{
+			TenantID:  "",
+			StewardID: "test-steward",
+			UserID:    "test-user",
+			Shell:     shell.GetDefaultShell(),
+			Cols:      80,
+			Rows:      24,
+		}
+		session, err := manager.CreateSession(ctx, req)
+		assert.Error(t, err)
+		assert.Nil(t, session)
+		assert.Contains(t, err.Error(), "tenant ID required")
+	})
+
+	t.Run("non-empty TenantID succeeds", func(t *testing.T) {
+		req := &SessionRequest{
+			TenantID:  "my-tenant",
+			StewardID: "test-steward",
+			UserID:    "test-user",
+			Shell:     shell.GetDefaultShell(),
+			Cols:      80,
+			Rows:      24,
+		}
+		session, err := manager.CreateSession(ctx, req)
+		require.NoError(t, err)
+		require.NotNil(t, session)
+
+		// Cleanup
+		err = manager.TerminateSession(ctx, session.ID)
+		require.NoError(t, err)
+	})
 }

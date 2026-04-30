@@ -15,9 +15,9 @@ import (
 	"gopkg.in/yaml.v3"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
-	"github.com/cfgis/cfgms/features/controller/ctxkeys"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
