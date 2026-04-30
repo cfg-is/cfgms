@@ -108,6 +108,43 @@ resources:
 - **Audit Logging**: All API calls logged for compliance
 - **Scope Limitation**: Minimal required permissions
 
+## Consent State Storage
+
+Admin-consent state (granted/revoked, accessible tenants, active OAuth2 flow) is
+persisted through the `ConsentStore` interface defined in `multitenant_store.go`.
+
+### ConsentStore interface
+
+```go
+type ConsentStore interface {
+    StoreConsent(provider string, status *ConsentStatus) error
+    GetConsent(provider string) (*ConsentStatus, error)   // (nil, nil) = not found
+    DeleteConsent(provider string) error                  // idempotent
+}
+```
+
+`StoreConsent` and `GetConsent` round-trip the complete `ConsentStatus` struct,
+including `AccessibleTenants []TenantInfo` and the nested `*OAuth2Flow` pointer.
+
+### InMemoryConsentStore
+
+`InMemoryConsentStore` is the pre-production implementation. It serialises each
+`ConsentStatus` to JSON before storing (using a `sync.RWMutex`-protected `[]byte`
+map), which exercises the same serialisation path a durable store would use. The
+contract test in `multitenant_store_test.go` runs `contractConsentStore` against
+this implementation to verify round-trip fidelity for all fields.
+
+```go
+// Zero value is ready to use, or construct explicitly:
+store := NewInMemoryConsentStore()
+manager := NewMultiTenantManager(credStore, store, httpClient)
+```
+
+`CredentialStore` (`StoreClientSecret` / `GetClientSecret`) is **no longer used
+for consent state**. Those methods remain on the interface for auth flows only.
+Any legacy flat-string consent data (e.g. `consent_granted:true;tenants:1`) that
+arrives at `GetConsent` returns a hard error — re-grant admin consent to recover.
+
 ## Development
 
 The SaaS Steward is designed to be:
@@ -115,4 +152,4 @@ The SaaS Steward is designed to be:
 - **Secure**: Industry-standard OAuth2 implementation
 - **Extensible**: Plugin architecture for new providers
 - **Observable**: Comprehensive logging and monitoring
-- **Testable**: Mocked providers for unit testing
+- **Testable**: Real components (InMemoryConsentStore, MockCredentialStore) for unit testing

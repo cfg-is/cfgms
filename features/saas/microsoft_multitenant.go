@@ -55,7 +55,7 @@ func NewMicrosoftMultiTenantProvider(credStore CredentialStore, httpClient *http
 
 	return &MicrosoftMultiTenantProvider{
 		BaseProvider:       baseProvider,
-		multiTenantManager: NewMultiTenantManager(credStore, httpClient),
+		multiTenantManager: NewMultiTenantManager(credStore, NewInMemoryConsentStore(), httpClient),
 		baseURL:            "https://graph.microsoft.com/v1.0",
 	}
 }
