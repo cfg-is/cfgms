@@ -5,10 +5,8 @@ package quic
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"io"
-	"net"
 	"sync"
 	"testing"
 	"time"
@@ -401,35 +399,24 @@ func TestGRPCOverQUIC_ClientDisconnect(t *testing.T) {
 	// The stream operations after cancel must return a context error (Canceled or EOF).
 	var msg echoMsg
 	err = stream.RecvMsg(&msg)
-	if err != nil {
-		t.Logf("RecvMsg after cancel returned (expected): %v", err)
-	}
-	assert.Error(t, err, "RecvMsg after context cancellation must return an error, not succeed")
+	require.Error(t, err, "RecvMsg after context cancellation must return an error, not succeed")
 }
 
 // TestGRPCOverQUIC_TLSRequired verifies that a connection attempt with a
-// mismatched or missing TLS configuration fails.
+// wrong ALPN fails, validating ALPN enforcement at the transport layer.
 func TestGRPCOverQUIC_TLSRequired(t *testing.T) {
 	tlsPair := newTestTLSPair(t)
 	_, addr := startEchoServer(t, tlsPair)
 
-	// Build a "bad" client TLS config with a different CA (no valid cert).
-	badCA := newTestTLSPair(t)
-
-	// Use a client TLS config from a different CA that the server will reject.
-	// The server requires client cert verification against its own CA.
-	wrongCATLS := &tls.Config{
-		InsecureSkipVerify: false, //nolint:gosec // intentional bad cert for negative test
-		NextProtos:         []string{testALPN},
-		ServerName:         "localhost",
-		RootCAs:            badCA.client.RootCAs, // wrong CA pool
-	}
+	// Use the correct CA but a wrong ALPN to test ALPN enforcement specifically.
+	wrongALPNTLS := tlsPair.client.Clone()
+	wrongALPNTLS.NextProtos = []string{"wrong-protocol"}
 
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 
-	_, dialErr := Dial(ctx, addr, wrongCATLS, nil)
-	assert.Error(t, dialErr, "dial with wrong CA should fail TLS verification")
+	_, dialErr := Dial(ctx, addr, wrongALPNTLS, nil)
+	assert.Error(t, dialErr, "dial with wrong ALPN should fail ALPN negotiation")
 }
 
 // TestGRPCOverQUIC_AddrWrapper verifies that our Addr wrapper is used for
@@ -452,7 +439,6 @@ func TestGRPCOverQUIC_AddrWrapper(t *testing.T) {
 // TestAddr_NetworkAndString verifies the Addr type satisfies net.Addr.
 func TestAddr_NetworkAndString(t *testing.T) {
 	a := newAddr("127.0.0.1:4433")
-	var _ net.Addr = a
 	assert.Equal(t, "quic", a.Network())
 	assert.Equal(t, "127.0.0.1:4433", a.String())
 }

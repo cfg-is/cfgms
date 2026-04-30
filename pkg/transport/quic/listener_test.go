@@ -203,6 +203,52 @@ func TestListen_DoesNotMutateCallerConfig(t *testing.T) {
 		"Listen() must not mutate the caller's *quicgo.Config in-place")
 }
 
+// TestListener_SlowHandshakePeerDoesNotBlockOthers verifies that a peer which
+// completes the TLS handshake but never opens a stream does not prevent other
+// peers from being accepted. This is the core DoS-resilience property of the
+// concurrent accept queue introduced in Issue #932.
+func TestListener_SlowHandshakePeerDoesNotBlockOthers(t *testing.T) {
+	tlsPair := newTestTLSPair(t)
+
+	lis, err := Listen("127.0.0.1:0", tlsPair.server, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lis.Close() })
+
+	type acceptResult struct {
+		conn net.Conn
+		err  error
+	}
+	acceptCh := make(chan acceptResult, 1)
+	go func() {
+		conn, aerr := lis.Accept()
+		acceptCh <- acceptResult{conn: conn, err: aerr}
+	}()
+
+	// Peer-1: complete TLS handshake but never open a stream (simulates stalling peer).
+	peer1, err := quicgo.DialAddr(t.Context(), lis.Addr().String(), tlsPair.client, nil)
+	require.NoError(t, err)
+	defer func() { _ = peer1.CloseWithError(0, "") }()
+
+	// Peer-2: dial normally and open a stream.
+	peer2, err := Dial(t.Context(), lis.Addr().String(), tlsPair.client, nil)
+	require.NoError(t, err)
+	defer func() { _ = peer2.Close() }()
+
+	// Write a byte to trigger stream notification on the server side.
+	_, err = peer2.Write([]byte{0x00})
+	require.NoError(t, err)
+
+	// Accept must deliver peer-2's conn within 2 seconds despite peer-1 stalling.
+	select {
+	case result := <-acceptCh:
+		require.NoError(t, result.err)
+		require.NotNil(t, result.conn)
+		_ = result.conn.Close()
+	case <-time.After(2 * time.Second):
+		t.Fatal("Accept blocked for >2s: slow-peer stalled the accept loop")
+	}
+}
+
 // TestListener_CloseUnblocksAccept verifies that Close causes a blocked Accept
 // to return with an error rather than hanging indefinitely.
 func TestListener_CloseUnblocksAccept(t *testing.T) {
