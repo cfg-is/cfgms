@@ -14,6 +14,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
+	quicgo "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -46,9 +47,11 @@ func restartServerAndRepoint(t *testing.T, client *Provider, tc *testCA, reg reg
 // forceStopServer forcefully kills a gRPC server without waiting for streams to finish.
 // GracefulStop() hangs on long-lived ControlChannel streams; this is needed for
 // reconnection tests that simulate server crashes.
-// The gRPC server is stopped first so that CONNECTION_CLOSE frames are sent to
-// clients before the QUIC listener is cleaned up; Conn.Close() sends a QUIC
-// CONNECTION_CLOSE which lets clients detect disconnection immediately.
+//
+// gRPC is stopped before the listener so that Stop() can send stream RST frames to
+// clients over the still-open QUIC connections. Closing the listener first tears down
+// the underlying UDP socket, preventing gRPC from notifying clients and causing them
+// to wait for the QUIC idle timeout (~90 s) instead of detecting the failure immediately.
 func forceStopServer(s *Provider) {
 	if s.grpcServer != nil {
 		s.grpcServer.Stop()
@@ -65,6 +68,14 @@ func TestMain(m *testing.M) {
 		max:        200 * time.Millisecond,
 		multiplier: 2.0,
 		jitter:     0.1,
+	}
+	// Use short QUIC timeouts so server failures are detected quickly on loaded
+	// CI machines even when CONNECTION_CLOSE frames are delayed by goroutine
+	// scheduling under the race detector. KeepAlivePeriod keeps established
+	// connections alive; MaxIdleTimeout bounds worst-case failure detection.
+	testQUICConfig = &quicgo.Config{
+		MaxIdleTimeout:  3 * time.Second,
+		KeepAlivePeriod: 200 * time.Millisecond,
 	}
 	os.Exit(m.Run())
 }
@@ -86,7 +97,7 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	listenAddr := server.listener.Addr().String()
 
 	// Set up command handler before connecting — handler survives reconnection
-	received := make(chan *types.Command, 1)
+	received := make(chan *types.SignedCommand, 1)
 
 	client := New(ModeClient)
 	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
@@ -95,8 +106,8 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 		"tls_config": tc.clientTLSConfig(t, "steward-reconnect"),
 		"steward_id": "steward-reconnect",
 	}))
-	require.NoError(t, client.SubscribeCommands(context.Background(), "steward-reconnect", func(ctx context.Context, cmd *types.Command) error {
-		received <- cmd
+	require.NoError(t, client.SubscribeCommands(context.Background(), "steward-reconnect", func(ctx context.Context, sc *types.SignedCommand) error {
+		received <- sc
 		return nil
 	}))
 	require.NoError(t, client.Start(context.Background()))
@@ -131,16 +142,16 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "steward should be re-registered")
 
 	// Verify commands work after reconnect
-	require.NoError(t, server2.SendCommand(context.Background(), &types.Command{
+	require.NoError(t, server2.SendCommand(context.Background(), &types.SignedCommand{Command: types.Command{
 		ID:        "cmd-after-reconnect",
 		Type:      types.CommandSyncConfig,
 		StewardID: "steward-reconnect",
 		Timestamp: time.Now(),
-	}))
+	}}))
 
 	select {
 	case got := <-received:
-		assert.Equal(t, "cmd-after-reconnect", got.ID)
+		assert.Equal(t, "cmd-after-reconnect", got.Command.ID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for command after reconnect")
 	}
@@ -178,11 +189,13 @@ func TestStopDuringReconnection(t *testing.T) {
 	// Kill server to trigger reconnection
 	forceStopServer(server)
 
-	// Wait for client to enter reconnecting state
+	// Wait for client to enter reconnecting state. Use 15s to accommodate
+	// loaded CI machines where goroutine scheduling under the race detector
+	// can delay QUIC disconnect propagation beyond the default 5s budget.
 	require.Eventually(t, func() bool {
 		s := client.getState()
 		return s == StateReconnecting || s == StateDisconnected
-	}, 5*time.Second, 10*time.Millisecond)
+	}, 15*time.Second, 10*time.Millisecond)
 
 	// Stop the client during reconnection — should not hang or leak goroutines
 	done := make(chan struct{})
