@@ -607,6 +607,38 @@ func TestM365TenantManager_GetTenantByM365ID_Index(t *testing.T) {
 		"ListTenants should be called exactly once across %d getTenantByM365ID calls", n)
 }
 
+// failingTenantStore is a countingTenantStore variant whose ListTenants always returns an error.
+type failingTenantStore struct {
+	*mockTenantStore
+	listErr error
+}
+
+func (f *failingTenantStore) ListTenants(ctx context.Context, filter *tenant.TenantFilter) ([]*tenant.Tenant, error) {
+	return nil, f.listErr
+}
+
+func TestM365TenantManager_GetTenantByM365ID_ListTenantsError(t *testing.T) {
+	ctx := context.Background()
+	failing := &failingTenantStore{
+		mockTenantStore: newMockTenantStore(),
+		listErr:         fmt.Errorf("storage unavailable"),
+	}
+	cfgmsTenantManager := tenant.NewManager(failing, nil)
+	m365Provider := NewMicrosoftMultiTenantProvider(&mockCredentialStore{}, &http.Client{Timeout: 30 * time.Second})
+	manager := NewM365TenantManager(cfgmsTenantManager, m365Provider, nil, nil)
+
+	// ListTenants fails → getTenantByM365ID must propagate the error.
+	_, err := manager.getTenantByM365ID(ctx, "any-m365-id")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "storage unavailable")
+
+	// Index must remain nil so the next call retries population.
+	manager.indexMu.Lock()
+	indexIsNil := manager.m365IDIndex == nil
+	manager.indexMu.Unlock()
+	assert.True(t, indexIsNil, "index must remain nil after a failed ListTenants so the next call retries")
+}
+
 // mockGDAPProvider is a test-local GDAP implementation for benchmark setup.
 type mockGDAPProvider struct {
 	relationships []GDAPRelationship
@@ -657,15 +689,20 @@ func BenchmarkM365TenantManager_DiscoverAndSyncTenants(b *testing.B) {
 				DiscoveryMethod: "gdap",
 				HealthStatus:    tenant.HealthStatusUnknown,
 			}
-			metaJSON, _ := json.Marshal(meta)
-			_ = mockStore.CreateTenant(ctx, &tenant.Tenant{
+			metaJSON, err := json.Marshal(meta)
+			if err != nil {
+				b.Fatalf("failed to marshal metadata for tenant %d: %v", i, err)
+			}
+			if err := mockStore.CreateTenant(ctx, &tenant.Tenant{
 				ID:   fmt.Sprintf("cfgms-bench-%d", i),
 				Name: fmt.Sprintf("Bench-Tenant-%d", i),
 				Metadata: map[string]string{
 					"m365_metadata": string(metaJSON),
 					"tenant_type":   "m365",
 				},
-			})
+			}); err != nil {
+				b.Fatalf("failed to seed tenant %d: %v", i, err)
+			}
 		}
 
 		b.StartTimer()
