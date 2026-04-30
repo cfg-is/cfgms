@@ -59,7 +59,6 @@ type Provider struct {
 	grpcServer    *grpc.Server            // may be externally provided or owned
 	ownGRPCServer bool                    // true if we started grpcServer
 	listener      *quictransport.Listener // QUIC listener, only when ownGRPCServer
-	handler       *dataPlaneHandler       // incoming-RPC dispatch handler
 
 	// Client-side (one or the other, not both)
 	grpcConn    *grpc.ClientConn // may be externally provided or owned
@@ -195,8 +194,6 @@ func (p *Provider) Start(ctx context.Context) error {
 }
 
 func (p *Provider) startServer() error {
-	p.handler = newDataPlaneHandler()
-
 	if p.ownGRPCServer {
 		ql, err := quictransport.Listen(p.listenAddr, p.tlsConfig, nil)
 		if err != nil {
@@ -208,7 +205,6 @@ func (p *Provider) startServer() error {
 		p.grpcServer = grpc.NewServer(
 			append([]grpc.ServerOption{grpc.Creds(quictransport.TransportCredentials())}, ServerOptions()...)...,
 		)
-		transportpb.RegisterStewardTransportServer(p.grpcServer, p.handler)
 
 		go func() {
 			if err := p.grpcServer.Serve(ql); err != nil {
@@ -217,14 +213,8 @@ func (p *Provider) startServer() error {
 		}()
 		p.logger.Info("gRPC data plane server started", "addr", p.listenAddr)
 	} else {
-		// Register only the data-transfer methods on the shared server.
-		// The shared server already has a StewardTransportServer registered
-		// (for the control plane). We cannot double-register, so we attach
-		// our handler via the server's internal mechanism. In practice the
-		// controller wires the handler at server-build time; for testing we
-		// create our own server above. When grpc_server is provided the
-		// caller is responsible for registering the handler.
-		p.logger.Info("gRPC data plane handler attached to existing gRPC server")
+		// Shared server: the caller (controller) registers the composite handler.
+		p.logger.Info("gRPC data plane attached to existing gRPC server")
 	}
 
 	p.started.Store(true)
@@ -266,10 +256,6 @@ func (p *Provider) Stop(ctx context.Context) error {
 	}
 	p.sessions = make(map[string]*Session)
 
-	if p.handler != nil {
-		p.handler.close()
-	}
-
 	if p.ownGRPCServer && p.grpcServer != nil {
 		p.grpcServer.GracefulStop()
 		p.grpcServer = nil
@@ -289,41 +275,30 @@ func (p *Provider) Stop(ctx context.Context) error {
 	return nil
 }
 
-// Handler returns the DP handler that implements StewardTransportServer for
-// data plane RPCs (SyncConfig, SyncDNA, BulkTransfer). Used by the controller
-// to build a composite handler that delegates CP and DP RPCs appropriately.
-// Returns nil if Start() has not been called.
-func (p *Provider) Handler() transportpb.StewardTransportServer {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.handler
-}
-
 // AcceptConnection accepts an incoming data-plane connection (server-side).
 //
-// In the gRPC model, "accepting a connection" means returning a Session that
-// is ready to handle incoming SyncConfig, SyncDNA, and BulkTransfer RPCs.
-// The session blocks on its handler channels when a transfer method is called.
+// Returns a Session whose client-mode transfer methods remain available for
+// use by the steward. Server-side DNA/Bulk/Config RPCs are now handled
+// directly by the respective handler structs (DNAHandler, BulkHandler,
+// ConfigHandler) registered on the composite gRPC server.
 func (p *Provider) AcceptConnection(_ context.Context) (interfaces.DataPlaneSession, error) {
 	p.mu.RLock()
 	mode := p.mode
 	started := p.started.Load()
-	handler := p.handler
 	p.mu.RUnlock()
 
 	if mode != "server" {
 		return nil, fmt.Errorf("AcceptConnection only available in server mode")
 	}
-	if !started || handler == nil {
+	if !started {
 		return nil, fmt.Errorf("server not started")
 	}
 
 	sessionID := fmt.Sprintf("grpc-server-session-%d", p.sessionCounter.Add(1))
 	s := &Session{
 		id:       sessionID,
-		peerID:   "", // populated from RPC context when first RPC arrives
+		peerID:   "",
 		mode:     "server",
-		handler:  handler,
 		provider: p,
 	}
 

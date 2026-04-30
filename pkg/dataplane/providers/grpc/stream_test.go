@@ -3,7 +3,6 @@
 package grpc
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -203,11 +202,8 @@ func TestChunksToBulkTransfer_ValidationErrors(t *testing.T) {
 // chunksToBulkTransfer are inverse operations for a normal-sized payload.
 func TestChunksToBulkTransfer_RoundTrip(t *testing.T) {
 	original := &types.BulkTransfer{
-		ID:        "bulk-rt-001",
-		StewardID: "steward-rt",
-		TenantID:  "tenant-rt",
-		Direction: "to_steward",
-		Type:      "file",
+		ID:   "bulk-rt-001",
+		Data: []byte("round trip payload"),
 	}
 	chunks, err := bulkTransferToChunks(original)
 	require.NoError(t, err)
@@ -216,8 +212,7 @@ func TestChunksToBulkTransfer_RoundTrip(t *testing.T) {
 	got, err := chunksToBulkTransfer(chunks)
 	require.NoError(t, err)
 	assert.Equal(t, original.ID, got.ID)
-	assert.Equal(t, original.StewardID, got.StewardID)
-	assert.Equal(t, original.TenantID, got.TenantID)
+	assert.Equal(t, original.Data, got.Data)
 }
 
 // TestBulkTransferToChunks_SmallPayload verifies that bulkTransferToChunks produces
@@ -257,28 +252,22 @@ func TestBulkChecksum_RoundTrip(t *testing.T) {
 }
 
 // TestBulkChecksum_TamperedData verifies that chunksToBulkTransfer returns
-// ErrChecksumMismatch when the assembled BulkTransfer carries a checksum that
-// does not match the Data field.
+// ErrChecksumMismatch when the chunk metadata carries a checksum that does not
+// match the SHA-256 of the assembled raw bytes.
 func TestBulkChecksum_TamperedData(t *testing.T) {
-	// Build a BulkTransfer where Checksum deliberately does not match Data.
-	tampered := &types.BulkTransfer{
-		ID:       "bulk-tamper",
-		Data:     []byte("actual payload"),
-		Checksum: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-	}
-
-	data, err := json.Marshal(tampered)
-	require.NoError(t, err)
-
+	payload := []byte("actual payload")
 	chunks := []*transportpb.BulkChunk{{
-		TransferId: tampered.ID,
-		Data:       data,
+		TransferId: "bulk-tamper",
+		Data:       payload,
 		Offset:     0,
-		TotalSize:  int64(len(data)),
+		TotalSize:  int64(len(payload)),
 		IsLast:     true,
+		Metadata: map[string]string{
+			"checksum": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		},
 	}}
 
-	_, err = chunksToBulkTransfer(chunks)
+	_, err := chunksToBulkTransfer(chunks)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrChecksumMismatch),
 		"tampered checksum must return ErrChecksumMismatch, got: %v", err)

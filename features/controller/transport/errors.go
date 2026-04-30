@@ -5,7 +5,12 @@ package transport
 
 import "errors"
 
-// ErrStewardIdentityMismatch is returned when the steward ID in a request does
-// not match the CN from the peer's mTLS certificate. S7 extends this file with
-// ErrTenantIDMismatch.
-var ErrStewardIdentityMismatch = errors.New("steward ID does not match authenticated mTLS peer CN")
+var (
+	// ErrStewardIdentityMismatch is returned when the steward ID in a request
+	// does not match the CN from the peer's mTLS certificate.
+	ErrStewardIdentityMismatch = errors.New("steward ID does not match authenticated mTLS peer CN")
+
+	// ErrTenantIDMismatch is returned when the tenant ID in a request does not
+	// match the authenticated mTLS peer CN.
+	ErrTenantIDMismatch = errors.New("tenant ID does not match authenticated mTLS peer CN")
+)

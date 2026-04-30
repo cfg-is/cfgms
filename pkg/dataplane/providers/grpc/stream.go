@@ -218,26 +218,29 @@ func chunksToDNATransfer(chunks []*transportpb.DNAChunk) (*types.DNATransfer, er
 // Bulk transfer conversion
 // =============================================================================
 
-// bulkTransferToChunks serialises bulk to JSON and splits into ≤64 KB chunks.
+// bulkTransferToChunks chunks bulk.Data raw bytes into ≤64 KB BulkChunks.
 //
-// A SHA-256 checksum of bulk.Data is computed and stored in bulk.Checksum before
-// marshalling so the receiver can verify integrity after reassembly.
+// A SHA-256 checksum of bulk.Data is computed and stored both in bulk.Checksum
+// and in the first chunk's metadata under the key "checksum", eliminating the
+// 3× memory amplification from JSON-encoding binary data.
 func bulkTransferToChunks(bulk *types.BulkTransfer) ([]*transportpb.BulkChunk, error) {
-	// Compute checksum over the payload before marshalling so it is preserved in JSON.
 	sum := sha256.Sum256(bulk.Data)
 	bulk.Checksum = fmt.Sprintf("sha256:%x", sum)
 
-	data, err := json.Marshal(bulk)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal BulkTransfer: %w", err)
+	// Build first-chunk metadata: carry through caller metadata and add checksum.
+	firstMeta := map[string]string{"checksum": bulk.Checksum}
+	for k, v := range bulk.Metadata {
+		firstMeta[k] = v
 	}
 
+	data := bulk.Data
 	if len(data) == 0 {
 		return []*transportpb.BulkChunk{{
 			TransferId: bulk.ID,
 			Data:       []byte{},
 			TotalSize:  0,
 			IsLast:     true,
+			Metadata:   firstMeta,
 		}}, nil
 	}
 
@@ -254,13 +257,17 @@ func bulkTransferToChunks(bulk *types.BulkTransfer) ([]*transportpb.BulkChunk, e
 			end = len(data)
 		}
 		isLast := i == total-1
+		var meta map[string]string
+		if i == 0 {
+			meta = firstMeta
+		}
 		chunks = append(chunks, &transportpb.BulkChunk{
 			TransferId: bulk.ID,
 			Data:       data[start:end],
 			Offset:     int64(start),
 			TotalSize:  int64(len(data)),
 			IsLast:     isLast,
-			Metadata:   bulk.Metadata,
+			Metadata:   meta,
 		})
 	}
 	return chunks, nil
@@ -270,6 +277,8 @@ func bulkTransferToChunks(bulk *types.BulkTransfer) ([]*transportpb.BulkChunk, e
 //
 // Validation: non-empty list, contiguous offsets (no gaps or duplicates),
 // assembled payload ≤ maxRecvMsgSize (8 MB), assembled size matches TotalSize.
+// Checksum is read from the first chunk's metadata["checksum"] and verified
+// against the SHA-256 of the assembled raw bytes.
 func chunksToBulkTransfer(chunks []*transportpb.BulkChunk) (*types.BulkTransfer, error) {
 	if len(chunks) == 0 {
 		return nil, ErrEmptyChunkList
@@ -298,30 +307,27 @@ func chunksToBulkTransfer(chunks []*transportpb.BulkChunk) (*types.BulkTransfer,
 		return nil, fmt.Errorf("%d bytes: %w", len(data), ErrPayloadTooLarge)
 	}
 
-	if len(data) == 0 {
-		return &types.BulkTransfer{
-			ID:       chunks[0].TransferId,
-			Metadata: chunks[0].Metadata,
-		}, nil
-	}
-
 	if int64(len(data)) != chunks[0].TotalSize {
 		return nil, fmt.Errorf("assembled %d bytes, TotalSize=%d: %w",
 			len(data), chunks[0].TotalSize, ErrTotalSizeMismatch)
 	}
 
-	var bulk types.BulkTransfer
-	if err := json.Unmarshal(data, &bulk); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal BulkTransfer: %w", err)
+	var checksum string
+	if chunks[0].Metadata != nil {
+		checksum = chunks[0].Metadata["checksum"]
 	}
-
-	if bulk.Checksum != "" {
-		sum := sha256.Sum256(bulk.Data)
+	if checksum != "" {
+		sum := sha256.Sum256(data)
 		expected := fmt.Sprintf("sha256:%x", sum)
-		if bulk.Checksum != expected {
-			return nil, fmt.Errorf("want %s, got %s: %w", expected, bulk.Checksum, ErrChecksumMismatch)
+		if checksum != expected {
+			return nil, fmt.Errorf("want %s, got %s: %w", expected, checksum, ErrChecksumMismatch)
 		}
 	}
 
-	return &bulk, nil
+	return &types.BulkTransfer{
+		ID:       chunks[0].TransferId,
+		Data:     data,
+		Checksum: checksum,
+		Metadata: chunks[0].Metadata,
+	}, nil
 }

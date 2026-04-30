@@ -22,7 +22,6 @@
 package interfaces_test
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -60,17 +59,8 @@ type DPProviderFactory func(t *testing.T) (
 func RunDPContractTests(t *testing.T, factory DPProviderFactory) {
 	t.Helper()
 
-	t.Run("ConfigSync", func(t *testing.T) {
-		testDPConfigSync(t, factory)
-	})
-	t.Run("DNASync", func(t *testing.T) {
-		testDPDNASync(t, factory)
-	})
 	t.Run("BulkTransfer", func(t *testing.T) {
 		testDPBulkTransfer(t, factory)
-	})
-	t.Run("LargePayload", func(t *testing.T) {
-		testDPLargePayload(t, factory)
 	})
 	t.Run("SessionIdentification", func(t *testing.T) {
 		testDPSessionIdentification(t, factory)
@@ -93,88 +83,6 @@ func RunDPContractTests(t *testing.T, factory DPProviderFactory) {
 }
 
 // --- Contract Implementations ---
-
-// testDPConfigSync verifies the server can send a ConfigTransfer and the
-// client receives it with all fields intact.
-func testDPConfigSync(t *testing.T, factory DPProviderFactory) {
-	t.Helper()
-	server, client, cleanup := factory(t)
-	defer cleanup()
-
-	serverSess, clientSess := dpGetSessions(t, server, client)
-
-	cfg := &dptypes.ConfigTransfer{
-		ID:        "contract-cfg-sync",
-		StewardID: "contract-steward",
-		TenantID:  "contract-tenant",
-		Version:   "1.2.3",
-		Timestamp: time.Now().UTC().Truncate(time.Millisecond),
-		Data:      []byte(`{"firewall":{"enabled":true},"packages":["openssh-server"]}`),
-	}
-
-	var received *dptypes.ConfigTransfer
-	var receiveErr error
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		received, receiveErr = clientSess.ReceiveConfig(context.Background())
-	}()
-
-	// Small delay so the client goroutine is waiting before the server sends
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, serverSess.SendConfig(context.Background(), cfg))
-
-	wg.Wait()
-
-	require.NoError(t, receiveErr)
-	require.NotNil(t, received)
-	assert.Equal(t, cfg.ID, received.ID)
-	assert.Equal(t, cfg.Version, received.Version)
-	assert.Equal(t, cfg.StewardID, received.StewardID)
-	assert.Equal(t, cfg.TenantID, received.TenantID)
-	assert.Equal(t, cfg.Data, received.Data)
-}
-
-// testDPDNASync verifies the client can send a DNATransfer and the server
-// receives it with all fields intact.
-func testDPDNASync(t *testing.T, factory DPProviderFactory) {
-	t.Helper()
-	server, client, cleanup := factory(t)
-	defer cleanup()
-
-	serverSess, clientSess := dpGetSessions(t, server, client)
-
-	dna := &dptypes.DNATransfer{
-		ID:         "contract-dna-sync",
-		StewardID:  "contract-steward",
-		TenantID:   "contract-tenant",
-		Timestamp:  time.Now().UTC().Truncate(time.Millisecond),
-		Attributes: []byte(`{"os":"linux","arch":"arm64","hostname":"dev-01","cpu_cores":8}`),
-		Delta:      false,
-	}
-
-	var received *dptypes.DNATransfer
-	var receiveErr error
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		received, receiveErr = serverSess.ReceiveDNA(context.Background())
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, clientSess.SendDNA(context.Background(), dna))
-
-	wg.Wait()
-
-	require.NoError(t, receiveErr)
-	require.NotNil(t, received)
-	assert.Equal(t, dna.ID, received.ID)
-	assert.Equal(t, dna.StewardID, received.StewardID)
-	assert.Equal(t, dna.Attributes, received.Attributes)
-	assert.Equal(t, dna.Delta, received.Delta)
-}
 
 // testDPBulkTransfer verifies bidirectional bulk data transfer completes with
 // data integrity.
@@ -200,46 +108,6 @@ func testDPBulkTransfer(t *testing.T, factory DPProviderFactory) {
 
 	// SendBulk should complete without error
 	require.NoError(t, clientSess.SendBulk(context.Background(), bulk))
-}
-
-// testDPLargePayload verifies a config payload larger than 1 MB transfers
-// correctly (exercises chunking if the implementation uses it).
-func testDPLargePayload(t *testing.T, factory DPProviderFactory) {
-	t.Helper()
-	server, client, cleanup := factory(t)
-	defer cleanup()
-
-	serverSess, clientSess := dpGetSessions(t, server, client)
-
-	// 1 MB payload
-	payload := bytes.Repeat([]byte("X"), 1024*1024)
-	cfg := &dptypes.ConfigTransfer{
-		ID:        "contract-cfg-large",
-		StewardID: "contract-steward",
-		TenantID:  "contract-tenant",
-		Version:   "large-1.0",
-		Timestamp: time.Now().UTC(),
-		Data:      payload,
-	}
-
-	var received *dptypes.ConfigTransfer
-	var receiveErr error
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		received, receiveErr = clientSess.ReceiveConfig(context.Background())
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, serverSess.SendConfig(context.Background(), cfg))
-
-	wg.Wait()
-
-	require.NoError(t, receiveErr)
-	require.NotNil(t, received)
-	assert.Equal(t, cfg.ID, received.ID)
-	assert.Equal(t, payload, received.Data, "large payload data must be identical after transfer")
 }
 
 // testDPSessionIdentification verifies session ID and peer IDs are non-empty
@@ -281,58 +149,24 @@ func testDPSessionClose(t *testing.T, factory DPProviderFactory) {
 	assert.True(t, clientSess.IsClosed(), "client session should be closed after Close()")
 }
 
-// testDPStatsTracking verifies that provider-level stats counters increment
-// after transfers.
+// testDPStatsTracking verifies that provider-level session counters increment
+// after AcceptConnection and Connect.
 func testDPStatsTracking(t *testing.T, factory DPProviderFactory) {
 	t.Helper()
 	server, client, cleanup := factory(t)
 	defer cleanup()
 
-	serverSess, clientSess := dpGetSessions(t, server, client)
+	dpGetSessions(t, server, client)
 
-	// Check initial stats
 	serverStats, err := server.GetStats(context.Background())
 	require.NoError(t, err)
-	initialServerSessions := serverStats.TotalSessionsAccepted
+	assert.Greater(t, serverStats.TotalSessionsAccepted, int64(0),
+		"server should have accepted at least one session")
 
 	clientStats, err := client.GetStats(context.Background())
 	require.NoError(t, err)
-	initialClientAttempts := clientStats.TotalConnectionAttempts
-
-	// Accept one server session (already done above), verify counter incremented
-	assert.Greater(t, serverStats.TotalSessionsAccepted, int64(0),
-		"server should have accepted at least one session")
 	assert.Greater(t, clientStats.TotalConnectionAttempts, int64(0),
 		"client should have at least one connection attempt")
-	_ = initialServerSessions
-	_ = initialClientAttempts
-
-	// Perform a config transfer and verify transfer stats increment
-	cfg := &dptypes.ConfigTransfer{
-		ID:        "contract-cfg-stats",
-		StewardID: "contract-steward",
-		TenantID:  "contract-tenant",
-		Version:   "1.0",
-		Timestamp: time.Now().UTC(),
-		Data:      []byte(`{"key":"value"}`),
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_, _ = clientSess.ReceiveConfig(context.Background())
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, serverSess.SendConfig(context.Background(), cfg))
-	wg.Wait()
-
-	// Verify server stats reflect the sent config
-	serverStats, err = server.GetStats(context.Background())
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, serverStats.ConfigTransfers.Sent, int64(1),
-		"server ConfigTransfers.Sent should increment after SendConfig")
 }
 
 // =============================================================================

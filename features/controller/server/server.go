@@ -853,21 +853,9 @@ func (s *Server) Start() error {
 			return fmt.Errorf("CP provider ServerHandler() returned nil")
 		}
 
-		// DP handler — use Unimplemented fallback if DP not initialized
-		var dpHandler transportpb.StewardTransportServer
-		if s.dataPlaneProvider != nil {
-			type handlerProvider interface {
-				Handler() transportpb.StewardTransportServer
-			}
-			if hp, ok := s.dataPlaneProvider.(handlerProvider); ok {
-				dpHandler = hp.Handler()
-			}
-		}
-		if dpHandler == nil {
-			dpHandler = &transportpb.UnimplementedStewardTransportServer{}
-		}
-
-		composite := newCompositeTransportServer(cpHandler, dpHandler, s.configHandler, s.logger)
+		dnaHandler := controllerTransport.NewDNAHandler(s.logger)
+		bulkHandler := controllerTransport.NewBulkHandler(s.logger)
+		composite := newCompositeTransportServer(cpHandler, dnaHandler, bulkHandler, s.configHandler, s.logger)
 		transportpb.RegisterStewardTransportServer(s.grpcServer, composite)
 
 		// Start serving on the shared QUIC listener
