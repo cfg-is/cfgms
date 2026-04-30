@@ -36,6 +36,7 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider
 	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
 
@@ -63,19 +64,18 @@ type TransportClient struct {
 
 	// Certificate PEMs (from registration response)
 	caCertPEM      string
-	clientCertPEM  string
-	clientKeyPEM   string
 	serverCertPEM  string // Controller's server cert for config signature verification (Story #315)
 	signingCertPEM string // Story #377: Dedicated signing cert (preferred over serverCertPEM)
+
+	// certManager provides on-demand client certificate loading per TLS handshake (Issue #920).
+	// When non-nil, GetClientCertificate is used instead of static PEM certs.
+	certManager *cert.Manager
 
 	// Command handler
 	commandHandler *commands.Handler
 
 	// Configuration executor (unified engine — same as standalone mode)
 	configExecutor *execution.Executor
-
-	// Configuration signature verifier
-	configVerifier signature.Verifier
 
 	// Command authentication settings (Story #919)
 	commandReplayWindow   time.Duration
@@ -129,9 +129,6 @@ type TransportConfig struct {
 	// ClientCertPEM is the client certificate PEM (for mTLS)
 	ClientCertPEM string
 
-	// ClientKeyPEM is the client private key PEM (for mTLS)
-	ClientKeyPEM string
-
 	// ServerCertPEM is the controller's server certificate PEM (for config signature verification)
 	// Story #315: Used to verify configurations signed by the controller
 	ServerCertPEM string
@@ -166,6 +163,16 @@ type TransportConfig struct {
 	// Zero means the commands.Handler default (65536 bytes) applies.
 	SignedCommandMaxParamsBytes int
 
+	// CertManager provides on-demand client certificate loading for TLS handshakes
+	// (Issue #920). When non-nil, GetClientCertificate is used per handshake so
+	// certificate rotations are picked up automatically. When nil the client falls
+	// back to disk-path or environment-variable certificate loading.
+	CertManager *cert.Manager
+
+	// SecretStore is used by the offline queue to persist its AES-256-GCM
+	// encryption key across restarts (Issue #920). May be nil.
+	SecretStore secretsif.SecretStore
+
 	// Logger for client logging
 	Logger logging.Logger
 }
@@ -185,11 +192,13 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	}
 
 	// Initialize offline queue for durable report persistence (Issue #419).
+	// Pass the SecretStore so the encryption key is persisted across restarts (Issue #920).
 	offlineQueue, err := NewOfflineQueue(OfflineQueueConfig{
-		Dir:     cfg.QueueDir,
-		MaxSize: cfg.MaxQueueSize,
-		MaxAge:  cfg.MaxQueueAge,
-		Logger:  cfg.Logger,
+		Dir:         cfg.QueueDir,
+		MaxSize:     cfg.MaxQueueSize,
+		MaxAge:      cfg.MaxQueueAge,
+		SecretStore: cfg.SecretStore,
+		Logger:      cfg.Logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize offline queue: %w", err)
@@ -203,10 +212,9 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		transportAddress:      cfg.ControllerURL,
 		certPath:              cfg.TLSCertPath,
 		caCertPEM:             cfg.CACertPEM,
-		clientCertPEM:         cfg.ClientCertPEM,
-		clientKeyPEM:          cfg.ClientKeyPEM,
 		serverCertPEM:         cfg.ServerCertPEM,
 		signingCertPEM:        cfg.SigningCertPEM,
+		certManager:           cfg.CertManager,
 		offlineQueue:          offlineQueue,
 		commandReplayWindow:   cfg.SignedCommandReplayWindow,
 		commandMaxParamsBytes: cfg.SignedCommandMaxParamsBytes,
@@ -380,12 +388,9 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		}
 	}
 
-	// Create command handler with the same verifier used for config signature
-	// verification (Story #919). Replay window and params limit come from the
-	// steward config (via TransportConfig); zero values use handler defaults.
-	c.mu.RLock()
-	verifier := c.configVerifier
-	c.mu.RUnlock()
+	// Build the verifier on demand from the stored signing/server cert PEMs.
+	// Not cached — Issue #920 removes the configVerifier field.
+	verifier := c.buildVerifierOnDemand()
 
 	handler, err := commands.New(&commands.Config{
 		StewardID:      stewardID,
@@ -435,10 +440,8 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			return fmt.Errorf("failed to unmarshal protobuf config: %w", err)
 		}
 
-		// Verify configuration signature
-		c.mu.RLock()
-		verifier := c.configVerifier
-		c.mu.RUnlock()
+		// Verify configuration signature — verifier obtained on demand (Issue #920).
+		verifier := c.buildVerifierOnDemand()
 
 		var unsignedProtoConfig *controller.StewardConfig
 		if verifier != nil {
@@ -949,26 +952,41 @@ func (c *TransportClient) SetTenantID(id string) {
 
 // createTLSConfig creates a TLS configuration for gRPC-over-QUIC with mTLS.
 // Sets ALPN to "cfgms-grpc" required by the QUIC transport layer.
-// Sources: PEM certs from registration (preferred), disk path, or environment variables.
+//
+// Source priority (Issue #920):
+//  1. certManager path: GetClientCertificate callback (on-demand per handshake)
+//  2. Disk path (TLSCertPath): static cert loaded from files
+//  3. Environment variables: CFGMS_TLS_CERT_PATH / KEY / CA
 func (c *TransportClient) createTLSConfig() (*tls.Config, error) {
 	c.mu.RLock()
 	caCertPEMStr := c.caCertPEM
-	clientCertPEMStr := c.clientCertPEM
-	clientKeyPEMStr := c.clientKeyPEM
 	certPath := c.certPath
+	certMgr := c.certManager
 	c.mu.RUnlock()
 
-	var caCertPEM, clientCertPEM, clientKeyPEM []byte
+	var tlsConfig *tls.Config
+	var caCertPEM []byte // used for CA pool and verifier fallback
 	var err error
 
-	if caCertPEMStr != "" && clientCertPEMStr != "" && clientKeyPEMStr != "" {
-		// Primary path: PEM certs from HTTP registration response
-		c.logger.Info("Using TLS certificates from registration response")
-		caCertPEM = []byte(caCertPEMStr)
-		clientCertPEM = []byte(clientCertPEMStr)
-		clientKeyPEM = []byte(clientKeyPEMStr)
-	} else if certPath != "" {
-		// Secondary path: certificates on disk
+	if certMgr != nil {
+		// Primary path (Issue #920): on-demand client cert per TLS handshake.
+		c.logger.Info("Using on-demand TLS certificate loading via CertManager")
+		if caCertPEMStr != "" {
+			caCertPEM = []byte(caCertPEMStr)
+		}
+		tlsConfig, err = certMgr.CreateOnDemandClientTLSConfig(caCertPEM, tls.VersionTLS13)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create on-demand TLS config: %w", err)
+		}
+		tlsConfig.NextProtos = []string{quictransport.ALPNProtocol}
+		return tlsConfig, nil
+	}
+
+	// Fallback paths: build TLS config from static cert files.
+	var clientCertPEM, clientKeyPEM []byte
+
+	if certPath != "" {
+		// Secondary path: certificates on disk.
 		caCertPath := filepath.Join(certPath, "ca.crt")
 		// #nosec G304 - Certificate paths are controlled via configuration
 		caCertPEM, err = os.ReadFile(caCertPath)
@@ -991,13 +1009,13 @@ func (c *TransportClient) createTLSConfig() (*tls.Config, error) {
 
 		c.logger.Info("Loaded TLS configuration from disk", "cert_path", certPath)
 	} else {
-		// Tertiary path: environment variables
+		// Tertiary path: environment variables.
 		certFile := os.Getenv("CFGMS_TLS_CERT_PATH")
 		keyFile := os.Getenv("CFGMS_TLS_KEY_PATH")
 		caFile := os.Getenv("CFGMS_TLS_CA_PATH")
 
 		if certFile == "" || keyFile == "" || caFile == "" {
-			// No TLS config available — provider will connect without mTLS
+			// No TLS config available — provider will connect without mTLS.
 			return nil, nil
 		}
 
@@ -1020,66 +1038,70 @@ func (c *TransportClient) createTLSConfig() (*tls.Config, error) {
 		c.logger.Info("Loaded TLS configuration from environment variables")
 	}
 
-	tlsConfig, err := cert.CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM, "", tls.VersionTLS13)
+	tlsConfig, err = cert.CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM, "", tls.VersionTLS13)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
 
-	// gRPC-over-QUIC requires the cfgms-grpc ALPN protocol
+	// gRPC-over-QUIC requires the cfgms-grpc ALPN protocol.
 	tlsConfig.NextProtos = []string{quictransport.ALPNProtocol}
 
-	// Initialize configuration signature verifier using controller's certificate.
-	// Story #377: Prefer dedicated signing cert over server cert.
-	c.mu.Lock()
-	if c.configVerifier == nil {
-		var serverCertPEM []byte
-
-		if c.signingCertPEM != "" {
-			serverCertPEM = []byte(c.signingCertPEM)
-			c.logger.Info("Using dedicated signing certificate for signature verification")
-		} else if c.serverCertPEM != "" {
-			serverCertPEM = []byte(c.serverCertPEM)
-			c.logger.Info("Using server certificate from registration for signature verification")
-		} else if certPath != "" {
-			// Story #377: Try signing.crt first, fall back to server.crt
-			signingCertPath := filepath.Join(certPath, "signing.crt")
-			serverCertPath := filepath.Join(certPath, "server.crt")
-
-			// #nosec G304 - Certificate paths are controlled via configuration
-			var readErr error
-			serverCertPEM, readErr = os.ReadFile(signingCertPath)
-			if readErr != nil {
-				// Fall back to server.crt
-				// #nosec G304 - Certificate paths are controlled via configuration
-				serverCertPEM, readErr = os.ReadFile(serverCertPath)
-				if readErr != nil {
-					c.logger.Warn("Failed to load signing/server certificate for signature verification, using CA")
-					serverCertPEM = caCertPEM
-				}
-			} else {
-				c.logger.Info("Using signing.crt from disk for signature verification")
-			}
-		} else {
-			c.logger.Warn("No server certificate available, using CA for signature verification")
-			serverCertPEM = caCertPEM
-		}
-
-		if len(serverCertPEM) > 0 {
-			verifier, verErr := signature.NewVerifier(&signature.VerifierConfig{
-				CertificatePEM: serverCertPEM,
-			})
-			if verErr != nil {
-				c.logger.Warn("Failed to create configuration verifier", "error", verErr)
-			} else {
-				c.configVerifier = verifier
-				c.logger.Info("Configuration signature verifier initialized",
-					"key_fingerprint", verifier.KeyFingerprint())
-			}
-		}
-	}
-	c.mu.Unlock()
-
 	return tlsConfig, nil
+}
+
+// buildVerifierOnDemand constructs a config/command signature verifier from the
+// controller's certificate PEMs stored in the client. Returns nil when no
+// certificate is available — callers treat a nil verifier as "skip verification".
+//
+// The verifier is NOT cached (Issue #920 removes the configVerifier field).
+// The cost is trivial — each call parses a PEM block and builds a verifier struct.
+func (c *TransportClient) buildVerifierOnDemand() signature.Verifier {
+	c.mu.RLock()
+	signingCertPEM := c.signingCertPEM
+	serverCertPEM := c.serverCertPEM
+	caCertPEM := c.caCertPEM
+	certPath := c.certPath
+	c.mu.RUnlock()
+
+	var certPEM []byte
+
+	switch {
+	case signingCertPEM != "":
+		certPEM = []byte(signingCertPEM)
+		c.logger.Info("Using dedicated signing certificate for signature verification")
+	case serverCertPEM != "":
+		certPEM = []byte(serverCertPEM)
+		c.logger.Info("Using server certificate for signature verification")
+	case certPath != "":
+		// Story #377: prefer signing.crt, fall back to server.crt.
+		signingPath := filepath.Join(certPath, "signing.crt")
+		serverPath := filepath.Join(certPath, "server.crt")
+		// #nosec G304 - Certificate paths are controlled via configuration
+		if raw, err := os.ReadFile(signingPath); err == nil {
+			certPEM = raw
+			c.logger.Info("Using signing.crt from disk for signature verification")
+		} else if raw, err := os.ReadFile(serverPath); err == nil {
+			certPEM = raw
+		} else if caCertPEM != "" {
+			certPEM = []byte(caCertPEM)
+			c.logger.Warn("Signing/server certificate not found; falling back to CA for signature verification")
+		}
+	case caCertPEM != "":
+		certPEM = []byte(caCertPEM)
+		c.logger.Warn("No server certificate available; using CA for signature verification")
+	}
+
+	if len(certPEM) == 0 {
+		return nil
+	}
+
+	verifier, err := signature.NewVerifier(&signature.VerifierConfig{CertificatePEM: certPEM})
+	if err != nil {
+		c.logger.Warn("Failed to create configuration verifier", "error", err)
+		return nil
+	}
+	c.logger.Info("Configuration signature verifier built", "key_fingerprint", verifier.KeyFingerprint())
+	return verifier
 }
 
 // publishEventWithQueue attempts to publish an event via the control plane.

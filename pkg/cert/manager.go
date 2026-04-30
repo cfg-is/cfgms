@@ -43,6 +43,8 @@
 package cert
 
 import (
+	"context"
+	"crypto/tls"
 	"fmt"
 	"path/filepath"
 )
@@ -532,6 +534,35 @@ type ManagerStats struct {
 	RenewalCandidates    int
 	CertificatesByType   map[CertificateType]int
 	CAInfo               *CertificateInfo
+}
+
+// GetClientCertificate returns the latest steward client certificate for TLS handshakes.
+// Each call reads the current certificate from the store so cert rotations are picked
+// up automatically — no explicit notification needed.
+func (m *Manager) GetClientCertificate(_ context.Context) (*tls.Certificate, error) {
+	clientCerts, err := m.store.GetCertificatesByType(CertificateTypeClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve client certificates: %w", err)
+	}
+	if len(clientCerts) == 0 {
+		return nil, fmt.Errorf("no client certificate found in store")
+	}
+
+	// GetCertificatesByType returns newest-first.
+	certInfo := clientCerts[0]
+	c, err := m.store.GetCertificate(certInfo.SerialNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve client certificate data: %w", err)
+	}
+	if len(c.CertificatePEM) == 0 || len(c.PrivateKeyPEM) == 0 {
+		return nil, fmt.Errorf("client certificate or private key is missing from store")
+	}
+
+	tlsCert, err := tls.X509KeyPair(c.CertificatePEM, c.PrivateKeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load client certificate key pair: %w", err)
+	}
+	return &tlsCert, nil
 }
 
 // GetStoragePath returns the certificate storage path

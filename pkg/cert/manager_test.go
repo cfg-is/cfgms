@@ -3,6 +3,7 @@
 package cert
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -467,4 +468,53 @@ func TestManager_SaveCertificateFiles(t *testing.T) {
 	savedKeyPEM, err := os.ReadFile(keyPath)
 	require.NoError(t, err)
 	assert.Equal(t, cert.PrivateKeyPEM, savedKeyPEM)
+}
+
+func TestManager_GetClientCertificate(t *testing.T) {
+	tempDir := t.TempDir()
+	manager, err := NewManager(&ManagerConfig{
+		StoragePath: tempDir,
+		CAConfig: &CAConfig{
+			Organization: "Test",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// No client cert in store yet — must return an error.
+	_, err = manager.GetClientCertificate(ctx)
+	assert.Error(t, err, "should error when no client cert exists")
+
+	// Generate the first client certificate.
+	cert1, err := manager.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-001",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// GetClientCertificate must return the cert successfully.
+	tlsCert1, err := manager.GetClientCertificate(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, tlsCert1)
+	assert.NotEmpty(t, tlsCert1.Certificate, "TLS cert must contain the leaf certificate bytes")
+
+	// Generate a second client certificate (simulates rotation).
+	cert2, err := manager.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-001-renewed",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// GetClientCertificate must now return the newest cert — leaf bytes differ.
+	tlsCert2, err := manager.GetClientCertificate(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, tlsCert2)
+	assert.NotEqual(t, cert1.SerialNumber, cert2.SerialNumber,
+		"rotation must produce a cert with a different serial")
+	// The leaf DER bytes are different between the two generated certs.
+	assert.NotEqual(t, tlsCert1.Certificate[0], tlsCert2.Certificate[0],
+		"second call must return the newer cert after rotation")
 }

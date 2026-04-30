@@ -3,6 +3,7 @@
 package cert
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -191,4 +192,27 @@ func (m *Manager) CreateClientTLSConfigFromManager(clientCertSerialNumber string
 	}
 
 	return CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM, serverName, minVersion)
+}
+
+// CreateOnDemandClientTLSConfig creates a client TLS config that fetches the client
+// certificate on every TLS handshake via the Manager, enabling transparent rotation.
+// When caCertPEM is non-empty it is used for server verification; otherwise system roots apply.
+func (m *Manager) CreateOnDemandClientTLSConfig(caCertPEM []byte, minVersion uint16) (*tls.Config, error) {
+	if minVersion < tls.VersionTLS12 {
+		return nil, fmt.Errorf("minimum TLS version must be 1.2 or higher, got 0x%04x", minVersion)
+	}
+	tlsConfig := &tls.Config{
+		MinVersion: minVersion, // #nosec G402 -- TLS 1.2+ enforced by validation above
+		GetClientCertificate: func(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return m.GetClientCertificate(context.Background())
+		},
+	}
+	if len(caCertPEM) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCertPEM) {
+			return nil, fmt.Errorf("failed to append CA certificate to pool")
+		}
+		tlsConfig.RootCAs = pool
+	}
+	return tlsConfig, nil
 }

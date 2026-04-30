@@ -2,13 +2,17 @@
 // Copyright 2026 Jordan Ritz
 // Package client provides tests for offline report queueing.
 // Issue #419: steward queues reports locally when controller is unreachable.
+// Issue #920: queue file is encrypted at rest with AES-256-GCM.
 package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +22,7 @@ import (
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // ---------------------------------------------------------------------------
@@ -170,9 +175,11 @@ func TestOfflineQueue_DrainEmptyQueue(t *testing.T) {
 
 func TestOfflineQueue_PersistenceAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
+	// Shared SecretStore so the encryption key persists across simulated restarts.
+	store := newInMemorySecretStore()
 
 	// First instance — enqueue three events.
-	q1, err := NewOfflineQueue(OfflineQueueConfig{Dir: dir, MaxSize: 10, MaxAge: time.Hour})
+	q1, err := NewOfflineQueue(OfflineQueueConfig{Dir: dir, MaxSize: 10, MaxAge: time.Hour, SecretStore: store})
 	require.NoError(t, err)
 	q1.Enqueue(makeTestEvent("evt-001", cpTypes.EventConfigApplied))
 	q1.Enqueue(makeTestEvent("evt-002", cpTypes.EventDNAChanged))
@@ -180,7 +187,7 @@ func TestOfflineQueue_PersistenceAcrossRestart(t *testing.T) {
 	assert.Equal(t, 3, q1.Len())
 
 	// Second instance simulates a restart from the same directory.
-	q2, err := NewOfflineQueue(OfflineQueueConfig{Dir: dir, MaxSize: 10, MaxAge: time.Hour})
+	q2, err := NewOfflineQueue(OfflineQueueConfig{Dir: dir, MaxSize: 10, MaxAge: time.Hour, SecretStore: store})
 	require.NoError(t, err)
 	assert.Equal(t, 3, q2.Len(), "events must survive restart")
 
@@ -194,8 +201,9 @@ func TestOfflineQueue_PersistenceAcrossRestart(t *testing.T) {
 
 func TestOfflineQueue_PersistencePartialDrainThenRestart(t *testing.T) {
 	dir := t.TempDir()
+	store := newInMemorySecretStore()
 
-	q1, err := NewOfflineQueue(OfflineQueueConfig{Dir: dir, MaxSize: 10, MaxAge: time.Hour})
+	q1, err := NewOfflineQueue(OfflineQueueConfig{Dir: dir, MaxSize: 10, MaxAge: time.Hour, SecretStore: store})
 	require.NoError(t, err)
 	for i := 1; i <= 4; i++ {
 		q1.Enqueue(makeTestEvent(fmt.Sprintf("evt-%03d", i), cpTypes.EventConfigApplied))
@@ -213,7 +221,7 @@ func TestOfflineQueue_PersistencePartialDrainThenRestart(t *testing.T) {
 	assert.Equal(t, 2, q1.Len())
 
 	// Restart: only the remaining 2 events should be present.
-	q2, err := NewOfflineQueue(OfflineQueueConfig{Dir: dir, MaxSize: 10, MaxAge: time.Hour})
+	q2, err := NewOfflineQueue(OfflineQueueConfig{Dir: dir, MaxSize: 10, MaxAge: time.Hour, SecretStore: store})
 	require.NoError(t, err)
 	assert.Equal(t, 2, q2.Len())
 
@@ -356,8 +364,8 @@ func TestOfflineQueue_QueueFileAtomicWrite(t *testing.T) {
 	q.Enqueue(makeTestEvent("evt-001", cpTypes.EventConfigApplied))
 
 	// The .tmp file must not exist after enqueue (atomic rename completed).
-	assert.FileExists(t, filepath.Join(dir, "offline_queue.json"))
-	assert.NoFileExists(t, filepath.Join(dir, "offline_queue.json.tmp"),
+	assert.FileExists(t, filepath.Join(dir, "offline_queue.enc"))
+	assert.NoFileExists(t, filepath.Join(dir, "offline_queue.enc.tmp"),
 		".tmp file must be cleaned up after atomic rename")
 }
 
@@ -510,4 +518,201 @@ func TestPublishEventWithQueue_DrainedOnReconnect(t *testing.T) {
 	assert.Len(t, cp.published, 2, "both queued events must be published")
 	assert.Equal(t, "queued-001", cp.published[0].ID, "events delivered in order")
 	assert.Equal(t, "queued-002", cp.published[1].ID, "events delivered in order")
+}
+
+// ---------------------------------------------------------------------------
+// Issue #920: Encryption tests
+// ---------------------------------------------------------------------------
+
+// inMemorySecretStore is a minimal SecretStore for testing that holds secrets in memory.
+type inMemorySecretStore struct {
+	mu      sync.Mutex
+	secrets map[string]string
+}
+
+func newInMemorySecretStore() *inMemorySecretStore {
+	return &inMemorySecretStore{secrets: make(map[string]string)}
+}
+
+func (s *inMemorySecretStore) StoreSecret(_ context.Context, req *secretsif.SecretRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secrets[req.Key] = req.Value
+	return nil
+}
+
+func (s *inMemorySecretStore) GetSecret(_ context.Context, key string) (*secretsif.Secret, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.secrets[key]
+	if !ok {
+		return nil, secretsif.ErrSecretNotFound
+	}
+	return &secretsif.Secret{Key: key, Value: v}, nil
+}
+
+func (s *inMemorySecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
+func (s *inMemorySecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *inMemorySecretStore) GetSecrets(_ context.Context, _ []string) (map[string]*secretsif.Secret, error) {
+	return nil, nil
+}
+func (s *inMemorySecretStore) StoreSecrets(_ context.Context, _ map[string]*secretsif.SecretRequest) error {
+	return nil
+}
+func (s *inMemorySecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsif.Secret, error) {
+	return nil, nil
+}
+func (s *inMemorySecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsif.SecretVersion, error) {
+	return nil, nil
+}
+func (s *inMemorySecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsif.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *inMemorySecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+func (s *inMemorySecretStore) RotateSecret(_ context.Context, _ string, _ string) error {
+	return nil
+}
+func (s *inMemorySecretStore) ExpireSecret(_ context.Context, _ string) error { return nil }
+func (s *inMemorySecretStore) HealthCheck(_ context.Context) error            { return nil }
+func (s *inMemorySecretStore) Close() error                                   { return nil }
+
+// TestOfflineQueue_EncryptionRoundTrip verifies that enqueued events survive a
+// restart (load → decrypt → check) when a SecretStore is provided.
+func TestOfflineQueue_EncryptionRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	store := newInMemorySecretStore()
+
+	q1, err := NewOfflineQueue(OfflineQueueConfig{
+		Dir: dir, MaxSize: 10, MaxAge: time.Hour, SecretStore: store,
+	})
+	require.NoError(t, err)
+
+	q1.Enqueue(makeTestEvent("enc-001", cpTypes.EventConfigApplied))
+	q1.Enqueue(makeTestEvent("enc-002", cpTypes.EventDNAChanged))
+	require.Equal(t, 2, q1.Len())
+
+	// Verify the on-disk file exists and is NOT valid JSON (it's encrypted).
+	raw, err := os.ReadFile(filepath.Join(dir, "offline_queue.enc"))
+	require.NoError(t, err)
+	var js interface{}
+	assert.Error(t, json.Unmarshal(raw, &js), "file must not be plaintext JSON")
+
+	// Reload from the same directory and secret store.
+	q2, err := NewOfflineQueue(OfflineQueueConfig{
+		Dir: dir, MaxSize: 10, MaxAge: time.Hour, SecretStore: store,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, q2.Len(), "events must survive encrypted restart")
+
+	var ids []string
+	q2.Drain(func(e *cpTypes.Event) error {
+		ids = append(ids, e.ID)
+		return nil
+	})
+	assert.Equal(t, []string{"enc-001", "enc-002"}, ids, "events must be in insertion order")
+}
+
+// TestOfflineQueue_TamperDetection verifies that mutating the encrypted file
+// causes load to return an authentication error (GCM tag mismatch).
+func TestOfflineQueue_TamperDetection(t *testing.T) {
+	dir := t.TempDir()
+	store := newInMemorySecretStore()
+
+	q, err := NewOfflineQueue(OfflineQueueConfig{
+		Dir: dir, MaxSize: 10, MaxAge: time.Hour, SecretStore: store,
+	})
+	require.NoError(t, err)
+	q.Enqueue(makeTestEvent("tamper-001", cpTypes.EventConfigApplied))
+
+	// Flip a byte in the middle of the ciphertext to simulate tampering.
+	encPath := filepath.Join(dir, "offline_queue.enc")
+	data, err := os.ReadFile(encPath)
+	require.NoError(t, err)
+	require.True(t, len(data) > 20, "encrypted file must have enough bytes to tamper")
+	data[len(data)/2] ^= 0xFF
+	require.NoError(t, os.WriteFile(encPath, data, 0600))
+
+	// Loading must fail with an authentication/decryption error.
+	q2 := &OfflineQueue{
+		seenIDs:       make(map[string]struct{}),
+		config:        OfflineQueueConfig{Dir: dir},
+		encryptionKey: q.encryptionKey, // same key
+	}
+	err = q2.load()
+	assert.Error(t, err, "tampered file must cause a decryption error")
+	assert.Contains(t, err.Error(), "authentication failure",
+		"error must mention authentication failure")
+}
+
+// TestOfflineQueue_LegacyPlaintextDeletion verifies that a pre-920 plaintext
+// offline_queue.json is deleted at startup and an Info log is emitted.
+func TestOfflineQueue_LegacyPlaintextDeletion(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "offline_queue.json")
+
+	// Write a fake plaintext file.
+	require.NoError(t, os.WriteFile(legacyPath, []byte(`{"entries":[],"next_seq":0}`), 0600))
+	assert.FileExists(t, legacyPath)
+
+	logger := logging.NewLogger("debug")
+	store := newInMemorySecretStore()
+
+	_, err := NewOfflineQueue(OfflineQueueConfig{
+		Dir: dir, MaxSize: 10, MaxAge: time.Hour,
+		SecretStore: store, Logger: logger,
+	})
+	require.NoError(t, err)
+
+	// Legacy file must be gone.
+	assert.NoFileExists(t, legacyPath, "legacy plaintext file must be deleted at startup")
+}
+
+// TestOfflineQueue_ConcurrentDrainSeenIDs verifies that concurrent Drain and
+// Enqueue calls do not corrupt seenIDs. Run with -race.
+func TestOfflineQueue_ConcurrentDrainSeenIDs(t *testing.T) {
+	q, err := NewOfflineQueue(OfflineQueueConfig{
+		MaxSize: 500,
+		MaxAge:  time.Hour,
+	})
+	require.NoError(t, err)
+
+	const enqueues = 200
+	var wg sync.WaitGroup
+
+	// Multiple concurrent producers.
+	for p := 0; p < 4; p++ {
+		p := p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < enqueues/4; i++ {
+				id := fmt.Sprintf("p%d-evt-%04d", p, i)
+				q.Enqueue(makeTestEvent(id, cpTypes.EventConfigApplied))
+			}
+		}()
+	}
+
+	// Concurrent consumer.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < enqueues; i++ {
+			q.Drain(func(e *cpTypes.Event) error { return nil })
+		}
+	}()
+
+	wg.Wait()
+
+	// Final drain to catch any stragglers.
+	q.Drain(func(e *cpTypes.Event) error { return nil })
+
+	// seenIDs must be consistent with entries.
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	assert.Equal(t, len(q.entries), len(q.seenIDs),
+		"seenIDs count must match entries count after concurrent operations")
 }
