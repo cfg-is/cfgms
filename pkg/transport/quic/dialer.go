@@ -21,7 +21,10 @@ import (
 // paired with grpc.WithTransportCredentials(insecure.NewCredentials()), since
 // TLS is handled at the QUIC layer.
 func Dial(ctx context.Context, addr string, tlsConfig *tls.Config, quicConfig *quicgo.Config) (net.Conn, error) {
-	quicConn, err := quicgo.DialAddr(ctx, addr, tlsConfig, mergeQuicConfig(quicConfig))
+	if quicConfig == nil {
+		quicConfig = defaultQuicConfig()
+	}
+	quicConn, err := quicgo.DialAddr(ctx, addr, tlsConfig, quicConfig)
 	if err != nil {
 		return nil, err
 	}

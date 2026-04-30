@@ -366,11 +366,9 @@ func TestGRPCOverQUIC_mTLS_NoCert(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	// Write data to trigger the server to process our (absent) certificate.
+	// The server sends certificate_required (CRYPTO_ERROR 0x174); the 3-second
+	// read deadline is sufficient for the alert to arrive without a sleep.
 	_, _ = conn.Write([]byte{0x00})
-
-	// The server sends certificate_required (CRYPTO_ERROR 0x174). Give the
-	// server a moment to send the alert before reading.
-	time.Sleep(100 * time.Millisecond)
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(3*time.Second)))
 	buf := make([]byte, 1)
 	_, readErr := conn.Read(buf)
@@ -426,8 +424,8 @@ func TestGRPCOverQUIC_mTLS_WrongCA(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 
+	// Write to trigger server-side cert processing; alert arrives within the read deadline.
 	_, _ = conn.Write([]byte{0x00})
-	time.Sleep(100 * time.Millisecond)
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(3*time.Second)))
 	buf := make([]byte, 1)
 	_, readErr := conn.Read(buf)

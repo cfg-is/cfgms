@@ -6,6 +6,7 @@ package quic
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"time"
 
@@ -32,21 +33,51 @@ import (
 //     TLS handshake timeout used by HTTP/2 clients and is still well within acceptable
 //     connection-establishment latency for a management plane.
 //
+// DoS resilience fields (Issue #931):
+//
+//   - MaxIncomingStreams 1: one bidirectional stream per QUIC connection is the design
+//     contract (see doc.go). Restricting to 1 prevents stream-flood attacks.
+//
+//   - MaxIncomingUniStreams -1: disable unidirectional streams entirely. gRPC uses only
+//     bidirectional streams, so any unidirectional stream is unexpected traffic.
+//
+//   - InitialStreamReceiveWindow 512 KB: quic-go default; set explicitly so the choice
+//     is documented and testable.
+//
+//   - InitialConnectionReceiveWindow 1 MB: with MaxIncomingStreams=1, this is effectively
+//     the same as the stream window in practice.
+//
+//   - Allow0RTT false: 0-RTT allows replay of early data, which is insecure for mTLS
+//     connections. Always disabled.
+//
+//   - DisablePathMTUDiscovery false: MTU discovery is safe and useful; set explicitly
+//     to document intent and prevent accidental regression.
+//
 // All values can be overridden by passing a custom *quic.Config to Listen/Dial.
 func defaultQuicConfig() *quicgo.Config {
 	return &quicgo.Config{
-		MaxIdleTimeout:       90 * time.Second,
-		KeepAlivePeriod:      25 * time.Second,
-		HandshakeIdleTimeout: 30 * time.Second,
+		MaxIdleTimeout:                 90 * time.Second,
+		KeepAlivePeriod:                25 * time.Second,
+		HandshakeIdleTimeout:           30 * time.Second,
+		MaxIncomingStreams:             1,
+		MaxIncomingUniStreams:          -1,
+		InitialStreamReceiveWindow:     512 * 1024,
+		InitialConnectionReceiveWindow: 1 * 1024 * 1024,
+		Allow0RTT:                      false,
+		DisablePathMTUDiscovery:        false,
 	}
 }
 
-// mergeQuicConfig returns cfg if non-nil, otherwise returns the default config.
-func mergeQuicConfig(cfg *quicgo.Config) *quicgo.Config {
-	if cfg != nil {
-		return cfg
+// requireAddressValidation is a GetConfigForClient callback that rejects any
+// connection whose source address has not been verified via QUIC's Retry mechanism.
+// It is defense-in-depth: Listen() also sets Transport.VerifySourceAddress so that
+// the Retry round-trip always completes before this callback is invoked, ensuring
+// that AddrVerified is true for every legitimate connection that reaches this gate.
+func requireAddressValidation(info *quicgo.ClientInfo) (*quicgo.Config, error) {
+	if !info.AddrVerified {
+		return nil, errors.New("quic: address validation required")
 	}
-	return defaultQuicConfig()
+	return nil, nil
 }
 
 // Listener wraps a QUIC listener to implement net.Listener.
@@ -56,6 +87,8 @@ func mergeQuicConfig(cfg *quicgo.Config) *quicgo.Config {
 // multiplexing within that stream.
 type Listener struct {
 	ql     *quicgo.Listener
+	tr     *quicgo.Transport // non-nil: Listen() owns this transport's UDP socket
+	cfg    *quicgo.Config    // effective config after Listen() injection
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -67,16 +100,52 @@ var _ net.Listener = (*Listener)(nil)
 //
 // tlsConfig must have NextProtos set to a value agreed with the client.
 // If quicConfig is nil, sensible defaults (MaxIdleTimeout: 90s,
-// KeepAlivePeriod: 25s, HandshakeIdleTimeout: 30s) are used. See defaultQuicConfig for rationale.
+// KeepAlivePeriod: 25s, HandshakeIdleTimeout: 30s, MaxIncomingStreams: 1,
+// and other DoS-resilience fields) are used. See defaultQuicConfig for rationale.
+//
+// Listen enforces QUIC address validation (Retry) on every inbound connection
+// as an anti-amplification measure. The Transport's VerifySourceAddress triggers a
+// Retry round-trip for every first-attempt connection; GetConfigForClient =
+// requireAddressValidation then gates the now-verified connection. Caller-provided
+// GetConfigForClient callbacks are preserved unchanged.
 func Listen(addr string, tlsConfig *tls.Config, quicConfig *quicgo.Config) (*Listener, error) {
-	ql, err := quicgo.ListenAddr(addr, tlsConfig, mergeQuicConfig(quicConfig))
+	if quicConfig == nil {
+		quicConfig = defaultQuicConfig()
+	}
+	// Shallow copy to avoid mutating the caller's config pointer in-place.
+	cfgCopy := *quicConfig
+	quicConfig = &cfgCopy
+	if quicConfig.GetConfigForClient == nil {
+		quicConfig.GetConfigForClient = requireAddressValidation
+	}
+
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
+		return nil, err
+	}
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return nil, err
+	}
+	// VerifySourceAddress triggers a QUIC Retry for every first-attempt
+	// connection. Honest clients respond to the Retry token automatically
+	// via quic-go's built-in handling. IP-spoofed senders cannot complete
+	// the round-trip, so they are silently dropped after the Retry.
+	tr := &quicgo.Transport{
+		Conn:                udpConn,
+		VerifySourceAddress: func(net.Addr) bool { return true },
+	}
+	ql, err := tr.Listen(tlsConfig, quicConfig)
+	if err != nil {
+		_ = udpConn.Close()
 		return nil, err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Listener{
 		ql:     ql,
+		tr:     tr,
+		cfg:    quicConfig,
 		ctx:    ctx,
 		cancel: cancel,
 	}, nil
@@ -106,7 +175,16 @@ func (l *Listener) Accept() (net.Conn, error) {
 // Close stops the listener. Any blocked Accept call will return with an error.
 func (l *Listener) Close() error {
 	l.cancel()
-	return l.ql.Close()
+	err := l.ql.Close()
+	if l.tr != nil {
+		_ = l.tr.Close()
+		// Transport.Close with createdConn=false does not close the underlying UDP
+		// socket; close it explicitly to release the file descriptor.
+		if cerr := l.tr.Conn.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}
+	return err
 }
 
 // Addr returns the listener's network address.
