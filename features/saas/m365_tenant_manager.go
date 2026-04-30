@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
@@ -38,6 +39,8 @@ type M365TenantManager struct {
 	adminConsentFlow   *auth.AdminConsentFlow
 	gdapProvider       GDAPProvider
 	httpClient         *http.Client
+	m365IDIndex        map[string]string // maps m365TenantID → cfgmsTenantID; nil means unpopulated
+	indexMu            sync.Mutex
 }
 
 // NewM365TenantManager creates a new M365 tenant manager
@@ -302,21 +305,33 @@ func (m *M365TenantManager) GetM365TenantStatus(ctx context.Context, cfgmsTenant
 // Helper methods
 
 func (m *M365TenantManager) getTenantByM365ID(ctx context.Context, m365TenantID string) (*tenant.Tenant, error) {
-	// List all tenants and search for M365 tenant ID in metadata
-	allTenants, err := m.cfgmsTenantManager.ListTenants(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, t := range allTenants {
-		if m365Metadata, err := m.getM365Metadata(t); err == nil {
-			if m365Metadata.M365TenantID == m365TenantID {
-				return t, nil
+	m.indexMu.Lock()
+	if m.m365IDIndex == nil {
+		allTenants, err := m.cfgmsTenantManager.ListTenants(ctx, nil)
+		if err != nil {
+			m.indexMu.Unlock()
+			return nil, err
+		}
+		m.m365IDIndex = make(map[string]string, len(allTenants))
+		for _, t := range allTenants {
+			if meta, metaErr := m.getM365Metadata(t); metaErr == nil {
+				m.m365IDIndex[meta.M365TenantID] = t.ID
 			}
 		}
 	}
+	cfgmsTenantID, found := m.m365IDIndex[m365TenantID]
+	m.indexMu.Unlock()
 
-	return nil, fmt.Errorf("tenant not found")
+	if !found {
+		return nil, fmt.Errorf("tenant not found")
+	}
+	return m.cfgmsTenantManager.GetTenant(ctx, cfgmsTenantID)
+}
+
+func (m *M365TenantManager) invalidateM365Index() {
+	m.indexMu.Lock()
+	m.m365IDIndex = nil
+	m.indexMu.Unlock()
 }
 
 func (m *M365TenantManager) createCFGMSTenant(ctx context.Context, m365Tenant *TenantInfo, discoveryMethod string, discoveredAt time.Time) error {
@@ -345,6 +360,9 @@ func (m *M365TenantManager) createCFGMSTenant(ctx context.Context, m365Tenant *T
 	}
 
 	_, err = m.cfgmsTenantManager.CreateTenant(ctx, req)
+	if err == nil {
+		m.invalidateM365Index()
+	}
 	return err
 }
 
@@ -366,7 +384,11 @@ func (m *M365TenantManager) updateTenantMetadata(ctx context.Context, cfgmsTenan
 		m365Metadata.CountryCode = m365Tenant.CountryCode
 	}
 
-	return m.saveM365Metadata(ctx, cfgmsTenant, m365Metadata)
+	err = m.saveM365Metadata(ctx, cfgmsTenant, m365Metadata)
+	if err == nil {
+		m.invalidateM365Index()
+	}
+	return err
 }
 
 func (m *M365TenantManager) getM365Metadata(cfgmsTenant *tenant.Tenant) (*tenant.M365TenantMetadata, error) {
