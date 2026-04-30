@@ -398,13 +398,13 @@ func TestGRPCOverQUIC_ClientDisconnect(t *testing.T) {
 	// Cancel before receiving the response.
 	cancel()
 
-	// The stream operations after cancel should return a context error.
+	// The stream operations after cancel must return a context error (Canceled or EOF).
 	var msg echoMsg
 	err = stream.RecvMsg(&msg)
 	if err != nil {
-		// Expected: context canceled or EOF.
 		t.Logf("RecvMsg after cancel returned (expected): %v", err)
 	}
+	assert.Error(t, err, "RecvMsg after context cancellation must return an error, not succeed")
 }
 
 // TestGRPCOverQUIC_TLSRequired verifies that a connection attempt with a
