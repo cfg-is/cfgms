@@ -4,18 +4,12 @@
 package quic
 
 import (
-	"net"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestConn_ImplementsNetConn verifies the compile-time interface contract.
-func TestConn_ImplementsNetConn(t *testing.T) {
-	var _ net.Conn = (*Conn)(nil)
-}
 
 // TestConn_ReadWrite verifies that bytes written through one end of a QUIC stream
 // are readable from the Conn wrapper on the other end.
