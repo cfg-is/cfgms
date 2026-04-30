@@ -3,7 +3,9 @@
 package grpc
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -228,4 +230,87 @@ func TestBulkTransferToChunks_SmallPayload(t *testing.T) {
 	chunks, err := bulkTransferToChunks(bulk)
 	require.NoError(t, err)
 	assert.NotEmpty(t, chunks)
+}
+
+// TestBulkChecksum_RoundTrip verifies that bulkTransferToChunks computes and stores
+// a SHA-256 checksum, and that chunksToBulkTransfer verifies it correctly on reassembly.
+func TestBulkChecksum_RoundTrip(t *testing.T) {
+	original := &types.BulkTransfer{
+		ID:        "bulk-checksum-rt",
+		StewardID: "steward-1",
+		TenantID:  "tenant-1",
+		Data:      []byte("bulk payload data for checksum test"),
+	}
+
+	chunks, err := bulkTransferToChunks(original)
+	require.NoError(t, err)
+	require.NotEmpty(t, chunks)
+
+	// Checksum must be populated on the struct before chunking.
+	assert.NotEmpty(t, original.Checksum, "bulkTransferToChunks must populate Checksum")
+	assert.True(t, strings.HasPrefix(original.Checksum, "sha256:"), "Checksum must have sha256: prefix")
+
+	got, err := chunksToBulkTransfer(chunks)
+	require.NoError(t, err, "valid checksum must pass verification")
+	assert.Equal(t, original.Data, got.Data)
+	assert.Equal(t, original.Checksum, got.Checksum)
+}
+
+// TestBulkChecksum_TamperedData verifies that chunksToBulkTransfer returns
+// ErrChecksumMismatch when the assembled BulkTransfer carries a checksum that
+// does not match the Data field.
+func TestBulkChecksum_TamperedData(t *testing.T) {
+	// Build a BulkTransfer where Checksum deliberately does not match Data.
+	tampered := &types.BulkTransfer{
+		ID:       "bulk-tamper",
+		Data:     []byte("actual payload"),
+		Checksum: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+	}
+
+	data, err := json.Marshal(tampered)
+	require.NoError(t, err)
+
+	chunks := []*transportpb.BulkChunk{{
+		TransferId: tampered.ID,
+		Data:       data,
+		Offset:     0,
+		TotalSize:  int64(len(data)),
+		IsLast:     true,
+	}}
+
+	_, err = chunksToBulkTransfer(chunks)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrChecksumMismatch),
+		"tampered checksum must return ErrChecksumMismatch, got: %v", err)
+}
+
+// TestDNATransfer_MixedTenantID verifies that chunksToDNATransfer returns
+// ErrTenantIDInconsistent when chunks carry different TenantID values.
+func TestDNATransfer_MixedTenantID(t *testing.T) {
+	chunks := []*transportpb.DNAChunk{
+		{StewardId: "s1", TenantId: "tenant-a", Data: []byte("x"), ChunkIndex: 0, TotalChunks: 2},
+		{StewardId: "s1", TenantId: "tenant-b", Data: []byte("y"), ChunkIndex: 1, TotalChunks: 2},
+	}
+
+	_, err := chunksToDNATransfer(chunks)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrTenantIDInconsistent),
+		"mixed TenantIDs must return ErrTenantIDInconsistent, got: %v", err)
+}
+
+// TestDNATransfer_ConsistentTenantID verifies that chunksToDNATransfer succeeds
+// when all chunks share the same TenantID.
+func TestDNATransfer_ConsistentTenantID(t *testing.T) {
+	dna := &types.DNATransfer{
+		ID:        "dna-tenant-ok",
+		StewardID: "s1",
+		TenantID:  "tenant-a",
+		Delta:     false,
+	}
+	chunks, err := dnaTransferToChunks(dna)
+	require.NoError(t, err)
+
+	got, err := chunksToDNATransfer(chunks)
+	require.NoError(t, err, "consistent TenantID must pass validation")
+	assert.Equal(t, dna.TenantID, got.TenantID)
 }

@@ -5,8 +5,10 @@ package transport
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -118,8 +120,37 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 		return fmt.Errorf("failed to marshal configuration: %w", err)
 	}
 
+	// Build the ConfigTransfer that will be JSON-encoded and chunked.
+	transfer := &dataplaneTypes.ConfigTransfer{
+		ID:        fmt.Sprintf("cfg-%s-%d", stewardID, time.Now().UnixNano()),
+		StewardID: stewardID,
+		Version:   configResp.Version,
+		Timestamp: time.Now(),
+		Data:      configBytes,
+	}
+
+	// Sign the proto payload and store the JSON-serialised signature in the transfer.
+	if h.signer != nil {
+		sig, err := h.signer.Sign(configBytes)
+		if err != nil {
+			h.logger.Error("Failed to sign config transfer", "steward_id", stewardID, "error", err)
+			return fmt.Errorf("failed to sign config transfer: %w", err)
+		}
+		sigJSON, err := json.Marshal(sig)
+		if err != nil {
+			return fmt.Errorf("failed to marshal config signature: %w", err)
+		}
+		transfer.Signature = sigJSON
+	}
+
+	// JSON-encode the ConfigTransfer so chunksToConfigTransfer can reassemble it.
+	transferBytes, err := json.Marshal(transfer)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config transfer: %w", err)
+	}
+
 	// Chunk and stream
-	totalChunks := (len(configBytes) + dataplaneTypes.DefaultChunkSize - 1) / dataplaneTypes.DefaultChunkSize
+	totalChunks := (len(transferBytes) + dataplaneTypes.DefaultChunkSize - 1) / dataplaneTypes.DefaultChunkSize
 	if totalChunks == 0 {
 		totalChunks = 1
 	}
@@ -130,15 +161,16 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 	for i := 0; i < totalChunks; i++ {
 		start := i * dataplaneTypes.DefaultChunkSize
 		end := start + dataplaneTypes.DefaultChunkSize
-		if end > len(configBytes) {
-			end = len(configBytes)
+		if end > len(transferBytes) {
+			end = len(transferBytes)
 		}
 
 		chunk := &transportpb.ConfigChunk{
-			Data:        configBytes[start:end],
+			Data:        transferBytes[start:end],
 			ChunkIndex:  int32(i),           //nolint:gosec // G115: bounded by totalChunks > math.MaxInt32 check above
 			TotalChunks: int32(totalChunks), //nolint:gosec // G115: bounded by totalChunks > math.MaxInt32 check above
 			Version:     configResp.Version,
+			ConfigId:    transfer.ID,
 		}
 
 		if err := stream.Send(chunk); err != nil {
@@ -150,7 +182,7 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 		"steward_id", stewardID,
 		"version", configResp.Version,
 		"chunks", totalChunks,
-		"bytes", len(configBytes),
+		"bytes", len(transferBytes),
 		"signed", h.signer != nil)
 
 	return nil
