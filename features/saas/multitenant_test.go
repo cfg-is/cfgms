@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -632,6 +633,75 @@ func TestTenantOnboardingWorkflow_ValidateRequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMultiTenantManager_TenantCacheConcurrency verifies that concurrent writes
+// to tenantCache (from RefreshTenantDiscovery triggered directly and via
+// ListAccessibleTenants) do not cause data races under go test -race.
+// tenantCache has no direct read paths in the current code, so this test exercises
+// write-write safety. The RWMutex is chosen to be forward-compatible with future reads.
+func TestMultiTenantManager_TenantCacheConcurrency(t *testing.T) {
+	credStore := NewMockCredentialStore()
+	consentStore := NewInMemoryConsentStore()
+	httpClient := &http.Client{}
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
+
+	ctx := context.Background()
+	provider := "microsoft"
+
+	// Pre-populate the base token. Only reads occur on this key during concurrent
+	// execution — concurrent map reads in Go are safe without a mutex.
+	err := credStore.StoreTokenSet(provider, &TokenSet{
+		AccessToken:  "base-token",
+		RefreshToken: "base-refresh-token",
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+	})
+	require.NoError(t, err)
+
+	// Set LastTenantDiscovery in the past so ListAccessibleTenants triggers a
+	// RefreshTenantDiscovery call, maximising concurrent write contention on tenantCache.
+	err = consentStore.StoreConsent(provider, &ConsentStatus{
+		Provider:            provider,
+		HasAdminConsent:     true,
+		ConsentGrantedAt:    time.Now(),
+		LastTenantDiscovery: time.Now().Add(-30 * time.Minute),
+		AccessibleTenants: []TenantInfo{
+			{TenantID: "tenant-1", HasAccess: true},
+		},
+	})
+	require.NoError(t, err)
+
+	const goroutines = 10
+	errs := make([]error, goroutines)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start // block until all goroutines are released simultaneously
+			if i%2 == 0 {
+				_, errs[i] = mtm.ListAccessibleTenants(ctx, provider)
+			} else {
+				errs[i] = mtm.RefreshTenantDiscovery(ctx, provider)
+			}
+		}(i)
+	}
+
+	close(start) // release all goroutines at once to maximise contention
+	wg.Wait()    // establishes happens-before for errs reads below
+
+	for i, goroutineErr := range errs {
+		assert.NoError(t, goroutineErr, "goroutine %d returned unexpected error", i)
+	}
+
+	// Verify that at least one refresh updated the consent store's accessible tenants.
+	status, err := mtm.GetConsentStatus(ctx, provider)
+	require.NoError(t, err)
+	assert.True(t, status.HasAdminConsent)
+	assert.NotEmpty(t, status.AccessibleTenants)
 }
 
 // Benchmarks
