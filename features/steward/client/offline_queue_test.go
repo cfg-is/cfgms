@@ -23,6 +23,7 @@ import (
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 )
 
 // ---------------------------------------------------------------------------
@@ -176,7 +177,7 @@ func TestOfflineQueue_DrainEmptyQueue(t *testing.T) {
 func TestOfflineQueue_PersistenceAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	// Shared SecretStore so the encryption key persists across simulated restarts.
-	store := newInMemorySecretStore()
+	store := newTestSecretStore(t)
 
 	// First instance — enqueue three events.
 	q1, err := NewOfflineQueue(OfflineQueueConfig{Dir: dir, MaxSize: 10, MaxAge: time.Hour, SecretStore: store})
@@ -201,7 +202,7 @@ func TestOfflineQueue_PersistenceAcrossRestart(t *testing.T) {
 
 func TestOfflineQueue_PersistencePartialDrainThenRestart(t *testing.T) {
 	dir := t.TempDir()
-	store := newInMemorySecretStore()
+	store := newTestSecretStore(t)
 
 	q1, err := NewOfflineQueue(OfflineQueueConfig{Dir: dir, MaxSize: 10, MaxAge: time.Hour, SecretStore: store})
 	require.NoError(t, err)
@@ -524,67 +525,27 @@ func TestPublishEventWithQueue_DrainedOnReconnect(t *testing.T) {
 // Issue #920: Encryption tests
 // ---------------------------------------------------------------------------
 
-// inMemorySecretStore is a minimal SecretStore for testing that holds secrets in memory.
-type inMemorySecretStore struct {
-	mu      sync.Mutex
-	secrets map[string]string
-}
-
-func newInMemorySecretStore() *inMemorySecretStore {
-	return &inMemorySecretStore{secrets: make(map[string]string)}
-}
-
-func (s *inMemorySecretStore) StoreSecret(_ context.Context, req *secretsif.SecretRequest) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.secrets[req.Key] = req.Value
-	return nil
-}
-
-func (s *inMemorySecretStore) GetSecret(_ context.Context, key string) (*secretsif.Secret, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.secrets[key]
-	if !ok {
-		return nil, secretsif.ErrSecretNotFound
+// newTestSecretStore creates a real StewardProvider-backed SecretStore in a
+// temporary directory. Skips the test when /etc/machine-id is unavailable —
+// the platform key derivation on Linux requires it.
+func newTestSecretStore(t *testing.T) secretsif.SecretStore {
+	t.Helper()
+	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
+		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
 	}
-	return &secretsif.Secret{Key: key, Value: v}, nil
+	provider := &stewardprovider.StewardProvider{}
+	store, err := provider.CreateSecretStore(map[string]interface{}{
+		"secrets_dir": t.TempDir(),
+	})
+	require.NoError(t, err, "failed to create test secret store")
+	return store
 }
-
-func (s *inMemorySecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
-func (s *inMemorySecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
-	return nil, nil
-}
-func (s *inMemorySecretStore) GetSecrets(_ context.Context, _ []string) (map[string]*secretsif.Secret, error) {
-	return nil, nil
-}
-func (s *inMemorySecretStore) StoreSecrets(_ context.Context, _ map[string]*secretsif.SecretRequest) error {
-	return nil
-}
-func (s *inMemorySecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsif.Secret, error) {
-	return nil, nil
-}
-func (s *inMemorySecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsif.SecretVersion, error) {
-	return nil, nil
-}
-func (s *inMemorySecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsif.SecretMetadata, error) {
-	return nil, nil
-}
-func (s *inMemorySecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
-	return nil
-}
-func (s *inMemorySecretStore) RotateSecret(_ context.Context, _ string, _ string) error {
-	return nil
-}
-func (s *inMemorySecretStore) ExpireSecret(_ context.Context, _ string) error { return nil }
-func (s *inMemorySecretStore) HealthCheck(_ context.Context) error            { return nil }
-func (s *inMemorySecretStore) Close() error                                   { return nil }
 
 // TestOfflineQueue_EncryptionRoundTrip verifies that enqueued events survive a
 // restart (load → decrypt → check) when a SecretStore is provided.
 func TestOfflineQueue_EncryptionRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	store := newInMemorySecretStore()
+	store := newTestSecretStore(t)
 
 	q1, err := NewOfflineQueue(OfflineQueueConfig{
 		Dir: dir, MaxSize: 10, MaxAge: time.Hour, SecretStore: store,
@@ -620,7 +581,7 @@ func TestOfflineQueue_EncryptionRoundTrip(t *testing.T) {
 // causes load to return an authentication error (GCM tag mismatch).
 func TestOfflineQueue_TamperDetection(t *testing.T) {
 	dir := t.TempDir()
-	store := newInMemorySecretStore()
+	store := newTestSecretStore(t)
 
 	q, err := NewOfflineQueue(OfflineQueueConfig{
 		Dir: dir, MaxSize: 10, MaxAge: time.Hour, SecretStore: store,
@@ -659,7 +620,7 @@ func TestOfflineQueue_LegacyPlaintextDeletion(t *testing.T) {
 	assert.FileExists(t, legacyPath)
 
 	logger := logging.NewLogger("debug")
-	store := newInMemorySecretStore()
+	store := newTestSecretStore(t)
 
 	_, err := NewOfflineQueue(OfflineQueueConfig{
 		Dir: dir, MaxSize: 10, MaxAge: time.Hour,
