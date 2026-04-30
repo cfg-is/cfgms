@@ -58,7 +58,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 // only the stream write half, and the peer must wait for the QUIC idle
 // timeout (~90s) to detect the disconnect.
 func (c *Conn) Close() error {
-	_ = c.stream.Close()
+	_ = c.stream.Close() // error ignored: CloseWithError below tears down the whole connection
 	return c.quicConn.CloseWithError(0, "")
 }
 
