@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"gopkg.in/yaml.v3"
 
@@ -618,6 +620,24 @@ func (c *TransportClient) GetConfiguration(ctx context.Context, modules []string
 	transfer, err := session.ReceiveConfig(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to receive configuration: %w", err)
+	}
+
+	// Verify the transport-level signature when both a verifier and signature are present.
+	// Skip silently when either is absent for backward compatibility with unsigned controllers.
+	if len(transfer.Signature) > 0 {
+		verifier := c.buildVerifierOnDemand()
+		if verifier != nil {
+			var sig signature.ConfigSignature
+			if err := json.Unmarshal(transfer.Signature, &sig); err != nil {
+				return nil, "", status.Error(codes.DataLoss, "config signature verification failed")
+			}
+			if err := verifier.Verify(transfer.Data, &sig); err != nil {
+				c.logger.Error("Config transfer signature verification failed",
+					"version", transfer.Version,
+					"error", err)
+				return nil, "", status.Error(codes.DataLoss, "config signature verification failed")
+			}
+		}
 	}
 
 	c.logger.Info("Configuration received",
