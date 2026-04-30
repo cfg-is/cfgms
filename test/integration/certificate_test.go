@@ -202,8 +202,8 @@ func (s *CertificateTestSuite) TestStewardWithCertificates() {
 	// Give components time to initialize
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify steward started successfully with certificate management
-	s.NotNil(s.env.Steward, "Steward should be initialized")
+	// Verify transport client was created successfully
+	s.NotNil(s.env.TransportClient, "TransportClient should be initialized")
 
 	// Verify certificates are still valid after steward startup
 	err := s.env.ValidateCertificateSetup()
@@ -223,7 +223,7 @@ func (s *CertificateTestSuite) TestCertificateHealthMonitoring() {
 	// This would require accessing the steward's health monitor, which would need
 	// to be exposed in the test environment for full testing
 	// For now, we just verify that the system starts and runs without errors
-	s.NotNil(s.env.Steward, "Steward should be running with certificate health monitoring")
+	s.NotNil(s.env.TransportClient, "TransportClient should be active")
 }
 
 // TestCertificatePersistenceAcrossReboots validates that certificates persist and reload correctly

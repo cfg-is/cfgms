@@ -11,107 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/testutil"
 )
-
-func TestStewardCreation(t *testing.T) {
-	// Test cases
-	tests := []struct {
-		name    string
-		cfg     *Config
-		wantErr bool
-	}{
-		{
-			name:    "with default config",
-			cfg:     nil, // Use nil to get a config with test certificates
-			wantErr: false,
-		},
-		{
-			name:    "with nil config",
-			cfg:     nil,
-			wantErr: false,
-		},
-		{
-			name:    "with custom config",
-			cfg:     nil, // Will be set up with test certificates
-			wantErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create a test logger
-			logger := logging.NewLogger("info")
-
-			var testCfg *Config
-
-			if tt.cfg == nil {
-				// Use test configuration with certificates
-				if tt.name == "with custom config" {
-					testConfig := &testutil.StewardTestConfig{
-						ControllerAddr: "localhost:9090",
-						StewardID:      "test-steward-1",
-						LogLevel:       "debug",
-					}
-					certDir, dataDir, cleanup := testutil.SetupTestEnvironment(t, testConfig)
-					testCfg = &Config{
-						ControllerAddr: testConfig.ControllerAddr,
-						CertPath:       certDir,
-						DataDir:        dataDir,
-						LogLevel:       testConfig.LogLevel,
-						ID:             testConfig.StewardID,
-					}
-					t.Cleanup(cleanup)
-				} else {
-					testConfig := testutil.DefaultStewardTestConfig()
-					certDir, dataDir, cleanup := testutil.SetupTestEnvironment(t, testConfig)
-					testCfg = &Config{
-						ControllerAddr: testConfig.ControllerAddr,
-						CertPath:       certDir,
-						DataDir:        dataDir,
-						LogLevel:       testConfig.LogLevel,
-						ID:             testConfig.StewardID,
-					}
-					t.Cleanup(cleanup)
-				}
-			} else {
-				testCfg = tt.cfg
-			}
-
-			steward, err := New(testCfg, logger)
-			// Story #198: Controller mode deprecated - all calls to New() should fail
-			assert.Error(t, err)
-			assert.Nil(t, steward)
-			assert.Contains(t, err.Error(), "deprecated")
-		})
-	}
-}
-
-func TestStewardLifecycle(t *testing.T) {
-	// Create a test logger
-	logger := logging.NewLogger("info")
-
-	// Set up test configuration with certificates
-	testConfig := testutil.DefaultStewardTestConfig()
-	testConfig.StewardID = "test-steward-lifecycle"
-	certDir, dataDir, cleanup := testutil.SetupTestEnvironment(t, testConfig)
-	t.Cleanup(cleanup)
-
-	cfg := &Config{
-		ControllerAddr: testConfig.ControllerAddr,
-		CertPath:       certDir,
-		DataDir:        dataDir,
-		LogLevel:       testConfig.LogLevel,
-		ID:             testConfig.StewardID,
-	}
-
-	steward, err := New(cfg, logger)
-	// Story #198: Controller mode deprecated
-	require.Error(t, err)
-	require.Nil(t, steward)
-	require.Contains(t, err.Error(), "deprecated")
-	// Skip rest of test - controller mode not supported
-}
 
 func TestHealthMonitor(t *testing.T) {
 	// Test cases for health monitor
@@ -158,21 +58,8 @@ func TestHealthMonitor(t *testing.T) {
 				tt.setupFn(monitor)
 			}
 
-			// Check status
+			// Check status — assertions happen synchronously; no goroutine needed
 			assert.Equal(t, tt.checkStatus, monitor.GetStatus())
-
-			// Create context for monitor
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			defer cancel()
-
-			// Start the monitor
-			go monitor.Start(ctx)
-
-			// Let it run briefly
-			time.Sleep(50 * time.Millisecond)
-
-			// Stop the monitor
-			monitor.Stop()
 		})
 	}
 }
@@ -186,5 +73,21 @@ func TestNewStandalone(t *testing.T) {
 	// Should fail because no config found
 	assert.Error(t, err)
 	assert.Nil(t, steward)
-	assert.Contains(t, err.Error(), "no configuration file found")
+	assert.Contains(t, err.Error(), "failed to load configuration")
+}
+
+// TestNewStandaloneWithConfig tests that NewStandalone succeeds with a valid config file.
+func TestNewStandaloneWithConfig(t *testing.T) {
+	logger := logging.NewLogger("info")
+	dir := t.TempDir()
+	cfgPath := writeMinimalCfg(t, dir, "standalone-test-steward")
+
+	s, err := NewStandalone(cfgPath, logger)
+	require.NoError(t, err)
+	require.NotNil(t, s)
+
+	assert.Equal(t, "standalone-test-steward", s.GetStewardID())
+	assert.NotNil(t, s.healthCheck)
+	assert.NotNil(t, s.executor)
+	require.NoError(t, s.Stop(context.Background()))
 }

@@ -210,6 +210,14 @@ func (c *Controller) GetListenAddr() string {
 	return c.server.GetListenAddr()
 }
 
+// GetTransportListenAddr returns the actual QUIC transport listen address after the server
+// has started. When Transport.ListenAddr is "host:0", this returns the OS-assigned port.
+func (c *Controller) GetTransportListenAddr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.server.GetTransportListenAddr()
+}
+
 // GetHTTPListenAddr returns the HTTP API server listen address after binding.
 func (c *Controller) GetHTTPListenAddr() string {
 	c.mu.RLock()
