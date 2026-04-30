@@ -28,10 +28,6 @@ type StewardConnection struct {
 	// StewardID is the unique identifier for this steward.
 	StewardID string
 
-	// TenantPath is the tenant path for this steward (e.g. "root/msp-a/client-1").
-	// Informational only — the registry does not use this for routing.
-	TenantPath string
-
 	// Sender is the underlying transport stream.
 	Sender MessageSender
 
@@ -74,6 +70,8 @@ func (c *StewardConnection) UpdateActivity() {
 //
 // Thread-safe — acquires the internal mutex to read the timestamp
 // that is written by Send() and UpdateActivity().
+// This is a monitoring hook for future use (e.g. idle-connection reaping);
+// it is not called in production today.
 func (c *StewardConnection) GetLastActivity() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()

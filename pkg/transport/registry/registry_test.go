@@ -41,7 +41,6 @@ func (m *mockSender) received() []interface{} {
 func newConn(stewardID string) *StewardConnection {
 	return &StewardConnection{
 		StewardID:   stewardID,
-		TenantPath:  "root/test",
 		Sender:      &mockSender{},
 		ConnectedAt: time.Now(),
 		RemoteAddr:  "127.0.0.1:50051",
@@ -516,5 +515,74 @@ func TestStewardConnection_NilSender(t *testing.T) {
 	err := reg.Register(conn)
 	if err == nil {
 		t.Error("Register() with nil Sender should return error, got nil")
+	}
+}
+
+// TestRegistry_HookPanicDoesNotCrashOnDisconnect verifies that a panicking OnDisconnect
+// callback does not crash the process or prevent the connection from being unregistered.
+func TestRegistry_HookPanicDoesNotCrashOnDisconnect(t *testing.T) {
+	reg := NewRegistry()
+
+	reg.OnDisconnect(func(string) {
+		panic("disconnect panic")
+	})
+
+	done := make(chan struct{}, 1)
+	reg.OnDisconnect(func(string) {
+		done <- struct{}{}
+	})
+
+	conn := newConn("steward-disconnect-panic-test")
+	if err := reg.Register(conn); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	reg.Unregister("steward-disconnect-panic-test")
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("OnDisconnect callbacks did not complete within timeout")
+	}
+
+	_, ok := reg.Get("steward-disconnect-panic-test")
+	if ok {
+		t.Fatal("Get() returned true after Unregister(), want false")
+	}
+}
+
+// TestRegistry_HookPanicDoesNotCrash verifies that a panicking OnConnect callback
+// does not crash the process or prevent the connection from being registered.
+func TestRegistry_HookPanicDoesNotCrash(t *testing.T) {
+	reg := NewRegistry()
+
+	// Register a hook that panics.
+	reg.OnConnect(func(string) {
+		panic("test panic")
+	})
+
+	// Register a second hook that signals completion so we can verify the
+	// goroutine scheduler ran the hooks without crashing the test binary.
+	done := make(chan struct{}, 1)
+	reg.OnConnect(func(string) {
+		done <- struct{}{}
+	})
+
+	conn := newConn("steward-panic-test")
+	if err := reg.Register(conn); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("OnConnect callbacks did not complete within timeout")
+	}
+
+	got, ok := reg.Get("steward-panic-test")
+	if !ok {
+		t.Fatal("Get() returned false after Register(), want true")
+	}
+	if got != conn {
+		t.Errorf("Get() returned wrong connection")
 	}
 }

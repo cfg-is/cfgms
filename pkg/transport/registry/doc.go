@@ -25,7 +25,6 @@
 //
 //	conn := &registry.StewardConnection{
 //	    StewardID:   "steward-001",
-//	    TenantPath:  "root/msp-a/client-1",
 //	    Sender:      stream, // implements MessageSender
 //	    ConnectedAt: time.Now(),
 //	    RemoteAddr:  "10.0.0.1:50051",

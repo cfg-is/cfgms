@@ -103,7 +103,10 @@ func (r *InMemoryRegistry) Register(conn *StewardConnection) error {
 	stewardID := conn.StewardID
 	for _, fn := range hooks {
 		fn := fn
-		go fn(stewardID)
+		go func() {
+			defer func() { recover() }() //nolint:errcheck // panic value intentionally discarded; no logger available in InMemoryRegistry yet
+			fn(stewardID)
+		}()
 	}
 
 	return nil
@@ -125,7 +128,10 @@ func (r *InMemoryRegistry) Unregister(stewardID string) {
 	if exists {
 		for _, fn := range hooks {
 			fn := fn
-			go fn(stewardID)
+			go func() {
+				defer func() { recover() }() //nolint:errcheck // panic value intentionally discarded; no logger available in InMemoryRegistry yet
+				fn(stewardID)
+			}()
 		}
 	}
 }
