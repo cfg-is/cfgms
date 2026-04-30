@@ -21,7 +21,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	transportauth "github.com/cfgis/cfgms/pkg/transport/auth"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
 
@@ -58,25 +57,17 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 		"current_version", req.GetCurrentVersion())
 
 	// Validate steward ID against the mTLS peer CN to close the steward-impersonation gap.
-	// Try the fast-path first (identity already extracted by auth interceptor), then fall
-	// back to raw peer extraction for callers that bypass the interceptor chain.
-	var peerID string
-	if identity, ok := transportauth.StewardIDFromContext(ctx); ok {
-		peerID = identity.StewardID
-	} else {
-		p, ok := peer.FromContext(ctx)
-		if !ok {
-			return status.Error(codes.Unauthenticated, "mTLS certificate required")
-		}
-		tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
-		if !ok {
-			return status.Error(codes.Unauthenticated, "mTLS certificate required")
-		}
-		id, err := quictransport.PeerStewardID(tlsInfo.State)
-		if err != nil {
-			return status.Error(codes.Unauthenticated, "mTLS certificate required")
-		}
-		peerID = id
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		return status.Error(codes.Unauthenticated, "mTLS certificate required")
+	}
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		return status.Error(codes.Unauthenticated, "mTLS certificate required")
+	}
+	peerID, err := quictransport.PeerStewardID(tlsInfo.State)
+	if err != nil {
+		return status.Error(codes.Unauthenticated, "mTLS certificate required")
 	}
 	if stewardID != peerID {
 		return status.Error(codes.PermissionDenied, "steward ID mismatch")
