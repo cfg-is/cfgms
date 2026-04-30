@@ -417,7 +417,7 @@ func (tsm *TenantSecretManager) decryptData(encryptedData string, key *tenantEnc
 func (tsm *TenantSecretManager) validateSecretRequest(request *SecretRequest) error {
 	result := &pkgsecurity.ValidationResult{Valid: true}
 
-	tsm.validator.ValidateString(result, "tenant_id", request.TenantID, "required", "uuid")
+	tsm.validator.ValidateString(result, "tenant_id", request.TenantID, "required", "charset:uuid")
 	tsm.validator.ValidateString(result, "name", request.Name, "required", "charset:alphanumeric_dash", "max_length:128")
 
 	validSecretTypes := []string{

@@ -25,10 +25,7 @@ type Validator struct {
 	maxJSONDepth        int
 	maxJSONStringLength int
 	allowedCharsets     map[string]*regexp.Regexp
-	prohibitedPatterns  []*regexp.Regexp
-	// M-INPUT-2: Regex matcher with timeout protection (security audit finding)
-	regexMatcher     *RegexMatcher
-	dnsLookupTimeout time.Duration
+	dnsLookupTimeout    time.Duration
 	// dnsLookup overrides the DNS resolver used by ValidateURL. When nil,
 	// net.DefaultResolver.LookupIPAddr is used. Set in tests only.
 	dnsLookup func(ctx context.Context, host string) ([]net.IPAddr, error)
@@ -79,21 +76,6 @@ func NewValidator() *Validator {
 		maxJSONDepth:        10,
 		maxJSONStringLength: 1000,
 		allowedCharsets:     make(map[string]*regexp.Regexp),
-		prohibitedPatterns: []*regexp.Regexp{
-			// Common injection patterns
-			regexp.MustCompile(`(?i)(script|javascript|vbscript|onload|onerror|onclick)`),
-			regexp.MustCompile(`(?i)(<\s*script|<\s*iframe|<\s*object|<\s*embed)`),
-			regexp.MustCompile(`(?i)(eval\s*\(|expression\s*\(|javascript:)`),
-			// SQL injection patterns
-			regexp.MustCompile(`(?i)(union\s+select|drop\s+table|delete\s+from|insert\s+into|update\s+set)`),
-			regexp.MustCompile(`(?i)(\'\s*;\s*drop|\'\s*or\s*1\s*=\s*1|--\s*$)`),
-			// Command injection patterns
-			regexp.MustCompile(`(?i)(&&|\|\||;|` + "`" + `|\$\(|\${)`),
-			// Path traversal patterns
-			regexp.MustCompile(`\.\.[/\\]|[/\\]\.\.[/\\]|[/\\]\.\.$`),
-			// LDAP injection patterns
-			regexp.MustCompile(`(?i)(\*\)|\|\(|\&\(|!\()`),
-		},
 	}
 
 	// Define allowed character sets
@@ -105,8 +87,6 @@ func NewValidator() *Validator {
 	v.allowedCharsets["safe_text"] = regexp.MustCompile(`^[a-zA-Z0-9\s\.\-_,;:!?\(\)\[\]]+$`)
 	v.allowedCharsets["base64"] = regexp.MustCompile(`^[A-Za-z0-9+/]*={0,2}$`)
 
-	// M-INPUT-2: Initialize regex matcher with timeout protection (security audit finding)
-	v.regexMatcher = NewRegexMatcher(DefaultRegexTimeout)
 	v.dnsLookupTimeout = 5 * time.Second
 
 	return v
@@ -141,29 +121,12 @@ func (v *Validator) ValidateString(result *ValidationResult, field, value string
 		return
 	}
 
-	// M-INPUT-2: Check for prohibited patterns with timeout protection (security audit finding)
-	for _, pattern := range v.prohibitedPatterns {
-		matched, err := v.regexMatcher.MatchStringWithTimeout(pattern, value)
-		if err != nil {
-			// M-INPUT-2: Regex timeout - potential ReDoS attack
-			result.AddError(field, "", "security_timeout", "regex validation timeout (potential ReDoS attack)")
-			return
-		}
-		if matched {
-			result.AddError(field, "", "security", "contains prohibited pattern")
-			return
-		}
-	}
-
-	// M-INPUT-2: Character set validation with timeout protection (security audit finding)
+	// Character set validation — allowlist-based; XSS, SQL injection, and other
+	// injection prevention is the responsibility of the output-encoding layer and
+	// parameterized queries respectively (see pkg/security/doc.go).
 	if charset := v.getRuleString(rules, "charset"); charset != "" {
 		if pattern, exists := v.allowedCharsets[charset]; exists {
-			matched, err := v.regexMatcher.MatchStringWithTimeout(pattern, value)
-			if err != nil {
-				result.AddError(field, "", "security_timeout", "regex validation timeout (potential ReDoS attack)")
-				return
-			}
-			if !matched {
+			if !pattern.MatchString(value) {
 				result.AddErrorf(field, "", "charset", "contains invalid characters for charset '%s'", charset)
 				return
 			}
@@ -179,60 +142,27 @@ func (v *Validator) ValidateString(result *ValidationResult, field, value string
 			}
 		}
 	}
-
-	// M-INPUT-2: Custom format validation with timeout protection (security audit finding)
-	if v.hasRule(rules, "email") {
-		matched, err := v.regexMatcher.MatchStringWithTimeout(v.allowedCharsets["email"], value)
-		if err != nil {
-			result.AddError(field, "", "security_timeout", "regex validation timeout")
-			return
-		}
-		if !matched {
-			result.AddError(field, "", "email", "invalid email format")
-			return
-		}
-	}
-
-	if v.hasRule(rules, "uuid") {
-		matched, err := v.regexMatcher.MatchStringWithTimeout(v.allowedCharsets["uuid"], value)
-		if err != nil {
-			result.AddError(field, "", "security_timeout", "regex validation timeout")
-			return
-		}
-		if !matched {
-			result.AddError(field, "", "uuid", "invalid UUID format")
-			return
-		}
-	}
-
-	if v.hasRule(rules, "hostname") {
-		matched, err := v.regexMatcher.MatchStringWithTimeout(v.allowedCharsets["hostname"], value)
-		if err != nil {
-			result.AddError(field, "", "security_timeout", "regex validation timeout")
-			return
-		}
-		if !matched {
-			result.AddError(field, "", "hostname", "invalid hostname format")
-			return
-		}
-	}
 }
 
-// ValidateInteger validates an integer field
+// ValidateInteger validates an integer field.
+// Zero is a valid value; callers that need "must be non-zero" should use
+// "min:1" or "positive". The "min" and "max" rules are enforced whenever
+// the rule is present, regardless of the rule's parsed value.
 func (v *Validator) ValidateInteger(result *ValidationResult, field string, value int64, rules ...string) {
-	if value == 0 && v.hasRule(rules, "required") {
-		result.AddError(field, "0", "required", "field is required")
-		return
+	if v.hasRuleWithValue(rules, "min") {
+		min := v.getRuleInt64(rules, "min")
+		if value < min {
+			result.AddErrorf(field, fmt.Sprintf("%d", value), "min", "minimum value is %d", min)
+			return
+		}
 	}
 
-	if min := v.getRuleInt64(rules, "min"); min != 0 && value < min {
-		result.AddErrorf(field, fmt.Sprintf("%d", value), "min", "minimum value is %d", min)
-		return
-	}
-
-	if max := v.getRuleInt64(rules, "max"); max != 0 && value > max {
-		result.AddErrorf(field, fmt.Sprintf("%d", value), "max", "maximum value is %d", max)
-		return
+	if v.hasRuleWithValue(rules, "max") {
+		max := v.getRuleInt64(rules, "max")
+		if value > max {
+			result.AddErrorf(field, fmt.Sprintf("%d", value), "max", "maximum value is %d", max)
+			return
+		}
 	}
 
 	if v.hasRule(rules, "positive") && value <= 0 {
@@ -277,27 +207,27 @@ func (v *Validator) ValidateIPAddress(result *ValidationResult, field, value str
 
 	ip := net.ParseIP(value)
 	if ip == nil {
-		result.AddError(field, value, "ip", "invalid IP address format")
+		result.AddError(field, "", "ip", "invalid IP address format")
 		return
 	}
 
 	if v.hasRule(rules, "no_private") {
 		if ip.IsPrivate() {
-			result.AddError(field, value, "no_private", "private IP addresses not allowed")
+			result.AddError(field, "", "no_private", "private IP addresses not allowed")
 			return
 		}
 	}
 
 	if v.hasRule(rules, "no_loopback") {
 		if ip.IsLoopback() {
-			result.AddError(field, value, "no_loopback", "loopback addresses not allowed")
+			result.AddError(field, "", "no_loopback", "loopback addresses not allowed")
 			return
 		}
 	}
 
 	if v.hasRule(rules, "ipv4_only") {
 		if ip.To4() == nil {
-			result.AddError(field, value, "ipv4_only", "only IPv4 addresses allowed")
+			result.AddError(field, "", "ipv4_only", "only IPv4 addresses allowed")
 			return
 		}
 	}
@@ -440,6 +370,18 @@ func (v *Validator) hasRule(rules []string, rule string) bool {
 	return false
 }
 
+// hasRuleWithValue reports whether any rule starts with "prefix:" regardless
+// of what follows. Used to distinguish "rule not present" from "rule present
+// with value 0" in ValidateInteger.
+func (v *Validator) hasRuleWithValue(rules []string, prefix string) bool {
+	for _, rule := range rules {
+		if strings.HasPrefix(rule, prefix+":") {
+			return true
+		}
+	}
+	return false
+}
+
 func (v *Validator) getRuleString(rules []string, prefix string) string {
 	for _, rule := range rules {
 		if strings.HasPrefix(rule, prefix+":") {
@@ -500,14 +442,6 @@ func (ev *EnhancedValidator) ValidateWithContext(result *ValidationResult, field
 		// Ensure the value doesn't reference other tenants
 		if strings.Contains(value, "/tenant/") && !strings.Contains(value, ev.context.TenantID) {
 			result.AddError(field, "", "tenant_scope", "cross-tenant reference not allowed")
-		}
-	}
-
-	if ev.hasRule(rules, "rate_limit") && ev.context != nil {
-		// This would integrate with rate limiting based on context
-		// For now, we'll just validate the field isn't being used for abuse
-		if len(value) > 100 && strings.Repeat("a", 50) == value[:50] {
-			result.AddError(field, "", "rate_limit", "potential abuse pattern detected")
 		}
 	}
 }

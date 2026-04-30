@@ -20,7 +20,7 @@ func (m *RegisterRequest) Validate() error {
 		result.AddError("initial_dna", "", "required", "initial DNA cannot be nil")
 	} else {
 		// Validate DNA ID
-		validator.ValidateString(result, "initial_dna.id", m.InitialDna.Id, "required", "uuid")
+		validator.ValidateString(result, "initial_dna.id", m.InitialDna.Id, "required", "charset:uuid")
 	}
 
 	// Validate credentials
