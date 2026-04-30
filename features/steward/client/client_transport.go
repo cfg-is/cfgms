@@ -1068,10 +1068,10 @@ func (c *TransportClient) buildVerifierOnDemand() signature.Verifier {
 	switch {
 	case signingCertPEM != "":
 		certPEM = []byte(signingCertPEM)
-		c.logger.Info("Using dedicated signing certificate for signature verification")
+		c.logger.Debug("Using dedicated signing certificate for signature verification")
 	case serverCertPEM != "":
 		certPEM = []byte(serverCertPEM)
-		c.logger.Info("Using server certificate for signature verification")
+		c.logger.Debug("Using server certificate for signature verification")
 	case certPath != "":
 		// Story #377: prefer signing.crt, fall back to server.crt.
 		signingPath := filepath.Join(certPath, "signing.crt")
@@ -1079,7 +1079,7 @@ func (c *TransportClient) buildVerifierOnDemand() signature.Verifier {
 		// #nosec G304 - Certificate paths are controlled via configuration
 		if raw, err := os.ReadFile(signingPath); err == nil {
 			certPEM = raw
-			c.logger.Info("Using signing.crt from disk for signature verification")
+			c.logger.Debug("Using signing.crt from disk for signature verification")
 		} else if raw, err := os.ReadFile(serverPath); err == nil {
 			certPEM = raw
 		} else if caCertPEM != "" {
@@ -1100,7 +1100,7 @@ func (c *TransportClient) buildVerifierOnDemand() signature.Verifier {
 		c.logger.Warn("Failed to create configuration verifier", "error", err)
 		return nil
 	}
-	c.logger.Info("Configuration signature verifier built", "key_fingerprint", verifier.KeyFingerprint())
+	c.logger.Debug("Configuration signature verifier built", "key_fingerprint", verifier.KeyFingerprint())
 	return verifier
 }
 

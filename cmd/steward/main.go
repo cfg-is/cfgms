@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -574,10 +575,7 @@ func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM string, logger l
 		return nil, secretStore
 	}
 
-	certStorePath := filepath.Join(os.TempDir(), "cfgms-steward", "certs")
-	if dataDir := os.Getenv("CFGMS_DATA_DIR"); dataDir != "" {
-		certStorePath = filepath.Join(dataDir, "certs")
-	}
+	certStorePath := defaultCertStoreDir()
 
 	// Try to load an existing local CA (created on a previous run).
 	certMgr, mgrErr := cert.NewManager(&cert.ManagerConfig{
@@ -610,4 +608,27 @@ func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM string, logger l
 	}
 
 	return certMgr, secretStore
+}
+
+// defaultCertStoreDir returns the platform-specific stable directory for the
+// steward's on-demand client certificate store. Uses the same path convention
+// as the StewardProvider's defaultSecretsDir so operators find both under the
+// same platform root (e.g. /var/lib/cfgms/ on Linux).
+func defaultCertStoreDir() string {
+	switch runtime.GOOS {
+	case "windows":
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		return filepath.Join(programData, "cfgms", "steward", "certs")
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		if home == "" {
+			home = "/tmp"
+		}
+		return filepath.Join(home, "Library", "Application Support", "cfgms", "steward", "certs")
+	default:
+		return "/var/lib/cfgms/steward/certs"
+	}
 }
