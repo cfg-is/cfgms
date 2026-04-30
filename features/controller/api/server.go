@@ -459,15 +459,33 @@ func (s *Server) Close(ctx context.Context) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		// Story #380: Stop auth defense system
-		if s.authDefense != nil {
-			s.authDefense.Stop()
-		}
-
-		// M-AUTH-1: Close secret store to stop its internal cache cleanup goroutine.
-		if s.secretStore != nil {
-			if err := s.secretStore.Close(); err != nil && firstErr == nil {
-				firstErr = err
+		// authDefense.Stop() and secretStore.Close() both call cache.Close() →
+		// c.cleanupDone.Wait() with no built-in timeout. On Windows, slower goroutine
+		// scheduling can cause them to block well past ctx's deadline. Run them in a
+		// single goroutine so Close() always honours the caller's context.
+		authDef := s.authDefense
+		secStore := s.secretStore
+		cacheDone := make(chan error, 1)
+		go func() {
+			// Story #380: Stop auth defense system
+			if authDef != nil {
+				authDef.Stop()
+			}
+			// M-AUTH-1: Close secret store to stop its internal cache cleanup goroutine.
+			var storeErr error
+			if secStore != nil {
+				storeErr = secStore.Close()
+			}
+			cacheDone <- storeErr
+		}()
+		select {
+		case storeErr := <-cacheDone:
+			if storeErr != nil && firstErr == nil {
+				firstErr = storeErr
+			}
+		case <-ctx.Done():
+			if firstErr == nil {
+				firstErr = fmt.Errorf("api server close: timed out stopping auth defense and secret store: %w", ctx.Err())
 			}
 		}
 

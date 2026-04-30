@@ -30,6 +30,10 @@ import (
 )
 
 func setupTestServer(t *testing.T) *Server {
+	// Isolate secrets storage per test. initializeSecretStore() defaults to a
+	// shared os.TempDir() path, which causes file-lock contention on Windows CI.
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
 	// Create test configuration
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false // Disable for testing
@@ -840,6 +844,9 @@ func (l *capturingWarnLogger) warnMessages() []string {
 // setupTestServerWithLogger creates a test server using the provided logger.
 // Use this when you need to capture log output for assertions.
 func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
+	// Isolate secrets storage per test (same reason as setupTestServer).
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
 

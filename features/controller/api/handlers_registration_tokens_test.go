@@ -30,6 +30,9 @@ import (
 func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	t.Helper()
 
+	// Isolate secrets storage per test to prevent shared-path contention on Windows CI.
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
 	// Create test configuration
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false // Disable for testing

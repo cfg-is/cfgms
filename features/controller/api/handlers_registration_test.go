@@ -63,6 +63,9 @@ func (c *controlledConsumeStore) ConsumeToken(ctx context.Context, tokenStr, ste
 func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMgr *cert.Manager, loggers ...logging.Logger) (*Server, *audit.Manager) {
 	t.Helper()
 
+	// Isolate secrets storage per test to prevent shared-path contention on Windows CI.
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
 
