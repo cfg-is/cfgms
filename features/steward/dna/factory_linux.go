@@ -17,7 +17,7 @@ func newPlatformSoftwareCollector(_ context.Context) SoftwareCollector {
 }
 
 func newPlatformNetworkCollector() NetworkCollector {
-	return &LinuxNetworkCollector{}
+	return &GenericNetworkCollector{}
 }
 
 func newPlatformSecurityCollector() SecurityCollector {

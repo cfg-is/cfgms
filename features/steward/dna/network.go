@@ -111,45 +111,5 @@ func (g *GenericNetworkCollector) CollectFirewall(_ context.Context, attributes 
 	return nil
 }
 
-// Platform-specific collector types (implementations in separate files)
-
-// WindowsNetworkCollector handles Windows-specific network collection
-type WindowsNetworkCollector struct{}
-
-func (w *WindowsNetworkCollector) CollectInterfaces(ctx context.Context, attributes map[string]string) error {
-	return (&GenericNetworkCollector{}).CollectInterfaces(ctx, attributes)
-}
-
-func (w *WindowsNetworkCollector) CollectRouting(ctx context.Context, attributes map[string]string) error {
-	return (&GenericNetworkCollector{}).CollectRouting(ctx, attributes)
-}
-
-func (w *WindowsNetworkCollector) CollectDNS(ctx context.Context, attributes map[string]string) error {
-	return (&GenericNetworkCollector{}).CollectDNS(ctx, attributes)
-}
-
-func (w *WindowsNetworkCollector) CollectFirewall(ctx context.Context, attributes map[string]string) error {
-	return (&GenericNetworkCollector{}).CollectFirewall(ctx, attributes)
-}
-
-// LinuxNetworkCollector handles Linux-specific network collection
-type LinuxNetworkCollector struct{}
-
-func (l *LinuxNetworkCollector) CollectInterfaces(ctx context.Context, attributes map[string]string) error {
-	return (&GenericNetworkCollector{}).CollectInterfaces(ctx, attributes)
-}
-
-func (l *LinuxNetworkCollector) CollectRouting(ctx context.Context, attributes map[string]string) error {
-	return (&GenericNetworkCollector{}).CollectRouting(ctx, attributes)
-}
-
-func (l *LinuxNetworkCollector) CollectDNS(ctx context.Context, attributes map[string]string) error {
-	return (&GenericNetworkCollector{}).CollectDNS(ctx, attributes)
-}
-
-func (l *LinuxNetworkCollector) CollectFirewall(ctx context.Context, attributes map[string]string) error {
-	return (&GenericNetworkCollector{}).CollectFirewall(ctx, attributes)
-}
-
 // DarwinNetworkCollector handles macOS-specific network collection
 type DarwinNetworkCollector struct{}

@@ -161,10 +161,10 @@ type Steward struct {
 	performanceCollector *performance.DefaultCollector
 
 	// Standalone components (nil in controller mode)
-	moduleRegistry  discovery.ModuleRegistry
-	moduleFactory   *factory.ModuleFactory
-	comparator      *stewardtesting.StateComparator
-	executionEngine *execution.ExecutionEngine
+	moduleRegistry discovery.ModuleRegistry
+	moduleFactory  *factory.ModuleFactory
+	comparator     *stewardtesting.StateComparator
+	executor       *execution.Executor
 
 	// DNA collection and drift detection for unmanaged attribute reporting
 	dnaCollector  *dna.Collector
@@ -315,8 +315,16 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 	// Create state comparator for configuration drift detection
 	comparator := stewardtesting.NewStateComparator()
 
-	// Create execution engine for resource orchestration
-	executionEngine := execution.New(moduleFactory, comparator, cfg.Steward.ErrorHandling, logger)
+	// Create executor for resource orchestration
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logger,
+		Factory:       moduleFactory,
+		Comparator:    comparator,
+		ErrorHandling: cfg.Steward.ErrorHandling,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create executor: %w", err)
+	}
 
 	// Create health monitor for metrics collection
 	healthMonitor := NewHealthMonitor(logger)
@@ -348,7 +356,7 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		moduleFactory:        moduleFactory,
 		secretStore:          secretStore,
 		comparator:           comparator,
-		executionEngine:      executionEngine,
+		executor:             executor,
 		dnaCollector:         dnaCollector,
 		driftDetector:        driftDetector,
 		shutdown:             make(chan struct{}),
@@ -408,7 +416,7 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 
 	// Register managed resource drift handler on the execution engine.
 	// When the Compare step detects drift, this logs the event before Set corrects it.
-	s.executionEngine.SetDriftEventHandler(s.onManagedResourceDrift)
+	s.executor.SetDriftEventHandler(s.onManagedResourceDrift)
 
 	// Give monitors a moment to start
 	time.Sleep(50 * time.Millisecond)
@@ -439,7 +447,7 @@ func (s *Steward) runConvergence(ctx context.Context) {
 		"id", s.standaloneConfig.Steward.ID,
 		"resources", len(s.standaloneConfig.Resources))
 
-	report := s.executionEngine.ExecuteConfiguration(ctx, s.standaloneConfig)
+	report := s.executor.ExecuteConfiguration(ctx, s.standaloneConfig)
 
 	s.logger.Info("Convergence run completed",
 		"total", report.TotalResources,
@@ -829,7 +837,7 @@ func (s *Steward) ExecuteConfiguration(ctx context.Context) (execution.Execution
 		return execution.ExecutionReport{}, fmt.Errorf("ExecuteConfiguration is only available in standalone mode")
 	}
 
-	report := s.executionEngine.ExecuteConfiguration(ctx, s.standaloneConfig)
+	report := s.executor.ExecuteConfiguration(ctx, s.standaloneConfig)
 	return report, nil
 }
 

@@ -14,46 +14,60 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestNew(t *testing.T) {
-	// Create real implementations for testing
+func newTestExecutor(t *testing.T, errorConfig config.ErrorHandlingConfig) *Executor {
+	t.Helper()
+	registry := discovery.ModuleRegistry{}
+	moduleFactory := factory.New(registry, errorConfig)
+	comparator := stewardtesting.NewStateComparator()
+	logger := logging.NewLogger("info")
+	executor, err := NewExecutor(&ExecutorConfig{
+		Logger:        logger,
+		Factory:       moduleFactory,
+		Comparator:    comparator,
+		ErrorHandling: errorConfig,
+	})
+	require.NoError(t, err)
+	return executor
+}
+
+func TestNewExecutorWithComponents(t *testing.T) {
 	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{}
 	moduleFactory := factory.New(registry, errorConfig)
 	comparator := stewardtesting.NewStateComparator()
 	logger := logging.NewLogger("info")
 
-	engine := New(moduleFactory, comparator, errorConfig, logger)
+	executor, err := NewExecutor(&ExecutorConfig{
+		Logger:        logger,
+		Factory:       moduleFactory,
+		Comparator:    comparator,
+		ErrorHandling: errorConfig,
+	})
 
-	assert.NotNil(t, engine)
-	assert.Equal(t, moduleFactory, engine.factory)
-	assert.Equal(t, comparator, engine.comparator)
-	assert.Equal(t, errorConfig, engine.config)
-	assert.Equal(t, logger, engine.logger)
+	require.NoError(t, err)
+	assert.NotNil(t, executor)
+	assert.Equal(t, moduleFactory, executor.factory)
+	assert.Equal(t, comparator, executor.comparator)
+	assert.Equal(t, errorConfig, executor.config)
+	assert.Equal(t, logger, executor.logger)
 }
 
 func TestExecuteConfiguration_EmptyResources(t *testing.T) {
-	// Setup with real implementations
-	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{
 		ResourceFailure: config.ActionFail,
 	}
-	moduleFactory := factory.New(registry, errorConfig)
-	comparator := stewardtesting.NewStateComparator()
-	logger := logging.NewLogger("info")
+	executor := newTestExecutor(t, errorConfig)
 
-	engine := New(moduleFactory, comparator, errorConfig, logger)
-
-	// Create empty configuration
 	cfg := config.StewardConfig{
 		Resources: []config.ResourceConfig{},
 	}
 
 	ctx := context.Background()
-	report := engine.ExecuteConfiguration(ctx, cfg)
+	report := executor.ExecuteConfiguration(ctx, cfg)
 
-	// Verify report for empty configuration
 	assert.Equal(t, 0, report.TotalResources)
 	assert.Equal(t, 0, report.SuccessfulCount)
 	assert.Equal(t, 0, report.FailedCount)
@@ -63,19 +77,12 @@ func TestExecuteConfiguration_EmptyResources(t *testing.T) {
 }
 
 func TestExecuteConfiguration_WithUnknownModule(t *testing.T) {
-	// Setup with real implementations
-	registry := discovery.ModuleRegistry{} // Empty registry - no modules available
 	errorConfig := config.ErrorHandlingConfig{
-		ModuleLoadFailure: config.ActionContinue, // Continue on module load failure
+		ModuleLoadFailure: config.ActionContinue,
 		ResourceFailure:   config.ActionWarn,
 	}
-	moduleFactory := factory.New(registry, errorConfig)
-	comparator := stewardtesting.NewStateComparator()
-	logger := logging.NewLogger("info")
+	executor := newTestExecutor(t, errorConfig)
 
-	engine := New(moduleFactory, comparator, errorConfig, logger)
-
-	// Create configuration with unknown module
 	cfg := config.StewardConfig{
 		Resources: []config.ResourceConfig{
 			{
@@ -87,9 +94,8 @@ func TestExecuteConfiguration_WithUnknownModule(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	report := engine.ExecuteConfiguration(ctx, cfg)
+	report := executor.ExecuteConfiguration(ctx, cfg)
 
-	// Verify report shows skipped resource due to module not found
 	assert.Equal(t, 1, report.TotalResources)
 	assert.Equal(t, 0, report.SuccessfulCount)
 	assert.Equal(t, 0, report.FailedCount)
@@ -104,16 +110,9 @@ func TestExecuteConfiguration_WithUnknownModule(t *testing.T) {
 }
 
 func TestExecuteConfiguration_CanceledContext(t *testing.T) {
-	// Setup with real implementations
-	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{}
-	moduleFactory := factory.New(registry, errorConfig)
-	comparator := stewardtesting.NewStateComparator()
-	logger := logging.NewLogger("info")
+	executor := newTestExecutor(t, errorConfig)
 
-	engine := New(moduleFactory, comparator, errorConfig, logger)
-
-	// Create configuration with a resource
 	cfg := config.StewardConfig{
 		Resources: []config.ResourceConfig{
 			{
@@ -124,13 +123,11 @@ func TestExecuteConfiguration_CanceledContext(t *testing.T) {
 		},
 	}
 
-	// Create canceled context
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	cancel()
 
-	report := engine.ExecuteConfiguration(ctx, cfg)
+	report := executor.ExecuteConfiguration(ctx, cfg)
 
-	// Verify that execution was cancelled
 	assert.Equal(t, 1, report.TotalResources)
 	assert.Contains(t, report.Errors, "execution cancelled: context canceled")
 }
@@ -144,26 +141,44 @@ func TestGenericConfigState(t *testing.T) {
 
 	state := &genericConfigState{data: data}
 
-	// Test AsMap
 	assert.Equal(t, data, state.AsMap())
 
-	// Test GetManagedFields
 	fields := state.GetManagedFields()
 	assert.Len(t, fields, 3)
 	assert.Contains(t, fields, "key1")
 	assert.Contains(t, fields, "key2")
 	assert.Contains(t, fields, "key3")
 
-	// Test ToYAML (mock implementation)
-	yaml, err := state.ToYAML()
-	assert.NoError(t, err)
-	assert.NotEmpty(t, yaml)
+	assert.NoError(t, state.Validate())
+}
 
-	// Test FromYAML (mock implementation)
-	err = state.FromYAML([]byte("test"))
-	assert.NoError(t, err)
+func TestGenericConfigState_ToYAMLFromYAML(t *testing.T) {
+	original := &genericConfigState{data: map[string]interface{}{
+		"host": "localhost",
+		"port": 8080,
+	}}
 
-	// Test Validate (mock implementation)
-	err = state.Validate()
-	assert.NoError(t, err)
+	// ToYAML produces valid YAML
+	yamlBytes, err := original.ToYAML()
+	require.NoError(t, err)
+	assert.NotEmpty(t, yamlBytes)
+
+	// FromYAML round-trips the data
+	restored := &genericConfigState{data: map[string]interface{}{}}
+	require.NoError(t, restored.FromYAML(yamlBytes))
+	assert.Equal(t, "localhost", restored.data["host"])
+}
+
+func TestGenericConfigState_ExcludesIdentifierFields(t *testing.T) {
+	state := &genericConfigState{data: map[string]interface{}{
+		"path":    "/etc/hosts",
+		"name":    "hosts-file",
+		"content": "127.0.0.1 localhost",
+	}}
+
+	fields := state.GetManagedFields()
+	assert.Len(t, fields, 1)
+	assert.Contains(t, fields, "content")
+	assert.NotContains(t, fields, "path")
+	assert.NotContains(t, fields, "name")
 }

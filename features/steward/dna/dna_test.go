@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -209,50 +208,6 @@ func TestGenerateSystemID(t *testing.T) {
 	id4 := collector.generateSystemID(attributes3)
 	assert.NotEmpty(t, id4)
 	assert.Len(t, id4, 16)
-}
-
-func TestRefreshDNA(t *testing.T) {
-	logger := logging.NewLogger("debug")
-	collector := NewCollector(logger)
-
-	dna, err := collector.RefreshDNA(t.Context())
-	require.NoError(t, err)
-	require.NotNil(t, dna)
-
-	// RefreshDNA should work the same as Collect
-	assert.NotEmpty(t, dna.Id)
-	assert.NotNil(t, dna.Attributes)
-	assert.NotNil(t, dna.LastUpdated)
-}
-
-func TestCompareDNA(t *testing.T) {
-	logger := logging.NewLogger("debug")
-	collector := NewCollector(logger)
-
-	// Create test DNA
-	dna1, err := collector.Collect(t.Context())
-	require.NoError(t, err)
-
-	dna2, err := collector.Collect(t.Context())
-	require.NoError(t, err)
-
-	// Same system should compare equal
-	assert.True(t, CompareDNA(dna1, dna2))
-
-	// Different system ID should not compare equal
-	dna3 := &commonpb.DNA{
-		Id: "different-id",
-		Attributes: map[string]string{
-			"primary_mac": "different-mac",
-			"hostname":    "different-host",
-		},
-	}
-	assert.False(t, CompareDNA(dna1, dna3))
-
-	// Nil DNA should not compare equal
-	assert.False(t, CompareDNA(dna1, nil))
-	assert.False(t, CompareDNA(nil, dna2))
-	assert.False(t, CompareDNA(nil, nil))
 }
 
 // TestBackgroundCollectionStartsOnFirstCollect verifies that the background

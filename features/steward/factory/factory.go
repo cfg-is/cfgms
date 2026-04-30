@@ -35,7 +35,6 @@ package factory
 import (
 	"fmt"
 	"log"
-	"reflect"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -132,18 +131,11 @@ func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
 	var instance modules.Module
 	var err error
 
-	// Try to load from registry first (discovered modules take priority)
-	if moduleInfo, exists := f.registry[moduleName]; exists {
-		instance, err = f.loadModuleFromPath(moduleName, moduleInfo.Path)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load module %s from path: %w", moduleName, err)
-		}
-	} else {
-		// Fall back to built-in modules when not in registry
-		instance, err = f.loadBuiltinModule(moduleName)
-		if err != nil {
-			return nil, fmt.Errorf("module %s not found in registry and not a built-in module", moduleName)
-		}
+	// Registry entries resolve to built-in modules (plugin loading not yet implemented).
+	// Built-in modules are always tried; the registry acts as an allow-list when present.
+	instance, err = f.loadBuiltinModule(moduleName)
+	if err != nil {
+		return nil, fmt.Errorf("module %s not found in registry and not a built-in module", moduleName)
 	}
 
 	// Validate the module implements the required interface
@@ -163,83 +155,31 @@ func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
 	return instance, nil
 }
 
-// loadModuleFromPath loads a Go module from the specified path
-func (f *ModuleFactory) loadModuleFromPath(moduleName, modulePath string) (modules.Module, error) {
-	// For Go modules, we need to use reflection or plugin system
-	// This is a simplified implementation - in a real system you might use:
-	// 1. Go plugins (.so files) - requires CGO
-	// 2. Built-in module registry with reflection
-	// 3. External process communication
-
-	// For now, we'll implement a built-in module registry approach
-	return f.loadBuiltinModule(moduleName)
+// builtinModuleConstructors maps module names to their zero-argument constructors.
+var builtinModuleConstructors = map[string]func() modules.Module{
+	"acme":      func() modules.Module { return acme_module.New() },
+	"directory": func() modules.Module { return directory.New() },
+	"file":      func() modules.Module { return file.New() },
+	"firewall":  func() modules.Module { return firewall.New() },
+	"package":   func() modules.Module { return package_module.New() },
+	"patch":     func() modules.Module { return patch.New() },
+	"script":    func() modules.Module { return script.New() },
 }
 
-// loadBuiltinModule loads modules that are built into the binary
+// loadBuiltinModule creates a new instance of a built-in module.
 func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, error) {
-	// This would be expanded to include all built-in modules
-	// For now, we'll use a simple registry pattern
-
-	switch moduleName {
-	case "acme":
-		return acme_module.New(), nil
-	case "directory":
-		return directory.New(), nil
-	case "file":
-		return file.New(), nil
-	case "firewall":
-		return firewall.New(), nil
-	case "package":
-		return package_module.New(), nil
-	case "patch":
-		return patch.New(), nil
-	case "script":
-		return script.New(), nil
-	default:
+	ctor, ok := builtinModuleConstructors[moduleName]
+	if !ok {
 		return nil, fmt.Errorf("unknown built-in module: %s", moduleName)
 	}
+	return ctor(), nil
 }
 
-// loadPluginModule loads a module using Go's plugin system (requires CGO)
-
-// ValidateModuleInterface ensures the module implements the required interface
+// ValidateModuleInterface ensures the module implements the required Module interface.
 func (f *ModuleFactory) ValidateModuleInterface(module interface{}) error {
-	// Check if it implements the Module interface
 	if _, ok := module.(modules.Module); !ok {
 		return fmt.Errorf("module does not implement Module interface")
 	}
-
-	// Use reflection to verify the interface methods exist with correct signatures
-	moduleType := reflect.TypeOf(module)
-
-	// Check Get method
-	getMethod, exists := moduleType.MethodByName("Get")
-	if !exists {
-		return fmt.Errorf("module missing Get method")
-	}
-
-	// Validate Get method signature: Get(ctx context.Context, resourceID string) (ConfigState, error)
-	if getMethod.Type.NumIn() != 3 { // receiver + 2 parameters
-		return fmt.Errorf("Get method has incorrect number of parameters")
-	}
-	if getMethod.Type.NumOut() != 2 { // ConfigState + error
-		return fmt.Errorf("Get method has incorrect number of return values")
-	}
-
-	// Check Set method
-	setMethod, exists := moduleType.MethodByName("Set")
-	if !exists {
-		return fmt.Errorf("module missing Set method")
-	}
-
-	// Validate Set method signature: Set(ctx context.Context, resourceID string, config ConfigState) error
-	if setMethod.Type.NumIn() != 4 { // receiver + 3 parameters
-		return fmt.Errorf("Set method has incorrect number of parameters")
-	}
-	if setMethod.Type.NumOut() != 1 { // error
-		return fmt.Errorf("Set method has incorrect number of return values")
-	}
-
 	return nil
 }
 
