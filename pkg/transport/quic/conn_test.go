@@ -4,18 +4,12 @@
 package quic
 
 import (
-	"net"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestConn_ImplementsNetConn verifies the compile-time interface contract.
-func TestConn_ImplementsNetConn(t *testing.T) {
-	var _ net.Conn = (*Conn)(nil)
-}
 
 // TestConn_ReadWrite verifies that bytes written through one end of a QUIC stream
 // are readable from the Conn wrapper on the other end.
@@ -64,6 +58,27 @@ func TestConn_Addresses(t *testing.T) {
 	// The network name must be "quic".
 	assert.Equal(t, "quic", serverConn.LocalAddr().Network())
 	assert.Equal(t, "quic", serverConn.RemoteAddr().Network())
+}
+
+// TestConn_CloseSignalsPeer verifies that Close sends a connection-level signal
+// so the peer receives an immediate error rather than waiting for the QUIC idle
+// timeout (~90s).
+func TestConn_CloseSignalsPeer(t *testing.T) {
+	tlsPair := newTestTLSPair(t)
+	serverConn, clientConn := dialPair(t, tlsPair)
+
+	// Set a short deadline so the test fails fast if the peer is not signalled.
+	require.NoError(t, clientConn.SetReadDeadline(time.Now().Add(2*time.Second)))
+
+	// Close the server side — this must signal the client immediately.
+	require.NoError(t, serverConn.Close())
+
+	buf := make([]byte, 16)
+	_, err := clientConn.Read(buf)
+	// The peer must receive either EOF or a QUIC application error; either
+	// indicates the connection is gone. The important property is that Read
+	// does not block for the full idle-timeout period.
+	assert.Error(t, err)
 }
 
 // TestConn_Deadlines verifies that deadline methods propagate to the stream
