@@ -10,14 +10,14 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/dataplane/types"
-	"google.golang.org/grpc"
 )
 
 // Session implements DataPlaneSession for the gRPC data plane provider.
 //
 // Client-mode sessions use a StewardTransportClient to initiate RPCs.
-// Server-mode sessions read from the dataPlaneHandler's pending-request
-// channels to serve RPCs initiated by connected stewards.
+// Server-mode sessions no longer queue RPCs via channels; incoming DNA,
+// Bulk, and Config RPCs are handled directly by DNAHandler, BulkHandler,
+// and ConfigHandler in the controller transport layer.
 type Session struct {
 	mu sync.RWMutex
 
@@ -29,9 +29,6 @@ type Session struct {
 
 	// Client mode
 	client transportpb.StewardTransportClient
-
-	// Server mode
-	handler *dataPlaneHandler
 
 	// Provider back-reference for stats
 	provider *Provider
@@ -51,61 +48,19 @@ func (s *Session) PeerID() string {
 
 // --- Configuration Transfers ---
 
-// SendConfig sends configuration to the peer.
-//
-// Server mode: waits for an incoming SyncConfig RPC then streams chunks back.
-// Client mode: not the typical direction for SyncConfig (controller → steward);
-// returns an error directing callers to use ReceiveConfig instead.
-func (s *Session) SendConfig(ctx context.Context, config *types.ConfigTransfer) error {
+// SendConfig is a server-side operation. After the direct-handler rewrite,
+// server-side config streaming is handled by ConfigHandler.HandleGRPC directly.
+// Client mode is not applicable for config sending.
+func (s *Session) SendConfig(_ context.Context, _ *types.ConfigTransfer) error {
 	if s.closed.Load() {
 		return fmt.Errorf("session closed")
 	}
 
 	switch s.mode {
 	case "server":
-		return s.serverSendConfig(ctx, config)
+		return fmt.Errorf("SendConfig server mode not supported: use ConfigHandler directly")
 	default:
 		return fmt.Errorf("SendConfig is a server-side operation (controller streams config to steward); use ReceiveConfig on the steward side")
-	}
-}
-
-func (s *Session) serverSendConfig(ctx context.Context, config *types.ConfigTransfer) error {
-	select {
-	case pending := <-s.handler.syncConfigReqs:
-		chunks, err := configTransferToChunks(config)
-		if err != nil {
-			s.provider.stats.transferErrors.Add(1)
-			select {
-			case pending.errCh <- err:
-			default:
-			}
-			return fmt.Errorf("failed to chunk config: %w", err)
-		}
-
-		for _, chunk := range chunks {
-			if err := pending.stream.Send(chunk); err != nil {
-				s.provider.stats.transferErrors.Add(1)
-				select {
-				case pending.errCh <- err:
-				default:
-				}
-				return fmt.Errorf("failed to send config chunk: %w", err)
-			}
-			s.provider.stats.bytesSent.Add(int64(len(chunk.Data)))
-		}
-
-		select {
-		case pending.errCh <- nil:
-		default:
-		}
-		s.provider.stats.configsSent.Add(1)
-		return nil
-
-	case <-ctx.Done():
-		s.provider.stats.timeoutErrors.Add(1)
-		return ctx.Err()
-	case <-s.handler.done:
-		return fmt.Errorf("server shutting down")
 	}
 }
 
@@ -214,80 +169,18 @@ func (s *Session) clientSendDNA(ctx context.Context, dna *types.DNATransfer) err
 	return nil
 }
 
-// ReceiveDNA receives DNA data from a steward.
-//
-// Server mode: waits for an incoming SyncDNA RPC, collects chunks, and returns
-// the assembled DNA transfer.
-// Client mode: not the typical direction; returns an error.
-func (s *Session) ReceiveDNA(ctx context.Context) (*types.DNATransfer, error) {
+// ReceiveDNA receives DNA data from a steward. After the direct-handler rewrite,
+// server-side DNA reception is handled by DNAHandler.HandleGRPC directly.
+func (s *Session) ReceiveDNA(_ context.Context) (*types.DNATransfer, error) {
 	if s.closed.Load() {
 		return nil, fmt.Errorf("session closed")
 	}
 
 	switch s.mode {
 	case "server":
-		return s.serverReceiveDNA(ctx)
+		return nil, fmt.Errorf("ReceiveDNA server mode not supported: use DNAHandler directly")
 	default:
 		return nil, fmt.Errorf("ReceiveDNA is a server-side operation (controller receives DNA from steward); use SendDNA on the client side")
-	}
-}
-
-func (s *Session) serverReceiveDNA(ctx context.Context) (*types.DNATransfer, error) {
-	select {
-	case pending := <-s.handler.syncDNAReqs:
-		var chunks []*transportpb.DNAChunk
-		for {
-			chunk, err := pending.stream.Recv()
-			if isEOF(err) {
-				break
-			}
-			if err != nil {
-				s.provider.stats.transferErrors.Add(1)
-				select {
-				case pending.errCh <- err:
-				default:
-				}
-				return nil, fmt.Errorf("failed to receive DNA chunk: %w", err)
-			}
-			chunks = append(chunks, chunk)
-			s.provider.stats.bytesReceived.Add(int64(len(chunk.Data)))
-		}
-
-		dna, err := chunksToDNATransfer(chunks)
-		if err != nil {
-			s.provider.stats.transferErrors.Add(1)
-			select {
-			case pending.errCh <- err:
-			default:
-			}
-			return nil, fmt.Errorf("failed to reassemble DNA: %w", err)
-		}
-
-		// Send acceptance response
-		if err := pending.stream.SendAndClose(&transportpb.DNASyncResponse{
-			Accepted: true,
-			Message:  "accepted",
-		}); err != nil {
-			s.provider.stats.transferErrors.Add(1)
-			select {
-			case pending.errCh <- err:
-			default:
-			}
-			return nil, fmt.Errorf("failed to send DNA sync response: %w", err)
-		}
-
-		select {
-		case pending.errCh <- nil:
-		default:
-		}
-		s.provider.stats.dnaReceived.Add(1)
-		return dna, nil
-
-	case <-ctx.Done():
-		s.provider.stats.timeoutErrors.Add(1)
-		return nil, ctx.Err()
-	case <-s.handler.done:
-		return nil, fmt.Errorf("server shutting down")
 	}
 }
 
@@ -296,7 +189,7 @@ func (s *Session) serverReceiveDNA(ctx context.Context) (*types.DNATransfer, err
 // SendBulk sends bulk data to the peer.
 //
 // Client mode: opens a BulkTransfer bidi stream and sends chunks.
-// Server mode: reads the pending BulkTransfer stream and sends response chunks.
+// Server mode: not supported after direct-handler rewrite; use BulkHandler directly.
 func (s *Session) SendBulk(ctx context.Context, bulk *types.BulkTransfer) error {
 	if s.closed.Load() {
 		return fmt.Errorf("session closed")
@@ -306,7 +199,7 @@ func (s *Session) SendBulk(ctx context.Context, bulk *types.BulkTransfer) error 
 	case "client":
 		return s.clientSendBulk(ctx, bulk)
 	case "server":
-		return s.serverSendBulk(ctx, bulk)
+		return fmt.Errorf("SendBulk server mode not supported: use BulkHandler directly")
 	default:
 		return fmt.Errorf("unsupported mode: %s", s.mode)
 	}
@@ -342,50 +235,8 @@ func (s *Session) clientSendBulk(ctx context.Context, bulk *types.BulkTransfer) 
 	return nil
 }
 
-func (s *Session) serverSendBulk(ctx context.Context, bulk *types.BulkTransfer) error {
-	select {
-	case pending := <-s.handler.bulkReqs:
-		chunks, err := bulkTransferToChunks(bulk)
-		if err != nil {
-			s.provider.stats.transferErrors.Add(1)
-			select {
-			case pending.errCh <- err:
-			default:
-			}
-			return fmt.Errorf("failed to chunk bulk data: %w", err)
-		}
-
-		for _, chunk := range chunks {
-			if err := pending.stream.Send(chunk); err != nil {
-				s.provider.stats.transferErrors.Add(1)
-				select {
-				case pending.errCh <- err:
-				default:
-				}
-				return fmt.Errorf("failed to send bulk chunk: %w", err)
-			}
-			s.provider.stats.bytesSent.Add(int64(len(chunk.Data)))
-		}
-
-		select {
-		case pending.errCh <- nil:
-		default:
-		}
-		s.provider.stats.bulkSent.Add(1)
-		return nil
-
-	case <-ctx.Done():
-		s.provider.stats.timeoutErrors.Add(1)
-		return ctx.Err()
-	case <-s.handler.done:
-		return fmt.Errorf("server shutting down")
-	}
-}
-
-// ReceiveBulk receives bulk data from the peer.
-//
-// Client mode: reads from a BulkTransfer bidi stream.
-// Server mode: waits for an incoming BulkTransfer RPC and reads chunks.
+// ReceiveBulk receives bulk data from the peer. After the direct-handler rewrite,
+// server-side bulk reception is handled by BulkHandler.HandleGRPC directly.
 func (s *Session) ReceiveBulk(ctx context.Context) (*types.BulkTransfer, error) {
 	if s.closed.Load() {
 		return nil, fmt.Errorf("session closed")
@@ -395,7 +246,7 @@ func (s *Session) ReceiveBulk(ctx context.Context) (*types.BulkTransfer, error) 
 	case "client":
 		return s.clientReceiveBulk(ctx)
 	case "server":
-		return s.serverReceiveBulk(ctx)
+		return nil, fmt.Errorf("ReceiveBulk server mode not supported: use BulkHandler directly")
 	default:
 		return nil, fmt.Errorf("unsupported mode: %s", s.mode)
 	}
@@ -432,52 +283,6 @@ func (s *Session) clientReceiveBulk(ctx context.Context) (*types.BulkTransfer, e
 	return bulk, nil
 }
 
-func (s *Session) serverReceiveBulk(ctx context.Context) (*types.BulkTransfer, error) {
-	select {
-	case pending := <-s.handler.bulkReqs:
-		var chunks []*transportpb.BulkChunk
-		for {
-			chunk, err := pending.stream.Recv()
-			if isEOF(err) {
-				break
-			}
-			if err != nil {
-				s.provider.stats.transferErrors.Add(1)
-				select {
-				case pending.errCh <- err:
-				default:
-				}
-				return nil, fmt.Errorf("failed to receive bulk chunk: %w", err)
-			}
-			chunks = append(chunks, chunk)
-			s.provider.stats.bytesReceived.Add(int64(len(chunk.Data)))
-		}
-
-		bulk, err := chunksToBulkTransfer(chunks)
-		if err != nil {
-			s.provider.stats.transferErrors.Add(1)
-			select {
-			case pending.errCh <- err:
-			default:
-			}
-			return nil, fmt.Errorf("failed to reassemble bulk: %w", err)
-		}
-
-		select {
-		case pending.errCh <- nil:
-		default:
-		}
-		s.provider.stats.bulkReceived.Add(1)
-		return bulk, nil
-
-	case <-ctx.Done():
-		s.provider.stats.timeoutErrors.Add(1)
-		return nil, ctx.Err()
-	case <-s.handler.done:
-		return nil, fmt.Errorf("server shutting down")
-	}
-}
-
 // --- Session Management ---
 
 // Close gracefully closes the session and removes it from the provider's sessions map.
@@ -506,132 +311,4 @@ func (s *Session) RemoteAddr() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.remoteAddr
-}
-
-// --- gRPC server handler ---
-
-// pendingSyncConfig represents an in-flight SyncConfig RPC waiting to be served.
-type pendingSyncConfig struct {
-	req    *transportpb.ConfigSyncRequest
-	stream grpc.ServerStreamingServer[transportpb.ConfigChunk]
-	errCh  chan error
-}
-
-// pendingSyncDNA represents an in-flight SyncDNA RPC waiting to be served.
-type pendingSyncDNA struct {
-	stream grpc.ClientStreamingServer[transportpb.DNAChunk, transportpb.DNASyncResponse]
-	errCh  chan error
-}
-
-// pendingBulk represents an in-flight BulkTransfer RPC waiting to be served.
-type pendingBulk struct {
-	stream grpc.BidiStreamingServer[transportpb.BulkChunk, transportpb.BulkChunk]
-	errCh  chan error
-}
-
-// dataPlaneHandler implements the StewardTransportServer data-transfer methods.
-//
-// Incoming RPCs are queued in buffered channels. Sessions drain those channels
-// by calling the appropriate transfer method (SendConfig, ReceiveDNA, etc.).
-type dataPlaneHandler struct {
-	transportpb.UnimplementedStewardTransportServer
-	syncConfigReqs chan *pendingSyncConfig
-	syncDNAReqs    chan *pendingSyncDNA
-	bulkReqs       chan *pendingBulk
-	done           chan struct{}
-}
-
-func newDataPlaneHandler() *dataPlaneHandler {
-	return &dataPlaneHandler{
-		// Buffer 16 concurrent RPCs per type before back-pressure kicks in.
-		syncConfigReqs: make(chan *pendingSyncConfig, 16),
-		syncDNAReqs:    make(chan *pendingSyncDNA, 16),
-		bulkReqs:       make(chan *pendingBulk, 16),
-		done:           make(chan struct{}),
-	}
-}
-
-func (h *dataPlaneHandler) close() {
-	select {
-	case <-h.done:
-		// already closed
-	default:
-		close(h.done)
-	}
-}
-
-// SyncConfig queues the incoming request and waits for the session to serve it.
-func (h *dataPlaneHandler) SyncConfig(req *transportpb.ConfigSyncRequest, stream grpc.ServerStreamingServer[transportpb.ConfigChunk]) error {
-	p := &pendingSyncConfig{
-		req:    req,
-		stream: stream,
-		errCh:  make(chan error, 1),
-	}
-
-	select {
-	case h.syncConfigReqs <- p:
-	case <-stream.Context().Done():
-		return stream.Context().Err()
-	case <-h.done:
-		return fmt.Errorf("server shutting down")
-	}
-
-	select {
-	case err := <-p.errCh:
-		return err
-	case <-stream.Context().Done():
-		return stream.Context().Err()
-	case <-h.done:
-		return fmt.Errorf("server shutting down")
-	}
-}
-
-// SyncDNA queues the incoming stream and waits for the session to serve it.
-func (h *dataPlaneHandler) SyncDNA(stream grpc.ClientStreamingServer[transportpb.DNAChunk, transportpb.DNASyncResponse]) error {
-	p := &pendingSyncDNA{
-		stream: stream,
-		errCh:  make(chan error, 1),
-	}
-
-	select {
-	case h.syncDNAReqs <- p:
-	case <-stream.Context().Done():
-		return stream.Context().Err()
-	case <-h.done:
-		return fmt.Errorf("server shutting down")
-	}
-
-	select {
-	case err := <-p.errCh:
-		return err
-	case <-stream.Context().Done():
-		return stream.Context().Err()
-	case <-h.done:
-		return fmt.Errorf("server shutting down")
-	}
-}
-
-// BulkTransfer queues the incoming stream and waits for the session to serve it.
-func (h *dataPlaneHandler) BulkTransfer(stream grpc.BidiStreamingServer[transportpb.BulkChunk, transportpb.BulkChunk]) error {
-	p := &pendingBulk{
-		stream: stream,
-		errCh:  make(chan error, 1),
-	}
-
-	select {
-	case h.bulkReqs <- p:
-	case <-stream.Context().Done():
-		return stream.Context().Err()
-	case <-h.done:
-		return fmt.Errorf("server shutting down")
-	}
-
-	select {
-	case err := <-p.errCh:
-		return err
-	case <-stream.Context().Done():
-		return stream.Context().Err()
-	case <-h.done:
-		return fmt.Errorf("server shutting down")
-	}
 }

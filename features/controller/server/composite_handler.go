@@ -13,30 +13,33 @@ import (
 )
 
 // compositeTransportServer delegates StewardTransport RPCs to the appropriate
-// provider handler. Control plane RPCs go to the CP handler; data plane RPCs
-// go to the DP handler. SyncConfig is handled directly by the config handler
-// to avoid the session-channel indirection. Future RPCs (TaskStream, Terminal,
-// LogStream) fall through to the Unimplemented base.
+// handler. Control plane RPCs go to the CP handler; SyncConfig is handled
+// directly by the config handler; SyncDNA by the DNA handler; BulkTransfer
+// by the bulk handler. Future RPCs (TaskStream, Terminal, LogStream) fall
+// through to the Unimplemented base.
 type compositeTransportServer struct {
 	transportpb.UnimplementedStewardTransportServer
 
 	cpHandler     transportpb.StewardTransportServer // Register, Ping, ControlChannel
-	dpHandler     transportpb.StewardTransportServer // SyncDNA, BulkTransfer
 	configHandler *controllerTransport.ConfigHandler // SyncConfig (direct handling)
+	dnaHandler    *controllerTransport.DNAHandler    // SyncDNA (direct handling)
+	bulkHandler   *controllerTransport.BulkHandler   // BulkTransfer (direct handling)
 	logger        logging.Logger
 }
 
 // newCompositeTransportServer creates a composite handler that delegates RPCs.
 func newCompositeTransportServer(
 	cpHandler transportpb.StewardTransportServer,
-	dpHandler transportpb.StewardTransportServer,
+	dnaHandler *controllerTransport.DNAHandler,
+	bulkHandler *controllerTransport.BulkHandler,
 	configHandler *controllerTransport.ConfigHandler,
 	logger logging.Logger,
 ) *compositeTransportServer {
 	return &compositeTransportServer{
 		cpHandler:     cpHandler,
-		dpHandler:     dpHandler,
 		configHandler: configHandler,
+		dnaHandler:    dnaHandler,
+		bulkHandler:   bulkHandler,
 		logger:        logger,
 	}
 }
@@ -70,12 +73,18 @@ func (c *compositeTransportServer) SyncConfig(req *transportpb.ConfigSyncRequest
 	return c.UnimplementedStewardTransportServer.SyncConfig(req, stream)
 }
 
-// SyncDNA delegates to the DP handler's channel-based model.
+// SyncDNA is handled directly by the DNA handler.
 func (c *compositeTransportServer) SyncDNA(stream grpc.ClientStreamingServer[transportpb.DNAChunk, transportpb.DNASyncResponse]) error {
-	return c.dpHandler.SyncDNA(stream)
+	if c.dnaHandler != nil {
+		return c.dnaHandler.HandleGRPC(stream)
+	}
+	return c.UnimplementedStewardTransportServer.SyncDNA(stream)
 }
 
-// BulkTransfer delegates to the DP handler's channel-based model.
+// BulkTransfer is handled directly by the bulk handler.
 func (c *compositeTransportServer) BulkTransfer(stream grpc.BidiStreamingServer[transportpb.BulkChunk, transportpb.BulkChunk]) error {
-	return c.dpHandler.BulkTransfer(stream)
+	if c.bulkHandler != nil {
+		return c.bulkHandler.HandleGRPC(stream)
+	}
+	return c.UnimplementedStewardTransportServer.BulkTransfer(stream)
 }
