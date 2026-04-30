@@ -85,12 +85,18 @@ func requireAddressValidation(info *quicgo.ClientInfo) (*quicgo.Config, error) {
 // Each accepted QUIC connection opens its first bidirectional stream, which is
 // wrapped as a net.Conn for gRPC to use. gRPC handles its own HTTP/2
 // multiplexing within that stream.
+//
+// Connections are accepted concurrently: Listen() starts a background goroutine
+// that accepts QUIC connections and spawns a per-connection goroutine to wait
+// for the first stream. Each connection has a 5-second deadline to open its
+// first stream; peers that stall are disconnected and do not block other peers.
 type Listener struct {
 	ql     *quicgo.Listener
 	tr     *quicgo.Transport // non-nil: Listen() owns this transport's UDP socket
 	cfg    *quicgo.Config    // effective config after Listen() injection
 	ctx    context.Context
 	cancel context.CancelFunc
+	conns  chan net.Conn // buffered queue of ready connections
 }
 
 // Compile-time check that Listener implements net.Listener.
@@ -142,34 +148,63 @@ func Listen(addr string, tlsConfig *tls.Config, quicConfig *quicgo.Config) (*Lis
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Listener{
+	l := &Listener{
 		ql:     ql,
 		tr:     tr,
 		cfg:    quicConfig,
 		ctx:    ctx,
 		cancel: cancel,
-	}, nil
+		conns:  make(chan net.Conn, 64),
+	}
+	go l.acceptLoop()
+	return l, nil
+}
+
+// acceptLoop runs in a background goroutine started by Listen(). It accepts
+// QUIC connections and spawns a per-connection goroutine for stream acceptance,
+// so no single slow peer can block others from being accepted.
+func (l *Listener) acceptLoop() {
+	for {
+		quicConn, err := l.ql.Accept(l.ctx)
+		if err != nil {
+			return
+		}
+		go l.acceptStream(quicConn)
+	}
+}
+
+// acceptStream waits up to 5 seconds for the peer to open its first
+// bidirectional stream. On success the wrapped Conn is pushed to l.conns.
+// On timeout the QUIC connection is closed so the peer is not left dangling.
+func (l *Listener) acceptStream(quicConn *quicgo.Conn) {
+	ctx, cancel := context.WithTimeout(l.ctx, 5*time.Second)
+	defer cancel()
+	stream, err := quicConn.AcceptStream(ctx)
+	if err != nil {
+		_ = quicConn.CloseWithError(1, "stream accept timeout")
+		return
+	}
+	local := newAddr(quicConn.LocalAddr().String())
+	remote := newAddr(quicConn.RemoteAddr().String())
+	select {
+	case l.conns <- newConn(quicConn, stream, local, remote):
+	case <-l.ctx.Done():
+		_ = quicConn.CloseWithError(1, "listener closed")
+	}
 }
 
 // Accept waits for and returns the next connection.
 //
-// It accepts the next QUIC connection, waits for the first bidirectional
-// stream to be opened, and returns that stream as a net.Conn.
+// It returns connections from the internal accept queue, which is populated
+// concurrently by acceptLoop and acceptStream. Accept returns immediately once
+// a peer has completed the TLS handshake and opened its first stream.
 func (l *Listener) Accept() (net.Conn, error) {
-	quicConn, err := l.ql.Accept(l.ctx)
-	if err != nil {
-		return nil, err
+	select {
+	case conn := <-l.conns:
+		return conn, nil
+	case <-l.ctx.Done():
+		return nil, l.ctx.Err()
 	}
-
-	stream, err := quicConn.AcceptStream(l.ctx)
-	if err != nil {
-		_ = quicConn.CloseWithError(1, "stream accept failed")
-		return nil, err
-	}
-
-	localAddr := newAddr(quicConn.LocalAddr().String())
-	remoteAddr := newAddr(quicConn.RemoteAddr().String())
-	return newConn(quicConn, stream, localAddr, remoteAddr), nil
 }
 
 // Close stops the listener. Any blocked Accept call will return with an error.

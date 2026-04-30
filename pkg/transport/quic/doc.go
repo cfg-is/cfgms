@@ -17,6 +17,14 @@
 // gRPC uses for its entire HTTP/2 connection lifetime. MaxIncomingStreams=1 is
 // enforced by the default QUIC config to prevent stream-flood attacks.
 //
+// Listen() starts a background goroutine (acceptLoop) that accepts QUIC
+// connections concurrently. Each accepted connection gets its own goroutine
+// (acceptStream) that waits up to 5 seconds for the peer to open its first
+// bidirectional stream. Peers that stall are closed via CloseWithError and do
+// not prevent other peers from being accepted. Ready connections are queued in
+// a buffered channel (capacity 64); Accept() returns the next queued connection
+// or blocks until one is available.
+//
 // # Server usage
 //
 //	lis, err := quic.Listen(addr, tlsConfig, nil)
