@@ -34,8 +34,8 @@ func newTestCA(t *testing.T) *cfgcert.CA {
 	return ca
 }
 
-// newTestServerCert returns a server tls.Certificate signed by ca.
-func newTestServerCert(t *testing.T, ca *cfgcert.CA) tls.Certificate {
+// newTestServerCert returns a server Certificate (with PEM fields) signed by ca.
+func newTestServerCert(t *testing.T, ca *cfgcert.CA) *cfgcert.Certificate {
 	t.Helper()
 	cert, err := ca.GenerateServerCertificate(&cfgcert.ServerCertConfig{
 		CommonName:   "localhost",
@@ -44,13 +44,11 @@ func newTestServerCert(t *testing.T, ca *cfgcert.CA) tls.Certificate {
 		KeySize:      2048,
 	})
 	require.NoError(t, err)
-	tlsCert, err := cfgcert.LoadTLSCertificate(cert.CertificatePEM, cert.PrivateKeyPEM)
-	require.NoError(t, err)
-	return tlsCert
+	return cert
 }
 
-// newTestClientCert returns a client tls.Certificate with the given CN signed by ca.
-func newTestClientCert(t *testing.T, ca *cfgcert.CA, cn string) tls.Certificate {
+// newTestClientCert returns a client Certificate (with PEM fields) with the given CN signed by ca.
+func newTestClientCert(t *testing.T, ca *cfgcert.CA, cn string) *cfgcert.Certificate {
 	t.Helper()
 	cert, err := ca.GenerateClientCertificate(&cfgcert.ClientCertConfig{
 		CommonName:   cn,
@@ -58,102 +56,7 @@ func newTestClientCert(t *testing.T, ca *cfgcert.CA, cn string) tls.Certificate 
 		KeySize:      2048,
 	})
 	require.NoError(t, err)
-	tlsCert, err := cfgcert.LoadTLSCertificate(cert.CertificatePEM, cert.PrivateKeyPEM)
-	require.NoError(t, err)
-	return tlsCert
-}
-
-// newTestCertPool builds an x509.CertPool containing the CA's certificate.
-func newTestCertPool(t *testing.T, ca *cfgcert.CA) *x509.CertPool {
-	t.Helper()
-	caPEM, err := ca.GetCACertificate()
-	require.NoError(t, err)
-	pool := x509.NewCertPool()
-	require.True(t, pool.AppendCertsFromPEM(caPEM))
-	return pool
-}
-
-// ---------------------------------------------------------------------------
-// ServerTLSConfig tests
-// ---------------------------------------------------------------------------
-
-// TestServerTLSConfig_Valid verifies that a valid cert and CA pool produce a
-// properly configured server TLS config.
-func TestServerTLSConfig_Valid(t *testing.T) {
-	ca := newTestCA(t)
-	serverCert := newTestServerCert(t, ca)
-	caPool := newTestCertPool(t, ca)
-
-	cfg, err := ServerTLSConfig(serverCert, caPool)
-	require.NoError(t, err)
-	require.NotNil(t, cfg)
-
-	assert.Equal(t, uint16(tls.VersionTLS13), cfg.MinVersion, "must enforce TLS 1.3")
-	assert.Equal(t, tls.RequireAndVerifyClientCert, cfg.ClientAuth, "must require client certificate")
-	assert.Equal(t, []string{ALPNProtocol}, cfg.NextProtos, "must set ALPN to cfgms-grpc")
-	assert.Len(t, cfg.Certificates, 1)
-}
-
-// TestServerTLSConfig_NilCertPool verifies that a nil CA pool returns an error,
-// since mTLS requires a pool to verify incoming client certificates.
-func TestServerTLSConfig_NilCertPool(t *testing.T) {
-	ca := newTestCA(t)
-	serverCert := newTestServerCert(t, ca)
-
-	cfg, err := ServerTLSConfig(serverCert, nil)
-	assert.Error(t, err)
-	assert.Nil(t, cfg)
-}
-
-// ---------------------------------------------------------------------------
-// ClientTLSConfig tests
-// ---------------------------------------------------------------------------
-
-// TestClientTLSConfig_Valid verifies that a valid client cert and root CA pool
-// produce a properly configured client TLS config.
-func TestClientTLSConfig_Valid(t *testing.T) {
-	ca := newTestCA(t)
-	clientCert := newTestClientCert(t, ca, "steward-test")
-	rootCAs := newTestCertPool(t, ca)
-
-	cfg, err := ClientTLSConfig(clientCert, rootCAs)
-	require.NoError(t, err)
-	require.NotNil(t, cfg)
-
-	assert.Equal(t, uint16(tls.VersionTLS13), cfg.MinVersion, "must enforce TLS 1.3")
-	assert.Equal(t, []string{ALPNProtocol}, cfg.NextProtos, "must set ALPN to cfgms-grpc")
-	assert.Len(t, cfg.Certificates, 1)
-	assert.NotNil(t, cfg.RootCAs)
-}
-
-// TestClientTLSConfig_NilRootCAs verifies that a nil root CA pool returns an
-// error, since the client must always verify the server certificate.
-func TestClientTLSConfig_NilRootCAs(t *testing.T) {
-	ca := newTestCA(t)
-	clientCert := newTestClientCert(t, ca, "steward-test")
-
-	cfg, err := ClientTLSConfig(clientCert, nil)
-	assert.Error(t, err)
-	assert.Nil(t, cfg)
-}
-
-// TestTLSConfig_ALPNMatch verifies that both server and client configs use the
-// same ALPN protocol so they can negotiate successfully.
-func TestTLSConfig_ALPNMatch(t *testing.T) {
-	ca := newTestCA(t)
-	serverCert := newTestServerCert(t, ca)
-	clientCert := newTestClientCert(t, ca, "steward-test")
-	caPool := newTestCertPool(t, ca)
-
-	serverCfg, err := ServerTLSConfig(serverCert, caPool)
-	require.NoError(t, err)
-
-	clientCfg, err := ClientTLSConfig(clientCert, caPool)
-	require.NoError(t, err)
-
-	require.Equal(t, serverCfg.NextProtos, clientCfg.NextProtos,
-		"server and client ALPN must match for TLS negotiation to succeed")
-	assert.Equal(t, []string{"cfgms-grpc"}, serverCfg.NextProtos)
+	return cert
 }
 
 // ---------------------------------------------------------------------------
@@ -236,19 +139,23 @@ func TestPeerStewardID_EmptyCN(t *testing.T) {
 // TestConn_TLSConnectionState verifies that after a full QUIC handshake,
 // TLSConnectionState returns a non-nil state containing peer certificates.
 func TestConn_TLSConnectionState(t *testing.T) {
-	// Use cfgms-grpc ALPN so we use the new TLS config helpers.
 	ca := newTestCA(t)
 	serverCert := newTestServerCert(t, ca)
 	clientCert := newTestClientCert(t, ca, "steward-state-test")
-	caPool := newTestCertPool(t, ca)
-
-	serverTLS, err := ServerTLSConfig(serverCert, caPool)
+	caPEM, err := ca.GetCACertificate()
 	require.NoError(t, err)
-	serverTLS.ServerName = "localhost"
 
-	clientTLS, err := ClientTLSConfig(clientCert, caPool)
+	serverTLS, err := cfgcert.CreateServerTLSConfig(
+		serverCert.CertificatePEM, serverCert.PrivateKeyPEM, caPEM, tls.VersionTLS13,
+	)
 	require.NoError(t, err)
-	clientTLS.ServerName = "localhost"
+	serverTLS.NextProtos = []string{ALPNProtocol}
+
+	clientTLS, err := cfgcert.CreateClientTLSConfig(
+		clientCert.CertificatePEM, clientCert.PrivateKeyPEM, caPEM, "localhost", tls.VersionTLS13,
+	)
+	require.NoError(t, err)
+	clientTLS.NextProtos = []string{ALPNProtocol}
 
 	tlsPair := &testTLSPair{server: serverTLS, client: clientTLS}
 	serverConn, clientConn := dialPair(t, tlsPair)
@@ -269,21 +176,26 @@ func TestConn_TLSConnectionState(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // newMTLSTLSPair builds a testTLSPair using the cfgms-grpc ALPN and proper
-// mTLS configs produced by ServerTLSConfig / ClientTLSConfig.
+// mTLS configs produced by pkg/cert helpers.
 func newMTLSTLSPair(t *testing.T, stewardID string) *testTLSPair {
 	t.Helper()
 	ca := newTestCA(t)
 	serverCert := newTestServerCert(t, ca)
 	clientCert := newTestClientCert(t, ca, stewardID)
-	caPool := newTestCertPool(t, ca)
-
-	serverTLS, err := ServerTLSConfig(serverCert, caPool)
+	caPEM, err := ca.GetCACertificate()
 	require.NoError(t, err)
-	serverTLS.ServerName = "localhost"
 
-	clientTLS, err := ClientTLSConfig(clientCert, caPool)
+	serverTLS, err := cfgcert.CreateServerTLSConfig(
+		serverCert.CertificatePEM, serverCert.PrivateKeyPEM, caPEM, tls.VersionTLS13,
+	)
 	require.NoError(t, err)
-	clientTLS.ServerName = "localhost"
+	serverTLS.NextProtos = []string{ALPNProtocol}
+
+	clientTLS, err := cfgcert.CreateClientTLSConfig(
+		clientCert.CertificatePEM, clientCert.PrivateKeyPEM, caPEM, "localhost", tls.VersionTLS13,
+	)
+	require.NoError(t, err)
+	clientTLS.NextProtos = []string{ALPNProtocol}
 
 	return &testTLSPair{server: serverTLS, client: clientTLS}
 }
@@ -323,19 +235,19 @@ func TestGRPCOverQUIC_mTLS(t *testing.T) {
 func TestGRPCOverQUIC_mTLS_NoCert(t *testing.T) {
 	ca := newTestCA(t)
 	serverCert := newTestServerCert(t, ca)
-	caPool := newTestCertPool(t, ca)
-
-	serverTLS, err := ServerTLSConfig(serverCert, caPool)
+	caPEM, err := ca.GetCACertificate()
 	require.NoError(t, err)
-	serverTLS.ServerName = "localhost"
+
+	serverTLS, err := cfgcert.CreateServerTLSConfig(
+		serverCert.CertificatePEM, serverCert.PrivateKeyPEM, caPEM, tls.VersionTLS13,
+	)
+	require.NoError(t, err)
+	serverTLS.NextProtos = []string{ALPNProtocol}
 
 	// Client config without a certificate — only the root CA, no client cert.
-	clientTLS := &tls.Config{
-		RootCAs:    caPool,
-		ServerName: "localhost",
-		MinVersion: tls.VersionTLS13,
-		NextProtos: []string{ALPNProtocol},
-	}
+	clientTLS, err := cfgcert.CreateClientTLSConfig(nil, nil, caPEM, "localhost", tls.VersionTLS13)
+	require.NoError(t, err)
+	clientTLS.NextProtos = []string{ALPNProtocol}
 
 	lis, err := Listen("127.0.0.1:0", serverTLS, nil)
 	require.NoError(t, err)
@@ -385,11 +297,14 @@ func TestGRPCOverQUIC_mTLS_WrongCA(t *testing.T) {
 	// Server trusts CA-A only.
 	caA := newTestCA(t)
 	serverCert := newTestServerCert(t, caA)
-	caAPool := newTestCertPool(t, caA)
-
-	serverTLS, err := ServerTLSConfig(serverCert, caAPool)
+	caAPEM, err := caA.GetCACertificate()
 	require.NoError(t, err)
-	serverTLS.ServerName = "localhost"
+
+	serverTLS, err := cfgcert.CreateServerTLSConfig(
+		serverCert.CertificatePEM, serverCert.PrivateKeyPEM, caAPEM, tls.VersionTLS13,
+	)
+	require.NoError(t, err)
+	serverTLS.NextProtos = []string{ALPNProtocol}
 
 	// Client uses a certificate signed by CA-B (which the server does not trust).
 	caB := newTestCA(t)
@@ -397,9 +312,11 @@ func TestGRPCOverQUIC_mTLS_WrongCA(t *testing.T) {
 
 	// The client trusts CA-A to verify the server cert (so the client-side
 	// handshake succeeds), but the client presents a cert from CA-B.
-	clientTLS, err := ClientTLSConfig(clientCert, caAPool)
+	clientTLS, err := cfgcert.CreateClientTLSConfig(
+		clientCert.CertificatePEM, clientCert.PrivateKeyPEM, caAPEM, "localhost", tls.VersionTLS13,
+	)
 	require.NoError(t, err)
-	clientTLS.ServerName = "localhost"
+	clientTLS.NextProtos = []string{ALPNProtocol}
 
 	lis, err := Listen("127.0.0.1:0", serverTLS, nil)
 	require.NoError(t, err)

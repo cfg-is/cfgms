@@ -5,60 +5,14 @@ package quic
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 )
 
 // ALPNProtocol is the ALPN protocol identifier for gRPC-over-QUIC in CFGMS.
 // Both sides must agree on this value for the TLS handshake to succeed.
-// Use this constant when configuring TLS NextProtos outside of the
-// ServerTLSConfig/ClientTLSConfig helpers.
+// Build *tls.Config using pkg/cert.CreateServerTLSConfig / CreateClientTLSConfig,
+// then set NextProtos = []string{ALPNProtocol} on the result.
 const ALPNProtocol = "cfgms-grpc"
-
-// ServerTLSConfig returns a *tls.Config suitable for the QUIC listener (controller side).
-//
-// The config enforces:
-//   - TLS 1.3 minimum (required by QUIC)
-//   - mTLS: RequireAndVerifyClientCert so every steward must present a valid cert
-//   - ALPN "cfgms-grpc" to distinguish this protocol on the same port
-//
-// The caller provides the server certificate and the CA pool used to verify
-// incoming client certificates. Both arguments are required.
-func ServerTLSConfig(serverCert tls.Certificate, clientCAs *x509.CertPool) (*tls.Config, error) {
-	if clientCAs == nil {
-		return nil, fmt.Errorf("clientCAs must not be nil: mTLS requires a CA pool to verify client certificates")
-	}
-
-	return &tls.Config{
-		Certificates: []tls.Certificate{serverCert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    clientCAs,
-		MinVersion:   tls.VersionTLS13,
-		NextProtos:   []string{ALPNProtocol},
-	}, nil
-}
-
-// ClientTLSConfig returns a *tls.Config suitable for the QUIC dialer (steward side).
-//
-// The config enforces:
-//   - TLS 1.3 minimum
-//   - Client certificate for mTLS so the controller can verify steward identity
-//   - ALPN "cfgms-grpc" (must match the server config)
-//
-// The caller provides the client certificate and the root CA pool used to
-// verify the server certificate. Both arguments are required.
-func ClientTLSConfig(clientCert tls.Certificate, rootCAs *x509.CertPool) (*tls.Config, error) {
-	if rootCAs == nil {
-		return nil, fmt.Errorf("rootCAs must not be nil: client must verify the server certificate")
-	}
-
-	return &tls.Config{
-		Certificates: []tls.Certificate{clientCert},
-		RootCAs:      rootCAs,
-		MinVersion:   tls.VersionTLS13,
-		NextProtos:   []string{ALPNProtocol},
-	}, nil
-}
 
 // PeerStewardID extracts the steward ID from a TLS connection's peer certificate.
 //

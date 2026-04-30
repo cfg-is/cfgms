@@ -40,6 +40,12 @@
 // with NextProtos set to a common value on both ends. gRPC should be configured
 // with insecure credentials since security is provided by the QUIC transport.
 //
+// Use pkg/cert.CreateServerTLSConfig and pkg/cert.CreateClientTLSConfig to
+// build the *tls.Config for each side. The only QUIC-specific requirement is
+// that NextProtos must include ALPNProtocol on both client and server:
+//
+//	tlsConfig.NextProtos = []string{quic.ALPNProtocol}
+//
 // Listen() enforces QUIC address validation (Retry) on every inbound connection
 // as an anti-amplification measure. Connections from unverified source addresses
 // are rejected via GetConfigForClient, causing quic-go to refuse the initial
