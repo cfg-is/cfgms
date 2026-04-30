@@ -252,7 +252,9 @@ func (e *TestEnv) Start() {
 		e.StewardCfg.ControllerAddr = e.dockerControllerAddr
 	} else {
 		// Start the in-process controller
-		_ = e.Controller.Start(e.ctx)
+		if err := e.Controller.Start(e.ctx); err != nil {
+			e.T.Fatalf("Failed to start controller: %v", err)
+		}
 
 		// Get actual controller addresses
 		controllerAddr := e.Controller.GetListenAddr()
@@ -262,11 +264,14 @@ func (e *TestEnv) Start() {
 		quicAddr = "localhost:4433"
 	}
 
-	// Create transport client for steward — uses gRPC-over-QUIC transport address
+	// Create transport client for steward — uses gRPC-over-QUIC transport address.
+	// Pass the CertManager from the test environment so on-demand cert loading is
+	// exercised in integration tests (Issue #920).
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
 		ControllerURL:     quicAddr,
 		RegistrationToken: e.registrationToken,
 		TLSCertPath:       e.StewardCfg.CertPath,
+		CertManager:       e.CertManager,
 		Logger:            e.Logger,
 	})
 	if err != nil {

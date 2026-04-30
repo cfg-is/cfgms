@@ -56,3 +56,52 @@ When no `Verifier` is configured (e.g. in development or testing), signature ver
 - `pkg/controlplane/types/messages.go` — `SignedCommand` and `CommandSigningBytes` definitions
 - `features/steward/commands/handler.go` — verification implementation
 - `features/steward/commands/replay_cache.go` — bounded TTL deduplication cache
+
+---
+
+# Offline Queue Encryption
+
+Implemented in Story #920. The offline event queue file is encrypted at rest with AES-256-GCM.
+
+## Encryption Scheme
+
+- **Algorithm**: AES-256-GCM (AEAD — provides both confidentiality and authenticity)
+- **File**: `offline_queue.enc` (replaces legacy `offline_queue.json`)
+- **On-disk format**: `[12-byte random nonce][ciphertext + 16-byte GCM authentication tag]`
+- **Key source**: `pkg/secrets` slot `steward/offline-queue-key` (32 random bytes)
+- **Key generation**: If the slot is absent, 32 random bytes are generated via `crypto/rand` and persisted to the SecretStore on first run
+- **Authentication**: GCM's 128-bit authentication tag covers the entire ciphertext — tampering causes load failure with a clear authentication error
+
+## Key Management
+
+The encryption key is stored in the steward's SecretStore (OS-native encryption via the `steward` provider: DPAPI on Windows, AES-256-GCM on Linux/macOS). This provides defence-in-depth: the queue file is encrypted with a key that is itself encrypted by the OS.
+
+When no SecretStore is available (e.g., first boot), a per-session random key is generated. In this case the queue is not persisted across restarts (key is in-memory only).
+
+## Legacy File Handling
+
+On startup, any pre-920 plaintext `offline_queue.json` file found in the queue directory is deleted (cannot be decrypted). An `Info`-level log is emitted and the queue starts fresh.
+
+---
+
+# On-Demand Certificate Loading
+
+Implemented in Story #920. The steward's TLS client certificate is now loaded per-handshake rather than cached in memory at connection time.
+
+## Mechanism
+
+- `TransportConfig.CertManager` accepts a `*cert.Manager` at construction
+- When a `CertManager` is provided, `tls.Config.GetClientCertificate` is set to a closure that calls `certManager.GetClientCertificate(ctx)` on every TLS handshake
+- `cert.Manager.GetClientCertificate` reads the newest `CertificateTypeClient` entry from the certificate store and returns a `tls.Certificate` with both leaf and private key
+- If the renewer has rotated the certificate, the next handshake automatically uses the new cert — no restart required
+
+## Benefits
+
+- Certificate rotation is transparent to running stewards
+- The raw private key PEM (`clientKeyPEM`) is no longer cached in `TransportClient` memory — the key lives only in the cert store and in the transient `tls.Certificate` returned per handshake
+
+## References
+
+- `pkg/cert/manager.go` — `GetClientCertificate` implementation
+- `features/steward/client/client_transport.go` — `createTLSConfig` closure wiring
+- `cmd/steward/main.go` — `buildCertManagerAndSecretStore` initialisation

@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,7 +20,9 @@ import (
 	"github.com/cfgis/cfgms/features/steward/client"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/registration"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/version"
 	"github.com/spf13/cobra"
 
@@ -504,13 +507,18 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
 	}
 
+	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
+	// offline queue encryption (Issue #920).
+	certMgr, secretStore := buildCertManagerAndSecretStore(regResp.ClientCert, regResp.ClientKey, logger)
+
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
 		ControllerURL:               regResp.TransportAddress,
 		RegistrationToken:           token,
 		CACertPEM:                   regResp.CACert,
 		ClientCertPEM:               regResp.ClientCert,
-		ClientKeyPEM:                regResp.ClientKey,
 		ServerCertPEM:               regResp.ServerCert,
+		CertManager:                 certMgr,
+		SecretStore:                 secretStore,
 		SignedCommandReplayWindow:   commandReplayWindow,
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
 		Logger:                      logger,
@@ -540,4 +548,66 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 	logger.Info("Configuration executor initialized", "tenant_id", regResp.TenantID)
 
 	return transportClient, nil
+}
+
+// buildCertManagerAndSecretStore initialises a cert.Manager (holding the
+// steward's client certificate for on-demand TLS loading) and a SecretStore
+// (for offline queue encryption key persistence). Both are best-effort — a nil
+// return from either does not prevent the steward from connecting, it just
+// disables the respective feature.
+func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM string, logger logging.Logger) (*cert.Manager, secretsif.SecretStore) {
+	// ── SecretStore ──────────────────────────────────────────────────────────
+	var secretStore secretsif.SecretStore
+	secretsProvider, err := secretsif.GetSecretProvider("steward")
+	if err == nil {
+		if store, storeErr := secretsProvider.CreateSecretStore(map[string]interface{}{}); storeErr == nil {
+			secretStore = store
+		} else {
+			logger.Warn("Failed to create steward secret store; offline-queue key will not persist", "error", storeErr)
+		}
+	} else {
+		logger.Warn("Steward secrets provider unavailable; offline-queue key will not persist", "error", err)
+	}
+
+	// ── cert.Manager ─────────────────────────────────────────────────────────
+	if clientCertPEM == "" || clientKeyPEM == "" {
+		return nil, secretStore
+	}
+
+	certStorePath := filepath.Join(os.TempDir(), "cfgms-steward", "certs")
+	if dataDir := os.Getenv("CFGMS_DATA_DIR"); dataDir != "" {
+		certStorePath = filepath.Join(dataDir, "certs")
+	}
+
+	// Try to load an existing local CA (created on a previous run).
+	certMgr, mgrErr := cert.NewManager(&cert.ManagerConfig{
+		StoragePath:    certStorePath,
+		LoadExistingCA: true,
+	})
+	if mgrErr != nil {
+		// First run — create a local CA used only as a cert store.
+		certMgr, mgrErr = cert.NewManager(&cert.ManagerConfig{
+			StoragePath:    certStorePath,
+			LoadExistingCA: false,
+			CAConfig: &cert.CAConfig{
+				Organization: "CFGMS Steward",
+				Country:      "US",
+				ValidityDays: 3650,
+			},
+		})
+		if mgrErr != nil {
+			logger.Warn("Failed to create cert.Manager; on-demand TLS cert loading disabled", "error", mgrErr)
+			return nil, secretStore
+		}
+	}
+
+	// Import the client cert+key from the registration response.
+	if _, impErr := certMgr.ImportCertificate(
+		[]byte(clientCertPEM), []byte(clientKeyPEM), cert.CertificateTypeClient,
+	); impErr != nil {
+		logger.Warn("Failed to import client certificate into cert.Manager", "error", impErr)
+		return nil, secretStore
+	}
+
+	return certMgr, secretStore
 }
