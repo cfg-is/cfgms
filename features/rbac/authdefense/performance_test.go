@@ -39,8 +39,10 @@ func TestPerformance_Throughput(t *testing.T) {
 
 	t.Logf("Throughput: %d ops in %v (%.0f ns/op)", iterations, elapsed, float64(perOp.Nanoseconds()))
 
-	// Rate limiting check should be sub-microsecond
-	assert.Less(t, perOp, 10*time.Microsecond, "CheckRequest should be < 10us per operation")
+	// CI-runner-tolerant smoke check: macOS GHA runners measure ~10µs/op while
+	// Linux measures ~100ns/op. 50µs gives ~5x headroom on the slowest observed
+	// runner and still catches a 100x+ regression on Linux or 5x+ on macOS.
+	assert.Less(t, perOp, 50*time.Microsecond, "CheckRequest should be < 50us per operation")
 }
 
 func TestPerformance_Concurrent(t *testing.T) {
