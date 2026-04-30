@@ -3,6 +3,7 @@
 package grpc
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -180,6 +181,15 @@ func chunksToDNATransfer(chunks []*transportpb.DNAChunk) (*types.DNATransfer, er
 		}
 	}
 
+	// All chunks must carry the same TenantID to prevent cross-tenant data confusion.
+	firstTenantID := chunks[0].TenantId
+	for i, c := range chunks[1:] {
+		if c.TenantId != firstTenantID {
+			return nil, fmt.Errorf("chunk %d has tenant_id %q, expected %q: %w",
+				i+1, c.TenantId, firstTenantID, ErrTenantIDInconsistent)
+		}
+	}
+
 	var data []byte
 	for _, c := range chunks {
 		data = append(data, c.Data...)
@@ -209,7 +219,14 @@ func chunksToDNATransfer(chunks []*transportpb.DNAChunk) (*types.DNATransfer, er
 // =============================================================================
 
 // bulkTransferToChunks serialises bulk to JSON and splits into ≤64 KB chunks.
+//
+// A SHA-256 checksum of bulk.Data is computed and stored in bulk.Checksum before
+// marshalling so the receiver can verify integrity after reassembly.
 func bulkTransferToChunks(bulk *types.BulkTransfer) ([]*transportpb.BulkChunk, error) {
+	// Compute checksum over the payload before marshalling so it is preserved in JSON.
+	sum := sha256.Sum256(bulk.Data)
+	bulk.Checksum = fmt.Sprintf("sha256:%x", sum)
+
 	data, err := json.Marshal(bulk)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal BulkTransfer: %w", err)
@@ -297,5 +314,14 @@ func chunksToBulkTransfer(chunks []*transportpb.BulkChunk) (*types.BulkTransfer,
 	if err := json.Unmarshal(data, &bulk); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal BulkTransfer: %w", err)
 	}
+
+	if bulk.Checksum != "" {
+		sum := sha256.Sum256(bulk.Data)
+		expected := fmt.Sprintf("sha256:%x", sum)
+		if bulk.Checksum != expected {
+			return nil, fmt.Errorf("want %s, got %s: %w", expected, bulk.Checksum, ErrChecksumMismatch)
+		}
+	}
+
 	return &bulk, nil
 }
