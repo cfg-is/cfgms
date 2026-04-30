@@ -1,24 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// Package drift provides real-time configuration drift detection for DNA monitoring.
+// Package drift provides real-time DNA drift detection.
 //
-// The drift detection system monitors DNA state changes and identifies
-// unauthorized or unexpected configuration modifications within minutes of occurrence.
+// The public surface after the drift-trim (Issue #921):
 //
-// Key features:
-// - Real-time drift detection with 5-minute response time
-// - Severity categorization (critical, warning, info)
-// - Smart filtering to reduce false positives
-// - Custom drift detection rules and policies
-// - Machine learning-based anomaly detection
+//   - Detector / NewDetector — compare two DNA states, return DriftEvent slices
+//   - DriftEvent, AttributeChange, DNAComparison — event and change data types
+//   - DriftSeverity (SeverityCritical / SeverityWarning / SeverityInfo) — severity
+//   - DriftCategory, ChangeType, DriftImpact, DriftStatus — classification enums
+//   - DetectorStats — runtime statistics from the detector
 //
 // Basic usage:
 //
-//	detector := drift.NewDetector(config, logger)
-//	events := detector.DetectDrift(previousDNA, currentDNA)
-//	for _, event := range events {
-//		log.Printf("Drift detected: %s", event.Description)
-//	}
+//	detector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
+//	events, err := detector.DetectDrift(ctx, previousDNA, currentDNA)
+//
+// The monitor, event-publisher, rule-engine, and filter subsystems had zero
+// external callers and were retired in this PR to reduce maintenance surface.
 package drift
 
 import (
@@ -39,94 +37,10 @@ type Detector interface {
 	// DetectDriftBatch processes multiple DNA comparisons efficiently
 	DetectDriftBatch(ctx context.Context, comparisons []*DNAComparison) ([]*DriftEvent, error)
 
-	// ValidateRules validates drift detection rules configuration
-	ValidateRules(rules []*DriftRule) error
-
-	// UpdateRules updates the active drift detection rules
-	UpdateRules(rules []*DriftRule) error
-
 	// GetStats returns drift detection statistics
 	GetStats() *DetectorStats
 
 	// Close releases detector resources
-	Close() error
-}
-
-// Monitor defines the interface for continuous drift monitoring.
-//
-// Monitors run background processes to continuously scan for drift
-// across all managed devices with configurable intervals.
-type Monitor interface {
-	// Start begins continuous drift monitoring
-	Start(ctx context.Context) error
-
-	// Stop halts drift monitoring
-	Stop() error
-
-	// SetInterval updates the monitoring scan interval
-	SetInterval(interval time.Duration)
-
-	// GetMonitoredDevices returns list of devices being monitored
-	GetMonitoredDevices() []string
-
-	// AddDevice adds a device to drift monitoring
-	AddDevice(deviceID string) error
-
-	// RemoveDevice removes a device from drift monitoring
-	RemoveDevice(deviceID string) error
-
-	// GetMonitorStats returns monitoring statistics
-	GetMonitorStats() *MonitorStats
-}
-
-// RuleEngine defines the interface for custom drift detection rules.
-//
-// Rule engines allow defining custom policies for what constitutes
-// drift based on attribute types, values, and change patterns.
-type RuleEngine interface {
-	// EvaluateRules evaluates all active rules against a drift event
-	EvaluateRules(ctx context.Context, event *DriftEvent) (*RuleResult, error)
-
-	// AddRule adds a new drift detection rule
-	AddRule(rule *DriftRule) error
-
-	// RemoveRule removes a drift detection rule
-	RemoveRule(ruleID string) error
-
-	// GetRules returns all active rules
-	GetRules() []*DriftRule
-
-	// ValidateRules validates drift detection rules configuration
-	ValidateRules(rules []*DriftRule) error
-
-	// TestRule tests a rule against sample data
-	TestRule(rule *DriftRule, testData *DNAComparison) (*RuleResult, error)
-
-	// Close releases rule engine resources
-	Close() error
-}
-
-// Filter defines the interface for drift event filtering.
-//
-// Filters reduce false positives by analyzing change patterns,
-// system context, and expected variations in DNA attributes.
-type Filter interface {
-	// FilterEvents filters out false positive drift events
-	FilterEvents(ctx context.Context, events []*DriftEvent) ([]*DriftEvent, error)
-
-	// IsExpectedChange determines if a change is expected/normal
-	IsExpectedChange(change *AttributeChange) (bool, string)
-
-	// AddWhitelist adds an attribute pattern to the whitelist
-	AddWhitelist(pattern *WhitelistPattern) error
-
-	// RemoveWhitelist removes a whitelist pattern
-	RemoveWhitelist(patternID string) error
-
-	// GetFilterStats returns filtering statistics
-	GetFilterStats() *FilterStats
-
-	// Close releases filter resources
 	Close() error
 }
 
@@ -185,64 +99,6 @@ type DNAComparison struct {
 	ComparedAt time.Time     `json:"compared_at"`
 }
 
-// DriftRule defines a custom drift detection rule.
-type DriftRule struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Enabled     bool   `json:"enabled"`
-
-	// Rule conditions
-	Conditions []*RuleCondition `json:"conditions"`
-	Operator   RuleOperator     `json:"operator"` // "AND", "OR"
-
-	// Rule actions
-	Severity DriftSeverity `json:"severity"`
-	Category DriftCategory `json:"category"`
-	Actions  []RuleAction  `json:"actions"`
-
-	// Rule metadata
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	CreatedBy string    `json:"created_by"`
-	Priority  int       `json:"priority"` // 1-10, higher = more important
-
-	// Rule statistics
-	TriggeredCount int64      `json:"triggered_count"`
-	LastTriggered  *time.Time `json:"last_triggered,omitempty"`
-}
-
-// RuleCondition defines a condition for drift rule evaluation.
-type RuleCondition struct {
-	Type      ConditionType `json:"type"`
-	Attribute string        `json:"attribute,omitempty"`
-	Operator  string        `json:"operator"` // "equals", "contains", "regex", "changed", "threshold"
-	Value     string        `json:"value,omitempty"`
-	Threshold float64       `json:"threshold,omitempty"`
-	Pattern   string        `json:"pattern,omitempty"`
-}
-
-// WhitelistPattern defines a pattern for expected changes.
-type WhitelistPattern struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	Attribute  string     `json:"attribute"`
-	Pattern    string     `json:"pattern"` // Regex pattern for expected values
-	Reason     string     `json:"reason"`  // Why this change is expected
-	ValidUntil *time.Time `json:"valid_until,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-}
-
-// RuleResult represents the result of rule evaluation.
-type RuleResult struct {
-	RuleID      string       `json:"rule_id"`
-	Matched     bool         `json:"matched"`
-	Confidence  float64      `json:"confidence"`
-	Actions     []RuleAction `json:"actions"`
-	Message     string       `json:"message"`
-	EvaluatedAt time.Time    `json:"evaluated_at"`
-}
-
 // DetectorStats provides statistics about drift detection.
 type DetectorStats struct {
 	TotalComparisons     int64            `json:"total_comparisons"`
@@ -255,30 +111,6 @@ type DetectorStats struct {
 	RulesTriggered       map[string]int64 `json:"rules_triggered"`
 	LastDetection        *time.Time       `json:"last_detection,omitempty"`
 }
-
-// MonitorStats provides statistics about drift monitoring.
-type MonitorStats struct {
-	MonitoredDevices    int           `json:"monitored_devices"`
-	ScanInterval        time.Duration `json:"scan_interval"`
-	LastScanTime        time.Time     `json:"last_scan_time"`
-	ScansCompleted      int64         `json:"scans_completed"`
-	AverageScanDuration time.Duration `json:"avg_scan_duration"`
-	DevicesWithDrift    int           `json:"devices_with_drift"`
-	PendingScans        int           `json:"pending_scans"`
-	MonitoringStatus    MonitorStatus `json:"monitoring_status"`
-}
-
-// FilterStats provides statistics about drift event filtering.
-type FilterStats struct {
-	EventsProcessed     int64         `json:"events_processed"`
-	EventsFiltered      int64         `json:"events_filtered"`
-	FilteringRate       float64       `json:"filtering_rate"`
-	WhitelistMatches    int64         `json:"whitelist_matches"`
-	FalsePositivesSaved int64         `json:"false_positives_saved"`
-	AverageFilterTime   time.Duration `json:"avg_filter_time"`
-}
-
-// Enum types
 
 // DriftSeverity defines the severity levels for drift events.
 type DriftSeverity string
@@ -326,44 +158,4 @@ const (
 	StatusAcknowledged DriftStatus = "acknowledged" // Acknowledged by operator
 	StatusResolved     DriftStatus = "resolved"     // Issue resolved
 	StatusIgnored      DriftStatus = "ignored"      // Marked as expected/ignored
-)
-
-// RuleOperator defines logical operators for rule conditions.
-type RuleOperator string
-
-const (
-	OperatorAND RuleOperator = "AND"
-	OperatorOR  RuleOperator = "OR"
-)
-
-// ConditionType defines types of rule conditions.
-type ConditionType string
-
-const (
-	ConditionAttributeMatch  ConditionType = "attribute_match"  // Match specific attribute value
-	ConditionAttributeChange ConditionType = "attribute_change" // Attribute changed
-	ConditionThreshold       ConditionType = "threshold"        // Numeric threshold exceeded
-	ConditionPattern         ConditionType = "pattern"          // Pattern matching
-	ConditionFrequency       ConditionType = "frequency"        // Change frequency
-)
-
-// RuleAction defines actions to take when rules are triggered.
-type RuleAction string
-
-const (
-	ActionAlert    RuleAction = "alert"    // Generate alert
-	ActionEmail    RuleAction = "email"    // Send email notification
-	ActionWebhook  RuleAction = "webhook"  // Call webhook
-	ActionBlock    RuleAction = "block"    // Block the change if possible
-	ActionLog      RuleAction = "log"      // Log to audit trail
-	ActionEscalate RuleAction = "escalate" // Escalate to higher severity
-)
-
-// MonitorStatus defines the status of drift monitoring.
-type MonitorStatus string
-
-const (
-	MonitorStatusRunning MonitorStatus = "running"
-	MonitorStatusStopped MonitorStatus = "stopped"
-	MonitorStatusError   MonitorStatus = "error"
 )
