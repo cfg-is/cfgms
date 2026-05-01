@@ -487,6 +487,32 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		require.NotNil(t, resp)
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
+
+	t.Run("port_qualified_allowlist", func(t *testing.T) {
+		allowlist := []string{"trusted.example.com:8443"}
+		handler, err := NewWebSocketHandler(manager, logger, allowlist)
+		require.NoError(t, err)
+
+		server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
+		defer server.Close()
+
+		wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + queryParams
+
+		// Exact port match is accepted.
+		headers := http.Header{"Origin": {"http://trusted.example.com:8443"}}
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+		require.NoError(t, err, "port-qualified allowlist origin must be accepted")
+		if err := conn.Close(); err != nil {
+			t.Logf("Failed to close connection: %v", err)
+		}
+
+		// Same host without port is rejected — allowlist matching is port-sensitive.
+		headers = http.Header{"Origin": {"http://trusted.example.com"}}
+		_, resp, err := websocket.DefaultDialer.Dial(wsURL, headers)
+		require.Error(t, err, "allowlist host without port must be rejected when allowlist entry is port-qualified")
+		require.NotNil(t, resp)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
 }
 
 // TestGenerateSecureToken verifies the token is cryptographically random and properly encoded.
