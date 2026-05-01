@@ -16,6 +16,7 @@ import (
 	"time"
 
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+	"github.com/cfgis/cfgms/pkg/storage/providers/internal/keysafe"
 )
 
 // FlatFileConfigStore implements cfgconfig.ConfigStore using the local filesystem.
@@ -74,29 +75,45 @@ func configFileName(key *cfgconfig.ConfigKey, format cfgconfig.ConfigFormat) str
 	return name + "." + configExt(format)
 }
 
-// configDir returns the directory for a tenant's configs in the given namespace.
-func (s *FlatFileConfigStore) configDir(tenantID, namespace string) (string, error) {
-	return safeJoin(s.root, tenantID, "configs", namespace)
+// validateConfigKey checks all user-controlled fields of a ConfigKey for path-safety.
+// Must be called at the top of every public method that accepts a *ConfigKey before
+// any filesystem operation is performed.
+func (s *FlatFileConfigStore) validateConfigKey(key *cfgconfig.ConfigKey) error {
+	if key == nil {
+		return fmt.Errorf("config key must not be nil")
+	}
+	if err := keysafe.ValidateTenantID(key.TenantID); err != nil {
+		return err
+	}
+	if err := keysafe.ValidateLeafField("namespace", key.Namespace); err != nil {
+		return err
+	}
+	if err := keysafe.ValidateLeafField("name", key.Name); err != nil {
+		return err
+	}
+	if key.Scope != "" {
+		if err := keysafe.ValidateLeafField("scope", key.Scope); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // configPath returns the filesystem path for a config entry with the given format.
+// The entire path including the leaf filename is validated by safeJoin.
 func (s *FlatFileConfigStore) configPath(key *cfgconfig.ConfigKey, format cfgconfig.ConfigFormat) (string, error) {
-	dir, err := s.configDir(key.TenantID, key.Namespace)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, configFileName(key, format)), nil
+	return safeJoin(s.root, key.TenantID, "configs", key.Namespace, configFileName(key, format))
 }
 
 // findConfigFile locates the file for a config key, trying .yaml then .json.
-// Returns ErrConfigNotFound if neither exists.
+// Returns ErrConfigNotFound if neither exists. Path validation errors are
+// returned directly so rejections are not hidden as missing-config errors.
 func (s *FlatFileConfigStore) findConfigFile(key *cfgconfig.ConfigKey) (string, error) {
 	for _, format := range []cfgconfig.ConfigFormat{cfgconfig.ConfigFormatYAML, cfgconfig.ConfigFormatJSON} {
-		dir, err := s.configDir(key.TenantID, key.Namespace)
+		path, err := safeJoin(s.root, key.TenantID, "configs", key.Namespace, configFileName(key, format))
 		if err != nil {
-			continue
+			return "", fmt.Errorf("invalid path components: %w", err)
 		}
-		path := filepath.Join(dir, configFileName(key, format))
 		if _, err := os.Stat(path); err == nil {
 			return path, nil
 		}
@@ -156,7 +173,7 @@ func (s *FlatFileConfigStore) readConfigFile(key *cfgconfig.ConfigKey) (*cfgconf
 		return nil, cfgconfig.ErrConfigNotFound
 	}
 
-	// #nosec G304 — path is validated by safeJoin inside findConfigFile
+	// #nosec G304 — path is validated by validateConfigKey at every public entry point and safeJoin inside findConfigFile
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -183,6 +200,9 @@ func (s *FlatFileConfigStore) StoreConfig(ctx context.Context, config *cfgconfig
 	}
 	if config.Key.Name == "" {
 		return cfgconfig.ErrNameRequired
+	}
+	if err := s.validateConfigKey(config.Key); err != nil {
+		return fmt.Errorf("invalid config key: %w", err)
 	}
 
 	s.mutex.Lock()
@@ -237,6 +257,9 @@ func (s *FlatFileConfigStore) StoreConfig(ctx context.Context, config *cfgconfig
 
 // GetConfig retrieves a configuration entry by key.
 func (s *FlatFileConfigStore) GetConfig(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
+	if err := s.validateConfigKey(key); err != nil {
+		return nil, fmt.Errorf("invalid config key: %w", err)
+	}
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	return s.readConfigFile(key)
@@ -244,6 +267,9 @@ func (s *FlatFileConfigStore) GetConfig(ctx context.Context, key *cfgconfig.Conf
 
 // DeleteConfig removes a configuration entry.
 func (s *FlatFileConfigStore) DeleteConfig(ctx context.Context, key *cfgconfig.ConfigKey) error {
+	if err := s.validateConfigKey(key); err != nil {
+		return fmt.Errorf("invalid config key: %w", err)
+	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -263,6 +289,23 @@ func (s *FlatFileConfigStore) DeleteConfig(ctx context.Context, key *cfgconfig.C
 
 // ListConfigs returns all configuration entries matching the filter.
 func (s *FlatFileConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
+	if filter != nil {
+		if filter.TenantID != "" {
+			if err := keysafe.ValidateTenantID(filter.TenantID); err != nil {
+				return nil, fmt.Errorf("invalid filter tenant ID: %w", err)
+			}
+		}
+		if filter.Namespace != "" {
+			if err := keysafe.ValidateLeafField("namespace", filter.Namespace); err != nil {
+				return nil, fmt.Errorf("invalid filter namespace: %w", err)
+			}
+		}
+		for _, name := range filter.Names {
+			if err := keysafe.ValidateLeafField("name", name); err != nil {
+				return nil, fmt.Errorf("invalid filter name: %w", err)
+			}
+		}
+	}
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -434,6 +477,9 @@ func paginateConfigs(results []*cfgconfig.ConfigEntry, filter *cfgconfig.ConfigF
 // The flat-file provider does not retain historical versions; only the
 // current state is stored. Use git-sync if you need PR-based change history.
 func (s *FlatFileConfigStore) GetConfigHistory(ctx context.Context, key *cfgconfig.ConfigKey, limit int) ([]*cfgconfig.ConfigEntry, error) {
+	if err := s.validateConfigKey(key); err != nil {
+		return nil, fmt.Errorf("invalid config key: %w", err)
+	}
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -447,6 +493,9 @@ func (s *FlatFileConfigStore) GetConfigHistory(ctx context.Context, key *cfgconf
 // GetConfigVersion returns the current entry if its version matches; otherwise ErrConfigNotFound.
 // The flat-file provider does not retain historical versions.
 func (s *FlatFileConfigStore) GetConfigVersion(ctx context.Context, key *cfgconfig.ConfigKey, version int64) (*cfgconfig.ConfigEntry, error) {
+	if err := s.validateConfigKey(key); err != nil {
+		return nil, fmt.Errorf("invalid config key: %w", err)
+	}
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -491,6 +540,9 @@ func (s *FlatFileConfigStore) DeleteConfigBatch(ctx context.Context, keys []*cfg
 //  2. root/msp-a/configs/<namespace>/<name>
 //  3. root/configs/<namespace>/<name>
 func (s *FlatFileConfigStore) ResolveConfigWithInheritance(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
+	if err := s.validateConfigKey(key); err != nil {
+		return nil, fmt.Errorf("invalid config key: %w", err)
+	}
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -503,6 +555,10 @@ func (s *FlatFileConfigStore) ResolveConfigWithInheritance(ctx context.Context, 
 			Namespace: key.Namespace,
 			Name:      key.Name,
 			Scope:     key.Scope,
+		}
+		// Defense in depth: re-validate each synthesized key before filesystem access.
+		if err := s.validateConfigKey(searchKey); err != nil {
+			return nil, fmt.Errorf("invalid synthesized key at tenant %q: %w", tenantID, err)
 		}
 		entry, err := s.readConfigFile(searchKey)
 		if err == nil {
@@ -522,6 +578,9 @@ func (s *FlatFileConfigStore) ValidateConfig(ctx context.Context, config *cfgcon
 	}
 	if config.Key.Name == "" {
 		return cfgconfig.ErrNameRequired
+	}
+	if err := s.validateConfigKey(config.Key); err != nil {
+		return fmt.Errorf("invalid config key: %w", err)
 	}
 	if config.Format != "" &&
 		config.Format != cfgconfig.ConfigFormatYAML &&

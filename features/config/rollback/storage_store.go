@@ -49,7 +49,7 @@ func (s *StorageRollbackStore) SaveOperation(ctx context.Context, operation *Rol
 	entry := &cfgconfig.ConfigEntry{
 		Key: &cfgconfig.ConfigKey{
 			TenantID:  "system", // System-level rollback operations
-			Namespace: "rollback/operations",
+			Namespace: "rollback-operations",
 			Name:      operation.ID,
 		},
 		Data:   yamlData,
@@ -80,7 +80,7 @@ func (s *StorageRollbackStore) SaveOperation(ctx context.Context, operation *Rol
 func (s *StorageRollbackStore) GetOperation(ctx context.Context, id string) (*RollbackOperation, error) {
 	key := &cfgconfig.ConfigKey{
 		TenantID:  "system",
-		Namespace: "rollback/operations",
+		Namespace: "rollback-operations",
 		Name:      id,
 	}
 
@@ -111,7 +111,7 @@ func (s *StorageRollbackStore) ListOperations(ctx context.Context, filters Rollb
 	// Build config filter from rollback filters
 	configFilter := &cfgconfig.ConfigFilter{
 		TenantID:  "system",
-		Namespace: "rollback/operations",
+		Namespace: "rollback-operations",
 		SortBy:    "created_at",
 		Order:     "desc",
 	}
@@ -213,7 +213,7 @@ func (s *StorageRollbackStore) UpdateOperation(ctx context.Context, operation *R
 	entry := &cfgconfig.ConfigEntry{
 		Key: &cfgconfig.ConfigKey{
 			TenantID:  "system",
-			Namespace: "rollback/operations",
+			Namespace: "rollback-operations",
 			Name:      operation.ID,
 		},
 		Data:   yamlData,

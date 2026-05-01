@@ -520,3 +520,193 @@ func TestCreatedAtPreservedOnUpdate(t *testing.T) {
 	// Version must have incremented
 	assert.Equal(t, int64(2), got2.Version)
 }
+
+// TestValidateConfigKey_RejectsMaliciousLeafFields verifies that malicious inputs in
+// Name, Scope, and Namespace are rejected as path traversal attempts.
+func TestValidateConfigKey_RejectsMaliciousLeafFields(t *testing.T) {
+	malicious := []string{
+		"../etc/passwd",
+		"foo/../bar",
+		"with\x00null",
+		"/abs",
+		`..\\windows`,
+		"C:foo",
+		".",
+		"foo.",
+		"foo ",
+		" foo",
+	}
+
+	store := newTestConfigStore(t)
+	ctx := context.Background()
+
+	for _, bad := range malicious {
+		bad := bad
+		t.Run("name="+bad, func(t *testing.T) {
+			err := store.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+				Key: &cfgconfig.ConfigKey{
+					TenantID:  "tenant1",
+					Namespace: "ns",
+					Name:      bad,
+				},
+				Data:   []byte(`x`),
+				Format: cfgconfig.ConfigFormatJSON,
+			})
+			assert.Error(t, err, "expected rejection of malicious Name %q", bad)
+		})
+
+		t.Run("namespace="+bad, func(t *testing.T) {
+			err := store.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+				Key: &cfgconfig.ConfigKey{
+					TenantID:  "tenant1",
+					Namespace: bad,
+					Name:      "cfg",
+				},
+				Data:   []byte(`x`),
+				Format: cfgconfig.ConfigFormatJSON,
+			})
+			assert.Error(t, err, "expected rejection of malicious Namespace %q", bad)
+		})
+
+		t.Run("scope="+bad, func(t *testing.T) {
+			err := store.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+				Key: &cfgconfig.ConfigKey{
+					TenantID:  "tenant1",
+					Namespace: "ns",
+					Name:      "cfg",
+					Scope:     bad,
+				},
+				Data:   []byte(`x`),
+				Format: cfgconfig.ConfigFormatJSON,
+			})
+			assert.Error(t, err, "expected rejection of malicious Scope %q", bad)
+		})
+	}
+}
+
+// TestValidateConfigKey_AcceptsHierarchicalTenantID verifies that the TenantID
+// validator allows internal "/" but rejects structural anomalies and ".." segments.
+func TestValidateConfigKey_AcceptsHierarchicalTenantID(t *testing.T) {
+	store := newTestConfigStore(t)
+	ctx := context.Background()
+
+	t.Run("accepts root/msp-a/client-1", func(t *testing.T) {
+		// Storing creates the key, which must be accepted.
+		entry := testEntry("root/msp-a/client-1", "ns", "cfg", []byte(`x`), cfgconfig.ConfigFormatJSON)
+		assert.NoError(t, store.StoreConfig(ctx, entry))
+	})
+
+	t.Run("rejects root//msp-a", func(t *testing.T) {
+		entry := testEntry("root//msp-a", "ns", "cfg", []byte(`x`), cfgconfig.ConfigFormatJSON)
+		assert.Error(t, store.StoreConfig(ctx, entry))
+	})
+
+	t.Run("rejects /root (leading slash)", func(t *testing.T) {
+		entry := testEntry("/root", "ns", "cfg", []byte(`x`), cfgconfig.ConfigFormatJSON)
+		assert.Error(t, store.StoreConfig(ctx, entry))
+	})
+
+	t.Run("rejects root/.. (dotdot segment)", func(t *testing.T) {
+		entry := testEntry("root/..", "ns", "cfg", []byte(`x`), cfgconfig.ConfigFormatJSON)
+		assert.Error(t, store.StoreConfig(ctx, entry))
+	})
+}
+
+// TestValidateConfigKey_AcceptsEmptyScope is a regression guard ensuring that
+// unscoped configs (Scope == "") are not rejected by the validator.
+func TestValidateConfigKey_AcceptsEmptyScope(t *testing.T) {
+	store := newTestConfigStore(t)
+	ctx := context.Background()
+
+	entry := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
+			TenantID:  "t1",
+			Namespace: "ns",
+			Name:      "cfg",
+			Scope:     "", // explicitly empty
+		},
+		Data:   []byte(`x`),
+		Format: cfgconfig.ConfigFormatJSON,
+	}
+	assert.NoError(t, store.StoreConfig(ctx, entry))
+}
+
+// TestFlatFileConfigStore_RejectsTraversalAtPublicMethods verifies that every
+// public method that accepts a ConfigKey rejects malicious Name values and does
+// not perform any filesystem operations outside the configured root.
+func TestFlatFileConfigStore_RejectsTraversalAtPublicMethods(t *testing.T) {
+	store := newTestConfigStore(t)
+	ctx := context.Background()
+
+	maliciousKey := &cfgconfig.ConfigKey{
+		TenantID:  "tenant1",
+		Namespace: "ns",
+		Name:      "../etc/passwd",
+	}
+
+	t.Run("StoreConfig", func(t *testing.T) {
+		err := store.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+			Key:    maliciousKey,
+			Data:   []byte(`bad`),
+			Format: cfgconfig.ConfigFormatJSON,
+		})
+		assert.Error(t, err)
+		assert.NotEqual(t, cfgconfig.ErrConfigNotFound, err)
+	})
+
+	t.Run("GetConfig", func(t *testing.T) {
+		_, err := store.GetConfig(ctx, maliciousKey)
+		assert.Error(t, err)
+		assert.NotEqual(t, cfgconfig.ErrConfigNotFound, err)
+	})
+
+	t.Run("DeleteConfig", func(t *testing.T) {
+		err := store.DeleteConfig(ctx, maliciousKey)
+		assert.Error(t, err)
+		assert.NotEqual(t, cfgconfig.ErrConfigNotFound, err)
+	})
+
+	t.Run("ListConfigs", func(t *testing.T) {
+		_, err := store.ListConfigs(ctx, &cfgconfig.ConfigFilter{
+			TenantID: "tenant1",
+			Names:    []string{"../etc/passwd"},
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("GetConfigHistory", func(t *testing.T) {
+		_, err := store.GetConfigHistory(ctx, maliciousKey, 10)
+		assert.Error(t, err)
+		assert.NotEqual(t, cfgconfig.ErrConfigNotFound, err)
+	})
+
+	t.Run("GetConfigVersion", func(t *testing.T) {
+		_, err := store.GetConfigVersion(ctx, maliciousKey, 1)
+		assert.Error(t, err)
+		assert.NotEqual(t, cfgconfig.ErrConfigNotFound, err)
+	})
+
+	t.Run("ResolveConfigWithInheritance", func(t *testing.T) {
+		_, err := store.ResolveConfigWithInheritance(ctx, maliciousKey)
+		assert.Error(t, err)
+		assert.NotEqual(t, cfgconfig.ErrConfigNotFound, err)
+	})
+}
+
+// TestFindConfigFile_ReturnsValidationErrorNotNotFound verifies that path traversal
+// attempts do not silently resolve to ErrConfigNotFound but return a validation error.
+func TestFindConfigFile_ReturnsValidationErrorNotNotFound(t *testing.T) {
+	store := newTestConfigStore(t)
+	ctx := context.Background()
+
+	// GetConfig exercises findConfigFile internally; with a malicious key the
+	// result must be a validation error, not ErrConfigNotFound.
+	_, err := store.GetConfig(ctx, &cfgconfig.ConfigKey{
+		TenantID:  "tenant1",
+		Namespace: "ns",
+		Name:      "../etc/passwd",
+	})
+	require.Error(t, err)
+	assert.NotEqual(t, cfgconfig.ErrConfigNotFound, err,
+		"path traversal must return a validation error, not ErrConfigNotFound")
+}
