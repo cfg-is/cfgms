@@ -5,10 +5,12 @@ package terminal
 import (
 	"context"
 	"encoding/base64"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -506,4 +509,341 @@ func TestGenerateSecureToken(t *testing.T) {
 
 	// Must not contain time or PID markers from the old format
 	assert.NotContains(t, token, "terminal_token_")
+}
+
+// kvLogEntry holds a single captured log message and its key-value arguments.
+type kvLogEntry struct {
+	msg string
+	kvs []interface{}
+}
+
+// kvCapturingLogger satisfies logging.Logger by embedding NoopLogger and recording
+// Info, Warn, and Error calls so tests can inspect what was logged.
+type kvCapturingLogger struct {
+	logging.NoopLogger
+	mu      sync.Mutex
+	entries []kvLogEntry
+}
+
+func (l *kvCapturingLogger) record(msg string, kvs []interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kvcopy := make([]interface{}, len(kvs))
+	copy(kvcopy, kvs)
+	l.entries = append(l.entries, kvLogEntry{msg: msg, kvs: kvcopy})
+}
+
+func (l *kvCapturingLogger) Info(msg string, kvs ...interface{})  { l.record(msg, kvs) }
+func (l *kvCapturingLogger) Warn(msg string, kvs ...interface{})  { l.record(msg, kvs) }
+func (l *kvCapturingLogger) Error(msg string, kvs ...interface{}) { l.record(msg, kvs) }
+
+func (l *kvCapturingLogger) allEntries() []kvLogEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]kvLogEntry, len(l.entries))
+	copy(out, l.entries)
+	return out
+}
+
+// sessionIDInEntry returns the "session_id" value from the first log entry whose
+// message exactly matches msg. Returns ("", false) when not found.
+func sessionIDInEntry(entries []kvLogEntry, msg string) (string, bool) {
+	for _, e := range entries {
+		if e.msg != msg {
+			continue
+		}
+		for i := 0; i+1 < len(e.kvs); i += 2 {
+			if k, ok := e.kvs[i].(string); ok && k == "session_id" {
+				if v, ok := e.kvs[i+1].(string); ok {
+					return v, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+// failConn wraps net.Conn to return an error on Write when failWrites is set.
+// Used to simulate a broken write path while leaving reads intact so that
+// readMessages stays blocked and writeMessages can attempt (and fail) a ping.
+type failConn struct {
+	net.Conn
+	mu         sync.Mutex
+	failWrites bool
+}
+
+func (c *failConn) setFailWrites(v bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failWrites = v
+}
+
+func (c *failConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	fail := c.failWrites
+	c.mu.Unlock()
+	if fail {
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Write(b)
+}
+
+// failListener wraps net.Listener and returns failConn wrappers so tests can
+// inject write failures on all accepted connections after the fact.
+type failListener struct {
+	net.Listener
+	mu    sync.Mutex
+	conns []*failConn
+}
+
+func (l *failListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	fc := &failConn{Conn: conn}
+	l.mu.Lock()
+	l.conns = append(l.conns, fc)
+	l.mu.Unlock()
+	return fc, nil
+}
+
+func (l *failListener) setAllFailWrites(v bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, c := range l.conns {
+		c.setFailWrites(v)
+	}
+}
+
+// TestWebSocketSessionIDRedaction_Established verifies that the Info log
+// "WebSocket terminal session established" passes session_id through RedactedID.
+func TestWebSocketSessionIDRedaction_Established(t *testing.T) {
+	capLogger := &kvCapturingLogger{}
+	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true}
+	manager, err := NewSessionManager(config, capLogger)
+	require.NoError(t, err)
+
+	handler, err := NewWebSocketHandler(manager, capLogger, nil)
+	require.NoError(t, err)
+
+	server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	headers := http.Header{"Origin": {server.URL}}
+	conn, _, err := websocket.DefaultDialer.Dial(
+		wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(),
+		headers,
+	)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	// Wait for session to be established and the log entry to be written.
+	time.Sleep(100 * time.Millisecond)
+
+	sessions := manager.GetActiveSessions()
+	require.Len(t, sessions, 1)
+	sessionID := sessions[0].ID
+
+	entries := capLogger.allEntries()
+	value, found := sessionIDInEntry(entries, "WebSocket terminal session established")
+	require.True(t, found, "expected 'WebSocket terminal session established' log entry with session_id")
+	assert.Equal(t, logging.RedactedID(sessionID), value, "session_id must be redacted in established log")
+	assert.NotEqual(t, sessionID, value, "raw session ID must not appear in log")
+	assert.True(t, strings.HasSuffix(value, "…"), "redacted ID must end with ellipsis")
+}
+
+// TestWebSocketSessionIDRedaction_Ended verifies that the Info log
+// "WebSocket terminal session ended" passes session_id through RedactedID.
+func TestWebSocketSessionIDRedaction_Ended(t *testing.T) {
+	capLogger := &kvCapturingLogger{}
+	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true}
+	manager, err := NewSessionManager(config, capLogger)
+	require.NoError(t, err)
+
+	handler, err := NewWebSocketHandler(manager, capLogger, nil)
+	require.NoError(t, err)
+
+	server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	headers := http.Header{"Origin": {server.URL}}
+	conn, _, err := websocket.DefaultDialer.Dial(
+		wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(),
+		headers,
+	)
+	require.NoError(t, err)
+
+	// Wait for session to establish, then capture the session ID.
+	time.Sleep(100 * time.Millisecond)
+	sessions := manager.GetActiveSessions()
+	require.Len(t, sessions, 1)
+	sessionID := sessions[0].ID
+
+	// Close the connection gracefully to trigger the session-ended log.
+	_ = conn.WriteMessage(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	_ = conn.Close()
+
+	// Wait for HandleWebSocket to log "session ended".
+	time.Sleep(200 * time.Millisecond)
+
+	entries := capLogger.allEntries()
+	value, found := sessionIDInEntry(entries, "WebSocket terminal session ended")
+	require.True(t, found, "expected 'WebSocket terminal session ended' log entry with session_id")
+	assert.Equal(t, logging.RedactedID(sessionID), value, "session_id must be redacted in ended log")
+	assert.NotEqual(t, sessionID, value, "raw session ID must not appear in log")
+	assert.True(t, strings.HasSuffix(value, "…"), "redacted ID must end with ellipsis")
+}
+
+// TestWebSocketSessionIDRedaction_ReadError verifies that the Warn log
+// "WebSocket read error" passes session_id through RedactedID.
+// A NormalClosure (1000) close frame is not in the server's expected-codes list
+// [GoingAway, AbnormalClosure], so IsUnexpectedCloseError returns true and the
+// Warn is emitted.
+func TestWebSocketSessionIDRedaction_ReadError(t *testing.T) {
+	capLogger := &kvCapturingLogger{}
+	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true}
+	manager, err := NewSessionManager(config, capLogger)
+	require.NoError(t, err)
+
+	handler, err := NewWebSocketHandler(manager, capLogger, nil)
+	require.NoError(t, err)
+
+	server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	headers := http.Header{"Origin": {server.URL}}
+	conn, _, err := websocket.DefaultDialer.Dial(
+		wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(),
+		headers,
+	)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	time.Sleep(100 * time.Millisecond)
+	sessions := manager.GetActiveSessions()
+	require.Len(t, sessions, 1)
+	sessionID := sessions[0].ID
+
+	// Send NormalClosure (1000) — not in server's expected-codes list → Warn logged.
+	_ = conn.WriteMessage(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+
+	time.Sleep(200 * time.Millisecond)
+
+	entries := capLogger.allEntries()
+	value, found := sessionIDInEntry(entries, "WebSocket read error")
+	require.True(t, found, "expected 'WebSocket read error' log entry with session_id")
+	assert.Equal(t, logging.RedactedID(sessionID), value, "session_id must be redacted in read-error log")
+	assert.NotEqual(t, sessionID, value, "raw session ID must not appear in log")
+	assert.True(t, strings.HasSuffix(value, "…"), "redacted ID must end with ellipsis")
+}
+
+// TestWebSocketSessionIDRedaction_HandleMessageError verifies that the Error log
+// "Failed to handle message" passes session_id through RedactedID.
+// A Resize message with invalid JSON triggers the error path.
+func TestWebSocketSessionIDRedaction_HandleMessageError(t *testing.T) {
+	capLogger := &kvCapturingLogger{}
+	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true}
+	manager, err := NewSessionManager(config, capLogger)
+	require.NoError(t, err)
+
+	handler, err := NewWebSocketHandler(manager, capLogger, nil)
+	require.NoError(t, err)
+
+	server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	headers := http.Header{"Origin": {server.URL}}
+	conn, _, err := websocket.DefaultDialer.Dial(
+		wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(),
+		headers,
+	)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	time.Sleep(100 * time.Millisecond)
+	sessions := manager.GetActiveSessions()
+	require.Len(t, sessions, 1)
+	sessionID := sessions[0].ID
+
+	// Send a Resize message with invalid JSON data to trigger handleMessage error.
+	badMsg := &TerminalMessage{
+		Type: MessageTypeResize,
+		Data: []byte("not-valid-json"),
+	}
+	err = conn.WriteJSON(badMsg)
+	require.NoError(t, err)
+
+	time.Sleep(200 * time.Millisecond)
+
+	entries := capLogger.allEntries()
+	value, found := sessionIDInEntry(entries, "Failed to handle message")
+	require.True(t, found, "expected 'Failed to handle message' log entry with session_id")
+	assert.Equal(t, logging.RedactedID(sessionID), value, "session_id must be redacted in handle-message-error log")
+	assert.NotEqual(t, sessionID, value, "raw session ID must not appear in log")
+	assert.True(t, strings.HasSuffix(value, "…"), "redacted ID must end with ellipsis")
+}
+
+// TestWebSocketSessionIDRedaction_PingFailure verifies that the Warn log
+// "Failed to send ping" passes session_id through RedactedID.
+// A failListener injects write failures on the server-side connection while
+// leaving reads unblocked, so readMessages keeps running and the ping ticker
+// can fire and fail.
+func TestWebSocketSessionIDRedaction_PingFailure(t *testing.T) {
+	capLogger := &kvCapturingLogger{}
+	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true}
+	manager, err := NewSessionManager(config, capLogger)
+	require.NoError(t, err)
+
+	handler, err := NewWebSocketHandler(manager, capLogger, nil)
+	require.NoError(t, err)
+	handler.pingInterval = 50 * time.Millisecond
+
+	rawLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	fl := &failListener{Listener: rawLn}
+
+	httpServer := &http.Server{
+		Handler: withTestTenant(http.HandlerFunc(handler.HandleWebSocket)),
+	}
+	go func() { _ = httpServer.Serve(fl) }()
+	defer func() { _ = httpServer.Close() }()
+
+	wsURL := "ws://" + rawLn.Addr().String()
+	headers := http.Header{"Origin": {"http://" + rawLn.Addr().String()}}
+	conn, _, err := websocket.DefaultDialer.Dial(
+		wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(),
+		headers,
+	)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	// Wait for the session to be established (first ping may already have succeeded).
+	time.Sleep(100 * time.Millisecond)
+	sessions := manager.GetActiveSessions()
+	require.Len(t, sessions, 1)
+	sessionID := sessions[0].ID
+
+	// Fail all server-side writes; the next ping tick (≤50 ms away) will fail.
+	fl.setAllFailWrites(true)
+
+	// Wait for at least two ping intervals so the failure is certain to have fired.
+	time.Sleep(150 * time.Millisecond)
+
+	entries := capLogger.allEntries()
+	value, found := sessionIDInEntry(entries, "Failed to send ping")
+	require.True(t, found, "expected 'Failed to send ping' log entry with session_id")
+	assert.Equal(t, logging.RedactedID(sessionID), value, "session_id must be redacted in ping-failure log")
+	assert.NotEqual(t, sessionID, value, "raw session ID must not appear in log")
+	assert.True(t, strings.HasSuffix(value, "…"), "redacted ID must end with ellipsis")
+
+	// Close the client to unblock readMessages so the goroutine can finish.
+	_ = conn.Close()
+	waitForSessionCleanup(t, manager, 0)
 }

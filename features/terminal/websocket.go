@@ -24,6 +24,7 @@ type DefaultWebSocketHandler struct {
 	sessionManager  SessionManager
 	logger          logging.Logger
 	originAllowlist []string
+	pingInterval    time.Duration
 }
 
 // NewWebSocketHandler creates a new WebSocket handler. originAllowlist contains
@@ -37,6 +38,7 @@ func NewWebSocketHandler(sessionManager SessionManager, logger logging.Logger, o
 		sessionManager:  sessionManager,
 		logger:          logger,
 		originAllowlist: originAllowlist,
+		pingInterval:    54 * time.Second,
 	}
 
 	handler.upgrader = websocket.Upgrader{
@@ -111,7 +113,7 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 	}
 
 	h.logger.Info("WebSocket terminal session established",
-		"session_id", session.ID,
+		"session_id", logging.RedactedID(session.ID),
 		"steward_id", session.StewardID,
 		"user_id", session.UserID,
 		"remote_addr", r.RemoteAddr)
@@ -125,7 +127,7 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 	}
 
 	h.logger.Info("WebSocket terminal session ended",
-		"session_id", session.ID,
+		"session_id", logging.RedactedID(session.ID),
 		"duration", time.Since(session.CreatedAt))
 }
 
@@ -240,13 +242,13 @@ func (h *DefaultWebSocketHandler) readMessages(ctx context.Context, conn *websoc
 			err := conn.ReadJSON(&msg)
 			if err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					h.logger.Warn("WebSocket read error", "session_id", session.ID, "error", err)
+					h.logger.Warn("WebSocket read error", "session_id", logging.RedactedID(session.ID), "error", err)
 				}
 				return
 			}
 
 			if err := h.handleMessage(ctx, &msg, session); err != nil {
-				h.logger.Error("Failed to handle message", "session_id", session.ID, "error", err)
+				h.logger.Error("Failed to handle message", "session_id", logging.RedactedID(session.ID), "error", err)
 				h.sendError(conn, fmt.Sprintf("Message handling error: %v", err))
 			}
 		}
@@ -255,7 +257,7 @@ func (h *DefaultWebSocketHandler) readMessages(ctx context.Context, conn *websoc
 
 // writeMessages writes messages to the WebSocket client
 func (h *DefaultWebSocketHandler) writeMessages(ctx context.Context, conn *websocket.Conn, session *Session, done chan struct{}) {
-	ticker := time.NewTicker(54 * time.Second) // Send ping every 54 seconds
+	ticker := time.NewTicker(h.pingInterval)
 	defer ticker.Stop()
 
 	for {
@@ -270,7 +272,7 @@ func (h *DefaultWebSocketHandler) writeMessages(ctx context.Context, conn *webso
 				_ = err // Explicitly ignore deadline errors for resilience
 			}
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				h.logger.Warn("Failed to send ping", "session_id", session.ID, "error", err)
+				h.logger.Warn("Failed to send ping", "session_id", logging.RedactedID(session.ID), "error", err)
 				return
 			}
 			// In a real implementation, this would include a channel for receiving
