@@ -149,9 +149,10 @@ func newRoundTripEnv(t *testing.T, stewardID string) *roundTripEnv {
 		grpc.Creds(quictransport.TransportCredentials()),
 		grpc.MaxRecvMsgSize(8*1024*1024),
 	)
+	queue := NewTenantQueue()
 	srv := &testTransportSrv{
-		dnaHandler:  NewDNAHandler(logging.NewNoopLogger()),
-		bulkHandler: NewBulkHandler(logging.NewNoopLogger()),
+		dnaHandler:  NewDNAHandler(logging.NewNoopLogger(), queue),
+		bulkHandler: NewBulkHandler(logging.NewNoopLogger(), queue),
 	}
 	transportpb.RegisterStewardTransportServer(grpcSrv, srv)
 	go func() { _ = grpcSrv.Serve(ql) }()
@@ -182,7 +183,7 @@ func newRoundTripEnv(t *testing.T, stewardID string) *roundTripEnv {
 // TestDNAHandler_MissingPeerCert verifies that a request with no mTLS peer
 // info in context is rejected with Unauthenticated.
 func TestDNAHandler_MissingPeerCert(t *testing.T) {
-	h := NewDNAHandler(logging.NewNoopLogger())
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue())
 	stream := newTestDNAStream(context.Background())
 
 	err := h.HandleGRPC(stream)
@@ -195,7 +196,7 @@ func TestDNAHandler_MissingPeerCert(t *testing.T) {
 // does not match the mTLS peer CN is rejected with PermissionDenied.
 func TestDNAHandler_StewardIDMismatch(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewDNAHandler(logging.NewNoopLogger())
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue())
 
 	ctx := peerContextWithCA(t, ca, "steward-alice")
 	stream := newTestDNAStream(ctx, &transportpb.DNAChunk{
@@ -221,7 +222,7 @@ func TestDNAHandler_StewardIDMismatch(t *testing.T) {
 // passes validation and the handler sends an accepted response.
 func TestDNAHandler_MatchingStewardIDAccepted(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewDNAHandler(logging.NewNoopLogger())
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue())
 
 	ctx := peerContextWithCA(t, ca, "steward-match")
 	stream := newTestDNAStream(ctx,
@@ -241,7 +242,7 @@ func TestDNAHandler_MatchingStewardIDAccepted(t *testing.T) {
 // accepted and returns a valid response.
 func TestDNAHandler_EmptyStream(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewDNAHandler(logging.NewNoopLogger())
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue())
 
 	ctx := peerContextWithCA(t, ca, "steward-empty")
 	stream := newTestDNAStream(ctx) // zero chunks
@@ -257,7 +258,7 @@ func TestDNAHandler_EmptyStream(t *testing.T) {
 // HandleGRPC to return a wrapped error with the expected message.
 func TestDNAHandler_RecvError(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewDNAHandler(logging.NewNoopLogger())
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue())
 
 	ctx := peerContextWithCA(t, ca, "steward-recv-err")
 	injectedErr := errors.New("simulated network failure")
@@ -268,6 +269,28 @@ func TestDNAHandler_RecvError(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, injectedErr), "error must wrap the injected recv error")
 	assert.Contains(t, err.Error(), "failed to receive DNA chunk")
+}
+
+// TestDNAHandler_QueueFull_ReturnsResourceExhausted verifies that when a
+// tenant's queue is at capacity the handler returns codes.ResourceExhausted.
+func TestDNAHandler_QueueFull_ReturnsResourceExhausted(t *testing.T) {
+	ca := newTestCA(t)
+	queue := NewTenantQueue()
+	h := NewDNAHandler(logging.NewNoopLogger(), queue)
+
+	for i := 0; i < MaxConcurrentPerTenant; i++ {
+		require.NoError(t, queue.Acquire("tenant-full"))
+	}
+
+	ctx := peerContextWithCA(t, ca, "steward-full")
+	stream := newTestDNAStream(ctx, &transportpb.DNAChunk{
+		StewardId: "steward-full",
+		TenantId:  "tenant-full",
+	})
+
+	err := h.HandleGRPC(stream)
+	require.Error(t, err)
+	assert.Equal(t, codes.ResourceExhausted, status.Code(err))
 }
 
 // ---------------------------------------------------------------------------

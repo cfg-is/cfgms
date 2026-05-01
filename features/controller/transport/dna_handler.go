@@ -20,11 +20,12 @@ import (
 // DNAHandler handles DNA sync RPCs from stewards.
 type DNAHandler struct {
 	logger logging.Logger
+	queue  *TenantQueue
 }
 
 // NewDNAHandler creates a new DNA sync handler.
-func NewDNAHandler(logger logging.Logger) *DNAHandler {
-	return &DNAHandler{logger: logger}
+func NewDNAHandler(logger logging.Logger, queue *TenantQueue) *DNAHandler {
+	return &DNAHandler{logger: logger, queue: queue}
 }
 
 // HandleGRPC processes a SyncDNA RPC on the shared gRPC-over-QUIC server.
@@ -33,6 +34,10 @@ func NewDNAHandler(logger logging.Logger) *DNAHandler {
 // against the steward_id field on the first DNA chunk to close the
 // steward-impersonation gap. A mismatch returns codes.PermissionDenied with
 // the message "steward ID mismatch" — consistent with ConfigHandler.
+//
+// Per-tenant back-pressure: after steward ID validation on the first chunk,
+// Acquire is called with the chunk's tenant_id. If the tenant's queue is full
+// (MaxConcurrentPerTenant in-flight), the RPC is rejected with ResourceExhausted.
 func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DNAChunk, transportpb.DNASyncResponse]) error {
 	ctx := stream.Context()
 
@@ -49,21 +54,36 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 		return status.Error(codes.Unauthenticated, "mTLS certificate required")
 	}
 
-	var chunkCount int
+	// Receive the first chunk to validate steward identity and acquire the
+	// per-tenant queue slot before draining the rest of the stream.
+	firstChunk, err := stream.Recv()
+	if err == io.EOF {
+		// Empty stream is accepted without consuming a queue slot.
+		h.logger.Info("DNA sync received", "chunks", 0, "peer_id", peerID)
+		return stream.SendAndClose(&transportpb.DNASyncResponse{Accepted: true, Message: "accepted"})
+	}
+	if err != nil {
+		return fmt.Errorf("failed to receive DNA chunk: %w", err)
+	}
+
+	if firstChunk.GetStewardId() != peerID {
+		return status.Error(codes.PermissionDenied, "steward ID mismatch")
+	}
+
+	tenantID := firstChunk.GetTenantId()
+	if qErr := h.queue.Acquire(tenantID); qErr != nil {
+		return status.Error(codes.ResourceExhausted, "tenant queue full")
+	}
+	defer h.queue.Release(tenantID)
+
+	chunkCount := 1
 	for {
-		chunk, err := stream.Recv()
+		_, err := stream.Recv()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return fmt.Errorf("failed to receive DNA chunk: %w", err)
-		}
-
-		// Validate the steward ID in the first chunk against the mTLS peer CN.
-		if chunkCount == 0 {
-			if chunk.GetStewardId() != peerID {
-				return status.Error(codes.PermissionDenied, "steward ID mismatch")
-			}
 		}
 		chunkCount++
 	}

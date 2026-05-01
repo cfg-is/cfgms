@@ -853,8 +853,9 @@ func (s *Server) Start() error {
 			return fmt.Errorf("CP provider ServerHandler() returned nil")
 		}
 
-		dnaHandler := controllerTransport.NewDNAHandler(s.logger)
-		bulkHandler := controllerTransport.NewBulkHandler(s.logger)
+		tenantQueue := controllerTransport.NewTenantQueue()
+		dnaHandler := controllerTransport.NewDNAHandler(s.logger, tenantQueue)
+		bulkHandler := controllerTransport.NewBulkHandler(s.logger, tenantQueue)
 		composite := newCompositeTransportServer(cpHandler, dnaHandler, bulkHandler, s.configHandler, s.logger)
 		transportpb.RegisterStewardTransportServer(s.grpcServer, composite)
 

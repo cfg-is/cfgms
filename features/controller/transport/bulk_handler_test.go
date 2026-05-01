@@ -20,7 +20,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Mock bidi stream
+// Test bidi stream helper
 // ---------------------------------------------------------------------------
 
 type testBulkStream struct {
@@ -72,7 +72,7 @@ var _ grpc.BidiStreamingServer[transportpb.BulkChunk, transportpb.BulkChunk] = (
 // This test verifies the structural requirement at compile time by checking
 // that BulkHandler accepts any chunk without identity validation.
 func TestBulkHandler_NoIdentityValidation(t *testing.T) {
-	h := NewBulkHandler(logging.NewNoopLogger())
+	h := NewBulkHandler(logging.NewNoopLogger(), NewTenantQueue())
 
 	// context.Background() carries no peer info — if BulkHandler tried to
 	// extract an mTLS identity it would fail here.
@@ -87,7 +87,7 @@ func TestBulkHandler_NoIdentityValidation(t *testing.T) {
 // TestBulkHandler_EmptyStream verifies that an empty stream (no chunks) is
 // accepted without error.
 func TestBulkHandler_EmptyStream(t *testing.T) {
-	h := NewBulkHandler(logging.NewNoopLogger())
+	h := NewBulkHandler(logging.NewNoopLogger(), NewTenantQueue())
 	stream := newTestBulkStream(context.Background())
 
 	err := h.HandleGRPC(stream)
@@ -97,7 +97,7 @@ func TestBulkHandler_EmptyStream(t *testing.T) {
 // TestBulkHandler_MultipleChunks verifies that multiple chunks are received
 // without error.
 func TestBulkHandler_MultipleChunks(t *testing.T) {
-	h := NewBulkHandler(logging.NewNoopLogger())
+	h := NewBulkHandler(logging.NewNoopLogger(), NewTenantQueue())
 
 	stream := newTestBulkStream(context.Background(),
 		&transportpb.BulkChunk{TransferId: "bulk-multi", Data: []byte("part1"), Offset: 0, TotalSize: 10},
@@ -111,7 +111,7 @@ func TestBulkHandler_MultipleChunks(t *testing.T) {
 // TestBulkHandler_RecvError verifies that a Recv() error (not EOF) causes
 // HandleGRPC to return a wrapped error with the expected message.
 func TestBulkHandler_RecvError(t *testing.T) {
-	h := NewBulkHandler(logging.NewNoopLogger())
+	h := NewBulkHandler(logging.NewNoopLogger(), NewTenantQueue())
 
 	injectedErr := errors.New("simulated network failure")
 	stream := &testBulkStream{ctx: context.Background(), recvErr: injectedErr}
@@ -121,6 +121,26 @@ func TestBulkHandler_RecvError(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, injectedErr), "error must wrap the injected recv error")
 	assert.Contains(t, err.Error(), "failed to receive bulk chunk")
+}
+
+// TestBulkHandler_QueueFull_ReturnsResourceExhausted verifies that when the
+// queue is at capacity the handler returns codes.ResourceExhausted. Unit tests
+// use context.Background() (no mTLS), so the queue key is "".
+func TestBulkHandler_QueueFull_ReturnsResourceExhausted(t *testing.T) {
+	queue := NewTenantQueue()
+	h := NewBulkHandler(logging.NewNoopLogger(), queue)
+
+	for i := 0; i < MaxConcurrentPerTenant; i++ {
+		require.NoError(t, queue.Acquire(""))
+	}
+
+	stream := newTestBulkStream(context.Background(),
+		&transportpb.BulkChunk{TransferId: "bulk-1", Data: []byte("x")},
+	)
+
+	err := h.HandleGRPC(stream)
+	require.Error(t, err)
+	assert.Equal(t, codes.ResourceExhausted, status.Code(err))
 }
 
 // ---------------------------------------------------------------------------
