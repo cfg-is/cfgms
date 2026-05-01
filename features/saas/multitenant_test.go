@@ -4,6 +4,7 @@ package saas
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -80,6 +81,11 @@ func (m *MockOAuth2Client) StartFlow(ctx context.Context, config *ExtendedOAuth2
 
 func (m *MockOAuth2Client) ClientCredentialsGrant(ctx context.Context, config *ExtendedOAuth2Config) (*TokenSet, error) {
 	args := m.Called(ctx, config)
+	return args.Get(0).(*TokenSet), args.Error(1)
+}
+
+func (m *MockOAuth2Client) ExchangeCode(ctx context.Context, flow *OAuth2Flow, authCode string) (*TokenSet, error) {
+	args := m.Called(ctx, flow, authCode)
 	return args.Get(0).(*TokenSet), args.Error(1)
 }
 
@@ -172,53 +178,208 @@ func TestMultiTenantManager_StartAdminConsent(t *testing.T) {
 }
 
 func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
-	credStore := NewMockCredentialStore()
-	consentStore := NewInMemoryConsentStore()
-	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
-
-	// Set up mock OAuth2 client
-	mockOAuth2 := &MockOAuth2Client{}
-	mtm.oauth2Client = mockOAuth2
-
-	ctx := context.Background()
-	provider := "microsoft"
-	authCode := "test-auth-code"
-
-	// First, start a consent flow to set up state in the ConsentStore.
-	config := &MultiTenantConfig{
-		OAuth2Config: OAuth2Config{
-			ClientID:     "test-client-id",
-			ClientSecret: "test-client-secret",
-			AuthURL:      "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize",
-			TokenURL:     "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
-			Scopes:       []string{"https://graph.microsoft.com/.default"},
+	tests := []struct {
+		name         string
+		authCode     string
+		serverResp   map[string]interface{}
+		serverStatus int
+		wantErr      bool
+	}{
+		{
+			name:     "successful consent completion",
+			authCode: "test-auth-code",
+			serverResp: map[string]interface{}{
+				"access_token":  "real-access-token",
+				"refresh_token": "real-refresh-token",
+				"token_type":    "Bearer",
+				"expires_in":    3600,
+				"scope":         "https://graph.microsoft.com/.default",
+			},
+			serverStatus: http.StatusOK,
+			wantErr:      false,
 		},
-		IsMultiTenant: true,
+		{
+			name:         "token endpoint returns error",
+			authCode:     "bad-code",
+			serverResp:   map[string]interface{}{"error": "invalid_grant"},
+			serverStatus: http.StatusBadRequest,
+			wantErr:      true,
+		},
 	}
 
-	mockFlow := &OAuth2Flow{
-		AuthURL:   "https://test-auth-url.com",
-		State:     "test-state",
-		Created:   time.Now(),
-		ExpiresAt: time.Now().Add(10 * time.Minute),
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Token exchange server verifies form fields and returns configured response.
+			tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.NoError(t, r.ParseForm())
+				assert.Equal(t, "authorization_code", r.FormValue("grant_type"))
+				assert.Equal(t, tt.authCode, r.FormValue("code"))
+				assert.Equal(t, "test-client-id", r.FormValue("client_id"))
+				assert.NotEmpty(t, r.FormValue("redirect_uri"))
+
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.serverStatus)
+				if err := json.NewEncoder(w).Encode(tt.serverResp); err != nil {
+					http.Error(w, "encode error", http.StatusInternalServerError)
+				}
+			}))
+			defer tokenServer.Close()
+
+			credStore := NewMockCredentialStore()
+			consentStore := NewInMemoryConsentStore()
+			// Use the real DefaultOAuth2Client so ExchangeCode hits the httptest server.
+			mtm := NewMultiTenantManager(credStore, consentStore, &http.Client{})
+
+			ctx := context.Background()
+			provider := "microsoft"
+
+			// Directly inject a ConsentStatus whose flow points at the test token server.
+			// This is equivalent to what StartAdminConsent stores after calling StartFlow.
+			flow := &OAuth2Flow{
+				TokenURL:     tokenServer.URL,
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+				RedirectURI:  "https://app.example.com/callback",
+				State:        "test-state",
+				Created:      time.Now(),
+				ExpiresAt:    time.Now().Add(10 * time.Minute),
+			}
+			require.NoError(t, consentStore.StoreConsent(provider, &ConsentStatus{
+				Provider:    provider,
+				ConsentFlow: flow,
+			}))
+
+			err := mtm.CompleteAdminConsent(ctx, provider, tt.authCode)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+
+			updatedStatus, err := mtm.GetConsentStatus(ctx, provider)
+			require.NoError(t, err)
+			assert.True(t, updatedStatus.HasAdminConsent)
+
+			// Confirm stored token came from the httptest server, not hardcoded literals.
+			storedTokens, err := credStore.GetTokenSet(provider)
+			require.NoError(t, err)
+			assert.Equal(t, "real-access-token", storedTokens.AccessToken)
+			assert.Equal(t, "real-refresh-token", storedTokens.RefreshToken)
+		})
+	}
+}
+
+func TestDefaultOAuth2Client_ExchangeCode(t *testing.T) {
+	tests := []struct {
+		name         string
+		flow         *OAuth2Flow
+		authCode     string
+		serverResp   map[string]interface{}
+		serverStatus int
+		wantErr      bool
+		validate     func(t *testing.T, ts *TokenSet)
+	}{
+		{
+			name:     "successful exchange with all fields",
+			authCode: "auth-code-abc",
+			flow: &OAuth2Flow{
+				ClientID:     "client-123",
+				ClientSecret: "secret-xyz",
+				RedirectURI:  "https://app.example.com/callback",
+				CodeVerifier: "verifier-pkce",
+			},
+			serverResp: map[string]interface{}{
+				"access_token":  "exchanged-access-token",
+				"refresh_token": "exchanged-refresh-token",
+				"token_type":    "Bearer",
+				"expires_in":    7200,
+				"scope":         "openid profile email",
+			},
+			serverStatus: http.StatusOK,
+			wantErr:      false,
+			validate: func(t *testing.T, ts *TokenSet) {
+				assert.Equal(t, "exchanged-access-token", ts.AccessToken)
+				assert.Equal(t, "exchanged-refresh-token", ts.RefreshToken)
+				assert.Equal(t, "Bearer", ts.TokenType)
+				assert.ElementsMatch(t, []string{"openid", "profile", "email"}, ts.Scopes)
+				assert.True(t, ts.ExpiresAt.After(time.Now()))
+			},
+		},
+		{
+			name:     "exchange without PKCE code_verifier",
+			authCode: "auth-code-nopkce",
+			flow: &OAuth2Flow{
+				ClientID:     "client-123",
+				ClientSecret: "secret-xyz",
+				RedirectURI:  "https://app.example.com/callback",
+				CodeVerifier: "",
+			},
+			serverResp: map[string]interface{}{
+				"access_token": "access-nopkce",
+				"token_type":   "Bearer",
+				"expires_in":   3600,
+			},
+			serverStatus: http.StatusOK,
+			wantErr:      false,
+			validate: func(t *testing.T, ts *TokenSet) {
+				assert.Equal(t, "access-nopkce", ts.AccessToken)
+			},
+		},
+		{
+			name:     "token endpoint returns 400",
+			authCode: "bad-code",
+			flow: &OAuth2Flow{
+				ClientID:     "client-123",
+				ClientSecret: "secret-xyz",
+				RedirectURI:  "https://app.example.com/callback",
+			},
+			serverResp:   map[string]interface{}{"error": "invalid_grant", "error_description": "code expired"},
+			serverStatus: http.StatusBadRequest,
+			wantErr:      true,
+		},
 	}
 
-	mockOAuth2.On("StartFlow", mock.Anything, mock.Anything).Return(mockFlow, nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.NoError(t, r.ParseForm())
+				assert.Equal(t, "authorization_code", r.FormValue("grant_type"))
+				assert.Equal(t, tt.authCode, r.FormValue("code"))
+				assert.Equal(t, tt.flow.RedirectURI, r.FormValue("redirect_uri"))
+				assert.Equal(t, tt.flow.ClientID, r.FormValue("client_id"))
+				assert.Equal(t, tt.flow.ClientSecret, r.FormValue("client_secret"))
+				if tt.flow.CodeVerifier != "" {
+					assert.Equal(t, tt.flow.CodeVerifier, r.FormValue("code_verifier"))
+				} else {
+					assert.Empty(t, r.FormValue("code_verifier"))
+				}
 
-	_, err := mtm.StartAdminConsent(ctx, provider, config)
-	require.NoError(t, err)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.serverStatus)
+				if err := json.NewEncoder(w).Encode(tt.serverResp); err != nil {
+					http.Error(w, "encode error", http.StatusInternalServerError)
+				}
+			}))
+			defer tokenServer.Close()
 
-	// StartAdminConsent stored the consent status (with ConsentFlow) in consentStore.
-	// CompleteAdminConsent reads it back from there — no manual setup needed.
+			tt.flow.TokenURL = tokenServer.URL
+			client := &DefaultOAuth2Client{httpClient: &http.Client{}}
 
-	err = mtm.CompleteAdminConsent(ctx, provider, authCode)
-	assert.NoError(t, err)
+			ts, err := client.ExchangeCode(context.Background(), tt.flow, tt.authCode)
 
-	// Verify consent status was updated
-	updatedStatus, err := mtm.GetConsentStatus(ctx, provider)
-	assert.NoError(t, err)
-	assert.True(t, updatedStatus.HasAdminConsent)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, ts)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, ts)
+			if tt.validate != nil {
+				tt.validate(t, ts)
+			}
+		})
+	}
 }
 
 func TestMultiTenantManager_GetTenantToken(t *testing.T) {

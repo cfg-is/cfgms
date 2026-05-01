@@ -18,7 +18,7 @@ Virtual Steward (M365)
 ## Key Components
 
 ### 1. Authentication Framework
-- **OAuth2 with PKCE**: Enhanced security for public clients
+- **OAuth2 with PKCE**: Authorization code exchange performs a real HTTP POST to the provider token endpoint; PKCE `code_verifier` is included when set
 - **Token Management**: Automatic refresh before expiration
 - **Secure Storage**: OS keychain integration where available
 - **Multi-Provider Support**: Extensible authentication providers

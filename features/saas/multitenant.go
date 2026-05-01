@@ -410,14 +410,7 @@ func (mtm *MultiTenantManager) isTenantAccessible(status *ConsentStatus, tenantI
 }
 
 func (mtm *MultiTenantManager) completeOAuth2Flow(ctx context.Context, flow *OAuth2Flow, authCode string) (*TokenSet, error) {
-	// This would implement the actual OAuth2 authorization code exchange
-	// For now, return a mock token set
-	return &TokenSet{
-		AccessToken:  "admin-consent-token",
-		RefreshToken: "admin-refresh-token",
-		TokenType:    "Bearer",
-		ExpiresAt:    time.Now().Add(1 * time.Hour),
-	}, nil
+	return mtm.oauth2Client.ExchangeCode(ctx, flow, authCode)
 }
 
 func (mtm *MultiTenantManager) discoverTenants(ctx context.Context, provider string, tokenSet *TokenSet) (*TenantDiscoveryResult, error) {

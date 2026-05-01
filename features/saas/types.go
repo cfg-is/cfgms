@@ -180,6 +180,15 @@ type OAuth2Flow struct {
 	// RedirectURI for OAuth2 callback
 	RedirectURI string `json:"redirect_uri"`
 
+	// TokenURL is the token endpoint for the authorization code exchange
+	TokenURL string `json:"token_url"`
+
+	// ClientID for the authorization code exchange
+	ClientID string `json:"client_id"`
+
+	// ClientSecret for the authorization code exchange
+	ClientSecret string `json:"client_secret"`
+
 	// Created timestamp
 	Created time.Time `json:"created"`
 
