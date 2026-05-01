@@ -55,7 +55,7 @@ func NewM365TenantManager(
 		m365Provider:       m365Provider,
 		adminConsentFlow:   adminConsentFlow,
 		gdapProvider:       gdapProvider,
-		httpClient:         &http.Client{Timeout: 30 * time.Second},
+		httpClient:         NewGraphHTTPClient(10, 20),
 	}
 }
 

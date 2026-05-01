@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"testing"
 	"time"
 
@@ -101,37 +100,6 @@ func (m *mockTenantStore) IsTenantAncestor(ctx context.Context, ancestorID, desc
 	return false, nil
 }
 
-type mockCredentialStore struct{}
-
-func (m *mockCredentialStore) StoreTokenSet(provider string, tokens *TokenSet) error {
-	return nil
-}
-
-func (m *mockCredentialStore) GetTokenSet(provider string) (*TokenSet, error) {
-	return &TokenSet{
-		AccessToken:  "mock-token",
-		TokenType:    "Bearer",
-		ExpiresAt:    time.Now().Add(1 * time.Hour),
-		RefreshToken: "mock-refresh",
-	}, nil
-}
-
-func (m *mockCredentialStore) DeleteTokenSet(provider string) error {
-	return nil
-}
-
-func (m *mockCredentialStore) StoreClientSecret(provider, clientSecret string) error {
-	return nil
-}
-
-func (m *mockCredentialStore) GetClientSecret(provider string) (string, error) {
-	return "mock-secret", nil
-}
-
-func (m *mockCredentialStore) IsAvailable() bool {
-	return true
-}
-
 // Test setup helper
 func setupTestManager(t *testing.T) (*M365TenantManager, *mockTenantStore, context.Context) {
 	ctx := context.Background()
@@ -143,11 +111,11 @@ func setupTestManager(t *testing.T) (*M365TenantManager, *mockTenantStore, conte
 	// (M365 integration tests don't need full RBAC setup)
 	cfgmsTenantManager := tenant.NewManager(mockStore, nil)
 
-	// Create mock credential store
-	mockCredStore := &mockCredentialStore{}
+	// Create credential store
+	mockCredStore := NewMockCredentialStore()
 
 	// Create M365 provider
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	httpClient := NewGraphHTTPClient(100, 1000)
 	m365Provider := NewMicrosoftMultiTenantProvider(mockCredStore, httpClient)
 
 	// Create admin consent flow (can be nil for basic tests)
@@ -564,7 +532,7 @@ func setupTestManagerWithCountingStore(t *testing.T) (*M365TenantManager, *count
 	ctx := context.Background()
 	counting := &countingTenantStore{mockTenantStore: newMockTenantStore()}
 	cfgmsTenantManager := tenant.NewManager(counting, nil)
-	m365Provider := NewMicrosoftMultiTenantProvider(&mockCredentialStore{}, &http.Client{Timeout: 30 * time.Second})
+	m365Provider := NewMicrosoftMultiTenantProvider(NewMockCredentialStore(), NewGraphHTTPClient(100, 1000))
 	manager := NewM365TenantManager(cfgmsTenantManager, m365Provider, nil, nil)
 	return manager, counting, ctx
 }
@@ -624,7 +592,7 @@ func TestM365TenantManager_GetTenantByM365ID_ListTenantsError(t *testing.T) {
 		listErr:         fmt.Errorf("storage unavailable"),
 	}
 	cfgmsTenantManager := tenant.NewManager(failing, nil)
-	m365Provider := NewMicrosoftMultiTenantProvider(&mockCredentialStore{}, &http.Client{Timeout: 30 * time.Second})
+	m365Provider := NewMicrosoftMultiTenantProvider(NewMockCredentialStore(), NewGraphHTTPClient(100, 1000))
 	manager := NewM365TenantManager(cfgmsTenantManager, m365Provider, nil, nil)
 
 	// ListTenants fails → getTenantByM365ID must propagate the error.
@@ -677,7 +645,7 @@ func BenchmarkM365TenantManager_DiscoverAndSyncTenants(b *testing.B) {
 
 		mockStore := newMockTenantStore()
 		cfgmsTenantManager := tenant.NewManager(mockStore, nil)
-		m365Provider := NewMicrosoftMultiTenantProvider(&mockCredentialStore{}, &http.Client{Timeout: 30 * time.Second})
+		m365Provider := NewMicrosoftMultiTenantProvider(NewMockCredentialStore(), NewGraphHTTPClient(100, 1000))
 		gdap := &mockGDAPProvider{relationships: relationships}
 		manager := NewM365TenantManager(cfgmsTenantManager, m365Provider, nil, gdap)
 

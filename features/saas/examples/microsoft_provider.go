@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"strings"
 
 	"github.com/cfgis/cfgms/features/saas"
@@ -41,7 +40,7 @@ func NewMicrosoftProvider() saas.Provider {
 		},
 	}
 
-	httpClient := &http.Client{}
+	httpClient := saas.NewGraphHTTPClient(10, 20)
 
 	return &MicrosoftProvider{
 		BaseProvider: saas.NewBaseProvider(info, httpClient),
@@ -261,10 +260,12 @@ func (p *MicrosoftProvider) createUser(ctx context.Context, data map[string]inte
 		graphData["accountEnabled"] = active
 	}
 
-	// Add required password profile for new users
-	graphData["passwordProfile"] = map[string]interface{}{
-		"forceChangePasswordNextSignIn": true,
-		"password":                      "TempPassword123!",
+	// Add password profile if caller supplies an initial_password; never hardcode credentials.
+	if password, exists := data["initial_password"]; exists {
+		graphData["passwordProfile"] = map[string]interface{}{
+			"forceChangePasswordNextSignIn": true,
+			"password":                      password,
+		}
 	}
 
 	return p.RawAPI(ctx, "POST", "/users", graphData)
@@ -323,16 +324,14 @@ func ExampleUsage() {
 
 	fmt.Printf("User created successfully: %+v\n", result.Data)
 
-	// Example: Raw API call for advanced operations
+	// Example: Raw API call for advanced operations.
+	// Caller must supply credentials at runtime (OS keychain, secret manager, etc.) —
+	// never hardcode passwords or secrets in source code.
 	customData := map[string]interface{}{
 		"@odata.type":       "#microsoft.graph.user",
 		"displayName":       "Jane Smith",
 		"userPrincipalName": "jane.smith@company.com",
 		"accountEnabled":    true,
-		"passwordProfile": map[string]interface{}{
-			"forceChangePasswordNextSignIn": true,
-			"password":                      "TempPassword456!",
-		},
 	}
 
 	rawResult, err := provider.RawAPI(ctx, "POST", "/users", customData)
