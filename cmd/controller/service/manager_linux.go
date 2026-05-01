@@ -53,7 +53,7 @@ func (m *linuxManager) Install(configPath string) error {
 
 	fmt.Println("Writing systemd unit...")
 	unit := generateSystemdUnit(configPath)
-	if err := os.WriteFile(linuxSystemdUnit, []byte(unit), 0644); err != nil {
+	if err := writeSystemdUnit(linuxSystemdUnit, []byte(unit)); err != nil {
 		return fmt.Errorf("failed to write systemd unit %s: %w", linuxSystemdUnit, err)
 	}
 
@@ -135,6 +135,13 @@ func (m *linuxManager) Status() (*ServiceStatus, error) {
 	}
 
 	return status, nil
+}
+
+// writeSystemdUnit writes a systemd unit file to path.
+// 0600: owner rw (root only); systemd reads unit files as root, group read is unnecessary
+// and would expose the config path to group members.
+func writeSystemdUnit(path string, content []byte) error {
+	return os.WriteFile(path, content, 0600)
 }
 
 // generateSystemdUnit returns a systemd unit that runs cfgms-controller with the
