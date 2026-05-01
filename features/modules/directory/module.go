@@ -237,7 +237,6 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 	}
 
 	// Step 4: Validate path is within AllowedBasePath — return on any error, storing nothing in m
-	// NOTE: symlink escapes outside AllowedBasePath are not blocked by ValidateAndCleanPath
 	cleanPath, err := security.ValidateAndCleanPath(dirConfig.AllowedBasePath, dirConfig.Path)
 	if err != nil {
 		logger.ErrorCtx(ctx, "Directory path traversal check failed",
@@ -272,7 +271,6 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 				return fmt.Errorf("failed to create directory: %w", err)
 			}
 		} else {
-			// NOTE: symlink escapes outside AllowedBasePath are not blocked by ValidateAndCleanPath
 			parent := filepath.Dir(cleanPath)
 			if _, err := os.Stat(parent); err != nil {
 				if os.IsNotExist(err) {
@@ -364,7 +362,6 @@ func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.C
 		return nil, ErrAllowedBasePathRequired
 	}
 
-	// NOTE: symlink escapes outside AllowedBasePath are not blocked by ValidateAndCleanPath
 	cleanPath, err := security.ValidateAndCleanPath(m.configuredBasePath, resourceID)
 	if err != nil {
 		return nil, fmt.Errorf("path security check failed: %w", err)
