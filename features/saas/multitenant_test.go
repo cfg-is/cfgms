@@ -4,9 +4,10 @@ package saas
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -435,64 +436,87 @@ func TestMicrosoftMultiTenantProvider_StartAdminConsent(t *testing.T) {
 }
 
 func TestMicrosoftMultiTenantProvider_CreateInTenant(t *testing.T) {
-	// This test makes real HTTP calls to graph.microsoft.com.
-	// Skip when running without external network access (e.g. CI containers).
-	conn, dialErr := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(context.Background(), "tcp", "graph.microsoft.com:443")
-	if dialErr != nil {
-		t.Skipf("skipping: graph.microsoft.com unreachable (%v)", dialErr)
+	tests := []struct {
+		name           string
+		serverStatus   int
+		serverBody     string
+		wantSuccess    bool
+		wantStatusCode int
+		wantDataKey    string
+		wantDataValue  string
+	}{
+		{
+			name:           "successful creation returns parsed response",
+			serverStatus:   http.StatusCreated,
+			serverBody:     `{"id":"new-user-id","displayName":"John Doe","userPrincipalName":"john@test.com"}`,
+			wantSuccess:    true,
+			wantStatusCode: http.StatusCreated,
+			wantDataKey:    "id",
+			wantDataValue:  "new-user-id",
+		},
+		{
+			name:           "server error propagates as failed result",
+			serverStatus:   http.StatusUnprocessableEntity,
+			serverBody:     `{"error":{"code":"Request_BadRequest","message":"Invalid user data"}}`,
+			wantSuccess:    false,
+			wantStatusCode: http.StatusUnprocessableEntity,
+		},
 	}
-	_ = conn.Close()
 
-	credStore := NewMockCredentialStore()
-	httpClient := &http.Client{}
-	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.serverStatus)
+				_, _ = w.Write([]byte(tt.serverBody))
+			}))
+			defer server.Close()
 
-	ctx := context.Background()
-	tenantID := "tenant-1"
-	resourceType := "users"
-	data := map[string]interface{}{
-		"displayName":       "John Doe",
-		"userPrincipalName": "john@test.com",
-	}
+			credStore := NewMockCredentialStore()
+			provider := NewMicrosoftMultiTenantProvider(credStore, server.Client())
+			provider.baseURL = server.URL
 
-	// Store real consent status via the provider's consentStore.
-	err := provider.multiTenantManager.consentStore.StoreConsent(
-		provider.GetInfo().Name,
-		&ConsentStatus{
-			Provider:         provider.GetInfo().Name,
-			HasAdminConsent:  true,
-			ConsentGrantedAt: time.Now(),
-			AccessibleTenants: []TenantInfo{
-				{TenantID: tenantID, HasAccess: true},
-			},
+			ctx := context.Background()
+			tenantID := "tenant-1"
+
+			err := provider.multiTenantManager.consentStore.StoreConsent(
+				provider.GetInfo().Name,
+				&ConsentStatus{
+					Provider:         provider.GetInfo().Name,
+					HasAdminConsent:  true,
+					ConsentGrantedAt: time.Now(),
+					AccessibleTenants: []TenantInfo{
+						{TenantID: tenantID, HasAccess: true},
+					},
+				})
+			require.NoError(t, err)
+
+			tenantKey := provider.multiTenantManager.getTenantKey(provider.GetInfo().Name, tenantID)
+			err = credStore.StoreTokenSet(tenantKey, &TokenSet{
+				AccessToken: "test-token",
+				TokenType:   "Bearer",
+				ExpiresAt:   time.Now().Add(1 * time.Hour),
+			})
+			require.NoError(t, err)
+
+			result, err := provider.CreateInTenant(ctx, tenantID, "users", map[string]interface{}{
+				"displayName":       "John Doe",
+				"userPrincipalName": "john@test.com",
+			})
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, tt.wantSuccess, result.Success)
+			assert.Equal(t, tt.wantStatusCode, result.StatusCode)
+			assert.Equal(t, tenantID, result.Metadata["tenant"])
+
+			if tt.wantDataKey != "" {
+				data, ok := result.Data.(map[string]interface{})
+				require.True(t, ok, "expected map response data")
+				assert.Equal(t, tt.wantDataValue, data[tt.wantDataKey])
+			}
 		})
-	require.NoError(t, err)
-
-	tenantKey := provider.multiTenantManager.getTenantKey(provider.GetInfo().Name, tenantID)
-	validToken := &TokenSet{
-		AccessToken: "tenant-token",
-		TokenType:   "Bearer",
-		ExpiresAt:   time.Now().Add(1 * time.Hour),
 	}
-	err = credStore.StoreTokenSet(tenantKey, validToken)
-	require.NoError(t, err)
-
-	// Test creating in tenant (this will use the mock implementation)
-	result, err := provider.CreateInTenant(ctx, tenantID, resourceType, data)
-
-	// The mock implementation should return success
-	assert.NoError(t, err)
-	require.NotNil(t, result)
-
-	// Debug: Print result details if test fails
-	if !result.Success {
-		t.Logf("Result failed: Success=%v, Error=%v, StatusCode=%d", result.Success, result.Error, result.StatusCode)
-	}
-
-	// The real HTTP call in rawAPIWithToken will fail since there's no server,
-	// but the test should still show the structure is correct
-	// For now, just verify we got a result
-	assert.NotEmpty(t, result.Metadata)
 }
 
 // Test TenantOnboardingWorkflow
@@ -702,6 +726,62 @@ func TestMultiTenantManager_TenantCacheConcurrency(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, status.HasAdminConsent)
 	assert.NotEmpty(t, status.AccessibleTenants)
+}
+
+// TestMicrosoftMultiTenantProvider_TenantlessCRUD verifies that the five
+// non-tenant-aware CRUD methods return ErrNoTenantSelected with a nil result.
+// Callers that need to act on a specific tenant must use the *InTenant variants.
+func TestMicrosoftMultiTenantProvider_TenantlessCRUD(t *testing.T) {
+	credStore := NewMockCredentialStore()
+	httpClient := &http.Client{}
+	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		call func() (*ProviderResult, error)
+	}{
+		{
+			name: "Create returns ErrNoTenantSelected",
+			call: func() (*ProviderResult, error) {
+				return provider.Create(ctx, "users", map[string]interface{}{"displayName": "Test"})
+			},
+		},
+		{
+			name: "Read returns ErrNoTenantSelected",
+			call: func() (*ProviderResult, error) {
+				return provider.Read(ctx, "users", "some-id")
+			},
+		},
+		{
+			name: "Update returns ErrNoTenantSelected",
+			call: func() (*ProviderResult, error) {
+				return provider.Update(ctx, "users", "some-id", map[string]interface{}{"displayName": "Updated"})
+			},
+		},
+		{
+			name: "Delete returns ErrNoTenantSelected",
+			call: func() (*ProviderResult, error) {
+				return provider.Delete(ctx, "users", "some-id")
+			},
+		},
+		{
+			name: "RawAPI returns ErrNoTenantSelected",
+			call: func() (*ProviderResult, error) {
+				return provider.RawAPI(ctx, "GET", "/users", nil)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := tt.call()
+			assert.Nil(t, result, "result must be nil — no side effects should occur")
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, ErrNoTenantSelected),
+				"expected ErrNoTenantSelected, got: %v", err)
+		})
+	}
 }
 
 // Benchmarks

@@ -145,6 +145,39 @@ for consent state**. Those methods remain on the interface for auth flows only.
 Any legacy flat-string consent data (e.g. `consent_granted:true;tenants:1`) that
 arrives at `GetConsent` returns a hard error — re-grant admin consent to recover.
 
+## Tenant-Scoped Operations
+
+All CRUD operations on `MicrosoftMultiTenantProvider` must use the explicit `*InTenant`
+variants. The unqualified methods (`Create`, `Read`, `Update`, `Delete`, `RawAPI`) return
+`ErrNoTenantSelected` immediately with no side effects.
+
+**Why:** A multi-tenant provider may have access to dozens of customer tenants. Silently
+routing an unqualified write to `tenants[0]` — whichever tenant happens to be first in
+the list — would make the target unpredictable and could corrupt or expose data in the
+wrong tenant. Forcing callers to name a tenant at the call site makes intent explicit and
+eliminates an entire class of cross-tenant write bugs.
+
+```go
+// Wrong — returns ErrNoTenantSelected, no request is made.
+result, err := provider.Create(ctx, "users", userData)
+
+// Correct — targets a specific tenant explicitly.
+result, err := provider.CreateInTenant(ctx, "tenant-id-here", "users", userData)
+```
+
+The `*InTenant` family covers all mutation and query operations:
+
+| Method | Tenant-scoped variant |
+|--------|----------------------|
+| `Create` | `CreateInTenant(ctx, tenantID, resourceType, data)` |
+| `Read` | `ReadFromTenant(ctx, tenantID, resourceType, resourceID)` |
+| `Update` | `UpdateInTenant(ctx, tenantID, resourceType, resourceID, data)` |
+| `Delete` | `DeleteFromTenant(ctx, tenantID, resourceType, resourceID)` |
+| `RawAPI` | `RawAPIInTenant(ctx, tenantID, method, path, body)` |
+
+`List` is excluded from this restriction — it performs an explicit cross-tenant aggregate
+via `ListUsersAcrossAllTenants` and its cross-tenant semantics are intentional and correct.
+
 ## Development
 
 The SaaS Steward is designed to be:
