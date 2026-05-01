@@ -9,6 +9,7 @@ import (
 	"log/slog"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/features/rbac/memory"
 	"github.com/cfgis/cfgms/pkg/audit"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -30,12 +31,22 @@ type Manager struct {
 	usePluggableStorage bool
 	auditManager        *audit.Manager
 
+	// Optional: wire via SetCacheManager to get synchronous cache invalidation on
+	// RevokeRole and DeleteRolesByTenant. When nil, those operations skip invalidation.
+	cacheManager *continuous.CacheManager
+
 	engine                  *AuthEngine
 	advancedEngine          *AdvancedAuthEngine
 	hierarchyEngine         *HierarchyEngine
 	delegationManager       *DelegationManager
 	templateManager         *TemplateManager
 	escalationPreventionMgr *EscalationPreventionManager
+}
+
+// SetCacheManager wires a CacheManager into the RBAC Manager so that RevokeRole
+// and DeleteRolesByTenant synchronously invalidate the authorization cache.
+func (m *Manager) SetCacheManager(cm *continuous.CacheManager) {
+	m.cacheManager = cm
 }
 
 // NewManager is DEPRECATED and removed in Epic 6: Complete Storage Migration
@@ -705,6 +716,19 @@ func (m *Manager) DeleteRolesByTenant(ctx context.Context, tenantID string) erro
 			)
 		}
 	}
+
+	// Synchronously invalidate all cached authorization decisions for this tenant.
+	// Invalidation errors are non-fatal: the roles have been deleted from storage,
+	// and L1 TTL (up to 5 min) + L2 TTL (up to 10 min) bound the stale window.
+	if m.cacheManager != nil {
+		if invErr := m.cacheManager.InvalidateTenant(tenantID); invErr != nil {
+			slog.Warn("rbac: failed to invalidate tenant cache after DeleteRolesByTenant",
+				"tenant_id", tenantID,
+				"error", invErr,
+			)
+		}
+	}
+
 	return nil
 }
 
@@ -758,6 +782,21 @@ func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID st
 		}
 	}
 
+	// Synchronously invalidate the authorization cache for this subject so stale
+	// grants cannot outlive the revocation. Worst-case stale window when the
+	// CacheManager is not wired: L1 TTL (up to 5 min) + L2 TTL (up to 10 min).
+	// Invalidation errors are non-fatal but are surfaced in the audit event.
+	var cacheInvalidationFailed bool
+	if m.cacheManager != nil {
+		if invErr := m.cacheManager.InvalidateSubject(subjectID); invErr != nil {
+			cacheInvalidationFailed = true
+			slog.Warn("rbac: failed to invalidate subject cache after RevokeRole",
+				"subject_id", subjectID,
+				"error", invErr,
+			)
+		}
+	}
+
 	// Record successful audit event
 	if m.auditManager != nil {
 		event := audit.UserManagementEvent(tenantID, subjectID, subjectID, "revoke_role").
@@ -766,6 +805,9 @@ func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID st
 			Detail("revoked_role", roleID).
 			Detail("subject_id", subjectID).
 			Severity(business.AuditSeverityHigh)
+		if cacheInvalidationFailed {
+			event = event.Detail("cache_invalidation_failed", "true")
+		}
 		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
 			slog.Warn("rbac: failed to record audit event", "error", auditErr)
 		}

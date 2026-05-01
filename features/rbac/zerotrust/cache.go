@@ -3,6 +3,7 @@
 package zerotrust
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -95,6 +96,36 @@ func (p *PolicyCache) promoteToL1(key string, result *PolicyEvaluationResult) {
 	// We accept the small overhead of duplicates across L1/L2 for thread safety
 	// Ignore error - L1 promotion is a performance optimization
 	_ = p.l1Cache.Set(key, result, p.cacheTTL)
+}
+
+// Invalidate removes all cached entries whose key starts with the given policyID.
+// Cache keys embed the policy ID as the first component (format: policyID:subjectID:...).
+// Both L1 and L2 are scanned independently so entries evicted from L1 but still in L2
+// are also removed.
+func (p *PolicyCache) Invalidate(policyID string) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	prefix := policyID + ":"
+	for _, key := range p.l1Cache.Keys() {
+		if strings.HasPrefix(key, prefix) {
+			p.l1Cache.Delete(key)
+		}
+	}
+	for _, key := range p.l2Cache.Keys() {
+		if strings.HasPrefix(key, prefix) {
+			p.l2Cache.Delete(key)
+		}
+	}
+}
+
+// Clear removes all entries from both L1 and L2 caches.
+func (p *PolicyCache) Clear() {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	p.l1Cache.Clear()
+	p.l2Cache.Clear()
 }
 
 // GetStats returns cache statistics

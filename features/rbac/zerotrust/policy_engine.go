@@ -316,6 +316,9 @@ func NewZeroTrustPolicyEngine(config *ZeroTrustConfig) *ZeroTrustPolicyEngine {
 	// Initialize policy management components
 	engine.policyManager = NewPolicyLifecycleManager(engine)
 	engine.policyEvaluator = NewPolicyEvaluator(engine)
+	// Wire the evaluator's cache into the lifecycle manager so DeactivatePolicy
+	// and RetirePolicy can synchronously invalidate cached evaluation results.
+	engine.policyManager.policyCache = engine.policyEvaluator.cache
 	engine.complianceEngine = NewComplianceFrameworkEngine(config.ComplianceFrameworks)
 	engine.complianceMonitor = NewComplianceMonitor(engine)
 
