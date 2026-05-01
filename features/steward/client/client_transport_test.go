@@ -5,7 +5,10 @@
 package client
 
 import (
+	"context"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,6 +16,96 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// kvCapturingLogger captures Info and Warn log entries for security assertions.
+// It satisfies logging.Logger via embedding NoopLogger while recording key-value
+// arguments so tests can verify sensitive fields are absent or properly redacted.
+// Issue #981: used to assert steward IDs appear only in redacted form in Connect logs.
+type kvCapturingLogger struct {
+	logging.NoopLogger
+	mu      sync.Mutex
+	entries []kvLogEntry
+}
+
+type kvLogEntry struct {
+	msg string
+	kvs []interface{}
+}
+
+func (l *kvCapturingLogger) Info(msg string, kvs ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kvcopy := make([]interface{}, len(kvs))
+	copy(kvcopy, kvs)
+	l.entries = append(l.entries, kvLogEntry{msg: msg, kvs: kvcopy})
+}
+
+func (l *kvCapturingLogger) Warn(msg string, kvs ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kvcopy := make([]interface{}, len(kvs))
+	copy(kvcopy, kvs)
+	l.entries = append(l.entries, kvLogEntry{msg: msg, kvs: kvcopy})
+}
+
+func (l *kvCapturingLogger) allEntries() []kvLogEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]kvLogEntry, len(l.entries))
+	copy(out, l.entries)
+	return out
+}
+
+// TestConnect_StewardIDRedactedInLogs verifies that Connect never logs the literal
+// steward ID (a server-generated bearer-like identifier) in plain form. The log
+// entries captured before Connect fails must use logging.RedactedID output only.
+// Issue #981: steward_id from controller registration must be redacted at Info level.
+func TestConnect_StewardIDRedactedInLogs(t *testing.T) {
+	cap := &kvCapturingLogger{}
+	c := &TransportClient{
+		stewardID:        "steward-test-abc123xyz",
+		transportAddress: "localhost:0", // unreachable; Connect will fail before fully connecting
+		logger:           cap,
+		heartbeatStop:    make(chan struct{}),
+		convergenceStop:  make(chan struct{}),
+		convergeInterval: 30 * time.Minute,
+	}
+
+	ctx := context.Background()
+	// Connect is expected to fail (no real controller). The log entries captured
+	// before the failure are what we validate.
+	_ = c.Connect(ctx)
+
+	literal := "steward-test-abc123xyz"
+	redacted := logging.RedactedID(literal)
+
+	entries := cap.allEntries()
+	require.NotEmpty(t, entries, "Connect must emit at least one log entry before failing")
+
+	// Assert the literal steward ID never appears as a log value.
+	for _, e := range entries {
+		for i := 1; i < len(e.kvs); i += 2 {
+			if s, ok := e.kvs[i].(string); ok {
+				assert.NotContains(t, s, literal,
+					"log entry %q must not contain the literal steward ID", e.msg)
+			}
+		}
+	}
+
+	// Assert the redacted form appears under "steward_id" in at least one entry.
+	foundRedacted := false
+	for _, e := range entries {
+		for i := 0; i+1 < len(e.kvs); i += 2 {
+			if key, ok := e.kvs[i].(string); ok && key == "steward_id" {
+				if val, ok := e.kvs[i+1].(string); ok && val == redacted {
+					foundRedacted = true
+				}
+			}
+		}
+	}
+	assert.True(t, foundRedacted,
+		"redacted steward ID %q must appear under 'steward_id' key in at least one log entry", redacted)
+}
 
 // TestTransportClient_CertReloadOnHandshake verifies that createTLSConfig wires
 // GetClientCertificate as a per-handshake callback (not a cached value) so that

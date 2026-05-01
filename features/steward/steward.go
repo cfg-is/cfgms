@@ -335,8 +335,8 @@ func (s *Steward) detectUnmanagedDNADrift(ctx context.Context) ([]*drift.DriftEv
 	// knows not to proceed with stale comparison results.
 	if prevDNA.Id != currentDNA.Id {
 		s.logger.Error("DNA identity changed between convergence cycles — manual reconciliation required",
-			"previous_id", prevDNA.Id,
-			"current_id", currentDNA.Id)
+			"previous_id", logging.RedactedID(prevDNA.Id),
+			"current_id", logging.RedactedID(currentDNA.Id))
 		evt := &drift.DriftEvent{
 			Severity:    drift.SeverityCritical,
 			Category:    drift.CategoryConfiguration,

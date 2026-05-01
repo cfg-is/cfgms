@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -275,7 +276,7 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	// Initialize gRPC control plane provider if not already set
 	if controlPlane == nil {
 		c.logger.Info("Initializing gRPC control plane provider",
-			"addr", transportAddress, "steward_id", stewardID)
+			"addr", transportAddress, "steward_id", logging.RedactedID(stewardID))
 
 		provider := grpcCP.New(grpcCP.ModeClient)
 
@@ -343,7 +344,7 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	c.dataPlaneSession = session
 	c.mu.Unlock()
 
-	c.logger.Info("gRPC data plane initialized", "session_id", session.ID())
+	c.logger.Info("gRPC data plane initialized", "session_id", logging.RedactedID(session.ID()))
 
 	// Setup command handler
 	cmdHandler, err := c.setupCommandHandler(ctx, stewardID)
@@ -356,7 +357,7 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	c.mu.Unlock()
 
 	// Subscribe to commands via gRPC control plane provider
-	c.logger.Info("Subscribing to commands", "steward_id", stewardID)
+	c.logger.Info("Subscribing to commands", "steward_id", logging.RedactedID(stewardID))
 	if err := controlPlane.SubscribeCommands(ctx, stewardID, func(ctx context.Context, sc *cpTypes.SignedCommand) error {
 		return cmdHandler.HandleCommand(ctx, sc)
 	}); err != nil {
@@ -408,7 +409,7 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 
 	// Register sync_config handler — retrieves config via gRPC data plane ReceiveConfig()
 	handler.RegisterHandler(cpTypes.CommandSyncConfig, func(ctx context.Context, cmd *cpTypes.Command) error {
-		c.logger.Info("Received sync_config command", "command_id", cmd.ID, "params", cmd.Params)
+		c.logger.Info("Received sync_config command", "command_id", cmd.ID, "params_keys", paramKeys(cmd.Params))
 
 		// Get modules filter from command params (optional, passed as context but not used in gRPC request)
 		var modules []string
@@ -1232,6 +1233,17 @@ func computeDelta(oldAttrs, newAttrs map[string]string) map[string]string {
 		}
 	}
 	return delta
+}
+
+// paramKeys returns the sorted key names from a command params map.
+// Values are not logged — they may contain secret fingerprints, tokens, or paths.
+func paramKeys(params map[string]interface{}) []string {
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // copyStringMap returns a shallow copy of a string→string map.
