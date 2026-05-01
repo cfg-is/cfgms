@@ -8,9 +8,16 @@ package saas
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 )
+
+// ErrNoTenantSelected is returned by Create, Read, Update, Delete, and RawAPI on
+// MicrosoftMultiTenantProvider when the caller has not specified a tenant. Use the
+// explicit *InTenant variants (CreateInTenant, ReadFromTenant, UpdateInTenant,
+// DeleteFromTenant, RawAPIInTenant) to target a specific tenant.
+var ErrNoTenantSelected = errors.New("no tenant selected: use CreateInTenant/ReadFromTenant/UpdateInTenant/DeleteFromTenant/RawAPIInTenant")
 
 // ConsentStore persists and retrieves admin-consent state for a provider.
 // Implementations must preserve all fields of ConsentStatus, including the

@@ -426,58 +426,30 @@ func (p *MicrosoftMultiTenantProvider) RefreshAuth(ctx context.Context, credStor
 	return p.multiTenantManager.RefreshTenantDiscovery(ctx, p.GetInfo().Name)
 }
 
-// Standard CRUD operations (these require tenant context - could default to first tenant or return error)
+// Standard CRUD operations — these require an explicit tenant context.
 
-// Create (delegates to first accessible tenant)
-func (p *MicrosoftMultiTenantProvider) Create(ctx context.Context, resourceType string, data map[string]interface{}) (*ProviderResult, error) {
-	tenants, err := p.ListAccessibleTenants(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tenants: %w", err)
-	}
-	if len(tenants) == 0 {
-		return nil, fmt.Errorf("no accessible tenants found")
-	}
-
-	return p.CreateInTenant(ctx, tenants[0].TenantID, resourceType, data)
+// Create returns ErrNoTenantSelected. Multi-tenant write operations must target a
+// specific tenant to avoid cross-tenant data corruption. Use CreateInTenant instead.
+func (p *MicrosoftMultiTenantProvider) Create(_ context.Context, _ string, _ map[string]interface{}) (*ProviderResult, error) {
+	return nil, ErrNoTenantSelected
 }
 
-// Read (delegates to first accessible tenant)
-func (p *MicrosoftMultiTenantProvider) Read(ctx context.Context, resourceType string, resourceID string) (*ProviderResult, error) {
-	tenants, err := p.ListAccessibleTenants(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tenants: %w", err)
-	}
-	if len(tenants) == 0 {
-		return nil, fmt.Errorf("no accessible tenants found")
-	}
-
-	return p.ReadFromTenant(ctx, tenants[0].TenantID, resourceType, resourceID)
+// Read returns ErrNoTenantSelected. Multi-tenant read operations must target a
+// specific tenant to avoid reading from an arbitrary tenant. Use ReadFromTenant instead.
+func (p *MicrosoftMultiTenantProvider) Read(_ context.Context, _ string, _ string) (*ProviderResult, error) {
+	return nil, ErrNoTenantSelected
 }
 
-// Update (delegates to first accessible tenant)
-func (p *MicrosoftMultiTenantProvider) Update(ctx context.Context, resourceType string, resourceID string, data map[string]interface{}) (*ProviderResult, error) {
-	tenants, err := p.ListAccessibleTenants(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tenants: %w", err)
-	}
-	if len(tenants) == 0 {
-		return nil, fmt.Errorf("no accessible tenants found")
-	}
-
-	return p.UpdateInTenant(ctx, tenants[0].TenantID, resourceType, resourceID, data)
+// Update returns ErrNoTenantSelected. Multi-tenant write operations must target a
+// specific tenant to avoid cross-tenant data corruption. Use UpdateInTenant instead.
+func (p *MicrosoftMultiTenantProvider) Update(_ context.Context, _ string, _ string, _ map[string]interface{}) (*ProviderResult, error) {
+	return nil, ErrNoTenantSelected
 }
 
-// Delete (delegates to first accessible tenant)
-func (p *MicrosoftMultiTenantProvider) Delete(ctx context.Context, resourceType string, resourceID string) (*ProviderResult, error) {
-	tenants, err := p.ListAccessibleTenants(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tenants: %w", err)
-	}
-	if len(tenants) == 0 {
-		return nil, fmt.Errorf("no accessible tenants found")
-	}
-
-	return p.DeleteFromTenant(ctx, tenants[0].TenantID, resourceType, resourceID)
+// Delete returns ErrNoTenantSelected. Multi-tenant write operations must target a
+// specific tenant to avoid cross-tenant data loss. Use DeleteFromTenant instead.
+func (p *MicrosoftMultiTenantProvider) Delete(_ context.Context, _ string, _ string) (*ProviderResult, error) {
+	return nil, ErrNoTenantSelected
 }
 
 // List (aggregates across all tenants)
@@ -514,17 +486,10 @@ func (p *MicrosoftMultiTenantProvider) List(ctx context.Context, resourceType st
 	}, nil
 }
 
-// RawAPI (delegates to first accessible tenant)
-func (p *MicrosoftMultiTenantProvider) RawAPI(ctx context.Context, method, path string, body interface{}) (*ProviderResult, error) {
-	tenants, err := p.ListAccessibleTenants(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tenants: %w", err)
-	}
-	if len(tenants) == 0 {
-		return nil, fmt.Errorf("no accessible tenants found")
-	}
-
-	return p.RawAPIInTenant(ctx, tenants[0].TenantID, method, path, body)
+// RawAPI returns ErrNoTenantSelected. Raw API calls against a multi-tenant provider
+// must specify a tenant to ensure the request is routed correctly. Use RawAPIInTenant instead.
+func (p *MicrosoftMultiTenantProvider) RawAPI(_ context.Context, _, _ string, _ interface{}) (*ProviderResult, error) {
+	return nil, ErrNoTenantSelected
 }
 
 // GetAPISchema returns the Microsoft Graph schema

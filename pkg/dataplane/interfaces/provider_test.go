@@ -260,4 +260,3 @@ func TestProviderStats(t *testing.T) {
 	assert.Equal(t, time.Minute, stats.Uptime)
 	assert.Equal(t, 1, stats.ActiveSessions)
 }
-
