@@ -7,6 +7,7 @@ package saas
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,13 @@ import (
 // explicit *InTenant variants (CreateInTenant, ReadFromTenant, UpdateInTenant,
 // DeleteFromTenant, RawAPIInTenant) to target a specific tenant.
 var ErrNoTenantSelected = errors.New("no tenant selected: use CreateInTenant/ReadFromTenant/UpdateInTenant/DeleteFromTenant/RawAPIInTenant")
+
+// TenantDiscoverer discovers accessible tenants using a token obtained from a
+// completed OAuth2 admin-consent flow. The provider context (e.g. "microsoft")
+// is known to the caller and does not need to be part of the interface contract.
+type TenantDiscoverer interface {
+	DiscoverTenants(ctx context.Context, token *TokenSet) (*TenantDiscoveryResult, error)
+}
 
 // ConsentStore persists and retrieves admin-consent state for a provider.
 // Implementations must preserve all fields of ConsentStatus, including the

@@ -18,6 +18,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Test-only implementations
+
+// stubTenantDiscoverer is a test-only TenantDiscoverer that returns a fixed set of
+// deterministic tenants without making any HTTP calls. Configure tenants at construction
+// time; pass err to simulate discovery failures.
+type stubTenantDiscoverer struct {
+	tenants []TenantInfo
+	err     error
+}
+
+func (s *stubTenantDiscoverer) DiscoverTenants(_ context.Context, _ *TokenSet) (*TenantDiscoveryResult, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &TenantDiscoveryResult{
+		Tenants:      s.tenants,
+		DiscoveredAt: time.Now(),
+		Success:      true,
+	}, nil
+}
+
+// newStubTenantDiscoverer returns a stub that returns the given tenants on every call.
+func newStubTenantDiscoverer(tenants ...TenantInfo) *stubTenantDiscoverer {
+	return &stubTenantDiscoverer{tenants: tenants}
+}
+
 // Mock implementations for testing
 
 // MockCredentialStore implements CredentialStore for testing token and client-secret
@@ -143,7 +169,7 @@ func TestMultiTenantManager_StartAdminConsent(t *testing.T) {
 			credStore := NewMockCredentialStore()
 			consentStore := NewInMemoryConsentStore()
 			httpClient := &http.Client{}
-			mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
+			mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
 
 			// Mock OAuth2Client
 			mockOAuth2 := &MockOAuth2Client{}
@@ -178,6 +204,12 @@ func TestMultiTenantManager_StartAdminConsent(t *testing.T) {
 }
 
 func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
+	// Deterministic tenants returned by the stub discoverer for success-path assertions.
+	stubTenants := []TenantInfo{
+		{TenantID: "stub-tenant-alpha", DisplayName: "Stub Alpha Corp", Domain: "alpha.example.com", HasAccess: true},
+		{TenantID: "stub-tenant-beta", DisplayName: "Stub Beta Corp", Domain: "beta.example.com", HasAccess: true},
+	}
+
 	tests := []struct {
 		name         string
 		authCode     string
@@ -228,7 +260,8 @@ func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
 			credStore := NewMockCredentialStore()
 			consentStore := NewInMemoryConsentStore()
 			// Use the real DefaultOAuth2Client so ExchangeCode hits the httptest server.
-			mtm := NewMultiTenantManager(credStore, consentStore, &http.Client{})
+			// Wire a stub discoverer so discoverTenants returns stubTenants without HTTP calls.
+			mtm := NewMultiTenantManager(credStore, consentStore, &http.Client{}, newStubTenantDiscoverer(stubTenants...))
 
 			ctx := context.Background()
 			provider := "microsoft"
@@ -266,6 +299,78 @@ func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, "real-access-token", storedTokens.AccessToken)
 			assert.Equal(t, "real-refresh-token", storedTokens.RefreshToken)
+
+			// Confirm the tenants returned by the stub discoverer were persisted
+			// unchanged — no fabrication occurs between discovery and storage.
+			require.Len(t, updatedStatus.AccessibleTenants, len(stubTenants))
+			for i, want := range stubTenants {
+				assert.Equal(t, want.TenantID, updatedStatus.AccessibleTenants[i].TenantID)
+				assert.Equal(t, want.DisplayName, updatedStatus.AccessibleTenants[i].DisplayName)
+				assert.Equal(t, want.Domain, updatedStatus.AccessibleTenants[i].Domain)
+				assert.Equal(t, want.HasAccess, updatedStatus.AccessibleTenants[i].HasAccess)
+			}
+		})
+	}
+}
+
+// TestMultiTenantManager_DiscoverTenantsErrors exercises the two new conditional
+// branches in discoverTenants: a nil discoverer and a discoverer that returns an error.
+// Both cases should cause CompleteAdminConsent to fail after a successful token exchange.
+func TestMultiTenantManager_DiscoverTenantsErrors(t *testing.T) {
+	// A token server that always returns a valid token so completeOAuth2Flow succeeds.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "ok-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		}); err != nil {
+			http.Error(w, "encode error", http.StatusInternalServerError)
+		}
+	}))
+	defer tokenServer.Close()
+
+	flow := &OAuth2Flow{
+		TokenURL:     tokenServer.URL,
+		ClientID:     "client-id",
+		ClientSecret: "client-secret",
+		RedirectURI:  "https://app.example.com/callback",
+		State:        "state",
+		Created:      time.Now(),
+		ExpiresAt:    time.Now().Add(10 * time.Minute),
+	}
+
+	tests := []struct {
+		name       string
+		discoverer TenantDiscoverer
+		wantErrMsg string
+	}{
+		{
+			name:       "nil discoverer returns error",
+			discoverer: nil,
+			wantErrMsg: "no tenant discoverer configured",
+		},
+		{
+			name:       "discoverer returns error propagates",
+			discoverer: &stubTenantDiscoverer{err: errors.New("graph unavailable")},
+			wantErrMsg: "graph unavailable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			credStore := NewMockCredentialStore()
+			consentStore := NewInMemoryConsentStore()
+			mtm := NewMultiTenantManager(credStore, consentStore, &http.Client{}, tt.discoverer)
+
+			require.NoError(t, consentStore.StoreConsent("microsoft", &ConsentStatus{
+				Provider:    "microsoft",
+				ConsentFlow: flow,
+			}))
+
+			err := mtm.CompleteAdminConsent(context.Background(), "microsoft", "any-code")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrMsg)
 		})
 	}
 }
@@ -386,7 +491,7 @@ func TestMultiTenantManager_GetTenantToken(t *testing.T) {
 	credStore := NewMockCredentialStore()
 	consentStore := NewInMemoryConsentStore()
 	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -424,7 +529,7 @@ func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
 	credStore := NewMockCredentialStore()
 	consentStore := NewInMemoryConsentStore()
 	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -458,7 +563,7 @@ func TestMultiTenantManager_ListAccessibleTenants(t *testing.T) {
 	credStore := NewMockCredentialStore()
 	consentStore := NewInMemoryConsentStore()
 	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -470,7 +575,7 @@ func TestMultiTenantManager_ListAccessibleTenants(t *testing.T) {
 		{
 			TenantID:    "explicit-tenant-alpha",
 			DisplayName: "Alpha Tenant",
-			Domain:      "alpha.onmicrosoft.com",
+			Domain:      "alpha.example.com",
 			HasAccess:   true,
 		},
 	}
@@ -497,7 +602,7 @@ func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 	credStore := NewMockCredentialStore()
 	consentStore := NewInMemoryConsentStore()
 	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -829,7 +934,10 @@ func TestMultiTenantManager_TenantCacheConcurrency(t *testing.T) {
 	credStore := NewMockCredentialStore()
 	consentStore := NewInMemoryConsentStore()
 	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
+	// Stub returns one deterministic tenant so RefreshTenantDiscovery writes a
+	// non-empty AccessibleTenants slice to the consent store on each call.
+	stub := newStubTenantDiscoverer(TenantInfo{TenantID: "stub-concurrent-tenant", HasAccess: true})
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, stub)
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -951,7 +1059,7 @@ func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
 	credStore := NewMockCredentialStore()
 	consentStore := NewInMemoryConsentStore()
 	httpClient := &http.Client{}
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient)
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
 
 	ctx := context.Background()
 	provider := "microsoft"
