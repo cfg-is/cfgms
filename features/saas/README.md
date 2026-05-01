@@ -108,6 +108,38 @@ resources:
 - **Audit Logging**: All API calls logged for compliance
 - **Scope Limitation**: Minimal required permissions
 
+## HTTP Client
+
+All Microsoft Graph API calls use an `*http.Client` built by `NewGraphHTTPClient`:
+
+```go
+// Default values: 10 req/s sustained, burst of 20
+client := saas.NewGraphHTTPClient(10, 20)
+
+// High limits for tests (avoids flakiness from rate limiting)
+testClient := saas.NewGraphHTTPClient(100, 1000)
+```
+
+### Rate limiting
+
+`NewGraphHTTPClient` wraps `http.DefaultTransport` with a `rateLimitedTransport`
+that enforces a per-process token-bucket rate limit using `golang.org/x/time/rate`.
+The limiter is shared across all tenants in the process (per-process, not per-tenant).
+Per-tenant limiting is a future optimization.
+
+Default values (10 req/s, burst 20) are conservative enough to avoid Microsoft Graph
+throttling under normal MSP workloads while still allowing short bursts for startup
+discovery.
+
+### Why not `pkg/cert`?
+
+`pkg/cert` manages CFGMS-internal mTLS certificates used for gRPC-over-QUIC between
+controller and steward. Microsoft Graph uses Microsoft's own public CA infrastructure —
+there is no mutual TLS or CFGMS certificate authority involved. `http.DefaultTransport`
+uses system root CAs, which already trust Microsoft's certificates. Using `pkg/cert`
+here would be incorrect: it would attempt to validate Microsoft's certificate against
+the CFGMS CA rather than the system trust store.
+
 ## Consent State Storage
 
 Admin-consent state (granted/revoked, accessible tenants, active OAuth2 flow) is

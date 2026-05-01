@@ -424,29 +424,9 @@ func (mtm *MultiTenantManager) discoverTenants(ctx context.Context, provider str
 	return mtm.tenantDiscoverer.DiscoverTenants(ctx, tokenSet)
 }
 
-func (mtm *MultiTenantManager) refreshTenantToken(ctx context.Context, provider, tenantID string) (*TokenSet, error) {
-	// Get the base refresh token
-	_, err := mtm.credStore.GetTokenSet(provider)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get base token set: %w", err)
-	}
-
-	// This would implement tenant-specific token refresh using the base token
-	// For Microsoft Graph, this involves using the refresh token with the specific tenant endpoint
-
-	// Mock implementation - create tenant-specific token
-	tenantToken := &TokenSet{
-		AccessToken:  fmt.Sprintf("tenant-%s-access-token", tenantID),
-		RefreshToken: fmt.Sprintf("tenant-%s-refresh-token", tenantID),
-		TokenType:    "Bearer",
-		ExpiresAt:    time.Now().Add(1 * time.Hour),
-	}
-
-	// Store the tenant-specific token
-	tenantKey := mtm.getTenantKey(provider, tenantID)
-	if err := mtm.credStore.StoreTokenSet(tenantKey, tenantToken); err != nil {
-		return nil, fmt.Errorf("failed to store tenant token: %w", err)
-	}
-
-	return tenantToken, nil
+func (mtm *MultiTenantManager) refreshTenantToken(_ context.Context, provider, tenantID string) (*TokenSet, error) {
+	// Per-tenant token refresh requires a real OAuth2 token exchange with the tenant's
+	// authorization endpoint. Callers must pre-populate the credential store (e.g. after
+	// admin consent completes) or re-run the admin consent flow to obtain a fresh token.
+	return nil, fmt.Errorf("tenant token refresh not yet implemented for provider %q tenantID %q: re-run admin consent to obtain a fresh token", provider, tenantID)
 }
