@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// maxRecursionDepth is the maximum recursion depth for SanitizeFieldsRecursive.
+const maxRecursionDepth = 10
+
 // maxLogValueLength is the maximum length for a sanitized log value.
 // Values exceeding this length are truncated with a [truncated] suffix.
 const maxLogValueLength = 1024
@@ -207,5 +210,56 @@ func sanitizeKeysAndValues(keysAndValues []any) []any {
 		}
 	}
 
+	return result
+}
+
+// SanitizeFieldsRecursive sanitizes all string keys and values in fields for safe
+// log inclusion. It recurses into nested map[string]interface{} and []interface{}
+// values up to 10 levels deep. Values implementing error have Error() sanitized;
+// fmt.Stringer values have String() sanitized. Non-string scalars pass through
+// unchanged. Maps at depth >= 10 are replaced with {"_truncated": "max depth exceeded"}.
+func SanitizeFieldsRecursive(fields map[string]interface{}) map[string]interface{} {
+	return sanitizeMapRecursive(fields, 0)
+}
+
+func sanitizeMapRecursive(fields map[string]interface{}, depth int) map[string]interface{} {
+	if depth >= maxRecursionDepth {
+		return map[string]interface{}{"_truncated": "max depth exceeded"}
+	}
+	result := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		result[SanitizeLogValue(k)] = sanitizeValueRecursive(v, depth+1)
+	}
+	return result
+}
+
+func sanitizeValueRecursive(v interface{}, depth int) interface{} {
+	if v == nil {
+		return nil
+	}
+	switch val := v.(type) {
+	case string:
+		return SanitizeLogValue(val)
+	case map[string]interface{}:
+		return sanitizeMapRecursive(val, depth)
+	case []interface{}:
+		return sanitizeSliceRecursive(val, depth)
+	case error:
+		return SanitizeLogValue(val.Error())
+	case fmt.Stringer:
+		return SanitizeLogValue(val.String())
+	default:
+		return v
+	}
+}
+
+func sanitizeSliceRecursive(items []interface{}, depth int) []interface{} {
+	if depth >= maxRecursionDepth {
+		return []interface{}{"_truncated: max depth exceeded"}
+	}
+	result := make([]interface{}, len(items))
+	for i, item := range items {
+		result[i] = sanitizeValueRecursive(item, depth+1)
+	}
 	return result
 }

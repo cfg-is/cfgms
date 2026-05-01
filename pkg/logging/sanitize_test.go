@@ -3,6 +3,7 @@
 package logging
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -392,6 +393,126 @@ func TestSensitiveLogConfig_GetSet(t *testing.T) {
 	SetSensitiveLogConfig(SensitiveLogConfig{UnredactedSensitiveValues: false})
 	got = GetSensitiveLogConfig()
 	assert.False(t, got.UnredactedSensitiveValues)
+}
+
+func TestSanitizeFieldsRecursive_StringValues(t *testing.T) {
+	fields := map[string]interface{}{
+		"clean":     "value",
+		"injected":  "bad\nvalue",
+		"null_byte": "a\x00b",
+		"ansi":      "\x1b[31mred\x1b[0m",
+	}
+	result := SanitizeFieldsRecursive(fields)
+	assert.Equal(t, "value", result["clean"])
+	assert.Equal(t, "bad_value", result["injected"])
+	assert.Equal(t, "a_b", result["null_byte"])
+	assert.Equal(t, "_[31mred_[0m", result["ansi"])
+}
+
+func TestSanitizeFieldsRecursive_NonStringPassThrough(t *testing.T) {
+	fields := map[string]interface{}{
+		"count":   42,
+		"enabled": true,
+		"ratio":   3.14,
+		"nothing": nil,
+	}
+	result := SanitizeFieldsRecursive(fields)
+	assert.Equal(t, 42, result["count"])
+	assert.Equal(t, true, result["enabled"])
+	assert.Equal(t, 3.14, result["ratio"])
+	assert.Nil(t, result["nothing"])
+}
+
+func TestSanitizeFieldsRecursive_SanitizesKeys(t *testing.T) {
+	fields := map[string]interface{}{
+		"key\ninjected": "value",
+	}
+	result := SanitizeFieldsRecursive(fields)
+	_, hasInjected := result["key\ninjected"]
+	assert.False(t, hasInjected, "injected key should be sanitized")
+	assert.Equal(t, "value", result["key_injected"])
+}
+
+func TestSanitizeFieldsRecursive_NestedMap(t *testing.T) {
+	fields := map[string]interface{}{
+		"outer": map[string]interface{}{
+			"inner": "bad\nvalue",
+			"count": 99,
+		},
+	}
+	result := SanitizeFieldsRecursive(fields)
+	inner, ok := result["outer"].(map[string]interface{})
+	require.True(t, ok, "outer should be a map")
+	assert.Equal(t, "bad_value", inner["inner"])
+	assert.Equal(t, 99, inner["count"])
+}
+
+func TestSanitizeFieldsRecursive_NestedSlice(t *testing.T) {
+	fields := map[string]interface{}{
+		"items": []interface{}{"a\nb", "clean", 42, nil},
+	}
+	result := SanitizeFieldsRecursive(fields)
+	items, ok := result["items"].([]interface{})
+	require.True(t, ok, "items should be a slice")
+	assert.Equal(t, "a_b", items[0])
+	assert.Equal(t, "clean", items[1])
+	assert.Equal(t, 42, items[2])
+	assert.Nil(t, items[3])
+}
+
+func TestSanitizeFieldsRecursive_ErrorValue(t *testing.T) {
+	fields := map[string]interface{}{
+		"err": fmt.Errorf("failed\nwith newline"),
+	}
+	result := SanitizeFieldsRecursive(fields)
+	assert.Equal(t, "failed_with newline", result["err"])
+}
+
+type testStringer struct{ val string }
+
+func (s testStringer) String() string { return s.val }
+
+func TestSanitizeFieldsRecursive_StringerValue(t *testing.T) {
+	fields := map[string]interface{}{
+		"stringer": testStringer{"stringer\nvalue"},
+	}
+	result := SanitizeFieldsRecursive(fields)
+	assert.Equal(t, "stringer_value", result["stringer"])
+}
+
+func TestSanitizeFieldsRecursive_DepthLimit(t *testing.T) {
+	// Build an 11-level deep map; the 10th level should be replaced with a truncation marker.
+	var buildNested func(depth int) map[string]interface{}
+	buildNested = func(depth int) map[string]interface{} {
+		if depth == 0 {
+			return map[string]interface{}{"leaf": "value\ninjected"}
+		}
+		return map[string]interface{}{"child": buildNested(depth - 1)}
+	}
+
+	// 11 levels: top-level + 10 child maps — the 10th child triggers truncation.
+	nested := buildNested(11)
+	result := SanitizeFieldsRecursive(nested)
+
+	// Traverse down to find the truncation marker without recursing 11 levels in test.
+	// We know truncation kicks in at depth 10. Walk down level by level.
+	current := result
+	for i := 0; i < 9; i++ {
+		child, ok := current["child"].(map[string]interface{})
+		require.True(t, ok, "expected child map at level %d", i+1)
+		current = child
+	}
+	// At this point, current["child"] should be the truncated map.
+	truncated, ok := current["child"].(map[string]interface{})
+	require.True(t, ok, "truncated value should be a map")
+	assert.Equal(t, "max depth exceeded", truncated["_truncated"])
+}
+
+func TestSanitizeFieldsRecursive_NilInput(t *testing.T) {
+	// A nil map should not panic.
+	result := SanitizeFieldsRecursive(nil)
+	assert.NotNil(t, result)
+	assert.Len(t, result, 0)
 }
 
 func TestSensitiveLogConfig_ConcurrentAccess(t *testing.T) {
