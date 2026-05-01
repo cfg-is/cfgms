@@ -92,6 +92,7 @@ type Server struct {
 	dnaStorageManager       *dnaStorage.Manager                 // Reports engine DNA storage (must be closed on Stop)
 	triggerManager          *workflowtrigger.TriggerManagerImpl // Issue #414: Workflow trigger manager
 	gitSyncer               *gitsync.Syncer                     // Issue #666: git-sync write-through component
+	webhookHandler          *gitsync.WebhookHandler             // Issue #681: drain in-flight webhook syncs on shutdown
 	storageManager          *interfaces.StorageManager          // Main storage manager (must be closed on Stop to release SQLite handles)
 }
 
@@ -587,6 +588,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		gitSyncer, webhookHandler := initializeGitSync(cfg.DataDir, storageManager.GetConfigStore(), logger)
 		if gitSyncer != nil {
 			srv.gitSyncer = gitSyncer
+			srv.webhookHandler = webhookHandler // Issue #681: retain for shutdown drain
 			if err := gitSyncer.Start(context.Background()); err != nil {
 				logger.Warn("git-sync: failed to start syncer", "error", err)
 			} else {
@@ -1049,6 +1051,22 @@ func (s *Server) Stop() error {
 		}
 	}
 
+	// Drain in-flight webhook-triggered syncs before closing storage (Issue #681).
+	// WaitForPendingSyncs must run before storageManager.Close() because webhook
+	// sync goroutines write to the config store.
+	if s.webhookHandler != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		s.webhookHandler.WaitForPendingSyncs(ctx)
+	}
+
+	// Stop git-sync syncer — cancels polling goroutines (Issue #666).
+	// Must also run before storageManager.Close().
+	if s.gitSyncer != nil {
+		s.gitSyncer.Stop()
+		s.logger.Info("git-sync syncer stopped")
+	}
+
 	// Close main storage manager — releases flatfile + SQLite store handles so
 	// temp-directory cleanup succeeds on Windows. Must run after managers that
 	// use the stores have stopped.
@@ -1056,12 +1074,6 @@ func (s *Server) Stop() error {
 		if err := s.storageManager.Close(); err != nil {
 			s.logger.Warn("Failed to close storage manager", "error", err)
 		}
-	}
-
-	// Stop git-sync syncer (Issue #666)
-	if s.gitSyncer != nil {
-		s.gitSyncer.Stop()
-		s.logger.Info("git-sync syncer stopped")
 	}
 
 	// Stop HTTP server

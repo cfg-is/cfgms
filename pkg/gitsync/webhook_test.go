@@ -4,6 +4,7 @@ package gitsync_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,12 +14,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/logging"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
 
@@ -76,7 +79,7 @@ func newWebhookSetup(t *testing.T, bs []gitsync.ScopeBinding) *webhookTestSetup 
 
 	// Ensure all background goroutines finish before the test's temp dir is
 	// removed, preventing "directory not empty" cleanup failures.
-	t.Cleanup(handler.WaitForPendingSyncs)
+	t.Cleanup(func() { handler.WaitForPendingSyncs(context.Background()) })
 	t.Cleanup(syncer.Stop)
 
 	return &webhookTestSetup{handler: handler, syncer: syncer, bindings: bindings}
@@ -130,7 +133,7 @@ func TestWebhookMatchingBinding(t *testing.T) {
 	assert.Equal(t, http.StatusAccepted, rec.Code)
 
 	// Wait for the background sync goroutine to finish.
-	setup.handler.WaitForPendingSyncs()
+	setup.handler.WaitForPendingSyncs(context.Background())
 }
 
 // TestWebhookBranchMismatch verifies that a push to a different branch than the
@@ -190,7 +193,7 @@ func TestWebhookValidHMAC(t *testing.T) {
 	assert.Equal(t, http.StatusAccepted, rec.Code)
 
 	// Wait for the background sync goroutine.
-	setup.handler.WaitForPendingSyncs()
+	setup.handler.WaitForPendingSyncs(context.Background())
 }
 
 // TestWebhookInvalidHMAC verifies that a request with an invalid HMAC-SHA256
@@ -318,5 +321,70 @@ func TestWebhookEnvVarHMAC(t *testing.T) {
 	assert.Equal(t, http.StatusAccepted, rec.Code)
 
 	// Wait for the background sync goroutine.
-	setup.handler.WaitForPendingSyncs()
+	setup.handler.WaitForPendingSyncs(context.Background())
+}
+
+// TestWebhookWaitForPendingSyncsDrainsBeforeDeadline verifies that
+// WaitForPendingSyncs returns before its context deadline when a
+// webhook-triggered background sync completes in time, and that the sync
+// result is visible in the config store after the drain. This mirrors the
+// shutdown drain that Stop() performs before closing storage (Issue #681).
+func TestWebhookWaitForPendingSyncsDrainsBeforeDeadline(t *testing.T) {
+	requireGit(t)
+
+	bareDir, _, _ := newTestRepo(t, map[string]string{
+		"policy1.yaml": "key: value\n",
+	})
+
+	// Build components directly so the store is accessible for result verification.
+	root := t.TempDir()
+	store, err := flatfile.NewFlatFileConfigStore(filepath.Join(root, "configs"))
+	require.NoError(t, err)
+
+	bindings, err := gitsync.NewBindingStore(root)
+	require.NoError(t, err)
+
+	binding := gitsync.ScopeBinding{
+		TenantPath: "root/t1",
+		Namespace:  "policies",
+		OriginURL:  bareDir,
+		Branch:     "main",
+	}
+	require.NoError(t, bindings.Add(binding))
+
+	logger := logging.ForComponent("webhook-test")
+	syncer, err := gitsync.NewSyncer(store, bindings, filepath.Join(root, "repos"), logger)
+	require.NoError(t, err)
+	t.Cleanup(syncer.Stop)
+
+	handler := gitsync.NewWebhookHandler(syncer, bindings, logger)
+	t.Cleanup(func() { handler.WaitForPendingSyncs(context.Background()) })
+
+	body := buildPushPayload(bareDir, "refs/heads/main")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/git-push", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code, "expected 202 Accepted when a binding matches")
+
+	// Drain with a 5-second deadline — a local bare-repo clone + import finishes
+	// well within this window even on a loaded CI runner. Context expiry here
+	// means the drain did NOT complete, which is exactly the race this fix
+	// prevents (writes to closed storage on shutdown).
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	handler.WaitForPendingSyncs(ctx)
+
+	assert.NoError(t, ctx.Err(), "WaitForPendingSyncs timed out: in-flight sync did not complete before deadline")
+
+	// Confirm the sync result is visible in the store — proves the drain
+	// completed with data written, not merely that the goroutine exited.
+	entry, storeErr := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{
+		TenantID:  "root/t1",
+		Namespace: "policies",
+		Name:      "policy1",
+	})
+	require.NoError(t, storeErr, "config store must contain the synced entry after drain")
+	assert.Equal(t, "key: value\n", string(entry.Data))
 }
