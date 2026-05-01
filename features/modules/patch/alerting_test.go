@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-package patch_test
+package patch
 
 import (
 	"context"
@@ -9,12 +9,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/cfgis/cfgms/features/modules/patch"
 )
 
 func TestDefaultAlertConfig(t *testing.T) {
-	config := patch.DefaultAlertConfig()
+	config := DefaultAlertConfig()
 
 	assert.True(t, config.Enabled, "Alerting should be enabled by default")
 	assert.Equal(t, 7, config.WarningThreshold, "Warning threshold should be 7 days")
@@ -26,48 +24,48 @@ func TestDefaultAlertConfig(t *testing.T) {
 }
 
 func TestNewAlertingManager(t *testing.T) {
-	config := patch.DefaultAlertConfig()
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	config := DefaultAlertConfig()
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 	require.NotNil(t, alertManager)
 }
 
 func TestAlertingManager_CheckDevice_Compliant(t *testing.T) {
-	config := patch.DefaultAlertConfig()
+	config := DefaultAlertConfig()
 	config.SuppressInfo = false // Don't suppress info alerts for testing
 
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{}) // No pending patches
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{}) // No pending patches
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
-		patch.DefaultPolicy(),
+		DefaultPolicy(),
 		nil,
 		"test-device",
 	)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 
 	ctx := context.Background()
 	alert, err := alertManager.CheckDevice(ctx, "test-device")
 	require.NoError(t, err)
 	require.NotNil(t, alert)
 
-	assert.Equal(t, patch.AlertLevelInfo, alert.Level)
-	assert.Equal(t, patch.ComplianceStatusCompliant, alert.Status)
+	assert.Equal(t, AlertLevelInfo, alert.Level)
+	assert.Equal(t, ComplianceStatusCompliant, alert.Status)
 }
 
 func TestAlertingManager_CheckDevice_Warning(t *testing.T) {
-	config := patch.DefaultAlertConfig()
+	config := DefaultAlertConfig()
 
-	mockManager := patch.NewMockPatchManager()
+	mockManager := NewMockPatchManager()
 
 	// Add a patch that's approaching deadline (3 days old, 4 days left)
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB8888888",
 			Title:       "Critical Security Update",
@@ -78,34 +76,34 @@ func TestAlertingManager_CheckDevice_Warning(t *testing.T) {
 		},
 	})
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
-		patch.DefaultPolicy(),
+		DefaultPolicy(),
 		nil,
 		"test-device",
 	)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 
 	ctx := context.Background()
 	alert, err := alertManager.CheckDevice(ctx, "test-device")
 	require.NoError(t, err)
 	require.NotNil(t, alert)
 
-	assert.Equal(t, patch.AlertLevelWarning, alert.Level)
-	assert.Equal(t, patch.ComplianceStatusWarning, alert.Status)
+	assert.Equal(t, AlertLevelWarning, alert.Level)
+	assert.Equal(t, ComplianceStatusWarning, alert.Status)
 	assert.Greater(t, alert.DaysUntilBreach, 0)
 	assert.Contains(t, alert.Message, "WARNING")
 }
 
 func TestAlertingManager_CheckDevice_Critical(t *testing.T) {
-	config := patch.DefaultAlertConfig()
+	config := DefaultAlertConfig()
 
-	mockManager := patch.NewMockPatchManager()
+	mockManager := NewMockPatchManager()
 
 	// Add a patch that's very close to deadline (6.5 days old, 12 hours left)
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB7777777",
 			Title:       "Critical Security Update",
@@ -116,34 +114,34 @@ func TestAlertingManager_CheckDevice_Critical(t *testing.T) {
 		},
 	})
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
-		patch.DefaultPolicy(),
+		DefaultPolicy(),
 		nil,
 		"test-device",
 	)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 
 	ctx := context.Background()
 	alert, err := alertManager.CheckDevice(ctx, "test-device")
 	require.NoError(t, err)
 	require.NotNil(t, alert)
 
-	assert.Equal(t, patch.AlertLevelCritical, alert.Level)
-	assert.Equal(t, patch.ComplianceStatusCritical, alert.Status)
+	assert.Equal(t, AlertLevelCritical, alert.Level)
+	assert.Equal(t, ComplianceStatusCritical, alert.Status)
 	assert.True(t, alert.DaysUntilBreach < 1)
 	assert.Contains(t, alert.Message, "CRITICAL")
 }
 
 func TestAlertingManager_CheckDevice_Breach(t *testing.T) {
-	config := patch.DefaultAlertConfig()
+	config := DefaultAlertConfig()
 
-	mockManager := patch.NewMockPatchManager()
+	mockManager := NewMockPatchManager()
 
 	// Add an overdue patch (10 days old)
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB6666666",
 			Title:       "Overdue Critical Patch",
@@ -154,43 +152,43 @@ func TestAlertingManager_CheckDevice_Breach(t *testing.T) {
 		},
 	})
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
-		patch.DefaultPolicy(),
+		DefaultPolicy(),
 		nil,
 		"test-device",
 	)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 
 	ctx := context.Background()
 	alert, err := alertManager.CheckDevice(ctx, "test-device")
 	require.NoError(t, err)
 	require.NotNil(t, alert)
 
-	assert.Equal(t, patch.AlertLevelBreach, alert.Level)
-	assert.Equal(t, patch.ComplianceStatusNonCompliant, alert.Status)
+	assert.Equal(t, AlertLevelBreach, alert.Level)
+	assert.Equal(t, ComplianceStatusNonCompliant, alert.Status)
 	assert.True(t, alert.DaysUntilBreach < 0)
 	assert.Contains(t, alert.Message, "BREACH")
 }
 
 func TestAlertingManager_SuppressInfo(t *testing.T) {
-	config := patch.DefaultAlertConfig()
+	config := DefaultAlertConfig()
 	config.SuppressInfo = true
 
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{}) // Compliant
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{}) // Compliant
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
-		patch.DefaultPolicy(),
+		DefaultPolicy(),
 		nil,
 		"test-device",
 	)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 
 	ctx := context.Background()
 	alert, err := alertManager.CheckDevice(ctx, "test-device")
@@ -199,12 +197,12 @@ func TestAlertingManager_SuppressInfo(t *testing.T) {
 }
 
 func TestAlertingManager_MaxAlertsPerDay(t *testing.T) {
-	config := patch.DefaultAlertConfig()
+	config := DefaultAlertConfig()
 	config.MaxAlertsPerDay = 2
 	config.AlertInterval = 1 * time.Millisecond // Very short interval for testing
 
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB9999999",
 			Title:       "Critical Patch",
@@ -215,15 +213,15 @@ func TestAlertingManager_MaxAlertsPerDay(t *testing.T) {
 		},
 	})
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
-		patch.DefaultPolicy(),
+		DefaultPolicy(),
 		nil,
 		"test-device",
 	)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 	ctx := context.Background()
 
 	// First alert should succeed
@@ -247,11 +245,11 @@ func TestAlertingManager_MaxAlertsPerDay(t *testing.T) {
 }
 
 func TestAlertingManager_AlertInterval(t *testing.T) {
-	config := patch.DefaultAlertConfig()
+	config := DefaultAlertConfig()
 	config.AlertInterval = 100 * time.Millisecond
 
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB8888888",
 			Title:       "Warning Patch",
@@ -262,15 +260,15 @@ func TestAlertingManager_AlertInterval(t *testing.T) {
 		},
 	})
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
-		patch.DefaultPolicy(),
+		DefaultPolicy(),
 		nil,
 		"test-device",
 	)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 	ctx := context.Background()
 
 	// First alert should succeed
@@ -293,10 +291,10 @@ func TestAlertingManager_AlertInterval(t *testing.T) {
 }
 
 func TestAlertingManager_CheckDevices(t *testing.T) {
-	config := patch.DefaultAlertConfig()
+	config := DefaultAlertConfig()
 
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB9999999",
 			Title:       "Critical Patch",
@@ -307,15 +305,15 @@ func TestAlertingManager_CheckDevices(t *testing.T) {
 		},
 	})
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
-		patch.DefaultPolicy(),
+		DefaultPolicy(),
 		nil,
 		"test-device",
 	)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 
 	ctx := context.Background()
 	deviceIDs := []string{"device-1", "device-2", "device-3"}
@@ -326,10 +324,10 @@ func TestAlertingManager_CheckDevices(t *testing.T) {
 }
 
 func TestAlertingManager_AlertDetails(t *testing.T) {
-	config := patch.DefaultAlertConfig()
+	config := DefaultAlertConfig()
 
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB1111111",
 			Title:       "Critical Security Update",
@@ -348,15 +346,15 @@ func TestAlertingManager_AlertDetails(t *testing.T) {
 		},
 	})
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
-		patch.DefaultPolicy(),
+		DefaultPolicy(),
 		nil,
 		"test-device",
 	)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 
 	ctx := context.Background()
 	alert, err := alertManager.CheckDevice(ctx, "test-device")
@@ -374,44 +372,44 @@ func TestAlertingManager_AlertDetails(t *testing.T) {
 }
 
 func TestAlertingManager_ChannelFiltering(t *testing.T) {
-	config := patch.AlertConfig{
+	config := AlertConfig{
 		Enabled:           true,
 		WarningThreshold:  7,
 		CriticalThreshold: 1,
 		AlertInterval:     24 * time.Hour,
 		MaxAlertsPerDay:   3,
 		SuppressInfo:      false,
-		DeliveryChannels: []patch.AlertChannel{
+		DeliveryChannels: []AlertChannel{
 			{
 				Type:     "webhook",
 				Target:   "https://example.com/warning",
-				MinLevel: patch.AlertLevelWarning,
+				MinLevel: AlertLevelWarning,
 			},
 			{
 				Type:     "webhook",
 				Target:   "https://example.com/critical",
-				MinLevel: patch.AlertLevelCritical,
+				MinLevel: AlertLevelCritical,
 			},
 			{
 				Type:     "webhook",
 				Target:   "https://example.com/all",
-				MinLevel: patch.AlertLevelInfo,
+				MinLevel: AlertLevelInfo,
 			},
 		},
 	}
 
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{})
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{})
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
-		patch.DefaultPolicy(),
+		DefaultPolicy(),
 		nil,
 		"test-device",
 	)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 
 	// Test that channels are filtered based on alert level
 	// This would need access to internal methods or we'd test through delivery
@@ -420,22 +418,22 @@ func TestAlertingManager_ChannelFiltering(t *testing.T) {
 }
 
 func TestNewComplianceScheduler(t *testing.T) {
-	config := patch.DefaultAlertConfig()
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	config := DefaultAlertConfig()
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 	deviceIDs := []string{"device-1", "device-2", "device-3"}
 
-	scheduler := patch.NewComplianceScheduler(alertManager, 1*time.Hour, deviceIDs)
+	scheduler := NewComplianceScheduler(alertManager, 1*time.Hour, deviceIDs)
 	require.NotNil(t, scheduler)
 }
 
 func TestComplianceScheduler_RunOnce(t *testing.T) {
-	config := patch.DefaultAlertConfig()
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	config := DefaultAlertConfig()
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB9999999",
 			Title:       "Test Patch",
@@ -446,18 +444,18 @@ func TestComplianceScheduler_RunOnce(t *testing.T) {
 		},
 	})
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
-		patch.DefaultPolicy(),
+		DefaultPolicy(),
 		nil,
 		"test-device",
 	)
 	require.NoError(t, err)
 
-	alertManager := patch.NewAlertingManager(config, patchModule)
+	alertManager := NewAlertingManager(config, patchModule)
 	deviceIDs := []string{"device-1"}
 
-	scheduler := patch.NewComplianceScheduler(alertManager, 10*time.Millisecond, deviceIDs)
+	scheduler := NewComplianceScheduler(alertManager, 10*time.Millisecond, deviceIDs)
 
 	// Create a context that will cancel after short time
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)

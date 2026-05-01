@@ -10,17 +10,41 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 )
 
-// New creates a new instance of the Package module
+// New creates a new instance of the Package module using the platform's real
+// package manager. If no supported package manager is found, the returned
+// module's Get and Set methods will return the initialization error so the
+// steward can surface a clear failure instead of silently providing fake data.
 func New() modules.Module {
-	return &PackageModule{
-		packageManager: NewMockPackageManager(),
+	mgr, err := NewPackageManager(context.Background())
+	if err != nil {
+		return &errPackageModule{err: fmt.Errorf("package module init: %w", err)}
 	}
+	return &PackageModule{packageManager: mgr}
 }
 
-// NewPackageModule creates a new package module instance
-func NewPackageModule() (*PackageModule, error) {
+// errPackageModule is returned by New when no real package manager is available.
+// All operations return the initialization error so callers see a clear failure.
+type errPackageModule struct {
+	err error
+}
+
+var _ modules.Module = (*errPackageModule)(nil)
+
+func (m *errPackageModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return nil, m.err
+}
+
+func (m *errPackageModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return m.err
+}
+
+// NewPackageModule creates a new package module instance with the provided manager.
+func NewPackageModule(mgr PackageManager) (*PackageModule, error) {
+	if mgr == nil {
+		return nil, ErrInvalidConfig
+	}
 	return &PackageModule{
-		packageManager: NewMockPackageManager(),
+		packageManager: mgr,
 	}, nil
 }
 
@@ -106,19 +130,10 @@ func (m *PackageModule) Set(ctx context.Context, name string, config modules.Con
 		return ErrResourceIDMismatch
 	}
 
-	// Validate package manager if specified
+	// Validate the requested package manager against the active one
 	if cfg.PackageManager != "" {
 		if !m.packageManager.IsValidManager(cfg.PackageManager) {
 			return ErrInvalidPackageManager
-		}
-		// Set the package manager if it's valid
-		if mock, ok := m.packageManager.(*MockPackageManager); ok {
-			mock.SetManager(cfg.PackageManager)
-		}
-	} else {
-		// Set default package manager
-		if mock, ok := m.packageManager.(*MockPackageManager); ok {
-			mock.SetManager("default")
 		}
 	}
 

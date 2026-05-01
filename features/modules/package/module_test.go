@@ -4,6 +4,7 @@ package package_module
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -132,7 +133,7 @@ version: latest
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, err := NewPackageModule()
+			m, err := NewPackageModule(NewMockPackageManager())
 			require.NoError(t, err)
 
 			if tt.setupFunc != nil {
@@ -194,7 +195,7 @@ dependencies:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, err := NewPackageModule()
+			m, err := NewPackageModule(NewMockPackageManager())
 			require.NoError(t, err)
 
 			err = m.Set(context.Background(), tt.resourceID, tt.config)
@@ -414,7 +415,7 @@ version: "1 2 3"
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, err := NewPackageModule()
+			m, err := NewPackageModule(NewMockPackageManager())
 			require.NoError(t, err)
 
 			err = m.Set(context.Background(), tt.resourceID, tt.config)
@@ -429,4 +430,30 @@ version: "1 2 3"
 			}
 		})
 	}
+}
+
+// TestErrPackageModule verifies that a module constructed from a failed init
+// returns the init error from both Get and Set rather than fake data.
+func TestErrPackageModule(t *testing.T) {
+	initErr := errors.New("no supported package manager found on Linux")
+	m := &errPackageModule{err: initErr}
+
+	ctx := context.Background()
+
+	// Get must return the init error
+	state, err := m.Get(ctx, "nginx")
+	assert.Nil(t, state)
+	assert.ErrorIs(t, err, initErr)
+
+	// Set must return the init error
+	cfg := &Config{Name: "nginx", State: "present", Version: "latest"}
+	err = m.Set(ctx, "nginx", cfg)
+	assert.ErrorIs(t, err, initErr)
+}
+
+// TestNewPackageModule_NilManager verifies that passing nil returns an error.
+func TestNewPackageModule_NilManager(t *testing.T) {
+	_, err := NewPackageModule(nil)
+	assert.Error(t, err)
+	assert.Equal(t, ErrInvalidConfig, err)
 }
