@@ -155,9 +155,24 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // WaitForPendingSyncs blocks until all background sync goroutines dispatched by
-// ServeHTTP have completed. This is primarily useful in tests.
-func (h *WebhookHandler) WaitForPendingSyncs() {
-	h.wg.Wait()
+// ServeHTTP have completed, or until ctx is cancelled. If the context expires
+// before all goroutines finish, a warning is logged and the function returns.
+// Call this before closing storage to avoid writes against a closed store.
+//
+// Implementation note: the goroutine below is a monitoring-only observer
+// (calls h.wg.Wait() and closes done). It performs no I/O and holds no
+// resource references. Its lifetime is bounded by when the last in-flight
+// sync goroutine finishes — at which point wg.Wait() returns and the
+// goroutine exits. This is a safe, well-understood Go pattern for bounded
+// WaitGroup waits.
+func (h *WebhookHandler) WaitForPendingSyncs(ctx context.Context) {
+	done := make(chan struct{})
+	go func() { h.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		h.logger.Warn("gitsync: shutdown timed out waiting for pending webhook syncs")
+	}
 }
 
 // validateHMAC returns true if signature is a valid X-Hub-Signature-256 value
