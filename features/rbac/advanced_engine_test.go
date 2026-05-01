@@ -7,116 +7,45 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac/memory"
 )
 
-// Simplified test without direct zero-trust mocking due to circular import constraints
-
-// Mock stores for testing
-type MockPermissionStore struct{ mock.Mock }
-type MockRoleStore struct{ mock.Mock }
-type MockSubjectStore struct{ mock.Mock }
-type MockRoleAssignmentStore struct{ mock.Mock }
-
-func (m *MockPermissionStore) CreatePermission(ctx context.Context, permission *common.Permission) error {
-	return nil
-}
-func (m *MockPermissionStore) GetPermission(ctx context.Context, id string) (*common.Permission, error) {
-	return nil, nil
-}
-func (m *MockPermissionStore) ListPermissions(ctx context.Context, resourceType string) ([]*common.Permission, error) {
-	return nil, nil
-}
-func (m *MockPermissionStore) UpdatePermission(ctx context.Context, permission *common.Permission) error {
-	return nil
-}
-func (m *MockPermissionStore) DeletePermission(ctx context.Context, id string) error { return nil }
-
-func (m *MockRoleStore) CreateRole(ctx context.Context, role *common.Role) error { return nil }
-func (m *MockRoleStore) GetRole(ctx context.Context, id string) (*common.Role, error) {
-	return nil, nil
-}
-func (m *MockRoleStore) ListRoles(ctx context.Context, tenantID string) ([]*common.Role, error) {
-	return nil, nil
-}
-func (m *MockRoleStore) UpdateRole(ctx context.Context, role *common.Role) error { return nil }
-func (m *MockRoleStore) DeleteRole(ctx context.Context, id string) error         { return nil }
-func (m *MockRoleStore) GetRolePermissions(ctx context.Context, roleID string) ([]*common.Permission, error) {
-	return []*common.Permission{
-		{Id: "steward.register", Name: "Register Steward", Description: "Allow steward registration"},
-	}, nil
-}
-func (m *MockRoleStore) GetRoleHierarchy(ctx context.Context, roleID string) (*memory.RoleHierarchy, error) {
-	return nil, nil
-}
-func (m *MockRoleStore) GetChildRoles(ctx context.Context, roleID string) ([]*common.Role, error) {
-	return nil, nil
-}
-func (m *MockRoleStore) GetParentRole(ctx context.Context, roleID string) (*common.Role, error) {
-	return nil, nil
-}
-func (m *MockRoleStore) SetRoleParent(ctx context.Context, roleID, parentRoleID string, inheritanceType common.RoleInheritanceType) error {
-	return nil
-}
-func (m *MockRoleStore) RemoveRoleParent(ctx context.Context, roleID string) error      { return nil }
-func (m *MockRoleStore) ValidateRoleHierarchy(ctx context.Context, roleID string) error { return nil }
-
-func (m *MockSubjectStore) CreateSubject(ctx context.Context, subject *common.Subject) error {
-	return nil
-}
-func (m *MockSubjectStore) GetSubject(ctx context.Context, id string) (*common.Subject, error) {
-	return &common.Subject{
-		Id:          id,
-		Type:        common.SubjectType_SUBJECT_TYPE_USER,
-		DisplayName: "Test User",
-		IsActive:    true,
-	}, nil
-}
-func (m *MockSubjectStore) ListSubjects(ctx context.Context, tenantID string, subjectType common.SubjectType) ([]*common.Subject, error) {
-	return nil, nil
-}
-func (m *MockSubjectStore) UpdateSubject(ctx context.Context, subject *common.Subject) error {
-	return nil
-}
-func (m *MockSubjectStore) DeleteSubject(ctx context.Context, id string) error { return nil }
-func (m *MockSubjectStore) GetSubjectRoles(ctx context.Context, subjectID, tenantID string) ([]*common.Role, error) {
-	return []*common.Role{
-		{Id: "admin", Name: "Administrator", Description: "Full admin access"},
-	}, nil
-}
-
-func (m *MockRoleAssignmentStore) AssignRole(ctx context.Context, assignment *common.RoleAssignment) error {
-	return nil
-}
-func (m *MockRoleAssignmentStore) RevokeRole(ctx context.Context, subjectID, roleID, tenantID string) error {
-	return nil
-}
-func (m *MockRoleAssignmentStore) GetAssignment(ctx context.Context, id string) (*common.RoleAssignment, error) {
-	return nil, nil
-}
-func (m *MockRoleAssignmentStore) ListAssignments(ctx context.Context, subjectID, roleID, tenantID string) ([]*common.RoleAssignment, error) {
-	return nil, nil
-}
-func (m *MockRoleAssignmentStore) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) {
-	return nil, nil
+func setupAdvancedEngineStore(t *testing.T) (*memory.Store, context.Context) {
+	t.Helper()
+	store := memory.NewStore()
+	ctx := context.Background()
+	require.NoError(t, store.Initialize(ctx))
+	return store, ctx
 }
 
 func TestAdvancedAuthEngine_BasicRBACFlow(t *testing.T) {
-	// Setup
-	mockPerm := &MockPermissionStore{}
-	mockRole := &MockRoleStore{}
-	mockSubject := &MockSubjectStore{}
-	mockAssignment := &MockRoleAssignmentStore{}
+	store, ctx := setupAdvancedEngineStore(t)
 
-	engine := NewAdvancedAuthEngine(mockPerm, mockRole, mockSubject, mockAssignment)
+	// Set up a permission, role, and active subject using real store components.
+	store.LoadPermissions([]*common.Permission{
+		{Id: "steward.register", Name: "Register Steward", Description: "Allow steward registration"},
+	})
+	store.LoadRoles([]*common.Role{
+		{Id: "admin", Name: "Administrator", Description: "Full admin access", TenantId: "tenant456",
+			PermissionIds: []string{"steward.register"}},
+	})
+	require.NoError(t, store.CreateSubject(ctx, &common.Subject{
+		Id:          "user123",
+		Type:        common.SubjectType_SUBJECT_TYPE_USER,
+		DisplayName: "Test User",
+		TenantId:    "tenant456",
+		IsActive:    true,
+		RoleIds:     []string{"admin"},
+	}))
+
+	engine := NewAdvancedAuthEngine(store, store, store, store)
 
 	// Test basic RBAC flow without zero-trust (disabled mode)
 	assert.Equal(t, ZeroTrustModeDisabled, engine.GetZeroTrustMode())
 
-	// Create test request
 	request := &common.AccessRequest{
 		SubjectId:    "user123",
 		PermissionId: "steward.register",
@@ -127,12 +56,10 @@ func TestAdvancedAuthEngine_BasicRBACFlow(t *testing.T) {
 		},
 	}
 
-	// Execute
-	response, err := engine.CheckPermission(context.Background(), request)
+	response, err := engine.CheckPermission(ctx, request)
 
-	// Verify
-	assert.NoError(t, err)
-	assert.NotNil(t, response)
+	require.NoError(t, err)
+	require.NotNil(t, response)
 	assert.True(t, response.Granted)
 	assert.Contains(t, response.Reason, "Access granted via role 'Administrator' with permission 'Register Steward'")
 }
