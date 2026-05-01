@@ -118,6 +118,11 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.logger.Warn("gitsync: webhook HMAC validation failed",
 					"tenant_path", logging.SanitizeLogValue(b.TenantPath),
 					"namespace", logging.SanitizeLogValue(b.Namespace))
+				// Intentional early return: reject the entire request (HTTP 401)
+				// when any matched binding's HMAC check fails, halting further
+				// iteration. We do not fall through to remaining bindings — a
+				// single HMAC failure poisons the whole response so the caller
+				// always sees rejection, not a partial 202.
 				http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
 				return
 			}
