@@ -5,6 +5,7 @@ package terminal
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,66 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// kvCapturingLogger captures Info and Warn log calls for security assertions.
+// It satisfies logging.Logger via embedding NoopLogger while recording key-value
+// arguments so tests can verify sensitive fields are redacted.
+type kvCapturingLogger struct {
+	logging.NoopLogger
+	mu      sync.Mutex
+	entries []kvLogEntry
+}
+
+type kvLogEntry struct {
+	msg string
+	kvs []interface{}
+}
+
+func (l *kvCapturingLogger) Info(msg string, kvs ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kvcopy := make([]interface{}, len(kvs))
+	copy(kvcopy, kvs)
+	l.entries = append(l.entries, kvLogEntry{msg: msg, kvs: kvcopy})
+}
+
+func (l *kvCapturingLogger) Warn(msg string, kvs ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kvcopy := make([]interface{}, len(kvs))
+	copy(kvcopy, kvs)
+	l.entries = append(l.entries, kvLogEntry{msg: msg, kvs: kvcopy})
+}
+
+// allKVContains reports whether any captured entry has a kv value equal to v.
+func (l *kvCapturingLogger) allKVContains(v string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, entry := range l.entries {
+		for i := 1; i < len(entry.kvs); i += 2 {
+			if s, ok := entry.kvs[i].(string); ok && s == v {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// anyKVKeyHasValue reports whether any captured entry has the given key mapped to the given value.
+func (l *kvCapturingLogger) anyKVKeyHasValue(key, value string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, entry := range l.entries {
+		for i := 0; i < len(entry.kvs)-1; i += 2 {
+			if k, ok := entry.kvs[i].(string); ok && k == key {
+				if v, ok2 := entry.kvs[i+1].(string); ok2 && v == value {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
 
 func TestSessionManagerCreation(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
@@ -543,4 +604,83 @@ func TestCreateSession_TenantIDRequired(t *testing.T) {
 		err = manager.TerminateSession(ctx, session.ID)
 		require.NoError(t, err)
 	})
+}
+
+// TestCreateSession_RedactsSessionID verifies that CreateSession never logs
+// the raw session UUID and always logs the redacted prefix form.
+func TestCreateSession_RedactsSessionID(t *testing.T) {
+	capLogger := &kvCapturingLogger{}
+	config := &Config{
+		SessionTimeout: 30 * time.Minute,
+		MaxSessions:    100,
+		RecordSessions: false,
+	}
+
+	manager, err := NewSessionManager(config, capLogger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	req := &SessionRequest{
+		TenantID:  "test-tenant",
+		StewardID: "test-steward-001",
+		UserID:    "test-user",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	}
+
+	session, err := manager.CreateSession(ctx, req)
+	require.NoError(t, err)
+	require.NotNil(t, session)
+
+	// Full UUID must not appear in any logged kv value.
+	assert.False(t, capLogger.allKVContains(session.ID),
+		"raw session UUID must not appear in any log kv value after CreateSession")
+
+	// Redacted form must be present under the session_id key.
+	redacted := logging.RedactedID(session.ID)
+	assert.True(t, capLogger.anyKVKeyHasValue("session_id", redacted),
+		"redacted session_id (%q) must appear in log kv values after CreateSession", redacted)
+
+	require.NoError(t, manager.TerminateSession(ctx, session.ID))
+}
+
+// TestTerminateSession_RedactsSessionID verifies that TerminateSession never logs
+// the raw session UUID and always logs the redacted prefix form.
+func TestTerminateSession_RedactsSessionID(t *testing.T) {
+	capLogger := &kvCapturingLogger{}
+	config := &Config{
+		SessionTimeout: 30 * time.Minute,
+		MaxSessions:    100,
+		RecordSessions: false,
+	}
+
+	manager, err := NewSessionManager(config, capLogger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	req := &SessionRequest{
+		TenantID:  "test-tenant",
+		StewardID: "test-steward-001",
+		UserID:    "test-user",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	}
+
+	session, err := manager.CreateSession(ctx, req)
+	require.NoError(t, err)
+
+	sessionID := session.ID
+	err = manager.TerminateSession(ctx, sessionID)
+	require.NoError(t, err)
+
+	// Full UUID must not appear in any logged kv value.
+	assert.False(t, capLogger.allKVContains(sessionID),
+		"raw session UUID must not appear in any log kv value after TerminateSession")
+
+	// Redacted form must be present under the session_id key.
+	redacted := logging.RedactedID(sessionID)
+	assert.True(t, capLogger.anyKVKeyHasValue("session_id", redacted),
+		"redacted session_id (%q) must appear in log kv values after TerminateSession", redacted)
 }
