@@ -1,0 +1,36 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(./.claude/scripts/po-act.sh preflight)",
+      "Bash(./.claude/scripts/po-act.sh preflight *)",
+      "Bash(./.claude/scripts/po-act.sh diagnose *)",
+      "Bash(./.claude/scripts/po-act.sh state *)",
+      "Bash(./.claude/scripts/po-act.sh merge-queue)",
+      "Bash(./.claude/scripts/po-act.sh merge-queue *)",
+      "Bash(./.claude/scripts/po-cycle-preflight.py)",
+      "Bash(./.claude/scripts/po-cycle-preflight.py *)",
+      "Bash(./.claude/scripts/agent-dispatch.sh list-running)",
+      "Bash(./.claude/scripts/agent-dispatch.sh list-exited)",
+      "Bash(./.claude/scripts/agent-dispatch.sh check-conflicts *)",
+      "Bash(./.claude/scripts/agent-dispatch.sh check-creds *)",
+      "Bash(./.claude/scripts/agent-dispatch.sh health-check *)",
+      "Bash(./.claude/scripts/agent-dispatch.sh inspect-exit *)",
+      "Bash(./.claude/scripts/agent-dispatch.sh inspect-detail *)",
+      "Bash(./.claude/scripts/agent-dispatch.sh inspect-container *)",
+      "Bash(./.claude/scripts/agent-dispatch.sh inspect-exit-container *)",
+      "Bash(./.claude/scripts/pr-review-helper.sh pre-review *)",
+      "Bash(./.claude/scripts/pr-review-helper.sh pr-overview *)",
+      "Bash(./.claude/scripts/pr-review-helper.sh pr-checks *)",
+      "Bash(./.claude/scripts/pr-review-helper.sh ci-details *)",
+      "Bash(./.claude/scripts/pr-review-helper.sh diff-scan *)",
+      "Bash(./.claude/scripts/pr-review-helper.sh doc-scan)",
+      "Bash(./scripts/pipeline-helper.sh view *)",
+      "Bash(./scripts/pipeline-helper.sh list-by-label *)",
+      "Bash(./scripts/pipeline-helper.sh list-prs *)",
+      "Bash(./scripts/pipeline-helper.sh sub-issue-summary *)"
+    ]
+  }
+}
