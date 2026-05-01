@@ -7,6 +7,7 @@ package cfgms.api.controller;
 option go_package = "github.com/cfgis/cfgms/api/proto/controller";
 
 import "common/common.proto";
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
 
@@ -94,6 +95,46 @@ message StewardSettings {
   repeated string module_paths = 3;
   LoggingConfig logging = 4;
   ErrorHandlingConfig error_handling = 5;
+
+  // secrets holds secret-reference key-value pairs (references only, not values).
+  // The actual secret values are managed by pkg/secrets.
+  map<string, string> secrets = 6;
+
+  // converge_interval is how often the steward re-converges against its config.
+  google.protobuf.Duration converge_interval = 7;
+
+  // script_signing configures script signing policy and trust configuration.
+  ScriptSigningConfig script_signing = 8;
+}
+
+// ScriptSigningConfig defines the steward-level script signing policy and trust configuration.
+message ScriptSigningConfig {
+  // policy sets the enforcement level: none, optional, or required.
+  string policy = 1;
+
+  // trust_mode defines which keys are accepted: any_valid, trusted_keys, or trusted_keys_and_public.
+  string trust_mode = 2;
+
+  // trusted_keys lists keys/certificates allowed to sign scripts.
+  repeated TrustedKeyRef trusted_keys = 3;
+
+  // allow_public_ca, when true alongside trusted_keys_and_public mode, also accepts public CAs.
+  bool allow_public_ca = 4;
+
+  // script_repo_url is the MSP-level Git repository URL for the tenant's script store.
+  string script_repo_url = 5;
+}
+
+// TrustedKeyRef identifies a trusted signing key or certificate.
+message TrustedKeyRef {
+  // name is a human-readable label for this key entry.
+  string name = 1;
+
+  // thumbprint is the certificate thumbprint used to identify the key.
+  string thumbprint = 2;
+
+  // public_key_ref is an opaque reference to a public key stored in the secrets provider.
+  string public_key_ref = 3;
 }
 
 // LoggingConfig defines logging output settings

@@ -168,7 +168,7 @@ func TestDetectUnmanagedDNADrift_NilDNACollector(t *testing.T) {
 	ctx := context.Background()
 	// Should not panic — nil collector is handled gracefully
 	assert.NotPanics(t, func() {
-		s.detectUnmanagedDNADrift(ctx)
+		_, _ = s.detectUnmanagedDNADrift(ctx)
 	})
 
 	require.NoError(t, s.Stop(context.Background()))
@@ -199,7 +199,7 @@ func TestDetectUnmanagedDNADrift_NilDriftDetector(t *testing.T) {
 	ctx := context.Background()
 	// Should not panic — nil drift detector is handled gracefully
 	assert.NotPanics(t, func() {
-		s.detectUnmanagedDNADrift(ctx)
+		_, _ = s.detectUnmanagedDNADrift(ctx)
 	})
 
 	require.NoError(t, s.Stop(context.Background()))
@@ -225,9 +225,9 @@ func TestDetectUnmanagedDNADrift_IDMismatchSkipsComparison(t *testing.T) {
 	s.previousDNAMu.Unlock()
 
 	ctx := context.Background()
-	// Should not panic — ID mismatch is handled gracefully, snapshot is updated
+	// Should not panic — ID mismatch returns ErrDNAIDMismatch rather than panicking
 	assert.NotPanics(t, func() {
-		s.detectUnmanagedDNADrift(ctx)
+		_, _ = s.detectUnmanagedDNADrift(ctx)
 	})
 
 	// Snapshot should be updated to the current (real) DNA despite the mismatch

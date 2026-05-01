@@ -163,7 +163,10 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to load module: %v", err)
 		result.ExecutionTime = time.Since(startTime)
-		e.handleResourceError(resource, err)
+		if rerr := e.handleResourceError(resource, err); rerr != nil {
+			result.Error = rerr.Error()
+			return result
+		}
 		return result
 	}
 
@@ -179,7 +182,10 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to create config state: %v", err)
 		result.ExecutionTime = time.Since(startTime)
-		e.handleResourceError(resource, err)
+		if rerr := e.handleResourceError(resource, err); rerr != nil {
+			result.Error = rerr.Error()
+			return result
+		}
 		return result
 	}
 
@@ -189,7 +195,10 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 		if err := configurable.Configure(desiredState); err != nil {
 			result.Error = fmt.Sprintf("failed to configure module: %v", err)
 			result.ExecutionTime = time.Since(startTime)
-			e.handleResourceError(resource, err)
+			if rerr := e.handleResourceError(resource, err); rerr != nil {
+				result.Error = rerr.Error()
+				return result
+			}
 			return result
 		}
 	}
@@ -198,7 +207,10 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to get current state: %v", err)
 		result.ExecutionTime = time.Since(startTime)
-		e.handleResourceError(resource, err)
+		if rerr := e.handleResourceError(resource, err); rerr != nil {
+			result.Error = rerr.Error()
+			return result
+		}
 		return result
 	}
 
@@ -226,7 +238,10 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	if err := module.Set(ctx, resourceID, desiredState); err != nil {
 		result.Error = fmt.Sprintf("failed to apply configuration: %v", err)
 		result.ExecutionTime = time.Since(startTime)
-		e.handleResourceError(resource, err)
+		if rerr := e.handleResourceError(resource, err); rerr != nil {
+			result.Error = rerr.Error()
+			return result
+		}
 		return result
 	}
 
@@ -235,7 +250,10 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	if err := e.verifyChanges(ctx, module, resourceID, desiredState); err != nil {
 		result.Error = fmt.Sprintf("verification failed: %v", err)
 		result.ExecutionTime = time.Since(startTime)
-		e.handleResourceError(resource, err)
+		if rerr := e.handleResourceError(resource, err); rerr != nil {
+			result.Error = rerr.Error()
+			return result
+		}
 		return result
 	}
 
@@ -287,7 +305,9 @@ func (e *Executor) verifyChanges(ctx context.Context, module modules.Module,
 }
 
 // handleResourceError handles errors according to the configured error handling policy.
-func (e *Executor) handleResourceError(resource config.ResourceConfig, err error) {
+// Returns a non-nil error only for ActionFail — the caller must abort the convergence pass.
+// For ActionContinue and ActionWarn, returns nil so execution continues.
+func (e *Executor) handleResourceError(resource config.ResourceConfig, err error) error {
 	switch e.config.ResourceFailure {
 	case config.ActionContinue:
 		e.logger.Error("Resource execution failed, continuing",
@@ -301,8 +321,9 @@ func (e *Executor) handleResourceError(resource config.ResourceConfig, err error
 		e.logger.Error("Resource execution failed",
 			"resource", resource.Name,
 			"error", err)
-		panic(fmt.Errorf("resource execution failed (fail policy): %s: %w", resource.Name, err))
+		return fmt.Errorf("convergence aborted by ActionFail policy: %w", err)
 	}
+	return nil
 }
 
 // ApplyConfiguration parses YAML or JSON configuration bytes and applies them

@@ -26,6 +26,7 @@ package steward
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -41,6 +42,11 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
+
+// ErrDNAIDMismatch is returned by detectUnmanagedDNADrift when the DNA identity
+// (derived from MAC + hostname) changes between convergence cycles, indicating a
+// VM/container migration or hardware change that requires manual reconciliation.
+var ErrDNAIDMismatch = errors.New("DNA-ID mismatch: manual reconciliation required")
 
 // Steward manages configuration for a single endpoint in standalone mode.
 //
@@ -277,23 +283,39 @@ func (s *Steward) runConvergence(ctx context.Context) {
 	// Collect a fresh DNA snapshot and compare against the previous one to detect
 	// changes to unmanaged attributes. This is a natural post-convergence activity:
 	// the convergence loop already handled managed resources above.
-	s.detectUnmanagedDNADrift(ctx)
+	events, err := s.detectUnmanagedDNADrift(ctx)
+	if err != nil {
+		s.logger.Error("Unmanaged DNA drift detection returned an error",
+			"error", err,
+			"event_count", len(events))
+		for _, evt := range events {
+			s.logger.Error("Critical DNA drift event",
+				"event_id", evt.ID,
+				"severity", evt.Severity,
+				"category", evt.Category,
+				"description", evt.Description)
+		}
+	}
 }
 
 // detectUnmanagedDNADrift collects a fresh DNA snapshot and compares it against
 // the previous snapshot. Changes to unmanaged attributes (hardware, OS, network)
 // are logged and reported to the controller for visibility.
 //
+// On DNA-ID mismatch (MAC or hostname change), a SeverityCritical drift event is
+// returned along with ErrDNAIDMismatch so callers know not to proceed with stale
+// comparison logic. This signals the operator that manual reconciliation is required.
+//
 // This is NOT a separate monitoring loop — it runs as part of the convergence cycle.
-func (s *Steward) detectUnmanagedDNADrift(ctx context.Context) {
+func (s *Steward) detectUnmanagedDNADrift(ctx context.Context) ([]*drift.DriftEvent, error) {
 	if s.dnaCollector == nil {
-		return
+		return nil, nil
 	}
 
 	currentDNA, err := s.dnaCollector.Collect(ctx)
 	if err != nil {
 		s.logger.Warn("Failed to collect DNA for drift detection", "error", err)
-		return
+		return nil, nil
 	}
 
 	s.previousDNAMu.Lock()
@@ -304,32 +326,49 @@ func (s *Steward) detectUnmanagedDNADrift(ctx context.Context) {
 	// On the first run there is no previous snapshot — just record and return.
 	if prevDNA == nil {
 		s.logger.Debug("DNA snapshot captured (first convergence run)")
-		return
+		return nil, nil
 	}
 
 	// DNA IDs are derived from stable hardware identifiers (MAC + hostname).
-	// If they differ we are likely running in a VM or container migration scenario —
-	// skip comparison rather than emitting spurious events.
+	// A mismatch indicates VM/container migration or hardware change — emit a critical
+	// drift event so the operator is aware, and return ErrDNAIDMismatch so the caller
+	// knows not to proceed with stale comparison results.
 	if prevDNA.Id != currentDNA.Id {
-		s.logger.Warn("DNA identity changed between convergence cycles — skipping drift detection",
+		s.logger.Error("DNA identity changed between convergence cycles — manual reconciliation required",
 			"previous_id", prevDNA.Id,
 			"current_id", currentDNA.Id)
-		return
+		evt := &drift.DriftEvent{
+			Severity:    drift.SeverityCritical,
+			Category:    drift.CategoryConfiguration,
+			Title:       "DNA identity mismatch",
+			Description: "DNA-ID mismatch (MAC or hostname change) — manual reconciliation required",
+			ChangeCount: 1,
+			Changes: []*drift.AttributeChange{
+				{
+					Attribute:     "id",
+					PreviousValue: prevDNA.Id,
+					CurrentValue:  currentDNA.Id,
+					ChangeType:    drift.ChangeTypeModified,
+					Severity:      drift.SeverityCritical,
+				},
+			},
+		}
+		return []*drift.DriftEvent{evt}, ErrDNAIDMismatch
 	}
 
 	if s.driftDetector == nil {
-		return
+		return nil, nil
 	}
 
 	events, err := s.driftDetector.DetectDrift(ctx, prevDNA, currentDNA)
 	if err != nil {
 		s.logger.Warn("DNA drift detection failed", "error", err)
-		return
+		return nil, nil
 	}
 
 	if len(events) == 0 {
 		s.logger.Debug("No unmanaged DNA attribute changes detected")
-		return
+		return nil, nil
 	}
 
 	// Log detected unmanaged drift events.
@@ -342,6 +381,7 @@ func (s *Steward) detectUnmanagedDNADrift(ctx context.Context) {
 			"change_count", event.ChangeCount,
 			"title", event.Title)
 	}
+	return events, nil
 }
 
 // onManagedResourceDrift is the DriftEventHandler registered on the execution engine.

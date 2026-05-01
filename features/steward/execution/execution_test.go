@@ -4,6 +4,7 @@ package execution
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -181,4 +182,53 @@ func TestGenericConfigState_ExcludesIdentifierFields(t *testing.T) {
 	assert.Contains(t, fields, "content")
 	assert.NotContains(t, fields, "path")
 	assert.NotContains(t, fields, "name")
+}
+
+// TestHandleResourceError_ActionFail_NoPanic verifies that ActionFail returns an
+// error instead of panicking, so the steward process survives a policy failure.
+func TestHandleResourceError_ActionFail_NoPanic(t *testing.T) {
+	errorConfig := config.ErrorHandlingConfig{
+		ResourceFailure: config.ActionFail,
+	}
+	executor := newTestExecutor(t, errorConfig)
+
+	resource := config.ResourceConfig{
+		Name:   "test-resource",
+		Module: "test-module",
+		Config: map[string]interface{}{"key": "value"},
+	}
+	origErr := fmt.Errorf("something went wrong")
+
+	// Must not panic — ActionFail used to panic, now returns an error.
+	var rerr error
+	require.NotPanics(t, func() {
+		rerr = executor.handleResourceError(resource, origErr)
+	})
+	require.Error(t, rerr)
+	assert.Contains(t, rerr.Error(), "convergence aborted by ActionFail policy")
+	assert.ErrorIs(t, rerr, origErr)
+}
+
+// TestHandleResourceError_ActionContinue_NoError verifies ActionContinue returns nil.
+func TestHandleResourceError_ActionContinue_NoError(t *testing.T) {
+	errorConfig := config.ErrorHandlingConfig{
+		ResourceFailure: config.ActionContinue,
+	}
+	executor := newTestExecutor(t, errorConfig)
+
+	resource := config.ResourceConfig{Name: "r", Module: "m", Config: map[string]interface{}{}}
+	rerr := executor.handleResourceError(resource, fmt.Errorf("oops"))
+	assert.NoError(t, rerr)
+}
+
+// TestHandleResourceError_ActionWarn_NoError verifies ActionWarn returns nil.
+func TestHandleResourceError_ActionWarn_NoError(t *testing.T) {
+	errorConfig := config.ErrorHandlingConfig{
+		ResourceFailure: config.ActionWarn,
+	}
+	executor := newTestExecutor(t, errorConfig)
+
+	resource := config.ResourceConfig{Name: "r", Module: "m", Config: map[string]interface{}{}}
+	rerr := executor.handleResourceError(resource, fmt.Errorf("oops"))
+	assert.NoError(t, rerr)
 }
