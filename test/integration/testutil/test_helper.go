@@ -18,6 +18,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/pkg/cert"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
+	"github.com/cfgis/cfgms/pkg/registration"
 	testpkg "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -195,9 +196,31 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		t.Logf("Note: Client certificate generation failed: %v (may already exist)", err)
 	}
 
-	// Create simple registration token for testing
-	// Format: cfgms_reg_{tenant_id}_{steward_id}_{random}
-	regToken := "cfgms_reg_test_tenant_test_steward_12345"
+	// Generate a cryptographically-random registration token.
+	// Hardcoded credentials are banned by CLAUDE.md and flagged by gosec G101.
+	tokenStoreIface := ctrl.GetRegistrationTokenStore()
+	if tokenStoreIface == nil {
+		t.Fatalf("registration token store is nil — controller not initialized")
+	}
+	tokenStore, ok := tokenStoreIface.(registration.Store)
+	if !ok {
+		t.Fatalf("failed to obtain registration token store: unexpected type %T", tokenStoreIface)
+	}
+	tokenReq := &registration.TokenCreateRequest{
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://localhost:0",
+		Group:         "test-group",
+		ExpiresIn:     "",
+		SingleUse:     false,
+	}
+	regTokenObj, regTokenErr := registration.CreateToken(tokenReq)
+	if regTokenErr != nil {
+		t.Fatalf("failed to create test registration token: %v", regTokenErr)
+	}
+	if err := tokenStore.SaveToken(ctx, regTokenObj); err != nil {
+		t.Fatalf("failed to save test registration token: %v", err)
+	}
+	regToken := regTokenObj.Token
 
 	return &TestEnv{
 		T:                 t,
