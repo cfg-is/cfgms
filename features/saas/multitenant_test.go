@@ -768,7 +768,12 @@ func TestTenantOnboardingWorkflow_StartTenantOnboarding(t *testing.T) {
 	credStore := NewMockCredentialStore()
 	httpClient := NewGraphHTTPClient(100, 1000)
 	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
-	workflow := NewTenantOnboardingWorkflow(provider)
+	providerCfg := &MicrosoftMultiTenantConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "https://localhost/callback",
+	}
+	workflow := NewTenantOnboardingWorkflow(provider, providerCfg)
 
 	request := &OnboardingRequest{
 		ProviderName: "microsoft-multitenant",
@@ -800,6 +805,74 @@ func TestTenantOnboardingWorkflow_StartTenantOnboarding(t *testing.T) {
 	assert.NotEmpty(t, result.OnboardingID)
 	assert.NotEmpty(t, result.ConsentURL)
 	assert.Contains(t, result.NextSteps, "Visit the consent URL to grant admin consent")
+}
+
+func TestTenantOnboardingWorkflow_StartAdminConsentFlow_UsesProviderConfig(t *testing.T) {
+	credStore := NewMockCredentialStore()
+	httpClient := NewGraphHTTPClient(100, 1000)
+	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
+
+	providerCfg := &MicrosoftMultiTenantConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "https://localhost/callback",
+	}
+	workflow := NewTenantOnboardingWorkflow(provider, providerCfg)
+
+	request := &OnboardingRequest{
+		ProviderName: "microsoft-multitenant",
+		MSPInfo: MSPInfo{
+			MSPName:      "Test MSP",
+			MSPTenantID:  "msp-tenant-123",
+			ContactEmail: "admin@msp.com",
+		},
+		ClientInfo: ClientInfo{
+			ClientName:    "Test Client",
+			PrimaryDomain: "testclient.com",
+		},
+		ConsentConfig: ConsentConfiguration{
+			RequiredScopes: []string{"https://graph.microsoft.com/.default"},
+			ConsentTimeout: 30 * time.Minute,
+		},
+	}
+
+	ctx := context.Background()
+	result, err := workflow.StartTenantOnboarding(ctx, request)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotEmpty(t, result.ConsentURL, "expected a consent URL from StartTenantOnboarding")
+
+	assert.Contains(t, result.ConsentURL, "test-client-id",
+		"consent URL must contain the ClientID from providerConfig, not a placeholder")
+
+	assert.NotContains(t, result.ConsentURL, "your-client-id")
+	assert.NotContains(t, result.ConsentURL, "your-client-secret")
+	assert.NotContains(t, result.ConsentURL, "your-redirect-uri")
+}
+
+func TestTenantOnboardingWorkflow_StartAdminConsentFlow_NilConfig(t *testing.T) {
+	credStore := NewMockCredentialStore()
+	httpClient := NewGraphHTTPClient(100, 1000)
+	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
+	workflow := NewTenantOnboardingWorkflow(provider, nil)
+
+	request := &OnboardingRequest{
+		ProviderName: "microsoft-multitenant",
+		MSPInfo:      MSPInfo{MSPName: "Test MSP"},
+		ClientInfo:   ClientInfo{ClientName: "Test Client"},
+		ConsentConfig: ConsentConfiguration{
+			RequiredScopes: []string{"https://graph.microsoft.com/.default"},
+			ConsentTimeout: 30 * time.Minute,
+		},
+	}
+
+	ctx := context.Background()
+	result, err := workflow.StartTenantOnboarding(ctx, request)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "providerConfig is required")
+	assert.NotNil(t, result)
 }
 
 func TestTenantOnboardingWorkflow_ValidateRequest(t *testing.T) {
