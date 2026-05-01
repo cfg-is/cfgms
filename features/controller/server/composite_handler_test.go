@@ -46,51 +46,51 @@ func (h *recordingHandler) ControlChannel(_ grpc.BidiStreamingServer[transportpb
 	return nil
 }
 
-// mockDNAStream implements grpc.ClientStreamingServer[DNAChunk, DNASyncResponse].
+// emptyDNAStream implements grpc.ClientStreamingServer[DNAChunk, DNASyncResponse].
 // Recv immediately returns EOF so the handler drains cleanly.
-type mockDNAStream struct {
+type emptyDNAStream struct {
 	ctx  context.Context
 	done bool
 }
 
-func (s *mockDNAStream) Recv() (*transportpb.DNAChunk, error) {
+func (s *emptyDNAStream) Recv() (*transportpb.DNAChunk, error) {
 	if s.done {
 		return nil, io.EOF
 	}
 	s.done = true
 	return nil, io.EOF
 }
-func (s *mockDNAStream) SendAndClose(*transportpb.DNASyncResponse) error { return nil }
-func (s *mockDNAStream) SetHeader(metadata.MD) error                     { return nil }
-func (s *mockDNAStream) SendHeader(metadata.MD) error                    { return nil }
-func (s *mockDNAStream) SetTrailer(metadata.MD)                          {}
-func (s *mockDNAStream) Context() context.Context {
+func (s *emptyDNAStream) SendAndClose(*transportpb.DNASyncResponse) error { return nil }
+func (s *emptyDNAStream) SetHeader(metadata.MD) error                     { return nil }
+func (s *emptyDNAStream) SendHeader(metadata.MD) error                    { return nil }
+func (s *emptyDNAStream) SetTrailer(metadata.MD)                          {}
+func (s *emptyDNAStream) Context() context.Context {
 	if s.ctx != nil {
 		return s.ctx
 	}
 	return context.Background()
 }
-func (s *mockDNAStream) SendMsg(interface{}) error { return nil }
-func (s *mockDNAStream) RecvMsg(interface{}) error { return nil }
+func (s *emptyDNAStream) SendMsg(interface{}) error { return nil }
+func (s *emptyDNAStream) RecvMsg(interface{}) error { return nil }
 
 // Compile-time check.
-var _ grpc.ClientStreamingServer[transportpb.DNAChunk, transportpb.DNASyncResponse] = (*mockDNAStream)(nil)
+var _ grpc.ClientStreamingServer[transportpb.DNAChunk, transportpb.DNASyncResponse] = (*emptyDNAStream)(nil)
 
-// mockBulkStream implements grpc.BidiStreamingServer[BulkChunk, BulkChunk].
+// emptyBulkStream implements grpc.BidiStreamingServer[BulkChunk, BulkChunk].
 // Recv immediately returns EOF so the handler drains cleanly.
-type mockBulkStream struct{}
+type emptyBulkStream struct{}
 
-func (s *mockBulkStream) Recv() (*transportpb.BulkChunk, error) { return nil, io.EOF }
-func (s *mockBulkStream) Send(*transportpb.BulkChunk) error     { return nil }
-func (s *mockBulkStream) SetHeader(metadata.MD) error           { return nil }
-func (s *mockBulkStream) SendHeader(metadata.MD) error          { return nil }
-func (s *mockBulkStream) SetTrailer(metadata.MD)                {}
-func (s *mockBulkStream) Context() context.Context              { return context.Background() }
-func (s *mockBulkStream) SendMsg(interface{}) error             { return nil }
-func (s *mockBulkStream) RecvMsg(interface{}) error             { return nil }
+func (s *emptyBulkStream) Recv() (*transportpb.BulkChunk, error) { return nil, io.EOF }
+func (s *emptyBulkStream) Send(*transportpb.BulkChunk) error     { return nil }
+func (s *emptyBulkStream) SetHeader(metadata.MD) error           { return nil }
+func (s *emptyBulkStream) SendHeader(metadata.MD) error          { return nil }
+func (s *emptyBulkStream) SetTrailer(metadata.MD)                {}
+func (s *emptyBulkStream) Context() context.Context              { return context.Background() }
+func (s *emptyBulkStream) SendMsg(interface{}) error             { return nil }
+func (s *emptyBulkStream) RecvMsg(interface{}) error             { return nil }
 
 // Compile-time check.
-var _ grpc.BidiStreamingServer[transportpb.BulkChunk, transportpb.BulkChunk] = (*mockBulkStream)(nil)
+var _ grpc.BidiStreamingServer[transportpb.BulkChunk, transportpb.BulkChunk] = (*emptyBulkStream)(nil)
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -127,7 +127,7 @@ func TestComposite_SyncDNA_NilHandler(t *testing.T) {
 	cp := newRecordingHandler()
 	composite := newCompositeTransportServer(cp, nil, nil, nil, nil)
 
-	err := composite.SyncDNA(&mockDNAStream{})
+	err := composite.SyncDNA(&emptyDNAStream{})
 	require.Error(t, err, "SyncDNA with nil dnaHandler should return unimplemented error")
 }
 
@@ -139,7 +139,7 @@ func TestComposite_SyncDNA_WithHandler(t *testing.T) {
 
 	// Empty stream with background context (no mTLS peer) → Unauthenticated from handler.
 	// This proves that dnaHandler.HandleGRPC is called, not the Unimplemented fallback.
-	err := composite.SyncDNA(&mockDNAStream{})
+	err := composite.SyncDNA(&emptyDNAStream{})
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "not implemented",
 		"SyncDNA must route through dnaHandler, not the Unimplemented fallback")
@@ -149,7 +149,7 @@ func TestComposite_BulkTransfer_NilHandler(t *testing.T) {
 	cp := newRecordingHandler()
 	composite := newCompositeTransportServer(cp, nil, nil, nil, nil)
 
-	err := composite.BulkTransfer(&mockBulkStream{})
+	err := composite.BulkTransfer(&emptyBulkStream{})
 	require.Error(t, err, "BulkTransfer with nil bulkHandler should return unimplemented error")
 }
 
@@ -159,7 +159,7 @@ func TestComposite_BulkTransfer_WithHandler(t *testing.T) {
 	bulkHandler := controllerTransport.NewBulkHandler(logger, controllerTransport.NewTenantQueue())
 	composite := newCompositeTransportServer(cp, nil, bulkHandler, nil, nil)
 
-	err := composite.BulkTransfer(&mockBulkStream{})
+	err := composite.BulkTransfer(&emptyBulkStream{})
 	require.NoError(t, err, "BulkTransfer with valid handler and empty stream must succeed")
 }
 
