@@ -511,40 +511,6 @@ func TestGenerateSecureToken(t *testing.T) {
 	assert.NotContains(t, token, "terminal_token_")
 }
 
-// kvLogEntry holds a single captured log message and its key-value arguments.
-type kvLogEntry struct {
-	msg string
-	kvs []interface{}
-}
-
-// kvCapturingLogger satisfies logging.Logger by embedding NoopLogger and recording
-// Info, Warn, and Error calls so tests can inspect what was logged.
-type kvCapturingLogger struct {
-	logging.NoopLogger
-	mu      sync.Mutex
-	entries []kvLogEntry
-}
-
-func (l *kvCapturingLogger) record(msg string, kvs []interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	kvcopy := make([]interface{}, len(kvs))
-	copy(kvcopy, kvs)
-	l.entries = append(l.entries, kvLogEntry{msg: msg, kvs: kvcopy})
-}
-
-func (l *kvCapturingLogger) Info(msg string, kvs ...interface{})  { l.record(msg, kvs) }
-func (l *kvCapturingLogger) Warn(msg string, kvs ...interface{})  { l.record(msg, kvs) }
-func (l *kvCapturingLogger) Error(msg string, kvs ...interface{}) { l.record(msg, kvs) }
-
-func (l *kvCapturingLogger) allEntries() []kvLogEntry {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make([]kvLogEntry, len(l.entries))
-	copy(out, l.entries)
-	return out
-}
-
 // sessionIDInEntry returns the "session_id" value from the first log entry whose
 // message exactly matches msg. Returns ("", false) when not found.
 func sessionIDInEntry(entries []kvLogEntry, msg string) (string, bool) {

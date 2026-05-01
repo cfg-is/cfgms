@@ -17,7 +17,7 @@ import (
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// kvCapturingLogger captures Info and Warn log calls for security assertions.
+// kvCapturingLogger captures Info, Warn, and Error log calls for security assertions.
 // It satisfies logging.Logger via embedding NoopLogger while recording key-value
 // arguments so tests can verify sensitive fields are redacted.
 type kvCapturingLogger struct {
@@ -31,7 +31,7 @@ type kvLogEntry struct {
 	kvs []interface{}
 }
 
-func (l *kvCapturingLogger) Info(msg string, kvs ...interface{}) {
+func (l *kvCapturingLogger) record(msg string, kvs []interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	kvcopy := make([]interface{}, len(kvs))
@@ -39,12 +39,16 @@ func (l *kvCapturingLogger) Info(msg string, kvs ...interface{}) {
 	l.entries = append(l.entries, kvLogEntry{msg: msg, kvs: kvcopy})
 }
 
-func (l *kvCapturingLogger) Warn(msg string, kvs ...interface{}) {
+func (l *kvCapturingLogger) Info(msg string, kvs ...interface{})  { l.record(msg, kvs) }
+func (l *kvCapturingLogger) Warn(msg string, kvs ...interface{})  { l.record(msg, kvs) }
+func (l *kvCapturingLogger) Error(msg string, kvs ...interface{}) { l.record(msg, kvs) }
+
+func (l *kvCapturingLogger) allEntries() []kvLogEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	kvcopy := make([]interface{}, len(kvs))
-	copy(kvcopy, kvs)
-	l.entries = append(l.entries, kvLogEntry{msg: msg, kvs: kvcopy})
+	out := make([]kvLogEntry, len(l.entries))
+	copy(out, l.entries)
+	return out
 }
 
 // allKVContains reports whether any captured entry has a kv value equal to v.
