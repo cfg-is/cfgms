@@ -270,3 +270,154 @@ func TestFormatKeysAndValues(t *testing.T) {
 func isControl(r rune) bool {
 	return r < 0x20 || (r >= 0x7f && r <= 0x9f)
 }
+
+func TestRedactedID_Empty(t *testing.T) {
+	got := RedactedID("")
+	assert.Equal(t, "", got)
+}
+
+func TestRedactedID_ShortString(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"three chars", "abc", "abc…"},
+		{"one char", "x", "x…"},
+		{"seven chars", "1234567", "1234567…"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := RedactedID(tt.input)
+			assert.Equal(t, tt.want, got)
+			assert.True(t, len([]rune(got)) > 0)
+			assert.Equal(t, "…", string([]rune(got)[len([]rune(got))-1:]))
+		})
+	}
+}
+
+func TestRedactedID_ExactlyEightChars(t *testing.T) {
+	got := RedactedID("12345678")
+	assert.Equal(t, "12345678…", got)
+}
+
+func TestRedactedID_NineOrMoreChars(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"nine chars", "123456789", "12345678…"},
+		{"long token", "abcdefghijklmnopqrstuvwxyz", "abcdefgh…"},
+		{"UUID-like", "550e8400-e29b-41d4-a716-446655440000", "550e8400…"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := RedactedID(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestRedactedID_ControlCharsInPrefix(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"newline in prefix", "abc\ndef_extra_suffix"},
+		{"carriage return in prefix", "abc\rdef_extra_suffix"},
+		{"ESC in prefix", "\x1babcdefghijklmn"},
+		{"null byte in prefix", "\x00abcdefghijklmn"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := RedactedID(tt.input)
+			// Must end with Unicode ellipsis
+			assert.True(t, len(got) > 0)
+			runes := []rune(got)
+			assert.Equal(t, '…', runes[len(runes)-1])
+			// No control characters in the prefix portion
+			prefix := string(runes[:len(runes)-1])
+			for _, r := range prefix {
+				assert.False(t, isControl(r), "control character U+%04X found in RedactedID prefix output", r)
+			}
+		})
+	}
+}
+
+func TestRedactedID_UnicodeSafe(t *testing.T) {
+	// Multi-byte Unicode that is shorter than 8 bytes by rune count but >8 by byte count
+	// The function slices by bytes, so we just ensure it doesn't panic and sanitizes correctly
+	input := "café résumé"
+	got := RedactedID(input)
+	assert.NotEmpty(t, got)
+	runes := []rune(got)
+	assert.Equal(t, '…', runes[len(runes)-1])
+}
+
+func TestRedactedID_UnredactedMode(t *testing.T) {
+	// Restore default config after test
+	orig := GetSensitiveLogConfig()
+	t.Cleanup(func() { SetSensitiveLogConfig(orig) })
+
+	SetSensitiveLogConfig(SensitiveLogConfig{UnredactedSensitiveValues: true})
+
+	// Full value returned (sanitized, no truncation to 8 chars)
+	got := RedactedID("123456789")
+	assert.Equal(t, "123456789", got)
+
+	// Still sanitizes control characters
+	got = RedactedID("abc\ndef")
+	assert.NotContains(t, got, "\n")
+	assert.Equal(t, "abc_def", got)
+}
+
+func TestSensitiveLogConfig_Defaults(t *testing.T) {
+	// The zero value defaults UnredactedSensitiveValues to false
+	cfg := SensitiveLogConfig{}
+	assert.False(t, cfg.UnredactedSensitiveValues)
+}
+
+func TestSensitiveLogConfig_GetSet(t *testing.T) {
+	orig := GetSensitiveLogConfig()
+	t.Cleanup(func() { SetSensitiveLogConfig(orig) })
+
+	SetSensitiveLogConfig(SensitiveLogConfig{UnredactedSensitiveValues: true})
+	got := GetSensitiveLogConfig()
+	assert.True(t, got.UnredactedSensitiveValues)
+
+	SetSensitiveLogConfig(SensitiveLogConfig{UnredactedSensitiveValues: false})
+	got = GetSensitiveLogConfig()
+	assert.False(t, got.UnredactedSensitiveValues)
+}
+
+func TestSensitiveLogConfig_ConcurrentAccess(t *testing.T) {
+	orig := GetSensitiveLogConfig()
+	t.Cleanup(func() { SetSensitiveLogConfig(orig) })
+
+	const goroutines = 50
+	done := make(chan struct{})
+
+	// Writers
+	for i := 0; i < goroutines; i++ {
+		go func(i int) {
+			SetSensitiveLogConfig(SensitiveLogConfig{UnredactedSensitiveValues: i%2 == 0})
+			done <- struct{}{}
+		}(i)
+	}
+
+	// Readers
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			_ = GetSensitiveLogConfig()
+			done <- struct{}{}
+		}()
+	}
+
+	for i := 0; i < goroutines*2; i++ {
+		<-done
+	}
+}

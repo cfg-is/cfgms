@@ -120,6 +120,32 @@ func SanitizeLogValue(s string) string {
 	return s
 }
 
+// RedactedID truncates an opaque identifier to an 8-character prefix followed by
+// "…" (U+2026) for safe log inclusion. Short identifiers (≤8 bytes) are returned
+// in full with the ellipsis appended. The empty string is returned unchanged.
+//
+// Control characters in the prefix are neutralised via SanitizeLogValue so that
+// callers need not pre-clean token or session ID values before logging.
+//
+// When SensitiveLogConfig.UnredactedSensitiveValues is true (development opt-in),
+// the full sanitized value is returned without truncation.
+//
+// Usage:
+//
+//	logger.Info("session opened", "session_id", logging.RedactedID(sessionID))
+func RedactedID(s string) string {
+	if s == "" {
+		return ""
+	}
+	if GetSensitiveLogConfig().UnredactedSensitiveValues {
+		return SanitizeLogValue(s)
+	}
+	if len(s) <= 8 {
+		return SanitizeLogValue(s) + "…"
+	}
+	return SanitizeLogValue(s[:8]) + "…"
+}
+
 // sanitizeMapValues sanitizes all string values in a map for safe logging.
 // Non-string values are left unchanged.
 func sanitizeMapValues(fields map[string]any) {
