@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -69,17 +70,43 @@ type ModuleTestHelper struct {
 	timeouts   E2ETimeouts
 }
 
+// GetCACertFromContainer extracts the CA certificate PEM from a Docker container.
+// The certificate is read from /app/certs/ca/ca.crt, which is the default path
+// for the CFGMS controller when running inside Docker.
+func GetCACertFromContainer(containerName string) ([]byte, error) {
+	if err := validateContainerName(containerName); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "cat", "/app/certs/ca/ca.crt")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA cert from container %s: %w", containerName, err)
+	}
+	return output, nil
+}
+
 // NewModuleTestHelper creates a new module test helper with default timeouts.
-func NewModuleTestHelper(baseURL string) *ModuleTestHelper {
-	return NewModuleTestHelperWithTimeouts(baseURL, DefaultE2ETimeouts())
+// Pass a non-nil caCertPEM to use a specific CA for TLS verification; nil uses the system root pool.
+func NewModuleTestHelper(baseURL string, caCertPEM []byte) *ModuleTestHelper {
+	return NewModuleTestHelperWithTimeouts(baseURL, caCertPEM, DefaultE2ETimeouts())
 }
 
 // NewModuleTestHelperWithTimeouts creates a new module test helper with custom timeouts.
-func NewModuleTestHelperWithTimeouts(baseURL string, timeouts E2ETimeouts) *ModuleTestHelper {
+// Pass a non-nil caCertPEM to use a specific CA for TLS verification; nil uses the system root pool.
+func NewModuleTestHelperWithTimeouts(baseURL string, caCertPEM []byte, timeouts E2ETimeouts) *ModuleTestHelper {
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
+	if len(caCertPEM) > 0 {
+		caCertPool := x509.NewCertPool()
+		if caCertPool.AppendCertsFromPEM(caCertPEM) {
+			tlsConfig.RootCAs = caCertPool
+		}
+	}
 	httpClient := &http.Client{
 		Timeout: timeouts.HTTP,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test helper
+			TLSClientConfig: tlsConfig,
 		},
 	}
 

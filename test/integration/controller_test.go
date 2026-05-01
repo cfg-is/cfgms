@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -58,11 +59,22 @@ func (s *ControllerTestSuite) waitForHTTPReady() {
 	s.T().Log("Warning: HTTP API may not be ready yet")
 }
 
-// tlsClient returns an HTTP client that skips TLS verification for self-signed test certs.
+// tlsClient returns an HTTP client configured with the test CA for TLS verification.
 func (s *ControllerTestSuite) tlsClient() *http.Client {
+	caCertPEM, err := s.env.CertManager.GetCACertificate()
+	if err != nil {
+		s.T().Fatalf("Failed to get CA certificate for test client: %v", err)
+	}
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCertPEM) {
+		s.T().Fatal("Failed to parse CA certificate PEM")
+	}
 	return &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 — test-only, self-signed cert
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS13,
+				RootCAs:    caCertPool,
+			},
 		},
 	}
 }

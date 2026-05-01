@@ -8,7 +8,6 @@ package ha
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -319,15 +318,7 @@ func TestGeographicLoadBalancing(t *testing.T) {
 			// For testing, we'll verify that all regions are accessible
 			accessibleRegions := make(map[string]bool)
 
-			// Create HTTP client with TLS skip verify for test certificates
-			client := &http.Client{
-				Timeout: 10 * time.Second,
-				Transport: &http.Transport{
-					TLSClientConfig: &tls.Config{
-						InsecureSkipVerify: true, //nolint:gosec // Test environment with self-signed certs
-					},
-				},
-			}
+			client := buildMultiControllerTLSClient("controller-east", "controller-central", "controller-west")
 
 			for i, url := range controllers {
 				resp, err := client.Get(fmt.Sprintf("%s/api/v1/health", url))
@@ -413,14 +404,7 @@ type ClusterNodesResponse struct {
 
 // getNodeInfo gets node information from a controller
 func getNodeInfo(url string) (*NodeInfoResponse, error) {
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec // Test environment with self-signed certs
-			},
-		},
-	}
+	client := buildTLSClient(containerNameForURL(url))
 
 	resp, err := client.Get(fmt.Sprintf("%s/api/v1/ha/node", url))
 	if err != nil {
@@ -442,14 +426,7 @@ func getNodeInfo(url string) (*NodeInfoResponse, error) {
 
 // getClusterNodes gets cluster nodes information from a controller
 func getClusterNodes(url string) ([]ha.NodeInfo, error) {
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec // Test environment with self-signed certs
-			},
-		},
-	}
+	client := buildTLSClient(containerNameForURL(url))
 
 	resp, err := client.Get(fmt.Sprintf("%s/api/v1/ha/cluster/nodes", url))
 	if err != nil {

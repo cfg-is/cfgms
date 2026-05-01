@@ -25,22 +25,40 @@ type TestHelper struct {
 
 // NewTestHelper creates a new test helper.
 // Uses CFGMS_TEST_HTTP_ADDR environment variable if set, otherwise defaults to baseURL parameter.
+// Attempts to extract the CA cert from the controller-standalone Docker container for TLS
+// verification; falls back to the system root pool when Docker is unavailable.
 func NewTestHelper(baseURL string) *TestHelper {
 	if envURL := os.Getenv("CFGMS_TEST_HTTP_ADDR"); envURL != "" {
 		baseURL = envURL
 	}
 
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test helper
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
+	if caCertPEM, err := GetCACertFromContainer("controller-standalone"); err == nil {
+		caCertPool := x509.NewCertPool()
+		if caCertPool.AppendCertsFromPEM(caCertPEM) {
+			tlsConfig.RootCAs = caCertPool
+		}
 	}
 
 	return &TestHelper{
 		httpClient: &http.Client{
-			Timeout:   10 * time.Second,
-			Transport: transport,
+			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: tlsConfig,
+			},
 		},
 		baseURL: baseURL,
 	}
+}
+
+// Client returns the underlying HTTP client for direct use in tests.
+func (h *TestHelper) Client() *http.Client {
+	return h.httpClient
+}
+
+// BaseURL returns the base URL for direct use in tests.
+func (h *TestHelper) BaseURL() string {
+	return h.baseURL
 }
 
 // CreateToken returns a pre-created reusable test token.

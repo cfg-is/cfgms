@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -216,16 +215,11 @@ func (s *TLSSecurityTestSuite) TestClientCertificateFromRegistration() {
 func (s *TLSSecurityTestSuite) TestExpiredCertificateRejectedByRegistration() {
 	s.T().Log("Testing expired token rejection")
 
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test helper
-	}
-	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
-
 	req, err := http.NewRequest(http.MethodPost,
-		fmt.Sprintf("%s/api/v1/register", s.helper.baseURL), nil)
+		fmt.Sprintf("%s/api/v1/register", s.helper.BaseURL()), nil)
 	require.NoError(s.T(), err)
 
-	resp, err := client.Do(req)
+	resp, err := s.helper.Client().Do(req)
 	if err != nil {
 		s.T().Logf("Request failed (expected for expired/invalid credentials): %v", err)
 		return
