@@ -7,11 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -53,22 +54,14 @@ func TestConvergenceLoopStopsOnContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Start the steward (launches the convergence loop internally)
-	startErr := make(chan error, 1)
-	go func() {
-		startErr <- s.Start(ctx)
-	}()
+	// Start is synchronous: it runs initial convergence then launches the loop goroutine.
+	require.NoError(t, s.Start(ctx))
 
-	// Allow the loop to start
-	time.Sleep(100 * time.Millisecond)
-
-	// Cancel context — convergence loop must stop
+	// Cancel context — the convergence loop goroutine checks ctx.Done() and exits.
 	cancel()
 
-	// Give the loop goroutine time to exit
-	time.Sleep(100 * time.Millisecond)
-
-	// Stop the steward
+	// Stop blocks until all goroutines have been signalled; returns immediately here
+	// because Stop closes the shutdown channel and the health monitor is already stopping.
 	require.NoError(t, s.Stop(context.Background()))
 }
 
@@ -83,13 +76,10 @@ func TestConvergenceLoopStopsOnShutdown(t *testing.T) {
 
 	ctx := context.Background()
 
-	go func() {
-		_ = s.Start(ctx)
-	}()
+	// Start is synchronous: runs initial convergence then launches the loop goroutine.
+	require.NoError(t, s.Start(ctx))
 
-	time.Sleep(100 * time.Millisecond)
-
-	// Stop signals shutdown channel — convergence loop must exit
+	// Stop signals the shutdown channel — convergence loop must exit.
 	require.NoError(t, s.Stop(context.Background()))
 }
 
@@ -105,7 +95,7 @@ func TestConvergeIntervalReadFromCfg(t *testing.T) {
 	// Verify the config was loaded with the correct interval
 	assert.Equal(t, "5m", s.standaloneConfig.Steward.ConvergeInterval)
 
-	_ = s.Stop(context.Background())
+	require.NoError(t, s.Stop(context.Background()))
 }
 
 func TestStandaloneRunsInitialConvergenceOnStart(t *testing.T) {
@@ -125,5 +115,64 @@ func TestStandaloneRunsInitialConvergenceOnStart(t *testing.T) {
 	assert.NoError(t, err)
 
 	cancel()
-	_ = s.Stop(context.Background())
+	require.NoError(t, s.Stop(context.Background()))
+}
+
+// TestDetectUnmanagedDNADrift_IDMismatch verifies that detectUnmanagedDNADrift
+// returns ErrDNAIDMismatch and a SeverityCritical drift event when the DNA identity
+// changes between convergence cycles.
+func TestDetectUnmanagedDNADrift_IDMismatch(t *testing.T) {
+	logger := logging.NewLogger("debug")
+	dir := t.TempDir()
+	cfgPath := writeMinimalCfg(t, dir, "dna-mismatch-steward")
+
+	s, err := NewStandalone(cfgPath, logger)
+	require.NoError(t, err)
+
+	// Inject a previousDNA with a sentinel ID that the real DNA collector will not produce.
+	// The collector derives IDs from stable hardware identifiers (MAC + hostname), so the
+	// real ID will always differ from the sentinel "guaranteed-mismatch-id-xyz".
+	s.previousDNAMu.Lock()
+	s.previousDNA = &commonpb.DNA{Id: "guaranteed-mismatch-id-xyz"}
+	s.previousDNAMu.Unlock()
+
+	ctx := context.Background()
+	events, driftErr := s.detectUnmanagedDNADrift(ctx)
+
+	assert.ErrorIs(t, driftErr, ErrDNAIDMismatch)
+	require.Len(t, events, 1, "expected exactly one critical drift event on ID mismatch")
+	assert.Equal(t, drift.SeverityCritical, events[0].Severity)
+	assert.Equal(t, drift.CategoryConfiguration, events[0].Category)
+	assert.Contains(t, events[0].Description, "manual reconciliation required")
+	require.NoError(t, s.Stop(ctx))
+}
+
+// TestDetectUnmanagedDNADrift_SameID verifies that no error is returned when
+// DNA IDs match (normal convergence cycle).
+func TestDetectUnmanagedDNADrift_SameID(t *testing.T) {
+	logger := logging.NewLogger("debug")
+	dir := t.TempDir()
+	cfgPath := writeMinimalCfg(t, dir, "dna-same-id-steward")
+
+	s, err := NewStandalone(cfgPath, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// First call seeds previousDNA — no comparison possible yet.
+	events, driftErr := s.detectUnmanagedDNADrift(ctx)
+	assert.NoError(t, driftErr)
+	assert.Empty(t, events)
+
+	// Second call — same DNA ID, should produce no error.
+	events2, driftErr2 := s.detectUnmanagedDNADrift(ctx)
+	assert.NoError(t, driftErr2, "same-ID path must not return ErrDNAIDMismatch")
+	// events2 may be non-empty if real DNA attributes changed between calls, but
+	// none should carry SeverityCritical (that severity is reserved for ID mismatches).
+	for _, evt := range events2 {
+		assert.NotEqual(t, drift.SeverityCritical, evt.Severity,
+			"same-ID path must not emit SeverityCritical events")
+	}
+
+	require.NoError(t, s.Stop(ctx))
 }

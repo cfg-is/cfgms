@@ -5,8 +5,10 @@ package config
 
 import (
 	"fmt"
+	"time"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -34,6 +36,38 @@ func ToProto(config *StewardConfig) (*controller.StewardConfig, error) {
 	if config.Steward.ModulePaths != nil {
 		stewardSettings.ModulePaths = config.Steward.ModulePaths
 	}
+
+	// Secrets: serialise SecretsConfig as a map of string references
+	stewardSettings.Secrets = map[string]string{
+		"secrets_dir": config.Steward.Secrets.SecretsDir,
+		"provider":    config.Steward.Secrets.Provider,
+	}
+
+	// ConvergeInterval: Go duration string → proto Duration
+	if config.Steward.ConvergeInterval != "" {
+		d, err := time.ParseDuration(config.Steward.ConvergeInterval)
+		if err != nil {
+			return nil, fmt.Errorf("invalid converge_interval %q: %w", config.Steward.ConvergeInterval, err)
+		}
+		stewardSettings.ConvergeInterval = durationpb.New(d)
+	}
+
+	// ScriptSigning
+	ss := config.Steward.ScriptSigning
+	protoSS := &controller.ScriptSigningConfig{
+		Policy:        string(ss.Policy),
+		TrustMode:     string(ss.TrustMode),
+		AllowPublicCa: ss.AllowPublicCA,
+		ScriptRepoUrl: ss.ScriptRepoURL,
+	}
+	for _, key := range ss.TrustedKeys {
+		protoSS.TrustedKeys = append(protoSS.TrustedKeys, &controller.TrustedKeyRef{
+			Name:         key.Name,
+			Thumbprint:   key.Thumbprint,
+			PublicKeyRef: key.PublicKeyRef,
+		})
+	}
+	stewardSettings.ScriptSigning = protoSS
 
 	// Convert resources
 	resources := make([]*controller.ResourceConfig, len(config.Resources))
@@ -88,6 +122,39 @@ func FromProto(proto *controller.StewardConfig) (*StewardConfig, error) {
 			ResourceFailure:    ErrorAction(proto.Steward.ErrorHandling.ResourceFailure),
 			ConfigurationError: ErrorAction(proto.Steward.ErrorHandling.ConfigurationError),
 		}
+	}
+
+	// Secrets: reconstruct SecretsConfig from the proto map
+	if proto.Steward.Secrets != nil {
+		config.Steward.Secrets = SecretsConfig{
+			SecretsDir: proto.Steward.Secrets["secrets_dir"],
+			Provider:   proto.Steward.Secrets["provider"],
+		}
+	}
+
+	// ConvergeInterval: proto Duration → Go duration string
+	if proto.Steward.ConvergeInterval != nil {
+		d := proto.Steward.ConvergeInterval.AsDuration()
+		config.Steward.ConvergeInterval = d.String()
+	}
+
+	// ScriptSigning
+	if proto.Steward.ScriptSigning != nil {
+		ps := proto.Steward.ScriptSigning
+		sc := ScriptSigningConfig{
+			Policy:        ScriptSigningPolicy(ps.Policy),
+			TrustMode:     ScriptTrustMode(ps.TrustMode),
+			AllowPublicCA: ps.AllowPublicCa,
+			ScriptRepoURL: ps.ScriptRepoUrl,
+		}
+		for _, key := range ps.TrustedKeys {
+			sc.TrustedKeys = append(sc.TrustedKeys, TrustedKeyRef{
+				Name:         key.Name,
+				Thumbprint:   key.Thumbprint,
+				PublicKeyRef: key.PublicKeyRef,
+			})
+		}
+		config.Steward.ScriptSigning = sc
 	}
 
 	// Convert resources
