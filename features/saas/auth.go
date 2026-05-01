@@ -20,7 +20,9 @@ package saas
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -388,6 +390,7 @@ func parseJWTConfig(config map[string]interface{}) (*JWTConfig, error) {
 // OAuth2Client interface for OAuth2 operations
 type OAuth2Client interface {
 	StartFlow(ctx context.Context, config *ExtendedOAuth2Config) (*OAuth2Flow, error)
+	ExchangeCode(ctx context.Context, flow *OAuth2Flow, authCode string) (*TokenSet, error)
 	ClientCredentialsGrant(ctx context.Context, config *ExtendedOAuth2Config) (*TokenSet, error)
 	RefreshToken(ctx context.Context, refreshToken string) (*TokenSet, error)
 }
@@ -413,11 +416,67 @@ func NewOAuth2Client(httpClient *http.Client) OAuth2Client {
 func (c *DefaultOAuth2Client) StartFlow(ctx context.Context, config *ExtendedOAuth2Config) (*OAuth2Flow, error) {
 	// Implementation would create OAuth2 flow with PKCE
 	return &OAuth2Flow{
-		AuthURL:     config.AuthURL,
-		RedirectURI: config.RedirectURL,
-		Created:     time.Now(),
-		ExpiresAt:   time.Now().Add(10 * time.Minute),
+		AuthURL:      config.AuthURL,
+		RedirectURI:  config.RedirectURL,
+		TokenURL:     config.TokenURL,
+		ClientID:     config.ClientID,
+		ClientSecret: config.ClientSecret,
+		Created:      time.Now(),
+		ExpiresAt:    time.Now().Add(10 * time.Minute),
 	}, nil
+}
+
+func (c *DefaultOAuth2Client) ExchangeCode(ctx context.Context, flow *OAuth2Flow, authCode string) (*TokenSet, error) {
+	data := url.Values{}
+	data.Set("grant_type", "authorization_code")
+	data.Set("code", authCode)
+	data.Set("redirect_uri", flow.RedirectURI)
+	data.Set("client_id", flow.ClientID)
+	data.Set("client_secret", flow.ClientSecret)
+	if flow.CodeVerifier != "" {
+		data.Set("code_verifier", flow.CodeVerifier)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", flow.TokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("token request failed: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("token endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		TokenType    string `json:"token_type"`
+		ExpiresIn    int    `json:"expires_in"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to decode token response: %w", err)
+	}
+
+	tokenSet := &TokenSet{
+		AccessToken:  tokenResp.AccessToken,
+		RefreshToken: tokenResp.RefreshToken,
+		TokenType:    tokenResp.TokenType,
+		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+	}
+	if tokenResp.Scope != "" {
+		tokenSet.Scopes = strings.Fields(tokenResp.Scope)
+	}
+	return tokenSet, nil
 }
 
 func (c *DefaultOAuth2Client) ClientCredentialsGrant(ctx context.Context, config *ExtendedOAuth2Config) (*TokenSet, error) {
