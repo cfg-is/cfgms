@@ -18,13 +18,17 @@ import (
 type TenantOnboardingWorkflow struct {
 	multiTenantManager *MultiTenantManager
 	provider           *MicrosoftMultiTenantProvider
+	providerConfig     *MicrosoftMultiTenantConfig
 }
 
-// NewTenantOnboardingWorkflow creates a new tenant onboarding workflow
-func NewTenantOnboardingWorkflow(provider *MicrosoftMultiTenantProvider) *TenantOnboardingWorkflow {
+// NewTenantOnboardingWorkflow creates a new tenant onboarding workflow.
+// cfg must be a non-nil *MicrosoftMultiTenantConfig carrying real ClientID,
+// ClientSecret, and RedirectURI — placeholder strings must never be passed here.
+func NewTenantOnboardingWorkflow(provider *MicrosoftMultiTenantProvider, cfg *MicrosoftMultiTenantConfig) *TenantOnboardingWorkflow {
 	return &TenantOnboardingWorkflow{
 		multiTenantManager: provider.multiTenantManager,
 		provider:           provider,
+		providerConfig:     cfg,
 	}
 }
 
@@ -269,11 +273,14 @@ func (tow *TenantOnboardingWorkflow) validateOnboardingRequest(request *Onboardi
 }
 
 func (tow *TenantOnboardingWorkflow) startAdminConsentFlow(ctx context.Context, request *OnboardingRequest) (string, error) {
-	// Build multi-tenant config from onboarding request
+	if tow.providerConfig == nil {
+		return "", fmt.Errorf("startAdminConsentFlow: providerConfig is required; NewTenantOnboardingWorkflow must be called with a non-nil *MicrosoftMultiTenantConfig")
+	}
+
 	mtConfig := &MicrosoftMultiTenantConfig{
-		ClientID:           "your-client-id", // This would come from provider config
-		ClientSecret:       "your-client-secret",
-		RedirectURI:        "your-redirect-uri",
+		ClientID:           tow.providerConfig.ClientID,
+		ClientSecret:       tow.providerConfig.ClientSecret,
+		RedirectURI:        tow.providerConfig.RedirectURI,
 		Scopes:             request.ConsentConfig.RequiredScopes,
 		AdminConsentScopes: append(request.ConsentConfig.RequiredScopes, request.ConsentConfig.OptionalScopes...),
 	}

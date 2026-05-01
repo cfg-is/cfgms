@@ -176,6 +176,13 @@ func (mtm *MultiTenantManager) StartAdminConsent(ctx context.Context, provider s
 
 	query := authURL.Query()
 
+	// Required OAuth2 authorization request parameters.
+	query.Set("client_id", flow.ClientID)
+	query.Set("response_type", "code")
+	if flow.RedirectURI != "" {
+		query.Set("redirect_uri", flow.RedirectURI)
+	}
+
 	// Add admin consent specific parameters
 	if config.ConsentPrompt != "" {
 		query.Set("prompt", config.ConsentPrompt)
