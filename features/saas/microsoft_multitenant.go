@@ -53,11 +53,19 @@ func NewMicrosoftMultiTenantProvider(credStore CredentialStore, httpClient *http
 	baseProvider := NewBaseProvider(info, httpClient)
 	baseProvider.SetCredentialStore(credStore)
 
-	return &MicrosoftMultiTenantProvider{
-		BaseProvider:       baseProvider,
-		multiTenantManager: NewMultiTenantManager(credStore, NewInMemoryConsentStore(), httpClient),
-		baseURL:            "https://graph.microsoft.com/v1.0",
+	p := &MicrosoftMultiTenantProvider{
+		BaseProvider: baseProvider,
+		baseURL:      "https://graph.microsoft.com/v1.0",
 	}
+	// Wire self as the TenantDiscoverer so DiscoverTenantsFromMicrosoft is the
+	// production implementation used by MultiTenantManager.discoverTenants.
+	p.multiTenantManager = NewMultiTenantManager(credStore, NewInMemoryConsentStore(), httpClient, p)
+	return p
+}
+
+// DiscoverTenants implements TenantDiscoverer by delegating to DiscoverTenantsFromMicrosoft.
+func (p *MicrosoftMultiTenantProvider) DiscoverTenants(ctx context.Context, token *TokenSet) (*TenantDiscoveryResult, error) {
+	return p.DiscoverTenantsFromMicrosoft(ctx, token)
 }
 
 // Multi-Tenant specific configuration

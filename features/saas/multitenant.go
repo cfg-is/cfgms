@@ -16,7 +16,7 @@
 //
 // Usage Example:
 //
-//	manager := NewMultiTenantManager(credStore, NewInMemoryConsentStore(), httpClient)
+//	manager := NewMultiTenantManager(credStore, NewInMemoryConsentStore(), httpClient, discoverer)
 //
 //	// Start admin consent flow
 //	consentURL, err := manager.StartAdminConsent(ctx, "microsoft", config)
@@ -41,10 +41,11 @@ import (
 
 // MultiTenantManager handles multi-tenant OAuth2 consent flows and token management
 type MultiTenantManager struct {
-	credStore    CredentialStore
-	consentStore ConsentStore
-	httpClient   *http.Client
-	oauth2Client OAuth2Client
+	credStore        CredentialStore
+	consentStore     ConsentStore
+	httpClient       *http.Client
+	oauth2Client     OAuth2Client
+	tenantDiscoverer TenantDiscoverer
 
 	// Cache of tenant discovery results to avoid repeated API calls
 	tenantCache map[string]*TenantDiscoveryResult
@@ -55,14 +56,17 @@ type MultiTenantManager struct {
 // NewMultiTenantManager creates a new multi-tenant manager.
 // consentStore persists admin-consent state; pass NewInMemoryConsentStore() for
 // pre-production use until a durable implementation is available.
-func NewMultiTenantManager(credStore CredentialStore, consentStore ConsentStore, httpClient *http.Client) *MultiTenantManager {
+// discoverer performs the actual tenant discovery API call after consent is
+// granted; MicrosoftMultiTenantProvider satisfies this interface in production.
+func NewMultiTenantManager(credStore CredentialStore, consentStore ConsentStore, httpClient *http.Client, discoverer TenantDiscoverer) *MultiTenantManager {
 	return &MultiTenantManager{
-		credStore:    credStore,
-		consentStore: consentStore,
-		httpClient:   httpClient,
-		oauth2Client: NewOAuth2Client(httpClient),
-		tenantCache:  make(map[string]*TenantDiscoveryResult),
-		cacheExpiry:  15 * time.Minute, // Cache tenant discovery for 15 minutes
+		credStore:        credStore,
+		consentStore:     consentStore,
+		httpClient:       httpClient,
+		oauth2Client:     NewOAuth2Client(httpClient),
+		tenantDiscoverer: discoverer,
+		tenantCache:      make(map[string]*TenantDiscoveryResult),
+		cacheExpiry:      15 * time.Minute,
 	}
 }
 
@@ -414,30 +418,10 @@ func (mtm *MultiTenantManager) completeOAuth2Flow(ctx context.Context, flow *OAu
 }
 
 func (mtm *MultiTenantManager) discoverTenants(ctx context.Context, provider string, tokenSet *TokenSet) (*TenantDiscoveryResult, error) {
-	// This would implement actual tenant discovery via provider APIs
-	// For Microsoft Graph, this would call /organizations or /tenants endpoints
-
-	// Mock implementation for now
-	result := &TenantDiscoveryResult{
-		Tenants: []TenantInfo{
-			{
-				TenantID:    "tenant-1",
-				DisplayName: "Customer Tenant 1",
-				Domain:      "customer1.onmicrosoft.com",
-				HasAccess:   true,
-			},
-			{
-				TenantID:    "tenant-2",
-				DisplayName: "Customer Tenant 2",
-				Domain:      "customer2.onmicrosoft.com",
-				HasAccess:   true,
-			},
-		},
-		DiscoveredAt: time.Now(),
-		Success:      true,
+	if mtm.tenantDiscoverer == nil {
+		return nil, fmt.Errorf("no tenant discoverer configured for provider %s", provider)
 	}
-
-	return result, nil
+	return mtm.tenantDiscoverer.DiscoverTenants(ctx, tokenSet)
 }
 
 func (mtm *MultiTenantManager) refreshTenantToken(ctx context.Context, provider, tenantID string) (*TokenSet, error) {

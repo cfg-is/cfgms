@@ -137,13 +137,45 @@ this implementation to verify round-trip fidelity for all fields.
 ```go
 // Zero value is ready to use, or construct explicitly:
 store := NewInMemoryConsentStore()
-manager := NewMultiTenantManager(credStore, store, httpClient)
+manager := NewMultiTenantManager(credStore, store, httpClient, discoverer)
 ```
 
 `CredentialStore` (`StoreClientSecret` / `GetClientSecret`) is **no longer used
 for consent state**. Those methods remain on the interface for auth flows only.
 Any legacy flat-string consent data (e.g. `consent_granted:true;tenants:1`) that
 arrives at `GetConsent` returns a hard error — re-grant admin consent to recover.
+
+### TenantDiscoverer wiring
+
+Tenant discovery is performed through the `TenantDiscoverer` interface (defined in
+`multitenant_store.go`):
+
+```go
+type TenantDiscoverer interface {
+    DiscoverTenants(ctx context.Context, token *TokenSet) (*TenantDiscoveryResult, error)
+}
+```
+
+**Production implementation:** `MicrosoftMultiTenantProvider` satisfies
+`TenantDiscoverer` via its `DiscoverTenants` method, which delegates to
+`DiscoverTenantsFromMicrosoft`. This makes a real HTTP GET to the Microsoft Graph
+`/v1.0/organization` endpoint and maps the response to `[]TenantInfo`.
+`NewMicrosoftMultiTenantProvider` wires itself as the discoverer at construction
+time:
+
+```go
+p := &MicrosoftMultiTenantProvider{...}
+p.multiTenantManager = NewMultiTenantManager(credStore, store, httpClient, p)
+```
+
+**Test implementation:** Unit tests use `stubTenantDiscoverer` (defined in
+`multitenant_test.go`) which returns a configurable fixed list of tenants without
+making any HTTP calls. Pass it to `NewMultiTenantManager` as the fourth argument:
+
+```go
+stub := newStubTenantDiscoverer(TenantInfo{TenantID: "test-tenant", HasAccess: true})
+mtm := NewMultiTenantManager(credStore, store, httpClient, stub)
+```
 
 ## Tenant-Scoped Operations
 
