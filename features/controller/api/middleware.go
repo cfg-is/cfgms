@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -412,40 +413,50 @@ func (s *Server) writeAuthorizationError(w http.ResponseWriter, message, code st
 
 // auditAuthorizationDecision logs authorization decisions for security auditing
 func (s *Server) auditAuthorizationDecision(r *http.Request, decision *AuthorizationDecision) {
-	// Create comprehensive audit log entry
 	auditFields := map[string]interface{}{
 		"event_type":     "api_authorization",
 		"timestamp":      decision.CheckedAt.UTC().Format(time.RFC3339Nano),
-		"subject_id":     decision.SubjectID,
-		"tenant_id":      decision.TenantID,
-		"permission_id":  decision.PermissionID,
-		"resource":       decision.Resource,
-		"action":         decision.Action,
-		"decision":       decision.Decision,
+		"subject_id":     logging.SanitizeLogValue(decision.SubjectID),
+		"tenant_id":      logging.SanitizeLogValue(decision.TenantID),
+		"permission_id":  logging.SanitizeLogValue(decision.PermissionID),
+		"resource":       logging.SanitizeLogValue(decision.Resource),
+		"action":         logging.SanitizeLogValue(decision.Action),
+		"decision":       logging.SanitizeLogValue(decision.Decision),
 		"granted":        decision.Granted,
-		"reason":         decision.Reason,
+		"reason":         logging.SanitizeLogValue(decision.Reason),
 		"duration_ms":    decision.DurationMs,
 		"request_path":   logging.SanitizeLogValue(r.URL.Path),
-		"request_method": r.Method,
+		"request_method": logging.SanitizeLogValue(r.Method),
 		"remote_addr":    logging.SanitizeLogValue(r.RemoteAddr),
 		"user_agent":     logging.SanitizeLogValue(r.Header.Get("User-Agent")),
-		"request_id":     s.getRequestID(r),
+		"request_id":     logging.SanitizeLogValue(s.getRequestID(r)),
 		"severity":       s.getAuditSeverity(decision),
 	}
 
-	// Add conditional variables if present
 	if decision.ConditionalVars != nil {
-		auditFields["conditional_vars"] = decision.ConditionalVars
+		auditFields["conditional_vars"] = logging.SanitizeFieldsRecursive(decision.ConditionalVars)
 	}
 
-	// Log at appropriate level based on decision outcome
 	if decision.Granted {
-		s.logger.Info("Authorization audit", auditFields)
+		s.logger.Info("Authorization audit", flattenFieldsToKV(auditFields)...)
 	} else {
-		// Failed authorization attempts need higher visibility
-		s.logger.Warn("Authorization audit - access denied", auditFields)
+		s.logger.Warn("Authorization audit - access denied", flattenFieldsToKV(auditFields)...)
 	}
+}
 
+// flattenFieldsToKV converts a map to a sorted flat key/value slice for variadic logger calls.
+// Keys are sorted alphabetically to make log output deterministic.
+func flattenFieldsToKV(fields map[string]interface{}) []interface{} {
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]interface{}, 0, 2*len(fields))
+	for _, k := range keys {
+		out = append(out, k, fields[k])
+	}
+	return out
 }
 
 // getRequestID extracts or generates a request ID for audit correlation
