@@ -32,11 +32,14 @@ package saas
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // MultiTenantManager handles multi-tenant OAuth2 consent flows and token management
@@ -284,6 +287,19 @@ func (mtm *MultiTenantManager) GetTenantToken(ctx context.Context, provider, ten
 		if err != nil {
 			return nil, fmt.Errorf("failed to refresh tenant token: %w", err)
 		}
+	}
+
+	// Verify the JWT tid claim matches the requested tenantID.
+	// Fail-open for opaque tokens (non-JWT or missing tid) to preserve
+	// compatibility with client-credentials flows that return opaque tokens.
+	tid, jwtErr := extractJWTTenantID(tokenSet.AccessToken)
+	if jwtErr != nil {
+		slog.Warn("GetTenantToken: tid extraction failed, proceeding with opaque token (fail-open)",
+			"provider", logging.SanitizeLogValue(provider),
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"reason", logging.SanitizeLogValue(jwtErr.Error()))
+	} else if tid != tenantID {
+		return nil, fmt.Errorf("token tenant mismatch: got %q, want %q — token rejected", tid, tenantID)
 	}
 
 	return tokenSet, nil
