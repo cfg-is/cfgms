@@ -8,7 +8,10 @@ package ha
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +19,63 @@ import (
 	"testing"
 	"time"
 )
+
+// getDockerCACert extracts the CA certificate PEM from a Docker container.
+// The certificate is read from /app/certs/ca/ca.crt (default CFGMS cert path inside Docker).
+func getDockerCACert(containerName string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "cat", "/app/certs/ca/ca.crt")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA cert from container %s: %w", containerName, err)
+	}
+	return output, nil
+}
+
+// buildTLSClient creates an HTTP client with the CA cert from the given Docker container.
+// Falls back to the system root pool when Docker is unavailable.
+func buildTLSClient(containerName string) *http.Client {
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
+	if caCertPEM, err := getDockerCACert(containerName); err == nil {
+		caCertPool := x509.NewCertPool()
+		if caCertPool.AppendCertsFromPEM(caCertPEM) {
+			tlsConfig.RootCAs = caCertPool
+		}
+	}
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+		},
+	}
+}
+
+// buildMultiControllerTLSClient creates an HTTP client with CA certs from all specified containers.
+// This allows a single client to talk to multiple controllers that have different CAs.
+// RootCAs is only set when at least one cert is successfully parsed; otherwise the system root pool
+// is used so the client never proceeds with an empty trust pool.
+func buildMultiControllerTLSClient(containerNames ...string) *http.Client {
+	caCertPool := x509.NewCertPool()
+	certsAdded := false
+	for _, name := range containerNames {
+		if caCertPEM, err := getDockerCACert(name); err == nil {
+			if caCertPool.AppendCertsFromPEM(caCertPEM) {
+				certsAdded = true
+			}
+		}
+	}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
+	if certsAdded {
+		tlsConfig.RootCAs = caCertPool
+	}
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+		},
+	}
+}
 
 var (
 	isDockerRunning bool

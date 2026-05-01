@@ -556,13 +556,21 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 		return nil, fmt.Errorf("failed to marshal registration request: %w", err)
 	}
 
-	// Create HTTP client with timeout
+	// Create HTTP client using the framework's cert manager for proper CA verification.
+	caCertPEM, err := f.certManager.GetCACertificate()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get CA cert for HTTP client: %w", err)
+	}
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse CA cert PEM")
+	}
 	httpClient := &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				MinVersion:         tls.VersionTLS12, // #nosec G402 -- TLS 1.2+ for test environment
-				InsecureSkipVerify: true,             // #nosec G402 -- Test environment with self-signed certs
+				MinVersion: tls.VersionTLS13,
+				RootCAs:    caCertPool,
 			},
 		},
 	}

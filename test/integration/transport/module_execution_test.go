@@ -86,7 +86,7 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 	regResp := s.testHelper.RegisterSteward(s.T(), token)
 	s.stewardID = regResp.StewardID
 
-	s.helper = NewModuleTestHelper(GetTestHTTPAddr("https://localhost:8080"))
+	s.helper = NewModuleTestHelper(GetTestHTTPAddr("https://localhost:8080"), []byte(regResp.CACert))
 }
 
 func (s *ModuleExecutionTestSuite) SetupTest() {
