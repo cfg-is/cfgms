@@ -282,6 +282,55 @@ func TestWebhookInvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// TestWebhookHMACFailureRejectsEntireRequest verifies that when multiple
+// bindings match a push event but any one of them fails HMAC validation, the
+// handler returns HTTP 401 — not HTTP 202. This guards against a future
+// contributor changing the early return to a continue, which would cause the
+// handler to return 202 Accepted even when some bindings' HMAC checks fail.
+func TestWebhookHMACFailureRejectsEntireRequest(t *testing.T) {
+	const (
+		originURL = "https://github.com/org/cfgms-configs.git"
+		secretA   = "secret-for-binding-a"
+		secretB   = "secret-for-binding-b"
+	)
+
+	tmpDir := t.TempDir()
+	secretFileA := filepath.Join(tmpDir, "secret-a.txt")
+	secretFileB := filepath.Join(tmpDir, "secret-b.txt")
+	require.NoError(t, os.WriteFile(secretFileA, []byte(secretA), 0600))
+	require.NoError(t, os.WriteFile(secretFileB, []byte(secretB), 0600))
+
+	setup := newWebhookSetup(t, []gitsync.ScopeBinding{
+		{
+			TenantPath:       "root/t1",
+			Namespace:        "ns1",
+			OriginURL:        originURL,
+			Branch:           "main",
+			WebhookSecretRef: secretFileA,
+		},
+		{
+			TenantPath:       "root/t2",
+			Namespace:        "ns2",
+			OriginURL:        originURL,
+			Branch:           "main",
+			WebhookSecretRef: secretFileB,
+		},
+	})
+
+	body := buildPushPayload(originURL, "refs/heads/main")
+	// Sign only with secretA — binding B's check will fail.
+	sig := hmacSHA256Signature(body, secretA)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/git-push", bytes.NewReader(body))
+	req.Header.Set("X-Hub-Signature-256", sig)
+	rec := httptest.NewRecorder()
+	setup.handler.ServeHTTP(rec, req)
+
+	// HTTP 401 is the expected response when any binding fails HMAC,
+	// regardless of which other bindings may have passed validation.
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
 // TestWebhookEnvVarHMAC verifies that WebhookSecretRef with "env:" prefix
 // resolves the secret from an environment variable.
 func TestWebhookEnvVarHMAC(t *testing.T) {
