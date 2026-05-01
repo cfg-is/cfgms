@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -281,69 +282,71 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 		regStore = pkgRegistration.NewStorageAdapter(regTokenStore)
 
-		// For Docker testing: Create pre-configured test tokens
-		// These tokens are used by integration tests in test/integration/
-		now := time.Now()
-		expiredTime := now.Add(-1 * time.Hour)
-		testTokens := []*pkgRegistration.Token{
-			{
-				Token:         "dockertest_standalone",
-				TenantID:      "test-tenant",
-				ControllerURL: "tcp://controller-standalone:1883",
-				Group:         "test-group",
-				CreatedAt:     now,
-				ExpiresAt:     nil,   // Never expires for testing
-				SingleUse:     false, // Can be reused for testing
-				Revoked:       false,
-			},
-			{
-				Token:         "integration_reusable",
-				TenantID:      "test-tenant-integration",
-				ControllerURL: "tcp://localhost:1886",
-				Group:         "production",
-				CreatedAt:     now,
-				ExpiresAt:     nil,   // Never expires for testing
-				SingleUse:     false, // Can be reused for integration tests
-				Revoked:       false,
-			},
-			{
-				Token:         "integration_expired",
-				TenantID:      "test-tenant-integration",
-				ControllerURL: "tcp://localhost:1886",
-				Group:         "production",
-				CreatedAt:     now.Add(-2 * time.Hour),
-				ExpiresAt:     &expiredTime, // Expired 1 hour ago
-				SingleUse:     true,
-				Revoked:       false,
-			},
-			{
-				Token:         "integration_revoked",
-				TenantID:      "test-tenant-integration",
-				ControllerURL: "tcp://localhost:1886",
-				Group:         "production",
-				CreatedAt:     now,
-				ExpiresAt:     nil,
-				SingleUse:     true,
-				Revoked:       true, // Revoked token
-				RevokedAt:     &now,
-			},
-			{
-				Token:         "integration_singleuse",
-				TenantID:      "test-tenant-integration",
-				ControllerURL: "tcp://localhost:1886",
-				Group:         "production",
-				CreatedAt:     now,
-				ExpiresAt:     nil,
-				SingleUse:     true, // Single-use token
-				Revoked:       false,
-			},
-		}
+		// Seed test tokens only when explicitly requested via environment variable.
+		// Never runs in production — must be set deliberately in test environments.
+		if os.Getenv("CFGMS_SEED_TEST_TOKENS") == "1" {
+			now := time.Now()
+			expiredTime := now.Add(-1 * time.Hour)
+			testTokens := []*pkgRegistration.Token{
+				{
+					Token:         "dockertest_standalone", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "test-tenant",
+					ControllerURL: "tcp://controller-standalone:1883",
+					Group:         "test-group",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					SingleUse:     false,
+					Revoked:       false,
+				},
+				{
+					Token:         "integration_reusable", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "test-tenant-integration",
+					ControllerURL: "tcp://localhost:1886",
+					Group:         "production",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					SingleUse:     false,
+					Revoked:       false,
+				},
+				{
+					Token:         "integration_expired", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "test-tenant-integration",
+					ControllerURL: "tcp://localhost:1886",
+					Group:         "production",
+					CreatedAt:     now.Add(-2 * time.Hour),
+					ExpiresAt:     &expiredTime,
+					SingleUse:     true,
+					Revoked:       false,
+				},
+				{
+					Token:         "integration_revoked", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "test-tenant-integration",
+					ControllerURL: "tcp://localhost:1886",
+					Group:         "production",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					SingleUse:     true,
+					Revoked:       true,
+					RevokedAt:     &now,
+				},
+				{
+					Token:         "integration_singleuse", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "test-tenant-integration",
+					ControllerURL: "tcp://localhost:1886",
+					Group:         "production",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					SingleUse:     true,
+					Revoked:       false,
+				},
+			}
 
-		for _, testToken := range testTokens {
-			if err := regStore.SaveToken(context.Background(), testToken); err != nil {
-				logger.Warn("Failed to create test token for Docker testing", "error", err, "token", testToken.Token)
-			} else {
-				logger.Info("Created test registration token for Docker testing", "token", testToken.Token, "tenant", testToken.TenantID)
+			for _, testToken := range testTokens {
+				if err := regStore.SaveToken(context.Background(), testToken); err != nil {
+					logger.Warn("Failed to seed test token", "error", err, "token", testToken.Token)
+				} else {
+					logger.Info("Seeded test registration token", "token", testToken.Token, "tenant", testToken.TenantID)
+				}
 			}
 		}
 	}
