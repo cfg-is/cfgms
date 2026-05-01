@@ -7,6 +7,7 @@ package service
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -127,4 +128,28 @@ func TestLinuxManagerNew(t *testing.T) {
 	require.NotNil(t, m)
 	_, ok := m.(*linuxManager)
 	assert.True(t, ok, "New() should return a *linuxManager on Linux")
+}
+
+func TestCopyBinaryPermissions(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "cfgms-controller-src")
+	require.NoError(t, os.WriteFile(src, []byte("binary content"), 0600))
+
+	dst := filepath.Join(t.TempDir(), "cfgms-controller")
+	require.NoError(t, copyBinary(src, dst))
+
+	info, err := os.Stat(dst)
+	require.NoError(t, err)
+	// 0750: owner rwx (service binary), group rx (service group), no world access
+	assert.Equal(t, os.FileMode(0750), info.Mode().Perm())
+}
+
+func TestSystemdUnitFilePermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cfgms-controller.service")
+	content := generateSystemdUnit("/etc/cfgms/controller.cfg")
+	require.NoError(t, writeSystemdUnit(path, []byte(content)))
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	// 0600: owner rw (root only); systemd reads as root, group read is unnecessary
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 }
