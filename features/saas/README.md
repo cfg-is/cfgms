@@ -267,6 +267,47 @@ The `*InTenant` family covers all mutation and query operations:
 `List` is excluded from this restriction — it performs an explicit cross-tenant aggregate
 via `ListUsersAcrossAllTenants` and its cross-tenant semantics are intentional and correct.
 
+## JWT Tenant Verification
+
+`MultiTenantManager.GetTenantToken` verifies that the `tid` claim in the returned
+access token matches the requested `tenantID` before returning the token to the caller.
+This prevents a compromised or misconfigured token store from silently returning a token
+that belongs to a different tenant.
+
+### How it works
+
+After the token is retrieved from the credential store (or refreshed), `GetTenantToken`
+calls `extractJWTTenantID(tokenSet.AccessToken)`, which:
+
+1. Splits the token on `.` and confirms three segments are present.
+2. Base64 URL-decodes the payload segment (middle segment, no padding — `RawURLEncoding`).
+3. JSON-unmarshals the payload and reads the `tid` string field.
+4. Returns the `tid` value, or an error if any step fails.
+
+If `tid` matches `tenantID` exactly, the token is returned normally.
+If `tid` does not match, the token is rejected and `GetTenantToken` returns:
+
+```
+token tenant mismatch: got "<actual-tid>", want "<requested-tenant>" — token rejected
+```
+
+### Fail-open for opaque tokens
+
+If `extractJWTTenantID` returns an error (e.g. the token is not a JWT, the payload
+cannot be decoded, or the `tid` field is absent), `GetTenantToken` logs a WARN and
+returns the token as-is. This preserves compatibility with client-credentials flows that
+issue opaque (non-JWT) access tokens.
+
+The WARN log includes the provider name, tenant ID, and the extraction error. It never
+includes any portion of the token value.
+
+### Dependency on real OAuth2 tokens (#697/#698)
+
+Full integration coverage of the tid check requires real OAuth2 tokens flowing through
+`refreshTenantToken`. The unit-level criteria (crafted JWT mismatch, opaque token
+fail-open) are testable independently. Mark the integration acceptance criterion as
+blocked on #697/#698 if those issues have not yet merged.
+
 ## Development
 
 The SaaS Steward is designed to be:

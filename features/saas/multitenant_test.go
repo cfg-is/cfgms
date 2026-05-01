@@ -517,6 +517,69 @@ func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
 	assert.Contains(t, err.Error(), "tenant inaccessible-tenant is not accessible")
 }
 
+func TestMultiTenantManager_GetTenantToken_TIDMismatch(t *testing.T) {
+	credStore := NewMockCredentialStore()
+	consentStore := NewInMemoryConsentStore()
+	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer())
+
+	ctx := context.Background()
+	provider := "microsoft"
+	tenantID := "correct-tenant"
+
+	require.NoError(t, consentStore.StoreConsent(provider, &ConsentStatus{
+		Provider:        provider,
+		HasAdminConsent: true,
+		AccessibleTenants: []TenantInfo{
+			{TenantID: tenantID, HasAccess: true},
+		},
+	}))
+
+	// Craft a JWT whose tid claim is a different tenant than the one being requested.
+	mismatchedJWT := makeTestJWT("wrong-tenant")
+	tenantKey := mtm.getTenantKey(provider, tenantID)
+	require.NoError(t, credStore.StoreTokenSet(tenantKey, &TokenSet{
+		AccessToken: mismatchedJWT,
+		TokenType:   "Bearer",
+		ExpiresAt:   time.Now().Add(1 * time.Hour),
+	}))
+
+	token, err := mtm.GetTenantToken(ctx, provider, tenantID)
+	assert.Nil(t, token)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token tenant mismatch")
+}
+
+func TestMultiTenantManager_GetTenantToken_OpaqueToken(t *testing.T) {
+	credStore := NewMockCredentialStore()
+	consentStore := NewInMemoryConsentStore()
+	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer())
+
+	ctx := context.Background()
+	provider := "microsoft"
+	tenantID := "any-tenant"
+
+	require.NoError(t, consentStore.StoreConsent(provider, &ConsentStatus{
+		Provider:        provider,
+		HasAdminConsent: true,
+		AccessibleTenants: []TenantInfo{
+			{TenantID: tenantID, HasAccess: true},
+		},
+	}))
+
+	// Opaque (non-JWT) access token; GetTenantToken must succeed (fail-open policy).
+	tenantKey := mtm.getTenantKey(provider, tenantID)
+	require.NoError(t, credStore.StoreTokenSet(tenantKey, &TokenSet{
+		AccessToken: "opaque-access-token-not-a-jwt",
+		TokenType:   "Bearer",
+		ExpiresAt:   time.Now().Add(1 * time.Hour),
+	}))
+
+	token, err := mtm.GetTenantToken(ctx, provider, tenantID)
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.Equal(t, "opaque-access-token-not-a-jwt", token.AccessToken)
+}
+
 func TestMultiTenantManager_GetTenantToken_ExpiredToken_RefreshNotImplemented(t *testing.T) {
 	credStore := NewMockCredentialStore()
 	consentStore := NewInMemoryConsentStore()
