@@ -126,6 +126,7 @@ The WebSocket upgrader enforces origin validation on every upgrade request. Conn
 - Default allowlist: empty (same-origin only)
 - Allowlist is a constructor parameter: `NewWebSocketHandler(sessionManager, logger, originAllowlist)`
 - The allowlist is sourced from controller configuration; the terminal feature does not read config directly
+- Production allowlist source: `CFGMS_TERMINAL_ALLOWED_ORIGINS` env var (comma-separated `host` or `host:port` entries, trimmed and empty-filtered), parsed at controller startup and passed to the constructor
 
 ### 6. mTLS Integration (`auth_integration.go`)
 

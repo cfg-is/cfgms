@@ -379,6 +379,22 @@ func (s *Server) setupRouter() {
 		s.workflowHandler.RegisterTriggerRoutes(triggerRouter)
 		s.logger.Info("Workflow and trigger API routes registered")
 	}
+
+	// TODO(#997): Wire terminal WebSocket handler when HTTP route is added (gated on epic #750).
+	// When the terminal route is registered, parse CFGMS_TERMINAL_ALLOWED_ORIGINS and pass the
+	// resulting slice to terminal.NewWebSocketHandler as the third argument. Parsing pattern
+	// mirrors CFGMS_ALLOWED_ORIGINS (comma-separated, strings.TrimSpace per entry, empty filtered):
+	//
+	//   var terminalOrigins []string
+	//   if raw := os.Getenv("CFGMS_TERMINAL_ALLOWED_ORIGINS"); raw != "" {
+	//       for _, o := range strings.Split(raw, ",") {
+	//           if trimmed := strings.TrimSpace(o); trimmed != "" {
+	//               terminalOrigins = append(terminalOrigins, trimmed)
+	//           }
+	//       }
+	//   }
+	//   terminalHandler, err := terminal.NewWebSocketHandler(sessionManager, s.logger, terminalOrigins)
+	//   // then register: api.Handle("/terminal/ws/{steward_id}", ...).Methods("GET")
 }
 
 // Start starts the HTTP server
