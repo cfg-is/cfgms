@@ -75,8 +75,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// H-AUTH-4: Reduce token prefix to 6 chars to prevent brute force (security audit finding)
-	s.logger.Info("Processing steward registration request", "token_prefix", req.Token[:min(len(req.Token), 6)])
+	s.logger.Info("Processing steward registration request", "token_prefix", logging.RedactedID(req.Token))
 
 	// Check if registration token store is available
 	if s.registrationTokenStore == nil {
@@ -89,6 +88,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	token, err := s.registrationTokenStore.GetToken(r.Context(), req.Token)
 	if err != nil {
 		s.logger.Warn("Invalid registration token", "error", err)
+		// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 		s.emitRegistrationAudit(r.Context(), req.Token, "unknown", "unknown",
 			business.AuditEventSecurityEvent, "registration_rejected",
 			business.AuditResultFailure, business.AuditSeverityCritical, nil)
@@ -98,7 +98,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Check if token is revoked
 	if token.Revoked {
-		s.logger.Warn("Attempted use of revoked token", "token_prefix", logging.SanitizeLogValue(req.Token[:min(len(req.Token), 8)]))
+		s.logger.Warn("Attempted use of revoked token", "token_prefix", logging.RedactedID(req.Token))
+		// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 		s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, "unknown",
 			business.AuditEventSecurityEvent, "registration_rejected",
 			business.AuditResultFailure, business.AuditSeverityCritical, nil)
@@ -108,7 +109,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Check if token is expired
 	if token.ExpiresAt != nil && token.ExpiresAt.Before(time.Now()) {
-		s.logger.Warn("Attempted use of expired token", "token_prefix", logging.SanitizeLogValue(req.Token[:min(len(req.Token), 8)]), "expired_at", token.ExpiresAt)
+		s.logger.Warn("Attempted use of expired token", "token_prefix", logging.RedactedID(req.Token), "expired_at", token.ExpiresAt)
+		// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 		s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, "unknown",
 			business.AuditEventSecurityEvent, "registration_rejected",
 			business.AuditResultFailure, business.AuditSeverityCritical, nil)
@@ -125,7 +127,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err := s.registrationTokenStore.ConsumeToken(r.Context(), req.Token, stewardID); err != nil {
 		if errors.Is(err, business.ErrTokenAlreadyUsed) {
 			s.logger.Warn("Single-use token already consumed",
-				"token_prefix", req.Token[:min(len(req.Token), 6)])
+				"token_prefix", logging.RedactedID(req.Token))
+			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 			s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
 				business.AuditEventSecurityEvent, "registration_rejected",
 				business.AuditResultFailure, business.AuditSeverityCritical, nil)
@@ -158,6 +161,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 				s.logger.Warn("Registration rejected by approval workflow",
 					"tenant_id", token.TenantID,
 					"reason", logging.SanitizeLogValue(reason))
+				// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 				s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
 					business.AuditEventSecurityEvent, "registration_rejected",
 					business.AuditResultDenied, business.AuditSeverityCritical, nil)
@@ -296,6 +300,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		successAction = "registration_quarantined"
 		successExtras = map[string]interface{}{"quarantined": true}
 	}
+	// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 	s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
 		business.AuditEventAuthentication, successAction,
 		business.AuditResultSuccess, business.AuditSeverityHigh, successExtras)
@@ -373,7 +378,7 @@ func (s *Server) emitRegistrationAudit(
 	if s.auditManager == nil {
 		return
 	}
-	tokenPrefix := tokenStr[:min(len(tokenStr), 6)]
+	tokenPrefix := logging.RedactedID(tokenStr)
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(eventType).
@@ -389,12 +394,4 @@ func (s *Server) emitRegistrationAudit(
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
 		s.logger.Warn("Failed to emit registration audit event", "error", err, "action", action)
 	}
-}
-
-// Helper function to get minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

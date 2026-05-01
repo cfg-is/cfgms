@@ -208,6 +208,9 @@ func TestHandleRegister_RevokedToken_Returns401(t *testing.T) {
 	assert.Equal(t, "registration_rejected", entries[0].Action)
 	assert.Equal(t, string(business.AuditResultFailure), string(entries[0].Result))
 	assert.Equal(t, string(business.AuditEventSecurityEvent), string(entries[0].EventType))
+	// audit.RedactedKeys includes "token", so token_prefix is stored as [REDACTED] — never raw.
+	assert.Equal(t, "[REDACTED]", entries[0].Details["token_prefix"],
+		"token_prefix in audit detail must be redacted by the audit manager")
 }
 
 func TestHandleRegister_ExpiredToken_Returns401(t *testing.T) {
@@ -235,6 +238,9 @@ func TestHandleRegister_ExpiredToken_Returns401(t *testing.T) {
 	assert.Equal(t, "registration_rejected", entries[0].Action)
 	assert.Equal(t, string(business.AuditResultFailure), string(entries[0].Result))
 	assert.Equal(t, string(business.AuditEventSecurityEvent), string(entries[0].EventType))
+	// audit.RedactedKeys includes "token", so token_prefix is stored as [REDACTED] — never raw.
+	assert.Equal(t, "[REDACTED]", entries[0].Details["token_prefix"],
+		"token_prefix in audit detail must be redacted by the audit manager")
 }
 
 func TestHandleRegister_StoreError_Returns500(t *testing.T) {
@@ -435,8 +441,17 @@ type kvCapturingLogger struct {
 }
 
 type kvLogEntry struct {
-	msg string
-	kvs []interface{}
+	level string
+	msg   string
+	kvs   []interface{}
+}
+
+func (l *kvCapturingLogger) Info(msg string, kvs ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kvcopy := make([]interface{}, len(kvs))
+	copy(kvcopy, kvs)
+	l.entries = append(l.entries, kvLogEntry{level: "info", msg: msg, kvs: kvcopy})
 }
 
 func (l *kvCapturingLogger) Warn(msg string, kvs ...interface{}) {
@@ -444,10 +459,10 @@ func (l *kvCapturingLogger) Warn(msg string, kvs ...interface{}) {
 	defer l.mu.Unlock()
 	kvcopy := make([]interface{}, len(kvs))
 	copy(kvcopy, kvs)
-	l.entries = append(l.entries, kvLogEntry{msg: msg, kvs: kvcopy})
+	l.entries = append(l.entries, kvLogEntry{level: "warn", msg: msg, kvs: kvcopy})
 }
 
-func (l *kvCapturingLogger) warnEntries() []kvLogEntry {
+func (l *kvCapturingLogger) allEntries() []kvLogEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	out := make([]kvLogEntry, len(l.entries))
@@ -455,7 +470,45 @@ func (l *kvCapturingLogger) warnEntries() []kvLogEntry {
 	return out
 }
 
-// warnKVContains checks whether any warn entry has a kv value that equals v.
+func (l *kvCapturingLogger) warnEntries() []kvLogEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []kvLogEntry
+	for _, e := range l.entries {
+		if e.level == "warn" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// allKVContains checks whether any captured log entry (any level) has a kv value that equals v.
+func (l *kvCapturingLogger) allKVContains(v string) bool {
+	for _, entry := range l.allEntries() {
+		for i := 1; i < len(entry.kvs); i += 2 {
+			if s, ok := entry.kvs[i].(string); ok && s == v {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// allKVKeyHasValue checks whether any captured log entry has the given key with the given value.
+func (l *kvCapturingLogger) allKVKeyHasValue(key, value string) bool {
+	for _, entry := range l.allEntries() {
+		for i := 0; i < len(entry.kvs)-1; i += 2 {
+			if k, ok := entry.kvs[i].(string); ok && k == key {
+				if v, ok2 := entry.kvs[i+1].(string); ok2 && v == value {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// warnKVContains checks whether any warn-level entry has a kv value that equals v.
 func (l *kvCapturingLogger) warnKVContains(v string) bool {
 	for _, entry := range l.warnEntries() {
 		for i := 1; i < len(entry.kvs); i += 2 {
@@ -492,10 +545,10 @@ func TestHandleRegister_RevokedToken_LogsTokenPrefixNotFullToken(t *testing.T) {
 	assert.False(t, capLogger.warnKVContains(fullToken),
 		"full token must not be logged in the revoked-token path")
 
-	// A truncated prefix must be present (at most 8 chars).
-	expectedPrefix := fullToken[:8]
+	// RedactedID produces an 8-char prefix followed by U+2026 ellipsis.
+	expectedPrefix := fullToken[:8] + "…"
 	assert.True(t, capLogger.warnKVContains(expectedPrefix),
-		"token_prefix (first 8 chars) must be logged in the revoked-token path")
+		"token_prefix (first 8 chars + ellipsis) must be logged in the revoked-token path")
 }
 
 // TestHandleRegister_ExpiredToken_LogsTokenPrefixNotFullToken verifies that the expired-token
@@ -521,7 +574,38 @@ func TestHandleRegister_ExpiredToken_LogsTokenPrefixNotFullToken(t *testing.T) {
 	assert.False(t, capLogger.warnKVContains(fullToken),
 		"full token must not be logged in the expired-token path")
 
-	expectedPrefix := fullToken[:8]
+	// RedactedID produces an 8-char prefix followed by U+2026 ellipsis.
+	expectedPrefix := fullToken[:8] + "…"
 	assert.True(t, capLogger.warnKVContains(expectedPrefix),
-		"token_prefix (first 8 chars) must be logged in the expired-token path")
+		"token_prefix (first 8 chars + ellipsis) must be logged in the expired-token path")
+}
+
+// TestHandleRegister_ValidToken_LogsRedactedPrefixNotFullToken verifies that the success path
+// logs only the RedactedID form of the token and never the raw token value.
+func TestHandleRegister_ValidToken_LogsRedactedPrefixNotFullToken(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	capLogger := &kvCapturingLogger{}
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr, capLogger)
+
+	fullToken := "cfgms_reg_valid_loggingtest_12345"
+	tok := &registration.Token{
+		Token:         fullToken,
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+		SingleUse:     true,
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, fullToken)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Raw token must not appear in any logged kv value.
+	assert.False(t, capLogger.allKVContains(fullToken),
+		"raw token must not appear in any log field value on the success path")
+
+	// The token_prefix key specifically must hold the RedactedID form (8 chars + U+2026 ellipsis).
+	expectedPrefix := fullToken[:8] + "…"
+	assert.True(t, capLogger.allKVKeyHasValue("token_prefix", expectedPrefix),
+		"token_prefix key must hold the 8-char+ellipsis redacted form on the success path")
 }
