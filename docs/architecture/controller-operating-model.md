@@ -421,6 +421,12 @@ All API operations are governed by role-based access control:
 - **Tenant scoping** — permissions are scoped to tenant path; an MSP admin sees all descendants, a client admin sees only their subtree
 - **Zero-trust evaluation** — every request is evaluated against the policy engine
 
+#### Cache Invalidation
+
+The RBAC and zero-trust policy subsystems maintain a two-tier authorization cache (L1 in-memory, L2 warm store). When a role is revoked or a zero-trust policy is deactivated or retired, all cache layers are invalidated **synchronously** before the write returns. Stale cached grants cannot outlive the policy change that revoked them.
+
+If a cache invalidation call fails transiently (e.g., transient error), the operation is still recorded in the audit log with `cache_invalidation_failed=true`. In that scenario, the worst-case stale window is bounded by cache TTLs: **up to 5 minutes** for L1 + **up to 10 minutes** for L2 (L2 TTL is typically 2× L1). Under normal operation (invalidation succeeds) the stale window is zero.
+
 ### API Authentication
 
 - **API keys** — stored encrypted, used for programmatic access

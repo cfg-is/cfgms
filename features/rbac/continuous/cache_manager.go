@@ -456,41 +456,72 @@ func (cm *CacheManager) invalidateSession(sessionID, reason string) error {
 	return nil
 }
 
+// InvalidateSubject removes all cached authorization decisions for the given subject
+// from both L1 and L2. L2 is scanned independently of L1 so entries that have already
+// been evicted from L1 but have not yet expired in L2 are still removed.
+func (cm *CacheManager) InvalidateSubject(subjectID string) error {
+	return cm.invalidateSubject(subjectID, "subject_invalidated")
+}
+
 func (cm *CacheManager) invalidateSubject(subjectID, reason string) error {
-	// Simplified - iterate through L1 cache entries to find matches
-	keysToRemove := make([]string, 0)
+	// Use a set to avoid double-deleting keys found in both L1 and L2.
+	keysToRemove := make(map[string]struct{})
+
+	// Scan L1 for matching entries.
 	for _, key := range cm.l1Cache.Keys() {
 		if value, found := cm.l1Cache.Get(key); found {
 			if cached, ok := value.(*CachedAuthDecision); ok && cached.SubjectID == subjectID {
-				keysToRemove = append(keysToRemove, key)
+				keysToRemove[key] = struct{}{}
 			}
 		}
 	}
 
-	// Remove from both L1 and L2
-	for _, key := range keysToRemove {
+	// Scan L2 independently — entries evicted from L1 may still be live in L2.
+	for _, key := range cm.l2Cache.Keys() {
+		if value, found := cm.l2Cache.Get(key); found {
+			if cached, ok := value.(*CachedAuthDecision); ok && cached.SubjectID == subjectID {
+				keysToRemove[key] = struct{}{}
+			}
+		}
+	}
+
+	for key := range keysToRemove {
 		cm.l1Cache.Delete(key)
 		cm.l2Cache.Delete(key)
-		// Also clean up session index
 		cm.removeKeyFromSessionIndex(key)
 	}
 
 	return nil
 }
 
+// InvalidateTenant removes all cached authorization decisions for the given tenant
+// from both L1 and L2. L2 is scanned independently of L1.
+func (cm *CacheManager) InvalidateTenant(tenantID string) error {
+	return cm.invalidateTenant(tenantID, "tenant_invalidated")
+}
+
 func (cm *CacheManager) invalidateTenant(tenantID, reason string) error {
-	// Simplified - iterate through L1 cache entries to find matches
-	keysToRemove := make([]string, 0)
+	keysToRemove := make(map[string]struct{})
+
+	// Scan L1 for matching entries.
 	for _, key := range cm.l1Cache.Keys() {
 		if value, found := cm.l1Cache.Get(key); found {
 			if cached, ok := value.(*CachedAuthDecision); ok && cached.TenantID == tenantID {
-				keysToRemove = append(keysToRemove, key)
+				keysToRemove[key] = struct{}{}
 			}
 		}
 	}
 
-	// Remove from both L1 and L2
-	for _, key := range keysToRemove {
+	// Scan L2 independently — entries evicted from L1 may still be live in L2.
+	for _, key := range cm.l2Cache.Keys() {
+		if value, found := cm.l2Cache.Get(key); found {
+			if cached, ok := value.(*CachedAuthDecision); ok && cached.TenantID == tenantID {
+				keysToRemove[key] = struct{}{}
+			}
+		}
+	}
+
+	for key := range keysToRemove {
 		cm.l1Cache.Delete(key)
 		cm.l2Cache.Delete(key)
 		cm.removeKeyFromSessionIndex(key)
@@ -500,18 +531,27 @@ func (cm *CacheManager) invalidateTenant(tenantID, reason string) error {
 }
 
 func (cm *CacheManager) invalidatePermission(permissionID, reason string) error {
-	// Simplified - iterate through L1 cache entries to find matches
-	keysToRemove := make([]string, 0)
+	keysToRemove := make(map[string]struct{})
+
+	// Scan L1 for matching entries.
 	for _, key := range cm.l1Cache.Keys() {
 		if value, found := cm.l1Cache.Get(key); found {
 			if cached, ok := value.(*CachedAuthDecision); ok && cached.PermissionID == permissionID {
-				keysToRemove = append(keysToRemove, key)
+				keysToRemove[key] = struct{}{}
 			}
 		}
 	}
 
-	// Remove from both L1 and L2
-	for _, key := range keysToRemove {
+	// Scan L2 independently — entries evicted from L1 may still be live in L2.
+	for _, key := range cm.l2Cache.Keys() {
+		if value, found := cm.l2Cache.Get(key); found {
+			if cached, ok := value.(*CachedAuthDecision); ok && cached.PermissionID == permissionID {
+				keysToRemove[key] = struct{}{}
+			}
+		}
+	}
+
+	for key := range keysToRemove {
 		cm.l1Cache.Delete(key)
 		cm.l2Cache.Delete(key)
 		cm.removeKeyFromSessionIndex(key)

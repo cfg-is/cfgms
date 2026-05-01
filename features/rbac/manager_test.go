@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import storage providers for testing
@@ -667,4 +668,122 @@ func TestManager_DeleteRolesByTenant(t *testing.T) {
 	otherRole, err := manager.GetRole(ctx, otherTenantID+".role-x")
 	require.NoError(t, err)
 	assert.Equal(t, otherTenantID, otherRole.TenantId)
+}
+
+// newTestManagerWithCache creates a Manager wired with a CacheManager for cache
+// invalidation tests. Returns both the manager and the raw CacheManager so tests
+// can prime cache entries and observe invalidation.
+func newTestManagerWithCache(t *testing.T) (*Manager, *continuous.CacheManager) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
+
+	cm := continuous.NewCacheManager(5*time.Minute, 100)
+	manager.SetCacheManager(cm)
+
+	ctx := context.Background()
+	require.NoError(t, manager.Initialize(ctx))
+	return manager, cm
+}
+
+// primeSubjectCache inserts a granted auth decision into the CacheManager for the
+// given subject so tests can verify the entry is removed after role revocation.
+func primeSubjectCache(t *testing.T, cm *continuous.CacheManager, subjectID, tenantID string) *continuous.ContinuousAuthRequest {
+	t.Helper()
+	req := &continuous.ContinuousAuthRequest{
+		AccessRequest: &common.AccessRequest{
+			SubjectId:    subjectID,
+			TenantId:     tenantID,
+			PermissionId: "test.permission",
+			ResourceId:   "test-resource",
+		},
+		SessionID: "session-" + subjectID,
+	}
+	resp := &continuous.ContinuousAuthResponse{
+		AccessResponse: &common.AccessResponse{Granted: true, Reason: "test grant"},
+		DecisionID:     "decision-" + subjectID,
+		DecisionTime:   time.Now(),
+		ValidUntil:     time.Now().Add(5 * time.Minute),
+		SessionValid:   true,
+	}
+	require.NoError(t, cm.CacheAuth(req, resp))
+	require.NotNil(t, cm.GetCachedAuth(req), "primed cache entry must be retrievable")
+	return req
+}
+
+// TestManager_RevokeRole_InvalidatesSubjectCache verifies that after RevokeRole the
+// CacheManager no longer returns a cached auth decision for the revoked subject.
+func TestManager_RevokeRole_InvalidatesSubjectCache(t *testing.T) {
+	ctx := context.Background()
+	manager, cm := newTestManagerWithCache(t)
+
+	tenantID := "cache-revoke-tenant"
+	subjectID := "cache-revoke-user"
+	roleID := tenantID + ".tenant.admin"
+
+	require.NoError(t, manager.CreateTenantDefaultRoles(ctx, tenantID))
+	require.NoError(t, manager.CreateSubject(ctx, &common.Subject{
+		Id:       subjectID,
+		Type:     common.SubjectType_SUBJECT_TYPE_USER,
+		TenantId: tenantID,
+		IsActive: true,
+	}))
+	require.NoError(t, manager.AssignRole(ctx, &common.RoleAssignment{
+		SubjectId: subjectID,
+		RoleId:    roleID,
+		TenantId:  tenantID,
+	}))
+
+	req := primeSubjectCache(t, cm, subjectID, tenantID)
+
+	require.NoError(t, manager.RevokeRole(ctx, subjectID, roleID, tenantID))
+
+	assert.Nil(t, cm.GetCachedAuth(req),
+		"GetCachedAuth must return nil after RevokeRole invalidates the subject cache")
+}
+
+// TestManager_DeleteRolesByTenant_InvalidatesTenantCache verifies that after
+// DeleteRolesByTenant the CacheManager no longer returns cached auth decisions
+// for any subject belonging to that tenant.
+func TestManager_DeleteRolesByTenant_InvalidatesTenantCache(t *testing.T) {
+	ctx := context.Background()
+	manager, cm := newTestManagerWithCache(t)
+
+	tenantID := "cache-delete-roles-tenant"
+	otherTenantID := "cache-other-tenant"
+
+	for _, r := range []*common.Role{
+		{Id: tenantID + ".role-a", Name: "Role A", TenantId: tenantID},
+	} {
+		require.NoError(t, manager.CreateRole(ctx, r))
+	}
+
+	// Prime cache for two different subjects in the target tenant.
+	req1 := primeSubjectCache(t, cm, "user1", tenantID)
+	req2 := primeSubjectCache(t, cm, "user2", tenantID)
+
+	// Also prime for a subject in a different tenant that must not be affected.
+	otherReq := primeSubjectCache(t, cm, "other-user", otherTenantID)
+
+	require.NoError(t, manager.DeleteRolesByTenant(ctx, tenantID))
+
+	assert.Nil(t, cm.GetCachedAuth(req1),
+		"user1 cache entry should be nil after DeleteRolesByTenant")
+	assert.Nil(t, cm.GetCachedAuth(req2),
+		"user2 cache entry should be nil after DeleteRolesByTenant")
+	assert.NotNil(t, cm.GetCachedAuth(otherReq),
+		"other tenant's cache entry must survive DeleteRolesByTenant")
 }

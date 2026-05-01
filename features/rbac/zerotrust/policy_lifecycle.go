@@ -12,7 +12,8 @@ import (
 
 // PolicyLifecycleManager provides comprehensive policy lifecycle management
 type PolicyLifecycleManager struct {
-	engine *ZeroTrustPolicyEngine
+	engine      *ZeroTrustPolicyEngine
+	policyCache *PolicyCache // cache to invalidate on policy state changes
 
 	// Policy storage and versioning
 	policies       map[string]*PolicyVersion   // policyID -> current version
@@ -425,6 +426,11 @@ func (p *PolicyLifecycleManager) DeactivatePolicy(ctx context.Context, policyID 
 	currentVersion.Status = PolicyVersionStatusDeprecated
 	currentVersion.DeactivatedAt = time.Now()
 
+	// Synchronously invalidate cache so stale grants cannot outlive this transition.
+	if p.policyCache != nil {
+		p.policyCache.Invalidate(policyID)
+	}
+
 	// Emit event
 	event := &PolicyEvent{
 		EventID:       fmt.Sprintf("deactivate-%s-%d", policyID, time.Now().UnixNano()),
@@ -434,6 +440,48 @@ func (p *PolicyLifecycleManager) DeactivatePolicy(ctx context.Context, policyID 
 		PolicyVersion: currentVersion.Version,
 		Actor:         deactivatedBy,
 		Description:   "Policy deactivated",
+		OldState:      oldStatus,
+		NewState:      currentVersion.Status,
+	}
+
+	p.emitEvent(event)
+
+	return nil
+}
+
+// RetirePolicy transitions a policy to the retired state.
+// It sets RetiredAt, invalidates the policy cache synchronously, and emits PolicyEventRetired.
+// The policy must be in deprecated (deactivated) status before it can be retired.
+func (p *PolicyLifecycleManager) RetirePolicy(ctx context.Context, policyID string, retiredBy string) error {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	currentVersion, exists := p.policies[policyID]
+	if !exists {
+		return fmt.Errorf("policy %s not found", policyID)
+	}
+
+	if currentVersion.Status != PolicyVersionStatusDeprecated {
+		return fmt.Errorf("policy %s is not deprecated (current status: %s)", policyID, currentVersion.Status)
+	}
+
+	oldStatus := currentVersion.Status
+	currentVersion.Status = PolicyVersionStatusRetired
+	currentVersion.RetiredAt = time.Now()
+
+	// Synchronously invalidate cache so stale grants cannot outlive this transition.
+	if p.policyCache != nil {
+		p.policyCache.Invalidate(policyID)
+	}
+
+	event := &PolicyEvent{
+		EventID:       fmt.Sprintf("retire-%s-%d", policyID, time.Now().UnixNano()),
+		EventType:     PolicyEventRetired,
+		EventTime:     time.Now(),
+		PolicyID:      policyID,
+		PolicyVersion: currentVersion.Version,
+		Actor:         retiredBy,
+		Description:   "Policy retired",
 		OldState:      oldStatus,
 		NewState:      currentVersion.Status,
 	}
