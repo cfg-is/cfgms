@@ -12,12 +12,14 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 )
 
-// New creates a new instance of the Patch module
+// New creates a new instance of the Patch module. On platforms without a real
+// patch implementation the module uses a stub manager that returns errors for
+// all operations, ensuring no fake data leaks into production binaries.
 func New() modules.Module {
 	return &PatchModule{
-		patchManager:  NewMockPatchManager(),
+		patchManager:  newStubPatchManager(),
 		policyEngine:  NewPolicyEngine(DefaultPolicy()),
-		windowManager: nil, // Optional - can be set later
+		windowManager: nil,
 		deviceID:      "default",
 	}
 }

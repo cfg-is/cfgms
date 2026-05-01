@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-package patch_test
+package patch
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/modules/patch"
 )
 
 // TestE2E_ComplianceWorkflow_CompliantSystem tests the full compliance workflow
@@ -20,7 +19,7 @@ func TestE2E_ComplianceWorkflow_CompliantSystem(t *testing.T) {
 	ctx := context.Background()
 
 	// Step 1: Create patch policy (7-day deadline for critical patches)
-	policy := patch.PatchPolicy{
+	policy := PatchPolicy{
 		Critical:          7 * 24 * time.Hour,
 		Important:         14 * 24 * time.Hour,
 		Moderate:          30 * 24 * time.Hour,
@@ -30,11 +29,11 @@ func TestE2E_ComplianceWorkflow_CompliantSystem(t *testing.T) {
 	}
 
 	// Step 2: Create mock patch manager with no pending patches (compliant)
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{}) // No patches needed
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{}) // No patches needed
 
 	// Step 3: Create patch module with policy
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
 		policy,
 		nil,
@@ -45,26 +44,26 @@ func TestE2E_ComplianceWorkflow_CompliantSystem(t *testing.T) {
 	// Step 4: Check compliance status
 	status, err := patchModule.CheckCompliance(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusCompliant, status)
+	assert.Equal(t, ComplianceStatusCompliant, status)
 
 	// Step 5: Get detailed compliance report
 	report, err := patchModule.GetComplianceReport(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusCompliant, report.Status)
+	assert.Equal(t, ComplianceStatusCompliant, report.Status)
 	assert.Equal(t, 0, len(report.MissingPatches))
 
 	// Step 6: Create alerting manager
-	alertConfig := patch.DefaultAlertConfig()
+	alertConfig := DefaultAlertConfig()
 	alertConfig.SuppressInfo = false // Don't suppress info alerts for testing
 
-	alertManager := patch.NewAlertingManager(alertConfig, patchModule)
+	alertManager := NewAlertingManager(alertConfig, patchModule)
 
 	// Step 7: Check for alerts (should be info level - compliant)
 	alert, err := alertManager.CheckDevice(ctx, "test-device-1")
 	require.NoError(t, err)
 	require.NotNil(t, alert)
-	assert.Equal(t, patch.AlertLevelInfo, alert.Level)
-	assert.Equal(t, patch.ComplianceStatusCompliant, alert.Status)
+	assert.Equal(t, AlertLevelInfo, alert.Level)
+	assert.Equal(t, ComplianceStatusCompliant, alert.Status)
 
 	t.Log("✓ Compliant system workflow completed successfully")
 }
@@ -75,12 +74,12 @@ func TestE2E_ComplianceWorkflow_WarningSystem(t *testing.T) {
 	ctx := context.Background()
 
 	// Step 1: Create patch policy
-	policy := patch.DefaultPolicy()
+	policy := DefaultPolicy()
 
 	// Step 2: Create mock with patch approaching deadline
 	// Critical patch released 3 days ago, 4 days left before 7-day deadline
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB8888888",
 			Title:       "Critical Security Update",
@@ -92,7 +91,7 @@ func TestE2E_ComplianceWorkflow_WarningSystem(t *testing.T) {
 	})
 
 	// Step 3: Create patch module
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
 		policy,
 		nil,
@@ -103,24 +102,24 @@ func TestE2E_ComplianceWorkflow_WarningSystem(t *testing.T) {
 	// Step 4: Check compliance - should be in warning state
 	status, err := patchModule.CheckCompliance(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusWarning, status)
+	assert.Equal(t, ComplianceStatusWarning, status)
 
 	// Step 5: Get detailed report
 	report, err := patchModule.GetComplianceReport(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusWarning, report.Status)
+	assert.Equal(t, ComplianceStatusWarning, report.Status)
 	assert.Equal(t, 1, len(report.MissingPatches))
 	assert.Greater(t, report.DaysUntilBreach, 0)
 	assert.Less(t, report.DaysUntilBreach, 7)
 
 	// Step 6: Generate alert
-	alertConfig := patch.DefaultAlertConfig()
-	alertManager := patch.NewAlertingManager(alertConfig, patchModule)
+	alertConfig := DefaultAlertConfig()
+	alertManager := NewAlertingManager(alertConfig, patchModule)
 
 	alert, err := alertManager.CheckDevice(ctx, "test-device-2")
 	require.NoError(t, err)
 	require.NotNil(t, alert)
-	assert.Equal(t, patch.AlertLevelWarning, alert.Level)
+	assert.Equal(t, AlertLevelWarning, alert.Level)
 	assert.Contains(t, alert.Message, "WARNING")
 	assert.Greater(t, alert.DaysUntilBreach, 0)
 
@@ -135,12 +134,12 @@ func TestE2E_ComplianceWorkflow_CriticalSystem(t *testing.T) {
 	ctx := context.Background()
 
 	// Step 1: Create patch policy
-	policy := patch.DefaultPolicy()
+	policy := DefaultPolicy()
 
 	// Step 2: Create mock with patch very close to deadline
 	// Critical patch released 6.5 days ago, 12 hours left
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB7777777",
 			Title:       "Critical Security Update",
@@ -152,7 +151,7 @@ func TestE2E_ComplianceWorkflow_CriticalSystem(t *testing.T) {
 	})
 
 	// Step 3: Create patch module
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
 		policy,
 		nil,
@@ -163,22 +162,22 @@ func TestE2E_ComplianceWorkflow_CriticalSystem(t *testing.T) {
 	// Step 4: Check compliance - should be critical
 	status, err := patchModule.CheckCompliance(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusCritical, status)
+	assert.Equal(t, ComplianceStatusCritical, status)
 
 	// Step 5: Get detailed report
 	report, err := patchModule.GetComplianceReport(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusCritical, report.Status)
+	assert.Equal(t, ComplianceStatusCritical, report.Status)
 	assert.True(t, report.DaysUntilBreach < 1)
 
 	// Step 6: Generate critical alert
-	alertConfig := patch.DefaultAlertConfig()
-	alertManager := patch.NewAlertingManager(alertConfig, patchModule)
+	alertConfig := DefaultAlertConfig()
+	alertManager := NewAlertingManager(alertConfig, patchModule)
 
 	alert, err := alertManager.CheckDevice(ctx, "test-device-3")
 	require.NoError(t, err)
 	require.NotNil(t, alert)
-	assert.Equal(t, patch.AlertLevelCritical, alert.Level)
+	assert.Equal(t, AlertLevelCritical, alert.Level)
 	assert.Contains(t, alert.Message, "CRITICAL")
 
 	t.Log("✓ Critical system workflow completed successfully")
@@ -191,11 +190,11 @@ func TestE2E_ComplianceWorkflow_NonCompliantSystem(t *testing.T) {
 	ctx := context.Background()
 
 	// Step 1: Create patch policy
-	policy := patch.DefaultPolicy()
+	policy := DefaultPolicy()
 
 	// Step 2: Create mock with overdue patch
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB6666666",
 			Title:       "Overdue Critical Patch",
@@ -207,7 +206,7 @@ func TestE2E_ComplianceWorkflow_NonCompliantSystem(t *testing.T) {
 	})
 
 	// Step 3: Create patch module
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
 		policy,
 		nil,
@@ -218,23 +217,23 @@ func TestE2E_ComplianceWorkflow_NonCompliantSystem(t *testing.T) {
 	// Step 4: Check compliance - should be non-compliant
 	status, err := patchModule.CheckCompliance(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusNonCompliant, status)
+	assert.Equal(t, ComplianceStatusNonCompliant, status)
 
 	// Step 5: Get detailed report
 	report, err := patchModule.GetComplianceReport(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusNonCompliant, report.Status)
+	assert.Equal(t, ComplianceStatusNonCompliant, report.Status)
 	assert.True(t, report.DaysUntilBreach < 0)
 	assert.True(t, report.MissingPatches[0].DaysOverdue > 0)
 
 	// Step 6: Generate breach alert
-	alertConfig := patch.DefaultAlertConfig()
-	alertManager := patch.NewAlertingManager(alertConfig, patchModule)
+	alertConfig := DefaultAlertConfig()
+	alertManager := NewAlertingManager(alertConfig, patchModule)
 
 	alert, err := alertManager.CheckDevice(ctx, "test-device-4")
 	require.NoError(t, err)
 	require.NotNil(t, alert)
-	assert.Equal(t, patch.AlertLevelBreach, alert.Level)
+	assert.Equal(t, AlertLevelBreach, alert.Level)
 	assert.Contains(t, alert.Message, "BREACH")
 
 	t.Log("✓ Non-compliant system workflow completed successfully")
@@ -261,8 +260,8 @@ func TestE2E_UpgradeWorkflow_CompatibleDevice(t *testing.T) {
 	}
 
 	// Step 2: Create compatibility checker
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
 	// Step 3: Check compatibility
 	result, err := checker.CheckCompatibility(dna, "11")
@@ -271,16 +270,16 @@ func TestE2E_UpgradeWorkflow_CompatibleDevice(t *testing.T) {
 	assert.Equal(t, 0, len(result.MissingRequirements))
 
 	// Step 4: Create upgrade policy (enabled)
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
 	policy.TestMode = true // Use test mode
 
 	// Step 5: Create patch module and upgrade manager
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	upgradeManager := patch.NewUpgradeManager(
+	upgradeManager := NewUpgradeManager(
 		patchModule,
 		checker,
 		policy,
@@ -320,8 +319,8 @@ func TestE2E_UpgradeWorkflow_IncompatibleDevice(t *testing.T) {
 	}
 
 	// Step 2: Create compatibility checker
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
 	// Step 3: Check compatibility
 	result, err := checker.CheckCompatibility(dna, "11")
@@ -330,17 +329,17 @@ func TestE2E_UpgradeWorkflow_IncompatibleDevice(t *testing.T) {
 	assert.Greater(t, len(result.MissingRequirements), 0)
 
 	// Step 4: Create upgrade policy with blocking enabled
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
 	policy.BlockIncompatible = true
 	policy.TestMode = false
 
 	// Step 5: Create patch module and upgrade manager
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	upgradeManager := patch.NewUpgradeManager(
+	upgradeManager := NewUpgradeManager(
 		patchModule,
 		checker,
 		policy,
@@ -368,9 +367,9 @@ func TestE2E_ComplianceScheduler(t *testing.T) {
 	defer cancel()
 
 	// Step 1: Create patch policy and module
-	policy := patch.DefaultPolicy()
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	policy := DefaultPolicy()
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB5555555",
 			Title:       "Test Patch",
@@ -381,7 +380,7 @@ func TestE2E_ComplianceScheduler(t *testing.T) {
 		},
 	})
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
 		policy,
 		nil,
@@ -390,12 +389,12 @@ func TestE2E_ComplianceScheduler(t *testing.T) {
 	require.NoError(t, err)
 
 	// Step 2: Create alerting manager
-	alertConfig := patch.DefaultAlertConfig()
-	alertManager := patch.NewAlertingManager(alertConfig, patchModule)
+	alertConfig := DefaultAlertConfig()
+	alertManager := NewAlertingManager(alertConfig, patchModule)
 
 	// Step 3: Create compliance scheduler with short interval
 	deviceIDs := []string{"device-1", "device-2", "device-3"}
-	scheduler := patch.NewComplianceScheduler(alertManager, 10*time.Millisecond, deviceIDs)
+	scheduler := NewComplianceScheduler(alertManager, 10*time.Millisecond, deviceIDs)
 	require.NotNil(t, scheduler)
 
 	// Step 4: Start scheduler (will run at least once before timeout)
@@ -411,11 +410,11 @@ func TestE2E_FullComplianceCycle(t *testing.T) {
 	ctx := context.Background()
 
 	// Step 1: Setup - Create policy and module
-	policy := patch.DefaultPolicy()
-	mockManager := patch.NewMockPatchManager()
+	policy := DefaultPolicy()
+	mockManager := NewMockPatchManager()
 
 	// Start with overdue patch
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB1111111",
 			Title:       "Critical Update",
@@ -426,7 +425,7 @@ func TestE2E_FullComplianceCycle(t *testing.T) {
 		},
 	})
 
-	patchModule, err := patch.NewPatchModuleWithPolicy(
+	patchModule, err := NewPatchModuleWithPolicy(
 		mockManager,
 		policy,
 		nil,
@@ -437,19 +436,19 @@ func TestE2E_FullComplianceCycle(t *testing.T) {
 	// Step 2: Initial compliance check - should be non-compliant
 	status, err := patchModule.CheckCompliance(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusNonCompliant, status)
+	assert.Equal(t, ComplianceStatusNonCompliant, status)
 
 	// Step 3: Generate alert
-	alertConfig := patch.DefaultAlertConfig()
-	alertManager := patch.NewAlertingManager(alertConfig, patchModule)
+	alertConfig := DefaultAlertConfig()
+	alertManager := NewAlertingManager(alertConfig, patchModule)
 
 	alert, err := alertManager.CheckDevice(ctx, "test-device-8")
 	require.NoError(t, err)
 	require.NotNil(t, alert)
-	assert.Equal(t, patch.AlertLevelBreach, alert.Level)
+	assert.Equal(t, AlertLevelBreach, alert.Level)
 
 	// Step 4: "Install" the patch (simulate remediation)
-	config := &patch.Config{
+	config := &Config{
 		PatchType:  "security",
 		AutoReboot: false,
 		TestMode:   true,
@@ -459,10 +458,10 @@ func TestE2E_FullComplianceCycle(t *testing.T) {
 	require.NoError(t, err)
 
 	// Step 5: Clear patches to simulate successful installation
-	mockManager.SetAvailablePatches([]patch.PatchInfo{})
+	mockManager.SetAvailablePatches([]PatchInfo{})
 
 	// Step 6: Create new module instance to get fresh data
-	patchModule2, err := patch.NewPatchModuleWithPolicy(
+	patchModule2, err := NewPatchModuleWithPolicy(
 		mockManager,
 		policy,
 		nil,
@@ -473,16 +472,16 @@ func TestE2E_FullComplianceCycle(t *testing.T) {
 	// Step 7: Recheck compliance - should now be compliant
 	status, err = patchModule2.CheckCompliance(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusCompliant, status)
+	assert.Equal(t, ComplianceStatusCompliant, status)
 
 	// Step 8: Verify no more breach alerts (use patchModule2 with fresh data)
 	alertConfig.SuppressInfo = false
-	alertManager = patch.NewAlertingManager(alertConfig, patchModule2)
+	alertManager = NewAlertingManager(alertConfig, patchModule2)
 
 	alert, err = alertManager.CheckDevice(ctx, "test-device-8")
 	require.NoError(t, err)
 	require.NotNil(t, alert)
-	assert.Equal(t, patch.AlertLevelInfo, alert.Level)
+	assert.Equal(t, AlertLevelInfo, alert.Level)
 
 	t.Log("✓ Full compliance cycle completed successfully")
 	t.Log("  Initial status: non-compliant (breach)")
