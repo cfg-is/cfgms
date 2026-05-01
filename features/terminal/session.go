@@ -75,7 +75,7 @@ func NewSession(req *SessionRequest, logger logging.Logger) (*Session, error) {
 	session.executor = executor
 
 	logger.Info("Created new terminal session",
-		"session_id", sessionID,
+		"session_id", logging.RedactedID(sessionID),
 		"steward_id", req.StewardID,
 		"user_id", req.UserID,
 		"shell", req.Shell,
