@@ -27,9 +27,13 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
-// UniversalAuthenticator provides authentication services for all provider types
+// UniversalAuthenticator provides authentication services for all provider types.
+// Not safe for concurrent calls to Authenticate/RefreshAuth on the same instance
+// (oauth2Client is replaced per-provider; add a mutex if concurrent use is required).
 type UniversalAuthenticator struct {
 	credStore    CredentialStore
 	httpClient   *http.Client
@@ -41,7 +45,7 @@ func NewUniversalAuthenticator(credStore CredentialStore, httpClient *http.Clien
 	return &UniversalAuthenticator{
 		credStore:    credStore,
 		httpClient:   httpClient,
-		oauth2Client: NewOAuth2Client(httpClient),
+		oauth2Client: NewOAuth2Client(httpClient, nil),
 	}
 }
 
@@ -133,6 +137,11 @@ func (ua *UniversalAuthenticator) authenticateOAuth2(ctx context.Context, provid
 	if err != nil {
 		return fmt.Errorf("invalid OAuth2 config: %w", err)
 	}
+
+	// Create a configured client so subsequent RefreshToken calls have access to
+	// TokenURL and client credentials without requiring an interface signature change.
+	oauth2Client := NewOAuth2Client(ua.httpClient, oauth2Config)
+	ua.oauth2Client = oauth2Client
 
 	// Start OAuth2 flow
 	flow, err := ua.oauth2Client.StartFlow(ctx, oauth2Config)
@@ -404,12 +413,15 @@ type ExtendedOAuth2Config struct {
 // DefaultOAuth2Client implements OAuth2Client interface
 type DefaultOAuth2Client struct {
 	httpClient *http.Client
+	config     *ExtendedOAuth2Config
 }
 
-// NewOAuth2Client creates a new OAuth2 client
-func NewOAuth2Client(httpClient *http.Client) OAuth2Client {
+// NewOAuth2Client creates a new OAuth2 client. config is optional; when non-nil,
+// it is stored for use by RefreshToken which needs TokenURL and client credentials.
+func NewOAuth2Client(httpClient *http.Client, config *ExtendedOAuth2Config) OAuth2Client {
 	return &DefaultOAuth2Client{
 		httpClient: httpClient,
+		config:     config,
 	}
 }
 
@@ -480,62 +492,194 @@ func (c *DefaultOAuth2Client) ExchangeCode(ctx context.Context, flow *OAuth2Flow
 }
 
 func (c *DefaultOAuth2Client) ClientCredentialsGrant(ctx context.Context, config *ExtendedOAuth2Config) (*TokenSet, error) {
-	// Implementation would perform client credentials grant
 	data := url.Values{}
 	data.Set("grant_type", "client_credentials")
 	data.Set("client_id", config.ClientID)
 	data.Set("client_secret", config.ClientSecret)
-	data.Set("scope", strings.Join(config.Scopes, " "))
+	if len(config.Scopes) > 0 {
+		data.Set("scope", strings.Join(config.Scopes, " "))
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", config.TokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
-
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("token request failed: %w", err)
 	}
 	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Log error but continue
-			_ = err // Explicitly ignore error for cleanup operation
-		}
+		_ = resp.Body.Close()
 	}()
+
+	var tokenResp struct {
+		AccessToken      string `json:"access_token"`
+		RefreshToken     string `json:"refresh_token"`
+		TokenType        string `json:"token_type"`
+		ExpiresIn        int    `json:"expires_in"`
+		Scope            string `json:"scope"`
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to decode token response: %w", err)
+	}
+
+	if tokenResp.Error != "" {
+		return nil, fmt.Errorf("OAuth2 error: %s - %s", tokenResp.Error, tokenResp.ErrorDescription)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("token request failed with status: %d", resp.StatusCode)
 	}
 
-	// Parse response and return TokenSet
-	// This is a simplified implementation
-	return &TokenSet{
-		AccessToken: "mock-access-token",
-		TokenType:   "Bearer",
-		ExpiresAt:   time.Now().Add(1 * time.Hour),
-	}, nil
+	tokenSet := &TokenSet{
+		AccessToken:  tokenResp.AccessToken,
+		RefreshToken: tokenResp.RefreshToken,
+		TokenType:    tokenResp.TokenType,
+		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+	}
+	if tokenResp.Scope != "" {
+		tokenSet.Scopes = strings.Fields(tokenResp.Scope)
+	}
+	return tokenSet, nil
 }
 
 func (c *DefaultOAuth2Client) RefreshToken(ctx context.Context, refreshToken string) (*TokenSet, error) {
-	// Implementation would refresh the OAuth2 token
-	return &TokenSet{
-		AccessToken:  "new-access-token",
-		RefreshToken: refreshToken,
-		TokenType:    "Bearer",
-		ExpiresAt:    time.Now().Add(1 * time.Hour),
-	}, nil
+	if c.config == nil || c.config.TokenURL == "" {
+		return nil, fmt.Errorf("RefreshToken: oauth2 client not configured with token URL and credentials")
+	}
+
+	data := url.Values{}
+	data.Set("grant_type", "refresh_token")
+	data.Set("refresh_token", refreshToken)
+	data.Set("client_id", c.config.ClientID)
+	data.Set("client_secret", c.config.ClientSecret)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.config.TokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("token request failed: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	var tokenResp struct {
+		AccessToken      string `json:"access_token"`
+		RefreshToken     string `json:"refresh_token"`
+		TokenType        string `json:"token_type"`
+		ExpiresIn        int    `json:"expires_in"`
+		Scope            string `json:"scope"`
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to decode token response: %w", err)
+	}
+
+	if tokenResp.Error != "" {
+		return nil, fmt.Errorf("OAuth2 error: %s - %s", tokenResp.Error, tokenResp.ErrorDescription)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token request failed with status: %d", resp.StatusCode)
+	}
+
+	tokenSet := &TokenSet{
+		AccessToken:  tokenResp.AccessToken,
+		RefreshToken: tokenResp.RefreshToken,
+		TokenType:    tokenResp.TokenType,
+		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+	}
+	if tokenSet.RefreshToken == "" {
+		tokenSet.RefreshToken = refreshToken
+	}
+	if tokenResp.Scope != "" {
+		tokenSet.Scopes = strings.Fields(tokenResp.Scope)
+	}
+	return tokenSet, nil
 }
 
-// JWT helper function (simplified implementation)
+// generateJWT signs a real JWT using github.com/golang-jwt/jwt/v5.
+// If config.Token is non-empty it is returned directly (pre-signed token passthrough).
+// config.PrivateKey must be set; an error is returned when it is empty.
+// config.Algorithm selects the signing method; defaults to RS256 when empty.
 func (ua *UniversalAuthenticator) generateJWT(config *JWTConfig) (string, error) {
-	// This would use a JWT library to generate signed tokens
-	// For now, return the provided token or a mock token
 	if config.Token != "" {
 		return config.Token, nil
 	}
-	return "mock-jwt-token", nil
+	if config.PrivateKey == "" {
+		return "", fmt.Errorf("generateJWT: private_key is required")
+	}
+
+	algorithm := config.Algorithm
+	if algorithm == "" {
+		algorithm = "RS256"
+	}
+
+	claims := jwt.MapClaims{}
+	for k, v := range config.Claims {
+		claims[k] = v
+	}
+	now := time.Now()
+	if _, ok := claims["iat"]; !ok {
+		claims["iat"] = now.Unix()
+	}
+	if _, ok := claims["exp"]; !ok {
+		claims["exp"] = now.Add(time.Hour).Unix()
+	}
+
+	var (
+		token *jwt.Token
+		key   interface{}
+	)
+	switch algorithm {
+	case "HS256":
+		key = []byte(config.PrivateKey)
+		token = jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	case "HS384":
+		key = []byte(config.PrivateKey)
+		token = jwt.NewWithClaims(jwt.SigningMethodHS384, claims)
+	case "HS512":
+		key = []byte(config.PrivateKey)
+		token = jwt.NewWithClaims(jwt.SigningMethodHS512, claims)
+	case "RS384":
+		pk, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(config.PrivateKey))
+		if err != nil {
+			return "", fmt.Errorf("generateJWT: failed to parse RSA private key: %w", err)
+		}
+		key = pk
+		token = jwt.NewWithClaims(jwt.SigningMethodRS384, claims)
+	case "RS512":
+		pk, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(config.PrivateKey))
+		if err != nil {
+			return "", fmt.Errorf("generateJWT: failed to parse RSA private key: %w", err)
+		}
+		key = pk
+		token = jwt.NewWithClaims(jwt.SigningMethodRS512, claims)
+	default:
+		// RS256 is the default for empty or unrecognised algorithm values.
+		pk, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(config.PrivateKey))
+		if err != nil {
+			return "", fmt.Errorf("generateJWT: failed to parse RSA private key: %w", err)
+		}
+		key = pk
+		token = jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	}
+
+	signed, err := token.SignedString(key)
+	if err != nil {
+		return "", fmt.Errorf("generateJWT: failed to sign token: %w", err)
+	}
+	return signed, nil
 }
 
 // AuthMiddleware provides HTTP middleware for automatic authentication

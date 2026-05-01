@@ -19,6 +19,9 @@ Virtual Steward (M365)
 
 ### 1. Authentication Framework
 - **OAuth2 with PKCE**: Authorization code exchange performs a real HTTP POST to the provider token endpoint; PKCE `code_verifier` is included when set
+- **Client Credentials Grant**: `DefaultOAuth2Client.ClientCredentialsGrant` issues a real HTTP POST to the configured `TokenURL`, decodes the JSON response body into a `TokenSet`, and returns the server-issued access token; no placeholder strings are returned
+- **Token Refresh**: `DefaultOAuth2Client.RefreshToken` issues a real HTTP POST with `grant_type=refresh_token` using the client credentials stored in `DefaultOAuth2Client.config`; the server-issued access token is returned directly
+- **JWT Signing**: `UniversalAuthenticator.generateJWT` uses `github.com/golang-jwt/jwt/v5` to sign real JWTs; RSA algorithms (RS256/RS384/RS512) accept a PEM-encoded private key and HMAC algorithms (HS256/HS384/HS512) use the raw key bytes; defaults to RS256 when `Algorithm` is empty
 - **Token Management**: Automatic refresh before expiration
 - **Secure Storage**: OS keychain integration where available
 - **Multi-Provider Support**: Extensible authentication providers
