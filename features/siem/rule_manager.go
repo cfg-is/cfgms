@@ -757,8 +757,8 @@ func (fw *FileWatcher) AddPath(path string) {
 
 // HasChanges checks if any watched files have changed
 func (fw *FileWatcher) HasChanges() bool {
-	fw.mutex.RLock()
-	defer fw.mutex.RUnlock()
+	fw.mutex.Lock()
+	defer fw.mutex.Unlock()
 
 	for path, lastMod := range fw.watchedPaths {
 		if stat, err := os.Stat(path); err == nil {
