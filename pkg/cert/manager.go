@@ -356,7 +356,7 @@ func (m *Manager) GetCertificateByCommonName(commonName string) ([]*CertificateI
 
 // ValidateCertificate validates a certificate
 func (m *Manager) ValidateCertificate(certPEM []byte) (*ValidationResult, error) {
-	return m.ca.ValidateCertificate(certPEM)
+	return m.validator.ValidateCertificateFile(certPEM)
 }
 
 // GetExpiringCertificates returns certificates expiring within the specified days
