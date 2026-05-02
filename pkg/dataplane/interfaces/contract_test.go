@@ -5,9 +5,11 @@
 // DataPlaneProvider and DataPlaneSession interfaces.
 //
 // These tests validate that any DataPlaneProvider implementation exhibits
-// correct behavioral contracts: config sync, DNA sync, bulk transfer, large
-// payloads, session identification, session lifecycle, stats tracking, and
-// security requirements (mTLS enforcement, cert validation).
+// correct behavioral contracts: session identification, session lifecycle,
+// stats tracking, and security requirements (mTLS enforcement, cert
+// validation). Transfer-RPC round-trip behaviour (config, DNA, bulk) is
+// verified at the handler layer in features/controller/transport/, where the
+// server-side handlers are actually wired onto the gRPC server.
 //
 // # Usage by Provider Implementors
 //
@@ -37,7 +39,6 @@ import (
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	dpinterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	dpgrpc "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc"
-	dptypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,12 +57,16 @@ type DPProviderFactory func(t *testing.T) (
 
 // RunDPContractTests runs the full DataPlaneProvider contract test suite using
 // the provided factory. Each contract is a subtest for granular reporting.
+//
+// Bulk/DNA/Config transfer round-trip coverage lives with the handler tests in
+// features/controller/transport/{bulk,dna}_handler_test.go. After Issue #898
+// the dataplane provider no longer registers server-side handlers itself, so
+// transfer RPCs are tested where the handler is wired up rather than against a
+// bare provider. Issue #1012 retired the orphaned BulkTransfer subtest that
+// remained here, which raced an Unimplemented status on a serviceless server.
 func RunDPContractTests(t *testing.T, factory DPProviderFactory) {
 	t.Helper()
 
-	t.Run("BulkTransfer", func(t *testing.T) {
-		testDPBulkTransfer(t, factory)
-	})
 	t.Run("SessionIdentification", func(t *testing.T) {
 		testDPSessionIdentification(t, factory)
 	})
@@ -83,32 +88,6 @@ func RunDPContractTests(t *testing.T, factory DPProviderFactory) {
 }
 
 // --- Contract Implementations ---
-
-// testDPBulkTransfer verifies bidirectional bulk data transfer completes with
-// data integrity.
-func testDPBulkTransfer(t *testing.T, factory DPProviderFactory) {
-	t.Helper()
-	server, client, cleanup := factory(t)
-	defer cleanup()
-
-	_, clientSess := dpGetSessions(t, server, client)
-
-	data := []byte("bulk payload data for contract test — log upload simulation")
-	bulk := &dptypes.BulkTransfer{
-		ID:        "contract-bulk",
-		StewardID: "contract-steward",
-		TenantID:  "contract-tenant",
-		Direction: "to_controller",
-		Type:      "logs",
-		TotalSize: int64(len(data)),
-		Data:      data,
-		Checksum:  "sha256:placeholder",
-		Metadata:  map[string]string{"filename": "app.log"},
-	}
-
-	// SendBulk should complete without error
-	require.NoError(t, clientSess.SendBulk(context.Background(), bulk))
-}
 
 // testDPSessionIdentification verifies session ID and peer IDs are non-empty
 // and consistent.
