@@ -52,6 +52,7 @@ type EventWindow struct {
 	TenantID   string
 	GroupKey   string
 	Metadata   map[string]interface{}
+	Triggered  bool // true after the window has emitted one CorrelatedEvent
 }
 
 // NewEventCorrelator creates a new event correlator
@@ -446,6 +447,10 @@ func (ec *EventCorrelatorImpl) addEventToWindow(window *EventWindow, event *Secu
 
 // checkCorrelationConditions checks if correlation conditions are met for a window
 func (ec *EventCorrelatorImpl) checkCorrelationConditions(window *EventWindow, rule *CorrelationRule) *CorrelatedEvent {
+	if window.Triggered {
+		return nil
+	}
+
 	eventCount := len(window.Events)
 
 	// Check minimum events requirement
@@ -459,7 +464,9 @@ func (ec *EventCorrelatorImpl) checkCorrelationConditions(window *EventWindow, r
 	}
 
 	// Correlation conditions met, create correlated event
-	return ec.createCorrelatedEvent(window, rule)
+	correlated := ec.createCorrelatedEvent(window, rule)
+	window.Triggered = true
+	return correlated
 }
 
 // createCorrelatedEvent creates a correlated event from a window
