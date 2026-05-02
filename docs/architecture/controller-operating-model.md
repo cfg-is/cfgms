@@ -178,7 +178,7 @@ The fleet registry is backed by a `StewardStore` (see `pkg/storage/interfaces/st
 
 **Steward lifecycle states**: `registered` → `active` → `lost` / `deregistered`. Records are retained indefinitely for audit; a `lost` steward can re-register and will have its record updated in place.
 
-**Implementation**: `features/steward/StewardHealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`: task latency counters, config error counts, recovery attempts) in-memory only. The in-memory metrics are not persisted and reset on restart — this is by design.
+**Implementation**: `features/controller/fleet/fleet.HealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`: task latency counters, config error counts, recovery attempts) in-memory only. The in-memory metrics are not persisted and reset on restart — this is by design.
 
 **After a restart**: On startup, the controller can call `ListStewards()` or `ListStewardsByStatus()` to enumerate the fleet without waiting for stewards to check in. The stored `last_seen` and `last_heartbeat_at` timestamps allow the controller to identify stewards that went silent before or during the restart.
 
