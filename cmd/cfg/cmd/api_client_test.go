@@ -565,3 +565,36 @@ func TestAPIClientRequestHeaders(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+func TestAPIClientGet(t *testing.T) {
+	t.Run("returns response for successful GET", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "GET", r.Method)
+			assert.Equal(t, "/api/v1/test", r.URL.Path)
+			assert.Equal(t, "Bearer test-key", r.Header.Get("Authorization"))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}))
+		defer server.Close()
+
+		cfg := &APIClientConfig{BaseURL: server.URL, APIKey: "test-key", TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		resp, err := client.Get(context.Background(), "/api/v1/test")
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	t.Run("returns error on connection failure", func(t *testing.T) {
+		cfg := &APIClientConfig{BaseURL: "http://127.0.0.1:0", TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		resp, err := client.Get(context.Background(), "/api/v1/test")
+		assert.Nil(t, resp)
+		assert.Error(t, err)
+	})
+}

@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,9 +18,11 @@ import (
 
 var (
 	// Controller command flags
-	healthURL    string
-	healthAPIKey string
-	healthFormat string
+	healthURL             string
+	healthAPIKey          string
+	healthFormat          string
+	controllerTLSCACert   string
+	controllerTLSInsecure bool
 )
 
 // controllerCmd represents the controller command
@@ -90,6 +93,8 @@ func init() {
 	controllerCmd.PersistentFlags().StringVar(&healthURL, "url", "", "Controller API URL (required)")
 	controllerCmd.PersistentFlags().StringVar(&healthAPIKey, "api-key", "", "API key for authentication")
 	controllerCmd.PersistentFlags().StringVar(&healthFormat, "format", "text", "Output format (text, json)")
+	controllerCmd.PersistentFlags().StringVar(&controllerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	controllerCmd.PersistentFlags().BoolVar(&controllerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 
 	_ = controllerCmd.MarkPersistentFlagRequired("url")
 
@@ -98,10 +103,38 @@ func init() {
 	controllerCmd.AddCommand(controllerMetricsCmd)
 }
 
+// getControllerClient creates an API client using controller flags or environment variables
+func getControllerClient() (*APIClient, error) {
+	apiURL := strings.TrimSuffix(healthURL, "/")
+	if apiURL == "" {
+		apiURL = os.Getenv("CFGMS_API_URL")
+	}
+
+	apiKey := healthAPIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("CFGMS_API_KEY")
+	}
+
+	tlsInsecure := controllerTLSInsecure
+	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
+		tlsInsecure = true
+	}
+
+	tlsCACertPath := controllerTLSCACert
+	if tlsCACertPath == "" {
+		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
+	}
+
+	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+}
+
 func runControllerStatus(cmd *cobra.Command, args []string) error {
-	// Make API request
-	url := strings.TrimSuffix(healthURL, "/") + "/api/v1/health/detailed"
-	resp, err := makeAPIRequest(url, healthAPIKey)
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/health/detailed")
 	if err != nil {
 		return fmt.Errorf("failed to fetch health status: %w", err)
 	}
@@ -192,9 +225,12 @@ func runControllerStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runControllerMetrics(cmd *cobra.Command, args []string) error {
-	// Make API request
-	url := strings.TrimSuffix(healthURL, "/") + "/api/v1/health/metrics"
-	resp, err := makeAPIRequest(url, healthAPIKey)
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/health/metrics")
 	if err != nil {
 		return fmt.Errorf("failed to fetch metrics: %w", err)
 	}
@@ -320,23 +356,6 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
-}
-
-func makeAPIRequest(url, apiKey string) (*http.Response, error) {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	return client.Do(req)
 }
 
 func getStatusIcon(status string) string {

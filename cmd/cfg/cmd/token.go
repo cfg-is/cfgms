@@ -190,25 +190,7 @@ func getAPIClient() (*APIClient, error) {
 		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
 	}
 
-	// Load CA certificate if provided
-	var caCertPEM []byte
-	if tlsCACertPath != "" {
-		var err error
-		// #nosec G304 - CA certificate path is intentionally provided by user via CLI flag or env var
-		caCertPEM, err = os.ReadFile(tlsCACertPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read CA certificate: %w", err)
-		}
-	}
-
-	cfg := &APIClientConfig{
-		BaseURL:     apiURL,
-		APIKey:      apiKey,
-		CACertPEM:   caCertPEM,
-		TLSInsecure: tlsInsecure,
-	}
-
-	return NewAPIClient(cfg)
+	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
 }
 
 func runTokenCreate(cmd *cobra.Command, args []string) error {

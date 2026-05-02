@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,9 +18,11 @@ import (
 
 var (
 	// Trace command flags
-	traceURL    string
-	traceAPIKey string
-	traceFormat string
+	traceURL         string
+	traceAPIKey      string
+	traceFormat      string
+	traceTLSCACert   string
+	traceTLSInsecure bool
 )
 
 // traceCmd represents the trace command
@@ -48,16 +51,46 @@ func init() {
 	traceCmd.Flags().StringVar(&traceURL, "url", "", "Controller API URL (required)")
 	traceCmd.Flags().StringVar(&traceAPIKey, "api-key", "", "API key for authentication")
 	traceCmd.Flags().StringVar(&traceFormat, "format", "text", "Output format (text, json)")
+	traceCmd.Flags().StringVar(&traceTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	traceCmd.Flags().BoolVar(&traceTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 
 	_ = traceCmd.MarkFlagRequired("url")
+}
+
+// getTraceClient creates an API client using trace flags or environment variables
+func getTraceClient() (*APIClient, error) {
+	apiURL := strings.TrimSuffix(traceURL, "/")
+	if apiURL == "" {
+		apiURL = os.Getenv("CFGMS_API_URL")
+	}
+
+	apiKey := traceAPIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("CFGMS_API_KEY")
+	}
+
+	tlsInsecure := traceTLSInsecure
+	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
+		tlsInsecure = true
+	}
+
+	tlsCACertPath := traceTLSCACert
+	if tlsCACertPath == "" {
+		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
+	}
+
+	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
 }
 
 func runTrace(cmd *cobra.Command, args []string) error {
 	requestID := args[0]
 
-	// Make API request
-	url := strings.TrimSuffix(traceURL, "/") + "/api/v1/health/trace/" + requestID
-	resp, err := makeAPIRequest(url, traceAPIKey)
+	client, err := getTraceClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/health/trace/"+requestID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch trace: %w", err)
 	}

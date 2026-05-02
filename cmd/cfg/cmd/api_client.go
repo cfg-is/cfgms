@@ -210,6 +210,12 @@ func (c *APIClient) RevokeToken(ctx context.Context, tokenStr string) (*APIToken
 	return &tokenResp, nil
 }
 
+// Get performs an HTTP GET request and returns the response.
+// Callers are responsible for closing resp.Body.
+func (c *APIClient) Get(ctx context.Context, path string) (*http.Response, error) {
+	return c.doRequest(ctx, "GET", path, nil)
+}
+
 // doRequest performs an HTTP request with authentication
 func (c *APIClient) doRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
 	url := c.baseURL + path
