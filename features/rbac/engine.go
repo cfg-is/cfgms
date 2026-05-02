@@ -5,6 +5,7 @@ package rbac
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/cfgis/cfgms/api/proto/common"
@@ -16,6 +17,7 @@ type AuthEngine struct {
 	roleStore       RoleStore
 	subjectStore    SubjectStore
 	assignmentStore RoleAssignmentStore
+	hierarchyEngine *HierarchyEngine
 }
 
 // NewAuthEngine creates a new authorization engine
@@ -31,6 +33,21 @@ func NewAuthEngine(
 		subjectStore:    subjectStore,
 		assignmentStore: assignmentStore,
 	}
+}
+
+// SetHierarchyEngine wires a HierarchyEngine into this AuthEngine so that
+// GetEffectivePermissions can traverse role inheritance chains.
+func (e *AuthEngine) SetHierarchyEngine(he *HierarchyEngine) {
+	e.hierarchyEngine = he
+}
+
+// isNotFoundError reports whether err is a "resource not found" error from the
+// memory store. The memory store consistently includes "not found" in such errors.
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "not found")
 }
 
 // CheckPermission checks if a subject has a specific permission
@@ -71,7 +88,10 @@ func (e *AuthEngine) CheckPermission(ctx context.Context, request *common.Access
 		// Get role permissions
 		permissions, err := e.roleStore.GetRolePermissions(ctx, role.Id)
 		if err != nil {
-			continue // Skip this role on error
+			if isNotFoundError(err) {
+				continue // Role may have been deleted; skip and keep evaluating
+			}
+			return nil, fmt.Errorf("failed to get permissions for role %s: %w", role.Id, err)
 		}
 
 		// Check if any permission matches the request
@@ -108,7 +128,10 @@ func (e *AuthEngine) GetSubjectPermissions(ctx context.Context, subjectID, tenan
 	for _, role := range roles {
 		permissions, err := e.roleStore.GetRolePermissions(ctx, role.Id)
 		if err != nil {
-			continue // Skip this role on error
+			if isNotFoundError(err) {
+				continue // Role may have been deleted; skip and keep collecting
+			}
+			return nil, fmt.Errorf("failed to get permissions for role %s: %w", role.Id, err)
 		}
 
 		for _, perm := range permissions {
@@ -170,9 +193,46 @@ func (e *AuthEngine) permissionMatches(permission *common.Permission, requestedP
 	return false
 }
 
-// GetEffectivePermissions gets all effective permissions for a subject considering role hierarchy
+// GetEffectivePermissions gets all effective permissions for a subject considering role hierarchy.
+// When a HierarchyEngine is wired, it calls ComputeEffectivePermissions for each role the
+// subject holds, merges direct and inherited permissions, and deduplicates by permission ID.
+// Falls back to GetSubjectPermissions when no HierarchyEngine is available.
 func (e *AuthEngine) GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
-	return e.GetSubjectPermissions(ctx, subjectID, tenantID)
+	if e.hierarchyEngine == nil {
+		return e.GetSubjectPermissions(ctx, subjectID, tenantID)
+	}
+
+	roles, err := e.subjectStore.GetSubjectRoles(ctx, subjectID, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get subject roles: %w", err)
+	}
+
+	permissionMap := make(map[string]*common.Permission)
+
+	for _, role := range roles {
+		effective, err := e.hierarchyEngine.ComputeEffectivePermissions(ctx, role.Id)
+		if err != nil {
+			// Role may have been deleted between GetSubjectRoles and hierarchy computation; skip.
+			slog.Warn("rbac: skipping role in GetEffectivePermissions", "role_id", role.Id, "error", err)
+			continue
+		}
+
+		for _, perm := range effective.DirectPermissions {
+			permissionMap[perm.Id] = perm
+		}
+		for _, perms := range effective.InheritedPermissions {
+			for _, perm := range perms {
+				permissionMap[perm.Id] = perm
+			}
+		}
+	}
+
+	permissions := make([]*common.Permission, 0, len(permissionMap))
+	for _, perm := range permissionMap {
+		permissions = append(permissions, perm)
+	}
+
+	return permissions, nil
 }
 
 // Verify that AuthEngine implements the AuthorizationEngine interface

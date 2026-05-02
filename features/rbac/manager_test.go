@@ -4,6 +4,7 @@ package rbac
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -753,6 +754,144 @@ func TestManager_RevokeRole_InvalidatesSubjectCache(t *testing.T) {
 
 	assert.Nil(t, cm.GetCachedAuth(req),
 		"GetCachedAuth must return nil after RevokeRole invalidates the subject cache")
+}
+
+// TestManager_CreateTenantDefaultRoles_PersistsAcrossRestart verifies that roles
+// created by CreateTenantDefaultRoles survive a manager restart (i.e., are written
+// to durable storage via StoreBulkRoles and re-loaded on Initialize).
+func TestManager_CreateTenantDefaultRoles_PersistsAcrossRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	ctx := context.Background()
+	tenantID := "persist-tenant"
+
+	// First manager instance: create default roles for the tenant.
+	m1 := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m1.Close(stopCtx)
+	})
+	require.NoError(t, m1.Initialize(ctx))
+	require.NoError(t, m1.CreateTenantDefaultRoles(ctx, tenantID))
+
+	// Verify roles exist in the first manager instance.
+	_, err = m1.GetRole(ctx, tenantID+".tenant.admin")
+	require.NoError(t, err, "tenant admin role must exist in first manager instance")
+
+	// Second manager instance using the same storage — simulates a restart.
+	m2 := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m2.Close(stopCtx)
+	})
+	require.NoError(t, m2.Initialize(ctx))
+
+	// Tenant roles must survive the restart.
+	tenantAdminRole, err := m2.GetRole(ctx, tenantID+".tenant.admin")
+	require.NoError(t, err, "tenant admin role must be reloaded from durable storage after restart")
+	assert.Equal(t, tenantID, tenantAdminRole.TenantId)
+
+	_, err = m2.GetRole(ctx, tenantID+".tenant.operator")
+	require.NoError(t, err, "tenant operator role must survive restart")
+
+	_, err = m2.GetRole(ctx, tenantID+".tenant.viewer")
+	require.NoError(t, err, "tenant viewer role must survive restart")
+}
+
+// TestManager_CheckPermission_DbError_RecordsAuditEvent verifies that when
+// CheckPermission encounters a non-not-found DB error from the auth engine, the
+// Manager records a RBAC_PERMISSION_CHECK_DB_ERROR audit event before propagating
+// the error to the caller.
+func TestManager_CheckPermission_DbError_RecordsAuditEvent(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	ctx := context.Background()
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(stopCtx)
+	})
+	require.NoError(t, manager.Initialize(ctx))
+
+	tenantID := "db-error-tenant"
+	subjectID := "db-error-user"
+	roleID := "db-error-role"
+
+	// Create a role and subject in the ephemeral store.
+	role := &common.Role{Id: roleID, Name: "DB Error Role", TenantId: tenantID}
+	manager.store.LoadRoles([]*common.Role{role})
+
+	subject := &common.Subject{
+		Id:       subjectID,
+		TenantId: tenantID,
+		IsActive: true,
+		RoleIds:  []string{roleID},
+	}
+	require.NoError(t, manager.store.CreateSubject(ctx, subject))
+
+	// Inject a non-not-found DB error into the base engine's role store.
+	dbErr := fmt.Errorf("simulated postgres connection failure")
+	errorStore := &errorInjectingRoleStore{
+		Store:       manager.store,
+		errorRoleID: roleID,
+		err:         dbErr,
+	}
+
+	// Replace the base engine inside the advanced engine with one that uses the
+	// error-injecting store. Both manager.engine and manager.advancedEngine.baseEngine
+	// are accessible from within the same package.
+	errorEngine := NewAuthEngine(manager.store, errorStore, manager.store, manager.store)
+	errorEngine.SetHierarchyEngine(manager.hierarchyEngine)
+	manager.engine = errorEngine
+	manager.advancedEngine.baseEngine = errorEngine
+
+	request := &common.AccessRequest{
+		SubjectId:    subjectID,
+		PermissionId: "config.read",
+		TenantId:     tenantID,
+	}
+
+	_, checkErr := manager.CheckPermission(ctx, request)
+	require.Error(t, checkErr, "Manager.CheckPermission must propagate non-not-found DB errors")
+
+	// Flush pending async audit writes before querying the audit store.
+	require.NoError(t, manager.FlushAudit(ctx))
+
+	// Verify RBAC_PERMISSION_CHECK_DB_ERROR audit event was recorded.
+	entries, err := manager.QueryAuditEntries(ctx, nil)
+	require.NoError(t, err)
+
+	var dbErrorEventFound bool
+	for _, entry := range entries {
+		if entry.ErrorCode == "RBAC_PERMISSION_CHECK_DB_ERROR" {
+			dbErrorEventFound = true
+			assert.Equal(t, subjectID, entry.UserID)
+			assert.Equal(t, tenantID, entry.TenantID)
+			break
+		}
+	}
+	assert.True(t, dbErrorEventFound, "RBAC_PERMISSION_CHECK_DB_ERROR audit event must be recorded when CheckPermission returns a DB error")
 }
 
 // TestManager_DeleteRolesByTenant_InvalidatesTenantCache verifies that after

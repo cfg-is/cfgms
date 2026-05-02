@@ -87,6 +87,13 @@ func (a *AdvancedAuthEngine) SetAuditManager(am *audit.Manager) {
 	a.auditManager = am
 }
 
+// SetHierarchyEngine wires a HierarchyEngine into the base AuthEngine so that
+// GetEffectivePermissions traverses role inheritance chains through the production
+// call path (Manager → advancedEngine → baseEngine with hierarchy).
+func (a *AdvancedAuthEngine) SetHierarchyEngine(he *HierarchyEngine) {
+	a.baseEngine.SetHierarchyEngine(he)
+}
+
 // SetZeroTrustEngine configures zero-trust policy integration
 func (a *AdvancedAuthEngine) SetZeroTrustEngine(engine *zerotrust.ZeroTrustPolicyEngine, mode ZeroTrustMode) {
 	a.zeroTrustEngine = engine
@@ -325,9 +332,13 @@ func (a *AdvancedAuthEngine) GetSubjectPermissions(ctx context.Context, subjectI
 	return result, nil
 }
 
-// GetEffectivePermissions gets all effective permissions including conditional and delegated
+// GetEffectivePermissions returns all effective permissions considering role hierarchy.
+// Delegates to baseEngine.GetEffectivePermissions so the hierarchy traversal wired via
+// SetHierarchyEngine is exercised through the production call path
+// (Manager.GetEffectivePermissions → advancedEngine → baseEngine with hierarchy).
+// Conditional and delegated permissions are available via GetSubjectPermissions.
 func (a *AdvancedAuthEngine) GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
-	return a.GetSubjectPermissions(ctx, subjectID, tenantID)
+	return a.baseEngine.GetEffectivePermissions(ctx, subjectID, tenantID)
 }
 
 // GetDelegationManager returns the delegation manager for external access

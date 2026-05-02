@@ -86,6 +86,10 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 		panic(fmt.Sprintf("NewManagerWithStorage: failed to create audit manager: %v", auditErr))
 	}
 
+	// Wire the hierarchy engine into the base auth engine so GetEffectivePermissions
+	// traverses role inheritance chains.
+	engine.SetHierarchyEngine(hierarchyEngine)
+
 	// Create manager instance with pluggable storage
 	manager := &Manager{
 		store:               ephemeralStore, // Epic 6: Ephemeral store - not persistent
@@ -112,6 +116,10 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 	manager.delegationManager = delegationManager
 	manager.templateManager = templateManager
 	manager.escalationPreventionMgr = escalationPreventionMgr
+
+	// Wire the hierarchy engine into the advanced engine's base engine so the production
+	// call path Manager.GetEffectivePermissions → advancedEngine → baseEngine uses hierarchy.
+	advancedEngine.SetHierarchyEngine(hierarchyEngine)
 
 	// Wire the durable audit manager into the advanced engine
 	advancedEngine.SetDelegationManager(delegationManager)
@@ -203,7 +211,12 @@ func (m *Manager) loadFromPersistentStorage(ctx context.Context) error {
 		return fmt.Errorf("failed to load subjects: %w", err)
 	}
 	for _, subject := range subjects {
-		_ = m.store.CreateSubject(ctx, subject)
+		if err := m.store.CreateSubject(ctx, subject); err != nil {
+			slog.Warn("rbac: failed to load subject from persistent storage",
+				"subject_id", subject.Id,
+				"error", err,
+			)
+		}
 	}
 
 	// Load all role assignments
@@ -212,7 +225,14 @@ func (m *Manager) loadFromPersistentStorage(ctx context.Context) error {
 		return fmt.Errorf("failed to load role assignments: %w", err)
 	}
 	for _, assignment := range assignments {
-		_ = m.store.AssignRole(ctx, assignment)
+		if err := m.store.AssignRole(ctx, assignment); err != nil {
+			slog.Warn("rbac: failed to load role assignment from persistent storage",
+				"assignment_id", assignment.Id,
+				"subject_id", assignment.SubjectId,
+				"role_id", assignment.RoleId,
+				"error", err,
+			)
+		}
 	}
 
 	return nil
@@ -259,6 +279,13 @@ func (m *Manager) CreateTenantDefaultRoles(ctx context.Context, tenantID string)
 	}
 
 	m.store.LoadRoles(tenantRoles)
+
+	if m.rbacStore != nil {
+		if err := m.rbacStore.StoreBulkRoles(ctx, tenantRoles); err != nil {
+			return fmt.Errorf("failed to persist tenant default roles for %s: %w", tenantID, err)
+		}
+	}
+
 	return nil
 }
 
@@ -1156,9 +1183,29 @@ func (m *Manager) GetRBACStore() business.RBACStore {
 	return m.rbacStore
 }
 
-// Override CheckPermission to use advanced engine by default
+// Override CheckPermission to use advanced engine by default.
+// When the engine returns a non-not-found DB error (propagated from GetRolePermissions),
+// records a RBAC_PERMISSION_CHECK_DB_ERROR audit event before returning the error so
+// partial-failure-as-cover attacks are detectable in the audit trail.
 func (m *Manager) CheckPermission(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
-	return m.advancedEngine.CheckPermission(ctx, request)
+	resp, err := m.advancedEngine.CheckPermission(ctx, request)
+	if err != nil {
+		if m.auditManager != nil {
+			event := audit.AuthorizationEvent(
+				request.TenantId, request.SubjectId, "permission", request.PermissionId,
+				"check_permission", business.AuditResultError,
+			).Error("RBAC_PERMISSION_CHECK_DB_ERROR", err.Error()).
+				Detail("subject_id", request.SubjectId).
+				Detail("tenant_id", request.TenantId).
+				Detail("permission_id", request.PermissionId).
+				Severity(business.AuditSeverityCritical)
+			if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+				slog.Warn("rbac: failed to record audit event", "error", auditErr)
+			}
+		}
+		return resp, err
+	}
+	return resp, nil
 }
 
 // Override GetSubjectPermissions to include delegated permissions
