@@ -145,18 +145,22 @@ func (ca *CA) LoadCA(storagePath string) error {
 		return fmt.Errorf("failed to read CA private key: %w", err)
 	}
 
-	keyBlock, _ := pem.Decode(caKeyPEM)
-	if keyBlock == nil {
-		return fmt.Errorf("failed to decode CA private key PEM")
-	}
-
-	caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	parsedKey, err := ParsePrivateKeyFromPEM(caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("failed to parse CA private key: %w", err)
 	}
 
+	rsaKey, ok := parsedKey.(*rsa.PrivateKey)
+	if !ok {
+		return fmt.Errorf("CA private key must be RSA, got unsupported key type")
+	}
+
+	if err := ValidateKeyPair(caCertPEM, caKeyPEM); err != nil {
+		return fmt.Errorf("CA key does not match certificate: %w", err)
+	}
+
 	ca.certificate = caCert
-	ca.privateKey = caKey
+	ca.privateKey = rsaKey
 	ca.initialized = true
 
 	return nil
