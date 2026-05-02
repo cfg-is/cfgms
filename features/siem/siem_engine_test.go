@@ -756,11 +756,13 @@ func TestSIEMEngine_MemoryUsage(t *testing.T) {
 	var memStatsAfter runtime.MemStats
 	runtime.ReadMemStats(&memStatsAfter)
 
-	memoryGrowth := memStatsAfter.Alloc - memStatsBefore.Alloc
+	// Use int64 arithmetic to handle the case where GC frees more than was
+	// allocated since the baseline (uint64 underflow would give a false huge value).
+	memoryGrowth := int64(memStatsAfter.Alloc) - int64(memStatsBefore.Alloc)
 	t.Logf("Memory growth: %d bytes (%.2f MB)", memoryGrowth, float64(memoryGrowth)/(1024*1024))
 
 	// Verify memory growth is reasonable (less than 50MB for this test)
-	assert.Less(t, memoryGrowth, uint64(50*1024*1024),
+	assert.Less(t, memoryGrowth, int64(50*1024*1024),
 		"Excessive memory growth: %d bytes", memoryGrowth)
 }
 

@@ -8,11 +8,13 @@ import (
 	"time"
 )
 
-// LatencyTracker tracks processing latency with percentile calculations
+// LatencyTracker tracks processing latency with percentile calculations.
+// The sample buffer is a fixed-size circular array: Record is O(1) per write.
 type LatencyTracker struct {
-	samples      []float64
+	samples      [1000]float64
 	mutex        sync.RWMutex
-	maxSamples   int
+	head         int // next-write slot (never reset, wraps via modulo)
+	count        int // valid slots filled so far, capped at 1000
 	totalSamples int64
 	totalLatency time.Duration
 }
@@ -34,10 +36,7 @@ type ThroughputWindow struct {
 
 // NewLatencyTracker creates a new latency tracker
 func NewLatencyTracker() *LatencyTracker {
-	return &LatencyTracker{
-		samples:    make([]float64, 0, 1000),
-		maxSamples: 1000, // Keep last 1000 samples for percentile calculation
-	}
+	return &LatencyTracker{}
 }
 
 // NewThroughputTracker creates a new throughput tracker
@@ -49,21 +48,15 @@ func NewThroughputTracker() *ThroughputTracker {
 	}
 }
 
-// Record records a latency sample
+// Record records a latency sample. O(1) — single indexed write, no copy/shift.
 func (lt *LatencyTracker) Record(latency time.Duration) {
 	lt.mutex.Lock()
 	defer lt.mutex.Unlock()
 
-	latencyMs := float64(latency.Nanoseconds()) / 1e6 // Convert to milliseconds
-
-	// Add to samples
-	if len(lt.samples) >= lt.maxSamples {
-		// Remove oldest sample (shift left)
-		copy(lt.samples, lt.samples[1:])
-		lt.samples[len(lt.samples)-1] = latencyMs
-	} else {
-		lt.samples = append(lt.samples, latencyMs)
-	}
+	latencyMs := float64(latency.Nanoseconds()) / 1e6
+	lt.samples[lt.head%1000] = latencyMs
+	lt.head++
+	lt.count = min(lt.count+1, 1000)
 
 	lt.totalSamples++
 	lt.totalLatency += latency
@@ -81,47 +74,56 @@ func (lt *LatencyTracker) GetAverage() float64 {
 	return float64(lt.totalLatency.Nanoseconds()) / float64(lt.totalSamples) / 1e6
 }
 
-// GetPercentile returns the specified percentile (0.0-1.0) in milliseconds
+// percentileFromSorted returns the p-th percentile (0.0–1.0) from a pre-sorted
+// slice using linear interpolation. Caller must sort before calling.
+func percentileFromSorted(sorted []float64, p float64) float64 {
+	if len(sorted) == 0 {
+		return 0.0
+	}
+	index := p * float64(len(sorted)-1)
+	lower := int(index)
+	upper := lower + 1
+	if upper >= len(sorted) {
+		return sorted[len(sorted)-1]
+	}
+	weight := index - float64(lower)
+	return sorted[lower] + weight*(sorted[upper]-sorted[lower])
+}
+
+// GetPercentile returns the specified percentile (0.0-1.0) in milliseconds.
+// The lock is released before sorting so writes are not blocked by the sort.
 func (lt *LatencyTracker) GetPercentile(percentile float64) float64 {
 	if percentile < 0.0 || percentile > 1.0 {
 		return 0.0
 	}
 
 	lt.mutex.RLock()
-	defer lt.mutex.RUnlock()
+	count := lt.count
+	temp := make([]float64, count)
+	copy(temp, lt.samples[:count])
+	lt.mutex.RUnlock()
 
-	if len(lt.samples) == 0 {
+	if count == 0 {
 		return 0.0
 	}
 
-	// Create a copy and sort
-	sortedSamples := make([]float64, len(lt.samples))
-	copy(sortedSamples, lt.samples)
-	sort.Float64s(sortedSamples)
-
-	// Calculate percentile index
-	index := percentile * float64(len(sortedSamples)-1)
-	lowerIndex := int(index)
-	upperIndex := lowerIndex + 1
-
-	if upperIndex >= len(sortedSamples) {
-		return sortedSamples[len(sortedSamples)-1]
-	}
-
-	// Linear interpolation between the two nearest values
-	lowerValue := sortedSamples[lowerIndex]
-	upperValue := sortedSamples[upperIndex]
-	weight := index - float64(lowerIndex)
-
-	return lowerValue + weight*(upperValue-lowerValue)
+	sort.Float64s(temp)
+	return percentileFromSorted(temp, percentile)
 }
 
-// GetStats returns comprehensive latency statistics
+// GetStats returns comprehensive latency statistics.
+// The buffer is copied once under a read lock; sorting and percentile math
+// happen outside the lock so writes are not blocked.
 func (lt *LatencyTracker) GetStats() map[string]interface{} {
 	lt.mutex.RLock()
-	defer lt.mutex.RUnlock()
+	count := lt.count
+	totalSamples := lt.totalSamples
+	totalLatency := lt.totalLatency
+	temp := make([]float64, count)
+	copy(temp, lt.samples[:count])
+	lt.mutex.RUnlock()
 
-	if len(lt.samples) == 0 {
+	if count == 0 {
 		return map[string]interface{}{
 			"sample_count": 0,
 			"average_ms":   0.0,
@@ -133,27 +135,34 @@ func (lt *LatencyTracker) GetStats() map[string]interface{} {
 		}
 	}
 
-	// Calculate min and max
-	min := lt.samples[0]
-	max := lt.samples[0]
-	for _, sample := range lt.samples {
-		if sample < min {
-			min = sample
+	minVal := temp[0]
+	maxVal := temp[0]
+	for _, s := range temp {
+		if s < minVal {
+			minVal = s
 		}
-		if sample > max {
-			max = sample
+		if s > maxVal {
+			maxVal = s
 		}
 	}
 
+	// Sort once; reuse for all three percentile calls.
+	sort.Float64s(temp)
+
+	var avgMs float64
+	if totalSamples > 0 {
+		avgMs = float64(totalLatency.Nanoseconds()) / float64(totalSamples) / 1e6
+	}
+
 	return map[string]interface{}{
-		"sample_count":  len(lt.samples),
-		"total_samples": lt.totalSamples,
-		"average_ms":    lt.GetAverage(),
-		"min_ms":        min,
-		"max_ms":        max,
-		"p50_ms":        lt.GetPercentile(0.50),
-		"p95_ms":        lt.GetPercentile(0.95),
-		"p99_ms":        lt.GetPercentile(0.99),
+		"sample_count":  count,
+		"total_samples": totalSamples,
+		"average_ms":    avgMs,
+		"min_ms":        minVal,
+		"max_ms":        maxVal,
+		"p50_ms":        percentileFromSorted(temp, 0.50),
+		"p95_ms":        percentileFromSorted(temp, 0.95),
+		"p99_ms":        percentileFromSorted(temp, 0.99),
 	}
 }
 
