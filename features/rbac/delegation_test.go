@@ -62,7 +62,9 @@ func createTestSubjectWithAdmin(t *testing.T, ctx context.Context, manager *Mana
 		RoleId:    "system.admin",
 		TenantId:  "root",
 	}
-	require.NoError(t, manager.AssignRole(ctx, assignment))
+	// M-AUTH-2: AssignRole requires justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: system admin role setup for delegation test subject")
+	require.NoError(t, manager.AssignRole(ctxJ, assignment))
 }
 
 // createTestSubjectBasic creates a delegatee subject with no special roles.

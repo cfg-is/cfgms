@@ -33,6 +33,8 @@ func TestRBACService_Integration(t *testing.T) {
 		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
+	// M-AUTH-2: inject justification so sensitive RBAC operations pass the gate
+	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: RBAC service integration")
 
 	err = rbacManager.Initialize(ctx)
 	require.NoError(t, err)

@@ -28,6 +28,8 @@ import (
 // This is an integration test that validates the complete authorization pipeline
 func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 	ctx := context.Background()
+	// M-AUTH-2: inject justification so sensitive RBAC operations pass the gate
+	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: cross-tenant isolation integration")
 
 	// Setup REAL RBAC and tenant infrastructure with git storage
 	tmpDir := t.TempDir()

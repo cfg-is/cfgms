@@ -69,6 +69,8 @@ func NewComponentFailureSecurityTestFramework(t *testing.T) *ComponentFailureSec
 // Setup initializes the test framework with test data
 func (framework *ComponentFailureSecurityTestFramework) Setup() error {
 	ctx := framework.env.GetContext()
+	// M-AUTH-2: inject justification so sensitive RBAC operations pass the gate
+	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: component failure security test setup")
 
 	// Initialize RBAC system
 	err := framework.rbacManager.Initialize(ctx)

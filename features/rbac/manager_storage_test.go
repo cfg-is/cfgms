@@ -65,6 +65,8 @@ func TestNewManagerWithStorage(t *testing.T) {
 
 			// Verify manager initializes correctly with pluggable storage
 			ctx := context.Background()
+			// M-AUTH-2: sensitive operations require justification in context
+			ctx = WithSensitiveOperationJustification(ctx, "test: storage backend operations")
 			err = manager.Initialize(ctx)
 			require.NoError(t, err)
 
@@ -178,6 +180,8 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 	require.NotNil(t, manager)
 
 	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctx = WithSensitiveOperationJustification(ctx, "test: tenant isolation operations")
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -252,6 +256,8 @@ func TestManagerWithStorage_AuditTrail(t *testing.T) {
 	require.NotNil(t, manager)
 
 	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctx = WithSensitiveOperationJustification(ctx, "test: audit trail operations")
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 

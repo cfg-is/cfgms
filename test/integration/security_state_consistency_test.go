@@ -94,6 +94,8 @@ func NewSecurityStateConsistencyTestFramework(t *testing.T) *SecurityStateConsis
 // Setup initializes the state consistency test framework
 func (framework *SecurityStateConsistencyTestFramework) Setup() error {
 	ctx := framework.env.GetContext()
+	// M-AUTH-2: inject justification so sensitive RBAC operations pass the gate
+	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: security state consistency setup")
 
 	// Initialize RBAC system
 	err := framework.rbacManager.Initialize(ctx)

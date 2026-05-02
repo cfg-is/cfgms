@@ -215,6 +215,9 @@ func TestManager_RoleAssignment(t *testing.T) {
 	err = manager.CreateSubject(ctx, subject)
 	require.NoError(t, err)
 
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: role assignment management for rbac validation")
+
 	// Assign a role
 	assignment := &common.RoleAssignment{
 		SubjectId: "test-user-1",
@@ -222,7 +225,7 @@ func TestManager_RoleAssignment(t *testing.T) {
 		TenantId:  tenantID,
 	}
 
-	err = manager.AssignRole(ctx, assignment)
+	err = manager.AssignRole(ctxJ, assignment)
 	require.NoError(t, err)
 
 	// Verify role assignment
@@ -237,7 +240,7 @@ func TestManager_RoleAssignment(t *testing.T) {
 	assert.Len(t, assignments, 1)
 
 	// Revoke role
-	err = manager.RevokeRole(ctx, "test-user-1", tenantID+".tenant.admin", tenantID)
+	err = manager.RevokeRole(ctxJ, "test-user-1", tenantID+".tenant.admin", tenantID)
 	require.NoError(t, err)
 
 	// Verify role was revoked
@@ -284,6 +287,9 @@ func TestManager_PermissionChecking(t *testing.T) {
 	err = manager.CreateSubject(ctx, subject)
 	require.NoError(t, err)
 
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: assign role for permission checking validation")
+
 	// Assign tenant admin role
 	assignment := &common.RoleAssignment{
 		SubjectId: "test-user-1",
@@ -291,7 +297,7 @@ func TestManager_PermissionChecking(t *testing.T) {
 		TenantId:  tenantID,
 	}
 
-	err = manager.AssignRole(ctx, assignment)
+	err = manager.AssignRole(ctxJ, assignment)
 	require.NoError(t, err)
 
 	// Test permission checking
@@ -371,6 +377,9 @@ func TestManager_SystemAdminPermissions(t *testing.T) {
 	err = manager.CreateSubject(ctx, subject)
 	require.NoError(t, err)
 
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: assign system admin role for permission validation")
+
 	// Assign system admin role
 	assignment := &common.RoleAssignment{
 		SubjectId: "system-admin",
@@ -378,7 +387,7 @@ func TestManager_SystemAdminPermissions(t *testing.T) {
 		TenantId:  "root",
 	}
 
-	err = manager.AssignRole(ctx, assignment)
+	err = manager.AssignRole(ctxJ, assignment)
 	require.NoError(t, err)
 
 	// System admin should have access to everything
@@ -508,6 +517,9 @@ func TestManager_InactiveSubjectPermissions(t *testing.T) {
 	err = manager.CreateSubject(ctx, subject)
 	require.NoError(t, err)
 
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: assign role to inactive subject for permission gate validation")
+
 	// Assign a role
 	assignment := &common.RoleAssignment{
 		SubjectId: "inactive-user",
@@ -515,7 +527,7 @@ func TestManager_InactiveSubjectPermissions(t *testing.T) {
 		TenantId:  tenantID,
 	}
 
-	err = manager.AssignRole(ctx, assignment)
+	err = manager.AssignRole(ctxJ, assignment)
 	require.NoError(t, err)
 
 	// Inactive subject should not have permissions
@@ -641,12 +653,15 @@ func TestManager_DeleteRolesByTenant(t *testing.T) {
 	tenantID := "delete-roles-tenant"
 	otherTenantID := "other-roles-tenant"
 
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: create roles for DeleteRolesByTenant validation")
+
 	for _, r := range []*common.Role{
 		{Id: tenantID + ".role-a", Name: "Role A", TenantId: tenantID},
 		{Id: tenantID + ".role-b", Name: "Role B", TenantId: tenantID},
 		{Id: otherTenantID + ".role-x", Name: "Role X", TenantId: otherTenantID},
 	} {
-		require.NoError(t, manager.CreateRole(ctx, r))
+		require.NoError(t, manager.CreateRole(ctxJ, r))
 	}
 
 	err = manager.DeleteRolesByTenant(ctx, tenantID)
@@ -742,7 +757,10 @@ func TestManager_RevokeRole_InvalidatesSubjectCache(t *testing.T) {
 		TenantId: tenantID,
 		IsActive: true,
 	}))
-	require.NoError(t, manager.AssignRole(ctx, &common.RoleAssignment{
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: assign and revoke role for cache invalidation validation")
+
+	require.NoError(t, manager.AssignRole(ctxJ, &common.RoleAssignment{
 		SubjectId: subjectID,
 		RoleId:    roleID,
 		TenantId:  tenantID,
@@ -750,7 +768,7 @@ func TestManager_RevokeRole_InvalidatesSubjectCache(t *testing.T) {
 
 	req := primeSubjectCache(t, cm, subjectID, tenantID)
 
-	require.NoError(t, manager.RevokeRole(ctx, subjectID, roleID, tenantID))
+	require.NoError(t, manager.RevokeRole(ctxJ, subjectID, roleID, tenantID))
 
 	assert.Nil(t, cm.GetCachedAuth(req),
 		"GetCachedAuth must return nil after RevokeRole invalidates the subject cache")
@@ -910,10 +928,13 @@ func TestManager_DeleteRolesByTenant_InvalidatesTenantCache(t *testing.T) {
 	tenantID := "cache-delete-roles-tenant"
 	otherTenantID := "cache-other-tenant"
 
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: create role for tenant cache invalidation validation")
+
 	for _, r := range []*common.Role{
 		{Id: tenantID + ".role-a", Name: "Role A", TenantId: tenantID},
 	} {
-		require.NoError(t, manager.CreateRole(ctx, r))
+		require.NoError(t, manager.CreateRole(ctxJ, r))
 	}
 
 	// Prime cache for two different subjects in the target tenant.

@@ -110,6 +110,8 @@ func NewDegradedModeSecurityTestFramework(t *testing.T) *DegradedModeSecurityTes
 // Setup initializes the degraded mode test framework
 func (framework *DegradedModeSecurityTestFramework) Setup() error {
 	ctx := framework.env.GetContext()
+	// M-AUTH-2: inject justification so sensitive RBAC operations pass the gate
+	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: degraded mode security test setup")
 
 	// Initialize RBAC system
 	err := framework.rbacManager.Initialize(ctx)
