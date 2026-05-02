@@ -177,35 +177,6 @@ func (m *Manager) GetCAInfo() (*CertificateInfo, error) {
 	return m.ca.GetCAInfo()
 }
 
-// GetServerCertificate returns the server certificate in PEM format
-// This retrieves the first server certificate from the store
-// Used for configuration signature verification in HA clusters
-func (m *Manager) GetServerCertificate() ([]byte, error) {
-	// Get all server certificates from the store
-	serverCertInfos, err := m.store.GetCertificatesByType(CertificateTypeServer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve server certificates: %w", err)
-	}
-
-	if len(serverCertInfos) == 0 {
-		return nil, fmt.Errorf("no server certificate found")
-	}
-
-	// Get the full certificate data using the serial number
-	// In practice, there should only be one server certificate per controller
-	certInfo := serverCertInfos[0]
-	cert, err := m.store.GetCertificate(certInfo.SerialNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve server certificate data: %w", err)
-	}
-
-	if len(cert.CertificatePEM) == 0 {
-		return nil, fmt.Errorf("server certificate PEM data is empty")
-	}
-
-	return cert.CertificatePEM, nil
-}
-
 // GenerateServerCertificate creates a new server certificate
 func (m *Manager) GenerateServerCertificate(config *ServerCertConfig) (*Certificate, error) {
 	cert, err := m.ca.GenerateServerCertificate(config)
@@ -463,26 +434,6 @@ func (m *Manager) ExportCertificate(serialNumber string, includePrivateKey bool)
 	return certPEM, keyPEM, nil
 }
 
-// GetCertificateStatus provides detailed status information for a certificate
-func (m *Manager) GetCertificateStatus(serialNumber string) (*CertificateStatus, error) {
-	cert, err := m.store.GetCertificate(serialNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get certificate: %w", err)
-	}
-
-	// Validate the certificate
-	validationResult, err := m.validator.ValidateCertificateFile(cert.CertificatePEM)
-	if err != nil {
-		return nil, fmt.Errorf("failed to validate certificate: %w", err)
-	}
-
-	return &CertificateStatus{
-		Certificate:  cert,
-		Validation:   validationResult,
-		NeedsRenewal: validationResult.DaysUntilExpiration <= m.config.RenewalThresholdDays,
-	}, nil
-}
-
 // GetManagerStats returns statistics about the certificate manager
 func (m *Manager) GetManagerStats() (*ManagerStats, error) {
 	allCerts, err := m.store.ListCertificates()
@@ -518,13 +469,6 @@ func (m *Manager) GetManagerStats() (*ManagerStats, error) {
 	}
 
 	return stats, nil
-}
-
-// CertificateStatus provides detailed status information for a certificate
-type CertificateStatus struct {
-	Certificate  *Certificate
-	Validation   *ValidationResult
-	NeedsRenewal bool
 }
 
 // ManagerStats provides statistics about the certificate manager
@@ -568,11 +512,4 @@ func (m *Manager) GetClientCertificate(_ context.Context) (*tls.Certificate, err
 // GetStoragePath returns the certificate storage path
 func (m *Manager) GetStoragePath() string {
 	return m.store.GetStoragePath()
-}
-
-// InitializeCA initializes the CA if not already initialized
-func (m *Manager) InitializeCA() error {
-	// CA should already be initialized in NewManager
-	// This method is for compatibility with test code
-	return nil
 }
