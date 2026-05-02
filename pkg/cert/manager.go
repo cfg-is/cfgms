@@ -44,7 +44,9 @@ package cert
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 )
@@ -406,7 +408,7 @@ func (m *Manager) ImportCertificate(certPEM, keyPEM []byte, certType Certificate
 		IsValid:        !IsCertificateExpired(x509Cert),
 		CertificatePEM: certPEM,
 		PrivateKeyPEM:  keyPEM,
-		Fingerprint:    GetCertificateFingerprint(x509Cert),
+		Fingerprint:    func() string { h := sha256.Sum256(x509Cert.Raw); return hex.EncodeToString(h[:]) }(),
 		Issuer:         x509Cert.Issuer.CommonName,
 	}
 

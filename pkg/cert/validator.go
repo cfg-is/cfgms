@@ -6,7 +6,6 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -34,94 +33,6 @@ func NewValidator(caCert *x509.Certificate) *Validator {
 	}
 
 	return validator
-}
-
-// AddRootCA adds a root CA certificate to the validation pool
-func (v *Validator) AddRootCA(cert *x509.Certificate) {
-	if cert != nil {
-		v.rootCAs.AddCert(cert)
-	}
-}
-
-// AddIntermediateCA adds an intermediate CA certificate to the validation pool
-func (v *Validator) AddIntermediateCA(cert *x509.Certificate) {
-	if cert != nil {
-		v.intermediateCAs.AddCert(cert)
-	}
-}
-
-// ValidateChain validates a certificate chain
-func (v *Validator) ValidateChain(certChain []*x509.Certificate) (*ValidationResult, error) {
-	if len(certChain) == 0 {
-		return &ValidationResult{
-			IsValid: false,
-			Errors:  []string{"certificate chain is empty"},
-		}, nil
-	}
-
-	// The first certificate in the chain should be the end-entity certificate
-	leafCert := certChain[0]
-
-	result := &ValidationResult{
-		IsValid:             true,
-		Errors:              []string{},
-		Warnings:            []string{},
-		ChainDepth:          len(certChain),
-		DaysUntilExpiration: int(time.Until(leafCert.NotAfter).Hours() / 24),
-	}
-
-	// Basic certificate validation
-	if err := v.validateBasicConstraints(leafCert, result); err != nil {
-		return result, err
-	}
-
-	// Create intermediate pool from chain (excluding leaf)
-	intermediates := x509.NewCertPool()
-	for i := 1; i < len(certChain); i++ {
-		intermediates.AddCert(certChain[i])
-	}
-
-	// Note: We rely on the intermediate pool created from the chain
-	// Additional pre-configured intermediate CAs are already in v.intermediateCAs
-
-	// Validate the certificate chain
-	opts := x509.VerifyOptions{
-		Roots:         v.rootCAs,
-		Intermediates: intermediates,
-		CurrentTime:   time.Now(),
-		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-	}
-
-	chains, err := leafCert.Verify(opts)
-	if err != nil {
-		result.IsValid = false
-		result.Errors = append(result.Errors, fmt.Sprintf("chain validation failed: %v", err))
-
-		// Try to provide more specific error information
-		if strings.Contains(err.Error(), "certificate has expired") {
-			result.IsExpired = true
-		}
-		if strings.Contains(err.Error(), "certificate is not yet valid") {
-			result.Errors = append(result.Errors, "certificate is not yet valid")
-		}
-		if strings.Contains(err.Error(), "unknown authority") {
-			result.Errors = append(result.Errors, "certificate signed by unknown authority")
-		}
-	} else {
-		// Validation successful
-		if len(chains) > 0 {
-			result.ChainDepth = len(chains[0])
-		}
-	}
-
-	// Check each certificate in the chain for warnings
-	for i, cert := range certChain {
-		if err := v.checkCertificateWarnings(cert, i, result); err != nil {
-			return result, err
-		}
-	}
-
-	return result, nil
 }
 
 // ValidateCertificate validates a single certificate
@@ -207,20 +118,6 @@ func (v *Validator) CheckExpiration(certs []*CertificateInfo, withinDays int) ([
 	}
 
 	return renewalInfos, nil
-}
-
-// VerifyHostname verifies if a certificate is valid for a hostname
-func (v *Validator) VerifyHostname(cert *x509.Certificate, hostname string) error {
-	if cert == nil {
-		return fmt.Errorf("certificate is nil")
-	}
-
-	if hostname == "" {
-		return fmt.Errorf("hostname is required")
-	}
-
-	// Use Go's built-in hostname verification
-	return cert.VerifyHostname(hostname)
 }
 
 // validateBasicConstraints performs basic certificate validation
@@ -321,18 +218,4 @@ func (v *Validator) ValidateCertificateFile(certPEM []byte) (*ValidationResult, 
 	}
 
 	return v.ValidateCertificate(cert)
-}
-
-// ValidateCertificateChainFiles validates a certificate chain from PEM file data
-func (v *Validator) ValidateCertificateChainFiles(certChainPEM []byte) (*ValidationResult, error) {
-	// Parse the certificate chain from PEM
-	certs, err := ParseCertificateChainFromPEM(certChainPEM)
-	if err != nil {
-		return &ValidationResult{
-			IsValid: false,
-			Errors:  []string{fmt.Sprintf("failed to parse certificate chain: %v", err)},
-		}, nil
-	}
-
-	return v.ValidateChain(certs)
 }
