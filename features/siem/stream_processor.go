@@ -75,6 +75,9 @@ type WorkerStats struct {
 	Errors           int64
 }
 
+// streamWorkerQueueSize is the per-worker batch queue depth inside StreamProcessorImpl.
+const streamWorkerQueueSize = 1000
+
 // NewStreamProcessor creates a new high-performance stream processor
 func NewStreamProcessor(config ProcessingConfig, patternMatcher PatternMatcher,
 	eventCorrelator EventCorrelator, ruleManager RuleManager) *StreamProcessorImpl {
@@ -93,9 +96,6 @@ func NewStreamProcessor(config ProcessingConfig, patternMatcher PatternMatcher,
 	}
 	if config.WorkerCount == 0 {
 		config.WorkerCount = runtime.NumCPU() * 2 // CPU-bound optimization
-	}
-	if config.WorkerQueueSize == 0 {
-		config.WorkerQueueSize = 1000
 	}
 	if config.MaxLatency == 0 {
 		config.MaxLatency = 100 * time.Millisecond // Target latency
@@ -149,7 +149,7 @@ func (sp *StreamProcessorImpl) Start(ctx context.Context) error {
 		sp.workers[i] = &StreamWorker{
 			id:              i,
 			processor:       sp,
-			inputChan:       make(chan *ProcessingBatch, sp.config.WorkerQueueSize),
+			inputChan:       make(chan *ProcessingBatch, streamWorkerQueueSize),
 			logger:          logger.WithField("worker_id", i),
 			processingStats: &WorkerStats{},
 		}
@@ -223,6 +223,24 @@ func (sp *StreamProcessorImpl) Stop(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// ProcessEntry sends a single log entry into the processing pipeline.
+// Non-blocking: drops the entry and returns an error when the internal buffer is full.
+func (sp *StreamProcessorImpl) ProcessEntry(ctx context.Context, entry interfaces.LogEntry) error {
+	if atomic.LoadInt32(&sp.running) == 0 {
+		return fmt.Errorf("stream processor not running")
+	}
+
+	atomic.AddInt64(&sp.metrics.EntriesProcessed, 1)
+
+	select {
+	case sp.inputBuffer <- entry:
+		return nil
+	default:
+		atomic.AddInt64(&sp.metrics.DroppedEntries, 1)
+		return fmt.Errorf("input buffer full, entry dropped")
+	}
 }
 
 // ProcessStream processes a continuous stream of log entries
@@ -367,14 +385,47 @@ func (sp *StreamProcessorImpl) updateMetrics() {
 	sp.metrics.GoroutineCount = runtime.NumGoroutine()
 }
 
-// GetMetrics returns current processing metrics
+// GetMetrics returns current processing metrics.
+// Counter fields updated via atomic.AddInt64 outside metricsLock are read with
+// atomic.LoadInt64 to avoid races with the struct copy of non-atomic fields.
 func (sp *StreamProcessorImpl) GetMetrics(ctx context.Context) (*ProcessingMetrics, error) {
+	// Read non-atomic fields under the RLock (updated only in updateMetrics).
 	sp.metricsLock.RLock()
-	defer sp.metricsLock.RUnlock()
+	uptime := sp.metrics.Uptime
+	lastProcessedTime := sp.metrics.LastProcessedTime
+	startTime := sp.metrics.StartTime
+	entriesPerSecond := sp.metrics.EntriesPerSecond
+	batchesProcessed := sp.metrics.BatchesProcessed
+	averageLatency := sp.metrics.AverageLatency
+	p95Latency := sp.metrics.P95Latency
+	p99Latency := sp.metrics.P99Latency
+	bufferUtilization := sp.metrics.BufferUtilization
+	memoryUsage := sp.metrics.MemoryUsage
+	goroutineCount := sp.metrics.GoroutineCount
+	workflowsTriggered := sp.metrics.WorkflowsTriggered
+	sp.metricsLock.RUnlock()
 
-	// Return a copy to prevent concurrent modification
-	metricsCopy := *sp.metrics
-	return &metricsCopy, nil
+	// Atomic loads for fields updated via atomic.AddInt64 without holding metricsLock.
+	return &ProcessingMetrics{
+		EntriesProcessed:        atomic.LoadInt64(&sp.metrics.EntriesProcessed),
+		DroppedEntries:          atomic.LoadInt64(&sp.metrics.DroppedEntries),
+		ProcessingErrors:        atomic.LoadInt64(&sp.metrics.ProcessingErrors),
+		PatternsMatched:         atomic.LoadInt64(&sp.metrics.PatternsMatched),
+		EventsCorrelated:        atomic.LoadInt64(&sp.metrics.EventsCorrelated),
+		SecurityEventsGenerated: atomic.LoadInt64(&sp.metrics.SecurityEventsGenerated),
+		WorkflowsTriggered:      workflowsTriggered,
+		BatchesProcessed:        batchesProcessed,
+		EntriesPerSecond:        entriesPerSecond,
+		AverageLatency:          averageLatency,
+		P95Latency:              p95Latency,
+		P99Latency:              p99Latency,
+		BufferUtilization:       bufferUtilization,
+		MemoryUsage:             memoryUsage,
+		GoroutineCount:          goroutineCount,
+		StartTime:               startTime,
+		LastProcessedTime:       lastProcessedTime,
+		Uptime:                  uptime,
+	}, nil
 }
 
 // Run executes the main worker processing loop

@@ -88,6 +88,11 @@ func (bp *BatchProcessor) addEntryToBatch(ctx context.Context, entry interfaces.
 	bp.batchMutex.Lock()
 	defer bp.batchMutex.Unlock()
 
+	// Re-initialize batch if it was flushed by a timeout between calls
+	if bp.currentBatch == nil {
+		bp.currentBatch = bp.newBatch(entry.TenantID)
+	}
+
 	// Ensure tenant consistency within batch
 	if bp.currentBatch.TenantID != "" && bp.currentBatch.TenantID != entry.TenantID {
 		// Different tenant, flush current batch first

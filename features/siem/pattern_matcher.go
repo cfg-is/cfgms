@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -36,9 +37,11 @@ type CompiledPattern struct {
 	*DetectionPattern
 	CompiledRegex  *regexp.Regexp
 	FieldMatchers  map[string]*regexp.Regexp
-	LastUsed       time.Time
-	MatchCount     int64
 	ProcessingTime time.Duration
+	// lastUsedNs and matchCount are updated concurrently by parallel goroutines in
+	// processEntriesParallel; they use atomic operations to avoid data races.
+	lastUsedNs int64 // unix nanoseconds, read via atomic.LoadInt64
+	MatchCount int64 // read/written via atomic.AddInt64 / atomic.LoadInt64
 }
 
 // NewPatternMatcher creates a new pattern matcher with optimization features
@@ -73,8 +76,8 @@ func (pm *PatternMatcherImpl) AddPattern(pattern *DetectionPattern) error {
 	compiled := &CompiledPattern{
 		DetectionPattern: pattern,
 		FieldMatchers:    make(map[string]*regexp.Regexp),
-		LastUsed:         time.Now(),
 	}
+	atomic.StoreInt64(&compiled.lastUsedNs, time.Now().UnixNano())
 
 	var err error
 	switch pattern.PatternType {
@@ -234,10 +237,11 @@ func (pm *PatternMatcherImpl) matchEntryAgainstPatterns(entry interfaces.LogEntr
 		entryMatches := pm.matchEntryAgainstPattern(entry, pattern)
 		matches = append(matches, entryMatches...)
 
-		// Update pattern statistics
-		pattern.LastUsed = time.Now()
+		// Update pattern statistics — use atomic ops since multiple goroutines in
+		// processEntriesParallel may update the same CompiledPattern concurrently.
+		atomic.StoreInt64(&pattern.lastUsedNs, time.Now().UnixNano())
 		if len(entryMatches) > 0 {
-			pattern.MatchCount += int64(len(entryMatches))
+			atomic.AddInt64(&pattern.MatchCount, int64(len(entryMatches)))
 		}
 	}
 
@@ -425,8 +429,8 @@ func (pm *PatternMatcherImpl) GetStatistics() map[string]interface{} {
 		patternDetails[id] = map[string]interface{}{
 			"name":            pattern.Name,
 			"type":            pattern.PatternType,
-			"match_count":     pattern.MatchCount,
-			"last_used":       pattern.LastUsed,
+			"match_count":     atomic.LoadInt64(&pattern.MatchCount),
+			"last_used":       time.Unix(0, atomic.LoadInt64(&pattern.lastUsedNs)),
 			"processing_time": pattern.ProcessingTime,
 			"enabled":         pattern.Enabled,
 		}

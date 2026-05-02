@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -140,7 +141,6 @@ func createTestConfig() ProcessingConfig {
 		BatchSize:              100,
 		BatchTimeout:           10 * time.Millisecond,
 		WorkerCount:            4,
-		WorkerQueueSize:        100,
 		MaxLatency:             100 * time.Millisecond,
 		TargetThroughput:       10000,
 		CorrelationWindow:      5 * time.Minute,
@@ -201,6 +201,37 @@ func TestSIEMEngine_StartStop(t *testing.T) {
 	assert.Contains(t, err.Error(), "not running")
 }
 
+// TestSIEMEngine_ProcessLogEntry_RoutesToStreamProcessor is a non-skippable test
+// that verifies ProcessLogEntry sends entries directly to StreamProcessor.ProcessEntry.
+// EntriesProcessed is incremented synchronously in ProcessEntry, so no sleep is needed.
+func TestSIEMEngine_ProcessLogEntry_RoutesToStreamProcessor(t *testing.T) {
+	triggerManager := NewMockTriggerManager()
+	workflowTrigger := NewMockWorkflowTrigger()
+	config := createTestConfig()
+
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = engine.Start(ctx)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, engine.Stop(ctx)) }()
+
+	entry := createTestLogEntry("ERROR", "routing test", "test-tenant")
+	err = engine.ProcessLogEntry(ctx, entry)
+	require.NoError(t, err)
+
+	// EntriesProcessed is incremented synchronously in ProcessEntry — no sleep needed
+	spMetrics, err := engine.streamProcessor.GetMetrics(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), spMetrics.EntriesProcessed,
+		"ProcessLogEntry must route directly through StreamProcessor.ProcessEntry")
+
+	metrics, err := engine.GetMetrics(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), metrics.TotalEntriesProcessed)
+}
+
 func TestSIEMEngine_ProcessLogEntry(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping SIEM engine test in short mode")
@@ -216,20 +247,127 @@ func TestSIEMEngine_ProcessLogEntry(t *testing.T) {
 	ctx := context.Background()
 	err = engine.Start(ctx)
 	require.NoError(t, err)
-	defer func() { _ = engine.Stop(ctx) }()
+	defer func() { assert.NoError(t, engine.Stop(ctx)) }()
 
 	// Process a log entry
 	entry := createTestLogEntry("ERROR", "Test error message", "test-tenant")
 	err = engine.ProcessLogEntry(ctx, entry)
 	require.NoError(t, err)
 
-	// Give some time for processing
-	time.Sleep(100 * time.Millisecond)
-
-	// Check metrics
+	// TotalEntriesProcessed and EntriesProcessed are updated synchronously — no sleep needed
 	metrics, err := engine.GetMetrics(ctx)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, metrics.TotalEntriesProcessed, int64(1))
+
+	// Verify entry reached the stream processor
+	spMetrics, err := engine.streamProcessor.GetMetrics(ctx)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, spMetrics.EntriesProcessed, int64(1),
+		"entry should have reached StreamProcessor.ProcessEntry")
+}
+
+func TestStreamProcessor_ProcessEntry(t *testing.T) {
+	config := createTestConfig()
+	patternMatcher := NewPatternMatcher()
+	eventCorrelator := NewEventCorrelator(5 * time.Minute)
+	ruleManager := NewRuleManager(patternMatcher, eventCorrelator)
+
+	sp := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager)
+
+	ctx := context.Background()
+
+	// ProcessEntry before Start should fail
+	entry := createTestLogEntry("ERROR", "test message", "test-tenant")
+	err := sp.ProcessEntry(ctx, entry)
+	assert.Error(t, err, "ProcessEntry should fail when stream processor is not running")
+	assert.Contains(t, err.Error(), "not running")
+
+	// Start the processor
+	err = sp.Start(ctx)
+	require.NoError(t, err)
+	defer func() { assert.NoError(t, sp.Stop(ctx)) }()
+
+	// ProcessEntry should succeed when running
+	err = sp.ProcessEntry(ctx, entry)
+	require.NoError(t, err)
+
+	// EntriesProcessed is incremented synchronously — no sleep needed
+	metrics, err := sp.GetMetrics(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), metrics.EntriesProcessed)
+}
+
+// TestStreamProcessor_ProcessEntry_BufferFull verifies the drop-on-full contract.
+// It uses direct struct access (same package) to set up a tiny buffer without
+// starting goroutines, making the test deterministic without timing dependencies.
+func TestStreamProcessor_ProcessEntry_BufferFull(t *testing.T) {
+	config := createTestConfig()
+	patternMatcher := NewPatternMatcher()
+	eventCorrelator := NewEventCorrelator(5 * time.Minute)
+	ruleManager := NewRuleManager(patternMatcher, eventCorrelator)
+
+	sp := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager)
+
+	// Manually configure a tiny buffer and mark running to isolate the drop-on-full
+	// path without goroutine scheduling races.
+	atomic.StoreInt32(&sp.running, 1)
+	sp.inputBuffer = make(chan interfaces.LogEntry, 2)
+	defer atomic.StoreInt32(&sp.running, 0)
+
+	ctx := context.Background()
+	entry := createTestLogEntry("ERROR", "test", "test-tenant")
+
+	// Fill the buffer to capacity
+	require.NoError(t, sp.ProcessEntry(ctx, entry))
+	require.NoError(t, sp.ProcessEntry(ctx, entry))
+
+	// Third call must fail with buffer-full error
+	err := sp.ProcessEntry(ctx, entry)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "input buffer full")
+
+	// DroppedEntries incremented; all 3 calls count toward EntriesProcessed
+	metrics, err := sp.GetMetrics(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), metrics.DroppedEntries)
+	assert.Equal(t, int64(3), metrics.EntriesProcessed)
+}
+
+func TestSIEMEngine_NoGoroutineLeak(t *testing.T) {
+	runtime.GC()
+	beforeCount := runtime.NumGoroutine()
+
+	triggerManager := NewMockTriggerManager()
+	workflowTrigger := NewMockWorkflowTrigger()
+	config := createTestConfig()
+
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = engine.Start(ctx)
+	require.NoError(t, err)
+
+	// Give goroutines time to start
+	time.Sleep(50 * time.Millisecond)
+
+	err = engine.Stop(ctx)
+	require.NoError(t, err)
+
+	// Poll for goroutines to clean up (stopChan fires immediately, so should be fast)
+	var afterCount int
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.GC()
+		afterCount = runtime.NumGoroutine()
+		if afterCount <= beforeCount+2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	assert.LessOrEqual(t, afterCount, beforeCount+2,
+		"goroutine leak detected: started with %d goroutines, ended with %d", beforeCount, afterCount)
 }
 
 func TestPatternMatcher_BasicMatching(t *testing.T) {
@@ -323,7 +461,7 @@ func BenchmarkSIEMEngine_ThroughputTest(b *testing.B) {
 	ctx := context.Background()
 	err = engine.Start(ctx)
 	require.NoError(b, err)
-	defer func() { _ = engine.Stop(ctx) }()
+	defer func() { assert.NoError(b, engine.Stop(ctx)) }()
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -400,7 +538,7 @@ func TestSIEMEngine_EndToEndProcessing(t *testing.T) {
 	ctx := context.Background()
 	err = engine.Start(ctx)
 	require.NoError(t, err)
-	defer func() { _ = engine.Stop(ctx) }()
+	defer func() { assert.NoError(t, engine.Stop(ctx)) }()
 
 	// Add a test pattern
 	pattern := &DetectionPattern{
@@ -469,7 +607,7 @@ func TestSIEMEngine_ThroughputRequirement(t *testing.T) {
 	ctx := context.Background()
 	err = engine.Start(ctx)
 	require.NoError(t, err)
-	defer func() { _ = engine.Stop(ctx) }()
+	defer func() { assert.NoError(t, engine.Stop(ctx)) }()
 
 	// Test processing 10,000+ entries per second
 	startTime := time.Now()
@@ -533,7 +671,7 @@ func TestSIEMEngine_LatencyRequirement(t *testing.T) {
 	ctx := context.Background()
 	err = engine.Start(ctx)
 	require.NoError(t, err)
-	defer func() { _ = engine.Stop(ctx) }()
+	defer func() { assert.NoError(t, engine.Stop(ctx)) }()
 
 	// Add pattern for latency testing
 	pattern := &DetectionPattern{
@@ -547,35 +685,38 @@ func TestSIEMEngine_LatencyRequirement(t *testing.T) {
 	err = engine.GetPatternMatcher().AddPattern(pattern)
 	require.NoError(t, err)
 
-	// Measure end-to-end latency for pattern detection
+	// Measure the actual ProcessLogEntry call latency (non-blocking send to stream processor).
+	// ProcessEntry increments EntriesProcessed synchronously, so this measures the real
+	// pipeline entry cost, not artificial sleep time.
 	numTests := 100
 	var totalLatency time.Duration
+	var maxLatency time.Duration
 
 	for i := 0; i < numTests; i++ {
-		startTime := time.Now()
 		entry := createTestLogEntry("INFO", "LATENCY_TEST message", "test-tenant")
+		startTime := time.Now()
 		err = engine.ProcessLogEntry(ctx, entry)
 		require.NoError(t, err)
-
-		// Wait for processing (this is a simplified latency test)
-		// In a real system, we'd measure actual processing completion
-		time.Sleep(1 * time.Millisecond)
 		latency := time.Since(startTime)
 		totalLatency += latency
+		if latency > maxLatency {
+			maxLatency = latency
+		}
 	}
 
 	averageLatency := totalLatency / time.Duration(numTests)
-	t.Logf("Average latency: %v", averageLatency)
+	t.Logf("ProcessLogEntry latency: avg=%v max=%v", averageLatency, maxLatency)
 
-	// Verify latency meets requirement (<100ms)
+	// Non-blocking send to an in-process channel must complete well under 100ms
 	assert.Less(t, averageLatency, 100*time.Millisecond,
-		"Latency requirement not met: got %v, need <100ms", averageLatency)
+		"ProcessLogEntry avg latency %v exceeds 100ms target", averageLatency)
+	assert.Less(t, maxLatency, 100*time.Millisecond,
+		"ProcessLogEntry max latency %v exceeds 100ms target", maxLatency)
 
-	// Check metrics
-	metrics, err := engine.GetMetrics(ctx)
+	// Verify all entries were tracked
+	spMetrics, err := engine.streamProcessor.GetMetrics(ctx)
 	require.NoError(t, err)
-	t.Logf("Engine metrics - Average latency: %.2fms, Max latency: %.2fms",
-		metrics.AverageLatency, metrics.MaxLatency)
+	assert.GreaterOrEqual(t, spMetrics.EntriesProcessed, int64(numTests))
 }
 
 func TestSIEMEngine_MemoryUsage(t *testing.T) {
@@ -608,7 +749,7 @@ func TestSIEMEngine_MemoryUsage(t *testing.T) {
 	// Wait for processing
 	time.Sleep(1 * time.Second)
 
-	_ = engine.Stop(ctx)
+	require.NoError(t, engine.Stop(ctx))
 
 	// Force GC and check memory
 	runtime.GC()
@@ -640,7 +781,7 @@ func TestSIEMEngine_StressTest(t *testing.T) {
 	ctx := context.Background()
 	err = engine.Start(ctx)
 	require.NoError(t, err)
-	defer func() { _ = engine.Stop(ctx) }()
+	defer func() { assert.NoError(t, engine.Stop(ctx)) }()
 
 	// Add multiple patterns
 	for i := 0; i < 10; i++ {
