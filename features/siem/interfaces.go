@@ -25,6 +25,10 @@ type StreamProcessor interface {
 	// ProcessStream processes a stream of log entries
 	ProcessStream(ctx context.Context, entries <-chan interfaces.LogEntry) error
 
+	// ProcessEntry sends a single log entry into the processing pipeline.
+	// Non-blocking: returns an error if the internal buffer is full.
+	ProcessEntry(ctx context.Context, entry interfaces.LogEntry) error
+
 	// GetMetrics returns current processing metrics
 	GetMetrics(ctx context.Context) (*ProcessingMetrics, error)
 }
@@ -326,8 +330,7 @@ type ProcessingConfig struct {
 	BatchTimeout time.Duration `json:"batch_timeout" yaml:"batch_timeout"`
 
 	// Worker configuration
-	WorkerCount     int `json:"worker_count" yaml:"worker_count"`
-	WorkerQueueSize int `json:"worker_queue_size" yaml:"worker_queue_size"`
+	WorkerCount int `json:"worker_count" yaml:"worker_count"`
 
 	// Performance configuration
 	MaxLatency       time.Duration `json:"max_latency" yaml:"max_latency"`
