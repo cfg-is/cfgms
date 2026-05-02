@@ -143,8 +143,8 @@ func GetCertificateInfo(cert *x509.Certificate) *CertificateInfo {
 		}
 	}
 
-	daysUntilExpiration := int(cert.NotAfter.Sub(cert.NotBefore).Hours() / 24)
-	if cert.NotAfter.Before(cert.NotBefore) {
+	daysUntilExpiration := int(time.Until(cert.NotAfter).Hours() / 24)
+	if daysUntilExpiration < 0 {
 		daysUntilExpiration = 0
 	}
 
@@ -154,7 +154,7 @@ func GetCertificateInfo(cert *x509.Certificate) *CertificateInfo {
 		SerialNumber:        cert.SerialNumber.String(),
 		CreatedAt:           cert.NotBefore,
 		ExpiresAt:           cert.NotAfter,
-		IsValid:             cert.NotBefore.Before(cert.NotAfter),
+		IsValid:             time.Now().Before(cert.NotAfter) && time.Now().After(cert.NotBefore),
 		Fingerprint:         GetCertificateFingerprint(cert),
 		Issuer:              cert.Issuer.CommonName,
 		DaysUntilExpiration: daysUntilExpiration,
