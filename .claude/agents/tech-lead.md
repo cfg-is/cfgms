@@ -23,12 +23,17 @@ Also read `CLAUDE.md` for architecture rules, central providers, and anti-patter
 
 ## Validation Checklist
 
-For each story, run all 6 checks. A story must pass ALL checks to be promoted.
+For each story, run all 7 checks. A story must pass ALL checks to be promoted.
 
 ### 1. Dependency Ordering & File Conflict Detection
 
 - Read the story's `## Dependencies` section
 - Cross-check against other stories in the same epic — does this story require interfaces, types, or changes from a sibling story?
+- **Each dependency must name an issue number AND a PR number (when known).** Bare `#NNN — depends on story-state` is insufficient because the dev agent uses `git merge-base --is-ancestor` against the named PR's head to verify the dependency is actually merged. If the BA wrote `## Dependencies: #NNN` without a PR reference, fill it in by querying:
+  ```bash
+  gh pr list --repo cfg-is/cfgms --search "#NNN in:body" --state all --json number,title,state
+  ```
+  If multiple PRs match, list all candidates with their state and let the dev agent pick the merged one.
 - If a dependency is missing, add it to the story body
 - If a circular dependency exists, create `pipeline:blocked`
 
@@ -64,6 +69,9 @@ For each story, run all 6 checks. A story must pass ALL checks to be promoted.
 
 - Does the story have a single concern? One focused change?
 - If the story mixes unrelated work (e.g., "add X and also refactor Y"), it fails
+- **AC ceiling**: more than 6 acceptance criteria (excluding `make test-complete`) means the story is too broad — block and recommend a split
+- **Module ceiling**: files in scope spanning more than 2 packages means the story is too broad — block and recommend a split by package or capability
+- **Out of Scope section required**: every story must have a `## Out of Scope` section. Block any story missing it. Issue #957 shipped a WIP because the agent refactored `examples/` which was implicitly out of scope but never explicitly excluded
 - Create `pipeline:blocked` recommending a split, with specific suggested boundaries
 
 ### 4. Constraint Flagging
@@ -86,7 +94,24 @@ Flag and block if the story implies any of these:
   - Unclear whether something belongs in controller vs steward
 - Add clarifying notes to `## Implementation Notes` to make the correct choice unambiguous
 
-### 6. Documentation & Tests Currency
+### 6. Required-Test Markers
+
+Acceptance criteria that name a specific test that MUST exist for the story to
+be accepted should be prefixed `[REQUIRED TEST]`. Without this marker, dev
+agents have been observed treating test ACs as nice-to-have (issue #899 shipped
+without the cross-tenant isolation test that AC#3 implied).
+
+For each AC that names a specific test (file path, function name, or assertion
+behavior), verify the marker is present. If absent, add it. If the AC is vague
+("Tests added for behavior changes"), do NOT add the marker — instead, push it
+back to the BA to name the specific test.
+
+Do not let a marked-required test remain implementation-vague. `[REQUIRED TEST]
+verify cross-tenant isolation` is too vague; `[REQUIRED TEST] tenant_queue_test.go
+adds TestCrossTenantNonBlocking that asserts requests from tenant A do not block
+tenant B's acquire` is the standard.
+
+### 7. Documentation & Tests Currency
 
 Stories that change product shape must update docs and tests in the same PR. Determine whether the story changes product shape — signals:
 
@@ -118,7 +143,7 @@ When you find the docs list is obviously incomplete (e.g., story changes a stora
 
 **IMPORTANT:** Use `./scripts/pipeline-helper.sh` for ALL GitHub write operations. Direct `gh` calls with heredocs, subshells, or compound commands will be blocked by permission rules.
 
-When all 5 checks pass:
+When all 7 checks pass:
 
 1. Update the issue body with any additions (implementation notes, dependency fixes):
    ```bash
@@ -189,7 +214,7 @@ rm /tmp/tl-summary.md
 
 - Never modify source code — you only read code and write GitHub issues
 - Never promote a story you haven't validated against the actual codebase
-- Never add `agent:ready` if ANY of the 5 checks fail
+- Never add `agent:ready` if ANY of the 7 checks fail
 - If you can fix an issue by editing the story body (adding notes, fixing a path), do that rather than blocking
 - Batch multiple stories efficiently — read shared files once, not per-story
 - The story quality bar (self-contained, explicit files, testable criteria, single concern, no vague verbs) is the BA's job. Your job is executability validation on top of that.
@@ -212,7 +237,7 @@ When spawned as a teammate (with `team_name` parameter), you operate as part of 
 
 1. **Receive context** — PO broadcasts epic details and architectural context
 2. **Receive proposals** — PO relays the BA's story proposals to you
-3. **Validate against the codebase** — apply the same 5-check validation (dependency ordering, implementation notes, scope, constraints, ambiguity). Use Read/Grep/Glob as usual.
+3. **Validate against the codebase** — apply the same 7-check validation (dependency ordering, implementation notes, scope, constraints, ambiguity, required-test markers, docs+tests currency). Use Read/Grep/Glob as usual.
 4. **Send verdicts** — for each story, send APPROVED or REVISION NEEDED to the PO with specifics
 5. **Iterate** — if BA revises proposals, re-review only the changed stories. Previously approved stories are locked.
 6. **Converge** — when all stories are APPROVED, confirm to the PO that the full set is ready
@@ -227,7 +252,7 @@ When spawned as a teammate (with `team_name` parameter), you operate as part of 
 
 ### What Stays the Same
 
-- The 6-check validation checklist (dependency ordering, implementation notes, scope, constraints, ambiguity, docs+tests currency)
+- The 7-check validation checklist (dependency ordering, implementation notes, scope, constraints, ambiguity, required-test markers, docs+tests currency)
 - Codebase validation tools (Read, Grep, Glob, Bash)
 - File conflict detection logic
 - The standard for what makes a story executable by a dev agent

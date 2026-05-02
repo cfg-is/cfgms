@@ -244,9 +244,33 @@ This runs **locally** with full Docker access for dispatch and fix cycles. The r
 
 Emits a compact summary (counts, running containers, merge queue, recommendations). Full JSON cached at `~/.cache/cfgms-po/preflight.json` for further `po-act.sh state '.some.jq.filter'` queries.
 
+**Code-health gate (check this BEFORE dispatch decisions):**
+
+The preflight runs `make check-architecture` and `go build ./...` against
+`origin/develop` in a temporary worktree. If either fails, the summary sets:
+
+```json
+"dispatch_blocked": true,
+"code_health": { "ok": false, "failing_checks": ["build" | "architecture"], ... }
+```
+
+When `dispatch_blocked == true`:
+1. **Do NOT dispatch any new work** this cycle — every dispatched agent would inherit the broken base and waste a cycle (this was the root cause of issue #1039 / PR #1051).
+2. Identify or create a tracking issue for the broken state. Search for an open issue with title prefix `[broken-develop]`. If none, create one:
+   ```bash
+   gh issue create --repo cfg-is/cfgms \
+     --title "[broken-develop] preflight failure on $(date -u +%Y-%m-%dT%H:%MZ)" \
+     --label "pipeline:blocked,priority:high" \
+     --body-file <(./.claude/scripts/po-act.sh state '.code_health')
+   ```
+3. Skip dispatch (Steps 3 and 4). You may still process review (Step 5), merge-queue maintenance, and acceptance-reviewer findings on PRs that were merged before the breakage — those are unaffected.
+4. Report at end of cycle: `Dispatch held: develop is broken (preflight failed: <checks>). Tracking: #NNN.`
+
+When `code_health.skipped == true` (preflight could not run the checks for some reason — usually missing toolchain), proceed with caution: the gate is bypassed but you should note it in the cycle report.
+
 If `.counts.ready == 0` AND `.counts.open_pr == 0` AND `.pipeline_state.fix_cycle | length == 0`: report "No actionable work — skipping cycle" and exit.
 
-The preflight handles all label queries, PR CI summaries, merge queue state, and dispatch/review recommendations in one ~3-second call. Read `dispatch_recommendations` and `review_recommendations` to decide actions. Raw section text (`deps_raw`, `files_raw`) is included so the LLM can override any recommendation.
+The preflight handles all label queries, PR CI summaries, merge queue state, code-health gate, and dispatch/review recommendations in one parallel call. Read `dispatch_recommendations` and `review_recommendations` to decide actions. Raw section text (`deps_raw`, `files_raw`) is included so the LLM can override any recommendation.
 
 ### 4.1 Processing Order
 

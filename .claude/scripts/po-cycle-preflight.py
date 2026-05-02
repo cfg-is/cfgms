@@ -18,6 +18,12 @@ suspicious, and flags degraded state explicitly rather than silently miscounting
 
 Exits non-zero only on fatal infra errors. Partial failures set degraded=true
 but still exit 0 with best-effort output.
+
+Code-health gate: phase 1 also runs `make check-architecture` and
+`go build ./...` against origin/develop in a temporary worktree. If either
+fails, the summary sets `dispatch_blocked: true` and the PO must escalate
+the broken-develop state via po-act.sh block instead of dispatching new work
+that would inherit the broken base.
 """
 
 import json
@@ -178,6 +184,140 @@ def running_containers():
         return [n for n in result.stdout.splitlines() if n.strip()]
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return None
+
+
+def code_health_check():
+    """Run a fast check of develop's code health so the PO can decide whether
+    to dispatch this cycle.
+
+    The PO runs in the local checkout, which may have uncommitted changes —
+    so we test against origin/develop in a temporary worktree instead.
+
+    Returns dict:
+      {
+        "ok": bool,
+        "skipped": bool,                       # True if check could not run
+        "skipped_reason": str | None,
+        "develop_sha": str | None,             # SHA actually checked
+        "checks": {
+          "architecture": {"ok": bool, "output": str},  # make check-architecture
+          "build": {"ok": bool, "output": str},         # go build ./...
+        },
+      }
+
+    A False `ok` means develop is broken — the PO must NOT dispatch this cycle
+    and should escalate via po-act.sh block on a tracking issue instead.
+    """
+    result = {
+        "ok": True,
+        "skipped": False,
+        "skipped_reason": None,
+        "develop_sha": None,
+        "checks": {},
+    }
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    if not (repo_root / ".git").exists():
+        result["skipped"] = True
+        result["skipped_reason"] = "no .git in expected repo root"
+        result["ok"] = False
+        return result
+
+    # Resolve origin/develop SHA without touching the working tree.
+    try:
+        sha_proc = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "origin/develop"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        if sha_proc.returncode != 0:
+            # Try fetching first
+            subprocess.run(
+                ["git", "-C", str(repo_root), "fetch", "--quiet", "origin", "develop"],
+                capture_output=True, text=True, check=False, timeout=30,
+            )
+            sha_proc = subprocess.run(
+                ["git", "-C", str(repo_root), "rev-parse", "origin/develop"],
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+        if sha_proc.returncode != 0:
+            result["skipped"] = True
+            result["skipped_reason"] = f"cannot resolve origin/develop: {sha_proc.stderr.strip()[:200]}"
+            result["ok"] = False
+            return result
+        develop_sha = sha_proc.stdout.strip()
+        result["develop_sha"] = develop_sha
+    except subprocess.TimeoutExpired:
+        result["skipped"] = True
+        result["skipped_reason"] = "git rev-parse timed out"
+        result["ok"] = False
+        return result
+
+    # Use a temporary worktree so we never disturb the live working tree the
+    # PO is operating in. The worktree is cheap (no full clone) and we tear it
+    # down after the checks.
+    worktree = cache_dir() / "code-health-worktree"
+    if worktree.exists():
+        # Stale from a previous crash — remove via git so refs stay clean.
+        subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "remove", "--force", str(worktree)],
+            capture_output=True, text=True, check=False, timeout=15,
+        )
+        if worktree.exists():
+            # Filesystem leftover (worktree metadata already gone)
+            import shutil
+            shutil.rmtree(worktree, ignore_errors=True)
+
+    add_proc = subprocess.run(
+        ["git", "-C", str(repo_root), "worktree", "add", "--quiet", "--detach",
+         str(worktree), develop_sha],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    if add_proc.returncode != 0:
+        result["skipped"] = True
+        result["skipped_reason"] = f"worktree add failed: {add_proc.stderr.strip()[:200]}"
+        result["ok"] = False
+        return result
+
+    try:
+        # Architecture check (fast — central provider violation detection).
+        arch = subprocess.run(
+            ["make", "check-architecture"],
+            cwd=str(worktree),
+            capture_output=True, text=True, check=False, timeout=120,
+        )
+        result["checks"]["architecture"] = {
+            "ok": arch.returncode == 0,
+            "output": (arch.stdout + arch.stderr).strip()[-1500:],
+        }
+
+        # Compilation check (cheap with build cache, catches stale-fixture
+        # breakage like issue #1039 where develop compiled but code expected
+        # removed imports).
+        build = subprocess.run(
+            ["go", "build", "./..."],
+            cwd=str(worktree),
+            capture_output=True, text=True, check=False, timeout=300,
+        )
+        result["checks"]["build"] = {
+            "ok": build.returncode == 0,
+            "output": (build.stdout + build.stderr).strip()[-1500:],
+        }
+
+        result["ok"] = (
+            result["checks"]["architecture"]["ok"]
+            and result["checks"]["build"]["ok"]
+        )
+    except subprocess.TimeoutExpired as e:
+        result["skipped"] = True
+        result["skipped_reason"] = f"check timed out: {e.cmd}"
+        result["ok"] = False
+    finally:
+        subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "remove", "--force", str(worktree)],
+            capture_output=True, text=True, check=False, timeout=15,
+        )
+
+    return result
 
 
 def extract_section(body, section_name):
@@ -436,6 +576,9 @@ def main():
         epic_future = ex.submit(gh_graphql_epic_summary)
         queue_future = ex.submit(gh_graphql_merge_queue)
         container_future = ex.submit(running_containers)
+        # Code health gates dispatch — runs in parallel with gh queries so the
+        # critical-path delay is min(gh, build) not gh+build.
+        code_health_future = ex.submit(code_health_check)
 
         label_results = {}
         for fut, lbl in list(label_futures.items()):
@@ -468,6 +611,15 @@ def main():
             degraded_reasons.append("docker ps unavailable — container list incomplete")
             containers = []
 
+        try:
+            code_health = code_health_future.result()
+        except Exception as e:
+            code_health = {
+                "ok": False, "skipped": True,
+                "skipped_reason": f"code_health_check raised: {e}",
+                "checks": {},
+            }
+
     out["pipeline_state"] = {
         "epics_open": label_results["pipeline:epic"],
         "drafts": label_results["pipeline:draft"],
@@ -479,6 +631,18 @@ def main():
     }
     out["running_containers"] = containers
     out["merge_queue"] = merge_queue
+    out["code_health"] = code_health
+    if not code_health.get("ok"):
+        if code_health.get("skipped"):
+            degraded_reasons.append(
+                f"code health check skipped: {code_health.get('skipped_reason')}"
+            )
+        else:
+            failing = [name for name, c in code_health.get("checks", {}).items() if not c.get("ok")]
+            degraded_reasons.append(
+                "develop is broken — DO NOT DISPATCH this cycle. Failing: "
+                + ", ".join(failing)
+            )
     queued_pr_numbers = {e["pr_number"] for e in merge_queue}
 
     out["epics"] = [
@@ -638,11 +802,23 @@ def write_output(out, mode):
         return
 
     # Default: emit a short summary to stdout + path reference
+    code_health = out.get("code_health") or {}
     summary = {
         "cache_file": str(cache_path),
         "cycle_generated_at": out["cycle_generated_at"],
         "degraded": out["degraded"],
         "degraded_reasons": out["degraded_reasons"],
+        "code_health": {
+            "ok": code_health.get("ok", False),
+            "skipped": code_health.get("skipped", False),
+            "skipped_reason": code_health.get("skipped_reason"),
+            "develop_sha": code_health.get("develop_sha"),
+            "failing_checks": [
+                name for name, c in (code_health.get("checks") or {}).items()
+                if not c.get("ok")
+            ],
+        },
+        "dispatch_blocked": not code_health.get("ok", False) and not code_health.get("skipped", False),
         "counts": {
             "ready": len(out.get("ready_stories", [])),
             "in_progress": len(out.get("in_progress_stories", [])),
