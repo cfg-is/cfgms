@@ -3,6 +3,7 @@
 package cert
 
 import (
+	"crypto/rsa"
 	"crypto/x509"
 	"fmt"
 	"strings"
@@ -257,9 +258,10 @@ func (v *Validator) validateBasicConstraints(cert *x509.Certificate, result *Val
 
 	// Check key size (for RSA keys)
 	if cert.PublicKeyAlgorithm == x509.RSA {
-		// This is a simplified check - in practice you'd need to cast to *rsa.PublicKey
-		// and check the key size properly
-		result.Warnings = append(result.Warnings, "consider verifying RSA key size is adequate (2048+ bits)")
+		if rsaKey, ok := cert.PublicKey.(*rsa.PublicKey); ok && rsaKey.N.BitLen() < 2048 {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("RSA key size %d bits is below minimum recommended 2048 bits", rsaKey.N.BitLen()))
+		}
 	}
 
 	return nil
