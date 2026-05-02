@@ -138,16 +138,15 @@ func (t *TemplateManager) ApplyTemplate(ctx context.Context, templateID, subject
 		TenantId:  tenantID,
 	}
 
+	if templateID == "emergency.break-glass" {
+		assignment.ExpiresAt = time.Now().Add(4 * time.Hour).Unix()
+	}
+
 	if err := t.rbacManager.AssignRole(ctx, assignment); err != nil {
 		// Cleanup: delete the created role if assignment fails
 		_ = t.rbacManager.DeleteRole(ctx, role.Id)
 		return fmt.Errorf("failed to assign template role: %w", err)
 	}
-
-	// Handle conditional permissions if any
-	// In the current implementation, conditional permissions are not stored with role assignments
-	// This is a limitation that would need to be addressed in a future version
-	// For now, we acknowledge but do not process conditional permissions from templates
 
 	return nil
 }
@@ -325,18 +324,18 @@ func (t *TemplateManager) getSystemTemplates() []*common.PermissionTemplate {
 		{
 			Id:            "emergency.break-glass",
 			Name:          "Emergency Break-Glass Access",
-			Description:   "Emergency access template with time-limited full privileges",
+			Description:   "Emergency access template. Assignments expire after 4 hours and must be renewed explicitly. Grants emergency.access on system resources only.",
 			Category:      "emergency",
-			PermissionIds: []string{"*"}, // All permissions
+			PermissionIds: []string{"emergency.break-glass"},
 			ConditionalPermissions: []*common.ConditionalPermission{
 				{
 					Id:           "emergency-time-limited",
-					PermissionId: "*",
+					PermissionId: "emergency.break-glass",
 					Conditions: []*common.Condition{
 						{
 							Type:     "time",
 							Operator: common.ConditionOperator_CONDITION_OPERATOR_LESS_THAN,
-							Values:   []string{time.Now().Add(4 * time.Hour).Format(time.RFC3339)},
+							Values:   []string{"4h"}, // duration resolved at assignment time, not template load time
 						},
 					},
 				},

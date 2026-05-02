@@ -69,6 +69,20 @@ func (e *AuthEngine) CheckPermission(ctx context.Context, request *common.Access
 		}, nil
 	}
 
+	// Get valid (non-expired) role assignments to enforce ExpiresAt on break-glass and other
+	// time-limited assignments. GetSubjectAssignments already filters out expired entries.
+	validAssignments, err := e.assignmentStore.GetSubjectAssignments(ctx, request.SubjectId, request.TenantId)
+	if err != nil {
+		return &common.AccessResponse{
+			Granted: false,
+			Reason:  fmt.Sprintf("Failed to get subject assignments: %v", err),
+		}, nil
+	}
+	validRoleMap := make(map[string]*common.RoleAssignment, len(validAssignments))
+	for _, a := range validAssignments {
+		validRoleMap[a.RoleId] = a
+	}
+
 	// Get subject's roles in the tenant context
 	roles, err := e.subjectStore.GetSubjectRoles(ctx, request.SubjectId, request.TenantId)
 	if err != nil {
@@ -83,6 +97,11 @@ func (e *AuthEngine) CheckPermission(ctx context.Context, request *common.Access
 
 	// Check each role for the required permission
 	for _, role := range roles {
+		// Skip roles absent from the valid-assignment map; their assignment is expired or not yet recorded.
+		if _, ok := validRoleMap[role.Id]; !ok {
+			continue
+		}
+
 		appliedRoles = append(appliedRoles, role.Name)
 
 		// Get role permissions
@@ -173,6 +192,11 @@ func (e *AuthEngine) ValidateAccess(ctx context.Context, authContext *common.Aut
 // permissionMatches checks if a permission matches the requested permission ID
 // Supports exact matches and wildcard patterns
 func (e *AuthEngine) permissionMatches(permission *common.Permission, requestedPermission string) bool {
+	// Literal "*" is not a wildcard match; use "prefix.*" syntax for namespace wildcards.
+	if permission.Id == "*" {
+		return false
+	}
+
 	// Exact match
 	if permission.Id == requestedPermission {
 		return true

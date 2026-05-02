@@ -210,6 +210,17 @@ var DefaultPermissions = []*common.Permission{
 		ResourceType: "system",
 		Actions:      []string{"create", "read", "update", "delete", "execute"},
 	},
+
+	// Emergency Access Permissions
+	// emergency.break-glass authorises break-glass emergency access on system resources only.
+	// Must never be granted to non-emergency roles.
+	{
+		Id:           "emergency.break-glass",
+		Name:         "Emergency Break-Glass Access",
+		Description:  "Authorises emergency break-glass access on system resources only. Must never be granted to non-emergency roles.",
+		ResourceType: "system",
+		Actions:      []string{"emergency.access"},
+	},
 }
 
 // Default system roles that combine permissions logically
