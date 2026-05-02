@@ -27,6 +27,7 @@
       "Bash(./.claude/scripts/pr-review-helper.sh ci-details *)",
       "Bash(./.claude/scripts/pr-review-helper.sh diff-scan *)",
       "Bash(./.claude/scripts/pr-review-helper.sh doc-scan)",
+      "Bash(./.claude/scripts/rebase-pr.sh *)",
       "Bash(./scripts/pipeline-helper.sh view *)",
       "Bash(./scripts/pipeline-helper.sh list-by-label *)",
       "Bash(./scripts/pipeline-helper.sh list-prs *)",
