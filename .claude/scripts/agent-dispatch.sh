@@ -859,8 +859,12 @@ else:
     fi
 
     # Apply pipeline:reviewing label BEFORE spawning the container so the host
-    # gate is set even if launch fails.
-    if ! gh pr edit "$pr_num" --repo cfg-is/cfgms --add-label "pipeline:reviewing" 2>/dev/null; then
+    # gate is set even if launch fails. Use the REST API directly because
+    # `gh pr edit --add-label` queries pullRequest.projectCards, which emits a
+    # GraphQL deprecation warning and exits 1 even on success. The Issues
+    # labels endpoint applies cleanly (PRs and issues share label storage).
+    if ! gh api -X POST "/repos/cfg-is/cfgms/issues/${pr_num}/labels" \
+        -f "labels[]=pipeline:reviewing" >/dev/null 2>&1; then
       echo "REVIEW_REFUSED:${pr_num}:label_apply_failed"
       exit 1
     fi
@@ -870,7 +874,7 @@ else:
 
     # Fresh clone at the PR branch.
     github_url=$(git -C "$REPO_ROOT" remote get-url origin)
-    trap "rm -rf '$clone_dir'; gh pr edit '$pr_num' --repo cfg-is/cfgms --remove-label 'pipeline:reviewing' >/dev/null 2>&1 || true" ERR
+    trap "rm -rf '$clone_dir'; gh api -X DELETE \"/repos/cfg-is/cfgms/issues/${pr_num}/labels/pipeline:reviewing\" >/dev/null 2>&1 || true" ERR
     git clone --quiet --local --branch develop "$REPO_ROOT" "$clone_dir"
     cd "$clone_dir"
     git remote set-url origin "$github_url"
@@ -904,9 +908,10 @@ agent definition. Then take exactly ONE of these closing actions:
 - **WAIT (CI pending)**: post the WAIT verdict comment and exit cleanly. The
   host PO will re-dispatch when CI completes.
 
-CRITICAL — final step regardless of verdict:
+CRITICAL — final step regardless of verdict, run this exact command (uses
+the REST API to avoid a spurious GraphQL projectCards warning):
 
-  gh pr edit ${pr_num} --repo cfg-is/cfgms --remove-label "pipeline:reviewing"
+  gh api -X DELETE "/repos/cfg-is/cfgms/issues/${pr_num}/labels/pipeline:reviewing"
 
 The host PO uses that label as the in-flight gate. If you exit without
 removing it, the PR will never be re-reviewed (the entrypoint has a failsafe
@@ -944,7 +949,7 @@ PROMPT_EOF
     else
       # Launch failed — strip label so PR is re-eligible, then clean up.
       echo "LAUNCH_FAILED:${container_name}:${container_id}"
-      gh pr edit "$pr_num" --repo cfg-is/cfgms --remove-label "pipeline:reviewing" 2>/dev/null || true
+      gh api -X DELETE "/repos/cfg-is/cfgms/issues/${pr_num}/labels/pipeline:reviewing" >/dev/null 2>&1 || true
       rm -rf "$clone_dir"
       echo "CLEANED:clone:${clone_dir}"
       exit 1
@@ -988,7 +993,7 @@ PROMPT_EOF
 
       # Strip the in-flight label so the PO can re-dispatch.
       if [[ -n "$pr_num" ]]; then
-        gh pr edit "$pr_num" --repo cfg-is/cfgms --remove-label "pipeline:reviewing" >/dev/null 2>&1 || true
+        gh api -X DELETE "/repos/cfg-is/cfgms/issues/${pr_num}/labels/pipeline:reviewing" >/dev/null 2>&1 || true
         echo "CLEANED:label:pipeline:reviewing:pr-${pr_num}"
       fi
 
