@@ -4,8 +4,7 @@
 package cmd
 
 import (
-	"fmt"
-
+	"github.com/cfgis/cfgms/pkg/version"
 	"github.com/spf13/cobra"
 )
 
@@ -13,7 +12,6 @@ var (
 	// Global flags
 	verbose bool
 	output  string
-	config  string
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -37,7 +35,6 @@ func init() {
 	// Global flags
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
 	rootCmd.PersistentFlags().StringVarP(&output, "output", "o", "text", "output format (text, json, html, unified, side-by-side, markdown)")
-	rootCmd.PersistentFlags().StringVarP(&config, "config", "c", "", "config file path")
 
 	// Add subcommands
 	rootCmd.AddCommand(diffCmd)
@@ -54,7 +51,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show version information",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("cfg version 0.3.0-alpha")
-		fmt.Println("CFGMS Configuration Management System")
+		cmd.Printf("cfg %s\n", version.Info())
+		cmd.Println("CFGMS Configuration Management System")
 	},
 }
