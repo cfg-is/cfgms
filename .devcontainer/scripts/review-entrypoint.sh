@@ -74,7 +74,9 @@ if [ -n "$PR_NUM" ]; then
     if gh pr view "$PR_NUM" --repo cfg-is/cfgms --json labels \
         --jq '[.labels[].name] | index("pipeline:reviewing")' 2>/dev/null | grep -q '^[0-9]'; then
         echo "WARN: pipeline:reviewing still on PR #${PR_NUM} after review — stripping (failsafe)"
-        gh pr edit "$PR_NUM" --repo cfg-is/cfgms --remove-label "pipeline:reviewing" 2>/dev/null || true
+        # Use REST API: gh pr edit triggers a GraphQL projectCards deprecation
+        # warning that exits non-zero even on success.
+        gh api -X DELETE "/repos/cfg-is/cfgms/issues/${PR_NUM}/labels/pipeline:reviewing" >/dev/null 2>&1 || true
     fi
 fi
 
