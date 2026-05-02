@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -18,6 +19,7 @@ var (
 	tokenGroup         string
 	tokenExpiresIn     string
 	tokenSingleUse     bool
+	tokenJSONOutput    bool
 
 	// API connection flags
 	tokenAPIURL      string
@@ -144,12 +146,14 @@ func init() {
 	tokenCreateCmd.Flags().StringVar(&tokenGroup, "group", "", "Optional group identifier")
 	tokenCreateCmd.Flags().StringVar(&tokenExpiresIn, "expires", "", "Expiration duration (e.g., 24h, 7d, 30d)")
 	tokenCreateCmd.Flags().BoolVar(&tokenSingleUse, "single-use", false, "Token can only be used once")
+	tokenCreateCmd.Flags().BoolVar(&tokenJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
 	_ = tokenCreateCmd.MarkFlagRequired("tenant-id")
 	_ = tokenCreateCmd.MarkFlagRequired("controller-url")
 
 	// List command flags
 	tokenListCmd.Flags().StringVar(&tokenTenantID, "tenant-id", "", "Filter by tenant ID (optional)")
+	tokenListCmd.Flags().BoolVar(&tokenJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
 	// Add subcommands
 	tokenCmd.AddCommand(tokenCreateCmd)
@@ -227,6 +231,10 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create token: %w", err)
 	}
 
+	if tokenJSONOutput {
+		return json.NewEncoder(os.Stdout).Encode(token)
+	}
+
 	// Output results
 	fmt.Printf("Registration Token: %s\n\n", token.Token)
 
@@ -267,6 +275,10 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 	resp, err := client.ListTokens(context.Background(), tokenTenantID)
 	if err != nil {
 		return fmt.Errorf("failed to list tokens: %w", err)
+	}
+
+	if tokenJSONOutput {
+		return json.NewEncoder(os.Stdout).Encode(resp)
 	}
 
 	if resp.Total == 0 {
