@@ -3,7 +3,7 @@ name: dispatch
 description: Launch headless agent containers for GitHub issues, branches, or PR fixes — or start interactive sessions
 parameters:
   - name: targets
-    description: "Issue numbers, branch names (containing '/'), 'fix-pr <NUM>', or 'interactive <BRANCH>'. Space-separated. Use '--dry-run' to preview."
+    description: "Issue numbers, branch names (containing '/'), 'fix-pr <NUM>', 'acceptance-review <PR>', or 'interactive <BRANCH>'. Space-separated. Use '--dry-run' to preview."
     required: true
 ---
 
@@ -21,6 +21,7 @@ Launch isolated agent containers to implement GitHub issues, continue work on br
    - Purely numeric → **issue number** (existing behavior)
    - Contains `/` → **branch name** (headless branch mode)
    - `fix-pr` followed by a number → **PR-fix mode** (headless)
+   - `acceptance-review` followed by a number → **acceptance-review mode** (headless review container, Section 4e)
    - `interactive` followed by a target → **interactive mode**. The target can be:
      - A branch name (contains `/`): `interactive feature/foo`
      - An issue number (numeric): `interactive 416`
@@ -188,6 +189,34 @@ The target determines how the clone is created; the launch is always the same (`
       "To view the session URL: `docker logs cfg-agent-interactive-<sanitized>`"
       "To drop into a shell: `docker exec -it cfg-agent-interactive-<sanitized> bash`"
       No label updates — interactive is user-driven.
+
+### 4e. Acceptance-Review Dispatch
+
+For each `acceptance-review <PR_NUM>`:
+
+   a. **Validate PR is open**: `gh pr view <PR> --repo cfg-is/cfgms --json state,headRefName,body,labels`. Skip with warning if not OPEN. The dispatch script will also refuse, but pre-flight gives the user a clearer message.
+
+   b. **Auto-detect story**: extract `Fixes #NNN` (or Closes/Resolves) from PR body, or `feature/story-(\d+)` from `headRefName`. The dispatch script does this too — surface its `REVIEW_REFUSED:<PR>:no_story_link` exit if neither matches.
+
+   c. **Dispatch headless review** (skip in dry-run):
+      ```bash
+      ./.claude/scripts/agent-dispatch.sh review-pr <PR_NUM>
+      ```
+      Output is one of:
+      - `REVIEW_DISPATCHED:<PR>:<STORY>:<container_id>` — running headless; check `/isoagents` for progress
+      - `REVIEW_REFUSED:<PR>:<reason>` — see reasons below
+      - `LAUNCH_FAILED:<container_name>:<error>` — Docker error; the script auto-strips the in-flight label
+
+      Refusal reasons and recovery:
+      - `pr_not_found` / `pr_state_<X>` — PR is closed/merged or doesn't exist
+      - `fork_branch_<owner>` — PR is from a fork; reviews of fork PRs aren't supported (no push rights)
+      - `no_story_link` — PR has no `Fixes #N` and no `feature/story-N` branch; manually associate or skip
+      - `already_in_flight` — `pipeline:reviewing` already on PR; another review is running. Use `/isoagents` to check on it.
+      - `container_exists` — a stale container exists; run `./.claude/scripts/agent-dispatch.sh cleanup-stale-reviews` first
+
+   d. **Tell the user**:
+      "Acceptance Reviewer dispatched headless for PR #<NUM>. Container: cfg-agent-review-pr-<NUM>. The review comment will appear on the PR when it's done (~5-15 min). Use `/isoagents` to check progress."
+      No label updates needed — the dispatch script applies `pipeline:reviewing` and the container strips it on exit.
 
 5. **Print full agent dashboard** (skip in dry-run): After launch, gather state for ALL agents (not just the ones dispatched this run):
 

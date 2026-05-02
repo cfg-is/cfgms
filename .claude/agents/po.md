@@ -310,25 +310,69 @@ For each `pipeline:fix` story, find its PR and dispatch the fix agent in one cal
 ```
 This cleans any stale container from a prior failed attempt, re-clones, and launches.
 
-**Step 5 — QA pass (Acceptance Reviewer) — FIFO order:**
-Find agent PRs (branch `feature/story-*`) without Acceptance Reviewer comment, sorted by creation timestamp ascending (oldest first). FIFO order minimizes rebase churn: the oldest PR was based on the earliest develop snapshot, so it has the fewest accumulated conflicts. Once it lands, the next-oldest only needs to rebase against one new merge instead of an arbitrary set.
+**Step 5 — QA pass (Acceptance Reviewer) — headless dispatch in FIFO order:**
+
+Inline subagent spawn (the previous behavior) caused multi-minute hangs in the
+host session because each tool call triggers an approval prompt in `default`
+permission mode. The acceptance reviewer now runs in a dedicated headless
+container with skip-permissions inside, and the host PO dispatches it
+non-blocking and moves on.
+
+**Find PRs that need review.** A PR is review-eligible when:
+- branch is `feature/story-*`
+- state is OPEN
+- has no comment from `acceptance-reviewer`
+- does NOT have label `pipeline:reviewing` (in flight)
+- does NOT have label `pipeline:fix` (waiting on dev fix; review re-runs after fix lands)
+
+Sorted by creation timestamp ascending (oldest first) — FIFO order minimizes
+rebase churn.
 
 ```bash
 gh pr list --repo cfg-is/cfgms --search "head:feature/story-" --state open \
-  --json number,headRefName,createdAt,comments \
-  --jq '[.[] | select(.comments | map(.author.login) | contains(["acceptance-reviewer"]) | not)] | sort_by(.createdAt)'
+  --json number,headRefName,createdAt,comments,labels \
+  --jq '[.[] | select((.comments | map(.author.login) | contains(["acceptance-reviewer"]) | not)
+        and ([.labels[].name] | contains(["pipeline:reviewing"]) | not)
+        and ([.labels[].name] | contains(["pipeline:fix"]) | not))] | sort_by(.createdAt)'
 ```
 
-Process PRs **serially in FIFO order** (do not spawn reviewers in parallel — parallel spawn creates a race where two reviewers both decide to auto-merge PRs that conflict with each other). For each PR in ascending `createdAt` order:
+**Dispatch one review per cycle in FIFO order.** Do not dispatch multiple in
+parallel — even though headless containers make it cheap, parallel reviews can
+both decide to auto-merge PRs that conflict at the file level. Pick the oldest
+eligible PR:
 
-1. **Dependency/conflict check**: If this PR shares files with a currently-merging or in-progress PR that is *older*, skip it and continue to the next PR in the queue. A PR held for a conflict gate does **not** block strictly-younger PRs from being reviewed if they don't share that dependency.
-2. **Spawn Acceptance Reviewer**: Use the **Agent tool** (not Bash): subagent_type `acceptance-reviewer`, prompt `"Review agent PR. pr:<PR_NUM> story:<STORY_NUM>"`, mode `auto`.
-3. **Wait for the reviewer to complete** before spawning the next one. This ensures merges happen in FIFO order and the next PR in the queue is reviewed against an up-to-date develop.
+```bash
+./.claude/scripts/agent-dispatch.sh review-pr <PR_NUM>
+```
 
-The Acceptance Reviewer (`.claude/agents/acceptance-reviewer.md`) verifies CI, checks acceptance criteria against the diff, and renders a verdict:
-- Zero findings: enqueue via `gh pr merge <PR_NUM> --squash` (merge queue handles rebase + re-validation), clean up container/worktree
-- Any findings (first review): apply `pipeline:fix` to story, post review comment on PR
-- Any findings (second review): apply `pipeline:blocked`, assign to founder
+Output is one of:
+- `REVIEW_DISPATCHED:<PR>:<STORY>:<container_id>` — running headless. Move on; the comment will appear on the PR when done.
+- `REVIEW_REFUSED:<PR>:<reason>` — see Section 4e of `.claude/commands/dispatch.md` for reasons. Common cases: `pr_state_<X>` (PR closed), `no_story_link` (manually associate), `already_in_flight` (skip — another review is running).
+
+After dispatch, **do NOT wait**. The next cron cycle will see the
+`acceptance-reviewer` comment on the PR (if review completed) and move on to
+other work. The dispatch is fire-and-forget on the host side.
+
+**Failsafe cleanup.** Run once per cron cycle, near the start (before Step 5):
+
+```bash
+./.claude/scripts/agent-dispatch.sh cleanup-stale-reviews
+```
+
+This removes review containers that exited >30 minutes ago without stripping
+the `pipeline:reviewing` label, archives their `agent-result.json`, and frees
+the PR for re-dispatch. Without it, a single crashed review wedges the PR
+indefinitely.
+
+**What the headless reviewer does** (`.claude/agents/acceptance-reviewer.md`,
+unchanged): verifies CI, checks acceptance criteria against the diff, posts
+the structured comment, and:
+- Zero findings: enqueues via `gh pr merge <PR> --squash` (merge queue handles rebase + re-validation), cleans up the dev agent's container/worktree
+- Any findings (first review): applies `pipeline:fix` to the story
+- Any findings (second review): applies `pipeline:blocked`, assigns to founder
+Final step in all cases: removes `pipeline:reviewing` from the PR. The
+container's `review-entrypoint.sh` has a failsafe that strips the label even
+if the agent crashes before getting to it.
 
 **Step 6 — Planning Team (BA + Tech Lead collaboration):**
 Find `pipeline:epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each epic, orchestrate a collaborative planning session where BA and Tech Lead work together to produce stories that are ready on the first try.
