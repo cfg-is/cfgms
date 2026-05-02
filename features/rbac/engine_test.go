@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -137,9 +138,15 @@ func TestAuthEngine_CheckPermission_DBError_Propagates(t *testing.T) {
 		Id:       "test-subject",
 		TenantId: "tenant1",
 		IsActive: true,
-		RoleIds:  []string{"db-error-role"},
 	}
 	require.NoError(t, store.CreateSubject(ctx, subject))
+
+	// Formally assign the role so it appears in the valid-assignment map used by CheckPermission.
+	require.NoError(t, store.AssignRole(ctx, &common.RoleAssignment{
+		SubjectId: "test-subject",
+		RoleId:    "db-error-role",
+		TenantId:  "tenant1",
+	}))
 
 	// Inject a non-not-found DB error (e.g., connection failure)
 	dbErr := fmt.Errorf("connection refused: postgres is unavailable")
@@ -185,9 +192,20 @@ func TestAuthEngine_CheckPermission_NotFoundError_Skips(t *testing.T) {
 		Id:       "test-subject",
 		TenantId: "tenant1",
 		IsActive: true,
-		RoleIds:  []string{"ghost-role", "valid-role"},
 	}
 	require.NoError(t, store.CreateSubject(ctx, subject))
+
+	// Formally assign both roles so they appear in the valid-assignment map.
+	require.NoError(t, store.AssignRole(ctx, &common.RoleAssignment{
+		SubjectId: "test-subject",
+		RoleId:    "ghost-role",
+		TenantId:  "tenant1",
+	}))
+	require.NoError(t, store.AssignRole(ctx, &common.RoleAssignment{
+		SubjectId: "test-subject",
+		RoleId:    "valid-role",
+		TenantId:  "tenant1",
+	}))
 
 	// ghost-role returns a not-found error from GetRolePermissions
 	notFoundErr := fmt.Errorf("role ghost-role not found")
@@ -204,4 +222,67 @@ func TestAuthEngine_CheckPermission_NotFoundError_Skips(t *testing.T) {
 	require.NoError(t, err, "not-found role error must be skipped, not propagated")
 	require.NotNil(t, resp)
 	assert.True(t, resp.Granted, "permission must be granted via the valid role after skipping the ghost role")
+}
+
+// TestPermissionMatches_LiteralStar_ReturnsFalse verifies that a Permission with
+// Id "*" does not match any requested permission string. The literal "*" is not a
+// valid wildcard; only the "prefix.*" form is supported.
+func TestPermissionMatches_LiteralStar_ReturnsFalse(t *testing.T) {
+	store, _ := setupEngineTestStore(t)
+	engine := NewAuthEngine(store, store, store, store)
+
+	starPerm := &common.Permission{Id: "*", Name: "Wildcard (invalid)"}
+
+	assert.False(t, engine.permissionMatches(starPerm, "system.admin"),
+		"Permission{Id:\"*\"} must not match \"system.admin\"")
+	assert.False(t, engine.permissionMatches(starPerm, "steward.read"),
+		"Permission{Id:\"*\"} must not match \"steward.read\"")
+	assert.False(t, engine.permissionMatches(starPerm, "*"),
+		"Permission{Id:\"*\"} must not match literal \"*\" request")
+	assert.False(t, engine.permissionMatches(starPerm, "anything.at.all"),
+		"Permission{Id:\"*\"} must not match any permission string")
+}
+
+// TestAuthEngine_CheckPermission_ExpiredAssignment_Denied verifies that a role
+// assignment with ExpiresAt in the past does not grant permissions. The permission
+// must be denied even though the role still exists and has the required permission.
+func TestAuthEngine_CheckPermission_ExpiredAssignment_Denied(t *testing.T) {
+	store, ctx := setupEngineTestStore(t)
+
+	perm := &common.Permission{Id: "steward.read", Name: "Steward Read", ResourceType: "steward", Actions: []string{"read"}}
+	store.LoadPermissions([]*common.Permission{perm})
+
+	role := &common.Role{
+		Id:            "temp-role",
+		Name:          "Temporary Role",
+		TenantId:      "tenant1",
+		PermissionIds: []string{"steward.read"},
+	}
+	store.LoadRoles([]*common.Role{role})
+
+	subject := &common.Subject{
+		Id:       "temp-subject",
+		TenantId: "tenant1",
+		IsActive: true,
+	}
+	require.NoError(t, store.CreateSubject(ctx, subject))
+
+	// Assign the role with an ExpiresAt set 1 hour in the past.
+	expiredAssignment := &common.RoleAssignment{
+		SubjectId: "temp-subject",
+		RoleId:    "temp-role",
+		TenantId:  "tenant1",
+		ExpiresAt: time.Now().Add(-1 * time.Hour).Unix(),
+	}
+	require.NoError(t, store.AssignRole(ctx, expiredAssignment))
+
+	engine := NewAuthEngine(store, store, store, store)
+
+	resp, err := engine.CheckPermission(ctx, &common.AccessRequest{
+		SubjectId:    "temp-subject",
+		PermissionId: "steward.read",
+		TenantId:     "tenant1",
+	})
+	require.NoError(t, err)
+	assert.False(t, resp.Granted, "expired role assignment must not grant permission")
 }

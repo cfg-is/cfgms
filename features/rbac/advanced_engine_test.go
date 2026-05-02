@@ -38,7 +38,12 @@ func TestAdvancedAuthEngine_BasicRBACFlow(t *testing.T) {
 		DisplayName: "Test User",
 		TenantId:    "tenant456",
 		IsActive:    true,
-		RoleIds:     []string{"admin"},
+	}))
+	// Formally assign the role so it appears in the valid-assignment map used by CheckPermission.
+	require.NoError(t, store.AssignRole(ctx, &common.RoleAssignment{
+		SubjectId: "user123",
+		RoleId:    "admin",
+		TenantId:  "tenant456",
 	}))
 
 	engine := NewAdvancedAuthEngine(store, store, store, store)

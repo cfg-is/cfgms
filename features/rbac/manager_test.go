@@ -846,9 +846,15 @@ func TestManager_CheckPermission_DbError_RecordsAuditEvent(t *testing.T) {
 		Id:       subjectID,
 		TenantId: tenantID,
 		IsActive: true,
-		RoleIds:  []string{roleID},
 	}
 	require.NoError(t, manager.store.CreateSubject(ctx, subject))
+
+	// Formally assign the role so it appears in the valid-assignment map used by CheckPermission.
+	require.NoError(t, manager.store.AssignRole(ctx, &common.RoleAssignment{
+		SubjectId: subjectID,
+		RoleId:    roleID,
+		TenantId:  tenantID,
+	}))
 
 	// Inject a non-not-found DB error into the base engine's role store.
 	dbErr := fmt.Errorf("simulated postgres connection failure")
