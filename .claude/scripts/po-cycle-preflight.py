@@ -502,7 +502,7 @@ def compute_dispatch_recommendations(ready_stories, active_stories, dep_states):
     return recommendations
 
 
-def compute_review_recommendations(pr_summaries, queued_pr_numbers):
+def compute_review_recommendations(pr_summaries, queued_pr_numbers, active_fix_pr_nums=None):
     """Decide what to do with each open story PR.
 
     Action vocabulary:
@@ -511,16 +511,38 @@ def compute_review_recommendations(pr_summaries, queued_pr_numbers):
               when mergeStateStatus is DIRTY (conflicts) or BEHIND (base advanced).
     - enqueue_merge: review armed + green + mergeable but neither in queue nor
               auto-merge-enabled — manual `gh pr merge --squash` to enqueue.
-    - skip: in-flight (in queue or auto-merge armed); leave alone.
+    - skip: in-flight (in queue, auto-merge armed, OR has active fix-agent
+              container — fix-agent and rebase-pr.sh would race on the same
+              branch); leave alone.
     - spawn_acceptance_reviewer: needs first-time review (CI green, no comment).
     - defer: CI still pending.
     - investigate: CI red and not stale-base; needs diagnose + dispatch-fix.
+
+    `active_fix_pr_nums`: set of PR numbers with `cfg-agent-pr-fix-<N>`
+    containers currently running. We never recommend rebase or dispatch-fix
+    against a PR whose fix container is actively working — both push to the
+    same branch and the second push wins, clobbering whichever finished
+    first. The host loops back next cycle once the container exits.
     """
+    if active_fix_pr_nums is None:
+        active_fix_pr_nums = set()
     recs = []
     for pr in pr_summaries:
         overall = pr["ci_summary"]["overall"]
         in_queue = pr["pr"] in queued_pr_numbers
         ms = (pr.get("merge_state_status") or "").upper()
+        fix_in_flight = pr["pr"] in active_fix_pr_nums
+
+        # PRIORITY 0: a fix-agent container is actively working on this PR.
+        # Any rebase or new dispatch-fix would race-push against it. Wait.
+        if fix_in_flight:
+            recs.append({
+                "pr": pr["pr"],
+                "story": pr["story_number"],
+                "action": "skip",
+                "reason": "fix-agent in flight (cfg-agent-pr-fix-<PR> running) — wait for it to exit before rebase or re-dispatch",
+            })
+            continue
 
         # PRIORITY 1: blocked-by-base detection. A PR with DIRTY or BEHIND
         # merge state can't merge until its branch is rebased onto develop.
@@ -823,8 +845,17 @@ def main():
     out["dispatch_recommendations"] = compute_dispatch_recommendations(
         ready_parsed, active_parsed, dep_states,
     )
+    # Pull the active fix-agent set out of running_containers so the review
+    # recommender can skip rebase/dispatch-fix work for any PR with an
+    # in-flight fix container. Container name pattern: cfg-agent-pr-fix-<PR>.
+    active_fix_pr_nums = set()
+    for name in containers or []:
+        if name.startswith("cfg-agent-pr-fix-"):
+            tail = name.removeprefix("cfg-agent-pr-fix-")
+            if tail.isdigit():
+                active_fix_pr_nums.add(int(tail))
     out["review_recommendations"] = compute_review_recommendations(
-        pr_summaries, queued_pr_numbers,
+        pr_summaries, queued_pr_numbers, active_fix_pr_nums,
     )
 
     parse_warning_count = sum(
