@@ -5,7 +5,6 @@ package siem
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/workflow/trigger"
@@ -280,43 +279,9 @@ func (wi *WorkflowIntegration) evaluateSIEMCondition(condition *trigger.SIEMCond
 		}
 	}
 
-	// Apply SIEM operator (reuse existing logic from SIEM processor)
-	return wi.applySIEMOperator(condition.Operator, fieldValue, condition.Value, condition.CaseSensitive)
-}
-
-// applySIEMOperator applies a SIEM operator for condition evaluation
-func (wi *WorkflowIntegration) applySIEMOperator(operator trigger.SIEMOperator, fieldValue, conditionValue interface{}, caseSensitive bool) bool {
-	// This mirrors the logic from the existing SIEM processor
-	// We could refactor to share this logic, but keeping it here for now for clarity
-
 	fieldStr := fmt.Sprintf("%v", fieldValue)
-	conditionStr := fmt.Sprintf("%v", conditionValue)
-
-	if !caseSensitive {
-		fieldStr = strings.ToLower(fieldStr)
-		conditionStr = strings.ToLower(conditionStr)
-	}
-
-	switch operator {
-	case trigger.SIEMOperatorEquals:
-		return fieldStr == conditionStr
-	case trigger.SIEMOperatorNotEquals:
-		return fieldStr != conditionStr
-	case trigger.SIEMOperatorContains:
-		return strings.Contains(fieldStr, conditionStr)
-	case trigger.SIEMOperatorNotContains:
-		return !strings.Contains(fieldStr, conditionStr)
-	case trigger.SIEMOperatorStartsWith:
-		return strings.HasPrefix(fieldStr, conditionStr)
-	case trigger.SIEMOperatorEndsWith:
-		return strings.HasSuffix(fieldStr, conditionStr)
-	case trigger.SIEMOperatorExists:
-		return fieldValue != nil
-	case trigger.SIEMOperatorNotExists:
-		return fieldValue == nil
-	default:
-		return false
-	}
+	conditionStr := fmt.Sprintf("%v", condition.Value)
+	return applyOperator(string(condition.Operator), fieldStr, conditionStr, condition.CaseSensitive)
 }
 
 // executeTrigger executes a workflow trigger for a security event
