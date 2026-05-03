@@ -16,12 +16,12 @@ import (
 func TestADModuleConfig(t *testing.T) {
 	t.Run("valid configuration", func(t *testing.T) {
 		config := &ADModuleConfig{
-			Domain:        "example.com",
-			AuthMethod:    "simple",
-			OperationType: "read",
-			ObjectTypes:   []string{"user", "group"},
-			Username:      "service-account",
-			Password:      "password123",
+			Domain:            "example.com",
+			AuthMethod:        "simple",
+			OperationType:     "read",
+			ObjectTypes:       []string{"user", "group"},
+			Username:          "service-account",
+			PasswordSecretKey: "ad/example.com/svc_password",
 		}
 
 		err := config.Validate()
@@ -90,21 +90,21 @@ func TestADModuleConfig(t *testing.T) {
 
 	t.Run("YAML serialization", func(t *testing.T) {
 		config := &ADModuleConfig{
-			Domain:        "example.com",
-			AuthMethod:    "simple",
-			OperationType: "read",
-			ObjectTypes:   []string{"user", "group"},
-			Username:      "service-account",
-			Password:      "secret123",
+			Domain:            "example.com",
+			AuthMethod:        "simple",
+			OperationType:     "read",
+			ObjectTypes:       []string{"user", "group"},
+			Username:          "service-account",
+			PasswordSecretKey: "ad/example.com/svc_password",
 		}
 
-		// Test ToYAML (should redact password)
+		// Test ToYAML — password_secret_key is serialized; no plaintext password exists
 		yamlData, err := config.ToYAML()
 		require.NoError(t, err)
 		yamlStr := string(yamlData)
 		assert.Contains(t, yamlStr, "domain: example.com")
-		assert.Contains(t, yamlStr, "[REDACTED]")
-		assert.NotContains(t, yamlStr, "secret123")
+		assert.Contains(t, yamlStr, "password_secret_key: ad/example.com/svc_password")
+		assert.NotContains(t, yamlStr, "password:")
 
 		// Test FromYAML
 		newConfig := &ADModuleConfig{}
@@ -112,6 +112,7 @@ func TestADModuleConfig(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "example.com", newConfig.Domain)
 		assert.Equal(t, "simple", newConfig.AuthMethod)
+		assert.Equal(t, "ad/example.com/svc_password", newConfig.PasswordSecretKey)
 	})
 }
 

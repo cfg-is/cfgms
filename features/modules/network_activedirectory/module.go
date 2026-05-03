@@ -15,11 +15,13 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // activeDirectoryModule implements the Module interface for Active Directory management
 type activeDirectoryModule struct {
-	logger logging.Logger
+	logger      logging.Logger
+	secretStore secretsinterfaces.SecretStore
 
 	// Connection management
 	conn    *ldap.Conn
@@ -37,6 +39,11 @@ type activeDirectoryModule struct {
 		lastRequest  time.Time
 		connectedAt  time.Time
 	}
+}
+
+// SetSecretStore injects a secret store for password resolution.
+func (m *activeDirectoryModule) SetSecretStore(store secretsinterfaces.SecretStore) {
+	m.secretStore = store
 }
 
 // New creates a new instance of the Active Directory module
@@ -127,8 +134,8 @@ func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, conf
 	if username, ok := configMap["username"].(string); ok {
 		adConfig.Username = username
 	}
-	if password, ok := configMap["password"].(string); ok {
-		adConfig.Password = password
+	if passwordSecretKey, ok := configMap["password_secret_key"].(string); ok {
+		adConfig.PasswordSecretKey = passwordSecretKey
 	}
 	if searchBase, ok := configMap["search_base"].(string); ok {
 		adConfig.SearchBase = searchBase
@@ -187,7 +194,7 @@ func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, conf
 	m.config = adConfig
 
 	// Initialize authentication manager
-	m.authManager = NewAuthenticationManager(adConfig)
+	m.authManager = NewAuthenticationManager(adConfig, m.secretStore)
 
 	// Establish new connection
 	if err := m.connect(ctx); err != nil {

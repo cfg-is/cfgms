@@ -26,9 +26,9 @@ type ADModuleConfig struct {
 	CrossDomainAuth bool     `yaml:"cross_domain_auth"`           // Enable cross-domain authentication
 
 	// Authentication
-	AuthMethod string `yaml:"auth_method"`        // "kerberos", "ntlm", "simple"
-	Username   string `yaml:"username,omitempty"` // Service account username
-	Password   string `yaml:"password,omitempty"` // Service account password
+	AuthMethod        string `yaml:"auth_method"`                   // "kerberos", "ntlm", "simple"
+	Username          string `yaml:"username,omitempty"`            // Service account username
+	PasswordSecretKey string `yaml:"password_secret_key,omitempty"` // pkg/secrets key for the service account password
 
 	// Search configuration
 	SearchBase string `yaml:"search_base,omitempty"` // Base DN for searches
@@ -65,6 +65,9 @@ func (c *ADModuleConfig) AsMap() map[string]interface{} {
 	if c.Username != "" {
 		result["username"] = c.Username
 	}
+	if c.PasswordSecretKey != "" {
+		result["password_secret_key"] = c.PasswordSecretKey
+	}
 	if c.SearchBase != "" {
 		result["search_base"] = c.SearchBase
 	}
@@ -95,10 +98,7 @@ func (c *ADModuleConfig) AsMap() map[string]interface{} {
 
 // ToYAML serializes the configuration to YAML
 func (c *ADModuleConfig) ToYAML() ([]byte, error) {
-	// Create a copy without sensitive fields for serialization
-	safe := *c
-	safe.Password = "[REDACTED]"
-	return yaml.Marshal(safe)
+	return yaml.Marshal(c)
 }
 
 // FromYAML deserializes YAML data into the configuration
