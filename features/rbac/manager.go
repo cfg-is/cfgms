@@ -35,7 +35,6 @@ type Manager struct {
 	// RevokeRole and DeleteRolesByTenant. When nil, those operations skip invalidation.
 	cacheManager *continuous.CacheManager
 
-	engine                  *AuthEngine
 	advancedEngine          *AdvancedAuthEngine
 	hierarchyEngine         *HierarchyEngine
 	delegationManager       *DelegationManager
@@ -77,7 +76,6 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 	// This store exists only for the lifetime of this manager instance
 	// All persistent data flows through global storage interfaces (auditStore, clientTenantStore)
 	ephemeralStore := memory.NewStore()
-	engine := NewAuthEngine(ephemeralStore, ephemeralStore, ephemeralStore, ephemeralStore)
 	hierarchyEngine := NewHierarchyEngine(ephemeralStore, ephemeralStore)
 
 	// Create audit manager for RBAC operations
@@ -85,10 +83,6 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 	if auditErr != nil {
 		panic(fmt.Sprintf("NewManagerWithStorage: failed to create audit manager: %v", auditErr))
 	}
-
-	// Wire the hierarchy engine into the base auth engine so GetEffectivePermissions
-	// traverses role inheritance chains.
-	engine.SetHierarchyEngine(hierarchyEngine)
 
 	// Create manager instance with pluggable storage
 	manager := &Manager{
@@ -98,15 +92,14 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 		rbacStore:           rbacStore, // Write-through persistent RBAC storage
 		usePluggableStorage: true,
 		auditManager:        auditManager,
-		engine:              engine,
 		hierarchyEngine:     hierarchyEngine,
 	}
 
 	// Initialize advanced components
 	advancedEngine := NewAdvancedAuthEngine(ephemeralStore, ephemeralStore, ephemeralStore, ephemeralStore)
-	delegationManager := NewDelegationManager(manager)                 // Pass manager for RBAC operations
-	templateManager := NewTemplateManager(manager)                     // Pass manager for template operations
-	escalationPreventionMgr := NewEscalationPreventionManager(manager) // Pass manager for privilege escalation protection
+	delegationManager := NewDelegationManager(manager)                          // Pass manager for RBAC operations
+	templateManager := NewTemplateManager(manager)                              // Pass manager for template operations
+	escalationPreventionMgr := NewEscalationPreventionManager(manager, manager) // manager satisfies both RBACManager and RBACStoreAccessor
 
 	// Set circular references
 	advancedEngine.SetRBACManager(manager)

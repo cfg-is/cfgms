@@ -11,9 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// makeDecision builds a CachedAuthDecision and stores it directly into only L2
-// (bypassing the normal CacheAuth path so that L1 never sees the entry).
-// This lets tests verify that invalidation scans L2 independently of L1.
+// storeL2Only inserts a cache entry via the normal CacheAuth path (so it is indexed),
+// then evicts the entry from L1 to simulate an entry that has been promoted to L2 only
+// (as if it was evicted from L1 by LRU pressure but has not yet expired in L2).
+// This verifies that index-based invalidation covers both L1 and L2 independently.
 func storeL2Only(t *testing.T, cm *CacheManager, subjectID, tenantID, permissionID string) string {
 	t.Helper()
 	req := &ContinuousAuthRequest{
@@ -25,17 +26,17 @@ func storeL2Only(t *testing.T, cm *CacheManager, subjectID, tenantID, permission
 		},
 		SessionID: "session-" + subjectID,
 	}
-	key := cm.generateCacheKey(req)
-	decision := &CachedAuthDecision{
-		CacheKey:     key,
-		CacheLevel:   CacheLevelL2,
-		ValidUntil:   time.Now().Add(5 * time.Minute),
-		SubjectID:    subjectID,
-		TenantID:     tenantID,
-		PermissionID: permissionID,
-		SessionID:    "session-" + subjectID,
+	resp := &ContinuousAuthResponse{
+		AccessResponse: &common.AccessResponse{Granted: true},
+		ValidUntil:     time.Now().Add(5 * time.Minute),
+		DecisionID:     "dec-" + subjectID,
+		DecisionTime:   time.Now(),
 	}
-	require.NoError(t, cm.l2Cache.Set(key, decision, 5*time.Minute))
+	require.NoError(t, cm.CacheAuth(req, resp))
+	key := cm.generateCacheKey(req)
+
+	// Evict from L1 to simulate an entry that exists only in L2.
+	cm.l1Cache.Delete(key)
 
 	// Confirm L1 does NOT have this entry.
 	_, inL1 := cm.l1Cache.Get(key)

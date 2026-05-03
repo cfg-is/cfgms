@@ -883,11 +883,10 @@ func TestManager_CheckPermission_DbError_RecordsAuditEvent(t *testing.T) {
 	}
 
 	// Replace the base engine inside the advanced engine with one that uses the
-	// error-injecting store. Both manager.engine and manager.advancedEngine.baseEngine
-	// are accessible from within the same package.
+	// error-injecting store. manager.advancedEngine.baseEngine is the actual
+	// path used by Manager.CheckPermission.
 	errorEngine := NewAuthEngine(manager.store, errorStore, manager.store, manager.store)
 	errorEngine.SetHierarchyEngine(manager.hierarchyEngine)
-	manager.engine = errorEngine
 	manager.advancedEngine.baseEngine = errorEngine
 
 	request := &common.AccessRequest{
