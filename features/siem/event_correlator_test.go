@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 func makeRule(id string, minEvents int, window time.Duration) *CorrelationRule {
@@ -26,7 +28,7 @@ func makeEvent(ruleID string) *SecurityEvent {
 		ID:        "e-" + ruleID + "-" + time.Now().Format("150405.000000000"),
 		Timestamp: time.Now(),
 		EventType: "test",
-		Severity:  SeverityLow,
+		Severity:  business.AuditSeverityLow,
 		TenantID:  "tenant-1",
 		RuleID:    ruleID,
 		Fields:    map[string]interface{}{},

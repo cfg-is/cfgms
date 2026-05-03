@@ -13,6 +13,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // StreamProcessorImpl implements the StreamProcessor interface with high-performance
@@ -524,7 +525,7 @@ func (w *StreamWorker) convertMatchesToEvents(matches []*PatternMatch, tenantID 
 			ID:          generateEventID(),
 			Timestamp:   match.Timestamp,
 			EventType:   "pattern_match",
-			Severity:    SeverityMedium, // Default severity, can be configured per pattern
+			Severity:    business.AuditSeverityMedium, // Default severity, can be configured per pattern
 			Source:      match.LogEntry.ServiceName,
 			Description: fmt.Sprintf("Pattern '%s' matched in %s", match.PatternID, match.Field),
 			RuleID:      match.PatternID,

@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // RuleManagerImpl implements configurable rule management for SIEM detection rules.
@@ -605,12 +606,11 @@ func (rm *RuleManagerImpl) ValidateRule(rule *DetectionRule) error {
 	}
 
 	// Validate severity
-	validSeverities := map[EventSeverity]bool{
-		SeverityCritical: true,
-		SeverityHigh:     true,
-		SeverityMedium:   true,
-		SeverityLow:      true,
-		SeverityInfo:     true,
+	validSeverities := map[business.AuditSeverity]bool{
+		business.AuditSeverityCritical: true,
+		business.AuditSeverityHigh:     true,
+		business.AuditSeverityMedium:   true,
+		business.AuditSeverityLow:      true,
 	}
 	if !validSeverities[rule.Severity] {
 		return fmt.Errorf("invalid severity: %s", rule.Severity)
