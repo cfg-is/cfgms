@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/telemetry"
 )
 
@@ -249,6 +250,16 @@ func BenchmarkGetCorrelationID(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = telemetry.GetCorrelationID(ctx)
 	}
+}
+
+// TestCrossPackageCorrelationIDRoundtrip verifies that logging.WithCorrelation and
+// telemetry.GetCorrelationID share the same context slot via ctxkeys.CorrelationIDKey.
+func TestCrossPackageCorrelationIDRoundtrip(t *testing.T) {
+	ctx := context.Background()
+	ctx = logging.WithCorrelation(ctx, "cross-pkg-test-id")
+
+	got := telemetry.GetCorrelationID(ctx)
+	assert.Equal(t, "cross-pkg-test-id", got, "telemetry.GetCorrelationID must read value set by logging.WithCorrelation")
 }
 
 func TestCorrelationIDUniqueness(t *testing.T) {

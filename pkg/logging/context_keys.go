@@ -13,6 +13,3 @@ type sessionIDKey struct{}
 
 // operationKey is the context key for operations
 type operationKey struct{}
-
-// correlationIDKey is the context key for correlation IDs
-type correlationIDKey struct{}
