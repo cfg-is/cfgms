@@ -121,3 +121,41 @@ func TestHandleListRoles_NoContextTenant_Returns401(t *testing.T) {
 	rec := callHandleListRoles(server, "", "")
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
+
+// TestServer_RBACSubjectRoutesDeregistered confirms that all 10 RBAC subject, assignment,
+// and permission-check routes are removed from the router. An unregistered route in
+// gorilla/mux returns 404 before any auth middleware fires; a registered-but-unimplemented
+// route would instead return 401 (auth) or 501 (stub handler).
+func TestServer_RBACSubjectRoutesDeregistered(t *testing.T) {
+	server := setupTestServer(t)
+
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/rbac/subjects"},
+		{http.MethodPost, "/api/v1/rbac/subjects"},
+		{http.MethodGet, "/api/v1/rbac/subjects/test-id"},
+		{http.MethodPut, "/api/v1/rbac/subjects/test-id"},
+		{http.MethodDelete, "/api/v1/rbac/subjects/test-id"},
+		{http.MethodGet, "/api/v1/rbac/subjects/test-id/roles"},
+		{http.MethodPost, "/api/v1/rbac/subjects/test-id/roles"},
+		{http.MethodDelete, "/api/v1/rbac/subjects/test-id/roles/role-id"},
+		{http.MethodGet, "/api/v1/rbac/subjects/test-id/permissions"},
+		{http.MethodPost, "/api/v1/rbac/check"},
+	}
+
+	for _, tt := range routes {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rec := httptest.NewRecorder()
+			server.router.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusNotFound, rec.Code,
+				"route %s %s must be deregistered (404 expected, route was still registered)",
+				tt.method, tt.path)
+			assert.NotEqual(t, http.StatusNotImplemented, rec.Code,
+				"route %s %s must not return 501 (stub handlers must be deleted)",
+				tt.method, tt.path)
+		})
+	}
+}
