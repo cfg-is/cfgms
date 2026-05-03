@@ -417,6 +417,7 @@ func TestSecurityEdgeCases_TenantIsolation(t *testing.T) {
 		mockWebhookHandler,
 		mockSIEMIntegration,
 		mockWorkflowTrigger,
+		nil,
 	)
 
 	// Setup storage mock expectations

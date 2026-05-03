@@ -18,7 +18,7 @@ func NewControllerTriggerManager(
 ) *TriggerManagerImpl {
 	// Phase 1: Create the manager with nil components to break the circular dependency.
 	// The manager's Start() guards against nil components, so this is safe during wiring.
-	manager := NewTriggerManager(storage, nil, nil, nil, workflowTrigger)
+	manager := NewTriggerManager(storage, nil, nil, nil, workflowTrigger, nil)
 
 	// Phase 2: Create each component with the manager reference.
 	scheduler := NewCronScheduler(manager, workflowTrigger)

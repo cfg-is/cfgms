@@ -45,7 +45,7 @@ func newTestTriggerManager(tb testing.TB, wt trigger.WorkflowTrigger) *trigger.T
 	tb.Helper()
 	provider, err := storageInterfaces.GetStorageProvider("flatfile")
 	require.NoError(tb, err, "flatfile provider must be registered via blank import in stream_processor_test.go")
-	return trigger.NewTriggerManager(provider, nil, nil, nil, wt)
+	return trigger.NewTriggerManager(provider, nil, nil, nil, wt, nil)
 }
 
 // Test helper functions
