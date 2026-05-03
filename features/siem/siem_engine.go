@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/workflow/trigger"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
@@ -21,7 +22,8 @@ import (
 // It coordinates all components to achieve 10,000+ log entries per second processing
 // with <100ms latency for real-time security event detection and workflow automation.
 type SIEMEngine struct {
-	logger *logging.ModuleLogger
+	logger       *logging.ModuleLogger
+	auditManager *audit.Manager
 
 	// Core components
 	streamProcessor     StreamProcessor
@@ -104,7 +106,7 @@ type GCController struct {
 
 // NewSIEMEngine creates a new SIEM processing engine with all components
 func NewSIEMEngine(config ProcessingConfig, triggerManager trigger.TriggerManager,
-	workflowTrigger trigger.WorkflowTrigger) (*SIEMEngine, error) {
+	workflowTrigger trigger.WorkflowTrigger, auditManager *audit.Manager) (*SIEMEngine, error) {
 
 	logger := logging.ForModule("siem.engine").WithField("component", "engine")
 
@@ -134,7 +136,7 @@ func NewSIEMEngine(config ProcessingConfig, triggerManager trigger.TriggerManage
 	patternMatcher := NewPatternMatcher()
 	eventCorrelator := NewEventCorrelator(config.CorrelationWindow)
 	ruleManager := NewRuleManager(patternMatcher, eventCorrelator)
-	streamProcessor := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager)
+	streamProcessor := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager, auditManager)
 
 	// Create workflow integration
 	workflowConfig := WorkflowIntegrationConfig{
@@ -161,6 +163,7 @@ func NewSIEMEngine(config ProcessingConfig, triggerManager trigger.TriggerManage
 
 	return &SIEMEngine{
 		logger:              logger,
+		auditManager:        auditManager,
 		streamProcessor:     streamProcessor,
 		patternMatcher:      patternMatcher,
 		eventCorrelator:     eventCorrelator,
