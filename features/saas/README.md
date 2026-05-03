@@ -103,27 +103,6 @@ resources:
           # Client-specific user configuration
 ```
 
-### TenantOnboardingWorkflow construction
-
-`NewTenantOnboardingWorkflow` requires a `*MicrosoftMultiTenantConfig` as its second
-argument. This config must carry real `ClientID`, `ClientSecret`, and `RedirectURI`
-values sourced from secure storage (e.g. OS keychain via `pkg/secrets`). Placeholder
-strings such as `"your-client-id"` must never be passed — `startAdminConsentFlow`
-will propagate these values directly into Microsoft's OAuth2 authorization endpoint,
-and placeholder values will cause consent to fail or silently target the wrong
-application registration.
-
-```go
-cfg := &MicrosoftMultiTenantConfig{
-    ClientID:     credentialStore.GetClientID(),
-    ClientSecret: credentialStore.GetClientSecret(),
-    RedirectURI:  "https://your-app.example.com/oauth/callback",
-}
-workflow := NewTenantOnboardingWorkflow(provider, cfg)
-```
-
-If `cfg` is `nil`, `startAdminConsentFlow` returns an error immediately rather than
-panicking — but callers should always supply a populated config.
 
 ## Security Features
 

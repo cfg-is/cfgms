@@ -325,21 +325,21 @@ func (ua *UniversalAuthenticator) getJWTHeaders(provider string) (map[string]str
 func (ua *UniversalAuthenticator) authenticateClientCert(ctx context.Context, provider string, config map[string]interface{}) error {
 	// Client certificate authentication is handled at the HTTP client level
 	// This would configure the HTTP client with the certificate
-	return fmt.Errorf("client certificate authentication not yet implemented")
+	return fmt.Errorf("client certificate authentication is not supported by this build")
 }
 
 // AWS Signature V4 Authentication Implementation
 
 func (ua *UniversalAuthenticator) authenticateAWSSignature(ctx context.Context, provider string, config map[string]interface{}) error {
 	// AWS Signature V4 signing is complex and would require dedicated implementation
-	return fmt.Errorf("AWS signature authentication not yet implemented")
+	return fmt.Errorf("AWS signature authentication is not supported by this build")
 }
 
 // Custom Authentication Implementation
 
 func (ua *UniversalAuthenticator) authenticateCustom(ctx context.Context, provider string, config map[string]interface{}) error {
 	// Custom authentication would be implemented per provider
-	return fmt.Errorf("custom authentication not yet implemented")
+	return fmt.Errorf("custom authentication is not supported by this build")
 }
 
 // Helper functions for parsing configuration
