@@ -5,6 +5,7 @@ package jit
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/zerotrust"
+	"github.com/cfgis/cfgms/pkg/audit"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // JITAccessManager manages Just-In-Time access requests and grants with zero-trust policy integration
@@ -21,7 +24,7 @@ type JITAccessManager struct {
 	requests            map[string]*JITAccessRequest
 	activeGrants        map[string]*JITAccessGrant
 	approvalWorkflows   map[string]*ApprovalWorkflow
-	auditLogger         *JITAuditLogger
+	auditManager        *audit.Manager
 	notificationService NotificationService
 
 	// Zero-trust policy integration
@@ -58,7 +61,6 @@ func NewJITAccessManager(rbacManager rbac.RBACManager, notificationService Notif
 		requests:            make(map[string]*JITAccessRequest),
 		activeGrants:        make(map[string]*JITAccessGrant),
 		approvalWorkflows:   make(map[string]*ApprovalWorkflow),
-		auditLogger:         NewJITAuditLogger(),
 		notificationService: notificationService,
 
 		// Zero-trust defaults
@@ -93,6 +95,90 @@ func (jam *JITAccessManager) GetZeroTrustMode() ZeroTrustJITMode {
 	jam.mutex.RLock()
 	defer jam.mutex.RUnlock()
 	return jam.zeroTrustMode
+}
+
+// SetAuditManager wires a durable audit manager for recording JIT access events.
+// It is a no-op when m is nil.
+func (jam *JITAccessManager) SetAuditManager(m *audit.Manager) {
+	jam.auditManager = m
+}
+
+// recordJITAccessRequest emits a jit_access request audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessRequest(ctx context.Context, request *JITAccessRequest, action string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		request.TenantID, request.RequesterID, "jit_access", request.ID, action,
+		business.AuditResultSuccess,
+	)); err != nil {
+		slog.Warn("failed to record jit access request audit event", "error", err)
+	}
+}
+
+// recordJITAccessApproval emits a jit_access approval audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessApproval(ctx context.Context, request *JITAccessRequest, grant *JITAccessGrant, approverID string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		request.TenantID, request.RequesterID, "jit_access", request.ID, "approve",
+		business.AuditResultSuccess,
+	).Detail("approver_id", approverID).Detail("grant_id", grant.ID)); err != nil {
+		slog.Warn("failed to record jit access approval audit event", "error", err)
+	}
+}
+
+// recordJITAccessDenial emits a jit_access denial audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessDenial(ctx context.Context, request *JITAccessRequest, reviewerID, reason string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		request.TenantID, request.RequesterID, "jit_access", request.ID, "deny",
+		business.AuditResultDenied,
+	).Detail("reviewer_id", reviewerID).Detail("reason", reason)); err != nil {
+		slog.Warn("failed to record jit access denial audit event", "error", err)
+	}
+}
+
+// recordJITAccessExtension emits a jit_access extension audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessExtension(ctx context.Context, grant *JITAccessGrant, requesterID string, duration time.Duration, reason string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		grant.TenantID, requesterID, "jit_access", grant.ID, "extend",
+		business.AuditResultSuccess,
+	).Detail("duration", duration.String()).Detail("reason", reason)); err != nil {
+		slog.Warn("failed to record jit access extension audit event", "error", err)
+	}
+}
+
+// recordJITAccessRevocation emits a jit_access revocation audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessRevocation(ctx context.Context, grant *JITAccessGrant, revokerID, reason string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		grant.TenantID, revokerID, "jit_access", grant.ID, "revoke",
+		business.AuditResultSuccess,
+	).Detail("reason", reason)); err != nil {
+		slog.Warn("failed to record jit access revocation audit event", "error", err)
+	}
+}
+
+// recordJITAccessUsage emits a jit_access usage audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessUsage(ctx context.Context, grant *JITAccessGrant, action, resourceID string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		grant.TenantID, grant.RequesterID, "jit_access", grant.ID, action,
+		business.AuditResultSuccess,
+	).Detail("resource_id", resourceID)); err != nil {
+		slog.Warn("failed to record jit access usage audit event", "error", err)
+	}
 }
 
 // RequestAccess creates a new JIT access request
@@ -174,7 +260,7 @@ func (jam *JITAccessManager) RequestAccess(ctx context.Context, req *JITAccessRe
 	}
 
 	// Audit the request
-	_ = jam.auditLogger.LogAccessRequest(ctx, request, "created")
+	jam.recordJITAccessRequest(ctx, request, "created")
 
 	// Send notifications
 	_ = jam.sendNotifications(ctx, request, "request_created")
@@ -263,7 +349,7 @@ func (jam *JITAccessManager) approveRequest(ctx context.Context, requestID, appr
 	}
 
 	// Audit the approval
-	_ = jam.auditLogger.LogAccessApproval(ctx, request, grant, approverID)
+	jam.recordJITAccessApproval(ctx, request, grant, approverID)
 
 	// Send notifications
 	_ = jam.sendNotifications(ctx, request, "request_approved")
@@ -296,7 +382,7 @@ func (jam *JITAccessManager) DenyRequest(ctx context.Context, requestID, reviewe
 	request.DenialReason = reason
 
 	// Audit the denial
-	_ = jam.auditLogger.LogAccessDenial(ctx, request, reviewerID, reason)
+	jam.recordJITAccessDenial(ctx, request, reviewerID, reason)
 
 	// Send notifications
 	_ = jam.sendNotifications(ctx, request, "request_denied")
@@ -356,7 +442,7 @@ func (jam *JITAccessManager) ExtendAccess(ctx context.Context, grantID string, d
 	})
 
 	// Audit the extension
-	_ = jam.auditLogger.LogAccessExtension(ctx, grant, requesterID, duration, reason)
+	jam.recordJITAccessExtension(ctx, grant, requesterID, duration, reason)
 
 	// Send notifications
 	_ = jam.sendExtensionNotifications(ctx, grant, duration, reason)
@@ -400,7 +486,7 @@ func (jam *JITAccessManager) RevokeAccess(ctx context.Context, grantID, revokerI
 	grant.RevocationReason = reason
 
 	// Audit the revocation
-	_ = jam.auditLogger.LogAccessRevocation(ctx, grant, revokerID, reason)
+	jam.recordJITAccessRevocation(ctx, grant, revokerID, reason)
 
 	// Send notifications
 	_ = jam.sendRevocationNotifications(ctx, grant, reason)

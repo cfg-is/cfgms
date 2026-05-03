@@ -13,6 +13,14 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/zerotrust"
+	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+
+	// Import storage providers to register them
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 func TestNewJITAccessManager(t *testing.T) {
@@ -27,7 +35,7 @@ func TestNewJITAccessManager(t *testing.T) {
 	assert.NotNil(t, jam.requests)
 	assert.NotNil(t, jam.activeGrants)
 	assert.NotNil(t, jam.approvalWorkflows)
-	assert.NotNil(t, jam.auditLogger)
+	assert.Nil(t, jam.auditManager)
 	assert.False(t, jam.zeroTrustEnabled)
 	assert.Equal(t, ZeroTrustJITModeDisabled, jam.zeroTrustMode)
 	assert.Nil(t, jam.zeroTrustEngine)
@@ -823,6 +831,93 @@ func TestJITAccessManager_ConcurrentAccess(t *testing.T) {
 	// Verify all requests are stored
 	assert.Len(t, jam.requests, numConcurrentRequests)
 	assert.Len(t, jam.activeGrants, numConcurrentRequests)
+}
+
+func TestJITAuditManager_RecordsEvents(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "jit-test")
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = auditMgr.Stop(ctx)
+		_ = storageManager.Close()
+	})
+
+	rbacManager := &MockRBACManager{}
+	rbacManager.SetCheckPermissionResponse("user1", "admin", "tenant1", false, "No access")
+	rbacManager.SetCheckPermissionResponse("approver1", "jit_access.approve", "tenant1", true, "Can approve")
+
+	jam := NewJITAccessManager(rbacManager, &MockNotificationService{})
+	jam.SetAuditManager(auditMgr)
+
+	ctx := context.Background()
+
+	request, err := jam.RequestAccess(ctx, &JITAccessRequestSpec{
+		RequesterID:   "user1",
+		TenantID:      "tenant1",
+		Permissions:   []string{"admin"},
+		Duration:      2 * time.Hour,
+		Justification: "Need access for testing",
+		AutoApprove:   false,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, request)
+
+	_, err = jam.ApproveRequest(ctx, request.ID, "approver1", "Approved for testing")
+	require.NoError(t, err)
+
+	flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	require.NoError(t, auditMgr.Flush(flushCtx))
+
+	entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "tenant1",
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(entries), 2, "expected at least 2 audit events (created + approve)")
+
+	byAction := make(map[string]*business.AuditEntry)
+	for _, e := range entries {
+		byAction[e.Action] = e
+	}
+
+	createdEntry, ok := byAction["created"]
+	require.True(t, ok, "expected 'created' action event")
+	assert.Equal(t, "tenant1", createdEntry.TenantID)
+	assert.Equal(t, "user1", createdEntry.UserID)
+	assert.Equal(t, "jit_access", createdEntry.ResourceType)
+
+	approveEntry, ok := byAction["approve"]
+	require.True(t, ok, "expected 'approve' action event")
+	assert.Equal(t, "tenant1", approveEntry.TenantID)
+	assert.Equal(t, "user1", approveEntry.UserID)
+	assert.Equal(t, "jit_access", approveEntry.ResourceType)
+}
+
+func TestJITAuditManager_NilSafe(t *testing.T) {
+	rbacManager := &MockRBACManager{}
+	rbacManager.SetCheckPermissionResponse("user1", "admin", "tenant1", false, "No access")
+
+	jam := NewJITAccessManager(rbacManager, &MockNotificationService{})
+	// Intentionally do NOT call SetAuditManager
+
+	ctx := context.Background()
+
+	request, err := jam.RequestAccess(ctx, &JITAccessRequestSpec{
+		RequesterID:   "user1",
+		TenantID:      "tenant1",
+		Permissions:   []string{"admin"},
+		Duration:      time.Hour,
+		Justification: "Testing nil safety",
+		AutoApprove:   false,
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, request)
 }
 
 // Mock implementations
