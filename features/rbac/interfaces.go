@@ -131,6 +131,13 @@ type PolicyEngine interface {
 	GetPolicies(ctx context.Context, tenantID, resourceType string) ([]memory.Policy, error)
 }
 
+// RBACStoreAccessor is a narrow interface used by EscalationPreventionManager to reach the
+// underlying RoleStore directly without going through the full RBACManager dispatch, which
+// would cause infinite recursion via SetRoleParent.
+type RBACStoreAccessor interface {
+	GetStore() *memory.Store
+}
+
 // RBACManager provides a high-level interface for RBAC operations
 type RBACManager interface {
 	PermissionStore

@@ -14,7 +14,8 @@ import (
 
 // EscalationPreventionManager provides comprehensive privilege escalation attack prevention
 type EscalationPreventionManager struct {
-	rbacManager RBACManager
+	rbacManager   RBACManager
+	storeAccessor RBACStoreAccessor
 
 	// Concurrent modification protection
 	operationMutex sync.RWMutex
@@ -36,27 +37,28 @@ type EscalationPreventionManager struct {
 
 // OperationRecord tracks RBAC operations for audit and analysis
 type OperationRecord struct {
-	ID           string                 `json:"id"`
-	Type         OperationType          `json:"type"`
-	SubjectID    string                 `json:"subject_id,omitempty"`
-	RoleID       string                 `json:"role_id,omitempty"`
-	ParentRoleID string                 `json:"parent_role_id,omitempty"`
-	TenantID     string                 `json:"tenant_id"`
-	Timestamp    time.Time              `json:"timestamp"`
-	Success      bool                   `json:"success"`
-	Error        string                 `json:"error,omitempty"`
-	Context      map[string]interface{} `json:"context,omitempty"`
+	ID           string                  `json:"id"`
+	Type         EscalationOperationType `json:"type"`
+	SubjectID    string                  `json:"subject_id,omitempty"`
+	RoleID       string                  `json:"role_id,omitempty"`
+	ParentRoleID string                  `json:"parent_role_id,omitempty"`
+	TenantID     string                  `json:"tenant_id"`
+	Timestamp    time.Time               `json:"timestamp"`
+	Success      bool                    `json:"success"`
+	Error        string                  `json:"error,omitempty"`
+	Context      map[string]interface{}  `json:"context,omitempty"`
 }
 
-// OperationType defines types of RBAC operations that can be tracked
-type OperationType string
+// EscalationOperationType defines types of RBAC operations tracked by escalation prevention.
+// This is distinct from continuous.OperationType which classifies API/resource/data risk levels.
+type EscalationOperationType string
 
 const (
-	OpTypeRoleAssignment   OperationType = "role_assignment"
-	OpTypeRoleRevocation   OperationType = "role_revocation"
-	OpTypeRoleParentSet    OperationType = "role_parent_set"
-	OpTypeRoleParentRemove OperationType = "role_parent_remove"
-	OpTypePermissionCheck  OperationType = "permission_check"
+	EscalationOpTypeRoleAssignment   EscalationOperationType = "role_assignment"
+	EscalationOpTypeRoleRevocation   EscalationOperationType = "role_revocation"
+	EscalationOpTypeRoleParentSet    EscalationOperationType = "role_parent_set"
+	EscalationOpTypeRoleParentRemove EscalationOperationType = "role_parent_remove"
+	EscalationOpTypePermissionCheck  EscalationOperationType = "permission_check"
 )
 
 // EscalationAlert represents a detected privilege escalation attempt
@@ -95,10 +97,13 @@ const (
 	SeverityCritical AlertSeverity = "critical"
 )
 
-// NewEscalationPreventionManager creates a new privilege escalation prevention manager
-func NewEscalationPreventionManager(rbacManager RBACManager) *EscalationPreventionManager {
+// NewEscalationPreventionManager creates a new privilege escalation prevention manager.
+// storeAccessor provides direct access to the underlying RoleStore without going through
+// the full RBACManager dispatch (which would cause infinite recursion via SetRoleParent).
+func NewEscalationPreventionManager(rbacManager RBACManager, storeAccessor RBACStoreAccessor) *EscalationPreventionManager {
 	return &EscalationPreventionManager{
 		rbacManager:            rbacManager,
+		storeAccessor:          storeAccessor,
 		operationLog:           make([]OperationRecord, 0),
 		recentOperations:       make(map[string][]time.Time),
 		escalationAlerts:       make([]EscalationAlert, 0),
@@ -116,7 +121,7 @@ func (epm *EscalationPreventionManager) ValidateAndSetRoleParent(ctx context.Con
 	// Record operation start
 	operation := OperationRecord{
 		ID:           operationID,
-		Type:         OpTypeRoleParentSet,
+		Type:         EscalationOpTypeRoleParentSet,
 		RoleID:       roleID,
 		ParentRoleID: parentRoleID,
 		SubjectID:    subjectID,
@@ -175,12 +180,9 @@ func (epm *EscalationPreventionManager) ValidateAndSetRoleParent(ctx context.Con
 	}
 
 	// Perform the actual role parent assignment directly through the underlying store
-	// to avoid circular calls back to the Manager's SetRoleParent method
-	manager, ok := epm.rbacManager.(*Manager)
-	if !ok {
-		return fmt.Errorf("escalation prevention manager requires Manager implementation")
-	}
-	err := manager.GetStore().SetRoleParent(ctx, roleID, parentRoleID, inheritanceType)
+	// to avoid circular calls back to the Manager's SetRoleParent method.
+	// Using storeAccessor (RBACStoreAccessor) instead of a type assertion to *Manager.
+	err := epm.storeAccessor.GetStore().SetRoleParent(ctx, roleID, parentRoleID, inheritanceType)
 
 	// Record operation result
 	operation.Success = (err == nil)
@@ -205,7 +207,7 @@ func (epm *EscalationPreventionManager) ValidateAndAssignRole(ctx context.Contex
 	// Record operation start
 	operation := OperationRecord{
 		ID:        operationID,
-		Type:      OpTypeRoleAssignment,
+		Type:      EscalationOpTypeRoleAssignment,
 		SubjectID: assignment.SubjectId,
 		RoleID:    assignment.RoleId,
 		TenantID:  assignment.TenantId,
@@ -433,7 +435,7 @@ func (epm *EscalationPreventionManager) countRecentChainModifications(roleID str
 	defer epm.operationMutex.RUnlock()
 
 	for _, operation := range epm.operationLog {
-		if operation.Type == OpTypeRoleParentSet &&
+		if operation.Type == EscalationOpTypeRoleParentSet &&
 			(operation.RoleID == roleID || operation.ParentRoleID == roleID) &&
 			operation.Timestamp.After(cutoff) {
 			count++
@@ -451,7 +453,7 @@ func (epm *EscalationPreventionManager) countRecentRoleAssignments(subjectID str
 	defer epm.operationMutex.RUnlock()
 
 	for _, operation := range epm.operationLog {
-		if operation.Type == OpTypeRoleAssignment &&
+		if operation.Type == EscalationOpTypeRoleAssignment &&
 			operation.SubjectID == subjectID &&
 			operation.Timestamp.After(cutoff) &&
 			operation.Success {
@@ -497,7 +499,7 @@ func (epm *EscalationPreventionManager) countRecentHighPrivilegeAssignments(subj
 	defer epm.operationMutex.RUnlock()
 
 	for _, operation := range epm.operationLog {
-		if operation.Type == OpTypeRoleAssignment &&
+		if operation.Type == EscalationOpTypeRoleAssignment &&
 			operation.SubjectID == subjectID &&
 			operation.Timestamp.After(cutoff) &&
 			operation.Success {
@@ -606,7 +608,7 @@ func (epm *EscalationPreventionManager) getPreviousSubjectRoles(subjectID, tenan
 		operation := epm.operationLog[i]
 		if operation.SubjectID == subjectID &&
 			operation.TenantID == tenantID &&
-			operation.Type == OpTypeRoleAssignment &&
+			operation.Type == EscalationOpTypeRoleAssignment &&
 			operation.Success {
 			// This is a simplified implementation
 			// In production, would track actual role states
