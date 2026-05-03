@@ -102,18 +102,19 @@ func TestGRPCTransportStatsAdapter_NoReconnectAttemptsKey(t *testing.T) {
 	assert.Equal(t, int64(0), adapter.GetReconnectionAttempts())
 }
 
-func TestBasicStorageStats_ReturnsProviderName(t *testing.T) {
-	stats := NewBasicStorageStats("git")
+func TestUnimplementedStorageStats_ReportsUnimplemented(t *testing.T) {
+	stats := NewUnimplementedStorageStats("git")
 
 	require.Equal(t, "git", stats.GetProviderName())
-	assert.Equal(t, float64(0), stats.GetPoolUtilization())
+	assert.False(t, stats.Implemented())
+	assert.Equal(t, -1.0, stats.GetPoolUtilization())
 
 	avg, p95, total, slow, errors := stats.GetQueryMetrics()
-	assert.Equal(t, float64(0), avg)
-	assert.Equal(t, float64(0), p95)
-	assert.Equal(t, int64(0), total)
-	assert.Equal(t, int64(0), slow)
-	assert.Equal(t, int64(0), errors)
+	assert.Equal(t, -1.0, avg)
+	assert.Equal(t, -1.0, p95)
+	assert.Equal(t, int64(-1), total)
+	assert.Equal(t, int64(-1), slow)
+	assert.Equal(t, int64(-1), errors)
 }
 
 func TestNoOpApplicationQueueStats_ReturnsZeros(t *testing.T) {

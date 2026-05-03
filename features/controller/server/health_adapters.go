@@ -83,30 +83,36 @@ func (a *GRPCTransportStatsAdapter) GetAvgLatency() time.Duration {
 	return stats.AvgLatency
 }
 
-// BasicStorageStats implements health.StorageProviderStats with the provider
-// name and zero metrics. Real latency instrumentation is a follow-up.
-type BasicStorageStats struct {
+// UnimplementedStorageStats implements health.StorageProviderStats with sentinel
+// values (-1) that are distinguishable from real zero measurements. Implemented()
+// returns false so callers can skip or annotate these metrics accordingly.
+type UnimplementedStorageStats struct {
 	providerName string
 }
 
-// NewBasicStorageStats creates a BasicStorageStats for the given provider.
-func NewBasicStorageStats(providerName string) *BasicStorageStats {
-	return &BasicStorageStats{providerName: providerName}
+// NewUnimplementedStorageStats creates an UnimplementedStorageStats for the given provider.
+func NewUnimplementedStorageStats(providerName string) *UnimplementedStorageStats {
+	return &UnimplementedStorageStats{providerName: providerName}
+}
+
+// Implemented returns false — storage metrics are not yet instrumented.
+func (s *UnimplementedStorageStats) Implemented() bool {
+	return false
 }
 
 // GetProviderName returns the storage provider name.
-func (s *BasicStorageStats) GetProviderName() string {
+func (s *UnimplementedStorageStats) GetProviderName() string {
 	return s.providerName
 }
 
-// GetPoolUtilization returns 0 (not instrumented yet).
-func (s *BasicStorageStats) GetPoolUtilization() float64 {
-	return 0
+// GetPoolUtilization returns -1.0 (sentinel: not instrumented).
+func (s *UnimplementedStorageStats) GetPoolUtilization() float64 {
+	return -1.0
 }
 
-// GetQueryMetrics returns zeros (not instrumented yet).
-func (s *BasicStorageStats) GetQueryMetrics() (avgLatencyMs, p95LatencyMs float64, totalQueries, slowQueries, queryErrors int64) {
-	return 0, 0, 0, 0, 0
+// GetQueryMetrics returns -1 for all values (sentinel: not instrumented).
+func (s *UnimplementedStorageStats) GetQueryMetrics() (avgLatencyMs, p95LatencyMs float64, totalQueries, slowQueries, queryErrors int64) {
+	return -1, -1, -1, -1, -1
 }
 
 // NoOpApplicationQueueStats implements health.ApplicationQueueStats returning
