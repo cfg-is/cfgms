@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // TestFileWatcherHasChangesConcurrent verifies HasChanges is race-free under
@@ -91,4 +94,67 @@ func TestFileWatcherAddPathMissingFile(t *testing.T) {
 	fw := NewFileWatcher()
 	fw.AddPath("/nonexistent/path/rules.yaml")
 	assert.False(t, fw.HasChanges())
+}
+
+// baseValidRule returns a minimal DetectionRule that passes ValidateRule.
+func baseValidRule() *DetectionRule {
+	return &DetectionRule{
+		ID:         "rule-1",
+		Name:       "Test Rule",
+		Severity:   business.AuditSeverityMedium,
+		TimeWindow: 5 * time.Minute,
+		Patterns: []*DetectionPattern{
+			{ID: "p-1", Pattern: "error"},
+		},
+		Actions: []*RuleAction{
+			{Type: ActionTypeLog},
+		},
+	}
+}
+
+// TestValidateRule_AcceptsAllFourBusinessSeverities verifies that each of the
+// four business.AuditSeverity values is accepted by ValidateRule.
+func TestValidateRule_AcceptsAllFourBusinessSeverities(t *testing.T) {
+	rm := NewRuleManager(nil, nil)
+	severities := []business.AuditSeverity{
+		business.AuditSeverityLow,
+		business.AuditSeverityMedium,
+		business.AuditSeverityHigh,
+		business.AuditSeverityCritical,
+	}
+	for _, sev := range severities {
+		rule := baseValidRule()
+		rule.Severity = sev
+		require.NoError(t, rm.ValidateRule(rule), "severity %q should be accepted", sev)
+	}
+}
+
+// TestValidateRule_RejectsRemovedInfoSeverity verifies that the former local
+// SeverityInfo value ("info") is no longer accepted after the migration to
+// business.AuditSeverity, which has no Info level.
+func TestValidateRule_RejectsRemovedInfoSeverity(t *testing.T) {
+	rm := NewRuleManager(nil, nil)
+	rule := baseValidRule()
+	rule.Severity = "info" // was SeverityInfo; now invalid
+	err := rm.ValidateRule(rule)
+	require.Error(t, err, "\"info\" severity must be rejected after migration to business.AuditSeverity")
+	assert.Contains(t, err.Error(), "invalid severity")
+}
+
+// TestValidateRule_RejectsEmptySeverity verifies that an empty severity string
+// returns an error.
+func TestValidateRule_RejectsEmptySeverity(t *testing.T) {
+	rm := NewRuleManager(nil, nil)
+	rule := baseValidRule()
+	rule.Severity = ""
+	require.Error(t, rm.ValidateRule(rule))
+}
+
+// TestValidateRule_RejectsArbitrarySeverityString verifies that an arbitrary
+// unrecognized severity string is rejected.
+func TestValidateRule_RejectsArbitrarySeverityString(t *testing.T) {
+	rm := NewRuleManager(nil, nil)
+	rule := baseValidRule()
+	rule.Severity = "unknown"
+	require.Error(t, rm.ValidateRule(rule))
 }

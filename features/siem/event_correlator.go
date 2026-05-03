@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // EventCorrelatorImpl implements event correlation across time windows for SIEM analysis.
@@ -479,7 +480,8 @@ func (ec *EventCorrelatorImpl) createCorrelatedEvent(window *EventWindow, rule *
 	})
 
 	// Determine severity (use highest severity)
-	severity := SeverityInfo
+	// SeverityInfo has no business.AuditSeverity equivalent; mapped to Low
+	severity := business.AuditSeverityLow
 	for _, event := range sortedEvents {
 		if ec.severityLevel(event.Severity) > ec.severityLevel(severity) {
 			severity = event.Severity
@@ -514,17 +516,15 @@ func (ec *EventCorrelatorImpl) createCorrelatedEvent(window *EventWindow, rule *
 }
 
 // severityLevel returns a numeric level for severity comparison
-func (ec *EventCorrelatorImpl) severityLevel(severity EventSeverity) int {
+func (ec *EventCorrelatorImpl) severityLevel(severity business.AuditSeverity) int {
 	switch severity {
-	case SeverityCritical:
-		return 5
-	case SeverityHigh:
+	case business.AuditSeverityCritical:
 		return 4
-	case SeverityMedium:
+	case business.AuditSeverityHigh:
 		return 3
-	case SeverityLow:
+	case business.AuditSeverityMedium:
 		return 2
-	case SeverityInfo:
+	case business.AuditSeverityLow:
 		return 1
 	default:
 		return 0
