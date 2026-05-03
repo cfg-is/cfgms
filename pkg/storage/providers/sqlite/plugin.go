@@ -23,8 +23,11 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
-// Compile-time assertion that SQLiteProvider satisfies StorageProvider.
-var _ interfaces.StorageProvider = (*SQLiteProvider)(nil)
+// Compile-time assertions that SQLiteProvider satisfies the required interfaces.
+var (
+	_ interfaces.StorageProvider     = (*SQLiteProvider)(nil)
+	_ interfaces.BusinessStoreOpener = (*SQLiteProvider)(nil)
+)
 
 // SQLiteProvider implements the StorageProvider interface using SQLite for persistence.
 // It is the default OSS backend for all business-data stores.
@@ -257,6 +260,29 @@ func (p *SQLiteProvider) CreateTriggerStore(config map[string]interface{}) (busi
 		return nil, err
 	}
 	return &SQLiteTriggerStore{db: db}, nil
+}
+
+// OpenBusinessStores implements interfaces.BusinessStoreOpener.
+// It opens the SQLite database at path exactly once, runs schema initialisation,
+// and returns all seven business stores sharing the same *sql.DB connection pool.
+// This prevents WAL read-lock slot exhaustion on Windows CI where opening seven
+// separate *sql.DB connections to the same file causes lock contention.
+// database/sql.DB.Close is idempotent, so StorageManager.Close safely calls it
+// on every store without error even though they share the underlying handle.
+func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessStoreBundle, error) {
+	db, err := openAndInit(path)
+	if err != nil {
+		return nil, err
+	}
+	return &interfaces.BusinessStoreBundle{
+		RBAC:              &SQLiteRBACStore{db: db},
+		Tenant:            &SQLiteTenantStore{db: db},
+		ClientTenant:      &SQLiteClientTenantStore{db: db},
+		RegistrationToken: &SQLiteRegistrationTokenStore{db: db},
+		Session:           &SQLiteSessionStore{db: db},
+		Command:           &SQLiteCommandStore{db: db},
+		Trigger:           &SQLiteTriggerStore{db: db},
+	}, nil
 }
 
 // init auto-registers the SQLite provider so it is available after a blank import.
