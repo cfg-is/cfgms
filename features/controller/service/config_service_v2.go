@@ -325,13 +325,6 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 	}, nil
 }
 
-// StreamConfigurationUpdates streams configuration updates to stewards
-// NOTE: Disabled - use control plane events for real-time updates.
-// This would need to be enhanced with storage-based change notifications
-func (s *ConfigurationServiceV2) StreamConfigurationUpdates(req *controller.ConfigStreamRequest, stream interface{}) error {
-	return fmt.Errorf("streaming not supported: use control plane events for real-time configuration updates")
-}
-
 // Helper methods
 
 // filterConfigByModules filters configuration to include only requested modules

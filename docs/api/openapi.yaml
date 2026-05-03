@@ -245,33 +245,6 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
-  /stewards/{stewardId}/config/status:
-    get:
-      summary: Get configuration status
-      description: Returns the status of configuration deployment on a steward
-      operationId: getConfigStatus
-      tags:
-        - Configuration
-      parameters:
-        - $ref: '#/components/parameters/stewardId'
-      responses:
-        '200':
-          description: Configuration status
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    $ref: '#/components/schemas/ConfigStatusInfo'
-                  timestamp:
-                    type: string
-                    format: date-time
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
   /certificates:
     get:
       summary: List certificates
@@ -775,24 +748,6 @@ components:
                 type: string
               message:
                 type: string
-
-    ConfigStatusInfo:
-      type: object
-      properties:
-        steward_id:
-          type: string
-        config_version:
-          type: string
-        last_applied:
-          type: string
-          format: date-time
-        status:
-          type: string
-          enum: [pending, applied, failed, unknown]
-        errors:
-          type: array
-          items:
-            type: string
 
     CertificateInfo:
       type: object

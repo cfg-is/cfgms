@@ -78,23 +78,6 @@ type ValidationError struct {
 	Suggestion string `json:"suggestion,omitempty"`
 }
 
-// ConfigStatusInfo represents configuration status
-type ConfigStatusInfo struct {
-	StewardID     string         `json:"steward_id"`
-	ConfigVersion string         `json:"config_version"`
-	Status        string         `json:"status"`
-	Modules       []ModuleStatus `json:"modules"`
-	UpdatedAt     time.Time      `json:"updated_at"`
-}
-
-// ModuleStatus represents the status of a module
-type ModuleStatus struct {
-	Name      string    `json:"name"`
-	Status    string    `json:"status"`
-	Message   string    `json:"message"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
 // CertificateInfo represents certificate information
 type CertificateInfo struct {
 	SerialNumber        string    `json:"serial_number"`
@@ -252,16 +235,6 @@ func ValidationErrorFromProto(err *controller.ValidationError) ValidationError {
 		Level:      level,
 		Code:       err.Code,
 		Suggestion: err.Suggestion,
-	}
-}
-
-// ModuleStatusFromProto converts a protobuf ModuleStatus to ModuleStatus
-func ModuleStatusFromProto(status *controller.ModuleStatus) ModuleStatus {
-	return ModuleStatus{
-		Name:      status.Name,
-		Status:    status.Status.Message,
-		Message:   status.Message,
-		Timestamp: status.Timestamp.AsTime(),
 	}
 }
 

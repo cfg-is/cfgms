@@ -436,31 +436,6 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, result)
 }
 
-// handleGetConfigStatus handles GET /api/v1/stewards/{id}/config/status
-func (s *Server) handleGetConfigStatus(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	stewardID := vars["id"]
-
-	if stewardID == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
-		return
-	}
-
-	// Get configuration status from the service
-	// For now, we'll return a placeholder since we need to implement this in the service layer
-	// TODO: Implement configuration status tracking in the service layer
-
-	status := ConfigStatusInfo{
-		StewardID:     stewardID,
-		ConfigVersion: "unknown",
-		Status:        "unknown",
-		Modules:       []ModuleStatus{},
-		UpdatedAt:     getCurrentTimestamp(),
-	}
-
-	s.writeSuccessResponse(w, status)
-}
-
 // handleGetEffectiveConfig handles GET /api/v1/stewards/{id}/config/effective
 func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)

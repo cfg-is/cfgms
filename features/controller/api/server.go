@@ -248,7 +248,6 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/config", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetStewardConfig))).Methods("GET")
 	stewards.Handle("/{id}/config", s.requirePermission("steward", "write-config")(http.HandlerFunc(s.handleUpdateStewardConfig))).Methods("PUT")
 	stewards.Handle("/{id}/config/validate", s.requirePermission("steward", "validate-config")(http.HandlerFunc(s.handleValidateConfig))).Methods("POST")
-	stewards.Handle("/{id}/config/status", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetConfigStatus))).Methods("GET")
 	stewards.Handle("/{id}/config/effective", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetEffectiveConfig))).Methods("GET")
 
 	// QUIC connection management endpoints
