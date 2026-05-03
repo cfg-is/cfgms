@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -20,9 +19,7 @@ import (
 // TestDirectAppAccessConfiguration tests direct app registration configuration
 // This test validates delegated permissions setup without requiring CSP sandbox
 func TestDirectAppAccessConfiguration(t *testing.T) {
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "direct-app-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	// Direct app configuration with delegated permissions
 	config := &OAuth2Config{
@@ -276,9 +273,7 @@ func TestDirectAppAccessTokenFlow(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "token-flow-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:                 "token-flow-client-id",
@@ -340,9 +335,7 @@ func TestDirectAppAccessTokenFlow(t *testing.T) {
 
 // TestDirectAppAccessPermissionScenarios tests realistic M365 permission scenarios
 func TestDirectAppAccessPermissionScenarios(t *testing.T) {
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "scenario-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:             "scenario-client-id",
@@ -472,9 +465,7 @@ func TestDirectAppAccessIntegration(t *testing.T) {
 		t.Skip("Skipping real M365 integration test - credentials not available")
 	}
 
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "integration-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:                 clientID,

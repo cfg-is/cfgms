@@ -4,8 +4,6 @@ package auth
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,11 +13,8 @@ import (
 
 // TestFullDelegatedPermissionsIntegration validates the complete delegated permissions implementation
 func TestFullDelegatedPermissionsIntegration(t *testing.T) {
-	tempDir := t.TempDir()
-
 	t.Run("TestProviderInterfaceExtension", func(t *testing.T) {
-		credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "provider"), "test-pass")
-		require.NoError(t, err)
+		credStore := newTestCredentialStore(t)
 
 		config := &OAuth2Config{
 			ClientID:                 "test-client",
@@ -41,15 +36,14 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 			UserPrincipalName: "test@example.com",
 		}
 
-		_, err = provider.GetDelegatedAccessToken(context.Background(), "test-tenant", userContext)
+		_, err := provider.GetDelegatedAccessToken(context.Background(), "test-tenant", userContext)
 		// Should fail without real credentials, but method should exist and return meaningful error
 		assert.Error(t, err)
 		assert.NotEmpty(t, err.Error(), "Error should have a meaningful message")
 	})
 
 	t.Run("TestUserContextManagement", func(t *testing.T) {
-		credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "context"), "test-pass")
-		require.NoError(t, err)
+		credStore := newTestCredentialStore(t)
 
 		userContext := &UserContext{
 			UserID:            "test-user-123",
@@ -61,7 +55,7 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 		}
 
 		// Test storing user context
-		err = credStore.StoreUserContext("test-tenant", userContext.UserID, userContext)
+		err := credStore.StoreUserContext("test-tenant", userContext.UserID, userContext)
 		require.NoError(t, err)
 
 		// Test retrieving user context
@@ -83,8 +77,7 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 	})
 
 	t.Run("TestDelegatedTokenStorage", func(t *testing.T) {
-		credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "tokens"), "test-pass")
-		require.NoError(t, err)
+		credStore := newTestCredentialStore(t)
 
 		userContext := &UserContext{
 			UserID:            "token-user",
@@ -102,7 +95,7 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 		}
 
 		// Test storing delegated token
-		err = credStore.StoreDelegatedToken("test-tenant", userContext.UserID, delegatedToken)
+		err := credStore.StoreDelegatedToken("test-tenant", userContext.UserID, delegatedToken)
 		require.NoError(t, err)
 
 		// Test retrieving delegated token
@@ -123,8 +116,7 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 	})
 
 	t.Run("TestDelegatedTokenCaching", func(t *testing.T) {
-		credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "cache"), "test-pass")
-		require.NoError(t, err)
+		credStore := newTestCredentialStore(t)
 
 		config := &OAuth2Config{
 			ClientID:             "cache-client",
@@ -177,8 +169,7 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 	})
 
 	t.Run("TestPermissionValidation", func(t *testing.T) {
-		credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "validation"), "test-pass")
-		require.NoError(t, err)
+		credStore := newTestCredentialStore(t)
 
 		provider := NewOAuth2Provider(credStore, &OAuth2Config{})
 
@@ -190,7 +181,7 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 			ExpiresAt:   time.Now().Add(time.Hour),
 		}
 
-		err = provider.ValidatePermissions(context.Background(), appToken, []string{"User.Read"})
+		err := provider.ValidatePermissions(context.Background(), appToken, []string{"User.Read"})
 		assert.NoError(t, err, "Application tokens should pass validation")
 
 		// Test delegated token with granted scopes
@@ -248,15 +239,14 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 	})
 
 	t.Run("TestBackwardCompatibility", func(t *testing.T) {
-		credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "compat"), "test-pass")
-		require.NoError(t, err)
+		credStore := newTestCredentialStore(t)
 
 		// This should work when loading old credential files
 		// The loadCredentials method should initialize missing fields
 		tenantID := "compat-tenant"
 
 		// Store a regular token first to create the file
-		err = credStore.StoreToken(tenantID, &AccessToken{Token: "test"})
+		err := credStore.StoreToken(tenantID, &AccessToken{Token: "test"})
 		require.NoError(t, err)
 
 		// Should be able to store delegated tokens even with existing old-format file
@@ -279,8 +269,7 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 
 // TestInteractiveAuthenticatorCreation verifies the interactive authenticator can be created
 func TestInteractiveAuthenticatorCreation(t *testing.T) {
-	credStore, err := NewFileCredentialStore(t.TempDir(), "test-pass")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:             "interactive-client",
@@ -311,13 +300,7 @@ func TestInteractiveAuthenticatorCreation(t *testing.T) {
 
 // TestRealWorldCredentialFlow tests the credential flow without making actual network calls
 func TestRealWorldCredentialFlow(t *testing.T) {
-	if os.Getenv("SKIP_INTEGRATION_TESTS") == "true" {
-		t.Skip("Integration tests disabled")
-	}
-
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(tempDir, "integration-test-pass")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:                 "integration-client-id",
@@ -361,7 +344,7 @@ func TestRealWorldCredentialFlow(t *testing.T) {
 	// Test complete flow simulation
 	t.Run("StoreAndRetrieveFlow", func(t *testing.T) {
 		// Store user context
-		err = credStore.StoreUserContext(config.TenantID, userContext.UserID, userContext)
+		err := credStore.StoreUserContext(config.TenantID, userContext.UserID, userContext)
 		require.NoError(t, err)
 
 		// Store delegated token
@@ -417,9 +400,7 @@ func TestRealWorldCredentialFlow(t *testing.T) {
 
 // BenchmarkDelegatedOperations benchmarks the performance of key delegated permission operations
 func BenchmarkDelegatedOperations(b *testing.B) {
-	tempDir := b.TempDir()
-	credStore, err := NewFileCredentialStore(tempDir, "benchmark-pass")
-	require.NoError(b, err)
+	credStore := newTestCredentialStore(b)
 
 	config := &OAuth2Config{
 		ClientID:             "benchmark-client",
@@ -457,8 +438,12 @@ func BenchmarkDelegatedOperations(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			userID := "benchmark-user-" + string(rune(i%100))
-			_ = credStore.StoreDelegatedToken(config.TenantID, userID, token)
-			_, _ = credStore.GetDelegatedToken(config.TenantID, userID)
+			if err := credStore.StoreDelegatedToken(config.TenantID, userID, token); err != nil {
+				b.Fatal(err)
+			}
+			if _, err := credStore.GetDelegatedToken(config.TenantID, userID); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 
@@ -466,8 +451,12 @@ func BenchmarkDelegatedOperations(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			userID := "context-user-" + string(rune(i%100))
-			_ = credStore.StoreUserContext(config.TenantID, userID, userContext)
-			_, _ = credStore.GetUserContext(config.TenantID, userID)
+			if err := credStore.StoreUserContext(config.TenantID, userID, userContext); err != nil {
+				b.Fatal(err)
+			}
+			if _, err := credStore.GetUserContext(config.TenantID, userID); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 }
