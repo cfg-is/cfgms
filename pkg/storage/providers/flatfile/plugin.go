@@ -202,6 +202,12 @@ func (p *FlatFileProvider) CreateCommandStore(config map[string]interface{}) (bu
 	return nil, ErrNotSupported
 }
 
+// CreateTriggerStore returns ErrNotSupported.
+// Trigger persistence belongs in the business-data tier (SQLite).
+func (p *FlatFileProvider) CreateTriggerStore(config map[string]interface{}) (business.TriggerStore, error) {
+	return nil, ErrNotSupported
+}
+
 // init auto-registers the flat-file provider so that a blank import is sufficient.
 func init() {
 	interfaces.RegisterStorageProvider(&FlatFileProvider{})

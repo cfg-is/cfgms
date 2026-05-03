@@ -100,6 +100,10 @@ func (m *MockStorageProvider) CreateCommandStore(_ map[string]interface{}) (busi
 	return nil, business.ErrNotSupported
 }
 
+func (m *MockStorageProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 // Mock implementations of store interfaces
 type MockClientTenantStore struct{}
 
@@ -700,7 +704,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 		sm := NewStorageManagerFromStores(
 			&MockConfigStore{}, &MockAuditStore{}, &MockRBACStore{},
 			&MockTenantStore{}, &MockClientTenantStore{}, &MockRegistrationTokenStore{},
-			nil, nil, nil,
+			nil, nil, nil, nil,
 		)
 
 		if sm.GetProviderName() != "composite" {
@@ -712,7 +716,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	})
 
 	t.Run("GetCapabilities returns zero value without panic", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		caps := sm.GetCapabilities()
 		// Zero value - no field should be set
 		if caps.SupportsTransactions || caps.SupportsVersioning || caps.MaxBatchSize != 0 {
@@ -721,14 +725,14 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	})
 
 	t.Run("GetVersion returns composite without panic", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if sm.GetVersion() != "composite" {
 			t.Errorf("expected version %q, got %q", "composite", sm.GetVersion())
 		}
 	})
 
 	t.Run("GetProvider returns nil without panic", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if sm.GetProvider() != nil {
 			t.Errorf("expected nil from GetProvider on composite manager")
 		}
@@ -745,7 +749,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 		sm := NewStorageManagerFromStores(
 			configStore, auditStore, rbacStore,
 			tenantStore, clientTenantStore, registrationTokenStore,
-			nil, nil, nil,
+			nil, nil, nil, nil,
 		)
 
 		if sm.GetConfigStore() != configStore {
@@ -775,10 +779,13 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 		if sm.GetCommandStore() != nil {
 			t.Errorf("CommandStore should be nil")
 		}
+		if sm.GetTriggerStore() != nil {
+			t.Errorf("TriggerStore should be nil")
+		}
 	})
 
 	t.Run("nil values allowed for all stores", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		// Should not panic
 		if sm.GetConfigStore() != nil {
 			t.Errorf("expected nil ConfigStore")
@@ -881,6 +888,10 @@ func TestCreateOSSStorageManager(t *testing.T) {
 		if sm.GetRegistrationTokenStore() == nil {
 			t.Errorf("RegistrationTokenStore should not be nil")
 		}
+		// TriggerStore: MockOSSProvider returns ErrNotSupported so it will be nil
+		if sm.GetTriggerStore() != nil {
+			t.Errorf("TriggerStore should be nil when provider returns ErrNotSupported")
+		}
 
 		globalRegistry.mutex.Lock()
 		delete(globalRegistry.providers, "flatfile")
@@ -929,6 +940,9 @@ func (m *MockOSSProvider) CreateSessionStore(_ map[string]interface{}) (business
 }
 func (m *MockOSSProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
 	return &MockCommandStore{}, nil
+}
+func (m *MockOSSProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
+	return nil, business.ErrNotSupported
 }
 
 // MockOSSProviderWithError is an interface stub that returns an error from a designated Create* method.
@@ -1008,6 +1022,12 @@ func (m *MockOSSProviderWithError) CreateCommandStore(_ map[string]interface{}) 
 		return nil, err
 	}
 	return &MockCommandStore{}, nil
+}
+func (m *MockOSSProviderWithError) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
+	if err := m.mayFail("CreateTriggerStore"); err != nil {
+		return nil, err
+	}
+	return nil, business.ErrNotSupported
 }
 
 func TestCreateOSSStorageManager_StoreCreationErrors(t *testing.T) {

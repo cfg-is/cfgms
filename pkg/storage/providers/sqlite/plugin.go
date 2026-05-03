@@ -250,6 +250,15 @@ func (p *SQLiteProvider) CreateCommandStore(config map[string]interface{}) (busi
 	return &SQLiteCommandStore{db: db}, nil
 }
 
+// CreateTriggerStore returns a SQLite-backed TriggerStore for durable workflow trigger persistence.
+func (p *SQLiteProvider) CreateTriggerStore(config map[string]interface{}) (business.TriggerStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteTriggerStore{db: db}, nil
+}
+
 // init auto-registers the SQLite provider so it is available after a blank import.
 func init() {
 	interfaces.RegisterStorageProvider(&SQLiteProvider{})

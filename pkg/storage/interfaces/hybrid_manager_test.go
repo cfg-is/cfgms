@@ -360,6 +360,10 @@ func (p *mockProvider) CreateCommandStore(_ map[string]interface{}) (business.Co
 	return nil, business.ErrNotSupported
 }
 
+func (p *mockProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:   true,
