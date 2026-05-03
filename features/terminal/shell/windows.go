@@ -10,12 +10,12 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
-	"time"
 )
 
 // WindowsExecutor implements shell execution for Windows systems
 type WindowsExecutor struct {
 	mu       sync.RWMutex
+	wg       sync.WaitGroup
 	config   *Config
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
@@ -126,6 +126,9 @@ func (e *WindowsExecutor) Start(ctx context.Context, config *Config) error {
 
 	e.running = true
 
+	// Track writer goroutines so Close can wait for them before closing channels
+	e.wg.Add(3)
+
 	// Start output readers
 	go e.readOutput(e.stdout, false) // stdout
 	go e.readOutput(e.stderr, true)  // stderr
@@ -216,11 +219,11 @@ func (e *WindowsExecutor) Close(ctx context.Context) error {
 		_ = stderr.Close()
 	}
 
-	// Give goroutines a moment to see the context cancellation
-	// before closing channels
-	time.Sleep(10 * time.Millisecond)
+	// Wait for writer goroutines to exit before closing channels.
+	// Without this barrier, a writer can race with close() and the race
+	// detector flags chansend-on-closed-channel.
+	e.wg.Wait()
 
-	// Close channels - safe now that goroutines should have exited
 	close(e.outputCh)
 	close(e.errorCh)
 
@@ -246,6 +249,7 @@ func (e *WindowsExecutor) IsRunning() bool {
 
 // readOutput reads output from stdout or stderr and sends it to the output channel
 func (e *WindowsExecutor) readOutput(reader io.ReadCloser, isStderr bool) {
+	defer e.wg.Done()
 	defer func() {
 		if isStderr {
 			return // Don't mark as not running for stderr reader
@@ -294,6 +298,8 @@ func (e *WindowsExecutor) readOutput(reader io.ReadCloser, isStderr bool) {
 
 // monitorProcess monitors the shell process and handles its exit
 func (e *WindowsExecutor) monitorProcess() {
+	defer e.wg.Done()
+
 	if e.cmd == nil {
 		return
 	}
