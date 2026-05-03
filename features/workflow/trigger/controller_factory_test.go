@@ -73,7 +73,7 @@ func newRealWorkflowTrigger(tb testing.TB) WorkflowTrigger {
 
 	registry := make(discovery.ModuleRegistry)
 	errCfg := stewardconfig.ErrorHandlingConfig{ModuleLoadFailure: stewardconfig.ActionContinue}
-	eng := workflow.NewEngine(factory.New(registry, errCfg), logging.NewNoopLogger())
+	eng := workflow.NewEngine(factory.New(registry, errCfg), logging.NewNoopLogger(), nil)
 
 	return &workflowEngineAdapter{
 		engine:      eng,

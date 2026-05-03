@@ -15,7 +15,7 @@ import (
 
 func TestWorkflowConditionalLogic(t *testing.T) {
 	logger := logging.NewLogger("info")
-	engine := NewEngine(nil, logger)
+	engine := NewEngine(nil, logger, nil)
 
 	tests := []struct {
 		name      string
@@ -351,7 +351,7 @@ func TestWorkflowConditionalLogic(t *testing.T) {
 
 func TestWorkflowExpressionConditions(t *testing.T) {
 	logger := logging.NewLogger("info")
-	engine := NewEngine(nil, logger)
+	engine := NewEngine(nil, logger, nil)
 
 	tests := []struct {
 		name       string
@@ -464,7 +464,7 @@ func TestWorkflowExpressionConditions(t *testing.T) {
 
 func TestWorkflowConditionalExecution(t *testing.T) {
 	logger := logging.NewLogger("info")
-	engine := NewEngine(nil, logger)
+	engine := NewEngine(nil, logger, nil)
 
 	workflow := Workflow{
 		Name: "conditional-test",

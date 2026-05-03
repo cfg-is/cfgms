@@ -67,7 +67,7 @@ func TestTrySuccess(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -132,7 +132,7 @@ func TestTryCatchHandled(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -197,7 +197,7 @@ func TestTryCatchNotHandled(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -262,7 +262,7 @@ func TestTryCatchByErrorType(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -313,7 +313,7 @@ func TestTryFinallyWithoutCatch(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -378,7 +378,7 @@ func TestCatchAllErrors(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -408,7 +408,7 @@ func TestTryMissingConfiguration(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)

@@ -315,6 +315,43 @@ func (e *DefaultTransformExecutor) ExecuteChain(ctx context.Context, chain []Tra
 					}, err
 				}
 
+			case TransformErrorActionContinueWith:
+				// No named-target concept in a chain; append a warning and skip remaining steps.
+				warning := fmt.Sprintf("Step %d (%s) failed with continue_with, skipping remaining chain: %s", i+1, step.Name, stepResult.Error)
+				allWarnings = append(allWarnings, warning)
+				e.logger.Warn("Transform step failed with continue_with, skipping chain", "step", i+1, "transform", step.Name, "error", stepResult.Error)
+				goto skipRemaining
+
+			case TransformErrorActionFallback:
+				if step.FallbackTransform != "" {
+					fallbackResult, fallbackErr := e.Execute(chainCtx, step.FallbackTransform, nil, currentData, chainVariables)
+					if fallbackErr != nil || !fallbackResult.Success {
+						errMsg := fallbackResult.Error
+						if fallbackErr != nil {
+							errMsg = fallbackErr.Error()
+						}
+						return TransformResult{
+							Success:  false,
+							Error:    fmt.Sprintf("Transform chain fallback failed at step %d (%s): %s", i+1, step.Name, errMsg),
+							Duration: time.Since(startTime),
+							Warnings: allWarnings,
+							Metadata: allMetadata,
+						}, fallbackErr
+					}
+					currentData = e.applyOutputMapping(step.OutputMapping, fallbackResult.Data, currentData, chainVariables)
+					allWarnings = append(allWarnings, fallbackResult.Warnings...)
+					lastResult = fallbackResult
+					continue
+				}
+				// No fallback configured — treat as stop.
+				return TransformResult{
+					Success:  false,
+					Error:    fmt.Sprintf("Transform chain stopped at step %d (%s): %s", i+1, step.Name, stepResult.Error),
+					Duration: time.Since(startTime),
+					Warnings: allWarnings,
+					Metadata: allMetadata,
+				}, err
+
 			default:
 				// Default behavior is to stop on error
 				return TransformResult{

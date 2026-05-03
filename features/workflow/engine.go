@@ -19,6 +19,15 @@ import (
 // the same value (Windows has ~15.6ms clock granularity).
 var executionIDCounter atomic.Uint64
 
+// TransformStepExecutor executes a workflow step of type transform.
+//
+// Declared here rather than importing features/workflow/transform to avoid an
+// import cycle: the transform package already imports features/workflow.
+// Concrete callers (e.g. cmd/) pass *transform.WorkflowTransformExecutor.
+type TransformStepExecutor interface {
+	ExecuteTransformStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
+}
+
 // Engine implements the WorkflowEngine interface
 type Engine struct {
 	moduleFactory    *factory.ModuleFactory
@@ -30,10 +39,13 @@ type Engine struct {
 	errorHandler     ErrorHandler
 	syncManager      *SyncManager
 	debugEngine      *DebugEngineImpl
+	transformExecutor TransformStepExecutor
 }
 
-// NewEngine creates a new workflow engine instance
-func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger) *Engine {
+// NewEngine creates a new workflow engine instance.
+// transformExecutor handles StepTypeTransform steps; pass nil if transform steps
+// are not used (executeStep will return an error for any transform step encountered).
+func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger, transformExecutor TransformStepExecutor) *Engine {
 	// Create module logger for structured workflow logging
 	workflowLogger := logging.ForModule("workflow").WithField("component", "engine")
 
@@ -60,6 +72,7 @@ func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger) *Eng
 		providerRegistry: providerRegistry,
 		errorHandler:     NewDefaultErrorHandler(),
 		syncManager:      NewSyncManager(),
+		transformExecutor: transformExecutor,
 	}
 
 	// Initialize debug engine
@@ -197,7 +210,8 @@ func (e *Engine) executeSteps(ctx context.Context, steps []Step, execution *Work
 }
 
 func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execution *WorkflowExecution, enableRetry bool) error {
-	for _, step := range steps {
+	for i := 0; i < len(steps); i++ {
+		step := steps[i]
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -259,6 +273,47 @@ func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execut
 							"decision", decision.Message)
 						if retryErr := e.executeStep(ctx, step, execution); retryErr != nil {
 							return workflowErr // Return original error if retry fails
+						}
+					case ErrorActionContinueWith:
+						targetName := decision.ContinueWith
+						targetIdx := -1
+						for j := i + 1; j < len(steps); j++ {
+							if steps[j].Name == targetName {
+								targetIdx = j
+								break
+							}
+						}
+						if targetIdx == -1 {
+							return NewWorkflowError(
+								ErrorCodeStepExecution,
+								fmt.Sprintf("continue_with target step not found: %s", targetName),
+								step.Name,
+								step.Type,
+								workflowErr,
+							).WithVariableState(execution.Variables)
+						}
+						e.logger.Warn("Continuing workflow from target step after error",
+							"step", step.Name,
+							"target", targetName,
+							"decision", decision.Message)
+						i = targetIdx - 1 // loop post-statement (i++) advances to targetIdx
+					case ErrorActionFallback:
+						if step.ErrorHandling == nil || step.ErrorHandling.FallbackStep == nil {
+							e.logger.Error("No fallback step configured, stopping workflow",
+								"step", step.Name,
+								"error", workflowErr.FullError())
+							return workflowErr
+						}
+						e.logger.Info("Executing fallback step after error",
+							"step", step.Name,
+							"fallback", step.ErrorHandling.FallbackStep.Name,
+							"decision", decision.Message)
+						if fallbackErr := e.executeStep(ctx, *step.ErrorHandling.FallbackStep, execution); fallbackErr != nil {
+							e.logger.Error("Fallback step also failed",
+								"step", step.Name,
+								"fallback", step.ErrorHandling.FallbackStep.Name,
+								"error", fallbackErr.Error())
+							return workflowErr // return the original error
 						}
 					default:
 						return workflowErr
@@ -357,6 +412,14 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		err = e.executeErrorWorkflowStep(ctx, step, execution)
 	case StepTypeComposite:
 		err = e.executeCompositeStep(ctx, step, execution)
+	case StepTypeTransform:
+		if e.transformExecutor == nil {
+			err = fmt.Errorf("transform executor not configured")
+		} else {
+			var transformResult StepResult
+			transformResult, err = e.transformExecutor.ExecuteTransformStep(ctx, step, execution)
+			execution.SetStepResult(step.Name, transformResult)
+		}
 	default:
 		err = fmt.Errorf("unknown step type: %s", step.Type)
 	}

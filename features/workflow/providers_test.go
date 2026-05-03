@@ -219,7 +219,7 @@ func TestEngine_ExecuteAPIStep_WithProviderRegistry(t *testing.T) {
 	// Create engine with provider registry
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 
 	workflow := Workflow{
 		Name: "api-provider-test",
