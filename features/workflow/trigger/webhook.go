@@ -10,6 +10,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,20 +27,24 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// errBearerAuthRateLimited is returned when the bearer token auth failure rate limit is exceeded.
+var errBearerAuthRateLimited = errors.New("bearer auth rate limit exceeded")
+
 // HTTPWebhookHandler implements the WebhookHandler interface using HTTP endpoints
 type HTTPWebhookHandler struct {
-	logger          *logging.ModuleLogger
-	triggerManager  TriggerManager
-	workflowTrigger WorkflowTrigger
-	server          *http.Server
-	router          *mux.Router
-	webhooks        map[string]*Trigger
-	pathToTrigger   map[string]string // Maps webhook paths to trigger IDs
-	rateLimiters    map[string]*rate.Limiter
-	mutex           sync.RWMutex
-	running         bool
-	address         string
-	port            int
+	logger              *logging.ModuleLogger
+	triggerManager      TriggerManager
+	workflowTrigger     WorkflowTrigger
+	server              *http.Server
+	router              *mux.Router
+	webhooks            map[string]*Trigger
+	pathToTrigger       map[string]string // Maps webhook paths to trigger IDs
+	rateLimiters        map[string]*rate.Limiter
+	authFailureLimiters map[string]*rate.Limiter
+	mutex               sync.RWMutex
+	running             bool
+	address             string
+	port                int
 }
 
 // NewHTTPWebhookHandler creates a new HTTP-based webhook handler
@@ -48,15 +53,16 @@ func NewHTTPWebhookHandler(triggerManager TriggerManager, workflowTrigger Workfl
 
 	router := mux.NewRouter()
 	handler := &HTTPWebhookHandler{
-		logger:          logger,
-		triggerManager:  triggerManager,
-		workflowTrigger: workflowTrigger,
-		router:          router,
-		webhooks:        make(map[string]*Trigger),
-		pathToTrigger:   make(map[string]string),
-		rateLimiters:    make(map[string]*rate.Limiter),
-		address:         address,
-		port:            port,
+		logger:              logger,
+		triggerManager:      triggerManager,
+		workflowTrigger:     workflowTrigger,
+		router:              router,
+		webhooks:            make(map[string]*Trigger),
+		pathToTrigger:       make(map[string]string),
+		rateLimiters:        make(map[string]*rate.Limiter),
+		authFailureLimiters: make(map[string]*rate.Limiter),
+		address:             address,
+		port:                port,
 	}
 
 	// Set up webhook routes
@@ -191,6 +197,7 @@ func (wh *HTTPWebhookHandler) UnregisterWebhook(ctx context.Context, triggerID s
 
 	delete(wh.webhooks, triggerID)
 	delete(wh.rateLimiters, triggerID)
+	delete(wh.authFailureLimiters, triggerID)
 
 	// Clean up path mapping
 	delete(wh.pathToTrigger, trigger.Webhook.Path)
@@ -219,7 +226,8 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 		"trigger_id", triggerID,
 		"payload_size", len(payload))
 
-	// Create trigger execution record
+	// Create trigger execution record — store only sanitized headers to prevent
+	// bearer tokens and credentials from leaking into persisted execution records.
 	execution := &TriggerExecution{
 		ID:        generateExecutionID(),
 		TriggerID: triggerID,
@@ -228,7 +236,7 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 		TriggerData: map[string]interface{}{
 			"trigger_type": "webhook",
 			"trigger_id":   triggerID,
-			"headers":      headers,
+			"headers":      sanitizeHeaders(headers),
 			"payload_size": len(payload),
 		},
 	}
@@ -249,7 +257,7 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 	}
 
 	// Authenticate request
-	if err := wh.authenticateRequest(trigger.Webhook, payload, headers); err != nil {
+	if err := wh.authenticateRequest(trigger.Webhook, payload, headers, triggerID); err != nil {
 		execution.Status = TriggerExecutionStatusFailed
 		execution.Error = fmt.Sprintf("authentication failed: %v", err)
 		endTime := time.Now()
@@ -279,11 +287,12 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 		return execution, err
 	}
 
-	// Add trigger data to variables
+	// Add trigger data to variables — sanitize headers to prevent auth credentials
+	// from reaching workflow steps via the webhook_headers variable.
 	triggerData := map[string]interface{}{
 		"trigger_type":    "webhook",
 		"trigger_id":      triggerID,
-		"webhook_headers": headers,
+		"webhook_headers": sanitizeHeaders(headers),
 		"execution_id":    execution.ID,
 	}
 
@@ -469,6 +478,13 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 	// Process webhook
 	execution, err := wh.HandleWebhook(ctx, triggerID, payload, headers)
 	if err != nil {
+		if errors.Is(err, errBearerAuthRateLimited) {
+			logger.WarnCtx(ctx, "Webhook bearer auth rate limit exceeded",
+				"trigger_id", triggerID,
+				"remote_addr", r.RemoteAddr)
+			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
 		logger.ErrorCtx(ctx, "Failed to process webhook",
 			"trigger_id", triggerID,
 			"error", err.Error())
@@ -536,7 +552,7 @@ func (wh *HTTPWebhookHandler) validatePayload(webhook *WebhookConfig, payload []
 }
 
 // authenticateRequest authenticates the webhook request
-func (wh *HTTPWebhookHandler) authenticateRequest(webhook *WebhookConfig, payload []byte, headers map[string]string) error {
+func (wh *HTTPWebhookHandler) authenticateRequest(webhook *WebhookConfig, payload []byte, headers map[string]string, triggerID string) error {
 	if webhook.Authentication == nil || webhook.Authentication.Type == WebhookAuthNone {
 		return nil
 	}
@@ -551,7 +567,7 @@ func (wh *HTTPWebhookHandler) authenticateRequest(webhook *WebhookConfig, payloa
 		return wh.validateAPIKey(auth, headers)
 
 	case WebhookAuthBearer:
-		return wh.validateBearerToken(auth, headers)
+		return wh.validateBearerToken(auth, headers, triggerID)
 
 	case WebhookAuthBasic:
 		return wh.validateBasicAuth(auth, headers)
@@ -627,23 +643,58 @@ func (wh *HTTPWebhookHandler) validateAPIKey(auth *WebhookAuth, headers map[stri
 	return nil
 }
 
-// validateBearerToken validates Bearer token
-func (wh *HTTPWebhookHandler) validateBearerToken(auth *WebhookAuth, headers map[string]string) error {
+// getOrCreateAuthFailureLimiter lazily initializes and returns the auth failure limiter for a trigger.
+func (wh *HTTPWebhookHandler) getOrCreateAuthFailureLimiter(triggerID string) *rate.Limiter {
+	if wh.authFailureLimiters == nil {
+		return nil
+	}
+	wh.mutex.RLock()
+	limiter, exists := wh.authFailureLimiters[triggerID]
+	wh.mutex.RUnlock()
+	if exists {
+		return limiter
+	}
+	wh.mutex.Lock()
+	defer wh.mutex.Unlock()
+	if limiter, exists = wh.authFailureLimiters[triggerID]; exists {
+		return limiter
+	}
+	limiter = rate.NewLimiter(rate.Limit(10.0/60.0), 10)
+	wh.authFailureLimiters[triggerID] = limiter
+	return limiter
+}
+
+// validateBearerToken validates Bearer token using constant-time NFC-normalized comparison.
+func (wh *HTTPWebhookHandler) validateBearerToken(auth *WebhookAuth, headers map[string]string, triggerID string) error {
+	// Fail-closed: missing config rejects all requests without leaking config state.
 	if auth.BearerToken == "" {
-		return fmt.Errorf("bearer token is required")
+		return errors.New("invalid Bearer token")
 	}
 
 	authHeader, exists := headers["Authorization"]
 	if !exists {
-		return fmt.Errorf("authorization header not found")
+		return wh.bearerAuthFailure(triggerID)
 	}
 
-	expectedToken := "Bearer " + auth.BearerToken
-	if authHeader != expectedToken {
-		return fmt.Errorf("invalid Bearer token")
+	// NFC-normalize both sides before comparison to prevent Unicode normalization attacks.
+	// Keep "Bearer " prefix on both sides — equal padding is acceptable.
+	normalizedReceived := norm.NFC.String(authHeader)
+	normalizedExpected := norm.NFC.String("Bearer " + auth.BearerToken)
+
+	if subtle.ConstantTimeCompare([]byte(normalizedReceived), []byte(normalizedExpected)) != 1 {
+		return wh.bearerAuthFailure(triggerID)
 	}
 
 	return nil
+}
+
+// bearerAuthFailure records an auth failure and returns errBearerAuthRateLimited if exhausted.
+func (wh *HTTPWebhookHandler) bearerAuthFailure(triggerID string) error {
+	limiter := wh.getOrCreateAuthFailureLimiter(triggerID)
+	if limiter != nil && !limiter.Allow() {
+		return errBearerAuthRateLimited
+	}
+	return errors.New("invalid Bearer token")
 }
 
 // validateBasicAuth validates HTTP Basic authentication
@@ -656,6 +707,23 @@ func (wh *HTTPWebhookHandler) validateBasicAuth(auth *WebhookAuth, headers map[s
 	// This would require base64 decoding the Authorization header
 	// and comparing username/password
 	return fmt.Errorf("basic auth validation not yet implemented")
+}
+
+// blockedWebhookHeaders is the set of header names (lowercased) that must never appear
+// in execution records or workflow variables to prevent credential leaks.
+var blockedWebhookHeaders = map[string]struct{}{
+	"authorization": {}, "cookie": {}, "x-api-key": {}, "x-auth-token": {},
+}
+
+// sanitizeHeaders returns a copy of headers with auth-related entries removed.
+func sanitizeHeaders(headers map[string]string) map[string]string {
+	out := make(map[string]string, len(headers))
+	for k, v := range headers {
+		if _, blocked := blockedWebhookHeaders[strings.ToLower(k)]; !blocked {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // mapPayloadToVariables maps webhook payload to workflow variables
@@ -690,9 +758,12 @@ func (wh *HTTPWebhookHandler) mapPayloadToVariables(trigger *Trigger, payload []
 		}
 	}
 
-	// Add headers as variables with "header_" prefix
+	// Add headers as variables with "header_" prefix, excluding auth-related headers.
 	for k, v := range headers {
-		variables["header_"+strings.ToLower(k)] = v
+		lk := strings.ToLower(k)
+		if _, blocked := blockedWebhookHeaders[lk]; !blocked {
+			variables["header_"+lk] = v
+		}
 	}
 
 	return variables, nil

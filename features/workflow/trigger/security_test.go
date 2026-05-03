@@ -165,7 +165,7 @@ func TestSecurityEdgeCases_WebhookAuthentication(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := handler.authenticateRequest(tt.webhook, tt.payload, tt.headers)
+			err := handler.authenticateRequest(tt.webhook, tt.payload, tt.headers, "test-trigger-id")
 
 			if tt.expectedResult {
 				assert.NoError(t, err, tt.description)
