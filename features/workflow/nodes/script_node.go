@@ -15,6 +15,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
+var scriptNodeLogger = logging.NewLogger("warn")
+
 // ScriptStepConfig defines configuration for script execution workflow steps
 type ScriptStepConfig struct {
 	// ScriptID is the ID of the script to execute (from repository)
@@ -169,7 +171,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 	}
 	if len(deviceIDs) == 0 {
 		// Zero-match from fleet filter: success with warning, no dispatch.
-		logging.NewLogger("warn").Warn("fleet filter matched no devices; skipping script dispatch",
+		scriptNodeLogger.Warn("fleet filter matched no devices; skipping script dispatch",
 			"node", n.Name)
 		return workflow.NodeOutput{
 			Success: true,
@@ -360,14 +362,14 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 			status = script.StatusFailed
 		}
 		if monErr := n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr); monErr != nil {
-			logging.NewLogger("warn").Warn("failed to update device execution status", "device_id", deviceID, "error", monErr)
+			scriptNodeLogger.Warn("failed to update device execution status", "device_id", deviceID, "error", monErr)
 		}
 
 		// Write durable tracking record on terminal state — best-effort.
 		if n.executionTracker != nil {
 			rec := buildInlineTrackingRecord(execution.ID, deviceID, n.config.ScriptID, n.config.Shell, status, result, input)
 			if trackErr := n.executionTracker.Record(ctx, rec); trackErr != nil {
-				logging.NewLogger("warn").Warn("failed to write execution tracking record", "device_id", deviceID, "error", trackErr)
+				scriptNodeLogger.Warn("failed to write execution tracking record", "device_id", deviceID, "error", trackErr)
 			}
 		}
 
