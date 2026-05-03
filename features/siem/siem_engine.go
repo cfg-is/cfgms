@@ -332,9 +332,11 @@ func (se *SIEMEngine) updateMetrics() {
 		se.metrics.GCPauseTime = time.Duration(pauseNs)
 	}
 
-	// Calculate throughput
+	// Calculate throughput. TotalEntriesProcessed is written atomically without
+	// the lock, so use atomic.Load to avoid a race with the write lock held here.
 	if se.metrics.Uptime > 0 {
-		se.metrics.CurrentThroughput = float64(se.metrics.TotalEntriesProcessed) / se.metrics.Uptime.Seconds()
+		total := atomic.LoadInt64(&se.metrics.TotalEntriesProcessed)
+		se.metrics.CurrentThroughput = float64(total) / se.metrics.Uptime.Seconds()
 		if se.metrics.CurrentThroughput > se.metrics.PeakThroughput {
 			se.metrics.PeakThroughput = se.metrics.CurrentThroughput
 		}
@@ -388,14 +390,44 @@ func (gc *GCController) optimizeGC() {
 	gc.adjustmentCount++
 }
 
-// GetMetrics returns comprehensive SIEM engine metrics
+// GetMetrics returns comprehensive SIEM engine metrics.
+// Fields written atomically (without the lock) are read with atomic.Load* to
+// avoid a data race between the struct-level copy and concurrent atomic writers.
 func (se *SIEMEngine) GetMetrics(ctx context.Context) (*SIEMMetrics, error) {
+	// Read lock-protected fields (written under metricsLock.Lock()).
 	se.metricsLock.RLock()
-	defer se.metricsLock.RUnlock()
+	snap := SIEMMetrics{
+		EntriesProcessedLastHour: se.metrics.EntriesProcessedLastHour,
+		EntriesProcessedLastDay:  se.metrics.EntriesProcessedLastDay,
+		CurrentThroughput:        se.metrics.CurrentThroughput,
+		PeakThroughput:           se.metrics.PeakThroughput,
+		AverageLatency:           se.metrics.AverageLatency,
+		P95Latency:               se.metrics.P95Latency,
+		P99Latency:               se.metrics.P99Latency,
+		MaxLatency:               se.metrics.MaxLatency,
+		WorkflowsTriggered:       se.metrics.WorkflowsTriggered,
+		BufferUtilization:        se.metrics.BufferUtilization,
+		MemoryUsage:              se.metrics.MemoryUsage,
+		CPUUsage:                 se.metrics.CPUUsage,
+		GoroutineCount:           se.metrics.GoroutineCount,
+		GCPauseTime:              se.metrics.GCPauseTime,
+		WorkerTimeouts:           se.metrics.WorkerTimeouts,
+		StartTime:                se.metrics.StartTime,
+		LastUpdateTime:           se.metrics.LastUpdateTime,
+		Uptime:                   se.metrics.Uptime,
+	}
+	se.metricsLock.RUnlock()
 
-	// Return a copy to prevent concurrent modification
-	metricsCopy := *se.metrics
-	return &metricsCopy, nil
+	// Read atomically-updated fields outside the lock using atomic.Load*.
+	snap.TotalEntriesProcessed = atomic.LoadInt64(&se.metrics.TotalEntriesProcessed)
+	snap.DroppedEntries = atomic.LoadInt64(&se.metrics.DroppedEntries)
+	snap.ProcessingErrors = atomic.LoadInt64(&se.metrics.ProcessingErrors)
+	snap.PatternsMatched = atomic.LoadInt64(&se.metrics.PatternsMatched)
+	snap.SecurityEventsGenerated = atomic.LoadInt64(&se.metrics.SecurityEventsGenerated)
+	snap.CorrelatedEventsGenerated = atomic.LoadInt64(&se.metrics.CorrelatedEventsGenerated)
+	snap.MemoryPressureEvents = atomic.LoadInt64(&se.metrics.MemoryPressureEvents)
+
+	return &snap, nil
 }
 
 // GetRuleManager returns the rule manager for external configuration
