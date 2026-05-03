@@ -421,7 +421,6 @@ func (se *SIEMEngine) GetMetrics(ctx context.Context) (*SIEMMetrics, error) {
 	// Read atomically-updated fields outside the lock using atomic.Load*.
 	snap.TotalEntriesProcessed = atomic.LoadInt64(&se.metrics.TotalEntriesProcessed)
 	snap.DroppedEntries = atomic.LoadInt64(&se.metrics.DroppedEntries)
-	snap.ActiveWorkers = atomic.LoadInt32(&se.metrics.ActiveWorkers)
 	snap.ProcessingErrors = atomic.LoadInt64(&se.metrics.ProcessingErrors)
 	snap.PatternsMatched = atomic.LoadInt64(&se.metrics.PatternsMatched)
 	snap.SecurityEventsGenerated = atomic.LoadInt64(&se.metrics.SecurityEventsGenerated)
