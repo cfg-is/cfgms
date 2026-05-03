@@ -546,18 +546,6 @@ func (ca *CA) ValidateCertificate(certPEM []byte) (*ValidationResult, error) {
 	return result, nil
 }
 
-// RevokeCertificate revokes a certificate (implementation for future CRL support)
-func (ca *CA) RevokeCertificate(serialNumber string, reason string) error {
-	// TODO: Implement certificate revocation list (CRL) support
-	return fmt.Errorf("certificate revocation not yet implemented")
-}
-
-// GetRevokedCertificates returns the list of revoked certificates
-func (ca *CA) GetRevokedCertificates() ([]string, error) {
-	// TODO: Implement certificate revocation list (CRL) support
-	return []string{}, nil
-}
-
 // saveToStorage saves the CA certificate and private key to storage
 func (ca *CA) saveToStorage() error {
 	if ca.config.StoragePath == "" {

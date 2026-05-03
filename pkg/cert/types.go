@@ -87,16 +87,6 @@ func (ct CertificateType) String() string {
 	}
 }
 
-// CertificateArchitecture represents the certificate deployment mode
-type CertificateArchitecture string
-
-const (
-	// CertArchitectureUnified uses a single server certificate for all purposes (backward compatible)
-	CertArchitectureUnified CertificateArchitecture = "unified"
-	// CertArchitectureSeparated uses purpose-specific certificates (public API, internal mTLS, config signing)
-	CertArchitectureSeparated CertificateArchitecture = "separated"
-)
-
 // SigningCertConfig contains configuration for config signing certificate generation
 type SigningCertConfig struct {
 	// Common name for the signing certificate
@@ -326,12 +316,6 @@ type CAManager interface {
 
 	// ValidateCertificate validates a certificate against this CA
 	ValidateCertificate(certPEM []byte) (*ValidationResult, error)
-
-	// RevokeCertificate revokes a certificate
-	RevokeCertificate(serialNumber string, reason string) error
-
-	// GetRevokedCertificates returns the list of revoked certificates
-	GetRevokedCertificates() ([]string, error)
 }
 
 // CertificateStore provides certificate storage and retrieval functionality
@@ -363,23 +347,14 @@ type CertificateStore interface {
 
 // CertificateValidator provides certificate validation functionality
 type CertificateValidator interface {
-	// ValidateChain validates a certificate chain
-	ValidateChain(certChain []*x509.Certificate) (*ValidationResult, error)
-
 	// ValidateCertificate validates a single certificate
 	ValidateCertificate(cert *x509.Certificate) (*ValidationResult, error)
 
 	// ValidateCertificateFile validates a certificate from PEM file data
 	ValidateCertificateFile(certPEM []byte) (*ValidationResult, error)
 
-	// ValidateCertificateChainFiles validates a certificate chain from PEM file data
-	ValidateCertificateChainFiles(certChainPEM []byte) (*ValidationResult, error)
-
 	// CheckExpiration checks if certificates are expiring
 	CheckExpiration(certs []*CertificateInfo, withinDays int) ([]*RenewalInfo, error)
-
-	// VerifyHostname verifies if a certificate is valid for a hostname
-	VerifyHostname(cert *x509.Certificate, hostname string) error
 }
 
 // CertificateRenewer provides certificate renewal functionality
@@ -392,7 +367,4 @@ type CertificateRenewer interface {
 
 	// AutoRenewCertificates automatically renews expiring certificates
 	AutoRenewCertificates(withinDays int) ([]*Certificate, error)
-
-	// ScheduleRenewal schedules automatic renewal for a certificate
-	ScheduleRenewal(serialNumber string, renewalDate time.Time) error
 }

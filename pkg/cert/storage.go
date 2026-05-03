@@ -364,41 +364,9 @@ func (fs *FileStore) loadCertificates() error {
 	return nil
 }
 
-// RefreshCache reloads all certificates from storage
-func (fs *FileStore) RefreshCache() error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	// Clear existing cache
-	fs.certs = make(map[string]*CertificateInfo)
-
-	// Reload certificates
-	return fs.loadCertificates()
-}
-
 // GetStoragePath returns the base storage path
 func (fs *FileStore) GetStoragePath() string {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 	return fs.basePath
-}
-
-// GetCertificateCount returns the number of certificates in storage
-func (fs *FileStore) GetCertificateCount() int {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-	return len(fs.certs)
-}
-
-// GetCertificateCountByType returns the number of certificates by type
-func (fs *FileStore) GetCertificateCountByType() map[CertificateType]int {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-
-	counts := make(map[CertificateType]int)
-	for _, cert := range fs.certs {
-		counts[cert.Type]++
-	}
-
-	return counts
 }

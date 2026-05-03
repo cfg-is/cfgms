@@ -112,78 +112,6 @@ func ValidateKeyPair(certPEM, keyPEM []byte) error {
 	return nil
 }
 
-// GetCertificateFingerprint calculates the SHA256 fingerprint of a certificate
-func GetCertificateFingerprint(cert *x509.Certificate) string {
-	if cert == nil {
-		return ""
-	}
-
-	// The fingerprint calculation is already implemented in ca.go
-	// We'll reuse that logic here by creating a temporary CA instance
-	ca := &CA{}
-	return ca.calculateFingerprint(cert.Raw)
-}
-
-// GetCertificateInfo extracts basic information from a certificate
-func GetCertificateInfo(cert *x509.Certificate) *CertificateInfo {
-	if cert == nil {
-		return nil
-	}
-
-	certType := CertificateTypeClient
-	if cert.IsCA {
-		certType = CertificateTypeCA
-	} else {
-		// Check if it's a server certificate by looking at extended key usage
-		for _, usage := range cert.ExtKeyUsage {
-			if usage == x509.ExtKeyUsageServerAuth {
-				certType = CertificateTypeServer
-				break
-			}
-		}
-	}
-
-	daysUntilExpiration := int(time.Until(cert.NotAfter).Hours() / 24)
-	if daysUntilExpiration < 0 {
-		daysUntilExpiration = 0
-	}
-
-	return &CertificateInfo{
-		Type:                certType,
-		CommonName:          cert.Subject.CommonName,
-		SerialNumber:        cert.SerialNumber.String(),
-		CreatedAt:           cert.NotBefore,
-		ExpiresAt:           cert.NotAfter,
-		IsValid:             time.Now().Before(cert.NotAfter) && time.Now().After(cert.NotBefore),
-		Fingerprint:         GetCertificateFingerprint(cert),
-		Issuer:              cert.Issuer.CommonName,
-		DaysUntilExpiration: daysUntilExpiration,
-		NeedsRenewal:        daysUntilExpiration < 30,
-	}
-}
-
-// LoadCertificateFromFile loads a certificate from a file
-func LoadCertificateFromFile(filename string) (*x509.Certificate, error) {
-	// #nosec G304 - Certificate management requires loading certificate files from controlled paths
-	certPEM, err := os.ReadFile(filename)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read certificate file: %w", err)
-	}
-
-	return ParseCertificateFromPEM(certPEM)
-}
-
-// LoadCertificateChainFromFile loads a certificate chain from a file
-func LoadCertificateChainFromFile(filename string) ([]*x509.Certificate, error) {
-	// #nosec G304 - Certificate management requires loading certificate files from controlled paths
-	certChainPEM, err := os.ReadFile(filename)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read certificate chain file: %w", err)
-	}
-
-	return ParseCertificateChainFromPEM(certChainPEM)
-}
-
 // SaveCertificateToFile saves a certificate to a file in PEM format
 func SaveCertificateToFile(cert *Certificate, certPath, keyPath string) error {
 	// Save certificate
@@ -201,16 +129,6 @@ func SaveCertificateToFile(cert *Certificate, certPath, keyPath string) error {
 	return nil
 }
 
-// IsCertificateExpiring checks if a certificate is expiring within the specified days
-func IsCertificateExpiring(cert *x509.Certificate, withinDays int) bool {
-	if cert == nil {
-		return false
-	}
-
-	expirationThreshold := time.Now().Add(time.Duration(withinDays) * 24 * time.Hour)
-	return cert.NotAfter.Before(expirationThreshold) && cert.NotAfter.After(time.Now())
-}
-
 // IsCertificateExpired checks if a certificate has expired
 func IsCertificateExpired(cert *x509.Certificate) bool {
 	if cert == nil {
@@ -218,30 +136,4 @@ func IsCertificateExpired(cert *x509.Certificate) bool {
 	}
 
 	return time.Now().After(cert.NotAfter)
-}
-
-// FormatCertificateInfo returns a human-readable string representation of certificate info
-func FormatCertificateInfo(info *CertificateInfo) string {
-	if info == nil {
-		return "No certificate information"
-	}
-
-	status := "Valid"
-	if !info.IsValid {
-		status = "Invalid"
-	} else if info.DaysUntilExpiration <= 0 {
-		status = "Expired"
-	} else if info.NeedsRenewal {
-		status = "Expiring Soon"
-	}
-
-	return fmt.Sprintf(
-		"Type: %s, CN: %s, Serial: %s, Status: %s, Expires: %s (%d days)",
-		info.Type.String(),
-		info.CommonName,
-		info.SerialNumber,
-		status,
-		info.ExpiresAt.Format("2006-01-02"),
-		info.DaysUntilExpiration,
-	)
 }

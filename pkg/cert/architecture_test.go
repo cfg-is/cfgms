@@ -172,12 +172,6 @@ func TestUnifiedMode_ServerCertUnchanged(t *testing.T) {
 	assert.Empty(t, signingCerts)
 }
 
-// TestCertificateArchitectureConstants verifies the architecture string constants
-func TestCertificateArchitectureConstants(t *testing.T) {
-	assert.Equal(t, CertificateArchitecture("unified"), CertArchitectureUnified)
-	assert.Equal(t, CertificateArchitecture("separated"), CertArchitectureSeparated)
-}
-
 // TestManagerGenerateInternalServerCertificate verifies Manager stores internal server certs
 func TestManagerGenerateInternalServerCertificate(t *testing.T) {
 	manager := setupTestManager(t)

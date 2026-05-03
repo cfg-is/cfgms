@@ -63,6 +63,34 @@ func waitForSessionCleanup(t *testing.T, manager SessionManager, expectedCount i
 	assert.Len(t, activeSessions, expectedCount, "Expected %d sessions after cleanup, but found %d", expectedCount, len(activeSessions))
 }
 
+// waitForActiveSessions polls until the manager has at least minCount active sessions.
+func waitForActiveSessions(t *testing.T, manager SessionManager, minCount int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(manager.GetActiveSessions()) >= minCount {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.GreaterOrEqual(t, len(manager.GetActiveSessions()), minCount,
+		"timed out waiting for %d active session(s)", minCount)
+}
+
+// waitForLogEntry polls capLogger until an entry with the given message appears,
+// then returns the session_id value from that entry.
+func waitForLogEntry(t *testing.T, capLogger *kvCapturingLogger, msg string) (string, bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if v, ok := sessionIDInEntry(capLogger.allEntries(), msg); ok {
+			return v, true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return sessionIDInEntry(capLogger.allEntries(), msg)
+}
+
 func TestWebSocketHandlerCreation(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &Config{
@@ -631,15 +659,12 @@ func TestWebSocketSessionIDRedaction_Established(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 
-	// Wait for session to be established and the log entry to be written.
-	time.Sleep(100 * time.Millisecond)
-
+	waitForActiveSessions(t, manager, 1)
 	sessions := manager.GetActiveSessions()
 	require.Len(t, sessions, 1)
 	sessionID := sessions[0].ID
 
-	entries := capLogger.allEntries()
-	value, found := sessionIDInEntry(entries, "WebSocket terminal session established")
+	value, found := waitForLogEntry(t, capLogger, "WebSocket terminal session established")
 	require.True(t, found, "expected 'WebSocket terminal session established' log entry with session_id")
 	assert.Equal(t, logging.RedactedID(sessionID), value, "session_id must be redacted in established log")
 	assert.NotEqual(t, sessionID, value, "raw session ID must not appear in log")
@@ -668,8 +693,7 @@ func TestWebSocketSessionIDRedaction_Ended(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Wait for session to establish, then capture the session ID.
-	time.Sleep(100 * time.Millisecond)
+	waitForActiveSessions(t, manager, 1)
 	sessions := manager.GetActiveSessions()
 	require.Len(t, sessions, 1)
 	sessionID := sessions[0].ID
@@ -679,11 +703,7 @@ func TestWebSocketSessionIDRedaction_Ended(t *testing.T) {
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 	_ = conn.Close()
 
-	// Wait for HandleWebSocket to log "session ended".
-	time.Sleep(200 * time.Millisecond)
-
-	entries := capLogger.allEntries()
-	value, found := sessionIDInEntry(entries, "WebSocket terminal session ended")
+	value, found := waitForLogEntry(t, capLogger, "WebSocket terminal session ended")
 	require.True(t, found, "expected 'WebSocket terminal session ended' log entry with session_id")
 	assert.Equal(t, logging.RedactedID(sessionID), value, "session_id must be redacted in ended log")
 	assert.NotEqual(t, sessionID, value, "raw session ID must not appear in log")
@@ -716,7 +736,7 @@ func TestWebSocketSessionIDRedaction_ReadError(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 
-	time.Sleep(100 * time.Millisecond)
+	waitForActiveSessions(t, manager, 1)
 	sessions := manager.GetActiveSessions()
 	require.Len(t, sessions, 1)
 	sessionID := sessions[0].ID
@@ -725,10 +745,7 @@ func TestWebSocketSessionIDRedaction_ReadError(t *testing.T) {
 	_ = conn.WriteMessage(websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 
-	time.Sleep(200 * time.Millisecond)
-
-	entries := capLogger.allEntries()
-	value, found := sessionIDInEntry(entries, "WebSocket read error")
+	value, found := waitForLogEntry(t, capLogger, "WebSocket read error")
 	require.True(t, found, "expected 'WebSocket read error' log entry with session_id")
 	assert.Equal(t, logging.RedactedID(sessionID), value, "session_id must be redacted in read-error log")
 	assert.NotEqual(t, sessionID, value, "raw session ID must not appear in log")
@@ -759,7 +776,7 @@ func TestWebSocketSessionIDRedaction_HandleMessageError(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 
-	time.Sleep(100 * time.Millisecond)
+	waitForActiveSessions(t, manager, 1)
 	sessions := manager.GetActiveSessions()
 	require.Len(t, sessions, 1)
 	sessionID := sessions[0].ID
@@ -772,10 +789,7 @@ func TestWebSocketSessionIDRedaction_HandleMessageError(t *testing.T) {
 	err = conn.WriteJSON(badMsg)
 	require.NoError(t, err)
 
-	time.Sleep(200 * time.Millisecond)
-
-	entries := capLogger.allEntries()
-	value, found := sessionIDInEntry(entries, "Failed to handle message")
+	value, found := waitForLogEntry(t, capLogger, "Failed to handle message")
 	require.True(t, found, "expected 'Failed to handle message' log entry with session_id")
 	assert.Equal(t, logging.RedactedID(sessionID), value, "session_id must be redacted in handle-message-error log")
 	assert.NotEqual(t, sessionID, value, "raw session ID must not appear in log")
@@ -816,8 +830,7 @@ func TestWebSocketSessionIDRedaction_PingFailure(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 
-	// Wait for the session to be established (first ping may already have succeeded).
-	time.Sleep(100 * time.Millisecond)
+	waitForActiveSessions(t, manager, 1)
 	sessions := manager.GetActiveSessions()
 	require.Len(t, sessions, 1)
 	sessionID := sessions[0].ID
@@ -825,11 +838,7 @@ func TestWebSocketSessionIDRedaction_PingFailure(t *testing.T) {
 	// Fail all server-side writes; the next ping tick (≤50 ms away) will fail.
 	fl.setAllFailWrites(true)
 
-	// Wait for at least two ping intervals so the failure is certain to have fired.
-	time.Sleep(150 * time.Millisecond)
-
-	entries := capLogger.allEntries()
-	value, found := sessionIDInEntry(entries, "Failed to send ping")
+	value, found := waitForLogEntry(t, capLogger, "Failed to send ping")
 	require.True(t, found, "expected 'Failed to send ping' log entry with session_id")
 	assert.Equal(t, logging.RedactedID(sessionID), value, "session_id must be redacted in ping-failure log")
 	assert.NotEqual(t, sessionID, value, "raw session ID must not appear in log")
