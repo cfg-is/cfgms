@@ -155,6 +155,29 @@ func createTestConfig() ProcessingConfig {
 
 // Unit Tests
 
+func TestSIEMEngine_ZeroConfigConstruction(t *testing.T) {
+	triggerManager := NewMockTriggerManager()
+	workflowTrigger := NewMockWorkflowTrigger()
+
+	engine, err := NewSIEMEngine(ProcessingConfig{}, triggerManager, workflowTrigger)
+	require.NoError(t, err)
+	require.NotNil(t, engine)
+	assert.NotNil(t, engine.streamProcessor)
+	assert.NotNil(t, engine.patternMatcher)
+	assert.NotNil(t, engine.eventCorrelator)
+	assert.NotNil(t, engine.ruleManager)
+}
+
+func TestSIEMEngine_InvalidConfigRejected(t *testing.T) {
+	triggerManager := NewMockTriggerManager()
+	workflowTrigger := NewMockWorkflowTrigger()
+
+	// Explicit sub-threshold values are not zero, so no default is applied; validation must reject them.
+	_, err := NewSIEMEngine(ProcessingConfig{BufferSize: 1, BatchSize: 200, WorkerCount: 4, TargetThroughput: 12000}, triggerManager, workflowTrigger)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "buffer size must be at least 1000")
+}
+
 func TestSIEMEngine_Creation(t *testing.T) {
 	triggerManager := NewMockTriggerManager()
 	workflowTrigger := NewMockWorkflowTrigger()

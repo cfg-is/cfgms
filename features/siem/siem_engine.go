@@ -108,11 +108,6 @@ func NewSIEMEngine(config ProcessingConfig, triggerManager trigger.TriggerManage
 
 	logger := logging.ForModule("siem.engine").WithField("component", "engine")
 
-	// Validate configuration
-	if err := validateProcessingConfig(config); err != nil {
-		return nil, fmt.Errorf("invalid processing configuration: %w", err)
-	}
-
 	// Set performance-optimized defaults
 	if config.BufferSize == 0 {
 		config.BufferSize = 100000 // Large buffer for high throughput
@@ -128,6 +123,11 @@ func NewSIEMEngine(config ProcessingConfig, triggerManager trigger.TriggerManage
 	}
 	if config.TargetThroughput == 0 {
 		config.TargetThroughput = 12000 // Target above 10k for safety margin
+	}
+
+	// Validate configuration after defaults are applied
+	if err := validateProcessingConfig(config); err != nil {
+		return nil, fmt.Errorf("invalid processing configuration: %w", err)
 	}
 
 	// Create core components
