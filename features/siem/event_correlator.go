@@ -312,35 +312,9 @@ func (ec *EventCorrelatorImpl) evaluateCondition(condition *Condition, event *Se
 	}
 
 	// Apply operator
-	return ec.applyConditionOperator(condition.Operator, fieldValue, condition.Value, condition.CaseSensitive)
-}
-
-// applyConditionOperator applies a condition operator
-func (ec *EventCorrelatorImpl) applyConditionOperator(operator string, fieldValue, conditionValue interface{}, caseSensitive bool) bool {
 	fieldStr := fmt.Sprintf("%v", fieldValue)
-	conditionStr := fmt.Sprintf("%v", conditionValue)
-
-	if !caseSensitive {
-		fieldStr = strings.ToLower(fieldStr)
-		conditionStr = strings.ToLower(conditionStr)
-	}
-
-	switch operator {
-	case "equals":
-		return fieldStr == conditionStr
-	case "not_equals":
-		return fieldStr != conditionStr
-	case "contains":
-		return strings.Contains(fieldStr, conditionStr)
-	case "not_contains":
-		return !strings.Contains(fieldStr, conditionStr)
-	case "starts_with":
-		return strings.HasPrefix(fieldStr, conditionStr)
-	case "ends_with":
-		return strings.HasSuffix(fieldStr, conditionStr)
-	default:
-		return false
-	}
+	conditionStr := fmt.Sprintf("%v", condition.Value)
+	return applyOperator(condition.Operator, fieldStr, conditionStr, condition.CaseSensitive)
 }
 
 // buildWindowKey builds a unique key for an event window
