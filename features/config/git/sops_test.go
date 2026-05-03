@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -565,10 +566,9 @@ func TestSOPSManager_EncryptContent_PlaintextChmodZero(t *testing.T) {
 	var hookCalled bool
 	manager.onChmod = func(path string, _ os.FileMode) {
 		info, err := os.Stat(path)
-		if err == nil {
-			capturedMode = info.Mode().Perm()
-			hookCalled = true
-		}
+		require.NoError(t, err, "os.Stat on chmod'd plaintext temp file must not fail")
+		capturedMode = info.Mode().Perm()
+		hookCalled = true
 	}
 
 	config := &SOPSConfig{
@@ -592,10 +592,22 @@ func TestSOPSManager_EncryptContent_PlaintextChmodZero(t *testing.T) {
 	// EncryptContent will fail at sops exec (binary unavailable in test env),
 	// but chmod must have been applied before the exec attempt.
 	_, encryptErr := manager.EncryptContent(ctx, content, config, "test.yaml")
-	assert.Error(t, encryptErr, "expected sops exec failure since binary is unavailable in test env")
+	require.Error(t, encryptErr, "expected sops exec failure since binary is unavailable in test env")
 
 	require.True(t, hookCalled, "onChmod hook should have been called — chmod must occur before sops exec")
-	assert.Equal(t, os.FileMode(0000), capturedMode, "plaintext temp file must have mode 0000 before sops exec")
+
+	// Windows only supports toggling the read-only attribute; os.Chmod(path, 0000) results
+	// in mode 0444 (read-only). On Unix the full 0000 is achievable. On Linux containers
+	// running as root, chmod still sets mode bits to 0000 (root bypasses DAC at access time,
+	// not at chmod time) so the assertion holds even under root.
+	expectedMode := os.FileMode(0000)
+	if runtime.GOOS == "windows" {
+		expectedMode = 0444
+	}
+	if runtime.GOOS != "windows" && os.Getuid() == 0 {
+		t.Log("running as root: mode bits are still set to 0000 by chmod, but root bypasses DAC — protection relies on short exec window and deferred Remove")
+	}
+	assert.Equal(t, expectedMode, capturedMode, "plaintext temp file must have mode 0000 (unix) or 0444 (windows) before sops exec")
 }
 
 // TestSOPSManager_EncryptContent_TempFilesRemoved asserts that both plaintext
@@ -603,6 +615,15 @@ func TestSOPSManager_EncryptContent_PlaintextChmodZero(t *testing.T) {
 func TestSOPSManager_EncryptContent_TempFilesRemoved(t *testing.T) {
 	manager := NewSOPSManager()
 	ctx := context.Background()
+
+	// Snapshot cfgms-sops-* files before the call so we can detect any leaks.
+	pattern := filepath.Join(os.TempDir(), "cfgms-sops-*")
+	before, err := filepath.Glob(pattern)
+	require.NoError(t, err, "glob pattern must be valid")
+	beforeSet := make(map[string]bool, len(before))
+	for _, f := range before {
+		beforeSet[f] = true
+	}
 
 	var capturedPath string
 	manager.onChmod = func(path string, _ os.FileMode) {
@@ -627,7 +648,7 @@ func TestSOPSManager_EncryptContent_TempFilesRemoved(t *testing.T) {
 
 	content := []byte("test: value\n")
 	_, encryptErr := manager.EncryptContent(ctx, content, config, "test.yaml")
-	assert.Error(t, encryptErr, "expected sops exec failure since binary is unavailable in test env")
+	require.Error(t, encryptErr, "expected sops exec failure since binary is unavailable in test env")
 
 	// After the function returns, the plaintext temp file must be removed.
 	// require.NotEmpty ensures the hook was called (production code reached chmod)
@@ -635,6 +656,16 @@ func TestSOPSManager_EncryptContent_TempFilesRemoved(t *testing.T) {
 	require.NotEmpty(t, capturedPath, "onChmod hook must be called — EncryptContent must reach chmod before sops exec")
 	_, statErr := os.Stat(capturedPath)
 	assert.True(t, os.IsNotExist(statErr), "plaintext temp file should be removed after EncryptContent returns")
+
+	// Verify no new cfgms-sops-* files remain — covers both plaintext (cfgms-sops-plain-*)
+	// and ciphertext (cfgms-sops-enc-*) cleanup via deferred os.Remove calls.
+	after, err := filepath.Glob(pattern)
+	require.NoError(t, err, "glob pattern must be valid")
+	for _, f := range after {
+		if !beforeSet[f] {
+			t.Errorf("EncryptContent left temp file behind: %s", f)
+		}
+	}
 }
 
 // TestSOPSManager_EncryptContent_DisabledPassthrough asserts that EncryptContent
@@ -689,4 +720,49 @@ func TestSOPSManager_EncryptContent_NoInPlace(t *testing.T) {
 	require.NotEmpty(t, plainPath, "onChmod should have captured the plaintext temp file path")
 	assert.True(t, strings.Contains(filepath.Base(plainPath), "cfgms-sops-plain-"),
 		"plaintext temp file should use cfgms-sops-plain-* pattern, got: %s", plainPath)
+}
+
+// TestSOPSManager_EncryptContent_ExtensionPreserved verifies that EncryptContent
+// preserves the file extension of the source path in the plaintext temp file name,
+// falling back to ".yaml" when the source has no extension.
+func TestSOPSManager_EncryptContent_ExtensionPreserved(t *testing.T) {
+	cases := []struct {
+		filePath    string
+		expectedExt string
+	}{
+		{"config.yaml", ".yaml"},
+		{"config.yml", ".yml"},
+		{"config.json", ".json"},
+		{"config", ".yaml"}, // no extension falls back to .yaml
+	}
+
+	kmsKey := "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+	for _, tc := range cases {
+		t.Run(tc.filePath, func(t *testing.T) {
+			manager := NewSOPSManager()
+			ctx := context.Background()
+
+			var plainPath string
+			manager.onChmod = func(path string, _ os.FileMode) {
+				plainPath = path
+			}
+
+			config := &SOPSConfig{
+				Enabled: true,
+				KMSProviders: map[string]KMSProvider{
+					"aws": {Type: "aws", KeyID: kmsKey},
+				},
+				EncryptionRules: []EncryptionRule{
+					{PathRegex: `.*`, KMSKey: kmsKey},
+				},
+			}
+
+			_, encryptErr := manager.EncryptContent(ctx, []byte("test: value\n"), config, tc.filePath)
+			require.Error(t, encryptErr, "expected sops exec failure since binary is unavailable in test env")
+
+			require.NotEmpty(t, plainPath, "onChmod must be called — EncryptContent must reach chmod before sops exec")
+			assert.Equal(t, tc.expectedExt, filepath.Ext(plainPath),
+				"plaintext temp file must preserve source extension for %s", tc.filePath)
+		})
+	}
 }
