@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -41,55 +40,6 @@ func (s *stubTenantDiscoverer) DiscoverTenants(_ context.Context, _ *TokenSet) (
 // newStubTenantDiscoverer returns a stub that returns the given tenants on every call.
 func newStubTenantDiscoverer(tenants ...TenantInfo) *stubTenantDiscoverer {
 	return &stubTenantDiscoverer{tenants: tenants}
-}
-
-// Mock implementations for testing
-
-// MockCredentialStore implements CredentialStore for testing token and client-secret
-// operations. It must NOT be used for consent state — use InMemoryConsentStore instead.
-type MockCredentialStore struct {
-	tokens  map[string]*TokenSet
-	secrets map[string]string
-}
-
-func NewMockCredentialStore() *MockCredentialStore {
-	return &MockCredentialStore{
-		tokens:  make(map[string]*TokenSet),
-		secrets: make(map[string]string),
-	}
-}
-
-func (m *MockCredentialStore) StoreTokenSet(provider string, tokens *TokenSet) error {
-	m.tokens[provider] = tokens
-	return nil
-}
-
-func (m *MockCredentialStore) GetTokenSet(provider string) (*TokenSet, error) {
-	if tokens, exists := m.tokens[provider]; exists {
-		return tokens, nil
-	}
-	return nil, fmt.Errorf("token set not found for provider: %s", provider)
-}
-
-func (m *MockCredentialStore) DeleteTokenSet(provider string) error {
-	delete(m.tokens, provider)
-	return nil
-}
-
-func (m *MockCredentialStore) StoreClientSecret(provider, clientSecret string) error {
-	m.secrets[provider] = clientSecret
-	return nil
-}
-
-func (m *MockCredentialStore) GetClientSecret(provider string) (string, error) {
-	if secret, exists := m.secrets[provider]; exists {
-		return secret, nil
-	}
-	return "", fmt.Errorf("client secret not found for provider: %s", provider)
-}
-
-func (m *MockCredentialStore) IsAvailable() bool {
-	return true
 }
 
 // Test MultiTenantManager
@@ -138,7 +88,7 @@ func TestMultiTenantManager_StartAdminConsent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			credStore := NewMockCredentialStore()
+			credStore := newTestCredentialStore(t)
 			consentStore := NewInMemoryConsentStore()
 			httpClient := NewGraphHTTPClient(100, 1000)
 			mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
@@ -215,7 +165,7 @@ func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
 			}))
 			defer tokenServer.Close()
 
-			credStore := NewMockCredentialStore()
+			credStore := newTestCredentialStore(t)
 			consentStore := NewInMemoryConsentStore()
 			// Use the real DefaultOAuth2Client so ExchangeCode hits the httptest server.
 			// Wire a stub discoverer so discoverTenants returns stubTenants without HTTP calls.
@@ -317,7 +267,7 @@ func TestMultiTenantManager_DiscoverTenantsErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			credStore := NewMockCredentialStore()
+			credStore := newTestCredentialStore(t)
 			consentStore := NewInMemoryConsentStore()
 			mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), tt.discoverer)
 
@@ -446,7 +396,7 @@ func TestDefaultOAuth2Client_ExchangeCode(t *testing.T) {
 }
 
 func TestMultiTenantManager_GetTenantToken(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
 	httpClient := NewGraphHTTPClient(100, 1000)
 	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
@@ -484,7 +434,7 @@ func TestMultiTenantManager_GetTenantToken(t *testing.T) {
 }
 
 func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
 	httpClient := NewGraphHTTPClient(100, 1000)
 	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
@@ -518,7 +468,7 @@ func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
 }
 
 func TestMultiTenantManager_GetTenantToken_TIDMismatch(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
 	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer())
 
@@ -550,7 +500,7 @@ func TestMultiTenantManager_GetTenantToken_TIDMismatch(t *testing.T) {
 }
 
 func TestMultiTenantManager_GetTenantToken_OpaqueToken(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
 	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer())
 
@@ -581,7 +531,7 @@ func TestMultiTenantManager_GetTenantToken_OpaqueToken(t *testing.T) {
 }
 
 func TestMultiTenantManager_GetTenantToken_ExpiredToken_RefreshNotImplemented(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
 	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer())
 
@@ -612,7 +562,7 @@ func TestMultiTenantManager_GetTenantToken_ExpiredToken_RefreshNotImplemented(t 
 }
 
 func TestMultiTenantManager_ListAccessibleTenants(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
 	httpClient := NewGraphHTTPClient(100, 1000)
 	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
@@ -651,7 +601,7 @@ func TestMultiTenantManager_ListAccessibleTenants(t *testing.T) {
 }
 
 func TestMultiTenantManager_RevokeConsent(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
 	httpClient := NewGraphHTTPClient(100, 1000)
 	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
@@ -709,7 +659,7 @@ func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 // Test MicrosoftMultiTenantProvider
 
 func TestMicrosoftMultiTenantProvider_Creation(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	httpClient := NewGraphHTTPClient(100, 1000)
 
 	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
@@ -720,7 +670,7 @@ func TestMicrosoftMultiTenantProvider_Creation(t *testing.T) {
 }
 
 func TestMicrosoftMultiTenantProvider_StartAdminConsent(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	httpClient := NewGraphHTTPClient(100, 1000)
 	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
 
@@ -778,7 +728,7 @@ func TestMicrosoftMultiTenantProvider_CreateInTenant(t *testing.T) {
 			}))
 			defer server.Close()
 
-			credStore := NewMockCredentialStore()
+			credStore := newTestCredentialStore(t)
 			provider := NewMicrosoftMultiTenantProvider(credStore, server.Client())
 			provider.baseURL = server.URL
 
@@ -828,7 +778,7 @@ func TestMicrosoftMultiTenantProvider_CreateInTenant(t *testing.T) {
 // Test TenantOnboardingWorkflow
 
 func TestTenantOnboardingWorkflow_StartTenantOnboarding(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	httpClient := NewGraphHTTPClient(100, 1000)
 	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
 	providerCfg := &MicrosoftMultiTenantConfig{
@@ -871,7 +821,7 @@ func TestTenantOnboardingWorkflow_StartTenantOnboarding(t *testing.T) {
 }
 
 func TestTenantOnboardingWorkflow_StartAdminConsentFlow_UsesProviderConfig(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	httpClient := NewGraphHTTPClient(100, 1000)
 	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
 
@@ -915,7 +865,7 @@ func TestTenantOnboardingWorkflow_StartAdminConsentFlow_UsesProviderConfig(t *te
 }
 
 func TestTenantOnboardingWorkflow_StartAdminConsentFlow_NilConfig(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	httpClient := NewGraphHTTPClient(100, 1000)
 	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
 	workflow := NewTenantOnboardingWorkflow(provider, nil)
@@ -1033,7 +983,7 @@ func TestTenantOnboardingWorkflow_ValidateRequest(t *testing.T) {
 // tenantCache has no direct read paths in the current code, so this test exercises
 // write-write safety. The RWMutex is chosen to be forward-compatible with future reads.
 func TestMultiTenantManager_TenantCacheConcurrency(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
 	httpClient := NewGraphHTTPClient(100, 1000)
 	// Stub returns one deterministic tenant so RefreshTenantDiscovery writes a
@@ -1103,7 +1053,7 @@ func TestMultiTenantManager_TenantCacheConcurrency(t *testing.T) {
 // non-tenant-aware CRUD methods return ErrNoTenantSelected with a nil result.
 // Callers that need to act on a specific tenant must use the *InTenant variants.
 func TestMicrosoftMultiTenantProvider_TenantlessCRUD(t *testing.T) {
-	credStore := NewMockCredentialStore()
+	credStore := newTestCredentialStore(t)
 	httpClient := NewGraphHTTPClient(100, 1000)
 	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
 	ctx := context.Background()
@@ -1158,7 +1108,7 @@ func TestMicrosoftMultiTenantProvider_TenantlessCRUD(t *testing.T) {
 // Benchmarks
 
 func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
-	credStore := NewMockCredentialStore()
+	credStore := newBenchCredentialStore(b)
 	consentStore := NewInMemoryConsentStore()
 	httpClient := NewGraphHTTPClient(100, 1000)
 	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
@@ -1203,7 +1153,7 @@ func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
 }
 
 func BenchmarkMicrosoftMultiTenantProvider_CreateInTenant(b *testing.B) {
-	credStore := NewMockCredentialStore()
+	credStore := newBenchCredentialStore(b)
 	httpClient := NewGraphHTTPClient(100, 1000)
 	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
 
