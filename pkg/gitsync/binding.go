@@ -41,14 +41,13 @@ type ScopeBinding struct {
 	// git origin. Accepted formats:
 	//   - "" (empty): anonymous access
 	//   - "env:<VAR>": read the password from environment variable VAR
+	//   - "secret:<KEY>": read the password from pkg/secrets via SecretStore
 	//   - any other string: treat as a file path and read the password from it
-	//
-	// TODO: migrate to pkg/secrets SecretStore once sub-story H lands.
 	CredentialsRef string `json:"credentials_ref,omitempty"`
 
 	// WebhookSecretRef is the credential reference for the HMAC-SHA256 webhook
-	// secret. Same resolution rules as CredentialsRef. When empty, HMAC
-	// validation is skipped for this binding.
+	// secret. Same resolution rules as CredentialsRef (env:, secret:, or file
+	// path). When empty, HMAC validation is skipped for this binding.
 	WebhookSecretRef string `json:"webhook_secret_ref,omitempty"`
 
 	// PollingInterval is how often to poll the origin for changes. Must be

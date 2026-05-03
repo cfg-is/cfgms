@@ -15,6 +15,26 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
+// BusinessStoreBundle groups all business-data stores that a single-connection
+// provider can return from one shared database handle. Used by BusinessStoreOpener.
+type BusinessStoreBundle struct {
+	RBAC              business.RBACStore
+	Tenant            business.TenantStore
+	ClientTenant      business.ClientTenantStore
+	RegistrationToken business.RegistrationTokenStore
+	Session           business.SessionStore
+	Command           business.CommandStore
+	Trigger           business.TriggerStore
+}
+
+// BusinessStoreOpener is an optional StorageProvider extension. A provider that
+// implements it can open all seven business stores from one shared database
+// connection, preventing WAL read-lock slot exhaustion on Windows when each
+// store would otherwise open its own connection to the same file.
+type BusinessStoreOpener interface {
+	OpenBusinessStores(path string) (*BusinessStoreBundle, error)
+}
+
 // StorageProvider defines the interface that all storage backends must implement.
 // Providers now return sub-package types from pkg/storage/interfaces/{business,config}.
 type StorageProvider interface {
@@ -694,6 +714,23 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	stewardStore, err := ffProvider.CreateStewardStore(flatfileCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create steward store (flatfile): %w", err)
+	}
+
+	// Prefer single-connection bundle when the provider supports it.
+	// This opens the SQLite database exactly once and shares the *sql.DB across
+	// all seven business stores, preventing WAL read-lock slot exhaustion that
+	// causes test hangs on Windows when each store opens its own connection.
+	if opener, ok := sqProvider.(BusinessStoreOpener); ok {
+		bundle, err := opener.OpenBusinessStores(sqliteConnStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open SQLite business stores: %w", err)
+		}
+		return NewStorageManagerFromStores(
+			configStore, auditStore,
+			bundle.RBAC, bundle.Tenant, bundle.ClientTenant,
+			bundle.RegistrationToken, bundle.Session,
+			stewardStore, bundle.Command, bundle.Trigger,
+		), nil
 	}
 
 	rbacStore, err := sqProvider.CreateRBACStore(sqliteCfg)
