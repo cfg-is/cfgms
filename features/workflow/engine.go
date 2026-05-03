@@ -30,15 +30,15 @@ type TransformStepExecutor interface {
 
 // Engine implements the WorkflowEngine interface
 type Engine struct {
-	moduleFactory    *factory.ModuleFactory
-	logger           *logging.ModuleLogger
-	executions       map[string]*WorkflowExecution
-	mutex            sync.RWMutex
-	httpClient       *HTTPClient
-	providerRegistry *ProviderRegistry
-	errorHandler     ErrorHandler
-	syncManager      *SyncManager
-	debugEngine      *DebugEngineImpl
+	moduleFactory     *factory.ModuleFactory
+	logger            *logging.ModuleLogger
+	executions        map[string]*WorkflowExecution
+	mutex             sync.RWMutex
+	httpClient        *HTTPClient
+	providerRegistry  *ProviderRegistry
+	errorHandler      ErrorHandler
+	syncManager       *SyncManager
+	debugEngine       *DebugEngineImpl
 	transformExecutor TransformStepExecutor
 }
 
@@ -65,13 +65,13 @@ func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger, tran
 	providerRegistry := NewProviderRegistry(logger) // Keep legacy for now
 
 	engine := &Engine{
-		moduleFactory:    moduleFactory,
-		logger:           workflowLogger,
-		executions:       make(map[string]*WorkflowExecution),
-		httpClient:       httpClient,
-		providerRegistry: providerRegistry,
-		errorHandler:     NewDefaultErrorHandler(),
-		syncManager:      NewSyncManager(),
+		moduleFactory:     moduleFactory,
+		logger:            workflowLogger,
+		executions:        make(map[string]*WorkflowExecution),
+		httpClient:        httpClient,
+		providerRegistry:  providerRegistry,
+		errorHandler:      NewDefaultErrorHandler(),
+		syncManager:       NewSyncManager(),
 		transformExecutor: transformExecutor,
 	}
 
