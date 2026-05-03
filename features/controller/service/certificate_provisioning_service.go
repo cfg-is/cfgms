@@ -172,10 +172,3 @@ func (s *CertificateProvisioningService) GetCertificateInfo(serialNumber string)
 func (s *CertificateProvisioningService) ListCertificatesBySteward(stewardID string) ([]*cert.CertificateInfo, error) {
 	return s.certManager.GetCertificateByCommonName(stewardID)
 }
-
-// RevokeCertificate revokes a certificate (placeholder for future implementation)
-func (s *CertificateProvisioningService) RevokeCertificate(serialNumber string, reason string) error {
-	// Certificate revocation is not yet implemented in the underlying cert manager
-	// This is a placeholder for future implementation
-	return fmt.Errorf("certificate revocation not yet implemented")
-}

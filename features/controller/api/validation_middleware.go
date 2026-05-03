@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 
@@ -410,7 +411,7 @@ func (s *Server) writeValidationErrorResponse(w http.ResponseWriter, result *sec
 				"validation_errors": result.Errors,
 			},
 		},
-		Timestamp: getCurrentTimestamp(),
+		Timestamp: time.Now().UTC(),
 	}
 
 	_ = json.NewEncoder(w).Encode(errorResponse)

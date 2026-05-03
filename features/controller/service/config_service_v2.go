@@ -14,7 +14,6 @@ import (
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/validation"
 	"github.com/cfgis/cfgms/pkg/config"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -56,7 +55,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 	s.logger.Debug("Configuration request received", "steward_id", logging.SanitizeLogValue(req.StewardId), "modules", sanitizedModules)
 
 	// Extract tenant context
-	tenantID := s.extractTenantID(ctx)
+	tenantID := extractTenantID(ctx)
 
 	// Verify steward exists and belongs to the tenant
 	if s.controllerSvc != nil {
@@ -259,7 +258,7 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 	}
 
 	// Extract tenant and steward ID from context (simplified)
-	tenantID := s.extractTenantID(ctx)
+	tenantID := extractTenantID(ctx)
 	stewardID := "validation" // For validation-only requests
 
 	// Use comprehensive validation framework
@@ -366,17 +365,6 @@ func (s *ConfigurationServiceV2) convertValidationLevel(level string) controller
 	default:
 		return controller.ValidationError_ERROR
 	}
-}
-
-// extractTenantID extracts tenant ID from context
-func (s *ConfigurationServiceV2) extractTenantID(ctx context.Context) string {
-	// Extract tenant ID from context value (set by auth middleware)
-	if tenantID, ok := ctx.Value(ctxkeys.TenantID).(string); ok && tenantID != "" {
-		return tenantID
-	}
-
-	s.logger.Debug("No tenant ID in context, using default tenant")
-	return "default"
 }
 
 // GetStorageStats returns storage statistics

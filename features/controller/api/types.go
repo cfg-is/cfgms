@@ -106,12 +106,6 @@ type CertificateProvisionResult struct {
 	ExpiresAt        time.Time `json:"expires_at"`
 }
 
-// CertificateRevocationRequest represents a certificate revocation request
-type CertificateRevocationRequest struct {
-	SerialNumber string `json:"serial_number"`
-	Reason       string `json:"reason,omitempty"`
-}
-
 // RoleInfo represents role information
 type RoleInfo struct {
 	ID          string    `json:"id"`
@@ -236,11 +230,4 @@ func ValidationErrorFromProto(err *controller.ValidationError) ValidationError {
 		Code:       err.Code,
 		Suggestion: err.Suggestion,
 	}
-}
-
-// CertificateInfoFromProto converts a protobuf CertificateInfo to CertificateInfo
-// Note: This is currently not used as we interface directly with cert manager
-func CertificateInfoFromProto(cert interface{}) CertificateInfo {
-	// Placeholder - would need to be implemented if gRPC cert service is used
-	return CertificateInfo{}
 }
