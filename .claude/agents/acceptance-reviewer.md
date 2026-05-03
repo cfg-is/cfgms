@@ -24,6 +24,30 @@ You are NOT the same as `/story-complete` QA. The distinction:
 
 You receive a PR number and story issue number as `$ARGUMENTS` (format: `pr:<PR_NUM> story:<STORY_NUM>`).
 
+## Phase 0: Draft-PR Short-Circuit (BLOCKING)
+
+Before any review work, check if the PR is a draft:
+
+```bash
+gh pr view <PR_NUM> --repo cfg-is/cfgms --json isDraft,body,title --jq '{isDraft, title, body_first_line: (.body | split("\n")[0])}'
+```
+
+If `isDraft == true`:
+
+- Do **NOT** run Phase 1–4. Do **NOT** check CI, acceptance criteria, or merge state.
+- Post a single comment on the PR using this exact body:
+
+  ```
+  Acceptance Reviewer — skipping draft PR.
+
+  Draft PRs are typically WIP from a truncated agent session (token reauth, token limit). The PO will dispatch `fix-pr` to resume the work; the resumed agent will mark this PR ready for review when finished. No findings to report at this stage.
+  ```
+
+- Remove the `pipeline:reviewing` label from the PR (so the failsafe doesn't think the review is still in flight).
+- Exit cleanly with verdict `SKIPPED_DRAFT`. Do NOT enqueue, label `pipeline:fix`, or label `pipeline:blocked` — those are wrong actions for a session-truncated WIP.
+
+A draft PR with body starting `Agent session failed with exit code` or title starting `WIP:` and ending `(agent failed)` is the canonical session-truncation case — same handling.
+
 ## Phase 1: Gather Context
 
 Run these in parallel:
