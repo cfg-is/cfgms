@@ -14,3 +14,12 @@ const (
 	// config handlers, service methods, and terminal session managers to enforce tenant isolation.
 	TenantID ContextKey = "tenant_id"
 )
+
+// correlationIDKeyType is unexported so no external package can construct a value of this type,
+// preventing key aliasing across package boundaries (the standard Go "opaque key" idiom).
+type correlationIDKeyType struct{}
+
+// CorrelationIDKey is the single canonical context key for correlation IDs.
+// Both pkg/logging and pkg/telemetry store and read correlation IDs under this key,
+// so that logging.WithCorrelation and telemetry.GetCorrelationID share the same slot.
+var CorrelationIDKey = correlationIDKeyType{}

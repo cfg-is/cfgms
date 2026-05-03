@@ -9,14 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
-
-// CorrelationIDKey is the context key for correlation IDs.
-// This enables correlation tracking across distributed operations.
-type CorrelationIDKey struct{}
 
 // GetCorrelationID extracts the correlation ID from the context.
 // If no correlation ID is present, it returns an empty string.
@@ -31,7 +28,7 @@ type CorrelationIDKey struct{}
 //	    logger.InfoCtx(ctx, "Processing request", "correlation_id", correlationID)
 //	}
 func GetCorrelationID(ctx context.Context) string {
-	if correlationID, ok := ctx.Value(CorrelationIDKey{}).(string); ok {
+	if correlationID, ok := ctx.Value(ctxkeys.CorrelationIDKey).(string); ok {
 		return correlationID
 	}
 
@@ -53,7 +50,7 @@ func GetCorrelationID(ctx context.Context) string {
 //	correlationID := "req-" + uuid.New().String()
 //	ctx = telemetry.WithCorrelationID(ctx, correlationID)
 func WithCorrelationID(ctx context.Context, correlationID string) context.Context {
-	ctx = context.WithValue(ctx, CorrelationIDKey{}, correlationID)
+	ctx = context.WithValue(ctx, ctxkeys.CorrelationIDKey, correlationID)
 
 	// Also add to active span if present
 	span := trace.SpanFromContext(ctx)
@@ -85,7 +82,7 @@ func ensureCorrelationID(ctx context.Context, span trace.Span) context.Context {
 	correlationID := GenerateCorrelationID()
 
 	// Add to context
-	ctx = context.WithValue(ctx, CorrelationIDKey{}, correlationID)
+	ctx = context.WithValue(ctx, ctxkeys.CorrelationIDKey, correlationID)
 
 	// Add to span attributes
 	if span.SpanContext().IsValid() {
