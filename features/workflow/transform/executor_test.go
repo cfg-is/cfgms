@@ -439,3 +439,101 @@ func (l *TestTransformLogger) WithField(key string, value interface{}) Transform
 func (l *TestTransformLogger) WithFields(fields map[string]interface{}) TransformLogger {
 	return l // Return same logger for simplicity in tests
 }
+
+func TestTransformExecutorContinueWith(t *testing.T) {
+	registry := NewDefaultTransformRegistry()
+	cache := DefaultMemoryTransformCache()
+	logger := &NoOpTransformLogger{}
+	executor := NewDefaultTransformExecutor(registry, cache, logger)
+
+	// Register a transform that always fails
+	failTransform := NewMockTransform("fail_transform")
+	failTransform.executeFunc = func(ctx context.Context, transformCtx TransformContext) (TransformResult, error) {
+		return TransformResult{
+			Success: false,
+			Error:   "intentional failure",
+		}, nil
+	}
+	require.NoError(t, registry.Register(failTransform))
+
+	// Chain with continue_with error action — no named target in a chain, so it
+	// appends a warning and skips remaining steps without returning an error.
+	chain := []TransformStep{
+		{
+			Name:    "fail_transform",
+			OnError: TransformErrorActionContinueWith,
+		},
+	}
+
+	ctx := context.Background()
+	result, err := executor.ExecuteChain(ctx, chain, map[string]interface{}{}, map[string]interface{}{})
+
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+	require.NotEmpty(t, result.Warnings)
+	assert.Contains(t, result.Warnings[0], "continue_with")
+}
+
+func TestTransformExecutorFallback(t *testing.T) {
+	t.Run("no fallback configured stops chain", func(t *testing.T) {
+		registry := NewDefaultTransformRegistry()
+		cache := DefaultMemoryTransformCache()
+		logger := &NoOpTransformLogger{}
+		executor := NewDefaultTransformExecutor(registry, cache, logger)
+
+		failTransform := NewMockTransform("fail_transform")
+		failTransform.executeFunc = func(ctx context.Context, transformCtx TransformContext) (TransformResult, error) {
+			return TransformResult{Success: false, Error: "intentional failure"}, nil
+		}
+		require.NoError(t, registry.Register(failTransform))
+
+		chain := []TransformStep{
+			{Name: "fail_transform", OnError: TransformErrorActionFallback},
+		}
+
+		ctx := context.Background()
+		result, err := executor.ExecuteChain(ctx, chain, map[string]interface{}{}, map[string]interface{}{})
+
+		// No panic, and chain stops with failure.
+		require.NoError(t, err)
+		assert.False(t, result.Success)
+		assert.NotEmpty(t, result.Error)
+	})
+
+	t.Run("fallback transform executes on error", func(t *testing.T) {
+		registry := NewDefaultTransformRegistry()
+		cache := DefaultMemoryTransformCache()
+		logger := &NoOpTransformLogger{}
+		executor := NewDefaultTransformExecutor(registry, cache, logger)
+
+		failTransform := NewMockTransform("fail_transform")
+		failTransform.executeFunc = func(ctx context.Context, transformCtx TransformContext) (TransformResult, error) {
+			return TransformResult{Success: false, Error: "intentional failure"}, nil
+		}
+		require.NoError(t, registry.Register(failTransform))
+
+		fallbackTransform := NewMockTransform("fallback_transform")
+		fallbackTransform.executeFunc = func(ctx context.Context, transformCtx TransformContext) (TransformResult, error) {
+			return TransformResult{
+				Data:    map[string]interface{}{"fallback": "ok"},
+				Success: true,
+			}, nil
+		}
+		require.NoError(t, registry.Register(fallbackTransform))
+
+		chain := []TransformStep{
+			{
+				Name:              "fail_transform",
+				OnError:           TransformErrorActionFallback,
+				FallbackTransform: "fallback_transform",
+			},
+		}
+
+		ctx := context.Background()
+		result, err := executor.ExecuteChain(ctx, chain, map[string]interface{}{}, map[string]interface{}{})
+
+		require.NoError(t, err)
+		assert.True(t, result.Success)
+		assert.Equal(t, "ok", result.Data["fallback"])
+	})
+}

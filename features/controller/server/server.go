@@ -712,7 +712,7 @@ func initializeWorkflowHandler(storageManager *interfaces.StorageManager, logger
 		stewardconfig.ErrorHandlingConfig{},
 	)
 
-	workflowEngine := workflow.NewEngine(moduleFactory, logger)
+	workflowEngine := workflow.NewEngine(moduleFactory, logger, nil)
 
 	configStore := storageManager.GetConfigStore()
 

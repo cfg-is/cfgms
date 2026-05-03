@@ -49,7 +49,7 @@ func TestFanOutStep(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -98,7 +98,7 @@ func TestFanInStep(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -202,7 +202,7 @@ func TestFanInStrategies(t *testing.T) {
 			// Create engine and execute workflow
 			moduleFactory := createTestFactory()
 			logger := pkgtesting.NewMockLogger(true)
-			engine := NewEngine(moduleFactory, logger)
+			engine := NewEngine(moduleFactory, logger, nil)
 			ctx := context.Background()
 
 			execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -251,7 +251,7 @@ func TestFanOutEmptyData(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -289,7 +289,7 @@ func TestFanInEmptyData(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -324,7 +324,7 @@ func TestFanOutMissingConfiguration(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -354,7 +354,7 @@ func TestFanInMissingConfiguration(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -407,7 +407,7 @@ func TestFanOutFanInCombined(t *testing.T) {
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)

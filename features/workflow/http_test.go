@@ -111,7 +111,7 @@ func TestEngine_ExecuteHTTPStep(t *testing.T) {
 	// Create engine
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 
 	workflow := Workflow{
 		Name: "http-test-workflow",
@@ -176,7 +176,7 @@ func TestEngine_ExecuteAPIStep(t *testing.T) {
 	// Create engine
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 
 	// Mock the Microsoft Graph API URL by overriding the buildMicrosoftGraphRequest method
 	// For this test, we'll create a simpler API config that uses our test server
@@ -237,7 +237,7 @@ func TestEngine_ExecuteWebhookStep(t *testing.T) {
 	// Create engine
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 
 	workflow := Workflow{
 		Name: "webhook-test-workflow",
@@ -284,7 +284,7 @@ func TestEngine_ExecuteDelayStep(t *testing.T) {
 	// Create engine
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 
 	workflow := Workflow{
 		Name: "delay-test-workflow",
@@ -356,7 +356,7 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 	// Create engine
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 
 	workflow := Workflow{
 		Name: "complex-api-workflow",

@@ -482,7 +482,7 @@ func (l *mockLogger) FatalCtx(ctx context.Context, msg string, fields ...interfa
 func createTestEngineWithDebug(t *testing.T) (*Engine, logging.Logger) {
 	logger := &mockLogger{}
 	moduleFactory := &factory.ModuleFactory{} // Mock factory for testing
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	return engine, logger
 }
 
