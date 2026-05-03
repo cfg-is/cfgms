@@ -173,3 +173,40 @@ func TestServer_ProductionStartup_EnvVarNotSet(t *testing.T) {
 		assert.Nil(t, tok)
 	}
 }
+
+// TestInitializeHAManager_UsesDefaultConfig verifies initializeHAManager succeeds using
+// ha.DefaultConfig() without requiring a controller config or LoadFromEnvironment call.
+// This confirms no regression from removing LoadFromEnvironment from the call site.
+func TestInitializeHAManager_UsesDefaultConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: false,
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: tempDir + "/flatfile",
+			SQLitePath:   tempDir + "/cfgms.db",
+		},
+	}
+
+	// Build a real StorageManager via the server constructor so we have a
+	// production-quality storage backend (no nil storageManager in any build).
+	srv, err := New(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+	require.NotNil(t, srv)
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	// initializeHAManager is exercised during New(); verify the constructed
+	// server exposes a healthy HA manager consistent with SingleServerMode defaults.
+	haManager := srv.GetHAManager()
+	require.NotNil(t, haManager, "HA manager must be initialized")
+
+	// Single-server mode: always the leader, node ID auto-generated.
+	assert.True(t, haManager.IsLeader(), "single-server node must always be leader")
+
+	node := haManager.GetLocalNode()
+	require.NotNil(t, node)
+	assert.NotEmpty(t, node.ID, "auto-generated node ID must not be empty")
+}

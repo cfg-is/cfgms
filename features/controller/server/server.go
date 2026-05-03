@@ -267,7 +267,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize HA manager
 	logger.Info("Initializing HA manager...")
-	haManager, err := initializeHAManager(cfg, logger, storageManager)
+	haManager, err := initializeHAManager(logger, storageManager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
 	}
@@ -1199,21 +1199,12 @@ func loadExistingCertificateManager(cfg *config.Config, logger logging.Logger) (
 	return manager, nil
 }
 
-// initializeHAManager initializes the HA manager based on configuration
-func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*ha.Manager, error) {
-	// Load HA config directly from environment variables (bypassing controller config)
-	haConfig := ha.DefaultConfig()
-
-	if err := haConfig.LoadFromEnvironment(); err != nil {
-		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
-	}
-
-	// Create HA manager
-	haManager, err := ha.NewManager(haConfig, logger, storageManager)
+// initializeHAManager initializes the HA manager using ha.DefaultConfig().
+func initializeHAManager(logger logging.Logger, storageManager *interfaces.StorageManager) (*ha.Manager, error) {
+	haManager, err := ha.NewManager(ha.DefaultConfig(), logger, storageManager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HA manager: %w", err)
 	}
-
 	return haManager, nil
 }
 
