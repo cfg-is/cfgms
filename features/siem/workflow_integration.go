@@ -296,17 +296,13 @@ func (wi *WorkflowIntegration) executeTrigger(ctx context.Context, triggerConfig
 		triggerData[k] = v
 	}
 
-	// Set timeout
-	var execCtx context.Context
-	var cancel context.CancelFunc
+	// Set timeout — choose trigger-specific timeout when provided, else use default.
+	timeout := wi.config.DefaultTimeout
 	if triggerConfig.Timeout > 0 {
-		execCtx, cancel = context.WithTimeout(ctx, triggerConfig.Timeout)
-		defer cancel()
-	} else {
-		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(ctx, wi.config.DefaultTimeout)
-		defer cancel()
+		timeout = triggerConfig.Timeout
 	}
+	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	// Execute workflow with retry
 	var lastErr error
