@@ -489,7 +489,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 
 		// Storage stats — provider name only, latency instrumentation is follow-up
-		storageStats := NewBasicStorageStats(cfg.Storage.Provider)
+		storageStats := NewUnimplementedStorageStats(cfg.Storage.Provider)
 		storageCollector := health.NewDefaultStorageCollector(storageStats)
 
 		// Application stats — uses no-op queue stats; workflow engine health
