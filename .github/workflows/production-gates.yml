@@ -53,10 +53,11 @@ jobs:
         echo "🔧 Installing Security Tools for Production Gate"
         echo "=============================================="
         
-        # Install Trivy — v0.69.4+ are compromised (CVE-2026-33634); apt repo
-        # no longer ships v0.69.3. Install from the official install.sh against
-        # the still-available GitHub release.
-        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin v0.69.3
+        # Install Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634);
+        # v0.70.0 is the post-incident clean release. The install helper
+        # verifies the archive SHA-256 against the pinned value before
+        # extraction. See docs/runbooks/trivy-rollback.md for rollback.
+        sudo .github/scripts/install-trivy.sh 'v0.70.0' '8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9'
 
         # Install other security tools
         make install-nancy

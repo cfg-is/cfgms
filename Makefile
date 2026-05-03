@@ -801,13 +801,13 @@ security-trivy:
 	@if ! command -v trivy >/dev/null 2>&1; then \
 		echo "❌ Error: trivy is not installed"; \
 		echo ""; \
-		echo "Install trivy v0.69.3 (NEVER use @latest — CVE-2026-33634):"; \
-		echo "  go install github.com/aquasecurity/trivy/cmd/trivy@v0.69.3"; \
+		echo "Install trivy v0.70.0 — NEVER use v0.69.4-v0.69.6 (CVE-2026-33634)"; \
+		echo "and NEVER use @latest:"; \
+		echo "  ./.github/scripts/install-trivy.sh v0.70.0 \\"; \
+		echo "    8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"; \
 		echo ""; \
-		echo "Alternative installation methods:"; \
-		echo "  # Binary download:"; \
-		echo "  curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.69.3"; \
-		echo "  # Official documentation: https://aquasecurity.github.io/trivy/latest/getting-started/installation/"; \
+		echo "Official documentation: https://aquasecurity.github.io/trivy/latest/getting-started/installation/"; \
+		echo "Rollback procedure: docs/runbooks/trivy-rollback.md"; \
 		exit 1; \
 	fi
 	@echo "Running trivy filesystem scan..."

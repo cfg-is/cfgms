@@ -45,11 +45,14 @@ jobs:
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Install Trivy
-      run: |
-        # Trivy v0.69.4+ are compromised (CVE-2026-33634); apt repo no longer
-        # ships v0.69.3. Install from the official install.sh against the
-        # still-available GitHub release.
-        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin v0.69.3
+      env:
+        # Trivy v0.69.4-v0.69.6 are compromised (CVE-2026-33634); v0.70.0 is
+        # the post-incident clean release. The install helper verifies the
+        # archive SHA-256 against this pinned value before extraction. See
+        # docs/runbooks/trivy-rollback.md for rollback procedure.
+        TRIVY_VERSION: 'v0.70.0'
+        TRIVY_SHA256: '8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9'
+      run: sudo .github/scripts/install-trivy.sh "$TRIVY_VERSION" "$TRIVY_SHA256"
 
     - name: Run Trivy Scan
       id: scan
@@ -297,10 +300,11 @@ jobs:
         # Only install tools if we need to generate remediation report
         make install-nancy
         
-        # Install Trivy — v0.69.4+ are compromised (CVE-2026-33634); apt repo
-        # no longer ships v0.69.3. Install from the official install.sh against
-        # the still-available GitHub release.
-        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin v0.69.3
+        # Install Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634);
+        # v0.70.0 is the post-incident clean release. The install helper
+        # verifies the archive SHA-256 against the pinned value before
+        # extraction. See docs/runbooks/trivy-rollback.md for rollback.
+        sudo .github/scripts/install-trivy.sh 'v0.70.0' '8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9'
 
         # Install gosec and staticcheck
         go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
