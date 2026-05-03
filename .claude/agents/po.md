@@ -477,6 +477,8 @@ The conversation follows this protocol:
 
 **6f. Create stories on GitHub (after consensus):**
 
+Story bodies must conform to the parser spec in **Reference: Story Body Conventions** below — in particular the `## Dependencies` and `## Files In Scope` rules. Stories that fail those rules are flagged with `parse_warnings` and skipped by the dispatcher. Both classes of bug (prose-only Dependencies, parent-epic-as-dep) have surfaced repeatedly during decompositions; produce parser-compliant bodies on first try rather than relying on a Tech Lead fix-up step.
+
 Once all stories are APPROVED (or PO-decided), create them on GitHub. For each story:
 ```bash
 cat > /tmp/story-body.md <<'STORY_EOF'
@@ -603,6 +605,41 @@ gh api graphql -f query='
   }
 ' -f id="<ISSUE_NODE_ID>"
 ```
+
+-----
+
+## Reference: Story Body Conventions
+
+The dispatcher's preflight parser (`./.claude/scripts/po-cycle-preflight.py`) reads two sections of every story body to gate dispatch decisions: `## Dependencies` and `## Files In Scope`. A story whose body fails parsing is flagged in `parse_warnings` and the dispatcher refuses to dispatch it. The BA / Planning Team must produce parser-compliant bodies on first try.
+
+### `## Dependencies`
+
+The parser accepts exactly these forms:
+
+1. **No dependencies** — section body is empty, or one of `None`, `None.`, `n/a` (case-insensitive after stripping). Bare is preferred.
+2. **One or more dependencies** — body contains one or more GitHub issue references in `#NNN` form. Use a markdown list:
+   ```
+   ## Dependencies
+   - #1140
+   - #1142
+   ```
+
+**Forbidden patterns** (each one has caused a real dispatch failure during decompositions):
+
+- **Prose with no `#NNN`** — e.g., `None — all three items are self-contained` or `Story A — must be merged first`. The parser sees content but cannot extract issue numbers, so it can't gate. Result: `parse_warnings` set, story skipped every cycle.
+- **Positional / pseudo-references** — `Story A`, `Story 5`, `#761-A`, `#728-S5`. The parser's `#NNN` regex extracts only the leading digits, collapsing `#761-A` to `#761`. If `#761` is the parent epic, the dispatcher treats it as an unsatisfied dep and holds the story forever (parent epics don't close until all children merge).
+
+**Audit-note form is acceptable** when it contains a real `#NNN`: `None — #1115 merged 2026-05-03; dependency satisfied` is valid. The parser extracts `#1115`, sees it's CLOSED, clears the dep gate. But prefer bare `None` when the dep is already satisfied — keeps the body shorter and the audit trail belongs in the planning summary on the epic, not on individual story bodies.
+
+### `## Files In Scope`
+
+Every file the story will touch listed in either backtick-quoted form (`` `path/to/file.go` ``) or bare path form (`path/to/file.go`). The parser uses these to compute file-overlap conflicts between in-flight stories — two stories editing the same file are serialized.
+
+If the section is present but contains no recognizable file paths, `parse_warnings` is set. Do not write prose-only file lists like "all controller package files".
+
+### When the parser disagrees with you
+
+The parser is strict on purpose — it's a gate, not a lint. If a story body looks valid to a human but produces a `parse_warning`, normalize the body to match the parser rather than relaxing the gate. The cost of a body edit is one second; the cost of a held story is a wasted cycle.
 
 -----
 
