@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
@@ -51,6 +52,20 @@ func TestBuildRootCommandFlags(t *testing.T) {
 func TestBuildRootCommandNoModeFlag(t *testing.T) {
 	cmd := buildRootCommand()
 	assert.Nil(t, cmd.Flags().Lookup("mode"), "mode flag must not be registered")
+}
+
+func TestInstallCommandEnforcesRequiredRegtoken(t *testing.T) {
+	// Verify cobra's MarkFlagRequired("regtoken") rejects the install subcommand
+	// when --regtoken is absent. This is the cobra-level guard that supersedes
+	// any manual empty-token check in runInstall — runInstall is never reached
+	// without a non-empty token value.
+	root := buildRootCommand()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"install"})
+	err := root.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "regtoken")
 }
 
 func TestRunInstallRequiresElevation(t *testing.T) {
