@@ -313,6 +313,30 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_command_transitions_command_id ON command_transitions(command_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_command_transitions_timestamp  ON command_transitions(timestamp)`,
 
+		// Triggers — durable workflow trigger persistence (Issue #1088)
+		// Secret material is never stored here; *_ref columns hold pkg/secrets keys.
+		`CREATE TABLE IF NOT EXISTS triggers (
+			id               TEXT PRIMARY KEY,
+			tenant_id        TEXT NOT NULL,
+			name             TEXT NOT NULL DEFAULT '',
+			type             TEXT NOT NULL DEFAULT '',
+			status           TEXT NOT NULL DEFAULT '',
+			workflow_name    TEXT NOT NULL DEFAULT '',
+			created_at       TEXT NOT NULL,
+			updated_at       TEXT NOT NULL,
+			webhook_path     TEXT NOT NULL DEFAULT '',
+			webhook_method   TEXT NOT NULL DEFAULT '[]',
+			bearer_ref       TEXT NOT NULL DEFAULT '',
+			hmac_ref         TEXT NOT NULL DEFAULT '',
+			apikey_ref       TEXT NOT NULL DEFAULT '',
+			basic_user_ref   TEXT NOT NULL DEFAULT '',
+			basic_pass_ref   TEXT NOT NULL DEFAULT '',
+			payload          BLOB NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_triggers_tenant_id ON triggers(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_triggers_type      ON triggers(type)`,
+		`CREATE INDEX IF NOT EXISTS idx_triggers_status    ON triggers(status)`,
+
 		// Durable sessions (Persistent=true only)
 		`CREATE TABLE IF NOT EXISTS sessions (
 			session_id       TEXT PRIMARY KEY,

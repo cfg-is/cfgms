@@ -33,6 +33,7 @@ type StorageProvider interface {
 	CreateSessionStore(config map[string]interface{}) (business.SessionStore, error)
 	CreateStewardStore(config map[string]interface{}) (business.StewardStore, error)
 	CreateCommandStore(config map[string]interface{}) (business.CommandStore, error)
+	CreateTriggerStore(config map[string]interface{}) (business.TriggerStore, error)
 
 	// Provider capabilities and metadata
 	GetCapabilities() ProviderCapabilities
@@ -145,6 +146,10 @@ func RegisterStorageProviderWithValidation(provider StorageProvider, testConfig 
 
 		if _, err := provider.CreateStewardStore(testConfig); err != nil && !errors.Is(err, business.ErrNotSupported) {
 			return fmt.Errorf("failed to create StewardStore: %w", err)
+		}
+
+		if _, err := provider.CreateTriggerStore(testConfig); err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return fmt.Errorf("failed to create TriggerStore: %w", err)
 		}
 	}
 
@@ -359,6 +364,15 @@ func CreateCommandStoreFromConfig(providerName string, config map[string]interfa
 	return provider.CreateCommandStore(config)
 }
 
+// CreateTriggerStoreFromConfig creates a TriggerStore from configuration.
+func CreateTriggerStoreFromConfig(providerName string, config map[string]interface{}) (business.TriggerStore, error) {
+	provider, err := GetStorageProvider(providerName)
+	if err != nil {
+		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
+	}
+	return provider.CreateTriggerStore(config)
+}
+
 // Deprecated: CreateAllStoresFromConfig creates all storage interfaces from a single configuration.
 // Use CreateOSSStorageManager for new deployments. This function is retained for backward
 // compatibility with the database provider in single-backend mode.
@@ -418,6 +432,11 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		return nil, fmt.Errorf("failed to create command store: %w", err)
 	}
 
+	triggerStore, err := provider.CreateTriggerStore(config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create trigger store: %w", err)
+	}
+
 	return &StorageManager{
 		providerName:           providerName,
 		provider:               provider,
@@ -430,6 +449,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		sessionStore:           sessionStore,
 		stewardStore:           stewardStore,
 		commandStore:           commandStore,
+		triggerStore:           triggerStore,
 	}, nil
 }
 
@@ -446,6 +466,7 @@ type StorageManager struct {
 	sessionStore           business.SessionStore
 	stewardStore           business.StewardStore
 	commandStore           business.CommandStore
+	triggerStore           business.TriggerStore
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -503,6 +524,11 @@ func (sm *StorageManager) GetCommandStore() business.CommandStore {
 	return sm.commandStore
 }
 
+// GetTriggerStore returns the workflow trigger storage interface (nil if not yet wired; Story J wires this).
+func (sm *StorageManager) GetTriggerStore() business.TriggerStore {
+	return sm.triggerStore
+}
+
 // GetCapabilities returns the provider's capabilities.
 // Returns a zero-value ProviderCapabilities when the manager has no backing provider
 // (e.g. a composite manager created with NewStorageManagerFromStores).
@@ -543,6 +569,7 @@ func (sm *StorageManager) Close() error {
 		sm.sessionStore,
 		sm.stewardStore,
 		sm.commandStore,
+		sm.triggerStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -613,6 +640,7 @@ func NewStorageManagerFromStores(
 	sessionStore business.SessionStore,
 	stewardStore business.StewardStore,
 	commandStore business.CommandStore,
+	triggerStore business.TriggerStore,
 ) *StorageManager {
 	return &StorageManager{
 		providerName:           "composite",
@@ -626,6 +654,7 @@ func NewStorageManagerFromStores(
 		sessionStore:           sessionStore,
 		stewardStore:           stewardStore,
 		commandStore:           commandStore,
+		triggerStore:           triggerStore,
 	}
 }
 
@@ -691,10 +720,14 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create command store (sqlite): %w", err)
 	}
+	triggerStore, err := sqProvider.CreateTriggerStore(sqliteCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create trigger store (sqlite): %w", err)
+	}
 
 	return NewStorageManagerFromStores(
 		configStore, auditStore, rbacStore,
 		tenantStore, clientTenantStore, registrationTokenStore,
-		sessionStore, stewardStore, commandStore,
+		sessionStore, stewardStore, commandStore, triggerStore,
 	), nil
 }
