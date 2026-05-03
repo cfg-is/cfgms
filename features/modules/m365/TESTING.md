@@ -86,63 +86,9 @@ export M365_TEST_USER_UPN="testuser@yourdomain.onmicrosoft.com"
 export M365_REDIRECT_URI="http://localhost:8080/callback"
 ```
 
-### 2. Build the Testing Tool
-
-```bash
-# From the CFGMS root directory
-go build -o bin/m365-test ./cmd/m365-test
-```
-
-## Running Tests
-
-### 1. Interactive Testing (Recommended)
-
-This is the primary testing mode that performs complete delegated permissions testing:
-
-```bash
-# Run with environment variables
-./bin/m365-test
-
-# Or with command line flags
-./bin/m365-test \
-  -client-id="your-client-id" \
-  -client-secret="your-client-secret" \
-  -tenant-id="your-tenant-id" \
-  -verbose=true
-```
-
-**Test Flow:**
-1. Tests application permissions (client credentials)
-2. Opens browser for interactive user authentication
-3. Performs delegated permissions testing
-4. Tests token storage/retrieval
-5. Runs comprehensive M365 operation scenarios
-6. Saves detailed test results
-
-### 2. Non-Interactive Testing
-
-For automated testing environments:
-
-```bash
-./bin/m365-test -interactive=false -test-scopes=false
-```
-
-This only tests:
-- Application permissions
-- Token management
-- Basic provider functionality
-
-### 3. Scope-Only Testing
-
-To test only permission scopes without full scenarios:
-
-```bash
-./bin/m365-test -test-scopes=true
-```
-
 ## Test Scenarios
 
-The testing tool runs six comprehensive scenarios:
+M365 integration tests run via `make test-m365-integration`. The following scenarios are validated:
 
 ### 1. User Management Scenario
 Tests user profile operations and user listing capabilities.
@@ -212,72 +158,6 @@ Tests audit log access.
 **Expected Results:**
 - ✅ Success only for Security Reader/Administrator roles
 - ❌ Forbidden for other users (expected)
-
-## Test Results
-
-### Result Files
-
-Test results are saved in the credential path (default: `./m365-test-creds/`):
-
-```
-m365-test-creds/
-├── test-results/
-│   └── permission-test-user-at-domain-20240101-120000.json
-├── scenario-results/
-│   └── scenario-results-20240101-120000.json
-└── [encrypted credential files]
-```
-
-### Permission Test Results Format
-
-```json
-{
-  "user_context": {
-    "user_id": "user-guid",
-    "user_principal_name": "user@domain.com",
-    "display_name": "Test User",
-    "roles": ["Global Administrator"],
-    "session_id": "session-123"
-  },
-  "tested_scopes": {
-    "User.Read": true,
-    "User.ReadWrite.All": true,
-    "Directory.Read.All": false
-  },
-  "failed_scopes": ["Directory.Read.All"],
-  "test_results": {
-    "User.Read": "Success",
-    "Directory.Read.All": "Failed: Insufficient privileges"
-  },
-  "test_timestamp": "2024-01-01T12:00:00Z"
-}
-```
-
-### Scenario Results Format
-
-```json
-[
-  {
-    "scenario_name": "User Management",
-    "success": true,
-    "operations": [
-      {
-        "name": "Get Current User Profile",
-        "method": "GET",
-        "url": "https://graph.microsoft.com/v1.0/me",
-        "status_code": 200,
-        "success": true,
-        "duration": "234ms"
-      }
-    ],
-    "metadata": {
-      "current_user_name": "Test User",
-      "user_count": 5
-    },
-    "execution_time": "1.2s"
-  }
-]
-```
 
 ## Expected Test Outcomes by User Role
 
@@ -376,67 +256,13 @@ Common Graph API error codes:
 - OAuth2 flow uses **PKCE** for additional security
 - **Local callback server** runs only during authentication
 
-## Advanced Testing
-
-### Custom Test Scenarios
-
-Create custom scenarios by extending the testing package:
-
-```go
-package main
-
-import (
-    "context"
-    "github.com/cfgis/cfgms/features/modules/m365/auth"
-    "github.com/cfgis/cfgms/features/modules/m365/testing"
-)
-
-func customScenario(ctx context.Context) {
-    // Initialize provider and authenticate user
-    // ...
-    
-    scenarioRunner := testing.NewScenarioRunner(provider, tenantID, userContext, token)
-    
-    // Run individual scenarios
-    userResult := scenarioRunner.RunUserManagementScenario(ctx)
-    caResult := scenarioRunner.RunConditionalAccessScenario(ctx)
-    
-    // Process results
-    // ...
-}
-```
-
-### Automated Testing Integration
-
-For CI/CD integration, use environment variables and non-interactive mode:
-
-```bash
-#!/bin/bash
-# ci-test-m365.sh
-
-export M365_CLIENT_ID="$CI_M365_CLIENT_ID"
-export M365_CLIENT_SECRET="$CI_M365_CLIENT_SECRET"
-export M365_TENANT_ID="$CI_M365_TENANT_ID"
-
-# Run non-interactive tests only
-./bin/m365-test -interactive=false -test-scopes=false -verbose=true
-
-# Check for failures
-if [ $? -ne 0 ]; then
-    echo "M365 integration tests failed"
-    exit 1
-fi
-```
-
 ## Contributing
 
 When adding new test scenarios:
 
-1. **Follow existing patterns** in the testing package
-2. **Handle permission failures gracefully** (many are expected)
-3. **Include comprehensive metadata** in results
-4. **Add clear success/failure criteria**
-5. **Document expected outcomes** for different user roles
+1. **Handle permission failures gracefully** (many are expected)
+2. **Add clear success/failure criteria**
+3. **Document expected outcomes** for different user roles
 
 ## Support
 
