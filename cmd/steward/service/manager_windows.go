@@ -30,8 +30,6 @@ type windowsManager struct {
 	binaryPath string
 }
 
-func (m *windowsManager) InstallPath() string { return windowsInstallPath }
-
 // IsElevated returns true if the current process has Administrator privileges.
 // It checks by attempting to open the service control manager, which requires
 // Administrator — the canonical check without additional packages.

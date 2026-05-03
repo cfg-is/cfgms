@@ -26,8 +26,6 @@ type linuxManager struct {
 	binaryPath string
 }
 
-func (m *linuxManager) InstallPath() string { return linuxInstallPath }
-
 func (m *linuxManager) IsElevated() bool {
 	return os.Getuid() == 0
 }

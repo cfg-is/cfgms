@@ -16,7 +16,9 @@ import (
 
 func TestDarwinManagerInstallPath(t *testing.T) {
 	m := New("/usr/local/bin/cfgms-steward")
-	assert.Equal(t, darwinInstallPath, m.InstallPath())
+	status, err := m.Status()
+	require.NoError(t, err)
+	assert.Equal(t, darwinInstallPath, status.InstallPath)
 }
 
 func TestDarwinManagerIsElevated(t *testing.T) {

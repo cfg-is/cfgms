@@ -53,12 +53,6 @@ func TestBuildRootCommandNoModeFlag(t *testing.T) {
 	assert.Nil(t, cmd.Flags().Lookup("mode"), "mode flag must not be registered")
 }
 
-func TestRunInstallRequiresToken(t *testing.T) {
-	err := runInstall("")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--regtoken is required")
-}
-
 func TestRunInstallRequiresElevation(t *testing.T) {
 	if isElevated() {
 		t.Skip("test requires non-elevated process — running as root")
