@@ -10,6 +10,15 @@
       "Bash(./.claude/scripts/po-act.sh state *)",
       "Bash(./.claude/scripts/po-act.sh merge-queue)",
       "Bash(./.claude/scripts/po-act.sh merge-queue *)",
+      "Bash(./.claude/scripts/po-act.sh dispatch *)",
+      "Bash(./.claude/scripts/po-act.sh dispatch-fix *)",
+      "Bash(./.claude/scripts/po-act.sh enqueue *)",
+      "Bash(./.claude/scripts/po-act.sh dequeue *)",
+      "Bash(./.claude/scripts/po-act.sh close-merged *)",
+      "Bash(./.claude/scripts/po-act.sh log *)",
+      "Bash(./.claude/scripts/po-act.sh block *)",
+      "Bash(./.claude/scripts/po-act.sh unblock *)",
+      "Bash(./.claude/scripts/po-act.sh rerun *)",
       "Bash(./.claude/scripts/po-cycle-preflight.py)",
       "Bash(./.claude/scripts/po-cycle-preflight.py *)",
       "Bash(./.claude/scripts/agent-dispatch.sh list-running)",
@@ -24,6 +33,9 @@
       "Bash(./.claude/scripts/agent-dispatch.sh review-pr *)",
       "Bash(./.claude/scripts/agent-dispatch.sh cleanup-stale-reviews)",
       "Bash(./.claude/scripts/agent-dispatch.sh cleanup-stale-reviews *)",
+      "Bash(./.claude/scripts/agent-dispatch.sh cleanup-stale)",
+      "Bash(./.claude/scripts/agent-dispatch.sh cleanup-issue *)",
+      "Bash(./.claude/scripts/agent-dispatch.sh cleanup-container *)",
       "Bash(./.claude/scripts/pr-review-helper.sh pre-review *)",
       "Bash(./.claude/scripts/pr-review-helper.sh pr-overview *)",
       "Bash(./.claude/scripts/pr-review-helper.sh pr-checks *)",
@@ -34,7 +46,16 @@
       "Bash(./scripts/pipeline-helper.sh view *)",
       "Bash(./scripts/pipeline-helper.sh list-by-label *)",
       "Bash(./scripts/pipeline-helper.sh list-prs *)",
-      "Bash(./scripts/pipeline-helper.sh sub-issue-summary *)"
+      "Bash(./scripts/pipeline-helper.sh sub-issue-summary *)",
+      "Bash(./scripts/pipeline-helper.sh label-add *)",
+      "Bash(./scripts/pipeline-helper.sh label-remove *)",
+      "Bash(./scripts/pipeline-helper.sh label-swap *)",
+      "Bash(./scripts/pipeline-helper.sh comment *)",
+      "Bash(./scripts/pipeline-helper.sh promote *)",
+      "Bash(./scripts/pipeline-helper.sh edit-body *)",
+      "Bash(./scripts/pipeline-helper.sh create-story *)",
+      "Bash(./scripts/pipeline-helper.sh create-ready-story *)",
+      "Bash(./scripts/pipeline-helper.sh block *)"
     ]
   }
 }
