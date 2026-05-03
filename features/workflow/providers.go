@@ -28,11 +28,20 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// ErrProviderNotImplemented is returned by stub provider implementations in default builds.
+// Use -tags experimental to enable simulated provider behaviour.
+var ErrProviderNotImplemented = errors.New("provider not implemented: build with -tags experimental to enable")
+
+// providerOverrides maps provider names to override implementations.
+// Populated by init() in providers_experimental.go before any ProviderRegistry is created.
+var providerOverrides = map[string]APIProvider{}
 
 // ProviderRegistry manages external API providers and their operations
 type ProviderRegistry struct {
@@ -192,26 +201,22 @@ func (r *ProviderRegistry) ExecuteOperation(ctx context.Context, config *APIConf
 	return response, nil
 }
 
-// registerBuiltinProviders registers the built-in API providers
+// registerBuiltinProviders registers the built-in API providers.
+// Entries in providerOverrides (set by providers_experimental.go init()) replace defaults.
 func (r *ProviderRegistry) registerBuiltinProviders() {
-	// Register Microsoft provider
-	if err := r.RegisterProvider("microsoft", &MicrosoftProvider{}); err != nil {
-		r.logger.Error("Failed to register Microsoft provider", "error", err)
+	defaults := map[string]APIProvider{
+		"microsoft":   &MicrosoftProvider{},
+		"google":      &GoogleProvider{},
+		"salesforce":  &SalesforceProvider{},
+		"connectwise": &ConnectWiseProvider{},
 	}
-
-	// Register Google provider
-	if err := r.RegisterProvider("google", &GoogleProvider{}); err != nil {
-		r.logger.Error("Failed to register Google provider", "error", err)
+	for name, p := range providerOverrides {
+		defaults[name] = p
 	}
-
-	// Register Salesforce provider
-	if err := r.RegisterProvider("salesforce", &SalesforceProvider{}); err != nil {
-		r.logger.Error("Failed to register Salesforce provider", "error", err)
-	}
-
-	// Register ConnectWise provider
-	if err := r.RegisterProvider("connectwise", &ConnectWiseProvider{}); err != nil {
-		r.logger.Error("Failed to register ConnectWise provider", "error", err)
+	for name, p := range defaults {
+		if err := r.RegisterProvider(name, p); err != nil {
+			r.logger.Error("Failed to register provider", "provider", name, "error", err)
+		}
 	}
 }
 
@@ -260,18 +265,8 @@ func (p *MicrosoftProvider) ValidateConfig(config *APIConfig) error {
 	return fmt.Errorf("unsupported service: %s", config.Service)
 }
 
-func (p *MicrosoftProvider) ExecuteOperation(ctx context.Context, config *APIConfig) (*APIResponse, error) {
-	// This is a simplified implementation
-	// In a real system, this would make actual Microsoft Graph API calls
-	return &APIResponse{
-		Success:    true,
-		Data:       map[string]interface{}{"message": "Microsoft operation simulated"},
-		StatusCode: 200,
-		Metadata: map[string]interface{}{
-			"provider": "microsoft",
-			"service":  config.Service,
-		},
-	}, nil
+func (p *MicrosoftProvider) ExecuteOperation(_ context.Context, _ *APIConfig) (*APIResponse, error) {
+	return nil, ErrProviderNotImplemented
 }
 
 func (p *MicrosoftProvider) RefreshToken(ctx context.Context, config *APIConfig) error {
@@ -320,16 +315,8 @@ func (p *GoogleProvider) ValidateConfig(config *APIConfig) error {
 	return fmt.Errorf("unsupported service: %s", config.Service)
 }
 
-func (p *GoogleProvider) ExecuteOperation(ctx context.Context, config *APIConfig) (*APIResponse, error) {
-	return &APIResponse{
-		Success:    true,
-		Data:       map[string]interface{}{"message": "Google operation simulated"},
-		StatusCode: 200,
-		Metadata: map[string]interface{}{
-			"provider": "google",
-			"service":  config.Service,
-		},
-	}, nil
+func (p *GoogleProvider) ExecuteOperation(_ context.Context, _ *APIConfig) (*APIResponse, error) {
+	return nil, ErrProviderNotImplemented
 }
 
 func (p *GoogleProvider) RefreshToken(ctx context.Context, config *APIConfig) error {
@@ -378,16 +365,8 @@ func (p *SalesforceProvider) ValidateConfig(config *APIConfig) error {
 	return fmt.Errorf("unsupported service: %s", config.Service)
 }
 
-func (p *SalesforceProvider) ExecuteOperation(ctx context.Context, config *APIConfig) (*APIResponse, error) {
-	return &APIResponse{
-		Success:    true,
-		Data:       map[string]interface{}{"message": "Salesforce operation simulated"},
-		StatusCode: 200,
-		Metadata: map[string]interface{}{
-			"provider": "salesforce",
-			"service":  config.Service,
-		},
-	}, nil
+func (p *SalesforceProvider) ExecuteOperation(_ context.Context, _ *APIConfig) (*APIResponse, error) {
+	return nil, ErrProviderNotImplemented
 }
 
 func (p *SalesforceProvider) RefreshToken(ctx context.Context, config *APIConfig) error {
@@ -438,16 +417,8 @@ func (p *ConnectWiseProvider) ValidateConfig(config *APIConfig) error {
 	return fmt.Errorf("unsupported service: %s", config.Service)
 }
 
-func (p *ConnectWiseProvider) ExecuteOperation(ctx context.Context, config *APIConfig) (*APIResponse, error) {
-	return &APIResponse{
-		Success:    true,
-		Data:       map[string]interface{}{"message": "ConnectWise operation simulated"},
-		StatusCode: 200,
-		Metadata: map[string]interface{}{
-			"provider": "connectwise",
-			"service":  config.Service,
-		},
-	}, nil
+func (p *ConnectWiseProvider) ExecuteOperation(_ context.Context, _ *APIConfig) (*APIResponse, error) {
+	return nil, ErrProviderNotImplemented
 }
 
 func (p *ConnectWiseProvider) RefreshToken(ctx context.Context, config *APIConfig) error {
