@@ -250,3 +250,106 @@ func TestRunTrace_APIError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "API request failed")
 }
+
+func TestPrintSpans_OutputMatchesConsolidation(t *testing.T) {
+	now := time.Now().UTC()
+	endTime := now.Add(10 * time.Millisecond)
+
+	spans := []spanType{
+		{
+			SpanID:     "span-1",
+			Operation:  "root-op",
+			StartTime:  now,
+			EndTime:    &endTime,
+			DurationMs: 10.0,
+			Status:     "success",
+		},
+		{
+			SpanID:       "span-2",
+			ParentSpanID: "span-1",
+			Operation:    "child-op",
+			StartTime:    now,
+			EndTime:      &endTime,
+			DurationMs:   5.0,
+			Status:       "success",
+			Tags:         map[string]string{"key": "value"},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		printSpans(spans, "", make(map[string]bool))
+	})
+
+	assert.Contains(t, output, "root-op")
+	assert.Contains(t, output, "child-op")
+	assert.Contains(t, output, "SUCCESS")
+	assert.Contains(t, output, "key: value")
+	assert.Contains(t, output, "10.00 ms")
+	assert.Contains(t, output, "5.00 ms")
+}
+
+func TestRunTrace_WithSpans(t *testing.T) {
+	const reqID = "req-with-spans"
+	now := time.Now().UTC()
+	endTime := now.Add(50 * time.Millisecond)
+	childEnd := now.Add(20 * time.Millisecond)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"request_id":  reqID,
+			"trace_id":    "trace-xyz",
+			"start_time":  now.Format(time.RFC3339Nano),
+			"end_time":    endTime.Format(time.RFC3339Nano),
+			"duration_ms": 50.0,
+			"operation":   "test-op",
+			"component":   "test",
+			"status":      "success",
+			"spans": []map[string]interface{}{
+				{
+					"span_id":     "s1",
+					"operation":   "fetch",
+					"start_time":  now.Format(time.RFC3339Nano),
+					"end_time":    endTime.Format(time.RFC3339Nano),
+					"duration_ms": 50.0,
+					"status":      "success",
+				},
+				{
+					"span_id":        "s2",
+					"parent_span_id": "s1",
+					"operation":      "db-query",
+					"start_time":     now.Format(time.RFC3339Nano),
+					"end_time":       childEnd.Format(time.RFC3339Nano),
+					"duration_ms":    20.0,
+					"status":         "success",
+					"tags":           map[string]string{"table": "configs"},
+				},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	origURL := traceURL
+	origFormat := traceFormat
+	origInsecure := traceTLSInsecure
+	t.Cleanup(func() {
+		traceURL = origURL
+		traceFormat = origFormat
+		traceTLSInsecure = origInsecure
+	})
+
+	traceURL = server.URL
+	traceFormat = "text"
+	traceTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runTrace(traceCmd, []string{reqID})
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, output, "Sub-Operations (Spans)")
+	assert.Contains(t, output, "fetch")
+	assert.Contains(t, output, "db-query")
+	assert.Contains(t, output, "table: configs")
+}

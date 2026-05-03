@@ -122,16 +122,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		Status          string                 `json:"status"`
 		Error           string                 `json:"error,omitempty"`
 		Metadata        map[string]interface{} `json:"metadata,omitempty"`
-		Spans           []struct {
-			SpanID       string            `json:"span_id"`
-			ParentSpanID string            `json:"parent_span_id,omitempty"`
-			Operation    string            `json:"operation"`
-			StartTime    time.Time         `json:"start_time"`
-			EndTime      *time.Time        `json:"end_time,omitempty"`
-			DurationMs   float64           `json:"duration_ms,omitempty"`
-			Status       string            `json:"status"`
-			Tags         map[string]string `json:"tags,omitempty"`
-		} `json:"spans,omitempty"`
+		Spans           []spanType             `json:"spans,omitempty"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&trace); err != nil {
@@ -182,21 +173,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	// Spans
 	if len(trace.Spans) > 0 {
 		fmt.Println("\n=== Sub-Operations (Spans) ===")
-		// Convert anonymous struct to spanType
-		spans := make([]spanType, len(trace.Spans))
-		for i, s := range trace.Spans {
-			spans[i] = spanType{
-				SpanID:       s.SpanID,
-				ParentSpanID: s.ParentSpanID,
-				Operation:    s.Operation,
-				StartTime:    s.StartTime,
-				EndTime:      s.EndTime,
-				DurationMs:   s.DurationMs,
-				Status:       s.Status,
-				Tags:         s.Tags,
-			}
-		}
-		printSpans(spans, "", make(map[string]bool))
+		printSpans(trace.Spans, "", make(map[string]bool))
 	}
 
 	fmt.Println()
