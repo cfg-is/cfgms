@@ -5,6 +5,7 @@ package trigger
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -12,7 +13,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // extractTenantFromContext extracts tenant ID from context, trying both logging and trigger context keys
@@ -36,6 +39,8 @@ func extractTenantFromContext(ctx context.Context) string {
 type TriggerManagerImpl struct {
 	logger          *logging.ModuleLogger
 	storage         interfaces.StorageProvider
+	triggerStore    business.TriggerStore
+	secretStore     secretsif.SecretStore
 	scheduler       Scheduler
 	webhookHandler  WebhookHandler
 	siemIntegration SIEMIntegration
@@ -53,12 +58,28 @@ func NewTriggerManager(
 	webhookHandler WebhookHandler,
 	siemIntegration SIEMIntegration,
 	workflowTrigger WorkflowTrigger,
+	secretStore secretsif.SecretStore,
 ) *TriggerManagerImpl {
 	logger := logging.ForModule("workflow.trigger.manager").WithField("component", "manager")
+
+	var triggerStore business.TriggerStore
+	if storage != nil {
+		ts, err := storage.CreateTriggerStore(nil)
+		if err != nil {
+			if !errors.Is(err, business.ErrNotSupported) {
+				logger.Warn("failed to initialize trigger store", "error", err.Error())
+			}
+			// ErrNotSupported: provider does not implement trigger persistence — silent skip
+		} else {
+			triggerStore = ts
+		}
+	}
 
 	return &TriggerManagerImpl{
 		logger:          logger,
 		storage:         storage,
+		triggerStore:    triggerStore,
+		secretStore:     secretStore,
 		scheduler:       scheduler,
 		webhookHandler:  webhookHandler,
 		siemIntegration: siemIntegration,
@@ -809,73 +830,278 @@ func (tm *TriggerManagerImpl) matchesFilter(trigger *Trigger, filter *TriggerFil
 }
 
 func (tm *TriggerManagerImpl) loadTriggersFromStorage(ctx context.Context) error {
-	// TODO: Implement storage loading
-	// This would involve reading triggers from the configured storage provider
+	if tm.triggerStore == nil {
+		return nil
+	}
+
+	tenantID := extractTenantFromContext(ctx)
+	records, err := tm.triggerStore.ListTriggers(ctx, business.TriggerStoreFilter{TenantID: tenantID})
+	if err != nil {
+		return fmt.Errorf("failed to list triggers from storage: %w", err)
+	}
+
+	for _, record := range records {
+		trigger, restoreErr := tm.restoreTriggerFromRecord(ctx, record)
+		if restoreErr != nil {
+			// Degraded load: skip trigger whose creds cannot be recovered; warn already emitted inside.
+			continue
+		}
+		tm.triggers[record.ID] = trigger
+	}
+
 	return nil
 }
 
 func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger *Trigger) error {
-	// No storage provider (e.g. composite OSS manager where GetProvider returns nil) — skip persistence.
-	if tm.storage == nil {
+	if tm.triggerStore == nil {
 		return nil
 	}
-	// Check if storage is available
-	available, err := tm.storage.Available()
+
+	record := &business.TriggerRecord{
+		ID:           trigger.ID,
+		TenantID:     trigger.TenantID,
+		Name:         trigger.Name,
+		Type:         string(trigger.Type),
+		Status:       string(trigger.Status),
+		WorkflowName: trigger.WorkflowName,
+		CreatedAt:    trigger.CreatedAt,
+		UpdatedAt:    trigger.UpdatedAt,
+	}
+
+	if trigger.Webhook != nil {
+		record.WebhookPath = trigger.Webhook.Path
+		record.WebhookMethod = trigger.Webhook.Method
+
+		if trigger.Webhook.Authentication != nil {
+			auth := trigger.Webhook.Authentication
+
+			if auth.BearerToken != "" {
+				if tm.secretStore == nil {
+					return fmt.Errorf("secret store required to persist trigger credentials")
+				}
+				refKey := fmt.Sprintf("trigger-%s-%s-bearer", trigger.TenantID, trigger.ID)
+				if err := tm.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
+					Key:      refKey,
+					Value:    auth.BearerToken,
+					TenantID: trigger.TenantID,
+				}); err != nil {
+					return fmt.Errorf("failed to store bearer token: %w", err)
+				}
+				record.BearerTokenRef = refKey
+			}
+
+			if auth.Secret != "" {
+				if tm.secretStore == nil {
+					return fmt.Errorf("secret store required to persist trigger credentials")
+				}
+				refKey := fmt.Sprintf("trigger-%s-%s-hmac-secret", trigger.TenantID, trigger.ID)
+				if err := tm.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
+					Key:      refKey,
+					Value:    auth.Secret,
+					TenantID: trigger.TenantID,
+				}); err != nil {
+					return fmt.Errorf("failed to store hmac secret: %w", err)
+				}
+				record.HMACSecretRef = refKey
+			}
+
+			if auth.APIKey != "" {
+				if tm.secretStore == nil {
+					return fmt.Errorf("secret store required to persist trigger credentials")
+				}
+				refKey := fmt.Sprintf("trigger-%s-%s-api-key", trigger.TenantID, trigger.ID)
+				if err := tm.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
+					Key:      refKey,
+					Value:    auth.APIKey,
+					TenantID: trigger.TenantID,
+				}); err != nil {
+					return fmt.Errorf("failed to store api key: %w", err)
+				}
+				record.APIKeyRef = refKey
+			}
+
+			if auth.BasicAuth != nil {
+				if auth.BasicAuth.Username != "" {
+					if tm.secretStore == nil {
+						return fmt.Errorf("secret store required to persist trigger credentials")
+					}
+					refKey := fmt.Sprintf("trigger-%s-%s-basic-user", trigger.TenantID, trigger.ID)
+					if err := tm.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
+						Key:      refKey,
+						Value:    auth.BasicAuth.Username,
+						TenantID: trigger.TenantID,
+					}); err != nil {
+						return fmt.Errorf("failed to store basic username: %w", err)
+					}
+					record.BasicUsernameRef = refKey
+				}
+
+				if auth.BasicAuth.Password != "" {
+					if tm.secretStore == nil {
+						return fmt.Errorf("secret store required to persist trigger credentials")
+					}
+					refKey := fmt.Sprintf("trigger-%s-%s-basic-pass", trigger.TenantID, trigger.ID)
+					if err := tm.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
+						Key:      refKey,
+						Value:    auth.BasicAuth.Password,
+						TenantID: trigger.TenantID,
+					}); err != nil {
+						return fmt.Errorf("failed to store basic password: %w", err)
+					}
+					record.BasicPasswordRef = refKey
+				}
+			}
+		}
+
+		// Serialize webhook config with Authentication zeroed out — no cleartext credentials in storage.
+		webhookClone := *trigger.Webhook
+		webhookClone.Authentication = nil
+		configBytes, err := json.Marshal(&webhookClone)
+		if err != nil {
+			return fmt.Errorf("failed to marshal webhook config: %w", err)
+		}
+		record.ConfigPayload = configBytes
+	}
+
+	return tm.triggerStore.StoreTrigger(ctx, record)
+}
+
+func (tm *TriggerManagerImpl) deleteTriggerFromStorage(ctx context.Context, triggerID string) error {
+	if tm.triggerStore == nil {
+		return nil
+	}
+
+	// Retrieve the record first so we know which secret refs to clean up.
+	record, err := tm.triggerStore.GetTrigger(ctx, triggerID)
 	if err != nil {
-		return fmt.Errorf("failed to check storage availability: %w", err)
-	}
-	if !available {
-		return fmt.Errorf("storage provider is not available")
-	}
-
-	// Convert trigger to JSON for storage
-	triggerData, err := json.Marshal(trigger)
-	if err != nil {
-		return fmt.Errorf("failed to marshal trigger: %w", err)
+		if errors.Is(err, business.ErrTriggerNotFound) {
+			// Already gone — treat as success (trigger may never have been persisted).
+			return nil
+		}
+		return fmt.Errorf("failed to fetch trigger record for deletion: %w", err)
 	}
 
-	// Try to use Store method if available (for testing with MockStorageProvider)
-	type storeInterface interface {
-		Store(context.Context, string, []byte) error
+	if err := tm.triggerStore.DeleteTrigger(ctx, triggerID); err != nil && !errors.Is(err, business.ErrTriggerNotFound) {
+		return fmt.Errorf("failed to delete trigger from store: %w", err)
 	}
 
-	if storer, ok := tm.storage.(storeInterface); ok {
-		storageKey := fmt.Sprintf("triggers/%s", trigger.ID)
-		if err := storer.Store(ctx, storageKey, triggerData); err != nil {
-			return fmt.Errorf("failed to store trigger: %w", err)
+	// Clean up secret refs; partial failure is non-critical (trigger record already deleted).
+	if tm.secretStore != nil {
+		for _, refKey := range []string{
+			record.BearerTokenRef,
+			record.HMACSecretRef,
+			record.APIKeyRef,
+			record.BasicUsernameRef,
+			record.BasicPasswordRef,
+		} {
+			if refKey == "" {
+				continue
+			}
+			if delErr := tm.secretStore.DeleteSecret(ctx, refKey); delErr != nil {
+				tm.logger.Warn("failed to clean up secret ref", "ref", refKey, "error", delErr.Error())
+			}
 		}
 	}
-	// If Store method not available, skip storage (for production with standard StorageProvider)
 
 	return nil
 }
 
-func (tm *TriggerManagerImpl) deleteTriggerFromStorage(ctx context.Context, triggerID string) error {
-	// No storage provider (e.g. composite OSS manager where GetProvider returns nil) — skip persistence.
-	if tm.storage == nil {
-		return nil
-	}
-	// Check if storage is available
-	available, err := tm.storage.Available()
-	if err != nil {
-		return fmt.Errorf("failed to check storage availability: %w", err)
-	}
-	if !available {
-		return fmt.Errorf("storage provider is not available")
-	}
-
-	// Try to use Delete method if available (for testing with MockStorageProvider)
-	type deleteInterface interface {
-		Delete(context.Context, string) error
+// restoreTriggerFromRecord reconstructs a Trigger from a stored TriggerRecord, recovering
+// credential values from the secretStore. Returns an error (and emits a WARN log) for any
+// ref that cannot be resolved; callers should skip the trigger on error (degraded load).
+func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, record *business.TriggerRecord) (*Trigger, error) {
+	trigger := &Trigger{
+		ID:           record.ID,
+		TenantID:     record.TenantID,
+		Name:         record.Name,
+		Type:         TriggerType(record.Type),
+		Status:       TriggerStatus(record.Status),
+		WorkflowName: record.WorkflowName,
+		CreatedAt:    record.CreatedAt,
+		UpdatedAt:    record.UpdatedAt,
 	}
 
-	if deleter, ok := tm.storage.(deleteInterface); ok {
-		storageKey := fmt.Sprintf("triggers/%s", triggerID)
-		if err := deleter.Delete(ctx, storageKey); err != nil {
-			return fmt.Errorf("failed to delete trigger: %w", err)
+	if len(record.ConfigPayload) == 0 {
+		return trigger, nil
+	}
+
+	var webhookConfig WebhookConfig
+	if err := json.Unmarshal(record.ConfigPayload, &webhookConfig); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config payload for trigger %s: %w", record.ID, err)
+	}
+
+	hasRefs := record.BearerTokenRef != "" || record.HMACSecretRef != "" || record.APIKeyRef != "" ||
+		record.BasicUsernameRef != "" || record.BasicPasswordRef != ""
+	if hasRefs && tm.secretStore == nil {
+		return nil, fmt.Errorf("trigger %s has credential refs but no secret store is configured", record.ID)
+	}
+
+	auth := &WebhookAuth{}
+	hasAuth := false
+
+	if record.BearerTokenRef != "" {
+		secret, err := tm.secretStore.GetSecret(ctx, record.BearerTokenRef)
+		if err != nil {
+			tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
+				"trigger_id", record.ID, "ref", record.BearerTokenRef, "error", err.Error())
+			return nil, fmt.Errorf("failed to get bearer token for trigger %s: %w", record.ID, err)
+		}
+		auth.BearerToken = secret.Value
+		hasAuth = true
+	}
+
+	if record.HMACSecretRef != "" {
+		secret, err := tm.secretStore.GetSecret(ctx, record.HMACSecretRef)
+		if err != nil {
+			tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
+				"trigger_id", record.ID, "ref", record.HMACSecretRef, "error", err.Error())
+			return nil, fmt.Errorf("failed to get hmac secret for trigger %s: %w", record.ID, err)
+		}
+		auth.Secret = secret.Value
+		hasAuth = true
+	}
+
+	if record.APIKeyRef != "" {
+		secret, err := tm.secretStore.GetSecret(ctx, record.APIKeyRef)
+		if err != nil {
+			tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
+				"trigger_id", record.ID, "ref", record.APIKeyRef, "error", err.Error())
+			return nil, fmt.Errorf("failed to get api key for trigger %s: %w", record.ID, err)
+		}
+		auth.APIKey = secret.Value
+		hasAuth = true
+	}
+
+	if record.BasicUsernameRef != "" || record.BasicPasswordRef != "" {
+		auth.BasicAuth = &BasicAuth{}
+
+		if record.BasicUsernameRef != "" {
+			secret, err := tm.secretStore.GetSecret(ctx, record.BasicUsernameRef)
+			if err != nil {
+				tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
+					"trigger_id", record.ID, "ref", record.BasicUsernameRef, "error", err.Error())
+				return nil, fmt.Errorf("failed to get basic username for trigger %s: %w", record.ID, err)
+			}
+			auth.BasicAuth.Username = secret.Value
+			hasAuth = true
+		}
+
+		if record.BasicPasswordRef != "" {
+			secret, err := tm.secretStore.GetSecret(ctx, record.BasicPasswordRef)
+			if err != nil {
+				tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
+					"trigger_id", record.ID, "ref", record.BasicPasswordRef, "error", err.Error())
+				return nil, fmt.Errorf("failed to get basic password for trigger %s: %w", record.ID, err)
+			}
+			auth.BasicAuth.Password = secret.Value
+			hasAuth = true
 		}
 	}
-	// If Delete method not available, skip storage (for production with standard StorageProvider)
 
-	return nil
+	if hasAuth {
+		webhookConfig.Authentication = auth
+	}
+	trigger.Webhook = &webhookConfig
+
+	return trigger, nil
 }

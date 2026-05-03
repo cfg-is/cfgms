@@ -32,6 +32,8 @@ type IntegrationTestSuite struct {
 	apiHandler      *APIHandler
 	workflowTrigger *TestWorkflowTrigger
 	storage         *TestStorageProvider
+	triggerStore    *inMemoryTriggerStore
+	secretStore     *inMemorySecretStore
 	router          *mux.Router
 	server          *httptest.Server
 }
@@ -149,7 +151,7 @@ func (t *TestStorageProvider) CreateCommandStore(_ map[string]interface{}) (busi
 }
 
 func (t *TestStorageProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
-	return nil, business.ErrNotSupported
+	return newInMemoryTriggerStore(), nil
 }
 
 func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
@@ -220,6 +222,7 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	// Create components
 	storage := NewTestStorageProvider()
 	workflowTrigger := NewTestWorkflowTrigger()
+	secretStore := newInMemorySecretStore()
 
 	// Create manager first (we'll create scheduler separately)
 	manager := NewTriggerManager(
@@ -228,6 +231,7 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 		nil, // webhook handler will be set later
 		nil, // siem integration will be set later
 		workflowTrigger,
+		secretStore,
 	)
 
 	// Create scheduler
@@ -257,6 +261,12 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	// Create test server
 	server := httptest.NewServer(router)
 
+	// Capture the trigger store created by NewTriggerManager for assertion use in tests.
+	var ts *inMemoryTriggerStore
+	if manager.triggerStore != nil {
+		ts = manager.triggerStore.(*inMemoryTriggerStore)
+	}
+
 	return &IntegrationTestSuite{
 		manager:         manager,
 		scheduler:       scheduler,
@@ -265,6 +275,8 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 		apiHandler:      apiHandler,
 		workflowTrigger: workflowTrigger,
 		storage:         storage,
+		triggerStore:    ts,
+		secretStore:     secretStore,
 		router:          router,
 		server:          server,
 	}
@@ -659,40 +671,28 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 		err := suite.manager.CreateTrigger(ctx, trigger)
 		require.NoError(t, err)
 
-		// Verify it's stored
-		exists, err := suite.storage.Exists(ctx, "triggers/persistence-test-1")
+		// Verify it's stored via TriggerStore (the authoritative persistence layer).
+		rec, err := suite.triggerStore.GetTrigger(ctx, "persistence-test-1")
 		require.NoError(t, err)
-		assert.True(t, exists)
-
-		// Retrieve from storage directly
-		data, err := suite.storage.Retrieve(ctx, "triggers/persistence-test-1")
-		require.NoError(t, err)
-
-		var storedTrigger Trigger
-		err = json.Unmarshal(data, &storedTrigger)
-		require.NoError(t, err)
-		assert.Equal(t, trigger.ID, storedTrigger.ID)
-		assert.Equal(t, trigger.Name, storedTrigger.Name)
+		assert.Equal(t, trigger.ID, rec.ID)
+		assert.Equal(t, trigger.Name, rec.Name)
 
 		// Update trigger
 		trigger.Name = "Updated Persistence Test"
 		err = suite.manager.UpdateTrigger(ctx, trigger)
 		require.NoError(t, err)
 
-		// Verify update is persisted
-		data, err = suite.storage.Retrieve(ctx, "triggers/persistence-test-1")
+		// Verify update is persisted.
+		rec, err = suite.triggerStore.GetTrigger(ctx, "persistence-test-1")
 		require.NoError(t, err)
-		err = json.Unmarshal(data, &storedTrigger)
-		require.NoError(t, err)
-		assert.Equal(t, "Updated Persistence Test", storedTrigger.Name)
+		assert.Equal(t, "Updated Persistence Test", rec.Name)
 
 		// Delete trigger
 		err = suite.manager.DeleteTrigger(ctx, trigger.ID)
 		require.NoError(t, err)
 
-		// Verify deletion from storage
-		exists, err = suite.storage.Exists(ctx, "triggers/persistence-test-1")
-		require.NoError(t, err)
-		assert.False(t, exists)
+		// Verify deletion from TriggerStore.
+		_, err = suite.triggerStore.GetTrigger(ctx, "persistence-test-1")
+		assert.ErrorIs(t, err, business.ErrTriggerNotFound)
 	})
 }
