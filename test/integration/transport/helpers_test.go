@@ -61,15 +61,18 @@ func (h *TestHelper) BaseURL() string {
 	return h.baseURL
 }
 
-// CreateToken returns a pre-created reusable test token.
-// The controller pre-creates test tokens on startup when transport is enabled.
+// CreateToken returns the pre-seeded reusable integration test token.
+//
+// The controller only seeds this token when started with CFGMS_SEED_TEST_TOKENS=1.
+// Integration test environments (Docker Compose, CI) must set that variable on
+// the controller process before it starts; see docker-compose.test.yml.
 //
 // NOTE: tenantID and group parameters are currently ignored — all registrations
 // use the same shared token with pre-configured metadata. Multi-tenant isolation
 // tests verify unique steward IDs but do NOT validate per-tenant token boundaries.
 // Per-tenant tokens require seeding distinct tokens in the controller test setup.
 func (h *TestHelper) CreateToken(_ *testing.T, _, _ string) string {
-	return "integration_reusable"
+	return "integration_reusable" //nolint:gosec // test-only token, requires CFGMS_SEED_TEST_TOKENS=1 on the controller
 }
 
 // RegisterSteward registers a steward via HTTP API and returns the response.

@@ -457,6 +457,8 @@ services:
       CFGMS_TIMESCALE_PASSWORD: "${TIMESCALEDB_PASSWORD}"
       # Disable HA to run in standalone mode
       CFGMS_HA_ENABLED: "false"
+      # Seed well-known test tokens for integration test suites (Issue #700)
+      CFGMS_SEED_TEST_TOKENS: "1"
       # Enable test endpoints for integration testing (auth bypass for /api/v1/test/*)
       CFGMS_ENABLE_TEST_ENDPOINTS: "true"
       CFGMS_CERT_PATH: "/app/certs"
