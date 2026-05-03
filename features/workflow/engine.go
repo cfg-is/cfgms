@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -30,15 +32,15 @@ type TransformStepExecutor interface {
 
 // Engine implements the WorkflowEngine interface
 type Engine struct {
-	moduleFactory    *factory.ModuleFactory
-	logger           *logging.ModuleLogger
-	executions       map[string]*WorkflowExecution
-	mutex            sync.RWMutex
-	httpClient       *HTTPClient
-	providerRegistry *ProviderRegistry
-	errorHandler     ErrorHandler
-	syncManager      *SyncManager
-	debugEngine      *DebugEngineImpl
+	moduleFactory     *factory.ModuleFactory
+	logger            *logging.ModuleLogger
+	executions        map[string]*WorkflowExecution
+	mutex             sync.RWMutex
+	httpClient        *HTTPClient
+	providerRegistry  *ProviderRegistry
+	errorHandler      ErrorHandler
+	syncManager       *SyncManager
+	debugEngine       *DebugEngineImpl
 	transformExecutor TransformStepExecutor
 }
 
@@ -65,13 +67,13 @@ func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger, tran
 	providerRegistry := NewProviderRegistry(logger) // Keep legacy for now
 
 	engine := &Engine{
-		moduleFactory:    moduleFactory,
-		logger:           workflowLogger,
-		executions:       make(map[string]*WorkflowExecution),
-		httpClient:       httpClient,
-		providerRegistry: providerRegistry,
-		errorHandler:     NewDefaultErrorHandler(),
-		syncManager:      NewSyncManager(),
+		moduleFactory:     moduleFactory,
+		logger:            workflowLogger,
+		executions:        make(map[string]*WorkflowExecution),
+		httpClient:        httpClient,
+		providerRegistry:  providerRegistry,
+		errorHandler:      NewDefaultErrorHandler(),
+		syncManager:       NewSyncManager(),
 		transformExecutor: transformExecutor,
 	}
 
@@ -255,24 +257,50 @@ func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execut
 							"decision", decision.Message)
 						continue
 					case ErrorActionRetry:
-						// Implement retry with backoff
-						if decision.RetryDelay > 0 {
-							e.logger.Info("Retrying step after delay",
+						// enableRetry=false in try/catch blocks — retry loop must not activate
+						retryConfig := retryConfigForStep(step)
+						if retryConfig == nil || retryConfig.MaxAttempts <= 1 {
+							return workflowErr
+						}
+						var lastRetryErr error = workflowErr
+						for attempt := 1; e.errorHandler.ShouldRetry(workflowErr, attempt, retryConfig); attempt++ {
+							delay := e.errorHandler.CalculateRetryDelay(attempt-1, retryConfig)
+							if delay > 0 {
+								e.logger.Info("Retrying step after delay",
+									"step", step.Name,
+									"delay", delay,
+									"attempt", attempt)
+								select {
+								case <-ctx.Done():
+									return ctx.Err()
+								case <-time.After(delay):
+								}
+							}
+							e.logger.Info("Retrying failed step",
 								"step", step.Name,
-								"delay", decision.RetryDelay,
-								"decision", decision.Message)
-							select {
-							case <-ctx.Done():
-								return ctx.Err()
-							case <-time.After(decision.RetryDelay):
+								"attempt", attempt)
+							lastRetryErr = e.executeStep(ctx, step, execution)
+							if result, exists := execution.GetStepResult(step.Name); exists {
+								result.RetryCount = attempt
+								execution.SetStepResult(step.Name, result)
+							}
+							if lastRetryErr == nil {
+								break
+							}
+							if wfErr, ok := lastRetryErr.(*WorkflowError); ok {
+								workflowErr = wfErr
+							} else {
+								workflowErr = NewWorkflowError(
+									ErrorCodeStepExecution,
+									lastRetryErr.Error(),
+									step.Name,
+									step.Type,
+									lastRetryErr,
+								).WithVariableState(execution.Variables)
 							}
 						}
-						// Retry the step (this would need more sophisticated retry tracking)
-						e.logger.Info("Retrying failed step",
-							"step", step.Name,
-							"decision", decision.Message)
-						if retryErr := e.executeStep(ctx, step, execution); retryErr != nil {
-							return workflowErr // Return original error if retry fails
+						if lastRetryErr != nil {
+							return workflowErr
 						}
 					case ErrorActionContinueWith:
 						targetName := decision.ContinueWith
@@ -818,13 +846,11 @@ func (g *genericConfigState) AsMap() map[string]interface{} {
 }
 
 func (g *genericConfigState) ToYAML() ([]byte, error) {
-	// This would use yaml.Marshal in a real implementation
-	return []byte("workflow yaml"), nil
+	return yaml.Marshal(g.data)
 }
 
 func (g *genericConfigState) FromYAML(data []byte) error {
-	// This would use yaml.Unmarshal in a real implementation
-	return nil
+	return yaml.Unmarshal(data, &g.data)
 }
 
 func (g *genericConfigState) Validate() error {
@@ -1205,4 +1231,24 @@ type fanOutResult struct {
 	Value      interface{}
 	StepResult interface{}
 	Error      error
+}
+
+// retryConfigForStep returns the RetryConfig for a step from its type-specific config,
+// or nil if the step type carries no retry config (e.g. StepTypeTask, StepTypeSequential).
+func retryConfigForStep(step Step) *RetryConfig {
+	switch step.Type {
+	case StepTypeHTTP:
+		if step.HTTP != nil {
+			return step.HTTP.Retry
+		}
+	case StepTypeAPI:
+		if step.API != nil {
+			return step.API.Retry
+		}
+	case StepTypeWebhook:
+		if step.Webhook != nil {
+			return step.Webhook.Retry
+		}
+	}
+	return nil
 }

@@ -5,6 +5,9 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,7 +91,7 @@ func TestEngine_ExecuteWorkflow_Simple(t *testing.T) {
 	// Check final status
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)
-	assert.Contains(t, []ExecutionStatus{StatusCompleted, StatusFailed}, finalExecution.GetStatus())
+	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 }
 
 func TestEngine_ExecuteWorkflow_Parallel(t *testing.T) {
@@ -142,7 +145,7 @@ func TestEngine_ExecuteWorkflow_Parallel(t *testing.T) {
 
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)
-	assert.Contains(t, []ExecutionStatus{StatusCompleted, StatusFailed}, finalExecution.GetStatus())
+	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 }
 
 func TestEngine_CancelExecution(t *testing.T) {
@@ -330,6 +333,7 @@ func (e *testTransformExecutor) ExecuteTransformStep(_ context.Context, _ Step, 
 }
 
 // testErrorHandler is a test implementation of ErrorHandler that always returns a fixed decision.
+// ShouldRetry always returns false — use testRetryDecisionHandler when ShouldRetry must return true.
 type testErrorHandler struct {
 	decision ErrorHandlingDecision
 }
@@ -343,6 +347,28 @@ func (h *testErrorHandler) ShouldRetry(_ *WorkflowError, _ int, _ *RetryConfig) 
 }
 
 func (h *testErrorHandler) CalculateRetryDelay(_ int, _ *RetryConfig) time.Duration {
+	return 0
+}
+
+// testRetryDecisionHandler returns a fixed HandleError decision and implements ShouldRetry
+// using real retry-count logic so tests can detect whether the retry loop was entered.
+type testRetryDecisionHandler struct {
+	decision    ErrorHandlingDecision
+	maxAttempts int
+}
+
+func (h *testRetryDecisionHandler) HandleError(_ context.Context, _ *WorkflowError, _ *WorkflowExecution) ErrorHandlingDecision {
+	return h.decision
+}
+
+func (h *testRetryDecisionHandler) ShouldRetry(err *WorkflowError, retryCount int, config *RetryConfig) bool {
+	if config != nil {
+		return retryCount < config.MaxAttempts && err.Recoverable
+	}
+	return retryCount < h.maxAttempts && err.Recoverable
+}
+
+func (h *testRetryDecisionHandler) CalculateRetryDelay(_ int, _ *RetryConfig) time.Duration {
 	return 0
 }
 
@@ -500,4 +526,146 @@ func TestFallbackStepExecution(t *testing.T) {
 
 	results := final.GetStepResults()
 	assert.Contains(t, results, "fallback-step")
+}
+
+// TestRetryMaxAttempts verifies that executeStepsWithRetry loops up to
+// retryConfigForStep(step).MaxAttempts on ErrorActionRetry and writes the
+// attempt count to StepResult.RetryCount.
+//
+// The server fails the first two executeHTTPStep calls completely (all MaxAttempts
+// HTTP-client-level retries return 500), then succeeds on the third call.
+// With MaxAttempts=3: initial + 2 retries = 3 total invocations, RetryCount=2.
+func TestRetryMaxAttempts(t *testing.T) {
+	const maxAttempts = 3
+	// Each failed executeHTTPStep call exhausts all maxAttempts HTTP-client retries.
+	// failedCalls=2 means the server must return 500 for (maxAttempts*2) requests,
+	// then 200 from request (maxAttempts*2 + 1) onward.
+	const failedCalls = 2
+	var requestCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := int(atomic.AddInt32(&requestCount, 1))
+		if n <= maxAttempts*failedCalls {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{}`)); err != nil {
+			t.Logf("write error: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	factory := createTestFactory()
+	logger := pkgtesting.NewMockLogger(true)
+	engine := NewEngine(factory, logger, nil)
+	// Use zero delays so the test runs instantly.
+	engine.errorHandler = &DefaultErrorHandler{
+		MaxRetries:        maxAttempts,
+		BaseDelay:         0,
+		MaxDelay:          0,
+		BackoffMultiplier: 1.0,
+	}
+
+	wf := Workflow{
+		Name: "retry-max-attempts-test",
+		Steps: []Step{
+			{
+				Name: "http-retry-step",
+				Type: StepTypeHTTP,
+				HTTP: &HTTPConfig{
+					URL:    server.URL,
+					Method: "GET",
+					Retry: &RetryConfig{
+						MaxAttempts:       maxAttempts,
+						InitialDelay:      0,
+						MaxDelay:          0,
+						BackoffMultiplier: 1.0,
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 5*time.Second)
+
+	final, err := engine.GetExecution(execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, final.GetStatus(), "workflow should complete successfully after retries")
+
+	stepResults := final.GetStepResults()
+	result, exists := stepResults["http-retry-step"]
+	require.True(t, exists, "step result must exist")
+	assert.Equal(t, 2, result.RetryCount, "RetryCount should be 2 (failed twice, succeeded on third attempt)")
+}
+
+// TestRetryNilConfig verifies that when retryConfigForStep returns nil (step type
+// has no Retry field), a step failure returns the error immediately without retrying.
+//
+// The error handler's ShouldRetry returns true (would allow retries if the nil guard
+// were absent), so RetryCount == 0 proves the nil guard fired and prevented the loop.
+func TestRetryNilConfig(t *testing.T) {
+	factory := createTestFactory()
+	logger := pkgtesting.NewMockLogger(true)
+	exec := &testTransformExecutor{
+		result: StepResult{Status: StatusFailed},
+		err:    fmt.Errorf("step error"),
+	}
+	engine := NewEngine(factory, logger, exec)
+	// ShouldRetry returns true (up to 5 attempts) — without the nil guard this handler
+	// would cause the loop to run, resulting in RetryCount > 0.
+	engine.errorHandler = &testRetryDecisionHandler{
+		decision:    ErrorHandlingDecision{Action: ErrorActionRetry},
+		maxAttempts: 5,
+	}
+
+	wf := Workflow{
+		Name: "nil-retry-config-test",
+		Steps: []Step{
+			// StepTypeTransform has no Retry field → retryConfigForStep returns nil.
+			{Name: "transform-step", Type: StepTypeTransform},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	final, err := engine.GetExecution(execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusFailed, final.GetStatus(), "workflow must fail when step has no retry config")
+
+	stepResults := final.GetStepResults()
+	result, exists := stepResults["transform-step"]
+	require.True(t, exists, "step result must exist")
+	assert.Equal(t, 0, result.RetryCount, "nil retryConfig must prevent the retry loop (RetryCount must be 0)")
+}
+
+// TestGenericConfigStateYAMLRoundTrip verifies that genericConfigState.ToYAML
+// produces valid YAML from the data map, and FromYAML restores the original values.
+func TestGenericConfigStateYAMLRoundTrip(t *testing.T) {
+	g := &genericConfigState{
+		data: map[string]interface{}{
+			"env":   "prod",
+			"count": 3,
+		},
+	}
+
+	yamlData, err := g.ToYAML()
+	require.NoError(t, err)
+	require.NotNil(t, yamlData)
+	assert.NotEqual(t, []byte("workflow yaml"), yamlData, "ToYAML must not return the stub value")
+
+	g2 := &genericConfigState{}
+	err = g2.FromYAML(yamlData)
+	require.NoError(t, err)
+
+	assert.Equal(t, "prod", g2.data["env"])
+	assert.EqualValues(t, 3, g2.data["count"])
 }
