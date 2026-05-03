@@ -298,19 +298,9 @@ func (s *Server) setupRouter() {
 	monitoring := api.PathPrefix("/monitoring").Subrouter()
 	monitoring.Handle("/health", s.requirePermission("monitoring", "read-health")(http.HandlerFunc(s.handleSystemHealth))).Methods("GET")
 	monitoring.Handle("/metrics", s.requirePermission("monitoring", "read-metrics")(http.HandlerFunc(s.handleSystemMetrics))).Methods("GET")
-	monitoring.Handle("/resources", s.requirePermission("monitoring", "read-resources")(http.HandlerFunc(s.handleResourceMetrics))).Methods("GET")
-	monitoring.Handle("/logs", s.requirePermission("monitoring", "read-logs")(http.HandlerFunc(s.handleMonitoringLogs))).Methods("GET")
-	monitoring.Handle("/traces", s.requirePermission("monitoring", "read-traces")(http.HandlerFunc(s.handleMonitoringTraces))).Methods("GET")
-	monitoring.Handle("/events", s.requirePermission("monitoring", "read-events")(http.HandlerFunc(s.handleMonitoringEvents))).Methods("GET")
 	monitoring.Handle("/config", s.requirePermission("monitoring", "read-config")(http.HandlerFunc(s.handleMonitoringConfig))).Methods("GET")
 
-	// Steward-specific monitoring
-	monitoring.Handle("/stewards/{id}/metrics", s.requirePermission("monitoring", "read-steward-metrics")(http.HandlerFunc(s.handleStewardMetrics))).Methods("GET")
-
-	// Controller service monitoring
-	monitoring.Handle("/controller/services", s.requirePermission("monitoring", "read-services")(http.HandlerFunc(s.handleControllerServices))).Methods("GET")
-
-	// New platform monitoring endpoints
+	// Platform monitoring endpoints
 	monitoring.Handle("/anomalies", s.requirePermission("monitoring", "read-anomalies")(http.HandlerFunc(s.handleMonitoringAnomalies))).Methods("GET")
 	monitoring.Handle("/components/{component}/health", s.requirePermission("monitoring", "read-component-health")(http.HandlerFunc(s.handleMonitoringComponentHealth))).Methods("GET")
 	monitoring.Handle("/components/{component}/metrics", s.requirePermission("monitoring", "read-component-metrics")(http.HandlerFunc(s.handleMonitoringComponentMetrics))).Methods("GET")

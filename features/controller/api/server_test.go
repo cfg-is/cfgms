@@ -1220,3 +1220,46 @@ func TestServer_SetWorkflowHandler_NilHandler_NoopSafe(t *testing.T) {
 	}, "SetWorkflowHandler(nil) must not panic")
 	assert.Nil(t, server.workflowHandler, "workflowHandler must be nil after SetWorkflowHandler(nil)")
 }
+
+// TestServer_MonitoringStubRoutesDeregistered verifies that the 6 synthetic-data
+// monitoring routes have been removed and return 404 rather than 200 with fabricated data.
+func TestServer_MonitoringStubRoutesDeregistered(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Create a key with the permissions that the removed routes previously required.
+	// If the routes still exist, auth passes and the handler returns 200.
+	// If the routes are gone, the mux returns 404 regardless of auth.
+	monitoringKey := NewTestKey(t, server, []string{
+		"monitoring:read-resources",
+		"monitoring:read-logs",
+		"monitoring:read-traces",
+		"monitoring:read-events",
+		"monitoring:read-steward-metrics",
+		"monitoring:read-services",
+	})
+
+	stubRoutes := []string{
+		"/api/v1/monitoring/resources",
+		"/api/v1/monitoring/logs",
+		"/api/v1/monitoring/traces",
+		"/api/v1/monitoring/events",
+		"/api/v1/monitoring/stewards/any-id/metrics",
+		"/api/v1/monitoring/controller/services",
+	}
+
+	for _, path := range stubRoutes {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest("GET", path, nil)
+			req.Header.Set("X-API-Key", monitoringKey)
+			rec := httptest.NewRecorder()
+
+			server.router.ServeHTTP(rec, req)
+
+			assert.NotEqual(t, http.StatusOK, rec.Code,
+				"deregistered stub route must not return 200 with synthetic data")
+			assert.True(t,
+				rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed,
+				"deregistered stub route %s should return 404 or 405, got %d", path, rec.Code)
+		})
+	}
+}
