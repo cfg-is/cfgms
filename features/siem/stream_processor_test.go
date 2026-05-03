@@ -163,11 +163,11 @@ func TestSanitizedFields(t *testing.T) {
 
 	fields := map[string]interface{}{
 		"newline_injection": "before\nINJECTED_LINE", // CWE-117 log forgery via newline
-		"ansi_escape":       "\x1b[31mRED\x1b[0m",   // ANSI color escape sequences
+		"ansi_escape":       "\x1b[31mRED\x1b[0m",    // ANSI color escape sequences
 		"cr_injection":      "before\roverwritten",   // CWE-117 via carriage return
-		"long_value":        string(longValue),        // must be truncated
+		"long_value":        string(longValue),       // must be truncated
 		"safe_value":        "10.0.0.1",              // safe passthrough
-		"numeric":           42,                       // numeric converted to string
+		"numeric":           42,                      // numeric converted to string
 	}
 
 	result := sanitizedFields(fields)
