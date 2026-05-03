@@ -528,6 +528,98 @@ func TestTemplateEngine_ProcessSubstitutions(t *testing.T) {
 	}
 }
 
+func TestWorkflowToStringMarshalsValidYAML(t *testing.T) {
+	engine := NewTemplateEngine()
+
+	workflow := Workflow{
+		Name:        "test-workflow",
+		Description: "A test workflow",
+		Steps: []Step{
+			{
+				Name:   "step-one",
+				Type:   StepTypeTask,
+				Module: "test-module",
+				Config: map[string]interface{}{
+					"key": "value",
+				},
+			},
+		},
+	}
+
+	yamlStr, err := engine.workflowToString(workflow)
+	require.NoError(t, err)
+	assert.NotEmpty(t, yamlStr)
+	assert.Contains(t, yamlStr, "test-workflow")
+	assert.Contains(t, yamlStr, "A test workflow")
+	assert.Contains(t, yamlStr, "step-one")
+}
+
+func TestStringToWorkflowRoundTrip(t *testing.T) {
+	engine := NewTemplateEngine()
+
+	original := Workflow{
+		Name:        "round-trip-workflow",
+		Description: "Round-trip test",
+		Steps: []Step{
+			{
+				Name:   "first-step",
+				Type:   StepTypeTask,
+				Module: "test-module",
+				Config: map[string]interface{}{
+					"param": "value",
+				},
+			},
+		},
+		Variables: map[string]interface{}{
+			"env": "production",
+		},
+	}
+
+	yamlStr, err := engine.workflowToString(original)
+	require.NoError(t, err)
+
+	restored, err := engine.stringToWorkflow(yamlStr)
+	require.NoError(t, err)
+
+	assert.Equal(t, original.Name, restored.Name)
+	assert.Equal(t, original.Description, restored.Description)
+	require.Len(t, restored.Steps, 1)
+	assert.Equal(t, original.Steps[0].Name, restored.Steps[0].Name)
+	assert.Equal(t, original.Variables["env"], restored.Variables["env"])
+
+	t.Run("invalid YAML propagates error", func(t *testing.T) {
+		_, err := engine.stringToWorkflow(":\tinvalid: yaml: [\x00")
+		assert.Error(t, err)
+	})
+}
+
+func TestProcessTemplateSubstitutionsEndToEnd(t *testing.T) {
+	engine := NewTemplateEngine()
+
+	workflow := Workflow{
+		Name:        "${workflow_name}",
+		Description: "Template workflow",
+		Steps: []Step{
+			{
+				Name:   "deploy-step",
+				Type:   StepTypeTask,
+				Module: "deploy-module",
+				Config: map[string]interface{}{
+					"target": "production",
+				},
+			},
+		},
+	}
+
+	parameters := map[string]interface{}{
+		"workflow_name": "test-wf",
+	}
+
+	result, err := engine.ProcessTemplateSubstitutions(workflow, parameters)
+	require.NoError(t, err)
+	assert.Equal(t, "test-wf", result.Name)
+}
+
 func TestWorkflowTemplate_CreationAndUpdate(t *testing.T) {
 	template := &WorkflowTemplate{
 		ID:          "test-template",
