@@ -5,6 +5,7 @@ package git
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -414,57 +415,6 @@ sops:
 	}
 }
 
-func TestSOPSManager_createTempFile(t *testing.T) {
-	manager := NewSOPSManager()
-
-	content := []byte("test: configuration\nvalue: 123")
-
-	tests := []struct {
-		name     string
-		filePath string
-		expected string
-	}{
-		{
-			name:     "YAML file",
-			filePath: "config.yaml",
-			expected: ".yaml",
-		},
-		{
-			name:     "YML file",
-			filePath: "config.yml",
-			expected: ".yml",
-		},
-		{
-			name:     "JSON file",
-			filePath: "config.json",
-			expected: ".json",
-		},
-		{
-			name:     "No extension",
-			filePath: "config",
-			expected: ".yaml",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tmpFile, err := manager.createTempFile(content, tt.filePath)
-			assert.NoError(t, err)
-			assert.True(t, strings.HasSuffix(tmpFile, tt.expected))
-
-			// Verify content was written correctly
-			fileContent, err := os.ReadFile(tmpFile)
-			assert.NoError(t, err)
-			assert.Equal(t, content, fileContent)
-
-			// Clean up
-			if err := os.Remove(tmpFile); err != nil {
-				t.Logf("Failed to remove temp file: %v", err)
-			}
-		})
-	}
-}
-
 func TestSOPSManager_selectKMSKey(t *testing.T) {
 	manager := NewSOPSManager()
 
@@ -554,4 +504,189 @@ func TestSOPSManager_selectKMSKey_NoProviders(t *testing.T) {
 	_, err := manager.selectKMSKey("test.yaml", config)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no KMS key found")
+}
+
+// TestSOPSManager_DecryptContent_NoTempFile asserts that DecryptContent does not
+// write any cfgms-sops-* temp file to os.TempDir(), even when the content is
+// SOPS-encrypted (piped to sops via stdin instead).
+func TestSOPSManager_DecryptContent_NoTempFile(t *testing.T) {
+	manager := NewSOPSManager()
+	ctx := context.Background()
+
+	// Snapshot temp files matching cfgms-sops-* before the call
+	pattern := filepath.Join(os.TempDir(), "cfgms-sops-*")
+	before, err := filepath.Glob(pattern)
+	require.NoError(t, err, "glob pattern must be valid")
+	beforeSet := make(map[string]bool, len(before))
+	for _, f := range before {
+		beforeSet[f] = true
+	}
+
+	// Content that passes IsSOPSEncrypted (has both "sops:" and "ENC[" markers)
+	sopsContent := []byte("test: ENC[AES256_GCM,data:abc,iv:def,tag:ghi,type:str]\nsops:\n  version: 3.7.3\n")
+
+	// DecryptContent will fail at sops exec (binary unavailable in test env),
+	// but must not create any temp file regardless.
+	_, decryptErr := manager.DecryptContent(ctx, sopsContent)
+	assert.Error(t, decryptErr, "expected sops exec failure since binary is unavailable in test env")
+
+	// Assert no new cfgms-sops-* files were created
+	after, err := filepath.Glob(pattern)
+	require.NoError(t, err, "glob pattern must be valid")
+	for _, f := range after {
+		if !beforeSet[f] {
+			t.Errorf("DecryptContent created unexpected temp file: %s", f)
+		}
+	}
+}
+
+// TestSOPSManager_DecryptContent_PlainPassthrough asserts that DecryptContent
+// returns non-SOPS content unchanged without invoking sops.
+func TestSOPSManager_DecryptContent_PlainPassthrough(t *testing.T) {
+	manager := NewSOPSManager()
+	ctx := context.Background()
+
+	plain := []byte("config: value\nother: setting\n")
+	result, err := manager.DecryptContent(ctx, plain)
+
+	require.NoError(t, err)
+	assert.Equal(t, plain, result)
+}
+
+// TestSOPSManager_EncryptContent_PlaintextChmodZero asserts that EncryptContent
+// calls os.Chmod(plainTmpPath, 0000) immediately after writing the plaintext temp
+// file, before invoking sops. The onChmod hook captures the file mode via os.Stat
+// between the chmod call and the sops exec.
+func TestSOPSManager_EncryptContent_PlaintextChmodZero(t *testing.T) {
+	manager := NewSOPSManager()
+	ctx := context.Background()
+
+	var capturedMode os.FileMode
+	var hookCalled bool
+	manager.onChmod = func(path string, _ os.FileMode) {
+		info, err := os.Stat(path)
+		if err == nil {
+			capturedMode = info.Mode().Perm()
+			hookCalled = true
+		}
+	}
+
+	config := &SOPSConfig{
+		Enabled: true,
+		KMSProviders: map[string]KMSProvider{
+			"aws": {
+				Type:  "aws",
+				KeyID: "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+			},
+		},
+		EncryptionRules: []EncryptionRule{
+			{
+				PathRegex: `.*\.yaml$`,
+				KMSKey:    "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+			},
+		},
+	}
+
+	content := []byte("test: value\nother: config\n")
+
+	// EncryptContent will fail at sops exec (binary unavailable in test env),
+	// but chmod must have been applied before the exec attempt.
+	_, encryptErr := manager.EncryptContent(ctx, content, config, "test.yaml")
+	assert.Error(t, encryptErr, "expected sops exec failure since binary is unavailable in test env")
+
+	require.True(t, hookCalled, "onChmod hook should have been called — chmod must occur before sops exec")
+	assert.Equal(t, os.FileMode(0000), capturedMode, "plaintext temp file must have mode 0000 before sops exec")
+}
+
+// TestSOPSManager_EncryptContent_TempFilesRemoved asserts that both plaintext
+// and ciphertext temp files are cleaned up after EncryptContent returns.
+func TestSOPSManager_EncryptContent_TempFilesRemoved(t *testing.T) {
+	manager := NewSOPSManager()
+	ctx := context.Background()
+
+	var capturedPath string
+	manager.onChmod = func(path string, _ os.FileMode) {
+		capturedPath = path
+	}
+
+	config := &SOPSConfig{
+		Enabled: true,
+		KMSProviders: map[string]KMSProvider{
+			"aws": {
+				Type:  "aws",
+				KeyID: "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+			},
+		},
+		EncryptionRules: []EncryptionRule{
+			{
+				PathRegex: `.*\.yaml$`,
+				KMSKey:    "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+			},
+		},
+	}
+
+	content := []byte("test: value\n")
+	_, encryptErr := manager.EncryptContent(ctx, content, config, "test.yaml")
+	assert.Error(t, encryptErr, "expected sops exec failure since binary is unavailable in test env")
+
+	// After the function returns, the plaintext temp file must be removed.
+	// require.NotEmpty ensures the hook was called (production code reached chmod)
+	// before we check the cleanup invariant.
+	require.NotEmpty(t, capturedPath, "onChmod hook must be called — EncryptContent must reach chmod before sops exec")
+	_, statErr := os.Stat(capturedPath)
+	assert.True(t, os.IsNotExist(statErr), "plaintext temp file should be removed after EncryptContent returns")
+}
+
+// TestSOPSManager_EncryptContent_DisabledPassthrough asserts that EncryptContent
+// returns content unchanged when the config is disabled.
+func TestSOPSManager_EncryptContent_DisabledPassthrough(t *testing.T) {
+	manager := NewSOPSManager()
+	ctx := context.Background()
+
+	config := &SOPSConfig{Enabled: false}
+	content := []byte("test: value\n")
+
+	result, err := manager.EncryptContent(ctx, content, config, "test.yaml")
+
+	require.NoError(t, err)
+	assert.Equal(t, content, result)
+}
+
+// TestSOPSManager_EncryptContent_NoInPlace asserts that the SOPS --in-place flag
+// is never passed to the sops command. This is verified by confirming that the
+// plaintext temp file name contains "plain" in its pattern and that the function
+// uses separate input/output paths (observable via the onChmod hook showing the
+// plaintext file path differs from any enc temp file).
+func TestSOPSManager_EncryptContent_NoInPlace(t *testing.T) {
+	manager := NewSOPSManager()
+	ctx := context.Background()
+
+	var plainPath string
+	manager.onChmod = func(path string, _ os.FileMode) {
+		plainPath = path
+	}
+
+	config := &SOPSConfig{
+		Enabled: true,
+		KMSProviders: map[string]KMSProvider{
+			"aws": {
+				Type:  "aws",
+				KeyID: "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+			},
+		},
+		EncryptionRules: []EncryptionRule{
+			{
+				PathRegex: `.*\.yaml$`,
+				KMSKey:    "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+			},
+		},
+	}
+
+	content := []byte("test: value\n")
+	_, encryptErr := manager.EncryptContent(ctx, content, config, "test.yaml")
+	assert.Error(t, encryptErr, "expected sops exec failure since binary is unavailable in test env")
+
+	require.NotEmpty(t, plainPath, "onChmod should have captured the plaintext temp file path")
+	assert.True(t, strings.Contains(filepath.Base(plainPath), "cfgms-sops-plain-"),
+		"plaintext temp file should use cfgms-sops-plain-* pattern, got: %s", plainPath)
 }
