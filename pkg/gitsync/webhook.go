@@ -104,7 +104,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// Validate HMAC-SHA256 if a webhook secret is configured.
 		if b.WebhookSecretRef != "" {
-			secret, secretErr := resolveWebhookSecret(b.WebhookSecretRef)
+			secret, secretErr := h.resolveWebhookSecret(r.Context(), b.WebhookSecretRef)
 			if secretErr != nil {
 				h.logger.Error("gitsync: failed to resolve webhook secret",
 					"tenant_path", logging.SanitizeLogValue(b.TenantPath),
@@ -203,10 +203,21 @@ func matchesOrigin(bindingURL string, payloadURLs ...string) bool {
 }
 
 // resolveWebhookSecret resolves a WebhookSecretRef to its plaintext secret
-// value using the same rules as resolveCredentials.
-func resolveWebhookSecret(ref string) (string, error) {
+// value using the same rules as resolveCredentials (secret:, env:, file path).
+func (h *WebhookHandler) resolveWebhookSecret(ctx context.Context, ref string) (string, error) {
 	if ref == "" {
 		return "", nil
+	}
+	if strings.HasPrefix(ref, "secret:") {
+		if h.syncer.secretStore == nil {
+			return "", fmt.Errorf("gitsync: secret: webhook secret reference requires a configured SecretStore")
+		}
+		key := strings.TrimPrefix(ref, "secret:")
+		s, err := h.syncer.secretStore.GetSecret(ctx, key)
+		if err != nil {
+			return "", fmt.Errorf("failed to retrieve webhook secret from SecretStore for key %q: %w", key, err)
+		}
+		return s.Value, nil
 	}
 	if strings.HasPrefix(ref, "env:") {
 		envVar := strings.TrimPrefix(ref, "env:")

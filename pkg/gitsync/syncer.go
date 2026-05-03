@@ -16,6 +16,7 @@ import (
 	gogithttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
@@ -53,6 +54,7 @@ type Syncer struct {
 	cancel        context.CancelFunc
 	newTickerFunc func(d time.Duration) (<-chan time.Time, func())
 	syncNotify    chan<- struct{} // optional; receives a value after each TriggerSync call
+	secretStore   secretsif.SecretStore
 }
 
 // Option is a functional option for NewSyncer.
@@ -73,6 +75,15 @@ func WithTickerFunc(fn func(d time.Duration) (<-chan time.Time, func())) Option 
 func WithSyncNotify(ch chan<- struct{}) Option {
 	return func(s *Syncer) {
 		s.syncNotify = ch
+	}
+}
+
+// WithSecretStore configures the SecretStore used to resolve "secret:<key>"
+// credential and webhook-secret references. When nil (the default), any ref
+// with the "secret:" prefix returns an error.
+func WithSecretStore(store secretsif.SecretStore) Option {
+	return func(s *Syncer) {
+		s.secretStore = store
 	}
 }
 
@@ -228,7 +239,7 @@ func (s *Syncer) TriggerSync(ctx context.Context, b ScopeBinding) error {
 func (s *Syncer) syncScope(ctx context.Context, b ScopeBinding) error {
 	repoDir := filepath.Join(s.workDir, sanitizeKey(b.key()))
 
-	auth, err := resolveCredentials(b.CredentialsRef)
+	auth, err := resolveCredentials(ctx, b.CredentialsRef, s.secretStore)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
 	}
@@ -410,16 +421,26 @@ func sanitizeKey(key string) string {
 
 // resolveCredentials resolves a CredentialsRef string to a go-git auth method.
 //
-// Resolution rules (v1):
+// Resolution rules:
 //
-//	"" (empty)     → anonymous access (nil auth)
-//	"env:<VAR>"    → read password from environment variable VAR
+//	"" (empty)       → anonymous access (nil auth)
+//	"secret:<KEY>"   → retrieve password from SecretStore using KEY
+//	"env:<VAR>"      → read password from environment variable VAR
 //	any other string → treat as a filesystem path; read the password from the file
-//
-// TODO: integrate with pkg/secrets SecretStore once sub-story H lands.
-func resolveCredentials(ref string) (*gogithttp.BasicAuth, error) {
+func resolveCredentials(ctx context.Context, ref string, store secretsif.SecretStore) (*gogithttp.BasicAuth, error) {
 	if ref == "" {
 		return nil, nil
+	}
+	if strings.HasPrefix(ref, "secret:") {
+		if store == nil {
+			return nil, fmt.Errorf("gitsync: secret: credential reference requires a configured SecretStore")
+		}
+		key := strings.TrimPrefix(ref, "secret:")
+		s, err := store.GetSecret(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve credential from SecretStore for key %q: %w", key, err)
+		}
+		return &gogithttp.BasicAuth{Username: "git", Password: s.Value}, nil
 	}
 	if strings.HasPrefix(ref, "env:") {
 		envVar := strings.TrimPrefix(ref, "env:")

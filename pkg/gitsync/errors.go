@@ -15,8 +15,8 @@
 //   - Scopes without a git binding are unaffected.
 //
 // Credentials reference:
-// For v1, CredentialsRef accepts an environment-variable name (prefix "env:") or a
-// plaintext file path. TODO: migrate to pkg/secrets SecretStore once sub-story H lands.
+// CredentialsRef accepts "secret:<KEY>" (pkg/secrets SecretStore), "env:<VAR>", or a
+// plaintext file path. WebhookSecretRef uses the same resolution rules.
 package gitsync
 
 import "errors"

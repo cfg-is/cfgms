@@ -21,6 +21,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
@@ -436,4 +437,141 @@ func TestWebhookWaitForPendingSyncsDrainsBeforeDeadline(t *testing.T) {
 	})
 	require.NoError(t, storeErr, "config store must contain the synced entry after drain")
 	assert.Equal(t, "key: value\n", string(entry.Data))
+}
+
+// TestResolveWebhookSecret_SecretScheme verifies that a "secret:<key>" WebhookSecretRef
+// is resolved via the SecretStore. A correctly signed request returns HTTP 202; a request
+// without a configured SecretStore returns HTTP 500.
+func TestResolveWebhookSecret_SecretScheme(t *testing.T) {
+	requireGit(t)
+
+	const (
+		secretKey   = "gitsync/webhook/secret"
+		secretValue = "webhook-secret-value"
+	)
+
+	bareDir, _, _ := newTestRepo(t, map[string]string{
+		"policy1.yaml": "key: value\n",
+	})
+
+	t.Run("resolves secret and accepts valid HMAC", func(t *testing.T) {
+		store := newTestStewardStore(t)
+		ctx := context.Background()
+		require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{
+			Key:       secretKey,
+			Value:     secretValue,
+			CreatedBy: "test",
+			TenantID:  "t1",
+		}))
+
+		root := t.TempDir()
+		configStore, err := flatfile.NewFlatFileConfigStore(filepath.Join(root, "configs"))
+		require.NoError(t, err)
+
+		bindings, err := gitsync.NewBindingStore(root)
+		require.NoError(t, err)
+
+		binding := gitsync.ScopeBinding{
+			TenantPath:       "root/webhook-secret-tenant",
+			Namespace:        "policies",
+			OriginURL:        bareDir,
+			Branch:           "main",
+			WebhookSecretRef: "secret:" + secretKey,
+		}
+		require.NoError(t, bindings.Add(binding))
+
+		logger := logging.ForComponent("webhook-secret-test")
+		syncer, err := gitsync.NewSyncer(configStore, bindings, filepath.Join(root, "repos"), logger,
+			gitsync.WithSecretStore(store))
+		require.NoError(t, err)
+		t.Cleanup(syncer.Stop)
+
+		handler := gitsync.NewWebhookHandler(syncer, bindings, logger)
+		t.Cleanup(func() { handler.WaitForPendingSyncs(context.Background()) })
+
+		body := buildPushPayload(bareDir, "refs/heads/main")
+		sig := hmacSHA256Signature(body, secretValue)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/git-push", bytes.NewReader(body))
+		req.Header.Set("X-Hub-Signature-256", sig)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusAccepted, rec.Code,
+			"valid HMAC against a secret-store-resolved secret must return 202")
+
+		handler.WaitForPendingSyncs(context.Background())
+	})
+
+	t.Run("returns HTTP 500 when SecretStore is not configured", func(t *testing.T) {
+		root := t.TempDir()
+		configStore, err := flatfile.NewFlatFileConfigStore(filepath.Join(root, "configs"))
+		require.NoError(t, err)
+
+		bindings, err := gitsync.NewBindingStore(root)
+		require.NoError(t, err)
+
+		binding := gitsync.ScopeBinding{
+			TenantPath:       "root/no-store-webhook-tenant",
+			Namespace:        "policies",
+			OriginURL:        bareDir,
+			Branch:           "main",
+			WebhookSecretRef: "secret:" + secretKey,
+		}
+		require.NoError(t, bindings.Add(binding))
+
+		logger := logging.ForComponent("webhook-no-store-test")
+		syncer, err := gitsync.NewSyncer(configStore, bindings, filepath.Join(root, "repos"), logger)
+		require.NoError(t, err)
+		t.Cleanup(syncer.Stop)
+
+		handler := gitsync.NewWebhookHandler(syncer, bindings, logger)
+		t.Cleanup(func() { handler.WaitForPendingSyncs(context.Background()) })
+
+		body := buildPushPayload(bareDir, "refs/heads/main")
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/git-push", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusInternalServerError, rec.Code,
+			"missing SecretStore for a secret: ref must return 500")
+	})
+
+	t.Run("returns HTTP 500 when secret key does not exist in store", func(t *testing.T) {
+		store := newTestStewardStore(t)
+		// Do NOT store the key — GetSecret will return ErrSecretNotFound.
+
+		root := t.TempDir()
+		configStore, err := flatfile.NewFlatFileConfigStore(filepath.Join(root, "configs"))
+		require.NoError(t, err)
+
+		bindings, err := gitsync.NewBindingStore(root)
+		require.NoError(t, err)
+
+		binding := gitsync.ScopeBinding{
+			TenantPath:       "root/missing-key-webhook-tenant",
+			Namespace:        "policies",
+			OriginURL:        bareDir,
+			Branch:           "main",
+			WebhookSecretRef: "secret:gitsync/webhook/nonexistent",
+		}
+		require.NoError(t, bindings.Add(binding))
+
+		logger := logging.ForComponent("webhook-missing-key-test")
+		syncer, err := gitsync.NewSyncer(configStore, bindings, filepath.Join(root, "repos"), logger,
+			gitsync.WithSecretStore(store))
+		require.NoError(t, err)
+		t.Cleanup(syncer.Stop)
+
+		handler := gitsync.NewWebhookHandler(syncer, bindings, logger)
+		t.Cleanup(func() { handler.WaitForPendingSyncs(context.Background()) })
+
+		body := buildPushPayload(bareDir, "refs/heads/main")
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/git-push", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusInternalServerError, rec.Code,
+			"missing secret key in store must return 500")
+	})
 }

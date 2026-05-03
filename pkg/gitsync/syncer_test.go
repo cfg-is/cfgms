@@ -16,6 +16,8 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
@@ -359,6 +361,106 @@ func TestPollingIntervalTooShort(t *testing.T) {
 	err = bindings.Add(binding)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, gitsync.ErrIntervalTooShort)
+}
+
+// newTestStewardStore creates a real steward SecretStore in a temp dir.
+// Skips the test when /etc/machine-id is absent (required for platform key
+// derivation on Linux).
+func newTestStewardStore(t *testing.T) secretsif.SecretStore {
+	t.Helper()
+	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
+		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
+	}
+	provider := &stewardprovider.StewardProvider{}
+	store, err := provider.CreateSecretStore(map[string]interface{}{
+		"secrets_dir": t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+// TestResolveCredentials_SecretScheme verifies that a "secret:<key>" CredentialsRef
+// is resolved via the SecretStore and that the syncer succeeds when the secret exists.
+// It also verifies that using a "secret:" ref without a configured SecretStore returns
+// ErrAuthFailed.
+func TestResolveCredentials_SecretScheme(t *testing.T) {
+	requireGit(t)
+
+	bareDir, _, _ := newTestRepo(t, map[string]string{
+		"policy1.yaml": "key: value\n",
+	})
+
+	ctx := context.Background()
+	const secretKey = "gitsync/test/token"
+	const tokenValue = "test-git-token"
+
+	t.Run("resolves secret and syncs successfully", func(t *testing.T) {
+		store := newTestStewardStore(t)
+		require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{
+			Key:       secretKey,
+			Value:     tokenValue,
+			CreatedBy: "test",
+			TenantID:  "t1",
+		}))
+
+		syncer, configStore, bindings := newTestSyncer(t, gitsync.WithSecretStore(store))
+		binding := gitsync.ScopeBinding{
+			TenantPath:     "root/secret-scheme-tenant",
+			Namespace:      "policies",
+			OriginURL:      bareDir,
+			Branch:         "main",
+			CredentialsRef: "secret:" + secretKey,
+		}
+		require.NoError(t, bindings.Add(binding))
+
+		require.NoError(t, syncer.TriggerSync(ctx, binding),
+			"sync must succeed when SecretStore holds the credential")
+
+		entry, err := configStore.GetConfig(ctx, &cfgconfig.ConfigKey{
+			TenantID:  "root/secret-scheme-tenant",
+			Namespace: "policies",
+			Name:      "policy1",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "key: value\n", string(entry.Data))
+	})
+
+	t.Run("returns ErrAuthFailed when SecretStore is not configured", func(t *testing.T) {
+		syncer, _, bindings := newTestSyncer(t) // no WithSecretStore
+		binding := gitsync.ScopeBinding{
+			TenantPath:     "root/no-store-tenant",
+			Namespace:      "policies",
+			OriginURL:      bareDir,
+			Branch:         "main",
+			CredentialsRef: "secret:" + secretKey,
+		}
+		require.NoError(t, bindings.Add(binding))
+
+		err := syncer.TriggerSync(ctx, binding)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, gitsync.ErrAuthFailed,
+			"missing SecretStore must be reported as ErrAuthFailed")
+	})
+
+	t.Run("returns ErrAuthFailed when secret key does not exist in store", func(t *testing.T) {
+		store := newTestStewardStore(t)
+		// Do NOT store the key — GetSecret will return ErrSecretNotFound.
+		syncer, _, bindings := newTestSyncer(t, gitsync.WithSecretStore(store))
+		binding := gitsync.ScopeBinding{
+			TenantPath:     "root/missing-key-tenant",
+			Namespace:      "policies",
+			OriginURL:      bareDir,
+			Branch:         "main",
+			CredentialsRef: "secret:gitsync/nonexistent/key",
+		}
+		require.NoError(t, bindings.Add(binding))
+
+		err := syncer.TriggerSync(ctx, binding)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, gitsync.ErrAuthFailed,
+			"missing secret key must be reported as ErrAuthFailed")
+	})
 }
 
 // TestJSONConfigImport verifies that JSON config files are imported with the
