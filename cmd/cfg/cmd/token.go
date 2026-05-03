@@ -133,6 +133,19 @@ Examples:
 	RunE: runTokenDelete,
 }
 
+// tokenGetCmd represents the token get command
+var tokenGetCmd = &cobra.Command{
+	Use:   "get <token>",
+	Short: "Get a registration token by value",
+	Long: `Retrieve a single registration token by its string value.
+
+Examples:
+  cfg token get abcdefghijklmnopqrstuvwxyz
+  cfg token get abcdefghijklmnopqrstuvwxyz --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runTokenGet,
+}
+
 func init() {
 	// Global token command flags (for API connection)
 	tokenCmd.PersistentFlags().StringVar(&tokenAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
@@ -155,11 +168,15 @@ func init() {
 	tokenListCmd.Flags().StringVar(&tokenTenantID, "tenant-id", "", "Filter by tenant ID (optional)")
 	tokenListCmd.Flags().BoolVar(&tokenJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
+	// Get command flags
+	tokenGetCmd.Flags().BoolVar(&tokenJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
+
 	// Add subcommands
 	tokenCmd.AddCommand(tokenCreateCmd)
 	tokenCmd.AddCommand(tokenListCmd)
 	tokenCmd.AddCommand(tokenRevokeCmd)
 	tokenCmd.AddCommand(tokenDeleteCmd)
+	tokenCmd.AddCommand(tokenGetCmd)
 }
 
 // getAPIClient creates an API client using flags or environment variables
@@ -335,6 +352,53 @@ func runTokenDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Token deleted successfully: %s\n", tokenStr)
+
+	return nil
+}
+
+func runTokenGet(cmd *cobra.Command, args []string) error {
+	tokenStr := args[0]
+	client, err := getAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	token, err := client.GetToken(context.Background(), tokenStr)
+	if err != nil {
+		return fmt.Errorf("failed to get token %s: %w", tokenStr, err)
+	}
+
+	if tokenJSONOutput {
+		return json.NewEncoder(os.Stdout).Encode(token)
+	}
+
+	fmt.Printf("Token: %s\n", token.Token)
+	fmt.Printf("  Tenant ID:      %s\n", token.TenantID)
+	fmt.Printf("  Controller URL: %s\n", token.ControllerURL)
+	if token.Group != "" {
+		fmt.Printf("  Group:          %s\n", token.Group)
+	}
+	fmt.Printf("  Created:        %s\n", token.CreatedAt)
+	if token.ExpiresAt != nil {
+		fmt.Printf("  Expires:        %s\n", *token.ExpiresAt)
+	} else {
+		fmt.Printf("  Expires:        Never\n")
+	}
+	fmt.Printf("  Single Use:     %v\n", token.SingleUse)
+	if token.UsedAt != nil {
+		fmt.Printf("  Used At:        %s\n", *token.UsedAt)
+		fmt.Printf("  Used By:        %s\n", token.UsedBy)
+	}
+	if token.Revoked {
+		fmt.Printf("  Status:         REVOKED")
+		if token.RevokedAt != nil {
+			fmt.Printf(" (at %s)", *token.RevokedAt)
+		}
+		fmt.Println()
+	} else {
+		fmt.Printf("  Status:         Active\n")
+	}
+	fmt.Println()
 
 	return nil
 }

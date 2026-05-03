@@ -65,6 +65,8 @@ func newTokenServer(t *testing.T) *httptest.Server {
 				Total:  1,
 			}
 			_ = json.NewEncoder(w).Encode(resp)
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v1/registration/tokens/"):
+			_ = json.NewEncoder(w).Encode(token)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -334,4 +336,125 @@ func TestRunTokenList_APIError(t *testing.T) {
 	err := runTokenList(tokenListCmd, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to list tokens")
+}
+
+func TestRunTokenGet_TextOutput(t *testing.T) {
+	server := newTokenServer(t)
+	defer server.Close()
+
+	origAPIURL := tokenAPIURL
+	origTLSInsecure := tokenTLSInsecure
+	origJSON := tokenJSONOutput
+	t.Cleanup(func() {
+		tokenAPIURL = origAPIURL
+		tokenTLSInsecure = origTLSInsecure
+		tokenJSONOutput = origJSON
+	})
+
+	tokenAPIURL = server.URL
+	tokenTLSInsecure = true
+	tokenJSONOutput = false
+
+	output := captureStdout(t, func() {
+		err := runTokenGet(tokenGetCmd, []string{"abc123testtoken"})
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, output, "Token: abc123testtoken")
+	assert.Contains(t, output, "Tenant ID:")
+	assert.Contains(t, output, "test-tenant")
+	assert.Contains(t, output, "Controller URL:")
+	assert.Contains(t, output, "controller.example.com:4433")
+	assert.Contains(t, output, "Status:")
+
+	// Must not be bare JSON
+	assert.False(t, json.Valid([]byte(strings.TrimSpace(output))), "text output must not be valid JSON")
+}
+
+func TestRunTokenGet_JSONOutput(t *testing.T) {
+	server := newTokenServer(t)
+	defer server.Close()
+
+	origAPIURL := tokenAPIURL
+	origTLSInsecure := tokenTLSInsecure
+	origJSON := tokenJSONOutput
+	t.Cleanup(func() {
+		tokenAPIURL = origAPIURL
+		tokenTLSInsecure = origTLSInsecure
+		tokenJSONOutput = origJSON
+	})
+
+	tokenAPIURL = server.URL
+	tokenTLSInsecure = true
+	tokenJSONOutput = true
+
+	output := captureStdout(t, func() {
+		err := runTokenGet(tokenGetCmd, []string{"abc123testtoken"})
+		require.NoError(t, err)
+	})
+
+	// Output must be valid JSON parseable as APITokenResponse
+	var parsed APITokenResponse
+	require.NoError(t, json.Unmarshal([]byte(output), &parsed), "output must be valid JSON")
+
+	assert.Equal(t, "abc123testtoken", parsed.Token)
+	assert.Equal(t, "test-tenant", parsed.TenantID)
+	assert.Equal(t, "controller.example.com:4433", parsed.ControllerURL)
+
+	// No human-readable text on stdout
+	assert.NotContains(t, output, "Token:")
+	assert.NotContains(t, output, "Tenant ID:")
+}
+
+func TestRunTokenGet_NotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"token not found"}`))
+	}))
+	defer server.Close()
+
+	origAPIURL := tokenAPIURL
+	origTLSInsecure := tokenTLSInsecure
+	origJSON := tokenJSONOutput
+	t.Cleanup(func() {
+		tokenAPIURL = origAPIURL
+		tokenTLSInsecure = origTLSInsecure
+		tokenJSONOutput = origJSON
+	})
+
+	tokenAPIURL = server.URL
+	tokenTLSInsecure = true
+	tokenJSONOutput = false
+
+	err := runTokenGet(tokenGetCmd, []string{"nonexistenttoken"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get token nonexistenttoken")
+}
+
+func TestRunTokenGet_APIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"internal server error"}`))
+	}))
+	defer server.Close()
+
+	origAPIURL := tokenAPIURL
+	origTLSInsecure := tokenTLSInsecure
+	origJSON := tokenJSONOutput
+	t.Cleanup(func() {
+		tokenAPIURL = origAPIURL
+		tokenTLSInsecure = origTLSInsecure
+		tokenJSONOutput = origJSON
+	})
+
+	tokenAPIURL = server.URL
+	tokenTLSInsecure = true
+	tokenJSONOutput = false
+
+	err := runTokenGet(tokenGetCmd, []string{"sometesttoken"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get token sometesttoken")
+	assert.Contains(t, err.Error(), "internal server error")
 }
