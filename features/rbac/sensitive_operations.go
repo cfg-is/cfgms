@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/cfgis/cfgms/pkg/audit"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -37,18 +38,27 @@ const (
 	SensitiveOpDeletePermission SensitiveOperationType = "delete_permission"
 
 	// User management operations
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpCreateUser SensitiveOperationType = "create_user"
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpDeleteUser SensitiveOperationType = "delete_user"
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpModifyUser SensitiveOperationType = "modify_user"
 
 	// System configuration operations
-	SensitiveOpModifyConfig    SensitiveOperationType = "modify_config"
+	// TODO(#742): enforce when user management moves through Manager
+	SensitiveOpModifyConfig SensitiveOperationType = "modify_config"
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpDisableSecurity SensitiveOperationType = "disable_security"
-	SensitiveOpViewAuditLogs   SensitiveOperationType = "view_audit_logs"
+	// TODO(#742): enforce when user management moves through Manager
+	SensitiveOpViewAuditLogs SensitiveOperationType = "view_audit_logs"
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpModifyAuditLogs SensitiveOperationType = "modify_audit_logs"
 
 	// Data operations
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpBulkDelete SensitiveOperationType = "bulk_delete"
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpDataExport SensitiveOperationType = "data_export"
 )
 
@@ -71,13 +81,14 @@ func ValidateSensitiveOperation(opCtx *SensitiveOperationContext) error {
 	}
 
 	// M-AUTH-2: Justification is mandatory for all sensitive operations
-	if opCtx.Justification == "" {
+	trimmed := strings.TrimSpace(opCtx.Justification)
+	if trimmed == "" {
 		return fmt.Errorf("%w: operation '%s' requires justification",
 			ErrJustificationRequired, opCtx.OperationType)
 	}
 
 	// M-AUTH-2: Minimum justification length (prevent empty/trivial justifications)
-	if len(opCtx.Justification) < 10 {
+	if len(trimmed) < 10 {
 		return fmt.Errorf("justification too short (minimum 10 characters): operation '%s'",
 			opCtx.OperationType)
 	}

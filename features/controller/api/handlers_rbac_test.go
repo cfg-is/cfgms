@@ -14,13 +14,15 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // createRoleForTenant creates a role for a specific tenant via the RBAC service.
 func createRoleForTenant(t *testing.T, server *Server, tenantID, roleID, roleName string) {
 	t.Helper()
-	ctx := context.Background()
+	// M-AUTH-2: CreateRole requires justification in context
+	ctx := rbac.WithSensitiveOperationJustification(context.Background(), "test: role setup for RBAC handler test")
 	_, err := server.rbacService.CreateRole(ctx, &controller.CreateRoleRequest{
 		Role: &common.Role{
 			Id:          roleID,

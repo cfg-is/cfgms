@@ -533,6 +533,8 @@ func TestDeleteTenant_CascadesRBACCleanup(t *testing.T) {
 	rbacManager := cfgmstesting.SetupTestRBACManager(t)
 	manager := setupRealTenantManager(t, rbacManager)
 	ctx := context.Background()
+	// M-AUTH-2: CreateRole requires justification in context
+	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: tenant RBAC cleanup cascade")
 
 	// Create a tenant — this also calls CreateTenantDefaultRoles (in-memory only)
 	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "RBACCleanupTenant"})

@@ -40,6 +40,8 @@ func NewPrivilegeEscalationTestFramework(t *testing.T) *PrivilegeEscalationTestF
 	rbacManager := testutil.SetupTestRBACManager(t)
 
 	ctx := context.Background()
+	// M-AUTH-2: inject justification so sensitive RBAC operations pass the gate
+	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: privilege escalation framework setup and operations")
 	err := rbacManager.Initialize(ctx)
 	require.NoError(t, err)
 

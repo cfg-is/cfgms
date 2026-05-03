@@ -103,6 +103,8 @@ func NewChaosSecurityTestFramework(t *testing.T) *ChaosSecurityTestFramework {
 // Setup initializes the chaos test framework
 func (framework *ChaosSecurityTestFramework) Setup() error {
 	ctx := framework.env.GetContext()
+	// M-AUTH-2: inject justification so sensitive RBAC operations pass the gate
+	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: chaos security test setup")
 
 	// Initialize RBAC system
 	err := framework.rbacManager.Initialize(ctx)

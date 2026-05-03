@@ -42,6 +42,8 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 	require.NotNil(t, manager.auditManager)
 
 	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctx = WithSensitiveOperationJustification(ctx, "test: RBAC audit integration")
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -342,6 +344,8 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 	require.NotNil(t, manager)
 
 	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctx = WithSensitiveOperationJustification(ctx, "test: audit failure handling")
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 

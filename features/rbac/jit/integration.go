@@ -425,8 +425,12 @@ func (jim *JITIntegrationManager) initializeJITPermissions(ctx context.Context) 
 		},
 	}
 
+	// Inject system justification for the M-AUTH-2 sensitive-operation gate.
+	// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+	ctxWithJustification := rbac.WithSensitiveOperationJustification(ctx,
+		"system: JIT integration initialization — creating JIT-specific permissions")
 	for _, permission := range jitPermissions {
-		if err := jim.rbacManager.CreatePermission(ctx, permission); err != nil {
+		if err := jim.rbacManager.CreatePermission(ctxWithJustification, permission); err != nil {
 			// Permission might already exist, which is okay
 			continue
 		}
@@ -472,8 +476,12 @@ func (jim *JITIntegrationManager) initializeJITRoles(ctx context.Context) error 
 		},
 	}
 
+	// Inject system justification for the M-AUTH-2 sensitive-operation gate.
+	// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+	ctxWithJustification := rbac.WithSensitiveOperationJustification(ctx,
+		"system: JIT integration initialization — creating JIT-specific roles")
 	for _, role := range jitRoles {
-		if err := jim.rbacManager.CreateRole(ctx, role); err != nil {
+		if err := jim.rbacManager.CreateRole(ctxWithJustification, role); err != nil {
 			// Role might already exist, which is okay
 			continue
 		}

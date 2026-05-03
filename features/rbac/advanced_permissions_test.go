@@ -37,6 +37,8 @@ func TestAdvancedPermissionManagement(t *testing.T) {
 		_ = manager.Close(ctx)
 	})
 	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctx = WithSensitiveOperationJustification(ctx, "test: advanced permission management")
 
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)

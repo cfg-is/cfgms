@@ -270,7 +270,8 @@ func (m *Manager) loadDefaultRoles(ctx context.Context) error {
 	return nil
 }
 
-// CreateTenantDefaultRoles creates default roles for a new tenant
+// CreateTenantDefaultRoles creates default roles for a new tenant.
+// Internal path: bypasses ValidateSensitiveOperation by calling store.LoadRoles directly.
 func (m *Manager) CreateTenantDefaultRoles(ctx context.Context, tenantID string) error {
 	tenantRoles := make([]*common.Role, 0)
 	for _, template := range GetTenantRoleTemplates() {
@@ -291,6 +292,21 @@ func (m *Manager) CreateTenantDefaultRoles(ctx context.Context, tenantID string)
 
 // Permission Store Methods
 func (m *Manager) CreatePermission(ctx context.Context, permission *common.Permission) error {
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpCreatePermission,
+		// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+		SubjectID:     "system",
+		TenantID:      "system",
+		ResourceID:    permission.Id,
+		Justification: justification,
+	}
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
 	// Write-through: persist to both ephemeral and persistent storage
 	if err := m.store.CreatePermission(ctx, permission); err != nil {
 		return err
@@ -333,6 +349,21 @@ func (m *Manager) UpdatePermission(ctx context.Context, permission *common.Permi
 }
 
 func (m *Manager) DeletePermission(ctx context.Context, id string) error {
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpDeletePermission,
+		// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+		SubjectID:     "system",
+		TenantID:      "system",
+		ResourceID:    id,
+		Justification: justification,
+	}
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
 	// Write-through: remove from both ephemeral and persistent storage
 	if err := m.store.DeletePermission(ctx, id); err != nil {
 		return err
@@ -350,6 +381,21 @@ func (m *Manager) DeletePermission(ctx context.Context, id string) error {
 
 // Role Store Methods
 func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpCreateRole,
+		// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+		SubjectID:     "system",
+		TenantID:      role.TenantId,
+		ResourceID:    role.Id,
+		Justification: justification,
+	}
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
 	// M-TENANT-2: Validate tenant boundary for role inheritance (security audit finding)
 	// Prevent cross-tenant role inheritance which could allow privilege escalation across tenants
 	if role.ParentRoleId != "" {
@@ -458,6 +504,21 @@ func (m *Manager) ListRoles(ctx context.Context, tenantID string) ([]*common.Rol
 }
 
 func (m *Manager) UpdateRole(ctx context.Context, role *common.Role) error {
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpModifyRole,
+		// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+		SubjectID:     "system",
+		TenantID:      role.TenantId,
+		ResourceID:    role.Id,
+		Justification: justification,
+	}
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
 	// Get the old role for change tracking
 	var oldRole *common.Role
 	if m.auditManager != nil {
@@ -735,6 +796,7 @@ func (m *Manager) DeleteRolesByTenant(ctx context.Context, tenantID string) erro
 		if role.IsSystemRole || role.TenantId != tenantID {
 			continue
 		}
+		// DeleteRole enforces ValidateSensitiveOperation; ctxWithJustification satisfies the gate.
 		if delErr := m.DeleteRole(ctxWithJustification, role.Id); delErr != nil {
 			slog.Warn("rbac: failed to delete role during tenant cascade cleanup",
 				"tenant_id", tenantID,
@@ -765,11 +827,41 @@ func (m *Manager) GetSubjectRoles(ctx context.Context, subjectID string, tenantI
 
 // Role Assignment Store Methods
 func (m *Manager) AssignRole(ctx context.Context, assignment *common.RoleAssignment) error {
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpAssignRole,
+		// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+		SubjectID:     "system",
+		TenantID:      assignment.TenantId,
+		ResourceID:    assignment.SubjectId,
+		Justification: justification,
+	}
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
 	// Use escalation prevention manager for enhanced security
 	return m.escalationPreventionMgr.ValidateAndAssignRole(ctx, assignment)
 }
 
 func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID string) error {
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpRevokeRole,
+		// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+		SubjectID:     "system",
+		TenantID:      tenantID,
+		ResourceID:    subjectID,
+		Justification: justification,
+	}
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
 	// Write-through: remove from both ephemeral and persistent storage
 	err := m.store.RevokeRole(ctx, subjectID, roleID, tenantID)
 	if err != nil {
@@ -879,14 +971,16 @@ func (m *Manager) CreateStewardSubject(ctx context.Context, stewardID, tenantID 
 		return err
 	}
 
-	// Assign steward service role
+	// Assign steward service role; inject system justification for the M-AUTH-2 gate.
+	// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+	ctxWithJustification := WithSensitiveOperationJustification(ctx, "system: steward service account automated role assignment during registration")
 	assignment := &common.RoleAssignment{
 		SubjectId: stewardID,
 		RoleId:    "steward.service",
 		TenantId:  tenantID,
 	}
 
-	return m.AssignRole(ctx, assignment)
+	return m.AssignRole(ctxWithJustification, assignment)
 }
 
 // CreateServiceSubject creates a subject for a service account
@@ -907,7 +1001,9 @@ func (m *Manager) CreateServiceSubject(ctx context.Context, serviceID, serviceNa
 		return err
 	}
 
-	// Assign requested roles
+	// Assign requested roles; inject system justification for the M-AUTH-2 gate.
+	// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+	ctxWithJustification := WithSensitiveOperationJustification(ctx, "system: service account automated role assignment during subject creation")
 	for _, roleID := range roleIDs {
 		assignment := &common.RoleAssignment{
 			SubjectId: serviceID,
@@ -915,7 +1011,7 @@ func (m *Manager) CreateServiceSubject(ctx context.Context, serviceID, serviceNa
 			TenantId:  tenantID,
 		}
 
-		if err := m.AssignRole(ctx, assignment); err != nil {
+		if err := m.AssignRole(ctxWithJustification, assignment); err != nil {
 			return err
 		}
 	}
