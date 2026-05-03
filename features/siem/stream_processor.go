@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -20,8 +21,9 @@ import (
 // buffered processing capabilities designed to handle 10,000+ log entries per second
 // with <100ms processing latency.
 type StreamProcessorImpl struct {
-	logger *logging.ModuleLogger
-	config ProcessingConfig
+	logger       *logging.ModuleLogger
+	config       ProcessingConfig
+	auditManager *audit.Manager
 
 	// Processing components
 	patternMatcher  PatternMatcher
@@ -65,6 +67,7 @@ type StreamWorker struct {
 	inputChan       chan *ProcessingBatch
 	logger          *logging.ModuleLogger
 	processingStats *WorkerStats
+	auditManager    *audit.Manager
 }
 
 // WorkerStats tracks individual worker performance
@@ -81,7 +84,7 @@ const streamWorkerQueueSize = 1000
 
 // NewStreamProcessor creates a new high-performance stream processor
 func NewStreamProcessor(config ProcessingConfig, patternMatcher PatternMatcher,
-	eventCorrelator EventCorrelator, ruleManager RuleManager) *StreamProcessorImpl {
+	eventCorrelator EventCorrelator, ruleManager RuleManager, auditManager *audit.Manager) *StreamProcessorImpl {
 
 	logger := logging.ForModule("siem.stream_processor").WithField("component", "processor")
 
@@ -108,6 +111,7 @@ func NewStreamProcessor(config ProcessingConfig, patternMatcher PatternMatcher,
 	return &StreamProcessorImpl{
 		logger:          logger,
 		config:          config,
+		auditManager:    auditManager,
 		patternMatcher:  patternMatcher,
 		eventCorrelator: eventCorrelator,
 		ruleManager:     ruleManager,
@@ -153,6 +157,7 @@ func (sp *StreamProcessorImpl) Start(ctx context.Context) error {
 			inputChan:       make(chan *ProcessingBatch, streamWorkerQueueSize),
 			logger:          logger.WithField("worker_id", i),
 			processingStats: &WorkerStats{},
+			auditManager:    sp.auditManager,
 		}
 	}
 
@@ -543,16 +548,41 @@ func (w *StreamWorker) convertMatchesToEvents(matches []*PatternMatch, tenantID 
 	return events
 }
 
-// processSecurityEvents processes individual security events (stub for workflow integration)
+// processSecurityEvents records each detected security event in the audit log.
 func (w *StreamWorker) processSecurityEvents(ctx context.Context, events []*SecurityEvent) {
-	// TODO: Implement workflow trigger integration
 	for _, event := range events {
 		w.logger.DebugCtx(ctx, "Processing security event",
 			"event_id", event.ID,
 			"event_type", event.EventType,
 			"severity", event.Severity,
 			"tenant_id", event.TenantID)
+
+		if w.auditManager == nil {
+			continue
+		}
+		builder := audit.SecurityEvent(event.TenantID, "siem", event.EventType, event.Description, event.Severity).
+			Detail("rule_id", event.RuleID).
+			Detail("source", logging.SanitizeLogValue(event.Source)).
+			Details(sanitizedFields(event.Fields))
+		if err := w.auditManager.RecordEvent(ctx, builder); err != nil {
+			w.logger.ErrorCtx(ctx, "Failed to record security event in audit log",
+				"event_id", event.ID,
+				"error", err.Error())
+		}
 	}
+}
+
+// sanitizedFields returns a copy of fields with each value sanitized via
+// logging.SanitizeLogValue to prevent user-controlled data from reaching logs or audit records.
+func sanitizedFields(fields map[string]interface{}) map[string]interface{} {
+	if fields == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		out[k] = logging.SanitizeLogValue(fmt.Sprintf("%v", v))
+	}
+	return out
 }
 
 // processCorrelatedEvents processes correlated events (stub for workflow integration)

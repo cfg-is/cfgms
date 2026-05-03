@@ -16,108 +16,36 @@ import (
 
 	"github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
+	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
-// MockTriggerManager implements trigger.TriggerManager for testing
-type MockTriggerManager struct {
-	triggers map[string]*trigger.Trigger
-	mutex    sync.RWMutex
-}
+// testWorkflowTrigger is a minimal real implementation of trigger.WorkflowTrigger.
+// WorkflowIntegration stores this reference but the current SIEM processing pipeline
+// does not invoke workflow execution paths — it is held for future wiring.
+type testWorkflowTrigger struct{}
 
-func NewMockTriggerManager() *MockTriggerManager {
-	return &MockTriggerManager{
-		triggers: make(map[string]*trigger.Trigger),
-	}
-}
-
-func (m *MockTriggerManager) CreateTrigger(ctx context.Context, t *trigger.Trigger) error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	m.triggers[t.ID] = t
-	return nil
-}
-
-func (m *MockTriggerManager) UpdateTrigger(ctx context.Context, t *trigger.Trigger) error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	m.triggers[t.ID] = t
-	return nil
-}
-
-func (m *MockTriggerManager) DeleteTrigger(ctx context.Context, triggerID string) error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	delete(m.triggers, triggerID)
-	return nil
-}
-
-func (m *MockTriggerManager) GetTrigger(ctx context.Context, triggerID string) (*trigger.Trigger, error) {
-	m.mutex.RLock()
-	defer m.mutex.RUnlock()
-	if t, exists := m.triggers[triggerID]; exists {
-		return t, nil
-	}
-	return nil, nil
-}
-
-func (m *MockTriggerManager) ListTriggers(ctx context.Context, filter *trigger.TriggerFilter) ([]*trigger.Trigger, error) {
-	m.mutex.RLock()
-	defer m.mutex.RUnlock()
-
-	var result []*trigger.Trigger
-	for _, t := range m.triggers {
-		result = append(result, t)
-	}
-	return result, nil
-}
-
-func (m *MockTriggerManager) EnableTrigger(ctx context.Context, triggerID string) error  { return nil }
-func (m *MockTriggerManager) DisableTrigger(ctx context.Context, triggerID string) error { return nil }
-func (m *MockTriggerManager) ExecuteTrigger(ctx context.Context, triggerID string, data map[string]interface{}) (*trigger.TriggerExecution, error) {
-	return nil, nil
-}
-func (m *MockTriggerManager) GetTriggerExecutions(ctx context.Context, triggerID string, limit int) ([]*trigger.TriggerExecution, error) {
-	return nil, nil
-}
-func (m *MockTriggerManager) Start(ctx context.Context) error { return nil }
-func (m *MockTriggerManager) Stop(ctx context.Context) error  { return nil }
-
-// MockWorkflowTrigger implements trigger.WorkflowTrigger for testing
-type MockWorkflowTrigger struct {
-	triggeredWorkflows []string
-	mutex              sync.RWMutex
-}
-
-func NewMockWorkflowTrigger() *MockWorkflowTrigger {
-	return &MockWorkflowTrigger{
-		triggeredWorkflows: make([]string, 0),
-	}
-}
-
-func (m *MockWorkflowTrigger) TriggerWorkflow(ctx context.Context, t *trigger.Trigger, data map[string]interface{}) (*trigger.WorkflowExecution, error) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	m.triggeredWorkflows = append(m.triggeredWorkflows, t.WorkflowName)
-
+func (t *testWorkflowTrigger) TriggerWorkflow(_ context.Context, trig *trigger.Trigger, _ map[string]interface{}) (*trigger.WorkflowExecution, error) {
 	return &trigger.WorkflowExecution{
-		ID:           "test-exec-" + t.ID,
-		WorkflowName: t.WorkflowName,
+		ID:           "test-exec-" + trig.ID,
+		WorkflowName: trig.WorkflowName,
 		Status:       "running",
 		StartTime:    time.Now(),
 	}, nil
 }
 
-func (m *MockWorkflowTrigger) ValidateTrigger(ctx context.Context, t *trigger.Trigger) error {
+func (t *testWorkflowTrigger) ValidateTrigger(_ context.Context, _ *trigger.Trigger) error {
 	return nil
 }
 
-func (m *MockWorkflowTrigger) GetTriggeredWorkflows() []string {
-	m.mutex.RLock()
-	defer m.mutex.RUnlock()
-	result := make([]string, len(m.triggeredWorkflows))
-	copy(result, m.triggeredWorkflows)
-	return result
+// newTestTriggerManager creates a real trigger.TriggerManagerImpl backed by the registered
+// flatfile StorageProvider. Trigger state is held in-memory; the flatfile provider satisfies
+// the Available() check but does not implement the optional key-value Store method, so
+// triggers are not persisted to disk — suitable for tests that exercise in-memory behaviour.
+func newTestTriggerManager(tb testing.TB, wt trigger.WorkflowTrigger) *trigger.TriggerManagerImpl {
+	tb.Helper()
+	provider, err := storageInterfaces.GetStorageProvider("flatfile")
+	require.NoError(tb, err, "flatfile provider must be registered via blank import in stream_processor_test.go")
+	return trigger.NewTriggerManager(provider, nil, nil, nil, wt)
 }
 
 // Test helper functions
@@ -156,10 +84,11 @@ func createTestConfig() ProcessingConfig {
 // Unit Tests
 
 func TestSIEMEngine_ZeroConfigConstruction(t *testing.T) {
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(t, wt)
+	workflowTrigger := wt
 
-	engine, err := NewSIEMEngine(ProcessingConfig{}, triggerManager, workflowTrigger)
+	engine, err := NewSIEMEngine(ProcessingConfig{}, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
 	require.NotNil(t, engine)
 	assert.NotNil(t, engine.streamProcessor)
@@ -169,21 +98,23 @@ func TestSIEMEngine_ZeroConfigConstruction(t *testing.T) {
 }
 
 func TestSIEMEngine_InvalidConfigRejected(t *testing.T) {
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(t, wt)
+	workflowTrigger := wt
 
 	// Explicit sub-threshold values are not zero, so no default is applied; validation must reject them.
-	_, err := NewSIEMEngine(ProcessingConfig{BufferSize: 1, BatchSize: 200, WorkerCount: 4, TargetThroughput: 12000}, triggerManager, workflowTrigger)
+	_, err := NewSIEMEngine(ProcessingConfig{BufferSize: 1, BatchSize: 200, WorkerCount: 4, TargetThroughput: 12000}, triggerManager, workflowTrigger, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "buffer size must be at least 1000")
 }
 
 func TestSIEMEngine_Creation(t *testing.T) {
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(t, wt)
+	workflowTrigger := wt
 	config := createTestConfig()
 
-	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, engine)
 	assert.Equal(t, int32(0), engine.running)
@@ -194,11 +125,12 @@ func TestSIEMEngine_Creation(t *testing.T) {
 }
 
 func TestSIEMEngine_StartStop(t *testing.T) {
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(t, wt)
+	workflowTrigger := wt
 	config := createTestConfig()
 
-	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -228,11 +160,12 @@ func TestSIEMEngine_StartStop(t *testing.T) {
 // that verifies ProcessLogEntry sends entries directly to StreamProcessor.ProcessEntry.
 // EntriesProcessed is incremented synchronously in ProcessEntry, so no sleep is needed.
 func TestSIEMEngine_ProcessLogEntry_RoutesToStreamProcessor(t *testing.T) {
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(t, wt)
+	workflowTrigger := wt
 	config := createTestConfig()
 
-	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -260,11 +193,12 @@ func TestSIEMEngine_ProcessLogEntry(t *testing.T) {
 		t.Skip("Skipping SIEM engine test in short mode")
 	}
 
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(t, wt)
+	workflowTrigger := wt
 	config := createTestConfig()
 
-	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -295,7 +229,7 @@ func TestStreamProcessor_ProcessEntry(t *testing.T) {
 	eventCorrelator := NewEventCorrelator(5 * time.Minute)
 	ruleManager := NewRuleManager(patternMatcher, eventCorrelator)
 
-	sp := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager)
+	sp := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager, nil)
 
 	ctx := context.Background()
 
@@ -329,7 +263,7 @@ func TestStreamProcessor_ProcessEntry_BufferFull(t *testing.T) {
 	eventCorrelator := NewEventCorrelator(5 * time.Minute)
 	ruleManager := NewRuleManager(patternMatcher, eventCorrelator)
 
-	sp := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager)
+	sp := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager, nil)
 
 	// Manually configure a tiny buffer and mark running to isolate the drop-on-full
 	// path without goroutine scheduling races.
@@ -360,11 +294,12 @@ func TestSIEMEngine_NoGoroutineLeak(t *testing.T) {
 	runtime.GC()
 	beforeCount := runtime.NumGoroutine()
 
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(t, wt)
+	workflowTrigger := wt
 	config := createTestConfig()
 
-	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -474,11 +409,12 @@ func TestEventCorrelator_BasicCorrelation(t *testing.T) {
 // Performance Tests
 
 func BenchmarkSIEMEngine_ThroughputTest(b *testing.B) {
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(b, wt)
+	workflowTrigger := wt
 	config := createTestConfig()
 
-	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(b, err)
 
 	ctx := context.Background()
@@ -551,11 +487,12 @@ func TestSIEMEngine_EndToEndProcessing(t *testing.T) {
 		t.Skip("Skipping end-to-end test in short mode")
 	}
 
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(t, wt)
+	workflowTrigger := wt
 	config := createTestConfig()
 
-	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -620,11 +557,12 @@ func TestSIEMEngine_ThroughputRequirement(t *testing.T) {
 		t.Skip("Skipping throughput test in short mode")
 	}
 
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(t, wt)
+	workflowTrigger := wt
 	config := createTestConfig()
 
-	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -684,11 +622,12 @@ func TestSIEMEngine_LatencyRequirement(t *testing.T) {
 		t.Skip("Skipping latency test in short mode")
 	}
 
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(t, wt)
+	workflowTrigger := wt
 	config := createTestConfig()
 
-	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -752,11 +691,12 @@ func TestSIEMEngine_MemoryUsage(t *testing.T) {
 	var memStatsBefore runtime.MemStats
 	runtime.ReadMemStats(&memStatsBefore)
 
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(t, wt)
+	workflowTrigger := wt
 	config := createTestConfig()
 
-	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -796,11 +736,12 @@ func TestSIEMEngine_StressTest(t *testing.T) {
 		t.Skip("Skipping stress test in short mode")
 	}
 
-	triggerManager := NewMockTriggerManager()
-	workflowTrigger := NewMockWorkflowTrigger()
+	wt := &testWorkflowTrigger{}
+	triggerManager := newTestTriggerManager(t, wt)
+	workflowTrigger := wt
 	config := createTestConfig()
 
-	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger)
+	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
 
 	ctx := context.Background()
