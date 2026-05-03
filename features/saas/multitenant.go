@@ -451,5 +451,5 @@ func (mtm *MultiTenantManager) refreshTenantToken(_ context.Context, provider, t
 	// Per-tenant token refresh requires a real OAuth2 token exchange with the tenant's
 	// authorization endpoint. Callers must pre-populate the credential store (e.g. after
 	// admin consent completes) or re-run the admin consent flow to obtain a fresh token.
-	return nil, fmt.Errorf("tenant token refresh not yet implemented for provider %q tenantID %q: re-run admin consent to obtain a fresh token", provider, tenantID)
+	return nil, fmt.Errorf("tenant token refresh is not supported for provider %q tenantID %q: re-run admin consent to obtain a fresh token", provider, tenantID)
 }
