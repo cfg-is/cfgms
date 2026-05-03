@@ -52,6 +52,10 @@ Every story MUST satisfy ALL of these criteria:
 - **Single concern:** One focused change per story. Not "refactor X and also add Y."
 - **No vague verbs:** Use add, implement, fix, create — never improve, enhance, clean up.
 - **`make test-complete` pass:** Always the final acceptance checkbox.
+- **≤6 acceptance criteria.** Stories with more than 6 ACs are too large — split them. (`make test-complete` does not count toward the ceiling.)
+- **≤2 module touch-points.** A story that edits files across more than 2 packages is too broad — split by package or by capability.
+- **Required tests are marked.** Tests that MUST be present to consider the story done are prefixed `[REQUIRED TEST]` in the AC list — agents have been observed treating unmarked test ACs as optional.
+- **Out of scope is explicit.** Every story has a `## Out of Scope` section calling out adjacent code the agent must NOT touch (e.g., `examples/` directory, README updates, refactors of nearby code). Agents that go out of scope cause acceptance-review kickbacks.
 
 ## Story Body Format
 
@@ -69,6 +73,24 @@ Each story must use this exact format:
 ## Dependencies
 
 <List other stories from this epic that must be completed first. Use "None" if independent.>
+
+For each dependency, list the issue number AND the PR number (once known) so the
+dev agent can run a `git merge-base --is-ancestor` check before starting:
+
+```
+- #NNN — <reason> — must be merged into develop before this story starts (PR: #MMM when known)
+```
+
+If the dev agent finds a listed PR has not yet merged, it halts and re-queues
+the story. This prevents the multi-module sequencing failures observed in
+issue #923 where parallel stories were dispatched out of order.
+
+## Out of Scope
+
+<Explicit list of things the dev agent must NOT change as part of this story.
+Examples: "Do not modify `examples/` directory", "Do not update README.md",
+"Do not refactor adjacent functions in the same file". Use "None" only if
+genuinely no nearby code is at risk of being touched.>
 
 ## Files In Scope
 
@@ -98,11 +120,29 @@ Each story must use this exact format:
 ## Acceptance Criteria
 
 - [ ] <Specific, testable criterion>
+- [ ] [REQUIRED TEST] <Specific test that MUST exist for the story to be accepted>
 - [ ] <Another criterion>
 - [ ] Tests added/updated for all behavior changes (unit + integration where applicable)
 - [ ] Docs updated — enumerate files here, or write "N/A — no product-shape change" with justification
 - [ ] `make test-complete` passes
 ```
+
+Mark every AC that requires a specific test with `[REQUIRED TEST]`. Acceptance
+review treats `[REQUIRED TEST]` items as hard gates — missing them blocks
+auto-merge. Issue #899 shipped without the cross-tenant isolation test
+because AC#3 was not marked required.
+
+For multi-fix stories, group ACs by fix module with a `### F<n>:` header:
+
+```
+### F6: <module name>
+- [ ] <AC for F6>
+
+### F12: <module name>
+- [ ] <AC for F12>
+```
+
+If you cannot fit the story in 6 ACs, split it.
 
 ## Documentation & Tests Currency
 

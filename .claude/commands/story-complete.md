@@ -118,6 +118,7 @@ gh pr list --head <branch-name-from-above> --state=open
 - Test results (from qa-test-runner)
 - QA code review summary (from qa-code-reviewer)
 - Security review summary (from security-engineer)
+- `Fixes #<issue-number>` on its own line (REQUIRED — develop uses squash merge, so the PR body becomes the merged commit message; without this keyword GitHub will not auto-close the linked issue)
 - `Co-Authored-By: Claude <noreply@anthropic.com>`
 
 ### 11. GitHub Project Update (optional)

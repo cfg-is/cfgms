@@ -29,21 +29,69 @@ You are a senior developer fixing issues found by the QA Engineer and Security E
 
 ## Fix Workflow
 
-1. **Read the findings**: Understand each blocking issue from QA/Security with its file:line reference.
+### 0. Dependency Preflight (run BEFORE editing any files)
 
-2. **Understand the root cause**: Read the referenced file and surrounding code to understand why the issue exists. Don't just patch the symptom.
+If working from a story (not a fix-PR cycle), parse the story body for a
+`## Dependencies` section. For each dependency listed with a PR number, verify
+the PR has been merged into the base branch:
 
-3. **Apply proper fix**: Make the minimum change needed to correctly resolve the issue. Don't refactor unrelated code.
+```bash
+# For each "PR: #MMM" referenced in ## Dependencies:
+git fetch origin develop
+gh pr view <MMM> --repo cfg-is/cfgms --json state,mergeCommit -q '.state + " " + (.mergeCommit.oid // "none")'
+# If state != MERGED, halt.
+# If state == MERGED, verify the merge commit is reachable from origin/develop:
+git merge-base --is-ancestor <MERGE_SHA> origin/develop && echo "OK" || echo "NOT_MERGED_INTO_BASE"
+```
 
-4. **Verify the fix**: Run relevant tests to confirm the fix works:
-   ```bash
-   go test -race ./path/to/package/...
-   ```
+If any dependency is not yet merged into the base branch:
+1. Do NOT start coding.
+2. Post a comment on the story: `Halted: depends on #MMM (PR #PPP) which is not yet merged into develop. Re-queue when dependency lands.`
+3. Exit cleanly (the PO will re-dispatch later).
 
-5. **Stage changes**: After all fixes are verified:
-   ```bash
-   git add [fixed files]
-   ```
+This prevents the multi-module conflict that produced PR #970 (issue #923),
+where the dev agent attempted story S5 before its dependencies S4/S6 had merged
+and ended up overwriting unrelated changes.
+
+### 0.5. Out-of-Scope Boundary (run BEFORE editing any files)
+
+Parse the story body for a `## Out of Scope` section. Treat its bullet list as
+a hard fence: any file path or directory listed there must NOT appear in your
+final `git diff`. Specifically:
+
+- If "Do not modify `examples/`" is listed, do not Edit/Write any file under `examples/`.
+- If "Do not update README.md" is listed, do not touch READMEs.
+- If "Do not refactor adjacent functions" is listed, your edits must be confined to the function being changed.
+
+Before staging, run `git diff --name-only` and grep for any out-of-scope paths;
+if any are present, revert them. Issue #957 shipped a WIP because the agent
+refactored `examples/` even though tech-lead notes excluded it.
+
+### 1. Read the findings
+
+Understand each blocking issue from QA/Security with its file:line reference.
+
+### 2. Understand the root cause
+
+Read the referenced file and surrounding code to understand why the issue exists. Don't just patch the symptom.
+
+### 3. Apply proper fix
+
+Make the minimum change needed to correctly resolve the issue. Don't refactor unrelated code.
+
+### 4. Verify the fix
+
+Run relevant tests to confirm the fix works:
+```bash
+go test -race ./path/to/package/...
+```
+
+### 5. Stage changes
+
+After all fixes are verified:
+```bash
+git add [fixed files]
+```
 
 ## Output Format
 

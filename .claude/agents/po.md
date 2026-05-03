@@ -244,9 +244,33 @@ This runs **locally** with full Docker access for dispatch and fix cycles. The r
 
 Emits a compact summary (counts, running containers, merge queue, recommendations). Full JSON cached at `~/.cache/cfgms-po/preflight.json` for further `po-act.sh state '.some.jq.filter'` queries.
 
+**Code-health gate (check this BEFORE dispatch decisions):**
+
+The preflight runs `make check-architecture` and `go build ./...` against
+`origin/develop` in a temporary worktree. If either fails, the summary sets:
+
+```json
+"dispatch_blocked": true,
+"code_health": { "ok": false, "failing_checks": ["build" | "architecture"], ... }
+```
+
+When `dispatch_blocked == true`:
+1. **Do NOT dispatch any new work** this cycle — every dispatched agent would inherit the broken base and waste a cycle (this was the root cause of issue #1039 / PR #1051).
+2. Identify or create a tracking issue for the broken state. Search for an open issue with title prefix `[broken-develop]`. If none, create one:
+   ```bash
+   gh issue create --repo cfg-is/cfgms \
+     --title "[broken-develop] preflight failure on $(date -u +%Y-%m-%dT%H:%MZ)" \
+     --label "pipeline:blocked,priority:high" \
+     --body-file <(./.claude/scripts/po-act.sh state '.code_health')
+   ```
+3. Skip dispatch (Steps 3 and 4). You may still process review (Step 5), merge-queue maintenance, and acceptance-reviewer findings on PRs that were merged before the breakage — those are unaffected.
+4. Report at end of cycle: `Dispatch held: develop is broken (preflight failed: <checks>). Tracking: #NNN.`
+
+When `code_health.skipped == true` (preflight could not run the checks for some reason — usually missing toolchain), proceed with caution: the gate is bypassed but you should note it in the cycle report.
+
 If `.counts.ready == 0` AND `.counts.open_pr == 0` AND `.pipeline_state.fix_cycle | length == 0`: report "No actionable work — skipping cycle" and exit.
 
-The preflight handles all label queries, PR CI summaries, merge queue state, and dispatch/review recommendations in one ~3-second call. Read `dispatch_recommendations` and `review_recommendations` to decide actions. Raw section text (`deps_raw`, `files_raw`) is included so the LLM can override any recommendation.
+The preflight handles all label queries, PR CI summaries, merge queue state, code-health gate, and dispatch/review recommendations in one parallel call. Read `dispatch_recommendations` and `review_recommendations` to decide actions. Raw section text (`deps_raw`, `files_raw`) is included so the LLM can override any recommendation.
 
 ### 4.1 Processing Order
 
@@ -286,25 +310,113 @@ For each `pipeline:fix` story, find its PR and dispatch the fix agent in one cal
 ```
 This cleans any stale container from a prior failed attempt, re-clones, and launches.
 
-**Step 5 — QA pass (Acceptance Reviewer) — FIFO order:**
-Find agent PRs (branch `feature/story-*`) without Acceptance Reviewer comment, sorted by creation timestamp ascending (oldest first). FIFO order minimizes rebase churn: the oldest PR was based on the earliest develop snapshot, so it has the fewest accumulated conflicts. Once it lands, the next-oldest only needs to rebase against one new merge instead of an arbitrary set.
+**Step 4.5 — Rebase stuck PRs:**
+
+The merge queue refuses to enqueue a PR with `mergeStateStatus = DIRTY`
+(merge conflicts with develop). The queue auto-rebases `BEHIND` PRs once
+they're enqueued, but only after an enqueue command — auto-merge alone
+doesn't trigger that. And CI-red PRs may be red because of stale-base
+issues that a rebase would clear. So PRs sit stuck even with all required
+checks green (DIRTY case) or with failures that aren't actually their
+fault (stale-base case).
+
+The preflight surfaces three actions in `review_recommendations`:
+
+| Action | When | What to do |
+|---|---|---|
+| `rebase` | mergeStateStatus is DIRTY or (BEHIND with auto-merge armed) | Run `rebase-pr.sh`. The PR's branch needs to be current before any other action makes sense. |
+| `rebase_then_investigate` | CI red (any required check failed) | Run `rebase-pr.sh`. If `REBASE_OK`, wait one cycle for CI to re-run. If `REBASE_NOOP`, the branch was already current → the failure is real → diagnose + dispatch-fix. |
+| `investigate` (legacy) | rare; falls through if neither rebase nor red applies | Same handling as rebase_then_investigate's NOOP branch. |
+
+For each `rebase` or `rebase_then_investigate` recommendation:
+
+```bash
+./.claude/scripts/rebase-pr.sh <PR_NUM>
+```
+
+Outcomes:
+- `REBASE_OK:<PR>` — fast-forward or auto-resolve succeeded; CI re-runs on the rebased branch. Move on. The next cycle will see the PR with fresh CI and either enqueue (review comment already there) or spawn a new review.
+- `REBASE_NOOP:<PR>` — branch was already up-to-date with develop. For `rebase` action: rare — investigate via `po-act.sh block`. For `rebase_then_investigate`: the failure is real, fall through to diagnose + dispatch-fix as if action were `investigate`:
+  ```bash
+  ./.claude/scripts/po-act.sh diagnose <PR>
+  ./scripts/pipeline-helper.sh label-add <STORY> "pipeline:fix"
+  ```
+- `REBASE_CONFLICT:<PR>` — real conflicts that need code changes. Apply `pipeline:fix` and post a comment on the PR with the conflicting files (the script prints them):
+  ```bash
+  ./scripts/pipeline-helper.sh label-add <STORY> "pipeline:fix"
+  ```
+  Step 4 will pick it up next cycle for dispatch-fix.
+- `REBASE_REFUSED:<PR>:<reason>` — PR closed/merged/from a fork. Skip; next cycle will resync.
+
+This step is REQUIRED before Step 5 because:
+1. A DIRTY PR without rebase will sit stuck even with all checks green — issue #1027 sat 22+ hours before the step was added.
+2. A CI-red PR caused by a stale base will keep failing forever — three PRs (#1008, #1029, #1055) had this exact problem in the May 1-2 cron run.
+
+Cheap to do every cycle: when the PR is already current, `rebase-pr.sh` returns `REBASE_NOOP` in ~5 seconds without modifying anything.
+
+**Step 5 — QA pass (Acceptance Reviewer) — headless dispatch in FIFO order:**
+
+Inline subagent spawn (the previous behavior) caused multi-minute hangs in the
+host session because each tool call triggers an approval prompt in `default`
+permission mode. The acceptance reviewer now runs in a dedicated headless
+container with skip-permissions inside, and the host PO dispatches it
+non-blocking and moves on.
+
+**Find PRs that need review.** A PR is review-eligible when:
+- branch is `feature/story-*`
+- state is OPEN
+- has no comment from `acceptance-reviewer`
+- does NOT have label `pipeline:reviewing` (in flight)
+- does NOT have label `pipeline:fix` (waiting on dev fix; review re-runs after fix lands)
+
+Sorted by creation timestamp ascending (oldest first) — FIFO order minimizes
+rebase churn.
 
 ```bash
 gh pr list --repo cfg-is/cfgms --search "head:feature/story-" --state open \
-  --json number,headRefName,createdAt,comments \
-  --jq '[.[] | select(.comments | map(.author.login) | contains(["acceptance-reviewer"]) | not)] | sort_by(.createdAt)'
+  --json number,headRefName,createdAt,comments,labels \
+  --jq '[.[] | select((.comments | map(.author.login) | contains(["acceptance-reviewer"]) | not)
+        and ([.labels[].name] | contains(["pipeline:reviewing"]) | not)
+        and ([.labels[].name] | contains(["pipeline:fix"]) | not))] | sort_by(.createdAt)'
 ```
 
-Process PRs **serially in FIFO order** (do not spawn reviewers in parallel — parallel spawn creates a race where two reviewers both decide to auto-merge PRs that conflict with each other). For each PR in ascending `createdAt` order:
+**Dispatch one review per cycle in FIFO order.** Do not dispatch multiple in
+parallel — even though headless containers make it cheap, parallel reviews can
+both decide to auto-merge PRs that conflict at the file level. Pick the oldest
+eligible PR:
 
-1. **Dependency/conflict check**: If this PR shares files with a currently-merging or in-progress PR that is *older*, skip it and continue to the next PR in the queue. A PR held for a conflict gate does **not** block strictly-younger PRs from being reviewed if they don't share that dependency.
-2. **Spawn Acceptance Reviewer**: Use the **Agent tool** (not Bash): subagent_type `acceptance-reviewer`, prompt `"Review agent PR. pr:<PR_NUM> story:<STORY_NUM>"`, mode `auto`.
-3. **Wait for the reviewer to complete** before spawning the next one. This ensures merges happen in FIFO order and the next PR in the queue is reviewed against an up-to-date develop.
+```bash
+./.claude/scripts/agent-dispatch.sh review-pr <PR_NUM>
+```
 
-The Acceptance Reviewer (`.claude/agents/acceptance-reviewer.md`) verifies CI, checks acceptance criteria against the diff, and renders a verdict:
-- Zero findings: enqueue via `gh pr merge <PR_NUM> --squash` (merge queue handles rebase + re-validation), clean up container/worktree
-- Any findings (first review): apply `pipeline:fix` to story, post review comment on PR
-- Any findings (second review): apply `pipeline:blocked`, assign to founder
+Output is one of:
+- `REVIEW_DISPATCHED:<PR>:<STORY>:<container_id>` — running headless. Move on; the comment will appear on the PR when done.
+- `REVIEW_REFUSED:<PR>:<reason>` — see Section 4e of `.claude/commands/dispatch.md` for reasons. Common cases: `pr_state_<X>` (PR closed), `no_story_link` (manually associate), `already_in_flight` (skip — another review is running).
+
+After dispatch, **do NOT wait**. The next cron cycle will see the
+`acceptance-reviewer` comment on the PR (if review completed) and move on to
+other work. The dispatch is fire-and-forget on the host side.
+
+**Failsafe cleanup.** Run once per cron cycle, near the start (before Step 5):
+
+```bash
+./.claude/scripts/agent-dispatch.sh cleanup-stale-reviews
+```
+
+This removes review containers that exited >30 minutes ago without stripping
+the `pipeline:reviewing` label, archives their `agent-result.json`, and frees
+the PR for re-dispatch. Without it, a single crashed review wedges the PR
+indefinitely.
+
+**What the headless reviewer does** (`.claude/agents/acceptance-reviewer.md`,
+unchanged): verifies CI, checks acceptance criteria against the diff, posts
+the structured comment, and:
+- Zero findings: enqueues via `gh pr merge <PR> --squash` (merge queue handles rebase + re-validation), cleans up the dev agent's container/worktree
+- Any findings (first review): applies `pipeline:fix` to the story
+- Any findings (second review): applies `pipeline:blocked`, assigns to founder
+Final step in all cases: removes `pipeline:reviewing` from the PR. The
+container's `review-entrypoint.sh` has a failsafe that strips the label even
+if the agent crashes before getting to it.
 
 **Step 6 — Planning Team (BA + Tech Lead collaboration):**
 Find `pipeline:epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each epic, orchestrate a collaborative planning session where BA and Tech Lead work together to produce stories that are ready on the first try.
