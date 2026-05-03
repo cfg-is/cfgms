@@ -327,10 +327,7 @@ func (tbac *TimeBasedAccessController) executeAccessExpiration(ctx context.Conte
 	grant.Status = JITAccessGrantStatusExpired
 
 	// Audit the expiration
-	_ = tbac.accessManager.auditLogger.LogAccessUsage(ctx, grant, "expired", "", map[string]interface{}{
-		"automatic_expiration": true,
-		"scheduled_at":         task.ScheduledAt,
-	})
+	tbac.accessManager.recordJITAccessUsage(ctx, grant, "expired", "")
 
 	return nil
 }
@@ -382,7 +379,7 @@ func (tbac *TimeBasedAccessController) executeRequestCleanup(ctx context.Context
 		request.Status = JITAccessRequestStatusExpired
 
 		// Audit the expiration
-		_ = tbac.accessManager.auditLogger.LogAccessRequest(ctx, request, "expired")
+		tbac.accessManager.recordJITAccessRequest(ctx, request, "expired")
 	}
 
 	return nil

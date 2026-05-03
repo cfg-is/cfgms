@@ -361,9 +361,8 @@ func (jim *JITIntegrationManager) applySecurityConstraints(ctx context.Context, 
 
 // logTenantSecurityEvent logs JIT access events to tenant security audit
 func (jim *JITIntegrationManager) logTenantSecurityEvent(ctx context.Context, request *JITAccessRequest, eventType string) error {
-	// This would integrate with the tenant security audit system
-	// For now, we'll use the JIT audit logger
-	return jim.jitAccessManager.auditLogger.LogAccessRequest(ctx, request, eventType)
+	jim.jitAccessManager.recordJITAccessRequest(ctx, request, eventType)
+	return nil
 }
 
 // initializeJITPermissions creates JIT-specific permissions

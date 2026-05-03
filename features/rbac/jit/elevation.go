@@ -5,12 +5,15 @@ package jit
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant/security"
+	"github.com/cfgis/cfgms/pkg/audit"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // PrivilegeElevationManager handles privilege elevation and de-elevation
@@ -19,7 +22,7 @@ type PrivilegeElevationManager struct {
 	jitAccessManager  *JITAccessManager
 	elevatedSessions  map[string]*ElevatedSession
 	elevationPolicies map[string]*ElevationPolicy
-	auditLogger       *JITAuditLogger
+	auditManager      *audit.Manager
 	mutex             sync.RWMutex
 }
 
@@ -30,8 +33,39 @@ func NewPrivilegeElevationManager(rbacManager rbac.RBACManager, jitAccessManager
 		jitAccessManager:  jitAccessManager,
 		elevatedSessions:  make(map[string]*ElevatedSession),
 		elevationPolicies: make(map[string]*ElevationPolicy),
-		auditLogger:       NewJITAuditLogger(),
 		mutex:             sync.RWMutex{},
+	}
+}
+
+// SetAuditManager wires a durable audit manager for recording privilege elevation events.
+// It is a no-op when m is nil.
+func (pem *PrivilegeElevationManager) SetAuditManager(m *audit.Manager) {
+	pem.auditManager = m
+}
+
+// recordElevationRequest emits a privilege_elevated authorization audit event. No-op when auditManager is nil.
+func (pem *PrivilegeElevationManager) recordElevationRequest(ctx context.Context, session *ElevatedSession) {
+	if pem.auditManager == nil {
+		return
+	}
+	if err := pem.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		session.TenantID, session.SubjectID, "jit_access", session.ID, "privilege_elevated",
+		business.AuditResultSuccess,
+	)); err != nil {
+		slog.Warn("failed to record privilege elevation request audit event", "error", err)
+	}
+}
+
+// recordElevationUsage emits an elevation_used authorization audit event. No-op when auditManager is nil.
+func (pem *PrivilegeElevationManager) recordElevationUsage(ctx context.Context, session *ElevatedSession, resourceID string) {
+	if pem.auditManager == nil {
+		return
+	}
+	if err := pem.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		session.TenantID, session.SubjectID, "jit_access", session.ID, "elevation_used",
+		business.AuditResultSuccess,
+	).Detail("resource_id", resourceID)); err != nil {
+		slog.Warn("failed to record elevation usage audit event", "error", err)
 	}
 }
 
@@ -275,15 +309,7 @@ func (pem *PrivilegeElevationManager) RequestPrivilegeElevation(ctx context.Cont
 	pem.elevatedSessions[session.ID] = session
 
 	// Audit the elevation
-	_ = pem.auditLogger.LogAccessRequest(ctx, &JITAccessRequest{
-		ID:              session.ID,
-		RequesterID:     session.SubjectID,
-		TenantID:        session.TenantID,
-		Permissions:     session.ElevatedPermissions,
-		Duration:        request.Duration,
-		Justification:   request.Justification,
-		EmergencyAccess: request.BreakGlass,
-	}, "privilege_elevated")
+	pem.recordElevationRequest(ctx, session)
 
 	return session, nil
 }
@@ -360,12 +386,7 @@ func (pem *PrivilegeElevationManager) LogElevatedActivity(ctx context.Context, s
 	// Enhanced audit logging for high-risk activities
 	if riskLevel == RiskLevelHigh || riskLevel == RiskLevelCritical ||
 		session.MonitoringLevel == MonitoringLevelContinuous {
-		_ = pem.auditLogger.LogAccessUsage(ctx, &JITAccessGrant{
-			ID:          session.ID,
-			RequesterID: session.SubjectID,
-			TenantID:    session.TenantID,
-			Permissions: session.ElevatedPermissions,
-		}, action, resourceID, details)
+		pem.recordElevationUsage(ctx, session, resourceID)
 	}
 
 	return nil

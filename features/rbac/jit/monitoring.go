@@ -5,8 +5,12 @@ package jit
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/audit"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // JITAccessMonitor provides real-time monitoring and alerting for JIT access
@@ -14,7 +18,7 @@ type JITAccessMonitor struct {
 	accessManager       *JITAccessManager
 	elevationManager    *PrivilegeElevationManager
 	timeController      *TimeBasedAccessController
-	auditLogger         *JITAuditLogger
+	auditManager        *audit.Manager
 	alertRules          map[string]*AlertRule
 	activeAlerts        map[string]*ActiveAlert
 	monitoringStats     *MonitoringStats
@@ -35,7 +39,6 @@ func NewJITAccessMonitor(
 		accessManager:       accessManager,
 		elevationManager:    elevationManager,
 		timeController:      timeController,
-		auditLogger:         NewJITAuditLogger(),
 		alertRules:          make(map[string]*AlertRule),
 		activeAlerts:        make(map[string]*ActiveAlert),
 		monitoringStats:     &MonitoringStats{},
@@ -43,6 +46,24 @@ func NewJITAccessMonitor(
 		mutex:               sync.RWMutex{},
 		stopChannel:         make(chan struct{}),
 		monitorInterval:     30 * time.Second, // Monitor every 30 seconds
+	}
+}
+
+// SetAuditManager wires a durable audit manager for recording JIT monitoring events.
+// It is a no-op when m is nil.
+func (jam *JITAccessMonitor) SetAuditManager(m *audit.Manager) {
+	jam.auditManager = m
+}
+
+// recordJITPolicyViolation emits a policy_violation security audit event. No-op when auditManager is nil.
+func (jam *JITAccessMonitor) recordJITPolicyViolation(ctx context.Context, tenantID, subjectID, description string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.SecurityEvent(
+		tenantID, subjectID, "policy_violation", description, business.AuditSeverityCritical,
+	)); err != nil {
+		slog.Warn("failed to record jit policy violation audit event", "error", err)
 	}
 }
 
@@ -469,34 +490,29 @@ func (jam *JITAccessMonitor) triggerAlert(ctx context.Context, rule *AlertRule, 
 	}
 
 	// Audit the alert
-	_ = jam.auditLogger.LogPolicyViolation(ctx, rule.TenantID, "system", string(rule.Type), alert.Description, map[string]interface{}{
-		"alert_id":     alertID,
-		"rule_id":      rule.ID,
-		"metric_value": value,
-		"threshold":    rule.Threshold,
-	})
+	jam.recordJITPolicyViolation(ctx, rule.TenantID, "system", alert.Description)
 }
 
 // checkComplianceViolations checks for compliance violations
 func (jam *JITAccessMonitor) checkComplianceViolations(ctx context.Context) {
-	// Check for access patterns that might violate compliance requirements
-	// This is a simplified implementation
-
-	cutoff := time.Now().Add(-24 * time.Hour)
-	filter := &JITAuditFilter{
-		DateFrom: &cutoff,
-		Severity: string(JITAuditSeverityHigh),
+	if jam.auditManager == nil {
+		return
 	}
 
-	entries, err := jam.auditLogger.GetAuditEntries(ctx, filter)
+	cutoff := time.Now().Add(-24 * time.Hour)
+	filter := &business.AuditFilter{
+		Severities: []business.AuditSeverity{business.AuditSeverityHigh},
+		TimeRange:  &business.TimeRange{Start: &cutoff},
+	}
+
+	entries, err := jam.auditManager.QueryEntries(ctx, filter)
 	if err != nil {
 		return
 	}
 
 	// Look for patterns that might indicate compliance violations
 	for _, entry := range entries {
-		if entry.EventType == JITAuditEventAccessUsed && entry.Severity == JITAuditSeverityCritical {
-			// This might indicate a compliance violation
+		if entry.Action == "elevation_used" && entry.Severity == business.AuditSeverityCritical {
 			jam.flagComplianceViolation(ctx, entry)
 		}
 	}
@@ -513,7 +529,7 @@ func (jam *JITAccessMonitor) detectUnusualPatterns(ctx context.Context) {
 }
 
 // flagComplianceViolation flags a potential compliance violation
-func (jam *JITAccessMonitor) flagComplianceViolation(ctx context.Context, entry JITAuditEntry) {
+func (jam *JITAccessMonitor) flagComplianceViolation(ctx context.Context, entry *business.AuditEntry) {
 	alertID := fmt.Sprintf("compliance-%d", time.Now().UnixNano())
 
 	alert := &ActiveAlert{
@@ -526,7 +542,7 @@ func (jam *JITAccessMonitor) flagComplianceViolation(ctx context.Context, entry 
 		TriggeredAt:   time.Now(),
 		LastUpdated:   time.Now(),
 		Status:        AlertStatusActive,
-		AffectedUsers: []string{entry.SubjectID},
+		AffectedUsers: []string{entry.UserID},
 		Context: map[string]interface{}{
 			"audit_entry_id": entry.ID,
 			"event_type":     entry.EventType,
