@@ -45,10 +45,6 @@ type Manager interface {
 	// IsElevated returns true if the current process has the privileges
 	// required to install or uninstall the service.
 	IsElevated() bool
-
-	// InstallPath returns the platform-standard path the binary will be
-	// copied to during Install.
-	InstallPath() string
 }
 
 // New returns the platform-specific Manager for the current OS.

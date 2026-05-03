@@ -16,8 +16,6 @@ func newManager(binaryPath string) Manager {
 
 type stubManager struct{}
 
-func (m *stubManager) InstallPath() string { return "" }
-
 func (m *stubManager) IsElevated() bool { return false }
 
 func (m *stubManager) Install(token string) error {

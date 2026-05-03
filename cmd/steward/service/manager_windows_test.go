@@ -14,7 +14,9 @@ import (
 
 func TestWindowsManagerInstallPath(t *testing.T) {
 	m := New("cfgms-steward.exe")
-	assert.Equal(t, windowsInstallPath, m.InstallPath())
+	status, err := m.Status()
+	require.NoError(t, err)
+	assert.Equal(t, windowsInstallPath, status.InstallPath)
 }
 
 func TestWindowsManagerStatusNotInstalled(t *testing.T) {

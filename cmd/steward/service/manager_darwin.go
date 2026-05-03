@@ -26,8 +26,6 @@ type darwinManager struct {
 	binaryPath string
 }
 
-func (m *darwinManager) InstallPath() string { return darwinInstallPath }
-
 func (m *darwinManager) IsElevated() bool {
 	return os.Getuid() == 0
 }

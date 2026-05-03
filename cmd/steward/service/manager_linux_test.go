@@ -17,7 +17,9 @@ import (
 
 func TestLinuxManagerInstallPath(t *testing.T) {
 	m := New("/usr/bin/cfgms-steward")
-	assert.Equal(t, linuxInstallPath, m.InstallPath())
+	status, err := m.Status()
+	require.NoError(t, err)
+	assert.Equal(t, linuxInstallPath, status.InstallPath)
 }
 
 func TestLinuxManagerIsElevated(t *testing.T) {

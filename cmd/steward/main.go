@@ -152,13 +152,9 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 
 	// gRPC transport registration flow.
 	if regToken != "" {
-		tokenPrefix := regToken
-		if len(regToken) > 15 {
-			tokenPrefix = regToken[:15] + "..."
-		}
 		logger.Info("Using registration token for auto-registration (gRPC transport mode)",
 			"operation", "registration_init",
-			"token_prefix", tokenPrefix)
+			"token_prefix", logging.RedactedID(regToken))
 
 		transportCl, err := registerAndConnect(ctx, regToken, logger)
 		if err != nil {
@@ -300,10 +296,6 @@ func buildStatusCommand() *cobra.Command {
 
 // runInstall performs the install operation for the current platform.
 func runInstall(regToken string) error {
-	if regToken == "" {
-		return fmt.Errorf("--regtoken is required for install")
-	}
-
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to determine executable path: %w", err)
