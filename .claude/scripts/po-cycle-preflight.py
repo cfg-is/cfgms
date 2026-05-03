@@ -503,13 +503,54 @@ def compute_dispatch_recommendations(ready_stories, active_stories, dep_states):
 
 
 def compute_review_recommendations(pr_summaries, queued_pr_numbers):
+    """Decide what to do with each open story PR.
+
+    Action vocabulary:
+    - rebase: PR's branch needs `rebase-pr.sh` to clear conflicts or stale base
+              before any other action makes sense. Always takes precedence
+              when mergeStateStatus is DIRTY (conflicts) or BEHIND (base advanced).
+    - enqueue_merge: review armed + green + mergeable but neither in queue nor
+              auto-merge-enabled — manual `gh pr merge --squash` to enqueue.
+    - skip: in-flight (in queue or auto-merge armed); leave alone.
+    - spawn_acceptance_reviewer: needs first-time review (CI green, no comment).
+    - defer: CI still pending.
+    - investigate: CI red and not stale-base; needs diagnose + dispatch-fix.
+    """
     recs = []
     for pr in pr_summaries:
         overall = pr["ci_summary"]["overall"]
+        in_queue = pr["pr"] in queued_pr_numbers
+        ms = (pr.get("merge_state_status") or "").upper()
+
+        # PRIORITY 1: blocked-by-base detection. A PR with DIRTY or BEHIND
+        # merge state can't merge until its branch is rebased onto develop.
+        # The merge queue handles BEHIND once enqueued, but DIRTY needs an
+        # explicit rebase first because the queue refuses to touch conflicts.
+        # Skip the rebase suggestion when the PR is already in the queue —
+        # the queue is doing its own rebase.
+        if not in_queue and ms == "DIRTY":
+            recs.append({
+                "pr": pr["pr"],
+                "story": pr["story_number"],
+                "action": "rebase",
+                "reason": "mergeStateStatus=DIRTY (conflicts with develop) — run `./.claude/scripts/rebase-pr.sh <PR>`; if it returns REBASE_CONFLICT, escalate to dispatch-fix",
+            })
+            continue
+        if not in_queue and ms == "BEHIND" and pr.get("auto_merge_enabled"):
+            # Auto-merge is armed but the queue hasn't picked it up — usually
+            # means the queue config requires a strictly-current base. Try a
+            # preemptive rebase so the next cycle finds it ready.
+            recs.append({
+                "pr": pr["pr"],
+                "story": pr["story_number"],
+                "action": "rebase",
+                "reason": "mergeStateStatus=BEHIND with auto-merge armed but not in queue — preemptive rebase via `./.claude/scripts/rebase-pr.sh <PR>`",
+            })
+            continue
+
         if pr["has_acceptance_review_comment"]:
             # Review done. Flag as stuck if CI green + mergeable but not in queue
             # and not already auto-merge-enabled (the two "enqueued" signals).
-            in_queue = pr["pr"] in queued_pr_numbers
             if (
                 overall == "green"
                 and pr.get("mergeable") == "MERGEABLE"
@@ -527,7 +568,7 @@ def compute_review_recommendations(pr_summaries, queued_pr_numbers):
                 if in_queue:
                     reason += " (PR currently in merge queue)"
                 elif pr.get("auto_merge_enabled"):
-                    reason += " (auto-merge armed, awaiting CI)"
+                    reason += f" (auto-merge armed, awaiting CI; mergeStateStatus={ms or 'UNKNOWN'})"
                 recs.append({
                     "pr": pr["pr"],
                     "story": pr["story_number"],
@@ -550,12 +591,26 @@ def compute_review_recommendations(pr_summaries, queued_pr_numbers):
                 "reason": f"CI pending: {', '.join(pending)}",
             })
         else:
+            # CI red. Two possibilities:
+            # - stale base (recent develop merges introduced the failure
+            #   even though PR's own code is fine) → rebase clears it
+            # - real bug (PR's own code broke something) → needs dispatch-fix
+            #
+            # We can't tell from preflight data alone which one it is, but
+            # rebase-pr.sh has a cheap NOOP path when the branch is already
+            # up-to-date with develop. So: always try rebase first. If
+            # REBASE_OK, the next cycle sees fresh CI; if REBASE_NOOP, the
+            # branch was already current so the failure is real and the PO
+            # falls through to dispatch-fix. Without this rule, the May 1-2
+            # cron run sat on three CI-red PRs (#1008, #1029, #1055) for
+            # hours because nothing wired stale-base recovery into the
+            # autonomous loop.
             failed = pr["ci_summary"]["failed_checks"][:3]
             recs.append({
                 "pr": pr["pr"],
                 "story": pr["story_number"],
-                "action": "investigate",
-                "reason": f"CI red: {', '.join(failed)}",
+                "action": "rebase_then_investigate",
+                "reason": f"CI red: {', '.join(failed)} (mergeStateStatus={ms or 'UNKNOWN'}) — try `rebase-pr.sh` first; if REBASE_NOOP (branch is current), failure is real → diagnose + dispatch-fix",
             })
     return recs
 

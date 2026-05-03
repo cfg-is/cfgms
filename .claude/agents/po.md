@@ -310,6 +310,50 @@ For each `pipeline:fix` story, find its PR and dispatch the fix agent in one cal
 ```
 This cleans any stale container from a prior failed attempt, re-clones, and launches.
 
+**Step 4.5 — Rebase stuck PRs:**
+
+The merge queue refuses to enqueue a PR with `mergeStateStatus = DIRTY`
+(merge conflicts with develop). The queue auto-rebases `BEHIND` PRs once
+they're enqueued, but only after an enqueue command — auto-merge alone
+doesn't trigger that. And CI-red PRs may be red because of stale-base
+issues that a rebase would clear. So PRs sit stuck even with all required
+checks green (DIRTY case) or with failures that aren't actually their
+fault (stale-base case).
+
+The preflight surfaces three actions in `review_recommendations`:
+
+| Action | When | What to do |
+|---|---|---|
+| `rebase` | mergeStateStatus is DIRTY or (BEHIND with auto-merge armed) | Run `rebase-pr.sh`. The PR's branch needs to be current before any other action makes sense. |
+| `rebase_then_investigate` | CI red (any required check failed) | Run `rebase-pr.sh`. If `REBASE_OK`, wait one cycle for CI to re-run. If `REBASE_NOOP`, the branch was already current → the failure is real → diagnose + dispatch-fix. |
+| `investigate` (legacy) | rare; falls through if neither rebase nor red applies | Same handling as rebase_then_investigate's NOOP branch. |
+
+For each `rebase` or `rebase_then_investigate` recommendation:
+
+```bash
+./.claude/scripts/rebase-pr.sh <PR_NUM>
+```
+
+Outcomes:
+- `REBASE_OK:<PR>` — fast-forward or auto-resolve succeeded; CI re-runs on the rebased branch. Move on. The next cycle will see the PR with fresh CI and either enqueue (review comment already there) or spawn a new review.
+- `REBASE_NOOP:<PR>` — branch was already up-to-date with develop. For `rebase` action: rare — investigate via `po-act.sh block`. For `rebase_then_investigate`: the failure is real, fall through to diagnose + dispatch-fix as if action were `investigate`:
+  ```bash
+  ./.claude/scripts/po-act.sh diagnose <PR>
+  ./scripts/pipeline-helper.sh label-add <STORY> "pipeline:fix"
+  ```
+- `REBASE_CONFLICT:<PR>` — real conflicts that need code changes. Apply `pipeline:fix` and post a comment on the PR with the conflicting files (the script prints them):
+  ```bash
+  ./scripts/pipeline-helper.sh label-add <STORY> "pipeline:fix"
+  ```
+  Step 4 will pick it up next cycle for dispatch-fix.
+- `REBASE_REFUSED:<PR>:<reason>` — PR closed/merged/from a fork. Skip; next cycle will resync.
+
+This step is REQUIRED before Step 5 because:
+1. A DIRTY PR without rebase will sit stuck even with all checks green — issue #1027 sat 22+ hours before the step was added.
+2. A CI-red PR caused by a stale base will keep failing forever — three PRs (#1008, #1029, #1055) had this exact problem in the May 1-2 cron run.
+
+Cheap to do every cycle: when the PR is already current, `rebase-pr.sh` returns `REBASE_NOOP` in ~5 seconds without modifying anything.
+
 **Step 5 — QA pass (Acceptance Reviewer) — headless dispatch in FIFO order:**
 
 Inline subagent spawn (the previous behavior) caused multi-minute hangs in the
