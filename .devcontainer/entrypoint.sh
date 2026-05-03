@@ -597,6 +597,17 @@ fi
 
 if [ "$EXIT_CODE" -eq 0 ]; then
     echo "Agent completed successfully. PR: ${PR_URL}"
+
+    # If we just finished a fix-pr resume of a session-truncated draft, mark
+    # the PR ready for review so the cron's acceptance-reviewer picks it up
+    # next cycle. Idempotent: gh pr ready on an already-ready PR is a no-op.
+    if [[ "$MODE" == "fix-pr" ]] && [[ -n "$PR_URL" ]]; then
+        is_draft=$(gh pr view "$PR_URL" --json isDraft -q '.isDraft' 2>/dev/null || echo "false")
+        if [[ "$is_draft" == "true" ]]; then
+            echo "Resumed PR was a draft; marking ready"
+            gh pr ready "$PR_URL" 2>/dev/null || true
+        fi
+    fi
 else
     echo "Agent failed with exit code ${EXIT_CODE}"
 

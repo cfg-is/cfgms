@@ -362,6 +362,25 @@ permission mode. The acceptance reviewer now runs in a dedicated headless
 container with skip-permissions inside, and the host PO dispatches it
 non-blocking and moves on.
 
+**Pre-step — Resume session-truncated WIP drafts.** Before any review work,
+process every `review_recommendations` entry with `action: "resume_failed_session"`.
+These are draft PRs pushed by `.devcontainer/entrypoint.sh` after an agent
+session hit a non-recoverable failure (token reauth, token-limit truncation,
+network drop). They should NOT be reviewed in their current state — the
+partial work is committed but incomplete.
+
+For each such entry:
+
+```bash
+./.claude/scripts/po-act.sh dispatch-fix <PR_NUM>
+```
+
+The fix-pr agent picks up the existing branch, completes the remaining work,
+and the entrypoint marks the PR ready for review when the agent exits 0. The
+next cron cycle will see the now-ready PR and route it through normal
+review (Step 5). This is "finishing a story", not "fixing a story" — fresh
+agent, fresh budget. No retry counter is incremented at the cron level.
+
 **Find PRs that need review.** A PR is review-eligible when:
 - branch is `feature/story-*`
 - state is OPEN
