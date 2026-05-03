@@ -55,7 +55,15 @@
       "Bash(./scripts/pipeline-helper.sh edit-body *)",
       "Bash(./scripts/pipeline-helper.sh create-story *)",
       "Bash(./scripts/pipeline-helper.sh create-ready-story *)",
-      "Bash(./scripts/pipeline-helper.sh block *)"
+      "Bash(./scripts/pipeline-helper.sh block *)",
+      "SlashCommand(/po)",
+      "SlashCommand(/po:*)",
+      "Skill(po)",
+      "Skill(po:*)",
+      "SlashCommand(/isoagents)",
+      "SlashCommand(/isoagents:*)",
+      "Skill(isoagents)",
+      "Skill(isoagents:*)"
     ]
   }
 }
