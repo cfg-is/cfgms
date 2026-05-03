@@ -9,6 +9,37 @@ import (
 	"time"
 )
 
+// PerformanceMetrics captures system performance during workflow execution
+type PerformanceMetrics struct {
+	// CPU metrics
+	CPUUsagePercent float64 `json:"cpu_usage_percent"`
+	GoRoutineCount  int     `json:"goroutine_count"`
+	ThreadCount     int     `json:"thread_count"`
+
+	// Memory metrics
+	MemoryUsageBytes  uint64        `json:"memory_usage_bytes"`
+	MemoryAllocBytes  uint64        `json:"memory_alloc_bytes"`
+	MemorySystemBytes uint64        `json:"memory_system_bytes"`
+	GCCount           uint32        `json:"gc_count"`
+	GCPauseTime       time.Duration `json:"gc_pause_time"`
+
+	// Network metrics (when available)
+	NetworkBytesIn     uint64 `json:"network_bytes_in,omitempty"`
+	NetworkBytesOut    uint64 `json:"network_bytes_out,omitempty"`
+	NetworkConnections int    `json:"network_connections,omitempty"`
+
+	// Disk I/O metrics (when available)
+	DiskReadBytes  uint64 `json:"disk_read_bytes,omitempty"`
+	DiskWriteBytes uint64 `json:"disk_write_bytes,omitempty"`
+
+	// Workflow-specific metrics
+	StepExecutionCount int `json:"step_execution_count"`
+	ActiveStepCount    int `json:"active_step_count"`
+	QueueDepth         int `json:"queue_depth,omitempty"`
+
+	Timestamp time.Time `json:"timestamp"`
+}
+
 // PerformanceCollector gathers system performance metrics during workflow execution
 type PerformanceCollector struct {
 	mutex        sync.RWMutex
