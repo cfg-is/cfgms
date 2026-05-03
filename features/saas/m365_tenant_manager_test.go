@@ -112,7 +112,7 @@ func setupTestManager(t *testing.T) (*M365TenantManager, *mockTenantStore, conte
 	cfgmsTenantManager := tenant.NewManager(mockStore, nil)
 
 	// Create credential store
-	mockCredStore := NewMockCredentialStore()
+	mockCredStore := newTestCredentialStore(t)
 
 	// Create M365 provider
 	httpClient := NewGraphHTTPClient(100, 1000)
@@ -532,7 +532,7 @@ func setupTestManagerWithCountingStore(t *testing.T) (*M365TenantManager, *count
 	ctx := context.Background()
 	counting := &countingTenantStore{mockTenantStore: newMockTenantStore()}
 	cfgmsTenantManager := tenant.NewManager(counting, nil)
-	m365Provider := NewMicrosoftMultiTenantProvider(NewMockCredentialStore(), NewGraphHTTPClient(100, 1000))
+	m365Provider := NewMicrosoftMultiTenantProvider(newTestCredentialStore(t), NewGraphHTTPClient(100, 1000))
 	manager := NewM365TenantManager(cfgmsTenantManager, m365Provider, nil, nil)
 	return manager, counting, ctx
 }
@@ -592,7 +592,7 @@ func TestM365TenantManager_GetTenantByM365ID_ListTenantsError(t *testing.T) {
 		listErr:         fmt.Errorf("storage unavailable"),
 	}
 	cfgmsTenantManager := tenant.NewManager(failing, nil)
-	m365Provider := NewMicrosoftMultiTenantProvider(NewMockCredentialStore(), NewGraphHTTPClient(100, 1000))
+	m365Provider := NewMicrosoftMultiTenantProvider(newTestCredentialStore(t), NewGraphHTTPClient(100, 1000))
 	manager := NewM365TenantManager(cfgmsTenantManager, m365Provider, nil, nil)
 
 	// ListTenants fails → getTenantByM365ID must propagate the error.
@@ -645,7 +645,7 @@ func BenchmarkM365TenantManager_DiscoverAndSyncTenants(b *testing.B) {
 
 		mockStore := newMockTenantStore()
 		cfgmsTenantManager := tenant.NewManager(mockStore, nil)
-		m365Provider := NewMicrosoftMultiTenantProvider(NewMockCredentialStore(), NewGraphHTTPClient(100, 1000))
+		m365Provider := NewMicrosoftMultiTenantProvider(newBenchCredentialStore(b), NewGraphHTTPClient(100, 1000))
 		gdap := &mockGDAPProvider{relationships: relationships}
 		manager := NewM365TenantManager(cfgmsTenantManager, m365Provider, nil, gdap)
 

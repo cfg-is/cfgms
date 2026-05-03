@@ -20,6 +20,7 @@ package saas
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -190,9 +191,20 @@ func (ua *UniversalAuthenticator) authenticateAPIKey(ctx context.Context, provid
 		return fmt.Errorf("invalid API key config: %w", err)
 	}
 
-	// Store the API key configuration
-	configData := fmt.Sprintf("%s:%s:%s", apiKeyConfig.Key, apiKeyConfig.Header, apiKeyConfig.QueryParam)
-	return ua.credStore.StoreClientSecret(provider, configData)
+	// Store the API key configuration as JSON
+	data, err := json.Marshal(struct {
+		Key        string `json:"key"`
+		Header     string `json:"header"`
+		QueryParam string `json:"query_param"`
+	}{
+		Key:        apiKeyConfig.Key,
+		Header:     apiKeyConfig.Header,
+		QueryParam: apiKeyConfig.QueryParam,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal API key config: %w", err)
+	}
+	return ua.credStore.StoreClientSecret(provider, string(data))
 }
 
 func (ua *UniversalAuthenticator) getAPIKeyHeaders(provider string) (map[string]string, error) {
@@ -201,18 +213,19 @@ func (ua *UniversalAuthenticator) getAPIKeyHeaders(provider string) (map[string]
 		return nil, fmt.Errorf("failed to get API key config: %w", err)
 	}
 
-	parts := strings.Split(configData, ":")
-	if len(parts) < 3 {
-		return nil, fmt.Errorf("invalid API key config format")
+	var apiKey struct {
+		Key        string `json:"key"`
+		Header     string `json:"header"`
+		QueryParam string `json:"query_param"`
+	}
+	if err := json.Unmarshal([]byte(configData), &apiKey); err != nil {
+		return nil, fmt.Errorf("invalid API key config: %w", err)
 	}
 
-	key, header := parts[0], parts[1]
-	if header != "" {
-		return map[string]string{header: key}, nil
+	if apiKey.Header != "" {
+		return map[string]string{apiKey.Header: apiKey.Key}, nil
 	}
-
-	// Default to X-API-Key header
-	return map[string]string{"X-API-Key": key}, nil
+	return map[string]string{"X-API-Key": apiKey.Key}, nil
 }
 
 // Basic Authentication Implementation
@@ -223,9 +236,18 @@ func (ua *UniversalAuthenticator) authenticateBasicAuth(ctx context.Context, pro
 		return fmt.Errorf("invalid basic auth config: %w", err)
 	}
 
-	// Store username:password
-	configData := fmt.Sprintf("%s:%s", basicConfig.Username, basicConfig.Password)
-	return ua.credStore.StoreClientSecret(provider, configData)
+	// Store username and password as JSON
+	data, err := json.Marshal(struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}{
+		Username: basicConfig.Username,
+		Password: basicConfig.Password,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal basic auth config: %w", err)
+	}
+	return ua.credStore.StoreClientSecret(provider, string(data))
 }
 
 func (ua *UniversalAuthenticator) getBasicAuthHeaders(provider string) (map[string]string, error) {
@@ -234,8 +256,17 @@ func (ua *UniversalAuthenticator) getBasicAuthHeaders(provider string) (map[stri
 		return nil, fmt.Errorf("failed to get basic auth config: %w", err)
 	}
 
+	var basicAuth struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal([]byte(configData), &basicAuth); err != nil {
+		return nil, fmt.Errorf("invalid basic auth config: %w", err)
+	}
+
+	encoded := base64.StdEncoding.EncodeToString([]byte(basicAuth.Username + ":" + basicAuth.Password))
 	return map[string]string{
-		"Authorization": "Basic " + configData, // Should be base64 encoded
+		"Authorization": "Basic " + encoded,
 	}, nil
 }
 

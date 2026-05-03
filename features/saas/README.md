@@ -315,4 +315,4 @@ The SaaS Steward is designed to be:
 - **Secure**: Industry-standard OAuth2 implementation
 - **Extensible**: Plugin architecture for new providers
 - **Observable**: Comprehensive logging and monitoring
-- **Testable**: Real components (InMemoryConsentStore, MockCredentialStore) for unit testing
+- **Testable**: Real components (InMemoryConsentStore, SecretStoreCredentialStore) for unit testing
