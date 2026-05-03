@@ -14,6 +14,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+
+	// storage providers for in-test audit manager setup
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 func TestNewZeroTrustPolicyEngine(t *testing.T) {
@@ -42,7 +49,7 @@ func TestNewZeroTrustPolicyEngine(t *testing.T) {
 	assert.NotNil(t, engine.policyCache)
 	assert.NotNil(t, engine.config)
 	assert.NotNil(t, engine.stats)
-	assert.NotNil(t, engine.auditLogger)
+	assert.Nil(t, engine.auditManager) // auditManager is wired via SetAuditManager; nil by default
 	assert.Equal(t, config.MaxEvaluationTime, engine.config.MaxEvaluationTime)
 	assert.Equal(t, config.FailSecure, engine.config.FailSecure)
 	assert.False(t, engine.started)
@@ -66,9 +73,6 @@ func TestZeroTrustPolicyEngineStartStop(t *testing.T) {
 	err = engine.Start(ctx)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "already started")
-
-	// Give background processes time to start
-	time.Sleep(50 * time.Millisecond)
 
 	// Test Stop
 	err = engine.Stop()
@@ -796,6 +800,102 @@ func TestZeroTrustPolicyEngine_PerformanceRequirement(t *testing.T) {
 	// DoS protection requirement: <15ms for policy evaluation
 	assert.Less(t, averageTime, 15*time.Millisecond,
 		"Average evaluation time %v exceeds 15ms DoS protection requirement", averageTime)
+}
+
+func newTestAuditManager(t *testing.T) *audit.Manager {
+	t.Helper()
+	storageManager, err := interfaces.CreateOSSStorageManager(t.TempDir(), t.TempDir()+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	m, err := audit.NewManager(storageManager.GetAuditStore(), "zerotrust-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.Stop(ctx)
+	})
+	return m
+}
+
+func TestZeroTrustAuditManager_RecordsEvaluationEvent(t *testing.T) {
+	auditManager := newTestAuditManager(t)
+
+	config := &ZeroTrustConfig{
+		MaxEvaluationTime: 5 * time.Second,
+		FailSecure:        true,
+		MetricsInterval:   1 * time.Second,
+	}
+	engine := NewZeroTrustPolicyEngine(config)
+	engine.SetAuditManager(auditManager)
+
+	request := &ZeroTrustAccessRequest{
+		RequestID:     "audit-test-001",
+		RequestTime:   time.Now(),
+		SubjectType:   SubjectTypeUser,
+		ResourceType:  "api",
+		SourceSystem:  "test-system",
+		RequestSource: RequestSourceAPI,
+		Priority:      RequestPriorityNormal,
+		AccessRequest: &common.AccessRequest{
+			SubjectId:    "user-audit",
+			ResourceId:   "res-audit",
+			PermissionId: "read",
+			TenantId:     "tenant-audit",
+			Context:      make(map[string]string),
+		},
+	}
+
+	ctx := context.Background()
+	response, err := engine.EvaluateAccess(ctx, request)
+	require.NoError(t, err)
+	assert.NotNil(t, response)
+
+	// Flush ensures the async audit write has reached the store.
+	flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	require.NoError(t, auditManager.Flush(flushCtx))
+
+	entries, err := auditManager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "tenant-audit",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "expected at least one audit entry for tenant-audit")
+
+	var found bool
+	for _, e := range entries {
+		if e.UserID == "user-audit" && e.ResourceType == "zero_trust_policy" && e.Action == "evaluate_access" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected an authorization event with subjectID=user-audit, resourceType=zero_trust_policy, action=evaluate_access")
+}
+
+func TestZeroTrustAuditManager_NilSafe(t *testing.T) {
+	config := &ZeroTrustConfig{
+		MaxEvaluationTime: 5 * time.Second,
+		FailSecure:        true,
+		MetricsInterval:   1 * time.Second,
+	}
+	// Intentionally do NOT call SetAuditManager.
+	engine := NewZeroTrustPolicyEngine(config)
+
+	request := &ZeroTrustAccessRequest{
+		RequestID:     "nil-audit-test",
+		RequestTime:   time.Now(),
+		SubjectType:   SubjectTypeUser,
+		ResourceType:  "api",
+		SourceSystem:  "test",
+		RequestSource: RequestSourceAPI,
+		Priority:      RequestPriorityNormal,
+	}
+
+	ctx := context.Background()
+	// Must not panic or return an error from the audit path.
+	response, err := engine.EvaluateAccess(ctx, request)
+	require.NoError(t, err)
+	assert.NotNil(t, response)
 }
 
 // Enhanced mock implementations with error simulation

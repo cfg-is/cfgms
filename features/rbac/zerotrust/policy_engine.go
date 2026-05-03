@@ -5,12 +5,15 @@ package zerotrust
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/audit"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // External system interfaces (to avoid circular imports)
@@ -62,8 +65,8 @@ type ZeroTrustPolicyEngine struct {
 	processingGroup sync.WaitGroup
 
 	// Statistics and monitoring
-	stats       *ZeroTrustStats
-	auditLogger *ZeroTrustAuditLogger
+	stats        *ZeroTrustStats
+	auditManager *audit.Manager
 }
 
 // ZeroTrustPolicy represents a complete zero-trust policy definition
@@ -310,7 +313,6 @@ func NewZeroTrustPolicyEngine(config *ZeroTrustConfig) *ZeroTrustPolicyEngine {
 		config:         config,
 		stopChannel:    make(chan struct{}),
 		stats:          NewZeroTrustStats(),
-		auditLogger:    NewZeroTrustAuditLogger(),
 	}
 
 	// Initialize policy management components
@@ -338,6 +340,38 @@ func (z *ZeroTrustPolicyEngine) SetIntegrations(
 	z.riskManager = riskManager
 	z.continuousAuthEngine = continuousAuthEngine
 	z.tenantSecurityEngine = tenantSecurityEngine
+}
+
+// SetAuditManager wires a pkg/audit.Manager for durable policy evaluation events.
+// It is a no-op when m is nil. Best-effort — never blocks evaluation.
+func (z *ZeroTrustPolicyEngine) SetAuditManager(m *audit.Manager) {
+	z.auditManager = m
+}
+
+// recordPolicyEvaluation emits an authorization audit event to the durable store.
+// It is a no-op when auditManager is nil.
+func (z *ZeroTrustPolicyEngine) recordPolicyEvaluation(ctx context.Context, request *ZeroTrustAccessRequest, response *ZeroTrustAccessResponse) {
+	if z.auditManager == nil {
+		return
+	}
+
+	var tenantID, subjectID string
+	if request.AccessRequest != nil {
+		tenantID = request.AccessRequest.TenantId
+		subjectID = request.AccessRequest.SubjectId
+	}
+
+	result := business.AuditResultDenied
+	if response.Granted {
+		result = business.AuditResultSuccess
+	}
+
+	if err := z.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		tenantID, subjectID, "zero_trust_policy", request.RequestID,
+		"evaluate_access", result,
+	)); err != nil {
+		slog.Warn("failed to record zero-trust audit event", "error", err)
+	}
 }
 
 // Start initializes and starts the zero-trust policy engine
@@ -431,10 +465,7 @@ func (z *ZeroTrustPolicyEngine) EvaluateAccess(ctx context.Context, request *Zer
 	processingTime := time.Since(startTime)
 	response.ProcessingTime = processingTime
 	z.updateStatistics(response, processingTime)
-	if err := z.auditLogger.LogAccessEvaluation(ctx, request, response, processingTime); err != nil {
-		// Log error but don't fail the access evaluation
-		_ = err // Prevent unused variable warning
-	}
+	z.recordPolicyEvaluation(ctx, request, response)
 
 	return response, nil
 }
@@ -680,8 +711,6 @@ func NewZeroTrustStats() *ZeroTrustStats {
 	stats.lastUpdated.Store(time.Now().UnixNano())
 	return stats
 }
-
-// NewZeroTrustAuditLogger is defined in audit.go
 
 // GetStats returns current zero-trust policy engine statistics
 // Note: Returns a snapshot struct with exported fields for backward compatibility
