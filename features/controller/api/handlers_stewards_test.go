@@ -357,3 +357,19 @@ func TestHandleListStewards_HTTPRegistration_NoDuplicates(t *testing.T) {
 	assert.Len(t, resp.Data, 1, "duplicate steward ID should produce exactly one entry")
 	assert.Equal(t, "quarantined", resp.Data[0].Status)
 }
+
+// TestServer_ConfigStatusRouteDeregistered verifies that GET /api/v1/stewards/{id}/config/status
+// is no longer registered and returns 404 or 405, never 200 with hardcoded "unknown" data.
+func TestServer_ConfigStatusRouteDeregistered(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-config"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/any-steward-id/config/status", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusOK, rec.Code, "config/status route must not return 200 after deregistration")
+	assert.True(t, rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed,
+		"expected 404 or 405, got %d", rec.Code)
+}
