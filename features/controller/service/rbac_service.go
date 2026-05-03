@@ -10,7 +10,6 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/rbac"
-	"github.com/cfgis/cfgms/features/rbac/memory"
 )
 
 // injectJustification extracts a sensitive-operation justification from gRPC incoming
@@ -458,7 +457,7 @@ func (s *RBACService) ValidateRoleHierarchy(ctx context.Context, req *controller
 
 // Helper methods for type conversion
 
-func (s *RBACService) convertToProtoHierarchy(hierarchy *memory.RoleHierarchy) *controller.RoleHierarchy {
+func (s *RBACService) convertToProtoHierarchy(hierarchy *rbac.RoleHierarchy) *controller.RoleHierarchy {
 	if hierarchy == nil {
 		return nil
 	}
@@ -484,7 +483,7 @@ func (s *RBACService) convertToProtoHierarchy(hierarchy *memory.RoleHierarchy) *
 	return protoHierarchy
 }
 
-func (s *RBACService) convertToProtoEffectivePermissions(effectivePerms *memory.EffectivePermissions) *controller.EffectivePermissions {
+func (s *RBACService) convertToProtoEffectivePermissions(effectivePerms *rbac.EffectivePermissions) *controller.EffectivePermissions {
 	if effectivePerms == nil {
 		return nil
 	}
