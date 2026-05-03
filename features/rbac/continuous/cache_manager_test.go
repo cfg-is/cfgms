@@ -153,7 +153,10 @@ func TestInvalidateSubject_CrossIndexCleanup(t *testing.T) {
 // of which targetEntries belong to targetSubject.
 func makeBenchmarkCache(b *testing.B, totalEntries, targetEntries int, targetSubject string) *CacheManager {
 	b.Helper()
-	cm := NewCacheManager(10*time.Minute, 100)
+	// Size L1 to hold all entries so no LRU eviction fires during setup.
+	// pkg/cache evictLRU uses an O(n²) sort; triggering it 90k times on a 10k-entry
+	// L1 would make setup take hours. The benchmark measures invalidateSubject, not setup.
+	cm := newCacheManagerSized(10*time.Minute, 100, totalEntries+1000, totalEntries+1000)
 	otherCount := totalEntries - targetEntries
 
 	for i := 0; i < otherCount; i++ {
