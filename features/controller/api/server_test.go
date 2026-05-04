@@ -79,7 +79,6 @@ func setupTestServer(t *testing.T) *Server {
 		tenantManager,
 		rbacManager,
 		nil,      // No system monitor for basic tests
-		nil,      // No platform monitor for basic tests
 		nil,      // No HA manager for basic tests
 		nil,      // No registration token store for basic tests
 		"",       // No signer cert serial for basic tests
@@ -871,7 +870,7 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	server, err := New(
 		cfg, logger, controllerService, configService,
 		nil, rbacService, nil, tenantManager, rbacManager,
-		nil, nil, nil, nil, "", nil, auditMgr,
+		nil, nil, nil, "", nil, auditMgr,
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
