@@ -103,6 +103,7 @@ func runController(configPath string, initMode bool) error {
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
 		return fmt.Errorf("failed to initialize global logging: %w", err)
 	}
+	(&logging.TelemetryBridge{}).Initialize()
 
 	logging.InitializeGlobalLoggerFactory("controller", "main")
 	logger := logging.ForComponent("controller")
@@ -302,6 +303,7 @@ func runInstall(configPath string) error {
 		if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
 			return fmt.Errorf("failed to initialize logging: %w", err)
 		}
+		(&logging.TelemetryBridge{}).Initialize()
 		logging.InitializeGlobalLoggerFactory("controller", "install")
 		logger := logging.ForComponent("controller")
 

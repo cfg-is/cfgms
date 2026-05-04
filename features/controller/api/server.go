@@ -34,7 +34,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
-	"github.com/cfgis/cfgms/pkg/telemetry"
 )
 
 // Server represents the REST API server component of the controller
@@ -54,7 +53,6 @@ type Server struct {
 	systemMonitor           *monitoring.SystemMonitor
 	platformMonitor         pkgmonitoring.PlatformMonitor
 	healthCollector         *health.Collector
-	tracer                  *telemetry.Tracer
 	haManager               *ha.Manager
 	apiKeys                 map[string]*APIKey             // In-memory cache for fast lookup
 	secretStore             secretsif.SecretStore          // M-AUTH-1: Central secrets provider for API keys
@@ -111,7 +109,6 @@ func New(
 	rbacManager *rbac.Manager,
 	systemMonitor *monitoring.SystemMonitor,
 	platformMonitor pkgmonitoring.PlatformMonitor,
-	tracer *telemetry.Tracer,
 	haManager *ha.Manager,
 	registrationTokenStore registration.Store,
 	signerCertSerial string, // Story #378: Serial of cert used for config signing
@@ -141,7 +138,6 @@ func New(
 		systemMonitor:           systemMonitor,
 		platformMonitor:         platformMonitor,
 		healthCollector:         healthCollector,
-		tracer:                  tracer,
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
 		signerCertSerial:        signerCertSerial,         // Story #378: For registration handler
