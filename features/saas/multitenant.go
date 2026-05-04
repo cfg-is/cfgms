@@ -35,7 +35,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -50,9 +49,6 @@ type MultiTenantManager struct {
 	tenantDiscoverer TenantDiscoverer
 	logger           logging.Logger
 
-	// Cache of tenant discovery results to avoid repeated API calls
-	tenantCache map[string]*TenantDiscoveryResult
-	cacheMu     sync.RWMutex
 	cacheExpiry time.Duration
 }
 
@@ -72,7 +68,6 @@ func NewMultiTenantManager(credStore CredentialStore, consentStore ConsentStore,
 		oauth2Client:     NewOAuth2Client(httpClient, nil),
 		tenantDiscoverer: discoverer,
 		logger:           logger,
-		tenantCache:      make(map[string]*TenantDiscoveryResult),
 		cacheExpiry:      15 * time.Minute,
 	}
 }
@@ -257,11 +252,6 @@ func (mtm *MultiTenantManager) CompleteAdminConsent(ctx context.Context, provide
 		return fmt.Errorf("failed to update consent status: %w", err)
 	}
 
-	// Cache the discovery result
-	mtm.cacheMu.Lock()
-	mtm.tenantCache[provider] = discoveryResult
-	mtm.cacheMu.Unlock()
-
 	return nil
 }
 
@@ -372,11 +362,6 @@ func (mtm *MultiTenantManager) RefreshTenantDiscovery(ctx context.Context, provi
 		return fmt.Errorf("failed to update consent status: %w", err)
 	}
 
-	// Update cache
-	mtm.cacheMu.Lock()
-	mtm.tenantCache[provider] = discoveryResult
-	mtm.cacheMu.Unlock()
-
 	return nil
 }
 
@@ -402,11 +387,6 @@ func (mtm *MultiTenantManager) RevokeConsent(ctx context.Context, provider strin
 	if err := mtm.consentStore.DeleteConsent(provider); err != nil {
 		return fmt.Errorf("failed to delete consent status: %w", err)
 	}
-
-	// Clear cache
-	mtm.cacheMu.Lock()
-	delete(mtm.tenantCache, provider)
-	mtm.cacheMu.Unlock()
 
 	return nil
 }
