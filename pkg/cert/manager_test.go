@@ -131,7 +131,10 @@ func TestManager_GenerateServerCertificate(t *testing.T) {
 	assert.NotEmpty(t, cert.SerialNumber)
 	assert.NotEmpty(t, cert.CertificatePEM)
 	assert.NotEmpty(t, cert.PrivateKeyPEM)
-	assert.True(t, cert.IsValid)
+
+	serverResult, err := manager.ValidateCertificate(cert.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, serverResult.IsValid)
 
 	// Verify certificate is stored
 	storedCert, err := manager.GetCertificate(cert.SerialNumber)
@@ -178,7 +181,10 @@ func TestManager_GenerateClientCertificate(t *testing.T) {
 	assert.NotEmpty(t, cert.SerialNumber)
 	assert.NotEmpty(t, cert.CertificatePEM)
 	assert.NotEmpty(t, cert.PrivateKeyPEM)
-	assert.True(t, cert.IsValid)
+
+	clientResult, err := manager.ValidateCertificate(cert.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, clientResult.IsValid)
 
 	// Verify certificate is stored
 	storedCert, err := manager.GetCertificate(cert.SerialNumber)
