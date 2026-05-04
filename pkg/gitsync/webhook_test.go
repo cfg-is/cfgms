@@ -23,7 +23,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // buildPushPayload returns a JSON push-event payload for the given origin URL
@@ -56,14 +56,13 @@ type webhookTestSetup struct {
 	bindings *gitsync.BindingStore
 }
 
-// newWebhookSetup creates a WebhookHandler backed by a real FlatFileConfigStore
+// newWebhookSetup creates a WebhookHandler backed by a real ConfigStore
 // and a BindingStore pre-populated with the given bindings.
 func newWebhookSetup(t *testing.T, bs []gitsync.ScopeBinding) *webhookTestSetup {
 	t.Helper()
 	root := t.TempDir()
 
-	store, err := flatfile.NewFlatFileConfigStore(filepath.Join(root, "configs"))
-	require.NoError(t, err)
+	store := pkgtesting.SetupTestStorage(t).GetConfigStore()
 
 	bindings, err := gitsync.NewBindingStore(root)
 	require.NoError(t, err)
@@ -388,8 +387,7 @@ func TestWebhookWaitForPendingSyncsDrainsBeforeDeadline(t *testing.T) {
 
 	// Build components directly so the store is accessible for result verification.
 	root := t.TempDir()
-	store, err := flatfile.NewFlatFileConfigStore(filepath.Join(root, "configs"))
-	require.NoError(t, err)
+	store := pkgtesting.SetupTestStorage(t).GetConfigStore()
 
 	bindings, err := gitsync.NewBindingStore(root)
 	require.NoError(t, err)
@@ -465,8 +463,7 @@ func TestResolveWebhookSecret_SecretScheme(t *testing.T) {
 		}))
 
 		root := t.TempDir()
-		configStore, err := flatfile.NewFlatFileConfigStore(filepath.Join(root, "configs"))
-		require.NoError(t, err)
+		configStore := pkgtesting.SetupTestStorage(t).GetConfigStore()
 
 		bindings, err := gitsync.NewBindingStore(root)
 		require.NoError(t, err)
@@ -505,8 +502,7 @@ func TestResolveWebhookSecret_SecretScheme(t *testing.T) {
 
 	t.Run("returns HTTP 500 when SecretStore is not configured", func(t *testing.T) {
 		root := t.TempDir()
-		configStore, err := flatfile.NewFlatFileConfigStore(filepath.Join(root, "configs"))
-		require.NoError(t, err)
+		configStore := pkgtesting.SetupTestStorage(t).GetConfigStore()
 
 		bindings, err := gitsync.NewBindingStore(root)
 		require.NoError(t, err)
@@ -542,8 +538,7 @@ func TestResolveWebhookSecret_SecretScheme(t *testing.T) {
 		// Do NOT store the key — GetSecret will return ErrSecretNotFound.
 
 		root := t.TempDir()
-		configStore, err := flatfile.NewFlatFileConfigStore(filepath.Join(root, "configs"))
-		require.NoError(t, err)
+		configStore := pkgtesting.SetupTestStorage(t).GetConfigStore()
 
 		bindings, err := gitsync.NewBindingStore(root)
 		require.NoError(t, err)
