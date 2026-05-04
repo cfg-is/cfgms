@@ -13,6 +13,7 @@ import (
 	"time"
 
 	cfgit "github.com/cfgis/cfgms/features/config/git"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // GitHubProvider implements the GitProvider interface for GitHub
@@ -22,16 +23,21 @@ type GitHubProvider struct {
 	token     string
 	owner     string
 	userAgent string
+	logger    logging.Logger
 }
 
 // NewGitHubProvider creates a new GitHub provider
-func NewGitHubProvider(token, owner string) *GitHubProvider {
+func NewGitHubProvider(token, owner string, logger logging.Logger) *GitHubProvider {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	return &GitHubProvider{
 		client:    &http.Client{Timeout: 30 * time.Second},
 		baseURL:   "https://api.github.com",
 		token:     token,
 		owner:     owner,
 		userAgent: "CFGMS-GitBackend/1.0",
+		logger:    logger,
 	}
 }
 
@@ -79,8 +85,10 @@ func (p *GitHubProvider) CreateRepository(ctx context.Context, config cfgit.Repo
 
 	// Set up branch protection for important branches
 	if err := p.setupInitialBranchProtection(ctx, repo); err != nil {
-		// Log but don't fail - this is not critical
-		fmt.Printf("warning: failed to set up branch protection: %v\n", err)
+		p.logger.Warn("failed to set up branch protection",
+			"repo", logging.SanitizeLogValue(repo.Name),
+			"error", err,
+		)
 	}
 
 	return repo, nil

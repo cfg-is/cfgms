@@ -4,19 +4,20 @@ package rollback
 
 import (
 	"context"
-	"log"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // DefaultRollbackNotifier provides a default implementation of RollbackNotifier
 type DefaultRollbackNotifier struct {
 	// In a real implementation, this would have email, webhook, or message queue clients
-	logger *log.Logger
+	logger logging.Logger
 }
 
 // NewDefaultRollbackNotifier creates a new default notifier
-func NewDefaultRollbackNotifier(logger *log.Logger) RollbackNotifier {
+func NewDefaultRollbackNotifier(logger logging.Logger) RollbackNotifier {
 	if logger == nil {
-		logger = log.Default()
+		logger = logging.NewNoopLogger()
 	}
 
 	return &DefaultRollbackNotifier{
@@ -26,12 +27,12 @@ func NewDefaultRollbackNotifier(logger *log.Logger) RollbackNotifier {
 
 // NotifyRollbackStarted sends a notification when rollback starts
 func (n *DefaultRollbackNotifier) NotifyRollbackStarted(ctx context.Context, operation *RollbackOperation) error {
-	n.logger.Printf("ROLLBACK STARTED: ID=%s, Target=%s/%s, Type=%s, User=%s",
-		operation.ID,
-		operation.Request.TargetType,
-		operation.Request.TargetID,
-		operation.Request.RollbackType,
-		operation.InitiatedBy,
+	n.logger.Info("rollback started",
+		"id", logging.SanitizeLogValue(operation.ID),
+		"target_type", logging.SanitizeLogValue(string(operation.Request.TargetType)),
+		"target_id", logging.SanitizeLogValue(operation.Request.TargetID),
+		"rollback_type", logging.SanitizeLogValue(string(operation.Request.RollbackType)),
+		"initiated_by", logging.SanitizeLogValue(operation.InitiatedBy),
 	)
 
 	// In a real implementation, this would:
@@ -45,11 +46,11 @@ func (n *DefaultRollbackNotifier) NotifyRollbackStarted(ctx context.Context, ope
 
 // NotifyRollbackProgress sends progress updates
 func (n *DefaultRollbackNotifier) NotifyRollbackProgress(ctx context.Context, operation *RollbackOperation) error {
-	n.logger.Printf("ROLLBACK PROGRESS: ID=%s, Stage=%s, Progress=%d%%, Action=%s",
-		operation.ID,
-		operation.Progress.Stage,
-		operation.Progress.Percentage,
-		operation.Progress.CurrentAction,
+	n.logger.Info("rollback progress",
+		"id", logging.SanitizeLogValue(operation.ID),
+		"stage", logging.SanitizeLogValue(operation.Progress.Stage),
+		"percentage", operation.Progress.Percentage,
+		"current_action", logging.SanitizeLogValue(operation.Progress.CurrentAction),
 	)
 
 	// In a real implementation, this would send progress updates
@@ -65,12 +66,12 @@ func (n *DefaultRollbackNotifier) NotifyRollbackCompleted(ctx context.Context, o
 		duration = operation.CompletedAt.Sub(operation.InitiatedAt).String()
 	}
 
-	n.logger.Printf("ROLLBACK COMPLETED: ID=%s, Success=%v, Duration=%s, Configs=%d, Devices=%d",
-		operation.ID,
-		operation.Result.Success,
-		duration,
-		operation.Result.ConfigurationsRolledBack,
-		operation.Result.DevicesAffected,
+	n.logger.Info("rollback completed",
+		"id", logging.SanitizeLogValue(operation.ID),
+		"success", operation.Result.Success,
+		"duration", duration,
+		"configs_rolled_back", operation.Result.ConfigurationsRolledBack,
+		"devices_affected", operation.Result.DevicesAffected,
 	)
 
 	// In a real implementation, this would send detailed completion reports
@@ -80,17 +81,17 @@ func (n *DefaultRollbackNotifier) NotifyRollbackCompleted(ctx context.Context, o
 
 // NotifyRollbackFailed sends failure notification
 func (n *DefaultRollbackNotifier) NotifyRollbackFailed(ctx context.Context, operation *RollbackOperation, err error) error {
-	n.logger.Printf("ROLLBACK FAILED: ID=%s, Error=%v",
-		operation.ID,
-		err,
+	n.logger.Error("rollback failed",
+		"id", logging.SanitizeLogValue(operation.ID),
+		"error", err,
 	)
 
 	if operation.Result != nil && len(operation.Result.Failures) > 0 {
 		for _, failure := range operation.Result.Failures {
-			n.logger.Printf("  - Component: %s, Error: %s, Recoverable: %v",
-				failure.Component,
-				failure.Error,
-				failure.Recoverable,
+			n.logger.Error("rollback failure detail",
+				"component", logging.SanitizeLogValue(failure.Component),
+				"error", logging.SanitizeLogValue(failure.Error),
+				"recoverable", failure.Recoverable,
 			)
 		}
 	}
@@ -106,13 +107,13 @@ func (n *DefaultRollbackNotifier) NotifyRollbackFailed(ctx context.Context, oper
 // WebhookNotifier sends notifications via webhooks
 type WebhookNotifier struct {
 	webhookURL string
-	logger     *log.Logger
+	logger     logging.Logger
 }
 
 // NewWebhookNotifier creates a new webhook notifier
-func NewWebhookNotifier(webhookURL string, logger *log.Logger) RollbackNotifier {
+func NewWebhookNotifier(webhookURL string, logger logging.Logger) RollbackNotifier {
 	if logger == nil {
-		logger = log.Default()
+		logger = logging.NewNoopLogger()
 	}
 
 	return &WebhookNotifier{
@@ -179,7 +180,7 @@ func (w *WebhookNotifier) sendWebhook(ctx context.Context, payload interface{}) 
 	// - Handle retries and failures
 	// - Respect rate limits
 
-	w.logger.Printf("Webhook notification: %+v", payload)
+	w.logger.Debug("webhook notification sent", "payload", payload)
 	return nil
 }
 
