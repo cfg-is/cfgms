@@ -21,6 +21,41 @@ import (
 	"github.com/cfgis/cfgms/pkg/testing/storage"
 )
 
+// TestManager_ConcreteCollaboratorTypes verifies that Manager stores concrete types
+// for the 4 collaborators that had single-impl interfaces eliminated (Issue #1234).
+// Before the fix these fields were interface types; the sessionSync field required
+// a type-assertion downcast to call Stop(). Now all four are concrete pointer types.
+func TestManager_ConcreteCollaboratorTypes(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "test-node-concrete-types"
+
+	mock := pkgtesting.NewMockLogger(true)
+	manager, err := NewManager(cfg, mock, storageManager)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+
+	t.Cleanup(func() {
+		if manager.raftConsensus != nil {
+			_ = manager.raftConsensus.Stop()
+		}
+	})
+
+	// All four collaborators must be non-nil concrete pointers after cluster-mode init.
+	require.NotNil(t, manager.sessionSync, "sessionSync must be initialized in cluster mode")
+	require.NotNil(t, manager.loadBalancer, "loadBalancer must be initialized in cluster mode")
+	require.NotNil(t, manager.failover, "failover must be initialized in cluster mode")
+	require.NotNil(t, manager.splitBrain, "splitBrain must be initialized in cluster mode")
+
+	// Stop() must be callable directly on the concrete *sessionSynchronizer field
+	// without any type-assertion downcast — the primary smell this issue removes.
+	ctx := context.Background()
+	assert.NoError(t, manager.sessionSync.Stop(ctx))
+}
+
 func TestManager_initRaft_logsInitStart(t *testing.T) {
 	mock := pkgtesting.NewMockLogger(true)
 

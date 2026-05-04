@@ -25,7 +25,6 @@ type runtimeStateStore interface {
 	DeleteRuntimeState(ctx context.Context, key string) error
 }
 
-// sessionSynchronizer implements SessionSynchronizer interface
 type sessionSynchronizer struct {
 	mu         sync.RWMutex
 	cfg        *SessionSyncConfig
@@ -60,7 +59,7 @@ type sessionState struct {
 }
 
 // NewSessionSynchronizer creates a new session synchronizer
-func NewSessionSynchronizer(cfg *SessionSyncConfig, logger logging.Logger, storage *interfaces.StorageManager, manager *Manager) (SessionSynchronizer, error) {
+func NewSessionSynchronizer(cfg *SessionSyncConfig, logger logging.Logger, storage *interfaces.StorageManager, manager *Manager) (*sessionSynchronizer, error) {
 	if cfg == nil {
 		cfg = &SessionSyncConfig{
 			Enabled:      true,

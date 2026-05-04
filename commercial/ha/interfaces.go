@@ -143,40 +143,10 @@ type HealthStatus struct {
 	Details   map[string]string    `json:"details,omitempty"`
 }
 
-// SessionSynchronizer handles session state synchronization across cluster nodes
-type SessionSynchronizer interface {
-	// SyncSessionState synchronizes session state to other cluster nodes
-	SyncSessionState(ctx context.Context, sessionID string, state interface{}) error
-
-	// GetSessionState retrieves session state from the cluster
-	GetSessionState(ctx context.Context, sessionID string) (interface{}, error)
-
-	// RemoveSessionState removes session state from the cluster
-	RemoveSessionState(ctx context.Context, sessionID string) error
-
-	// Subscribe to session state changes
-	Subscribe(ctx context.Context, handler SessionStateHandler) error
-}
-
 // SessionStateHandler handles session state change notifications
 type SessionStateHandler interface {
 	OnSessionStateChanged(sessionID string, state interface{}) error
 	OnSessionRemoved(sessionID string) error
-}
-
-// LoadBalancer handles request distribution across cluster nodes
-type LoadBalancer interface {
-	// GetNextNode returns the next node for load balancing
-	GetNextNode() (*NodeInfo, error)
-
-	// UpdateNodeHealth updates the health status of a node
-	UpdateNodeHealth(nodeID string, health *HealthStatus) error
-
-	// RemoveNode removes a node from load balancing
-	RemoveNode(nodeID string) error
-
-	// GetLoadBalancingStrategy returns the current strategy
-	GetLoadBalancingStrategy() LoadBalancingStrategy
 }
 
 // LoadBalancingStrategy represents different load balancing strategies
@@ -204,24 +174,6 @@ func (s LoadBalancingStrategy) String() string {
 	}
 }
 
-// FailoverManager handles automatic failover operations
-type FailoverManager interface {
-	// Start begins failover monitoring
-	Start(ctx context.Context) error
-
-	// Stop stops failover monitoring
-	Stop(ctx context.Context) error
-
-	// RegisterFailoverHandler registers a handler for failover events
-	RegisterFailoverHandler(handler FailoverHandler)
-
-	// TriggerFailover manually triggers a failover
-	TriggerFailover(ctx context.Context, reason string) error
-
-	// GetFailoverHistory returns recent failover events
-	GetFailoverHistory() ([]*FailoverEvent, error)
-}
-
 // FailoverHandler handles failover events
 type FailoverHandler interface {
 	OnFailoverStarted(event *FailoverEvent) error
@@ -240,21 +192,6 @@ type FailoverEvent struct {
 	SessionsMigrated int                    `json:"sessions_migrated"`
 	Status           string                 `json:"status"`
 	Details          map[string]interface{} `json:"details,omitempty"`
-}
-
-// SplitBrainDetector detects and prevents split-brain scenarios
-type SplitBrainDetector interface {
-	// Start begins split-brain detection
-	Start(ctx context.Context) error
-
-	// Stop stops split-brain detection
-	Stop(ctx context.Context) error
-
-	// CheckSplitBrain checks for split-brain conditions
-	CheckSplitBrain(ctx context.Context) (*SplitBrainStatus, error)
-
-	// RegisterSplitBrainHandler registers a handler for split-brain events
-	RegisterSplitBrainHandler(handler SplitBrainHandler)
 }
 
 // SplitBrainHandler handles split-brain detection events
