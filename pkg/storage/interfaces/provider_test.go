@@ -5,13 +5,69 @@ package interfaces
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
+
+// testLogEntry captures a single log call for test assertions.
+type testLogEntry struct {
+	Message string
+	Data    []interface{}
+}
+
+// testMockLogger captures log calls for assertion without importing pkg/testing
+// (which would create an import cycle via pkg/testing/storage_helper.go).
+type testMockLogger struct {
+	mu   sync.Mutex
+	logs map[string][]testLogEntry
+}
+
+func newTestMockLogger() *testMockLogger {
+	return &testMockLogger{logs: map[string][]testLogEntry{
+		"debug": {}, "info": {}, "warn": {}, "error": {}, "fatal": {},
+	}}
+}
+
+func (l *testMockLogger) record(level, msg string, kv []interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.logs[level] = append(l.logs[level], testLogEntry{Message: msg, Data: kv})
+}
+
+func (l *testMockLogger) GetLogs(level string) []testLogEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.logs[level]
+}
+
+func (l *testMockLogger) Debug(msg string, kv ...interface{}) { l.record("debug", msg, kv) }
+func (l *testMockLogger) Info(msg string, kv ...interface{})  { l.record("info", msg, kv) }
+func (l *testMockLogger) Warn(msg string, kv ...interface{})  { l.record("warn", msg, kv) }
+func (l *testMockLogger) Error(msg string, kv ...interface{}) { l.record("error", msg, kv) }
+func (l *testMockLogger) Fatal(msg string, kv ...interface{}) { l.record("fatal", msg, kv) }
+func (l *testMockLogger) DebugCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("debug", msg, kv)
+}
+func (l *testMockLogger) InfoCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("info", msg, kv)
+}
+func (l *testMockLogger) WarnCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("warn", msg, kv)
+}
+func (l *testMockLogger) ErrorCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("error", msg, kv)
+}
+func (l *testMockLogger) FatalCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("fatal", msg, kv)
+}
+
+var _ logging.Logger = (*testMockLogger)(nil)
 
 // MockStorageProvider implements StorageProvider for testing
 type MockStorageProvider struct {
@@ -1147,5 +1203,45 @@ func TestUnregisterStorageProvider(t *testing.T) {
 	success = UnregisterStorageProvider("nonexistent")
 	if success {
 		t.Errorf("Should not succeed unregistering non-existent provider")
+	}
+}
+
+func TestRegisterStorageProvider_routesThroughInjectedLogger(t *testing.T) {
+	// Save and clear registry
+	originalProviders := make(map[string]StorageProvider)
+	globalRegistry.mutex.RLock()
+	for name, provider := range globalRegistry.providers {
+		originalProviders[name] = provider
+	}
+	globalRegistry.mutex.RUnlock()
+
+	globalRegistry.mutex.Lock()
+	globalRegistry.providers = make(map[string]StorageProvider)
+	globalRegistry.mutex.Unlock()
+
+	defer func() {
+		globalRegistry.mutex.Lock()
+		globalRegistry.providers = originalProviders
+		globalRegistry.mutex.Unlock()
+	}()
+
+	mock := newTestMockLogger()
+	SetStorageLogger(mock)
+	defer SetStorageLogger(logging.NewNoopLogger())
+
+	testProvider := &MockStorageProvider{
+		name:        "test",
+		description: "test provider",
+		version:     "1.0",
+		available:   true,
+	}
+	RegisterStorageProvider(testProvider)
+
+	logs := mock.GetLogs("info")
+	if len(logs) == 0 {
+		t.Fatal("expected at least one info log entry after RegisterStorageProvider")
+	}
+	if logs[0].Message != "Registered storage provider: test v1.0" {
+		t.Errorf("unexpected log message: %q", logs[0].Message)
 	}
 }
