@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/cache"
 	"gopkg.in/yaml.v3"
 )
 
@@ -88,6 +89,10 @@ type MarketplaceConfig struct {
 
 	// Categories available in the marketplace
 	Categories []string
+
+	// Clock allows injecting a fake clock for deterministic TTL testing.
+	// Leave nil for production (defaults to time.Now()).
+	Clock cache.Clock
 }
 
 // Marketplace manages template discovery, distribution, and collaboration
@@ -95,9 +100,7 @@ type Marketplace struct {
 	config       MarketplaceConfig
 	registry     *TemplateRegistry
 	store        TemplateStore
-	catalogCache map[string]*MarketplaceTemplate
-	cacheMutex   sync.RWMutex
-	lastRefresh  time.Time
+	catalogCache *cache.Cache
 }
 
 // NewMarketplace creates a new template marketplace
@@ -123,10 +126,16 @@ func NewMarketplace(config MarketplaceConfig, store TemplateStore) *Marketplace 
 	}
 
 	return &Marketplace{
-		config:       config,
-		registry:     NewTemplateRegistry(),
-		store:        store,
-		catalogCache: make(map[string]*MarketplaceTemplate),
+		config:   config,
+		registry: NewTemplateRegistry(),
+		store:    store,
+		catalogCache: cache.NewCache(cache.CacheConfig{
+			Name:            "templates-catalog",
+			DefaultTTL:      config.RefreshInterval,
+			CleanupInterval: 1 * time.Minute,
+			EvictionPolicy:  cache.EvictionLRU,
+			Clock:           config.Clock,
+		}),
 	}
 }
 
@@ -137,12 +146,13 @@ func (m *Marketplace) Search(ctx context.Context, query MarketplaceSearchQuery) 
 		return nil, fmt.Errorf("failed to refresh catalog: %w", err)
 	}
 
-	m.cacheMutex.RLock()
-	defer m.cacheMutex.RUnlock()
-
 	var results []*MarketplaceTemplate
 
-	for _, template := range m.catalogCache {
+	for _, v := range m.catalogCache.GetMany(m.catalogCache.Keys()) {
+		template, ok := v.(*MarketplaceTemplate)
+		if !ok {
+			continue
+		}
 		if m.matchesQuery(template, query) {
 			results = append(results, template)
 		}
@@ -172,12 +182,11 @@ func (m *Marketplace) Get(ctx context.Context, templateID, version string) (*Mar
 	// Try local cache first
 	cacheKey := fmt.Sprintf("%s@%s", templateID, version)
 
-	m.cacheMutex.RLock()
-	if cached, exists := m.catalogCache[cacheKey]; exists {
-		m.cacheMutex.RUnlock()
-		return cached, nil
+	if v, found := m.catalogCache.Get(cacheKey); found {
+		if cached, ok := v.(*MarketplaceTemplate); ok {
+			return cached, nil
+		}
 	}
-	m.cacheMutex.RUnlock()
 
 	// Try local store
 	template, err := m.store.Get(ctx, templateID)
@@ -190,11 +199,10 @@ func (m *Marketplace) Get(ctx context.Context, templateID, version string) (*Mar
 		return nil, fmt.Errorf("failed to refresh catalog: %w", err)
 	}
 
-	m.cacheMutex.RLock()
-	defer m.cacheMutex.RUnlock()
-
-	if cached, exists := m.catalogCache[cacheKey]; exists {
-		return cached, nil
+	if v, found := m.catalogCache.Get(cacheKey); found {
+		if cached, ok := v.(*MarketplaceTemplate); ok {
+			return cached, nil
+		}
 	}
 
 	return nil, fmt.Errorf("template not found: %s@%s", templateID, version)
@@ -302,10 +310,10 @@ func (m *Marketplace) Publish(ctx context.Context, template *MarketplaceTemplate
 	}
 
 	// Add to catalog
-	m.cacheMutex.Lock()
 	cacheKey := fmt.Sprintf("%s@%s", template.ID, template.SemanticVersion)
-	m.catalogCache[cacheKey] = template
-	m.cacheMutex.Unlock()
+	if err := m.catalogCache.Set(cacheKey, template, 0); err != nil {
+		return fmt.Errorf("failed to cache template: %w", err)
+	}
 
 	return nil
 }
@@ -327,11 +335,7 @@ func (m *Marketplace) ListCategories() []string {
 // Helper methods
 
 func (m *Marketplace) refreshCatalogIfNeeded(ctx context.Context) error {
-	m.cacheMutex.RLock()
-	shouldRefresh := time.Since(m.lastRefresh) > m.config.RefreshInterval
-	m.cacheMutex.RUnlock()
-
-	if shouldRefresh {
+	if _, found := m.catalogCache.Get("catalog:refreshed"); !found {
 		return m.refreshCatalog(ctx)
 	}
 	return nil
@@ -349,17 +353,23 @@ func (m *Marketplace) refreshCatalog(ctx context.Context) error {
 		return err
 	}
 
-	m.cacheMutex.Lock()
-	defer m.cacheMutex.Unlock()
-
 	for _, template := range templates {
 		mt := m.convertToMarketplaceTemplate(template)
 		cacheKey := fmt.Sprintf("%s@%s", template.ID, template.Version)
-		m.catalogCache[cacheKey] = mt
+		if err := m.catalogCache.Set(cacheKey, mt, 0); err != nil {
+			return fmt.Errorf("failed to cache template %s: %w", cacheKey, err)
+		}
 	}
 
-	m.lastRefresh = time.Now()
+	if err := m.catalogCache.Set("catalog:refreshed", true, 0); err != nil {
+		return fmt.Errorf("failed to set catalog refresh sentinel: %w", err)
+	}
 	return nil
+}
+
+// Close stops the catalog cache cleanup routine and releases resources.
+func (m *Marketplace) Close() {
+	m.catalogCache.Close()
 }
 
 func (m *Marketplace) convertToMarketplaceTemplate(t *Template) *MarketplaceTemplate {
