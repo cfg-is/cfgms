@@ -88,9 +88,6 @@ const (
 // PerformanceConfig defines performance-related configuration
 type PerformanceConfig struct {
 	MaxProcessingTime        time.Duration `json:"max_processing_time"`
-	EnableCaching            bool          `json:"enable_caching"`
-	CacheTimeout             time.Duration `json:"cache_timeout"`
-	EnableParallelEval       bool          `json:"enable_parallel_eval"`
 	RiskAssessmentTimeout    time.Duration `json:"risk_assessment_timeout"`
 	ContinuousAuthTimeout    time.Duration `json:"continuous_auth_timeout"`
 	MaxContinuousAuthLatency time.Duration `json:"max_continuous_auth_latency"`
@@ -217,9 +214,6 @@ func NewEnhancedAccessControlManager(
 		enableZeroTrustPolicies: false,                       // Default to disabled
 		performanceConfig: &PerformanceConfig{
 			MaxProcessingTime:        5 * time.Second,
-			EnableCaching:            true,
-			CacheTimeout:             10 * time.Minute,
-			EnableParallelEval:       false,
 			RiskAssessmentTimeout:    2 * time.Second,
 			ContinuousAuthTimeout:    500 * time.Millisecond,
 			MaxContinuousAuthLatency: 10 * time.Millisecond,

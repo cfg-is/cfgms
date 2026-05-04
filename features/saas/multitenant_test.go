@@ -777,11 +777,9 @@ func TestMicrosoftMultiTenantProvider_CreateInTenant(t *testing.T) {
 	}
 }
 
-// TestMultiTenantManager_TenantCacheConcurrency verifies that concurrent writes
-// to tenantCache (from RefreshTenantDiscovery triggered directly and via
-// ListAccessibleTenants) do not cause data races under go test -race.
-// tenantCache has no direct read paths in the current code, so this test exercises
-// write-write safety. The RWMutex is chosen to be forward-compatible with future reads.
+// TestMultiTenantManager_TenantCacheConcurrency verifies that concurrent calls to
+// RefreshTenantDiscovery (triggered directly and via ListAccessibleTenants) do not
+// cause data races or errors under go test -race.
 func TestMultiTenantManager_TenantCacheConcurrency(t *testing.T) {
 	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
@@ -805,7 +803,7 @@ func TestMultiTenantManager_TenantCacheConcurrency(t *testing.T) {
 	require.NoError(t, err)
 
 	// Set LastTenantDiscovery in the past so ListAccessibleTenants triggers a
-	// RefreshTenantDiscovery call, maximising concurrent write contention on tenantCache.
+	// RefreshTenantDiscovery call, maximising concurrent write contention on the consentStore.
 	err = consentStore.StoreConsent(provider, &ConsentStatus{
 		Provider:            provider,
 		HasAdminConsent:     true,
