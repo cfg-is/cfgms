@@ -33,14 +33,14 @@ func TestManager_ConcreteCollaboratorTypes(t *testing.T) {
 	cfg.Mode = ClusterMode
 	cfg.Node.ID = "test-node-concrete-types"
 
-	mock := pkgtesting.NewMockLogger(true)
-	manager, err := NewManager(cfg, mock, storageManager)
+	logger := logging.GetLogger()
+	manager, err := NewManager(cfg, logger, storageManager)
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
 	t.Cleanup(func() {
 		if manager.raftConsensus != nil {
-			_ = manager.raftConsensus.Stop()
+			assert.NoError(t, manager.raftConsensus.Stop())
 		}
 	})
 
