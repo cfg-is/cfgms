@@ -515,32 +515,20 @@ func TestSIEMEngine_EndToEndProcessing(t *testing.T) {
 	err = engine.GetPatternMatcher().AddPattern(pattern)
 	require.NoError(t, err)
 
-	// Add a workflow trigger
-	siemTrigger := &trigger.Trigger{
-		ID:           "test-trigger",
-		Name:         "Security Alert Trigger",
-		Type:         trigger.TriggerTypeSIEM,
-		Status:       trigger.TriggerStatusActive,
-		TenantID:     "test-tenant",
-		WorkflowName: "security-response",
-		SIEM: &trigger.SIEMConfig{
-			EventTypes: []string{"pattern_match"},
-			Enabled:    true,
-		},
-	}
-
-	err = triggerManager.CreateTrigger(ctx, siemTrigger)
-	require.NoError(t, err)
-
 	// Process log entries that should trigger the pattern
+	var lastEntry interfaces.LogEntry
 	for i := 0; i < 10; i++ {
 		entry := createTestLogEntry("ERROR", "SECURITY_ALERT: Suspicious activity detected", "test-tenant")
 		err = engine.ProcessLogEntry(ctx, entry)
 		require.NoError(t, err)
+		lastEntry = entry
 	}
 
-	// Wait for processing
-	time.Sleep(500 * time.Millisecond)
+	// Verify the pattern matcher fires on the processed entries — MatchEntry is synchronous
+	matches, err := engine.GetPatternMatcher().MatchEntry(lastEntry)
+	require.NoError(t, err)
+	require.NotEmpty(t, matches, "expected pattern matcher to return at least one match")
+	assert.Equal(t, "test-pattern-security", matches[0].PatternID)
 
 	// Check metrics
 	metrics, err := engine.GetMetrics(ctx)
