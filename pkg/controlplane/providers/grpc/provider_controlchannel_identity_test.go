@@ -38,9 +38,9 @@ func newMultiStewardEnv(t *testing.T) *multiStewardEnv {
 	})
 	require.NoError(t, err)
 	require.NoError(t, server.Start(context.Background()))
-	t.Cleanup(func() { forceStopServer(server) })
+	t.Cleanup(server.ForceStop)
 
-	listenAddr := server.listener.Addr().String()
+	listenAddr := server.ListenAddr()
 
 	clientA := New(ModeClient)
 	err = clientA.Initialize(context.Background(), map[string]interface{}{

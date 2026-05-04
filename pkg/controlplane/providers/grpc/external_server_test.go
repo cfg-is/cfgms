@@ -22,8 +22,12 @@ func TestExternalServer_InitializeWithGRPCServer(t *testing.T) {
 		"grpc_server": grpcServer,
 	})
 	require.NoError(t, err)
-	assert.False(t, p.ownGRPCServer, "should not own the gRPC server")
-	assert.Same(t, grpcServer, p.grpcServer, "should store the provided gRPC server")
+	require.NoError(t, p.Start(context.Background()))
+	defer func() { _ = p.Stop(context.Background()) }()
+	// External server path: no QUIC listener is created
+	assert.Equal(t, "", p.ListenAddr(), "should not create a QUIC listener when external gRPC server provided")
+	// External server path: a handler is registered with the provided gRPC server
+	assert.NotNil(t, p.ServerHandler(), "should register handler with the external gRPC server")
 }
 
 func TestExternalServer_StartCreatesServerImpl(t *testing.T) {
@@ -40,8 +44,8 @@ func TestExternalServer_StartCreatesServerImpl(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = p.Stop(context.Background()) }()
 
-	assert.Nil(t, p.listener, "should not create a QUIC listener")
-	assert.NotNil(t, p.serverImpl, "should create serverImpl for handler delegation")
+	assert.Equal(t, "", p.ListenAddr(), "should not create a QUIC listener")
+	assert.NotNil(t, p.ServerHandler(), "should create serverImpl for handler delegation")
 }
 
 func TestExternalServer_ServerHandlerReturnsHandler(t *testing.T) {
@@ -132,13 +136,10 @@ func TestOwnedServer_StillWorks(t *testing.T) {
 		"tls_config": serverTLS,
 	})
 	require.NoError(t, err)
-	assert.True(t, p.ownGRPCServer, "should own the gRPC server when using addr")
-
 	err = p.Start(context.Background())
 	require.NoError(t, err)
-	defer forceStopServer(p)
+	defer p.ForceStop()
 
-	assert.NotNil(t, p.listener, "should create a QUIC listener")
-	assert.NotNil(t, p.grpcServer, "should create a gRPC server")
-	assert.True(t, p.IsConnected())
+	assert.NotEqual(t, "", p.ListenAddr(), "should create a QUIC listener when using addr")
+	assert.True(t, p.IsConnected(), "should be connected after Start with owned gRPC server")
 }

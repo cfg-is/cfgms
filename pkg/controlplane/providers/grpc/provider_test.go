@@ -51,7 +51,7 @@ func TestControlPlaneProvider_reconnectLoop_logsWarning(t *testing.T) {
 	}))
 	require.NoError(t, server.Start(context.Background()))
 
-	serverAddr := server.listener.Addr().String()
+	serverAddr := server.ListenAddr()
 	mockLog := pkgtesting.NewMockLogger(true)
 
 	client := New(ModeClient)
@@ -72,7 +72,7 @@ func TestControlPlaneProvider_reconnectLoop_logsWarning(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "steward should be registered before server is killed")
 
 	// Kill the server to trigger the reconnect loop on the client side.
-	forceStopServer(server)
+	server.ForceStop()
 
 	// The reconnect loop will fail to reconnect (server is gone) and emit a warn log.
 	require.Eventually(t, func() bool {
