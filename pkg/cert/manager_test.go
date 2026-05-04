@@ -579,8 +579,7 @@ func TestManager_ValidateCertificate_Expired(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ca := manager.ca.(*CA)
-	expiredPEM := generateExpiredCertPEM(t, ca)
+	expiredPEM := generateExpiredCertPEM(t, manager.ca)
 
 	result, err := manager.ValidateCertificate(expiredPEM)
 	require.NoError(t, err)

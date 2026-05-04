@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// FileStore implements CertificateStore using filesystem storage
+// FileStore provides filesystem-based certificate storage
 type FileStore struct {
 	mu       sync.RWMutex
 	basePath string
