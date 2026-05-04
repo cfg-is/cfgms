@@ -3,6 +3,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -11,10 +13,12 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/cmd/controller/service"
+	controllerapi "github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/version"
 	"github.com/spf13/cobra"
 
@@ -86,7 +90,12 @@ func runController(configPath string, initMode bool) error {
 			"then update your configuration to use 'flatfile' or 'database'")
 	}
 
-	loggingConfig, err := buildLoggingConfig(cfg, "main")
+	secretStore, err := controllerapi.NewSecretStore(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize secret store: %w", err)
+	}
+
+	loggingConfig, err := buildLoggingConfig(cfg, secretStore, "main")
 	if err != nil {
 		return err
 	}
@@ -274,6 +283,11 @@ func runInstall(configPath string) error {
 		return fmt.Errorf("failed to load configuration from %s: %w", configPath, err)
 	}
 
+	secretStore, err := controllerapi.NewSecretStore(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize secret store: %w", err)
+	}
+
 	caPath, err := resolveInstallCAPath(cfg, configPath)
 	if err != nil {
 		return err
@@ -281,7 +295,7 @@ func runInstall(configPath string) error {
 
 	if !initialization.IsInitialized(caPath) {
 		fmt.Println("Controller not yet initialized — running --init...")
-		loggingConfig, err := buildLoggingConfig(cfg, "install")
+		loggingConfig, err := buildLoggingConfig(cfg, secretStore, "install")
 		if err != nil {
 			return fmt.Errorf("failed to initialize logging: %w", err)
 		}
@@ -400,8 +414,8 @@ func resolveInstallCAPath(cfg *config.Config, configPath string) (string, error)
 // buildLoggingConfig constructs a complete LoggingConfig for the given component.
 // All fields are set identically regardless of call site so runController and
 // runInstall share the same logging shape.
-func buildLoggingConfig(cfg *config.Config, component string) (*logging.LoggingConfig, error) {
-	logProviderConfig, err := getLogProviderConfig(cfg)
+func buildLoggingConfig(cfg *config.Config, store secretsif.SecretStore, component string) (*logging.LoggingConfig, error) {
+	logProviderConfig, err := getLogProviderConfig(cfg, store)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build log provider config: %w", err)
 	}
@@ -430,7 +444,10 @@ func getLogProvider(cfg *config.Config) string {
 }
 
 // getLogProviderConfig creates provider-specific configuration.
-func getLogProviderConfig(cfg *config.Config) (map[string]interface{}, error) {
+// For the timescale provider all 6 connection fields are read exclusively from
+// the SecretStore under the "controller/logging/timescale/<field>" keys.
+// A missing secret is a hard startup error — there is no env var fallback.
+func getLogProviderConfig(cfg *config.Config, store secretsif.SecretStore) (map[string]interface{}, error) {
 	if cfg.Logging != nil && cfg.Logging.Config != nil && len(cfg.Logging.Config) > 0 {
 		return cfg.Logging.Config, nil
 	}
@@ -439,40 +456,29 @@ func getLogProviderConfig(cfg *config.Config) (map[string]interface{}, error) {
 
 	switch provider {
 	case "timescale":
-		password := os.Getenv("CFGMS_TIMESCALE_PASSWORD")
-		if password == "" {
-			return nil, fmt.Errorf("CFGMS_TIMESCALE_PASSWORD environment variable is required when " +
-				"using timescale logging provider; configure logging.config.password in the config " +
-				"file or set CFGMS_TIMESCALE_PASSWORD (see QUICK_START.md for examples)")
+		if store == nil {
+			return nil, fmt.Errorf("controller logging: SecretStore is required for TimescaleDB credentials")
 		}
-		host := os.Getenv("CFGMS_TIMESCALE_HOST")
-		if host == "" {
-			host = "localhost"
+		ctx := context.Background()
+		// field → leaf key under "controller/" tenant
+		// key format: controller/logging-timescale-<field>
+		// (SOPS store requires tenant/leaf where leaf must not contain '/')
+		fields := []string{"password", "host", "port", "database", "username", "ssl_mode"}
+		result := make(map[string]interface{}, len(fields))
+		for _, field := range fields {
+			leaf := "logging-timescale-" + strings.ReplaceAll(field, "_", "-")
+			key := "controller/" + leaf
+			secret, err := store.GetSecret(ctx, key)
+			if err != nil {
+				if errors.Is(err, secretsif.ErrSecretNotFound) {
+					return nil, fmt.Errorf("timescale %s: secret '%s' not found in store; "+
+						"pre-store via the secrets CLI before starting the controller", field, key)
+				}
+				return nil, fmt.Errorf("timescale %s: failed to retrieve secret '%s': %w", field, key, err)
+			}
+			result[field] = secret.Value
 		}
-		port := os.Getenv("CFGMS_TIMESCALE_PORT")
-		if port == "" {
-			port = "5432"
-		}
-		database := os.Getenv("CFGMS_TIMESCALE_DATABASE")
-		if database == "" {
-			database = "cfgms"
-		}
-		username := os.Getenv("CFGMS_TIMESCALE_USER")
-		if username == "" {
-			username = "cfgms"
-		}
-		sslMode := os.Getenv("CFGMS_TIMESCALE_SSLMODE")
-		if sslMode == "" {
-			sslMode = "require"
-		}
-		return map[string]interface{}{
-			"host":     host,
-			"port":     port,
-			"database": database,
-			"username": username,
-			"password": password,
-			"ssl_mode": sslMode,
-		}, nil
+		return result, nil
 
 	default:
 		return map[string]interface{}{

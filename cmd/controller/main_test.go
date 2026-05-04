@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,9 @@ import (
 
 	"github.com/cfgis/cfgms/cmd/controller/service"
 	"github.com/cfgis/cfgms/features/controller/config"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -130,36 +134,75 @@ func TestRunControllerNoDebugOutput(t *testing.T) {
 		"runController must not write [DEBUG] output to stdout")
 }
 
-// TestGetLogProviderConfigTimescaleMissingPassword verifies that getLogProviderConfig
-// returns a non-nil error when the timescale provider is configured but
-// CFGMS_TIMESCALE_PASSWORD is not set.
-func TestGetLogProviderConfigTimescaleMissingPassword(t *testing.T) {
-	t.Setenv("CFGMS_TIMESCALE_PASSWORD", "")
-	cfg := &config.Config{
-		Logging: &config.LoggingConfig{
-			Provider: "timescale",
-		},
-	}
-	result, err := getLogProviderConfig(cfg)
-	require.Error(t, err, "expected error when CFGMS_TIMESCALE_PASSWORD is unset")
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "CFGMS_TIMESCALE_PASSWORD")
-}
+// TestGetLogProviderConfig_SecretsResolution verifies that getLogProviderConfig
+// loads all 6 TimescaleDB fields from a real SOPS-backed SecretStore in t.TempDir().
+// Keys follow the controller/logging-timescale-<field> convention required by the
+// SOPS store (tenant/leaf where the leaf must not contain '/').
+func TestGetLogProviderConfig_SecretsResolution(t *testing.T) {
+	store := newTestSecretStore(t)
+	ctx := context.Background()
 
-// TestGetLogProviderConfigTimescaleWithPassword verifies that getLogProviderConfig
-// returns a nil error and a map containing the "password" key when
-// CFGMS_TIMESCALE_PASSWORD is set.
-func TestGetLogProviderConfigTimescaleWithPassword(t *testing.T) {
-	t.Setenv("CFGMS_TIMESCALE_PASSWORD", "secret123")
-	cfg := &config.Config{
-		Logging: &config.LoggingConfig{
-			Provider: "timescale",
-		},
+	// Store each field under its production key: controller/logging-timescale-<field>
+	// ssl_mode uses a hyphen: logging-timescale-ssl-mode
+	fieldSecrets := map[string]string{
+		"logging-timescale-password": "s3cr3t",
+		"logging-timescale-host":     "timescale.example.com",
+		"logging-timescale-port":     "5432",
+		"logging-timescale-database": "cfgms_logs",
+		"logging-timescale-username": "cfgms_user",
+		"logging-timescale-ssl-mode": "require",
 	}
-	result, err := getLogProviderConfig(cfg)
+	for leaf, value := range fieldSecrets {
+		err := store.StoreSecret(ctx, &secretsif.SecretRequest{
+			Key:       leaf,
+			TenantID:  "controller",
+			Value:     value,
+			CreatedBy: "test",
+		})
+		require.NoError(t, err, "pre-populating secret %q", leaf)
+	}
+
+	cfg := &config.Config{
+		Logging: &config.LoggingConfig{Provider: "timescale"},
+	}
+	result, err := getLogProviderConfig(cfg, store)
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.Equal(t, "secret123", result["password"])
+	assert.Equal(t, "s3cr3t", result["password"])
+	assert.Equal(t, "timescale.example.com", result["host"])
+	assert.Equal(t, "5432", result["port"])
+	assert.Equal(t, "cfgms_logs", result["database"])
+	assert.Equal(t, "cfgms_user", result["username"])
+	assert.Equal(t, "require", result["ssl_mode"])
+}
+
+// TestGetLogProviderConfig_FailsWithoutPassword verifies that getLogProviderConfig
+// returns a clear startup error naming the missing secret key when the password
+// secret is absent from the store.
+func TestGetLogProviderConfig_FailsWithoutPassword(t *testing.T) {
+	store := newTestSecretStore(t) // empty store — no secrets pre-populated
+
+	cfg := &config.Config{
+		Logging: &config.LoggingConfig{Provider: "timescale"},
+	}
+	_, err := getLogProviderConfig(cfg, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "controller/logging-timescale-password")
+	assert.Contains(t, err.Error(), "not found")
+}
+
+// newTestSecretStore creates a real SOPS-backed SecretStore rooted in t.TempDir().
+func newTestSecretStore(t *testing.T) secretsif.SecretStore {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := secretsif.CreateSecretStoreFromConfig("sops", map[string]interface{}{
+		"storage_provider": "flatfile",
+		"storage_config":   map[string]interface{}{"root": dir},
+		"cache_enabled":    false,
+	})
+	require.NoError(t, err, "creating test secret store")
+	t.Cleanup(func() { _ = store.Close() })
+	return store
 }
 
 // TestBuildLoggingConfigFieldsComplete asserts that buildLoggingConfig populates
@@ -168,7 +211,7 @@ func TestBuildLoggingConfigFieldsComplete(t *testing.T) {
 	cfg := &config.Config{
 		LogLevel: "debug",
 	}
-	lc, err := buildLoggingConfig(cfg, "test")
+	lc, err := buildLoggingConfig(cfg, nil, "test")
 	require.NoError(t, err)
 	require.NotNil(t, lc)
 
@@ -190,10 +233,10 @@ func TestRunInstallLoggingConfigMatchesRunController(t *testing.T) {
 		LogLevel: "info",
 	}
 
-	mainCfg, err := buildLoggingConfig(cfg, "main")
+	mainCfg, err := buildLoggingConfig(cfg, nil, "main")
 	require.NoError(t, err)
 
-	installCfg, err := buildLoggingConfig(cfg, "install")
+	installCfg, err := buildLoggingConfig(cfg, nil, "install")
 	require.NoError(t, err)
 
 	assert.Equal(t, mainCfg.Level, installCfg.Level)
