@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 func TestAuditLogger_LogExecution(t *testing.T) {
@@ -347,6 +349,90 @@ func TestCreateAuditRecord_WithError(t *testing.T) {
 	if record.ErrorMessage != testError.Error() {
 		t.Errorf("Expected error message %s, got %s", testError.Error(), record.ErrorMessage)
 	}
+}
+
+func TestAuditLogger_LogExecution_ContextExtraction(t *testing.T) {
+	t.Run("typed keys populate record fields", func(t *testing.T) {
+		logger := NewAuditLogger(10)
+		ctx := context.Background()
+		ctx = context.WithValue(ctx, ctxkeys.CorrelationIDKey, "corr-abc")
+		ctx = context.WithValue(ctx, ctxkeys.UserIDKey, "user-xyz")
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, "tenant-123")
+
+		record := &AuditRecord{
+			StewardID:     "s1",
+			ResourceID:    "r1",
+			ExecutionTime: time.Now(),
+			Status:        StatusCompleted,
+		}
+		if err := logger.LogExecution(ctx, record); err != nil {
+			t.Fatalf("LogExecution returned error: %v", err)
+		}
+
+		if record.CorrelationID != "corr-abc" {
+			t.Errorf("CorrelationID: got %q, want %q", record.CorrelationID, "corr-abc")
+		}
+		if record.UserID != "user-xyz" {
+			t.Errorf("UserID: got %q, want %q", record.UserID, "user-xyz")
+		}
+		if record.TenantID != "tenant-123" {
+			t.Errorf("TenantID: got %q, want %q", record.TenantID, "tenant-123")
+		}
+	})
+
+	t.Run("missing typed keys leave fields empty", func(t *testing.T) {
+		logger := NewAuditLogger(10)
+
+		record := &AuditRecord{
+			StewardID:     "s2",
+			ResourceID:    "r2",
+			ExecutionTime: time.Now(),
+			Status:        StatusCompleted,
+		}
+		if err := logger.LogExecution(context.Background(), record); err != nil {
+			t.Fatalf("LogExecution returned error: %v", err)
+		}
+
+		if record.CorrelationID != "" {
+			t.Errorf("CorrelationID should be empty, got %q", record.CorrelationID)
+		}
+		if record.UserID != "" {
+			t.Errorf("UserID should be empty, got %q", record.UserID)
+		}
+		if record.TenantID != "" {
+			t.Errorf("TenantID should be empty, got %q", record.TenantID)
+		}
+	})
+
+	t.Run("plain string keys do not populate record fields", func(t *testing.T) {
+		logger := NewAuditLogger(10)
+		//nolint:staticcheck // SA1029: intentionally using plain strings to verify typed keys are required
+		ctx := context.WithValue(context.Background(), "correlation_id", "plain-corr")
+		//nolint:staticcheck // SA1029: intentionally using plain strings to verify typed keys are required
+		ctx = context.WithValue(ctx, "user_id", "plain-user")
+		//nolint:staticcheck // SA1029: intentionally using plain strings to verify typed keys are required
+		ctx = context.WithValue(ctx, "tenant_id", "plain-tenant")
+
+		record := &AuditRecord{
+			StewardID:     "s3",
+			ResourceID:    "r3",
+			ExecutionTime: time.Now(),
+			Status:        StatusCompleted,
+		}
+		if err := logger.LogExecution(ctx, record); err != nil {
+			t.Fatalf("LogExecution returned error: %v", err)
+		}
+
+		if record.CorrelationID != "" {
+			t.Errorf("plain string key must not set CorrelationID, got %q", record.CorrelationID)
+		}
+		if record.UserID != "" {
+			t.Errorf("plain string key must not set UserID, got %q", record.UserID)
+		}
+		if record.TenantID != "" {
+			t.Errorf("plain string key must not set TenantID, got %q", record.TenantID)
+		}
+	})
 }
 
 func TestAuditLogger_Pagination(t *testing.T) {

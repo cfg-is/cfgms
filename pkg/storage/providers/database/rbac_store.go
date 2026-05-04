@@ -11,6 +11,8 @@ import (
 	"time"
 
 	_ "github.com/lib/pq" // PostgreSQL driver
+
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // ErrCrossTenantAccessDenied is returned when attempting to access a resource from a different tenant
@@ -115,7 +117,7 @@ func (s *DatabaseRBACStore) validateTenantAccess(ctx context.Context, resourceTe
 	}
 
 	// Extract authenticated tenant ID from context
-	authTenantIDValue := ctx.Value("tenant_id")
+	authTenantIDValue := ctx.Value(ctxkeys.TenantID)
 	if authTenantIDValue == nil {
 		// If no tenant_id in context, allow operation (backwards compatibility)
 		// This supports operations from internal system components

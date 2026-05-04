@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // AuditLogger handles comprehensive audit logging for script executions
@@ -117,13 +119,13 @@ func (al *AuditLogger) LogExecution(ctx context.Context, record *AuditRecord) er
 	}
 
 	// Extract context information
-	if correlationID, ok := ctx.Value("correlation_id").(string); ok {
+	if correlationID, ok := ctx.Value(ctxkeys.CorrelationIDKey).(string); ok {
 		record.CorrelationID = correlationID
 	}
-	if userID, ok := ctx.Value("user_id").(string); ok {
+	if userID, ok := ctx.Value(ctxkeys.UserIDKey).(string); ok {
 		record.UserID = userID
 	}
-	if tenantID, ok := ctx.Value("tenant_id").(string); ok {
+	if tenantID, ok := ctx.Value(ctxkeys.TenantID).(string); ok {
 		record.TenantID = tenantID
 	}
 

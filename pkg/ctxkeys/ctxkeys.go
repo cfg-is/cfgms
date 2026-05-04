@@ -4,16 +4,13 @@
 // defined here to avoid cross-feature imports.
 package ctxkeys
 
-// ContextKey is the type for shared context keys. Using a named type
-// prevents accidental collisions with keys from other packages.
-type ContextKey string
+// tenantIDKeyType is unexported to prevent external construction and key aliasing.
+type tenantIDKeyType struct{}
 
-const (
-	// TenantID is the context key for the authenticated tenant ID.
-	// Set by the auth middleware after validating an API key and read by
-	// config handlers, service methods, and terminal session managers to enforce tenant isolation.
-	TenantID ContextKey = "tenant_id"
-)
+// TenantID is the canonical context key for the authenticated tenant ID.
+// Set by the auth middleware after validating an API key and read by
+// config handlers, service methods, and terminal session managers to enforce tenant isolation.
+var TenantID = tenantIDKeyType{}
 
 // correlationIDKeyType is unexported so no external package can construct a value of this type,
 // preventing key aliasing across package boundaries (the standard Go "opaque key" idiom).
@@ -23,3 +20,9 @@ type correlationIDKeyType struct{}
 // Both pkg/logging and pkg/telemetry store and read correlation IDs under this key,
 // so that logging.WithCorrelation and telemetry.GetCorrelationID share the same slot.
 var CorrelationIDKey = correlationIDKeyType{}
+
+// userIDKeyType is unexported to prevent external construction and key aliasing.
+type userIDKeyType struct{}
+
+// UserIDKey is the canonical context key for the authenticated user ID.
+var UserIDKey = userIDKeyType{}
