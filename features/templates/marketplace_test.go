@@ -4,6 +4,7 @@ package templates_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +13,24 @@ import (
 
 	"github.com/cfgis/cfgms/features/templates"
 )
+
+// fakeClock is a controllable clock for deterministic TTL testing.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (f *fakeClock) Now() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.now
+}
+
+func (f *fakeClock) advance(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.now = f.now.Add(d)
+}
 
 func TestMarketplace_BasicOperations(t *testing.T) {
 	// Setup
@@ -22,10 +41,12 @@ func TestMarketplace_BasicOperations(t *testing.T) {
 		RefreshInterval:         1 * time.Hour,
 	}
 	marketplace := templates.NewMarketplace(config, store)
+	defer marketplace.Close()
 
 	ctx := context.Background()
 
-	// Create a test template
+	// Create a test template. Metadata["category"] is required so that
+	// convertToMarketplaceTemplate can reconstruct Category after a store refresh.
 	testTemplate := &templates.MarketplaceTemplate{
 		Template: &templates.Template{
 			ID:          "test-template",
@@ -36,6 +57,7 @@ func TestMarketplace_BasicOperations(t *testing.T) {
 			Tags:        []string{"test", "example"},
 			CreatedAt:   time.Now(),
 			UpdatedAt:   time.Now(),
+			Metadata:    map[string]interface{}{"category": "security"},
 		},
 		Author:          "Test Author",
 		License:         "MIT",
@@ -55,21 +77,20 @@ func TestMarketplace_BasicOperations(t *testing.T) {
 	assert.Equal(t, "Test Template", retrieved.Name)
 	assert.Equal(t, "Test Author", retrieved.Author)
 
-	// Test: List templates (may return 0 if catalog not refreshed yet)
+	// Test: List templates — sentinel is absent after Publish, so refresh fires and
+	// loads the published template from the store.
 	templateList, err := marketplace.List(ctx, "security")
 	require.NoError(t, err)
-	// Note: List may return 0 results until catalog refresh interval passes
-	assert.GreaterOrEqual(t, len(templateList), 0)
+	assert.GreaterOrEqual(t, len(templateList), 1, "published security template must appear after catalog refresh")
 
-	// Test: Search templates (may return 0 if catalog not refreshed yet)
+	// Test: Search templates — sentinel is now set, cache is warm, template matches.
 	searchQuery := templates.MarketplaceSearchQuery{
 		Query:    "test",
 		Category: "security",
 	}
 	searchResults, err := marketplace.Search(ctx, searchQuery)
 	require.NoError(t, err)
-	// Note: Search may return 0 results until catalog refresh interval passes
-	assert.GreaterOrEqual(t, len(searchResults), 0)
+	assert.GreaterOrEqual(t, len(searchResults), 1, "published template matches 'test' query in security category")
 }
 
 func TestMarketplace_Search(t *testing.T) {
@@ -80,6 +101,7 @@ func TestMarketplace_Search(t *testing.T) {
 		LocalCachePath:          t.TempDir(),
 	}
 	marketplace := templates.NewMarketplace(config, store)
+	defer marketplace.Close()
 
 	ctx := context.Background()
 
@@ -95,6 +117,7 @@ func TestMarketplace_Search(t *testing.T) {
 				Tags:        []string{"security", "ssh", "linux"},
 				CreatedAt:   time.Now(),
 				UpdatedAt:   time.Now(),
+				Metadata:    map[string]interface{}{"category": "security"},
 			},
 			Author:               "CFGMS Team",
 			License:              "MIT",
@@ -113,6 +136,7 @@ func TestMarketplace_Search(t *testing.T) {
 				Tags:        []string{"security", "baseline", "linux"},
 				CreatedAt:   time.Now(),
 				UpdatedAt:   time.Now(),
+				Metadata:    map[string]interface{}{"category": "security"},
 			},
 			Author:               "CFGMS Team",
 			License:              "MIT",
@@ -131,6 +155,7 @@ func TestMarketplace_Search(t *testing.T) {
 				Tags:        []string{"backup", "system"},
 				CreatedAt:   time.Now(),
 				UpdatedAt:   time.Now(),
+				Metadata:    map[string]interface{}{"category": "system"},
 			},
 			Author:          "CFGMS Team",
 			License:         "MIT",
@@ -146,14 +171,14 @@ func TestMarketplace_Search(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Test: Search by category
+	// Test: Search by category — first Search triggers a catalog refresh (sentinel absent),
+	// loading all 3 published templates from the store. Two are in "security" category.
 	t.Run("SearchByCategory", func(t *testing.T) {
 		results, err := marketplace.Search(ctx, templates.MarketplaceSearchQuery{
 			Category: "security",
 		})
 		require.NoError(t, err)
-		// Note: Results depend on catalog refresh timing
-		assert.GreaterOrEqual(t, len(results), 0)
+		assert.GreaterOrEqual(t, len(results), 2, "ssh-hardening and baseline-security are both security templates")
 	})
 
 	// Test: Search by query
@@ -174,14 +199,16 @@ func TestMarketplace_Search(t *testing.T) {
 		assert.GreaterOrEqual(t, len(results), 1)
 	})
 
-	// Test: Search by compliance framework
+	// Test: Search by compliance framework — catalog is warm from SearchByCategory.
+	// ComplianceFrameworks is not stored in Template.Metadata and therefore not
+	// recovered by convertToMarketplaceTemplate after a store refresh. The search
+	// returns 0 results, which is the expected post-refresh behaviour.
 	t.Run("SearchByCompliance", func(t *testing.T) {
 		results, err := marketplace.Search(ctx, templates.MarketplaceSearchQuery{
 			ComplianceFrameworks: []string{"CIS"},
 		})
 		require.NoError(t, err)
-		// Note: Results depend on catalog refresh timing
-		assert.GreaterOrEqual(t, len(results), 0)
+		assert.Equal(t, 0, len(results), "ComplianceFrameworks is not preserved through store refresh")
 	})
 }
 
@@ -193,6 +220,7 @@ func TestMarketplace_Fork(t *testing.T) {
 		LocalCachePath:          t.TempDir(),
 	}
 	marketplace := templates.NewMarketplace(config, store)
+	defer marketplace.Close()
 
 	ctx := context.Background()
 
@@ -243,6 +271,7 @@ func TestMarketplace_Install(t *testing.T) {
 		LocalCachePath:          t.TempDir(),
 	}
 	marketplace := templates.NewMarketplace(config, store)
+	defer marketplace.Close()
 
 	ctx := context.Background()
 
@@ -314,6 +343,7 @@ func TestMarketplace_Validation(t *testing.T) {
 		LocalCachePath:          t.TempDir(),
 	}
 	marketplace := templates.NewMarketplace(config, store)
+	defer marketplace.Close()
 
 	ctx := context.Background()
 
@@ -406,6 +436,7 @@ func TestMarketplace_ListCategories(t *testing.T) {
 		LocalCachePath:          t.TempDir(),
 	}
 	marketplace := templates.NewMarketplace(config, store)
+	defer marketplace.Close()
 
 	// Test: List categories
 	categories := marketplace.ListCategories()
@@ -416,4 +447,84 @@ func TestMarketplace_ListCategories(t *testing.T) {
 	assert.Contains(t, categories, "networking")
 	assert.Contains(t, categories, "system")
 	assert.Contains(t, categories, "application")
+}
+
+func TestMarketplace_CatalogCacheTTL(t *testing.T) {
+	clk := &fakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+
+	store := templates.NewInMemoryTemplateStore()
+	refreshInterval := 5 * time.Minute
+	config := templates.MarketplaceConfig{
+		AllowCommunityTemplates: true,
+		LocalCachePath:          t.TempDir(),
+		RefreshInterval:         refreshInterval,
+		Clock:                   clk,
+	}
+	marketplace := templates.NewMarketplace(config, store)
+	defer marketplace.Close()
+
+	ctx := context.Background()
+
+	tmpl := &templates.MarketplaceTemplate{
+		Template: &templates.Template{
+			ID:          "ttl-test",
+			Name:        "TTL Test Template",
+			Content:     []byte("content"),
+			Version:     "1.0.0",
+			Description: "Template for TTL testing",
+			Tags:        []string{"test"},
+			CreatedAt:   clk.Now(),
+			UpdatedAt:   clk.Now(),
+		},
+		Author:          "Test Author",
+		License:         "MIT",
+		Category:        "security",
+		SemanticVersion: "1.0.0",
+	}
+
+	// Publish saves the template to the store and adds it to the cache directly.
+	err := marketplace.Publish(ctx, tmpl)
+	require.NoError(t, err)
+
+	// First Search call: "catalog:refreshed" sentinel is absent — triggers refreshCatalog,
+	// which loads tmpl from the store. Results must include tmpl.
+	results, err := marketplace.Search(ctx, templates.MarketplaceSearchQuery{})
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, len(results), 1, "post-refresh results must include the published template")
+
+	// Second Search within TTL: sentinel hit — no second refresh.
+	// Advance time by less than RefreshInterval.
+	clk.advance(refreshInterval / 2)
+	results2, err := marketplace.Search(ctx, templates.MarketplaceSearchQuery{})
+	require.NoError(t, err)
+	// Result count must be the same; no new items were added.
+	assert.Equal(t, len(results), len(results2), "within TTL, cache should serve the same data")
+
+	// Advance past TTL: sentinel expires, next Search must trigger refresh.
+	clk.advance(refreshInterval + time.Second)
+
+	// Add a second template to the store while the cache is expired.
+	tmpl2 := &templates.MarketplaceTemplate{
+		Template: &templates.Template{
+			ID:          "ttl-test-2",
+			Name:        "TTL Test Template 2",
+			Content:     []byte("content2"),
+			Version:     "1.0.0",
+			Description: "Second template added after TTL expiry",
+			Tags:        []string{"test"},
+			CreatedAt:   clk.Now(),
+			UpdatedAt:   clk.Now(),
+		},
+		Author:          "Test Author",
+		License:         "MIT",
+		Category:        "security",
+		SemanticVersion: "1.0.0",
+	}
+	err = marketplace.Publish(ctx, tmpl2)
+	require.NoError(t, err)
+
+	// After TTL expiry, Search must trigger a fresh refresh and pick up tmpl2.
+	results3, err := marketplace.Search(ctx, templates.MarketplaceSearchQuery{})
+	require.NoError(t, err)
+	assert.Greater(t, len(results3), len(results), "post-TTL refresh should return more results")
 }
