@@ -294,7 +294,6 @@ type PatchModule struct {
 }
 
 // WindowManager defines the interface for maintenance window management
-// This is imported from pkg/maintenance but defined here to avoid circular imports
 type WindowManager interface {
 	CanReboot(ctx context.Context, deviceID string) (bool, error)
 	CanPerformMaintenance(ctx context.Context, deviceID string) (bool, error)
