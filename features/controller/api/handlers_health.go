@@ -4,6 +4,7 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/cfgis/cfgms/pkg/version"
 )
@@ -14,7 +15,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	health := HealthStatus{
 		Status:    "healthy",
 		Version:   version.ShortWithoutPrefix(),
-		Timestamp: getCurrentTimestamp(),
+		Timestamp: time.Now().UTC(),
 		Services:  make(map[string]string),
 	}
 

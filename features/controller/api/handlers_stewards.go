@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"gopkg.in/yaml.v3"
@@ -294,7 +295,7 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 		StewardID: stewardID,
 		Version:   configResp.Version,
 		Config:    config,
-		UpdatedAt: getCurrentTimestamp(),
+		UpdatedAt: time.Now().UTC(),
 	}
 
 	s.writeSuccessResponse(w, configInfo)

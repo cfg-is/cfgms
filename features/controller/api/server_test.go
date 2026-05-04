@@ -1194,6 +1194,27 @@ func TestTenantContextKeyType(t *testing.T) {
 	assert.Nil(t, oldVal, "old plain string 'tenant-id' must not match the typed ctxkeys.TenantID")
 }
 
+// TestServer_CertificateRevokeRouteDeregistered confirms the POST
+// /api/v1/certificates/{serial}/revoke route has been removed.
+// Must return 404 (no route) or 405 (route exists, wrong method) — NOT 501.
+func TestServer_CertificateRevokeRouteDeregistered(t *testing.T) {
+	server := setupTestServer(t)
+
+	revokeKey := NewTestKey(t, server, []string{"certificate:revoke"})
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/any-serial/revoke", nil)
+	req.Header.Set("X-API-Key", revokeKey)
+	rec := httptest.NewRecorder()
+
+	server.router.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusNotImplemented, rec.Code,
+		"route must not return 501 — handler was deleted")
+	assert.True(t,
+		rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed,
+		"deregistered revoke route must return 404 or 405, got %d", rec.Code)
+}
+
 // TestServer_SetWorkflowHandler_PropagatesFleetQuery verifies that SetWorkflowHandler
 // propagates the server's fleet query to the workflow handler (Issue #609).
 // This exercises the integration path: server.fleetQuery → handler.fleetQuery.
