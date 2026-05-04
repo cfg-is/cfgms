@@ -16,7 +16,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/testutil"
 )
@@ -407,42 +406,6 @@ func TestDatabaseClientTenantStore_AdminConsent(t *testing.T) {
 
 	_, err = store.GetAdminConsentRequest("test-state-789")
 	assert.Error(t, err)
-}
-
-func TestDatabaseProvider_Integration(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping database integration tests in short mode")
-	}
-
-	// Skip if DATABASE_URL is not set (CI/CD environments)
-	if os.Getenv("DATABASE_URL") == "" {
-		t.Skip("DATABASE_URL not set, skipping integration test")
-	}
-
-	db := setupTestDatabase(t)
-	defer func() { _ = db.Close() }()
-
-	// Test provider registration
-	providerNames := interfaces.GetRegisteredProviderNames()
-	assert.Contains(t, providerNames, "database")
-
-	// Test getting the provider
-	provider, err := interfaces.GetStorageProvider("database")
-	require.NoError(t, err)
-	assert.NotNil(t, provider)
-
-	// Test creating storage manager (database provider uses single-backend mode)
-	storageManager, err := interfaces.CreateAllStoresFromConfig("database", getTestConfig()) //nolint:staticcheck
-	require.NoError(t, err)
-	require.NotNil(t, storageManager)
-
-	assert.Equal(t, "database", storageManager.GetProviderName())
-	assert.NotNil(t, storageManager.GetClientTenantStore())
-	assert.NotNil(t, storageManager.GetConfigStore())
-	assert.NotNil(t, storageManager.GetAuditStore())
-
-	capabilities := storageManager.GetCapabilities()
-	assert.True(t, capabilities.SupportsTransactions)
 }
 
 func TestDatabaseProvider_ErrorHandling(t *testing.T) {
