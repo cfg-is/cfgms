@@ -11,6 +11,7 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/config/rollback"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -23,7 +24,7 @@ import (
 type ConfigurationServiceV2 struct {
 	logger              logging.Logger
 	configManager       *config.Manager
-	rollbackManager     *config.RollbackManager
+	rollbackManager     rollback.RollbackManager
 	inheritanceResolver *config.InheritanceResolver
 	validationManager   *config.ValidationManager
 	controllerSvc       *ControllerService
@@ -35,12 +36,16 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 	return &ConfigurationServiceV2{
 		logger:              logger,
 		configManager:       config.NewManagerWithStorageManager(storageManager),
-		rollbackManager:     config.NewRollbackManagerWithStorageManager(storageManager),
 		inheritanceResolver: config.NewInheritanceResolverWithStorageManager(storageManager),
 		validationManager:   config.NewValidationManager(storageManager.GetConfigStore()),
 		controllerSvc:       controllerSvc,
 		storageManager:      storageManager,
 	}
+}
+
+// SetRollbackManager wires the canonical rollback manager into the service.
+func (s *ConfigurationServiceV2) SetRollbackManager(m rollback.RollbackManager) {
+	s.rollbackManager = m
 }
 
 // GetConfiguration retrieves configuration for a specific steward using ConfigStore
@@ -165,36 +170,67 @@ func (s *ConfigurationServiceV2) GetEffectiveConfiguration(ctx context.Context, 
 	return s.inheritanceResolver.ResolveConfiguration(ctx, tenantID, stewardID)
 }
 
-// RollbackConfiguration performs configuration rollback using storage versioning
+// RollbackConfiguration performs configuration rollback via the canonical rollback manager.
 func (s *ConfigurationServiceV2) RollbackConfiguration(ctx context.Context, request *config.RollbackRequest) (*config.RollbackResponse, error) {
-	s.logger.Info("Configuration rollback requested",
-		"tenant_id", request.TenantID,
-		"steward_id", request.StewardID,
-		"target_version", request.TargetVersion,
-		"reason", request.Reason,
-		"requested_by", request.RequestedBy)
+	if s.rollbackManager == nil {
+		return nil, fmt.Errorf("rollback manager not initialized")
+	}
 
-	response, err := s.rollbackManager.PerformRollback(ctx, request)
+	s.logger.Info("Configuration rollback requested",
+		"steward_id", logging.SanitizeLogValue(request.StewardID),
+		"target_version", request.TargetVersion,
+		"reason", logging.SanitizeLogValue(request.Reason))
+
+	translated := s.translateRollbackRequest(request)
+	op, err := s.rollbackManager.ExecuteRollback(ctx, translated)
 	if err != nil {
 		s.logger.Error("Configuration rollback failed",
-			"tenant_id", request.TenantID,
-			"steward_id", request.StewardID,
+			"steward_id", logging.SanitizeLogValue(request.StewardID),
 			"target_version", request.TargetVersion,
 			"error", err)
-		return response, err
+		return &config.RollbackResponse{
+			Success:  false,
+			Errors:   []string{err.Error()},
+			Warnings: []string{},
+		}, err
+	}
+
+	var errors []string
+	if op.Result != nil {
+		for _, f := range op.Result.Failures {
+			errors = append(errors, f.Error)
+		}
+	}
+
+	response := &config.RollbackResponse{
+		RollbackID: op.ID,
+		Success:    op.Status == rollback.RollbackStatusCompleted,
+		Errors:     errors,
+		Warnings:   []string{},
 	}
 
 	if response.Success {
 		s.logger.Info("Configuration rollback successful",
-			"tenant_id", request.TenantID,
-			"steward_id", request.StewardID,
-			"rollback_id", response.RollbackID,
-			"from_version", response.PreviousVersion,
-			"to_version", response.NewVersion,
-			"risk_level", response.RiskLevel)
+			"steward_id", logging.SanitizeLogValue(request.StewardID),
+			"rollback_id", op.ID)
 	}
 
 	return response, nil
+}
+
+// translateRollbackRequest maps a config.RollbackRequest to the canonical rollback.RollbackRequest.
+// RollbackTo uses fmt.Sprintf("v%d", ...) — the git-backed rollback manager resolves version refs.
+func (s *ConfigurationServiceV2) translateRollbackRequest(req *config.RollbackRequest) rollback.RollbackRequest {
+	return rollback.RollbackRequest{
+		TargetID:   req.StewardID,
+		TargetType: rollback.TargetTypeSteward,
+		RollbackTo: fmt.Sprintf("v%d", req.TargetVersion),
+		Reason:     req.Reason,
+		DryRun:     req.ValidateOnly,
+		Options: rollback.RollbackOptions{
+			SkipValidation: req.SkipValidation,
+		},
+	}
 }
 
 // ListConfigurations lists all configurations for a tenant

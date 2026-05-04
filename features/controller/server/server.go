@@ -560,7 +560,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Story #416: Wire rollback manager into API server
 	rollbackManager := initializeRollbackManager(storageManager, logger)
 	httpServer.SetRollbackManager(rollbackManager)
-	logger.Info("Rollback manager wired to HTTP API server")
+	configService.SetRollbackManager(rollbackManager)
+	logger.Info("Rollback manager wired to HTTP API server and gRPC config service")
 
 	// Story #416: Wire reports engine into API server
 	reportsHandler, reportsDNAManager := initializeReportsHandler(cfg, logger)
