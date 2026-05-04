@@ -8,6 +8,8 @@ import (
 	"crypto/rand"
 	"fmt"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // DefaultApprovalIntegration implements the ApprovalIntegration interface
@@ -21,14 +23,20 @@ type DefaultApprovalIntegration struct {
 
 	// defaultExpiry is the default expiration time for approval requests
 	defaultExpiry time.Duration
+
+	logger logging.Logger
 }
 
 // NewDefaultApprovalIntegration creates a new DefaultApprovalIntegration
-func NewDefaultApprovalIntegration() *DefaultApprovalIntegration {
+func NewDefaultApprovalIntegration(logger logging.Logger) *DefaultApprovalIntegration {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	return &DefaultApprovalIntegration{
 		requests:      make(map[string]*ApprovalRequest),
 		approvers:     initializeDefaultApprovers(),
 		defaultExpiry: 24 * time.Hour, // 24 hours default
+		logger:        logger,
 	}
 }
 
@@ -68,9 +76,10 @@ func (ai *DefaultApprovalIntegration) CreateApprovalRequest(ctx context.Context,
 
 	// Send notifications to approvers
 	if err := ai.notifyApprovers(ctx, request); err != nil {
-		// Log warning but don't fail the request creation
-		// In a real implementation, this would use proper logging
-		fmt.Printf("Warning: Failed to notify approvers: %v\n", err)
+		ai.logger.Warn("failed to notify approvers",
+			"request_id", logging.SanitizeLogValue(request.ID),
+			"error", err,
+		)
 	}
 
 	return request, nil
@@ -95,7 +104,10 @@ func (ai *DefaultApprovalIntegration) UpdateApprovalRequest(ctx context.Context,
 
 	// Notify approvers of the update
 	if err := ai.notifyApproversOfUpdate(ctx, request); err != nil {
-		fmt.Printf("Warning: Failed to notify approvers of update: %v\n", err)
+		ai.logger.Warn("failed to notify approvers of update",
+			"request_id", logging.SanitizeLogValue(requestID),
+			"error", err,
+		)
 	}
 
 	return nil
@@ -135,7 +147,10 @@ func (ai *DefaultApprovalIntegration) CancelApprovalRequest(ctx context.Context,
 
 	// Notify approvers of cancellation
 	if err := ai.notifyApproversOfCancellation(ctx, request); err != nil {
-		fmt.Printf("Warning: Failed to notify approvers of cancellation: %v\n", err)
+		ai.logger.Warn("failed to notify approvers of cancellation",
+			"request_id", logging.SanitizeLogValue(requestID),
+			"error", err,
+		)
 	}
 
 	return nil
@@ -368,20 +383,26 @@ func (ai *DefaultApprovalIntegration) allApproved(request *ApprovalRequest) bool
 // notifyApprovers sends notifications to required approvers
 func (ai *DefaultApprovalIntegration) notifyApprovers(ctx context.Context, request *ApprovalRequest) error {
 	// In a real implementation, this would send emails, Slack messages, etc.
-	fmt.Printf("Notifying approvers %v for request %s: %s\n",
-		request.RequiredApprovers, request.ID, request.Title)
+	ai.logger.Info("notifying approvers",
+		"request_id", logging.SanitizeLogValue(request.ID),
+		"approver_count", len(request.RequiredApprovers),
+	)
 	return nil
 }
 
 // notifyApproversOfUpdate notifies approvers of request updates
 func (ai *DefaultApprovalIntegration) notifyApproversOfUpdate(ctx context.Context, request *ApprovalRequest) error {
-	fmt.Printf("Notifying approvers of update for request %s\n", request.ID)
+	ai.logger.Info("notifying approvers of update",
+		"request_id", logging.SanitizeLogValue(request.ID),
+	)
 	return nil
 }
 
 // notifyApproversOfCancellation notifies approvers of request cancellation
 func (ai *DefaultApprovalIntegration) notifyApproversOfCancellation(ctx context.Context, request *ApprovalRequest) error {
-	fmt.Printf("Notifying approvers of cancellation for request %s\n", request.ID)
+	ai.logger.Info("notifying approvers of cancellation",
+		"request_id", logging.SanitizeLogValue(request.ID),
+	)
 	return nil
 }
 

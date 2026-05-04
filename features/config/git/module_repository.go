@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // ModuleRepositoryManager manages script and module repositories
@@ -20,16 +22,21 @@ type ModuleRepositoryManager struct {
 	repoCache    map[string]*Repository   // repo_id -> repository
 	mu           sync.RWMutex
 	secValidator *ModuleSecurityValidator
+	logger       logging.Logger
 }
 
 // NewModuleRepositoryManager creates a new module repository manager
-func NewModuleRepositoryManager(gitManager GitManager, store RepositoryStore) *ModuleRepositoryManager {
+func NewModuleRepositoryManager(gitManager GitManager, store RepositoryStore, logger logging.Logger) *ModuleRepositoryManager {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	return &ModuleRepositoryManager{
 		gitManager:   gitManager,
 		store:        store,
 		moduleCache:  make(map[string]*CustomModule),
 		repoCache:    make(map[string]*Repository),
 		secValidator: NewModuleSecurityValidator(),
+		logger:       logger,
 	}
 }
 
@@ -130,13 +137,19 @@ func (mrm *ModuleRepositoryManager) LoadModulesFromRepository(ctx context.Contex
 	for _, spec := range moduleSpecs {
 		module, err := mrm.loadModule(ctx, repo, localPath, spec)
 		if err != nil {
-			fmt.Printf("Warning: failed to load module %s: %v\n", spec, err)
+			mrm.logger.Warn("failed to load module",
+				"spec", logging.SanitizeLogValue(spec),
+				"error", err,
+			)
 			continue
 		}
 
 		// Validate security
 		if err := mrm.secValidator.ValidateModule(ctx, module); err != nil {
-			fmt.Printf("Warning: module %s failed security validation: %v\n", module.Name, err)
+			mrm.logger.Warn("module failed security validation",
+				"module", logging.SanitizeLogValue(module.Name),
+				"error", err,
+			)
 			module.SecurityStatus.Status = SecurityStatusRejected
 			module.SecurityStatus.Issues = []SecurityIssue{{
 				Type:        "security_validation",

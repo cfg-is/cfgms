@@ -654,7 +654,7 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 	rollbackValidator := rollback.NewRollbackValidator(&noOpModuleRegistry{}, nil)
 
 	// Create notifier using standard logger
-	rollbackNotifier := rollback.NewDefaultRollbackNotifier(nil)
+	rollbackNotifier := rollback.NewDefaultRollbackNotifier(logger)
 
 	// Create local git store for commit history access
 	localGitStore := gitStorage.NewLocalRepositoryStore("", "")
@@ -663,7 +663,7 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 	gitManager := configgit.NewGitManager(nil, localGitStore, configgit.GitManagerConfig{
 		DefaultBranch: "main",
 		AutoSync:      false,
-	})
+	}, logger)
 
 	manager := rollback.NewRollbackManager(gitManager, rollbackValidator, rollbackStore, rollbackNotifier)
 	logger.Info("Rollback manager initialized")
