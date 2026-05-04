@@ -17,7 +17,8 @@ import (
 type FileStore struct {
 	mu       sync.RWMutex
 	basePath string
-	certs    map[string]*CertificateInfo // indexed by serial number
+	// Disk-synchronised index: authoritative in-memory snapshot of PEM files on disk. Populated by loadCertificates on init and kept consistent on every StoreCertificate/DeleteCertificate call. Not a cache — migrating to pkg/cache would lose the write-through-to-disk invariant.
+	certs map[string]*CertificateInfo // indexed by serial number
 }
 
 // NewFileStore creates a new filesystem-based certificate store

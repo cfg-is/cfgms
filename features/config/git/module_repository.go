@@ -16,8 +16,9 @@ import (
 
 // ModuleRepositoryManager manages script and module repositories
 type ModuleRepositoryManager struct {
-	gitManager   GitManager
-	store        RepositoryStore
+	gitManager GitManager
+	store      RepositoryStore
+	// Authoritative in-memory state: RepositoryStore (git filesystem) has no metadata persistence layer. These maps are the only record of registered repositories and their local paths. Not a cache — pkg/cache migration would make repository registration non-durable across restarts.
 	moduleCache  map[string]*CustomModule // module_id -> module
 	repoCache    map[string]*Repository   // repo_id -> repository
 	mu           sync.RWMutex
