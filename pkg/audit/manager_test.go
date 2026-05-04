@@ -19,11 +19,6 @@ import (
 	secretsInterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-
-	// Import storage providers to register them
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // testSecretStore is a minimal in-memory implementation of secretsInterfaces.SecretStore

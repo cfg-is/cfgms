@@ -14,7 +14,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	_ "github.com/cfgis/cfgms/pkg/testing"
 )
 
 func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
