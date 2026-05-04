@@ -272,8 +272,12 @@ func TestBreachDetector_TimePatternDetection(t *testing.T) {
 		}
 	}
 
-	// Access outside business hours (2 AM)
-	outsideHours := time.Now().Truncate(time.Hour).Add(2 * time.Hour)
+	// Capture risk score before the out-of-hours event
+	riskScoreBefore := bd.GetTenantRiskScore(tenantID)
+
+	// Access outside business hours — use hour 2 which is always outside the 9–17 active window
+	now := time.Now()
+	twoAM := time.Date(now.Year(), now.Month(), now.Day(), 2, 0, 0, 0, now.Location())
 	event := &security.AccessEvent{
 		ID:        "outside-hours-event",
 		TenantID:  tenantID,
@@ -281,16 +285,15 @@ func TestBreachDetector_TimePatternDetection(t *testing.T) {
 		Resource:  "/api/v1/sensitive-data",
 		SourceIP:  "192.168.1.100",
 		UserAgent: "Business-Client/1.0",
-		Timestamp: outsideHours,
+		Timestamp: twoAM,
 		Success:   true,
 	}
 	err := bd.RecordAccess(ctx, event)
 	require.NoError(t, err)
 
-	// Verify all events were processed and the risk score is in a valid range
-	riskScore := bd.GetTenantRiskScore(tenantID)
-	assert.GreaterOrEqual(t, riskScore, 0.0)
-	assert.LessOrEqual(t, riskScore, 1.0)
+	// Out-of-hours access should increase risk score above the business-hours baseline
+	riskScoreAfter := bd.GetTenantRiskScore(tenantID)
+	assert.Greater(t, riskScoreAfter, riskScoreBefore, "out-of-hours access should increase risk score")
 }
 
 func TestBreachDetector_CredentialStuffingPattern(t *testing.T) {
@@ -657,11 +660,13 @@ func TestBreachDetector_BaselineEstablishment(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// With only 10 events, risk score should still be in valid range
-	riskScore := bd.GetTenantRiskScore(tenantID)
-	assert.GreaterOrEqual(t, riskScore, 0.0)
+	// Before baseline: 10 normal events should not produce any breach indicators
+	preIndicators := bd.GetActiveBreachIndicators(tenantID)
+	assert.Empty(t, preIndicators, "10 normal events should not trigger breach indicators")
+	riskScorePre := bd.GetTenantRiskScore(tenantID)
+	assert.GreaterOrEqual(t, riskScorePre, 0.0)
 
-	// Record enough events to establish baseline
+	// Record enough events to establish baseline (requires ≥50)
 	for i := 10; i < 60; i++ {
 		event := &security.AccessEvent{
 			ID:        fmt.Sprintf("baseline-event-%d", i),
@@ -677,8 +682,10 @@ func TestBreachDetector_BaselineEstablishment(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// After 60 events, the tenant profile is established and risk score is valid
-	riskScore = bd.GetTenantRiskScore(tenantID)
+	// After 60 normal events: no breach indicators (baseline should not produce false positives)
+	indicators := bd.GetActiveBreachIndicators(tenantID)
+	assert.Empty(t, indicators, "60 normal same-origin events should not trigger breach indicators")
+	riskScore := bd.GetTenantRiskScore(tenantID)
 	assert.GreaterOrEqual(t, riskScore, 0.0)
 	assert.LessOrEqual(t, riskScore, 1.0)
 }
@@ -707,7 +714,9 @@ func TestBreachDetector_DeviceFingerprinting(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Verify events were processed without error; device fingerprinting is internal state
+	// Consistent single-device activity should not trigger breach indicators (no false positives)
+	indicators := bd.GetActiveBreachIndicators(tenantID)
+	assert.Empty(t, indicators, "consistent single-device activity should not trigger breach indicators")
 	riskScore := bd.GetTenantRiskScore(tenantID)
 	assert.GreaterOrEqual(t, riskScore, 0.0)
 	assert.LessOrEqual(t, riskScore, 1.0)
@@ -740,10 +749,28 @@ func TestBreachDetector_TimePatternAnalysis(t *testing.T) {
 		}
 	}
 
-	// Verify events were processed without error; time pattern analysis is internal state
-	riskScore := bd.GetTenantRiskScore(tenantID)
-	assert.GreaterOrEqual(t, riskScore, 0.0)
-	assert.LessOrEqual(t, riskScore, 1.0)
+	// Regular business-hours activity should not trigger breach indicators
+	indicators := bd.GetActiveBreachIndicators(tenantID)
+	assert.Empty(t, indicators, "business-hours activity should not trigger breach indicators")
+
+	// After establishing time patterns, out-of-hours access should increase risk score
+	riskScoreBefore := bd.GetTenantRiskScore(tenantID)
+	now := time.Now()
+	outOfHours := time.Date(now.Year(), now.Month(), now.Day(), 2, 0, 0, 0, now.Location())
+	oohEvent := &security.AccessEvent{
+		ID:        "out-of-hours-event",
+		TenantID:  tenantID,
+		Operation: "read",
+		Resource:  "/api/v1/configs",
+		SourceIP:  "192.168.1.100",
+		UserAgent: "Business-Client/1.0",
+		Timestamp: outOfHours,
+		Success:   true,
+	}
+	err := bd.RecordAccess(ctx, oohEvent)
+	require.NoError(t, err)
+	riskScoreAfter := bd.GetTenantRiskScore(tenantID)
+	assert.Greater(t, riskScoreAfter, riskScoreBefore, "out-of-hours access should increase risk score after time patterns are established")
 }
 
 // Benchmark tests for performance validation

@@ -45,13 +45,6 @@ func newTestAuditManager(tb testing.TB) *audit.Manager {
 	return mgr
 }
 
-// newTestAuditLogger creates a TenantSecurityAuditLogger backed by a real audit.Manager.
-// Accepts testing.TB so it works in both *testing.T and *testing.B contexts.
-func newTestAuditLogger(tb testing.TB) *TenantSecurityAuditLogger {
-	tb.Helper()
-	return NewTenantSecurityAuditLogger(newTestAuditManager(tb))
-}
-
 // newTenantSecurityAuditLoggerWithCap creates a logger with a custom in-memory cap.
 // Use this in cap-eviction and FIFO tests to avoid writing thousands of durable entries
 // on slow platforms (Windows CI): a small cap like 10–12 exercises the same eviction

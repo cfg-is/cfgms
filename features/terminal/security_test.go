@@ -351,7 +351,7 @@ func TestCommandInterceptor_InputFiltering(t *testing.T) {
 				case event := <-auditChan:
 					assert.Equal(t, terminal.FilterActionBlock, event.Action)
 				case <-time.After(100 * time.Millisecond):
-					// No event received, which might be expected for partial inputs
+					t.Error("expected block audit event for dangerous command, but none received within 100ms")
 				}
 			}
 		})
