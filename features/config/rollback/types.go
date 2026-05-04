@@ -49,6 +49,9 @@ const (
 
 	// TargetTypeMSP rolls back MSP-level configurations
 	TargetTypeMSP TargetType = "msp"
+
+	// TargetTypeSteward rolls back a steward agent configuration
+	TargetTypeSteward TargetType = "steward"
 )
 
 // RollbackStatus represents the status of a rollback operation
