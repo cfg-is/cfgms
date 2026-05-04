@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/cache"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -24,23 +24,15 @@ type OAuth2Provider struct {
 	credentialStore CredentialStore
 
 	// Token cache to avoid unnecessary requests (for application tokens)
-	tokenCache map[string]*cachedToken
-	cacheMutex sync.RWMutex
+	tokenCache *cache.Cache
 
 	// Delegated token cache for user-specific tokens
-	delegatedTokenCache map[string]*cachedToken
-	delegatedCacheMutex sync.RWMutex
+	delegatedTokenCache *cache.Cache
 
 	// Default configuration for new tenants
 	defaultConfig *OAuth2Config
 
 	logger logging.Logger
-}
-
-// cachedToken represents a cached access token with expiration tracking
-type cachedToken struct {
-	token     *AccessToken
-	expiresAt time.Time
 }
 
 // NewOAuth2Provider creates a new OAuth2Provider instance
@@ -52,11 +44,19 @@ func NewOAuth2Provider(credentialStore CredentialStore, defaultConfig *OAuth2Con
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		credentialStore:     credentialStore,
-		tokenCache:          make(map[string]*cachedToken),
-		delegatedTokenCache: make(map[string]*cachedToken),
-		defaultConfig:       defaultConfig,
-		logger:              logger,
+		credentialStore: credentialStore,
+		tokenCache: cache.NewCache(cache.CacheConfig{
+			Name:            "m365-token",
+			DefaultTTL:      55 * time.Minute,
+			CleanupInterval: 1 * time.Minute,
+		}),
+		delegatedTokenCache: cache.NewCache(cache.CacheConfig{
+			Name:            "m365-delegated-token",
+			DefaultTTL:      55 * time.Minute,
+			CleanupInterval: 1 * time.Minute,
+		}),
+		defaultConfig: defaultConfig,
+		logger:        logger,
 	}
 }
 
@@ -508,113 +508,84 @@ func (p *OAuth2Provider) getOAuth2Config(tenantID string) (*OAuth2Config, error)
 
 // getCachedToken retrieves a token from the cache
 func (p *OAuth2Provider) getCachedToken(tenantID string) *AccessToken {
-	p.cacheMutex.RLock()
-	defer p.cacheMutex.RUnlock()
-
-	cached, exists := p.tokenCache[tenantID]
-	if !exists {
+	value, found := p.tokenCache.Get(tenantID)
+	if !found {
 		return nil
 	}
-
-	// Check if cached token is still valid (with 5-minute buffer)
-	if time.Now().Add(5 * time.Minute).After(cached.expiresAt) {
+	token, ok := value.(*AccessToken)
+	if !ok {
 		return nil
 	}
-
-	return cached.token
+	return token
 }
 
-// setCachedToken stores a token in the cache
+// setCachedToken stores a token in the cache with a TTL that fires 5 minutes before the token expires
 func (p *OAuth2Provider) setCachedToken(tenantID string, token *AccessToken) {
-	p.cacheMutex.Lock()
-	defer p.cacheMutex.Unlock()
-
-	p.tokenCache[tenantID] = &cachedToken{
-		token:     token,
-		expiresAt: token.ExpiresAt,
+	ttl := time.Until(token.ExpiresAt) - 5*time.Minute
+	if ttl <= 0 {
+		p.logger.Debug("skipping token cache: TTL too short", "tenant_id", logging.SanitizeLogValue(tenantID))
+		return
 	}
+	_ = p.tokenCache.Set(tenantID, token, ttl)
 }
 
 // getDelegatedCachedToken retrieves a delegated token from the cache
 func (p *OAuth2Provider) getDelegatedCachedToken(cacheKey string) *AccessToken {
-	p.delegatedCacheMutex.RLock()
-	defer p.delegatedCacheMutex.RUnlock()
-
-	cached, exists := p.delegatedTokenCache[cacheKey]
-	if !exists {
+	value, found := p.delegatedTokenCache.Get(cacheKey)
+	if !found {
 		return nil
 	}
-
-	// Check if cached token is still valid (with 5-minute buffer)
-	if time.Now().Add(5 * time.Minute).After(cached.expiresAt) {
+	token, ok := value.(*AccessToken)
+	if !ok {
 		return nil
 	}
-
-	return cached.token
+	return token
 }
 
-// setDelegatedCachedToken stores a delegated token in the cache
+// setDelegatedCachedToken stores a delegated token in the cache with a TTL that fires 5 minutes before the token expires
 func (p *OAuth2Provider) setDelegatedCachedToken(cacheKey string, token *AccessToken) {
-	p.delegatedCacheMutex.Lock()
-	defer p.delegatedCacheMutex.Unlock()
-
-	p.delegatedTokenCache[cacheKey] = &cachedToken{
-		token:     token,
-		expiresAt: token.ExpiresAt,
+	ttl := time.Until(token.ExpiresAt) - 5*time.Minute
+	if ttl <= 0 {
+		p.logger.Debug("skipping delegated token cache: TTL too short", "cache_key", logging.SanitizeLogValue(cacheKey))
+		return
 	}
+	_ = p.delegatedTokenCache.Set(cacheKey, token, ttl)
 }
 
 // ClearCache clears the token cache for all tenants
 func (p *OAuth2Provider) ClearCache() {
-	p.cacheMutex.Lock()
-	defer p.cacheMutex.Unlock()
-
-	p.tokenCache = make(map[string]*cachedToken)
+	p.tokenCache.Clear()
 }
 
 // ClearDelegatedCache clears the delegated token cache for all users
 func (p *OAuth2Provider) ClearDelegatedCache() {
-	p.delegatedCacheMutex.Lock()
-	defer p.delegatedCacheMutex.Unlock()
-
-	p.delegatedTokenCache = make(map[string]*cachedToken)
+	p.delegatedTokenCache.Clear()
 }
 
 // ClearCacheForTenant clears the token cache for a specific tenant
 func (p *OAuth2Provider) ClearCacheForTenant(tenantID string) {
-	p.cacheMutex.Lock()
-	defer p.cacheMutex.Unlock()
-
-	delete(p.tokenCache, tenantID)
+	p.tokenCache.Delete(tenantID)
 }
 
 // ClearDelegatedCacheForUser clears the delegated token cache for a specific user
 func (p *OAuth2Provider) ClearDelegatedCacheForUser(tenantID, userID string) {
-	p.delegatedCacheMutex.Lock()
-	defer p.delegatedCacheMutex.Unlock()
-
-	cacheKey := fmt.Sprintf("%s:%s", tenantID, userID)
-	delete(p.delegatedTokenCache, cacheKey)
+	p.delegatedTokenCache.Delete(fmt.Sprintf("%s:%s", tenantID, userID))
 }
 
 // ClearDelegatedCacheForTenant clears all delegated tokens for a specific tenant
 func (p *OAuth2Provider) ClearDelegatedCacheForTenant(tenantID string) {
-	p.delegatedCacheMutex.Lock()
-	defer p.delegatedCacheMutex.Unlock()
-
-	// Find and remove all cache entries for this tenant
-	keysToDelete := make([]string, 0)
 	tenantPrefix := tenantID + ":"
-
-	for cacheKey := range p.delegatedTokenCache {
-		if strings.HasPrefix(cacheKey, tenantPrefix) {
-			keysToDelete = append(keysToDelete, cacheKey)
+	for _, key := range p.delegatedTokenCache.Keys() {
+		if strings.HasPrefix(key, tenantPrefix) {
+			p.delegatedTokenCache.Delete(key)
 		}
 	}
+}
 
-	for _, key := range keysToDelete {
-		delete(p.delegatedTokenCache, key)
-	}
+// Close stops the background cleanup routines for both token caches
+func (p *OAuth2Provider) Close() {
+	p.tokenCache.Close()
+	p.delegatedTokenCache.Close()
 }
 
 // SetHTTPClient allows customization of the HTTP client
