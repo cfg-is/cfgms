@@ -19,6 +19,8 @@ import (
 func TestHTTPClient_ExecuteRequest(t *testing.T) {
 	// Create a test server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Ensure measurable duration on all platforms (Windows timer resolution ~1ms)
+		time.Sleep(time.Millisecond)
 		// Check authentication header
 		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
 			w.WriteHeader(http.StatusUnauthorized)
