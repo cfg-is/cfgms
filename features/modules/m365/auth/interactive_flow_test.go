@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -21,9 +20,7 @@ import (
 
 // TestInteractiveAuthFlowSetup tests the setup button experience backend
 func TestInteractiveAuthFlowSetup(t *testing.T) {
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "interactive-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:                 "test-interactive-client-id",
@@ -414,9 +411,7 @@ func TestCapabilityTesting(t *testing.T) {
 	}))
 	defer mockGraphServer.Close()
 
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "capability-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:             "capability-test-client",
@@ -556,9 +551,7 @@ func TestRealM365InteractiveIntegration(t *testing.T) {
 		t.Skip("Skipping real M365 interactive integration test - credentials not available")
 	}
 
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "real-integration-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:             clientID,
