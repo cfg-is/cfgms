@@ -32,7 +32,6 @@ package saas
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -49,6 +48,7 @@ type MultiTenantManager struct {
 	httpClient       *http.Client
 	oauth2Client     OAuth2Client
 	tenantDiscoverer TenantDiscoverer
+	logger           logging.Logger
 
 	// Cache of tenant discovery results to avoid repeated API calls
 	tenantCache map[string]*TenantDiscoveryResult
@@ -61,13 +61,17 @@ type MultiTenantManager struct {
 // pre-production use until a durable implementation is available.
 // discoverer performs the actual tenant discovery API call after consent is
 // granted; MicrosoftMultiTenantProvider satisfies this interface in production.
-func NewMultiTenantManager(credStore CredentialStore, consentStore ConsentStore, httpClient *http.Client, discoverer TenantDiscoverer) *MultiTenantManager {
+func NewMultiTenantManager(credStore CredentialStore, consentStore ConsentStore, httpClient *http.Client, discoverer TenantDiscoverer, logger logging.Logger) *MultiTenantManager {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	return &MultiTenantManager{
 		credStore:        credStore,
 		consentStore:     consentStore,
 		httpClient:       httpClient,
 		oauth2Client:     NewOAuth2Client(httpClient, nil),
 		tenantDiscoverer: discoverer,
+		logger:           logger,
 		tenantCache:      make(map[string]*TenantDiscoveryResult),
 		cacheExpiry:      15 * time.Minute,
 	}
@@ -294,7 +298,7 @@ func (mtm *MultiTenantManager) GetTenantToken(ctx context.Context, provider, ten
 	// compatibility with client-credentials flows that return opaque tokens.
 	tid, jwtErr := extractJWTTenantID(tokenSet.AccessToken)
 	if jwtErr != nil {
-		slog.Warn("GetTenantToken: tid extraction failed, proceeding with opaque token (fail-open)",
+		mtm.logger.Warn("GetTenantToken: tid extraction failed, proceeding with opaque token (fail-open)",
 			"provider", logging.SanitizeLogValue(provider),
 			"tenant_id", logging.SanitizeLogValue(tenantID),
 			"reason", logging.SanitizeLogValue(jwtErr.Error()))

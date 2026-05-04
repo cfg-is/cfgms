@@ -44,7 +44,7 @@ func newTestApprovalHook(t *testing.T) (*WorkflowApprovalHook, cfgconfig.ConfigS
 	errorConfig := stewardconfig.ErrorHandlingConfig{
 		ModuleLoadFailure: stewardconfig.ActionContinue,
 	}
-	moduleFactory := factory.New(registry, errorConfig)
+	moduleFactory := factory.New(registry, errorConfig, logging.NewNoopLogger())
 	logger := logging.NewNoopLogger()
 	engine := workflow.NewEngine(moduleFactory, logger, nil)
 

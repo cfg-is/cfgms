@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/logging"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -91,7 +93,7 @@ func TestMultiTenantManager_StartAdminConsent(t *testing.T) {
 			credStore := newTestCredentialStore(t)
 			consentStore := NewInMemoryConsentStore()
 			httpClient := NewGraphHTTPClient(100, 1000)
-			mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
+			mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 			ctx := context.Background()
 			url, err := mtm.StartAdminConsent(ctx, "microsoft", tt.config)
@@ -169,7 +171,7 @@ func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
 			consentStore := NewInMemoryConsentStore()
 			// Use the real DefaultOAuth2Client so ExchangeCode hits the httptest server.
 			// Wire a stub discoverer so discoverTenants returns stubTenants without HTTP calls.
-			mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(stubTenants...))
+			mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(stubTenants...), logging.NewNoopLogger())
 
 			ctx := context.Background()
 			provider := "microsoft"
@@ -269,7 +271,7 @@ func TestMultiTenantManager_DiscoverTenantsErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			credStore := newTestCredentialStore(t)
 			consentStore := NewInMemoryConsentStore()
-			mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), tt.discoverer)
+			mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), tt.discoverer, logging.NewNoopLogger())
 
 			require.NoError(t, consentStore.StoreConsent("microsoft", &ConsentStatus{
 				Provider:    "microsoft",
@@ -399,7 +401,7 @@ func TestMultiTenantManager_GetTenantToken(t *testing.T) {
 	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
 	httpClient := NewGraphHTTPClient(100, 1000)
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -437,7 +439,7 @@ func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
 	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
 	httpClient := NewGraphHTTPClient(100, 1000)
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -470,7 +472,7 @@ func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
 func TestMultiTenantManager_GetTenantToken_TIDMismatch(t *testing.T) {
 	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
-	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer())
+	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -502,7 +504,7 @@ func TestMultiTenantManager_GetTenantToken_TIDMismatch(t *testing.T) {
 func TestMultiTenantManager_GetTenantToken_OpaqueToken(t *testing.T) {
 	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
-	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer())
+	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -533,7 +535,7 @@ func TestMultiTenantManager_GetTenantToken_OpaqueToken(t *testing.T) {
 func TestMultiTenantManager_GetTenantToken_ExpiredToken_RefreshNotImplemented(t *testing.T) {
 	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
-	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer())
+	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -565,7 +567,7 @@ func TestMultiTenantManager_ListAccessibleTenants(t *testing.T) {
 	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
 	httpClient := NewGraphHTTPClient(100, 1000)
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -604,7 +606,7 @@ func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 	credStore := newTestCredentialStore(t)
 	consentStore := NewInMemoryConsentStore()
 	httpClient := NewGraphHTTPClient(100, 1000)
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -787,7 +789,7 @@ func TestMultiTenantManager_TenantCacheConcurrency(t *testing.T) {
 	// Stub returns one deterministic tenant so RefreshTenantDiscovery writes a
 	// non-empty AccessibleTenants slice to the consent store on each call.
 	stub := newStubTenantDiscoverer(TenantInfo{TenantID: "stub-concurrent-tenant", HasAccess: true})
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, stub)
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, stub, logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -909,7 +911,7 @@ func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
 	credStore := newBenchCredentialStore(b)
 	consentStore := NewInMemoryConsentStore()
 	httpClient := NewGraphHTTPClient(100, 1000)
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer())
+	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -995,4 +997,41 @@ func BenchmarkMicrosoftMultiTenantProvider_CreateInTenant(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// TestMultiTenantManager_GetTenantToken_logsOnTIDFailure verifies that when
+// extractJWTTenantID fails (opaque / non-JWT token), the manager logs a warn
+// through its injected logger rather than through slog.Default().
+func TestMultiTenantManager_GetTenantToken_logsOnTIDFailure(t *testing.T) {
+	credStore := newTestCredentialStore(t)
+	consentStore := NewInMemoryConsentStore()
+	mock := pkgtesting.NewMockLogger(true)
+	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(), mock)
+
+	ctx := context.Background()
+	provider := "microsoft"
+	tenantID := "any-tenant"
+
+	require.NoError(t, consentStore.StoreConsent(provider, &ConsentStatus{
+		Provider:        provider,
+		HasAdminConsent: true,
+		AccessibleTenants: []TenantInfo{
+			{TenantID: tenantID, HasAccess: true},
+		},
+	}))
+
+	// Store an opaque (non-JWT) token; extractJWTTenantID will fail, triggering the warn.
+	tenantKey := mtm.getTenantKey(provider, tenantID)
+	require.NoError(t, credStore.StoreTokenSet(tenantKey, &TokenSet{
+		AccessToken: "opaque-not-a-jwt",
+		TokenType:   "Bearer",
+		ExpiresAt:   time.Now().Add(1 * time.Hour),
+	}))
+
+	token, err := mtm.GetTenantToken(ctx, provider, tenantID)
+	require.NoError(t, err, "fail-open: opaque token must succeed")
+	require.NotNil(t, token)
+
+	warnLogs := mock.GetLogs("warn")
+	assert.NotEmpty(t, warnLogs, "expected at least one warn log for opaque-token tid-extraction failure")
 }

@@ -73,7 +73,7 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 			ConfigurationError: config.ActionFail,
 		}
 		// Empty registry — all 7 built-in modules are loaded on demand by the factory
-		f = factory.New(discovery.ModuleRegistry{}, defaultErrCfg)
+		f = factory.New(discovery.ModuleRegistry{}, defaultErrCfg, cfg.Logger)
 		errCfg = defaultErrCfg
 	}
 	if comp == nil {

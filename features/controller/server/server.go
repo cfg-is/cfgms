@@ -710,6 +710,7 @@ func initializeWorkflowHandler(storageManager *interfaces.StorageManager, logger
 	moduleFactory := stewardfactory.New(
 		discovery.ModuleRegistry{},
 		stewardconfig.ErrorHandlingConfig{},
+		logger,
 	)
 
 	workflowEngine := workflow.NewEngine(moduleFactory, logger, nil)

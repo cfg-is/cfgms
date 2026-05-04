@@ -3,13 +3,20 @@
 package factory
 
 import (
+	"context"
+	"errors"
 	"testing"
 
+	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/file"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
+	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew(t *testing.T) {
@@ -25,7 +32,7 @@ func TestNew(t *testing.T) {
 		ModuleLoadFailure: config.ActionFail,
 	}
 
-	factory := New(registry, errorConfig)
+	factory := New(registry, errorConfig, logging.NewNoopLogger())
 
 	assert.NotNil(t, factory)
 	assert.Equal(t, registry, factory.registry)
@@ -121,7 +128,7 @@ func TestCreateModuleInstance(t *testing.T) {
 				ModuleLoadFailure: tt.errorAction,
 			}
 
-			factory := New(tt.registry, errorConfig)
+			factory := New(tt.registry, errorConfig, logging.NewNoopLogger())
 
 			module, err := factory.CreateModuleInstance(tt.moduleName)
 
@@ -143,7 +150,7 @@ func TestCreateModuleInstance(t *testing.T) {
 func TestGetLoadedModules(t *testing.T) {
 	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{}
-	factory := New(registry, errorConfig)
+	factory := New(registry, errorConfig, logging.NewNoopLogger())
 
 	// Initially empty
 	loaded := factory.GetLoadedModules()
@@ -164,7 +171,7 @@ func TestGetLoadedModules(t *testing.T) {
 func TestUnloadModule(t *testing.T) {
 	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{}
-	factory := New(registry, errorConfig)
+	factory := New(registry, errorConfig, logging.NewNoopLogger())
 
 	// Load a real module
 	_, err := factory.LoadModule("file")
@@ -178,7 +185,7 @@ func TestUnloadModule(t *testing.T) {
 func TestUnloadAllModules(t *testing.T) {
 	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{}
-	factory := New(registry, errorConfig)
+	factory := New(registry, errorConfig, logging.NewNoopLogger())
 
 	// Load multiple real built-in modules
 	for _, name := range []string{"file", "directory", "script"} {
@@ -203,7 +210,7 @@ func TestGetModuleInfo(t *testing.T) {
 	}
 
 	errorConfig := config.ErrorHandlingConfig{}
-	factory := New(registry, errorConfig)
+	factory := New(registry, errorConfig, logging.NewNoopLogger())
 
 	// Test existing module
 	info, exists := factory.GetModuleInfo("test-module")
@@ -216,10 +223,80 @@ func TestGetModuleInfo(t *testing.T) {
 }
 
 func TestAllSevenBuiltinModulesLoad(t *testing.T) {
-	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail})
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
 	for _, name := range []string{"acme", "directory", "file", "firewall", "package", "patch", "script"} {
 		mod, err := factory.LoadModule(name)
 		assert.NoError(t, err, "built-in module %q must load without error", name)
 		assert.NotNil(t, mod, "built-in module %q must not be nil", name)
 	}
+}
+
+// stubFailingSecretStoreModule implements modules.Module and modules.SecretStoreInjectable.
+// SetSecretStore always returns an error to exercise the warning-log path in attemptSecretStoreInjection.
+type stubFailingSecretStoreModule struct{}
+
+func (s *stubFailingSecretStoreModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return nil, nil
+}
+
+func (s *stubFailingSecretStoreModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+func (s *stubFailingSecretStoreModule) SetSecretStore(_ secretsif.SecretStore) error {
+	return errors.New("injection always fails")
+}
+
+func (s *stubFailingSecretStoreModule) GetSecretStore() (secretsif.SecretStore, bool) {
+	return nil, false
+}
+
+// stubSecretStore is a no-op SecretStore that satisfies the interface so the
+// factory's nil-guard does not short-circuit before reaching SetSecretStore.
+type stubSecretStore struct{}
+
+func (s *stubSecretStore) StoreSecret(_ context.Context, _ *secretsif.SecretRequest) error {
+	return nil
+}
+func (s *stubSecretStore) GetSecret(_ context.Context, _ string) (*secretsif.Secret, error) {
+	return nil, nil
+}
+func (s *stubSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
+func (s *stubSecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *stubSecretStore) GetSecrets(_ context.Context, _ []string) (map[string]*secretsif.Secret, error) {
+	return nil, nil
+}
+func (s *stubSecretStore) StoreSecrets(_ context.Context, _ map[string]*secretsif.SecretRequest) error {
+	return nil
+}
+func (s *stubSecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsif.Secret, error) {
+	return nil, nil
+}
+func (s *stubSecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsif.SecretVersion, error) {
+	return nil, nil
+}
+func (s *stubSecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsif.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *stubSecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+func (s *stubSecretStore) RotateSecret(_ context.Context, _ string, _ string) error { return nil }
+func (s *stubSecretStore) ExpireSecret(_ context.Context, _ string) error           { return nil }
+func (s *stubSecretStore) HealthCheck(_ context.Context) error                      { return nil }
+func (s *stubSecretStore) Close() error                                             { return nil }
+
+func TestModuleFactory_injectSecretStore_logsWarning(t *testing.T) {
+	mock := pkgtesting.NewMockLogger(true)
+	f := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{}, mock)
+	f.secretStore = &stubSecretStore{}
+
+	mod := &stubFailingSecretStoreModule{}
+	f.attemptSecretStoreInjection(mod, "test-module")
+
+	warnLogs := mock.GetLogs("warn")
+	require.Len(t, warnLogs, 1)
+	assert.Equal(t, "failed to inject secret store into module", warnLogs[0].Message)
 }

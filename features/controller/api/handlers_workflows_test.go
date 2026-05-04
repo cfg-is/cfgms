@@ -44,7 +44,7 @@ func newTestWorkflowHandler(t *testing.T) (*WorkflowHandler, cfgconfig.ConfigSto
 	errorConfig := stewardconfig.ErrorHandlingConfig{
 		ModuleLoadFailure: stewardconfig.ActionContinue,
 	}
-	moduleFactory := factory.New(registry, errorConfig)
+	moduleFactory := factory.New(registry, errorConfig, logging.NewNoopLogger())
 	logger := logging.NewNoopLogger()
 	engine := workflow.NewEngine(moduleFactory, logger, nil)
 
@@ -519,7 +519,7 @@ func TestWorkflowHandler_SpecialCharsInName_HandledSafely(t *testing.T) {
 
 	registry := make(discovery.ModuleRegistry)
 	errCfg := stewardconfig.ErrorHandlingConfig{ModuleLoadFailure: stewardconfig.ActionContinue}
-	engine := workflow.NewEngine(factory.New(registry, errCfg), capLogger, nil)
+	engine := workflow.NewEngine(factory.New(registry, errCfg, logging.NewNoopLogger()), capLogger, nil)
 	h := NewWorkflowHandler(engine, configStore, nil, capLogger)
 	router := newWorkflowRouter(h)
 
