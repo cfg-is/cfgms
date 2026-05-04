@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/steward/discovery"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // ModuleLoader defines the interface for loading modules
@@ -38,6 +39,9 @@ type LifecycleAwareModuleFactory struct {
 	// config contains lifecycle configuration defaults
 	config ModuleConfig
 
+	// logger receives structured log output
+	logger logging.Logger
+
 	// mu protects concurrent access
 	mu sync.RWMutex
 }
@@ -47,10 +51,14 @@ func NewLifecycleAwareModuleFactory(
 	discoveryRegistry discovery.ModuleRegistry,
 	moduleRegistry *ModuleRegistry,
 	loader ModuleLoader,
+	logger logging.Logger,
 ) *LifecycleAwareModuleFactory {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 
-	// Create lifecycle manager
-	lifecycleManager := NewModuleLifecycleManager(moduleRegistry)
+	// Create lifecycle manager with the same logger
+	lifecycleManager := NewModuleLifecycleManager(moduleRegistry, logger)
 
 	return &LifecycleAwareModuleFactory{
 		loader:            loader,
@@ -58,6 +66,7 @@ func NewLifecycleAwareModuleFactory(
 		registry:          moduleRegistry,
 		discoveryRegistry: discoveryRegistry,
 		config:            DefaultModuleConfig(),
+		logger:            logger,
 	}
 }
 
@@ -120,7 +129,7 @@ func (laf *LifecycleAwareModuleFactory) LoadModule(moduleName string) (Module, e
 		// Unregister on failure
 		if unregErr := laf.lifecycleManager.UnregisterModule(moduleName); unregErr != nil {
 			// Log the unregister error but don't change the return error
-			fmt.Printf("Warning: failed to unregister module '%s' after load failure: %v\n", moduleName, unregErr)
+			laf.logger.Warn("failed to unregister module after load failure", "module", moduleName, "error", unregErr)
 		}
 		return nil, fmt.Errorf("failed to initialize module '%s': %v", moduleName, err)
 	}
@@ -165,7 +174,7 @@ func (laf *LifecycleAwareModuleFactory) LoadModuleWithConfig(moduleName string, 
 		// Unregister on failure
 		if unregErr := laf.lifecycleManager.UnregisterModule(moduleName); unregErr != nil {
 			// Log the unregister error but don't change the return error
-			fmt.Printf("Warning: failed to unregister module '%s' after load failure: %v\n", moduleName, unregErr)
+			laf.logger.Warn("failed to unregister module after load failure", "module", moduleName, "error", unregErr)
 		}
 		return nil, fmt.Errorf("failed to initialize module '%s': %v", moduleName, err)
 	}

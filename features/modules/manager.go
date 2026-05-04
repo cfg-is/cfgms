@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // ModuleLifecycleManager manages the lifecycle of all modules in the system
 type ModuleLifecycleManager struct {
 	// registry is the module registry for dependency management
 	registry *ModuleRegistry
+
+	// logger receives structured log output
+	logger logging.Logger
 
 	// instances tracks all loaded module instances
 	instances map[string]*ModuleInstance
@@ -40,11 +45,15 @@ type ModuleLifecycleManager struct {
 }
 
 // NewModuleLifecycleManager creates a new module lifecycle manager
-func NewModuleLifecycleManager(registry *ModuleRegistry) *ModuleLifecycleManager {
+func NewModuleLifecycleManager(registry *ModuleRegistry, logger logging.Logger) *ModuleLifecycleManager {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &ModuleLifecycleManager{
 		registry:            registry,
+		logger:              logger,
 		instances:           make(map[string]*ModuleInstance),
 		eventListeners:      make([]LifecycleEventListener, 0),
 		healthCheckInterval: 60 * time.Second, // Default: 1 minute
@@ -630,7 +639,7 @@ func (mlm *ModuleLifecycleManager) publishEvent(event LifecycleEvent) {
 			defer func() {
 				if r := recover(); r != nil {
 					// Log panic but don't crash the system
-					fmt.Printf("Panic in lifecycle event listener: %v\n", r)
+					mlm.logger.Error("panic in lifecycle event listener", "recover", fmt.Sprintf("%v", r))
 				}
 			}()
 			l.OnLifecycleEvent(e)

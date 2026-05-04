@@ -12,10 +12,12 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // intunePolicyModule implements the Module interface for Intune device configuration management
 type intunePolicyModule struct {
+	modules.DefaultLoggingSupport
 	authProvider auth.Provider
 	graphClient  graph.Client
 }
@@ -377,8 +379,10 @@ func (m *intunePolicyModule) assignConfiguration(ctx context.Context, token *aut
 		// This would involve calling something like:
 		// POST /deviceManagement/deviceConfigurations/{id}/assign
 
-		// Placeholder logging
-		fmt.Printf("Assigning configuration %s to target type %s\n", configurationID, assignment.Target.TargetType)
+		m.GetEffectiveLogger(logging.NewNoopLogger()).Info("assigning configuration",
+			"configuration_id", configurationID,
+			"target_type", assignment.Target.TargetType,
+		)
 
 		// In real implementation:
 		// - Build assignment request based on assignment.Target
