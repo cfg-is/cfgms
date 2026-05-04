@@ -273,10 +273,6 @@ func TestResolveInstallCAPathWithCertificate(t *testing.T) {
 	assert.Equal(t, dir, caPath)
 }
 
-// TestSignalHandling is implemented in platform-specific files:
-// - main_test_unix.go for Unix systems (uses syscall.Kill)
-// - main_test_windows.go for Windows (uses channel-based simulation)
-
 // fakeServer is a test double for the controllerServer interface defined in
 // main.go. It does NOT mock any CFGMS business-logic component; it models
 // the OS-process lifecycle boundary (Start/Stop) with controllable return
