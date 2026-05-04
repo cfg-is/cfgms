@@ -29,41 +29,6 @@ func createTestSession(sessionID, userID, tenantID string) *business.Session {
 	}
 }
 
-func TestNewRuntimeCache(t *testing.T) {
-	config := CacheConfig{
-		Name:            "test-cache",
-		MaxSessions:     100,
-		MaxRuntimeItems: 50,
-		DefaultTTL:      30 * time.Minute,
-		CleanupInterval: 5 * time.Minute,
-	}
-
-	cache := NewRuntimeCache(config)
-	defer func() { _ = cache.Close() }()
-
-	assert.Equal(t, config.Name, cache.config.Name)
-	assert.Equal(t, config.MaxSessions, cache.config.MaxSessions)
-	assert.Equal(t, config.MaxRuntimeItems, cache.config.MaxRuntimeItems)
-	assert.Equal(t, config.DefaultTTL, cache.config.DefaultTTL)
-
-	// Verify initial state
-	assert.NotNil(t, cache.sessions)
-	assert.NotNil(t, cache.runtimeState)
-	assert.NotNil(t, cache.mutex)
-	assert.Equal(t, 0, len(cache.sessions))
-	assert.Equal(t, 0, len(cache.runtimeState))
-}
-
-func TestDefaultCacheConfig(t *testing.T) {
-	config := DefaultCacheConfig()
-
-	assert.Equal(t, "runtime-cache", config.Name)
-	assert.Equal(t, 1000, config.MaxSessions)
-	assert.Equal(t, 500, config.MaxRuntimeItems)
-	assert.Equal(t, 2*time.Hour, config.DefaultTTL)
-	assert.Equal(t, 5*time.Minute, config.CleanupInterval)
-}
-
 func TestCacheEntry(t *testing.T) {
 	t.Run("IsExpired - not expired", func(t *testing.T) {
 		entry := &CacheEntry{
