@@ -133,7 +133,10 @@ Enqueue the PR for merge and clean up:
 # Enqueue for merge — uses retry + verify-after wrapping around `gh pr merge --squash`
 # so a transient GitHub enqueue rejection (CI re-run race, branch-protection cache
 # lag) doesn't silently drop the PR. The merge queue handles rebase + re-validation.
-./.claude/scripts/po-act.sh enqueue <PR_NUM>
+# Passing the story number lets enqueue patch the PR body with `Fixes #<STORY_NUM>`
+# if the dev agent forgot it — without that keyword, GitHub won't auto-close the
+# story when the PR merges.
+./.claude/scripts/po-act.sh enqueue <PR_NUM> <STORY_NUM>
 
 # Extract story number from branch for cleanup
 # Branch pattern: feature/story-<NUM>-*
