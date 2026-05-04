@@ -4,10 +4,6 @@ package telemetry
 
 import (
 	"context"
-	"crypto/rand"
-	"fmt"
-	"strings"
-	"time"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/google/uuid"
@@ -165,76 +161,6 @@ func InjectPropagationContext(ctx context.Context, propCtx *PropagationContext) 
 	// primarily handles correlation ID injection for logging purposes.
 
 	return ctx
-}
-
-// TraceIDKey is the context key for trace IDs.
-type TraceIDKey struct{}
-
-// SpanIDKey is the context key for span IDs.
-type SpanIDKey struct{}
-
-// GenerateTraceID creates a new 32-character hex trace ID.
-func GenerateTraceID() string {
-	// Generate 16 random bytes and convert to 32-char hex string
-	bytes := make([]byte, 16)
-	_, err := rand.Read(bytes)
-	if err != nil {
-		// Fallback to UUID without dashes
-		return strings.ReplaceAll(uuid.New().String(), "-", "")
-	}
-	return fmt.Sprintf("%032x", bytes)
-}
-
-// GenerateSpanID creates a new 16-character hex span ID.
-func GenerateSpanID() string {
-	// Generate 8 random bytes and convert to 16-char hex string
-	bytes := make([]byte, 8)
-	_, err := rand.Read(bytes)
-	if err != nil {
-		// Fallback to timestamp-based ID
-		return fmt.Sprintf("%016x", time.Now().UnixNano())
-	}
-	return fmt.Sprintf("%016x", bytes)
-}
-
-// GetTraceID extracts the trace ID from the context.
-func GetTraceID(ctx context.Context) string {
-	if traceID, ok := ctx.Value(TraceIDKey{}).(string); ok {
-		return traceID
-	}
-
-	// Try to extract from span context if available
-	span := trace.SpanFromContext(ctx)
-	if span.SpanContext().IsValid() {
-		return span.SpanContext().TraceID().String()
-	}
-
-	return ""
-}
-
-// WithTraceID adds a trace ID to the context.
-func WithTraceID(ctx context.Context, traceID string) context.Context {
-	return context.WithValue(ctx, TraceIDKey{}, traceID)
-}
-
-// GetSpanID extracts the span ID from the context.
-func GetSpanID(ctx context.Context) string {
-	if spanID, ok := ctx.Value(SpanIDKey{}).(string); ok {
-		return spanID
-	}
-
-	// Try to extract from span context if available
-	span := trace.SpanFromContext(ctx)
-	if span.SpanContext().IsValid() {
-		return span.SpanContext().SpanID().String()
-	}
-
-	return ""
-}
-
-// WithSpanID adds a span ID to the context.
-func WithSpanID(ctx context.Context, spanID string) context.Context {
-	return context.WithValue(ctx, SpanIDKey{}, spanID)
 }
 
 // EnsureCorrelationID ensures that a correlation ID is present in the context.
