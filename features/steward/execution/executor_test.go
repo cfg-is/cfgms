@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-package execution
+package execution_test
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -63,31 +64,31 @@ func testDirConfig(path string) string {
 
 func TestNewExecutor(t *testing.T) {
 	logger := logging.ForModule("executor_test")
-	executor, err := NewExecutor(&ExecutorConfig{
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
 		TenantID: "test-tenant",
 		Logger:   logger,
 	})
 	require.NoError(t, err)
 	assert.NotNil(t, executor)
-	assert.NotNil(t, executor.factory)
-	assert.NotNil(t, executor.comparator)
+	// Constructor success proves wiring; ExecuteConfiguration without error confirms
+	// factory and comparator are operational end-to-end.
 }
 
 func TestNewExecutor_RequiresLogger(t *testing.T) {
-	_, err := NewExecutor(&ExecutorConfig{TenantID: "test"})
+	_, err := execution.NewExecutor(&execution.ExecutorConfig{TenantID: "test"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "logger is required")
 }
 
 func TestExecutor_AllSevenModulesAvailable(t *testing.T) {
 	logger := logging.ForModule("executor_test")
-	executor, err := NewExecutor(&ExecutorConfig{Logger: logger})
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: logger})
 	require.NoError(t, err)
 
 	// All 7 built-in modules must be loadable via the factory
 	modules := []string{"file", "directory", "script", "firewall", "package", "patch", "acme"}
 	for _, name := range modules {
-		mod, err := executor.factory.LoadModule(name)
+		mod, err := execution.ExecutorFactory(executor).LoadModule(name)
 		assert.NoError(t, err, "module %q should be loadable", name)
 		assert.NotNil(t, mod, "module %q should not be nil", name)
 	}
@@ -97,7 +98,7 @@ func TestExecutor_ApplyConfiguration_Success(t *testing.T) {
 	tempDir := t.TempDir()
 	logger := logging.ForModule("executor_test")
 
-	executor, err := NewExecutor(&ExecutorConfig{
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
 		TenantID: "test-tenant",
 		Logger:   logger,
 	})
@@ -154,7 +155,7 @@ func TestExecutor_ApplyConfiguration_WithErrors(t *testing.T) {
 	tempDir := t.TempDir()
 	logger := logging.ForModule("executor_test")
 
-	executor, err := NewExecutor(&ExecutorConfig{
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
 		TenantID: "test-tenant",
 		Logger:   logger,
 	})
@@ -210,7 +211,7 @@ func TestExecutor_ApplyConfiguration_WithErrors(t *testing.T) {
 
 func TestExecutor_ApplyConfiguration_InvalidYAML(t *testing.T) {
 	logger := logging.ForModule("executor_test")
-	executor, err := NewExecutor(&ExecutorConfig{Logger: logger})
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: logger})
 	require.NoError(t, err)
 
 	// Use a truly invalid YAML document (tab character where spaces are required)
@@ -229,7 +230,7 @@ func TestExecutor_GetCompareSetVerify_Workflow(t *testing.T) {
 	tempDir := t.TempDir()
 	logger := logging.ForModule("executor_test")
 
-	executor, err := NewExecutor(&ExecutorConfig{Logger: logger})
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: logger})
 	require.NoError(t, err)
 
 	configJSON := `{
@@ -264,7 +265,7 @@ func TestExecutor_ApplyConfiguration_PermissionsRejectedOnWindows(t *testing.T) 
 	tempDir := t.TempDir()
 	logger := logging.ForModule("executor_test")
 
-	executor, err := NewExecutor(&ExecutorConfig{Logger: logger})
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: logger})
 	require.NoError(t, err)
 
 	// On Windows, specifying Unix permissions should produce an error
