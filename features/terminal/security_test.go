@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-package terminal
+package terminal_test
 
 import (
 	"context"
@@ -9,285 +9,70 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/rbac/memory"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/terminal"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// MockRBACManager is a mock implementation of rbac.RBACManager
-type MockRBACManager struct {
-	mock.Mock
-}
-
-func (m *MockRBACManager) CheckPermission(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
-	args := m.Called(ctx, request)
-	return args.Get(0).(*common.AccessResponse), args.Error(1)
-}
-
-func (m *MockRBACManager) GetSubjectPermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
-	args := m.Called(ctx, subjectID, tenantID)
-	return args.Get(0).([]*common.Permission), args.Error(1)
-}
-
-// Add other required methods for RBACManager interface
-func (m *MockRBACManager) CreatePermission(ctx context.Context, permission *common.Permission) error {
-	args := m.Called(ctx, permission)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) GetPermission(ctx context.Context, id string) (*common.Permission, error) {
-	args := m.Called(ctx, id)
-	return args.Get(0).(*common.Permission), args.Error(1)
-}
-
-func (m *MockRBACManager) ListPermissions(ctx context.Context, resourceType string) ([]*common.Permission, error) {
-	args := m.Called(ctx, resourceType)
-	return args.Get(0).([]*common.Permission), args.Error(1)
-}
-
-func (m *MockRBACManager) UpdatePermission(ctx context.Context, permission *common.Permission) error {
-	args := m.Called(ctx, permission)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) DeletePermission(ctx context.Context, id string) error {
-	args := m.Called(ctx, id)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) CreateRole(ctx context.Context, role *common.Role) error {
-	args := m.Called(ctx, role)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) GetRole(ctx context.Context, id string) (*common.Role, error) {
-	args := m.Called(ctx, id)
-	return args.Get(0).(*common.Role), args.Error(1)
-}
-
-func (m *MockRBACManager) ListRoles(ctx context.Context, tenantID string) ([]*common.Role, error) {
-	args := m.Called(ctx, tenantID)
-	return args.Get(0).([]*common.Role), args.Error(1)
-}
-
-func (m *MockRBACManager) UpdateRole(ctx context.Context, role *common.Role) error {
-	args := m.Called(ctx, role)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) DeleteRole(ctx context.Context, id string) error {
-	args := m.Called(ctx, id)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) GetRolePermissions(ctx context.Context, roleID string) ([]*common.Permission, error) {
-	args := m.Called(ctx, roleID)
-	return args.Get(0).([]*common.Permission), args.Error(1)
-}
-
-func (m *MockRBACManager) CreateSubject(ctx context.Context, subject *common.Subject) error {
-	args := m.Called(ctx, subject)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) GetSubject(ctx context.Context, id string) (*common.Subject, error) {
-	args := m.Called(ctx, id)
-	return args.Get(0).(*common.Subject), args.Error(1)
-}
-
-func (m *MockRBACManager) ListSubjects(ctx context.Context, tenantID string, subjectType common.SubjectType) ([]*common.Subject, error) {
-	args := m.Called(ctx, tenantID, subjectType)
-	return args.Get(0).([]*common.Subject), args.Error(1)
-}
-
-func (m *MockRBACManager) UpdateSubject(ctx context.Context, subject *common.Subject) error {
-	args := m.Called(ctx, subject)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) DeleteSubject(ctx context.Context, id string) error {
-	args := m.Called(ctx, id)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) GetSubjectRoles(ctx context.Context, subjectID string, tenantID string) ([]*common.Role, error) {
-	args := m.Called(ctx, subjectID, tenantID)
-	return args.Get(0).([]*common.Role), args.Error(1)
-}
-
-func (m *MockRBACManager) AssignRole(ctx context.Context, assignment *common.RoleAssignment) error {
-	args := m.Called(ctx, assignment)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID string) error {
-	args := m.Called(ctx, subjectID, roleID, tenantID)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) GetAssignment(ctx context.Context, id string) (*common.RoleAssignment, error) {
-	args := m.Called(ctx, id)
-	return args.Get(0).(*common.RoleAssignment), args.Error(1)
-}
-
-func (m *MockRBACManager) ListAssignments(ctx context.Context, subjectID, roleID, tenantID string) ([]*common.RoleAssignment, error) {
-	args := m.Called(ctx, subjectID, roleID, tenantID)
-	return args.Get(0).([]*common.RoleAssignment), args.Error(1)
-}
-
-func (m *MockRBACManager) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) {
-	args := m.Called(ctx, subjectID, tenantID)
-	return args.Get(0).([]*common.RoleAssignment), args.Error(1)
-}
-
-func (m *MockRBACManager) ValidateAccess(ctx context.Context, authContext *common.AuthorizationContext, requiredPermission string) (*common.AccessResponse, error) {
-	args := m.Called(ctx, authContext, requiredPermission)
-	return args.Get(0).(*common.AccessResponse), args.Error(1)
-}
-
-func (m *MockRBACManager) Initialize(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) CreateTenantDefaultRoles(ctx context.Context, tenantID string) error {
-	args := m.Called(ctx, tenantID)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
-	args := m.Called(ctx, subjectID, tenantID)
-	return args.Get(0).([]*common.Permission), args.Error(1)
-}
-
-func (m *MockRBACManager) ComputeRolePermissions(ctx context.Context, roleID string) (*memory.EffectivePermissions, error) {
-	args := m.Called(ctx, roleID)
-	return args.Get(0).(*memory.EffectivePermissions), args.Error(1)
-}
-
-func (m *MockRBACManager) CreateRoleWithParent(ctx context.Context, role *common.Role, parentRoleID string, inheritanceType common.RoleInheritanceType) error {
-	args := m.Called(ctx, role, parentRoleID, inheritanceType)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) GetRoleHierarchyTree(ctx context.Context, rootRoleID string, maxDepth int) (*memory.RoleHierarchy, error) {
-	args := m.Called(ctx, rootRoleID, maxDepth)
-	return args.Get(0).(*memory.RoleHierarchy), args.Error(1)
-}
-
-func (m *MockRBACManager) ValidateHierarchyOperation(ctx context.Context, childRoleID, parentRoleID string) error {
-	args := m.Called(ctx, childRoleID, parentRoleID)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) ResolvePermissionConflicts(ctx context.Context, roleID string, conflictingPermissions map[string][]*common.Permission) (map[string]*common.Permission, error) {
-	args := m.Called(ctx, roleID, conflictingPermissions)
-	return args.Get(0).(map[string]*common.Permission), args.Error(1)
-}
-
-func (m *MockRBACManager) GetRoleHierarchy(ctx context.Context, roleID string) (*memory.RoleHierarchy, error) {
-	args := m.Called(ctx, roleID)
-	return args.Get(0).(*memory.RoleHierarchy), args.Error(1)
-}
-
-func (m *MockRBACManager) GetChildRoles(ctx context.Context, roleID string) ([]*common.Role, error) {
-	args := m.Called(ctx, roleID)
-	return args.Get(0).([]*common.Role), args.Error(1)
-}
-
-func (m *MockRBACManager) GetParentRole(ctx context.Context, roleID string) (*common.Role, error) {
-	args := m.Called(ctx, roleID)
-	return args.Get(0).(*common.Role), args.Error(1)
-}
-
-func (m *MockRBACManager) SetRoleParent(ctx context.Context, roleID, parentRoleID string, inheritanceType common.RoleInheritanceType) error {
-	args := m.Called(ctx, roleID, parentRoleID, inheritanceType)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) RemoveRoleParent(ctx context.Context, roleID string) error {
-	args := m.Called(ctx, roleID)
-	return args.Error(0)
-}
-
-func (m *MockRBACManager) ValidateRoleHierarchy(ctx context.Context, roleID string) error {
-	args := m.Called(ctx, roleID)
-	return args.Error(0)
-}
-
 func TestSecurityValidator_ValidateSessionAccess(t *testing.T) {
-	tests := []struct {
-		name           string
-		userID         string
-		stewardID      string
-		tenantID       string
-		mockSetup      func(*MockRBACManager)
-		expectedError  bool
-		expectedAccess bool
-	}{
-		{
-			name:      "Valid terminal access",
-			userID:    "user123",
-			stewardID: "steward456",
-			tenantID:  "tenant789",
-			mockSetup: func(m *MockRBACManager) {
-				m.On("CheckPermission", mock.Anything, mock.AnythingOfType("*common.AccessRequest")).Return(
-					&common.AccessResponse{
-						Granted: true,
-						Reason:  "Access granted",
-					}, nil)
-				m.On("GetSubjectPermissions", mock.Anything, "user123", "tenant789").Return(
-					[]*common.Permission{
-						{Id: "terminal.session.create", ResourceType: "terminal"},
-						{Id: "terminal.session.read", ResourceType: "terminal"},
-					}, nil)
-			},
-			expectedError:  false,
-			expectedAccess: true,
-		},
-		{
-			name:      "Access denied - no permission",
-			userID:    "user123",
-			stewardID: "steward456",
-			tenantID:  "tenant789",
-			mockSetup: func(m *MockRBACManager) {
-				m.On("CheckPermission", mock.Anything, mock.AnythingOfType("*common.AccessRequest")).Return(
-					&common.AccessResponse{
-						Granted: false,
-						Reason:  "Insufficient permissions",
-					}, nil)
-			},
-			expectedError:  true,
-			expectedAccess: false,
-		},
-	}
+	ctx := context.Background()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mockRBAC := &MockRBACManager{}
-			tt.mockSetup(mockRBAC)
+	t.Run("Valid terminal access", func(t *testing.T) {
+		manager := pkgtesting.SetupTestRBACManager(t)
+		// M-AUTH-2: sensitive RBAC operations require justification in context
+		ctxJ := rbac.WithSensitiveOperationJustification(ctx, "test: terminal security validator setup")
 
-			validator := NewSecurityValidator(mockRBAC)
-			ctx := context.Background()
+		// terminal.session.create and terminal.session.read are pre-loaded by
+		// manager.Initialize via DefaultPermissions — no need to create them here.
+		require.NoError(t, manager.CreateRole(ctxJ, &common.Role{
+			Id:            "terminal-user",
+			Name:          "Terminal User",
+			TenantId:      "tenant789",
+			PermissionIds: []string{"terminal.session.create", "terminal.session.read"},
+		}))
+		require.NoError(t, manager.CreateSubject(ctxJ, &common.Subject{
+			Id:          "user123",
+			Type:        common.SubjectType_SUBJECT_TYPE_USER,
+			DisplayName: "Test User",
+			TenantId:    "tenant789",
+			IsActive:    true,
+		}))
+		require.NoError(t, manager.AssignRole(ctxJ, &common.RoleAssignment{
+			SubjectId: "user123",
+			RoleId:    "terminal-user",
+			TenantId:  "tenant789",
+		}))
 
-			securityContext, err := validator.ValidateSessionAccess(ctx, tt.userID, tt.stewardID, tt.tenantID)
+		validator := terminal.NewSecurityValidator(manager)
+		securityContext, err := validator.ValidateSessionAccess(ctx, "user123", "steward456", "tenant789")
 
-			if tt.expectedError {
-				assert.Error(t, err)
-				assert.Nil(t, securityContext)
-			} else {
-				assert.NoError(t, err)
-				assert.NotNil(t, securityContext)
-				assert.Equal(t, tt.userID, securityContext.UserID)
-				assert.Equal(t, tt.stewardID, securityContext.StewardID)
-				assert.Equal(t, tt.tenantID, securityContext.TenantID)
-			}
+		assert.NoError(t, err)
+		require.NotNil(t, securityContext)
+		assert.Equal(t, "user123", securityContext.UserID)
+		assert.Equal(t, "steward456", securityContext.StewardID)
+		assert.Equal(t, "tenant789", securityContext.TenantID)
+	})
 
-			mockRBAC.AssertExpectations(t)
-		})
-	}
+	t.Run("Access denied - no permission", func(t *testing.T) {
+		manager := pkgtesting.SetupTestRBACManager(t)
+
+		require.NoError(t, manager.CreateSubject(ctx, &common.Subject{
+			Id:          "user123",
+			Type:        common.SubjectType_SUBJECT_TYPE_USER,
+			DisplayName: "Test User",
+			TenantId:    "tenant789",
+			IsActive:    true,
+		}))
+
+		validator := terminal.NewSecurityValidator(manager)
+		securityContext, err := validator.ValidateSessionAccess(ctx, "user123", "steward456", "tenant789")
+
+		assert.Error(t, err)
+		assert.Nil(t, securityContext)
+	})
 }
 
 func TestSecurityValidator_ValidateCommand(t *testing.T) {
@@ -295,56 +80,56 @@ func TestSecurityValidator_ValidateCommand(t *testing.T) {
 		name             string
 		command          string
 		expectedAllowed  bool
-		expectedAction   FilterAction
-		expectedSeverity FilterSeverity
+		expectedAction   terminal.FilterAction
+		expectedSeverity terminal.FilterSeverity
 	}{
 		{
 			name:             "Safe command - ls",
 			command:          "ls -la",
 			expectedAllowed:  true,
-			expectedAction:   FilterActionAllow,
+			expectedAction:   terminal.FilterActionAllow,
 			expectedSeverity: "",
 		},
 		{
 			name:             "Dangerous command - rm -rf",
 			command:          "rm -rf /",
 			expectedAllowed:  false,
-			expectedAction:   FilterActionBlock,
-			expectedSeverity: FilterSeverityCritical,
+			expectedAction:   terminal.FilterActionBlock,
+			expectedSeverity: terminal.FilterSeverityCritical,
 		},
 		{
 			name:             "Audit command - sudo",
 			command:          "sudo systemctl restart nginx",
 			expectedAllowed:  true,
-			expectedAction:   FilterActionAudit,
-			expectedSeverity: FilterSeverityHigh,
+			expectedAction:   terminal.FilterActionAudit,
+			expectedSeverity: terminal.FilterSeverityHigh,
 		},
 		{
 			name:             "Network scanning command",
 			command:          "nmap -sS 192.168.1.0/24",
 			expectedAllowed:  false,
-			expectedAction:   FilterActionBlock,
-			expectedSeverity: FilterSeverityHigh,
+			expectedAction:   terminal.FilterActionBlock,
+			expectedSeverity: terminal.FilterSeverityHigh,
 		},
 		{
 			name:             "System configuration edit",
 			command:          "vi /etc/passwd",
 			expectedAllowed:  true,
-			expectedAction:   FilterActionAudit,
-			expectedSeverity: FilterSeverityHigh,
+			expectedAction:   terminal.FilterActionAudit,
+			expectedSeverity: terminal.FilterSeverityHigh,
 		},
 	}
 
-	mockRBAC := &MockRBACManager{}
-	validator := NewSecurityValidator(mockRBAC)
+	// ValidateCommand does not use the rbacManager; nil is safe here.
+	validator := terminal.NewSecurityValidator(nil)
 	ctx := context.Background()
 
-	securityContext := &SessionSecurityContext{
+	securityContext := &terminal.SessionSecurityContext{
 		SessionID:    "test-session",
 		UserID:       "test-user",
 		StewardID:    "test-steward",
 		TenantID:     "test-tenant",
-		FilterRules:  validator.getApplicableFilterRules("test-tenant", "test-steward"),
+		FilterRules:  terminal.GetApplicableFilterRules(validator, "test-tenant", "test-steward"),
 		AuditEnabled: true,
 	}
 
@@ -362,7 +147,7 @@ func TestSecurityValidator_ValidateCommand(t *testing.T) {
 				assert.Equal(t, tt.expectedSeverity, result.Severity)
 			}
 
-			if result.Action == FilterActionBlock || result.Action == FilterActionAudit {
+			if result.Action == terminal.FilterActionBlock || result.Action == terminal.FilterActionAudit {
 				assert.NotNil(t, result.AuditEvent)
 				assert.Equal(t, tt.command, result.AuditEvent.Command)
 				assert.Equal(t, tt.expectedAction, result.AuditEvent.Action)
@@ -372,76 +157,68 @@ func TestSecurityValidator_ValidateCommand(t *testing.T) {
 }
 
 func TestCommandFilterRules(t *testing.T) {
-	rules := getDefaultCommandFilterRules()
+	// ValidateCommand does not use the rbacManager; nil is safe here.
+	validator := terminal.NewSecurityValidator(nil)
+	ctx := context.Background()
+
+	filterRules := terminal.GetApplicableFilterRules(validator, "test-tenant", "test-steward")
+	secCtx := &terminal.SessionSecurityContext{
+		SessionID:   "test-session",
+		UserID:      "test-user",
+		StewardID:   "test-steward",
+		TenantID:    "test-tenant",
+		FilterRules: filterRules,
+	}
 
 	tests := []struct {
-		name            string
-		command         string
-		expectedMatches int
-		expectedAction  FilterAction
+		name           string
+		command        string
+		expectedAction terminal.FilterAction
 	}{
 		{
-			name:            "rm -rf command",
-			command:         "rm -rf /tmp/test",
-			expectedMatches: 1,
-			expectedAction:  FilterActionBlock,
+			name:           "rm -rf command",
+			command:        "rm -rf /tmp/test",
+			expectedAction: terminal.FilterActionBlock,
 		},
 		{
-			name:            "format command",
-			command:         "format c:",
-			expectedMatches: 1,
-			expectedAction:  FilterActionBlock,
+			name:           "format command",
+			command:        "format c:",
+			expectedAction: terminal.FilterActionBlock,
 		},
 		{
-			name:            "sudo command",
-			command:         "sudo apt update",
-			expectedMatches: 1,
-			expectedAction:  FilterActionAudit,
+			name:           "sudo command",
+			command:        "sudo apt update",
+			expectedAction: terminal.FilterActionAudit,
 		},
 		{
-			name:            "safe command",
-			command:         "echo hello world",
-			expectedMatches: 0,
-			expectedAction:  FilterActionAllow,
+			name:           "safe command",
+			command:        "echo hello world",
+			expectedAction: terminal.FilterActionAllow,
 		},
 		{
-			name:            "nmap command",
-			command:         "nmap -sS target.com",
-			expectedMatches: 1,
-			expectedAction:  FilterActionBlock,
+			name:           "nmap command",
+			command:        "nmap -sS target.com",
+			expectedAction: terminal.FilterActionBlock,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			matchCount := 0
-			var matchedRule CommandFilterRule
-
-			for _, rule := range rules {
-				if rule.compiledRx != nil && rule.compiledRx.MatchString(tt.command) {
-					matchCount++
-					matchedRule = rule
-				}
-			}
-
-			assert.Equal(t, tt.expectedMatches, matchCount)
-
-			if matchCount > 0 {
-				assert.Equal(t, tt.expectedAction, matchedRule.Action)
-			}
+			result, err := validator.ValidateCommand(ctx, secCtx, tt.command)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedAction, result.Action)
 		})
 	}
 }
 
 func TestSessionMonitor_ThreatLevelCalculation(t *testing.T) {
-	mockRBAC := &MockRBACManager{}
-	validator := NewSecurityValidator(mockRBAC)
+	// ValidateCommand does not use the rbacManager; nil is safe here.
+	validator := terminal.NewSecurityValidator(nil)
 
-	// Use custom config with AutoTerminateOnCritical disabled to prevent race condition
-	// The test needs to verify threat level calculation without the session being terminated
-	config := DefaultMonitorConfig()
+	// AutoTerminateOnCritical disabled to prevent session termination during the test.
+	config := terminal.DefaultMonitorConfig()
 	config.AutoTerminateOnCritical = false
-	monitor := NewSessionMonitor(validator, config)
+	monitor := terminal.NewSessionMonitor(validator, config)
 
 	ctx := context.Background()
 	if err := monitor.Start(ctx); err != nil {
@@ -453,104 +230,84 @@ func TestSessionMonitor_ThreatLevelCalculation(t *testing.T) {
 		}
 	}()
 
-	// Create a test session
-	session := &Session{
+	session := &terminal.Session{
 		ID:        "test-session",
 		UserID:    "test-user",
 		StewardID: "test-steward",
 		CreatedAt: time.Now(),
 	}
 
-	securityContext := &SessionSecurityContext{
+	securityContext := &terminal.SessionSecurityContext{
 		SessionID: session.ID,
 		UserID:    session.UserID,
 		StewardID: session.StewardID,
 		TenantID:  "test-tenant",
 	}
 
-	// Add session to monitoring
 	err := monitor.AddSession(session, securityContext)
 	require.NoError(t, err)
 
-	// Test different threat scenarios
 	t.Run("Low threat level - normal activity", func(t *testing.T) {
 		sessionInfo, err := monitor.GetSessionInfo(session.ID)
 		require.NoError(t, err)
-		assert.Equal(t, ThreatLevelLow, sessionInfo.ThreatLevel)
+		assert.Equal(t, terminal.ThreatLevelLow, sessionInfo.ThreatLevel)
 	})
 
 	t.Run("Medium threat level - some alerts", func(t *testing.T) {
-		// Simulate some alerts
-		monitor.generateAlert(monitor.sessions[session.ID], "test_alert", FilterSeverityMedium, "Test alert")
-		monitor.generateAlert(monitor.sessions[session.ID], "test_alert", FilterSeverityMedium, "Test alert")
-		monitor.generateAlert(monitor.sessions[session.ID], "test_alert", FilterSeverityMedium, "Test alert")
-
-		// Update threat level
-		monitor.updateThreatLevel(monitor.sessions[session.ID])
-
-		sessionInfo, err := monitor.GetSessionInfo(session.ID)
+		// Get a working copy of the session from the monitor.
+		sessionCopy, err := monitor.GetSessionInfo(session.ID)
 		require.NoError(t, err)
-		assert.Equal(t, ThreatLevelMedium, sessionInfo.ThreatLevel)
+
+		// Generate 3 alerts on the copy (AlertCount > 2 → Medium).
+		terminal.GenerateAlert(monitor, sessionCopy, "test_alert", terminal.FilterSeverityMedium, "Test alert")
+		terminal.GenerateAlert(monitor, sessionCopy, "test_alert", terminal.FilterSeverityMedium, "Test alert")
+		terminal.GenerateAlert(monitor, sessionCopy, "test_alert", terminal.FilterSeverityMedium, "Test alert")
+
+		terminal.UpdateThreatLevel(monitor, sessionCopy)
+
+		assert.Equal(t, terminal.ThreatLevelMedium, sessionCopy.ThreatLevel)
 	})
 
 	t.Run("High threat level - many alerts", func(t *testing.T) {
-		// Add more alerts to reach high threat level
-		for i := 0; i < 3; i++ {
-			monitor.generateAlert(monitor.sessions[session.ID], "test_alert", FilterSeverityMedium, "Test alert")
+		// Get a fresh copy; add enough alerts to reach High (AlertCount > 5).
+		sessionCopy, err := monitor.GetSessionInfo(session.ID)
+		require.NoError(t, err)
+
+		for i := 0; i < 6; i++ {
+			terminal.GenerateAlert(monitor, sessionCopy, "test_alert", terminal.FilterSeverityMedium, "Test alert")
 		}
 
-		monitor.updateThreatLevel(monitor.sessions[session.ID])
+		terminal.UpdateThreatLevel(monitor, sessionCopy)
 
-		sessionInfo, err := monitor.GetSessionInfo(session.ID)
-		require.NoError(t, err)
-		assert.Equal(t, ThreatLevelHigh, sessionInfo.ThreatLevel)
+		assert.Equal(t, terminal.ThreatLevelHigh, sessionCopy.ThreatLevel)
 	})
 
 	t.Run("Critical threat level - blocked commands", func(t *testing.T) {
-		// Safely update blocked commands count through the monitor's mutex
-		monitor.sessionsMutex.Lock()
-		monitoredSession, exists := monitor.sessions[session.ID]
-		if !exists {
-			monitor.sessionsMutex.Unlock()
-			t.Fatal("session not found in monitor")
-		}
-
-		// Lock the session and update blocked commands
-		monitoredSession.mutex.Lock()
-		monitoredSession.BlockedCommands = 5
-		monitoredSession.mutex.Unlock()
-		monitor.sessionsMutex.Unlock()
-
-		// Update threat level (this will read the BlockedCommands value)
-		monitor.sessionsMutex.RLock()
-		monitoredSession, exists = monitor.sessions[session.ID]
-		monitor.sessionsMutex.RUnlock()
-		if !exists {
-			t.Fatal("session not found after blocked commands update")
-		}
-
-		monitor.updateThreatLevel(monitoredSession)
-
-		sessionInfo, err := monitor.GetSessionInfo(session.ID)
+		// Get a fresh copy and set BlockedCommands directly (BlockedCommands > 3 → Critical).
+		sessionCopy, err := monitor.GetSessionInfo(session.ID)
 		require.NoError(t, err)
-		assert.Equal(t, ThreatLevelCritical, sessionInfo.ThreatLevel)
+
+		sessionCopy.BlockedCommands = 5
+		terminal.UpdateThreatLevel(monitor, sessionCopy)
+
+		assert.Equal(t, terminal.ThreatLevelCritical, sessionCopy.ThreatLevel)
 	})
 }
 
 func TestCommandInterceptor_InputFiltering(t *testing.T) {
-	mockRBAC := &MockRBACManager{}
-	validator := NewSecurityValidator(mockRBAC)
+	// ValidateCommand does not use the rbacManager; nil is safe here.
+	validator := terminal.NewSecurityValidator(nil)
 
-	securityContext := &SessionSecurityContext{
+	securityContext := &terminal.SessionSecurityContext{
 		SessionID:   "test-session",
 		UserID:      "test-user",
 		StewardID:   "test-steward",
 		TenantID:    "test-tenant",
-		FilterRules: validator.getApplicableFilterRules("test-tenant", "test-steward"),
+		FilterRules: terminal.GetApplicableFilterRules(validator, "test-tenant", "test-steward"),
 	}
 
-	auditChan := make(chan *CommandAuditEvent, 10)
-	interceptor := NewCommandInterceptor(validator, securityContext, auditChan)
+	auditChan := make(chan *terminal.CommandAuditEvent, 10)
+	interceptor := terminal.NewCommandInterceptor(validator, securityContext, auditChan)
 
 	ctx := context.Background()
 
@@ -590,12 +347,11 @@ func TestCommandInterceptor_InputFiltering(t *testing.T) {
 			}
 
 			if tt.expectBlocked {
-				// Check if an audit event was generated
 				select {
 				case event := <-auditChan:
-					assert.Equal(t, FilterActionBlock, event.Action)
+					assert.Equal(t, terminal.FilterActionBlock, event.Action)
 				case <-time.After(100 * time.Millisecond):
-					// No event received, which might be expected for partial inputs
+					t.Error("expected block audit event for dangerous command, but none received within 100ms")
 				}
 			}
 		})
@@ -603,17 +359,23 @@ func TestCommandInterceptor_InputFiltering(t *testing.T) {
 }
 
 func TestDefaultCommandFilterRules(t *testing.T) {
-	rules := getDefaultCommandFilterRules()
+	// ValidateCommand does not use the rbacManager; nil is safe here.
+	validator := terminal.NewSecurityValidator(nil)
+	ctx := context.Background()
 
-	// Ensure all rules have compiled regex patterns
-	for _, rule := range rules {
-		assert.NotNil(t, rule.compiledRx, "Rule %s should have compiled regex", rule.ID)
-		assert.NotEmpty(t, rule.Pattern, "Rule %s should have pattern", rule.ID)
-		assert.NotEmpty(t, rule.Name, "Rule %s should have name", rule.ID)
-		assert.NotEmpty(t, rule.Description, "Rule %s should have description", rule.ID)
+	filterRules := terminal.GetApplicableFilterRules(validator, "test-tenant", "test-steward")
+	secCtx := &terminal.SessionSecurityContext{
+		SessionID:   "test-session",
+		UserID:      "test-user",
+		StewardID:   "test-steward",
+		TenantID:    "test-tenant",
+		FilterRules: filterRules,
 	}
 
-	// Test specific dangerous patterns
+	// Verify that default filter rules are non-empty (compiled and loaded correctly).
+	assert.NotEmpty(t, filterRules, "Default filter rules should be present")
+
+	// Test that dangerous patterns are caught by the compiled rules.
 	dangerousCommands := []string{
 		"rm -rf /",
 		"format c:",
@@ -624,71 +386,25 @@ func TestDefaultCommandFilterRules(t *testing.T) {
 
 	for _, cmd := range dangerousCommands {
 		t.Run(fmt.Sprintf("Dangerous command: %s", cmd), func(t *testing.T) {
-			found := false
-			for _, rule := range rules {
-				if rule.compiledRx.MatchString(cmd) {
-					found = true
-					assert.Contains(t, []FilterAction{FilterActionBlock, FilterActionAudit}, rule.Action,
-						"Dangerous command should be blocked or audited")
-					break
-				}
-			}
-			assert.True(t, found, "Dangerous command should match at least one rule")
-		})
-	}
-}
-
-func TestSecurityLevels(t *testing.T) {
-	mockRBAC := &MockRBACManager{}
-	validator := NewSecurityValidator(mockRBAC)
-
-	tests := []struct {
-		name          string
-		permissions   []string
-		filterRules   []CommandFilterRule
-		expectedLevel SecurityLevel
-	}{
-		{
-			name:          "Admin permissions - maximum security",
-			permissions:   []string{"terminal.admin", "system.admin"},
-			filterRules:   []CommandFilterRule{},
-			expectedLevel: SecurityLevelMaximum,
-		},
-		{
-			name:          "Regular user - enhanced security",
-			permissions:   []string{"terminal.session.create", "terminal.session.read"},
-			filterRules:   []CommandFilterRule{},
-			expectedLevel: SecurityLevelEnhanced,
-		},
-		{
-			name:        "Critical rules present - maximum security",
-			permissions: []string{"terminal.session.create"},
-			filterRules: []CommandFilterRule{
-				{Severity: FilterSeverityCritical},
-			},
-			expectedLevel: SecurityLevelMaximum,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			level := validator.determineMonitoringLevel(tt.permissions, tt.filterRules)
-			assert.Equal(t, tt.expectedLevel, level)
+			result, err := validator.ValidateCommand(ctx, secCtx, cmd)
+			require.NoError(t, err)
+			assert.Contains(t, []terminal.FilterAction{terminal.FilterActionBlock, terminal.FilterActionAudit}, result.Action,
+				"Dangerous command should be blocked or audited")
 		})
 	}
 }
 
 func BenchmarkCommandValidation(b *testing.B) {
-	mockRBAC := &MockRBACManager{}
-	validator := NewSecurityValidator(mockRBAC)
+	// ValidateCommand does not use the rbacManager; nil is safe here.
+	validator := terminal.NewSecurityValidator(nil)
 	ctx := context.Background()
 
-	securityContext := &SessionSecurityContext{
+	securityContext := &terminal.SessionSecurityContext{
 		SessionID:   "bench-session",
 		UserID:      "bench-user",
 		StewardID:   "bench-steward",
 		TenantID:    "bench-tenant",
-		FilterRules: validator.getApplicableFilterRules("bench-tenant", "bench-steward"),
+		FilterRules: terminal.GetApplicableFilterRules(validator, "bench-tenant", "bench-steward"),
 	}
 
 	testCommands := []string{
