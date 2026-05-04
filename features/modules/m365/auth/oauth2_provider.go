@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // OAuth2Provider implements the Provider interface using OAuth2 client credentials flow
@@ -31,6 +33,8 @@ type OAuth2Provider struct {
 
 	// Default configuration for new tenants
 	defaultConfig *OAuth2Config
+
+	logger logging.Logger
 }
 
 // cachedToken represents a cached access token with expiration tracking
@@ -40,7 +44,10 @@ type cachedToken struct {
 }
 
 // NewOAuth2Provider creates a new OAuth2Provider instance
-func NewOAuth2Provider(credentialStore CredentialStore, defaultConfig *OAuth2Config) *OAuth2Provider {
+func NewOAuth2Provider(credentialStore CredentialStore, defaultConfig *OAuth2Config, logger logging.Logger) *OAuth2Provider {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	return &OAuth2Provider{
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
@@ -49,6 +56,7 @@ func NewOAuth2Provider(credentialStore CredentialStore, defaultConfig *OAuth2Con
 		tokenCache:          make(map[string]*cachedToken),
 		delegatedTokenCache: make(map[string]*cachedToken),
 		defaultConfig:       defaultConfig,
+		logger:              logger,
 	}
 }
 
@@ -93,7 +101,7 @@ func (p *OAuth2Provider) GetAccessToken(ctx context.Context, tenantID string) (*
 	// Store the new token
 	if err := p.credentialStore.StoreToken(tenantID, token); err != nil {
 		// Log warning but don't fail - we can still return the token
-		fmt.Printf("Warning: Failed to store token for tenant %s: %v\n", tenantID, err)
+		p.logger.Warn("failed to store token", "tenant_id", logging.SanitizeLogValue(tenantID), "error", err)
 	}
 
 	// Cache the token
@@ -255,14 +263,18 @@ func (p *OAuth2Provider) RefreshDelegatedToken(ctx context.Context, refreshToken
 	// Store the refreshed token
 	if err := p.credentialStore.StoreDelegatedToken(tenantID, userContext.UserID, token); err != nil {
 		// Log warning but don't fail
-		fmt.Printf("Warning: Failed to store delegated token for user %s in tenant %s: %v\n",
-			userContext.UserID, tenantID, err)
+		p.logger.Warn("failed to store delegated token",
+			"user_id", logging.SanitizeLogValue(userContext.UserID),
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", err)
 	}
 
 	// Store updated user context
 	if err := p.credentialStore.StoreUserContext(tenantID, userContext.UserID, userContext); err != nil {
-		fmt.Printf("Warning: Failed to store user context for user %s in tenant %s: %v\n",
-			userContext.UserID, tenantID, err)
+		p.logger.Warn("failed to store user context",
+			"user_id", logging.SanitizeLogValue(userContext.UserID),
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", err)
 	}
 
 	// Cache the token
@@ -690,14 +702,18 @@ func (p *OAuth2Provider) ExchangeCodeForDelegatedToken(ctx context.Context, tena
 
 		// Store as delegated token
 		if err := p.credentialStore.StoreDelegatedToken(tenantID, userContext.UserID, token); err != nil {
-			fmt.Printf("Warning: Failed to store delegated token for user %s in tenant %s: %v\n",
-				userContext.UserID, tenantID, err)
+			p.logger.Warn("failed to store delegated token",
+				"user_id", logging.SanitizeLogValue(userContext.UserID),
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"error", err)
 		}
 
 		// Store user context
 		if err := p.credentialStore.StoreUserContext(tenantID, userContext.UserID, userContext); err != nil {
-			fmt.Printf("Warning: Failed to store user context for user %s in tenant %s: %v\n",
-				userContext.UserID, tenantID, err)
+			p.logger.Warn("failed to store user context",
+				"user_id", logging.SanitizeLogValue(userContext.UserID),
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"error", err)
 		}
 
 		// Cache as delegated token
@@ -706,7 +722,7 @@ func (p *OAuth2Provider) ExchangeCodeForDelegatedToken(ctx context.Context, tena
 	} else {
 		// Store as application token
 		if err := p.credentialStore.StoreToken(tenantID, token); err != nil {
-			fmt.Printf("Warning: Failed to store token for tenant %s: %v\n", tenantID, err)
+			p.logger.Warn("failed to store token", "tenant_id", logging.SanitizeLogValue(tenantID), "error", err)
 		}
 
 		// Cache the token

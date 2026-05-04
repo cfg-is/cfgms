@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // TestDirectAppAccessConfiguration tests direct app registration configuration
@@ -59,7 +61,7 @@ func TestDirectAppAccessConfiguration(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	t.Run("TestDirectAppConfigurationStorage", func(t *testing.T) {
@@ -287,7 +289,7 @@ func TestDirectAppAccessTokenFlow(t *testing.T) {
 		Scopes:                   []string{"User.Read.All", "Directory.Read.All"},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	t.Run("TestApplicationTokenFlow", func(t *testing.T) {
@@ -348,7 +350,7 @@ func TestDirectAppAccessPermissionScenarios(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	// Define realistic scenarios for different M365 operations
@@ -484,7 +486,7 @@ func TestDirectAppAccessIntegration(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	t.Run("TestRealApplicationToken", func(t *testing.T) {

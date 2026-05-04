@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // TestDelegatedPermissionsIntegration tests the complete delegated permissions workflow
@@ -45,7 +47,7 @@ func TestDelegatedPermissionsIntegration(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	t.Run("TestDelegatedAuthConfiguration", func(t *testing.T) {
@@ -235,7 +237,7 @@ func TestDelegatedPermissionsScenarios(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	t.Run("TestUserManagementWithDelegatedPermissions", func(t *testing.T) {
@@ -324,7 +326,7 @@ func TestTokenRefreshFlow(t *testing.T) {
 		FallbackToAppPermissions: true,
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	t.Run("TestDelegatedTokenRefresh", func(t *testing.T) {
@@ -414,7 +416,7 @@ func BenchmarkDelegatedTokenOperations(b *testing.B) {
 		SupportDelegatedAuth: true,
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 
 	userContext := &UserContext{
 		UserID:            "benchmark-user",

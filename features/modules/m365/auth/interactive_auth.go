@@ -11,8 +11,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // InteractiveAuthenticator provides methods for interactive OAuth2 flows
@@ -20,17 +23,22 @@ type InteractiveAuthenticator struct {
 	provider     *OAuth2Provider
 	callbackAddr string
 	server       *http.Server
+	logger       logging.Logger
 }
 
 // NewInteractiveAuthenticator creates a new interactive authenticator
-func NewInteractiveAuthenticator(provider *OAuth2Provider, callbackAddr string) *InteractiveAuthenticator {
+func NewInteractiveAuthenticator(provider *OAuth2Provider, callbackAddr string, logger logging.Logger) *InteractiveAuthenticator {
 	if callbackAddr == "" {
 		callbackAddr = ":8080"
+	}
+	if logger == nil {
+		logger = logging.NewNoopLogger()
 	}
 
 	return &InteractiveAuthenticator{
 		provider:     provider,
 		callbackAddr: callbackAddr,
+		logger:       logger,
 	}
 }
 
@@ -65,12 +73,12 @@ func (ia *InteractiveAuthenticator) AuthenticateUser(ctx context.Context, tenant
 	defer ia.stopCallbackServer()
 
 	// Open browser or show URL
-	fmt.Printf("\n🔐 Interactive M365 Authentication Required\n")
-	fmt.Printf("==================================================\n")
-	fmt.Printf("Please open the following URL in your browser:\n\n")
-	fmt.Printf("%s\n\n", authURL)
-	fmt.Printf("After authorization, you will be redirected to localhost.\n")
-	fmt.Printf("Waiting for callback...\n\n")
+	_, _ = fmt.Fprintf(os.Stdout, "\n🔐 Interactive M365 Authentication Required\n")
+	_, _ = fmt.Fprintf(os.Stdout, "==================================================\n")
+	_, _ = fmt.Fprintf(os.Stdout, "Please open the following URL in your browser:\n\n")
+	_, _ = fmt.Fprintf(os.Stdout, "%s\n\n", authURL)
+	_, _ = fmt.Fprintf(os.Stdout, "After authorization, you will be redirected to localhost.\n")
+	_, _ = fmt.Fprintf(os.Stdout, "Waiting for callback...\n\n")
 
 	// Wait for callback with timeout
 	select {
@@ -85,7 +93,7 @@ func (ia *InteractiveAuthenticator) AuthenticateUser(ctx context.Context, tenant
 			return nil, nil, fmt.Errorf("failed to get user info: %w", err)
 		}
 
-		fmt.Printf("✅ Authentication successful! Welcome, %s\n", userContext.DisplayName)
+		_, _ = fmt.Fprintf(os.Stdout, "✅ Authentication successful! Welcome, %s\n", userContext.DisplayName)
 		return userContext, result.token, nil
 
 	case <-time.After(5 * time.Minute):
@@ -250,7 +258,7 @@ func (ia *InteractiveAuthenticator) setupCallbackHandler(state, codeVerifier, te
 func (ia *InteractiveAuthenticator) startCallbackServer() error {
 	go func() {
 		if err := ia.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			fmt.Printf("Callback server error: %v\n", err)
+			ia.logger.Warn("callback server error", "error", err)
 		}
 	}()
 
@@ -305,8 +313,7 @@ func (ia *InteractiveAuthenticator) getUserInfo(ctx context.Context, token *Acce
 	req.Header.Set("Accept", "application/json")
 
 	// Make the request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := ia.provider.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user info: %w", err)
 	}
@@ -341,7 +348,7 @@ func (ia *InteractiveAuthenticator) getUserInfo(ctx context.Context, token *Acce
 	roles, err := ia.getUserRoles(ctx, token)
 	if err != nil {
 		// Log warning but don't fail - roles are nice-to-have
-		fmt.Printf("Warning: Could not retrieve user roles: %v\n", err)
+		ia.logger.Warn("could not retrieve user roles", "error", err)
 		roles = []string{}
 	}
 
@@ -371,8 +378,7 @@ func (ia *InteractiveAuthenticator) getUserRoles(ctx context.Context, token *Acc
 	req.Header.Set("Accept", "application/json")
 
 	// Make the request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := ia.provider.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user roles: %w", err)
 	}
@@ -449,31 +455,31 @@ func (ia *InteractiveAuthenticator) TestDelegatedPermissions(ctx context.Context
 		"DeviceManagementConfiguration.ReadWrite.All",
 	}
 
-	fmt.Printf("🧪 Testing Delegated Permissions for %s\n", userContext.DisplayName)
-	fmt.Printf("================================================\n")
+	_, _ = fmt.Fprintf(os.Stdout, "🧪 Testing Delegated Permissions for %s\n", userContext.DisplayName)
+	_, _ = fmt.Fprintf(os.Stdout, "================================================\n")
 
 	for _, scope := range scopesToTest {
-		fmt.Printf("Testing %s... ", scope)
+		_, _ = fmt.Fprintf(os.Stdout, "Testing %s... ", scope)
 
 		err := ia.provider.ValidatePermissions(ctx, token, []string{scope})
 		if err != nil {
 			result.TestedScopes[scope] = false
 			result.FailedScopes = append(result.FailedScopes, scope)
 			result.TestResults[scope] = fmt.Sprintf("Failed: %s", err.Error())
-			fmt.Printf("❌ Failed\n")
+			_, _ = fmt.Fprintf(os.Stdout, "❌ Failed\n")
 		} else {
 			result.TestedScopes[scope] = true
 			result.TestResults[scope] = "Success"
-			fmt.Printf("✅ Success\n")
+			_, _ = fmt.Fprintf(os.Stdout, "✅ Success\n")
 		}
 	}
 
-	fmt.Printf("\n📊 Test Summary:\n")
-	fmt.Printf("- Successful scopes: %d\n", len(result.TestedScopes)-len(result.FailedScopes))
-	fmt.Printf("- Failed scopes: %d\n", len(result.FailedScopes))
+	_, _ = fmt.Fprintf(os.Stdout, "\n📊 Test Summary:\n")
+	_, _ = fmt.Fprintf(os.Stdout, "- Successful scopes: %d\n", len(result.TestedScopes)-len(result.FailedScopes))
+	_, _ = fmt.Fprintf(os.Stdout, "- Failed scopes: %d\n", len(result.FailedScopes))
 
 	if len(result.FailedScopes) > 0 {
-		fmt.Printf("- Failed scopes: %s\n", strings.Join(result.FailedScopes, ", "))
+		_, _ = fmt.Fprintf(os.Stdout, "- Failed scopes: %s\n", strings.Join(result.FailedScopes, ", "))
 	}
 
 	return result, nil

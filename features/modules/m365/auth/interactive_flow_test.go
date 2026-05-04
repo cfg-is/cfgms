@@ -16,6 +16,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // TestInteractiveAuthFlowSetup tests the setup button experience backend
@@ -44,7 +46,7 @@ func TestInteractiveAuthFlowSetup(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	flow := NewInteractiveAuthFlow(provider, config)
 	ctx := context.Background()
 
@@ -420,7 +422,7 @@ func TestCapabilityTesting(t *testing.T) {
 		Scopes:               []string{"https://graph.microsoft.com/.default"}, // Application permissions use .default scope
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	flow := NewInteractiveAuthFlow(provider, config)
 
 	// Note: GraphBaseURL is a const, so we use HTTP transport override instead
@@ -566,7 +568,7 @@ func TestRealM365InteractiveIntegration(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	flow := NewInteractiveAuthFlow(provider, config)
 	ctx := context.Background()
 
