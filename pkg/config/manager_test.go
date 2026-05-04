@@ -6,209 +6,45 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing/storage"
 )
 
-// MockConfigStore implements cfgconfig.ConfigStore for testing
-type MockConfigStore struct {
-	configs map[string]*cfgconfig.ConfigEntry
-	history map[string][]*cfgconfig.ConfigEntry
+// newTestManager creates a Manager backed by a real OSS storage stack for testing.
+func newTestManager(t *testing.T) *Manager {
+	t.Helper()
+	sm, err := pkgtesting.CreateTestStorageManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
+	return NewManagerWithStorageManager(sm)
 }
 
-func NewMockConfigStore() *MockConfigStore {
-	return &MockConfigStore{
-		configs: make(map[string]*cfgconfig.ConfigEntry),
-		history: make(map[string][]*cfgconfig.ConfigEntry),
-	}
+// newTestValidationManager creates a ValidationManager backed by a real OSS storage stack.
+func newTestValidationManager(t *testing.T) *ValidationManager {
+	t.Helper()
+	sm, err := pkgtesting.CreateTestStorageManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
+	return NewValidationManager(sm.GetConfigStore())
 }
-
-func (m *MockConfigStore) StoreConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
-	key := config.Key.String()
-
-	// Store current version in history
-	if existing, exists := m.configs[key]; exists {
-		if m.history[key] == nil {
-			m.history[key] = []*cfgconfig.ConfigEntry{}
-		}
-		m.history[key] = append(m.history[key], existing)
-	}
-
-	// Set version and timestamps
-	config.Version = int64(len(m.history[key]) + 1)
-	config.UpdatedAt = time.Now()
-	if config.CreatedAt.IsZero() {
-		config.CreatedAt = config.UpdatedAt
-	}
-
-	// Store new version
-	m.configs[key] = config
-	return nil
-}
-
-func (m *MockConfigStore) GetConfig(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
-	keyStr := key.String()
-	config, exists := m.configs[keyStr]
-	if !exists {
-		return nil, &cfgconfig.ConfigValidationError{
-			Field:   "key",
-			Message: "configuration not found",
-			Code:    "CONFIG_NOT_FOUND",
-		}
-	}
-
-	// Return a copy
-	configCopy := *config
-	return &configCopy, nil
-}
-
-func (m *MockConfigStore) DeleteConfig(ctx context.Context, key *cfgconfig.ConfigKey) error {
-	keyStr := key.String()
-	delete(m.configs, keyStr)
-	delete(m.history, keyStr)
-	return nil
-}
-
-func (m *MockConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
-	var results []*cfgconfig.ConfigEntry
-
-	for _, config := range m.configs {
-		// Apply filtering
-		if filter.TenantID != "" && config.Key.TenantID != filter.TenantID {
-			continue
-		}
-		if filter.Namespace != "" && config.Key.Namespace != filter.Namespace {
-			continue
-		}
-
-		// Return a copy
-		configCopy := *config
-		results = append(results, &configCopy)
-	}
-
-	return results, nil
-}
-
-func (m *MockConfigStore) GetConfigHistory(ctx context.Context, key *cfgconfig.ConfigKey, limit int) ([]*cfgconfig.ConfigEntry, error) {
-	keyStr := key.String()
-	history, exists := m.history[keyStr]
-	if !exists {
-		return []*cfgconfig.ConfigEntry{}, nil
-	}
-
-	// Return most recent versions first
-	var results []*cfgconfig.ConfigEntry
-	start := len(history) - limit
-	if start < 0 {
-		start = 0
-	}
-
-	for i := len(history) - 1; i >= start; i-- {
-		configCopy := *history[i]
-		results = append(results, &configCopy)
-	}
-
-	return results, nil
-}
-
-func (m *MockConfigStore) GetConfigVersion(ctx context.Context, key *cfgconfig.ConfigKey, version int64) (*cfgconfig.ConfigEntry, error) {
-	keyStr := key.String()
-	history, exists := m.history[keyStr]
-	if !exists {
-		return nil, &cfgconfig.ConfigValidationError{
-			Field:   "version",
-			Message: "configuration history not found",
-			Code:    "HISTORY_NOT_FOUND",
-		}
-	}
-
-	// Find version in history
-	for _, entry := range history {
-		if entry.Version == version {
-			configCopy := *entry
-			return &configCopy, nil
-		}
-	}
-
-	return nil, &cfgconfig.ConfigValidationError{
-		Field:   "version",
-		Message: "version not found",
-		Code:    "VERSION_NOT_FOUND",
-	}
-}
-
-func (m *MockConfigStore) StoreConfigBatch(ctx context.Context, configs []*cfgconfig.ConfigEntry) error {
-	for _, config := range configs {
-		if err := m.StoreConfig(ctx, config); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (m *MockConfigStore) DeleteConfigBatch(ctx context.Context, keys []*cfgconfig.ConfigKey) error {
-	for _, key := range keys {
-		if err := m.DeleteConfig(ctx, key); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (m *MockConfigStore) ResolveConfigWithInheritance(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
-	// Simplified inheritance - just return the direct config
-	return m.GetConfig(ctx, key)
-}
-
-func (m *MockConfigStore) ValidateConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
-	if config.Key == nil {
-		return &cfgconfig.ConfigValidationError{
-			Field:   "key",
-			Message: "key is required",
-			Code:    "KEY_REQUIRED",
-		}
-	}
-	return nil
-}
-
-func (m *MockConfigStore) GetConfigStats(ctx context.Context) (*cfgconfig.ConfigStats, error) {
-	totalConfigs := int64(len(m.configs))
-	totalSize := int64(0)
-
-	for _, config := range m.configs {
-		totalSize += int64(len(config.Data))
-	}
-
-	var averageSize int64
-	if totalConfigs > 0 {
-		averageSize = totalSize / totalConfigs
-	}
-
-	return &cfgconfig.ConfigStats{
-		TotalConfigs: totalConfigs,
-		TotalSize:    totalSize,
-		AverageSize:  averageSize,
-		LastUpdated:  time.Now(),
-	}, nil
-}
-
-// Test Cases
 
 func TestManagerStoreAndGetConfiguration(t *testing.T) {
-	mockStore := NewMockConfigStore()
-	manager := NewManager(mockStore)
+	manager := newTestManager(t)
 	ctx := context.Background()
 
-	// Create test configuration
 	testConfig := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
 			ID:   "test-steward",
 			Mode: stewardconfig.ModeStandalone,
+			Logging: stewardconfig.LoggingConfig{
+				Level: "info",
+			},
 		},
 		Resources: []stewardconfig.ResourceConfig{
 			{
@@ -221,15 +57,12 @@ func TestManagerStoreAndGetConfiguration(t *testing.T) {
 		},
 	}
 
-	// Store configuration
 	err := manager.StoreConfiguration(ctx, "test-tenant", "test-steward", testConfig)
 	require.NoError(t, err)
 
-	// Retrieve configuration
 	retrievedConfig, err := manager.GetConfiguration(ctx, "test-tenant", "test-steward")
 	require.NoError(t, err)
 
-	// Verify configuration
 	assert.Equal(t, testConfig.Steward.ID, retrievedConfig.Steward.ID)
 	assert.Equal(t, testConfig.Steward.Mode, retrievedConfig.Steward.Mode)
 	assert.Len(t, retrievedConfig.Resources, 1)
@@ -238,27 +71,26 @@ func TestManagerStoreAndGetConfiguration(t *testing.T) {
 }
 
 func TestManagerGetConfigurationNotFound(t *testing.T) {
-	mockStore := NewMockConfigStore()
-	manager := NewManager(mockStore)
+	manager := newTestManager(t)
 	ctx := context.Background()
 
-	// Try to get non-existent configuration
 	_, err := manager.GetConfiguration(ctx, "test-tenant", "non-existent")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "configuration not found")
 }
 
 func TestManagerConfigurationHistory(t *testing.T) {
-	mockStore := NewMockConfigStore()
-	manager := NewManager(mockStore)
+	manager := newTestManager(t)
 	ctx := context.Background()
 
-	// Create and store multiple versions
 	for i := 1; i <= 3; i++ {
 		testConfig := &stewardconfig.StewardConfig{
 			Steward: stewardconfig.StewardSettings{
 				ID:   "test-steward",
 				Mode: stewardconfig.ModeStandalone,
+				Logging: stewardconfig.LoggingConfig{
+					Level: "info",
+				},
 			},
 			Resources: []stewardconfig.ResourceConfig{
 				{
@@ -275,25 +107,23 @@ func TestManagerConfigurationHistory(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Get configuration history
 	history, err := manager.GetConfigurationHistory(ctx, "test-tenant", "test-steward", 5)
 	require.NoError(t, err)
-	assert.Len(t, history, 2) // First version goes to history, current version not in history
-
-	// Verify versions are in descending order
-	assert.True(t, history[0].Version > history[1].Version)
+	// Flatfile store returns only the current version; no historical snapshots are retained.
+	assert.Len(t, history, 1)
 }
 
 func TestManagerGetConfigurationVersion(t *testing.T) {
-	mockStore := NewMockConfigStore()
-	manager := NewManager(mockStore)
+	manager := newTestManager(t)
 	ctx := context.Background()
 
-	// Store initial version
 	testConfig1 := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
 			ID:   "test-steward",
 			Mode: stewardconfig.ModeStandalone,
+			Logging: stewardconfig.LoggingConfig{
+				Level: "info",
+			},
 		},
 		Resources: []stewardconfig.ResourceConfig{
 			{
@@ -309,11 +139,19 @@ func TestManagerGetConfigurationVersion(t *testing.T) {
 	err := manager.StoreConfiguration(ctx, "test-tenant", "test-steward", testConfig1)
 	require.NoError(t, err)
 
-	// Store second version
+	// Flatfile store assigns version 1 on first write; retrieval by current version succeeds.
+	versionConfig, err := manager.GetConfigurationVersion(ctx, "test-tenant", "test-steward", 1)
+	require.NoError(t, err)
+	pathValue := versionConfig.Resources[0].Config["path"]
+	assert.Equal(t, "/opt/test1", pathValue)
+
 	testConfig2 := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
 			ID:   "test-steward",
 			Mode: stewardconfig.ModeStandalone,
+			Logging: stewardconfig.LoggingConfig{
+				Level: "info",
+			},
 		},
 		Resources: []stewardconfig.ResourceConfig{
 			{
@@ -329,26 +167,29 @@ func TestManagerGetConfigurationVersion(t *testing.T) {
 	err = manager.StoreConfiguration(ctx, "test-tenant", "test-steward", testConfig2)
 	require.NoError(t, err)
 
-	// Get version 1
-	versionConfig, err := manager.GetConfigurationVersion(ctx, "test-tenant", "test-steward", 1)
+	// After second write version becomes 2; that is the only version available.
+	versionConfig, err = manager.GetConfigurationVersion(ctx, "test-tenant", "test-steward", 2)
 	require.NoError(t, err)
+	pathValue = versionConfig.Resources[0].Config["path"]
+	assert.Equal(t, "/opt/test2", pathValue)
 
-	// Verify it's the first version
-	pathValue := versionConfig.Resources[0].Config["path"]
-	assert.Equal(t, "/opt/test1", pathValue)
+	// Version 1 is no longer available once version 2 is the current head.
+	_, err = manager.GetConfigurationVersion(ctx, "test-tenant", "test-steward", 1)
+	assert.Error(t, err)
 }
 
 func TestManagerListConfigurations(t *testing.T) {
-	mockStore := NewMockConfigStore()
-	manager := NewManager(mockStore)
+	manager := newTestManager(t)
 	ctx := context.Background()
 
-	// Store configurations for different stewards
 	for i := 1; i <= 3; i++ {
 		testConfig := &stewardconfig.StewardConfig{
 			Steward: stewardconfig.StewardSettings{
 				ID:   fmt.Sprintf("steward-%d", i),
 				Mode: stewardconfig.ModeStandalone,
+				Logging: stewardconfig.LoggingConfig{
+					Level: "info",
+				},
 			},
 		}
 
@@ -356,12 +197,10 @@ func TestManagerListConfigurations(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// List configurations
 	summaries, err := manager.ListConfigurations(ctx, "test-tenant")
 	require.NoError(t, err)
 	assert.Len(t, summaries, 3)
 
-	// Verify summary data
 	for _, summary := range summaries {
 		assert.Equal(t, "test-tenant", summary.TenantID)
 		assert.NotEmpty(t, summary.StewardID)
@@ -371,11 +210,9 @@ func TestManagerListConfigurations(t *testing.T) {
 }
 
 func TestManagerBatchStoreConfigurations(t *testing.T) {
-	mockStore := NewMockConfigStore()
-	manager := NewManager(mockStore)
+	manager := newTestManager(t)
 	ctx := context.Background()
 
-	// Create batch configurations
 	var batchConfigs []*BatchConfigurationEntry
 
 	for i := 1; i <= 3; i++ {
@@ -383,6 +220,9 @@ func TestManagerBatchStoreConfigurations(t *testing.T) {
 			Steward: stewardconfig.StewardSettings{
 				ID:   fmt.Sprintf("steward-%d", i),
 				Mode: stewardconfig.ModeStandalone,
+				Logging: stewardconfig.LoggingConfig{
+					Level: "info",
+				},
 			},
 		}
 
@@ -393,11 +233,9 @@ func TestManagerBatchStoreConfigurations(t *testing.T) {
 		})
 	}
 
-	// Store batch
 	err := manager.BatchStoreConfigurations(ctx, batchConfigs)
 	require.NoError(t, err)
 
-	// Verify all configurations were stored
 	for i := 1; i <= 3; i++ {
 		config, err := manager.GetConfiguration(ctx, "test-tenant", fmt.Sprintf("steward-%d", i))
 		require.NoError(t, err)
@@ -406,11 +244,9 @@ func TestManagerBatchStoreConfigurations(t *testing.T) {
 }
 
 func TestManagerValidateConfiguration(t *testing.T) {
-	mockStore := NewMockConfigStore()
-	manager := NewManager(mockStore)
+	manager := newTestManager(t)
 	ctx := context.Background()
 
-	// Test valid configuration
 	validConfig := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
 			ID:   "test-steward",
@@ -434,10 +270,10 @@ func TestManagerValidateConfiguration(t *testing.T) {
 	err := manager.ValidateConfiguration(ctx, validConfig)
 	assert.NoError(t, err)
 
-	// Test invalid configuration (empty steward ID)
+	// Empty steward ID is rejected by stewardconfig.ValidateConfiguration.
 	invalidConfig := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
-			ID:   "", // Invalid: empty ID
+			ID:   "",
 			Mode: stewardconfig.ModeStandalone,
 		},
 	}
@@ -447,45 +283,44 @@ func TestManagerValidateConfiguration(t *testing.T) {
 }
 
 func TestManagerDeleteConfiguration(t *testing.T) {
-	mockStore := NewMockConfigStore()
-	manager := NewManager(mockStore)
+	manager := newTestManager(t)
 	ctx := context.Background()
 
-	// Store configuration
 	testConfig := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
 			ID:   "test-steward",
 			Mode: stewardconfig.ModeStandalone,
+			Logging: stewardconfig.LoggingConfig{
+				Level: "info",
+			},
 		},
 	}
 
 	err := manager.StoreConfiguration(ctx, "test-tenant", "test-steward", testConfig)
 	require.NoError(t, err)
 
-	// Verify it exists
 	_, err = manager.GetConfiguration(ctx, "test-tenant", "test-steward")
 	assert.NoError(t, err)
 
-	// Delete configuration
 	err = manager.DeleteConfiguration(ctx, "test-tenant", "test-steward")
 	assert.NoError(t, err)
 
-	// Verify it's deleted
 	_, err = manager.GetConfiguration(ctx, "test-tenant", "test-steward")
 	assert.Error(t, err)
 }
 
 func TestManagerGetConfigurationStats(t *testing.T) {
-	mockStore := NewMockConfigStore()
-	manager := NewManager(mockStore)
+	manager := newTestManager(t)
 	ctx := context.Background()
 
-	// Store a few configurations
 	for i := 1; i <= 2; i++ {
 		testConfig := &stewardconfig.StewardConfig{
 			Steward: stewardconfig.StewardSettings{
 				ID:   fmt.Sprintf("steward-%d", i),
 				Mode: stewardconfig.ModeStandalone,
+				Logging: stewardconfig.LoggingConfig{
+					Level: "info",
+				},
 			},
 		}
 
@@ -493,7 +328,6 @@ func TestManagerGetConfigurationStats(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Get stats
 	stats, err := manager.GetConfigurationStats(ctx)
 	require.NoError(t, err)
 
@@ -501,4 +335,81 @@ func TestManagerGetConfigurationStats(t *testing.T) {
 	assert.Greater(t, stats.TotalSize, int64(0))
 	assert.Greater(t, stats.AverageSize, int64(0))
 	assert.NotZero(t, stats.LastUpdated)
+}
+
+// ValidationManager tests verify that ValidateConfiguration still rejects
+// invalid configs after the removal of the duplicate validateStewardSettings.
+
+func TestValidationManagerRejectsInvalidLogLevel(t *testing.T) {
+	vm := newTestValidationManager(t)
+	ctx := context.Background()
+
+	config := &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{
+			ID:   "test-steward",
+			Mode: stewardconfig.ModeStandalone,
+			Logging: stewardconfig.LoggingConfig{
+				Level: "verbose", // not a valid level
+			},
+		},
+	}
+
+	result := vm.ValidateConfiguration(ctx, "test-tenant", "test-steward", config)
+	assert.False(t, result.Valid)
+	require.NotEmpty(t, result.Errors)
+	assert.Equal(t, "BASIC_VALIDATION_FAILED", result.Errors[0].Code)
+}
+
+func TestValidationManagerRejectsInvalidMode(t *testing.T) {
+	vm := newTestValidationManager(t)
+	ctx := context.Background()
+
+	config := &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{
+			ID:   "test-steward",
+			Mode: "unknown-mode", // not a valid mode
+			Logging: stewardconfig.LoggingConfig{
+				Level: "info",
+			},
+		},
+	}
+
+	result := vm.ValidateConfiguration(ctx, "test-tenant", "test-steward", config)
+	assert.False(t, result.Valid)
+	require.NotEmpty(t, result.Errors)
+	assert.Equal(t, "BASIC_VALIDATION_FAILED", result.Errors[0].Code)
+}
+
+func TestValidationManagerRejectsDuplicateResourceNames(t *testing.T) {
+	vm := newTestValidationManager(t)
+	ctx := context.Background()
+
+	config := &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{
+			ID:   "test-steward",
+			Mode: stewardconfig.ModeStandalone,
+			Logging: stewardconfig.LoggingConfig{
+				Level: "info",
+			},
+		},
+		Modules: map[string]string{
+			"file": "file",
+		},
+		Resources: []stewardconfig.ResourceConfig{
+			{Name: "dup", Module: "file", Config: map[string]interface{}{"path": "/tmp/a"}},
+			{Name: "dup", Module: "file", Config: map[string]interface{}{"path": "/tmp/b"}},
+		},
+	}
+
+	result := vm.ValidateConfiguration(ctx, "test-tenant", "test-steward", config)
+	assert.False(t, result.Valid)
+
+	// Verify validateResources in pkg/config specifically catches the duplicate
+	// (stewardconfig.ValidateConfiguration also catches it, but we want to confirm
+	// the local validateResources path is exercised and emits DUPLICATE_RESOURCE_NAME).
+	codes := make([]string, 0, len(result.Errors))
+	for _, e := range result.Errors {
+		codes = append(codes, e.Code)
+	}
+	assert.Contains(t, codes, "DUPLICATE_RESOURCE_NAME")
 }
