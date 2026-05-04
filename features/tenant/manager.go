@@ -37,6 +37,7 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*Tenant
 	tenantID := m.generateTenantID(req.Name)
 
 	// Create tenant object
+	now := time.Now()
 	tenant := &Tenant{
 		ID:          tenantID,
 		Name:        req.Name,
@@ -44,6 +45,8 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*Tenant
 		ParentID:    req.ParentID,
 		Metadata:    req.Metadata,
 		Status:      TenantStatusActive,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 
 	// Create the tenant in storage

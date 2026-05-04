@@ -12,21 +12,14 @@ import (
 
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 func TestEnhancedMultiTenantSecurity(t *testing.T) {
 	ctx := context.Background()
 
 	// Setup test infrastructure with durable storage (git-backed)
-	tmpDir := t.TempDir()
-	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
+	storageManager := pkgtesting.SetupTestStorage(t)
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, nil)

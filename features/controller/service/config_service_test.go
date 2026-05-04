@@ -15,11 +15,7 @@ import (
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage provider for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
@@ -67,13 +63,8 @@ func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
 // createTestServiceV2 creates a ConfigurationServiceV2 backed by a real git StorageManager
 func createTestServiceV2(t *testing.T) *ConfigurationServiceV2 {
 	t.Helper()
-
 	logger := logging.NewNoopLogger()
-	tmpDir := t.TempDir()
-	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
-
+	storageManager := pkgtesting.SetupTestStorage(t)
 	return NewConfigurationServiceV2(logger, storageManager, nil)
 }
 
