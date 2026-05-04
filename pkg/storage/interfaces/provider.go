@@ -95,7 +95,7 @@ type providerRegistry struct {
 // RegisterStorageProvider registers a storage provider (called from provider init() functions).
 // This function includes validation to ensure providers implement all required interfaces.
 func RegisterStorageProvider(provider StorageProvider) {
-	if err := validateProvider(provider); err != nil {
+	if err := ValidateProvider(provider); err != nil {
 		// Log the error but don't panic - allows system to start with other providers
 		getRegistryLogger().Warn(fmt.Sprintf("Failed to register storage provider '%s': %v", provider.Name(), err))
 		return
@@ -114,8 +114,8 @@ func RegisterStorageProvider(provider StorageProvider) {
 		"description", provider.Description())
 }
 
-// validateProvider ensures a provider implements all required interfaces correctly.
-func validateProvider(provider StorageProvider) error {
+// ValidateProvider ensures a provider implements all required interfaces correctly.
+func ValidateProvider(provider StorageProvider) error {
 	if provider == nil {
 		return fmt.Errorf("provider is nil")
 	}
@@ -155,7 +155,7 @@ func validateProvider(provider StorageProvider) error {
 // RegisterStorageProviderWithValidation registers a provider with full validation.
 // This is an enhanced version that tests interface creation with a test config.
 func RegisterStorageProviderWithValidation(provider StorageProvider, testConfig map[string]interface{}) error {
-	if err := validateProvider(provider); err != nil {
+	if err := ValidateProvider(provider); err != nil {
 		return fmt.Errorf("provider validation failed: %w", err)
 	}
 
