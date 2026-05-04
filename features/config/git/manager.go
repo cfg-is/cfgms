@@ -16,11 +16,12 @@ import (
 
 // DefaultGitManager implements the GitManager interface
 type DefaultGitManager struct {
-	provider     GitProvider
-	store        RepositoryStore
-	syncManager  SyncManager
-	hookManager  HookManager
-	sopsManager  *SOPSManager
+	provider    GitProvider
+	store       RepositoryStore
+	syncManager SyncManager
+	hookManager HookManager
+	sopsManager *SOPSManager
+	// Authoritative in-memory state: RepositoryStore (git filesystem) has no metadata persistence layer. These maps are the only record of registered repositories and their local paths. Not a cache — pkg/cache migration would make repository registration non-durable across restarts.
 	repositories map[string]*Repository
 	localCache   map[string]string // repoID -> local path
 	mu           sync.RWMutex
