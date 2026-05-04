@@ -8,6 +8,7 @@ package ha
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,8 +19,42 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite" // Register git provider
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testing/storage"
 )
+
+func TestManager_initRaft_logsInitStart(t *testing.T) {
+	mock := pkgtesting.NewMockLogger(true)
+
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "test-node-init-raft"
+
+	manager, err := NewManager(cfg, mock, storageManager)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+
+	t.Cleanup(func() {
+		if manager.raftConsensus != nil {
+			assert.NoError(t, manager.raftConsensus.Stop())
+		}
+	})
+
+	debugLogs := mock.GetLogs("debug")
+	require.NotEmpty(t, debugLogs, "expected debug logs from raft initialization")
+
+	found := false
+	for _, entry := range debugLogs {
+		if strings.Contains(entry.Message, "RAFT_INIT") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected a debug log containing RAFT_INIT, got logs: %v", debugLogs)
+}
 
 func TestManager_SingleServerMode(t *testing.T) {
 	// Create test logger

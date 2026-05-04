@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -122,21 +121,21 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 	if len(peers) > 0 {
 		// Starting a new cluster
 		rc.node = raft.StartNode(config, peers)
-		log.Printf("RAFT: Started new Raft node, node_id=%d, peers=%v", nodeID, peers)
+		logger.Info("RAFT: Started new Raft node", "node_id", nodeID, "peers", peers)
 
 		// Log Raft status immediately after start
 		status := rc.node.Status()
-		log.Printf("RAFT: Initial status after StartNode, node_id=%d, term=%d, lead=%d, raft_state=%s",
-			nodeID, status.Term, status.Lead, status.RaftState)
+		logger.Debug("RAFT: Initial status after StartNode",
+			"node_id", nodeID, "term", status.Term, "lead", status.Lead, "raft_state", status.RaftState)
 	} else {
 		// Joining existing cluster (will be added via ConfChange)
 		rc.node = raft.RestartNode(config)
-		log.Printf("RAFT: Restarted Raft node, node_id=%d", nodeID)
+		logger.Info("RAFT: Restarted Raft node", "node_id", nodeID)
 	}
 
 	// CRITICAL: Start the Raft processing loop IMMEDIATELY
 	// The Ready channel must be consumed or Raft will block
-	log.Printf("RAFT: Starting Raft processing loop immediately, node_id=%d", nodeID)
+	logger.Debug("RAFT: Starting Raft processing loop immediately", "node_id", nodeID)
 	go rc.runRaft()
 
 	return rc, nil
@@ -144,7 +143,7 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 
 // Start begins the Raft consensus engine
 func (rc *RaftConsensus) Start() error {
-	log.Printf("RAFT: Starting Raft consensus engine, node_id=%d", rc.nodeID)
+	rc.logger.Info("RAFT: Starting Raft consensus engine", "node_id", rc.nodeID)
 
 	// Note: runRaft() goroutine is already started in NewRaftConsensus()
 	// to ensure Ready channel is consumed immediately
@@ -165,7 +164,7 @@ func (rc *RaftConsensus) Start() error {
 
 // Stop gracefully stops the Raft consensus engine
 func (rc *RaftConsensus) Stop() error {
-	log.Printf("RAFT: Stopping Raft consensus engine, node_id=%d", rc.nodeID)
+	rc.logger.Info("RAFT: Stopping Raft consensus engine", "node_id", rc.nodeID)
 
 	close(rc.stopC)
 	rc.cancel()
@@ -184,7 +183,7 @@ func (rc *RaftConsensus) runRaft() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	log.Printf("RAFT: Main Raft loop started, node_id=%d, ticker=%p", rc.nodeID, ticker)
+	rc.logger.Debug("RAFT: Main Raft loop started", "node_id", rc.nodeID)
 	tickCount := 0
 	loopCount := 0
 
@@ -195,45 +194,45 @@ func (rc *RaftConsensus) runRaft() {
 	for {
 		loopCount++
 		if loopCount%100 == 0 {
-			log.Printf("RAFT: Loop iteration %d, node_id=%d", loopCount, rc.nodeID)
+			rc.logger.Debug("RAFT: Loop iteration", "count", loopCount, "node_id", rc.nodeID)
 		}
 
 		select {
 		case <-ticker.C:
 			tickCount++
-			log.Printf("RAFT: Tick %d START, node_id=%d", tickCount, rc.nodeID)
+			rc.logger.Debug("RAFT: Tick START", "tick", tickCount, "node_id", rc.nodeID)
 			rc.node.Tick()
-			log.Printf("RAFT: Tick %d COMPLETE, node_id=%d", tickCount, rc.nodeID)
+			rc.logger.Debug("RAFT: Tick COMPLETE", "tick", tickCount, "node_id", rc.nodeID)
 
 		case <-debugTicker.C:
 			// Periodic health check
 
 		case rd := <-rc.node.Ready():
 			// Process Ready updates from Raft
-			log.Printf("RAFT: Processing Ready, node_id=%d, has_entries=%d, has_messages=%d, has_snapshot=%t",
-				rc.nodeID, len(rd.Entries), len(rd.Messages), !raft.IsEmptySnap(rd.Snapshot))
+			rc.logger.Debug("RAFT: Processing Ready",
+				"node_id", rc.nodeID, "entries", len(rd.Entries), "messages", len(rd.Messages), "has_snapshot", !raft.IsEmptySnap(rd.Snapshot))
 			rc.processReady(rd)
 
 		case prop := <-rc.proposeC:
 			// Propose new entry to Raft log
-			log.Printf("RAFT: Received proposal, node_id=%d", rc.nodeID)
+			rc.logger.Debug("RAFT: Received proposal", "node_id", rc.nodeID)
 			if err := rc.node.Propose(rc.ctx, prop); err != nil {
 				rc.logger.Error("Failed to propose to Raft", "error", err)
 			}
 
 		case cc := <-rc.confChangeC:
 			// Propose configuration change
-			log.Printf("RAFT: Received conf change, node_id=%d", rc.nodeID)
+			rc.logger.Debug("RAFT: Received conf change", "node_id", rc.nodeID)
 			if err := rc.node.ProposeConfChange(rc.ctx, cc); err != nil {
 				rc.logger.Error("Failed to propose conf change", "error", err)
 			}
 
 		case <-rc.stopC:
-			log.Printf("RAFT: Raft loop stopping, node_id=%d", rc.nodeID)
+			rc.logger.Debug("RAFT: Raft loop stopping", "node_id", rc.nodeID)
 			return
 
 		case <-rc.ctx.Done():
-			log.Printf("RAFT: Raft loop context cancelled, node_id=%d", rc.nodeID)
+			rc.logger.Debug("RAFT: Raft loop context cancelled", "node_id", rc.nodeID)
 			return
 		}
 	}
@@ -241,57 +240,57 @@ func (rc *RaftConsensus) runRaft() {
 
 // processReady handles Ready struct from Raft
 func (rc *RaftConsensus) processReady(rd raft.Ready) {
-	log.Printf("RAFT: processReady START, node_id=%d", rc.nodeID)
+	rc.logger.Debug("RAFT: processReady START", "node_id", rc.nodeID)
 
 	// Save to storage before sending messages
 	if !raft.IsEmptySnap(rd.Snapshot) {
-		log.Printf("RAFT: Applying snapshot, node_id=%d", rc.nodeID)
+		rc.logger.Debug("RAFT: Applying snapshot", "node_id", rc.nodeID)
 		if err := rc.storage.ApplySnapshot(rd.Snapshot); err != nil {
-			log.Printf("RAFT: Failed to apply snapshot, node_id=%d, error=%v", rc.nodeID, err)
+			rc.logger.Error("RAFT: Failed to apply snapshot", "node_id", rc.nodeID, "error", err)
 		}
 		rc.publishSnapshot(rd.Snapshot)
 	}
 
 	if len(rd.Entries) > 0 {
-		log.Printf("RAFT: Appending %d entries to storage, node_id=%d", len(rd.Entries), rc.nodeID)
+		rc.logger.Debug("RAFT: Appending entries to storage", "count", len(rd.Entries), "node_id", rc.nodeID)
 		if err := rc.storage.Append(rd.Entries); err != nil {
-			log.Printf("RAFT: Failed to append entries, node_id=%d, error=%v", rc.nodeID, err)
+			rc.logger.Error("RAFT: Failed to append entries", "node_id", rc.nodeID, "error", err)
 		}
 	}
 
 	if !raft.IsEmptyHardState(rd.HardState) {
 		hardState := rd.HardState
-		log.Printf("RAFT: Setting HardState, node_id=%d, term=%d, vote=%d, commit=%d",
-			rc.nodeID, hardState.Term, hardState.Vote, hardState.Commit)
+		rc.logger.Debug("RAFT: Setting HardState",
+			"node_id", rc.nodeID, "term", hardState.Term, "vote", hardState.Vote, "commit", hardState.Commit)
 		if err := rc.storage.SetHardState(hardState); err != nil {
-			log.Printf("RAFT: Failed to set hard state, node_id=%d, error=%v", rc.nodeID, err)
+			rc.logger.Error("RAFT: Failed to set hard state", "node_id", rc.nodeID, "error", err)
 		}
 	}
 
 	// Send messages to peers
 	if rc.transport != nil && len(rd.Messages) > 0 {
-		log.Printf("RAFT: Sending %d messages to peers, node_id=%d", len(rd.Messages), rc.nodeID)
+		rc.logger.Debug("RAFT: Sending messages to peers", "count", len(rd.Messages), "node_id", rc.nodeID)
 		rc.transport.Send(rd.Messages)
 	}
 
 	// Apply committed entries to state machine
 	if len(rd.CommittedEntries) > 0 {
-		log.Printf("RAFT: Applying %d committed entries, node_id=%d", len(rd.CommittedEntries), rc.nodeID)
+		rc.logger.Debug("RAFT: Applying committed entries", "count", len(rd.CommittedEntries), "node_id", rc.nodeID)
 		rc.publishEntries(rc.entriesToApply(rd.CommittedEntries))
 	}
 
 	// Update leadership
 	if rd.SoftState != nil {
 		softState := rd.SoftState
-		log.Printf("RAFT: Updating leadership, node_id=%d, lead=%d, raft_state=%s",
-			rc.nodeID, softState.Lead, softState.RaftState)
+		rc.logger.Debug("RAFT: Updating leadership",
+			"node_id", rc.nodeID, "lead", softState.Lead, "raft_state", softState.RaftState)
 		rc.updateLeadership(softState)
 	}
 
 	// Advance the Raft state machine
-	log.Printf("RAFT: Calling Advance(), node_id=%d", rc.nodeID)
+	rc.logger.Debug("RAFT: Calling Advance()", "node_id", rc.nodeID)
 	rc.node.Advance()
-	log.Printf("RAFT: processReady COMPLETE, node_id=%d", rc.nodeID)
+	rc.logger.Debug("RAFT: processReady COMPLETE", "node_id", rc.nodeID)
 }
 
 // entriesToApply filters out entries that have already been applied
@@ -307,12 +306,12 @@ func (rc *RaftConsensus) entriesToApply(entries []raftpb.Entry) []raftpb.Entry {
 	firstIdx := entries[0].Index
 	lastIdx := entries[len(entries)-1].Index
 
-	log.Printf("RAFT: entriesToApply check, node_id=%d, firstIdx=%d, lastIdx=%d, appliedIndex=%d",
-		rc.nodeID, firstIdx, lastIdx, rc.appliedIndex)
+	rc.logger.Debug("RAFT: entriesToApply check",
+		"node_id", rc.nodeID, "firstIdx", firstIdx, "lastIdx", lastIdx, "appliedIndex", rc.appliedIndex)
 
 	// If we've already applied all these entries, skip them
 	if lastIdx <= rc.appliedIndex {
-		log.Printf("RAFT: All entries already applied, node_id=%d", rc.nodeID)
+		rc.logger.Debug("RAFT: All entries already applied", "node_id", rc.nodeID)
 		return nil
 	}
 
@@ -321,7 +320,7 @@ func (rc *RaftConsensus) entriesToApply(entries []raftpb.Entry) []raftpb.Entry {
 	if firstIdx <= rc.appliedIndex {
 		// Some entries at the beginning have already been applied
 		offset = rc.appliedIndex + 1 - firstIdx
-		log.Printf("RAFT: Skipping %d already-applied entries, node_id=%d", offset, rc.nodeID)
+		rc.logger.Debug("RAFT: Skipping already-applied entries", "count", offset, "node_id", rc.nodeID)
 	}
 
 	if offset >= uint64(len(entries)) {
@@ -344,13 +343,13 @@ func (rc *RaftConsensus) publishEntries(entries []raftpb.Entry) {
 
 			// Apply command to state machine
 			if err := rc.applyCommand(entry.Data); err != nil {
-				log.Printf("RAFT: Failed to apply command: %v", err)
+				rc.logger.Error("RAFT: Failed to apply command", "error", err)
 			}
 
 		case raftpb.EntryConfChange:
 			var cc raftpb.ConfChange
 			if err := cc.Unmarshal(entry.Data); err != nil {
-				log.Printf("RAFT: Failed to unmarshal conf change: %v", err)
+				rc.logger.Error("RAFT: Failed to unmarshal conf change", "error", err)
 				continue
 			}
 
@@ -358,9 +357,9 @@ func (rc *RaftConsensus) publishEntries(entries []raftpb.Entry) {
 
 			switch cc.Type {
 			case raftpb.ConfChangeAddNode:
-				log.Printf("RAFT: Added node to cluster, node_id=%d", cc.NodeID)
+				rc.logger.Info("RAFT: Added node to cluster", "node_id", cc.NodeID)
 			case raftpb.ConfChangeRemoveNode:
-				log.Printf("RAFT: Removed node from cluster, node_id=%d", cc.NodeID)
+				rc.logger.Info("RAFT: Removed node from cluster", "node_id", cc.NodeID)
 				rc.clusterState.mu.Lock()
 				delete(rc.clusterState.Nodes, cc.NodeID)
 				rc.clusterState.mu.Unlock()
@@ -371,7 +370,7 @@ func (rc *RaftConsensus) publishEntries(entries []raftpb.Entry) {
 		rc.mu.Lock()
 		if entry.Index > rc.appliedIndex {
 			rc.appliedIndex = entry.Index
-			log.Printf("RAFT: Updated appliedIndex=%d, node_id=%d", rc.appliedIndex, rc.nodeID)
+			rc.logger.Debug("RAFT: Updated appliedIndex", "applied_index", rc.appliedIndex, "node_id", rc.nodeID)
 		}
 		rc.mu.Unlock()
 	}
@@ -409,7 +408,7 @@ func (rc *RaftConsensus) applyNodeUpdate(data interface{}) error {
 	rc.clusterState.LastModified = time.Now()
 	rc.clusterState.mu.Unlock()
 
-	log.Printf("RAFT: Applied node update, node_id=%d, node_info=%+v", update.NodeID, update.NodeInfo)
+	rc.logger.Debug("RAFT: Applied node update", "node_id", update.NodeID, "node_info", update.NodeInfo)
 
 	return nil
 }
@@ -420,11 +419,11 @@ func (rc *RaftConsensus) publishSnapshot(snapshot raftpb.Snapshot) {
 		return
 	}
 
-	log.Printf("RAFT: Publishing snapshot at index %d", snapshot.Metadata.Index)
+	rc.logger.Debug("RAFT: Publishing snapshot", "index", snapshot.Metadata.Index)
 
 	var state ClusterState
 	if err := json.Unmarshal(snapshot.Data, &state); err != nil {
-		log.Printf("RAFT: Failed to unmarshal snapshot: %v", err)
+		rc.logger.Error("RAFT: Failed to unmarshal snapshot", "error", err)
 		return
 	}
 
@@ -442,10 +441,10 @@ func (rc *RaftConsensus) updateLeadership(ss *raft.SoftState) {
 	isLeader := ss.Lead == rc.nodeID && ss.RaftState == raft.StateLeader
 
 	if !wasLeader && isLeader {
-		log.Printf("RAFT: Node became LEADER, node_id=%d, term=%d", rc.nodeID, rc.node.Status().Term)
+		rc.logger.Info("RAFT: Node became LEADER", "node_id", rc.nodeID, "term", rc.node.Status().Term)
 		rc.clusterState.Leader = rc.nodeID
 	} else if wasLeader && !isLeader {
-		log.Printf("RAFT: Node lost LEADER status, node_id=%d, new_leader=%d", rc.nodeID, ss.Lead)
+		rc.logger.Info("RAFT: Node lost LEADER status", "node_id", rc.nodeID, "new_leader", ss.Lead)
 		rc.clusterState.Leader = ss.Lead
 	}
 

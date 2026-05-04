@@ -10,7 +10,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -70,7 +69,7 @@ func newStaticDiscovery(cfg *DiscoveryConfig, logger logging.Logger, manager *Ma
 
 // Start begins the discovery process
 func (d *staticDiscovery) Start(ctx context.Context) error {
-	log.Printf("DISCOVERY_START: Entering staticDiscovery.Start()")
+	d.logger.Debug("DISCOVERY_START: Entering staticDiscovery.Start()")
 	d.mu.Lock()
 
 	if d.started {
@@ -78,38 +77,38 @@ func (d *staticDiscovery) Start(ctx context.Context) error {
 		return fmt.Errorf("discovery is already started")
 	}
 
-	log.Printf("DISCOVERY_START: About to set up context and mark as started")
+	d.logger.Debug("DISCOVERY_START: About to set up context and mark as started")
 	// TEMP FIX: Use Background context to prevent immediate cancellation
 	// TODO: Investigate why parent context is getting cancelled
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 	d.started = true
 
 	// Register local node - avoid deadlock by accessing nodeInfo directly
-	log.Printf("DISCOVERY_START: About to get local node info directly")
+	d.logger.Debug("DISCOVERY_START: About to get local node info directly")
 	// Access nodeInfo directly to avoid GetLocalNode() deadlock during startup
 	nodeInfo := *d.manager.nodeInfo // Create a copy
 	nodeInfo.LastSeen = time.Now()
-	log.Printf("DISCOVERY_START: Got local node info, adding to nodes map, node_id=%s", nodeInfo.ID)
+	d.logger.Debug("DISCOVERY_START: Got local node info, adding to nodes map", "node_id", nodeInfo.ID)
 	d.nodes[nodeInfo.ID] = &nodeInfo
 
 	d.mu.Unlock() // Release lock before calling loadStaticNodes which needs to acquire it
 
 	// Load static nodes from configuration
-	log.Printf("DISCOVERY_START: About to load static nodes from configuration")
+	d.logger.Debug("DISCOVERY_START: About to load static nodes from configuration")
 	if err := d.loadStaticNodes(); err != nil {
-		log.Printf("DISCOVERY_START: Failed to load static nodes: %v", err)
+		d.logger.Error("DISCOVERY_START: Failed to load static nodes", "error", err)
 	}
-	log.Printf("DISCOVERY_START: Static nodes loaded successfully, total_nodes=%d", len(d.nodes))
+	d.logger.Debug("DISCOVERY_START: Static nodes loaded successfully", "total_nodes", len(d.nodes))
 
 	// Start periodic discovery if interval is configured
-	log.Printf("DISCOVERY_START: About to start periodic discovery, interval=%v", d.cfg.Interval)
+	d.logger.Debug("DISCOVERY_START: About to start periodic discovery", "interval", d.cfg.Interval)
 	if d.cfg.Interval > 0 {
 		go d.periodicDiscovery()
 	}
 
-	log.Printf("DISCOVERY_START: Static discovery started, interval=%v, node_timeout=%v", d.cfg.Interval, d.cfg.NodeTimeout)
+	d.logger.Info("Static discovery started", "interval", d.cfg.Interval, "node_timeout", d.cfg.NodeTimeout)
 
-	log.Printf("DISCOVERY_START: Exiting staticDiscovery.Start() successfully")
+	d.logger.Debug("DISCOVERY_START: Exiting staticDiscovery.Start() successfully")
 	return nil
 }
 
@@ -192,8 +191,8 @@ func (d *staticDiscovery) UnregisterNode(nodeID string) error {
 
 // loadStaticNodes loads static node configuration
 func (d *staticDiscovery) loadStaticNodes() error {
-	log.Printf("LOAD_STATIC: Entering loadStaticNodes()")
-	log.Printf("LOAD_STATIC: Discovery config contents: %+v, len=%d", d.cfg.Config, len(d.cfg.Config))
+	d.logger.Debug("LOAD_STATIC: Entering loadStaticNodes()")
+	d.logger.Debug("LOAD_STATIC: Discovery config contents", "config", d.cfg.Config, "len", len(d.cfg.Config))
 
 	// Check for static nodes in configuration
 	// Handle both []interface{} and []map[string]interface{} types
@@ -210,26 +209,26 @@ func (d *staticDiscovery) loadStaticNodes() error {
 	}
 
 	if len(staticNodes) > 0 {
-		log.Printf("LOAD_STATIC: Found static nodes in configuration, count=%d", len(staticNodes))
+		d.logger.Debug("LOAD_STATIC: Found static nodes in configuration", "count", len(staticNodes))
 		for i, nodeMap := range staticNodes {
-			log.Printf("LOAD_STATIC: Processing static node, index=%d, data=%+v", i, nodeMap)
+			d.logger.Debug("LOAD_STATIC: Processing static node", "index", i, "data", nodeMap)
 			node, err := d.parseNodeFromConfig(nodeMap)
 			if err != nil {
-				log.Printf("LOAD_STATIC: Failed to parse static node: %v, data=%+v", err, nodeMap)
+				d.logger.Warn("LOAD_STATIC: Failed to parse static node", "error", err, "data", nodeMap)
 				continue
 			}
 
-			log.Printf("LOAD_STATIC: About to register static node, node_id=%s", node.ID)
+			d.logger.Debug("LOAD_STATIC: About to register static node", "node_id", node.ID)
 			if err := d.RegisterNode(node); err != nil {
-				log.Printf("LOAD_STATIC: Failed to register static node: %v, node_id=%s", err, node.ID)
+				d.logger.Warn("LOAD_STATIC: Failed to register static node", "error", err, "node_id", node.ID)
 			}
-			log.Printf("LOAD_STATIC: Static node registered successfully, node_id=%s", node.ID)
+			d.logger.Debug("LOAD_STATIC: Static node registered successfully", "node_id", node.ID)
 		}
 	} else {
-		log.Printf("LOAD_STATIC: No static nodes found in configuration")
+		d.logger.Debug("LOAD_STATIC: No static nodes found in configuration")
 	}
 
-	log.Printf("LOAD_STATIC: Exiting loadStaticNodes() successfully")
+	d.logger.Debug("LOAD_STATIC: Exiting loadStaticNodes() successfully")
 	return nil
 }
 
@@ -271,17 +270,17 @@ func (d *staticDiscovery) parseNodeFromConfig(nodeMap map[string]interface{}) (*
 
 // periodicDiscovery runs periodic discovery
 func (d *staticDiscovery) periodicDiscovery() {
-	log.Printf("PERIODIC_DISCOVERY: Goroutine started, interval=%v", d.cfg.Interval)
+	d.logger.Debug("PERIODIC_DISCOVERY: Goroutine started", "interval", d.cfg.Interval)
 	ticker := time.NewTicker(d.cfg.Interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-d.ctx.Done():
-			log.Printf("PERIODIC_DISCOVERY: Context cancelled, exiting")
+			d.logger.Debug("PERIODIC_DISCOVERY: Context cancelled, exiting")
 			return
 		case <-ticker.C:
-			log.Printf("PERIODIC_DISCOVERY: Ticker fired, calling performDiscovery()")
+			d.logger.Debug("PERIODIC_DISCOVERY: Ticker fired, calling performDiscovery()")
 			d.performDiscovery()
 		}
 	}
@@ -310,7 +309,7 @@ func (d *staticDiscovery) checkNodeHealth(node *NodeInfo) bool {
 		tlsConfig, err = cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
 	}
 	if err != nil {
-		log.Printf("DISCOVERY: Failed to create TLS config for health check: %v", err)
+		d.logger.Error("DISCOVERY: Failed to create TLS config for health check", "error", err)
 		return false
 	}
 
@@ -327,21 +326,21 @@ func (d *staticDiscovery) checkNodeHealth(node *NodeInfo) bool {
 		// TLS handshake errors mean the server IS responding — it just requires proper certs.
 		// This is a connectivity check, not a data exchange, so this is correct behavior.
 		if strings.Contains(err.Error(), "tls:") || strings.Contains(err.Error(), "certificate") {
-			log.Printf("HEALTH_CHECK: Node up (TLS handshake), node_id=%s, address=%s", node.ID, node.Address)
+			d.logger.Debug("HEALTH_CHECK: Node up (TLS handshake)", "node_id", node.ID, "address", node.Address)
 			return true // Server is up, just needs mTLS
 		}
-		log.Printf("HEALTH_CHECK: Node unreachable, node_id=%s, address=%s, error=%v", node.ID, node.Address, err)
+		d.logger.Warn("HEALTH_CHECK: Node unreachable", "node_id", node.ID, "address", node.Address, "error", err)
 		return false
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
-			log.Printf("HEALTH_CHECK: Failed to close response body, node_id=%s, error=%v", node.ID, err)
+			d.logger.Error("HEALTH_CHECK: Failed to close response body", "node_id", node.ID, "error", err)
 		}
 	}()
 
 	isHealthy := resp.StatusCode == 200 || resp.StatusCode == 404 || resp.StatusCode == 401 // Any response means server is up
-	log.Printf("HEALTH_CHECK: Node checked, node_id=%s, address=%s, status=%d, healthy=%v",
-		node.ID, node.Address, resp.StatusCode, isHealthy)
+	d.logger.Debug("HEALTH_CHECK: Node checked",
+		"node_id", node.ID, "address", node.Address, "status", resp.StatusCode, "healthy", isHealthy)
 	return isHealthy
 }
 
@@ -373,18 +372,18 @@ func (d *staticDiscovery) performDiscovery() {
 
 		// Check if node has timed out
 		if node.LastSeen.Before(timeoutThreshold) {
-			log.Printf("DISCOVERY_CYCLE: Node timed out, node_id=%s, last_seen=%v, timeout_threshold=%v",
-				nodeID, node.LastSeen, timeoutThreshold)
+			d.logger.Warn("DISCOVERY_CYCLE: Node timed out",
+				"node_id", nodeID, "last_seen", node.LastSeen, "timeout_threshold", timeoutThreshold)
 
 			// If the timed-out node is the leader, trigger election
 			if currentLeader != nil && nodeID == currentLeader.ID {
-				log.Printf("DISCOVERY_CYCLE: Leader has timed out, triggering election, leader_id=%s", nodeID)
+				d.logger.Warn("DISCOVERY_CYCLE: Leader has timed out, triggering election", "leader_id", nodeID)
 				go d.manager.triggerLeaderElection("leader timeout detected")
 			}
 		}
 	}
 
-	log.Printf("DISCOVERY_CYCLE: Discovery cycle completed, total_nodes=%d", len(d.nodes))
+	d.logger.Debug("DISCOVERY_CYCLE: Discovery cycle completed", "total_nodes", len(d.nodes))
 }
 
 // geographicDiscovery implements Discovery with geographic awareness
