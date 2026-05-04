@@ -71,21 +71,21 @@ var _ logging.Logger = (*testMockLogger)(nil)
 
 // MockStorageProvider implements StorageProvider for testing
 type MockStorageProvider struct {
-	name         string
-	description  string
-	version      string
-	available    bool
-	availableErr error
-	capabilities ProviderCapabilities
+	MockName         string
+	MockDescription  string
+	MockVersion      string
+	MockAvailable    bool
+	MockAvailableErr error
+	MockCapabilities ProviderCapabilities
 }
 
 func NewMockStorageProvider() *MockStorageProvider {
 	return &MockStorageProvider{
-		name:        "mock",
-		description: "Mock storage provider for testing",
-		version:     "1.0.0",
-		available:   true,
-		capabilities: ProviderCapabilities{
+		MockName:        "mock",
+		MockDescription: "Mock storage provider for testing",
+		MockVersion:     "1.0.0",
+		MockAvailable:   true,
+		MockCapabilities: ProviderCapabilities{
 			SupportsTransactions:   true,
 			SupportsVersioning:     true,
 			SupportsFullTextSearch: false,
@@ -101,27 +101,27 @@ func NewMockStorageProvider() *MockStorageProvider {
 }
 
 func (m *MockStorageProvider) Name() string {
-	return m.name
+	return m.MockName
 }
 
 func (m *MockStorageProvider) Description() string {
-	return m.description
+	return m.MockDescription
 }
 
 func (m *MockStorageProvider) GetVersion() string {
-	return m.version
+	return m.MockVersion
 }
 
 func (m *MockStorageProvider) Available() (bool, error) {
-	return m.available, m.availableErr
+	return m.MockAvailable, m.MockAvailableErr
 }
 
 func (m *MockStorageProvider) GetCapabilities() ProviderCapabilities {
-	return m.capabilities
+	return m.MockCapabilities
 }
 
 func (m *MockStorageProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
-	return &MockClientTenantStore{}, nil
+	return newMockClientTenantStore(), nil
 }
 
 func (m *MockStorageProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
@@ -161,11 +161,24 @@ func (m *MockStorageProvider) CreateTriggerStore(_ map[string]interface{}) (busi
 }
 
 // Mock implementations of store interfaces
-type MockClientTenantStore struct{}
+type MockClientTenantStore struct {
+	tenants map[string]*business.ClientTenant
+}
 
-func (m *MockClientTenantStore) StoreClientTenant(_ *business.ClientTenant) error { return nil }
-func (m *MockClientTenantStore) GetClientTenant(_ string) (*business.ClientTenant, error) {
-	return nil, business.ErrTenantNotFound
+func newMockClientTenantStore() *MockClientTenantStore {
+	return &MockClientTenantStore{tenants: make(map[string]*business.ClientTenant)}
+}
+
+func (m *MockClientTenantStore) StoreClientTenant(ct *business.ClientTenant) error {
+	m.tenants[ct.ID] = ct
+	return nil
+}
+func (m *MockClientTenantStore) GetClientTenant(id string) (*business.ClientTenant, error) {
+	ct, ok := m.tenants[id]
+	if !ok {
+		return nil, business.ErrTenantNotFound
+	}
+	return ct, nil
 }
 func (m *MockClientTenantStore) GetClientTenantByIdentifier(_ string) (*business.ClientTenant, error) {
 	return nil, business.ErrTenantNotFound
@@ -569,41 +582,41 @@ func TestValidateProvider(t *testing.T) {
 		{
 			name: "empty name",
 			provider: &MockStorageProvider{
-				name:        "",
-				description: "test",
-				version:     "1.0.0",
-				available:   true,
+				MockName:        "",
+				MockDescription: "test",
+				MockVersion:     "1.0.0",
+				MockAvailable:   true,
 			},
 			expectError: true,
 		},
 		{
 			name: "empty description",
 			provider: &MockStorageProvider{
-				name:        "test",
-				description: "",
-				version:     "1.0.0",
-				available:   true,
+				MockName:        "test",
+				MockDescription: "",
+				MockVersion:     "1.0.0",
+				MockAvailable:   true,
 			},
 			expectError: true,
 		},
 		{
 			name: "empty version",
 			provider: &MockStorageProvider{
-				name:        "test",
-				description: "test",
-				version:     "",
-				available:   true,
+				MockName:        "test",
+				MockDescription: "test",
+				MockVersion:     "",
+				MockAvailable:   true,
 			},
 			expectError: true,
 		},
 		{
 			name: "negative batch size",
 			provider: &MockStorageProvider{
-				name:        "test",
-				description: "test",
-				version:     "1.0.0",
-				available:   true,
-				capabilities: ProviderCapabilities{
+				MockName:        "test",
+				MockDescription: "test",
+				MockVersion:     "1.0.0",
+				MockAvailable:   true,
+				MockCapabilities: ProviderCapabilities{
 					MaxBatchSize: -1,
 				},
 			},
@@ -613,7 +626,7 @@ func TestValidateProvider(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateProvider(tt.provider)
+			err := ValidateProvider(tt.provider)
 			if tt.expectError && err == nil {
 				t.Errorf("Expected validation error, got none")
 			}
@@ -655,15 +668,28 @@ func TestCreateAllStoresFromConfig(t *testing.T) {
 
 	manager, err := CreateAllStoresFromConfig("mock", config)
 	if err != nil {
-		t.Errorf("Failed to create storage manager: %v", err)
+		t.Fatalf("Failed to create storage manager: %v", err)
 	}
 
 	if manager.GetProviderName() != "mock" {
 		t.Errorf("Expected provider name 'mock', got: %s", manager.GetProviderName())
 	}
 
-	if manager.GetClientTenantStore() == nil {
-		t.Errorf("ClientTenantStore should not be nil")
+	ctStore := manager.GetClientTenantStore()
+	if ctStore == nil {
+		t.Fatal("ClientTenantStore should not be nil")
+	}
+	// Round-trip: store a tenant and verify retrieval returns the same value.
+	want := &business.ClientTenant{ID: "rt-tenant-1", TenantName: "Round Trip Tenant"}
+	if err := ctStore.StoreClientTenant(want); err != nil {
+		t.Fatalf("StoreClientTenant failed: %v", err)
+	}
+	got, err := ctStore.GetClientTenant("rt-tenant-1")
+	if err != nil {
+		t.Fatalf("GetClientTenant failed: %v", err)
+	}
+	if got.ID != want.ID || got.TenantName != want.TenantName {
+		t.Errorf("round-trip mismatch: got %+v, want %+v", got, want)
 	}
 
 	if manager.GetConfigStore() == nil {
@@ -759,7 +785,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	t.Run("composite provider name and nil provider", func(t *testing.T) {
 		sm := NewStorageManagerFromStores(
 			&MockConfigStore{}, &MockAuditStore{}, &MockRBACStore{},
-			&MockTenantStore{}, &MockClientTenantStore{}, &MockRegistrationTokenStore{},
+			&MockTenantStore{}, newMockClientTenantStore(), &MockRegistrationTokenStore{},
 			nil, nil, nil, nil,
 		)
 
@@ -799,7 +825,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 		auditStore := &MockAuditStore{}
 		rbacStore := &MockRBACStore{}
 		tenantStore := &MockTenantStore{}
-		clientTenantStore := &MockClientTenantStore{}
+		clientTenantStore := newMockClientTenantStore()
 		registrationTokenStore := &MockRegistrationTokenStore{}
 
 		sm := NewStorageManagerFromStores(
@@ -986,7 +1012,7 @@ func (m *MockOSSProvider) CreateTenantStore(_ map[string]interface{}) (business.
 	return &MockTenantStore{}, nil
 }
 func (m *MockOSSProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
-	return &MockClientTenantStore{}, nil
+	return newMockClientTenantStore(), nil
 }
 func (m *MockOSSProvider) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
 	return &MockRegistrationTokenStore{}, nil
@@ -1059,7 +1085,7 @@ func (m *MockOSSProviderWithError) CreateClientTenantStore(_ map[string]interfac
 	if err := m.mayFail("CreateClientTenantStore"); err != nil {
 		return nil, err
 	}
-	return &MockClientTenantStore{}, nil
+	return newMockClientTenantStore(), nil
 }
 func (m *MockOSSProviderWithError) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
 	if err := m.mayFail("CreateRegistrationTokenStore"); err != nil {
@@ -1230,10 +1256,10 @@ func TestRegisterStorageProvider_routesThroughInjectedLogger(t *testing.T) {
 	defer SetStorageLogger(logging.NewNoopLogger())
 
 	testProvider := &MockStorageProvider{
-		name:        "test",
-		description: "test provider",
-		version:     "1.0",
-		available:   true,
+		MockName:        "test",
+		MockDescription: "test provider",
+		MockVersion:     "1.0",
+		MockAvailable:   true,
 	}
 	RegisterStorageProvider(testProvider)
 

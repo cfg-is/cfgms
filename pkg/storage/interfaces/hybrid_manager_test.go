@@ -118,9 +118,18 @@ func TestHybridStorageManager_Creation(t *testing.T) {
 	require.NotNil(t, manager)
 
 	// Test interface access
-	assert.NotNil(t, manager.GetClientTenantStore())
+	ctStore := manager.GetClientTenantStore()
+	require.NotNil(t, ctStore)
 	assert.NotNil(t, manager.GetAuditStore())
 	assert.NotNil(t, manager.GetConfigStore())
+
+	// Round-trip: store a client tenant and verify retrieval returns the same value.
+	wantTenant := &business.ClientTenant{ID: "hybrid-rt-1", TenantName: "Hybrid Round Trip"}
+	require.NoError(t, ctStore.StoreClientTenant(wantTenant))
+	gotTenant, err := ctStore.GetClientTenant("hybrid-rt-1")
+	require.NoError(t, err)
+	assert.Equal(t, wantTenant.ID, gotTenant.ID)
+	assert.Equal(t, wantTenant.TenantName, gotTenant.TenantName)
 
 	// Test provider access
 	assert.NotNil(t, manager.GetOperationalProvider())
@@ -325,7 +334,7 @@ func (p *mockProvider) Available() (bool, error) {
 }
 
 func (p *mockProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
-	return &mockClientTenantStore{}, nil
+	return newMockClientTenantStoreHybrid(), nil
 }
 
 func (p *mockProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
@@ -384,14 +393,25 @@ func (p *mockProvider) GetVersion() string {
 }
 
 // Mock store implementations
-type mockClientTenantStore struct{}
+type mockClientTenantStore struct {
+	tenants map[string]*business.ClientTenant
+}
 
-func (s *mockClientTenantStore) StoreClientTenant(_ *business.ClientTenant) error {
+func newMockClientTenantStoreHybrid() *mockClientTenantStore {
+	return &mockClientTenantStore{tenants: make(map[string]*business.ClientTenant)}
+}
+
+func (s *mockClientTenantStore) StoreClientTenant(ct *business.ClientTenant) error {
+	s.tenants[ct.ID] = ct
 	return nil
 }
 
 func (s *mockClientTenantStore) GetClientTenant(tenantID string) (*business.ClientTenant, error) {
-	return &business.ClientTenant{ID: tenantID, TenantName: "Mock Tenant"}, nil
+	ct, ok := s.tenants[tenantID]
+	if !ok {
+		return nil, business.ErrTenantNotFound
+	}
+	return ct, nil
 }
 
 func (s *mockClientTenantStore) GetClientTenantByIdentifier(clientIdentifier string) (*business.ClientTenant, error) {
