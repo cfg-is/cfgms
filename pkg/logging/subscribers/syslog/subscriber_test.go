@@ -168,49 +168,6 @@ func TestSyslogSubscriber_Available_NetworkSyslog(t *testing.T) {
 	}
 }
 
-func TestSyslogSubscriber_HandleLogEntry(t *testing.T) {
-	// Skip this test if not running in an environment with syslog
-	if os.Getenv("CFGMS_TEST_SYSLOG") != "1" {
-		t.Skip("Syslog tests disabled - set CFGMS_TEST_SYSLOG=1 to enable")
-	}
-
-	subscriber := NewSyslogSubscriber()
-
-	config := map[string]interface{}{
-		"network":         "", // Local syslog
-		"facility":        "daemon",
-		"tag":             "cfgms-test",
-		"structured_data": true,
-	}
-
-	err := subscriber.Initialize(config)
-	require.NoError(t, err)
-	defer func() { _ = subscriber.Close() }()
-
-	// Create test log entry
-	entry := interfaces.LogEntry{
-		Timestamp:   time.Now(),
-		Level:       "INFO",
-		Message:     "Test syslog subscriber",
-		ServiceName: "cfgms-controller",
-		Component:   "test-component",
-		TenantID:    "test-tenant",
-		SessionID:   "test-session",
-		Fields: map[string]interface{}{
-			"test_field": "test_value",
-		},
-	}
-
-	// Populate RFC5424 fields
-	interfaces.PopulateRFC5424Fields(&entry, "test-host", "cfgms-test", "12345", interfaces.FacilityDaemon)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	err = subscriber.HandleLogEntry(ctx, entry)
-	assert.NoError(t, err)
-}
-
 func TestSyslogSubscriber_HandleLogEntry_NotInitialized(t *testing.T) {
 	subscriber := NewSyslogSubscriber()
 

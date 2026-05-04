@@ -1,3 +1,5 @@
+//go:build integration
+
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
 package timescale
@@ -20,10 +22,6 @@ import (
 
 // TestTimescaleProvider_BasicFunctionality tests basic provider operations
 func TestTimescaleProvider_BasicFunctionality(t *testing.T) {
-	if !isTimescaleTestEnabled() {
-		t.Skip("TimescaleDB tests disabled - set CFGMS_TEST_TIMESCALEDB=1 to enable")
-	}
-
 	// Test availability check before initialization
 	provider := &TimescaleProvider{}
 	available, err := provider.Available()
@@ -57,10 +55,6 @@ func TestTimescaleProvider_BasicFunctionality(t *testing.T) {
 
 // TestTimescaleProvider_WriteAndQuery tests writing and querying log entries
 func TestTimescaleProvider_WriteAndQuery(t *testing.T) {
-	if !isTimescaleTestEnabled() {
-		t.Skip("TimescaleDB tests disabled - set CFGMS_TEST_TIMESCALEDB=1 to enable")
-	}
-
 	provider, _ := createTestProviderWithCleanup(t, "writequery")
 
 	ctx := context.Background()
@@ -180,10 +174,6 @@ func TestTimescaleProvider_WriteAndQuery(t *testing.T) {
 
 // TestTimescaleProvider_LevelFiltering tests log level filtering
 func TestTimescaleProvider_LevelFiltering(t *testing.T) {
-	if !isTimescaleTestEnabled() {
-		t.Skip("TimescaleDB tests disabled - set CFGMS_TEST_TIMESCALEDB=1 to enable")
-	}
-
 	provider, _ := createTestProviderWithCleanup(t, "level")
 
 	ctx := context.Background()
@@ -249,10 +239,6 @@ func TestTimescaleProvider_LevelFiltering(t *testing.T) {
 
 // TestTimescaleProvider_HighVolume tests high-volume logging performance
 func TestTimescaleProvider_HighVolume(t *testing.T) {
-	if !isTimescaleTestEnabled() {
-		t.Skip("TimescaleDB tests disabled - set CFGMS_TEST_TIMESCALEDB=1 to enable")
-	}
-
 	provider, config := createTestProviderWithCleanup(t, "highvolume")
 	config["batch_size"] = 1000
 
@@ -329,10 +315,6 @@ func TestTimescaleProvider_HighVolume(t *testing.T) {
 
 // TestTimescaleProvider_Stats tests statistics functionality
 func TestTimescaleProvider_Stats(t *testing.T) {
-	if !isTimescaleTestEnabled() {
-		t.Skip("TimescaleDB tests disabled - set CFGMS_TEST_TIMESCALEDB=1 to enable")
-	}
-
 	provider, _ := createTestProviderWithCleanup(t, "stats")
 
 	ctx := context.Background()
@@ -374,10 +356,6 @@ func TestTimescaleProvider_Stats(t *testing.T) {
 
 // TestTimescaleProvider_ProviderRegistration tests provider registration
 func TestTimescaleProvider_ProviderRegistration(t *testing.T) {
-	if !isTimescaleTestEnabled() {
-		t.Skip("TimescaleDB tests disabled - set CFGMS_TEST_TIMESCALEDB=1 to enable")
-	}
-
 	// Test that the provider is registered
 	provider, err := interfaces.CreateLoggingProviderFromConfig("timescale", getTestTimescaleConfig())
 	assert.NoError(t, err)
@@ -389,11 +367,6 @@ func TestTimescaleProvider_ProviderRegistration(t *testing.T) {
 }
 
 // Helper functions
-
-// isTimescaleTestEnabled checks if TimescaleDB tests should run
-func isTimescaleTestEnabled() bool {
-	return os.Getenv("CFGMS_TEST_TIMESCALEDB") == "1"
-}
 
 // getTestTimescaleConfig returns test configuration for TimescaleDB with unique table names
 func getTestTimescaleConfig() map[string]interface{} {
