@@ -248,7 +248,9 @@ func TestNewManager_ErrorConditions(t *testing.T) {
 	}
 }
 
-// TestManager_RecordEvent tests basic event recording
+// TestManager_RecordEvent verifies that RecordEvent persists the event to the
+// store. It calls flushOrFail to drain the async queue before reading back, so
+// the test fails if RecordEvent silently discards the event.
 func TestManager_RecordEvent(t *testing.T) {
 	manager := newTestManager(t, "test")
 	ctx := context.Background()
@@ -262,11 +264,19 @@ func TestManager_RecordEvent(t *testing.T) {
 		Detail("test_key", "test_value").
 		Severity(business.AuditSeverityMedium)
 
-	err := manager.RecordEvent(ctx, event)
-	assert.NoError(t, err)
+	require.NoError(t, manager.RecordEvent(ctx, event))
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "test_action", entries[0].Action)
+	assert.Equal(t, "test-tenant", entries[0].TenantID)
 }
 
-// TestManager_RecordBatch tests batch event recording
+// TestManager_RecordBatch verifies that RecordBatch persists all events to the
+// store. It calls flushOrFail to drain the async queue before reading back, so
+// the test fails if RecordBatch silently discards events.
 func TestManager_RecordBatch(t *testing.T) {
 	manager := newTestManager(t, "test")
 	ctx := context.Background()
@@ -288,8 +298,19 @@ func TestManager_RecordBatch(t *testing.T) {
 			Severity(business.AuditSeverityMedium),
 	}
 
-	err := manager.RecordBatch(ctx, events)
-	assert.NoError(t, err)
+	require.NoError(t, manager.RecordBatch(ctx, events))
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+
+	actions := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		actions[e.Action] = true
+	}
+	assert.True(t, actions["login"], "expected entry with Action=login")
+	assert.True(t, actions["config_update"], "expected entry with Action=config_update")
 }
 
 // TestManager_ValidationErrors tests validation error handling
