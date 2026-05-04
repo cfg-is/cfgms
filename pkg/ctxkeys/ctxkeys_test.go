@@ -26,11 +26,11 @@ func TestTenantIDMissing(t *testing.T) {
 }
 
 func TestContextKeyCollision(t *testing.T) {
-	// A plain string key must not collide with the typed ContextKey.
+	// A plain string key must not collide with the struct-typed TenantID key.
 	//nolint:staticcheck // SA1029: intentionally using a plain string to verify typed key does not collide
 	ctx := context.WithValue(context.Background(), "tenant_id", "plain-string-value")
 	got, ok := ctx.Value(ctxkeys.TenantID).(string)
-	assert.False(t, ok, "typed key must not match plain string key")
+	assert.False(t, ok, "struct-typed key must not match plain string key")
 	assert.Empty(t, got)
 }
 
@@ -53,6 +53,29 @@ func TestCorrelationIDKeyCollision(t *testing.T) {
 	//nolint:staticcheck // SA1029: intentionally using a plain string to verify typed key does not collide
 	ctx := context.WithValue(context.Background(), "correlation_id", "plain-string-value")
 	got, ok := ctx.Value(ctxkeys.CorrelationIDKey).(string)
+	assert.False(t, ok, "struct-typed key must not match plain string key")
+	assert.Empty(t, got)
+}
+
+func TestUserIDKeyRoundtrip(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "user-abc-123")
+	got, ok := ctx.Value(ctxkeys.UserIDKey).(string)
+	assert.True(t, ok)
+	assert.Equal(t, "user-abc-123", got)
+}
+
+func TestUserIDKeyMissing(t *testing.T) {
+	ctx := context.Background()
+	got, ok := ctx.Value(ctxkeys.UserIDKey).(string)
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
+func TestUserIDKeyCollision(t *testing.T) {
+	// A plain string key must not collide with the struct-typed UserIDKey.
+	//nolint:staticcheck // SA1029: intentionally using a plain string to verify typed key does not collide
+	ctx := context.WithValue(context.Background(), "user_id", "plain-string-value")
+	got, ok := ctx.Value(ctxkeys.UserIDKey).(string)
 	assert.False(t, ok, "struct-typed key must not match plain string key")
 	assert.Empty(t, got)
 }
