@@ -103,7 +103,7 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 	server, err := New(
 		cfg, logger, controllerService, configService, nil, rbacService,
 		certMgr, tenantManager, rbacManager,
-		nil, nil, nil,
+		nil, nil,
 		tokenStore,
 		"",
 		nil,

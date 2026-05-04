@@ -519,7 +519,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		tenantManager,
 		rbacManager,
 		nil, // systemMonitor
-		nil, // platformMonitor
 		haManager,
 		regStore,         // registrationTokenStore
 		signerCertSerial, // Story #378: signer cert serial for registration

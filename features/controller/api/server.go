@@ -30,7 +30,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
-	pkgmonitoring "github.com/cfgis/cfgms/pkg/monitoring"
 	"github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
@@ -51,7 +50,6 @@ type Server struct {
 	tenantManager           *tenant.Manager
 	rbacManager             *rbac.Manager
 	systemMonitor           *monitoring.SystemMonitor
-	platformMonitor         pkgmonitoring.PlatformMonitor
 	healthCollector         *health.Collector
 	haManager               *ha.Manager
 	apiKeys                 map[string]*APIKey             // In-memory cache for fast lookup
@@ -108,7 +106,6 @@ func New(
 	tenantManager *tenant.Manager,
 	rbacManager *rbac.Manager,
 	systemMonitor *monitoring.SystemMonitor,
-	platformMonitor pkgmonitoring.PlatformMonitor,
 	haManager *ha.Manager,
 	registrationTokenStore registration.Store,
 	signerCertSerial string, // Story #378: Serial of cert used for config signing
@@ -136,7 +133,6 @@ func New(
 		tenantManager:           tenantManager,
 		rbacManager:             rbacManager,
 		systemMonitor:           systemMonitor,
-		platformMonitor:         platformMonitor,
 		healthCollector:         healthCollector,
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
