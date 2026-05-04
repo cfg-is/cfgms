@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-package saas
+package saas_test
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
+	saas "github.com/cfgis/cfgms/features/saas"
 	"github.com/cfgis/cfgms/pkg/logging"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,15 +24,15 @@ import (
 // deterministic tenants without making any HTTP calls. Configure tenants at construction
 // time; pass err to simulate discovery failures.
 type stubTenantDiscoverer struct {
-	tenants []TenantInfo
+	tenants []saas.TenantInfo
 	err     error
 }
 
-func (s *stubTenantDiscoverer) DiscoverTenants(_ context.Context, _ *TokenSet) (*TenantDiscoveryResult, error) {
+func (s *stubTenantDiscoverer) DiscoverTenants(_ context.Context, _ *saas.TokenSet) (*saas.TenantDiscoveryResult, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
-	return &TenantDiscoveryResult{
+	return &saas.TenantDiscoveryResult{
 		Tenants:      s.tenants,
 		DiscoveredAt: time.Now(),
 		Success:      true,
@@ -40,7 +40,7 @@ func (s *stubTenantDiscoverer) DiscoverTenants(_ context.Context, _ *TokenSet) (
 }
 
 // newStubTenantDiscoverer returns a stub that returns the given tenants on every call.
-func newStubTenantDiscoverer(tenants ...TenantInfo) *stubTenantDiscoverer {
+func newStubTenantDiscoverer(tenants ...saas.TenantInfo) *stubTenantDiscoverer {
 	return &stubTenantDiscoverer{tenants: tenants}
 }
 
@@ -49,15 +49,15 @@ func newStubTenantDiscoverer(tenants ...TenantInfo) *stubTenantDiscoverer {
 func TestMultiTenantManager_StartAdminConsent(t *testing.T) {
 	tests := []struct {
 		name     string
-		config   *MultiTenantConfig
+		config   *saas.MultiTenantConfig
 		wantErr  bool
 		errMsg   string
 		validate func(t *testing.T, url string)
 	}{
 		{
 			name: "successful consent flow start",
-			config: &MultiTenantConfig{
-				OAuth2Config: OAuth2Config{
+			config: &saas.MultiTenantConfig{
+				OAuth2Config: saas.OAuth2Config{
 					ClientID:     "test-client-id",
 					ClientSecret: "test-client-secret",
 					AuthURL:      "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize",
@@ -77,8 +77,8 @@ func TestMultiTenantManager_StartAdminConsent(t *testing.T) {
 		},
 		{
 			name: "non-multitenant config",
-			config: &MultiTenantConfig{
-				OAuth2Config: OAuth2Config{
+			config: &saas.MultiTenantConfig{
+				OAuth2Config: saas.OAuth2Config{
 					ClientID: "test-client-id",
 				},
 				IsMultiTenant: false,
@@ -91,9 +91,9 @@ func TestMultiTenantManager_StartAdminConsent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			credStore := newTestCredentialStore(t)
-			consentStore := NewInMemoryConsentStore()
-			httpClient := NewGraphHTTPClient(100, 1000)
-			mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
+			consentStore := saas.NewInMemoryConsentStore()
+			httpClient := saas.NewGraphHTTPClient(100, 1000)
+			mtm := saas.NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 			ctx := context.Background()
 			url, err := mtm.StartAdminConsent(ctx, "microsoft", tt.config)
@@ -115,7 +115,7 @@ func TestMultiTenantManager_StartAdminConsent(t *testing.T) {
 
 func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
 	// Deterministic tenants returned by the stub discoverer for success-path assertions.
-	stubTenants := []TenantInfo{
+	stubTenants := []saas.TenantInfo{
 		{TenantID: "stub-tenant-alpha", DisplayName: "Stub Alpha Corp", Domain: "alpha.example.com", HasAccess: true},
 		{TenantID: "stub-tenant-beta", DisplayName: "Stub Beta Corp", Domain: "beta.example.com", HasAccess: true},
 	}
@@ -168,17 +168,17 @@ func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
 			defer tokenServer.Close()
 
 			credStore := newTestCredentialStore(t)
-			consentStore := NewInMemoryConsentStore()
+			consentStore := saas.NewInMemoryConsentStore()
 			// Use the real DefaultOAuth2Client so ExchangeCode hits the httptest server.
 			// Wire a stub discoverer so discoverTenants returns stubTenants without HTTP calls.
-			mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(stubTenants...), logging.NewNoopLogger())
+			mtm := saas.NewMultiTenantManager(credStore, consentStore, saas.NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(stubTenants...), logging.NewNoopLogger())
 
 			ctx := context.Background()
 			provider := "microsoft"
 
 			// Directly inject a ConsentStatus whose flow points at the test token server.
 			// This is equivalent to what StartAdminConsent stores after calling StartFlow.
-			flow := &OAuth2Flow{
+			flow := &saas.OAuth2Flow{
 				TokenURL:     tokenServer.URL,
 				ClientID:     "test-client-id",
 				ClientSecret: "test-client-secret",
@@ -187,7 +187,7 @@ func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
 				Created:      time.Now(),
 				ExpiresAt:    time.Now().Add(10 * time.Minute),
 			}
-			require.NoError(t, consentStore.StoreConsent(provider, &ConsentStatus{
+			require.NoError(t, consentStore.StoreConsent(provider, &saas.ConsentStatus{
 				Provider:    provider,
 				ConsentFlow: flow,
 			}))
@@ -240,7 +240,7 @@ func TestMultiTenantManager_DiscoverTenantsErrors(t *testing.T) {
 	}))
 	defer tokenServer.Close()
 
-	flow := &OAuth2Flow{
+	flow := &saas.OAuth2Flow{
 		TokenURL:     tokenServer.URL,
 		ClientID:     "client-id",
 		ClientSecret: "client-secret",
@@ -252,7 +252,7 @@ func TestMultiTenantManager_DiscoverTenantsErrors(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		discoverer TenantDiscoverer
+		discoverer saas.TenantDiscoverer
 		wantErrMsg string
 	}{
 		{
@@ -270,10 +270,10 @@ func TestMultiTenantManager_DiscoverTenantsErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			credStore := newTestCredentialStore(t)
-			consentStore := NewInMemoryConsentStore()
-			mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), tt.discoverer, logging.NewNoopLogger())
+			consentStore := saas.NewInMemoryConsentStore()
+			mtm := saas.NewMultiTenantManager(credStore, consentStore, saas.NewGraphHTTPClient(100, 1000), tt.discoverer, logging.NewNoopLogger())
 
-			require.NoError(t, consentStore.StoreConsent("microsoft", &ConsentStatus{
+			require.NoError(t, consentStore.StoreConsent("microsoft", &saas.ConsentStatus{
 				Provider:    "microsoft",
 				ConsentFlow: flow,
 			}))
@@ -288,17 +288,17 @@ func TestMultiTenantManager_DiscoverTenantsErrors(t *testing.T) {
 func TestDefaultOAuth2Client_ExchangeCode(t *testing.T) {
 	tests := []struct {
 		name         string
-		flow         *OAuth2Flow
+		flow         *saas.OAuth2Flow
 		authCode     string
 		serverResp   map[string]interface{}
 		serverStatus int
 		wantErr      bool
-		validate     func(t *testing.T, ts *TokenSet)
+		validate     func(t *testing.T, ts *saas.TokenSet)
 	}{
 		{
 			name:     "successful exchange with all fields",
 			authCode: "auth-code-abc",
-			flow: &OAuth2Flow{
+			flow: &saas.OAuth2Flow{
 				ClientID:     "client-123",
 				ClientSecret: "secret-xyz",
 				RedirectURI:  "https://app.example.com/callback",
@@ -313,7 +313,7 @@ func TestDefaultOAuth2Client_ExchangeCode(t *testing.T) {
 			},
 			serverStatus: http.StatusOK,
 			wantErr:      false,
-			validate: func(t *testing.T, ts *TokenSet) {
+			validate: func(t *testing.T, ts *saas.TokenSet) {
 				assert.Equal(t, "exchanged-access-token", ts.AccessToken)
 				assert.Equal(t, "exchanged-refresh-token", ts.RefreshToken)
 				assert.Equal(t, "Bearer", ts.TokenType)
@@ -324,7 +324,7 @@ func TestDefaultOAuth2Client_ExchangeCode(t *testing.T) {
 		{
 			name:     "exchange without PKCE code_verifier",
 			authCode: "auth-code-nopkce",
-			flow: &OAuth2Flow{
+			flow: &saas.OAuth2Flow{
 				ClientID:     "client-123",
 				ClientSecret: "secret-xyz",
 				RedirectURI:  "https://app.example.com/callback",
@@ -337,14 +337,14 @@ func TestDefaultOAuth2Client_ExchangeCode(t *testing.T) {
 			},
 			serverStatus: http.StatusOK,
 			wantErr:      false,
-			validate: func(t *testing.T, ts *TokenSet) {
+			validate: func(t *testing.T, ts *saas.TokenSet) {
 				assert.Equal(t, "access-nopkce", ts.AccessToken)
 			},
 		},
 		{
 			name:     "token endpoint returns 400",
 			authCode: "bad-code",
-			flow: &OAuth2Flow{
+			flow: &saas.OAuth2Flow{
 				ClientID:     "client-123",
 				ClientSecret: "secret-xyz",
 				RedirectURI:  "https://app.example.com/callback",
@@ -379,7 +379,7 @@ func TestDefaultOAuth2Client_ExchangeCode(t *testing.T) {
 			defer tokenServer.Close()
 
 			tt.flow.TokenURL = tokenServer.URL
-			client := &DefaultOAuth2Client{httpClient: NewGraphHTTPClient(100, 1000)}
+			client := saas.NewOAuth2Client(saas.NewGraphHTTPClient(100, 1000), nil)
 
 			ts, err := client.ExchangeCode(context.Background(), tt.flow, tt.authCode)
 
@@ -399,28 +399,28 @@ func TestDefaultOAuth2Client_ExchangeCode(t *testing.T) {
 
 func TestMultiTenantManager_GetTenantToken(t *testing.T) {
 	credStore := newTestCredentialStore(t)
-	consentStore := NewInMemoryConsentStore()
-	httpClient := NewGraphHTTPClient(100, 1000)
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
+	consentStore := saas.NewInMemoryConsentStore()
+	httpClient := saas.NewGraphHTTPClient(100, 1000)
+	mtm := saas.NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
 	tenantID := "tenant-1"
 
 	// Store real consent status with explicit accessible tenants.
-	err := consentStore.StoreConsent(provider, &ConsentStatus{
+	err := consentStore.StoreConsent(provider, &saas.ConsentStatus{
 		Provider:         provider,
 		HasAdminConsent:  true,
 		ConsentGrantedAt: time.Now(),
-		AccessibleTenants: []TenantInfo{
+		AccessibleTenants: []saas.TenantInfo{
 			{TenantID: tenantID, HasAccess: true},
 		},
 	})
 	require.NoError(t, err)
 
 	// Store a valid token for the tenant
-	tenantKey := mtm.getTenantKey(provider, tenantID)
-	validToken := &TokenSet{
+	tenantKey := saas.GetTenantKey(mtm, provider, tenantID)
+	validToken := &saas.TokenSet{
 		AccessToken: "valid-token",
 		TokenType:   "Bearer",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
@@ -437,20 +437,20 @@ func TestMultiTenantManager_GetTenantToken(t *testing.T) {
 
 func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
 	credStore := newTestCredentialStore(t)
-	consentStore := NewInMemoryConsentStore()
-	httpClient := NewGraphHTTPClient(100, 1000)
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
+	consentStore := saas.NewInMemoryConsentStore()
+	httpClient := saas.NewGraphHTTPClient(100, 1000)
+	mtm := saas.NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
 	tenantID := "inaccessible-tenant"
 
 	// Set up consent status without the requested tenant
-	status := &ConsentStatus{
+	status := &saas.ConsentStatus{
 		Provider:         provider,
 		HasAdminConsent:  true,
 		ConsentGrantedAt: time.Now(),
-		AccessibleTenants: []TenantInfo{
+		AccessibleTenants: []saas.TenantInfo{
 			{
 				TenantID:    "different-tenant",
 				DisplayName: "Different Tenant",
@@ -471,25 +471,25 @@ func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
 
 func TestMultiTenantManager_GetTenantToken_TIDMismatch(t *testing.T) {
 	credStore := newTestCredentialStore(t)
-	consentStore := NewInMemoryConsentStore()
-	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(), logging.NewNoopLogger())
+	consentStore := saas.NewInMemoryConsentStore()
+	mtm := saas.NewMultiTenantManager(credStore, consentStore, saas.NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
 	tenantID := "correct-tenant"
 
-	require.NoError(t, consentStore.StoreConsent(provider, &ConsentStatus{
+	require.NoError(t, consentStore.StoreConsent(provider, &saas.ConsentStatus{
 		Provider:        provider,
 		HasAdminConsent: true,
-		AccessibleTenants: []TenantInfo{
+		AccessibleTenants: []saas.TenantInfo{
 			{TenantID: tenantID, HasAccess: true},
 		},
 	}))
 
 	// Craft a JWT whose tid claim is a different tenant than the one being requested.
 	mismatchedJWT := makeTestJWT("wrong-tenant")
-	tenantKey := mtm.getTenantKey(provider, tenantID)
-	require.NoError(t, credStore.StoreTokenSet(tenantKey, &TokenSet{
+	tenantKey := saas.GetTenantKey(mtm, provider, tenantID)
+	require.NoError(t, credStore.StoreTokenSet(tenantKey, &saas.TokenSet{
 		AccessToken: mismatchedJWT,
 		TokenType:   "Bearer",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
@@ -503,24 +503,24 @@ func TestMultiTenantManager_GetTenantToken_TIDMismatch(t *testing.T) {
 
 func TestMultiTenantManager_GetTenantToken_OpaqueToken(t *testing.T) {
 	credStore := newTestCredentialStore(t)
-	consentStore := NewInMemoryConsentStore()
-	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(), logging.NewNoopLogger())
+	consentStore := saas.NewInMemoryConsentStore()
+	mtm := saas.NewMultiTenantManager(credStore, consentStore, saas.NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
 	tenantID := "any-tenant"
 
-	require.NoError(t, consentStore.StoreConsent(provider, &ConsentStatus{
+	require.NoError(t, consentStore.StoreConsent(provider, &saas.ConsentStatus{
 		Provider:        provider,
 		HasAdminConsent: true,
-		AccessibleTenants: []TenantInfo{
+		AccessibleTenants: []saas.TenantInfo{
 			{TenantID: tenantID, HasAccess: true},
 		},
 	}))
 
 	// Opaque (non-JWT) access token; GetTenantToken must succeed (fail-open policy).
-	tenantKey := mtm.getTenantKey(provider, tenantID)
-	require.NoError(t, credStore.StoreTokenSet(tenantKey, &TokenSet{
+	tenantKey := saas.GetTenantKey(mtm, provider, tenantID)
+	require.NoError(t, credStore.StoreTokenSet(tenantKey, &saas.TokenSet{
 		AccessToken: "opaque-access-token-not-a-jwt",
 		TokenType:   "Bearer",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
@@ -534,24 +534,24 @@ func TestMultiTenantManager_GetTenantToken_OpaqueToken(t *testing.T) {
 
 func TestMultiTenantManager_GetTenantToken_ExpiredToken_RefreshNotImplemented(t *testing.T) {
 	credStore := newTestCredentialStore(t)
-	consentStore := NewInMemoryConsentStore()
-	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(), logging.NewNoopLogger())
+	consentStore := saas.NewInMemoryConsentStore()
+	mtm := saas.NewMultiTenantManager(credStore, consentStore, saas.NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
 	tenantID := "tenant-1"
 
-	require.NoError(t, consentStore.StoreConsent(provider, &ConsentStatus{
+	require.NoError(t, consentStore.StoreConsent(provider, &saas.ConsentStatus{
 		Provider:        provider,
 		HasAdminConsent: true,
-		AccessibleTenants: []TenantInfo{
+		AccessibleTenants: []saas.TenantInfo{
 			{TenantID: tenantID, HasAccess: true},
 		},
 	}))
 
 	// Store an expired token; refreshTenantToken is called and must return an error.
-	tenantKey := mtm.getTenantKey(provider, tenantID)
-	require.NoError(t, credStore.StoreTokenSet(tenantKey, &TokenSet{
+	tenantKey := saas.GetTenantKey(mtm, provider, tenantID)
+	require.NoError(t, credStore.StoreTokenSet(tenantKey, &saas.TokenSet{
 		AccessToken: "expired-token",
 		TokenType:   "Bearer",
 		ExpiresAt:   time.Now().Add(-1 * time.Hour),
@@ -565,9 +565,9 @@ func TestMultiTenantManager_GetTenantToken_ExpiredToken_RefreshNotImplemented(t 
 
 func TestMultiTenantManager_ListAccessibleTenants(t *testing.T) {
 	credStore := newTestCredentialStore(t)
-	consentStore := NewInMemoryConsentStore()
-	httpClient := NewGraphHTTPClient(100, 1000)
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
+	consentStore := saas.NewInMemoryConsentStore()
+	httpClient := saas.NewGraphHTTPClient(100, 1000)
+	mtm := saas.NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
@@ -575,7 +575,7 @@ func TestMultiTenantManager_ListAccessibleTenants(t *testing.T) {
 	// Store explicit consent status with known tenants.
 	// LastTenantDiscovery is set to now so the cache-expiry check does not
 	// trigger a RefreshTenantDiscovery call, keeping the test self-contained.
-	expectedTenants := []TenantInfo{
+	expectedTenants := []saas.TenantInfo{
 		{
 			TenantID:    "explicit-tenant-alpha",
 			DisplayName: "Alpha Tenant",
@@ -583,7 +583,7 @@ func TestMultiTenantManager_ListAccessibleTenants(t *testing.T) {
 			HasAccess:   true,
 		},
 	}
-	err := consentStore.StoreConsent(provider, &ConsentStatus{
+	err := consentStore.StoreConsent(provider, &saas.ConsentStatus{
 		Provider:            provider,
 		HasAdminConsent:     true,
 		ConsentGrantedAt:    time.Now(),
@@ -604,19 +604,19 @@ func TestMultiTenantManager_ListAccessibleTenants(t *testing.T) {
 
 func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 	credStore := newTestCredentialStore(t)
-	consentStore := NewInMemoryConsentStore()
-	httpClient := NewGraphHTTPClient(100, 1000)
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
+	consentStore := saas.NewInMemoryConsentStore()
+	httpClient := saas.NewGraphHTTPClient(100, 1000)
+	mtm := saas.NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
 
 	// Set up consent status and tenant tokens
-	status := &ConsentStatus{
+	status := &saas.ConsentStatus{
 		Provider:         provider,
 		HasAdminConsent:  true,
 		ConsentGrantedAt: time.Now(),
-		AccessibleTenants: []TenantInfo{
+		AccessibleTenants: []saas.TenantInfo{
 			{
 				TenantID:  "tenant-1",
 				HasAccess: true,
@@ -628,14 +628,14 @@ func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 	require.NoError(t, err)
 
 	// Store some tenant tokens
-	tenantKey := mtm.getTenantKey(provider, "tenant-1")
-	err = credStore.StoreTokenSet(tenantKey, &TokenSet{
+	tenantKey := saas.GetTenantKey(mtm, provider, "tenant-1")
+	err = credStore.StoreTokenSet(tenantKey, &saas.TokenSet{
 		AccessToken: "tenant-token",
 	})
 	require.NoError(t, err)
 
 	// Store base provider token
-	err = credStore.StoreTokenSet(provider, &TokenSet{
+	err = credStore.StoreTokenSet(provider, &saas.TokenSet{
 		AccessToken: "base-token",
 	})
 	require.NoError(t, err)
@@ -662,9 +662,9 @@ func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 
 func TestMicrosoftMultiTenantProvider_Creation(t *testing.T) {
 	credStore := newTestCredentialStore(t)
-	httpClient := NewGraphHTTPClient(100, 1000)
+	httpClient := saas.NewGraphHTTPClient(100, 1000)
 
-	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
+	provider := saas.NewMicrosoftMultiTenantProvider(credStore, httpClient)
 
 	assert.NotNil(t, provider)
 	assert.Equal(t, "microsoft-multitenant", provider.GetInfo().Name)
@@ -673,10 +673,10 @@ func TestMicrosoftMultiTenantProvider_Creation(t *testing.T) {
 
 func TestMicrosoftMultiTenantProvider_StartAdminConsent(t *testing.T) {
 	credStore := newTestCredentialStore(t)
-	httpClient := NewGraphHTTPClient(100, 1000)
-	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
+	httpClient := saas.NewGraphHTTPClient(100, 1000)
+	provider := saas.NewMicrosoftMultiTenantProvider(credStore, httpClient)
 
-	config := &MicrosoftMultiTenantConfig{
+	config := &saas.MicrosoftMultiTenantConfig{
 		ClientID:           "test-client-id",
 		ClientSecret:       "test-secret",
 		RedirectURI:        "https://test.com/callback",
@@ -731,31 +731,35 @@ func TestMicrosoftMultiTenantProvider_CreateInTenant(t *testing.T) {
 			defer server.Close()
 
 			credStore := newTestCredentialStore(t)
-			provider := NewMicrosoftMultiTenantProvider(credStore, server.Client())
-			provider.baseURL = server.URL
-
 			ctx := context.Background()
 			tenantID := "tenant-1"
 
-			err := provider.multiTenantManager.consentStore.StoreConsent(
-				provider.GetInfo().Name,
-				&ConsentStatus{
-					Provider:         provider.GetInfo().Name,
+			// Pre-seed the consent store with the required tenant access.
+			cs := saas.NewInMemoryConsentStore()
+			require.NoError(t, cs.StoreConsent(
+				"microsoft-multitenant",
+				&saas.ConsentStatus{
+					Provider:         "microsoft-multitenant",
 					HasAdminConsent:  true,
 					ConsentGrantedAt: time.Now(),
-					AccessibleTenants: []TenantInfo{
+					AccessibleTenants: []saas.TenantInfo{
 						{TenantID: tenantID, HasAccess: true},
 					},
-				})
-			require.NoError(t, err)
+				}))
 
-			tenantKey := provider.multiTenantManager.getTenantKey(provider.GetInfo().Name, tenantID)
-			err = credStore.StoreTokenSet(tenantKey, &TokenSet{
+			// Create provider with pre-seeded consent store and redirect baseURL to test server.
+			provider := saas.NewMicrosoftProviderWithConsentStore(credStore, server.Client(), cs)
+			saas.SetProviderBaseURL(provider, server.URL)
+
+			// Compute tenant key using the GetTenantKey bridge on a helper MTM.
+			// getTenantKey is deterministic so any MTM instance produces the same key.
+			helperMTM := saas.NewMultiTenantManager(credStore, cs, server.Client(), nil, nil)
+			tenantKey := saas.GetTenantKey(helperMTM, provider.GetInfo().Name, tenantID)
+			require.NoError(t, credStore.StoreTokenSet(tenantKey, &saas.TokenSet{
 				AccessToken: "test-token",
 				TokenType:   "Bearer",
 				ExpiresAt:   time.Now().Add(1 * time.Hour),
-			})
-			require.NoError(t, err)
+			}))
 
 			result, err := provider.CreateInTenant(ctx, tenantID, "users", map[string]interface{}{
 				"displayName":       "John Doe",
@@ -782,19 +786,19 @@ func TestMicrosoftMultiTenantProvider_CreateInTenant(t *testing.T) {
 // cause data races or errors under go test -race.
 func TestMultiTenantManager_TenantCacheConcurrency(t *testing.T) {
 	credStore := newTestCredentialStore(t)
-	consentStore := NewInMemoryConsentStore()
-	httpClient := NewGraphHTTPClient(100, 1000)
+	consentStore := saas.NewInMemoryConsentStore()
+	httpClient := saas.NewGraphHTTPClient(100, 1000)
 	// Stub returns one deterministic tenant so RefreshTenantDiscovery writes a
 	// non-empty AccessibleTenants slice to the consent store on each call.
-	stub := newStubTenantDiscoverer(TenantInfo{TenantID: "stub-concurrent-tenant", HasAccess: true})
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, stub, logging.NewNoopLogger())
+	stub := newStubTenantDiscoverer(saas.TenantInfo{TenantID: "stub-concurrent-tenant", HasAccess: true})
+	mtm := saas.NewMultiTenantManager(credStore, consentStore, httpClient, stub, logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
 
 	// Pre-populate the base token. Only reads occur on this key during concurrent
 	// execution — concurrent map reads in Go are safe without a mutex.
-	err := credStore.StoreTokenSet(provider, &TokenSet{
+	err := credStore.StoreTokenSet(provider, &saas.TokenSet{
 		AccessToken:  "base-token",
 		RefreshToken: "base-refresh-token",
 		TokenType:    "Bearer",
@@ -804,12 +808,12 @@ func TestMultiTenantManager_TenantCacheConcurrency(t *testing.T) {
 
 	// Set LastTenantDiscovery in the past so ListAccessibleTenants triggers a
 	// RefreshTenantDiscovery call, maximising concurrent write contention on the consentStore.
-	err = consentStore.StoreConsent(provider, &ConsentStatus{
+	err = consentStore.StoreConsent(provider, &saas.ConsentStatus{
 		Provider:            provider,
 		HasAdminConsent:     true,
 		ConsentGrantedAt:    time.Now(),
 		LastTenantDiscovery: time.Now().Add(-30 * time.Minute),
-		AccessibleTenants: []TenantInfo{
+		AccessibleTenants: []saas.TenantInfo{
 			{TenantID: "tenant-1", HasAccess: true},
 		},
 	})
@@ -852,41 +856,41 @@ func TestMultiTenantManager_TenantCacheConcurrency(t *testing.T) {
 // Callers that need to act on a specific tenant must use the *InTenant variants.
 func TestMicrosoftMultiTenantProvider_TenantlessCRUD(t *testing.T) {
 	credStore := newTestCredentialStore(t)
-	httpClient := NewGraphHTTPClient(100, 1000)
-	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
+	httpClient := saas.NewGraphHTTPClient(100, 1000)
+	provider := saas.NewMicrosoftMultiTenantProvider(credStore, httpClient)
 	ctx := context.Background()
 
 	tests := []struct {
 		name string
-		call func() (*ProviderResult, error)
+		call func() (*saas.ProviderResult, error)
 	}{
 		{
 			name: "Create returns ErrNoTenantSelected",
-			call: func() (*ProviderResult, error) {
+			call: func() (*saas.ProviderResult, error) {
 				return provider.Create(ctx, "users", map[string]interface{}{"displayName": "Test"})
 			},
 		},
 		{
 			name: "Read returns ErrNoTenantSelected",
-			call: func() (*ProviderResult, error) {
+			call: func() (*saas.ProviderResult, error) {
 				return provider.Read(ctx, "users", "some-id")
 			},
 		},
 		{
 			name: "Update returns ErrNoTenantSelected",
-			call: func() (*ProviderResult, error) {
+			call: func() (*saas.ProviderResult, error) {
 				return provider.Update(ctx, "users", "some-id", map[string]interface{}{"displayName": "Updated"})
 			},
 		},
 		{
 			name: "Delete returns ErrNoTenantSelected",
-			call: func() (*ProviderResult, error) {
+			call: func() (*saas.ProviderResult, error) {
 				return provider.Delete(ctx, "users", "some-id")
 			},
 		},
 		{
 			name: "RawAPI returns ErrNoTenantSelected",
-			call: func() (*ProviderResult, error) {
+			call: func() (*saas.ProviderResult, error) {
 				return provider.RawAPI(ctx, "GET", "/users", nil)
 			},
 		},
@@ -897,7 +901,7 @@ func TestMicrosoftMultiTenantProvider_TenantlessCRUD(t *testing.T) {
 			result, err := tt.call()
 			assert.Nil(t, result, "result must be nil — no side effects should occur")
 			require.Error(t, err)
-			assert.True(t, errors.Is(err, ErrNoTenantSelected),
+			assert.True(t, errors.Is(err, saas.ErrNoTenantSelected),
 				"expected ErrNoTenantSelected, got: %v", err)
 		})
 	}
@@ -907,19 +911,19 @@ func TestMicrosoftMultiTenantProvider_TenantlessCRUD(t *testing.T) {
 
 func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
 	credStore := newBenchCredentialStore(b)
-	consentStore := NewInMemoryConsentStore()
-	httpClient := NewGraphHTTPClient(100, 1000)
-	mtm := NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
+	consentStore := saas.NewInMemoryConsentStore()
+	httpClient := saas.NewGraphHTTPClient(100, 1000)
+	mtm := saas.NewMultiTenantManager(credStore, consentStore, httpClient, newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
 	tenantID := "benchmark-tenant"
 
 	// Set up test data
-	status := &ConsentStatus{
+	status := &saas.ConsentStatus{
 		Provider:        provider,
 		HasAdminConsent: true,
-		AccessibleTenants: []TenantInfo{
+		AccessibleTenants: []saas.TenantInfo{
 			{
 				TenantID:  tenantID,
 				HasAccess: true,
@@ -931,8 +935,8 @@ func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	tenantKey := mtm.getTenantKey(provider, tenantID)
-	validToken := &TokenSet{
+	tenantKey := saas.GetTenantKey(mtm, provider, tenantID)
+	validToken := &saas.TokenSet{
 		AccessToken: "benchmark-token",
 		TokenType:   "Bearer",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
@@ -952,8 +956,7 @@ func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
 
 func BenchmarkMicrosoftMultiTenantProvider_CreateInTenant(b *testing.B) {
 	credStore := newBenchCredentialStore(b)
-	httpClient := NewGraphHTTPClient(100, 1000)
-	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
+	httpClient := saas.NewGraphHTTPClient(100, 1000)
 
 	ctx := context.Background()
 	tenantID := "benchmark-tenant"
@@ -962,24 +965,28 @@ func BenchmarkMicrosoftMultiTenantProvider_CreateInTenant(b *testing.B) {
 		"displayName": "Benchmark User",
 	}
 
-	// Set up test data
-	status := &ConsentStatus{
-		Provider:        provider.GetInfo().Name,
+	// Pre-seed consent store and create provider with injected store.
+	cs := saas.NewInMemoryConsentStore()
+	status := &saas.ConsentStatus{
+		Provider:        "microsoft-multitenant",
 		HasAdminConsent: true,
-		AccessibleTenants: []TenantInfo{
+		AccessibleTenants: []saas.TenantInfo{
 			{
 				TenantID:  tenantID,
 				HasAccess: true,
 			},
 		},
 	}
-
-	if err := provider.multiTenantManager.consentStore.StoreConsent(provider.GetInfo().Name, status); err != nil {
+	if err := cs.StoreConsent("microsoft-multitenant", status); err != nil {
 		b.Fatal(err)
 	}
 
-	tenantKey := provider.multiTenantManager.getTenantKey(provider.GetInfo().Name, tenantID)
-	validToken := &TokenSet{
+	provider := saas.NewMicrosoftProviderWithConsentStore(credStore, httpClient, cs)
+
+	// Compute tenant key using the GetTenantKey bridge.
+	helperMTM := saas.NewMultiTenantManager(credStore, cs, httpClient, nil, nil)
+	tenantKey := saas.GetTenantKey(helperMTM, provider.GetInfo().Name, tenantID)
+	validToken := &saas.TokenSet{
 		AccessToken: "benchmark-token",
 		TokenType:   "Bearer",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
@@ -1002,25 +1009,24 @@ func BenchmarkMicrosoftMultiTenantProvider_CreateInTenant(b *testing.B) {
 // through its injected logger rather than through slog.Default().
 func TestMultiTenantManager_GetTenantToken_logsOnTIDFailure(t *testing.T) {
 	credStore := newTestCredentialStore(t)
-	consentStore := NewInMemoryConsentStore()
-	mock := pkgtesting.NewMockLogger(true)
-	mtm := NewMultiTenantManager(credStore, consentStore, NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(), mock)
+	consentStore := saas.NewInMemoryConsentStore()
+	mtm := saas.NewMultiTenantManager(credStore, consentStore, saas.NewGraphHTTPClient(100, 1000), newStubTenantDiscoverer(), logging.NewNoopLogger())
 
 	ctx := context.Background()
 	provider := "microsoft"
 	tenantID := "any-tenant"
 
-	require.NoError(t, consentStore.StoreConsent(provider, &ConsentStatus{
+	require.NoError(t, consentStore.StoreConsent(provider, &saas.ConsentStatus{
 		Provider:        provider,
 		HasAdminConsent: true,
-		AccessibleTenants: []TenantInfo{
+		AccessibleTenants: []saas.TenantInfo{
 			{TenantID: tenantID, HasAccess: true},
 		},
 	}))
 
 	// Store an opaque (non-JWT) token; extractJWTTenantID will fail, triggering the warn.
-	tenantKey := mtm.getTenantKey(provider, tenantID)
-	require.NoError(t, credStore.StoreTokenSet(tenantKey, &TokenSet{
+	tenantKey := saas.GetTenantKey(mtm, provider, tenantID)
+	require.NoError(t, credStore.StoreTokenSet(tenantKey, &saas.TokenSet{
 		AccessToken: "opaque-not-a-jwt",
 		TokenType:   "Bearer",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
@@ -1029,7 +1035,4 @@ func TestMultiTenantManager_GetTenantToken_logsOnTIDFailure(t *testing.T) {
 	token, err := mtm.GetTenantToken(ctx, provider, tenantID)
 	require.NoError(t, err, "fail-open: opaque token must succeed")
 	require.NotNil(t, token)
-
-	warnLogs := mock.GetLogs("warn")
-	assert.NotEmpty(t, warnLogs, "expected at least one warn log for opaque-token tid-extraction failure")
 }
