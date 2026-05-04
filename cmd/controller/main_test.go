@@ -16,7 +16,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

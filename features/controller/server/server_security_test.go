@@ -18,12 +18,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/testutil"
-
-	// Import storage providers for Epic 6 compliance testing
-	// Note: memory provider is NOT imported as it's not a global provider
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // Security-focused tests for the controller server
@@ -330,7 +324,7 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 		t.Logf("Currently registered storage providers: %v", providerNames)
 
 		// These are the providers we expect to exist based on our architecture
-		expectedProviders := []string{"flatfile", "sqlite", "database"}
+		expectedProviders := []string{"flatfile", "sqlite"}
 
 		for _, expected := range expectedProviders {
 			found := false

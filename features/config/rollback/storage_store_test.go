@@ -13,9 +13,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database" // Register database provider
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite" // Register sqlite provider
+	_ "github.com/cfgis/cfgms/pkg/testing"
 	teststorage "github.com/cfgis/cfgms/pkg/testing/storage"
 )
 

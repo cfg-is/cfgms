@@ -13,11 +13,7 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/rbac"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 func TestRBACService_ConvertToProtoHierarchy_Roundtrip(t *testing.T) {
@@ -91,11 +87,8 @@ func TestRBACService_ConvertToProtoEffectivePermissions_Nil(t *testing.T) {
 }
 
 func TestRBACService_Integration(t *testing.T) {
-	// Setup RBAC manager and service with git storage
-	tmpDir := t.TempDir()
-	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
+	// Setup RBAC manager and service with OSS composite storage
+	storageManager := pkgtesting.SetupTestStorage(t)
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -106,7 +99,7 @@ func TestRBACService_Integration(t *testing.T) {
 	// M-AUTH-2: inject justification so sensitive RBAC operations pass the gate
 	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: RBAC service integration")
 
-	err = rbacManager.Initialize(ctx)
+	err := rbacManager.Initialize(ctx)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {

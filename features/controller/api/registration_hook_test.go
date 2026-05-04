@@ -21,23 +21,16 @@ import (
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-
-	// Auto-register git storage provider
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // newTestApprovalHook builds a WorkflowApprovalHook backed by real git storage and workflow engine.
 func newTestApprovalHook(t *testing.T) (*WorkflowApprovalHook, cfgconfig.ConfigStore) {
 	t.Helper()
 
-	tmpDir := t.TempDir()
-	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
+	storageManager := pkgtesting.SetupTestStorage(t)
 	configStore := storageManager.GetConfigStore()
 
 	registry := make(discovery.ModuleRegistry)

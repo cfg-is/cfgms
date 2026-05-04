@@ -11,16 +11,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	storageif "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// newTestTracker creates a HealthTracker backed by a real flat-file StewardStore.
+// newTestTracker creates a HealthTracker backed by a real OSS composite StewardStore.
 func newTestTracker(t *testing.T) *HealthTracker {
 	t.Helper()
-	store, err := flatfile.NewFlatFileStewardStore(t.TempDir())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
+	store := pkgtesting.SetupTestStorage(t).GetStewardStore()
 	logger := logging.NewLogger("debug")
 	return NewHealthTracker(store, logger)
 }
@@ -149,8 +148,9 @@ func TestHealthTracker_EphemeralMetricsNotPersisted(t *testing.T) {
 	root := t.TempDir()
 	ctx := context.Background()
 
-	store1, err := flatfile.NewFlatFileStewardStore(root)
+	sm1, err := storageif.CreateOSSStorageManager(root, root+"/cfgms.db")
 	require.NoError(t, err)
+	store1 := sm1.GetStewardStore()
 	logger := logging.NewLogger("debug")
 
 	tracker1 := NewHealthTracker(store1, logger)
@@ -162,11 +162,12 @@ func TestHealthTracker_EphemeralMetricsNotPersisted(t *testing.T) {
 	require.NotNil(t, metrics1)
 	assert.Equal(t, 1, metrics1.TaskCount)
 	assert.Equal(t, 1, metrics1.ConfigErrors)
-	_ = store1.Close()
+	_ = sm1.Close()
 
-	store2, err := flatfile.NewFlatFileStewardStore(root)
+	sm2, err := storageif.CreateOSSStorageManager(root, root+"/cfgms.db")
 	require.NoError(t, err)
-	defer func() { _ = store2.Close() }()
+	defer func() { _ = sm2.Close() }()
+	store2 := sm2.GetStewardStore()
 
 	tracker2 := NewHealthTracker(store2, logger)
 
