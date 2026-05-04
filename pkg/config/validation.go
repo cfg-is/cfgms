@@ -89,16 +89,6 @@ func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID
 
 	// Validate tenant context
 	result.TenantChecks = vm.validateTenantContext(ctx, tenantID, stewardID, config)
-	if !result.TenantChecks.TenantExists {
-		result.Valid = false
-		result.Errors = append(result.Errors, ValidationError{
-			Field:      "tenant_id",
-			Message:    fmt.Sprintf("Tenant '%s' does not exist", tenantID),
-			Code:       "TENANT_NOT_FOUND",
-			Level:      "error",
-			Suggestion: "Ensure the tenant exists before storing configuration",
-		})
-	}
 
 	// Validate module dependencies
 	result.DependencyChecks = vm.validateDependencies(ctx, config)
@@ -138,9 +128,6 @@ func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID
 
 	// Validate resource configurations
 	vm.validateResources(result, config)
-
-	// Validate steward settings
-	vm.validateStewardSettings(result, config)
 
 	return result
 }
@@ -280,80 +267,6 @@ func (vm *ValidationManager) validateResources(result *ValidationResult, config 
 	}
 }
 
-// validateStewardSettings validates steward-specific settings
-func (vm *ValidationManager) validateStewardSettings(result *ValidationResult, config *stewardconfig.StewardConfig) {
-	// Validate steward ID
-	if config.Steward.ID == "" {
-		result.Warnings = append(result.Warnings, ValidationError{
-			Field:      "steward.id",
-			Message:    "Steward ID is empty - will use hostname as default",
-			Code:       "EMPTY_STEWARD_ID",
-			Level:      "warning",
-			Suggestion: "Consider setting an explicit steward ID for better identification",
-		})
-	}
-
-	// Validate operation mode
-	validModes := []stewardconfig.OperationMode{stewardconfig.ModeStandalone, stewardconfig.ModeController}
-	modeValid := false
-	for _, validMode := range validModes {
-		if config.Steward.Mode == validMode {
-			modeValid = true
-			break
-		}
-	}
-
-	if !modeValid && config.Steward.Mode != "" {
-		result.Valid = false
-		result.Errors = append(result.Errors, ValidationError{
-			Field:      "steward.mode",
-			Message:    fmt.Sprintf("Invalid operation mode: %s", config.Steward.Mode),
-			Code:       "INVALID_OPERATION_MODE",
-			Level:      "error",
-			Suggestion: "Use 'standalone' or 'controller' as operation mode",
-		})
-	}
-
-	// Validate logging configuration
-	validLogLevels := []string{"debug", "info", "warn", "error"}
-	if config.Steward.Logging.Level != "" {
-		levelValid := false
-		for _, validLevel := range validLogLevels {
-			if config.Steward.Logging.Level == validLevel {
-				levelValid = true
-				break
-			}
-		}
-
-		if !levelValid {
-			result.Valid = false
-			result.Errors = append(result.Errors, ValidationError{
-				Field:      "steward.logging.level",
-				Message:    fmt.Sprintf("Invalid log level: %s", config.Steward.Logging.Level),
-				Code:       "INVALID_LOG_LEVEL",
-				Level:      "error",
-				Suggestion: "Use debug, info, warn, or error as log level",
-			})
-		}
-	}
-
-	// Validate error handling settings
-	validActions := []stewardconfig.ErrorAction{stewardconfig.ActionContinue, stewardconfig.ActionFail, stewardconfig.ActionWarn}
-
-	if config.Steward.ErrorHandling.ModuleLoadFailure != "" {
-		if !isValidErrorAction(config.Steward.ErrorHandling.ModuleLoadFailure, validActions) {
-			result.Valid = false
-			result.Errors = append(result.Errors, ValidationError{
-				Field:      "steward.error_handling.module_load_failure",
-				Message:    fmt.Sprintf("Invalid error action: %s", config.Steward.ErrorHandling.ModuleLoadFailure),
-				Code:       "INVALID_ERROR_ACTION",
-				Level:      "error",
-				Suggestion: "Use continue, fail, or warn as error action",
-			})
-		}
-	}
-}
-
 // isValidResourceName checks if a resource name follows the required format
 func isValidResourceName(name string) bool {
 	if name == "" {
@@ -370,16 +283,6 @@ func isValidResourceName(name string) bool {
 	}
 
 	return true
-}
-
-// isValidErrorAction checks if an error action is valid
-func isValidErrorAction(action stewardconfig.ErrorAction, validActions []stewardconfig.ErrorAction) bool {
-	for _, validAction := range validActions {
-		if action == validAction {
-			return true
-		}
-	}
-	return false
 }
 
 // ValidateConfigurationEntry validates a configuration entry for storage
