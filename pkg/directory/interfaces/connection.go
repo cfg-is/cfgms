@@ -11,10 +11,11 @@ package interfaces
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // DirectoryConnectionPool manages a pool of directory connections with health monitoring
@@ -39,6 +40,7 @@ type DirectoryConnectionPool interface {
 type DefaultDirectoryConnectionPool struct {
 	// Configuration
 	config PoolConfig
+	logger logging.Logger
 
 	// Connection management
 	connections    chan DirectoryConnection
@@ -132,13 +134,17 @@ type PoolHealth struct {
 }
 
 // NewDirectoryConnectionPool creates a new directory connection pool
-func NewDirectoryConnectionPool(config PoolConfig, connectionFunc ConnectionFunc) (*DefaultDirectoryConnectionPool, error) {
+func NewDirectoryConnectionPool(config PoolConfig, connectionFunc ConnectionFunc, logger logging.Logger) (*DefaultDirectoryConnectionPool, error) {
 	if config.MaxConnections <= 0 {
 		return nil, fmt.Errorf("max_connections must be positive")
 	}
 
 	if connectionFunc == nil {
 		return nil, fmt.Errorf("connection function cannot be nil")
+	}
+
+	if logger == nil {
+		logger = logging.NewNoopLogger()
 	}
 
 	// Set defaults
@@ -172,6 +178,7 @@ func NewDirectoryConnectionPool(config PoolConfig, connectionFunc ConnectionFunc
 
 	pool := &DefaultDirectoryConnectionPool{
 		config:         config,
+		logger:         logger,
 		connections:    make(chan DirectoryConnection, config.MaxConnections),
 		activeConns:    make(map[DirectoryConnection]bool),
 		connectionFunc: connectionFunc,
@@ -342,8 +349,7 @@ func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 	if atomic.LoadInt32(&p.closed) != 0 {
 		if conn != nil {
 			if err := conn.Close(context.Background()); err != nil {
-				// Log error but don't fail the operation
-				log.Printf("Warning: failed to close connection: %v", err)
+				p.logger.Warn("failed to close connection", "error", err)
 			}
 		}
 		return fmt.Errorf("connection pool is closed")
@@ -365,8 +371,7 @@ func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 	if err := p.healthChecker.CheckHealth(ctx, conn); err != nil {
 		// Connection is unhealthy, close it
 		if err := conn.Close(ctx); err != nil {
-			// Log error but don't fail the health check process
-			log.Printf("Warning: failed to close unhealthy connection: %v", err)
+			p.logger.Warn("failed to close unhealthy connection", "error", err)
 		}
 
 		p.updateStatistics(func(stats *PoolStatistics) {
@@ -390,8 +395,7 @@ func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 	default:
 		// Pool is full, close connection
 		if err := conn.Close(ctx); err != nil {
-			// Log error but don't fail the pool operation
-			log.Printf("Warning: failed to close excess connection: %v", err)
+			p.logger.Warn("failed to close excess connection", "error", err)
 		}
 
 		p.updateStatistics(func(stats *PoolStatistics) {
@@ -419,9 +423,8 @@ func (p *DefaultDirectoryConnectionPool) Close() error {
 		close(p.connections)
 		for conn := range p.connections {
 			if conn != nil {
-				if err := conn.Close(context.Background()); err != nil {
-					// Log error - could add logging here if needed
-					_ = err
+				if closeErr := conn.Close(context.Background()); closeErr != nil {
+					p.logger.Warn("failed to close connection", "error", closeErr)
 				}
 			}
 		}
@@ -430,9 +433,8 @@ func (p *DefaultDirectoryConnectionPool) Close() error {
 		p.mutex.Lock()
 		for conn := range p.activeConns {
 			if conn != nil {
-				if err := conn.Close(context.Background()); err != nil {
-					// Log error - could add logging here if needed
-					_ = err
+				if closeErr := conn.Close(context.Background()); closeErr != nil {
+					p.logger.Warn("failed to close connection", "error", closeErr)
 				}
 			}
 		}
