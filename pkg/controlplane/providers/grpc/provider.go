@@ -12,7 +12,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,7 +74,7 @@ type Provider struct {
 	idleTimeout     time.Duration // 0 = use QUIC default (90s)
 	stewardID       string
 	tenantID        string
-	logger          *slog.Logger
+	logger          logging.Logger
 	startTime       time.Time
 
 	// Subscription handlers (client mode)
@@ -120,7 +119,7 @@ func New(mode Mode) *Provider {
 		mode:              mode,
 		eventHandlers:     []eventSubscription{},
 		heartbeatHandlers: []interfaces.HeartbeatHandler{},
-		logger:            slog.Default(),
+		logger:            logging.NewNoopLogger(),
 	}
 }
 
@@ -132,7 +131,7 @@ func (p *Provider) Name() string { return p.name }
 //   - "mode": string - "server" or "client"
 //   - "addr": string - Listen address (server) or controller address (client)
 //   - "tls_config": *tls.Config - TLS configuration for mTLS
-//   - "logger": *slog.Logger - Logger (optional)
+//   - "logger": logging.Logger - Logger (optional)
 //   - "keepalive_period": time.Duration - QUIC keepalive interval (optional, default 25s)
 //   - "idle_timeout": time.Duration - QUIC idle timeout (optional, default 90s)
 //   - "on_state_change": func(ConnectionState) - Connection state change callback (optional, client mode only)
@@ -155,7 +154,7 @@ func (p *Provider) Initialize(ctx context.Context, config map[string]interface{}
 		p.mode = Mode(modeStr)
 	}
 
-	if logger, ok := config["logger"].(*slog.Logger); ok {
+	if logger, ok := config["logger"].(logging.Logger); ok {
 		p.logger = logger
 	}
 
@@ -292,7 +291,7 @@ func (p *Provider) startServer() error {
 			}
 		}()
 
-		p.logger.Info("gRPC control plane server started", "addr", p.addr)
+		p.logger.Info("gRPC control plane server started", "addr", logging.SanitizeLogValue(p.addr))
 	} else {
 		// External gRPC server (Story #515): the caller is responsible for
 		// registering a composite handler and starting the server. We only
@@ -317,7 +316,7 @@ func (p *Provider) startClient() error {
 
 	go p.clientReceiveLoop()
 
-	p.logger.Info("gRPC control plane client connected", "addr", p.addr, "steward_id", p.stewardID)
+	p.logger.Info("gRPC control plane client connected", "addr", logging.SanitizeLogValue(p.addr), "steward_id", logging.SanitizeLogValue(p.stewardID))
 	return nil
 }
 
@@ -455,10 +454,17 @@ func (p *Provider) reconnectLoop() {
 		p.reconnectAttempts.Add(1)
 
 		wait := bo.next()
+
+		// Read addr under sendMu — restartServerAndRepoint writes p.addr under sendMu,
+		// so reads outside sendMu are a data race (same pattern as dialAndOpenStream).
+		p.sendMu.Lock()
+		addr := p.addr
+		p.sendMu.Unlock()
+
 		p.logger.Info("reconnecting to controller",
 			"attempt", bo.attempt,
 			"backoff", wait,
-			"addr", p.addr,
+			"addr", logging.SanitizeLogValue(addr),
 		)
 
 		// Wait for backoff duration or cancellation
@@ -484,7 +490,13 @@ func (p *Provider) reconnectLoop() {
 		p.lastConnectedAt = time.Now()
 		p.mu.Unlock()
 
-		p.logger.Info("reconnected to controller", "addr", p.addr, "steward_id", p.stewardID)
+		// Re-read addr under sendMu for the success log — addr may have changed
+		// if restartServerAndRepoint updated it during the backoff window.
+		p.sendMu.Lock()
+		addr = p.addr
+		p.sendMu.Unlock()
+
+		p.logger.Info("reconnected to controller", "addr", logging.SanitizeLogValue(addr), "steward_id", logging.SanitizeLogValue(p.stewardID))
 
 		// Restart the receive loop (which will call reconnectLoop again if it breaks)
 		go p.clientReceiveLoop()
@@ -814,7 +826,7 @@ func (p *Provider) dispatchHeartbeat(hb *types.Heartbeat) {
 		handler := handler
 		go func() {
 			if err := handler(p.ctx, hb); err != nil {
-				p.logger.Error("heartbeat handler error", "steward_id", hb.StewardID, "error", err)
+				p.logger.Error("heartbeat handler error", "steward_id", logging.SanitizeLogValue(hb.StewardID), "error", err)
 			}
 		}()
 	}
@@ -935,7 +947,7 @@ func (s *transportServer) Register(ctx context.Context, req *controllerpb.Regist
 		return nil, status.Error(codes.InvalidArgument, "client_id is required in credentials")
 	}
 
-	s.provider.logger.Info("steward registered", "steward_id", stewardID, "version", req.GetVersion())
+	s.provider.logger.Info("steward registered", "steward_id", logging.SanitizeLogValue(stewardID), "version", logging.SanitizeLogValue(req.GetVersion()))
 
 	return &controllerpb.RegisterResponse{
 		StewardId: stewardID,
@@ -980,7 +992,7 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	}
 	defer s.provider.registry.Unregister(stewardID)
 
-	s.provider.logger.Info("steward connected to ControlChannel", "steward_id", stewardID, "remote_addr", p.Addr.String())
+	s.provider.logger.Info("steward connected to ControlChannel", "steward_id", logging.SanitizeLogValue(stewardID), "remote_addr", logging.SanitizeLogValue(p.Addr.String()))
 
 	// Receive loop: authenticated-CN-wins contract — the mTLS peer CN is the
 	// authoritative steward identity. Empty payload StewardIDs are stamped with
@@ -989,7 +1001,7 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
-			s.provider.logger.Info("steward ControlChannel closed", "steward_id", stewardID, "error", err)
+			s.provider.logger.Info("steward ControlChannel closed", "steward_id", logging.SanitizeLogValue(stewardID), "error", err)
 			return nil
 		}
 
