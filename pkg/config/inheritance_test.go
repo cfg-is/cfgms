@@ -13,9 +13,7 @@ import (
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
-	teststorage "github.com/cfgis/cfgms/pkg/testing/storage"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // seedThreeLevelTenants creates root → msp → client tenant hierarchy in the store.
@@ -42,9 +40,7 @@ func marshalStewardConfig(t *testing.T, cfg stewardconfig.StewardConfig) []byte 
 }
 
 func TestGetTenantPath_Returns3LevelAncestorChain(t *testing.T) {
-	sm, err := teststorage.CreateTestStorageManager()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sm.Close() })
+	sm := pkgtesting.SetupTestStorage(t)
 
 	ctx := context.Background()
 	seedThreeLevelTenants(t, ctx, sm)
@@ -57,21 +53,17 @@ func TestGetTenantPath_Returns3LevelAncestorChain(t *testing.T) {
 }
 
 func TestGetTenantPath_ErrorOnUnknownTenant(t *testing.T) {
-	sm, err := teststorage.CreateTestStorageManager()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sm.Close() })
+	sm := pkgtesting.SetupTestStorage(t)
 
 	ctx := context.Background()
 	ir := NewInheritanceResolverWithStorageManager(sm)
 
-	_, err = ir.getTenantPath(ctx, "nonexistent")
+	_, err := ir.getTenantPath(ctx, "nonexistent")
 	assert.Error(t, err)
 }
 
 func TestResolveConfiguration_3LevelHierarchy(t *testing.T) {
-	sm, err := teststorage.CreateTestStorageManager()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sm.Close() })
+	sm := pkgtesting.SetupTestStorage(t)
 
 	ctx := context.Background()
 	seedThreeLevelTenants(t, ctx, sm)
@@ -120,23 +112,19 @@ func TestResolveConfiguration_3LevelHierarchy(t *testing.T) {
 }
 
 func TestResolveConfiguration_ErrorOnUnknownTenant(t *testing.T) {
-	sm, err := teststorage.CreateTestStorageManager()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sm.Close() })
+	sm := pkgtesting.SetupTestStorage(t)
 
 	ctx := context.Background()
 	ir := NewInheritanceResolverWithStorageManager(sm)
 
 	// Tenant "ghost" does not exist in the store — ResolveConfiguration must propagate the error.
-	_, err = ir.ResolveConfiguration(ctx, "ghost", "steward-1")
+	_, err := ir.ResolveConfiguration(ctx, "ghost", "steward-1")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to resolve tenant hierarchy")
 }
 
 func TestResolveConfiguration_LaterLevelOverridesEarlier(t *testing.T) {
-	sm, err := teststorage.CreateTestStorageManager()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sm.Close() })
+	sm := pkgtesting.SetupTestStorage(t)
 
 	ctx := context.Background()
 	seedThreeLevelTenants(t, ctx, sm)

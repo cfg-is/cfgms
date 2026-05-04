@@ -11,26 +11,20 @@ import (
 	"github.com/stretchr/testify/require"
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing/storage"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // newTestManager creates a Manager backed by a real OSS storage stack for testing.
 func newTestManager(t *testing.T) *Manager {
 	t.Helper()
-	sm, err := pkgtesting.CreateTestStorageManager()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sm.Close() })
+	sm := pkgtesting.SetupTestStorage(t)
 	return NewManagerWithStorageManager(sm)
 }
 
 // newTestValidationManager creates a ValidationManager backed by a real OSS storage stack.
 func newTestValidationManager(t *testing.T) *ValidationManager {
 	t.Helper()
-	sm, err := pkgtesting.CreateTestStorageManager()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sm.Close() })
+	sm := pkgtesting.SetupTestStorage(t)
 	return NewValidationManager(sm.GetConfigStore())
 }
 
