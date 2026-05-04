@@ -132,8 +132,11 @@ func TestCA_GenerateServerCertificate(t *testing.T) {
 	assert.NotEmpty(t, cert.SerialNumber)
 	assert.NotEmpty(t, cert.CertificatePEM)
 	assert.NotEmpty(t, cert.PrivateKeyPEM)
-	assert.True(t, cert.IsValid)
 	assert.NotEmpty(t, cert.Fingerprint)
+
+	serverResult, err := ca.ValidateCertificate(cert.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, serverResult.IsValid)
 
 	// Parse and verify the generated certificate
 	x509Cert, err := ParseCertificateFromPEM(cert.CertificatePEM)
@@ -194,8 +197,11 @@ func TestCA_GenerateClientCertificate(t *testing.T) {
 	assert.NotEmpty(t, cert.SerialNumber)
 	assert.NotEmpty(t, cert.CertificatePEM)
 	assert.NotEmpty(t, cert.PrivateKeyPEM)
-	assert.True(t, cert.IsValid)
 	assert.NotEmpty(t, cert.Fingerprint)
+
+	clientResult, err := ca.ValidateCertificate(cert.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, clientResult.IsValid)
 
 	// Parse and verify the generated certificate
 	x509Cert, err := ParseCertificateFromPEM(cert.CertificatePEM)
@@ -332,7 +338,6 @@ func TestCA_GetCAInfo(t *testing.T) {
 	assert.Equal(t, "Test CA Root CA", info.CommonName)
 	assert.NotEmpty(t, info.SerialNumber)
 	assert.NotEmpty(t, info.Fingerprint)
-	assert.True(t, info.IsValid)
 	assert.Greater(t, info.DaysUntilExpiration, 0)
 	assert.Equal(t, info.CommonName, info.Issuer) // Self-signed
 }
