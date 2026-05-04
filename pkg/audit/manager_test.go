@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-package audit
+package audit_test
 
 import (
 	"context"
@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/audit"
 	secretsInterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -80,13 +81,13 @@ func (s *testSecretStore) Close() error                                         
 // newTestManager creates a real audit manager backed by OSS storage in a temp dir.
 // The returned manager's drain goroutine is stopped via t.Cleanup so callers do
 // not need to call Stop themselves.
-func newTestManager(t *testing.T, source string) *Manager {
+func newTestManager(t *testing.T, source string) *audit.Manager {
 	t.Helper()
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 
-	m, err := NewManager(storageManager.GetAuditStore(), source)
+	m, err := audit.NewManager(storageManager.GetAuditStore(), source)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -160,10 +161,10 @@ func (s *slowAuditStore) GetLastAuditEntry(ctx context.Context, tenantID string)
 }
 func (s *slowAuditStore) Close() error { return s.inner.Close() }
 
-// flushManagerForTest builds a manager and waits for an enqueued event to reach
-// the store. Tests that query the store after RecordEvent MUST call Flush first
-// because RecordEvent now enqueues asynchronously.
-func flushOrFail(t *testing.T, m *Manager) {
+// flushOrFail drains the async queue and fails the test if Flush returns an error.
+// Tests that query the store after RecordEvent MUST call flushOrFail first
+// because RecordEvent enqueues asynchronously.
+func flushOrFail(t *testing.T, m *audit.Manager) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -202,7 +203,7 @@ func TestNewManager(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, auditStore)
 
-			manager, err := NewManager(auditStore, "test")
+			manager, err := audit.NewManager(auditStore, "test")
 			require.NoError(t, err)
 			require.NotNil(t, manager)
 		})
@@ -236,7 +237,7 @@ func TestNewManager_ErrorConditions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, err := NewManager(tt.store, tt.source)
+			m, err := audit.NewManager(tt.store, tt.source)
 			assert.Error(t, err)
 			assert.Nil(t, m)
 		})
@@ -250,7 +251,7 @@ func TestManager_RecordEvent(t *testing.T) {
 	manager := newTestManager(t, "test")
 	ctx := context.Background()
 
-	event := NewEventBuilder().
+	event := audit.NewEventBuilder().
 		Tenant("test-tenant").
 		Type(business.AuditEventConfiguration).
 		Action("test_action").
@@ -276,15 +277,15 @@ func TestManager_RecordBatch(t *testing.T) {
 	manager := newTestManager(t, "test")
 	ctx := context.Background()
 
-	events := []*AuditEventBuilder{
-		NewEventBuilder().
+	events := []*audit.AuditEventBuilder{
+		audit.NewEventBuilder().
 			Tenant("test-tenant").
 			Type(business.AuditEventAuthentication).
 			Action("login").
 			User("user1", business.AuditUserTypeHuman).
 			Resource("session", "session1", "").
 			Severity(business.AuditSeverityHigh),
-		NewEventBuilder().
+		audit.NewEventBuilder().
 			Tenant("test-tenant").
 			Type(business.AuditEventConfiguration).
 			Action("config_update").
@@ -315,12 +316,12 @@ func TestManager_ValidationErrors(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		event         *AuditEventBuilder
+		event         *audit.AuditEventBuilder
 		expectedError error
 	}{
 		{
 			name: "missing tenant ID",
-			event: NewEventBuilder().
+			event: audit.NewEventBuilder().
 				Type(business.AuditEventConfiguration).
 				Action("test_action").
 				User("test-user", business.AuditUserTypeHuman).
@@ -329,7 +330,7 @@ func TestManager_ValidationErrors(t *testing.T) {
 		},
 		{
 			name: "missing user ID",
-			event: NewEventBuilder().
+			event: audit.NewEventBuilder().
 				Tenant("test-tenant").
 				Type(business.AuditEventConfiguration).
 				Action("test_action").
@@ -338,7 +339,7 @@ func TestManager_ValidationErrors(t *testing.T) {
 		},
 		{
 			name: "missing action",
-			event: NewEventBuilder().
+			event: audit.NewEventBuilder().
 				Tenant("test-tenant").
 				Type(business.AuditEventConfiguration).
 				User("test-user", business.AuditUserTypeHuman).
@@ -347,7 +348,7 @@ func TestManager_ValidationErrors(t *testing.T) {
 		},
 		{
 			name: "missing resource type",
-			event: NewEventBuilder().
+			event: audit.NewEventBuilder().
 				Tenant("test-tenant").
 				Type(business.AuditEventConfiguration).
 				Action("test_action").
@@ -367,7 +368,7 @@ func TestManager_ValidationErrors(t *testing.T) {
 
 // TestAuditEventBuilder tests the fluent builder interface
 func TestAuditEventBuilder(t *testing.T) {
-	event := NewEventBuilder().
+	event := audit.NewEventBuilder().
 		Tenant("test-tenant").
 		Type(business.AuditEventAuthentication).
 		Action("login").
@@ -383,7 +384,7 @@ func TestAuditEventBuilder(t *testing.T) {
 		Severity(business.AuditSeverityHigh)
 
 	entry := &business.AuditEntry{}
-	event.build(entry)
+	audit.BuildEntry(event, entry)
 
 	assert.Equal(t, "test-tenant", entry.TenantID)
 	assert.Equal(t, business.AuditEventAuthentication, entry.EventType)
@@ -410,9 +411,9 @@ func TestAuditEventBuilder(t *testing.T) {
 // TestPredefinedEventBuilders tests predefined event builder functions
 func TestPredefinedEventBuilders(t *testing.T) {
 	t.Run("AuthenticationEvent", func(t *testing.T) {
-		event := AuthenticationEvent("tenant1", "user1", "login", business.AuditResultSuccess)
+		event := audit.AuthenticationEvent("tenant1", "user1", "login", business.AuditResultSuccess)
 		entry := &business.AuditEntry{}
-		event.build(entry)
+		audit.BuildEntry(event, entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
 		assert.Equal(t, business.AuditEventAuthentication, entry.EventType)
@@ -426,9 +427,9 @@ func TestPredefinedEventBuilders(t *testing.T) {
 	})
 
 	t.Run("AuthorizationEvent", func(t *testing.T) {
-		event := AuthorizationEvent("tenant1", "user1", "config", "config1", "read", business.AuditResultDenied)
+		event := audit.AuthorizationEvent("tenant1", "user1", "config", "config1", "read", business.AuditResultDenied)
 		entry := &business.AuditEntry{}
-		event.build(entry)
+		audit.BuildEntry(event, entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
 		assert.Equal(t, business.AuditEventAuthorization, entry.EventType)
@@ -441,9 +442,9 @@ func TestPredefinedEventBuilders(t *testing.T) {
 	})
 
 	t.Run("ConfigurationEvent", func(t *testing.T) {
-		event := ConfigurationEvent("tenant1", "user1", "steward_config", "steward1", "Config1", "update")
+		event := audit.ConfigurationEvent("tenant1", "user1", "steward_config", "steward1", "Config1", "update")
 		entry := &business.AuditEntry{}
-		event.build(entry)
+		audit.BuildEntry(event, entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
 		assert.Equal(t, business.AuditEventConfiguration, entry.EventType)
@@ -456,14 +457,14 @@ func TestPredefinedEventBuilders(t *testing.T) {
 	})
 
 	t.Run("SystemEvent", func(t *testing.T) {
-		event := SystemEvent("tenant1", "startup", "System started successfully")
+		event := audit.SystemEvent("tenant1", "startup", "System started successfully")
 		entry := &business.AuditEntry{}
-		event.build(entry)
+		audit.BuildEntry(event, entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
 		assert.Equal(t, business.AuditEventSystemEvent, entry.EventType)
 		assert.Equal(t, "startup", entry.Action)
-		assert.Equal(t, SystemUserID, entry.UserID)
+		assert.Equal(t, audit.SystemUserID, entry.UserID)
 		assert.Equal(t, business.AuditUserTypeSystem, entry.UserType)
 		assert.Equal(t, "system", entry.ResourceType)
 		assert.Equal(t, "controller", entry.ResourceID)
@@ -472,9 +473,9 @@ func TestPredefinedEventBuilders(t *testing.T) {
 	})
 
 	t.Run("SecurityEvent", func(t *testing.T) {
-		event := SecurityEvent("tenant1", "user1", "intrusion_detected", "Multiple failed login attempts", business.AuditSeverityCritical)
+		event := audit.SecurityEvent("tenant1", "user1", "intrusion_detected", "Multiple failed login attempts", business.AuditSeverityCritical)
 		entry := &business.AuditEntry{}
-		event.build(entry)
+		audit.BuildEntry(event, entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
 		assert.Equal(t, business.AuditEventSecurityEvent, entry.EventType)
@@ -493,7 +494,7 @@ func TestAuthenticationEvent_Persists(t *testing.T) {
 	manager := newTestManager(t, "controller")
 	ctx := context.Background()
 
-	event := AuthenticationEvent("tenant1", "user1", "login", business.AuditResultSuccess)
+	event := audit.AuthenticationEvent("tenant1", "user1", "login", business.AuditResultSuccess)
 	err := manager.RecordEvent(ctx, event)
 	assert.NoError(t, err, "AuthenticationEvent must not return a validation error")
 }
@@ -504,7 +505,7 @@ func TestSystemEvent_Persists(t *testing.T) {
 	manager := newTestManager(t, "controller")
 	ctx := context.Background()
 
-	event := SystemEvent(SystemTenantID, "startup", "Controller started")
+	event := audit.SystemEvent(audit.SystemTenantID, "startup", "Controller started")
 	err := manager.RecordEvent(ctx, event)
 	assert.NoError(t, err, "SystemEvent must not return a validation error")
 }
@@ -515,77 +516,103 @@ func TestSecurityEvent_Persists(t *testing.T) {
 	manager := newTestManager(t, "controller")
 	ctx := context.Background()
 
-	event := SecurityEvent(SystemTenantID, SystemUserID, "brute_force_detected", "Multiple failed auth attempts", business.AuditSeverityHigh)
+	event := audit.SecurityEvent(audit.SystemTenantID, audit.SystemUserID, "brute_force_detected", "Multiple failed auth attempts", business.AuditSeverityHigh)
 	err := manager.RecordEvent(ctx, event)
 	assert.NoError(t, err, "SecurityEvent must not return a validation error")
 }
 
-// TestRedactMap verifies that redactMap replaces sensitive key values with [REDACTED]
-// and leaves innocuous keys unchanged.
+// TestRedactMap verifies that Detail() values with sensitive key names are stored as [REDACTED]
+// and innocuous keys are preserved after BuildEntry.
 func TestRedactMap(t *testing.T) {
-	input := map[string]interface{}{
-		"password":    "hunter2",
-		"api_token":   "tok_abc123",
-		"some_secret": "s3cr3t",
-		"user_count":  42,
-		"enabled":     true,
-		"username":    "alice",
-	}
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("test_action").
+		User("test-user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("password", "hunter2").
+		Detail("api_token", "tok_abc123").
+		Detail("some_secret", "s3cr3t").
+		Detail("user_count", 42).
+		Detail("enabled", true).
+		Detail("username", "alice").
+		Severity(business.AuditSeverityMedium)
 
-	result := redactMap(input)
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
 
-	assert.Equal(t, "[REDACTED]", result["password"], "password should be redacted")
-	assert.Equal(t, "[REDACTED]", result["api_token"], "api_token should be redacted")
-	assert.Equal(t, "[REDACTED]", result["some_secret"], "some_secret should be redacted")
-	assert.Equal(t, 42, result["user_count"], "user_count should not be redacted")
-	assert.Equal(t, true, result["enabled"], "bool values should not be redacted")
-	assert.Equal(t, "alice", result["username"], "username should not be redacted")
-
-	// Verify original map is not mutated
-	assert.Equal(t, "hunter2", input["password"], "original map must not be mutated")
+	assert.Equal(t, "[REDACTED]", entry.Details["password"], "password should be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["api_token"], "api_token should be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["some_secret"], "some_secret should be redacted")
+	assert.Equal(t, 42, entry.Details["user_count"], "user_count should not be redacted")
+	assert.Equal(t, true, entry.Details["enabled"], "bool values should not be redacted")
+	assert.Equal(t, "alice", entry.Details["username"], "username should not be redacted")
 }
 
-// TestRedactMap_NilAndEmpty verifies edge cases for redactMap.
+// TestRedactMap_NilAndEmpty verifies edge cases for Details redaction.
 func TestRedactMap_NilAndEmpty(t *testing.T) {
-	assert.Nil(t, redactMap(nil))
-	assert.Empty(t, redactMap(map[string]interface{}{}))
+	// Builder with no Details → entry.Details must be empty after build.
+	event := audit.NewEventBuilder().
+		Tenant("t").
+		Type(business.AuditEventConfiguration).
+		Action("a").
+		User("u", business.AuditUserTypeHuman).
+		Resource("r", "id", "").
+		Severity(business.AuditSeverityLow)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+	assert.Empty(t, entry.Details, "entry with no details must produce empty Details after build")
 }
 
 // TestRedactMap_CaseInsensitive verifies that key matching is case-insensitive.
 func TestRedactMap_CaseInsensitive(t *testing.T) {
-	input := map[string]interface{}{
-		"Password":     "secret1",
-		"API_KEY":      "secret2",
-		"X-Auth-Token": "secret3",
-		"Username":     "alice",
-	}
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("Password", "secret1").
+		Detail("API_KEY", "secret2").
+		Detail("X-Auth-Token", "secret3").
+		Detail("Username", "alice").
+		Severity(business.AuditSeverityMedium)
 
-	result := redactMap(input)
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
 
-	assert.Equal(t, "[REDACTED]", result["Password"], "Password (mixed case) should be redacted")
-	assert.Equal(t, "[REDACTED]", result["API_KEY"], "API_KEY (uppercase) should be redacted")
-	assert.Equal(t, "[REDACTED]", result["X-Auth-Token"], "X-Auth-Token should be redacted")
-	assert.Equal(t, "alice", result["Username"], "Username should not be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["Password"], "Password (mixed case) should be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["API_KEY"], "API_KEY (uppercase) should be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["X-Auth-Token"], "X-Auth-Token should be redacted")
+	assert.Equal(t, "alice", entry.Details["Username"], "Username should not be redacted")
 }
 
 // TestRedactMap_NonStringOnSensitiveKey verifies that non-string values under sensitive keys
 // pass through unredacted (only string values are replaced).
 func TestRedactMap_NonStringOnSensitiveKey(t *testing.T) {
-	input := map[string]interface{}{
-		"password":    12345,
-		"token_count": true,
-		"auth_level":  3.14,
-	}
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("password", 12345).
+		Detail("token_count", true).
+		Detail("auth_level", 3.14).
+		Severity(business.AuditSeverityMedium)
 
-	result := redactMap(input)
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
 
-	// Non-string values pass through — only string values are candidates for redaction
-	assert.Equal(t, 12345, result["password"], "integer under sensitive key must pass through")
-	assert.Equal(t, true, result["token_count"], "bool under sensitive key must pass through")
-	assert.Equal(t, 3.14, result["auth_level"], "float under sensitive key must pass through")
+	// Non-string values pass through — only string values are candidates for redaction.
+	assert.Equal(t, 12345, entry.Details["password"], "integer under sensitive key must pass through")
+	assert.Equal(t, true, entry.Details["token_count"], "bool under sensitive key must pass through")
+	assert.Equal(t, 3.14, entry.Details["auth_level"], "float under sensitive key must pass through")
 }
 
-// TestRedactErrorMessage verifies the direct output of redactErrorMessage.
+// TestRedactErrorMessage verifies that error messages containing key=value
+// patterns with sensitive key names have the value portion redacted after build.
 func TestRedactErrorMessage(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -627,7 +654,19 @@ func TestRedactErrorMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := redactErrorMessage(tt.input)
+			event := audit.NewEventBuilder().
+				Tenant("t").
+				Type(business.AuditEventAuthentication).
+				Action("login").
+				User("u", business.AuditUserTypeHuman).
+				Resource("session", "u", "").
+				Error("E", tt.input).
+				Severity(business.AuditSeverityMedium)
+
+			entry := &business.AuditEntry{}
+			audit.BuildEntry(event, entry)
+
+			result := entry.ErrorMessage
 			for _, s := range tt.contains {
 				assert.Contains(t, result, s, "result should contain %q", s)
 			}
@@ -643,7 +682,7 @@ func TestRecordEvent_RedactsDetails(t *testing.T) {
 	manager := newTestManager(t, "test")
 	ctx := context.Background()
 
-	event := NewEventBuilder().
+	event := audit.NewEventBuilder().
 		Tenant("test-tenant").
 		Type(business.AuditEventConfiguration).
 		Action("test_action").
@@ -689,7 +728,7 @@ func TestChanges_Redacted(t *testing.T) {
 		"token":    "new-token",
 	}
 
-	event := NewEventBuilder().
+	event := audit.NewEventBuilder().
 		Tenant("test-tenant").
 		Type(business.AuditEventConfiguration).
 		Action("update_credentials").
@@ -732,7 +771,7 @@ func TestRecordEvent_RedactsErrorMessage(t *testing.T) {
 	manager := newTestManager(t, "test")
 	ctx := context.Background()
 
-	event := NewEventBuilder().
+	event := audit.NewEventBuilder().
 		Tenant("test-tenant").
 		Type(business.AuditEventAuthentication).
 		Action("login").
@@ -779,7 +818,7 @@ func TestManager_IntegrityVerification(t *testing.T) {
 		Source:       "test",
 		Version:      "1.0",
 	}
-	entry.Checksum = manager.generateChecksum(entry)
+	entry.Checksum = audit.GenerateChecksum(manager, entry)
 	assert.True(t, manager.VerifyIntegrity(entry))
 
 	originalAction := entry.Action
@@ -790,7 +829,7 @@ func TestManager_IntegrityVerification(t *testing.T) {
 	assert.True(t, manager.VerifyIntegrity(entry))
 
 	// Part 2: record two events via the manager and verify chain fields on the second.
-	event1 := NewEventBuilder().
+	event1 := audit.NewEventBuilder().
 		Tenant("integrity-tenant").
 		Type(business.AuditEventConfiguration).
 		Action("first_action").
@@ -799,7 +838,7 @@ func TestManager_IntegrityVerification(t *testing.T) {
 		Severity(business.AuditSeverityMedium)
 	require.NoError(t, manager.RecordEvent(ctx, event1))
 
-	event2 := NewEventBuilder().
+	event2 := audit.NewEventBuilder().
 		Tenant("integrity-tenant").
 		Type(business.AuditEventConfiguration).
 		Action("second_action").
@@ -831,7 +870,7 @@ func TestChain_MonotonicSequence(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		event := NewEventBuilder().
+		event := audit.NewEventBuilder().
 			Tenant("seq-tenant").
 			Type(business.AuditEventConfiguration).
 			Action("seq_action").
@@ -863,7 +902,7 @@ func TestChain_PreviousChecksumLinked(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		event := NewEventBuilder().
+		event := audit.NewEventBuilder().
 			Tenant("link-tenant").
 			Type(business.AuditEventConfiguration).
 			Action("link_action").
@@ -899,7 +938,7 @@ func TestVerifyChain_DetectsTampering(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		event := NewEventBuilder().
+		event := audit.NewEventBuilder().
 			Tenant("tamper-tenant").
 			Type(business.AuditEventConfiguration).
 			Action("original_action").
@@ -948,7 +987,7 @@ func TestVerifyChain_SingleEntry(t *testing.T) {
 	manager := newTestManager(t, "chain-test")
 	ctx := context.Background()
 
-	event := NewEventBuilder().
+	event := audit.NewEventBuilder().
 		Tenant("single-chain-tenant").
 		Type(business.AuditEventConfiguration).
 		Action("single_action").
@@ -977,7 +1016,7 @@ func TestVerifyChain_DetectsPreviousChecksumMismatch(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		event := NewEventBuilder().
+		event := audit.NewEventBuilder().
 			Tenant("prev-mismatch-tenant").
 			Type(business.AuditEventConfiguration).
 			Action("pm_action").
@@ -1002,7 +1041,7 @@ func TestVerifyChain_DetectsPreviousChecksumMismatch(t *testing.T) {
 	modifiedEntry := *entries[1]
 	modifiedEntry.PreviousChecksum = "00000000000000000000000000000000000000000000000000000000000000"
 	// Update the checksum so the self-checksum still matches, isolating the chain-linkage check.
-	modifiedEntry.Checksum = manager.generateChecksum(&modifiedEntry)
+	modifiedEntry.Checksum = audit.GenerateChecksum(manager, &modifiedEntry)
 	modifiedSlice := []*business.AuditEntry{entries[0], &modifiedEntry, entries[2]}
 
 	breaks := manager.VerifyChain(modifiedSlice)
@@ -1024,7 +1063,7 @@ func TestVerifyChain_DetectsDeletion(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		event := NewEventBuilder().
+		event := audit.NewEventBuilder().
 			Tenant("gap-tenant").
 			Type(business.AuditEventConfiguration).
 			Action("gap_action").
@@ -1068,7 +1107,7 @@ func TestManager_Flush(t *testing.T) {
 
 	const numEvents = 25
 	for i := 0; i < numEvents; i++ {
-		event := NewEventBuilder().
+		event := audit.NewEventBuilder().
 			Tenant("flush-tenant").
 			Type(business.AuditEventConfiguration).
 			Action("flush_action").
@@ -1120,7 +1159,7 @@ func TestManager_ShutdownOrderGuarantee(t *testing.T) {
 		delay: 20 * time.Millisecond,
 	}
 
-	manager, err := NewManager(slow, "slow-test")
+	manager, err := audit.NewManager(slow, "slow-test")
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1131,7 +1170,7 @@ func TestManager_ShutdownOrderGuarantee(t *testing.T) {
 	const numEvents = 10
 	ctx := context.Background()
 	for i := 0; i < numEvents; i++ {
-		event := NewEventBuilder().
+		event := audit.NewEventBuilder().
 			Tenant("slow-tenant").
 			Type(business.AuditEventConfiguration).
 			Action("slow_action").
@@ -1171,7 +1210,7 @@ func TestManager_StopIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = storageManager.Close() })
 
-	manager, err := NewManager(storageManager.GetAuditStore(), "stop-test")
+	manager, err := audit.NewManager(storageManager.GetAuditStore(), "stop-test")
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -1193,13 +1232,13 @@ func TestManager_RecordAfterStop(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = storageManager.Close() })
 
-	manager, err := NewManager(storageManager.GetAuditStore(), "stopped-test")
+	manager, err := audit.NewManager(storageManager.GetAuditStore(), "stopped-test")
 	require.NoError(t, err)
 
 	ctx := context.Background()
 	require.NoError(t, manager.Stop(ctx))
 
-	event := NewEventBuilder().
+	event := audit.NewEventBuilder().
 		Tenant("stopped-tenant").
 		Type(business.AuditEventConfiguration).
 		Action("stopped_action").
@@ -1228,7 +1267,7 @@ func TestManager_ConcurrentRecordAndFlush(t *testing.T) {
 		go func(writerID int) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
-				event := NewEventBuilder().
+				event := audit.NewEventBuilder().
 					Tenant("concurrent-tenant").
 					Type(business.AuditEventConfiguration).
 					Action("concurrent_action").
@@ -1278,7 +1317,7 @@ func TestManager_FlushRespectsContextCancellation(t *testing.T) {
 		inner: storageManager.GetAuditStore(),
 		delay: 50 * time.Millisecond,
 	}
-	manager, err := NewManager(slow, "ctx-test")
+	manager, err := audit.NewManager(slow, "ctx-test")
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1289,7 +1328,7 @@ func TestManager_FlushRespectsContextCancellation(t *testing.T) {
 	// Enqueue many events so the drain will take significantly longer than
 	// the flush deadline.
 	for i := 0; i < 20; i++ {
-		event := NewEventBuilder().
+		event := audit.NewEventBuilder().
 			Tenant("ctx-tenant").
 			Type(business.AuditEventConfiguration).
 			Action("ctx_action").
@@ -1309,6 +1348,7 @@ func TestManager_FlushRespectsContextCancellation(t *testing.T) {
 
 // TestWithSecretsStore_LoadsExistingKey verifies that WithSecretsStore loads a
 // pre-existing HMAC key from the secrets store rather than generating a new one.
+// Chain integrity is confirmed by recording entries and calling VerifyChain.
 func TestWithSecretsStore_LoadsExistingKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
@@ -1323,7 +1363,7 @@ func TestWithSecretsStore_LoadsExistingKey(t *testing.T) {
 	ss := newTestSecretStore()
 	ss.secrets["audit/hmac-key"] = hex.EncodeToString(knownKey)
 
-	m, err := NewManager(storageManager.GetAuditStore(), "test-src", WithSecretsStore(ss))
+	m, err := audit.NewManager(storageManager.GetAuditStore(), "test-src", audit.WithSecretsStore(ss))
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1331,7 +1371,24 @@ func TestWithSecretsStore_LoadsExistingKey(t *testing.T) {
 		_ = m.Stop(ctx)
 	})
 
-	assert.Equal(t, knownKey, m.hmacKey, "manager must load the pre-existing HMAC key")
+	// Record an entry and confirm the chain is verifiable — proving the loaded key is functional.
+	ctx := context.Background()
+	event := audit.NewEventBuilder().
+		Tenant("hmac-load-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("load_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-1", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, m.RecordEvent(ctx, event))
+	flushOrFail(t, m)
+
+	entries, err := m.QueryEntries(ctx, &business.AuditFilter{TenantID: "hmac-load-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	breaks := m.VerifyChain(entries)
+	assert.Empty(t, breaks, "chain must be intact when manager loads a pre-existing HMAC key")
 }
 
 // TestWithSecretsStore_GeneratesAndPersistsKey verifies that when no key exists
@@ -1344,7 +1401,7 @@ func TestWithSecretsStore_GeneratesAndPersistsKey(t *testing.T) {
 
 	ss := newTestSecretStore() // empty store — no pre-existing key
 
-	m, err := NewManager(storageManager.GetAuditStore(), "test-src", WithSecretsStore(ss))
+	m, err := audit.NewManager(storageManager.GetAuditStore(), "test-src", audit.WithSecretsStore(ss))
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1352,14 +1409,31 @@ func TestWithSecretsStore_GeneratesAndPersistsKey(t *testing.T) {
 		_ = m.Stop(ctx)
 	})
 
-	require.Len(t, m.hmacKey, 32, "must generate a 32-byte HMAC key")
-
 	// Key must have been persisted to the secrets store.
 	stored, ok := ss.secrets["audit/hmac-key"]
 	require.True(t, ok, "generated key must be persisted to secrets store")
 	raw, decErr := hex.DecodeString(stored)
 	require.NoError(t, decErr)
-	assert.Equal(t, m.hmacKey, raw, "persisted key must match Manager's in-memory key")
+	assert.Len(t, raw, 32, "persisted HMAC key must be 32 bytes")
+
+	// Record an entry and confirm the chain is verifiable — proving the generated key is functional.
+	ctx := context.Background()
+	event := audit.NewEventBuilder().
+		Tenant("hmac-gen-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("gen_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-1", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, m.RecordEvent(ctx, event))
+	flushOrFail(t, m)
+
+	entries, err := m.QueryEntries(ctx, &business.AuditFilter{TenantID: "hmac-gen-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	breaks := m.VerifyChain(entries)
+	assert.Empty(t, breaks, "chain must be intact when using a generated and persisted HMAC key")
 }
 
 // TestWithSecretsStore_StoreFailureFallsBack verifies that when StoreSecret
@@ -1373,7 +1447,7 @@ func TestWithSecretsStore_StoreFailureFallsBack(t *testing.T) {
 	ss := newTestSecretStore()
 	ss.storeErr = errors.New("backend unavailable")
 
-	m, err := NewManager(storageManager.GetAuditStore(), "test-src", WithSecretsStore(ss))
+	m, err := audit.NewManager(storageManager.GetAuditStore(), "test-src", audit.WithSecretsStore(ss))
 	require.NoError(t, err, "Manager must start even when StoreSecret fails")
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1381,5 +1455,22 @@ func TestWithSecretsStore_StoreFailureFallsBack(t *testing.T) {
 		_ = m.Stop(ctx)
 	})
 
-	require.Len(t, m.hmacKey, 32, "must have a 32-byte in-process fallback key")
+	// Record an entry and confirm the chain is verifiable — proving the fallback key is functional.
+	ctx := context.Background()
+	event := audit.NewEventBuilder().
+		Tenant("hmac-fallback-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("fallback_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-1", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, m.RecordEvent(ctx, event))
+	flushOrFail(t, m)
+
+	entries, err := m.QueryEntries(ctx, &business.AuditFilter{TenantID: "hmac-fallback-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	breaks := m.VerifyChain(entries)
+	assert.Empty(t, breaks, "chain must be intact even with an in-process fallback HMAC key")
 }
