@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 var (
@@ -281,6 +283,7 @@ func isValidPatchID(patchID string) bool {
 
 // PatchModule implements the Module interface for OS patch management
 type PatchModule struct {
+	modules.DefaultLoggingSupport
 	mu            sync.RWMutex
 	patchManager  PatchManager
 	policyEngine  *PolicyEngine

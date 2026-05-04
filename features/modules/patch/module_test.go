@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // Helper function to create Config from YAML string
@@ -552,4 +553,41 @@ func TestMockPatchManager(t *testing.T) {
 	// Test IsValidPatchType
 	assert.True(t, mock.IsValidPatchType("security"))
 	assert.False(t, mock.IsValidPatchType("invalid"))
+}
+
+func TestPatchModule_executeScript_logsScript(t *testing.T) {
+	patchManager := NewMockPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	mock := pkgtesting.NewMockLogger(true)
+	require.NoError(t, m.SetLogger(mock))
+
+	err = m.executeScript(context.Background(), "/usr/local/bin/patch-hook.sh")
+	require.NoError(t, err)
+
+	logs := mock.GetLogs("debug")
+	require.NotEmpty(t, logs, "expected debug log from executeScript")
+	assert.Equal(t, "executing script", logs[0].Message)
+}
+
+func TestPatchModule_DefaultLoggingSupport_embed(t *testing.T) {
+	m := New()
+
+	// PatchModule must implement LoggingInjectable via the DefaultLoggingSupport embed
+	injectable, ok := m.(modules.LoggingInjectable)
+	require.True(t, ok, "PatchModule must implement modules.LoggingInjectable")
+
+	// Before injection, GetLogger returns nil, false
+	logger, injected := injectable.GetLogger()
+	assert.Nil(t, logger)
+	assert.False(t, injected)
+
+	// After SetLogger, GetLogger returns the injected logger
+	mock := pkgtesting.NewMockLogger(true)
+	require.NoError(t, injectable.SetLogger(mock))
+
+	logger, injected = injectable.GetLogger()
+	assert.Equal(t, mock, logger)
+	assert.True(t, injected)
 }

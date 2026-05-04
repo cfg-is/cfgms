@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // New creates a new instance of the Patch module. On platforms without a real
@@ -243,9 +244,7 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 	// Execute post-patch script if specified
 	if cfg.PostPatchScript != "" {
 		if err := m.executeScript(ctx, cfg.PostPatchScript); err != nil {
-			// Log warning but don't fail the operation
-			// In a real implementation, this would use proper logging
-			fmt.Printf("Warning: post-patch script failed: %v\n", err)
+			m.GetEffectiveLogger(logging.NewNoopLogger()).Warn("post-patch script failed", "error", err)
 		}
 	}
 
@@ -264,9 +263,7 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 				return ErrMaintenanceWindowNotActive
 			}
 
-			// In a real implementation, this would trigger a system reboot
-			// For now, we'll just log it
-			fmt.Println("Auto-reboot would be triggered here")
+			m.GetEffectiveLogger(logging.NewNoopLogger()).Info("auto-reboot triggered")
 		} else {
 			m.mu.Unlock()
 			return ErrRebootRequired
@@ -280,7 +277,7 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 	err = m.refreshStatus(ctx)
 	if err != nil {
 		// Don't fail the operation if status refresh fails
-		fmt.Printf("Warning: failed to refresh patch status: %v\n", err)
+		m.GetEffectiveLogger(logging.NewNoopLogger()).Warn("failed to refresh patch status", "error", err)
 	}
 
 	return nil
@@ -356,7 +353,7 @@ func (m *PatchModule) executeScript(ctx context.Context, script string) error {
 	}
 
 	// Simulate script execution
-	fmt.Printf("Executing script: %s\n", script)
+	m.GetEffectiveLogger(logging.NewNoopLogger()).Debug("executing script", "script", logging.SanitizeLogValue(script))
 	return nil
 }
 
@@ -370,8 +367,7 @@ func (m *PatchModule) isInMaintenanceWindow(ctx context.Context, config *Config)
 	// Check if we're in a maintenance window
 	inWindow, err := m.windowManager.IsInWindow(ctx, m.deviceID)
 	if err != nil {
-		// Log error but don't block operation (fail open for safety)
-		fmt.Printf("Warning: failed to check maintenance window: %v\n", err)
+		m.GetEffectiveLogger(logging.NewNoopLogger()).Warn("failed to check maintenance window", "error", err)
 		return true
 	}
 
@@ -388,8 +384,7 @@ func (m *PatchModule) canReboot(ctx context.Context) bool {
 	// Check if we can reboot
 	canReboot, err := m.windowManager.CanReboot(ctx, m.deviceID)
 	if err != nil {
-		// Log error but don't block operation (fail open for safety)
-		fmt.Printf("Warning: failed to check reboot permission: %v\n", err)
+		m.GetEffectiveLogger(logging.NewNoopLogger()).Warn("failed to check reboot permission", "error", err)
 		return true
 	}
 
