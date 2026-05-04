@@ -20,13 +20,15 @@ import (
 type InheritanceResolver struct {
 	configStore       cfgconfig.ConfigStore
 	clientTenantStore business.ClientTenantStore
+	tenantStore       business.TenantStore
 }
 
 // NewInheritanceResolver creates a new inheritance resolver
-func NewInheritanceResolver(configStore cfgconfig.ConfigStore, clientTenantStore business.ClientTenantStore) *InheritanceResolver {
+func NewInheritanceResolver(configStore cfgconfig.ConfigStore, clientTenantStore business.ClientTenantStore, tenantStore business.TenantStore) *InheritanceResolver {
 	return &InheritanceResolver{
 		configStore:       configStore,
 		clientTenantStore: clientTenantStore,
+		tenantStore:       tenantStore,
 	}
 }
 
@@ -35,6 +37,7 @@ func NewInheritanceResolverWithStorageManager(storageManager *interfaces.Storage
 	return &InheritanceResolver{
 		configStore:       storageManager.GetConfigStore(),
 		clientTenantStore: storageManager.GetClientTenantStore(),
+		tenantStore:       storageManager.GetTenantStore(),
 	}
 }
 
@@ -99,14 +102,9 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 	return effective, nil
 }
 
-// getTenantPath returns the tenant hierarchy path from MSP to the specified tenant
+// getTenantPath returns the tenant hierarchy path from root to the specified tenant
 func (ir *InheritanceResolver) getTenantPath(ctx context.Context, tenantID string) ([]string, error) {
-	// Get the tenant hierarchy using ClientTenantStore
-	// This is a simplified implementation - full implementation would traverse the hierarchy
-
-	// For now, return a basic path structure
-	// In full implementation, this would query the tenant store for the complete hierarchy
-	return []string{"msp", tenantID}, nil
+	return ir.tenantStore.GetTenantPath(ctx, tenantID)
 }
 
 // applyConfigurationLevel applies configuration from a specific hierarchy level
@@ -388,19 +386,7 @@ type TraceElement struct {
 
 // getConfigValue extracts the value at a specific configuration path
 func (ir *InheritanceResolver) getConfigValue(config *stewardconfig.StewardConfig, path string) interface{} {
-	// This is a simplified implementation - full version would use reflection or a more sophisticated path resolver
-	switch path {
-	case "steward.id":
-		return config.Steward.ID
-	case "steward.mode":
-		return string(config.Steward.Mode)
-	case "steward.logging.level":
-		return config.Steward.Logging.Level
-	case "steward.logging.format":
-		return config.Steward.Logging.Format
-	default:
-		return nil
-	}
+	return nil
 }
 
 // getPathDescription returns a human-readable description of a configuration path
