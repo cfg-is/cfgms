@@ -505,3 +505,9 @@ func (s *Steward) GetLoadedModules() []string {
 func (s *Steward) GetStewardID() string {
 	return s.standaloneConfig.Steward.ID
 }
+
+// GetConvergeInterval returns the convergence interval string from configuration.
+// Useful for CLI status output and operator observability.
+func (s *Steward) GetConvergeInterval() string {
+	return s.standaloneConfig.Steward.ConvergeInterval
+}

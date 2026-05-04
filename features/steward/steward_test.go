@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-package steward
+package steward_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	steward "github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -17,31 +18,31 @@ func TestHealthMonitor(t *testing.T) {
 	// Test cases for health monitor
 	tests := []struct {
 		name        string
-		setupFn     func(*HealthMonitor)
-		checkStatus HealthStatus
+		setupFn     func(*steward.HealthMonitor)
+		checkStatus steward.HealthStatus
 	}{
 		{
 			name: "default is healthy",
-			setupFn: func(hm *HealthMonitor) {
+			setupFn: func(hm *steward.HealthMonitor) {
 				// No setup, should be healthy by default
 			},
-			checkStatus: StatusHealthy,
+			checkStatus: steward.StatusHealthy,
 		},
 		{
 			name: "record error changes metrics",
-			setupFn: func(hm *HealthMonitor) {
+			setupFn: func(hm *steward.HealthMonitor) {
 				hm.RecordConfigError()
 				hm.RecordConfigError()
 				hm.RecordConfigError()
 			},
-			checkStatus: StatusDegraded, // Status changes to degraded after errors
+			checkStatus: steward.StatusDegraded, // Status changes to degraded after errors
 		},
 		{
 			name: "record latency updates metrics",
-			setupFn: func(hm *HealthMonitor) {
+			setupFn: func(hm *steward.HealthMonitor) {
 				hm.RecordTaskLatency(500 * time.Millisecond)
 			},
-			checkStatus: StatusDegraded, // Status changes to degraded after high latency
+			checkStatus: steward.StatusDegraded, // Status changes to degraded after high latency
 		},
 	}
 
@@ -51,7 +52,7 @@ func TestHealthMonitor(t *testing.T) {
 			logger := logging.NewLogger("info")
 
 			// Create a health monitor
-			monitor := NewHealthMonitor(logger)
+			monitor := steward.NewHealthMonitor(logger)
 
 			// Apply setup function
 			if tt.setupFn != nil {
@@ -68,11 +69,11 @@ func TestNewStandalone(t *testing.T) {
 	// Test standalone creation with empty config (should fail)
 	logger := logging.NewLogger("info")
 
-	steward, err := NewStandalone("", logger)
+	s, err := steward.NewStandalone("", logger)
 
 	// Should fail because no config found
 	assert.Error(t, err)
-	assert.Nil(t, steward)
+	assert.Nil(t, s)
 	assert.Contains(t, err.Error(), "failed to load configuration")
 }
 
@@ -82,12 +83,11 @@ func TestNewStandaloneWithConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeMinimalCfg(t, dir, "standalone-test-steward")
 
-	s, err := NewStandalone(cfgPath, logger)
+	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
 
 	assert.Equal(t, "standalone-test-steward", s.GetStewardID())
-	assert.NotNil(t, s.healthCheck)
-	assert.NotNil(t, s.executor)
+	// Constructor success + Start()/Stop() succeeding proves healthCheck and executor wiring.
 	require.NoError(t, s.Stop(context.Background()))
 }

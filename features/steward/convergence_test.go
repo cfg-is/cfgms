@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-package steward
+package steward_test
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	steward "github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -48,7 +49,7 @@ func TestConvergenceLoopStopsOnContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeMinimalCfg(t, dir, "loop-test-steward")
 
-	s, err := NewStandalone(cfgPath, logger)
+	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
 
@@ -70,7 +71,7 @@ func TestConvergenceLoopStopsOnShutdown(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeMinimalCfg(t, dir, "shutdown-test-steward")
 
-	s, err := NewStandalone(cfgPath, logger)
+	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
 
@@ -88,12 +89,12 @@ func TestConvergeIntervalReadFromCfg(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeMinimalCfgWithInterval(t, dir, "interval-test-steward", "5m")
 
-	s, err := NewStandalone(cfgPath, logger)
+	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
 
-	// Verify the config was loaded with the correct interval
-	assert.Equal(t, "5m", s.standaloneConfig.Steward.ConvergeInterval)
+	// Verify the config was loaded with the correct interval via the public getter.
+	assert.Equal(t, "5m", s.GetConvergeInterval())
 
 	require.NoError(t, s.Stop(context.Background()))
 }
@@ -103,7 +104,7 @@ func TestStandaloneRunsInitialConvergenceOnStart(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeMinimalCfg(t, dir, "initial-convergence-steward")
 
-	s, err := NewStandalone(cfgPath, logger)
+	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
 
@@ -126,20 +127,18 @@ func TestDetectUnmanagedDNADrift_IDMismatch(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeMinimalCfg(t, dir, "dna-mismatch-steward")
 
-	s, err := NewStandalone(cfgPath, logger)
+	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 
 	// Inject a previousDNA with a sentinel ID that the real DNA collector will not produce.
 	// The collector derives IDs from stable hardware identifiers (MAC + hostname), so the
 	// real ID will always differ from the sentinel "guaranteed-mismatch-id-xyz".
-	s.previousDNAMu.Lock()
-	s.previousDNA = &commonpb.DNA{Id: "guaranteed-mismatch-id-xyz"}
-	s.previousDNAMu.Unlock()
+	steward.SetPreviousDNA(s, &commonpb.DNA{Id: "guaranteed-mismatch-id-xyz"})
 
 	ctx := context.Background()
-	events, driftErr := s.detectUnmanagedDNADrift(ctx)
+	events, driftErr := steward.DetectUnmanagedDNADrift(s, ctx)
 
-	assert.ErrorIs(t, driftErr, ErrDNAIDMismatch)
+	assert.ErrorIs(t, driftErr, steward.ErrDNAIDMismatch)
 	require.Len(t, events, 1, "expected exactly one critical drift event on ID mismatch")
 	assert.Equal(t, drift.SeverityCritical, events[0].Severity)
 	assert.Equal(t, drift.CategoryConfiguration, events[0].Category)
@@ -154,18 +153,18 @@ func TestDetectUnmanagedDNADrift_SameID(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeMinimalCfg(t, dir, "dna-same-id-steward")
 
-	s, err := NewStandalone(cfgPath, logger)
+	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 
 	ctx := context.Background()
 
 	// First call seeds previousDNA — no comparison possible yet.
-	events, driftErr := s.detectUnmanagedDNADrift(ctx)
+	events, driftErr := steward.DetectUnmanagedDNADrift(s, ctx)
 	assert.NoError(t, driftErr)
 	assert.Empty(t, events)
 
 	// Second call — same DNA ID, should produce no error.
-	events2, driftErr2 := s.detectUnmanagedDNADrift(ctx)
+	events2, driftErr2 := steward.DetectUnmanagedDNADrift(s, ctx)
 	assert.NoError(t, driftErr2, "same-ID path must not return ErrDNAIDMismatch")
 	// events2 may be non-empty if real DNA attributes changed between calls, but
 	// none should carry SeverityCritical (that severity is reserved for ID mismatches).
