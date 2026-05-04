@@ -14,9 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	_ "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // TestMSPCompleteFlow tests the complete MSP flow using the new global storage architecture

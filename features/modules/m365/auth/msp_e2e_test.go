@@ -13,10 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-
-	// Import git plugin to register it with global storage
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	_ "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // TestMSPEndToEndClientOnboarding simulates a complete real-world MSP client onboarding scenario

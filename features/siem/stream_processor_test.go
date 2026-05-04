@@ -12,31 +12,14 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
-	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-
-	// Register OSS storage providers
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // newTestAuditManager creates a real audit.Manager backed by OSS storage in a temp dir.
 func newTestAuditManager(t *testing.T) *audit.Manager {
 	t.Helper()
-	tmpDir := t.TempDir()
-	storageManager, err := storageInterfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
-
-	mgr, err := audit.NewManager(storageManager.GetAuditStore(), "siem")
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = mgr.Stop(ctx)
-	})
-	return mgr
+	return pkgtesting.SetupTestAuditManager(t)
 }
 
 // TestStreamProcessor_SecurityEventAuditEmission verifies that a pattern match

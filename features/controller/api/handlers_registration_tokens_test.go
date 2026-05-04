@@ -22,8 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // setupTestServerWithTokenStore creates a test server with a real registration token store
@@ -40,20 +39,15 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	// Create test logger
 	logger := logging.NewNoopLogger()
 
-	// Create temporary directory for storage
-	tempDir := t.TempDir()
-
 	// Initialize RBAC system with OSS composite storage
-	storageManager, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
+	storageManager := pkgtesting.SetupTestStorage(t)
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
-	err = rbacManager.Initialize(context.Background())
+	err := rbacManager.Initialize(context.Background())
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

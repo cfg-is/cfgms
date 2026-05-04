@@ -14,15 +14,10 @@ import (
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 
-	// Import storage providers to register them
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	storageif "github.com/cfgis/cfgms/pkg/storage/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestAdvancedServiceWithConfig tests service creation with custom configuration
@@ -58,11 +53,8 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
 	require.NoError(t, err)
 
-	// Create audit components using git storage for testing
-	tmpDir := t.TempDir()
-	globalStorageManager, err := storageif.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = globalStorageManager.Close() })
+	// Create audit components using OSS storage for testing
+	globalStorageManager := pkgtesting.SetupTestStorage(t)
 
 	auditStore := globalStorageManager.GetAuditStore()
 	auditManager, err := audit.NewManager(auditStore, "test-reports")
@@ -590,11 +582,8 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
 	require.NoError(t, err, "Failed to create drift detector")
 
-	// Create audit components using git storage for testing
-	tmpDir := t.TempDir()
-	globalStorageManager, err := storageif.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err, "Failed to create global storage manager")
-	t.Cleanup(func() { _ = globalStorageManager.Close() })
+	// Create audit components using OSS storage for testing
+	globalStorageManager := pkgtesting.SetupTestStorage(t)
 
 	auditStore := globalStorageManager.GetAuditStore()
 	auditManager, err := audit.NewManager(auditStore, "test-reports")
