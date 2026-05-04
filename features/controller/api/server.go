@@ -123,7 +123,7 @@ func New(
 	}
 
 	// M-AUTH-1: Initialize central secrets provider for API key storage
-	secretStore, err := initializeSecretStore(cfg, logger)
+	secretStore, err := NewSecretStore(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize secret store: %w", err)
 	}
@@ -832,9 +832,11 @@ func (s *Server) configureCORS() {
 	}
 }
 
-// M-AUTH-1: Initialize central secrets provider for API key storage
-// Replaces the incorrect file-based APIKeyStore implementation
-func initializeSecretStore(cfg *config.Config, logger logging.Logger) (secretsif.SecretStore, error) {
+// NewSecretStore initializes and returns the central secrets provider for the controller.
+// It is exported so that cmd/controller/main.go can initialize the store before logging
+// is configured, while server.New continues to call it internally unchanged.
+func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
+	logger := logging.ForComponent("controller")
 	// Determine secrets storage path
 	secretsPath := os.Getenv("CFGMS_SECRETS_REPO_PATH")
 	if secretsPath == "" {
