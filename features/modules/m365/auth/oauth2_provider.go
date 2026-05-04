@@ -519,11 +519,13 @@ func (p *OAuth2Provider) getCachedToken(tenantID string) *AccessToken {
 	return token
 }
 
-// setCachedToken stores a token in the cache with a TTL that fires 5 minutes before the token expires
+// setCachedToken stores a token in the cache with a TTL that fires 5 minutes before the token expires.
+// If the token is already within the buffer window (TTL ≤ 0) any existing entry is evicted.
 func (p *OAuth2Provider) setCachedToken(tenantID string, token *AccessToken) {
 	ttl := time.Until(token.ExpiresAt) - 5*time.Minute
 	if ttl <= 0 {
 		p.logger.Debug("skipping token cache: TTL too short", "tenant_id", logging.SanitizeLogValue(tenantID))
+		p.tokenCache.Delete(tenantID)
 		return
 	}
 	_ = p.tokenCache.Set(tenantID, token, ttl)
@@ -542,11 +544,13 @@ func (p *OAuth2Provider) getDelegatedCachedToken(cacheKey string) *AccessToken {
 	return token
 }
 
-// setDelegatedCachedToken stores a delegated token in the cache with a TTL that fires 5 minutes before the token expires
+// setDelegatedCachedToken stores a delegated token in the cache with a TTL that fires 5 minutes before the token expires.
+// If the token is already within the buffer window (TTL ≤ 0) any existing entry is evicted.
 func (p *OAuth2Provider) setDelegatedCachedToken(cacheKey string, token *AccessToken) {
 	ttl := time.Until(token.ExpiresAt) - 5*time.Minute
 	if ttl <= 0 {
 		p.logger.Debug("skipping delegated token cache: TTL too short", "cache_key", logging.SanitizeLogValue(cacheKey))
+		p.delegatedTokenCache.Delete(cacheKey)
 		return
 	}
 	_ = p.delegatedTokenCache.Set(cacheKey, token, ttl)

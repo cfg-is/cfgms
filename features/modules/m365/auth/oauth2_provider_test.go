@@ -275,6 +275,56 @@ func TestOAuth2Provider_setCachedToken_skipsTTLTooShort(t *testing.T) {
 	assert.Nil(t, provider.getCachedToken("tenant1"), "token near expiry must not be cached")
 }
 
+// TestOAuth2Provider_setCachedToken_evictsStaleEntry verifies that calling setCachedToken
+// with an expired token evicts any pre-existing valid entry for that key.
+func TestOAuth2Provider_setCachedToken_evictsStaleEntry(t *testing.T) {
+	provider := NewOAuth2Provider(&failingCredentialStore{}, nil, nil)
+	defer provider.Close()
+
+	validToken := &AccessToken{
+		Token:     "valid-token",
+		TokenType: "Bearer",
+		ExpiresAt: time.Now().Add(60 * time.Minute),
+	}
+	provider.setCachedToken("tenant1", validToken)
+	require.NotNil(t, provider.getCachedToken("tenant1"), "valid token must be cached initially")
+
+	expiredToken := &AccessToken{
+		Token:     "expired-token",
+		TokenType: "Bearer",
+		ExpiresAt: time.Now().Add(-time.Hour),
+	}
+	provider.setCachedToken("tenant1", expiredToken)
+
+	assert.Nil(t, provider.getCachedToken("tenant1"), "stale entry must be evicted when setCachedToken is called with an expired token")
+}
+
+// TestOAuth2Provider_setDelegatedCachedToken_evictsStaleEntry verifies that calling
+// setDelegatedCachedToken with an expired token evicts any pre-existing valid entry.
+func TestOAuth2Provider_setDelegatedCachedToken_evictsStaleEntry(t *testing.T) {
+	provider := NewOAuth2Provider(&failingCredentialStore{}, nil, nil)
+	defer provider.Close()
+
+	cacheKey := "tenant1:user1"
+
+	validToken := &AccessToken{
+		Token:     "valid-delegated-token",
+		TokenType: "Bearer",
+		ExpiresAt: time.Now().Add(60 * time.Minute),
+	}
+	provider.setDelegatedCachedToken(cacheKey, validToken)
+	require.NotNil(t, provider.getDelegatedCachedToken(cacheKey), "valid token must be cached initially")
+
+	expiredToken := &AccessToken{
+		Token:     "expired-delegated-token",
+		TokenType: "Bearer",
+		ExpiresAt: time.Now().Add(-time.Hour),
+	}
+	provider.setDelegatedCachedToken(cacheKey, expiredToken)
+
+	assert.Nil(t, provider.getDelegatedCachedToken(cacheKey), "stale entry must be evicted when setDelegatedCachedToken is called with an expired token")
+}
+
 // TestOAuth2Provider_ClearMethods verifies all five Clear* methods delegate
 // correctly to pkg/cache without panicking.
 func TestOAuth2Provider_ClearMethods(t *testing.T) {
