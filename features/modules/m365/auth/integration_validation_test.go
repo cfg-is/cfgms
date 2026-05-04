@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // TestFullDelegatedPermissionsIntegration validates the complete delegated permissions implementation
@@ -25,7 +27,7 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 			DelegatedScopes:          []string{"User.Read", "Directory.Read.All"},
 		}
 
-		provider := NewOAuth2Provider(credStore, config)
+		provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 
 		// Verify provider implements enhanced interface
 		assert.NotNil(t, provider)
@@ -124,7 +126,7 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 			SupportDelegatedAuth: true,
 		}
 
-		provider := NewOAuth2Provider(credStore, config)
+		provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 
 		userContext := &UserContext{
 			UserID:            "cache-user",
@@ -171,7 +173,7 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 	t.Run("TestPermissionValidation", func(t *testing.T) {
 		credStore := newTestCredentialStore(t)
 
-		provider := NewOAuth2Provider(credStore, &OAuth2Config{})
+		provider := NewOAuth2Provider(credStore, &OAuth2Config{}, logging.NewNoopLogger())
 
 		// Test application token (should pass all validations)
 		appToken := &AccessToken{
@@ -279,10 +281,10 @@ func TestInteractiveAuthenticatorCreation(t *testing.T) {
 		SupportDelegatedAuth: true,
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 
 	// Should be able to create interactive authenticator
-	interactiveAuth := NewInteractiveAuthenticator(provider, ":8080")
+	interactiveAuth := NewInteractiveAuthenticator(provider, ":8080", logging.NewNoopLogger())
 	assert.NotNil(t, interactiveAuth)
 
 	// Should be able to generate PKCE parameters
@@ -313,7 +315,7 @@ func TestRealWorldCredentialFlow(t *testing.T) {
 		RequiredDelegatedScopes:  []string{"User.Read"},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	// Test that the flow would work with real credentials
@@ -408,7 +410,7 @@ func BenchmarkDelegatedOperations(b *testing.B) {
 		SupportDelegatedAuth: true,
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 
 	userContext := &UserContext{
 		UserID:            "benchmark-user",

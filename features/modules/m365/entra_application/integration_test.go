@@ -16,6 +16,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
+	"github.com/cfgis/cfgms/pkg/logging"
 	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 )
 
@@ -477,7 +478,7 @@ func createRealAuthProvider(t *testing.T) auth.Provider {
 	}
 
 	// Create provider
-	provider := auth.NewOAuth2Provider(credStore, config)
+	provider := auth.NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 
 	return provider
 }

@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // TestSimpleInteractiveFlow tests basic interactive flow components
@@ -27,7 +29,7 @@ func TestSimpleInteractiveFlow(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	flow := NewInteractiveAuthFlow(provider, config)
 	ctx := context.Background()
 
