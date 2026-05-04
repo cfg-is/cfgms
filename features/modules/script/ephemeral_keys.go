@@ -63,13 +63,18 @@ type EphemeralKeyManager struct {
 
 // NewEphemeralKeyManager creates a new ephemeral key manager
 func NewEphemeralKeyManager() *EphemeralKeyManager {
+	return newEphemeralKeyManagerWithInterval(1 * time.Minute)
+}
+
+// newEphemeralKeyManagerWithInterval creates an EphemeralKeyManager with a custom cleanup interval.
+// Use in tests to avoid waiting for the 1-minute default before verifying cleanup behaviour.
+func newEphemeralKeyManagerWithInterval(cleanupInterval time.Duration) *EphemeralKeyManager {
 	manager := &EphemeralKeyManager{
 		keys:            make(map[string]*EphemeralAPIKey),
-		cleanupInterval: 1 * time.Minute,
+		cleanupInterval: cleanupInterval,
 		stopCleanup:     make(chan struct{}),
 	}
 
-	// Start cleanup goroutine
 	go manager.cleanupExpiredKeys()
 
 	return manager
