@@ -71,6 +71,7 @@ import (
 	"github.com/cfgis/cfgms/features/reports/templates"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -213,12 +214,12 @@ func NewAdvancedServiceWithConfig(
 
 // getUserIDFromContext extracts user ID from context for RBAC validation
 func (s *AdvancedService) getUserIDFromContext(ctx context.Context) string {
-	// Check for user ID in context (this would be set by middleware)
+	// dead read: no set-site uses this plain string key; tracked for cleanup separately
 	if userID, ok := ctx.Value("user_id").(string); ok && userID != "" {
 		return userID
 	}
 
-	// Fallback to extracting from JWT claims or other auth context
+	// dead read: no set-site uses this plain string key; tracked for cleanup separately
 	if claims, ok := ctx.Value("auth_claims").(map[string]interface{}); ok {
 		if sub, ok := claims["sub"].(string); ok {
 			return sub
@@ -226,7 +227,7 @@ func (s *AdvancedService) getUserIDFromContext(ctx context.Context) string {
 	}
 
 	// For testing/development - extract from tenant context
-	if tenantID, ok := ctx.Value("tenant_id").(string); ok {
+	if tenantID, ok := ctx.Value(ctxkeys.TenantID).(string); ok {
 		return "system-user-" + tenantID
 	}
 

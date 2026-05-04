@@ -10,14 +10,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// Context key types to avoid collisions
-type contextKey string
-
-const (
-	watcherNameKey   contextKey = "watcher_name"
-	correlationIDKey contextKey = "correlation_id"
-)
-
 // LoggingWatcher logs all system events to the configured logger.
 // This provides a simple way to ensure all system events are captured in logs.
 type LoggingWatcher struct {
@@ -39,7 +31,7 @@ func (lw *LoggingWatcher) OnSystemEvent(event SystemEvent) {
 
 	// Add correlation context if available
 	if event.CorrelationID != "" {
-		ctx = context.WithValue(ctx, correlationIDKey, event.CorrelationID)
+		ctx = logging.WithCorrelation(ctx, event.CorrelationID)
 	}
 
 	switch event.Severity {
@@ -206,7 +198,7 @@ func (aw *AlertingWatcher) OnSystemEvent(event SystemEvent) {
 	// Send the alert
 	ctx := context.Background()
 	if event.CorrelationID != "" {
-		ctx = context.WithValue(ctx, correlationIDKey, event.CorrelationID)
+		ctx = logging.WithCorrelation(ctx, event.CorrelationID)
 	}
 
 	if err := aw.alerter.SendAlert(ctx, event); err != nil {
