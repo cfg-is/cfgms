@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +13,7 @@ import (
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/dataplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"google.golang.org/grpc"
 )
@@ -77,14 +77,14 @@ type Provider struct {
 	stats Stats
 
 	// Logger
-	logger *slog.Logger
+	logger logging.Logger
 }
 
 // New creates a new gRPC data plane provider with defaults.
 func New() *Provider {
 	return &Provider{
 		sessions: make(map[string]*Session),
-		logger:   slog.Default(),
+		logger:   logging.NewNoopLogger(),
 	}
 }
 
@@ -101,7 +101,7 @@ func (p *Provider) Description() string {
 // Config keys:
 //   - "mode": string ("server" or "client") — required
 //   - "tls_config": *tls.Config — required when creating own server or connection
-//   - "logger": *slog.Logger — optional
+//   - "logger": logging.Logger — optional
 //
 // Server mode additional keys:
 //   - "listen_addr": string — required if "grpc_server" not provided
@@ -121,7 +121,7 @@ func (p *Provider) Initialize(_ context.Context, config map[string]interface{}) 
 	}
 	p.mode = mode
 
-	if logger, ok := config["logger"].(*slog.Logger); ok {
+	if logger, ok := config["logger"].(logging.Logger); ok {
 		p.logger = logger
 	}
 
@@ -206,12 +206,13 @@ func (p *Provider) startServer() error {
 			append([]grpc.ServerOption{grpc.Creds(quictransport.TransportCredentials())}, ServerOptions()...)...,
 		)
 
+		srv := p.grpcServer
 		go func() {
-			if err := p.grpcServer.Serve(ql); err != nil {
+			if err := srv.Serve(ql); err != nil {
 				p.logger.Error("gRPC data plane server stopped", "error", err)
 			}
 		}()
-		p.logger.Info("gRPC data plane server started", "addr", p.listenAddr)
+		p.logger.Info("gRPC data plane server started", "addr", logging.SanitizeLogValue(p.listenAddr))
 	} else {
 		// Shared server: the caller (controller) registers the composite handler.
 		p.logger.Info("gRPC data plane attached to existing gRPC server")
@@ -236,7 +237,7 @@ func (p *Provider) startClient() error {
 	}
 	p.grpcClient = transportpb.NewStewardTransportClient(p.grpcConn)
 	p.started.Store(true)
-	p.logger.Info("gRPC data plane client ready", "steward_id", p.stewardID)
+	p.logger.Info("gRPC data plane client ready", "steward_id", logging.SanitizeLogValue(p.stewardID))
 	return nil
 }
 
@@ -343,7 +344,7 @@ func (p *Provider) Connect(ctx context.Context, serverAddr string) (interfaces.D
 
 	p.logger.Debug("gRPC data plane client session created",
 		"session_id", sessionID,
-		"steward_id", p.stewardID)
+		"steward_id", logging.SanitizeLogValue(p.stewardID))
 	return s, nil
 }
 
