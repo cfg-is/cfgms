@@ -12,7 +12,6 @@ import (
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/features/validation"
 	"github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -28,7 +27,6 @@ type ConfigurationServiceV2 struct {
 	inheritanceResolver *config.InheritanceResolver
 	validationManager   *config.ValidationManager
 	controllerSvc       *ControllerService
-	validator           *validation.Validator
 	storageManager      *interfaces.StorageManager
 }
 
@@ -41,7 +39,6 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 		inheritanceResolver: config.NewInheritanceResolverWithStorageManager(storageManager),
 		validationManager:   config.NewValidationManager(storageManager.GetConfigStore()),
 		controllerSvc:       controllerSvc,
-		validator:           validation.NewValidator(),
 		storageManager:      storageManager,
 	}
 }
