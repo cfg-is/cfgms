@@ -228,7 +228,7 @@ func testStewardControllerFailover(t *testing.T, ctx context.Context, helper *Do
 
 // testConfigurationContinuity tests configuration push continuity during failover
 func testConfigurationContinuity(t *testing.T, ctx context.Context, helper *DockerComposeHelper, controllers []string, stewards []string) {
-	t.Skip("Skipping: configuration push API not yet implemented (requires controller config push endpoint)")
+	t.Skip("Skipping: configuration push API not yet implemented — Issue #1254")
 	t.Log("Testing configuration push continuity during failover...")
 
 	// Push a test configuration to all stewards
@@ -338,7 +338,7 @@ func testConfigurationContinuity(t *testing.T, ctx context.Context, helper *Dock
 
 // testSessionPersistence tests gRPC session persistence during failover
 func testSessionPersistence(t *testing.T, ctx context.Context, helper *DockerComposeHelper, controllers []string, stewards []string) {
-	t.Skip("Skipping: session monitoring API not yet implemented (requires gRPC session management)")
+	t.Skip("Skipping: session monitoring API not yet implemented — Issue #1255")
 	t.Log("Testing gRPC session persistence during failover...")
 
 	// Record initial session counts
