@@ -301,24 +301,22 @@ func TestManager_ConfigValidation(t *testing.T) {
 	assert.Contains(t, err.Error(), "min quorum must be between 1 and expected size")
 }
 
-func TestConfig_LoadFromEnvironment(t *testing.T) {
-	cfg := DefaultConfig()
-
-	// Set environment variables
-	t.Setenv("CFGMS_HA_MODE", "cluster")
-	t.Setenv("CFGMS_NODE_ID", "test-node-123")
-	t.Setenv("CFGMS_HA_NODE_NAME", "test-controller")
-	t.Setenv("CFGMS_HA_CLUSTER_SIZE", "5")
-	t.Setenv("CFGMS_HA_MIN_QUORUM", "3")
-
-	err := cfg.LoadFromEnvironment()
+func TestConfig_LoadFromEnvironment_InvalidQuorum(t *testing.T) {
+	logger := logging.GetLogger()
+	storageManager, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
 
-	assert.Equal(t, ClusterMode, cfg.Mode)
-	assert.Equal(t, "test-node-123", cfg.Node.ID)
-	assert.Equal(t, "test-controller", cfg.Node.Name)
-	assert.Equal(t, 5, cfg.Cluster.ExpectedSize)
-	assert.Equal(t, 3, cfg.Cluster.MinQuorum)
+	t.Setenv("CFGMS_HA_MODE", "cluster")
+	t.Setenv("CFGMS_NODE_ID", "test-node")
+	t.Setenv("CFGMS_HA_CLUSTER_SIZE", "3")
+	t.Setenv("CFGMS_HA_MIN_QUORUM", "5")
+
+	cfg := DefaultConfig()
+	require.NoError(t, cfg.LoadFromEnvironment())
+
+	_, err = NewManager(cfg, logger, storageManager)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "quorum")
 }
 
 func TestDeploymentModeProgression(t *testing.T) {
