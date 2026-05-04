@@ -9,7 +9,28 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+var (
+	blobLoggerMu sync.RWMutex
+	blobLogger   logging.Logger = logging.NewNoopLogger()
+)
+
+// SetBlobLogger sets the logger used by the blob provider registry for registration messages.
+// Safe to call concurrently with RegisterBlobProvider.
+func SetBlobLogger(l logging.Logger) {
+	blobLoggerMu.Lock()
+	defer blobLoggerMu.Unlock()
+	blobLogger = l
+}
+
+func getBlobLogger() logging.Logger {
+	blobLoggerMu.RLock()
+	defer blobLoggerMu.RUnlock()
+	return blobLogger
+}
 
 // BlobStore defines the storage interface for large binary objects.
 // Large artifacts (installer binaries, report archives, DNA snapshots) are stored
@@ -120,11 +141,11 @@ type blobProviderRegistry struct {
 // RegisterBlobProvider registers a BlobProvider. Called from provider init() functions.
 func RegisterBlobProvider(provider BlobProvider) {
 	if provider == nil {
-		fmt.Println("Warning: attempted to register nil blob provider")
+		getBlobLogger().Warn("attempted to register nil blob provider")
 		return
 	}
 	if provider.Name() == "" {
-		fmt.Println("Warning: blob provider name cannot be empty")
+		getBlobLogger().Warn("blob provider name cannot be empty")
 		return
 	}
 
@@ -132,13 +153,13 @@ func RegisterBlobProvider(provider BlobProvider) {
 	defer globalBlobRegistry.mutex.Unlock()
 
 	if existing, exists := globalBlobRegistry.providers[provider.Name()]; exists {
-		fmt.Printf("Warning: overwriting existing blob provider '%s' (version %s) with version %s\n",
-			provider.Name(), existing.GetVersion(), provider.GetVersion())
+		getBlobLogger().Warn("overwriting existing blob provider",
+			"name", provider.Name(), "existing_version", existing.GetVersion(), "new_version", provider.GetVersion())
 	}
 
 	globalBlobRegistry.providers[provider.Name()] = provider
-	fmt.Printf("Registered blob provider: %s v%s - %s\n",
-		provider.Name(), provider.GetVersion(), provider.Description())
+	getBlobLogger().Info("Registered blob provider: "+provider.Name()+" v"+provider.GetVersion(),
+		"description", provider.Description())
 }
 
 // GetBlobProvider retrieves a registered BlobProvider by name.

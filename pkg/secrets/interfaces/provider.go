@@ -7,7 +7,28 @@ package interfaces
 import (
 	"fmt"
 	"sync"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+var (
+	secretsLoggerMu sync.RWMutex
+	secretsLogger   logging.Logger = logging.NewNoopLogger()
+)
+
+// SetSecretsLogger sets the logger used by the secrets provider registry for registration messages.
+// Safe to call concurrently with RegisterSecretProvider.
+func SetSecretsLogger(l logging.Logger) {
+	secretsLoggerMu.Lock()
+	defer secretsLoggerMu.Unlock()
+	secretsLogger = l
+}
+
+func getSecretsLogger() logging.Logger {
+	secretsLoggerMu.RLock()
+	defer secretsLoggerMu.RUnlock()
+	return secretsLogger
+}
 
 // SecretProvider defines the interface that all secrets backends must implement
 // Providers can implement SOPS (git-based), Vault, Azure KeyVault, AWS Secrets Manager, etc.
@@ -42,8 +63,7 @@ type providerRegistry struct {
 func RegisterSecretProvider(provider SecretProvider) {
 	if err := validateProvider(provider); err != nil {
 		// Log the error but don't panic - allows system to start with other providers
-		// In production, this would use the configured logger
-		fmt.Printf("Warning: Failed to register secrets provider '%s': %v\n", provider.Name(), err)
+		getSecretsLogger().Warn(fmt.Sprintf("Failed to register secrets provider '%s': %v", provider.Name(), err))
 		return
 	}
 
@@ -52,13 +72,13 @@ func RegisterSecretProvider(provider SecretProvider) {
 
 	// Check for duplicate registration
 	if existing, exists := globalRegistry.providers[provider.Name()]; exists {
-		fmt.Printf("Warning: Overwriting existing secrets provider '%s' (version %s) with version %s\n",
-			provider.Name(), existing.GetVersion(), provider.GetVersion())
+		getSecretsLogger().Warn(fmt.Sprintf("Overwriting existing secrets provider '%s' (version %s) with version %s",
+			provider.Name(), existing.GetVersion(), provider.GetVersion()))
 	}
 
 	globalRegistry.providers[provider.Name()] = provider
-	fmt.Printf("Registered secrets provider: %s v%s - %s\n",
-		provider.Name(), provider.GetVersion(), provider.Description())
+	getSecretsLogger().Info(fmt.Sprintf("Registered secrets provider: %s v%s", provider.Name(), provider.GetVersion()),
+		"description", provider.Description())
 }
 
 // validateProvider ensures a provider implements all required interfaces correctly
@@ -83,7 +103,7 @@ func validateProvider(provider SecretProvider) error {
 	// Test provider availability (non-blocking)
 	if available, err := provider.Available(); !available && err != nil {
 		// Provider not available is OK (might need setup), but returning error suggests implementation issue
-		fmt.Printf("Note: Provider '%s' reports as unavailable: %v\n", provider.Name(), err)
+		getSecretsLogger().Info(fmt.Sprintf("Note: Provider '%s' reports as unavailable: %v", provider.Name(), err))
 	}
 
 	capabilities := provider.GetCapabilities()
@@ -119,8 +139,8 @@ func RegisterSecretProviderWithValidation(provider SecretProvider, testConfig ma
 	defer globalRegistry.mutex.Unlock()
 
 	globalRegistry.providers[provider.Name()] = provider
-	fmt.Printf("Successfully registered and validated secrets provider: %s v%s\n",
-		provider.Name(), provider.GetVersion())
+	getSecretsLogger().Info(fmt.Sprintf("Successfully registered and validated secrets provider: %s v%s",
+		provider.Name(), provider.GetVersion()))
 
 	return nil
 }

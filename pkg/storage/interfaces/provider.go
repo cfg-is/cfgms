@@ -11,9 +11,29 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
+
+var (
+	registryLoggerMu sync.RWMutex
+	registryLogger   logging.Logger = logging.NewNoopLogger()
+)
+
+// SetStorageLogger sets the logger used by the storage provider registry for registration messages.
+// Safe to call concurrently with RegisterStorageProvider.
+func SetStorageLogger(l logging.Logger) {
+	registryLoggerMu.Lock()
+	defer registryLoggerMu.Unlock()
+	registryLogger = l
+}
+
+func getRegistryLogger() logging.Logger {
+	registryLoggerMu.RLock()
+	defer registryLoggerMu.RUnlock()
+	return registryLogger
+}
 
 // BusinessStoreBundle groups all business-data stores that a single-connection
 // provider can return from one shared database handle. Used by BusinessStoreOpener.
@@ -77,7 +97,7 @@ type providerRegistry struct {
 func RegisterStorageProvider(provider StorageProvider) {
 	if err := validateProvider(provider); err != nil {
 		// Log the error but don't panic - allows system to start with other providers
-		fmt.Printf("Warning: Failed to register storage provider '%s': %v\n", provider.Name(), err)
+		getRegistryLogger().Warn(fmt.Sprintf("Failed to register storage provider '%s': %v", provider.Name(), err))
 		return
 	}
 
@@ -85,13 +105,13 @@ func RegisterStorageProvider(provider StorageProvider) {
 	defer globalRegistry.mutex.Unlock()
 
 	if existing, exists := globalRegistry.providers[provider.Name()]; exists {
-		fmt.Printf("Warning: Overwriting existing storage provider '%s' (version %s) with version %s\n",
-			provider.Name(), existing.GetVersion(), provider.GetVersion())
+		getRegistryLogger().Warn(fmt.Sprintf("Overwriting existing storage provider '%s' (version %s) with version %s",
+			provider.Name(), existing.GetVersion(), provider.GetVersion()))
 	}
 
 	globalRegistry.providers[provider.Name()] = provider
-	fmt.Printf("Registered storage provider: %s v%s - %s\n",
-		provider.Name(), provider.GetVersion(), provider.Description())
+	getRegistryLogger().Info(fmt.Sprintf("Registered storage provider: %s v%s", provider.Name(), provider.GetVersion()),
+		"description", provider.Description())
 }
 
 // validateProvider ensures a provider implements all required interfaces correctly.
@@ -113,7 +133,7 @@ func validateProvider(provider StorageProvider) error {
 	}
 
 	if available, err := provider.Available(); !available && err != nil {
-		fmt.Printf("Note: Provider '%s' reports as unavailable: %v\n", provider.Name(), err)
+		getRegistryLogger().Info(fmt.Sprintf("Note: Provider '%s' reports as unavailable: %v", provider.Name(), err))
 	}
 
 	capabilities := provider.GetCapabilities()
@@ -177,8 +197,8 @@ func RegisterStorageProviderWithValidation(provider StorageProvider, testConfig 
 	defer globalRegistry.mutex.Unlock()
 
 	globalRegistry.providers[provider.Name()] = provider
-	fmt.Printf("Successfully registered and validated storage provider: %s v%s\n",
-		provider.Name(), provider.GetVersion())
+	getRegistryLogger().Info(fmt.Sprintf("Successfully registered and validated storage provider: %s v%s",
+		provider.Name(), provider.GetVersion()))
 
 	return nil
 }
