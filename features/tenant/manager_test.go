@@ -14,7 +14,6 @@ import (
 	cfgmstesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// mockStore implements Store interface for testing
 // newTestTenantManager creates a Manager backed by real SQLite+flatfile storage.
 func newTestTenantManager(t *testing.T) *Manager {
 	t.Helper()
