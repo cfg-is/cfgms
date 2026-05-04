@@ -33,32 +33,13 @@ func restartServerAndRepoint(t *testing.T, client *Provider, tc *testCA, reg reg
 		"registry":   reg,
 	}))
 	require.NoError(t, server.Start(context.Background()))
-	t.Cleanup(func() { forceStopServer(server) })
+	t.Cleanup(server.ForceStop)
 
 	// Point the client's reconnection loop at the new server address.
-	// Use sendMu because dialAndOpenStream reads addr under sendMu.
-	client.sendMu.Lock()
-	client.addr = server.listener.Addr().String()
-	client.sendMu.Unlock()
+	// SetAddrUnderSendMu holds sendMu because dialAndOpenStream reads addr under sendMu.
+	SetAddrUnderSendMu(client, server.ListenAddr())
 
 	return server
-}
-
-// forceStopServer forcefully kills a gRPC server without waiting for streams to finish.
-// GracefulStop() hangs on long-lived ControlChannel streams; this is needed for
-// reconnection tests that simulate server crashes.
-//
-// gRPC is stopped before the listener so that Stop() can send stream RST frames to
-// clients over the still-open QUIC connections. Closing the listener first tears down
-// the underlying UDP socket, preventing gRPC from notifying clients and causing them
-// to wait for the QUIC idle timeout (~90 s) instead of detecting the failure immediately.
-func forceStopServer(s *Provider) {
-	if s.grpcServer != nil {
-		s.grpcServer.Stop()
-	}
-	if s.listener != nil {
-		_ = s.listener.Close()
-	}
 }
 
 func TestMain(m *testing.M) {
@@ -94,7 +75,7 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	}))
 	require.NoError(t, server.Start(context.Background()))
 
-	listenAddr := server.listener.Addr().String()
+	listenAddr := server.ListenAddr()
 
 	// Set up command handler before connecting — handler survives reconnection
 	received := make(chan *types.SignedCommand, 1)
@@ -120,11 +101,11 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 	assert.True(t, client.IsConnected())
 
-	forceStopServer(server)
+	server.ForceStop()
 
 	// Client should detect disconnection
 	require.Eventually(t, func() bool {
-		return client.getState() != StateConnected
+		return GetState(client) != StateConnected
 	}, 5*time.Second, 10*time.Millisecond, "client should detect disconnection")
 
 	// Restart server (new port, client addr updated automatically)
@@ -132,7 +113,7 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 
 	// Client should reconnect automatically
 	require.Eventually(t, func() bool {
-		return client.getState() == StateConnected
+		return GetState(client) == StateConnected
 	}, 30*time.Second, 100*time.Millisecond, "client should reconnect")
 
 	// Steward should be back in the registry
@@ -170,7 +151,7 @@ func TestStopDuringReconnection(t *testing.T) {
 		"registry":   reg,
 	}))
 	require.NoError(t, server.Start(context.Background()))
-	listenAddr := server.listener.Addr().String()
+	listenAddr := server.ListenAddr()
 
 	client := New(ModeClient)
 	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
@@ -183,17 +164,17 @@ func TestStopDuringReconnection(t *testing.T) {
 
 	// Wait for connection
 	require.Eventually(t, func() bool {
-		return client.getState() == StateConnected
+		return GetState(client) == StateConnected
 	}, 5*time.Second, 10*time.Millisecond)
 
 	// Kill server to trigger reconnection
-	forceStopServer(server)
+	server.ForceStop()
 
 	// Wait for client to enter reconnecting state. Use 15s to accommodate
 	// loaded CI machines where goroutine scheduling under the race detector
 	// can delay QUIC disconnect propagation beyond the default 5s budget.
 	require.Eventually(t, func() bool {
-		s := client.getState()
+		s := GetState(client)
 		return s == StateReconnecting || s == StateDisconnected
 	}, 15*time.Second, 10*time.Millisecond)
 
@@ -211,7 +192,7 @@ func TestStopDuringReconnection(t *testing.T) {
 		t.Fatal("client.Stop() hung during reconnection")
 	}
 
-	assert.Equal(t, StateDisconnected, client.getState())
+	assert.Equal(t, StateDisconnected, GetState(client))
 }
 
 func TestSendsDuringDisconnectionReturnErrors(t *testing.T) {
@@ -226,7 +207,7 @@ func TestSendsDuringDisconnectionReturnErrors(t *testing.T) {
 		"registry":   reg,
 	}))
 	require.NoError(t, server.Start(context.Background()))
-	listenAddr := server.listener.Addr().String()
+	listenAddr := server.ListenAddr()
 
 	client := New(ModeClient)
 	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
@@ -239,15 +220,15 @@ func TestSendsDuringDisconnectionReturnErrors(t *testing.T) {
 	t.Cleanup(func() { _ = client.Stop(context.Background()) })
 
 	require.Eventually(t, func() bool {
-		return client.getState() == StateConnected
+		return GetState(client) == StateConnected
 	}, 5*time.Second, 10*time.Millisecond)
 
 	// Kill server
-	forceStopServer(server)
+	server.ForceStop()
 
 	// Wait for disconnection
 	require.Eventually(t, func() bool {
-		return client.getState() != StateConnected
+		return GetState(client) != StateConnected
 	}, 5*time.Second, 10*time.Millisecond)
 
 	// All send methods should return errors (state may be disconnected or reconnecting)
@@ -270,7 +251,9 @@ func TestSendsDuringDisconnectionReturnErrors(t *testing.T) {
 	require.Error(t, err)
 
 	// DeliveryFailures should be incremented
-	assert.True(t, client.deliveryFailures.Load() >= 3)
+	clientStats, err := client.GetStats(context.Background())
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, clientStats.DeliveryFailures, int64(3))
 }
 
 func TestOnStateChangeCallback(t *testing.T) {
@@ -288,7 +271,7 @@ func TestOnStateChangeCallback(t *testing.T) {
 		"registry":   reg,
 	}))
 	require.NoError(t, server.Start(context.Background()))
-	listenAddr := server.listener.Addr().String()
+	listenAddr := server.ListenAddr()
 
 	client := New(ModeClient)
 	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
@@ -337,7 +320,7 @@ func TestReconnectStatsTracking(t *testing.T) {
 		"registry":   reg,
 	}))
 	require.NoError(t, server.Start(context.Background()))
-	listenAddr := server.listener.Addr().String()
+	listenAddr := server.ListenAddr()
 
 	client := New(ModeClient)
 	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
@@ -350,15 +333,24 @@ func TestReconnectStatsTracking(t *testing.T) {
 	t.Cleanup(func() { _ = client.Stop(context.Background()) })
 
 	require.Eventually(t, func() bool {
-		return client.getState() == StateConnected
+		return GetState(client) == StateConnected
 	}, 5*time.Second, 10*time.Millisecond)
 
 	// Kill server to trigger reconnection attempts
-	forceStopServer(server)
+	server.ForceStop()
 
 	// Wait for at least one reconnect attempt
 	require.Eventually(t, func() bool {
-		return client.reconnectAttempts.Load() >= 1
+		stats, err := client.GetStats(context.Background())
+		if err != nil {
+			return false
+		}
+		v, ok := stats.ProviderMetrics["reconnect_attempts"]
+		if !ok {
+			return false
+		}
+		attempts, ok := v.(int64)
+		return ok && attempts >= 1
 	}, 10*time.Second, 50*time.Millisecond)
 
 	// Verify stats include reconnect info
@@ -374,7 +366,7 @@ func TestReconnectStatsTracking(t *testing.T) {
 
 	// Wait for reconnection
 	require.Eventually(t, func() bool {
-		return client.getState() == StateConnected
+		return GetState(client) == StateConnected
 	}, 30*time.Second, 100*time.Millisecond)
 }
 
@@ -396,7 +388,7 @@ func TestRapidDisconnectReconnectCycles(t *testing.T) {
 		"registry":   reg,
 	}))
 	require.NoError(t, server.Start(context.Background()))
-	listenAddr = server.listener.Addr().String()
+	listenAddr = server.ListenAddr()
 
 	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
 		"mode":       "client",
@@ -408,15 +400,15 @@ func TestRapidDisconnectReconnectCycles(t *testing.T) {
 	t.Cleanup(func() { _ = client.Stop(context.Background()) })
 
 	require.Eventually(t, func() bool {
-		return client.getState() == StateConnected
+		return GetState(client) == StateConnected
 	}, 5*time.Second, 10*time.Millisecond)
 
 	// Rapid kill/restart cycles
 	for i := 0; i < 3; i++ {
-		forceStopServer(server)
+		server.ForceStop()
 
 		require.Eventually(t, func() bool {
-			return client.getState() != StateConnected
+			return GetState(client) != StateConnected
 		}, 5*time.Second, 10*time.Millisecond)
 
 		// Restart server (new port, client addr updated automatically)
@@ -424,7 +416,7 @@ func TestRapidDisconnectReconnectCycles(t *testing.T) {
 		serverCount.Add(1)
 
 		require.Eventually(t, func() bool {
-			return client.getState() == StateConnected
+			return GetState(client) == StateConnected
 		}, 30*time.Second, 100*time.Millisecond, "should reconnect after cycle %d", i)
 	}
 

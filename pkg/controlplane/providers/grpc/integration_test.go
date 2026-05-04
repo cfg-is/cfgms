@@ -46,10 +46,10 @@ func newTestEnv(t *testing.T, stewardID string) *testEnv {
 	// Start server on ephemeral port
 	err = server.Start(context.Background())
 	require.NoError(t, err)
-	t.Cleanup(func() { forceStopServer(server) })
+	t.Cleanup(server.ForceStop)
 
 	// Get the actual listen address
-	listenAddr := server.listener.Addr().String()
+	listenAddr := server.ListenAddr()
 
 	client := New(ModeClient)
 	err = client.Initialize(context.Background(), map[string]interface{}{
@@ -303,9 +303,9 @@ func TestFanOutCommand(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, server.Start(context.Background()))
-	t.Cleanup(func() { forceStopServer(server) })
+	t.Cleanup(server.ForceStop)
 
-	listenAddr := server.listener.Addr().String()
+	listenAddr := server.ListenAddr()
 
 	// Connect two stewards
 	received := make(map[string]chan *types.SignedCommand)
@@ -394,9 +394,9 @@ func TestDisconnectCleansUpRegistry(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, server.Start(context.Background()))
-	t.Cleanup(func() { forceStopServer(server) })
+	t.Cleanup(server.ForceStop)
 
-	listenAddr := server.listener.Addr().String()
+	listenAddr := server.ListenAddr()
 
 	client := New(ModeClient)
 	err = client.Initialize(context.Background(), map[string]interface{}{
@@ -449,9 +449,9 @@ func TestMultipleConcurrentStewards(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, server.Start(context.Background()))
-	t.Cleanup(func() { forceStopServer(server) })
+	t.Cleanup(server.ForceStop)
 
-	listenAddr := server.listener.Addr().String()
+	listenAddr := server.ListenAddr()
 
 	const numStewards = 5
 
@@ -529,9 +529,17 @@ func TestStatsTracking(t *testing.T) {
 
 	// Poll until all stats are populated (async dispatch via goroutines)
 	require.Eventually(t, func() bool {
-		return env.server.eventsReceived.Load() >= 1 &&
-			env.server.heartbeatsReceived.Load() >= 1 &&
-			env.client.commandsReceived.Load() >= 1
+		sStats, err := env.server.GetStats(context.Background())
+		if err != nil {
+			return false
+		}
+		cStats, err := env.client.GetStats(context.Background())
+		if err != nil {
+			return false
+		}
+		return sStats.EventsReceived >= 1 &&
+			sStats.HeartbeatsReceived >= 1 &&
+			cStats.CommandsReceived >= 1
 	}, 5*time.Second, 10*time.Millisecond)
 
 	// Check server stats
@@ -555,9 +563,12 @@ func TestStatsTracking(t *testing.T) {
 func TestModeValidation(t *testing.T) {
 	// Server-only methods fail in client mode
 	client := New(ModeClient)
-	client.stewardID = "test"
-	client.addr = "localhost:50051"
-	client.tlsConfig = &tls.Config{}
+	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "client",
+		"addr":       "localhost:50051",
+		"tls_config": &tls.Config{MinVersion: tls.VersionTLS13},
+		"steward_id": "test",
+	}))
 
 	err := client.SendCommand(context.Background(), &types.SignedCommand{})
 	assert.Error(t, err)
@@ -574,8 +585,11 @@ func TestModeValidation(t *testing.T) {
 
 	// Client-only methods fail in server mode
 	server := New(ModeServer)
-	server.addr = ":50051"
-	server.tlsConfig = &tls.Config{}
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       ":50051",
+		"tls_config": &tls.Config{MinVersion: tls.VersionTLS13},
+	}))
 
 	err = server.SubscribeCommands(context.Background(), "x", nil)
 	assert.Error(t, err)
