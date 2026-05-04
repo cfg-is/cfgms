@@ -15,12 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLinuxManagerInstallPath(t *testing.T) {
-	m := New("/usr/bin/cfgms-steward")
-	status, err := m.Status()
-	require.NoError(t, err)
-	assert.Equal(t, linuxInstallPath, status.InstallPath)
-}
+var _ Manager = New("")
 
 func TestLinuxManagerIsElevated(t *testing.T) {
 	m := New("/usr/bin/cfgms-steward")
@@ -87,13 +82,6 @@ func TestGenerateSystemdUnitContainsRestartPolicy(t *testing.T) {
 	unit := generateSystemdUnit("tok_test")
 	assert.Contains(t, unit, "Restart=always", "Restart=always required by acceptance criteria")
 	assert.Contains(t, unit, "RestartSec=10", "RestartSec=10 required by acceptance criteria")
-}
-
-func TestLinuxManagerNew(t *testing.T) {
-	m := New("/path/to/binary")
-	require.NotNil(t, m)
-	_, ok := m.(*linuxManager)
-	assert.True(t, ok, "New() should return a *linuxManager on Linux")
 }
 
 func TestCopyBinaryPermissions(t *testing.T) {

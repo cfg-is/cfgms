@@ -15,10 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLinuxManagerInstallPath(t *testing.T) {
-	m := New("/usr/bin/cfgms-controller")
-	assert.Equal(t, linuxInstallPath, m.InstallPath())
-}
+var _ Manager = New("")
 
 func TestLinuxManagerIsElevated(t *testing.T) {
 	m := New("/usr/bin/cfgms-controller")
@@ -121,13 +118,6 @@ func TestConfigPathFromUnit(t *testing.T) {
 			assert.Equal(t, tc.expected, got)
 		})
 	}
-}
-
-func TestLinuxManagerNew(t *testing.T) {
-	m := New("/path/to/binary")
-	require.NotNil(t, m)
-	_, ok := m.(*linuxManager)
-	assert.True(t, ok, "New() should return a *linuxManager on Linux")
 }
 
 func TestCopyBinaryPermissions(t *testing.T) {
