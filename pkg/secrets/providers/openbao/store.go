@@ -19,7 +19,6 @@ import (
 )
 
 // OpenBaoSecretStore implements interfaces.SecretStore using OpenBao KV v2.
-// It also implements interfaces.LeasedSecret via lease.go.
 type OpenBaoSecretStore struct {
 	client    *openbao.Client
 	mountPath string

@@ -486,8 +486,6 @@ The tests cover:
 - Secret rotation with old-version access
 - Custom metadata update and retrieval
 - `ListSecrets` with prefix filter and tenant isolation
-- Lease semantics: `LeaseSecret` returns `ErrLeaseNotSupported` for static KV v2
-- `RenewLease` / `RevokeLease` error paths for invalid lease IDs
 - Bulk `StoreSecrets` / `GetSecrets`
 - `HealthCheck` and `Close`
 
