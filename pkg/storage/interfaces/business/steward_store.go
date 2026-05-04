@@ -128,9 +128,3 @@ type StewardStore interface {
 	// Close releases any resources held by the store.
 	Close() error
 }
-
-// StewardStoreProvider is an optional extension interface that providers implement
-// when they support StewardStore.
-type StewardStoreProvider interface {
-	CreateStewardStore(config map[string]interface{}) (StewardStore, error)
-}

@@ -65,8 +65,3 @@ type TenantHierarchy struct {
 	Depth    int      `json:"depth" yaml:"depth"`       // Depth in hierarchy (0 = root)
 	Children []string `json:"children" yaml:"children"` // Direct child tenant IDs
 }
-
-// TenantStoreProvider defines how storage providers create tenant stores
-type TenantStoreProvider interface {
-	CreateTenantStore(config map[string]interface{}) (TenantStore, error)
-}

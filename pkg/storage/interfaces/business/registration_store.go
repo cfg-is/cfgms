@@ -109,8 +109,3 @@ type RegistrationTokenFilter struct {
 	SingleUse *bool  `json:"single_use,omitempty"`
 	Used      *bool  `json:"used,omitempty"` // Filter by used/unused status
 }
-
-// RegistrationTokenStoreProvider defines how storage providers create registration token stores
-type RegistrationTokenStoreProvider interface {
-	CreateRegistrationTokenStore(config map[string]interface{}) (RegistrationTokenStore, error)
-}
