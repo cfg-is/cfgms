@@ -449,6 +449,129 @@ test_create_clone_duplicate_pr_gate() {
     rm -rf "$tmp_dir"
 }
 
+# Test check-providers.sh: exit-code behaviour (AC 2 through AC 5)
+test_check_providers() {
+    log_test "Testing check-providers.sh exit-code behaviour..."
+
+    local script
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-providers.sh"
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    # Initialise a minimal git repo so git ls-files works
+    git init "$tmp_dir" >/dev/null 2>&1
+    git -C "$tmp_dir" config user.email "test@test.com"
+    git -C "$tmp_dir" config user.name "Test"
+
+    # --- AC2: clean tree exits 0 -----------------------------------------
+    local output
+    local exit_code
+    exit_code=0
+    output=$(cd "$tmp_dir" && bash "$script" 2>&1) || exit_code=$?
+    if [ "$exit_code" -eq 0 ]; then
+        log_pass "check-providers.sh: Exits 0 on clean tree (AC 2)"
+    else
+        log_fail "check-providers.sh: Should exit 0 on clean tree (exit $exit_code, output: $output)"
+    fi
+    if echo "$output" | grep -q "No storage provider import violations found."; then
+        log_pass "check-providers.sh: Prints clean summary on empty tree (AC 2)"
+    else
+        log_fail "check-providers.sh: Missing clean summary line (output: $output)"
+    fi
+
+    # --- AC3: tracked violation exits 1, output must include file:line -----
+    mkdir -p "$tmp_dir/pkg/somefeature"
+    cat > "$tmp_dir/pkg/somefeature/foo.go" << 'GOEOF'
+package somefeature
+
+import _ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+GOEOF
+    git -C "$tmp_dir" add pkg/somefeature/foo.go >/dev/null 2>&1
+    git -C "$tmp_dir" commit -m "add violation" >/dev/null 2>&1
+
+    exit_code=0
+    output=$(cd "$tmp_dir" && bash "$script" 2>&1) || exit_code=$?
+    if [ "$exit_code" -eq 1 ]; then
+        log_pass "check-providers.sh: Exits 1 when violation found (AC 3)"
+    else
+        log_fail "check-providers.sh: Should exit 1 when violation found (exit $exit_code)"
+    fi
+    # AC 3 requires file:line format, not just filename
+    if echo "$output" | grep -qE "pkg/somefeature/foo.go:[0-9]+:"; then
+        log_pass "check-providers.sh: Reports file:line in violation output (AC 3)"
+    else
+        log_fail "check-providers.sh: Should report file:line format (output: $output)"
+    fi
+
+    # Remove the violation before testing allowed paths
+    git -C "$tmp_dir" rm pkg/somefeature/foo.go >/dev/null 2>&1
+    git -C "$tmp_dir" commit -m "remove violation" >/dev/null 2>&1
+
+    # --- AC4: all 7 allowed paths do NOT trigger violations -----------------
+    # Each path gets its own add/check/remove cycle on a clean base tree.
+    local allowed_paths
+    allowed_paths=(
+        "pkg/storage/providers/myprovider/foo.go"
+        "pkg/testing/foo.go"
+        "test/integration/foo.go"
+        "cmd/controller/main.go"
+        "cmd/cfg/cmd/storage.go"
+        "features/controller/initialization/initialization.go"
+        "features/controller/server/server.go"
+    )
+    local allowed_file
+    for allowed_file in "${allowed_paths[@]}"; do
+        mkdir -p "$tmp_dir/$(dirname "$allowed_file")"
+        printf 'package p\n\nimport _ "github.com/cfgis/cfgms/pkg/storage/providers/git"\n' \
+            > "$tmp_dir/$allowed_file"
+        git -C "$tmp_dir" add "$allowed_file" >/dev/null 2>&1
+        git -C "$tmp_dir" commit -m "add allowed $allowed_file" >/dev/null 2>&1
+
+        exit_code=0
+        output=$(cd "$tmp_dir" && bash "$script" 2>&1) || exit_code=$?
+        if [ "$exit_code" -eq 0 ]; then
+            log_pass "check-providers.sh: Allowed path '$allowed_file' does not trigger (AC 4)"
+        else
+            log_fail "check-providers.sh: Allowed path '$allowed_file' should not trigger (exit $exit_code)"
+        fi
+
+        git -C "$tmp_dir" rm "$allowed_file" >/dev/null 2>&1
+        git -C "$tmp_dir" commit -m "remove $allowed_file" >/dev/null 2>&1
+    done
+
+    # --- AC5: --staged-only scans only staged files -------------------------
+    # Untracked/unstaged violation must be ignored
+    mkdir -p "$tmp_dir/pkg/unstaged"
+    cat > "$tmp_dir/pkg/unstaged/bar.go" << 'GOEOF'
+package unstaged
+
+import _ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+GOEOF
+    # Do NOT git add — file is untracked and unstaged
+
+    exit_code=0
+    output=$(cd "$tmp_dir" && bash "$script" --staged-only 2>&1) || exit_code=$?
+    if [ "$exit_code" -eq 0 ]; then
+        log_pass "check-providers.sh: --staged-only ignores unstaged violation (AC 5)"
+    else
+        log_fail "check-providers.sh: --staged-only should ignore unstaged file (exit $exit_code, output: $output)"
+    fi
+
+    # Stage the violation and verify --staged-only now catches it
+    git -C "$tmp_dir" add pkg/unstaged/bar.go >/dev/null 2>&1
+
+    exit_code=0
+    output=$(cd "$tmp_dir" && bash "$script" --staged-only 2>&1) || exit_code=$?
+    if [ "$exit_code" -eq 1 ]; then
+        log_pass "check-providers.sh: --staged-only detects staged violation (AC 5)"
+    else
+        log_fail "check-providers.sh: --staged-only should detect staged violation (exit $exit_code)"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
 # Main execution
 echo "🔍 Script Validation Test Suite"
 echo "================================"
@@ -476,6 +599,8 @@ echo ""
 test_create_clone_deletion_failure
 echo ""
 test_create_clone_duplicate_pr_gate
+echo ""
+test_check_providers
 echo ""
 echo ""
 echo "📊 Test Summary"
