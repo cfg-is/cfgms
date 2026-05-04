@@ -9,6 +9,7 @@ package logging
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"go.opentelemetry.io/otel/trace"
@@ -49,19 +50,19 @@ func (t *TelemetryBridge) GetTraceInfoFromContext(ctx context.Context) (string, 
 
 // Initialize sets up the telemetry bridge to replace placeholder functions.
 // This should be called during application initialization after telemetry setup.
+// It is safe to call concurrently and from multiple goroutines.
 func (t *TelemetryBridge) Initialize() {
-	// Replace the placeholder functions with actual implementations
-	// This is done to avoid circular dependencies while maintaining functionality
-	globalTelemetryBridge = t
+	globalTelemetryBridge.Store(t)
 }
 
-// Global bridge instance for function replacement
-var globalTelemetryBridge *TelemetryBridge
+// globalTelemetryBridge is the atomic bridge instance. Atomic access ensures
+// Initialize() and the extractor functions are race-free when called concurrently.
+var globalTelemetryBridge atomic.Pointer[TelemetryBridge]
 
 // UpdatedExtractCorrelationID is the enhanced correlation ID extractor.
 func UpdatedExtractCorrelationID(ctx context.Context) string {
-	if globalTelemetryBridge != nil {
-		return globalTelemetryBridge.GetCorrelationIDFromContext(ctx)
+	if b := globalTelemetryBridge.Load(); b != nil {
+		return b.GetCorrelationIDFromContext(ctx)
 	}
 
 	// Direct read from the canonical key — no bridge required.
@@ -73,8 +74,8 @@ func UpdatedExtractCorrelationID(ctx context.Context) string {
 
 // UpdatedExtractTraceInfo is the enhanced trace info extractor.
 func UpdatedExtractTraceInfo(ctx context.Context) (string, string) {
-	if globalTelemetryBridge != nil {
-		return globalTelemetryBridge.GetTraceInfoFromContext(ctx)
+	if b := globalTelemetryBridge.Load(); b != nil {
+		return b.GetTraceInfoFromContext(ctx)
 	}
 
 	// Fallback: no trace information available

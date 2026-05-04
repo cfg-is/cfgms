@@ -146,6 +146,7 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
 		return fmt.Errorf("failed to initialize global logging: %w", err)
 	}
+	(&logging.TelemetryBridge{}).Initialize()
 
 	logging.InitializeGlobalLoggerFactory("steward", "main")
 	logger := logging.ForComponent("steward")

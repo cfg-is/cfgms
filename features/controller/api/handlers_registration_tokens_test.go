@@ -102,7 +102,6 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 		rbacManager,
 		nil, // No system monitor for basic tests
 		nil, // No platform monitor for basic tests
-		nil, // No tracer for basic tests
 		nil, // No HA manager for basic tests
 		tokenStore,
 		"",       // No signer cert serial for basic tests
