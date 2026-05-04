@@ -19,7 +19,7 @@ import (
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // requireGit skips the test if the git binary is not found in PATH.
@@ -99,13 +99,12 @@ func newTestRepo(t *testing.T, initialFiles map[string]string) (bareDir, workDir
 	return bare, work, push
 }
 
-// newTestSyncer creates a Syncer wired to a FlatFileConfigStore for testing.
-func newTestSyncer(t *testing.T, opts ...gitsync.Option) (*gitsync.Syncer, *flatfile.FlatFileConfigStore, *gitsync.BindingStore) {
+// newTestSyncer creates a Syncer wired to a real ConfigStore for testing.
+func newTestSyncer(t *testing.T, opts ...gitsync.Option) (*gitsync.Syncer, cfgconfig.ConfigStore, *gitsync.BindingStore) {
 	t.Helper()
 	root := t.TempDir()
 
-	store, err := flatfile.NewFlatFileConfigStore(filepath.Join(root, "configs"))
-	require.NoError(t, err)
+	store := pkgtesting.SetupTestStorage(t).GetConfigStore()
 
 	bindings, err := gitsync.NewBindingStore(root)
 	require.NoError(t, err)

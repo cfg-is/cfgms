@@ -17,8 +17,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	storageif "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // workflowEngineAdapter implements WorkflowTrigger using a real *workflow.Engine and a real
@@ -84,7 +83,9 @@ func newRealWorkflowTrigger(tb testing.TB) WorkflowTrigger {
 // TestNewControllerTriggerManager_ReturnsWiredManager verifies that the factory creates a
 // manager with all three components (scheduler, webhookHandler, siemIntegration) non-nil.
 func TestNewControllerTriggerManager_ReturnsWiredManager(t *testing.T) {
-	storage := &flatfile.FlatFileProvider{}
+	pkgtesting.SetupTestStorage(t)
+	storage, err := storageif.GetStorageProvider("flatfile")
+	require.NoError(t, err)
 	wt := newRealWorkflowTrigger(t)
 
 	manager := NewControllerTriggerManager(storage, wt)
@@ -100,7 +101,9 @@ func TestNewControllerTriggerManager_ReturnsWiredManager(t *testing.T) {
 // TestNewControllerTriggerManager_ComponentsReferenceManager verifies that the two-phase
 // circular-dependency resolution wires each component back to the parent manager.
 func TestNewControllerTriggerManager_ComponentsReferenceManager(t *testing.T) {
-	storage := &flatfile.FlatFileProvider{}
+	pkgtesting.SetupTestStorage(t)
+	storage, err := storageif.GetStorageProvider("flatfile")
+	require.NoError(t, err)
 	wt := newRealWorkflowTrigger(t)
 
 	manager := NewControllerTriggerManager(storage, wt)
@@ -122,7 +125,9 @@ func TestNewControllerTriggerManager_ComponentsReferenceManager(t *testing.T) {
 // TestNewControllerTriggerManager_StartStopLifecycle verifies that the manager created by
 // the factory starts and stops cleanly using the real component implementations.
 func TestNewControllerTriggerManager_StartStopLifecycle(t *testing.T) {
-	storage := &flatfile.FlatFileProvider{}
+	pkgtesting.SetupTestStorage(t)
+	storage, err := storageif.GetStorageProvider("flatfile")
+	require.NoError(t, err)
 	wt := newRealWorkflowTrigger(t)
 
 	manager := NewControllerTriggerManager(storage, wt)
@@ -130,7 +135,7 @@ func TestNewControllerTriggerManager_StartStopLifecycle(t *testing.T) {
 
 	ctx := context.Background()
 
-	err := manager.Start(ctx)
+	err = manager.Start(ctx)
 	assert.NoError(t, err, "Start must succeed with real components")
 	assert.True(t, manager.running, "manager must be running after Start")
 
