@@ -77,14 +77,23 @@ case "$cmd" in
 
   enqueue)
     pr="${1:?PR number required}"
-    gh pr merge "$pr" --repo "$REPO" --squash >/dev/null 2>&1 || {
-      # "already queued" is success for our purposes
-      gh pr merge "$pr" --repo "$REPO" --squash 2>&1 | grep -qi "already queued" && {
-        echo "ALREADY_QUEUED:$pr"; exit 0;
-      }
-      echo "ENQUEUE_FAILED:$pr" >&2; exit 1;
-    }
-    echo "ENQUEUED:$pr"
+    # Retry up to 3 times with 5s backoff; transient enqueue rejections happen
+    # when GitHub's gate sees CI re-runs, stale branch-protection cache, or
+    # queue saturation. Then verify auto-merge is actually armed before
+    # declaring success — `gh pr merge --squash` exiting 0 is necessary but
+    # not sufficient (a non-zero exit with "already queued" is also success).
+    for attempt in 1 2 3; do
+      out=$(gh pr merge "$pr" --repo "$REPO" --squash 2>&1) && break
+      echo "$out" | grep -qi "already queued" && { echo "ALREADY_QUEUED:$pr"; exit 0; }
+      [ "$attempt" -lt 3 ] && sleep 5
+    done
+    # Verify-after: auto-merge must be armed for the queue to actually pick this up.
+    if gh pr view "$pr" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest != null' 2>/dev/null | grep -q true; then
+      echo "ENQUEUED:$pr"
+    else
+      echo "ENQUEUE_FAILED:$pr (auto-merge not armed after 3 attempts)" >&2
+      exit 1
+    fi
     ;;
 
   dequeue)

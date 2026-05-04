@@ -130,13 +130,17 @@ Classify each finding by severity:
 Enqueue the PR for merge and clean up:
 
 ```bash
-# Enqueue for merge — the merge queue handles rebase + re-validation automatically
-gh pr merge <PR_NUM> --repo cfg-is/cfgms --squash
+# Enqueue for merge — uses retry + verify-after wrapping around `gh pr merge --squash`
+# so a transient GitHub enqueue rejection (CI re-run race, branch-protection cache
+# lag) doesn't silently drop the PR. The merge queue handles rebase + re-validation.
+./.claude/scripts/po-act.sh enqueue <PR_NUM>
 
 # Extract story number from branch for cleanup
 # Branch pattern: feature/story-<NUM>-*
 ./.claude/scripts/agent-dispatch.sh cleanup-issue <STORY_NUM>
 ```
+
+If `po-act.sh enqueue` exits non-zero (`ENQUEUE_FAILED`), do NOT proceed to cleanup. Surface the failure: post a one-line comment on the PR noting the enqueue gate refused, and leave the dev agent's container/worktree intact so the next cron cycle's reconciliation step can pick it up. Common causes the script's retry can't recover from: required reviewer not yet assigned, CODEOWNERS gate, or a CI check newly going red between PASS verdict and enqueue call.
 
 If the story had `pipeline:fix`, remove it:
 ```bash
