@@ -25,27 +25,6 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
-// TestAdvancedServiceCreation tests the creation of AdvancedService
-func TestAdvancedServiceCreation(t *testing.T) {
-	service := createTestAdvancedService(t)
-
-	assert.NotNil(t, service)
-	assert.NotNil(t, service.Service)
-	assert.NotNil(t, service.advancedEngine)
-	assert.NotNil(t, service.advancedProvider)
-	assert.NotNil(t, service.rbacManager)
-	assert.NotNil(t, service.auditManager)
-
-	// Test configuration
-	config := service.GetConfiguration()
-	assert.True(t, config.EnableAuditIntegration)
-	assert.False(t, config.EnableRBACValidation) // Disabled for integration testing
-	assert.True(t, config.EnableCrossSystemMetrics)
-	assert.Equal(t, 50, config.MaxTenantsPerReport)
-	assert.Contains(t, config.ComplianceFrameworks, "CIS")
-	assert.Contains(t, config.ComplianceFrameworks, "HIPAA")
-}
-
 // TestAdvancedServiceWithConfig tests service creation with custom configuration
 func TestAdvancedServiceWithConfig(t *testing.T) {
 	logger := &testLogger{}

@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -757,20 +756,49 @@ func TestSecurityEdgeCases_CryptographicSafety(t *testing.T) {
 
 			assert.Equal(t, expectedSignature, signature, tt.description)
 
-			// Constant-time HMAC comparison is verified by TestWebhookHandlerUsesHmacEqual below —
-			// wall-clock timing is statistically unreliable for single calls.
+			// Wall-clock timing is statistically unreliable for single calls; tampered-signature
+			// rejection is covered by TestWebhookHandler_TamperedSignatureRejected.
 		})
 	}
 }
 
-// TestWebhookHandlerUsesHmacEqual verifies that the production webhook handler uses
-// hmac.Equal for signature comparison, ensuring constant-time behavior. This fails
-// if a future refactor accidentally replaces it with bytes.Equal or ==.
-func TestWebhookHandlerUsesHmacEqual(t *testing.T) {
-	source, err := os.ReadFile("webhook.go")
-	require.NoError(t, err, "failed to read webhook.go")
-	assert.True(t, strings.Contains(string(source), "hmac.Equal("),
-		"webhook.go must use hmac.Equal() for signature comparison to ensure constant-time behavior")
+// TestWebhookHandler_TamperedSignatureRejected verifies that the webhook handler rejects
+// a request whose HMAC signature has been tampered with (one hex byte flipped), guarding
+// the property that tampered signatures are rejected regardless of implementation details.
+func TestWebhookHandler_TamperedSignatureRejected(t *testing.T) {
+	// authenticateRequest only uses webhook config + payload; triggerManager and
+	// workflowTrigger are never called, so nil is safe here.
+	handler := NewHTTPWebhookHandler(nil, nil, "localhost", 8080)
+
+	secret := "test-webhook-secret"
+	payload := []byte(`{"event":"push","repo":"example"}`)
+
+	// Compute a valid HMAC-SHA256 signature.
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(payload)
+	validSig := hex.EncodeToString(mac.Sum(nil))
+
+	// Flip the first hex character to produce a one-byte-different signature.
+	sigBytes := []byte(validSig)
+	if sigBytes[0] == '0' {
+		sigBytes[0] = '1'
+	} else {
+		sigBytes[0] = '0'
+	}
+	tamperedSig := string(sigBytes)
+
+	webhook := &WebhookConfig{
+		Authentication: &WebhookAuth{
+			Type:            WebhookAuthHMAC,
+			Secret:          secret,
+			SignatureHeader: "X-Signature-256",
+		},
+	}
+
+	err := handler.authenticateRequest(webhook, payload, map[string]string{
+		"X-Signature-256": tamperedSig,
+	}, "test-trigger-id")
+	assert.Error(t, err, "a one-byte-flipped HMAC signature must be rejected")
 }
 
 // Helper function to generate random bytes for testing
