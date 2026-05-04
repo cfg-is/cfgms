@@ -7,16 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage providers to register them
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // TestNewManagerWithStorage tests the new constructor that accepts storage interfaces

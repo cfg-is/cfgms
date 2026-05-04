@@ -14,9 +14,6 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestValidateSensitiveOperation tests validation of sensitive operations

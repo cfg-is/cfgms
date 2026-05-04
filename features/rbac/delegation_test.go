@@ -14,9 +14,6 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // newTestDelegationSetup constructs a DelegationManager backed by real storage.
