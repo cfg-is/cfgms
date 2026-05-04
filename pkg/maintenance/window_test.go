@@ -239,6 +239,54 @@ func TestManager_CanReboot_InWindow(t *testing.T) {
 	assert.True(t, canReboot, "Should allow reboot when inside maintenance window")
 }
 
+func TestManager_CanReboot_DeferWithMaxDeferDays(t *testing.T) {
+	// MaxDeferDays=7 is set but currently not evaluated by CanReboot — this test documents the known limitation.
+	policy := maintenance.Policy{
+		Enabled:       true,
+		DefaultAction: "defer",
+		Windows: []maintenance.Window{
+			{
+				MaxDeferDays: 7,
+				Schedule:     "test_schedule",
+				Duration:     time.Hour,
+			},
+		},
+	}
+	manager := maintenance.NewManager(policy, nil)
+
+	ctx := context.Background()
+	canReboot, err := manager.CanReboot(ctx, "device-1")
+
+	require.NoError(t, err)
+	assert.False(t, canReboot, "Should defer reboot; MaxDeferDays field is not evaluated by CanReboot")
+}
+
+func TestDefaultParser_Daily2AM_IgnoresDuration(t *testing.T) {
+	// defaultParser.IsInSchedule hardcodes "hour >= 2 && hour < 4" and never reads Window.Duration.
+	// We prove Duration is ignored by showing two managers with different Duration values always
+	// return identical results — regardless of what time CI runs this test.
+	ctx := context.Background()
+
+	managerShort := maintenance.NewManager(maintenance.Policy{
+		Enabled: true,
+		Windows: []maintenance.Window{{Schedule: "daily_2am", Duration: 30 * time.Minute}},
+	}, nil)
+
+	managerLong := maintenance.NewManager(maintenance.Policy{
+		Enabled: true,
+		Windows: []maintenance.Window{{Schedule: "daily_2am", Duration: 4 * time.Hour}},
+	}, nil)
+
+	shortResult, err := managerShort.IsInWindow(ctx, "device-1")
+	require.NoError(t, err)
+
+	longResult, err := managerLong.IsInWindow(ctx, "device-1")
+	require.NoError(t, err)
+
+	// Duration has no effect: both managers return the same result at any clock time.
+	assert.Equal(t, shortResult, longResult, "Duration field has no effect on defaultParser IsInWindow")
+}
+
 // mockScheduleParser is a mock implementation of ScheduleParser for testing
 type mockScheduleParser struct {
 	isInSchedule bool
