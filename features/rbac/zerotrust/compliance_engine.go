@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/cache"
 )
 
 // ComplianceFrameworkEngine provides compliance validation against major frameworks
@@ -16,7 +18,7 @@ type ComplianceFrameworkEngine struct {
 	validators map[ComplianceFramework]ComplianceValidator
 
 	// Compliance cache for performance
-	complianceCache *ComplianceCache
+	complianceCache *cache.Cache
 
 	// Configuration
 	enabledFrameworks []ComplianceFramework
@@ -113,24 +115,6 @@ type ComplianceValidator interface {
 	GetSupportedControls() []string
 }
 
-// ComplianceCache provides high-performance caching for compliance validation results
-type ComplianceCache struct {
-	entries map[string]*ComplianceCacheEntry
-	mutex   sync.RWMutex
-	maxSize int
-	ttl     time.Duration
-}
-
-// ComplianceCacheEntry represents a cached compliance validation result
-type ComplianceCacheEntry struct {
-	Key          string                      `json:"key"`
-	Result       *ComplianceValidationResult `json:"result"`
-	CreatedAt    time.Time                   `json:"created_at"`
-	ExpiresAt    time.Time                   `json:"expires_at"`
-	AccessCount  int64                       `json:"access_count"`
-	LastAccessed time.Time                   `json:"last_accessed"`
-}
-
 // ComplianceStats tracks compliance engine statistics
 type ComplianceStats struct {
 	TotalValidations       int64                         `json:"total_validations"`
@@ -165,9 +149,15 @@ const (
 // NewComplianceFrameworkEngine creates a new compliance framework engine
 func NewComplianceFrameworkEngine(enabledFrameworks []ComplianceFramework) *ComplianceFrameworkEngine {
 	engine := &ComplianceFrameworkEngine{
-		frameworks:        make(map[ComplianceFramework]*FrameworkTemplate),
-		validators:        make(map[ComplianceFramework]ComplianceValidator),
-		complianceCache:   NewComplianceCache(1000, 10*time.Minute),
+		frameworks: make(map[ComplianceFramework]*FrameworkTemplate),
+		validators: make(map[ComplianceFramework]ComplianceValidator),
+		complianceCache: cache.NewCache(cache.CacheConfig{
+			Name:            "zerotrust-compliance",
+			MaxRuntimeItems: 1000,
+			DefaultTTL:      10 * time.Minute,
+			CleanupInterval: 1 * time.Minute,
+			EvictionPolicy:  cache.EvictionLRU,
+		}),
 		enabledFrameworks: enabledFrameworks,
 		strictMode:        true,
 		cacheEnabled:      true,
@@ -234,11 +224,13 @@ func (c *ComplianceFrameworkEngine) validateFrameworkCompliance(ctx context.Cont
 	// Check cache first
 	if c.cacheEnabled {
 		cacheKey := c.generateComplianceCacheKey(request, framework)
-		if cachedResult := c.complianceCache.Get(cacheKey); cachedResult != nil {
-			c.stats.mutex.Lock()
-			c.stats.CachedValidations++
-			c.stats.mutex.Unlock()
-			return cachedResult, nil
+		if value, found := c.complianceCache.Get(cacheKey); found {
+			if cachedResult, ok := value.(*ComplianceValidationResult); ok {
+				c.stats.mutex.Lock()
+				c.stats.CachedValidations++
+				c.stats.mutex.Unlock()
+				return cachedResult, nil
+			}
 		}
 	}
 
@@ -256,10 +248,10 @@ func (c *ComplianceFrameworkEngine) validateFrameworkCompliance(ctx context.Cont
 
 	result.ProcessingTime = time.Since(startTime)
 
-	// Cache the result
+	// Cache the result — ignore error; a missed cache write is non-critical
 	if c.cacheEnabled {
 		cacheKey := c.generateComplianceCacheKey(request, framework)
-		c.complianceCache.Put(cacheKey, result)
+		_ = c.complianceCache.Set(cacheKey, result, 0)
 	}
 
 	return result, nil
@@ -668,102 +660,7 @@ func NewComplianceStats() *ComplianceStats {
 	}
 }
 
-func NewComplianceCache(maxSize int, ttl time.Duration) *ComplianceCache {
-	cache := &ComplianceCache{
-		entries: make(map[string]*ComplianceCacheEntry),
-		maxSize: maxSize,
-		ttl:     ttl,
-	}
-
-	// Start cleanup goroutine
-	go cache.cleanupLoop()
-
-	return cache
-}
-
-// ComplianceCache methods
-
-func (cc *ComplianceCache) Get(key string) *ComplianceValidationResult {
-	cc.mutex.RLock()
-	defer cc.mutex.RUnlock()
-
-	entry, exists := cc.entries[key]
-	if !exists {
-		return nil
-	}
-
-	// Check if expired
-	if time.Now().After(entry.ExpiresAt) {
-		delete(cc.entries, key)
-		return nil
-	}
-
-	// Update access information
-	entry.AccessCount++
-	entry.LastAccessed = time.Now()
-
-	return entry.Result
-}
-
-func (cc *ComplianceCache) Put(key string, result *ComplianceValidationResult) {
-	cc.mutex.Lock()
-	defer cc.mutex.Unlock()
-
-	// Check if we need to evict entries
-	if len(cc.entries) >= cc.maxSize {
-		cc.evictLRU()
-	}
-
-	now := time.Now()
-	cc.entries[key] = &ComplianceCacheEntry{
-		Key:          key,
-		Result:       result,
-		CreatedAt:    now,
-		ExpiresAt:    now.Add(cc.ttl),
-		AccessCount:  1,
-		LastAccessed: now,
-	}
-}
-
-func (cc *ComplianceCache) evictLRU() {
-	var oldestKey string
-	var oldestTime time.Time
-
-	for key, entry := range cc.entries {
-		if oldestTime.IsZero() || entry.LastAccessed.Before(oldestTime) {
-			oldestKey = key
-			oldestTime = entry.LastAccessed
-		}
-	}
-
-	if oldestKey != "" {
-		delete(cc.entries, oldestKey)
-	}
-}
-
-func (cc *ComplianceCache) cleanupLoop() {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		cc.cleanup()
-	}
-}
-
-func (cc *ComplianceCache) cleanup() {
-	cc.mutex.Lock()
-	defer cc.mutex.Unlock()
-
-	now := time.Now()
-	var expiredKeys []string
-
-	for key, entry := range cc.entries {
-		if now.After(entry.ExpiresAt) {
-			expiredKeys = append(expiredKeys, key)
-		}
-	}
-
-	for _, key := range expiredKeys {
-		delete(cc.entries, key)
-	}
+// Close stops the compliance cache cleanup routine and releases resources.
+func (c *ComplianceFrameworkEngine) Close() {
+	c.complianceCache.Close()
 }
