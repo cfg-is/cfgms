@@ -21,7 +21,7 @@ import (
 func newTestExecutor(t *testing.T, errorConfig config.ErrorHandlingConfig) *Executor {
 	t.Helper()
 	registry := discovery.ModuleRegistry{}
-	moduleFactory := factory.New(registry, errorConfig)
+	moduleFactory := factory.New(registry, errorConfig, logging.NewNoopLogger())
 	comparator := stewardtesting.NewStateComparator()
 	logger := logging.NewLogger("info")
 	executor, err := NewExecutor(&ExecutorConfig{
@@ -37,7 +37,7 @@ func newTestExecutor(t *testing.T, errorConfig config.ErrorHandlingConfig) *Exec
 func TestNewExecutorWithComponents(t *testing.T) {
 	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{}
-	moduleFactory := factory.New(registry, errorConfig)
+	moduleFactory := factory.New(registry, errorConfig, logging.NewNoopLogger())
 	comparator := stewardtesting.NewStateComparator()
 	logger := logging.NewLogger("info")
 

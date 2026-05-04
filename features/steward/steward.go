@@ -123,7 +123,7 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 	if stewardID == "" {
 		stewardID = "steward-standalone" // Default ID for standalone mode
 	}
-	moduleFactory := factory.NewWithStewardID(registry, cfg.Steward.ErrorHandling, stewardID)
+	moduleFactory := factory.NewWithStewardID(registry, cfg.Steward.ErrorHandling, stewardID, logger)
 
 	// Initialize steward secret store if provider is available
 	var secretStore secretsif.SecretStore

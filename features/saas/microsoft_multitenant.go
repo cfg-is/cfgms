@@ -21,6 +21,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // MicrosoftMultiTenantProvider implements multi-tenant Microsoft Graph operations
@@ -59,7 +61,7 @@ func NewMicrosoftMultiTenantProvider(credStore CredentialStore, httpClient *http
 	}
 	// Wire self as the TenantDiscoverer so DiscoverTenantsFromMicrosoft is the
 	// production implementation used by MultiTenantManager.discoverTenants.
-	p.multiTenantManager = NewMultiTenantManager(credStore, NewInMemoryConsentStore(), httpClient, p)
+	p.multiTenantManager = NewMultiTenantManager(credStore, NewInMemoryConsentStore(), httpClient, p, logging.NewNoopLogger())
 	return p
 }
 

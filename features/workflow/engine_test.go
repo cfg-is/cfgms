@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/factory"
+	"github.com/cfgis/cfgms/pkg/logging"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -37,7 +38,7 @@ func createTestFactory() *factory.ModuleFactory {
 		ModuleLoadFailure: config.ActionContinue,
 	}
 
-	return factory.New(registry, errorConfig)
+	return factory.New(registry, errorConfig, logging.NewNoopLogger())
 }
 
 func TestEngine_ExecuteWorkflow_Simple(t *testing.T) {

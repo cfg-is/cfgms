@@ -34,7 +34,6 @@ package factory
 
 import (
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -69,6 +68,9 @@ type ModuleFactory struct {
 	// stewardID identifies the steward this factory belongs to
 	stewardID string
 
+	// logger is the factory's own operational logger
+	logger logging.Logger
+
 	// loggerProvider creates loggers for module injection
 	loggerProvider modules.LoggerProvider
 
@@ -83,12 +85,16 @@ type ModuleFactory struct {
 //
 // The factory will use the registry to locate modules when loading and apply
 // the error configuration to determine how to handle loading failures.
-func New(registry discovery.ModuleRegistry, errorConfig config.ErrorHandlingConfig) *ModuleFactory {
+func New(registry discovery.ModuleRegistry, errorConfig config.ErrorHandlingConfig, logger logging.Logger) *ModuleFactory {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	return &ModuleFactory{
 		registry:        registry,
 		instances:       make(map[string]modules.Module),
 		config:          errorConfig,
 		stewardID:       "unknown", // Will be set by steward during initialization
+		logger:          logger,
 		injectionStatus: make(map[string]modules.LoggerInjectionStatus),
 	}
 }
@@ -96,12 +102,16 @@ func New(registry discovery.ModuleRegistry, errorConfig config.ErrorHandlingConf
 // NewWithStewardID creates a new ModuleFactory with a specific steward ID and logging capability.
 //
 // This constructor enables centralized logging from the moment of factory creation.
-func NewWithStewardID(registry discovery.ModuleRegistry, errorConfig config.ErrorHandlingConfig, stewardID string) *ModuleFactory {
+func NewWithStewardID(registry discovery.ModuleRegistry, errorConfig config.ErrorHandlingConfig, stewardID string, logger logging.Logger) *ModuleFactory {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	factory := &ModuleFactory{
 		registry:        registry,
 		instances:       make(map[string]modules.Module),
 		config:          errorConfig,
 		stewardID:       stewardID,
+		logger:          logger,
 		injectionStatus: make(map[string]modules.LoggerInjectionStatus),
 	}
 
@@ -253,7 +263,7 @@ func (f *ModuleFactory) attemptSecretStoreInjection(instance modules.Module, mod
 
 	if err := injectable.SetSecretStore(f.secretStore); err != nil {
 		// Log but don't fail - module can operate without secrets
-		log.Printf("Warning: failed to inject secret store into module %s: %v", moduleName, err)
+		f.logger.Warn("failed to inject secret store into module", "module", moduleName, "error", err)
 	}
 }
 
