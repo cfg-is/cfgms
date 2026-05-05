@@ -50,12 +50,6 @@ type SessionStore interface {
 	Close() error
 }
 
-// SessionStoreProvider is an optional extension interface that providers implement
-// when they support durable session storage.
-type SessionStoreProvider interface {
-	CreateSessionStore(config map[string]interface{}) (SessionStore, error)
-}
-
 // Session represents a session in the session storage system
 type Session struct {
 	// Core session identity

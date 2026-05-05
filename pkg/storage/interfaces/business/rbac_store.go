@@ -53,8 +53,3 @@ type RBACStore interface {
 	Initialize(ctx context.Context) error
 	Close() error
 }
-
-// RBACStoreProvider defines how storage providers create RBAC stores
-type RBACStoreProvider interface {
-	CreateRBACStore(config map[string]interface{}) (RBACStore, error)
-}
