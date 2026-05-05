@@ -14,30 +14,16 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	gdaptypes "github.com/cfgis/cfgms/features/modules/m365/gdap/types"
 	"github.com/cfgis/cfgms/features/tenant"
 )
-
-// GDAPProvider defines the interface for GDAP operations (avoids import cycle)
-type GDAPProvider interface {
-	DiscoverGDAPCustomers(ctx context.Context) ([]GDAPRelationship, error)
-	ValidateGDAPAccess(ctx context.Context, customerTenantID string, requiredRoles []string) (*GDAPRelationship, error)
-}
-
-// GDAPRelationship represents a GDAP relationship (copied to avoid import cycle)
-type GDAPRelationship struct {
-	RelationshipID   string
-	CustomerTenantID string
-	CustomerName     string
-	Status           string // "active", "pending", "expired", "terminated"
-	ExpiresAt        time.Time
-}
 
 // M365TenantManager integrates M365 multi-tenant capabilities with CFGMS tenant management
 type M365TenantManager struct {
 	cfgmsTenantManager *tenant.Manager
 	m365Provider       *MicrosoftMultiTenantProvider
 	adminConsentFlow   *auth.AdminConsentFlow
-	gdapProvider       GDAPProvider
+	gdapProvider       gdaptypes.GDAPProvider
 	httpClient         *http.Client
 	m365IDIndex        map[string]string // maps m365TenantID → cfgmsTenantID; nil means unpopulated
 	indexMu            sync.Mutex
@@ -48,7 +34,7 @@ func NewM365TenantManager(
 	cfgmsTenantManager *tenant.Manager,
 	m365Provider *MicrosoftMultiTenantProvider,
 	adminConsentFlow *auth.AdminConsentFlow,
-	gdapProvider GDAPProvider,
+	gdapProvider gdaptypes.GDAPProvider,
 ) *M365TenantManager {
 	return &M365TenantManager{
 		cfgmsTenantManager: cfgmsTenantManager,
@@ -79,7 +65,7 @@ func (m *M365TenantManager) DiscoverAndSyncTenants(ctx context.Context, discover
 			tenants = append(tenants, TenantInfo{
 				TenantID:    rel.CustomerTenantID,
 				DisplayName: rel.CustomerName,
-				HasAccess:   rel.Status == "active",
+				HasAccess:   rel.Status == gdaptypes.GDAPStatusActive,
 			})
 		}
 	default:
@@ -515,7 +501,7 @@ func (m *M365TenantManager) checkGDAPRelationship(ctx context.Context, m365Tenan
 		}
 	}
 
-	if relationship.Status != "active" {
+	if relationship.Status != gdaptypes.GDAPStatusActive {
 		return HealthCheckResult{
 			Name:    "gdap_relationship",
 			Status:  tenant.HealthStatusDegraded,

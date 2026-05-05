@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	gdaptypes "github.com/cfgis/cfgms/features/modules/m365/gdap/types"
 	"github.com/cfgis/cfgms/features/saas"
 )
 
@@ -116,34 +117,20 @@ type GDAPConfig struct {
 	RequireActiveRelationship bool `json:"require_active_relationship"`
 }
 
-// GDAPRelationship represents a GDAP relationship with a customer tenant
-type GDAPRelationship struct {
-	RelationshipID   string                 `json:"relationship_id"`
-	CustomerTenantID string                 `json:"customer_tenant_id"`
-	CustomerName     string                 `json:"customer_name"`
-	Status           GDAPRelationshipStatus `json:"status"`
-	Roles            []GDAPRole             `json:"roles"`
-	ExpiresAt        time.Time              `json:"expires_at"`
-	CreatedAt        time.Time              `json:"created_at"`
-	LastModified     time.Time              `json:"last_modified"`
-}
-
-// GDAPRelationshipStatus represents the status of a GDAP relationship
-type GDAPRelationshipStatus string
-
-const (
-	GDAPStatusPending    GDAPRelationshipStatus = "pending"
-	GDAPStatusActive     GDAPRelationshipStatus = "active"
-	GDAPStatusExpired    GDAPRelationshipStatus = "expired"
-	GDAPStatusTerminated GDAPRelationshipStatus = "terminated"
+// Type aliases re-export the canonical types from gdaptypes so existing
+// code in this package compiles without modification.
+type (
+	GDAPRelationship       = gdaptypes.GDAPRelationship
+	GDAPRelationshipStatus = gdaptypes.GDAPRelationshipStatus
+	GDAPRole               = gdaptypes.GDAPRole
 )
 
-// GDAPRole represents a role assignment within a GDAP relationship
-type GDAPRole struct {
-	RoleDefinitionID string `json:"role_definition_id"`
-	RoleName         string `json:"role_name"`
-	RoleDescription  string `json:"role_description"`
-}
+const (
+	GDAPStatusPending    = gdaptypes.GDAPStatusPending
+	GDAPStatusActive     = gdaptypes.GDAPStatusActive
+	GDAPStatusExpired    = gdaptypes.GDAPStatusExpired
+	GDAPStatusTerminated = gdaptypes.GDAPStatusTerminated
+)
 
 // DiscoverGDAPCustomers discovers customer tenants accessible via GDAP
 func (p *GDAPProvider) DiscoverGDAPCustomers(ctx context.Context) ([]GDAPRelationship, error) {

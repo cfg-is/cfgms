@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	gdaptypes "github.com/cfgis/cfgms/features/modules/m365/gdap/types"
 	"github.com/cfgis/cfgms/features/tenant"
 )
 
@@ -122,7 +123,7 @@ func setupTestManager(t *testing.T) (*M365TenantManager, *mockTenantStore, conte
 	var adminConsentFlow *auth.AdminConsentFlow
 
 	// Create GDAP provider (can be nil for basic tests)
-	var gdapProvider GDAPProvider
+	var gdapProvider gdaptypes.GDAPProvider
 
 	// Create M365 tenant manager
 	manager := NewM365TenantManager(
@@ -609,14 +610,14 @@ func TestM365TenantManager_GetTenantByM365ID_ListTenantsError(t *testing.T) {
 
 // mockGDAPProvider is a test-local GDAP implementation for benchmark setup.
 type mockGDAPProvider struct {
-	relationships []GDAPRelationship
+	relationships []gdaptypes.GDAPRelationship
 }
 
-func (m *mockGDAPProvider) DiscoverGDAPCustomers(_ context.Context) ([]GDAPRelationship, error) {
+func (m *mockGDAPProvider) DiscoverGDAPCustomers(_ context.Context) ([]gdaptypes.GDAPRelationship, error) {
 	return m.relationships, nil
 }
 
-func (m *mockGDAPProvider) ValidateGDAPAccess(_ context.Context, customerTenantID string, _ []string) (*GDAPRelationship, error) {
+func (m *mockGDAPProvider) ValidateGDAPAccess(_ context.Context, customerTenantID string, _ []string) (*gdaptypes.GDAPRelationship, error) {
 	for i := range m.relationships {
 		if m.relationships[i].CustomerTenantID == customerTenantID {
 			return &m.relationships[i], nil
@@ -629,13 +630,13 @@ func BenchmarkM365TenantManager_DiscoverAndSyncTenants(b *testing.B) {
 	ctx := context.Background()
 	const n = 100
 
-	relationships := make([]GDAPRelationship, n)
+	relationships := make([]gdaptypes.GDAPRelationship, n)
 	for i := range n {
-		relationships[i] = GDAPRelationship{
+		relationships[i] = gdaptypes.GDAPRelationship{
 			RelationshipID:   fmt.Sprintf("rel-%d", i),
 			CustomerTenantID: fmt.Sprintf("m365-bench-%d", i),
 			CustomerName:     fmt.Sprintf("Bench Tenant %d", i),
-			Status:           "active",
+			Status:           gdaptypes.GDAPStatusActive,
 			ExpiresAt:        time.Now().Add(365 * 24 * time.Hour),
 		}
 	}
