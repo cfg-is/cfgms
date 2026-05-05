@@ -1,28 +1,41 @@
-# CFGMS path-injection sanitizers.
+# CFGMS path-injection sanitizer modeled as a summary.
 #
-# Functions in this list return values that have been validated as
-# non-traversal-vulnerable. CodeQL's default model treats their inputs as
-# tainted and follows the taint into the return value, which produces false
-# positives at every os.Read/Write/Stat sink consuming the result. This
-# extension teaches CodeQL that the return value is sanitized for the
-# `path-injection` taint kind.
+# safeJoin returns values that have been validated against the configured
+# base path (filepath.Clean + strict prefix check); if any traversal is
+# detected it returns an error instead. CodeQL's default analysis traces
+# taint from arguments through to the return value because it can't see the
+# runtime check, so every os.Read/Write/Stat sink consuming a safeJoin
+# result fires a path-injection false positive.
 #
-# Format (per CodeQL `sanitizerModel` extensible predicate):
-#   [package, type, subtypes, name, signature, ext, output, kind, provenance]
+# CodeQL's Go pack does not expose an extensible `sanitizerModel`
+# predicate. Instead we use `summaryModel` with `value` kind: this declares
+# that the function's input-to-output relationship is *value flow*, not
+# taint flow. The effect is that taint that reaches an argument is NOT
+# propagated to the return value — i.e., the function acts as a sanitizer.
+#
+# Format (per CodeQL `summaryModel` extensible predicate):
+#   [package, type, subtypes, name, signature, ext, input, output, kind, provenance]
 #
 # - package:    Go module path containing the function
 # - type:       receiver type (empty for top-level functions)
-# - subtypes:   include subtypes (boolean, irrelevant for top-level functions)
+# - subtypes:   include subtypes (boolean; irrelevant for top-level functions)
 # - name:       function name
 # - signature:  function signature (empty matches any)
 # - ext:        access path qualifier (empty)
-# - output:     which value is sanitized — "ReturnValue"
-# - kind:       taint kind being sanitized — "path-injection"
-# - provenance: how the model was derived — "manual" (hand-authored, not generated)
+# - input:      where taint enters — "Argument[N]" or "Argument[N..M]"
+# - output:     where flow lands — "ReturnValue" (or indexed if multi-return)
+# - kind:       "value" (no taint propagation) or "taint" (propagate)
+# - provenance: how the model was derived — "manual" (hand-authored)
+#
+# safeJoin signature: func safeJoin(base string, parts ...string) (string, error)
+#   - Argument[0]   = base
+#   - Argument[1]   = variadic parts slice (whole)
+#   - ReturnValue[0] = sanitized path string (the value protected by runtime check)
 
 extensions:
   - addsTo:
       pack: codeql/go-all
-      extensible: sanitizerModel
+      extensible: summaryModel
     data:
-      - ["github.com/cfgis/cfgms/pkg/storage/providers/flatfile", "", false, "safeJoin", "", "", "ReturnValue", "path-injection", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/storage/providers/flatfile", "", false, "safeJoin", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/storage/providers/flatfile", "", false, "safeJoin", "", "", "Argument[1]", "ReturnValue[0]", "value", "manual"]
