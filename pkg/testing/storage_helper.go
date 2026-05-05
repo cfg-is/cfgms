@@ -5,6 +5,8 @@ package testing
 
 import (
 	"context"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,18 +19,21 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
+// testStorageSeq produces unique in-memory SQLite database names across all tests.
+var testStorageSeq int64
+
 // SetupTestStorage creates an OSS composite storage manager for testing.
-// Uses flatfile (config/audit/steward) and SQLite (business data) providers backed
-// by temporary directories — each call produces fully isolated storage.
+// Uses flatfile (config/audit/steward) and a named in-memory SQLite (business data).
 //
-// The returned manager is registered with t.Cleanup to close all SQLite handles
-// before t.TempDir cleanup runs. This is required on Windows, where RemoveAll
-// fails if any database file is still held open.
+// Named in-memory SQLite avoids file I/O entirely. On Windows CI, WAL mode's
+// FlushFileBuffers call blocks for minutes under load — switching to in-memory
+// eliminates that syscall while preserving per-call isolation (distinct names).
 func SetupTestStorage(t *testing.T) *interfaces.StorageManager {
 	t.Helper()
 
 	flatfileRoot := t.TempDir()
-	sqlitePath := t.TempDir() + "/cfgms.db"
+	seq := atomic.AddInt64(&testStorageSeq, 1)
+	sqlitePath := fmt.Sprintf("file:cfgms-test-%d?mode=memory&cache=shared", seq)
 
 	storageManager, err := interfaces.CreateOSSStorageManager(flatfileRoot, sqlitePath)
 	if err != nil {
@@ -36,6 +41,8 @@ func SetupTestStorage(t *testing.T) *interfaces.StorageManager {
 	}
 
 	t.Cleanup(func() {
+		// Close releases the in-memory SQLite database. This also prevents the
+		// named in-memory DB from persisting beyond the test's lifetime.
 		if err := storageManager.Close(); err != nil {
 			t.Logf("SetupTestStorage cleanup: storage close error: %v", err)
 		}
