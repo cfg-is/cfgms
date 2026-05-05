@@ -214,13 +214,11 @@ func NewAdvancedServiceWithConfig(
 
 // getUserIDFromContext extracts user ID from context for RBAC validation
 func (s *AdvancedService) getUserIDFromContext(ctx context.Context) string {
-	// dead read: no set-site uses this plain string key; tracked for cleanup separately
-	if userID, ok := ctx.Value("user_id").(string); ok && userID != "" {
+	if userID, ok := ctx.Value(ctxkeys.UserIDKey).(string); ok && userID != "" {
 		return userID
 	}
 
-	// dead read: no set-site uses this plain string key; tracked for cleanup separately
-	if claims, ok := ctx.Value("auth_claims").(map[string]interface{}); ok {
+	if claims, ok := ctx.Value(ctxkeys.AuthClaimsKey).(map[string]interface{}); ok {
 		if sub, ok := claims["sub"].(string); ok {
 			return sub
 		}

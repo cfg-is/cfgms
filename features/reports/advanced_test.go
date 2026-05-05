@@ -13,6 +13,7 @@ import (
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 
@@ -412,6 +413,28 @@ func TestConvenienceMethods(t *testing.T) {
 	)
 	assert.NoError(t, err)
 	assert.NotNil(t, dashboardData)
+}
+
+// TestGetUserIDFromContext verifies getUserIDFromContext reads user identity via typed ctxkeys,
+// not plain string literals.
+func TestGetUserIDFromContext(t *testing.T) {
+	service := createTestAdvancedService(t)
+
+	// UserIDKey (typed) takes priority over other fallbacks.
+	ctxWithUserID := context.WithValue(context.Background(), ctxkeys.UserIDKey, "user-abc-123")
+	assert.Equal(t, "user-abc-123", service.getUserIDFromContext(ctxWithUserID))
+
+	// AuthClaimsKey (typed) is the second fallback; sub field extracted.
+	claims := map[string]interface{}{"sub": "claims-user-456", "role": "admin"}
+	ctxWithClaims := context.WithValue(context.Background(), ctxkeys.AuthClaimsKey, claims)
+	assert.Equal(t, "claims-user-456", service.getUserIDFromContext(ctxWithClaims))
+
+	// TenantID fallback when neither UserIDKey nor AuthClaimsKey is present.
+	ctxWithTenant := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-xyz")
+	assert.Equal(t, "system-user-tenant-xyz", service.getUserIDFromContext(ctxWithTenant))
+
+	// Default when no context values are set.
+	assert.Equal(t, "system-user", service.getUserIDFromContext(context.Background()))
 }
 
 // TestServiceClose tests service cleanup
