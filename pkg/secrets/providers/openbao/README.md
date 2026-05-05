@@ -1,9 +1,8 @@
 # OpenBao Secrets Provider
 
 Apache 2.0-licensed secrets provider backed by [OpenBao](https://github.com/openbao/openbao)
-(an Apache 2.0 fork of HashiCorp Vault). Implements both `interfaces.SecretStore`
-(full CRUD, versioning, rotation, metadata, health) and `interfaces.LeasedSecret`
-(lease mint, renew, revoke) against OpenBao's **KV v2** engine.
+(an Apache 2.0 fork of HashiCorp Vault). Implements `interfaces.SecretStore`
+(full CRUD, versioning, rotation, metadata, health) against OpenBao's **KV v2** engine.
 
 ## Dev-Mode Quickstart
 
@@ -66,16 +65,6 @@ OpenBao KV v2 provides native versioning:
 - `ListSecretVersions` returns all versions via the KV v2 metadata endpoint.
 - Deleted secrets (via `DeleteSecret` / `ExpireSecret`) use
   `DeleteMetadata`, which removes all versions permanently.
-
-## Leasing (`LeasedSecret`)
-
-`OpenBaoSecretStore` implements `interfaces.LeasedSecret`:
-
-| Method        | Behaviour                                                                         |
-|---------------|-----------------------------------------------------------------------------------|
-| `LeaseSecret` | Always returns `ErrLeaseNotSupported` for KV v2 (static secrets have no leases). |
-| `RenewLease`  | Calls `/sys/leases/renew` — use with dynamic engines (database, PKI, AWS).        |
-| `RevokeLease` | Calls `/sys/leases/revoke` — immediately invalidates the lease.                   |
 
 ## Production Guard
 
