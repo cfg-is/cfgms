@@ -69,7 +69,7 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 	//   literal       → strings.ToUpper(param.Name) on all platforms — no secret
 	//                   prefix because the value is not a credential
 	var secretEnvEntries []string
-	if e.secretStore != nil && len(e.secretBindings) > 0 {
+	if len(e.secretBindings) > 0 {
 		resolved, err := ResolveSecretBindings(ctx, e.secretStore, e.secretBindings)
 		if err != nil {
 			return nil, fmt.Errorf("secret injection blocked: %w", err)
