@@ -81,9 +81,15 @@ func (n *DefaultRollbackNotifier) NotifyRollbackCompleted(ctx context.Context, o
 
 // NotifyRollbackFailed sends failure notification
 func (n *DefaultRollbackNotifier) NotifyRollbackFailed(ctx context.Context, operation *RollbackOperation, err error) error {
+	// err is expected non-nil (this is the failure-notify path), but guard
+	// defensively so a buggy caller can't crash the notifier.
+	errMsg := ""
+	if err != nil {
+		errMsg = err.Error()
+	}
 	n.logger.Error("rollback failed",
 		"id", logging.SanitizeLogValue(operation.ID),
-		"error", err,
+		"error", logging.SanitizeLogValue(errMsg),
 	)
 
 	if operation.Result != nil && len(operation.Result.Failures) > 0 {
