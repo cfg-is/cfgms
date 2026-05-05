@@ -15,7 +15,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// splitBrainDetector implements SplitBrainDetector interface
 type splitBrainDetector struct {
 	mu      sync.RWMutex
 	cfg     *SplitBrainConfig
@@ -42,7 +41,7 @@ type partitionInfo struct {
 }
 
 // NewSplitBrainDetector creates a new split-brain detector
-func NewSplitBrainDetector(cfg *SplitBrainConfig, logger logging.Logger, manager *Manager) (SplitBrainDetector, error) {
+func NewSplitBrainDetector(cfg *SplitBrainConfig, logger logging.Logger, manager *Manager) (*splitBrainDetector, error) {
 	if cfg == nil {
 		cfg = &SplitBrainConfig{
 			Enabled:            true,

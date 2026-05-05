@@ -33,10 +33,10 @@ type Manager struct {
 	healthChecker *HealthChecker
 	raftConsensus *RaftConsensus // NEW: Raft-based consensus (replaces discovery + custom election)
 	discovery     Discovery      // DEPRECATED: Will be removed
-	loadBalancer  LoadBalancer
-	failover      FailoverManager
-	splitBrain    SplitBrainDetector
-	sessionSync   SessionSynchronizer
+	loadBalancer  *loadBalancer
+	failover      *failoverManager
+	splitBrain    *splitBrainDetector
+	sessionSync   *sessionSynchronizer
 
 	// State management
 	storageManager *interfaces.StorageManager
@@ -250,7 +250,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	}
 
 	if m.sessionSync != nil {
-		if err := m.sessionSync.(*sessionSynchronizer).Stop(ctx); err != nil {
+		if err := m.sessionSync.Stop(ctx); err != nil {
 			stopErrors = append(stopErrors, fmt.Errorf("session sync stop: %w", err))
 		}
 	}

@@ -16,7 +16,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// loadBalancer implements LoadBalancer interface
 type loadBalancer struct {
 	mu       sync.RWMutex
 	cfg      *LoadBalancingConfig
@@ -42,7 +41,7 @@ type nodeStats struct {
 }
 
 // NewLoadBalancer creates a new load balancer
-func NewLoadBalancer(cfg *LoadBalancingConfig, logger logging.Logger) (LoadBalancer, error) {
+func NewLoadBalancer(cfg *LoadBalancingConfig, logger logging.Logger) (*loadBalancer, error) {
 	if cfg == nil {
 		cfg = &LoadBalancingConfig{
 			Strategy: HealthBasedStrategy,

@@ -16,7 +16,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// failoverManager implements FailoverManager interface
 type failoverManager struct {
 	mu      sync.RWMutex
 	cfg     *FailoverConfig
@@ -34,7 +33,7 @@ type failoverManager struct {
 }
 
 // NewFailoverManager creates a new failover manager
-func NewFailoverManager(cfg *FailoverConfig, logger logging.Logger, manager *Manager) (FailoverManager, error) {
+func NewFailoverManager(cfg *FailoverConfig, logger logging.Logger, manager *Manager) (*failoverManager, error) {
 	if cfg == nil {
 		cfg = &FailoverConfig{
 			Enabled:             true,
