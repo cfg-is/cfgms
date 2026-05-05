@@ -118,21 +118,6 @@ This directory contains automated CI/CD workflows for CFGMS. All workflows are n
 
 ### Compliance & Quality Workflows
 
-#### `template-validation.yml`
-**Purpose**: Template and configuration file validation
-
-**Triggers**: Push to main/develop, Pull Requests
-
-**What it does**:
-- Validates workflow templates
-- Checks configuration file syntax
-- Validates YAML schema compliance
-- Ensures template consistency
-
-**Runtime**: ~1-2 minutes
-
----
-
 #### `license-check.yml`
 **Purpose**: License compliance and dependency validation
 
@@ -212,7 +197,6 @@ make test-integration-setup && make generate-test-certificates
 | security-scan.yml | ✅ | ✅ | Daily (3 AM UTC) | ❌ |
 | codeql-analysis.yml | ✅ | ✅ | Weekly | ❌ |
 | docker-security.yml | ✅ | ✅ | ❌ | ✅ |
-| template-validation.yml | ✅ | ✅ | ❌ | ❌ |
 | license-check.yml | ✅ | ✅ | ❌ | ❌ |
 | release.yml | ❌ | ❌ | ❌ | ✅ (tags: v*) |
 

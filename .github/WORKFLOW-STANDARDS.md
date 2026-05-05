@@ -16,7 +16,6 @@ This document defines standards and best practices for GitHub Actions workflows 
    - `documentation.yml` - Documentation validation (docs/**, *.md)
    - `docker-security.yml` - Container security (Dockerfile*, go.mod, go.sum)
    - `license-check.yml` - License compliance (go.mod, go.sum)
-   - `template-validation.yml` - Template validation (features/templates/**)
 
 3. **Production Workflows** (run on main/releases)
    - `production-gates.yml` - Comprehensive production readiness validation

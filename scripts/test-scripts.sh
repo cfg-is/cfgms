@@ -51,46 +51,6 @@ test_syntax() {
     echo "  Tested $scripts_tested scripts"
 }
 
-# Test 2: Template validation script (critical for CI)
-test_template_validation() {
-    log_test "Testing template validation script..."
-
-    # Test structure validation
-    if bash scripts/validate-templates.sh structure >/dev/null 2>&1; then
-        log_pass "validate-templates.sh structure: Works"
-    else
-        log_fail "validate-templates.sh structure: Failed"
-    fi
-
-    # Test manifest validation
-    if bash scripts/validate-templates.sh manifests >/dev/null 2>&1; then
-        log_pass "validate-templates.sh manifests: Works"
-    else
-        log_fail "validate-templates.sh manifests: Failed"
-    fi
-
-    # Test README validation
-    if bash scripts/validate-templates.sh readme >/dev/null 2>&1; then
-        log_pass "validate-templates.sh readme: Works"
-    else
-        log_fail "validate-templates.sh readme: Failed"
-    fi
-
-    # Test compliance validation
-    if bash scripts/validate-templates.sh compliance >/dev/null 2>&1; then
-        log_pass "validate-templates.sh compliance: Works"
-    else
-        log_fail "validate-templates.sh compliance: Failed"
-    fi
-
-    # Test secrets validation (may have warnings, but should not fail)
-    if bash scripts/validate-templates.sh secrets >/dev/null 2>&1; then
-        log_pass "validate-templates.sh secrets: Works"
-    else
-        log_fail "validate-templates.sh secrets: Failed"
-    fi
-}
-
 # Test 3: License header checker
 test_license_checker() {
     log_test "Testing license header checker..."
@@ -159,7 +119,6 @@ test_executable_permissions() {
     log_test "Testing script executable permissions..."
 
     local critical_scripts=(
-        "scripts/validate-templates.sh"
         "scripts/generate-invalid-test-certs.sh"
         "scripts/generate-test-credentials.sh"
         "scripts/wait-for-services.sh"
@@ -578,8 +537,6 @@ echo "================================"
 echo ""
 
 test_syntax
-echo ""
-test_template_validation
 echo ""
 test_license_checker
 echo ""
