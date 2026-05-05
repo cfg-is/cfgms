@@ -263,7 +263,7 @@ When `dispatch_blocked == true`:
      --label "pipeline:blocked,priority:high" \
      --body-file <(./.claude/scripts/po-act.sh state '.code_health')
    ```
-3. Skip dispatch (Steps 3 and 4). You may still process review (Step 5), merge-queue maintenance, and acceptance-reviewer findings on PRs that were merged before the breakage — those are unaffected.
+3. Skip dispatch (Steps 5 and 6). You may still process review (Step 4), merge-queue maintenance, and acceptance-reviewer findings on PRs that were merged before the breakage — those are unaffected.
 4. Report at end of cycle: `Dispatch held: develop is broken (preflight failed: <checks>). Tracking: #NNN.`
 
 When `code_health.skipped == true` (preflight could not run the checks for some reason — usually missing toolchain), proceed with caution: the gate is bypassed but you should note it in the cycle report.
@@ -276,6 +276,8 @@ The preflight handles all label queries, PR CI summaries, merge queue state, cod
 
 Each step creates a `pipeline:blocked` issue on unrecoverable failure and continues to the next.
 
+**Priority order (cap-constrained):** in-flight work is processed before new work. The 5-container cap is shared across all autonomous activity (dev agents, fix-pr, review containers), so when slots are scarce the cycle finishes existing PRs first — they unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them. The numbered steps below reflect this priority: Step 3 (rebase) → Step 4 (review) → Step 5 (fix-cycle) → Step 6 (dispatch new dev). If the cap is exhausted by Steps 3-5, defer Step 6 to the next cycle.
+
 **Step 1 — Unblock check:**
 Find recently merged PRs. Check if any `pipeline:draft` stories had `## Dependencies` referencing the merged story. If satisfied, they're eligible for Tech Lead review.
 
@@ -287,30 +289,13 @@ Remove stale agent containers and clones. Run:
 This finds containers whose stories are closed, `agent:failed`, or `pipeline:blocked` and removes them. Runs before dispatch so re-dispatched stories start with a clean environment. Safe to run every cycle — idempotent, skips containers whose stories are still active.
 
 **Step 2 — Tech Lead pass (legacy only):**
-Handles `pipeline:draft` stories that were created before the Planning Team was introduced. New epics go through Step 6 (Planning Team) and produce `agent:ready` stories directly. Once the backlog of legacy drafts clears, this step becomes a no-op.
+Handles `pipeline:draft` stories that were created before the Planning Team was introduced. New epics go through Step 7 (Planning Team) and produce `agent:ready` stories directly. Once the backlog of legacy drafts clears, this step becomes a no-op.
 
 Find `pipeline:draft` stories. Collect their issue numbers, then use the **Agent tool** (not Bash) to spawn the Tech Lead: subagent_type `tech-lead`, prompt `"Review draft stories for dev agent executability: #NNN #NNN #NNN"`, mode `auto`.
 
 The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency ordering, implementation notes, scope, constraints, and ambiguity. Passing stories get promoted (`pipeline:draft` → `agent:ready`). Failing stories get a `pipeline:blocked` issue.
 
-**Step 3 — Dispatch:**
-Find `agent:ready` issues without `agent:in-progress`. Before dispatching, check for file conflicts with in-flight agents:
-
-Both gates are computed by the preflight script (`dispatch_recommendations` with `action: "dispatch"` vs `"hold"` and a `reason` string). Trust its recommendation by default, override only if `parse_warnings` are non-empty on the story.
-
-For each story the preflight recommends dispatching:
-```bash
-./.claude/scripts/po-act.sh dispatch <NUM>
-```
-
-**Step 4 — Fix cycle:**
-For each `pipeline:fix` story, find its PR and dispatch the fix agent in one call:
-```bash
-./.claude/scripts/po-act.sh dispatch-fix <PR_NUM>
-```
-This cleans any stale container from a prior failed attempt, re-clones, and launches.
-
-**Step 4.5 — Rebase stuck PRs:**
+**Step 3 — Rebase stuck PRs:**
 
 The merge queue refuses to enqueue a PR with `mergeStateStatus = DIRTY`
 (merge conflicts with develop). The queue auto-rebases `BEHIND` PRs once
@@ -345,16 +330,16 @@ Outcomes:
   ```bash
   ./scripts/pipeline-helper.sh label-add <STORY> "pipeline:fix"
   ```
-  Step 4 will pick it up next cycle for dispatch-fix.
+  Step 5 will pick it up next cycle for dispatch-fix.
 - `REBASE_REFUSED:<PR>:<reason>` — PR closed/merged/from a fork. Skip; next cycle will resync.
 
-This step is REQUIRED before Step 5 because:
+This step is REQUIRED before Step 4 because:
 1. A DIRTY PR without rebase will sit stuck even with all checks green — issue #1027 sat 22+ hours before the step was added.
 2. A CI-red PR caused by a stale base will keep failing forever — three PRs (#1008, #1029, #1055) had this exact problem in the May 1-2 cron run.
 
 Cheap to do every cycle: when the PR is already current, `rebase-pr.sh` returns `REBASE_NOOP` in ~5 seconds without modifying anything.
 
-**Step 5 — QA pass (Acceptance Reviewer) — headless dispatch in FIFO order:**
+**Step 4 — QA pass (Acceptance Reviewer) — headless dispatch in FIFO order:**
 
 Inline subagent spawn (the previous behavior) caused multi-minute hangs in the
 host session because each tool call triggers an approval prompt in `default`
@@ -378,7 +363,7 @@ For each such entry:
 The fix-pr agent picks up the existing branch, completes the remaining work,
 and the entrypoint marks the PR ready for review when the agent exits 0. The
 next cron cycle will see the now-ready PR and route it through normal
-review (Step 5). This is "finishing a story", not "fixing a story" — fresh
+review (Step 4). This is "finishing a story", not "fixing a story" — fresh
 agent, fresh budget. No retry counter is incremented at the cron level.
 
 **Find PRs that need review.** A PR is review-eligible when:
@@ -416,7 +401,7 @@ After dispatch, **do NOT wait**. The next cron cycle will see the
 `acceptance-reviewer` comment on the PR (if review completed) and move on to
 other work. The dispatch is fire-and-forget on the host side.
 
-**Failsafe cleanup.** Run once per cron cycle, near the start (before Step 5):
+**Failsafe cleanup.** Run once per cron cycle, near the start (before Step 4):
 
 ```bash
 ./.claude/scripts/agent-dispatch.sh cleanup-stale-reviews
@@ -437,33 +422,52 @@ Final step in all cases: removes `pipeline:reviewing` from the PR. The
 container's `review-entrypoint.sh` has a failsafe that strips the label even
 if the agent crashes before getting to it.
 
-**Step 6 — Planning Team (BA + Tech Lead collaboration):**
+**Step 5 — Fix cycle:**
+For each `pipeline:fix` story, find its PR and dispatch the fix agent in one call:
+```bash
+./.claude/scripts/po-act.sh dispatch-fix <PR_NUM>
+```
+This cleans any stale container from a prior failed attempt, re-clones, and launches.
+
+**Step 6 — Dispatch:**
+Find `agent:ready` issues without `agent:in-progress`. Before dispatching, check for file conflicts with in-flight agents:
+
+Both gates are computed by the preflight script (`dispatch_recommendations` with `action: "dispatch"` vs `"hold"` and a `reason` string). Trust its recommendation by default, override only if `parse_warnings` are non-empty on the story.
+
+For each story the preflight recommends dispatching:
+```bash
+./.claude/scripts/po-act.sh dispatch <NUM>
+```
+
+**This step is intentionally last in priority order.** If the 5-container cap is exhausted by Steps 3-5 (rebase, review, fix-cycle), defer dispatch to the next cycle. Existing in-flight PRs unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them.
+
+**Step 7 — Planning Team (BA + Tech Lead collaboration):**
 Find `pipeline:epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each epic, orchestrate a collaborative planning session where BA and Tech Lead work together to produce stories that are ready on the first try.
 
-**6a. Read the epic and gather context:**
+**7a. Read the epic and gather context:**
 ```bash
 gh issue view <NUM> --repo cfg-is/cfgms --json number,title,body,labels
 ```
 Extract the epic's Goal, Success Criteria, Non-Goals, Constraints, and PM Notes. Also read `CLAUDE.md` architecture rules and `docs/product/roadmap.md` for milestone context.
 
-**6b. Create the planning team:**
+**7b. Create the planning team:**
 ```
 TeamCreate(team_name: "planning-epic-<NUM>")
 ```
 
-**6c. Spawn BA and Tech Lead as teammates (in parallel):**
+**7c. Spawn BA and Tech Lead as teammates (in parallel):**
 
 Spawn both using the **Agent tool** with `team_name` and `name` parameters. Read each agent's `.claude/agents/*.md` file and include the **Team Mode** section instructions in the prompt. Use `subagent_type: "general-purpose"`, `model: "sonnet"`, `mode: "auto"`.
 
 - BA: `Agent(subagent_type: "general-purpose", team_name: "planning-epic-<NUM>", name: "ba", model: "sonnet", mode: "auto", prompt: <ba.md Team Mode instructions>)`
 - Tech Lead: `Agent(subagent_type: "general-purpose", team_name: "planning-epic-<NUM>", name: "tech-lead", model: "sonnet", mode: "auto", prompt: <tech-lead.md Team Mode instructions>)`
 
-**6d. Broadcast epic context to the team:**
+**7d. Broadcast epic context to the team:**
 ```
 SendMessage(to: "*", summary: "Epic context for planning", message: <epic body + architectural context from CLAUDE.md>)
 ```
 
-**6e. Orchestrate the planning conversation:**
+**7e. Orchestrate the planning conversation:**
 
 The conversation follows this protocol:
 
@@ -475,7 +479,7 @@ The conversation follows this protocol:
 
 **Maximum 3 revision rounds.** A round = BA revises + Tech Lead re-reviews. After 3 rounds, any remaining REVISION NEEDED stories are resolved by PO decision: either accept with a PO note, or drop and document in a `pipeline:blocked` issue.
 
-**6f. Create stories on GitHub (after consensus):**
+**7f. Create stories on GitHub (after consensus):**
 
 Story bodies must conform to the parser spec in **Reference: Story Body Conventions** below — in particular the `## Dependencies` and `## Files In Scope` rules. Stories that fail those rules are flagged with `parse_warnings` and skipped by the dispatcher. Both classes of bug (prose-only Dependencies, parent-epic-as-dep) have surfaced repeatedly during decompositions; produce parser-compliant bodies on first try rather than relying on a Tech Lead fix-up step.
 
@@ -491,7 +495,7 @@ rm /tmp/story-body.md
 
 Stories are created with `pipeline:story` + `agent:ready` labels — they skip `pipeline:draft` entirely since the Tech Lead already validated them during the planning conversation.
 
-**6g. Post summary on epic:**
+**7g. Post summary on epic:**
 ```bash
 cat > /tmp/planning-summary.md <<'SUMMARY_EOF'
 ## Planning Team — Decomposition Complete
@@ -511,13 +515,13 @@ SUMMARY_EOF
 rm /tmp/planning-summary.md
 ```
 
-**6h. Shutdown the planning team:**
+**7h. Shutdown the planning team:**
 Send shutdown to both teammates: `SendMessage(to: "*", message: {type: "shutdown_request"})`. Then clean up:
 ```
 TeamDelete()
 ```
 
-**6i. Fallback — convergence failure:**
+**7i. Fallback — convergence failure:**
 If the PO drops any stories (couldn't converge after 3 rounds), create a single `pipeline:blocked` issue:
 ```bash
 cat > /tmp/blocked-body.md <<'BLOCK_EOF'
@@ -536,10 +540,10 @@ BLOCK_EOF
 rm /tmp/blocked-body.md
 ```
 
-**Step 7 — Forward edge:**
+**Step 8 — Forward edge:**
 If active milestone >80% complete and next milestone has no epics, create `pipeline:blocked` requesting intent capture.
 
-**Step 8 — Session log:**
+**Step 9 — Session log:**
 Post timestamped summary on each active epic. Skip if no actions taken.
 
 ### 4.2 Idempotency
