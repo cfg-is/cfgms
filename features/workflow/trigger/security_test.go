@@ -20,6 +20,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/workflow"
 )
 
 func TestSecurityEdgeCases_WebhookAuthentication(t *testing.T) {
@@ -646,7 +648,7 @@ func TestSecurityEdgeCases_RateLimitBypass(t *testing.T) {
 
 	// Mock workflow execution
 	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(
-		&WorkflowExecution{ID: "exec-1", WorkflowName: "test", Status: "running", StartTime: time.Now()}, nil)
+		&workflow.WorkflowExecution{ID: "exec-1", WorkflowName: "test", Status: workflow.StatusRunning, StartTime: time.Now()}, nil)
 
 	tests := []struct {
 		name        string

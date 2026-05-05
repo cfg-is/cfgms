@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
+	"github.com/cfgis/cfgms/features/workflow"
 )
 
 // MockTriggerManager implements TriggerManager for testing
@@ -88,12 +90,12 @@ type MockWorkflowTrigger struct {
 	mock.Mock
 }
 
-func (m *MockWorkflowTrigger) TriggerWorkflow(ctx context.Context, trigger *Trigger, data map[string]interface{}) (*WorkflowExecution, error) {
+func (m *MockWorkflowTrigger) TriggerWorkflow(ctx context.Context, trigger *Trigger, data map[string]interface{}) (*workflow.WorkflowExecution, error) {
 	args := m.Called(ctx, trigger, data)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
-	return args.Get(0).(*WorkflowExecution), args.Error(1)
+	return args.Get(0).(*workflow.WorkflowExecution), args.Error(1)
 }
 
 func (m *MockWorkflowTrigger) ValidateTrigger(ctx context.Context, trigger *Trigger) error {

@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -168,18 +169,18 @@ func (t *TestStorageProvider) GetVersion() string {
 
 // TestWorkflowTrigger implements a test workflow trigger that records executions
 type TestWorkflowTrigger struct {
-	executions []WorkflowExecution
+	executions []*workflow.WorkflowExecution
 	mutex      sync.RWMutex
 	failNext   bool
 }
 
 func NewTestWorkflowTrigger() *TestWorkflowTrigger {
 	return &TestWorkflowTrigger{
-		executions: make([]WorkflowExecution, 0),
+		executions: make([]*workflow.WorkflowExecution, 0),
 	}
 }
 
-func (t *TestWorkflowTrigger) TriggerWorkflow(ctx context.Context, trigger *Trigger, data map[string]interface{}) (*WorkflowExecution, error) {
+func (t *TestWorkflowTrigger) TriggerWorkflow(ctx context.Context, trigger *Trigger, data map[string]interface{}) (*workflow.WorkflowExecution, error) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 
@@ -188,15 +189,15 @@ func (t *TestWorkflowTrigger) TriggerWorkflow(ctx context.Context, trigger *Trig
 		return nil, fmt.Errorf("simulated workflow execution failure")
 	}
 
-	execution := WorkflowExecution{
+	execution := &workflow.WorkflowExecution{
 		ID:           fmt.Sprintf("exec-%d", len(t.executions)+1),
 		WorkflowName: trigger.WorkflowName,
-		Status:       "running",
+		Status:       workflow.StatusRunning,
 		StartTime:    time.Now(),
 	}
 
 	t.executions = append(t.executions, execution)
-	return &execution, nil
+	return execution, nil
 }
 
 func (t *TestWorkflowTrigger) ValidateTrigger(ctx context.Context, trigger *Trigger) error {
@@ -206,10 +207,10 @@ func (t *TestWorkflowTrigger) ValidateTrigger(ctx context.Context, trigger *Trig
 	return nil
 }
 
-func (t *TestWorkflowTrigger) GetExecutions() []WorkflowExecution {
+func (t *TestWorkflowTrigger) GetExecutions() []*workflow.WorkflowExecution {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
-	return append([]WorkflowExecution{}, t.executions...)
+	return append([]*workflow.WorkflowExecution{}, t.executions...)
 }
 
 func (t *TestWorkflowTrigger) SetFailNext(fail bool) {

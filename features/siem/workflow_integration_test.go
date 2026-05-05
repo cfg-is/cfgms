@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,7 +24,7 @@ type contextCapturingTrigger struct {
 	calls     int
 }
 
-func (c *contextCapturingTrigger) TriggerWorkflow(ctx context.Context, t *trigger.Trigger, data map[string]interface{}) (*trigger.WorkflowExecution, error) {
+func (c *contextCapturingTrigger) TriggerWorkflow(ctx context.Context, t *trigger.Trigger, data map[string]interface{}) (*workflow.WorkflowExecution, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -34,7 +35,7 @@ func (c *contextCapturingTrigger) TriggerWorkflow(ctx context.Context, t *trigge
 	if c.calls <= c.failCount {
 		return nil, errors.New("transient error")
 	}
-	return &trigger.WorkflowExecution{
+	return &workflow.WorkflowExecution{
 		ID:           "exec-1",
 		WorkflowName: t.WorkflowName,
 		Status:       "running",
