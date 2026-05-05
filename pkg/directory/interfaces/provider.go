@@ -31,6 +31,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/directory/types"
 )
 
 // DirectoryProvider defines the unified interface for all directory service providers.
@@ -143,70 +145,11 @@ type ProviderCapabilities struct {
 	RateLimitInfo *RateLimitInfo `json:"rate_limit_info,omitempty"`
 }
 
-// DirectoryUser represents a normalized user object across all directory providers
-type DirectoryUser struct {
-	// Core Identity
-	ID                string `json:"id"`                         // Unique identifier in source directory
-	UserPrincipalName string `json:"user_principal_name"`        // UPN (user@domain.com)
-	SAMAccountName    string `json:"sam_account_name,omitempty"` // For AD compatibility
-	DisplayName       string `json:"display_name"`               // Full display name
+// DirectoryUser is an alias for types.DirectoryUser — types is the canonical definition.
+type DirectoryUser = types.DirectoryUser
 
-	// Authentication
-	AccountEnabled bool       `json:"account_enabled"`           // Is account enabled
-	PasswordExpiry *time.Time `json:"password_expiry,omitempty"` // When password expires
-	LastLogon      *time.Time `json:"last_logon,omitempty"`      // Last successful logon
-
-	// Contact Information
-	EmailAddress string `json:"email_address,omitempty"` // Primary email
-	PhoneNumber  string `json:"phone_number,omitempty"`  // Primary phone
-	MobilePhone  string `json:"mobile_phone,omitempty"`  // Mobile phone
-
-	// Organizational Information
-	Department     string `json:"department,omitempty"`      // Department name
-	JobTitle       string `json:"job_title,omitempty"`       // Job title
-	Manager        string `json:"manager,omitempty"`         // Manager's ID
-	OfficeLocation string `json:"office_location,omitempty"` // Office location
-	Company        string `json:"company,omitempty"`         // Company name
-
-	// Directory Structure
-	DistinguishedName string   `json:"distinguished_name,omitempty"` // Full DN (for AD)
-	OU                string   `json:"ou,omitempty"`                 // Parent OU
-	Groups            []string `json:"groups,omitempty"`             // Group memberships
-
-	// Provider-Specific Attributes
-	ProviderAttributes map[string]interface{} `json:"provider_attributes,omitempty"`
-
-	// Metadata
-	Created  *time.Time `json:"created,omitempty"`  // When created
-	Modified *time.Time `json:"modified,omitempty"` // When last modified
-	Source   string     `json:"source"`             // Source provider name
-}
-
-// DirectoryGroup represents a normalized group object across all directory providers
-type DirectoryGroup struct {
-	// Core Identity
-	ID          string `json:"id"`                    // Unique identifier
-	Name        string `json:"name"`                  // Group name
-	DisplayName string `json:"display_name"`          // Display name
-	Description string `json:"description,omitempty"` // Group description
-
-	// Group Properties
-	GroupType  GroupType  `json:"group_type"`            // Security vs Distribution
-	GroupScope GroupScope `json:"group_scope,omitempty"` // Domain, Global, Universal
-
-	// Directory Structure
-	DistinguishedName string   `json:"distinguished_name,omitempty"` // Full DN (for AD)
-	OU                string   `json:"ou,omitempty"`                 // Parent OU
-	Members           []string `json:"members,omitempty"`            // Member user IDs
-
-	// Provider-Specific Attributes
-	ProviderAttributes map[string]interface{} `json:"provider_attributes,omitempty"`
-
-	// Metadata
-	Created  *time.Time `json:"created,omitempty"`  // When created
-	Modified *time.Time `json:"modified,omitempty"` // When last modified
-	Source   string     `json:"source"`             // Source provider name
-}
+// DirectoryGroup is an alias for types.DirectoryGroup — types is the canonical definition.
+type DirectoryGroup = types.DirectoryGroup
 
 // OrganizationalUnit represents a normalized OU object (primarily for AD compatibility)
 type OrganizationalUnit struct {
@@ -240,16 +183,17 @@ const (
 	DirectoryObjectTypeOU    DirectoryObjectType = "organizational_unit"
 )
 
-// GroupType represents the type of group
-type GroupType string
+// GroupType is an alias for types.GroupType — types is the canonical definition.
+type GroupType = types.GroupType
 
 const (
 	GroupTypeSecurity     GroupType = "security"
 	GroupTypeDistribution GroupType = "distribution"
+	GroupTypeMicrosoft365 GroupType = "microsoft365"
 )
 
-// GroupScope represents the scope of a group (AD concept)
-type GroupScope string
+// GroupScope is an alias for types.GroupScope — types is the canonical definition.
+type GroupScope = types.GroupScope
 
 const (
 	GroupScopeDomainLocal GroupScope = "domain_local"
