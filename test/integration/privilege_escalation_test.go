@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -337,7 +338,10 @@ func (f *PrivilegeEscalationTestFramework) TestTimingBasedPrivilegeEscalationAtt
 	t.Log("Testing timing-based privilege escalation attack prevention...")
 
 	var wg sync.WaitGroup
-	attackBlocked := true
+	// Use atomic.Bool to avoid a data race: both goroutines may write this
+	// concurrently, and the race detector flags bool writes without synchronisation.
+	var attackBlocked atomic.Bool
+	attackBlocked.Store(true)
 
 	// Goroutine 1: Attempt to assign admin role
 	wg.Add(1)
@@ -359,7 +363,7 @@ func (f *PrivilegeEscalationTestFramework) TestTimingBasedPrivilegeEscalationAtt
 		if err != nil {
 			t.Logf("First timing attack blocked: %v", err)
 		} else {
-			attackBlocked = false
+			attackBlocked.Store(false)
 		}
 	}()
 
@@ -387,7 +391,7 @@ func (f *PrivilegeEscalationTestFramework) TestTimingBasedPrivilegeEscalationAtt
 		if err != nil || !response.Granted {
 			t.Logf("Second timing attack blocked - permission denied")
 		} else {
-			attackBlocked = false
+			attackBlocked.Store(false)
 			t.Errorf("SECURITY VULNERABILITY: Timing-based escalation succeeded")
 		}
 	}()
@@ -396,7 +400,7 @@ func (f *PrivilegeEscalationTestFramework) TestTimingBasedPrivilegeEscalationAtt
 
 	// Record attack results
 	f.attackMutex.Lock()
-	if attackBlocked {
+	if attackBlocked.Load() {
 		f.blockedAttacks += 2
 	} else {
 		f.successfulAttacks++
