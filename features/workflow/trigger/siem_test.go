@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/workflow"
 )
 
 func TestSIEMProcessor_NewSIEMProcessor(t *testing.T) {
@@ -216,8 +218,6 @@ func TestSIEMProcessor_UnregisterSIEMTrigger(t *testing.T) {
 				assert.Contains(t, err.Error(), tt.errorMsg)
 			} else {
 				assert.NoError(t, err)
-				// Allow time for any concurrent goroutines to finish before checking state
-				time.Sleep(10 * time.Millisecond)
 
 				processor.mutex.RLock()
 				_, existsInSiemTriggers := processor.siemTriggers[tt.triggerID]
@@ -773,20 +773,31 @@ func TestSIEMProcessor_FireTrigger(t *testing.T) {
 		TriggerID: triggerID,
 	}
 
-	// Mock successful workflow execution
-	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(
-		&WorkflowExecution{
-			ID:           "exec-123",
-			WorkflowName: "security-alert-workflow",
-			Status:       "running",
-			StartTime:    time.Now(),
-		}, nil)
+	// Use a channel to synchronize with the async goroutine inside fireTrigger.
+	triggered := make(chan struct{}, 1)
+	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.Anything).
+		Return(
+			&workflow.WorkflowExecution{
+				ID:           "exec-123",
+				WorkflowName: "security-alert-workflow",
+				Status:       workflow.StatusRunning,
+				StartTime:    time.Now(),
+			}, nil).
+		Run(func(_ mock.Arguments) {
+			select {
+			case triggered <- struct{}{}:
+			default:
+			}
+		})
 
 	ctx := context.Background()
 	processor.fireTrigger(ctx, triggerID, trigger)
 
-	// Give the goroutine time to execute
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-triggered:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("TriggerWorkflow was not called within 500ms")
+	}
 
 	// Verify workflow trigger was called
 	mockWorkflowTrigger.AssertCalled(t, "TriggerWorkflow", mock.Anything, trigger, mock.Anything)

@@ -29,7 +29,7 @@ type workflowEngineAdapter struct {
 	configStore cfgconfig.ConfigStore
 }
 
-func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *Trigger, data map[string]interface{}) (*WorkflowExecution, error) {
+func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *Trigger, data map[string]interface{}) (*workflow.WorkflowExecution, error) {
 	store := workflow.NewWorkflowStore(a.configStore, trig.TenantID)
 	vw, err := store.GetLatestWorkflow(ctx, trig.WorkflowName)
 	if err != nil {
@@ -46,13 +46,11 @@ func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *Trigg
 	if err != nil {
 		return nil, fmt.Errorf("failed to start workflow %q: %w", trig.WorkflowName, err)
 	}
-	return &WorkflowExecution{
-		ID:           exec.ID,
-		WorkflowName: exec.WorkflowName,
-		Status:       string(exec.GetStatus()),
-		StartTime:    exec.StartTime,
-	}, nil
+	return exec, nil
 }
+
+// compile-time assertion: workflowEngineAdapter must satisfy WorkflowTrigger
+var _ WorkflowTrigger = (*workflowEngineAdapter)(nil)
 
 func (a *workflowEngineAdapter) ValidateTrigger(_ context.Context, trig *Trigger) error {
 	if trig.WorkflowName == "" {

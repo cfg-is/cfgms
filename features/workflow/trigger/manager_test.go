@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -1046,10 +1047,10 @@ func TestTriggerManagerImpl_ExecuteTrigger(t *testing.T) {
 	}
 
 	mockWorkflowTrigger.On("TriggerWorkflow", ctx, trigger, mock.Anything).Return(
-		&WorkflowExecution{
+		&workflow.WorkflowExecution{
 			ID:           "exec-123",
 			WorkflowName: "test-workflow",
-			Status:       "running",
+			Status:       workflow.StatusRunning,
 			StartTime:    time.Now(),
 		}, nil)
 

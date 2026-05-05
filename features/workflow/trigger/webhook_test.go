@@ -19,6 +19,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/workflow"
 )
 
 func TestHTTPWebhookHandler_NewHTTPWebhookHandler(t *testing.T) {
@@ -670,10 +672,10 @@ func TestHTTPWebhookHandler_HandleWebhookRequest(t *testing.T) {
 
 	// Mock successful workflow execution
 	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(
-		&WorkflowExecution{
+		&workflow.WorkflowExecution{
 			ID:           "exec-123",
 			WorkflowName: "test-workflow",
-			Status:       "running",
+			Status:       workflow.StatusRunning,
 			StartTime:    time.Now(),
 		}, nil)
 
@@ -798,7 +800,7 @@ func TestHTTPWebhookHandler_RateLimit(t *testing.T) {
 
 	// Mock workflow execution
 	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(
-		&WorkflowExecution{ID: "exec-1", WorkflowName: "test", Status: "running", StartTime: time.Now()}, nil)
+		&workflow.WorkflowExecution{ID: "exec-1", WorkflowName: "test", Status: workflow.StatusRunning, StartTime: time.Now()}, nil)
 
 	// First request should succeed
 	req1, _ := http.NewRequest("POST", "/webhook/webhook-ratelimited", strings.NewReader(`{"test": "data"}`))
@@ -967,7 +969,7 @@ func TestHandleWebhookNoAuthHeadersInWorkflowVariables(t *testing.T) {
 		}
 		return true
 	})).Return(
-		&WorkflowExecution{ID: "exec-sanitize", WorkflowName: "test-workflow", Status: "running", StartTime: time.Now()},
+		&workflow.WorkflowExecution{ID: "exec-sanitize", WorkflowName: "test-workflow", Status: workflow.StatusRunning, StartTime: time.Now()},
 		nil,
 	)
 

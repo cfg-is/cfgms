@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -24,8 +25,8 @@ import (
 // does not invoke workflow execution paths — it is held for future wiring.
 type testWorkflowTrigger struct{}
 
-func (t *testWorkflowTrigger) TriggerWorkflow(_ context.Context, trig *trigger.Trigger, _ map[string]interface{}) (*trigger.WorkflowExecution, error) {
-	return &trigger.WorkflowExecution{
+func (t *testWorkflowTrigger) TriggerWorkflow(_ context.Context, trig *trigger.Trigger, _ map[string]interface{}) (*workflow.WorkflowExecution, error) {
+	return &workflow.WorkflowExecution{
 		ID:           "test-exec-" + trig.ID,
 		WorkflowName: trig.WorkflowName,
 		Status:       "running",

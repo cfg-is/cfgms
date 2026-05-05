@@ -742,7 +742,7 @@ type workflowEngineAdapter struct {
 	configStore cfgconfig.ConfigStore
 }
 
-func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *workflowtrigger.Trigger, data map[string]interface{}) (*workflowtrigger.WorkflowExecution, error) {
+func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *workflowtrigger.Trigger, data map[string]interface{}) (*workflow.WorkflowExecution, error) {
 	// Resolve workflow from storage using a system-level (empty) tenant scope.
 	store := workflow.NewWorkflowStore(a.configStore, trig.TenantID)
 	vw, err := store.GetLatestWorkflow(ctx, trig.WorkflowName)
@@ -764,12 +764,7 @@ func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *workf
 		return nil, fmt.Errorf("failed to start workflow %q: %w", trig.WorkflowName, err)
 	}
 
-	return &workflowtrigger.WorkflowExecution{
-		ID:           exec.ID,
-		WorkflowName: exec.WorkflowName,
-		Status:       string(exec.GetStatus()),
-		StartTime:    exec.StartTime,
-	}, nil
+	return exec, nil
 }
 
 func (a *workflowEngineAdapter) ValidateTrigger(_ context.Context, trig *workflowtrigger.Trigger) error {
