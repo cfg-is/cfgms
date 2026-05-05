@@ -10,6 +10,7 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/jit"
+	"github.com/cfgis/cfgms/features/rbac/ports"
 	"github.com/cfgis/cfgms/features/rbac/zerotrust"
 	"github.com/cfgis/cfgms/features/tenant/security"
 )
@@ -37,17 +38,12 @@ type RiskBasedAccessIntegration struct {
 	zeroTrustEngine   *zerotrust.ZeroTrustPolicyEngine
 	zeroTrustEnabled  bool
 	zeroTrustRiskMode ZeroTrustRiskMode
-	baseRiskManager   RiskManager // Base risk manager for compatibility
+	baseRiskManager   ports.RiskManager // Base risk manager for compatibility
 	config            *RiskIntegrationConfig
 
 	// Continuous authorization integration
 	continuousRiskMonitor *ContinuousRiskMonitor
 	sessionRiskTracker    *SessionRiskTracker
-}
-
-// RiskManager interface for base risk assessment
-type RiskManager interface {
-	AssessRisk(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error)
 }
 
 // RiskIntegrationConfig configuration for risk-based access integration

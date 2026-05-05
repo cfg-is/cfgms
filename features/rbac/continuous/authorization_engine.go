@@ -9,26 +9,13 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac/ports"
 )
 
-// RBACManager interface defines the RBAC operations needed by continuous authorization
-type RBACManager interface {
-	CheckPermission(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error)
-	GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error)
-	GetSubjectPermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error)
-	Initialize(ctx context.Context) error
-}
-
-// JITManager interface defines JIT operations needed by continuous authorization
-type JITManager interface {
-	CheckJITAccess(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error)
-	// Add JIT methods as needed
-}
-
-// RiskManager interface defines risk operations needed by continuous authorization
-type RiskManager interface {
+// ContinuousRiskManager is session-compliance oriented and intentionally distinct from ports.RiskManager.
+// It surfaces enhanced risk checks (EnhancedRiskAccessCheck) rather than the canonical AssessRisk method.
+type ContinuousRiskManager interface {
 	EnhancedRiskAccessCheck(ctx context.Context, request *common.AccessRequest) (*RiskAccessResult, error)
-	// Add risk methods as needed
 }
 
 // RiskAccessResult represents result from risk assessment
@@ -154,9 +141,9 @@ type RiskFactor struct {
 // with dynamic permission updates and immediate revocation capabilities
 type ContinuousAuthorizationEngine struct {
 	// Core dependencies
-	rbacManager    RBACManager
-	jitManager     JITManager
-	riskManager    RiskManager
+	rbacManager    ports.RBACManager
+	jitManager     ports.JITManager
+	riskManager    ContinuousRiskManager
 	tenantSecurity TenantSecurityMiddleware
 
 	// Core components
@@ -332,9 +319,9 @@ const (
 
 // NewContinuousAuthorizationEngine creates a new continuous authorization engine
 func NewContinuousAuthorizationEngine(
-	rbacManager RBACManager,
-	jitManager JITManager,
-	riskManager RiskManager,
+	rbacManager ports.RBACManager,
+	jitManager ports.JITManager,
+	riskManager ContinuousRiskManager,
 	tenantSecurity TenantSecurityMiddleware,
 	config *ContinuousAuthConfig,
 ) *ContinuousAuthorizationEngine {
@@ -560,7 +547,7 @@ func (cae *ContinuousAuthorizationEngine) performAuthorizationCheck(ctx context.
 	// If RBAC denies, check JIT access
 	if !rbacResponse.Granted {
 		if cae.jitManager != nil {
-			jitResponse, err := cae.jitManager.CheckJITAccess(ctx, accessRequest)
+			jitResponse, err := cae.jitManager.ValidateJITAccess(ctx, accessRequest)
 			if err == nil && jitResponse != nil && jitResponse.Granted {
 				rbacResponse = jitResponse
 			}

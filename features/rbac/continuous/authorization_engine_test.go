@@ -57,18 +57,18 @@ func (m *MockRBACManager) Initialize(ctx context.Context) error {
 	return m.initializeError
 }
 
-// MockJITManager implements JITManager interface for testing
+// MockJITManager implements ports.JITManager interface for testing
 type MockJITManager struct {
-	checkJITAccessResponse *common.AccessResponse
-	checkJITAccessError    error
+	validateJITAccessResponse *common.AccessResponse
+	validateJITAccessError    error
 }
 
-func (m *MockJITManager) CheckJITAccess(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
-	if m.checkJITAccessError != nil {
-		return nil, m.checkJITAccessError
+func (m *MockJITManager) ValidateJITAccess(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
+	if m.validateJITAccessError != nil {
+		return nil, m.validateJITAccessError
 	}
-	if m.checkJITAccessResponse != nil {
-		return m.checkJITAccessResponse, nil
+	if m.validateJITAccessResponse != nil {
+		return m.validateJITAccessResponse, nil
 	}
 
 	// Default no JIT access
@@ -200,11 +200,10 @@ func TestContinuousAuthorizationEngine_Start_Success(t *testing.T) {
 	ctx := context.Background()
 
 	err := engine.Start(ctx)
-
 	require.NoError(t, err)
+	assert.True(t, engine.running)
 
-	// Verify that monitoring loops are started (we can't easily test this without exposing internal state)
-	// The important thing is that Start doesn't return an error
+	t.Cleanup(func() { _ = engine.Stop() })
 }
 
 func TestContinuousAuthorizationEngine_Start_InitializationError(t *testing.T) {
@@ -304,7 +303,7 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_WithJITAccess(t *testing.
 	}
 
 	engine.jitManager = &MockJITManager{
-		checkJITAccessResponse: &common.AccessResponse{
+		validateJITAccessResponse: &common.AccessResponse{
 			Granted:            true,
 			Reason:             "JIT access active",
 			AppliedPermissions: []string{"admin"},

@@ -12,7 +12,7 @@ import (
 // ContextMonitor provides continuous monitoring of authorization context and compliance
 type ContextMonitor struct {
 	// Core dependencies
-	riskManager RiskManager
+	riskManager ContinuousRiskManager
 
 	// Context tracking
 	contextStore map[string]*AuthorizationContext // sessionID -> context
@@ -345,7 +345,7 @@ type ContextMonitorStats struct {
 }
 
 // NewContextMonitor creates a new context monitor
-func NewContextMonitor(riskManager RiskManager, checkInterval time.Duration) *ContextMonitor {
+func NewContextMonitor(riskManager ContinuousRiskManager, checkInterval time.Duration) *ContextMonitor {
 	return &ContextMonitor{
 		riskManager:     riskManager,
 		contextStore:    make(map[string]*AuthorizationContext),
