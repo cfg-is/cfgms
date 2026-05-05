@@ -41,7 +41,6 @@
 package cert
 
 import (
-	"crypto/x509"
 	"time"
 )
 
@@ -283,88 +282,4 @@ type RenewalInfo struct {
 
 	// Whether renewal is urgent
 	IsUrgent bool
-}
-
-// CAManager provides Certificate Authority management functionality
-type CAManager interface {
-	// Initialize creates a new Certificate Authority
-	Initialize(config *CAConfig) error
-
-	// LoadCA loads an existing Certificate Authority
-	LoadCA(storagePath string) error
-
-	// GetCACertificate returns the CA certificate in PEM format
-	GetCACertificate() ([]byte, error)
-
-	// IsInitialized returns true if the CA is initialized
-	IsInitialized() bool
-
-	// GetCAInfo returns information about the CA
-	GetCAInfo() (*CertificateInfo, error)
-
-	// GenerateServerCertificate creates a new server certificate
-	GenerateServerCertificate(config *ServerCertConfig) (*Certificate, error)
-
-	// GenerateClientCertificate creates a new client certificate
-	GenerateClientCertificate(config *ClientCertConfig) (*Certificate, error)
-
-	// GenerateSigningCertificate creates a config signing certificate (CodeSigning EKU, 4096-bit RSA)
-	GenerateSigningCertificate(config *SigningCertConfig) (*Certificate, error)
-
-	// GenerateInternalServerCertificate creates an internal mTLS server certificate
-	GenerateInternalServerCertificate(config *ServerCertConfig) (*Certificate, error)
-
-	// ValidateCertificate validates a certificate against this CA
-	ValidateCertificate(certPEM []byte) (*ValidationResult, error)
-}
-
-// CertificateStore provides certificate storage and retrieval functionality
-type CertificateStore interface {
-	// StoreCertificate stores a certificate
-	StoreCertificate(cert *Certificate) error
-
-	// GetCertificate retrieves a certificate by serial number
-	GetCertificate(serialNumber string) (*Certificate, error)
-
-	// GetCertificateByCommonName retrieves certificates by common name
-	GetCertificateByCommonName(commonName string) ([]*CertificateInfo, error)
-
-	// GetCertificatesByType retrieves certificates by type
-	GetCertificatesByType(certType CertificateType) ([]*CertificateInfo, error)
-
-	// ListCertificates returns all certificates
-	ListCertificates() ([]*CertificateInfo, error)
-
-	// DeleteCertificate removes a certificate from storage
-	DeleteCertificate(serialNumber string) error
-
-	// GetExpiringCertificates returns certificates expiring within the specified days
-	GetExpiringCertificates(withinDays int) ([]*CertificateInfo, error)
-
-	// GetStoragePath returns the base storage path
-	GetStoragePath() string
-}
-
-// CertificateValidator provides certificate validation functionality
-type CertificateValidator interface {
-	// ValidateCertificate validates a single certificate
-	ValidateCertificate(cert *x509.Certificate) (*ValidationResult, error)
-
-	// ValidateCertificateFile validates a certificate from PEM file data
-	ValidateCertificateFile(certPEM []byte) (*ValidationResult, error)
-
-	// CheckExpiration checks if certificates are expiring
-	CheckExpiration(certs []*CertificateInfo, withinDays int) ([]*RenewalInfo, error)
-}
-
-// CertificateRenewer provides certificate renewal functionality
-type CertificateRenewer interface {
-	// GetRenewalCandidates returns certificates that need renewal
-	GetRenewalCandidates(withinDays int) ([]*RenewalInfo, error)
-
-	// RenewCertificate renews a certificate
-	RenewCertificate(serialNumber string, config interface{}) (*Certificate, error)
-
-	// AutoRenewCertificates automatically renews expiring certificates
-	AutoRenewCertificates(withinDays int) ([]*Certificate, error)
 }

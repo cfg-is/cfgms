@@ -69,10 +69,10 @@ type ManagerConfig struct {
 
 // Manager provides high-level certificate management functionality
 type Manager struct {
-	ca        CAManager
-	store     CertificateStore
-	validator CertificateValidator
-	renewer   CertificateRenewer
+	ca        *CA
+	store     *FileStore
+	validator *Validator
+	renewer   *Renewer
 	config    *ManagerConfig
 }
 

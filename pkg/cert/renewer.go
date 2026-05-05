@@ -7,15 +7,15 @@ import (
 	"sort"
 )
 
-// Renewer implements CertificateRenewer for certificate renewal operations
+// Renewer provides certificate renewal operations
 type Renewer struct {
-	ca        CAManager
-	store     CertificateStore
-	validator CertificateValidator
+	ca        *CA
+	store     *FileStore
+	validator *Validator
 }
 
 // NewRenewer creates a new certificate renewer
-func NewRenewer(ca CAManager, store CertificateStore, validator CertificateValidator) *Renewer {
+func NewRenewer(ca *CA, store *FileStore, validator *Validator) *Renewer {
 	return &Renewer{
 		ca:        ca,
 		store:     store,

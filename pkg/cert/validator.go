@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Validator implements CertificateValidator for certificate validation operations
+// Validator provides certificate validation operations
 type Validator struct {
 	// Optional CA certificate for chain validation
 	caCert *x509.Certificate
