@@ -87,19 +87,6 @@ func DefaultConfig(serviceName, component string) *Config {
 	}
 }
 
-// LogEntry represents a structured log entry for JSON output.
-type LogEntry struct {
-	Timestamp     time.Time              `json:"timestamp"`
-	Level         string                 `json:"level"`
-	Message       string                 `json:"message"`
-	ServiceName   string                 `json:"service_name,omitempty"`
-	Component     string                 `json:"component,omitempty"`
-	CorrelationID string                 `json:"correlation_id,omitempty"`
-	TraceID       string                 `json:"trace_id,omitempty"`
-	SpanID        string                 `json:"span_id,omitempty"`
-	Fields        map[string]interface{} `json:"fields,omitempty"`
-}
-
 // DefaultLogger is an enhanced implementation of Logger with correlation support
 // It can use either the legacy stdout logging or the new provider system
 type DefaultLogger struct {
@@ -229,7 +216,7 @@ func (l *DefaultLogger) logEntry(ctx context.Context, level Level, levelStr, msg
 
 // logJSON outputs structured JSON logs with correlation support.
 func (l *DefaultLogger) logJSON(ctx context.Context, level, msg string, keysAndValues ...interface{}) {
-	entry := LogEntry{
+	entry := interfaces.LogEntry{
 		Timestamp:   time.Now().UTC(),
 		Level:       level,
 		Message:     SanitizeLogValue(msg),
