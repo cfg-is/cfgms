@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac/ports"
 )
 
 // Import the actual protobuf types
@@ -62,12 +63,8 @@ const (
 	PolicyEffectDeny  PolicyEffect = "deny"
 )
 
-// PolicyCondition represents a condition in a policy
-type PolicyCondition struct {
-	Attribute string      `json:"attribute"`
-	Operator  string      `json:"operator"`
-	Value     interface{} `json:"value"`
-}
+// PolicyCondition is an alias for the canonical type in the ports package.
+type PolicyCondition = ports.PolicyCondition
 
 const (
 	RoleInheritanceNone        = common.RoleInheritanceType_ROLE_INHERITANCE_NONE
