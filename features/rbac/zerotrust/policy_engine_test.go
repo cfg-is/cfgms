@@ -913,6 +913,20 @@ func (m *mockRBACManagerWithError) GetEffectivePermissions(ctx context.Context, 
 	return []*common.Permission{{Id: "test-permission", Name: "Test Permission"}}, nil
 }
 
+func (m *mockRBACManagerWithError) GetSubjectPermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
+	if m.shouldError {
+		return nil, errors.New("RBAC system unavailable")
+	}
+	return []*common.Permission{{Id: "test-permission", Name: "Test Permission"}}, nil
+}
+
+func (m *mockRBACManagerWithError) Initialize(ctx context.Context) error {
+	if m.shouldError {
+		return errors.New("RBAC system unavailable")
+	}
+	return nil
+}
+
 func (m *mockRBACManagerWithError) SetError(shouldError bool) {
 	m.shouldError = shouldError
 }
@@ -979,6 +993,19 @@ func (m *mockRBACManager) GetEffectivePermissions(ctx context.Context, subjectID
 			Name: "Test Permission",
 		},
 	}, nil
+}
+
+func (m *mockRBACManager) GetSubjectPermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
+	return []*common.Permission{
+		{
+			Id:   "test-permission",
+			Name: "Test Permission",
+		},
+	}, nil
+}
+
+func (m *mockRBACManager) Initialize(ctx context.Context) error {
+	return nil
 }
 
 type mockJITManager struct{}
