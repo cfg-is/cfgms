@@ -13,25 +13,16 @@ import (
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import git storage provider for testing
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // createTestConfigStore creates a real git-backed ConfigStore for testing.
 // This follows the same pattern as createTestServiceV2 in config_service_test.go.
 func createTestConfigStore(t *testing.T) cfgconfig.ConfigStore {
 	t.Helper()
-
-	tmpDir := t.TempDir()
-	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
-
-	return storageManager.GetConfigStore()
+	sm := pkgtesting.SetupTestStorage(t)
+	return sm.GetConfigStore()
 }
 
 // TestConfigurationStorageMigration tests the Epic 6 compliant storage migration

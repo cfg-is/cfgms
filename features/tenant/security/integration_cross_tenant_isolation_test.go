@@ -17,11 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // TestCrossTenantPermissionIsolationIntegration tests tenant isolation using real RBAC components
@@ -32,17 +28,14 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: cross-tenant isolation integration")
 
 	// Setup REAL RBAC and tenant infrastructure with git storage
-	tmpDir := t.TempDir()
-	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
+	storageManager := pkgtesting.SetupTestStorage(t)
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
-	err = rbacManager.Initialize(ctx)
+	err := rbacManager.Initialize(ctx)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		// 30s allows the rbac drain goroutine to finish on slow Windows CI
@@ -237,13 +230,9 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 			err = rbacManager.CreateRoleWithParent(ctx, childRole, "parent-admin-role",
 				common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE)
 
-			// Current RBAC system doesn't enforce cross-tenant role restrictions yet
-			// This test documents the current behavior for future enhancement
-			if err != nil {
-				t.Logf("✅ Cross-tenant role inheritance blocked: %v", err)
-			} else {
-				t.Logf("ℹ️  Cross-tenant role inheritance allowed - RBAC system needs cross-tenant validation enhancement")
-			}
+			// M-TENANT-2: cross-tenant role inheritance is blocked by the RBAC system.
+			require.Error(t, err, "cross-tenant role inheritance must be blocked")
+			assert.Contains(t, err.Error(), "cross-tenant role inheritance not allowed")
 		})
 
 		t.Run("SameTenantRoleInheritanceAllowed", func(t *testing.T) {
@@ -437,8 +426,6 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 						}
 					}
 
-					// Small delay to vary timing
-					time.Sleep(time.Millisecond * time.Duration((id%5)+1))
 				}
 			}(userID)
 		}

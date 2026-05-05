@@ -15,15 +15,11 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-
-	// Register storage providers
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // newTestAuditManager creates a real audit.Manager backed by OSS storage for tests.
-// Registers cleanup via tb.Cleanup. Accepts testing.TB so it works in both
-// *testing.T and *testing.B contexts.
+// Accepts testing.TB so it works in both *testing.T and *testing.B contexts.
 func newTestAuditManager(tb testing.TB) *audit.Manager {
 	tb.Helper()
 	tmpDir := tb.TempDir()
@@ -65,11 +61,7 @@ func newTenantSecurityAuditLoggerWithCap(tb testing.TB, cap int) *TenantSecurity
 func TestTenantSecurityAuditLogger_ForwardsToAuditManager(t *testing.T) {
 	ctx := context.Background()
 
-	tmpDir := t.TempDir()
-	sm, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sm.Close() })
-
+	sm := pkgtesting.SetupTestStorage(t)
 	auditMgr, err := audit.NewManager(sm.GetAuditStore(), "tenant-security-test")
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -207,11 +199,7 @@ func TestTenantSecurityAuditLogger_CapEviction(t *testing.T) {
 	ctx := context.Background()
 	const writeCount = 1100
 
-	tmpDir := t.TempDir()
-	sm, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sm.Close() })
-
+	sm := pkgtesting.SetupTestStorage(t)
 	auditMgr, err := audit.NewManager(sm.GetAuditStore(), "tenant-security-cap-test")
 	require.NoError(t, err)
 	t.Cleanup(func() {

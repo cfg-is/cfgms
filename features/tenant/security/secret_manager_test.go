@@ -15,10 +15,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/secrets/providers/steward"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // newTestSecretStore creates a steward-backed SecretStore for tests.
@@ -874,12 +872,8 @@ func TestTenantSecretManager_GenerateSecretID(t *testing.T) {
 func TestTenantSecretManager_AuditIntegration(t *testing.T) {
 	secretStore := newTestSecretStore(t)
 
-	tmpDir := t.TempDir()
-	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
-
-	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "tenant_secret_manager")
+	sm := pkgtesting.SetupTestStorage(t)
+	auditMgr, err := audit.NewManager(sm.GetAuditStore(), "tenant_secret_manager")
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

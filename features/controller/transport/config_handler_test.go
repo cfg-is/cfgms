@@ -26,11 +26,7 @@ import (
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Register storage providers required by CreateOSSStorageManager.
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // ---------------------------------------------------------------------------
@@ -98,13 +94,7 @@ func peerContextWithCA(t *testing.T, ca *cfgcert.CA, cn string) context.Context 
 // storage rooted in a temporary directory that is cleaned up after the test.
 func createTestService(t *testing.T) *service.ConfigurationServiceV2 {
 	t.Helper()
-	tmpDir := t.TempDir()
-	storageManager, err := interfaces.CreateOSSStorageManager(
-		tmpDir+"/flatfile",
-		tmpDir+"/cfgms.db",
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = storageManager.Close() })
+	storageManager := pkgtesting.SetupTestStorage(t)
 	return service.NewConfigurationServiceV2(logging.NewNoopLogger(), storageManager, nil)
 }
 
