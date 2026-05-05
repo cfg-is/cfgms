@@ -1,0 +1,13 @@
+name: "CFGMS CodeQL config"
+
+# Use security-extended query suite plus the local extension pack.
+queries:
+  - uses: security-extended
+
+# Reference the local data-extension pack so CodeQL recognizes
+# CFGMS-specific sanitizers (notably safeJoin in pkg/storage/providers/flatfile).
+# Path is resolved from the source root (repo top), not from this config
+# file's directory — see https://docs.github.com/en/code-security/code-scanning/managing-your-code-scanning-configuration/configuring-advanced-setup-for-code-scanning#specifying-additional-queries.
+packs:
+  go:
+    - .github/codeql/extensions
