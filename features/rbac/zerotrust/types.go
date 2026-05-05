@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac/ports"
 )
 
 // ZeroTrustAccessRequest represents a comprehensive access request for zero-trust evaluation
@@ -360,12 +361,8 @@ type TenantPolicyIntegration struct {
 
 // Configuration types
 
-type PolicyCondition struct {
-	Field     string            `json:"field"`
-	Operator  ConditionOperator `json:"operator"`
-	Value     interface{}       `json:"value"`
-	ValueType string            `json:"value_type"`
-}
+// PolicyCondition is an alias for the canonical type in the ports package.
+type PolicyCondition = ports.PolicyCondition
 
 type AccessRequirement struct {
 	Type      RequirementType `json:"type"`
@@ -595,17 +592,18 @@ const (
 	AuditEventComplianceCheck   AuditEventType = "compliance_check"
 )
 
-type ConditionOperator string
+// ConditionOperator and its constants are aliased from the canonical ports package.
+type ConditionOperator = ports.ConditionOperator
 
 const (
-	ConditionOperatorEquals      ConditionOperator = "equals"
-	ConditionOperatorNotEquals   ConditionOperator = "not_equals"
-	ConditionOperatorContains    ConditionOperator = "contains"
-	ConditionOperatorRegex       ConditionOperator = "regex"
-	ConditionOperatorGreaterThan ConditionOperator = "greater_than"
-	ConditionOperatorLessThan    ConditionOperator = "less_than"
-	ConditionOperatorIn          ConditionOperator = "in"
-	ConditionOperatorNotIn       ConditionOperator = "not_in"
+	ConditionOperatorEquals      = ports.ConditionOperatorEquals
+	ConditionOperatorNotEquals   = ports.ConditionOperatorNotEquals
+	ConditionOperatorContains    = ports.ConditionOperatorContains
+	ConditionOperatorRegex       = ports.ConditionOperatorRegex
+	ConditionOperatorGreaterThan = ports.ConditionOperatorGreaterThan
+	ConditionOperatorLessThan    = ports.ConditionOperatorLessThan
+	ConditionOperatorIn          = ports.ConditionOperatorIn
+	ConditionOperatorNotIn       = ports.ConditionOperatorNotIn
 )
 
 type RequirementType string
