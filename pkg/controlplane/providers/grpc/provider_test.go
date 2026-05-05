@@ -11,6 +11,7 @@ import (
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
+	quicgo "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -54,7 +55,10 @@ func TestControlPlaneProvider_reconnectLoop_logsWarning(t *testing.T) {
 	serverAddr := server.ListenAddr()
 	mockLog := pkgtesting.NewMockLogger(true)
 
-	client := New(ModeClient)
+	client := New(ModeClient,
+		withBackoff(&backoff{initial: 50 * time.Millisecond, max: 200 * time.Millisecond, multiplier: 2.0, jitter: 0.1}),
+		withQUICConfig(&quicgo.Config{MaxIdleTimeout: 3 * time.Second, KeepAlivePeriod: 200 * time.Millisecond}),
+	)
 	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
 		"mode":       "client",
 		"addr":       serverAddr,

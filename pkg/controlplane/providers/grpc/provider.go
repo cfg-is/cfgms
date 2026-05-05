@@ -44,6 +44,25 @@ const (
 	ModeClient Mode = "client"
 )
 
+// option is an unexported functional option for New.
+type option func(*Provider)
+
+// withBackoff injects a custom backoff configuration into the provider.
+// Intended for testing only; production code uses the defaults.
+func withBackoff(b *backoff) option {
+	return func(p *Provider) {
+		p.backoffOverride = b
+	}
+}
+
+// withQUICConfig injects a custom QUIC configuration into the provider.
+// Intended for testing only; production code uses the defaults.
+func withQUICConfig(cfg *quicgo.Config) option {
+	return func(p *Provider) {
+		p.quicConfigOverride = cfg
+	}
+}
+
 // Provider implements the ControlPlaneProvider interface using gRPC-over-QUIC.
 type Provider struct {
 	mu sync.RWMutex
@@ -76,6 +95,10 @@ type Provider struct {
 	tenantID        string
 	logger          logging.Logger
 	startTime       time.Time
+
+	// Per-instance overrides injected via constructor options (test-only)
+	backoffOverride    *backoff
+	quicConfigOverride *quicgo.Config
 
 	// Subscription handlers (client mode)
 	commandHandler interfaces.CommandHandler
@@ -113,14 +136,18 @@ type eventSubscription struct {
 }
 
 // New creates a new gRPC control plane provider.
-func New(mode Mode) *Provider {
-	return &Provider{
+func New(mode Mode, opts ...option) *Provider {
+	p := &Provider{
 		name:              "grpc",
 		mode:              mode,
 		eventHandlers:     []eventSubscription{},
 		heartbeatHandlers: []interfaces.HeartbeatHandler{},
 		logger:            logging.NewNoopLogger(),
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 func (p *Provider) Name() string { return p.name }
@@ -254,8 +281,8 @@ func (p *Provider) Start(ctx context.Context) error {
 
 // quicConfig returns a *quicgo.Config with any user overrides, or nil for defaults.
 func (p *Provider) quicConfig() *quicgo.Config {
-	if testQUICConfig != nil {
-		return testQUICConfig
+	if p.quicConfigOverride != nil {
+		return p.quicConfigOverride
 	}
 	if p.keepalivePeriod == 0 && p.idleTimeout == 0 {
 		return nil // use QUIC transport defaults
@@ -418,27 +445,16 @@ func (p *Provider) clientReceiveLoop() {
 	}
 }
 
-// testBackoffOverride allows tests to use shorter backoff intervals.
-// Only set from test code via the unexported field.
-var testBackoffOverride *backoff
-
-// testQUICConfig allows tests to override the QUIC configuration.
-// Setting a short MaxIdleTimeout and KeepAlivePeriod ensures that
-// server failures are detected quickly on loaded CI machines even
-// when CONNECTION_CLOSE frames are delayed by goroutine scheduling.
-// Only set from test code via the unexported field.
-var testQUICConfig *quicgo.Config
-
 // reconnectLoop attempts to re-establish the ControlChannel with exponential backoff.
 // It runs until either a connection is established or the provider context is cancelled.
 func (p *Provider) reconnectLoop() {
 	bo := defaultBackoff()
-	if testBackoffOverride != nil {
+	if p.backoffOverride != nil {
 		bo = &backoff{
-			initial:    testBackoffOverride.initial,
-			max:        testBackoffOverride.max,
-			multiplier: testBackoffOverride.multiplier,
-			jitter:     testBackoffOverride.jitter,
+			initial:    p.backoffOverride.initial,
+			max:        p.backoffOverride.max,
+			multiplier: p.backoffOverride.multiplier,
+			jitter:     p.backoffOverride.jitter,
 		}
 	}
 

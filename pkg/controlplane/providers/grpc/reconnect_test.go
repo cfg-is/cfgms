@@ -5,7 +5,7 @@ package grpc
 
 import (
 	"context"
-	"os"
+	"crypto/tls"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,23 +42,32 @@ func restartServerAndRepoint(t *testing.T, client *Provider, tc *testCA, reg reg
 	return server
 }
 
-func TestMain(m *testing.M) {
-	// Use fast backoff for all reconnection tests to avoid timeouts with race detector.
-	testBackoffOverride = &backoff{
-		initial:    50 * time.Millisecond,
-		max:        200 * time.Millisecond,
-		multiplier: 2.0,
-		jitter:     0.1,
-	}
-	// Use short QUIC timeouts so server failures are detected quickly on loaded
-	// CI machines even when CONNECTION_CLOSE frames are delayed by goroutine
-	// scheduling under the race detector. KeepAlivePeriod keeps established
-	// connections alive; MaxIdleTimeout bounds worst-case failure detection.
-	testQUICConfig = &quicgo.Config{
-		MaxIdleTimeout:  3 * time.Second,
-		KeepAlivePeriod: 200 * time.Millisecond,
-	}
-	os.Exit(m.Run())
+// newTestClient creates a ModeClient Provider pre-configured with fast backoff
+// and short QUIC timeouts for reconnection tests. Fast backoff avoids timeouts
+// under the race detector; short QUIC timeouts ensure server failures are
+// detected quickly on loaded CI machines even when CONNECTION_CLOSE frames are
+// delayed by goroutine scheduling.
+func newTestClient(t *testing.T, addr string, tlsConfig *tls.Config, stewardID string) *Provider {
+	t.Helper()
+	p := New(ModeClient,
+		withBackoff(&backoff{
+			initial:    50 * time.Millisecond,
+			max:        200 * time.Millisecond,
+			multiplier: 2.0,
+			jitter:     0.1,
+		}),
+		withQUICConfig(&quicgo.Config{
+			MaxIdleTimeout:  3 * time.Second,
+			KeepAlivePeriod: 200 * time.Millisecond,
+		}),
+	)
+	require.NoError(t, p.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "client",
+		"addr":       addr,
+		"tls_config": tlsConfig,
+		"steward_id": stewardID,
+	}))
+	return p
 }
 
 func TestReconnectAfterServerRestart(t *testing.T) {
@@ -80,13 +89,7 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	// Set up command handler before connecting — handler survives reconnection
 	received := make(chan *types.SignedCommand, 1)
 
-	client := New(ModeClient)
-	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
-		"mode":       "client",
-		"addr":       listenAddr,
-		"tls_config": tc.clientTLSConfig(t, "steward-reconnect"),
-		"steward_id": "steward-reconnect",
-	}))
+	client := newTestClient(t, listenAddr, tc.clientTLSConfig(t, "steward-reconnect"), "steward-reconnect")
 	require.NoError(t, client.SubscribeCommands(context.Background(), "steward-reconnect", func(ctx context.Context, sc *types.SignedCommand) error {
 		received <- sc
 		return nil
@@ -153,13 +156,7 @@ func TestStopDuringReconnection(t *testing.T) {
 	require.NoError(t, server.Start(context.Background()))
 	listenAddr := server.ListenAddr()
 
-	client := New(ModeClient)
-	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
-		"mode":       "client",
-		"addr":       listenAddr,
-		"tls_config": tc.clientTLSConfig(t, "steward-stop-reconnect"),
-		"steward_id": "steward-stop-reconnect",
-	}))
+	client := newTestClient(t, listenAddr, tc.clientTLSConfig(t, "steward-stop-reconnect"), "steward-stop-reconnect")
 	require.NoError(t, client.Start(context.Background()))
 
 	// Wait for connection
@@ -209,13 +206,7 @@ func TestSendsDuringDisconnectionReturnErrors(t *testing.T) {
 	require.NoError(t, server.Start(context.Background()))
 	listenAddr := server.ListenAddr()
 
-	client := New(ModeClient)
-	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
-		"mode":       "client",
-		"addr":       listenAddr,
-		"tls_config": tc.clientTLSConfig(t, "steward-send-err"),
-		"steward_id": "steward-send-err",
-	}))
+	client := newTestClient(t, listenAddr, tc.clientTLSConfig(t, "steward-send-err"), "steward-send-err")
 	require.NoError(t, client.Start(context.Background()))
 	t.Cleanup(func() { _ = client.Stop(context.Background()) })
 
@@ -273,7 +264,10 @@ func TestOnStateChangeCallback(t *testing.T) {
 	require.NoError(t, server.Start(context.Background()))
 	listenAddr := server.ListenAddr()
 
-	client := New(ModeClient)
+	client := New(ModeClient,
+		withBackoff(&backoff{initial: 50 * time.Millisecond, max: 200 * time.Millisecond, multiplier: 2.0, jitter: 0.1}),
+		withQUICConfig(&quicgo.Config{MaxIdleTimeout: 3 * time.Second, KeepAlivePeriod: 200 * time.Millisecond}),
+	)
 	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
 		"mode":       "client",
 		"addr":       listenAddr,
@@ -322,13 +316,7 @@ func TestReconnectStatsTracking(t *testing.T) {
 	require.NoError(t, server.Start(context.Background()))
 	listenAddr := server.ListenAddr()
 
-	client := New(ModeClient)
-	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
-		"mode":       "client",
-		"addr":       listenAddr,
-		"tls_config": tc.clientTLSConfig(t, "steward-stats-reconnect"),
-		"steward_id": "steward-stats-reconnect",
-	}))
+	client := newTestClient(t, listenAddr, tc.clientTLSConfig(t, "steward-stats-reconnect"), "steward-stats-reconnect")
 	require.NoError(t, client.Start(context.Background()))
 	t.Cleanup(func() { _ = client.Stop(context.Background()) })
 
@@ -375,9 +363,6 @@ func TestRapidDisconnectReconnectCycles(t *testing.T) {
 
 	var serverCount atomic.Int32
 
-	client := New(ModeClient)
-	var listenAddr string
-
 	// Start initial server
 	reg := registry.NewRegistry()
 	server := New(ModeServer)
@@ -388,14 +373,9 @@ func TestRapidDisconnectReconnectCycles(t *testing.T) {
 		"registry":   reg,
 	}))
 	require.NoError(t, server.Start(context.Background()))
-	listenAddr = server.ListenAddr()
+	listenAddr := server.ListenAddr()
 
-	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
-		"mode":       "client",
-		"addr":       listenAddr,
-		"tls_config": tc.clientTLSConfig(t, "steward-rapid"),
-		"steward_id": "steward-rapid",
-	}))
+	client := newTestClient(t, listenAddr, tc.clientTLSConfig(t, "steward-rapid"), "steward-rapid")
 	require.NoError(t, client.Start(context.Background()))
 	t.Cleanup(func() { _ = client.Stop(context.Background()) })
 
