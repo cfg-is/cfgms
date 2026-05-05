@@ -56,6 +56,9 @@ func ResolveSecretBindings(ctx context.Context, store interfaces.SecretStore, bi
 			if binding.Key == "" {
 				return nil, fmt.Errorf("param %q: key is required for from: secret-store", binding.Name)
 			}
+			if store == nil {
+				return nil, fmt.Errorf("param %q: secret-store binding requires a non-nil secret store", binding.Name)
+			}
 			secret, err := store.GetSecret(ctx, binding.Key)
 			if err != nil {
 				return nil, fmt.Errorf("secret resolution failed for param %q (key %q): %w", binding.Name, binding.Key, err)

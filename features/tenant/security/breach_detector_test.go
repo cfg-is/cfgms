@@ -253,8 +253,13 @@ func TestBreachDetector_TimePatternDetection(t *testing.T) {
 
 	tenantID := "550e8400-e29b-41d4-a716-446655440000"
 
-	// Establish baseline during business hours (9 AM - 5 PM)
-	baseDate := time.Now().Add(-24 * time.Hour)
+	// Establish baseline during business hours (9 AM - 5 PM).
+	// Use absolute clock hours via time.Date so updateActiveHours converges to 9-17.
+	// time.Now().Add(N*time.Hour) was wrong here: it adds N hours to the current
+	// clock time (yesterday-at-now-hour + N), not "yesterday at hour N" — when the
+	// test ran at 14:35 the baseline populated hours 23,0-7 instead of 9-17 and the
+	// 2 AM "out-of-hours" event below fell inside the detected active range.
+	yesterday := time.Now().Add(-24 * time.Hour)
 	for hour := 9; hour <= 17; hour++ {
 		for i := 0; i < 5; i++ {
 			event := &security.AccessEvent{
@@ -264,7 +269,7 @@ func TestBreachDetector_TimePatternDetection(t *testing.T) {
 				Resource:  "/api/v1/configs",
 				SourceIP:  "192.168.1.100",
 				UserAgent: "Business-Client/1.0",
-				Timestamp: baseDate.Add(time.Duration(hour) * time.Hour).Add(time.Duration(i*10) * time.Minute),
+				Timestamp: time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), hour, i*10, 0, 0, yesterday.Location()),
 				Success:   true,
 			}
 			err := bd.RecordAccess(ctx, event)
