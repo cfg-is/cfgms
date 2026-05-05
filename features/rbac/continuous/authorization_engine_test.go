@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-package continuous
+package continuous_test
 
 import (
 	"context"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac/continuous"
+	"github.com/cfgis/cfgms/features/rbac/ports"
 )
 
 // Mock implementations for testing
@@ -80,11 +81,11 @@ func (m *MockJITManager) ValidateJITAccess(ctx context.Context, request *common.
 
 // MockRiskManager implements RiskManager interface for testing
 type MockRiskManager struct {
-	enhancedRiskResponse *RiskAccessResult
+	enhancedRiskResponse *continuous.RiskAccessResult
 	enhancedRiskError    error
 }
 
-func (m *MockRiskManager) EnhancedRiskAccessCheck(ctx context.Context, request *common.AccessRequest) (*RiskAccessResult, error) {
+func (m *MockRiskManager) EnhancedRiskAccessCheck(ctx context.Context, request *common.AccessRequest) (*continuous.RiskAccessResult, error) {
 	if m.enhancedRiskError != nil {
 		return nil, m.enhancedRiskError
 	}
@@ -93,7 +94,7 @@ func (m *MockRiskManager) EnhancedRiskAccessCheck(ctx context.Context, request *
 	}
 
 	// Default low risk response
-	return &RiskAccessResult{
+	return &continuous.RiskAccessResult{
 		StandardResponse: &common.AccessResponse{
 			Granted:            true,
 			Reason:             "Low risk assessment",
@@ -105,11 +106,11 @@ func (m *MockRiskManager) EnhancedRiskAccessCheck(ctx context.Context, request *
 // MockTenantSecurityPolicyEngine for testing
 type MockTenantSecurityPolicyEngine struct{}
 
-func (m *MockTenantSecurityPolicyEngine) EvaluateSecurityPolicy(ctx context.Context, request *SecurityEvaluationRequest) (*SecurityPolicyResult, error) {
-	return &SecurityPolicyResult{
+func (m *MockTenantSecurityPolicyEngine) EvaluateSecurityPolicy(ctx context.Context, request *continuous.SecurityEvaluationRequest) (*continuous.SecurityPolicyResult, error) {
+	return &continuous.SecurityPolicyResult{
 		ComplianceStatus:   true,
 		RecommendedActions: []string{},
-		Violations:         []PolicyViolation{},
+		Violations:         []continuous.PolicyViolation{},
 		AppliedRules:       []string{"default-rule"},
 		Allowed:            true,
 	}, nil
@@ -117,10 +118,10 @@ func (m *MockTenantSecurityPolicyEngine) EvaluateSecurityPolicy(ctx context.Cont
 
 // MockTenantSecurityMiddleware implements TenantSecurityMiddleware for testing
 type MockTenantSecurityMiddleware struct {
-	policyEngine TenantSecurityPolicyEngine
+	policyEngine continuous.TenantSecurityPolicyEngine
 }
 
-func (m *MockTenantSecurityMiddleware) GetPolicyEngine() TenantSecurityPolicyEngine {
+func (m *MockTenantSecurityMiddleware) GetPolicyEngine() continuous.TenantSecurityPolicyEngine {
 	if m.policyEngine != nil {
 		return m.policyEngine
 	}
@@ -129,8 +130,8 @@ func (m *MockTenantSecurityMiddleware) GetPolicyEngine() TenantSecurityPolicyEng
 
 // Test helper functions
 
-func createTestContinuousAuthEngine() *ContinuousAuthorizationEngine {
-	config := &ContinuousAuthConfig{
+func defaultTestConfig() *continuous.ContinuousAuthConfig {
+	return &continuous.ContinuousAuthConfig{
 		MaxAuthLatencyMs:       10,
 		PermissionCacheTTL:     5 * time.Minute,
 		SessionUpdateInterval:  60 * time.Second,
@@ -140,25 +141,37 @@ func createTestContinuousAuthEngine() *ContinuousAuthorizationEngine {
 		RiskCheckInterval:      30 * time.Second,
 		EnableAutoTermination:  false,
 	}
-
-	return &ContinuousAuthorizationEngine{
-		rbacManager:     &MockRBACManager{},
-		jitManager:      &MockJITManager{},
-		riskManager:     &MockRiskManager{},
-		tenantSecurity:  &MockTenantSecurityMiddleware{},
-		sessionRegistry: NewSessionRegistry(),
-		permissionCache: NewCacheManager(config.PermissionCacheTTL, config.MaxAuthLatencyMs),
-		eventBus:        NewPermissionEventBus(100),                           // buffer size
-		contextMonitor:  NewContextMonitor(nil, config.SessionUpdateInterval), // nil risk manager for test
-		policyEnforcer:  NewPolicyEnforcer(nil, false),                        // nil tenant security, no auto termination
-		config:          config,
-		stats:           &AuthorizationStats{mutex: sync.RWMutex{}}, // Initialize stats for tests
-		stopChannel:     make(chan struct{}),                        // Initialize stop channel
-	}
 }
 
-func createTestContinuousAuthRequest(subjectID, resourceID, permissionID, tenantID, sessionID string) *ContinuousAuthRequest {
-	return &ContinuousAuthRequest{
+// newTestContinuousEngine creates a ContinuousAuthorizationEngine via the public constructor.
+// Nil arguments default to the standard mock implementations.
+func newTestContinuousEngine(
+	rbacMgr ports.RBACManager,
+	jitMgr ports.JITManager,
+	riskMgr continuous.ContinuousRiskManager,
+	ts continuous.TenantSecurityMiddleware,
+) *continuous.ContinuousAuthorizationEngine {
+	if rbacMgr == nil {
+		rbacMgr = &MockRBACManager{}
+	}
+	if jitMgr == nil {
+		jitMgr = &MockJITManager{}
+	}
+	if riskMgr == nil {
+		riskMgr = &MockRiskManager{}
+	}
+	if ts == nil {
+		ts = &MockTenantSecurityMiddleware{}
+	}
+	return continuous.NewContinuousAuthorizationEngine(rbacMgr, jitMgr, riskMgr, ts, defaultTestConfig())
+}
+
+func createTestContinuousAuthEngine() *continuous.ContinuousAuthorizationEngine {
+	return newTestContinuousEngine(nil, nil, nil, nil)
+}
+
+func createTestContinuousAuthRequest(subjectID, resourceID, permissionID, tenantID, sessionID string) *continuous.ContinuousAuthRequest {
+	return &continuous.ContinuousAuthRequest{
 		AccessRequest: &common.AccessRequest{
 			SubjectId:    subjectID,
 			ResourceId:   resourceID,
@@ -169,7 +182,7 @@ func createTestContinuousAuthRequest(subjectID, resourceID, permissionID, tenant
 			},
 		},
 		SessionID:     sessionID,
-		OperationType: OperationTypeStandard,
+		OperationType: continuous.OperationTypeStandard,
 		ResourceContext: map[string]string{
 			"resource_type": "database",
 			"sensitivity":   "high",
@@ -181,18 +194,15 @@ func createTestContinuousAuthRequest(subjectID, resourceID, permissionID, tenant
 
 func TestNewContinuousAuthorizationEngine(t *testing.T) {
 	engine := createTestContinuousAuthEngine()
+	ctx := context.Background()
 
-	assert.NotNil(t, engine)
-	assert.NotNil(t, engine.rbacManager)
-	assert.NotNil(t, engine.jitManager)
-	assert.NotNil(t, engine.riskManager)
-	assert.NotNil(t, engine.tenantSecurity)
-	assert.NotNil(t, engine.sessionRegistry)
-	assert.NotNil(t, engine.permissionCache)
-	assert.NotNil(t, engine.eventBus)
-	assert.NotNil(t, engine.contextMonitor)
-	assert.NotNil(t, engine.policyEnforcer)
-	assert.NotNil(t, engine.config)
+	// Prove all 9 internal dependencies were correctly wired:
+	// Start() initialises each component and returns an error if any are nil or fail.
+	err := engine.Start(ctx)
+	require.NoError(t, err)
+
+	err = engine.Stop()
+	require.NoError(t, err)
 }
 
 func TestContinuousAuthorizationEngine_Start_Success(t *testing.T) {
@@ -201,16 +211,15 @@ func TestContinuousAuthorizationEngine_Start_Success(t *testing.T) {
 
 	err := engine.Start(ctx)
 	require.NoError(t, err)
-	assert.True(t, engine.running)
 
 	t.Cleanup(func() { _ = engine.Stop() })
 }
 
 func TestContinuousAuthorizationEngine_Start_InitializationError(t *testing.T) {
-	engine := createTestContinuousAuthEngine()
-	engine.rbacManager = &MockRBACManager{
-		initializeError: fmt.Errorf("initialization failed"),
-	}
+	engine := newTestContinuousEngine(
+		&MockRBACManager{initializeError: fmt.Errorf("initialization failed")},
+		nil, nil, nil,
+	)
 	ctx := context.Background()
 
 	err := engine.Start(ctx)
@@ -233,21 +242,19 @@ func TestContinuousAuthorizationEngine_Stop_Success(t *testing.T) {
 }
 
 func TestContinuousAuthorizationEngine_AuthorizeAction_Success(t *testing.T) {
-	engine := createTestContinuousAuthEngine()
-	ctx := context.Background()
-
-	// Register session first
-	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
-	require.NoError(t, err)
-
-	// Setup successful RBAC response
-	engine.rbacManager = &MockRBACManager{
+	rbacMgr := &MockRBACManager{
 		checkPermissionResponse: &common.AccessResponse{
 			Granted:            true,
 			Reason:             "Access granted by RBAC",
 			AppliedPermissions: []string{"read"},
 		},
 	}
+	engine := newTestContinuousEngine(rbacMgr, nil, nil, nil)
+	ctx := context.Background()
+
+	// Register session first
+	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
+	require.NoError(t, err)
 
 	request := createTestContinuousAuthRequest("user1", "resource1", "read", "tenant1", "session1")
 
@@ -260,20 +267,18 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_Success(t *testing.T) {
 }
 
 func TestContinuousAuthorizationEngine_AuthorizeAction_RBACDenied(t *testing.T) {
-	engine := createTestContinuousAuthEngine()
-	ctx := context.Background()
-
-	// Register session first
-	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
-	require.NoError(t, err)
-
-	// Setup RBAC denial
-	engine.rbacManager = &MockRBACManager{
+	rbacMgr := &MockRBACManager{
 		checkPermissionResponse: &common.AccessResponse{
 			Granted: false,
 			Reason:  "Access denied by RBAC",
 		},
 	}
+	engine := newTestContinuousEngine(rbacMgr, nil, nil, nil)
+	ctx := context.Background()
+
+	// Register session first
+	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
+	require.NoError(t, err)
 
 	request := createTestContinuousAuthRequest("user1", "resource1", "admin", "tenant1", "session1")
 
@@ -287,39 +292,36 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_RBACDenied(t *testing.T) 
 }
 
 func TestContinuousAuthorizationEngine_AuthorizeAction_WithJITAccess(t *testing.T) {
-	engine := createTestContinuousAuthEngine()
-	ctx := context.Background()
-
-	// Register session first
-	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
-	require.NoError(t, err)
-
-	// Setup RBAC denial but JIT access granted
-	engine.rbacManager = &MockRBACManager{
-		checkPermissionResponse: &common.AccessResponse{
-			Granted: false,
-			Reason:  "No standard permission",
+	engine := newTestContinuousEngine(
+		&MockRBACManager{
+			checkPermissionResponse: &common.AccessResponse{
+				Granted: false,
+				Reason:  "No standard permission",
+			},
 		},
-	}
-
-	engine.jitManager = &MockJITManager{
-		validateJITAccessResponse: &common.AccessResponse{
-			Granted:            true,
-			Reason:             "JIT access active",
-			AppliedPermissions: []string{"admin"},
-		},
-	}
-
-	// Setup risk manager to preserve JIT access decision
-	engine.riskManager = &MockRiskManager{
-		enhancedRiskResponse: &RiskAccessResult{
-			StandardResponse: &common.AccessResponse{
+		&MockJITManager{
+			validateJITAccessResponse: &common.AccessResponse{
 				Granted:            true,
 				Reason:             "JIT access active",
 				AppliedPermissions: []string{"admin"},
 			},
 		},
-	}
+		&MockRiskManager{
+			enhancedRiskResponse: &continuous.RiskAccessResult{
+				StandardResponse: &common.AccessResponse{
+					Granted:            true,
+					Reason:             "JIT access active",
+					AppliedPermissions: []string{"admin"},
+				},
+			},
+		},
+		nil,
+	)
+	ctx := context.Background()
+
+	// Register session first
+	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
+	require.NoError(t, err)
 
 	request := createTestContinuousAuthRequest("user1", "resource1", "admin", "tenant1", "session1")
 
@@ -332,30 +334,30 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_WithJITAccess(t *testing.
 }
 
 func TestContinuousAuthorizationEngine_AuthorizeAction_RiskBasedDenial(t *testing.T) {
-	engine := createTestContinuousAuthEngine()
+	engine := newTestContinuousEngine(
+		&MockRBACManager{
+			checkPermissionResponse: &common.AccessResponse{
+				Granted:            true,
+				Reason:             "RBAC permission granted",
+				AppliedPermissions: []string{"read"},
+			},
+		},
+		nil,
+		&MockRiskManager{
+			enhancedRiskResponse: &continuous.RiskAccessResult{
+				StandardResponse: &common.AccessResponse{
+					Granted: false,
+					Reason:  "High risk detected - access denied",
+				},
+			},
+		},
+		nil,
+	)
 	ctx := context.Background()
 
 	// Register session first
 	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
 	require.NoError(t, err)
-
-	// Setup RBAC success but high risk denial
-	engine.rbacManager = &MockRBACManager{
-		checkPermissionResponse: &common.AccessResponse{
-			Granted:            true,
-			Reason:             "RBAC permission granted",
-			AppliedPermissions: []string{"read"},
-		},
-	}
-
-	engine.riskManager = &MockRiskManager{
-		enhancedRiskResponse: &RiskAccessResult{
-			StandardResponse: &common.AccessResponse{
-				Granted: false,
-				Reason:  "High risk detected - access denied",
-			},
-		},
-	}
 
 	request := createTestContinuousAuthRequest("user1", "resource1", "read", "tenant1", "session1")
 
@@ -373,7 +375,7 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_ValidationErrors(t *testi
 
 	tests := []struct {
 		name    string
-		request *ContinuousAuthRequest
+		request *continuous.ContinuousAuthRequest
 		wantErr bool
 	}{
 		{
@@ -383,14 +385,14 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_ValidationErrors(t *testi
 		},
 		{
 			name: "missing access request",
-			request: &ContinuousAuthRequest{
+			request: &continuous.ContinuousAuthRequest{
 				SessionID: "session1",
 			},
 			wantErr: true,
 		},
 		{
 			name: "missing subject ID",
-			request: &ContinuousAuthRequest{
+			request: &continuous.ContinuousAuthRequest{
 				AccessRequest: &common.AccessRequest{
 					ResourceId:   "resource1",
 					PermissionId: "read",
@@ -402,7 +404,7 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_ValidationErrors(t *testi
 		},
 		{
 			name: "missing session ID",
-			request: &ContinuousAuthRequest{
+			request: &continuous.ContinuousAuthRequest{
 				AccessRequest: &common.AccessRequest{
 					SubjectId:    "user1",
 					ResourceId:   "resource1",
@@ -504,17 +506,15 @@ func TestContinuousAuthorizationEngine_GetAuthorizationStats(t *testing.T) {
 }
 
 func TestContinuousAuthorizationEngine_AuthorizeAction_SystemIntegrationFailure(t *testing.T) {
-	engine := createTestContinuousAuthEngine()
+	engine := newTestContinuousEngine(
+		&MockRBACManager{checkPermissionError: fmt.Errorf("RBAC system unavailable")},
+		nil, nil, nil,
+	)
 	ctx := context.Background()
 
 	// Register session first
 	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
 	require.NoError(t, err)
-
-	// Setup RBAC system failure
-	engine.rbacManager = &MockRBACManager{
-		checkPermissionError: fmt.Errorf("RBAC system unavailable"),
-	}
 
 	request := createTestContinuousAuthRequest("user1", "resource1", "read", "tenant1", "session1")
 
@@ -532,12 +532,12 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_SecurityEdgeCases(t *test
 
 	tests := []struct {
 		name        string
-		request     *ContinuousAuthRequest
+		request     *continuous.ContinuousAuthRequest
 		expectError bool
 	}{
 		{
 			name: "malformed session ID",
-			request: &ContinuousAuthRequest{
+			request: &continuous.ContinuousAuthRequest{
 				AccessRequest: &common.AccessRequest{
 					SubjectId:    "user1",
 					ResourceId:   "resource1",
@@ -550,7 +550,7 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_SecurityEdgeCases(t *test
 		},
 		{
 			name: "injection attempt in subject ID",
-			request: &ContinuousAuthRequest{
+			request: &continuous.ContinuousAuthRequest{
 				AccessRequest: &common.AccessRequest{
 					SubjectId:    "user1'; DROP TABLE users; --",
 					ResourceId:   "resource1",
@@ -563,7 +563,7 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_SecurityEdgeCases(t *test
 		},
 		{
 			name: "cross-tenant access attempt",
-			request: &ContinuousAuthRequest{
+			request: &continuous.ContinuousAuthRequest{
 				AccessRequest: &common.AccessRequest{
 					SubjectId:    "user1",
 					ResourceId:   "tenant2/sensitive-resource",
@@ -597,7 +597,7 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_ConcurrentRequests(t *tes
 	ctx := context.Background()
 
 	const numConcurrent = 10
-	results := make(chan *ContinuousAuthResponse, numConcurrent)
+	results := make(chan *continuous.ContinuousAuthResponse, numConcurrent)
 	errors := make(chan error, numConcurrent)
 
 	// Run multiple concurrent authorization requests
