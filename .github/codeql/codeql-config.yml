@@ -1,0 +1,11 @@
+name: "CFGMS CodeQL config"
+
+# Use security-extended query suite plus the local extension pack.
+queries:
+  - uses: security-extended
+
+# Reference the local data-extension pack so CodeQL recognizes
+# CFGMS-specific sanitizers (notably safeJoin in pkg/storage/providers/flatfile).
+packs:
+  go:
+    - "./extensions"

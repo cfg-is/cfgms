@@ -88,12 +88,11 @@ jobs:
       uses: github/codeql-action/init@480db559a14342288b67e54bd959dd52dc3ee68f # v3
       with:
         languages: ${{ matrix.language }}
-        # Use security-extended query suite for comprehensive coverage
-        # Available suites:
-        #   - default: Standard security and quality queries
-        #   - security-extended: All security queries (recommended)
-        #   - security-and-quality: Security + code quality queries
-        queries: security-extended
+        # Pull queries (security-extended) AND data-extension packs from a
+        # repo-local config. The config registers ./.github/codeql/extensions/
+        # which models pkg/storage/providers/flatfile.safeJoin as a path-
+        # injection sanitizer so default-suite false positives auto-close.
+        config-file: ./.github/codeql/codeql-config.yml
         # Enable automatic language detection
         setup-python-dependencies: false
 
