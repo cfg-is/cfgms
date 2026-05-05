@@ -26,3 +26,9 @@ type userIDKeyType struct{}
 
 // UserIDKey is the canonical context key for the authenticated user ID.
 var UserIDKey = userIDKeyType{}
+
+// authClaimsKeyType is unexported to prevent external construction and key aliasing.
+type authClaimsKeyType struct{}
+
+// AuthClaimsKey is the canonical context key for authentication claims (e.g., JWT claims map).
+var AuthClaimsKey = authClaimsKeyType{}
