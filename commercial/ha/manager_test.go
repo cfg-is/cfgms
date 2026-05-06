@@ -337,6 +337,61 @@ func TestManager_HealthChecks(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestManager_HealthChecks_ConcurrentRegistration verifies that calling
+// RegisterHealthCheck while the health checker is running does not cause a data
+// race on the healthChecks map or a deadlock between the health checker goroutine
+// and Manager.Stop. Both were possible before the lock-ordering fix in health.go.
+func TestManager_HealthChecks_ConcurrentRegistration(t *testing.T) {
+	logger := logging.GetLogger()
+
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.HealthCheck.Interval = 5 * time.Millisecond
+	manager, err := NewManager(cfg, logger, storageManager)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+
+	// Register checks concurrently while the health-checker goroutine is running.
+	// With the old code this races on healthChecks (read without m.mu in
+	// performHealthChecks, write under m.mu in RegisterHealthCheck).
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 20; i++ {
+			manager.RegisterHealthCheck("concurrent-check", func(ctx context.Context) error {
+				return nil
+			})
+		}
+	}()
+
+	<-done
+
+	// Verify that at least one performHealthChecks cycle ran while registrations
+	// were in flight and picked up the concurrent-check. This confirms the data-race
+	// fix actually propagates concurrent registrations to observable health state,
+	// not just that the goroutine didn't crash.
+	require.Eventually(t, func() bool {
+		h := manager.GetHealth()
+		_, exists := h.Checks["concurrent-check"]
+		return exists
+	}, 3*time.Second, 25*time.Millisecond, "concurrent-check must appear in health status")
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	// Stop must not deadlock. The old code deadlocked when Manager.Stop held m.mu
+	// and called h.Stop (needing h.mu) while the health goroutine held h.mu and
+	// waited for m.mu.
+	err = manager.Stop(stopCtx)
+	assert.NoError(t, err)
+}
+
 func TestManager_ConfigValidation(t *testing.T) {
 	logger := logging.GetLogger()
 	storageManager, err := storage.CreateTestStorageManager()

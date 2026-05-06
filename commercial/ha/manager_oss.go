@@ -158,9 +158,11 @@ func (m *Manager) GetClusterNodes() ([]*NodeInfo, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// OSS: Only returns the local node
-	nodes := []*NodeInfo{m.GetLocalNode()}
-	return nodes, nil
+	// Build the copy directly rather than calling GetLocalNode() which would
+	// try to re-acquire m.mu.RLock while we already hold it.
+	nodeCopy := *m.nodeInfo
+	nodeCopy.LastSeen = time.Now()
+	return []*NodeInfo{&nodeCopy}, nil
 }
 
 // IsLeader returns true if this node is the cluster leader (always true in OSS)

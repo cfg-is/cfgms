@@ -163,10 +163,15 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	m.logger.Info("Starting HA Manager", "mode", m.cfg.GetModeString())
 
-	// Start health checker
+	// Start health checker with a snapshot of currently-registered checks.
+	// m.mu is held here so the snapshot is consistent with the map state.
 	m.logger.Info("DEBUG: About to start health checker...")
 	if m.healthChecker != nil {
-		if err := m.healthChecker.Start(m.ctx); err != nil {
+		checkSnapshot := make(map[string]HealthCheckFunc, len(m.healthChecks))
+		for name, fn := range m.healthChecks {
+			checkSnapshot[name] = fn
+		}
+		if err := m.healthChecker.Start(m.ctx, checkSnapshot); err != nil {
 			return fmt.Errorf("failed to start health checker: %w", err)
 		}
 	}
