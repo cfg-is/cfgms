@@ -60,8 +60,8 @@ make install-nancy
 
 # Install individual tools (Ubuntu/Debian)
 sudo apt-get install trivy
-go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
-go install honnef.co/go/tools/cmd/staticcheck@latest
+go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
+go install honnef.co/go/tools/cmd/staticcheck@2026.1
 ```
 
 ### Development Security Commands

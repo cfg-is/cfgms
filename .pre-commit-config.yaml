@@ -8,8 +8,8 @@
 
 repos:
   # Go security pattern analysis with gosec
-  - repo: https://github.com/securecodewarrior/gosec
-    rev: v2.22.0
+  - repo: https://github.com/securego/gosec
+    rev: v2.26.1
     hooks:
       - id: gosec
         name: gosec security scan
@@ -46,7 +46,7 @@ repos:
                 staticcheck "$@"
               fi
             else
-              echo "⚠️  staticcheck not installed - skipping (run: go install honnef.co/go/tools/cmd/staticcheck@latest)"
+              echo "⚠️  staticcheck not installed - skipping (run: go install honnef.co/go/tools/cmd/staticcheck@2026.1)"
               exit 0
             fi
         stages: [commit]

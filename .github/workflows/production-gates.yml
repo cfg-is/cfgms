@@ -61,7 +61,7 @@ jobs:
 
         # Install other security tools
         make install-nancy
-        go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
+        go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
         go install honnef.co/go/tools/cmd/staticcheck@2026.1
         
         echo "✅ Security tools installed"

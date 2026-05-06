@@ -41,8 +41,7 @@ This guide provides instructions for setting up a local CFGMS development enviro
 - **Docker** - For integration tests and local deployment
 - **golangci-lint** - Code linting
   ```bash
-  # Install using go install
-  go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.12.1
   ```
 
 - **entr** - For watch mode during development
@@ -61,7 +60,7 @@ This guide provides instructions for setting up a local CFGMS development enviro
 
 - **gosec** - Security scanning
   ```bash
-  go install github.com/securego/gosec/v2/cmd/gosec@latest
+  go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
   ```
 
 ### System Requirements

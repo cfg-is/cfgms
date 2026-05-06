@@ -416,12 +416,12 @@ make security-remediation-report 2>&1 | tee remediation-debug.log
 # Check current versions
 trivy --version      # Should be latest stable
 nancy --version      # Should be v1.0.51+
-gosec -version       # Should be v2.18+
+gosec -version       # Should be v2.26.1+
 staticcheck -version # Should be 2023.1+
 
 # Update to compatible versions
-go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
-go install honnef.co/go/tools/cmd/staticcheck@latest
+go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
+go install honnef.co/go/tools/cmd/staticcheck@2026.1
 ```
 
 ## Escalation Procedures
@@ -541,8 +541,8 @@ rm -rf ~/.cache/staticcheck
 
 # Reinstall tools
 make install-nancy
-go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
-go install honnef.co/go/tools/cmd/staticcheck@latest
+go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
+go install honnef.co/go/tools/cmd/staticcheck@2026.1
 
 # Test installations
 trivy --version && nancy --version && gosec -version && staticcheck -version

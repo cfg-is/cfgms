@@ -17,7 +17,7 @@ CFGMS uses a multi-layered security scanning approach with four primary tools:
 # 1. Install security tools
 ./.github/scripts/install-trivy.sh v0.70.0 \
     8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9
-go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
+go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
 go install honnef.co/go/tools/cmd/staticcheck@2026.1
 make install-nancy     # Auto-install Nancy for your platform
 
@@ -136,7 +136,7 @@ gosec analyzes Go source code for security problems and anti-patterns.
 
 ```bash
 # Go installation (all platforms) - RECOMMENDED
-go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
+go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
 
 # Verify installation
 gosec --version
@@ -422,7 +422,7 @@ Current tool versions (as of v0.3.1):
 
 - **Trivy**: v0.70.0 (pinned — v0.69.4-v0.69.6 compromised per CVE-2026-33634; v0.70.0 is the post-incident clean rebuild with new GPG key. Install via `./.github/scripts/install-trivy.sh`. NEVER use @latest, NEVER use `go install`.)
 - **Nancy**: v1.2.0
-- **gosec**: v2.25.0 (pinned — avoid @latest)
+- **gosec**: v2.26.1 (pinned — avoid @latest)
 - **staticcheck**: 2026.1 (pinned — avoid @latest)
 
 ## Contributing to Security Setup
@@ -560,7 +560,7 @@ pre-commit install --install-hooks
 ```bash
 # Install missing Go tools
 go install honnef.co/go/tools/cmd/staticcheck@2026.1
-go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
+go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
 
 # Verify PATH
 which staticcheck gosec
