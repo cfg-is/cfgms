@@ -8,6 +8,8 @@ package ha
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testing/storage"
 )
 
@@ -565,4 +568,108 @@ func TestDeploymentModeProgression(t *testing.T) {
 		err = manager.Stop(ctx)
 		assert.NoError(t, err)
 	})
+}
+
+// TestManager_GetCACertPEM_EmptyPath verifies that GetCACertPEM returns nil when
+// CACertPath is empty — no CA is available and no error is surfaced to the caller.
+func TestManager_GetCACertPEM_EmptyPath(t *testing.T) {
+	logger := logging.GetLogger()
+	sm, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+	// CACertPath intentionally left empty
+
+	manager, err := NewManager(cfg, logger, sm)
+	require.NoError(t, err)
+
+	got := manager.GetCACertPEM()
+	assert.Nil(t, got, "GetCACertPEM must return nil when CACertPath is empty")
+}
+
+// TestManager_GetCACertPEM_ValidPath verifies that GetCACertPEM returns the file
+// bytes when CACertPath points to a readable file.
+func TestManager_GetCACertPEM_ValidPath(t *testing.T) {
+	logger := logging.GetLogger()
+	sm, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	// Write a dummy CA cert PEM to a temp file.
+	tmpDir := t.TempDir()
+	caPath := filepath.Join(tmpDir, "ca.pem")
+	want := []byte("-----BEGIN CERTIFICATE-----\ndummy-ca-pem\n-----END CERTIFICATE-----\n")
+	require.NoError(t, os.WriteFile(caPath, want, 0600))
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+	cfg.CACertPath = caPath
+
+	manager, err := NewManager(cfg, logger, sm)
+	require.NoError(t, err)
+
+	got := manager.GetCACertPEM()
+	require.NotNil(t, got, "GetCACertPEM must return bytes when CACertPath is readable")
+	assert.Equal(t, want, got, "GetCACertPEM must return exactly the file contents")
+}
+
+// TestManager_GetCACertPEM_InvalidPath verifies that GetCACertPEM returns nil (not an error)
+// when CACertPath points to a non-existent file, and that a warning is logged.
+func TestManager_GetCACertPEM_InvalidPath(t *testing.T) {
+	mockLogger := pkgtesting.NewMockLogger(true)
+	sm, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+	cfg.CACertPath = "/nonexistent/path/ca.pem"
+
+	manager, err := NewManager(cfg, mockLogger, sm)
+	require.NoError(t, err)
+
+	got := manager.GetCACertPEM()
+	assert.Nil(t, got, "GetCACertPEM must return nil when file is unreadable")
+
+	// A warning must be logged so operators know the CA cert could not be loaded.
+	found := false
+	for _, entry := range mockLogger.GetLogs("warn") {
+		if entry.Message == "Failed to read HA CA certificate" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "GetCACertPEM must log a warning when the CA cert file cannot be read")
+}
+
+// TestManager_GetCACertPEM_Concurrent verifies that GetCACertPEM is safe to call
+// from multiple goroutines simultaneously (no data race on m.cfg.CACertPath).
+func TestManager_GetCACertPEM_Concurrent(t *testing.T) {
+	logger := logging.GetLogger()
+	sm, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	tmpDir := t.TempDir()
+	caPath := filepath.Join(tmpDir, "ca.pem")
+	require.NoError(t, os.WriteFile(caPath, []byte("dummy-cert"), 0600))
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+	cfg.CACertPath = caPath
+
+	manager, err := NewManager(cfg, logger, sm)
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 50; j++ {
+				pem := manager.GetCACertPEM()
+				assert.NotNil(t, pem)
+			}
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < 10; i++ {
+		<-done
+	}
 }

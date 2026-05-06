@@ -237,6 +237,28 @@ func (m *Manager) GetDeploymentMode() DeploymentMode {
 	return m.cfg.Mode
 }
 
+// GetCACertPEM returns the CA certificate PEM bytes for HA peer verification.
+// Returns nil when CACertPath is empty or the file cannot be read; logs a warning
+// on read failure so operators can detect misconfiguration.
+// Safe to call concurrently.
+func (m *Manager) GetCACertPEM() []byte {
+	m.mu.RLock()
+	path := m.cfg.CACertPath
+	m.mu.RUnlock()
+
+	if path == "" {
+		return nil
+	}
+
+	// #nosec G304 -- certificate paths are operator-controlled configuration values
+	certPEM, err := os.ReadFile(path)
+	if err != nil {
+		m.logger.Warn("Failed to read HA CA certificate", "path", path, "error", err)
+		return nil
+	}
+	return certPEM
+}
+
 // GetLocalNode returns information about the local node
 func (m *Manager) GetLocalNode() *NodeInfo {
 	m.mu.RLock()

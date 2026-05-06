@@ -473,3 +473,16 @@ func TestManager_HealthStatusImmutability(t *testing.T) {
 	assert.Equal(t, NodeStateHealthy, health2.Checks["test"], "Check status should not be modified")
 	assert.Empty(t, health2.Details["test"], "Details should not be modified")
 }
+
+// TestManager_GetCACertPEM_OSS_AlwaysNil verifies that the OSS manager always returns nil
+// for GetCACertPEM, since OSS only runs in SingleServerMode and has no cluster CA to expose.
+func TestManager_GetCACertPEM_OSS_AlwaysNil(t *testing.T) {
+	logger := logging.GetLogger()
+	sm := getTestStorageManager(t)
+
+	manager, err := NewManager(nil, logger, sm)
+	require.NoError(t, err)
+
+	got := manager.GetCACertPEM()
+	assert.Nil(t, got, "OSS manager must always return nil for GetCACertPEM")
+}
