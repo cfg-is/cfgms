@@ -66,14 +66,6 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
 	}
 
-	// Debug logging for NodeID tracking and timing configuration
-	logger.Info("DEBUG: HA Manager initialization",
-		"node_id_after_env_load", cfg.Node.ID,
-		"node_region", cfg.Node.Region,
-		"node_timeout", cfg.Cluster.Discovery.NodeTimeout,
-		"election_timeout", cfg.Cluster.ElectionTimeout,
-		"heartbeat_interval", cfg.Cluster.HeartbeatInterval)
-
 	// Generate node ID if not provided
 	if cfg.Node.ID == "" {
 		nodeID, err := generateNodeID()
@@ -81,7 +73,6 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 			return nil, fmt.Errorf("failed to generate node ID: %w", err)
 		}
 		cfg.Node.ID = nodeID
-		logger.Info("DEBUG: Generated node ID", "generated_id", nodeID)
 	}
 
 	// Set default node name if not provided
@@ -103,12 +94,6 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 		Coordinates:      cfg.Node.Coordinates,
 		Latency:          make(map[string]time.Duration),
 	}
-
-	// Debug logging for NodeInfo creation
-	logger.Info("DEBUG: Created NodeInfo",
-		"node_id", nodeInfo.ID,
-		"region", nodeInfo.Region,
-		"address", nodeInfo.Address)
 
 	// For single server mode, this node is always the leader
 	if cfg.Mode == SingleServerMode {
@@ -134,11 +119,9 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 	manager.clusterNodes[nodeInfo.ID] = nodeInfo
 
 	// Initialize components based on deployment mode
-	manager.logger.Info("DEBUG: About to call initializeComponents()...")
 	if err := manager.initializeComponents(); err != nil {
 		return nil, fmt.Errorf("failed to initialize HA components: %w", err)
 	}
-	manager.logger.Info("DEBUG: initializeComponents() completed successfully")
 
 	manager.logger.Info("HA Manager initialized",
 		"mode", cfg.GetModeString(),
@@ -165,7 +148,6 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	// Start health checker with a snapshot of currently-registered checks.
 	// m.mu is held here so the snapshot is consistent with the map state.
-	m.logger.Info("DEBUG: About to start health checker...")
 	if m.healthChecker != nil {
 		checkSnapshot := make(map[string]HealthCheckFunc, len(m.healthChecks))
 		for name, fn := range m.healthChecks {
@@ -175,23 +157,16 @@ func (m *Manager) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to start health checker: %w", err)
 		}
 	}
-	m.logger.Info("DEBUG: Health checker started successfully")
 
-	// Start components based on deployment mode
-	m.logger.Info("DEBUG: About to start components based on deployment mode", "mode", m.cfg.Mode)
 	switch m.cfg.Mode {
 	case ClusterMode:
-		m.logger.Info("DEBUG: Starting cluster mode...")
 		if err := m.startClusterMode(); err != nil {
 			return fmt.Errorf("failed to start cluster mode: %w", err)
 		}
-		m.logger.Info("DEBUG: Cluster mode started successfully")
 	case BlueGreenMode:
-		m.logger.Info("DEBUG: Starting blue-green mode...")
 		if err := m.startBlueGreenMode(); err != nil {
 			return fmt.Errorf("failed to start blue-green mode: %w", err)
 		}
-		m.logger.Info("DEBUG: Blue-green mode started successfully")
 	case SingleServerMode:
 		m.logger.Info("Running in single server mode - no additional HA components needed")
 	}
@@ -406,25 +381,19 @@ func (m *Manager) initializeClusterComponents() error {
 	var err error
 
 	// Initialize Raft consensus (sole source of truth for membership and leader election)
-	m.logger.Info("DEBUG: About to initialize Raft consensus...")
 	if err := m.initializeRaftConsensus(); err != nil {
 		return fmt.Errorf("failed to initialize Raft consensus: %w", err)
 	}
-	m.logger.Info("DEBUG: Raft consensus initialization completed successfully")
 
-	m.logger.Info("DEBUG: About to initialize failover manager...")
 	m.failover, err = NewFailoverManager(m.cfg.Failover, m.logger, m)
 	if err != nil {
 		return fmt.Errorf("failed to initialize failover manager: %w", err)
 	}
-	m.logger.Info("DEBUG: Failover manager initialization completed successfully")
 
-	m.logger.Info("DEBUG: About to initialize split-brain detector...")
 	m.splitBrain, err = NewSplitBrainDetector(m.cfg.SplitBrain, m.logger, m)
 	if err != nil {
 		return fmt.Errorf("failed to initialize split-brain detector: %w", err)
 	}
-	m.logger.Info("DEBUG: Split-brain detector initialization completed successfully")
 
 	return nil
 }
@@ -584,15 +553,11 @@ func (m *Manager) initializeBlueGreenComponents() error {
 
 // startClusterMode starts components for cluster mode
 func (m *Manager) startClusterMode() error {
-	m.logger.Info("DEBUG: Starting cluster mode components...")
-
 	// Start Raft consensus (sole authority for membership and leader election)
 	if m.raftConsensus != nil {
-		m.logger.Info("DEBUG: About to start Raft consensus...")
 		if err := m.raftConsensus.Start(); err != nil {
 			return fmt.Errorf("failed to start Raft consensus: %w", err)
 		}
-		m.logger.Info("DEBUG: Raft consensus started successfully")
 
 		// Replicate local node metadata through the Raft log once a leader exists.
 		// Proposals sent before leader election are dropped, so we wait for
@@ -641,26 +606,17 @@ func (m *Manager) startClusterMode() error {
 	}
 
 	if m.failover != nil {
-		m.logger.Info("DEBUG: About to start failover manager component...")
 		if err := m.failover.Start(m.ctx); err != nil {
 			return fmt.Errorf("failed to start failover manager: %w", err)
 		}
-		m.logger.Info("DEBUG: Failover manager component started successfully")
-	} else {
-		m.logger.Info("DEBUG: Failover manager component is nil (disabled), skipping start")
 	}
 
 	if m.splitBrain != nil {
-		m.logger.Info("DEBUG: About to start split-brain detector component...")
 		if err := m.splitBrain.Start(m.ctx); err != nil {
 			return fmt.Errorf("failed to start split-brain detector: %w", err)
 		}
-		m.logger.Info("DEBUG: Split-brain detector component started successfully")
-	} else {
-		m.logger.Info("DEBUG: Split-brain detector component is nil (disabled), skipping start")
 	}
 
-	m.logger.Info("DEBUG: All cluster mode components started successfully")
 	return nil
 }
 
