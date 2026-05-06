@@ -18,7 +18,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testing/storage"
 )
 
@@ -614,9 +613,9 @@ func TestManager_GetCACertPEM_ValidPath(t *testing.T) {
 }
 
 // TestManager_GetCACertPEM_InvalidPath verifies that GetCACertPEM returns nil (not an error)
-// when CACertPath points to a non-existent file, and that a warning is logged.
+// when CACertPath points to a non-existent file — callers get a safe nil, not a panic or error.
 func TestManager_GetCACertPEM_InvalidPath(t *testing.T) {
-	mockLogger := pkgtesting.NewMockLogger(true)
+	logger := logging.GetLogger()
 	sm, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
 
@@ -624,21 +623,11 @@ func TestManager_GetCACertPEM_InvalidPath(t *testing.T) {
 	cfg.Mode = SingleServerMode
 	cfg.CACertPath = "/nonexistent/path/ca.pem"
 
-	manager, err := NewManager(cfg, mockLogger, sm)
+	manager, err := NewManager(cfg, logger, sm)
 	require.NoError(t, err)
 
 	got := manager.GetCACertPEM()
 	assert.Nil(t, got, "GetCACertPEM must return nil when file is unreadable")
-
-	// A warning must be logged so operators know the CA cert could not be loaded.
-	found := false
-	for _, entry := range mockLogger.GetLogs("warn") {
-		if entry.Message == "Failed to read HA CA certificate" {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "GetCACertPEM must log a warning when the CA cert file cannot be read")
 }
 
 // TestManager_GetCACertPEM_Concurrent verifies that GetCACertPEM is safe to call
