@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -23,8 +24,8 @@ type leaderStatus interface {
 // handleConfigPush implements POST /api/v1/config/push.
 //
 // Validates the StewardConfiguration body, rejects non-leader nodes with 503,
-// records an audit event, and returns 202 Accepted with a push ID. Fan-out to
-// stewards is handled in a subsequent story and is deliberately out of scope.
+// records an audit event, triggers a fire-and-forget fan-out to all active
+// stewards via commandPublisher, and returns 202 Accepted immediately.
 func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Reject followers immediately — only the leader accepts config pushes.
 	if checker := s.pushLeaderStatus; checker != nil && !checker.IsLeader() {
@@ -54,6 +55,27 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	queuedAt := time.Now().UTC()
 
 	s.emitConfigPushAudit(r, cfg.TenantID, cfg.ConfigID, pushID)
+
+	// Fan-out CommandSyncConfig to every active steward. Fire-and-forget: the
+	// goroutine uses context.Background so it is not cancelled when the HTTP
+	// response is written. 202 is returned to the caller immediately.
+	if s.commandPublisher != nil {
+		stewards := s.controllerService.GetAllStewards()
+		cfgSnapshot := cfg
+		go func() {
+			result := push.Fanout(context.Background(), &cfgSnapshot, stewards, s.commandPublisher, s.logger)
+			s.logger.Info("Config push fan-out complete",
+				"push_id", pushID,
+				"succeeded", len(result.Succeeded),
+				"failed", len(result.Failed))
+			for stewardID, err := range result.Failed {
+				s.logger.Error("Config push fan-out delivery failed",
+					"push_id", pushID,
+					"steward_id", logging.SanitizeLogValue(stewardID),
+					"error", err)
+			}
+		}()
+	}
 
 	s.respondJSON(w, http.StatusAccepted, ConfigPushResponse{
 		PushID:   pushID,

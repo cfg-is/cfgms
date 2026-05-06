@@ -6,20 +6,27 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	common "github.com/cfgis/cfgms/api/proto/common"
+	ctrlproto "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/push"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -87,6 +94,7 @@ func setupPushServer(t *testing.T) (*Server, *audit.Manager) {
 		nil, tenantManager, rbacManager,
 		nil, nil, nil, "", nil,
 		auditMgr,
+		nil, // No command publisher: fanout is out of scope for push handler unit tests
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -251,4 +259,151 @@ func TestHandleConfigPush_AuditEventEmitted(t *testing.T) {
 	require.Len(t, entries, 1, "expected exactly one config.push.initiated audit entry")
 	assert.Equal(t, payload.TenantID, entries[0].TenantID)
 	assert.Equal(t, "config.push.initiated", entries[0].Action)
+}
+
+// syncedControlPlane is a real ControlPlaneProvider for handler-level fanout tests.
+// It records steward IDs from SendCommand calls and signals a WaitGroup so tests
+// can synchronize with the fire-and-forget goroutine.
+type syncedControlPlane struct {
+	mu       sync.Mutex
+	received []string
+	wg       sync.WaitGroup
+}
+
+func (c *syncedControlPlane) ReceivedIDs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, len(c.received))
+	copy(out, c.received)
+	return out
+}
+
+func (c *syncedControlPlane) Name() string      { return "synced-recording" }
+func (c *syncedControlPlane) IsConnected() bool { return true }
+
+func (c *syncedControlPlane) Initialize(_ context.Context, _ map[string]interface{}) error {
+	return nil
+}
+func (c *syncedControlPlane) Start(_ context.Context) error { return nil }
+func (c *syncedControlPlane) Stop(_ context.Context) error  { return nil }
+
+func (c *syncedControlPlane) SendCommand(_ context.Context, cmd *controlplaneTypes.SignedCommand) error {
+	defer c.wg.Done()
+	c.mu.Lock()
+	c.received = append(c.received, cmd.Command.StewardID)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *syncedControlPlane) FanOutCommand(_ context.Context, _ *controlplaneTypes.SignedCommand, _ []string) (*controlplaneTypes.FanOutResult, error) {
+	return nil, fmt.Errorf("FanOutCommand must not be called; route via SendCommand through TriggerConfigSync")
+}
+
+func (c *syncedControlPlane) SubscribeCommands(_ context.Context, _ string, _ controlplaneInterfaces.CommandHandler) error {
+	return nil
+}
+
+func (c *syncedControlPlane) PublishEvent(_ context.Context, _ *controlplaneTypes.Event) error {
+	return nil
+}
+
+func (c *syncedControlPlane) SubscribeEvents(_ context.Context, _ *controlplaneTypes.EventFilter, _ controlplaneInterfaces.EventHandler) error {
+	return nil
+}
+
+func (c *syncedControlPlane) SendHeartbeat(_ context.Context, _ *controlplaneTypes.Heartbeat) error {
+	return nil
+}
+
+func (c *syncedControlPlane) SubscribeHeartbeats(_ context.Context, _ controlplaneInterfaces.HeartbeatHandler) error {
+	return nil
+}
+
+func (c *syncedControlPlane) GetStats(_ context.Context) (*controlplaneTypes.ControlPlaneStats, error) {
+	return &controlplaneTypes.ControlPlaneStats{}, nil
+}
+
+// registerActiveSteward registers a steward and immediately transitions it to
+// "active" status via a heartbeat, matching the real steward lifecycle.
+// Returns the controller-assigned steward ID (not the DNA ID).
+func registerActiveSteward(t *testing.T, svc *service.ControllerService, dnaID string) string {
+	t.Helper()
+	ctx := context.Background()
+	resp, err := svc.AcceptRegistration(ctx, &ctrlproto.RegisterRequest{
+		Version:    "1.0.0",
+		InitialDna: &common.DNA{Id: dnaID},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, resp.StewardId, "AcceptRegistration must return a generated steward ID")
+	_, err = svc.ProcessHeartbeat(ctx, &ctrlproto.HeartbeatRequest{
+		StewardId: resp.StewardId,
+		Status:    "active",
+	})
+	require.NoError(t, err)
+	return resp.StewardId
+}
+
+// makeSyncedPublisher creates a real commands.Publisher backed by the synced control plane.
+func makeSyncedPublisher(t *testing.T, cp *syncedControlPlane) *commands.Publisher {
+	t.Helper()
+	pub, err := commands.New(&commands.Config{
+		ControlPlane: cp,
+		Signer:       nil,
+		Logger:       logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+	return pub
+}
+
+// TestHandleConfigPush_FanoutNoActiveStewards verifies that when commandPublisher is
+// wired but no active stewards exist, the handler still returns 202 and no SendCommand
+// calls are dispatched.
+func TestHandleConfigPush_FanoutNoActiveStewards(t *testing.T) {
+	server := setupTestServer(t)
+	server.pushLeaderStatus = nil // leader
+
+	cp := &syncedControlPlane{}
+	server.commandPublisher = makeSyncedPublisher(t, cp)
+
+	body := marshalPayload(t, validPushPayload())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	// No active stewards → Fanout skips all → no SendCommand calls.
+	// cp.received is never written by the goroutine, so this read is race-free.
+	assert.Empty(t, cp.ReceivedIDs())
+}
+
+// TestHandleConfigPush_FanoutToActiveStewards verifies that when commandPublisher is
+// wired and an active steward exists, the fire-and-forget goroutine dispatches
+// TriggerConfigSync (via SendCommand) to that steward.
+func TestHandleConfigPush_FanoutToActiveStewards(t *testing.T) {
+	server := setupTestServer(t)
+	server.pushLeaderStatus = nil // leader
+
+	cp := &syncedControlPlane{}
+	server.commandPublisher = makeSyncedPublisher(t, cp)
+
+	stewardID := registerActiveSteward(t, server.controllerService, "fanout-dna-1")
+
+	// Expect exactly one TriggerConfigSync call (one active steward).
+	cp.wg.Add(1)
+
+	body := marshalPayload(t, validPushPayload())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	// Wait for the fire-and-forget goroutine to deliver to the active steward.
+	cp.wg.Wait()
+
+	assert.ElementsMatch(t, []string{stewardID}, cp.ReceivedIDs())
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/cfgis/cfgms/commercial/ha"
 	"github.com/cfgis/cfgms/features/config/rollback"
+	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/health"
@@ -71,6 +72,7 @@ type Server struct {
 	scriptAuditLogger       *script.AuditLogger            // Issue #708: in-memory execution metrics
 	scriptMonitor           *script.ExecutionMonitor       // Issue #708: active execution tracking
 	pushLeaderStatus        leaderStatus                   // Issue #1318: leader check for config push (nil = leader)
+	commandPublisher        *commands.Publisher            // Issue #1319: fan-out config push to active stewards
 	registry                registry.Registry              // Issue #1323: active steward connection registry
 	stopCleanup             chan struct{}                  // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                  // closed when cleanup goroutine exits
@@ -118,6 +120,7 @@ func New(
 	signerCertSerial string, // Story #378: Serial of cert used for config signing
 	healthCollector *health.Collector, // Story #417: CFGMS health monitoring
 	auditManager *audit.Manager, // Issue #775: registration audit events
+	commandPublisher *commands.Publisher, // Issue #1319: fan-out config push to active stewards
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -148,6 +151,7 @@ func New(
 		secretStore:             secretStore,              // M-AUTH-1: Central secrets provider
 		approvalHook:            &DefaultApprovalHook{},   // Issue #422: accept-all default
 		auditManager:            auditManager,             // Issue #775: registration audit events
+		commandPublisher:        commandPublisher,         // Issue #1319: fan-out config push to active stewards
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
 	}
