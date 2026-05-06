@@ -4,6 +4,8 @@ package reports
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,7 +25,7 @@ import (
 
 // TestAdvancedServiceWithConfig tests service creation with custom configuration
 func TestAdvancedServiceWithConfig(t *testing.T) {
-	logger := &testLogger{}
+	logger := logging.NewNoopLogger()
 
 	// Create DNA storage manager
 	dnaStorageConfig := &storage.Config{
@@ -397,22 +399,31 @@ func TestConvenienceMethods(t *testing.T) {
 	complianceData, err := service.GenerateComplianceAssessment(
 		ctx, tenantIDs, []string{"CIS"}, timeRange, interfaces.FormatJSON,
 	)
-	assert.NoError(t, err)
-	assert.NotNil(t, complianceData)
+	require.NoError(t, err)
+	require.NotEmpty(t, complianceData)
+	var complianceReport interfaces.ComplianceReport
+	require.NoError(t, json.Unmarshal(complianceData, &complianceReport), "compliance data must be valid JSON")
+	assert.NotEmpty(t, complianceReport.ID, "compliance report must carry a non-empty ID")
 
 	// Test security analysis
 	securityData, err := service.GenerateSecurityAnalysis(
 		ctx, tenantIDs, timeRange, "comprehensive", interfaces.FormatJSON,
 	)
-	assert.NoError(t, err)
-	assert.NotNil(t, securityData)
+	require.NoError(t, err)
+	require.NotEmpty(t, securityData)
+	var securityReport interfaces.SecurityReport
+	require.NoError(t, json.Unmarshal(securityData, &securityReport), "security data must be valid JSON")
+	assert.NotEmpty(t, securityReport.ID, "security report must carry a non-empty ID")
 
 	// Test executive dashboard
 	dashboardData, err := service.GenerateExecutiveDashboard(
 		ctx, tenantIDs, timeRange, "executive", interfaces.FormatJSON,
 	)
-	assert.NoError(t, err)
-	assert.NotNil(t, dashboardData)
+	require.NoError(t, err)
+	require.NotEmpty(t, dashboardData)
+	var executiveReport interfaces.ExecutiveReport
+	require.NoError(t, json.Unmarshal(dashboardData, &executiveReport), "dashboard data must be valid JSON")
+	assert.NotEmpty(t, executiveReport.ID, "executive report must carry a non-empty ID")
 }
 
 // TestGetUserIDFromContext verifies getUserIDFromContext reads user identity via typed ctxkeys,
@@ -569,11 +580,70 @@ func TestGetCrossSystemMetrics(t *testing.T) {
 	assert.LessOrEqual(t, metrics.AuditMetrics.FailureRate, 100.0)
 }
 
+// TestExportFormats covers JSON, HTML, and PDF serialization paths in exportAdvancedReport.
+// Each sub-test asserts content structure (not just byte length) for its format.
+func TestExportFormats(t *testing.T) {
+	service := createTestAdvancedService(t)
+	ctx := context.Background()
+
+	// Generate a real ComplianceReport to use as serialization input.
+	report, err := service.GenerateComplianceReport(ctx, interfaces.ComplianceReportRequest{
+		TimeRange: interfaces.TimeRange{
+			Start: time.Now().Add(-24 * time.Hour),
+			End:   time.Now(),
+		},
+		TenantIDs:   []string{"tenant1"},
+		Frameworks:  []string{"CIS"},
+		Format:      interfaces.FormatJSON,
+		DetailLevel: "summary",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	require.NotEmpty(t, report.ID, "generated report must have a non-empty ID")
+
+	t.Run("JSON", func(t *testing.T) {
+		data, err := service.exportAdvancedReport(ctx, report, interfaces.FormatJSON)
+		require.NoError(t, err)
+		require.NotEmpty(t, data)
+
+		var decoded interfaces.ComplianceReport
+		require.NoError(t, json.Unmarshal(data, &decoded), "JSON output must unmarshal into ComplianceReport")
+		assert.NotEmpty(t, decoded.ID, "decoded report must carry a non-empty ID")
+		assert.Equal(t, report.TenantIDs, decoded.TenantIDs, "decoded report must preserve tenant IDs")
+		assert.Equal(t, report.Frameworks, decoded.Frameworks, "decoded report must preserve frameworks")
+	})
+
+	t.Run("HTML", func(t *testing.T) {
+		data, err := service.exportAdvancedReport(ctx, report, interfaces.FormatHTML)
+		require.NoError(t, err)
+		require.NotEmpty(t, data)
+
+		body := string(data)
+		assert.True(t, strings.HasPrefix(body, "<!DOCTYPE html>"), "HTML must start with DOCTYPE declaration")
+		assert.Contains(t, body, "<html", "HTML output must contain <html element")
+		assert.Contains(t, body, report.ID, "HTML output must embed the report ID")
+	})
+
+	t.Run("PDF", func(t *testing.T) {
+		data, err := service.exportAdvancedReport(ctx, report, interfaces.FormatPDF)
+		require.NoError(t, err)
+		require.NotEmpty(t, data)
+
+		require.GreaterOrEqual(t, len(data), 4, "PDF output must be at least 4 bytes")
+		assert.Equal(t, "%PDF", string(data[:4]), "PDF must begin with %%PDF magic bytes")
+	})
+
+	t.Run("unsupported_format", func(t *testing.T) {
+		_, err := service.exportAdvancedReport(ctx, report, interfaces.FormatCSV)
+		assert.Error(t, err, "unsupported format must return an error")
+	})
+}
+
 // Helper Functions
 
 // createTestAdvancedService creates a test instance of AdvancedService using minimal real components
 func createTestAdvancedService(t *testing.T) *AdvancedService {
-	logger := &testLogger{}
+	logger := logging.NewNoopLogger()
 
 	// Create minimal real components needed for the service
 	// Create DNA storage manager (which is what the constructor expects)
@@ -659,20 +729,3 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 
 	return service
 }
-
-// testLogger implements logging.Logger for testing
-type testLogger struct{}
-
-// Ensure testLogger implements logging.Logger
-var _ logging.Logger = (*testLogger)(nil)
-
-func (l *testLogger) Debug(msg string, keysAndValues ...interface{})                         {}
-func (l *testLogger) Info(msg string, keysAndValues ...interface{})                          {}
-func (l *testLogger) Warn(msg string, keysAndValues ...interface{})                          {}
-func (l *testLogger) Error(msg string, keysAndValues ...interface{})                         {}
-func (l *testLogger) Fatal(msg string, keysAndValues ...interface{})                         {}
-func (l *testLogger) DebugCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
-func (l *testLogger) InfoCtx(ctx context.Context, msg string, keysAndValues ...interface{})  {}
-func (l *testLogger) WarnCtx(ctx context.Context, msg string, keysAndValues ...interface{})  {}
-func (l *testLogger) ErrorCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
-func (l *testLogger) FatalCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
