@@ -11,6 +11,7 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgmstesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -18,9 +19,8 @@ import (
 func newTestTenantManager(t *testing.T) *Manager {
 	t.Helper()
 	storageManager := cfgmstesting.SetupTestStorage(t)
-	tenantStore := NewStorageAdapter(storageManager.GetTenantStore())
 	rbacManager := cfgmstesting.SetupTestRBACManager(t)
-	return NewManager(tenantStore, rbacManager)
+	return NewManager(storageManager.GetTenantStore(), rbacManager)
 }
 
 func TestManager_CreateTenant(t *testing.T) {
@@ -41,7 +41,7 @@ func TestManager_CreateTenant(t *testing.T) {
 	assert.NotEmpty(t, tenant.ID)
 	assert.Equal(t, "Test-Tenant", tenant.Name)
 	assert.Equal(t, "A test tenant", tenant.Description)
-	assert.Equal(t, TenantStatusActive, tenant.Status)
+	assert.Equal(t, business.TenantStatusActive, tenant.Status)
 	assert.Equal(t, "test@example.com", tenant.Metadata["owner"])
 	assert.NotZero(t, tenant.CreatedAt)
 	assert.NotZero(t, tenant.UpdatedAt)
@@ -139,7 +139,7 @@ func TestManager_ListTenants(t *testing.T) {
 	assert.GreaterOrEqual(t, len(tenants), 2)
 
 	// List tenants with filter
-	filter := &TenantFilter{ParentID: tenant1.ID}
+	filter := &business.TenantFilter{ParentID: tenant1.ID}
 	filteredTenants, err := manager.ListTenants(ctx, filter)
 	require.NoError(t, err)
 	assert.Len(t, filteredTenants, 1)
@@ -247,8 +247,7 @@ func TestManager_IsTenantAncestor(t *testing.T) {
 func setupRealTenantManager(t *testing.T, rbacManager *rbac.Manager) *Manager {
 	t.Helper()
 	storageManager := cfgmstesting.SetupTestStorage(t)
-	tenantStore := NewStorageAdapter(storageManager.GetTenantStore())
-	return NewManager(tenantStore, rbacManager)
+	return NewManager(storageManager.GetTenantStore(), rbacManager)
 }
 
 func TestDeleteTenant_CascadesRBACCleanup(t *testing.T) {

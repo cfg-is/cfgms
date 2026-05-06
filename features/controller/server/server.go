@@ -169,8 +169,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	logger.Info("RBAC initialization completed")
 
 	// Initialize tenant management with durable storage
-	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
-	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	tenantManager := tenant.NewManager(storageManager.GetTenantStore(), rbacManager)
 
 	// Create the controller service
 	controllerService := service.NewControllerService(logger)

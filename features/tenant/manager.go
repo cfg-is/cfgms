@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/rbac"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // Manager handles tenant operations and integrates with RBAC
@@ -27,7 +28,7 @@ func NewManager(store Store, rbacManager *rbac.Manager) *Manager {
 }
 
 // CreateTenant creates a new tenant with validation and RBAC setup
-func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*Tenant, error) {
+func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*business.TenantData, error) {
 	// Validate the request
 	if err := m.validateTenantRequest(req); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
@@ -38,19 +39,19 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*Tenant
 
 	// Create tenant object
 	now := time.Now()
-	tenant := &Tenant{
+	td := &business.TenantData{
 		ID:          tenantID,
 		Name:        req.Name,
 		Description: req.Description,
 		ParentID:    req.ParentID,
 		Metadata:    req.Metadata,
-		Status:      TenantStatusActive,
+		Status:      business.TenantStatusActive,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
 
 	// Create the tenant in storage
-	if err := m.store.CreateTenant(ctx, tenant); err != nil {
+	if err := m.store.CreateTenant(ctx, td); err != nil {
 		return nil, fmt.Errorf("failed to create tenant: %w", err)
 	}
 
@@ -63,16 +64,16 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*Tenant
 		}
 	}
 
-	return tenant, nil
+	return td, nil
 }
 
 // GetTenant retrieves a tenant by ID
-func (m *Manager) GetTenant(ctx context.Context, tenantID string) (*Tenant, error) {
+func (m *Manager) GetTenant(ctx context.Context, tenantID string) (*business.TenantData, error) {
 	return m.store.GetTenant(ctx, tenantID)
 }
 
 // UpdateTenant updates an existing tenant
-func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *TenantRequest) (*Tenant, error) {
+func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *TenantRequest) (*business.TenantData, error) {
 	// Get existing tenant
 	existing, err := m.store.GetTenant(ctx, tenantID)
 	if err != nil {
@@ -137,17 +138,17 @@ func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
 }
 
 // ListTenants lists tenants with optional filtering
-func (m *Manager) ListTenants(ctx context.Context, filter *TenantFilter) ([]*Tenant, error) {
+func (m *Manager) ListTenants(ctx context.Context, filter *business.TenantFilter) ([]*business.TenantData, error) {
 	return m.store.ListTenants(ctx, filter)
 }
 
 // GetTenantHierarchy retrieves the hierarchical structure for a tenant
-func (m *Manager) GetTenantHierarchy(ctx context.Context, tenantID string) (*TenantHierarchy, error) {
+func (m *Manager) GetTenantHierarchy(ctx context.Context, tenantID string) (*business.TenantHierarchy, error) {
 	return m.store.GetTenantHierarchy(ctx, tenantID)
 }
 
 // GetChildTenants returns all direct child tenants
-func (m *Manager) GetChildTenants(ctx context.Context, parentID string) ([]*Tenant, error) {
+func (m *Manager) GetChildTenants(ctx context.Context, parentID string) ([]*business.TenantData, error) {
 	return m.store.GetChildTenants(ctx, parentID)
 }
 
