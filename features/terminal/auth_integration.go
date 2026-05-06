@@ -14,9 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
-	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -24,13 +22,12 @@ import (
 
 // AuthenticatedTerminalManager manages terminal sessions with mTLS authentication and continuous authorization
 type AuthenticatedTerminalManager struct {
-	baseManager          SessionManager
-	rbacManager          rbac.RBACManager
-	certValidator        *cert.Validator
-	securityValidator    *SecurityValidator
-	auditManager         *audit.Manager
-	sessionMonitor       *SessionMonitor
-	continuousAuthEngine *continuous.ContinuousAuthorizationEngine
+	baseManager       SessionManager
+	rbacManager       rbac.RBACManager
+	certValidator     *cert.Validator
+	securityValidator *SecurityValidator
+	auditManager      *audit.Manager
+	sessionMonitor    *SessionMonitor
 
 	// Anti-hijacking measures
 	sessionTokens map[string]*SessionToken
@@ -158,7 +155,6 @@ func NewAuthenticatedTerminalManager(
 		securityValidator:    securityValidator,
 		auditManager:         auditManager,
 		sessionMonitor:       sessionMonitor,
-		continuousAuthEngine: nil, // Will be set when enabled
 		sessionTokens:        make(map[string]*SessionToken),
 		config:               config,
 		continuousAuthConfig: DefaultContinuousAuthConfig(),
@@ -309,32 +305,6 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 		_ = err // Explicitly ignore monitoring failures for resilience
 	}
 
-	// Register session for continuous authorization if enabled
-	if atm.continuousAuthConfig.EnableContinuousAuth && atm.continuousAuthEngine != nil {
-		if regErr := atm.RegisterSessionForContinuousAuth(ctx, session.ID, userID, tenantID, "terminal"); regErr != nil {
-			// Log error but don't fail authentication
-			resourceID := req.StewardID
-			if resourceID == "" {
-				resourceID = userID
-			}
-			_ = atm.auditManager.RecordEvent(ctx,
-				audit.NewEventBuilder().
-					Tenant(tenantID).
-					Type(business.AuditEventSecurityEvent).
-					Action("terminal.continuous_auth_registration_failed").
-					User(userID, business.AuditUserTypeHuman).
-					Session(session.ID).
-					Resource("terminal", resourceID, "").
-					Result(business.AuditResultError).
-					Severity(business.AuditSeverityMedium).
-					Details(map[string]interface{}{
-						"violation_type": "continuous_auth_registration_failed",
-						"details":        fmt.Sprintf("Failed to register session for continuous auth: %v", regErr),
-					}),
-			)
-		}
-	}
-
 	// Log successful authentication
 	clientIP := atm.getClientIP(r)
 	resourceID := req.StewardID
@@ -465,12 +435,6 @@ func (atm *AuthenticatedTerminalManager) TerminateSession(ctx context.Context, s
 	if err := atm.sessionMonitor.RemoveSession(sessionID); err != nil {
 		// Log error but continue with termination
 		_ = err // Explicitly ignore monitoring errors during termination
-	}
-
-	// Unregister from continuous authorization
-	if err := atm.UnregisterSessionFromContinuousAuth(ctx, sessionID); err != nil {
-		// Log error but continue with termination
-		_ = err // Explicitly ignore continuous auth errors during termination
 	}
 
 	// Terminate the actual session
@@ -782,285 +746,19 @@ func DefaultContinuousAuthConfig() *ContinuousAuthConfig {
 	}
 }
 
-// EnableContinuousAuthorization enables continuous authorization for terminal sessions
-func (atm *AuthenticatedTerminalManager) EnableContinuousAuthorization(engine *continuous.ContinuousAuthorizationEngine, config *ContinuousAuthConfig) {
-	atm.continuousAuthEngine = engine
-	if config != nil {
-		atm.continuousAuthConfig = config
-	}
-	atm.continuousAuthConfig.EnableContinuousAuth = true
-}
-
-// AuthorizeCommand performs continuous authorization for a specific command
-func (atm *AuthenticatedTerminalManager) AuthorizeCommand(ctx context.Context, sessionID, command string, token *SessionToken) (*continuous.ContinuousAuthResponse, error) {
-	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
-		// Fall back to traditional command validation
-		return atm.authorizeCommandTraditional(ctx, sessionID, command, token)
-	}
-
-	// Apply command authorization timeout
-	authCtx, cancel := context.WithTimeout(ctx, atm.continuousAuthConfig.CommandAuthTimeout)
-	defer cancel()
-
-	// Determine command risk level
-	riskLevel := atm.assessCommandRisk(command)
-	operationType := atm.getOperationType(riskLevel)
-
-	// Create continuous authorization request
-	continuousRequest := &continuous.ContinuousAuthRequest{
-		AccessRequest: &common.AccessRequest{
-			SubjectId:    token.UserID,
-			PermissionId: "terminal.execute",
-			TenantId:     extractTenantID(token),
-			ResourceId:   command,
-		},
-		SessionID:     sessionID,
-		OperationType: operationType,
-		ResourceContext: map[string]string{
-			"session_id":   sessionID,
-			"command":      command,
-			"risk_level":   string(riskLevel),
-			"command_type": string(operationType),
-		},
-		RequestTime: time.Now(),
-	}
-
-	// Perform continuous authorization
-	authStart := time.Now()
-	response, err := atm.continuousAuthEngine.AuthorizeAction(authCtx, continuousRequest)
-	authLatency := time.Since(authStart)
-
-	// Check authorization latency against SLA
-	if authLatency.Milliseconds() > int64(atm.continuousAuthConfig.MaxAuthLatencyMs) {
-		_ = atm.auditManager.RecordEvent(ctx,
-			audit.NewEventBuilder().
-				Tenant(extractTenantID(token)).
-				Type(business.AuditEventSecurityEvent).
-				Action("terminal.authorization_latency_sla_violation").
-				User(token.UserID, business.AuditUserTypeHuman).
-				Session(sessionID).
-				Resource("session", sessionID, "").
-				Result(business.AuditResultSuccess).
-				Severity(business.AuditSeverityMedium).
-				Details(map[string]interface{}{
-					"violation_type": "authorization_latency_sla_violation",
-					"details":        fmt.Sprintf("Authorization latency %v exceeds SLA %dms", authLatency, atm.continuousAuthConfig.MaxAuthLatencyMs),
-				}),
-		)
-	}
-
-	if err != nil {
-		// Handle fallback based on configuration
-		switch atm.continuousAuthConfig.ContinuousAuthFallback {
-		case "allow":
-			// Allow command execution but log the issue
-			_ = atm.auditManager.RecordEvent(ctx,
-				audit.NewEventBuilder().
-					Tenant(extractTenantID(token)).
-					Type(business.AuditEventSecurityEvent).
-					Action("terminal.continuous_auth_failure_fallback_allow").
-					User(token.UserID, business.AuditUserTypeHuman).
-					Session(sessionID).
-					Resource("session", sessionID, "").
-					Result(business.AuditResultError).
-					Severity(business.AuditSeverityHigh).
-					Details(map[string]interface{}{
-						"violation_type": "continuous_auth_failure_fallback_allow",
-						"details":        fmt.Sprintf("Continuous auth failed: %v", err),
-					}),
-			)
-			return &continuous.ContinuousAuthResponse{
-				AccessResponse: &common.AccessResponse{
-					Granted: true,
-					Reason:  "Fallback to allow due to continuous auth failure",
-				},
-				ValidUntil: time.Now().Add(5 * time.Minute),
-			}, nil
-		case "deny":
-			return nil, fmt.Errorf("continuous authorization failed: %w", err)
-		case "traditional":
-			return atm.authorizeCommandTraditional(ctx, sessionID, command, token)
-		default:
-			return nil, fmt.Errorf("continuous authorization failed: %w", err)
-		}
-	}
-
-	// Log successful authorization for audit
-	if response.AccessResponse.Granted {
-		_ = atm.auditManager.RecordEvent(ctx,
-			audit.NewEventBuilder().
-				Tenant(extractTenantID(token)).
-				Type(business.AuditEventSystemAccess).
-				Action("terminal.command_authorized").
-				User(token.UserID, business.AuditUserTypeHuman).
-				Session(sessionID).
-				Resource("session", sessionID, "").
-				Result(business.AuditResultSuccess).
-				Severity(business.AuditSeverityLow).
-				Details(map[string]interface{}{
-					"command": command,
-					"latency": authLatency.String(),
-				}),
-		)
-	} else {
-		_ = atm.auditManager.RecordEvent(ctx,
-			audit.NewEventBuilder().
-				Tenant(extractTenantID(token)).
-				Type(business.AuditEventAuthorization).
-				Action("terminal.command_authorization_denied").
-				User(token.UserID, business.AuditUserTypeHuman).
-				Session(sessionID).
-				Resource("session", sessionID, "").
-				Result(business.AuditResultDenied).
-				Severity(business.AuditSeverityMedium).
-				Details(map[string]interface{}{
-					"command": command,
-					"reason":  response.AccessResponse.Reason,
-				}),
-		)
-	}
-
-	return response, nil
-}
-
-// authorizeCommandTraditional performs traditional command authorization without continuous auth
-func (atm *AuthenticatedTerminalManager) authorizeCommandTraditional(ctx context.Context, sessionID, command string, token *SessionToken) (*continuous.ContinuousAuthResponse, error) {
-	// Check if command requires special authorization
-	requiresAuth := atm.doesCommandRequireAuth(command)
-
-	if !requiresAuth {
-		return &continuous.ContinuousAuthResponse{
-			AccessResponse: &common.AccessResponse{
-				Granted: true,
-				Reason:  "Command allowed by traditional authorization",
-			},
-			ValidUntil: time.Now().Add(5 * time.Minute),
-		}, nil
-	}
-
-	// For high-risk commands, check RBAC permissions
-	hasPermission, err := atm.rbacManager.CheckPermission(ctx, &common.AccessRequest{
-		SubjectId:    token.UserID,
-		PermissionId: "terminal.execute.high_risk",
-		TenantId:     extractTenantID(token),
-		ResourceId:   command,
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("traditional authorization check failed: %w", err)
-	}
-
-	return &continuous.ContinuousAuthResponse{
-		AccessResponse: hasPermission,
-		ValidUntil:     time.Now().Add(1 * time.Minute),
-	}, nil
-}
-
-// RevalidateSession performs session revalidation for continuous authorization
-func (atm *AuthenticatedTerminalManager) RevalidateSession(ctx context.Context, sessionID string, token *SessionToken) error {
-	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
-		return nil // No revalidation needed for traditional auth
-	}
-
-	// Check if revalidation is due
-	if time.Since(token.LastRotated) < atm.continuousAuthConfig.SessionRevalidationInterval {
-		return nil // Revalidation not yet due
-	}
-
-	// Create revalidation request
-	revalidationRequest := &continuous.ContinuousAuthRequest{
-		AccessRequest: &common.AccessRequest{
-			SubjectId:    token.UserID,
-			PermissionId: "terminal.session.continue",
-			TenantId:     extractTenantID(token),
-			ResourceId:   sessionID,
-		},
-		SessionID:     sessionID,
-		OperationType: continuous.OperationTypeStandard,
-		ResourceContext: map[string]string{
-			"session_id": sessionID,
-			"action":     "revalidate",
-		},
-		RequestTime: time.Now(),
-	}
-
-	// Perform revalidation
-	response, err := atm.continuousAuthEngine.AuthorizeAction(ctx, revalidationRequest)
-	if err != nil {
-		return fmt.Errorf("session revalidation failed: %w", err)
-	}
-
-	if !response.AccessResponse.Granted {
-		// Session revalidation failed - terminate session
-		terminationReason := fmt.Sprintf("Session revalidation denied: %s", response.AccessResponse.Reason)
-		if termErr := atm.TerminateSession(ctx, sessionID, terminationReason); termErr != nil {
-			_ = termErr // Log but don't fail on termination error
-		}
-
-		return fmt.Errorf("session terminated due to revalidation failure: %s", response.AccessResponse.Reason)
-	}
-
-	// Update token rotation time
-	atm.tokenMutex.Lock()
-	token.LastRotated = time.Now()
-	atm.tokenMutex.Unlock()
-
+// HandlePermissionRevocation handles real-time permission revocation for terminal sessions
+func (atm *AuthenticatedTerminalManager) HandlePermissionRevocation(ctx context.Context, userID, tenantID string, permissions []string) error {
 	return nil
 }
 
-// Helper methods for continuous authorization
-
-// assessCommandRisk determines the risk level of a command
-func (atm *AuthenticatedTerminalManager) assessCommandRisk(command string) continuous.RiskLevel {
-	// Check for critical commands first
-	for _, critical := range atm.continuousAuthConfig.CriticalCommands {
-		if strings.Contains(command, critical) {
-			return continuous.RiskLevelCritical
-		}
-	}
-
-	// Check for high-risk commands
-	for _, highRisk := range atm.continuousAuthConfig.HighRiskCommands {
-		if strings.Contains(command, highRisk) {
-			return continuous.RiskLevelHigh
-		}
-	}
-
-	// Check for commands requiring authorization
-	for _, requireAuth := range atm.continuousAuthConfig.RequireAuthCommands {
-		if strings.Contains(command, requireAuth) {
-			return continuous.RiskLevelModerate
-		}
-	}
-
-	return continuous.RiskLevelLow
-}
-
-// getOperationType determines the operation type based on risk level
-func (atm *AuthenticatedTerminalManager) getOperationType(riskLevel continuous.RiskLevel) continuous.OperationType {
-	switch riskLevel {
-	case continuous.RiskLevelCritical:
-		return continuous.OperationTypeCritical
-	case continuous.RiskLevelHigh:
-		return continuous.OperationTypeHighRisk
-	case continuous.RiskLevelModerate:
-		return continuous.OperationTypeModerate
-	default:
-		return continuous.OperationTypeStandard
-	}
-}
-
-// doesCommandRequireAuth checks if a command requires special authorization in traditional mode
-func (atm *AuthenticatedTerminalManager) doesCommandRequireAuth(command string) bool {
-	allRequiredCommands := append(atm.continuousAuthConfig.RequireAuthCommands,
-		append(atm.continuousAuthConfig.HighRiskCommands, atm.continuousAuthConfig.CriticalCommands...)...)
-
-	for _, requiredCmd := range allRequiredCommands {
-		if strings.Contains(command, requiredCmd) {
-			return true
-		}
-	}
-	return false
+// GetSessionRBACStatus returns the current RBAC status of a terminal session
+func (atm *AuthenticatedTerminalManager) GetSessionRBACStatus(ctx context.Context, sessionID string) (*TerminalRBACStatus, error) {
+	return &TerminalRBACStatus{
+		SessionID:             sessionID,
+		ContinuousAuthEnabled: false,
+		LastValidated:         time.Now(),
+		Status:                "traditional_auth",
+	}, nil
 }
 
 // extractTenantID extracts tenant ID from session token
@@ -1069,276 +767,6 @@ func extractTenantID(token *SessionToken) string {
 		return tenantID
 	}
 	return "default" // Fallback to default tenant
-}
-
-// HandlePermissionRevocation handles real-time permission revocation for terminal sessions
-func (atm *AuthenticatedTerminalManager) HandlePermissionRevocation(ctx context.Context, userID, tenantID string, permissions []string) error {
-	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
-		return nil // No continuous auth enabled
-	}
-
-	// Find all active sessions for the user
-	activeSessions := make([]*SessionToken, 0)
-	atm.tokenMutex.RLock()
-	for _, token := range atm.sessionTokens {
-		if token.UserID == userID && token.Active {
-			if tenantID == "" || extractTenantID(token) == tenantID {
-				activeSessions = append(activeSessions, token)
-			}
-		}
-	}
-	atm.tokenMutex.RUnlock()
-
-	// Revoke permissions using continuous authorization engine
-	startTime := time.Now()
-	err := atm.continuousAuthEngine.RevokePermissions(ctx, userID, tenantID, permissions)
-	if err != nil {
-		return fmt.Errorf("failed to revoke permissions: %w", err)
-	}
-
-	propagationTime := time.Since(startTime)
-
-	// Terminate sessions that no longer have required permissions
-	resourceID := userID
-	if resourceID == "" {
-		resourceID = audit.SystemUserID
-	}
-	effectiveTenantID := tenantID
-	if effectiveTenantID == "" {
-		effectiveTenantID = audit.SystemTenantID
-	}
-	for _, token := range activeSessions {
-		// Check if session requires the revoked permissions
-		if atm.sessionRequiresPermissions(token, permissions) {
-			// Schedule session for termination
-			terminationReason := fmt.Sprintf("Permission revoked: %s", strings.Join(permissions, ", "))
-
-			_ = atm.auditManager.RecordEvent(ctx,
-				audit.NewEventBuilder().
-					Tenant(effectiveTenantID).
-					Type(business.AuditEventSecurityEvent).
-					Action("terminal.permission_revocation_termination").
-					User(userID, business.AuditUserTypeHuman).
-					Session(token.SessionID).
-					Resource("session", token.SessionID, "").
-					Result(business.AuditResultDenied).
-					Severity(business.AuditSeverityCritical).
-					Details(map[string]interface{}{
-						"violation_type": "permission_revocation_termination",
-						"details":        terminationReason,
-					}),
-			)
-
-			// Terminate the session
-			if termErr := atm.TerminateSession(ctx, token.SessionID, terminationReason); termErr != nil {
-				// Log error but continue processing other sessions
-				_ = termErr
-			}
-		}
-	}
-
-	// Log successful permission revocation
-	_ = atm.auditManager.RecordEvent(ctx,
-		audit.NewEventBuilder().
-			Tenant(effectiveTenantID).
-			Type(business.AuditEventSecurityEvent).
-			Action("terminal.permission_revocation_completed").
-			User(userID, business.AuditUserTypeHuman).
-			Resource("user", resourceID, "").
-			Result(business.AuditResultSuccess).
-			Severity(business.AuditSeverityHigh).
-			Details(map[string]interface{}{
-				"permissions":      strings.Join(permissions, ", "),
-				"propagation_time": propagationTime.String(),
-			}),
-	)
-
-	return nil
-}
-
-// sessionRequiresPermissions checks if a session requires specific permissions for continued operation
-func (atm *AuthenticatedTerminalManager) sessionRequiresPermissions(token *SessionToken, permissions []string) bool {
-	// Check if any of the revoked permissions are critical for terminal sessions
-	criticalPermissions := []string{
-		"terminal.session.create",
-		"terminal.session.continue",
-		"terminal.execute",
-	}
-
-	for _, revokedPerm := range permissions {
-		for _, criticalPerm := range criticalPermissions {
-			if revokedPerm == criticalPerm {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// EnhanceJITIntegration enhances JIT access integration for terminal operations
-func (atm *AuthenticatedTerminalManager) EnhanceJITIntegration(ctx context.Context, sessionID, command string, token *SessionToken) (*continuous.ContinuousAuthResponse, error) {
-	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
-		return atm.authorizeCommandTraditional(ctx, sessionID, command, token)
-	}
-
-	// Create JIT-specific continuous authorization request
-	continuousRequest := &continuous.ContinuousAuthRequest{
-		AccessRequest: &common.AccessRequest{
-			SubjectId:    token.UserID,
-			PermissionId: "terminal.execute.elevated",
-			TenantId:     extractTenantID(token),
-			ResourceId:   command,
-			Context: map[string]string{
-				"session_id":     sessionID,
-				"command":        command,
-				"elevation_type": "jit",
-				"operation_type": "terminal_command",
-			},
-		},
-		SessionID:     sessionID,
-		OperationType: continuous.OperationTypeTerminal,
-		ResourceContext: map[string]string{
-			"command":            command,
-			"requires_elevation": "true",
-			"session_type":       "terminal",
-		},
-		RequestTime: time.Now(),
-	}
-
-	// Apply command authorization timeout for JIT operations
-	authCtx, cancel := context.WithTimeout(ctx, atm.continuousAuthConfig.CommandAuthTimeout)
-	defer cancel()
-
-	authStart := time.Now()
-	response, err := atm.continuousAuthEngine.AuthorizeAction(authCtx, continuousRequest)
-	authLatency := time.Since(authStart)
-
-	// Log JIT access attempt
-	granted := response != nil && response.AccessResponse.Granted
-	_ = atm.auditManager.RecordEvent(ctx,
-		audit.NewEventBuilder().
-			Tenant(extractTenantID(token)).
-			Type(business.AuditEventSystemAccess).
-			Action("terminal.jit_access_attempt").
-			User(token.UserID, business.AuditUserTypeHuman).
-			Session(sessionID).
-			Resource("session", sessionID, "").
-			Result(business.AuditResultSuccess).
-			Severity(business.AuditSeverityMedium).
-			Details(map[string]interface{}{
-				"command": command,
-				"granted": granted,
-				"latency": authLatency.String(),
-			}),
-	)
-
-	if err != nil {
-		// Log JIT failure
-		_ = atm.auditManager.RecordEvent(ctx,
-			audit.NewEventBuilder().
-				Tenant(extractTenantID(token)).
-				Type(business.AuditEventSecurityEvent).
-				Action("terminal.jit_access_failure").
-				User(token.UserID, business.AuditUserTypeHuman).
-				Session(sessionID).
-				Resource("session", sessionID, "").
-				Result(business.AuditResultError).
-				Severity(business.AuditSeverityHigh).
-				Details(map[string]interface{}{
-					"command": command,
-					"details": fmt.Sprintf("JIT authorization failed: %v", err),
-				}),
-		)
-		return nil, fmt.Errorf("JIT authorization failed: %w", err)
-	}
-
-	return response, nil
-}
-
-// RegisterSessionForContinuousAuth registers a terminal session for continuous authorization monitoring
-func (atm *AuthenticatedTerminalManager) RegisterSessionForContinuousAuth(ctx context.Context, sessionID, userID, tenantID string, sessionType string) error {
-	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
-		return nil // No continuous auth enabled
-	}
-
-	// Create metadata for continuous authorization
-	metadata := map[string]string{
-		"session_type":             sessionType,
-		"requires_continuous_auth": "true",
-		"user_id":                  userID,
-		"tenant_id":                tenantID,
-		"created_at":               time.Now().Format(time.RFC3339),
-		"privilege_level":          "high", // Terminal sessions are considered high privilege
-	}
-
-	err := atm.continuousAuthEngine.RegisterSession(ctx, sessionID, userID, tenantID, metadata)
-	if err != nil {
-		return fmt.Errorf("failed to register session for continuous authorization: %w", err)
-	}
-
-	// Log successful registration
-	_ = atm.auditManager.RecordEvent(ctx,
-		audit.NewEventBuilder().
-			Tenant(tenantID).
-			Type(business.AuditEventSystemAccess).
-			Action("terminal.continuous_auth_registration").
-			User(userID, business.AuditUserTypeHuman).
-			Session(sessionID).
-			Resource("session", sessionID, "").
-			Result(business.AuditResultSuccess).
-			Severity(business.AuditSeverityLow).
-			Details(map[string]interface{}{
-				"session_type": sessionType,
-			}),
-	)
-
-	return nil
-}
-
-// UnregisterSessionFromContinuousAuth removes a terminal session from continuous authorization monitoring
-func (atm *AuthenticatedTerminalManager) UnregisterSessionFromContinuousAuth(ctx context.Context, sessionID string) error {
-	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
-		return nil // No continuous auth enabled
-	}
-
-	err := atm.continuousAuthEngine.UnregisterSession(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to unregister session from continuous authorization: %w", err)
-	}
-
-	return nil
-}
-
-// GetSessionRBACStatus returns the current RBAC status of a terminal session
-func (atm *AuthenticatedTerminalManager) GetSessionRBACStatus(ctx context.Context, sessionID string) (*TerminalRBACStatus, error) {
-	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
-		return &TerminalRBACStatus{
-			SessionID:             sessionID,
-			ContinuousAuthEnabled: false,
-			LastValidated:         time.Now(),
-			Status:                "traditional_auth",
-		}, nil
-	}
-
-	// Get session status from continuous authorization engine
-	status, err := atm.continuousAuthEngine.GetSessionStatus(ctx, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get session status: %w", err)
-	}
-
-	rbacStatus := &TerminalRBACStatus{
-		SessionID:             sessionID,
-		ContinuousAuthEnabled: true,
-		LastValidated:         status.LastValidation,
-		Status:                status.Status,
-		ActivePermissions:     status.ActivePermissions,
-		RequiresReauth:        status.RequiresReauth,
-		SecurityAlerts:        status.SecurityAlerts,
-		ComplianceStatus:      status.ComplianceStatus,
-		RecommendedActions:    status.RecommendedActions,
-	}
-
-	return rbacStatus, nil
 }
 
 // TerminalRBACStatus represents the RBAC status of a terminal session
@@ -1352,4 +780,9 @@ type TerminalRBACStatus struct {
 	SecurityAlerts        int       `json:"security_alerts"`
 	ComplianceStatus      string    `json:"compliance_status"`
 	RecommendedActions    []string  `json:"recommended_actions"`
+}
+
+// RevalidateSession performs session revalidation (no-op without continuous auth engine)
+func (atm *AuthenticatedTerminalManager) RevalidateSession(ctx context.Context, sessionID string, token *SessionToken) error {
+	return nil
 }

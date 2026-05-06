@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/features/rbac/memory"
 	"github.com/cfgis/cfgms/features/terminal/shell"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -155,50 +154,6 @@ func TestTerminalRBACIntegrationReal(t *testing.T) {
 			}
 		}
 		assert.False(t, foundBlockingMatch, "Safe command should not match block rules")
-	})
-
-	t.Run("ContinuousAuthRegistryReal", func(t *testing.T) {
-		// Test real session registry without full continuous auth engine
-		registry := continuous.NewSessionRegistry()
-		require.NotNil(t, registry)
-
-		err := registry.Start(ctx)
-		require.NoError(t, err)
-
-		// Register a real session
-		metadata := map[string]string{
-			"session_type":             "terminal",
-			"requires_continuous_auth": "true",
-			"privilege_level":          "high",
-		}
-
-		err = registry.RegisterSession(ctx, "test-session", "test-user", "test-tenant", metadata)
-		require.NoError(t, err)
-
-		// Validate session
-		valid, err := registry.ValidateSession(ctx, "test-session", "test-user")
-		require.NoError(t, err)
-		assert.True(t, valid)
-
-		// Test session status
-		status, err := registry.GetSessionStatus(ctx, "test-session")
-		require.NoError(t, err)
-		assert.Equal(t, "test-session", status.SessionID)
-		assert.Equal(t, "active", status.Status)
-		assert.True(t, status.IsValid)
-		assert.True(t, status.RequiresReauth)
-
-		// Test session cleanup
-		err = registry.UnregisterSession(ctx, "test-session")
-		require.NoError(t, err)
-
-		// Should now be invalid
-		valid, err = registry.ValidateSession(ctx, "test-session", "test-user")
-		require.Error(t, err) // Should error because session not found
-		assert.False(t, valid)
-
-		err = registry.Stop()
-		require.NoError(t, err)
 	})
 
 	t.Run("PerformanceValidationReal", func(t *testing.T) {
