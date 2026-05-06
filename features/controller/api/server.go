@@ -34,6 +34,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
 // Server represents the REST API server component of the controller
@@ -70,6 +71,7 @@ type Server struct {
 	scriptAuditLogger       *script.AuditLogger            // Issue #708: in-memory execution metrics
 	scriptMonitor           *script.ExecutionMonitor       // Issue #708: active execution tracking
 	pushLeaderStatus        leaderStatus                   // Issue #1318: leader check for config push (nil = leader)
+	registry                registry.Registry              // Issue #1323: active steward connection registry
 	stopCleanup             chan struct{}                  // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                  // closed when cleanup goroutine exits
 	closeOnce               sync.Once                      // idempotent Close
@@ -551,6 +553,15 @@ func (s *Server) SetScriptModule(tracker script.ExecutionTracker, auditLogger *s
 	s.scriptTracker = tracker
 	s.scriptAuditLogger = auditLogger
 	s.scriptMonitor = monitor
+}
+
+// SetRegistry wires the active-steward connection registry so that
+// GET /api/v1/stewards/{id} can report connection_state and active_sessions
+// (Issue #1323). Call this after New() returns but before Start() is called.
+func (s *Server) SetRegistry(r registry.Registry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.registry = r
 }
 
 // SetGitSyncWebhookHandler registers the git-sync push-event webhook handler.

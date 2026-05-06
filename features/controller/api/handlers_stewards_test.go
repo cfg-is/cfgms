@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,6 +19,7 @@ import (
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
 // ---- buildFleetFilter unit tests (no server required) ----
@@ -356,6 +358,110 @@ func TestHandleListStewards_HTTPRegistration_NoDuplicates(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Len(t, resp.Data, 1, "duplicate steward ID should produce exactly one entry")
 	assert.Equal(t, "quarantined", resp.Data[0].Status)
+}
+
+// noopSender is a minimal transport stub that satisfies registry.MessageSender
+// so that registry.Register's nil-Sender guard passes in tests. It is not a
+// mock of a CFGMS business component — MessageSender is a low-level transport
+// interface whose production implementation is a gRPC stream that cannot be
+// instantiated in unit tests without a live gRPC server. Tests here validate
+// registry lookup behavior, not message delivery.
+type noopSender struct{}
+
+func (n *noopSender) SendMsg(_ interface{}) error { return nil }
+
+// TestHandleGetSteward_ConnectedSteward verifies that active_sessions == 1 and
+// connection_state == "connected" when the steward has an entry in the registry.
+func TestHandleGetSteward_ConnectedSteward(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+	// Register the steward in the controller service so GetStewardInfo can find it.
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "connected-host", "os": "linux",
+	})
+
+	// Wire a real InMemoryRegistry with the steward registered.
+	reg := registry.NewRegistry()
+	require.NoError(t, reg.Register(&registry.StewardConnection{
+		StewardID:   stewardID,
+		Sender:      &noopSender{},
+		ConnectedAt: time.Now(),
+	}))
+	server.SetRegistry(reg)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, stewardID, resp.Data.ID)
+	assert.NotEmpty(t, resp.Data.Status)
+	assert.Equal(t, 1, resp.Data.ActiveSessions)
+	assert.Equal(t, "connected", resp.Data.ConnectionState)
+}
+
+// TestHandleGetSteward_DisconnectedSteward verifies that active_sessions == 0 and
+// connection_state == "disconnected" when the steward is not in the registry.
+func TestHandleGetSteward_DisconnectedSteward(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+	// Register the steward in the controller service but not in the connection registry.
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "disconnected-host", "os": "linux",
+	})
+
+	// Wire a real InMemoryRegistry with no entry for this steward.
+	reg := registry.NewRegistry()
+	server.SetRegistry(reg)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, stewardID, resp.Data.ID)
+	assert.NotEmpty(t, resp.Data.Status)
+	assert.Equal(t, 0, resp.Data.ActiveSessions)
+	assert.Equal(t, "disconnected", resp.Data.ConnectionState)
+}
+
+// TestHandleGetSteward_NilRegistry verifies that active_sessions == 0 and
+// connection_state == "disconnected" when no registry is wired (OSS single-node).
+func TestHandleGetSteward_NilRegistry(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "no-registry-host", "os": "linux",
+	})
+	// registry is nil by default in setupTestServer — no SetRegistry call.
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, stewardID, resp.Data.ID)
+	assert.NotEmpty(t, resp.Data.Status)
+	assert.Equal(t, 0, resp.Data.ActiveSessions)
+	assert.Equal(t, "disconnected", resp.Data.ConnectionState)
 }
 
 // TestServer_ConfigStatusRouteDeregistered verifies that GET /api/v1/stewards/{id}/config/status

@@ -30,13 +30,18 @@ type APIError struct {
 
 // StewardInfo represents steward information for API responses
 type StewardInfo struct {
-	ID          string            `json:"id"`
-	Status      string            `json:"status"`
-	LastSeen    time.Time         `json:"last_seen"`
-	Version     string            `json:"version"`
-	ConnectedAt time.Time         `json:"connected_at"`
-	Metrics     map[string]string `json:"metrics,omitempty"`
-	DNA         *DNAInfo          `json:"dna,omitempty"`
+	ID              string            `json:"id"`
+	Status          string            `json:"status"`
+	LastSeen        time.Time         `json:"last_seen"`
+	Version         string            `json:"version"`
+	ConnectedAt     time.Time         `json:"connected_at"`
+	Metrics         map[string]string `json:"metrics,omitempty"`
+	DNA             *DNAInfo          `json:"dna,omitempty"`
+	// ActiveSessions is 1 when the steward has an active ControlChannel stream,
+	// 0 otherwise. Each steward holds at most one stream at a time, so this is
+	// a binary sentinel, not a real connection count.
+	ActiveSessions  int    `json:"active_sessions"`
+	ConnectionState string `json:"connection_state"` // "connected" or "disconnected"
 }
 
 // DNAInfo represents DNA information for API responses
