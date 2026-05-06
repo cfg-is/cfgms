@@ -57,8 +57,12 @@
 package reports
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	htmltemplate "html/template"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet/storage"
@@ -655,21 +659,183 @@ func (s *AdvancedService) Close() error {
 
 // Helper Methods
 
-// exportAdvancedReport converts an advanced report to the requested format
-func (s *AdvancedService) exportAdvancedReport(ctx context.Context, report interface{}, format interfaces.ExportFormat) ([]byte, error) {
-	// This is a simplified implementation - in practice, would need type assertion
-	// and proper serialization for different report types
+// exportAdvancedReport converts an advanced report to the requested format.
+func (s *AdvancedService) exportAdvancedReport(_ context.Context, report interface{}, format interfaces.ExportFormat) ([]byte, error) {
 	switch format {
 	case interfaces.FormatJSON:
-		// Would serialize report to JSON
-		return []byte("{}"), nil // Placeholder
+		data, err := json.Marshal(report)
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize report to JSON: %w", err)
+		}
+		return data, nil
 	case interfaces.FormatHTML:
-		// Would render report as HTML
-		return []byte("<html></html>"), nil // Placeholder
+		return renderAdvancedReportHTML(report)
 	case interfaces.FormatPDF:
-		// Would render report as PDF
-		return []byte("PDF content"), nil // Placeholder
+		return renderAdvancedReportPDF(report)
 	default:
 		return nil, fmt.Errorf("unsupported format: %s", format)
 	}
+}
+
+// advancedReportHTMLData holds values interpolated into the HTML export template.
+type advancedReportHTMLData struct {
+	ReportID    string
+	GeneratedAt string
+	JSONContent string // full report as indented JSON; html/template escapes it
+}
+
+// advancedHTMLTmpl is the html/template used for advanced report HTML export.
+// html/template (not text/template) is required to prevent XSS in report content.
+var advancedHTMLTmpl = htmltemplate.Must(htmltemplate.New("advanced-report").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CFGMS Report {{.ReportID}}</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:2em;color:#333}
+h1{color:#007acc}pre{background:#f4f4f4;padding:1em;border-radius:4px;overflow:auto}
+</style>
+</head>
+<body>
+<h1>CFGMS Advanced Report</h1>
+<p><strong>Report ID:</strong> {{.ReportID}}</p>
+<p><strong>Generated At:</strong> {{.GeneratedAt}}</p>
+<h2>Report Data</h2>
+<pre>{{.JSONContent}}</pre>
+</body>
+</html>`))
+
+// renderAdvancedReportHTML serialises report to a full HTML document.
+func renderAdvancedReportHTML(report interface{}) ([]byte, error) {
+	raw, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize report for HTML export: %w", err)
+	}
+
+	data := advancedReportHTMLData{
+		ReportID:    extractAdvancedReportID(report),
+		GeneratedAt: extractAdvancedReportGeneratedAt(report),
+		JSONContent: string(raw),
+	}
+
+	var buf bytes.Buffer
+	if err := advancedHTMLTmpl.Execute(&buf, data); err != nil {
+		return nil, fmt.Errorf("failed to render HTML template: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// renderAdvancedReportPDF generates a minimal valid PDF-1.4 document with report content.
+// Uses pure stdlib byte-stream construction — the PDF-1.4 text-object format is sufficient
+// for single-page text summaries without requiring an external PDF library.
+func renderAdvancedReportPDF(report interface{}) ([]byte, error) {
+	id := extractAdvancedReportID(report)
+	ts := extractAdvancedReportGeneratedAt(report)
+
+	title := "CFGMS Advanced Report"
+	body := "Report ID: " + id + "\nGenerated: " + ts
+
+	stream := buildPDFContentStream(title, body)
+
+	var buf bytes.Buffer
+	buf.WriteString("%PDF-1.4\n")
+
+	// Track byte offset of each object (1-indexed; index 0 unused).
+	var offsets [5]int
+
+	offsets[1] = buf.Len()
+	fmt.Fprintf(&buf, "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+
+	offsets[2] = buf.Len()
+	fmt.Fprintf(&buf, "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
+
+	offsets[3] = buf.Len()
+	fmt.Fprintf(&buf, "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"+
+		" /Contents 4 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1"+
+		" /BaseFont /Helvetica >> >> >> >>\nendobj\n")
+
+	offsets[4] = buf.Len()
+	fmt.Fprintf(&buf, "4 0 obj\n<< /Length %d >>\nstream\n%sendstream\nendobj\n",
+		len(stream), stream)
+
+	xrefOffset := buf.Len()
+	fmt.Fprintf(&buf, "xref\n0 5\n")
+	// Each xref entry must be exactly 20 bytes: 10-digit-offset SP 5-digit-gen SP n|f CR LF
+	fmt.Fprintf(&buf, "0000000000 65535 f\r\n")
+	for i := 1; i <= 4; i++ {
+		fmt.Fprintf(&buf, "%010d 00000 n\r\n", offsets[i])
+	}
+	fmt.Fprintf(&buf, "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n%d\n", xrefOffset)
+	buf.WriteString("%%EOF\n")
+
+	return buf.Bytes(), nil
+}
+
+// buildPDFContentStream builds a BT…ET text block for a single PDF page.
+func buildPDFContentStream(title, body string) string {
+	var b strings.Builder
+	b.WriteString("BT\n")
+	fmt.Fprintf(&b, "/F1 14 Tf\n50 730 Td\n(%s) Tj\n", pdfEscapeString(title))
+	fmt.Fprintf(&b, "/F1 10 Tf\n0 -25 Td\n(%s) Tj\n", pdfEscapeString(body))
+	b.WriteString("ET\n")
+	return b.String()
+}
+
+// pdfEscapeString escapes characters that are special inside PDF literal strings.
+func pdfEscapeString(s string) string {
+	var b strings.Builder
+	for _, ch := range s {
+		switch ch {
+		case '\\':
+			b.WriteString("\\\\")
+		case '(':
+			b.WriteString("\\(")
+		case ')':
+			b.WriteString("\\)")
+		case '\n', '\r':
+			b.WriteByte(' ')
+		default:
+			if ch > 126 {
+				b.WriteByte(' ') // Type1 fonts only cover printable ASCII
+			} else {
+				b.WriteRune(ch)
+			}
+		}
+	}
+	return b.String()
+}
+
+// extractAdvancedReportID returns the ID field from any known advanced report type.
+func extractAdvancedReportID(report interface{}) string {
+	switch r := report.(type) {
+	case *interfaces.ComplianceReport:
+		return r.ID
+	case *interfaces.SecurityReport:
+		return r.ID
+	case *interfaces.ExecutiveReport:
+		return r.ID
+	case *interfaces.MultiTenantReport:
+		return r.ID
+	case *interfaces.AdvancedReport:
+		return r.ID
+	}
+	return "unknown"
+}
+
+// extractAdvancedReportGeneratedAt returns the GeneratedAt timestamp from any known advanced report type.
+func extractAdvancedReportGeneratedAt(report interface{}) string {
+	switch r := report.(type) {
+	case *interfaces.ComplianceReport:
+		return r.GeneratedAt.Format(time.RFC3339)
+	case *interfaces.SecurityReport:
+		return r.GeneratedAt.Format(time.RFC3339)
+	case *interfaces.ExecutiveReport:
+		return r.GeneratedAt.Format(time.RFC3339)
+	case *interfaces.MultiTenantReport:
+		return r.GeneratedAt.Format(time.RFC3339)
+	case *interfaces.AdvancedReport:
+		return r.GeneratedAt.Format(time.RFC3339)
+	}
+	return time.Now().Format(time.RFC3339)
 }
