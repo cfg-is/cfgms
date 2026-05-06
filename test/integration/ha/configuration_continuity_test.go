@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/features/controller/push"
 	"github.com/stretchr/testify/require"
 )
 
@@ -223,7 +224,7 @@ func testMultipleConfigurationPushesWithFailover(t *testing.T, ctx context.Conte
 	t.Log("Testing multiple configuration pushes with controller failover...")
 
 	// Create multiple test configurations
-	configs := []StewardConfiguration{
+	configs := []push.StewardConfiguration{
 		createTestConfiguration("multi-config-1", "security"),
 		createTestConfiguration("multi-config-2", "monitoring"),
 		createTestConfiguration("multi-config-3", "backup"),
@@ -247,7 +248,7 @@ func testMultipleConfigurationPushesWithFailover(t *testing.T, ctx context.Conte
 	pushResults := make(chan error, len(configs))
 
 	for i, config := range configs {
-		go func(configIndex int, cfg StewardConfiguration) {
+		go func(configIndex int, cfg push.StewardConfiguration) {
 			// Stagger the pushes slightly
 			time.Sleep(time.Duration(configIndex) * 2 * time.Second)
 			err := pushConfigurationToStewards(leaderURL, cfg)
@@ -352,7 +353,7 @@ func testConfigurationRollbackDuringFailover(t *testing.T, ctx context.Context, 
 // Helper functions
 
 // createLargeTestConfiguration creates a large configuration for testing
-func createLargeTestConfiguration(configID string) StewardConfiguration {
+func createLargeTestConfiguration(configID string) push.StewardConfiguration {
 	// Create a configuration with many policies to simulate slow push
 	policies := make(map[string]interface{})
 
@@ -372,7 +373,7 @@ func createLargeTestConfiguration(configID string) StewardConfiguration {
 		}
 	}
 
-	return StewardConfiguration{
+	return push.StewardConfiguration{
 		ConfigID: configID,
 		Version:  "1.0.0",
 		TenantID: "test-tenant",
@@ -382,8 +383,8 @@ func createLargeTestConfiguration(configID string) StewardConfiguration {
 }
 
 // createTestConfiguration creates a test configuration
-func createTestConfiguration(configID string, category string) StewardConfiguration {
-	return StewardConfiguration{
+func createTestConfiguration(configID string, category string) push.StewardConfiguration {
+	return push.StewardConfiguration{
 		ConfigID: configID,
 		Version:  "1.0.0",
 		TenantID: "test-tenant",
@@ -398,7 +399,7 @@ func createTestConfiguration(configID string, category string) StewardConfigurat
 }
 
 // pushLargeConfiguration pushes a large configuration to the controller
-func pushLargeConfiguration(controllerURL string, config StewardConfiguration) error {
+func pushLargeConfiguration(controllerURL string, config push.StewardConfiguration) error {
 	// Call the controller's large config push API and return actual errors
 	client := &http.Client{Timeout: 30 * time.Second}
 
