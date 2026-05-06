@@ -11,6 +11,7 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -433,6 +434,9 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			"version", version,
 			"config_size", len(configData))
 
+		// Compute SHA-256 of the raw wire bytes for DNA delivery verification (Issue #1316).
+		configHash := fmt.Sprintf("%x", sha256.Sum256(configData))
+
 		// Unmarshal protobuf SignedConfig
 		var signedProtoConfig controller.SignedConfig
 		if err := proto.Unmarshal(configData, &signedProtoConfig); err != nil {
@@ -543,6 +547,19 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			"command_id", cmd.ID,
 			"version", version,
 			"status", report.Status)
+
+		// Publish DNA update carrying the config hash so the controller can verify
+		// delivery via heartbeats (Issue #1316).
+		c.dnaMu.RLock()
+		currentDNA := copyStringMap(c.lastPublishedDNA)
+		c.dnaMu.RUnlock()
+		if currentDNA == nil {
+			currentDNA = make(map[string]string)
+		}
+		currentDNA["config_hash"] = configHash
+		if pubErr := c.PublishDNAUpdate(ctx, currentDNA, configHash, ""); pubErr != nil {
+			c.logger.Info("DNA update after config apply skipped", "error", pubErr)
+		}
 
 		return nil
 	})
