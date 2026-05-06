@@ -500,8 +500,30 @@ func (m *Manager) initializeRaftConsensus() error {
 		}
 	}
 
+	// Collect allowed peer CNs for mTLS verification on /raft/message.
+	// The local node's own CN is included first so single-node loopback messages
+	// are accepted without requiring a second allowlist entry.
+	allowedCNs := []string{m.nodeInfo.ID}
+	if clusterNodes := m.cfg.Cluster.Discovery.Config["nodes"]; clusterNodes != nil {
+		if nodes, ok := clusterNodes.([]interface{}); ok {
+			for _, n := range nodes {
+				if nodeMap, ok := n.(map[string]interface{}); ok {
+					if id, ok := nodeMap["id"].(string); ok && id != m.nodeInfo.ID {
+						allowedCNs = append(allowedCNs, id)
+					}
+				}
+			}
+		} else if nodes, ok := clusterNodes.([]map[string]interface{}); ok {
+			for _, nodeMap := range nodes {
+				if id, ok := nodeMap["id"].(string); ok && id != m.nodeInfo.ID {
+					allowedCNs = append(allowedCNs, id)
+				}
+			}
+		}
+	}
+
 	// Create and attach transport
-	transport := newRaftTransport(nodeID, m.nodeInfo.Address, m.raftConsensus, caCertPEM, m.logger)
+	transport := newRaftTransport(nodeID, m.nodeInfo.Address, m.raftConsensus, caCertPEM, allowedCNs, m.logger)
 	m.raftConsensus.SetTransport(transport)
 
 	// Add peer addresses to transport

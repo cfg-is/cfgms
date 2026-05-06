@@ -554,6 +554,22 @@ Multiple controller instances form a **Raft consensus cluster**. Raft is the sol
 
 Stewards connect to any cluster node. If their node goes down, they reconnect to another.
 
+#### Raft Peer Authentication
+
+The `POST /raft/message` endpoint uses **mTLS peer certificate CN verification** as its sole authentication mechanism. The TLS listener in `ClusterMode` is configured with `ClientAuth = tls.RequestClientCert` (set in `setupManagedTLS`), so HA peers that present a client certificate have it recorded in `r.TLS.PeerCertificates` for application-layer inspection.
+
+`HandleMessage` extracts `r.TLS.PeerCertificates[0].Subject.CommonName` and rejects (HTTP 403) any request where:
+
+- `r.TLS` is nil (plain HTTP, not mTLS)
+- No peer certificate was presented
+- The peer certificate CN does not match any entry in the node's `allowedCNs` list
+
+The `allowedCNs` list is built at startup from the `discovery.config.nodes` peer entries (each node's `id` field) plus the local node's own `id`. This means **operators must provision peer certificates whose CN matches the `node.id` value declared in the cluster node configuration**. There is no automatic peer-cert provisioning in the HA subsystem — certificate management is delegated to `pkg/cert` and is operator-controlled via `CFGMS_HA_CA_CERT_PATH`.
+
+The `GET /api/v1/raft/status` endpoint is protected by RBAC (`ha:read-status` permission) via the standard API authentication middleware — it is not a peer endpoint and must not be accessed without a valid API key.
+
+> **Do not use the `X-Raft-From` header for authentication** — it is set by the sender and is untrusted. Only the TLS peer certificate is authoritative.
+
 ## REST API
 
 The REST API is the admin interface to the controller. All operations are authenticated, authorized via RBAC, and audit-logged.
