@@ -242,6 +242,34 @@ func (m *MockGraphClient) DeleteGroup(ctx context.Context, token *auth.AccessTok
 	return args.Error(0)
 }
 
+func (m *MockGraphClient) ListAdminUnitUserMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) ListAdminUnitGroupMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) ListAdminUnitScopedRoleMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]graph.AdminUnitScopedRoleMember, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) AddAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error {
+	return nil
+}
+
+func (m *MockGraphClient) AddAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID string, request *graph.AddScopedRoleMemberRequest) (*graph.AdminUnitScopedRoleMember, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) RemoveAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error {
+	return nil
+}
+
+func (m *MockGraphClient) RemoveAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID, scopedRoleMemberID string) error {
+	return nil
+}
+
 func TestNew(t *testing.T) {
 	mockAuth := &MockAuthProvider{}
 	mockGraph := &MockGraphClient{}

@@ -62,6 +62,15 @@ type Client interface {
 	CreateGroup(ctx context.Context, token *auth.AccessToken, request *CreateGroupRequest) (*Group, error)
 	UpdateGroup(ctx context.Context, token *auth.AccessToken, groupID string, request *UpdateGroupRequest) error
 	DeleteGroup(ctx context.Context, token *auth.AccessToken, groupID string) error
+
+	// Administrative Unit member operations
+	ListAdminUnitUserMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error)
+	ListAdminUnitGroupMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error)
+	ListAdminUnitScopedRoleMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]AdminUnitScopedRoleMember, error)
+	AddAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error
+	AddAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID string, request *AddScopedRoleMemberRequest) (*AdminUnitScopedRoleMember, error)
+	RemoveAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error
+	RemoveAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID, scopedRoleMemberID string) error
 }
 
 // User represents a Microsoft Graph user object
@@ -559,4 +568,23 @@ type UpdateGroupRequest struct {
 	MailNickname    *string  `json:"mailNickname,omitempty"`
 	Visibility      *string  `json:"visibility,omitempty"`
 	MembershipRule  *string  `json:"membershipRule,omitempty"`
+}
+
+// AdminUnitScopedRoleMember represents a scoped role assignment in an administrative unit
+type AdminUnitScopedRoleMember struct {
+	ID             string                  `json:"id"`
+	RoleID         string                  `json:"roleId"`
+	RoleMemberInfo AdminUnitRoleMemberInfo `json:"roleMemberInfo"`
+}
+
+// AdminUnitRoleMemberInfo contains principal information for a scoped role assignment
+type AdminUnitRoleMemberInfo struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName,omitempty"`
+}
+
+// AddScopedRoleMemberRequest represents a request to add a scoped role member to an administrative unit
+type AddScopedRoleMemberRequest struct {
+	RoleID         string                  `json:"roleId"`
+	RoleMemberInfo AdminUnitRoleMemberInfo `json:"roleMemberInfo"`
 }

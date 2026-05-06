@@ -4,291 +4,368 @@ package entra_admin_unit
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
 )
 
-// Mock implementations for testing
-
-type MockAuthProvider struct {
-	mock.Mock
+// testHTTPAuthProvider is a minimal auth.Provider for httptest.Server-based tests.
+// It returns a preset token without making any network calls.
+type testHTTPAuthProvider struct {
+	token *auth.AccessToken
 }
 
-func (m *MockAuthProvider) GetAccessToken(ctx context.Context, tenantID string) (*auth.AccessToken, error) {
-	args := m.Called(ctx, tenantID)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+func (p *testHTTPAuthProvider) GetAccessToken(_ context.Context, _ string) (*auth.AccessToken, error) {
+	return p.token, nil
+}
+func (p *testHTTPAuthProvider) GetDelegatedAccessToken(_ context.Context, _ string, _ *auth.UserContext) (*auth.AccessToken, error) {
+	return p.token, nil
+}
+func (p *testHTTPAuthProvider) RefreshToken(_ context.Context, _ string) (*auth.AccessToken, error) {
+	return p.token, nil
+}
+func (p *testHTTPAuthProvider) RefreshDelegatedToken(_ context.Context, _ string, _ *auth.UserContext) (*auth.AccessToken, error) {
+	return p.token, nil
+}
+func (p *testHTTPAuthProvider) IsTokenValid(_ *auth.AccessToken) bool { return true }
+func (p *testHTTPAuthProvider) ValidatePermissions(_ context.Context, _ *auth.AccessToken, _ []string) error {
+	return nil
+}
+
+// newTestToken creates a non-expired AccessToken for tests.
+func newTestToken() *auth.AccessToken {
+	return &auth.AccessToken{
+		Token:     "test-bearer-token",
+		TokenType: "Bearer",
+		TenantID:  "test-tenant-id",
+		ExpiresAt: time.Now().Add(1 * time.Hour),
 	}
-	return args.Get(0).(*auth.AccessToken), args.Error(1)
 }
 
-func (m *MockAuthProvider) GetDelegatedAccessToken(ctx context.Context, tenantID string, userContext *auth.UserContext) (*auth.AccessToken, error) {
-	args := m.Called(ctx, tenantID, userContext)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+// TestAdminUnitMemberOperations verifies that member operations make real Graph API HTTP calls
+// to the correct endpoints and return the expected data. Uses an httptest.Server to stand in
+// for the Microsoft Graph API without requiring a live tenant.
+func TestAdminUnitMemberOperations(t *testing.T) {
+	const auID = "au-test-id"
+	const userID = "user-abc-123"
+	const groupID = "group-def-456"
+	const roleID = "role-ghi-789"
+	const principalID = "principal-jkl-000"
+	const assignmentID = "assignment-mno-111"
+
+	token := newTestToken()
+
+	mux := http.NewServeMux()
+
+	// GET /administrativeUnits/{auID}/members/microsoft.graph.user
+	mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/members/microsoft.graph.user", auID),
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"value": []map[string]string{{"id": userID}},
+			})
+		})
+
+	// GET /administrativeUnits/{auID}/members/microsoft.graph.group
+	mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/members/microsoft.graph.group", auID),
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"value": []map[string]string{{"id": groupID}},
+			})
+		})
+
+	// GET /administrativeUnits/{auID}/scopedRoleMembers
+	mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/scopedRoleMembers", auID),
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"value": []map[string]interface{}{
+					{
+						"id":     assignmentID,
+						"roleId": roleID,
+						"roleMemberInfo": map[string]string{
+							"id":          principalID,
+							"displayName": "Test Principal",
+						},
+					},
+				},
+			})
+		})
+
+	// POST /administrativeUnits/{auID}/members/$ref
+	mux.HandleFunc(fmt.Sprintf("POST /administrativeUnits/%s/members/$ref", auID),
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+
+	// POST /administrativeUnits/{auID}/scopedRoleMembers
+	mux.HandleFunc(fmt.Sprintf("POST /administrativeUnits/%s/scopedRoleMembers", auID),
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":     assignmentID,
+				"roleId": roleID,
+				"roleMemberInfo": map[string]string{
+					"id": principalID,
+				},
+			})
+		})
+
+	// DELETE /administrativeUnits/{auID}/members/{userID}/$ref
+	mux.HandleFunc(fmt.Sprintf("DELETE /administrativeUnits/%s/members/%s/$ref", auID, userID),
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+
+	// DELETE /administrativeUnits/{auID}/scopedRoleMembers/{assignmentID}
+	mux.HandleFunc(fmt.Sprintf("DELETE /administrativeUnits/%s/scopedRoleMembers/%s", auID, assignmentID),
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	graphClient := graph.NewHTTPClient(graph.WithBaseURL(server.URL))
+	module := &entraAdminUnitModule{
+		authProvider: &testHTTPAuthProvider{token: token},
+		graphClient:  graphClient,
 	}
-	return args.Get(0).(*auth.AccessToken), args.Error(1)
+	ctx := context.Background()
+
+	t.Run("AddUserMember", func(t *testing.T) {
+		err := module.addUserMember(ctx, token, auID, userID)
+		require.NoError(t, err, "addUserMember must not return an error for 204 response")
+	})
+
+	t.Run("AddGroupMember", func(t *testing.T) {
+		err := module.addGroupMember(ctx, token, auID, groupID)
+		require.NoError(t, err, "addGroupMember must not return an error for 204 response")
+	})
+
+	t.Run("ListUserMembers", func(t *testing.T) {
+		members, err := module.getAdminUnitUserMembers(ctx, token, auID)
+		require.NoError(t, err)
+		assert.Equal(t, []string{userID}, members, "expected exactly the seeded user ID")
+	})
+
+	t.Run("ListGroupMembers", func(t *testing.T) {
+		members, err := module.getAdminUnitGroupMembers(ctx, token, auID)
+		require.NoError(t, err)
+		assert.Equal(t, []string{groupID}, members, "expected exactly the seeded group ID")
+	})
+
+	t.Run("ListScopedRoleMembers", func(t *testing.T) {
+		members, err := module.getAdminUnitScopedRoleMembers(ctx, token, auID)
+		require.NoError(t, err)
+		require.Len(t, members, 1)
+		assert.Equal(t, principalID, members[0].PrincipalID)
+		assert.Equal(t, roleID, members[0].RoleDefinitionID)
+	})
+
+	t.Run("AddScopedRoleMember", func(t *testing.T) {
+		rm := &ScopedRoleMember{
+			PrincipalID:      principalID,
+			RoleDefinitionID: roleID,
+		}
+		err := module.addScopedRoleMember(ctx, token, auID, rm)
+		require.NoError(t, err, "addScopedRoleMember must not return an error for 201 response")
+	})
 }
 
-func (m *MockAuthProvider) RefreshToken(ctx context.Context, refreshToken string) (*auth.AccessToken, error) {
-	args := m.Called(ctx, refreshToken)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+// TestAdminUnitMemberErrors_PropagateCorrectly verifies that non-2xx HTTP responses from the
+// Graph API are returned as errors and never silently swallowed.
+func TestAdminUnitMemberErrors_PropagateCorrectly(t *testing.T) {
+	const auID = "au-err-id"
+	token := newTestToken()
+
+	errorBody := `{"error":{"code":"Forbidden","message":"Insufficient privileges"}}`
+
+	cases := []struct {
+		name       string
+		statusCode int
+		setup      func(mux *http.ServeMux)
+		run        func(t *testing.T, m *entraAdminUnitModule, ctx context.Context)
+	}{
+		{
+			name:       "ListUserMembers_403",
+			statusCode: http.StatusForbidden,
+			setup: func(mux *http.ServeMux) {
+				mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/members/microsoft.graph.user", auID),
+					func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = fmt.Fprint(w, errorBody)
+					})
+			},
+			run: func(t *testing.T, m *entraAdminUnitModule, ctx context.Context) {
+				_, err := m.getAdminUnitUserMembers(ctx, token, auID)
+				assert.Error(t, err, "must propagate 403 error from list user members")
+			},
+		},
+		{
+			name:       "ListGroupMembers_500",
+			statusCode: http.StatusInternalServerError,
+			setup: func(mux *http.ServeMux) {
+				mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/members/microsoft.graph.group", auID),
+					func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusInternalServerError)
+						_, _ = fmt.Fprint(w, errorBody)
+					})
+			},
+			run: func(t *testing.T, m *entraAdminUnitModule, ctx context.Context) {
+				_, err := m.getAdminUnitGroupMembers(ctx, token, auID)
+				assert.Error(t, err, "must propagate 500 error from list group members")
+			},
+		},
+		{
+			name:       "ListScopedRoleMembers_404",
+			statusCode: http.StatusNotFound,
+			setup: func(mux *http.ServeMux) {
+				mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/scopedRoleMembers", auID),
+					func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusNotFound)
+						_, _ = fmt.Fprint(w, errorBody)
+					})
+			},
+			run: func(t *testing.T, m *entraAdminUnitModule, ctx context.Context) {
+				_, err := m.getAdminUnitScopedRoleMembers(ctx, token, auID)
+				assert.Error(t, err, "must propagate 404 error from list scoped role members")
+			},
+		},
+		{
+			name:       "AddMember_403",
+			statusCode: http.StatusForbidden,
+			setup: func(mux *http.ServeMux) {
+				mux.HandleFunc(fmt.Sprintf("POST /administrativeUnits/%s/members/$ref", auID),
+					func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = fmt.Fprint(w, errorBody)
+					})
+			},
+			run: func(t *testing.T, m *entraAdminUnitModule, ctx context.Context) {
+				err := m.addUserMember(ctx, token, auID, "some-user-id")
+				assert.Error(t, err, "must propagate 403 error from add user member")
+				err = m.addGroupMember(ctx, token, auID, "some-group-id")
+				assert.Error(t, err, "must propagate 403 error from add group member")
+			},
+		},
+		{
+			name:       "AddScopedRoleMember_403",
+			statusCode: http.StatusForbidden,
+			setup: func(mux *http.ServeMux) {
+				mux.HandleFunc(fmt.Sprintf("POST /administrativeUnits/%s/scopedRoleMembers", auID),
+					func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = fmt.Fprint(w, errorBody)
+					})
+			},
+			run: func(t *testing.T, m *entraAdminUnitModule, ctx context.Context) {
+				err := m.addScopedRoleMember(ctx, token, auID, &ScopedRoleMember{
+					PrincipalID:      "p-id",
+					RoleDefinitionID: "r-id",
+				})
+				assert.Error(t, err, "must propagate 403 error from add scoped role member")
+			},
+		},
+		{
+			name:       "RemoveUserMember_403",
+			statusCode: http.StatusForbidden,
+			setup: func(mux *http.ServeMux) {
+				const staleUserID = "stale-user-id"
+				mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/members/microsoft.graph.user", auID),
+					func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						_ = json.NewEncoder(w).Encode(map[string]interface{}{
+							"value": []map[string]string{{"id": staleUserID}},
+						})
+					})
+				mux.HandleFunc(fmt.Sprintf("DELETE /administrativeUnits/%s/members/%s/$ref", auID, staleUserID),
+					func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = fmt.Fprint(w, errorBody)
+					})
+			},
+			run: func(t *testing.T, m *entraAdminUnitModule, ctx context.Context) {
+				err := m.syncUserMembers(ctx, token, auID, []string{})
+				assert.Error(t, err, "must propagate 403 error from remove user member")
+			},
+		},
+		{
+			name:       "RemoveScopedRoleMember_403",
+			statusCode: http.StatusForbidden,
+			setup: func(mux *http.ServeMux) {
+				const staleAssignmentID = "stale-assignment-id"
+				mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/scopedRoleMembers", auID),
+					func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						_ = json.NewEncoder(w).Encode(map[string]interface{}{
+							"value": []map[string]interface{}{
+								{
+									"id":             staleAssignmentID,
+									"roleId":         "stale-role-id",
+									"roleMemberInfo": map[string]string{"id": "stale-principal-id"},
+								},
+							},
+						})
+					})
+				mux.HandleFunc(fmt.Sprintf("DELETE /administrativeUnits/%s/scopedRoleMembers/%s", auID, staleAssignmentID),
+					func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = fmt.Fprint(w, errorBody)
+					})
+			},
+			run: func(t *testing.T, m *entraAdminUnitModule, ctx context.Context) {
+				err := m.syncScopedRoleMembers(ctx, token, auID, []ScopedRoleMember{})
+				assert.Error(t, err, "must propagate 403 error from remove scoped role member")
+			},
+		},
 	}
-	return args.Get(0).(*auth.AccessToken), args.Error(1)
-}
 
-func (m *MockAuthProvider) RefreshDelegatedToken(ctx context.Context, refreshToken string, userContext *auth.UserContext) (*auth.AccessToken, error) {
-	args := m.Called(ctx, refreshToken, userContext)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	noRetryOpts := []graph.ClientOption{
+		graph.WithRetryConfig(&graph.RetryConfig{MaxRetries: 0}),
 	}
-	return args.Get(0).(*auth.AccessToken), args.Error(1)
-}
 
-func (m *MockAuthProvider) IsTokenValid(token *auth.AccessToken) bool {
-	args := m.Called(token)
-	return args.Bool(0)
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			tc.setup(mux)
+			server := httptest.NewServer(mux)
+			defer server.Close()
 
-func (m *MockAuthProvider) ValidatePermissions(ctx context.Context, token *auth.AccessToken, requiredScopes []string) error {
-	args := m.Called(ctx, token, requiredScopes)
-	return args.Error(0)
-}
-
-type MockGraphClient struct {
-	mock.Mock
-}
-
-// Implementation of all required Graph client methods (simplified for testing)
-func (m *MockGraphClient) GetUser(ctx context.Context, token *auth.AccessToken, userPrincipalName string) (*graph.User, error) {
-	args := m.Called(ctx, token, userPrincipalName)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+			opts := append([]graph.ClientOption{graph.WithBaseURL(server.URL)}, noRetryOpts...)
+			graphClient := graph.NewHTTPClient(opts...)
+			m := &entraAdminUnitModule{
+				authProvider: &testHTTPAuthProvider{token: token},
+				graphClient:  graphClient,
+			}
+			tc.run(t, m, context.Background())
+		})
 	}
-	return args.Get(0).(*graph.User), args.Error(1)
-}
-
-func (m *MockGraphClient) ListUsers(ctx context.Context, token *auth.AccessToken, filter string) ([]graph.User, error) {
-	args := m.Called(ctx, token, filter)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).([]graph.User), args.Error(1)
-}
-
-func (m *MockGraphClient) CreateUser(ctx context.Context, token *auth.AccessToken, request *graph.CreateUserRequest) (*graph.User, error) {
-	args := m.Called(ctx, token, request)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*graph.User), args.Error(1)
-}
-
-func (m *MockGraphClient) UpdateUser(ctx context.Context, token *auth.AccessToken, userID string, request *graph.UpdateUserRequest) error {
-	args := m.Called(ctx, token, userID, request)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) DeleteUser(ctx context.Context, token *auth.AccessToken, userID string) error {
-	args := m.Called(ctx, token, userID)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) GetUserLicenses(ctx context.Context, token *auth.AccessToken, userID string) ([]graph.LicenseAssignment, error) {
-	args := m.Called(ctx, token, userID)
-	return args.Get(0).([]graph.LicenseAssignment), args.Error(1)
-}
-
-func (m *MockGraphClient) AssignLicense(ctx context.Context, token *auth.AccessToken, userID, skuID string, disabledPlans []string) error {
-	args := m.Called(ctx, token, userID, skuID, disabledPlans)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) RemoveLicense(ctx context.Context, token *auth.AccessToken, userID, skuID string) error {
-	args := m.Called(ctx, token, userID, skuID)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) GetUserGroups(ctx context.Context, token *auth.AccessToken, userID string) ([]string, error) {
-	args := m.Called(ctx, token, userID)
-	return args.Get(0).([]string), args.Error(1)
-}
-
-func (m *MockGraphClient) AddUserToGroup(ctx context.Context, token *auth.AccessToken, userID, groupName string) error {
-	args := m.Called(ctx, token, userID, groupName)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) RemoveUserFromGroup(ctx context.Context, token *auth.AccessToken, userID, groupName string) error {
-	args := m.Called(ctx, token, userID, groupName)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) GetConditionalAccessPolicy(ctx context.Context, token *auth.AccessToken, policyID string) (*graph.ConditionalAccessPolicy, error) {
-	args := m.Called(ctx, token, policyID)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*graph.ConditionalAccessPolicy), args.Error(1)
-}
-
-func (m *MockGraphClient) CreateConditionalAccessPolicy(ctx context.Context, token *auth.AccessToken, request *graph.CreateConditionalAccessPolicyRequest) (*graph.ConditionalAccessPolicy, error) {
-	args := m.Called(ctx, token, request)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*graph.ConditionalAccessPolicy), args.Error(1)
-}
-
-func (m *MockGraphClient) UpdateConditionalAccessPolicy(ctx context.Context, token *auth.AccessToken, policyID string, request *graph.UpdateConditionalAccessPolicyRequest) error {
-	args := m.Called(ctx, token, policyID, request)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) DeleteConditionalAccessPolicy(ctx context.Context, token *auth.AccessToken, policyID string) error {
-	args := m.Called(ctx, token, policyID)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) GetDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string) (*graph.DeviceConfiguration, error) {
-	args := m.Called(ctx, token, configurationID)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*graph.DeviceConfiguration), args.Error(1)
-}
-
-func (m *MockGraphClient) CreateDeviceConfiguration(ctx context.Context, token *auth.AccessToken, request *graph.CreateDeviceConfigurationRequest) (*graph.DeviceConfiguration, error) {
-	args := m.Called(ctx, token, request)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*graph.DeviceConfiguration), args.Error(1)
-}
-
-func (m *MockGraphClient) UpdateDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, request *graph.UpdateDeviceConfigurationRequest) error {
-	args := m.Called(ctx, token, configurationID, request)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) DeleteDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string) error {
-	args := m.Called(ctx, token, configurationID)
-	return args.Error(0)
-}
-
-// Application operations
-func (m *MockGraphClient) GetApplication(ctx context.Context, token *auth.AccessToken, applicationID string) (*graph.Application, error) {
-	args := m.Called(ctx, token, applicationID)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*graph.Application), args.Error(1)
-}
-
-func (m *MockGraphClient) CreateApplication(ctx context.Context, token *auth.AccessToken, request *graph.CreateApplicationRequest) (*graph.Application, error) {
-	args := m.Called(ctx, token, request)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*graph.Application), args.Error(1)
-}
-
-func (m *MockGraphClient) UpdateApplication(ctx context.Context, token *auth.AccessToken, applicationID string, request *graph.UpdateApplicationRequest) error {
-	args := m.Called(ctx, token, applicationID, request)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) DeleteApplication(ctx context.Context, token *auth.AccessToken, applicationID string) error {
-	args := m.Called(ctx, token, applicationID)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) ListApplications(ctx context.Context, token *auth.AccessToken, filter string) ([]graph.Application, error) {
-	args := m.Called(ctx, token, filter)
-	return args.Get(0).([]graph.Application), args.Error(1)
-}
-
-// Administrative Unit operations
-func (m *MockGraphClient) GetAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string) (*graph.AdministrativeUnit, error) {
-	args := m.Called(ctx, token, unitID)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*graph.AdministrativeUnit), args.Error(1)
-}
-
-func (m *MockGraphClient) CreateAdministrativeUnit(ctx context.Context, token *auth.AccessToken, request *graph.CreateAdministrativeUnitRequest) (*graph.AdministrativeUnit, error) {
-	args := m.Called(ctx, token, request)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*graph.AdministrativeUnit), args.Error(1)
-}
-
-func (m *MockGraphClient) UpdateAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string, request *graph.UpdateAdministrativeUnitRequest) error {
-	args := m.Called(ctx, token, unitID, request)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) DeleteAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string) error {
-	args := m.Called(ctx, token, unitID)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) ListAdministrativeUnits(ctx context.Context, token *auth.AccessToken, filter string) ([]graph.AdministrativeUnit, error) {
-	args := m.Called(ctx, token, filter)
-	return args.Get(0).([]graph.AdministrativeUnit), args.Error(1)
-}
-
-// Group operations (extend existing)
-func (m *MockGraphClient) GetGroup(ctx context.Context, token *auth.AccessToken, groupID string) (*graph.Group, error) {
-	args := m.Called(ctx, token, groupID)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*graph.Group), args.Error(1)
-}
-
-func (m *MockGraphClient) CreateGroup(ctx context.Context, token *auth.AccessToken, request *graph.CreateGroupRequest) (*graph.Group, error) {
-	args := m.Called(ctx, token, request)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*graph.Group), args.Error(1)
-}
-
-func (m *MockGraphClient) UpdateGroup(ctx context.Context, token *auth.AccessToken, groupID string, request *graph.UpdateGroupRequest) error {
-	args := m.Called(ctx, token, groupID, request)
-	return args.Error(0)
-}
-
-func (m *MockGraphClient) ListGroups(ctx context.Context, token *auth.AccessToken, filter string) ([]graph.Group, error) {
-	args := m.Called(ctx, token, filter)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).([]graph.Group), args.Error(1)
-}
-
-func (m *MockGraphClient) DeleteGroup(ctx context.Context, token *auth.AccessToken, groupID string) error {
-	args := m.Called(ctx, token, groupID)
-	return args.Error(0)
 }
 
 // Test functions
 
 func TestNew(t *testing.T) {
-	mockAuth := &MockAuthProvider{}
-	mockGraph := &MockGraphClient{}
-
-	module := New(mockAuth, mockGraph)
+	module := New(&testHTTPAuthProvider{token: newTestToken()}, graph.NewHTTPClient())
 	assert.NotNil(t, module)
 }
 
@@ -713,4 +790,182 @@ func TestEntraAdminUnitConfig_ExtensionAttributes(t *testing.T) {
 		assert.Equal(t, "field1", arr[0])
 		assert.Equal(t, "field2", arr[1])
 	}
+}
+
+// TestAdminUnitSyncMemberOperations verifies that sync methods add missing members and remove
+// stale members by making the correct Graph API HTTP calls.
+func TestAdminUnitSyncMemberOperations(t *testing.T) {
+	const auID = "au-sync-id"
+	const userID = "user-sync-123"
+	const groupID = "group-sync-456"
+	const roleID = "role-sync-789"
+	const principalID = "principal-sync-000"
+	const assignmentID = "assignment-sync-111"
+
+	token := newTestToken()
+	noRetry := graph.WithRetryConfig(&graph.RetryConfig{MaxRetries: 0})
+
+	t.Run("SyncUserMembers_AddsNewMember", func(t *testing.T) {
+		var addCalled bool
+		mux := http.NewServeMux()
+		mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/members/microsoft.graph.user", auID),
+			func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": []interface{}{}})
+			})
+		mux.HandleFunc(fmt.Sprintf("POST /administrativeUnits/%s/members/$ref", auID),
+			func(w http.ResponseWriter, r *http.Request) {
+				addCalled = true
+				w.WriteHeader(http.StatusNoContent)
+			})
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		m := &entraAdminUnitModule{
+			authProvider: &testHTTPAuthProvider{token: token},
+			graphClient:  graph.NewHTTPClient(graph.WithBaseURL(server.URL), noRetry),
+		}
+		require.NoError(t, m.syncUserMembers(context.Background(), token, auID, []string{userID}))
+		assert.True(t, addCalled, "should have called add member for new user")
+	})
+
+	t.Run("SyncUserMembers_RemovesStaleMembers", func(t *testing.T) {
+		var deleteCalled bool
+		mux := http.NewServeMux()
+		mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/members/microsoft.graph.user", auID),
+			func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"value": []map[string]string{{"id": userID}},
+				})
+			})
+		mux.HandleFunc(fmt.Sprintf("DELETE /administrativeUnits/%s/members/%s/$ref", auID, userID),
+			func(w http.ResponseWriter, r *http.Request) {
+				deleteCalled = true
+				w.WriteHeader(http.StatusNoContent)
+			})
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		m := &entraAdminUnitModule{
+			authProvider: &testHTTPAuthProvider{token: token},
+			graphClient:  graph.NewHTTPClient(graph.WithBaseURL(server.URL), noRetry),
+		}
+		require.NoError(t, m.syncUserMembers(context.Background(), token, auID, []string{}))
+		assert.True(t, deleteCalled, "should have removed the stale user member")
+	})
+
+	t.Run("SyncGroupMembers_AddsNewMember", func(t *testing.T) {
+		var addCalled bool
+		mux := http.NewServeMux()
+		mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/members/microsoft.graph.group", auID),
+			func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": []interface{}{}})
+			})
+		mux.HandleFunc(fmt.Sprintf("POST /administrativeUnits/%s/members/$ref", auID),
+			func(w http.ResponseWriter, r *http.Request) {
+				addCalled = true
+				w.WriteHeader(http.StatusNoContent)
+			})
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		m := &entraAdminUnitModule{
+			authProvider: &testHTTPAuthProvider{token: token},
+			graphClient:  graph.NewHTTPClient(graph.WithBaseURL(server.URL), noRetry),
+		}
+		require.NoError(t, m.syncGroupMembers(context.Background(), token, auID, []string{groupID}))
+		assert.True(t, addCalled, "should have called add member for new group")
+	})
+
+	t.Run("SyncGroupMembers_RemovesStaleMembers", func(t *testing.T) {
+		var deleteCalled bool
+		mux := http.NewServeMux()
+		mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/members/microsoft.graph.group", auID),
+			func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"value": []map[string]string{{"id": groupID}},
+				})
+			})
+		mux.HandleFunc(fmt.Sprintf("DELETE /administrativeUnits/%s/members/%s/$ref", auID, groupID),
+			func(w http.ResponseWriter, r *http.Request) {
+				deleteCalled = true
+				w.WriteHeader(http.StatusNoContent)
+			})
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		m := &entraAdminUnitModule{
+			authProvider: &testHTTPAuthProvider{token: token},
+			graphClient:  graph.NewHTTPClient(graph.WithBaseURL(server.URL), noRetry),
+		}
+		require.NoError(t, m.syncGroupMembers(context.Background(), token, auID, []string{}))
+		assert.True(t, deleteCalled, "should have removed the stale group member")
+	})
+
+	t.Run("SyncScopedRoleMembers_AddsNewMember", func(t *testing.T) {
+		var addCalled bool
+		mux := http.NewServeMux()
+		mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/scopedRoleMembers", auID),
+			func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": []interface{}{}})
+			})
+		mux.HandleFunc(fmt.Sprintf("POST /administrativeUnits/%s/scopedRoleMembers", auID),
+			func(w http.ResponseWriter, r *http.Request) {
+				addCalled = true
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id": assignmentID, "roleId": roleID,
+					"roleMemberInfo": map[string]string{"id": principalID},
+				})
+			})
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		m := &entraAdminUnitModule{
+			authProvider: &testHTTPAuthProvider{token: token},
+			graphClient:  graph.NewHTTPClient(graph.WithBaseURL(server.URL), noRetry),
+		}
+		err := m.syncScopedRoleMembers(context.Background(), token, auID, []ScopedRoleMember{
+			{PrincipalID: principalID, RoleDefinitionID: roleID},
+		})
+		require.NoError(t, err)
+		assert.True(t, addCalled, "should have added the new scoped role member")
+	})
+
+	t.Run("SyncScopedRoleMembers_RemovesStaleMembers", func(t *testing.T) {
+		var deleteCalled bool
+		mux := http.NewServeMux()
+		mux.HandleFunc(fmt.Sprintf("GET /administrativeUnits/%s/scopedRoleMembers", auID),
+			func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"value": []map[string]interface{}{
+						{
+							"id":             assignmentID,
+							"roleId":         roleID,
+							"roleMemberInfo": map[string]string{"id": principalID},
+						},
+					},
+				})
+			})
+		mux.HandleFunc(fmt.Sprintf("DELETE /administrativeUnits/%s/scopedRoleMembers/%s", auID, assignmentID),
+			func(w http.ResponseWriter, r *http.Request) {
+				deleteCalled = true
+				w.WriteHeader(http.StatusNoContent)
+			})
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		m := &entraAdminUnitModule{
+			authProvider: &testHTTPAuthProvider{token: token},
+			graphClient:  graph.NewHTTPClient(graph.WithBaseURL(server.URL), noRetry),
+		}
+		require.NoError(t, m.syncScopedRoleMembers(context.Background(), token, auID, []ScopedRoleMember{}))
+		assert.True(t, deleteCalled, "should have removed the stale scoped role member")
+	})
 }
