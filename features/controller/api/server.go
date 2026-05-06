@@ -623,11 +623,26 @@ func (s *Server) setupManagedTLS() (*tls.Config, error) {
 		return nil, fmt.Errorf("failed to get server certificate: %w", err)
 	}
 
-	// Load the certificate and key
-	// Create TLS config using pkg/cert helper (no client auth for API server)
-	tlsConfig, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, nil, tls.VersionTLS12)
+	// In ClusterMode, supply the HA CA cert so the TLS listener can request (but not
+	// require) a client certificate from HA peers, populating r.TLS.PeerCertificates
+	// for the application-layer CN check without breaking non-HA clients.
+	var caCertPEM []byte
+	inClusterMode := s.haManager != nil && s.haManager.GetDeploymentMode() == ha.ClusterMode
+	if inClusterMode {
+		caCertPEM = s.haManager.GetCACertPEM()
+	}
+
+	tlsConfig, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, caCertPEM, tls.VersionTLS12)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TLS config: %w", err)
+	}
+
+	// Override to RequestClientCert: peers may present a cert (which the app layer
+	// inspects via r.TLS.PeerCertificates), but non-HA clients without a cert are
+	// still accepted. CreateServerTLSConfig sets RequireAndVerifyClientCert when
+	// caCertPEM != nil; this overrides that to the softer policy.
+	if inClusterMode {
+		tlsConfig.ClientAuth = tls.RequestClientCert
 	}
 
 	return tlsConfig, nil

@@ -214,6 +214,12 @@ func (m *Manager) GetRaftTransport() RaftTransport {
 	return nil
 }
 
+// GetCACertPEM returns the HA CA certificate PEM bytes.
+// OSS always returns nil — ClusterMode is a commercial feature.
+func (m *Manager) GetCACertPEM() []byte {
+	return nil
+}
+
 // runHealthChecks runs health checks periodically
 func (m *Manager) runHealthChecks() {
 	ticker := time.NewTicker(30 * time.Second)

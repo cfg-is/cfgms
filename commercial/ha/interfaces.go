@@ -130,6 +130,11 @@ type ClusterManager interface {
 
 	// GetRaftTransport returns the Raft HTTP transport (commercial only, returns nil in OSS)
 	GetRaftTransport() RaftTransport
+
+	// GetCACertPEM returns the CA certificate PEM bytes used to verify HA peer TLS.
+	// Returns nil when CACertPath is unconfigured or the file cannot be read.
+	// Safe to call concurrently.
+	GetCACertPEM() []byte
 }
 
 // HealthCheckFunc is a function that checks the health of a component
