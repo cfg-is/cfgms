@@ -262,6 +262,15 @@ func (p *SQLiteProvider) CreateTriggerStore(config map[string]interface{}) (busi
 	return &SQLiteTriggerStore{db: db}, nil
 }
 
+// CreatePushStore returns a SQLite-backed PushStore for durable push-state persistence.
+func (p *SQLiteProvider) CreatePushStore(config map[string]interface{}) (business.PushStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLitePushStore{db: db}, nil
+}
+
 // OpenBusinessStores implements interfaces.BusinessStoreOpener.
 // It opens the SQLite database at path exactly once, runs schema initialisation,
 // and returns all seven business stores sharing the same *sql.DB connection pool.
@@ -282,6 +291,7 @@ func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessSt
 		Session:           &SQLiteSessionStore{db: db},
 		Command:           &SQLiteCommandStore{db: db},
 		Trigger:           &SQLiteTriggerStore{db: db},
+		Push:              &SQLitePushStore{db: db},
 	}, nil
 }
 

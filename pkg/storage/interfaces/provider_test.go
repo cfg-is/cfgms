@@ -160,6 +160,10 @@ func (m *MockStorageProvider) CreateTriggerStore(_ map[string]interface{}) (busi
 	return nil, business.ErrNotSupported
 }
 
+func (m *MockStorageProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 // Mock implementations of store interfaces
 type MockClientTenantStore struct {
 	tenants map[string]*business.ClientTenant
@@ -488,6 +492,22 @@ func (m *MockCommandStore) PurgeExpiredRecords(_ context.Context, _ time.Time) (
 func (m *MockCommandStore) HealthCheck(_ context.Context) error { return nil }
 func (m *MockCommandStore) Close() error                        { return nil }
 
+// MockPushStore implements business.PushStore for testing
+type MockPushStore struct{}
+
+func (m *MockPushStore) CreatePush(_ context.Context, _ *business.PushRecord) error {
+	return nil
+}
+func (m *MockPushStore) UpdatePushStatus(_ context.Context, _ string, _ business.PushStatus) error {
+	return nil
+}
+func (m *MockPushStore) GetPendingPushes(_ context.Context) ([]*business.PushRecord, error) {
+	return nil, nil
+}
+func (m *MockPushStore) GetPush(_ context.Context, _ string) (*business.PushRecord, error) {
+	return nil, nil
+}
+
 // Test provider registration
 func TestRegisterStorageProvider(t *testing.T) {
 	// Clear registry for test
@@ -786,7 +806,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 		sm := NewStorageManagerFromStores(
 			&MockConfigStore{}, &MockAuditStore{}, &MockRBACStore{},
 			&MockTenantStore{}, newMockClientTenantStore(), &MockRegistrationTokenStore{},
-			nil, nil, nil, nil,
+			nil, nil, nil, nil, nil,
 		)
 
 		if sm.GetProviderName() != "composite" {
@@ -798,7 +818,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	})
 
 	t.Run("GetCapabilities returns zero value without panic", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		caps := sm.GetCapabilities()
 		// Zero value - no field should be set
 		if caps.SupportsTransactions || caps.SupportsVersioning || caps.MaxBatchSize != 0 {
@@ -807,14 +827,14 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	})
 
 	t.Run("GetVersion returns composite without panic", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if sm.GetVersion() != "composite" {
 			t.Errorf("expected version %q, got %q", "composite", sm.GetVersion())
 		}
 	})
 
 	t.Run("GetProvider returns nil without panic", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if sm.GetProvider() != nil {
 			t.Errorf("expected nil from GetProvider on composite manager")
 		}
@@ -827,11 +847,12 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 		tenantStore := &MockTenantStore{}
 		clientTenantStore := newMockClientTenantStore()
 		registrationTokenStore := &MockRegistrationTokenStore{}
+		pushStore := &MockPushStore{}
 
 		sm := NewStorageManagerFromStores(
 			configStore, auditStore, rbacStore,
 			tenantStore, clientTenantStore, registrationTokenStore,
-			nil, nil, nil, nil,
+			nil, nil, nil, nil, pushStore,
 		)
 
 		if sm.GetConfigStore() != configStore {
@@ -864,10 +885,13 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 		if sm.GetTriggerStore() != nil {
 			t.Errorf("TriggerStore should be nil")
 		}
+		if sm.GetPushStore() != pushStore {
+			t.Errorf("PushStore mismatch")
+		}
 	})
 
 	t.Run("nil values allowed for all stores", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		// Should not panic
 		if sm.GetConfigStore() != nil {
 			t.Errorf("expected nil ConfigStore")
@@ -1026,6 +1050,9 @@ func (m *MockOSSProvider) CreateCommandStore(_ map[string]interface{}) (business
 func (m *MockOSSProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
 	return nil, business.ErrNotSupported
 }
+func (m *MockOSSProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
+	return nil, business.ErrNotSupported
+}
 
 // MockOSSProviderWithError is an interface stub that returns an error from a designated Create* method.
 // It is used to test that CreateOSSStorageManager propagates store-creation errors correctly.
@@ -1111,6 +1138,12 @@ func (m *MockOSSProviderWithError) CreateTriggerStore(_ map[string]interface{}) 
 	}
 	return nil, business.ErrNotSupported
 }
+func (m *MockOSSProviderWithError) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
+	if err := m.mayFail("CreatePushStore"); err != nil {
+		return nil, err
+	}
+	return nil, business.ErrNotSupported
+}
 
 func TestCreateOSSStorageManager_StoreCreationErrors(t *testing.T) {
 	// Save and clear registry
@@ -1145,6 +1178,7 @@ func TestCreateOSSStorageManager_StoreCreationErrors(t *testing.T) {
 		"CreateRegistrationTokenStore",
 		"CreateSessionStore",
 		"CreateCommandStore",
+		"CreatePushStore",
 	}
 
 	for _, failMethod := range flatfileFailures {

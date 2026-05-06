@@ -155,6 +155,10 @@ func (t *TestStorageProvider) CreateTriggerStore(_ map[string]interface{}) (busi
 	return newInMemoryTriggerStore(), nil
 }
 
+func (t *TestStorageProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{
 		MaxBatchSize:          100,

@@ -337,6 +337,23 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_triggers_type      ON triggers(type)`,
 		`CREATE INDEX IF NOT EXISTS idx_triggers_status    ON triggers(status)`,
 
+		// Push records — durable configuration push state (Issue #1317)
+		// Stores pending and in-progress push operations so a new leader can resume
+		// after failover. The data column holds the full StewardConfiguration JSON blob.
+		`CREATE TABLE IF NOT EXISTS push_records (
+			id           TEXT PRIMARY KEY,
+			config_id    TEXT NOT NULL,
+			tenant_id    TEXT NOT NULL,
+			version      TEXT NOT NULL,
+			status       TEXT NOT NULL,
+			initiated_by TEXT NOT NULL,
+			data         BLOB NOT NULL,
+			created_at   TEXT NOT NULL,
+			updated_at   TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_push_records_status    ON push_records(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_push_records_tenant_id ON push_records(tenant_id)`,
+
 		// Durable sessions (Persistent=true only)
 		`CREATE TABLE IF NOT EXISTS sessions (
 			session_id       TEXT PRIMARY KEY,

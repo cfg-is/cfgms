@@ -208,6 +208,12 @@ func (p *FlatFileProvider) CreateTriggerStore(config map[string]interface{}) (bu
 	return nil, ErrNotSupported
 }
 
+// CreatePushStore returns ErrNotSupported.
+// Push-state persistence belongs in the business-data tier (SQLite).
+func (p *FlatFileProvider) CreatePushStore(config map[string]interface{}) (business.PushStore, error) {
+	return nil, ErrNotSupported
+}
+
 // init auto-registers the flat-file provider so that a blank import is sufficient.
 func init() {
 	interfaces.RegisterStorageProvider(&FlatFileProvider{})

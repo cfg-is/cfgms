@@ -124,6 +124,10 @@ func (m *MockStorageProvider) CreateTriggerStore(_ map[string]interface{}) (busi
 	return nil, business.ErrNotSupported
 }
 
+func (m *MockStorageProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (m *MockStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	args := m.Called()
 	return args.Get(0).(interfaces.ProviderCapabilities)

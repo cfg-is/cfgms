@@ -166,6 +166,12 @@ func (p *DatabaseProvider) CreateTriggerStore(config map[string]interface{}) (bu
 	return nil, business.ErrNotSupported
 }
 
+// CreatePushStore is not supported by the database provider.
+// Push-state persistence belongs in the business-data tier (SQLite for OSS).
+func (p *DatabaseProvider) CreatePushStore(config map[string]interface{}) (business.PushStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)
