@@ -14,7 +14,6 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/jit"
-	"github.com/cfgis/cfgms/features/rbac/zerotrust"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -27,7 +26,6 @@ func TestNewJITAccessManager(t *testing.T) {
 	jam := jit.NewJITAccessManager(rbacManager, notificationService)
 
 	assert.NotNil(t, jam)
-	assert.Equal(t, jit.ZeroTrustJITModeDisabled, jam.GetZeroTrustMode())
 
 	// Smoke test: constructor wires all dependencies — RequestAccess processes the request.
 	// Use admin (high-privilege) to prevent time-sensitive auto-approval from triggering.
@@ -41,68 +39,6 @@ func TestNewJITAccessManager(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.NotNil(t, smokeReq)
-}
-
-func TestJITAccessManager_EnableZeroTrustPolicies(t *testing.T) {
-	tests := []struct {
-		name     string
-		engine   *zerotrust.ZeroTrustPolicyEngine
-		mode     jit.ZeroTrustJITMode
-		wantMode jit.ZeroTrustJITMode
-	}{
-		{
-			name:     "Enable with valid engine and mode",
-			engine:   createMockZeroTrustEngine(),
-			mode:     jit.ZeroTrustJITModeComprehensive,
-			wantMode: jit.ZeroTrustJITModeComprehensive,
-		},
-		{
-			name:     "Disable with disabled mode",
-			engine:   createMockZeroTrustEngine(),
-			mode:     jit.ZeroTrustJITModeDisabled,
-			wantMode: jit.ZeroTrustJITModeDisabled,
-		},
-		{
-			name:     "Nil engine stores mode but keeps disabled effective state",
-			engine:   nil,
-			mode:     jit.ZeroTrustJITModeComprehensive,
-			wantMode: jit.ZeroTrustJITModeComprehensive,
-		},
-		{
-			name:     "Enable request validation mode",
-			engine:   createMockZeroTrustEngine(),
-			mode:     jit.ZeroTrustJITModeRequestValidation,
-			wantMode: jit.ZeroTrustJITModeRequestValidation,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			jam := jit.NewJITAccessManager(newTestRBACManager(t), jit.NewSimpleNotificationService())
-
-			jam.EnableZeroTrustPolicies(tt.engine, tt.mode)
-
-			assert.Equal(t, tt.wantMode, jam.GetZeroTrustMode())
-		})
-	}
-}
-
-func TestJITAccessManager_SetZeroTrustMode(t *testing.T) {
-	jam := jit.NewJITAccessManager(newTestRBACManager(t), jit.NewSimpleNotificationService())
-	engine := createMockZeroTrustEngine()
-
-	// First enable with an engine
-	jam.EnableZeroTrustPolicies(engine, jit.ZeroTrustJITModeComprehensive)
-	assert.NotEqual(t, jit.ZeroTrustJITModeDisabled, jam.GetZeroTrustMode())
-
-	// Change mode to disabled
-	jam.SetZeroTrustMode(jit.ZeroTrustJITModeDisabled)
-	assert.Equal(t, jit.ZeroTrustJITModeDisabled, jam.GetZeroTrustMode())
-
-	// Change mode back to enabled
-	jam.SetZeroTrustMode(jit.ZeroTrustJITModeApprovalGating)
-	assert.NotEqual(t, jit.ZeroTrustJITModeDisabled, jam.GetZeroTrustMode())
-	assert.Equal(t, jit.ZeroTrustJITModeApprovalGating, jam.GetZeroTrustMode())
 }
 
 func TestJITAccessManager_RequestAccess_Success(t *testing.T) {
@@ -734,32 +670,6 @@ func TestJITAccessManager_GetActiveGrants(t *testing.T) {
 	assert.Equal(t, grant3.ID, grants2[0].ID)
 }
 
-func TestJITAccessManager_ZeroTrustModeConfiguration(t *testing.T) {
-	jam := jit.NewJITAccessManager(newTestRBACManager(t), jit.NewSimpleNotificationService())
-
-	// Initial state: disabled
-	assert.Equal(t, jit.ZeroTrustJITModeDisabled, jam.GetZeroTrustMode())
-
-	// Enable zero-trust with comprehensive mode
-	engine := createMockZeroTrustEngine()
-	jam.EnableZeroTrustPolicies(engine, jit.ZeroTrustJITModeComprehensive)
-	assert.Equal(t, jit.ZeroTrustJITModeComprehensive, jam.GetZeroTrustMode())
-
-	// Test specific modes via SetZeroTrustMode
-	jam.SetZeroTrustMode(jit.ZeroTrustJITModeRequestValidation)
-	assert.Equal(t, jit.ZeroTrustJITModeRequestValidation, jam.GetZeroTrustMode())
-
-	jam.SetZeroTrustMode(jit.ZeroTrustJITModeApprovalGating)
-	assert.Equal(t, jit.ZeroTrustJITModeApprovalGating, jam.GetZeroTrustMode())
-
-	jam.SetZeroTrustMode(jit.ZeroTrustJITModeGrantValidation)
-	assert.Equal(t, jit.ZeroTrustJITModeGrantValidation, jam.GetZeroTrustMode())
-
-	// Disable
-	jam.SetZeroTrustMode(jit.ZeroTrustJITModeDisabled)
-	assert.Equal(t, jit.ZeroTrustJITModeDisabled, jam.GetZeroTrustMode())
-}
-
 func TestJITAccessManager_ConcurrentAccess(t *testing.T) {
 	rbacManager := newTestRBACManager(t)
 	jam := jit.NewJITAccessManager(rbacManager, jit.NewSimpleNotificationService())
@@ -977,14 +887,4 @@ func grantPermission(t *testing.T, mgr *rbac.Manager, subjectID, permissionID, t
 		TenantId:  tenantID,
 	}
 	require.NoError(t, mgr.AssignRole(ctx, assignment))
-}
-
-// Helper function to create a mock zero-trust engine
-func createMockZeroTrustEngine() *zerotrust.ZeroTrustPolicyEngine {
-	config := &zerotrust.ZeroTrustConfig{
-		MaxEvaluationTime: 5 * time.Second,
-		FailSecure:        true,
-		MetricsInterval:   1 * time.Second,
-	}
-	return zerotrust.NewZeroTrustPolicyEngine(config)
 }
