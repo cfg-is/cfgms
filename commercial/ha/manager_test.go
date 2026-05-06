@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testing/storage"
 )
 
@@ -56,8 +57,8 @@ func TestManager_initRaft_logsInitStart(t *testing.T) {
 	cfg.Mode = ClusterMode
 	cfg.Node.ID = "test-node-init-raft"
 
-	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, storageManager)
+	mock := pkgtesting.NewMockLogger(true)
+	manager, err := NewManager(cfg, mock, storageManager)
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
@@ -73,6 +74,23 @@ func TestManager_initRaft_logsInitStart(t *testing.T) {
 	expectedID := hashStringToUint64(cfg.Node.ID)
 	assert.Equal(t, expectedID, manager.raftConsensus.nodeID,
 		"raftConsensus nodeID must be the fnv hash of the config node ID string")
+
+	// Verify the init log uses structured key-value fields with no "RAFT_INIT:" prefix.
+	debugLogs := mock.GetLogs("debug")
+	var found bool
+	for _, entry := range debugLogs {
+		if entry.Message == "Starting Raft consensus initialization" {
+			for i := 0; i < len(entry.Data)-1; i += 2 {
+				if k, ok := entry.Data[i].(string); ok && k == "node_id_string" {
+					found = true
+					break
+				}
+			}
+		}
+	}
+	assert.True(t, found,
+		"expected a debug log with message 'Starting Raft consensus initialization' and 'node_id_string' key; got debug logs: %v",
+		debugLogs)
 }
 
 func TestManager_SingleServerMode(t *testing.T) {

@@ -13,7 +13,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"go.etcd.io/raft/v3/raftpb"
@@ -36,8 +35,14 @@ func TestRaftTransport_Start_logsStartup(t *testing.T) {
 
 	infoLogs := mock.GetLogs("info")
 	require.NotEmpty(t, infoLogs, "expected at least one info log after Start()")
-	assert.True(t, strings.Contains(infoLogs[0].Message, "RAFT_TRANSPORT"),
-		"startup log should contain RAFT_TRANSPORT, got: %s", infoLogs[0].Message)
+	var found bool
+	for _, entry := range infoLogs {
+		if entry.Message == "Started transport" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected info log with message 'Started transport'; got: %v", infoLogs)
 }
 
 // makeFakePeerCert returns a minimal x509.Certificate with the given CN, suitable

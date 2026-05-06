@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // NOTE: All type definitions (Config, NodeConfig, ClusterConfig, etc.) are now in types.go
@@ -28,25 +26,12 @@ func DefaultConfig() *Config {
 			Capabilities: []string{"config", "rbac", "monitoring", "workflow"},
 		},
 		Cluster: ClusterConfig{
-			ExpectedSize:        3,
-			MinQuorum:           2,
-			ElectionTimeout:     10 * time.Second,
-			HeartbeatInterval:   2 * time.Second,
-			LeaderLeaseDuration: 15 * time.Second,
-			CandidateTimeout:    5 * time.Second,
-			ApplyTimeout:        2 * time.Second,
+			ExpectedSize:      3,
+			MinQuorum:         2,
+			ElectionTimeout:   10 * time.Second,
+			HeartbeatInterval: 2 * time.Second,
 			Discovery: &DiscoveryConfig{
-				Method:      "static",
-				Config:      make(map[string]interface{}),
-				Interval:    30 * time.Second,
-				NodeTimeout: 60 * time.Second,
-				Geographic: &GeographicDiscoveryConfig{
-					EnableRegionAffinity:         true,
-					CrossRegionTimeoutMultiplier: 2.0,
-					MaxCrossRegionLatency:        500 * time.Millisecond,
-					LatencyCheckInterval:         60 * time.Second,
-					RegionalWeights:              make(map[string]float64),
-				},
+				Config: make(map[string]interface{}),
 			},
 		},
 		HealthCheck: &HealthCheckConfig{
@@ -82,9 +67,6 @@ func DefaultConfig() *Config {
 
 // LoadFromEnvironment loads HA configuration from environment variables
 func (c *Config) LoadFromEnvironment() error {
-	logger := logging.NewLogger("debug")
-	logger.Info("HA Config Loading - Starting LoadFromEnvironment")
-
 	// Load deployment mode
 	if mode := os.Getenv("CFGMS_HA_MODE"); mode != "" {
 		switch strings.ToLower(mode) {
@@ -154,45 +136,10 @@ func (c *Config) LoadFromEnvironment() error {
 		}
 	}
 
-	if nodeTimeout := os.Getenv("CFGMS_HA_NODE_TIMEOUT"); nodeTimeout != "" {
-		if timeout, err := time.ParseDuration(nodeTimeout); err == nil {
-			c.Cluster.Discovery.NodeTimeout = timeout
-		}
-	}
-
-	if discoveryInterval := os.Getenv("CFGMS_HA_DISCOVERY_INTERVAL"); discoveryInterval != "" {
-		if interval, err := time.ParseDuration(discoveryInterval); err == nil {
-			c.Cluster.Discovery.Interval = interval
-		}
-	}
-
-	if leaderLease := os.Getenv("CFGMS_HA_LEADER_LEASE_DURATION"); leaderLease != "" {
-		if duration, err := time.ParseDuration(leaderLease); err == nil {
-			c.Cluster.LeaderLeaseDuration = duration
-		}
-	}
-
-	if candidateTimeout := os.Getenv("CFGMS_HA_CANDIDATE_TIMEOUT"); candidateTimeout != "" {
-		if timeout, err := time.ParseDuration(candidateTimeout); err == nil {
-			c.Cluster.CandidateTimeout = timeout
-		}
-	}
-
-	if applyTimeout := os.Getenv("CFGMS_HA_APPLY_TIMEOUT"); applyTimeout != "" {
-		if timeout, err := time.ParseDuration(applyTimeout); err == nil {
-			c.Cluster.ApplyTimeout = timeout
-		}
-	}
-
 	if healthInterval := os.Getenv("CFGMS_HA_HEALTH_CHECK_INTERVAL"); healthInterval != "" {
 		if interval, err := time.ParseDuration(healthInterval); err == nil {
 			c.HealthCheck.Interval = interval
 		}
-	}
-
-	// Load discovery configuration
-	if discoveryMethod := os.Getenv("CFGMS_HA_DISCOVERY_METHOD"); discoveryMethod != "" {
-		c.Cluster.Discovery.Method = discoveryMethod
 	}
 
 	// Load cluster nodes for static discovery
@@ -256,13 +203,6 @@ func (c *Config) LoadFromEnvironment() error {
 		}
 	}
 
-	logger.Info("HA Config Loading - Completed LoadFromEnvironment",
-		"node_id", c.Node.ID,
-		"node_region", c.Node.Region,
-		"node_name", c.Node.Name,
-		"mode", c.GetModeString(),
-		"node_id_empty", c.Node.ID == "")
-
 	return nil
 }
 
@@ -290,18 +230,6 @@ func (c *Config) Validate() error {
 
 		if c.Cluster.HeartbeatInterval <= 0 {
 			return fmt.Errorf("heartbeat interval must be positive")
-		}
-
-		if c.Cluster.LeaderLeaseDuration <= 0 {
-			return fmt.Errorf("leader lease duration must be positive")
-		}
-
-		if c.Cluster.CandidateTimeout <= 0 {
-			return fmt.Errorf("candidate timeout must be positive")
-		}
-
-		if c.Cluster.ApplyTimeout <= 0 {
-			return fmt.Errorf("apply timeout must be positive")
 		}
 
 		if c.Cluster.Discovery == nil {

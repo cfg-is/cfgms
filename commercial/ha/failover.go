@@ -276,7 +276,7 @@ func (fm *failoverManager) executeFailover(ctx context.Context, reason string, m
 	// Execute failover steps
 	var failoverErr error
 
-	// Step 1: Elect new leader (if in cluster mode)
+	// Elect new leader (if in cluster mode)
 	if fm.manager.cfg.Mode == ClusterMode {
 		if err := fm.electNewLeader(ctx); err != nil {
 			failoverErr = fmt.Errorf("leader election failed: %w", err)
@@ -288,7 +288,7 @@ func (fm *failoverManager) executeFailover(ctx context.Context, reason string, m
 
 	sessionsMigrated := 0
 
-	// Step 3: Update cluster state
+	// Update cluster state after leader election
 	if failoverErr == nil {
 		if err := fm.updateClusterState(ctx); err != nil {
 			fm.logger.Warn("Cluster state update failed", "error", err)
@@ -358,8 +358,6 @@ func (fm *failoverManager) electNewLeader(ctx context.Context) error {
 
 // updateClusterState updates cluster state after failover
 func (fm *failoverManager) updateClusterState(ctx context.Context) error {
-	// Update local node state and propagate to cluster
-	// In a production implementation, this would update distributed state
 	return nil
 }
 

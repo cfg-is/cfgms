@@ -426,24 +426,24 @@ func (m *Manager) initializeRaftConsensus() error {
 	// Use a simple hash of the node ID string
 	nodeID := hashStringToUint64(m.nodeInfo.ID)
 
-	m.logger.Debug("RAFT_INIT: Starting Raft consensus initialization",
+	m.logger.Debug("Starting Raft consensus initialization",
 		"node_id_string", m.nodeInfo.ID, "node_id_uint64", nodeID, "node_address", m.nodeInfo.Address)
 
 	// Build peer list from cluster configuration
 	peers := make([]raft.Peer, 0)
 
 	// Parse cluster nodes from config
-	m.logger.Debug("RAFT_INIT: Parsing cluster nodes from config", "config_nil", m.cfg.Cluster.Discovery.Config == nil)
+	m.logger.Debug("Parsing cluster nodes from config", "config_nil", m.cfg.Cluster.Discovery.Config == nil)
 
 	// seenHashes guards against node ID hash collisions before they can silently alias
 	// two distinct nodes to the same Raft peer ID.
 	seenHashes := make(map[uint64]string) // hash → original string ID
 
 	if clusterNodes := m.cfg.Cluster.Discovery.Config["nodes"]; clusterNodes != nil {
-		m.logger.Debug("RAFT_INIT: Found cluster nodes in config", "type", fmt.Sprintf("%T", clusterNodes))
+		m.logger.Debug("Found cluster nodes in config", "type", fmt.Sprintf("%T", clusterNodes))
 		// Try both []interface{} and []map[string]interface{} type assertions
 		if nodes, ok := clusterNodes.([]interface{}); ok {
-			m.logger.Debug("RAFT_INIT: Cluster nodes is []interface{}", "count", len(nodes))
+			m.logger.Debug("Cluster nodes is []interface{}", "count", len(nodes))
 			for i, n := range nodes {
 				if nodeMap, ok := n.(map[string]interface{}); ok {
 					if id, ok := nodeMap["id"].(string); ok {
@@ -456,12 +456,12 @@ func (m *Manager) initializeRaftConsensus() error {
 							ID:      peerID,
 							Context: []byte(id), // Store original string ID
 						})
-						m.logger.Debug("RAFT_INIT: Added peer to list", "index", i, "peer_id_string", id, "peer_id_uint64", peerID)
+						m.logger.Debug("Added peer to list", "index", i, "peer_id_string", id, "peer_id_uint64", peerID)
 					}
 				}
 			}
 		} else if nodes, ok := clusterNodes.([]map[string]interface{}); ok {
-			m.logger.Debug("RAFT_INIT: Cluster nodes is []map[string]interface{}", "count", len(nodes))
+			m.logger.Debug("Cluster nodes is []map[string]interface{}", "count", len(nodes))
 			for i, nodeMap := range nodes {
 				if id, ok := nodeMap["id"].(string); ok {
 					peerID := hashStringToUint64(id)
@@ -473,14 +473,14 @@ func (m *Manager) initializeRaftConsensus() error {
 						ID:      peerID,
 						Context: []byte(id), // Store original string ID
 					})
-					m.logger.Debug("RAFT_INIT: Added peer to list", "index", i, "peer_id_string", id, "peer_id_uint64", peerID)
+					m.logger.Debug("Added peer to list", "index", i, "peer_id_string", id, "peer_id_uint64", peerID)
 				}
 			}
 		} else {
-			m.logger.Debug("RAFT_INIT: Cluster nodes has unexpected type", "type", fmt.Sprintf("%T", clusterNodes))
+			m.logger.Debug("Cluster nodes has unexpected type", "type", fmt.Sprintf("%T", clusterNodes))
 		}
 	} else {
-		m.logger.Debug("RAFT_INIT: No cluster nodes found in config")
+		m.logger.Debug("No cluster nodes found in config")
 	}
 
 	// Create Raft consensus
@@ -496,7 +496,7 @@ func (m *Manager) initializeRaftConsensus() error {
 		var readErr error
 		caCertPEM, readErr = os.ReadFile(m.cfg.CACertPath)
 		if readErr != nil {
-			m.logger.Warn("RAFT_INIT: Failed to read CA cert", "path", m.cfg.CACertPath, "error", readErr)
+			m.logger.Warn("Failed to read CA cert", "path", m.cfg.CACertPath, "error", readErr)
 		}
 	}
 
@@ -527,12 +527,12 @@ func (m *Manager) initializeRaftConsensus() error {
 	m.raftConsensus.SetTransport(transport)
 
 	// Add peer addresses to transport
-	m.logger.Debug("RAFT_INIT: Configuring peer addresses for transport")
+	m.logger.Debug("Configuring peer addresses for transport")
 	peerCount := 0
 	if clusterNodes := m.cfg.Cluster.Discovery.Config["nodes"]; clusterNodes != nil {
 		// Try both []interface{} and []map[string]interface{} type assertions
 		if nodes, ok := clusterNodes.([]interface{}); ok {
-			m.logger.Debug("RAFT_INIT: Processing peer addresses ([]interface{})", "total_nodes", len(nodes))
+			m.logger.Debug("Processing peer addresses ([]interface{})", "total_nodes", len(nodes))
 			for i, n := range nodes {
 				if nodeMap, ok := n.(map[string]interface{}); ok {
 					if id, ok := nodeMap["id"].(string); ok {
@@ -541,19 +541,19 @@ func (m *Manager) initializeRaftConsensus() error {
 							if peerID != nodeID { // Don't add self
 								transport.AddPeer(peerID, addr)
 								peerCount++
-								m.logger.Debug("RAFT_INIT: Added peer address to transport",
+								m.logger.Debug("Added peer address to transport",
 									"index", i, "peer_id_string", id, "peer_id_uint64", peerID, "address", addr)
 							} else {
-								m.logger.Debug("RAFT_INIT: Skipped self in peer list", "node_id", id)
+								m.logger.Debug("Skipped self in peer list", "node_id", id)
 							}
 						} else {
-							m.logger.Debug("RAFT_INIT: Node missing address", "index", i, "node_id", id)
+							m.logger.Debug("Node missing address", "index", i, "node_id", id)
 						}
 					}
 				}
 			}
 		} else if nodes, ok := clusterNodes.([]map[string]interface{}); ok {
-			m.logger.Debug("RAFT_INIT: Processing peer addresses ([]map)", "total_nodes", len(nodes))
+			m.logger.Debug("Processing peer addresses ([]map)", "total_nodes", len(nodes))
 			for i, nodeMap := range nodes {
 				if id, ok := nodeMap["id"].(string); ok {
 					if addr, ok := nodeMap["address"].(string); ok {
@@ -561,20 +561,20 @@ func (m *Manager) initializeRaftConsensus() error {
 						if peerID != nodeID { // Don't add self
 							transport.AddPeer(peerID, addr)
 							peerCount++
-							m.logger.Debug("RAFT_INIT: Added peer address to transport",
+							m.logger.Debug("Added peer address to transport",
 								"index", i, "peer_id_string", id, "peer_id_uint64", peerID, "address", addr)
 						} else {
-							m.logger.Debug("RAFT_INIT: Skipped self in peer list", "node_id", id)
+							m.logger.Debug("Skipped self in peer list", "node_id", id)
 						}
 					} else {
-						m.logger.Debug("RAFT_INIT: Node missing address", "index", i, "node_id", id)
+						m.logger.Debug("Node missing address", "index", i, "node_id", id)
 					}
 				}
 			}
 		}
 	}
 
-	m.logger.Debug("RAFT_INIT: Raft consensus initialized",
+	m.logger.Debug("Raft consensus initialized",
 		"node_id", nodeID, "total_peers", len(peers), "configured_peer_addresses", peerCount)
 
 	return nil
