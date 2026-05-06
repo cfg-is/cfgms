@@ -19,9 +19,6 @@ type Config struct {
 	// Cluster configuration (only used in commercial builds)
 	Cluster ClusterConfig `yaml:"cluster" json:"cluster"`
 
-	// Load balancing configuration (only used in commercial builds)
-	LoadBalancing *LoadBalancingConfig `yaml:"load_balancing,omitempty" json:"load_balancing,omitempty"`
-
 	// Failover configuration (only used in commercial builds)
 	Failover *FailoverConfig `yaml:"failover,omitempty" json:"failover,omitempty"`
 
@@ -64,15 +61,14 @@ type GeographicCoordinates struct {
 
 // ClusterConfig contains cluster-wide configuration (commercial only)
 type ClusterConfig struct {
-	ExpectedSize        int                `yaml:"expected_size" json:"expected_size"`
-	MinQuorum           int                `yaml:"min_quorum" json:"min_quorum"`
-	ElectionTimeout     time.Duration      `yaml:"election_timeout" json:"election_timeout"`
-	HeartbeatInterval   time.Duration      `yaml:"heartbeat_interval" json:"heartbeat_interval"`
-	LeaderLeaseDuration time.Duration      `yaml:"leader_lease_duration" json:"leader_lease_duration"`
-	CandidateTimeout    time.Duration      `yaml:"candidate_timeout" json:"candidate_timeout"`
-	ApplyTimeout        time.Duration      `yaml:"apply_timeout" json:"apply_timeout"`
-	Discovery           *DiscoveryConfig   `yaml:"discovery" json:"discovery"`
-	SessionSync         *SessionSyncConfig `yaml:"session_sync" json:"session_sync"`
+	ExpectedSize        int              `yaml:"expected_size" json:"expected_size"`
+	MinQuorum           int              `yaml:"min_quorum" json:"min_quorum"`
+	ElectionTimeout     time.Duration    `yaml:"election_timeout" json:"election_timeout"`
+	HeartbeatInterval   time.Duration    `yaml:"heartbeat_interval" json:"heartbeat_interval"`
+	LeaderLeaseDuration time.Duration    `yaml:"leader_lease_duration" json:"leader_lease_duration"`
+	CandidateTimeout    time.Duration    `yaml:"candidate_timeout" json:"candidate_timeout"`
+	ApplyTimeout        time.Duration    `yaml:"apply_timeout" json:"apply_timeout"`
+	Discovery           *DiscoveryConfig `yaml:"discovery" json:"discovery"`
 }
 
 // DiscoveryConfig contains node discovery configuration (commercial only)
@@ -91,47 +87,6 @@ type GeographicDiscoveryConfig struct {
 	MaxCrossRegionLatency        time.Duration      `yaml:"max_cross_region_latency" json:"max_cross_region_latency"`
 	LatencyCheckInterval         time.Duration      `yaml:"latency_check_interval" json:"latency_check_interval"`
 	RegionalWeights              map[string]float64 `yaml:"regional_weights,omitempty" json:"regional_weights,omitempty"`
-}
-
-// SessionSyncConfig contains session synchronization configuration (commercial only)
-type SessionSyncConfig struct {
-	Enabled           bool          `yaml:"enabled" json:"enabled"`
-	SyncInterval      time.Duration `yaml:"sync_interval" json:"sync_interval"`
-	StateTimeout      time.Duration `yaml:"state_timeout" json:"state_timeout"`
-	ReplicationFactor int           `yaml:"replication_factor" json:"replication_factor"`
-	MaxStateSize      int           `yaml:"max_state_size" json:"max_state_size"` // Maximum session state size
-}
-
-// LoadBalancingConfig contains load balancing configuration (commercial only)
-type LoadBalancingConfig struct {
-	Strategy           LoadBalancingStrategy          `yaml:"strategy" json:"strategy"`
-	HealthCheckEnabled bool                           `yaml:"health_check_enabled" json:"health_check_enabled"`
-	SessionAffinity    bool                           `yaml:"session_affinity" json:"session_affinity"`
-	HealthBased        *HealthBasedConfig             `yaml:"health_based,omitempty" json:"health_based,omitempty"`
-	ConnectionBased    *ConnectionBasedConfig         `yaml:"connection_based,omitempty" json:"connection_based,omitempty"`
-	Geographic         *GeographicLoadBalancingConfig `yaml:"geographic,omitempty" json:"geographic,omitempty"`
-}
-
-// HealthBasedConfig contains health-based load balancing configuration
-type HealthBasedConfig struct {
-	MinHealthScore     float64 `yaml:"min_health_score" json:"min_health_score"`
-	HealthWeightFactor float64 `yaml:"health_weight_factor" json:"health_weight_factor"`
-}
-
-// ConnectionBasedConfig contains connection-based load balancing configuration
-type ConnectionBasedConfig struct {
-	MaxConnectionsPerNode int     `yaml:"max_connections_per_node" json:"max_connections_per_node"`
-	ConnectionThreshold   float64 `yaml:"connection_threshold" json:"connection_threshold"`
-}
-
-// GeographicLoadBalancingConfig contains geographic load balancing settings
-type GeographicLoadBalancingConfig struct {
-	EnableRegionAffinity    bool               `yaml:"enable_region_affinity" json:"enable_region_affinity"`
-	RegionAffinityWeight    float64            `yaml:"region_affinity_weight" json:"region_affinity_weight"`
-	LatencyWeightFactor     float64            `yaml:"latency_weight_factor" json:"latency_weight_factor"`
-	MaxLatencyThreshold     time.Duration      `yaml:"max_latency_threshold" json:"max_latency_threshold"`
-	CrossRegionFallback     bool               `yaml:"cross_region_fallback" json:"cross_region_fallback"`
-	RegionalCapacityWeights map[string]float64 `yaml:"regional_capacity_weights,omitempty" json:"regional_capacity_weights,omitempty"`
 }
 
 // FailoverConfig contains automatic failover configuration (commercial only)

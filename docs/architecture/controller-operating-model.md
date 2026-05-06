@@ -551,7 +551,6 @@ Multiple controller instances form a **Raft consensus cluster**. Raft is the sol
 - **State replication** — cfg changes, registration events, and fleet state are replicated across nodes via the Raft log
 - **Automatic failover** — if the leader goes down, Raft elects a new leader automatically
 - **Split-brain detection** — the cluster detects and resolves network partitions; quorum-based resolution delegates leader step-down to Raft (`CheckQuorum`) rather than calling explicit demote operations
-- **Session sync** — steward sessions are synchronized across nodes for seamless failover
 
 Stewards connect to any cluster node. If their node goes down, they reconnect to another.
 

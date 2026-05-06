@@ -1,8 +1,8 @@
 //go:build commercial
+// +build commercial
 
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright 2026 Jordan Ritz
-// +build commercial
 
 package ha
 
@@ -48,13 +48,6 @@ func DefaultConfig() *Config {
 					RegionalWeights:              make(map[string]float64),
 				},
 			},
-			SessionSync: &SessionSyncConfig{
-				Enabled:           true,
-				SyncInterval:      5 * time.Second,
-				StateTimeout:      300 * time.Second, // 5 minutes
-				ReplicationFactor: 3,
-				MaxStateSize:      1024 * 1024, // 1MB
-			},
 		},
 		HealthCheck: &HealthCheckConfig{
 			Enabled:          true,
@@ -75,27 +68,6 @@ func DefaultConfig() *Config {
 			MaxDuration:         5 * time.Minute,
 			GracePeriod:         10 * time.Second,
 			MaxSessionMigration: 1000,
-		},
-		LoadBalancing: &LoadBalancingConfig{
-			Strategy:           HealthBasedStrategy,
-			HealthCheckEnabled: true,
-			SessionAffinity:    true,
-			HealthBased: &HealthBasedConfig{
-				MinHealthScore:     0.7,
-				HealthWeightFactor: 1.0,
-			},
-			ConnectionBased: &ConnectionBasedConfig{
-				MaxConnectionsPerNode: 1000,
-				ConnectionThreshold:   0.8,
-			},
-			Geographic: &GeographicLoadBalancingConfig{
-				EnableRegionAffinity:    true,
-				RegionAffinityWeight:    0.8,
-				LatencyWeightFactor:     0.5,
-				MaxLatencyThreshold:     250 * time.Millisecond,
-				CrossRegionFallback:     true,
-				RegionalCapacityWeights: make(map[string]float64),
-			},
 		},
 		SplitBrain: &SplitBrainConfig{
 			Enabled:            true,
