@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // handleListCertificates handles GET /api/v1/certificates
@@ -20,12 +21,12 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 	stewardID := r.URL.Query().Get("steward_id")
 
 	// Get certificates from certificate manager
-	var certificates []CertificateInfo
+	certificates := make([]CertificateInfo, 0)
 	if stewardID != "" {
 		// Filter by steward ID (common name)
 		certInfos, err := s.certManager.GetCertificateByCommonName(stewardID)
 		if err != nil {
-			s.logger.Error("Failed to get certificates for steward", "steward_id", stewardID, "error", err)
+			s.logger.Error("Failed to get certificates for steward", "steward_id", logging.SanitizeLogValue(stewardID), "error", err)
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get certificates", "INTERNAL_ERROR")
 			return
 		}
@@ -42,9 +43,23 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 			})
 		}
 	} else {
-		// Get all certificates - this would require a new method in cert manager
-		// For now, return empty list with a note
-		s.logger.Info("Listing all certificates not implemented yet")
+		certInfos, err := s.certManager.ListCertificates()
+		if err != nil {
+			s.logger.Error("Failed to list certificates", "error", err)
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list certificates", "INTERNAL_ERROR")
+			return
+		}
+		for _, certInfo := range certInfos {
+			certificates = append(certificates, CertificateInfo{
+				SerialNumber:        certInfo.SerialNumber,
+				CommonName:          certInfo.CommonName,
+				StewardID:           certInfo.ClientID,
+				IsValid:             certInfo.IsValid,
+				ExpiresAt:           certInfo.ExpiresAt,
+				DaysUntilExpiration: safeInt32(certInfo.DaysUntilExpiration),
+				NeedsRenewal:        certInfo.NeedsRenewal,
+			})
+		}
 	}
 
 	s.writeSuccessResponse(w, certificates)
@@ -86,8 +101,8 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 	provisionResp, err := s.certProvisioningService.ProvisionCertificate(req)
 	if err != nil {
 		s.logger.Error("Failed to provision certificate",
-			"steward_id", provisionReq.StewardID,
-			"common_name", provisionReq.CommonName,
+			"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
+			"common_name", logging.SanitizeLogValue(provisionReq.CommonName),
 			"error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
 		return
