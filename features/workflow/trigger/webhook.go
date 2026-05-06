@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,9 @@ import (
 
 // errBearerAuthRateLimited is returned when the bearer token auth failure rate limit is exceeded.
 var errBearerAuthRateLimited = errors.New("bearer auth rate limit exceeded")
+
+// errBasicAuthUnauthorized is returned when Basic auth credentials are missing or invalid.
+var errBasicAuthUnauthorized = errors.New("basic auth unauthorized")
 
 // HTTPWebhookHandler implements the WebhookHandler interface using HTTP endpoints
 type HTTPWebhookHandler struct {
@@ -485,6 +489,13 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}
+		if errors.Is(err, errBasicAuthUnauthorized) {
+			logger.WarnCtx(ctx, "Webhook basic auth failed",
+				"trigger_id", triggerID,
+				"remote_addr", r.RemoteAddr)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 		logger.ErrorCtx(ctx, "Failed to process webhook",
 			"trigger_id", triggerID,
 			"error", err.Error())
@@ -526,11 +537,8 @@ func (wh *HTTPWebhookHandler) validatePayload(webhook *WebhookConfig, payload []
 
 	// Validate JSON structure if JSON schema is provided
 	if validation.JSONSchema != "" {
-		// TODO: Implement JSON schema validation
-		// For now, just check if it's valid JSON
-		var jsonData interface{}
-		if err := json.Unmarshal(payload, &jsonData); err != nil {
-			return fmt.Errorf("invalid JSON payload: %w", err)
+		if err := validateJSONSchema(payload, validation.JSONSchema); err != nil {
+			return err
 		}
 	}
 
@@ -703,10 +711,39 @@ func (wh *HTTPWebhookHandler) validateBasicAuth(auth *WebhookAuth, headers map[s
 		return fmt.Errorf("basic auth configuration is required")
 	}
 
-	// TODO: Implement Basic auth validation
-	// This would require base64 decoding the Authorization header
-	// and comparing username/password
-	return fmt.Errorf("basic auth validation not yet implemented")
+	authHeader, exists := headers["Authorization"]
+	if !exists {
+		return errBasicAuthUnauthorized
+	}
+
+	const prefix = "Basic "
+	if !strings.HasPrefix(authHeader, prefix) {
+		return errBasicAuthUnauthorized
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(authHeader[len(prefix):])
+	if err != nil {
+		return errBasicAuthUnauthorized
+	}
+
+	// Split on the first colon only — passwords may contain colons (RFC 7617).
+	colonIdx := strings.IndexByte(string(decoded), ':')
+	if colonIdx < 0 {
+		return errBasicAuthUnauthorized
+	}
+
+	username := string(decoded[:colonIdx])
+	password := string(decoded[colonIdx+1:])
+
+	usernameMatch := subtle.ConstantTimeCompare([]byte(username), []byte(auth.BasicAuth.Username))
+	passwordMatch := subtle.ConstantTimeCompare([]byte(password), []byte(auth.BasicAuth.Password))
+
+	// AND the results to prevent short-circuit timing differences.
+	if usernameMatch&passwordMatch != 1 {
+		return errBasicAuthUnauthorized
+	}
+
+	return nil
 }
 
 // blockedWebhookHeaders is the set of header names (lowercased) that must never appear
@@ -724,6 +761,115 @@ func sanitizeHeaders(headers map[string]string) map[string]string {
 		}
 	}
 	return out
+}
+
+// validateJSONSchema validates a JSON payload against a JSON schema using basic structural
+// validation (type, required, properties). Supports a subset of JSON Schema draft-07.
+func validateJSONSchema(payload []byte, schema string) error {
+	var payloadDoc interface{}
+	if err := json.Unmarshal(payload, &payloadDoc); err != nil {
+		return fmt.Errorf("invalid JSON payload: %w", err)
+	}
+
+	var schemaDoc map[string]interface{}
+	if err := json.Unmarshal([]byte(schema), &schemaDoc); err != nil {
+		return fmt.Errorf("invalid JSON schema: %w", err)
+	}
+
+	if err := applySchemaRules(payloadDoc, schemaDoc); err != nil {
+		return fmt.Errorf("payload does not match JSON schema: %w", err)
+	}
+	return nil
+}
+
+// applySchemaRules recursively applies JSON schema rules (type, required, properties).
+func applySchemaRules(value interface{}, schema map[string]interface{}) error {
+	if schemaType, ok := schema["type"]; ok {
+		typeName, ok := schemaType.(string)
+		if !ok {
+			return fmt.Errorf("schema 'type' must be a string")
+		}
+		if err := checkJSONType(value, typeName); err != nil {
+			return err
+		}
+	}
+
+	obj, isObj := value.(map[string]interface{})
+
+	if required, ok := schema["required"]; ok {
+		requiredFields, ok := required.([]interface{})
+		if !ok {
+			return fmt.Errorf("schema 'required' must be an array")
+		}
+		if !isObj {
+			return fmt.Errorf("payload must be an object to validate required fields")
+		}
+		for _, f := range requiredFields {
+			field, _ := f.(string)
+			if _, exists := obj[field]; !exists {
+				return fmt.Errorf("required field %q is missing", field)
+			}
+		}
+	}
+
+	if properties, ok := schema["properties"]; ok && isObj {
+		propsMap, ok := properties.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("schema 'properties' must be an object")
+		}
+		for fieldName, fieldSchema := range propsMap {
+			if fieldValue, exists := obj[fieldName]; exists {
+				fieldSchemaMap, ok := fieldSchema.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if err := applySchemaRules(fieldValue, fieldSchemaMap); err != nil {
+					return fmt.Errorf("field %q: %w", fieldName, err)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkJSONType verifies that a JSON value matches the declared schema type.
+func checkJSONType(value interface{}, schemaType string) error {
+	switch schemaType {
+	case "object":
+		if _, ok := value.(map[string]interface{}); !ok {
+			return fmt.Errorf("expected type object, got %T", value)
+		}
+	case "array":
+		if _, ok := value.([]interface{}); !ok {
+			return fmt.Errorf("expected type array, got %T", value)
+		}
+	case "string":
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("expected type string, got %T", value)
+		}
+	case "number":
+		if _, ok := value.(float64); !ok {
+			return fmt.Errorf("expected type number, got %T", value)
+		}
+	case "integer":
+		f, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("expected type integer, got %T", value)
+		}
+		if f != float64(int64(f)) {
+			return fmt.Errorf("expected integer value, got %v", f)
+		}
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("expected type boolean, got %T", value)
+		}
+	case "null":
+		if value != nil {
+			return fmt.Errorf("expected null, got %T", value)
+		}
+	}
+	return nil
 }
 
 // mapPayloadToVariables maps webhook payload to workflow variables

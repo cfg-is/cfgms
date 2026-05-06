@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -1008,6 +1009,275 @@ func TestHandleWebhookNoAuthHeadersInWorkflowVariables(t *testing.T) {
 
 	// Safe headers must still be present.
 	assert.Contains(t, combined, "safe-value", "non-auth headers must still be present")
+}
+
+// TestWebhookPayloadSchemaValidation covers valid payload, invalid payload, and no-schema cases.
+func TestWebhookPayloadSchemaValidation(t *testing.T) {
+	handler := &HTTPWebhookHandler{}
+
+	tests := []struct {
+		name          string
+		webhook       *WebhookConfig
+		payload       []byte
+		expectError   bool
+		errorContains string
+	}{
+		{
+			name: "no schema configured accepts any payload",
+			webhook: &WebhookConfig{
+				PayloadValidation: &PayloadValidation{
+					JSONSchema: "",
+				},
+			},
+			payload:     []byte(`{"anything": "accepted"}`),
+			expectError: false,
+		},
+		{
+			name: "valid payload matching schema",
+			webhook: &WebhookConfig{
+				PayloadValidation: &PayloadValidation{
+					JSONSchema: `{"type": "object", "required": ["id", "name"], "properties": {"id": {"type": "string"}, "name": {"type": "string"}}}`,
+				},
+			},
+			payload:     []byte(`{"id": "123", "name": "test", "extra": "ignored"}`),
+			expectError: false,
+		},
+		{
+			name: "payload missing required field rejected with schema error",
+			webhook: &WebhookConfig{
+				PayloadValidation: &PayloadValidation{
+					JSONSchema: `{"type": "object", "required": ["id", "name"]}`,
+				},
+			},
+			payload:       []byte(`{"id": "123"}`),
+			expectError:   true,
+			errorContains: "payload does not match JSON schema",
+		},
+		{
+			name: "payload wrong root type rejected",
+			webhook: &WebhookConfig{
+				PayloadValidation: &PayloadValidation{
+					JSONSchema: `{"type": "object"}`,
+				},
+			},
+			payload:       []byte(`["not", "an", "object"]`),
+			expectError:   true,
+			errorContains: "payload does not match JSON schema",
+		},
+		{
+			name: "property type mismatch rejected",
+			webhook: &WebhookConfig{
+				PayloadValidation: &PayloadValidation{
+					JSONSchema: `{"type": "object", "properties": {"count": {"type": "integer"}}}`,
+				},
+			},
+			payload:       []byte(`{"count": "not-a-number"}`),
+			expectError:   true,
+			errorContains: "payload does not match JSON schema",
+		},
+		{
+			name: "invalid JSON schema config returns error",
+			webhook: &WebhookConfig{
+				PayloadValidation: &PayloadValidation{
+					JSONSchema: `{invalid json`,
+				},
+			},
+			payload:       []byte(`{"id": "123"}`),
+			expectError:   true,
+			errorContains: "invalid JSON schema",
+		},
+		{
+			name: "no validation config accepts payload",
+			webhook: &WebhookConfig{
+				PayloadValidation: nil,
+			},
+			payload:     []byte(`{"anything": "accepted"}`),
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := handler.validatePayload(tt.webhook, tt.payload)
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestWebhookBasicAuth covers correct credentials, wrong password, and missing header cases.
+func TestWebhookBasicAuth(t *testing.T) {
+	handler := &HTTPWebhookHandler{}
+
+	auth := &WebhookAuth{
+		BasicAuth: &BasicAuth{
+			Username: "admin",
+			Password: "s3cr3t!",
+		},
+	}
+
+	basicHeader := func(username, password string) string {
+		return "Basic " + base64.StdEncoding.EncodeToString([]byte(username+":"+password))
+	}
+
+	tests := []struct {
+		name        string
+		headers     map[string]string
+		expectError bool
+		errorIs     error
+	}{
+		{
+			name:        "correct credentials accepted",
+			headers:     map[string]string{"Authorization": basicHeader("admin", "s3cr3t!")},
+			expectError: false,
+		},
+		{
+			name:        "wrong password rejected",
+			headers:     map[string]string{"Authorization": basicHeader("admin", "wrong")},
+			expectError: true,
+			errorIs:     errBasicAuthUnauthorized,
+		},
+		{
+			name:        "wrong username rejected",
+			headers:     map[string]string{"Authorization": basicHeader("other", "s3cr3t!")},
+			expectError: true,
+			errorIs:     errBasicAuthUnauthorized,
+		},
+		{
+			name:        "missing Authorization header rejected",
+			headers:     map[string]string{},
+			expectError: true,
+			errorIs:     errBasicAuthUnauthorized,
+		},
+		{
+			name:        "malformed base64 rejected",
+			headers:     map[string]string{"Authorization": "Basic not-valid-base64!!!"},
+			expectError: true,
+			errorIs:     errBasicAuthUnauthorized,
+		},
+		{
+			name:        "non-Basic scheme rejected",
+			headers:     map[string]string{"Authorization": "Bearer some-token"},
+			expectError: true,
+			errorIs:     errBasicAuthUnauthorized,
+		},
+		{
+			name:        "password mismatch confirms split on first colon only",
+			headers:     map[string]string{"Authorization": basicHeader("admin", "s3cr3t!:extra")},
+			expectError: true, // "s3cr3t!:extra" != "s3cr3t!" — correct first-colon split, wrong password
+			errorIs:     errBasicAuthUnauthorized,
+		},
+	}
+
+	// Nil BasicAuth config tested separately since it requires a different auth struct.
+	t.Run("nil BasicAuth config returns configuration error", func(t *testing.T) {
+		err := handler.validateBasicAuth(&WebhookAuth{BasicAuth: nil}, map[string]string{
+			"Authorization": basicHeader("admin", "s3cr3t!"),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "basic auth configuration is required")
+	})
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := handler.validateBasicAuth(auth, tt.headers)
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorIs != nil {
+					assert.ErrorIs(t, err, tt.errorIs)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestWebhookBasicAuthHTTP verifies that the HTTP handler returns 401 for missing or wrong
+// Basic auth credentials and 202 for correct credentials.
+func TestWebhookBasicAuthHTTP(t *testing.T) {
+	mockTriggerManager := &MockTriggerManager{}
+	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	handler := NewHTTPWebhookHandler(mockTriggerManager, mockWorkflowTrigger, "localhost", 0)
+
+	trigger := &Trigger{
+		ID:           "webhook-basic",
+		Type:         TriggerTypeWebhook,
+		WorkflowName: "test-workflow",
+		Webhook: &WebhookConfig{
+			Path:    "/webhook/basic-auth-test",
+			Method:  []string{"POST"},
+			Enabled: true,
+			Authentication: &WebhookAuth{
+				Type: WebhookAuthBasic,
+				BasicAuth: &BasicAuth{
+					Username: "user",
+					Password: "pass",
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	err := handler.RegisterWebhook(ctx, trigger)
+	require.NoError(t, err)
+
+	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(
+		&workflow.WorkflowExecution{
+			ID:           "exec-basic",
+			WorkflowName: "test-workflow",
+			Status:       workflow.StatusRunning,
+			StartTime:    time.Now(),
+		}, nil)
+
+	basicHeader := func(username, password string) string {
+		return "Basic " + base64.StdEncoding.EncodeToString([]byte(username+":"+password))
+	}
+
+	tests := []struct {
+		name           string
+		authHeader     string
+		expectedStatus int
+	}{
+		{
+			name:           "missing Authorization header returns 401",
+			authHeader:     "",
+			expectedStatus: http.StatusUnauthorized,
+		},
+		{
+			name:           "wrong password returns 401",
+			authHeader:     basicHeader("user", "wrong"),
+			expectedStatus: http.StatusUnauthorized,
+		},
+		{
+			name:           "correct credentials returns 202",
+			authHeader:     basicHeader("user", "pass"),
+			expectedStatus: http.StatusAccepted,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest("POST", "/webhook/basic-auth-test",
+				strings.NewReader(`{"event": "test"}`))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
+			}
+
+			rr := httptest.NewRecorder()
+			handler.router.ServeHTTP(rr, req)
+
+			assert.Equal(t, tt.expectedStatus, rr.Code)
+		})
+	}
 }
 
 // Helper function to generate HMAC signature for tests
