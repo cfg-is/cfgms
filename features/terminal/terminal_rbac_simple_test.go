@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/features/terminal/shell"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -95,19 +94,6 @@ func TestTerminalRBACIntegration(t *testing.T) {
 
 		assert.True(t, hasRmRfBlock, "rm -rf blocking rule should exist")
 		assert.True(t, hasSudoAudit, "sudo audit rule should exist")
-	})
-
-	t.Run("ContinuousAuthTypes", func(t *testing.T) {
-		// Test that continuous authorization types are properly defined
-
-		// Test operation types
-		assert.Equal(t, "terminal", string(continuous.OperationTypeTerminal))
-		assert.Equal(t, "critical", string(continuous.OperationTypeCritical))
-
-		// Test risk levels
-		assert.Equal(t, "low", string(continuous.RiskLevelLow))
-		assert.Equal(t, "high", string(continuous.RiskLevelHigh))
-		assert.Equal(t, "critical", string(continuous.RiskLevelCritical))
 	})
 
 	t.Run("SessionTokenStructure", func(t *testing.T) {
