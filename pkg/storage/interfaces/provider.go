@@ -45,6 +45,7 @@ type BusinessStoreBundle struct {
 	Session           business.SessionStore
 	Command           business.CommandStore
 	Trigger           business.TriggerStore
+	Push              business.PushStore
 }
 
 // BusinessStoreOpener is an optional StorageProvider extension. A provider that
@@ -74,6 +75,7 @@ type StorageProvider interface {
 	CreateStewardStore(config map[string]interface{}) (business.StewardStore, error)
 	CreateCommandStore(config map[string]interface{}) (business.CommandStore, error)
 	CreateTriggerStore(config map[string]interface{}) (business.TriggerStore, error)
+	CreatePushStore(config map[string]interface{}) (business.PushStore, error)
 
 	// Provider capabilities and metadata
 	GetCapabilities() ProviderCapabilities
@@ -477,6 +479,11 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		return nil, fmt.Errorf("failed to create trigger store: %w", err)
 	}
 
+	pushStore, err := provider.CreatePushStore(config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create push store: %w", err)
+	}
+
 	return &StorageManager{
 		providerName:           providerName,
 		provider:               provider,
@@ -490,6 +497,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		stewardStore:           stewardStore,
 		commandStore:           commandStore,
 		triggerStore:           triggerStore,
+		pushStore:              pushStore,
 	}, nil
 }
 
@@ -507,6 +515,7 @@ type StorageManager struct {
 	stewardStore           business.StewardStore
 	commandStore           business.CommandStore
 	triggerStore           business.TriggerStore
+	pushStore              business.PushStore
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -569,6 +578,11 @@ func (sm *StorageManager) GetTriggerStore() business.TriggerStore {
 	return sm.triggerStore
 }
 
+// GetPushStore returns the push-state storage interface (nil if not supported by provider).
+func (sm *StorageManager) GetPushStore() business.PushStore {
+	return sm.pushStore
+}
+
 // GetCapabilities returns the provider's capabilities.
 // Returns a zero-value ProviderCapabilities when the manager has no backing provider
 // (e.g. a composite manager created with NewStorageManagerFromStores).
@@ -610,6 +624,7 @@ func (sm *StorageManager) Close() error {
 		sm.stewardStore,
 		sm.commandStore,
 		sm.triggerStore,
+		sm.pushStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -681,6 +696,7 @@ func NewStorageManagerFromStores(
 	stewardStore business.StewardStore,
 	commandStore business.CommandStore,
 	triggerStore business.TriggerStore,
+	pushStore business.PushStore,
 ) *StorageManager {
 	return &StorageManager{
 		providerName:           "composite",
@@ -695,6 +711,7 @@ func NewStorageManagerFromStores(
 		stewardStore:           stewardStore,
 		commandStore:           commandStore,
 		triggerStore:           triggerStore,
+		pushStore:              pushStore,
 	}
 }
 
@@ -749,7 +766,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 			configStore, auditStore,
 			bundle.RBAC, bundle.Tenant, bundle.ClientTenant,
 			bundle.RegistrationToken, bundle.Session,
-			stewardStore, bundle.Command, bundle.Trigger,
+			stewardStore, bundle.Command, bundle.Trigger, bundle.Push,
 		), nil
 	}
 
@@ -781,10 +798,14 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create trigger store (sqlite): %w", err)
 	}
+	pushStore, err := sqProvider.CreatePushStore(sqliteCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create push store (sqlite): %w", err)
+	}
 
 	return NewStorageManagerFromStores(
 		configStore, auditStore, rbacStore,
 		tenantStore, clientTenantStore, registrationTokenStore,
-		sessionStore, stewardStore, commandStore, triggerStore,
+		sessionStore, stewardStore, commandStore, triggerStore, pushStore,
 	), nil
 }

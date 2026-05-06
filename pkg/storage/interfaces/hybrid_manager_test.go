@@ -373,6 +373,10 @@ func (p *mockProvider) CreateTriggerStore(_ map[string]interface{}) (business.Tr
 	return nil, business.ErrNotSupported
 }
 
+func (p *mockProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:   true,
