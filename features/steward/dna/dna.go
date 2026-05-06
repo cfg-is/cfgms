@@ -148,7 +148,7 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 		LastUpdated: timestamppb.New(now),
 
 		// Sync metadata (will be updated by steward with config info)
-		ConfigHash:      "", // Will be set when steward loads configuration
+		ConfigHash:      "",
 		LastSyncTime:    timestamppb.New(now),
 		AttributeCount:  c.safeInt32(len(attributes)), // Safe conversion with bounds validation
 		SyncFingerprint: c.generateSyncFingerprint(systemID, attributes, ""),
