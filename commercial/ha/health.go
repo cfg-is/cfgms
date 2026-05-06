@@ -60,8 +60,11 @@ func NewHealthChecker(cfg *HealthCheckConfig, logger logging.Logger, manager *Ma
 	}
 }
 
-// Start begins health checking
-func (h *HealthChecker) Start(ctx context.Context) error {
+// Start begins health checking. initialChecks is a snapshot of the checks
+// registered at the time Start is called; the caller must hold m.mu while
+// building the snapshot to ensure it is consistent with what Manager.Start
+// records before launching this goroutine.
+func (h *HealthChecker) Start(ctx context.Context, initialChecks map[string]HealthCheckFunc) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -72,8 +75,11 @@ func (h *HealthChecker) Start(ctx context.Context) error {
 	h.ctx, h.cancel = context.WithCancel(ctx)
 	h.started = true
 
-	// Initialize health check states
-	h.initializeCheckStates()
+	// Initialize health check states from the caller-supplied snapshot.
+	// Using a parameter (rather than reading h.manager.healthChecks directly)
+	// avoids acquiring m.mu here, which would deadlock because Manager.Start
+	// already holds m.mu when it calls this method.
+	h.initializeCheckStates(initialChecks)
 
 	// Start periodic health checking
 	go h.periodicHealthCheck()
@@ -106,9 +112,11 @@ func (h *HealthChecker) Stop(ctx context.Context) error {
 	return nil
 }
 
-// initializeCheckStates initializes health check states
-func (h *HealthChecker) initializeCheckStates() {
-	for name := range h.manager.healthChecks {
+// initializeCheckStates seeds h.checkStates from a caller-supplied snapshot.
+// Never reads h.manager.healthChecks directly — the snapshot is taken by
+// Manager.Start under m.mu, making the dependency on that lock explicit.
+func (h *HealthChecker) initializeCheckStates(checks map[string]HealthCheckFunc) {
+	for name := range checks {
 		h.checkStates[name] = &healthCheckState{
 			name:         name,
 			currentState: NodeStateHealthy,
@@ -132,28 +140,43 @@ func (h *HealthChecker) periodicHealthCheck() {
 	}
 }
 
-// performHealthChecks performs all registered health checks
+// performHealthChecks performs all registered health checks.
+//
+// Lock ordering: h.mu and m.mu must never be held simultaneously.
+// Manager.Stop holds m.mu then calls h.Stop (which needs h.mu); holding
+// both in the opposite order here causes a deadlock. Instead:
+//  1. Copy healthChecks under m.mu.RLock (no h.mu).
+//  2. Run checks and update h.checkStates under h.mu (no m.mu).
+//  3. Publish results under m.mu.Lock (no h.mu).
 func (h *HealthChecker) performHealthChecks() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	// Step 1: snapshot the registered checks without holding h.mu.
+	// RegisterHealthCheck writes healthChecks under m.mu.Lock, so we must
+	// read it under m.mu.RLock to avoid a data race.
+	h.manager.mu.RLock()
+	checkFuncs := make(map[string]HealthCheckFunc, len(h.manager.healthChecks))
+	for name, fn := range h.manager.healthChecks {
+		checkFuncs[name] = fn
+	}
+	h.manager.mu.RUnlock()
 
+	// Step 2: execute checks and update h.checkStates under h.mu only.
 	checkResults := make(map[string]NodeState)
 	overallState := NodeStateHealthy
 
-	// Perform each health check
-	for name, checkFunc := range h.manager.healthChecks {
+	h.mu.Lock()
+	for name, checkFunc := range checkFuncs {
 		state := h.performSingleHealthCheck(name, checkFunc)
 		checkResults[name] = state
 
-		// Update overall state based on worst individual state
 		if state == NodeStateFailed {
 			overallState = NodeStateFailed
 		} else if state == NodeStateDegraded && overallState == NodeStateHealthy {
 			overallState = NodeStateDegraded
 		}
 	}
+	h.mu.Unlock()
 
-	// Update manager's health status
+	// Step 3: publish results under m.mu only (h.mu already released).
 	h.manager.mu.Lock()
 	h.manager.healthStatus = &HealthStatus{
 		Overall:   overallState,
@@ -161,10 +184,7 @@ func (h *HealthChecker) performHealthChecks() {
 		Timestamp: time.Now(),
 		Details:   make(map[string]string),
 	}
-
-	// Update local node state
 	h.manager.nodeInfo.State = overallState
-
 	h.manager.mu.Unlock()
 
 	h.logger.Debug("Health check completed",
