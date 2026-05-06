@@ -17,10 +17,93 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
+// newTestClusterCfg returns a minimal ClusterConfig that mirrors the old hardcoded
+// Raft defaults (100ms tick, 10 election ticks, 1 heartbeat tick) for tests that
+// do not exercise timing-specific behaviour.
+func newTestClusterCfg() *ClusterConfig {
+	return &ClusterConfig{
+		HeartbeatInterval: 100 * time.Millisecond,
+		ElectionTimeout:   1 * time.Second,
+	}
+}
+
+// TestRaftConsensus_TimingDerivedFromClusterConfig verifies that HeartbeatTick,
+// ElectionTick, and the internal ticker interval are all derived from ClusterConfig
+// rather than hardcoded constants. With HeartbeatInterval=500ms / ElectionTimeout=5s
+// the expected values are: tickInterval=500ms, HeartbeatTick=1, ElectionTick=10.
+func TestRaftConsensus_TimingDerivedFromClusterConfig(t *testing.T) {
+	clusterCfg := &ClusterConfig{
+		HeartbeatInterval: 500 * time.Millisecond,
+		ElectionTimeout:   5 * time.Second,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	nodeInfo := &NodeInfo{ID: "timing-node", State: NodeStateHealthy, Role: NodeRoleFollower}
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, clusterCfg, logging.GetLogger())
+	require.NoError(t, err)
+	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+
+	assert.Equal(t, 500*time.Millisecond, rc.tickInterval, "tickInterval must equal HeartbeatInterval")
+	assert.Equal(t, 1, rc.config.HeartbeatTick, "HeartbeatTick must be 1 (Raft recommendation)")
+	assert.Equal(t, 10, rc.config.ElectionTick, "ElectionTick must equal ElectionTimeout/HeartbeatInterval")
+}
+
+// TestRaftConsensus_NewRaftConsensus_NilClusterCfgReturnsError verifies that a nil
+// ClusterConfig is rejected at construction time with a descriptive error.
+func TestRaftConsensus_NewRaftConsensus_NilClusterCfgReturnsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	nodeInfo := &NodeInfo{ID: "err-node", State: NodeStateHealthy, Role: NodeRoleFollower}
+	_, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, nil, logging.GetLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "clusterCfg")
+}
+
+// TestRaftConsensus_NewRaftConsensus_ZeroHeartbeatIntervalReturnsError verifies that
+// a non-positive HeartbeatInterval is rejected at construction time.
+func TestRaftConsensus_NewRaftConsensus_ZeroHeartbeatIntervalReturnsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	nodeInfo := &NodeInfo{ID: "err-node", State: NodeStateHealthy, Role: NodeRoleFollower}
+	cfg := &ClusterConfig{HeartbeatInterval: 0, ElectionTimeout: 1 * time.Second}
+	_, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, cfg, logging.GetLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HeartbeatInterval")
+}
+
+// TestRaftConsensus_NewRaftConsensus_ZeroElectionTimeoutReturnsError verifies that
+// a non-positive ElectionTimeout is rejected at construction time.
+func TestRaftConsensus_NewRaftConsensus_ZeroElectionTimeoutReturnsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	nodeInfo := &NodeInfo{ID: "err-node", State: NodeStateHealthy, Role: NodeRoleFollower}
+	cfg := &ClusterConfig{HeartbeatInterval: 100 * time.Millisecond, ElectionTimeout: 0}
+	_, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, cfg, logging.GetLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ElectionTimeout")
+}
+
+// TestRaftConsensus_NewRaftConsensus_ElectionTickTooSmallReturnsError verifies that
+// an ElectionTimeout less than 5× HeartbeatInterval is rejected (Raft safety requirement).
+func TestRaftConsensus_NewRaftConsensus_ElectionTickTooSmallReturnsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	nodeInfo := &NodeInfo{ID: "err-node", State: NodeStateHealthy, Role: NodeRoleFollower}
+	// ElectionTimeout / HeartbeatInterval = 2, which is < 5×HeartbeatTick (= 5).
+	cfg := &ClusterConfig{HeartbeatInterval: 500 * time.Millisecond, ElectionTimeout: 1 * time.Second}
+	_, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, cfg, logging.GetLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ElectionTimeout")
+}
+
 func TestRaftConsensus_propose_logsError(t *testing.T) {
+	// pkgtesting.MockLogger is used here because this test asserts on captured log output.
 	mock := pkgtesting.NewMockLogger(true)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -32,7 +115,7 @@ func TestRaftConsensus_propose_logsError(t *testing.T) {
 		Role:  NodeRoleFollower,
 	}
 
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, mock)
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), mock)
 	require.NoError(t, err)
 
 	// Stop the underlying raft node so that Propose returns ErrStopped.
@@ -64,8 +147,6 @@ func TestRaftConsensus_propose_logsError(t *testing.T) {
 // encodes the command and sends it through proposeC, and that after the Raft loop
 // processes the entry, GetClusterNodes returns the updated NodeInfo.
 func TestRaftConsensus_ProposeNodeUpdate_AppliedViaRaft(t *testing.T) {
-	mock := pkgtesting.NewMockLogger(true)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -78,7 +159,7 @@ func TestRaftConsensus_ProposeNodeUpdate_AppliedViaRaft(t *testing.T) {
 
 	// Single-peer list so StartNode bootstraps a new single-node cluster.
 	peers := []raft.Peer{{ID: 1}}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, mock)
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), logging.GetLogger())
 	require.NoError(t, err)
 	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
@@ -113,13 +194,11 @@ func TestRaftConsensus_ProposeNodeUpdate_AppliedViaRaft(t *testing.T) {
 // TestRaftConsensus_ProposeAddNode_SubmitsToChannel verifies ProposeAddNode does not
 // block the caller and enqueues a ConfChange of type ConfChangeAddNode to confChangeC.
 func TestRaftConsensus_ProposeAddNode_SubmitsToChannel(t *testing.T) {
-	mock := pkgtesting.NewMockLogger(true)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "node-1", Address: "127.0.0.1:2000"}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, mock)
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
 	require.NoError(t, err)
 	// Stop before the deferred Stop — stopOnce makes this safe; both return nil.
 	rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
@@ -143,13 +222,11 @@ func TestRaftConsensus_ProposeAddNode_SubmitsToChannel(t *testing.T) {
 // TestRaftConsensus_ProposeRemoveNode_SubmitsToChannel verifies ProposeRemoveNode does
 // not block and enqueues a ConfChange of type ConfChangeRemoveNode to confChangeC.
 func TestRaftConsensus_ProposeRemoveNode_SubmitsToChannel(t *testing.T) {
-	mock := pkgtesting.NewMockLogger(true)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "node-1", Address: "127.0.0.1:3000"}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, mock)
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
 	require.NoError(t, err)
 	rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
@@ -169,13 +246,11 @@ func TestRaftConsensus_ProposeRemoveNode_SubmitsToChannel(t *testing.T) {
 // TestRaftConsensus_ProposeNodeUpdate_ChannelFull_ReturnsError verifies that
 // ProposeNodeUpdate returns a non-nil error rather than blocking when proposeC is full.
 func TestRaftConsensus_ProposeNodeUpdate_ChannelFull_ReturnsError(t *testing.T) {
-	mock := pkgtesting.NewMockLogger(true)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "node-fill", Address: "127.0.0.1:4000"}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, mock)
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
 	require.NoError(t, err)
 
 	// Stop blocks until runRaft exits, guaranteeing proposeC won't be drained.
@@ -194,13 +269,11 @@ func TestRaftConsensus_ProposeNodeUpdate_ChannelFull_ReturnsError(t *testing.T) 
 // TestRaftConsensus_ProposeAddNode_ChannelFull_ReturnsError verifies that
 // ProposeAddNode returns a non-nil error rather than blocking when confChangeC is full.
 func TestRaftConsensus_ProposeAddNode_ChannelFull_ReturnsError(t *testing.T) {
-	mock := pkgtesting.NewMockLogger(true)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "node-add-fill", Address: "127.0.0.1:5000"}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, mock)
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
 	require.NoError(t, err)
 
 	// Stop blocks until runRaft exits, guaranteeing confChangeC won't be drained.
@@ -219,13 +292,11 @@ func TestRaftConsensus_ProposeAddNode_ChannelFull_ReturnsError(t *testing.T) {
 // TestRaftConsensus_ProposeRemoveNode_ChannelFull_ReturnsError verifies that
 // ProposeRemoveNode returns a non-nil error rather than blocking when confChangeC is full.
 func TestRaftConsensus_ProposeRemoveNode_ChannelFull_ReturnsError(t *testing.T) {
-	mock := pkgtesting.NewMockLogger(true)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "node-rem-fill", Address: "127.0.0.1:7000"}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, mock)
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
 	require.NoError(t, err)
 
 	// Stop blocks until runRaft exits, guaranteeing confChangeC won't be drained.
