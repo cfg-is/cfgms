@@ -34,6 +34,9 @@ var errBearerAuthRateLimited = errors.New("bearer auth rate limit exceeded")
 // errBasicAuthUnauthorized is returned when Basic auth credentials are missing or invalid.
 var errBasicAuthUnauthorized = errors.New("basic auth unauthorized")
 
+// errPayloadValidationFailed is returned when a webhook payload fails schema or structural validation.
+var errPayloadValidationFailed = errors.New("payload validation failed")
+
 // HTTPWebhookHandler implements the WebhookHandler interface using HTTP endpoints
 type HTTPWebhookHandler struct {
 	logger              *logging.ModuleLogger
@@ -257,7 +260,7 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 			"trigger_id", triggerID,
 			"error", err.Error())
 
-		return execution, err
+		return execution, fmt.Errorf("%w: %v", errPayloadValidationFailed, err)
 	}
 
 	// Authenticate request
@@ -494,6 +497,13 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 				"trigger_id", triggerID,
 				"remote_addr", r.RemoteAddr)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if errors.Is(err, errPayloadValidationFailed) {
+			logger.WarnCtx(ctx, "Webhook payload validation failed",
+				"trigger_id", triggerID,
+				"remote_addr", r.RemoteAddr)
+			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
 		logger.ErrorCtx(ctx, "Failed to process webhook",

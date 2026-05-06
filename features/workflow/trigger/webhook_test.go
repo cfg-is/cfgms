@@ -1280,6 +1280,76 @@ func TestWebhookBasicAuthHTTP(t *testing.T) {
 	}
 }
 
+// TestWebhookPayloadSchemaValidationHTTP verifies that the HTTP handler returns 400 for
+// payloads that fail JSON schema validation and 202 for valid payloads.
+func TestWebhookPayloadSchemaValidationHTTP(t *testing.T) {
+	mockTriggerManager := &MockTriggerManager{}
+	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	handler := NewHTTPWebhookHandler(mockTriggerManager, mockWorkflowTrigger, "localhost", 0)
+
+	trigger := &Trigger{
+		ID:           "webhook-schema",
+		Type:         TriggerTypeWebhook,
+		WorkflowName: "test-workflow",
+		Webhook: &WebhookConfig{
+			Path:    "/webhook/schema-test",
+			Method:  []string{"POST"},
+			Enabled: true,
+			PayloadValidation: &PayloadValidation{
+				JSONSchema: `{"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}`,
+			},
+		},
+	}
+
+	ctx := context.Background()
+	err := handler.RegisterWebhook(ctx, trigger)
+	require.NoError(t, err)
+
+	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(
+		&workflow.WorkflowExecution{
+			ID:           "exec-schema",
+			WorkflowName: "test-workflow",
+			Status:       workflow.StatusRunning,
+			StartTime:    time.Now(),
+		}, nil)
+
+	tests := []struct {
+		name           string
+		payload        string
+		expectedStatus int
+	}{
+		{
+			name:           "schema-invalid payload returns 400",
+			payload:        `{"name": "missing-id-field"}`,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "wrong root type returns 400",
+			payload:        `["not", "an", "object"]`,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "valid payload returns 202",
+			payload:        `{"id": "abc123"}`,
+			expectedStatus: http.StatusAccepted,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest("POST", "/webhook/schema-test",
+				strings.NewReader(tt.payload))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+
+			rr := httptest.NewRecorder()
+			handler.router.ServeHTTP(rr, req)
+
+			assert.Equal(t, tt.expectedStatus, rr.Code)
+		})
+	}
+}
+
 // Helper function to generate HMAC signature for tests
 func generateHMACSignature(secret string, payload []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
