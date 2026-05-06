@@ -9,7 +9,6 @@ package ha
 import (
 	"context"
 	"fmt"
-	"math"
 	"sync"
 	"time"
 
@@ -283,8 +282,8 @@ func (fm *failoverManager) executeFailover(ctx context.Context, reason string, m
 			failoverErr = fmt.Errorf("leader election failed: %w", err)
 		}
 	} else {
-		// For single server or blue-green mode, promote local node
-		fm.manager.promoteToLeader()
+		// For single server or blue-green mode, the local node is always the leader.
+		fm.logger.Info("Non-cluster mode failover: local node is leader by default")
 	}
 
 	// Step 2: Migrate sessions if session sync is enabled
@@ -357,136 +356,13 @@ func (fm *failoverManager) executeFailover(ctx context.Context, reason string, m
 	return nil
 }
 
-// electNewLeader elects a new leader from available nodes with geographic awareness
+// electNewLeader defers to Raft consensus for leader election.
+// Raft is the sole authority for leader election; explicit promote/demote calls
+// have been removed. The Raft protocol (CheckQuorum, PreVote) handles step-down
+// and promotion automatically.
 func (fm *failoverManager) electNewLeader(ctx context.Context) error {
-	nodes, err := fm.manager.GetClusterNodes()
-	if err != nil {
-		return fmt.Errorf("failed to get cluster nodes: %w", err)
-	}
-
-	// Find healthy nodes that can become leader
-	candidates := make([]*NodeInfo, 0)
-	for _, node := range nodes {
-		if node.State == NodeStateHealthy && node.Role != NodeRoleLeader {
-			candidates = append(candidates, node)
-		}
-	}
-
-	if len(candidates) == 0 {
-		return fmt.Errorf("no healthy candidates for leader election")
-	}
-
-	// Apply geographic-aware leader selection
-	newLeader := fm.selectGeographicAwareLeader(candidates)
-
-	// Check if this node should become the leader
-	localNode := fm.manager.GetLocalNode()
-	if newLeader.ID == localNode.ID {
-		fm.manager.promoteToLeader()
-		fm.logger.Info("Local node elected as new leader",
-			"node_id", localNode.ID,
-			"region", localNode.Region)
-	} else {
-		fm.manager.demoteFromLeader()
-		fm.logger.Info("Remote node elected as new leader",
-			"node_id", newLeader.ID,
-			"region", newLeader.Region)
-	}
-
+	fm.logger.Info("Leader election deferred to Raft consensus — Raft is the sole election authority")
 	return nil
-}
-
-// selectGeographicAwareLeader selects the best leader candidate considering geographic factors
-func (fm *failoverManager) selectGeographicAwareLeader(candidates []*NodeInfo) *NodeInfo {
-	if len(candidates) == 1 {
-		return candidates[0]
-	}
-
-	localNode := fm.manager.GetLocalNode()
-	if localNode == nil {
-		// No local context, use first candidate
-		return candidates[0]
-	}
-
-	// Scoring criteria for leader selection (higher score = better candidate):
-	// 1. Same region as current leader (for session continuity) - 40%
-	// 2. Lowest average latency to other nodes - 30%
-	// 3. Regional distribution balance - 20%
-	// 4. Node capabilities and resources - 10%
-
-	var bestCandidate *NodeInfo
-	var highestScore float64
-
-	for _, candidate := range candidates {
-		score := fm.calculateLeaderScore(candidate, localNode, candidates)
-		if score > highestScore {
-			highestScore = score
-			bestCandidate = candidate
-		}
-	}
-
-	if bestCandidate == nil {
-		bestCandidate = candidates[0] // Fallback
-	}
-
-	fm.logger.Debug("Leader selected with geographic awareness",
-		"selected_node", bestCandidate.ID,
-		"selected_region", bestCandidate.Region,
-		"score", highestScore)
-
-	return bestCandidate
-}
-
-// calculateLeaderScore calculates a score for leader election candidacy
-func (fm *failoverManager) calculateLeaderScore(candidate, localNode *NodeInfo, allCandidates []*NodeInfo) float64 {
-	score := 0.0
-
-	// Base score for being healthy
-	score += 1.0
-
-	// Same region bonus (session continuity)
-	if candidate.Region == localNode.Region {
-		score += 0.4
-	}
-
-	// Latency component - lower average latency to other nodes is better
-	if len(candidate.Latency) > 0 {
-		totalLatency := time.Duration(0)
-		count := 0
-		for _, otherNode := range allCandidates {
-			if otherNode.ID != candidate.ID {
-				if latency, exists := candidate.Latency[otherNode.ID]; exists {
-					totalLatency += latency
-					count++
-				}
-			}
-		}
-		if count > 0 {
-			avgLatency := totalLatency / time.Duration(count)
-			// Convert to score (lower latency = higher score)
-			latencyScore := math.Max(0, 1.0-(float64(avgLatency.Milliseconds())/500.0)) * 0.3
-			score += latencyScore
-		}
-	}
-
-	// Regional distribution bonus - prefer distributing leadership across regions
-	regionCount := make(map[string]int)
-	for _, node := range allCandidates {
-		regionCount[node.Region]++
-	}
-
-	// Prefer candidates from less represented regions
-	if total := len(allCandidates); total > 0 {
-		regionBalance := 1.0 - (float64(regionCount[candidate.Region]) / float64(total))
-		score += regionBalance * 0.2
-	}
-
-	// Capability bonus (simplified - could be enhanced)
-	if len(candidate.Capabilities) > 0 {
-		score += 0.1
-	}
-
-	return score
 }
 
 // migrateSessions migrates sessions during failover with geographic optimization

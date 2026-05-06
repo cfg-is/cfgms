@@ -314,24 +314,12 @@ func (sbd *splitBrainDetector) performQuorumValidation() {
 		"required_quorum", requiredQuorum,
 		"has_quorum", hasQuorum)
 
-	// If we don't have quorum and we're the leader, step down
+	// If we don't have quorum and we're the leader, Raft handles step-down automatically.
+	// CheckQuorum:true in raft.Config causes the leader to step down when it can no longer
+	// reach a quorum of peers — no explicit demotion is needed here.
 	if !hasQuorum && sbd.manager.IsLeader() {
-		sbd.logger.Warn("Quorum lost, stepping down as leader")
-		sbd.manager.demoteFromLeader()
-
-		// Notify handlers
-		status := &SplitBrainStatus{
-			Detected:   true,
-			Timestamp:  time.Now(),
-			Resolution: "stepped_down_no_quorum",
-			Details: map[string]interface{}{
-				"healthy_nodes":   healthyNodes,
-				"required_quorum": requiredQuorum,
-				"action":          "step_down",
-			},
-		}
-
-		sbd.handleSplitBrainDetected(status)
+		sbd.logger.Warn("Quorum lost — Raft CheckQuorum:true will step down the leader automatically",
+			"healthy_nodes", healthyNodes, "required_quorum", requiredQuorum)
 	}
 }
 
@@ -396,10 +384,10 @@ func (sbd *splitBrainDetector) applyQuorumBasedResolution(status *SplitBrainStat
 		}
 	}
 
-	// If we don't have quorum, step down if we're leader
+	// Raft CheckQuorum:true handles leader step-down on quorum loss automatically.
 	if healthyNodes < sbd.manager.cfg.Cluster.MinQuorum && sbd.manager.IsLeader() {
-		sbd.manager.demoteFromLeader()
-		return "stepped_down_no_quorum"
+		sbd.logger.Warn("Quorum lost — Raft will step down the leader via CheckQuorum")
+		return "raft_will_step_down"
 	}
 
 	return "maintaining_quorum"
@@ -407,12 +395,10 @@ func (sbd *splitBrainDetector) applyQuorumBasedResolution(status *SplitBrainStat
 
 // applyOldestLeaderResolution applies oldest leader resolution
 func (sbd *splitBrainDetector) applyOldestLeaderResolution(status *SplitBrainStatus) string {
-	// Find the oldest leader and step down if we're not it
-	// This is a simplified implementation
+	// Raft CheckQuorum:true handles leader step-down — no explicit demotion needed.
 	if sbd.manager.IsLeader() {
-		// For now, always step down - in production, would compare node start times
-		sbd.manager.demoteFromLeader()
-		return "stepped_down_not_oldest"
+		sbd.logger.Warn("Leader resolution — Raft manages step-down via CheckQuorum")
+		return "raft_manages_step_down"
 	}
 
 	return "not_leader"
@@ -420,9 +406,10 @@ func (sbd *splitBrainDetector) applyOldestLeaderResolution(status *SplitBrainSta
 
 // applyStepDownResolution applies step-down resolution
 func (sbd *splitBrainDetector) applyStepDownResolution(status *SplitBrainStatus) string {
+	// Raft CheckQuorum:true handles leader step-down — no explicit demotion needed.
 	if sbd.manager.IsLeader() {
-		sbd.manager.demoteFromLeader()
-		return "stepped_down_split_brain"
+		sbd.logger.Warn("Step-down resolution — Raft manages leader step-down via CheckQuorum")
+		return "raft_manages_step_down"
 	}
 
 	return "not_leader"

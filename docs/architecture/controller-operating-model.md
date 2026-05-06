@@ -544,12 +544,13 @@ The controller runs as a single instance. If it goes down, stewards continue ope
 
 ### Commercial (Cluster)
 
-Multiple controller instances form a Raft consensus cluster:
+Multiple controller instances form a **Raft consensus cluster**. Raft is the sole authority for cluster membership and leader election — there is no static or geographic node discovery layer, and no ad-hoc election logic outside Raft:
 
-- **Leader election** — one node is elected leader and handles writes
-- **State replication** — cfg changes, registration events, and fleet state are replicated across nodes
-- **Automatic failover** — if the leader goes down, a new leader is elected
-- **Split-brain detection** — cluster detects and resolves network partitions
+- **Cluster membership** — determined exclusively by Raft consensus; peers are bootstrapped from the `discovery.config.nodes` list and thereafter managed by Raft configuration changes
+- **Leader election** — Raft consensus elects one node as leader to handle writes; `CheckQuorum:true` causes the leader to step down automatically when it loses quorum, without any explicit demotion call
+- **State replication** — cfg changes, registration events, and fleet state are replicated across nodes via the Raft log
+- **Automatic failover** — if the leader goes down, Raft elects a new leader automatically
+- **Split-brain detection** — the cluster detects and resolves network partitions; quorum-based resolution delegates leader step-down to Raft (`CheckQuorum`) rather than calling explicit demote operations
 - **Session sync** — steward sessions are synchronized across nodes for seamless failover
 
 Stewards connect to any cluster node. If their node goes down, they reconnect to another.

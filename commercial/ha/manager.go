@@ -31,8 +31,7 @@ type Manager struct {
 	// Core components
 	nodeInfo      *NodeInfo
 	healthChecker *HealthChecker
-	raftConsensus *RaftConsensus // NEW: Raft-based consensus (replaces discovery + custom election)
-	discovery     Discovery      // DEPRECATED: Will be removed
+	raftConsensus *RaftConsensus
 	loadBalancer  *loadBalancer
 	failover      *failoverManager
 	splitBrain    *splitBrainDetector
@@ -46,17 +45,11 @@ type Manager struct {
 	cancel         context.CancelFunc
 
 	// Cluster state
-	clusterNodes  map[string]*NodeInfo
-	currentLeader string
-	isLeader      bool
+	clusterNodes map[string]*NodeInfo
 
 	// Health checks
 	healthChecks map[string]HealthCheckFunc
 	healthStatus *HealthStatus
-
-	// Callbacks (reserved for future use)
-	// failoverHandlers    []FailoverHandler
-	// splitBrainHandlers  []SplitBrainHandler
 }
 
 // NewManager creates a new HA manager
@@ -136,7 +129,6 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 			Timestamp: time.Now(),
 			Details:   make(map[string]string),
 		},
-		isLeader: cfg.Mode == SingleServerMode, // Single server is always leader
 	}
 
 	// Add this node to cluster nodes
@@ -231,9 +223,9 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 
-	if m.discovery != nil {
-		if err := m.discovery.Stop(ctx); err != nil {
-			stopErrors = append(stopErrors, fmt.Errorf("discovery stop: %w", err))
+	if m.raftConsensus != nil {
+		if err := m.raftConsensus.Stop(); err != nil {
+			stopErrors = append(stopErrors, fmt.Errorf("raft consensus stop: %w", err))
 		}
 	}
 
@@ -288,22 +280,12 @@ func (m *Manager) GetClusterNodes() ([]*NodeInfo, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Use Raft consensus if available (NEW)
+	// Use Raft consensus as the single source of truth for cluster membership
 	if m.raftConsensus != nil {
 		return m.raftConsensus.GetClusterNodes(), nil
 	}
 
-	// If old discovery is available, use it (DEPRECATED)
-	if m.discovery != nil {
-		discoveredNodes, err := m.discovery.DiscoverNodes()
-		if err != nil {
-			m.logger.Warn("Failed to discover nodes, falling back to local view", "error", err)
-		} else if len(discoveredNodes) > 0 {
-			return discoveredNodes, nil
-		}
-	}
-
-	// Fallback to local cluster nodes map
+	// Fallback to local cluster nodes map (for SingleServerMode)
 	nodes := make([]*NodeInfo, 0, len(m.clusterNodes))
 	for _, node := range m.clusterNodes {
 		// Create a copy to prevent modification
@@ -319,13 +301,17 @@ func (m *Manager) IsLeader() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Use Raft consensus if available (NEW)
+	// Single server mode is always the leader
+	if m.cfg.Mode == SingleServerMode {
+		return true
+	}
+
+	// Raft consensus is the sole authority for leadership
 	if m.raftConsensus != nil {
 		return m.raftConsensus.IsLeader()
 	}
 
-	// Fallback to old method (DEPRECATED)
-	return m.isLeader
+	return false
 }
 
 // GetLeader returns the current cluster leader node
@@ -333,23 +319,18 @@ func (m *Manager) GetLeader() (*NodeInfo, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Use Raft consensus if available (NEW)
+	// Single server mode: local node is always the leader
+	if m.cfg.Mode == SingleServerMode {
+		nodeInfo := *m.nodeInfo
+		return &nodeInfo, nil
+	}
+
+	// Raft consensus is the sole authority for leadership
 	if m.raftConsensus != nil {
 		return m.raftConsensus.GetLeaderInfo()
 	}
 
-	// Fallback to old method (DEPRECATED)
-	if m.currentLeader == "" {
-		return nil, fmt.Errorf("no leader elected")
-	}
-
-	if leader, exists := m.clusterNodes[m.currentLeader]; exists {
-		// Create a copy to prevent modification
-		leaderCopy := *leader
-		return &leaderCopy, nil
-	}
-
-	return nil, fmt.Errorf("leader node not found")
+	return nil, fmt.Errorf("no leader elected")
 }
 
 // RegisterHealthCheck registers a health check function
@@ -388,13 +369,16 @@ func (m *Manager) GetHealth() *HealthStatus {
 // GetRaftTransport returns the Raft transport for HTTP endpoint handling
 func (m *Manager) GetRaftTransport() RaftTransport {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	rc := m.raftConsensus
+	m.mu.RUnlock()
 
-	if m.raftConsensus == nil {
+	if rc == nil {
 		return nil
 	}
 
-	return m.raftConsensus.transport
+	rc.mu.RLock()
+	defer rc.mu.RUnlock()
+	return rc.transport
 }
 
 // initializeComponents initializes HA components based on deployment mode
@@ -423,21 +407,12 @@ func (m *Manager) initializeComponents() error {
 func (m *Manager) initializeClusterComponents() error {
 	var err error
 
-	// Initialize Raft consensus (replaces old discovery + custom leader election)
+	// Initialize Raft consensus (sole source of truth for membership and leader election)
 	m.logger.Info("DEBUG: About to initialize Raft consensus...")
 	if err := m.initializeRaftConsensus(); err != nil {
 		return fmt.Errorf("failed to initialize Raft consensus: %w", err)
 	}
 	m.logger.Info("DEBUG: Raft consensus initialization completed successfully")
-
-	// DEPRECATED: Old discovery - kept temporarily for compatibility
-	// TODO: Remove after full Raft migration
-	m.logger.Info("DEBUG: About to initialize legacy discovery (deprecated)...")
-	m.discovery, err = NewDiscovery(m.cfg.Cluster.Discovery, m.logger, m)
-	if err != nil {
-		return fmt.Errorf("failed to initialize discovery: %w", err)
-	}
-	m.logger.Info("DEBUG: Legacy discovery initialization completed successfully")
 
 	// Re-enabled LoadBalancer component - Step 2 of systematic HA re-enabling
 	m.logger.Info("DEBUG: About to initialize load balancer...")
@@ -544,7 +519,7 @@ func (m *Manager) initializeRaftConsensus() error {
 
 	// Create and attach transport
 	transport := newRaftTransport(nodeID, m.nodeInfo.Address, m.raftConsensus, caCertPEM, m.logger)
-	m.raftConsensus.transport = transport
+	m.raftConsensus.SetTransport(transport)
 
 	// Add peer addresses to transport
 	m.logger.Debug("RAFT_INIT: Configuring peer addresses for transport")
@@ -609,17 +584,9 @@ func hashStringToUint64(s string) uint64 {
 	return hash
 }
 
-// initializeBlueGreenComponents initializes components for blue-green mode
+// initializeBlueGreenComponents initializes components for blue-green mode.
+// Discovery has been removed; blue-green mode requires no additional components.
 func (m *Manager) initializeBlueGreenComponents() error {
-	// For blue-green mode, we need minimal components
-	var err error
-
-	// Initialize a simple discovery for blue-green pair
-	m.discovery, err = NewDiscovery(m.cfg.Cluster.Discovery, m.logger, m)
-	if err != nil {
-		return fmt.Errorf("failed to initialize discovery for blue-green: %w", err)
-	}
-
 	return nil
 }
 
@@ -627,24 +594,13 @@ func (m *Manager) initializeBlueGreenComponents() error {
 func (m *Manager) startClusterMode() error {
 	m.logger.Info("DEBUG: Starting cluster mode components...")
 
-	// Start Raft consensus (NEW - replaces old leader election)
+	// Start Raft consensus (sole authority for membership and leader election)
 	if m.raftConsensus != nil {
 		m.logger.Info("DEBUG: About to start Raft consensus...")
 		if err := m.raftConsensus.Start(); err != nil {
 			return fmt.Errorf("failed to start Raft consensus: %w", err)
 		}
 		m.logger.Info("DEBUG: Raft consensus started successfully")
-	}
-
-	// DEPRECATED: Old discovery - will be removed
-	if m.discovery != nil {
-		m.logger.Info("DEBUG: About to start legacy discovery component (deprecated)...")
-		if err := m.discovery.Start(m.ctx); err != nil {
-			return fmt.Errorf("failed to start discovery: %w", err)
-		}
-		m.logger.Info("DEBUG: Legacy discovery component started successfully")
-	} else {
-		m.logger.Info("DEBUG: Discovery component is nil (disabled), skipping start")
 	}
 
 	if m.failover != nil {
@@ -673,22 +629,13 @@ func (m *Manager) startClusterMode() error {
 		m.logger.Info("DEBUG: Session synchronizer component is nil (disabled), skipping")
 	}
 
-	// Perform initial leader election for cluster mode
-	m.logger.Info("DEBUG: Starting initial leader election...")
-	go m.performInitialLeaderElection()
-
 	m.logger.Info("DEBUG: All cluster mode components started successfully")
 	return nil
 }
 
-// startBlueGreenMode starts components for blue-green mode
+// startBlueGreenMode starts components for blue-green mode.
+// Discovery has been removed; blue-green mode starts with no additional components.
 func (m *Manager) startBlueGreenMode() error {
-	if m.discovery != nil {
-		if err := m.discovery.Start(m.ctx); err != nil {
-			return fmt.Errorf("failed to start discovery for blue-green: %w", err)
-		}
-	}
-
 	return nil
 }
 
@@ -724,200 +671,3 @@ func generateNodeID() (string, error) {
 	}
 	return hex.EncodeToString(bytes), nil
 }
-
-// updateNodeState updates the state of a cluster node (reserved for future use)
-// func (m *Manager) updateNodeState(nodeID string, state NodeState) {
-// 	m.mu.Lock()
-// 	defer m.mu.Unlock()
-//
-// 	if node, exists := m.clusterNodes[nodeID]; exists {
-// 		node.State = state
-// 		node.LastSeen = time.Now()
-// 		m.logger.Debug("Node state updated", "node_id", nodeID, "state", state.String())
-// 	}
-// }
-
-// promoteToLeader promotes this node to leader
-func (m *Manager) promoteToLeader() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if !m.isLeader {
-		m.isLeader = true
-		m.nodeInfo.Role = NodeRoleLeader
-		m.currentLeader = m.nodeInfo.ID
-		m.logger.Info("Node promoted to leader", "node_id", m.nodeInfo.ID)
-	}
-}
-
-// demoteFromLeader demotes this node from leader
-func (m *Manager) demoteFromLeader() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.isLeader {
-		m.isLeader = false
-		m.nodeInfo.Role = NodeRoleFollower
-		m.logger.Info("Node demoted from leader", "node_id", m.nodeInfo.ID)
-	}
-}
-
-// performInitialLeaderElection performs the initial leader election for cluster mode
-// triggerLeaderElection triggers a new leader election with available nodes
-func (m *Manager) triggerLeaderElection(reason string) {
-	m.logger.Info("Triggering leader election", "reason", reason)
-
-	// Get current cluster nodes
-	nodes, err := m.GetClusterNodes()
-	if err != nil {
-		m.logger.Error("Failed to get cluster nodes for election", "error", err)
-		return
-	}
-
-	// Collect healthy candidates
-	var candidates []*NodeInfo
-	for _, node := range nodes {
-		if node.State == NodeStateHealthy {
-			candidates = append(candidates, node)
-		}
-	}
-
-	if len(candidates) == 0 {
-		m.logger.Warn("No healthy candidates for leader election")
-		// As fallback, promote self if no other nodes found
-		localNode := m.GetLocalNode()
-		m.logger.Info("No other candidates found, promoting self as leader", "node_id", localNode.ID)
-		m.promoteToLeader()
-		return
-	}
-
-	// Find the candidate with the lowest ID (lexicographically) - deterministic election
-	var chosenLeader *NodeInfo
-	for _, candidate := range candidates {
-		if chosenLeader == nil || candidate.ID < chosenLeader.ID {
-			chosenLeader = candidate
-		}
-	}
-
-	if chosenLeader == nil {
-		m.logger.Error("Failed to select leader from candidates")
-		return
-	}
-
-	localNode := m.GetLocalNode()
-	m.logger.Info("Leader election result",
-		"chosen_leader", chosenLeader.ID,
-		"local_node", localNode.ID,
-		"total_candidates", len(candidates),
-		"reason", reason)
-
-	if chosenLeader.ID == localNode.ID {
-		// This node should become the leader
-		m.logger.Info("Local node selected as new leader", "node_id", localNode.ID)
-		m.promoteToLeader()
-	} else {
-		// Another node should be the leader
-		m.logger.Info("Remote node selected as new leader",
-			"leader_id", chosenLeader.ID,
-			"local_id", localNode.ID)
-
-		m.mu.Lock()
-		m.currentLeader = chosenLeader.ID
-		m.mu.Unlock()
-	}
-}
-
-func (m *Manager) performInitialLeaderElection() {
-	m.logger.Info("DEBUG: Starting initial leader election process...")
-
-	// Wait for discovery to find other nodes in the cluster
-	// We need to wait until we can see other cluster members before electing a leader
-	const maxRetries = 30 // Max wait time is 60 seconds (30 * 2s)
-	const retryDelay = 2 * time.Second
-
-	// Get expected node count - default for 3-node test cluster
-	expectedNodes := 3
-
-	m.logger.Info("DEBUG: Waiting for node discovery before leader election",
-		"expected_nodes", expectedNodes,
-		"max_wait_time", maxRetries*int(retryDelay.Seconds()))
-
-	var nodes []*NodeInfo
-	var err error
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		// Check if any leader is already elected by another node
-		m.mu.RLock()
-		hasLeader := m.currentLeader != ""
-		m.mu.RUnlock()
-
-		if hasLeader {
-			m.logger.Info("DEBUG: Leader already exists, skipping initial election")
-			return
-		}
-
-		// Try to get cluster nodes
-		nodes, err = m.GetClusterNodes()
-		if err != nil {
-			m.logger.Warn("Failed to get cluster nodes, retrying...", "error", err, "attempt", attempt+1)
-			time.Sleep(retryDelay)
-			continue
-		}
-
-		// Count healthy nodes
-		healthyNodes := 0
-		for _, node := range nodes {
-			if node.State == NodeStateHealthy {
-				healthyNodes++
-			}
-		}
-
-		m.logger.Debug("DEBUG: Discovery progress",
-			"discovered_nodes", len(nodes),
-			"healthy_nodes", healthyNodes,
-			"expected_nodes", expectedNodes,
-			"attempt", attempt+1)
-
-		// If we've discovered enough nodes (at least 2 for a 3-node cluster), proceed with election
-		minNodesForElection := (expectedNodes + 1) / 2 // Majority of expected nodes
-		if healthyNodes >= minNodesForElection {
-			m.logger.Info("DEBUG: Sufficient nodes discovered for leader election",
-				"healthy_nodes", healthyNodes,
-				"min_required", minNodesForElection)
-			break
-		}
-
-		time.Sleep(retryDelay)
-	}
-
-	// Final check for existing leader after discovery wait
-	m.mu.RLock()
-	hasLeader := m.currentLeader != ""
-	m.mu.RUnlock()
-
-	if hasLeader {
-		m.logger.Info("DEBUG: Leader already exists after discovery wait, skipping election")
-		return
-	}
-
-	// Use the common election logic
-	m.triggerLeaderElection("initial_election")
-}
-
-// getExternalAddress determines the external address for the node (reserved for future use)
-// func getExternalAddress() string {
-// 	// Try to get the external address from the configuration or environment
-// 	if addr := os.Getenv("CFGMS_HA_EXTERNAL_ADDRESS"); addr != "" {
-// 		return addr
-// 	}
-//
-// 	// Fallback to detecting the local IP address
-// 	conn, err := net.Dial("udp", "8.8.8.8:80")
-// 	if err != nil {
-// 		return "127.0.0.1:8080" // Default fallback
-// 	}
-// 	defer func() { _ = conn.Close() }()
-//
-// 	localAddr := conn.LocalAddr().(*net.UDPAddr)
-// 	return fmt.Sprintf("%s:8080", localAddr.IP.String()) // Assume default port
-// }
