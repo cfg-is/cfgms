@@ -382,7 +382,7 @@ type Application struct {
 // ApplicationWeb represents web settings for an application
 type ApplicationWeb struct {
 	RedirectUris []string `json:"redirectUris"`
-	LogoutUrl    string   `json:"logoutUrl,omitempty"`
+	LogoutURL    string   `json:"logoutUrl,omitempty"`
 }
 
 // ApplicationSpa represents SPA settings for an application
@@ -392,7 +392,7 @@ type ApplicationSpa struct {
 
 // ApplicationResourceAccess represents required resource access
 type ApplicationResourceAccess struct {
-	ResourceAppId  string                       `json:"resourceAppId"`
+	ResourceAppID  string                       `json:"resourceAppId"`
 	ResourceAccess []ApplicationPermissionScope `json:"resourceAccess"`
 }
 
@@ -446,7 +446,7 @@ type ApplicationPasswordCredential struct {
 
 // ApplicationOptionalClaims represents optional claims configuration
 type ApplicationOptionalClaims struct {
-	IdToken     []ApplicationOptionalClaim `json:"idToken"`
+	IDToken     []ApplicationOptionalClaim `json:"idToken"`
 	AccessToken []ApplicationOptionalClaim `json:"accessToken"`
 	Saml2Token  []ApplicationOptionalClaim `json:"saml2Token"`
 }

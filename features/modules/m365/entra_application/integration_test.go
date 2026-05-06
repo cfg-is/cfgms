@@ -108,7 +108,7 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 		},
 		RequiredResourceAccess: []ResourceAccess{
 			{
-				ResourceAppId: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
+				ResourceAppID: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
 				ResourceAccess: []PermissionScope{
 					{ID: "e1fe6dd8-ba31-4d61-89e7-88639da4683d", Type: "Scope"}, // User.Read
 				},
@@ -267,10 +267,10 @@ func TestEntraApplication_Integration_ComplexConfiguration(t *testing.T) {
 			Mobile:  []string{"https://cfgms-complex-app.example.com/mobile"},
 			Desktop: []string{"https://cfgms-complex-app.example.com/desktop"},
 		},
-		LogoutUrl: "https://cfgms-complex-app.example.com/logout",
+		LogoutURL: "https://cfgms-complex-app.example.com/logout",
 		RequiredResourceAccess: []ResourceAccess{
 			{
-				ResourceAppId: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
+				ResourceAppID: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
 				ResourceAccess: []PermissionScope{
 					{ID: "e1fe6dd8-ba31-4d61-89e7-88639da4683d", Type: "Scope"}, // User.Read
 					{ID: "06da0dbc-49e2-44d2-8312-53746cb0532c", Type: "Scope"}, // Mail.Read
@@ -308,7 +308,7 @@ func TestEntraApplication_Integration_ComplexConfiguration(t *testing.T) {
 			},
 		},
 		OptionalClaims: &OptionalClaims{
-			IdToken: []OptionalClaim{
+			IDToken: []OptionalClaim{
 				{
 					Name:      "email",
 					Essential: true,
@@ -518,7 +518,7 @@ func TestEntraApplication_Integration_FullCRUD(t *testing.T) {
 		},
 		RequiredResourceAccess: []ResourceAccess{
 			{
-				ResourceAppId: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
+				ResourceAppID: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
 				ResourceAccess: []PermissionScope{
 					{ID: "e1fe6dd8-ba31-4d61-89e7-88639da4683d", Type: "Scope"}, // User.Read
 				},
@@ -603,7 +603,7 @@ func TestEntraApplication_Integration_FullCRUD(t *testing.T) {
 		},
 		RequiredResourceAccess: []ResourceAccess{
 			{
-				ResourceAppId: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
+				ResourceAppID: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
 				ResourceAccess: []PermissionScope{
 					{ID: "e1fe6dd8-ba31-4d61-89e7-88639da4683d", Type: "Scope"}, // User.Read
 					{ID: "06da0dbc-49e2-44d2-8312-53746cb0532c", Type: "Scope"}, // Mail.Read (ADD)

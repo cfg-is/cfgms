@@ -420,10 +420,10 @@ func TestEntraApplicationConfig_AsMap(t *testing.T) {
 		RedirectUris: &RedirectUris{
 			Web: []string{"https://example.com/callback"},
 		},
-		LogoutUrl: "https://example.com/logout",
+		LogoutURL: "https://example.com/logout",
 		RequiredResourceAccess: []ResourceAccess{
 			{
-				ResourceAppId: "00000003-0000-0000-c000-000000000000",
+				ResourceAppID: "00000003-0000-0000-c000-000000000000",
 				ResourceAccess: []PermissionScope{
 					{ID: "e1fe6dd8-ba31-4d61-89e7-88639da4683d", Type: "Scope"},
 				},
@@ -462,7 +462,7 @@ func TestEntraApplicationConfig_AsMap(t *testing.T) {
 			},
 		},
 		OptionalClaims: &OptionalClaims{
-			IdToken: []OptionalClaim{
+			IDToken: []OptionalClaim{
 				{Name: "email", Essential: true},
 			},
 		},
@@ -537,7 +537,7 @@ func TestEntraApplicationConfig_GetManagedFields(t *testing.T) {
 					Web: []string{"https://example.com/callback"},
 				},
 				RequiredResourceAccess: []ResourceAccess{
-					{ResourceAppId: "test-app-id"},
+					{ResourceAppID: "test-app-id"},
 				},
 				OAuth2Permissions: []OAuth2Scope{
 					{Value: "read"},
@@ -795,7 +795,7 @@ func TestComplexStructureSerialization(t *testing.T) {
 		SignInAudience: "AzureADMultipleOrgs",
 		TenantID:       "tenant-123",
 		OptionalClaims: &OptionalClaims{
-			IdToken: []OptionalClaim{
+			IDToken: []OptionalClaim{
 				{
 					Name:      "email",
 					Essential: true,
@@ -813,7 +813,7 @@ func TestComplexStructureSerialization(t *testing.T) {
 		},
 		RequiredResourceAccess: []ResourceAccess{
 			{
-				ResourceAppId: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
+				ResourceAppID: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
 				ResourceAccess: []PermissionScope{
 					{ID: "e1fe6dd8-ba31-4d61-89e7-88639da4683d", Type: "Scope"}, // User.Read
 					{ID: "405a51b5-8d8d-430b-9842-8be4b0e9f324", Type: "Role"},  // User.Read.All
@@ -834,13 +834,13 @@ func TestComplexStructureSerialization(t *testing.T) {
 	assert.Equal(t, config.DisplayName, deserializedConfig.DisplayName)
 	assert.Equal(t, config.SignInAudience, deserializedConfig.SignInAudience)
 	assert.NotNil(t, deserializedConfig.OptionalClaims)
-	assert.Len(t, deserializedConfig.OptionalClaims.IdToken, 1)
-	assert.Equal(t, "email", deserializedConfig.OptionalClaims.IdToken[0].Name)
-	assert.True(t, deserializedConfig.OptionalClaims.IdToken[0].Essential)
-	assert.Len(t, deserializedConfig.OptionalClaims.IdToken[0].AdditionalProperties, 1)
+	assert.Len(t, deserializedConfig.OptionalClaims.IDToken, 1)
+	assert.Equal(t, "email", deserializedConfig.OptionalClaims.IDToken[0].Name)
+	assert.True(t, deserializedConfig.OptionalClaims.IDToken[0].Essential)
+	assert.Len(t, deserializedConfig.OptionalClaims.IDToken[0].AdditionalProperties, 1)
 
 	assert.Len(t, deserializedConfig.RequiredResourceAccess, 1)
-	assert.Equal(t, "00000003-0000-0000-c000-000000000000", deserializedConfig.RequiredResourceAccess[0].ResourceAppId)
+	assert.Equal(t, "00000003-0000-0000-c000-000000000000", deserializedConfig.RequiredResourceAccess[0].ResourceAppID)
 	assert.Len(t, deserializedConfig.RequiredResourceAccess[0].ResourceAccess, 2)
 }
 

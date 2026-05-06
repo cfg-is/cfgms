@@ -153,24 +153,24 @@ func (i *MemoryIndexer) QueryRecords(ctx context.Context, deviceID string, optio
 	totalCount := int64(len(filteredRecords))
 
 	// Apply pagination
-	start_idx := 0
-	end_idx := len(filteredRecords)
+	startIdx := 0
+	endIdx := len(filteredRecords)
 
 	if options.Offset > 0 {
-		start_idx = options.Offset
-		if start_idx >= len(filteredRecords) {
+		startIdx = options.Offset
+		if startIdx >= len(filteredRecords) {
 			return []*RecordRef{}, totalCount, nil
 		}
 	}
 
 	if options.Limit > 0 {
-		end_idx = start_idx + options.Limit
-		if end_idx > len(filteredRecords) {
-			end_idx = len(filteredRecords)
+		endIdx = startIdx + options.Limit
+		if endIdx > len(filteredRecords) {
+			endIdx = len(filteredRecords)
 		}
 	}
 
-	result := filteredRecords[start_idx:end_idx]
+	result := filteredRecords[startIdx:endIdx]
 
 	i.logger.Debug("DNA records queried",
 		"device_id", logging.SanitizeLogValue(deviceID),
@@ -431,24 +431,24 @@ func (i *MemoryIndexer) QueryByAttribute(ctx context.Context, attribute, value s
 	}
 
 	// Apply pagination
-	start_idx := 0
-	end_idx := len(filteredRefs)
+	startIdx := 0
+	endIdx := len(filteredRefs)
 
 	if options.Offset > 0 {
-		start_idx = options.Offset
-		if start_idx >= len(filteredRefs) {
+		startIdx = options.Offset
+		if startIdx >= len(filteredRefs) {
 			return []*RecordRef{}, nil
 		}
 	}
 
 	if options.Limit > 0 {
-		end_idx = start_idx + options.Limit
-		if end_idx > len(filteredRefs) {
-			end_idx = len(filteredRefs)
+		endIdx = startIdx + options.Limit
+		if endIdx > len(filteredRefs) {
+			endIdx = len(filteredRefs)
 		}
 	}
 
-	return filteredRefs[start_idx:end_idx], nil
+	return filteredRefs[startIdx:endIdx], nil
 }
 
 // GetDeviceTimeline returns a timeline of changes for a device
@@ -478,24 +478,24 @@ func (i *MemoryIndexer) GetDeviceTimeline(ctx context.Context, deviceID string, 
 	}
 
 	// Apply pagination
-	start_idx := 0
-	end_idx := len(filteredRefs)
+	startIdx := 0
+	endIdx := len(filteredRefs)
 
 	if options.Offset > 0 {
-		start_idx = options.Offset
-		if start_idx >= len(filteredRefs) {
+		startIdx = options.Offset
+		if startIdx >= len(filteredRefs) {
 			return []*RecordRef{}, nil
 		}
 	}
 
 	if options.Limit > 0 {
-		end_idx = start_idx + options.Limit
-		if end_idx > len(filteredRefs) {
-			end_idx = len(filteredRefs)
+		endIdx = startIdx + options.Limit
+		if endIdx > len(filteredRefs) {
+			endIdx = len(filteredRefs)
 		}
 	}
 
-	return filteredRefs[start_idx:end_idx], nil
+	return filteredRefs[startIdx:endIdx], nil
 }
 
 // GetTimeRangeStats returns statistics for a specific time range

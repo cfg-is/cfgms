@@ -39,7 +39,7 @@ type EntraApplicationConfig struct {
 	// Application URLs
 	IdentifierUris []string      `yaml:"identifier_uris,omitempty"`
 	RedirectUris   *RedirectUris `yaml:"redirect_uris,omitempty"`
-	LogoutUrl      string        `yaml:"logout_url,omitempty"`
+	LogoutURL      string        `yaml:"logout_url,omitempty"`
 
 	// API permissions and scopes
 	RequiredResourceAccess []ResourceAccess `yaml:"required_resource_access,omitempty"`
@@ -84,7 +84,7 @@ type RedirectUris struct {
 
 // ResourceAccess represents required permissions to a resource (API)
 type ResourceAccess struct {
-	ResourceAppId  string            `yaml:"resource_app_id"`
+	ResourceAppID  string            `yaml:"resource_app_id"`
 	ResourceAccess []PermissionScope `yaml:"resource_access"`
 }
 
@@ -130,12 +130,12 @@ type KeyCredential struct {
 	Type        string `yaml:"type"`          // "AsymmetricX509Cert", "X509CertAndPassword"
 	Usage       string `yaml:"usage"`         // "Sign", "Verify"
 	Key         string `yaml:"key,omitempty"` // Base64-encoded certificate
-	KeyId       string `yaml:"key_id,omitempty"`
+	KeyID       string `yaml:"key_id,omitempty"`
 }
 
 // OptionalClaims represents optional claims configuration
 type OptionalClaims struct {
-	IdToken     []OptionalClaim `yaml:"id_token,omitempty"`
+	IDToken     []OptionalClaim `yaml:"id_token,omitempty"`
 	AccessToken []OptionalClaim `yaml:"access_token,omitempty"`
 	Saml2Token  []OptionalClaim `yaml:"saml2_token,omitempty"`
 }
@@ -182,8 +182,8 @@ func (c *EntraApplicationConfig) AsMap() map[string]interface{} {
 	if c.RedirectUris != nil {
 		result["redirect_uris"] = c.RedirectUris
 	}
-	if c.LogoutUrl != "" {
-		result["logout_url"] = c.LogoutUrl
+	if c.LogoutURL != "" {
+		result["logout_url"] = c.LogoutURL
 	}
 	if len(c.RequiredResourceAccess) > 0 {
 		result["required_resource_access"] = c.RequiredResourceAccess

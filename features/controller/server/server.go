@@ -61,8 +61,8 @@ import (
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
 
-// BUILD_VERSION_CHECK is a compile-time constant to verify code version in Docker
-const BUILD_VERSION_CHECK = "story-362-config-signing-enabled"
+// buildVersionCheck is a compile-time constant to verify code version in Docker
+const buildVersionCheck = "story-362-config-signing-enabled"
 
 // Server represents the controller server component (gRPC-over-QUIC based)
 type Server struct {
@@ -793,7 +793,7 @@ func (s *Server) Start() error {
 	}
 
 	// Start shared gRPC-over-QUIC transport and wire composite handler (Story #515)
-	s.logger.Info("Controller build version", "version", BUILD_VERSION_CHECK)
+	s.logger.Info("Controller build version", "version", buildVersionCheck)
 	if s.controlPlane != nil {
 		// Build TLS config for the QUIC listener
 		grpcTLSConfig, err := buildGRPCControlPlaneTLSConfig(s.cfg, s.certManager, s.logger)
