@@ -21,7 +21,8 @@ import (
 
 // RaftConsensus provides Raft-based consensus for HA cluster
 type RaftConsensus struct {
-	mu sync.RWMutex
+	mu       sync.RWMutex
+	stopOnce sync.Once
 
 	// Raft core
 	node    raft.Node
@@ -141,6 +142,14 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 	return rc, nil
 }
 
+// SetTransport attaches a transport to the Raft consensus engine.
+// Must be called before Start(). Thread-safe.
+func (rc *RaftConsensus) SetTransport(t *raftTransport) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	rc.transport = t
+}
+
 // Start begins the Raft consensus engine
 func (rc *RaftConsensus) Start() error {
 	rc.logger.Info("RAFT: Starting Raft consensus engine", "node_id", rc.nodeID)
@@ -148,9 +157,12 @@ func (rc *RaftConsensus) Start() error {
 	// Note: runRaft() goroutine is already started in NewRaftConsensus()
 	// to ensure Ready channel is consumed immediately
 
-	// Start transport layer
-	if rc.transport != nil {
-		if err := rc.transport.Start(rc.ctx); err != nil {
+	// Start transport layer (read under lock to avoid race with SetTransport)
+	rc.mu.RLock()
+	transport := rc.transport
+	rc.mu.RUnlock()
+	if transport != nil {
+		if err := transport.Start(rc.ctx); err != nil {
 			return fmt.Errorf("failed to start Raft transport: %w", err)
 		}
 	}
@@ -162,19 +174,20 @@ func (rc *RaftConsensus) Start() error {
 	return nil
 }
 
-// Stop gracefully stops the Raft consensus engine
+// Stop gracefully stops the Raft consensus engine. Safe to call multiple times.
 func (rc *RaftConsensus) Stop() error {
-	rc.logger.Info("RAFT: Stopping Raft consensus engine", "node_id", rc.nodeID)
-
-	close(rc.stopC)
-	rc.cancel()
-
-	if rc.transport != nil {
-		rc.transport.Stop()
-	}
-
-	rc.node.Stop()
-
+	rc.stopOnce.Do(func() {
+		rc.logger.Info("RAFT: Stopping Raft consensus engine", "node_id", rc.nodeID)
+		close(rc.stopC)
+		rc.cancel()
+		rc.mu.RLock()
+		t := rc.transport
+		rc.mu.RUnlock()
+		if t != nil {
+			t.Stop()
+		}
+		rc.node.Stop()
+	})
 	return nil
 }
 
@@ -267,10 +280,13 @@ func (rc *RaftConsensus) processReady(rd raft.Ready) {
 		}
 	}
 
-	// Send messages to peers
-	if rc.transport != nil && len(rd.Messages) > 0 {
+	// Send messages to peers (read transport under lock to avoid race with SetTransport)
+	rc.mu.RLock()
+	transport := rc.transport
+	rc.mu.RUnlock()
+	if transport != nil && len(rd.Messages) > 0 {
 		rc.logger.Debug("RAFT: Sending messages to peers", "count", len(rd.Messages), "node_id", rc.nodeID)
-		rc.transport.Send(rd.Messages)
+		transport.Send(rd.Messages)
 	}
 
 	// Apply committed entries to state machine

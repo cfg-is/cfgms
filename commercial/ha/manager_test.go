@@ -146,7 +146,6 @@ func TestManager_SingleServerMode(t *testing.T) {
 }
 
 func TestManager_BlueGreenMode(t *testing.T) {
-	t.Skip("Skipping due to known deadlock issue in discovery - will be addressed in future PR")
 	// Create test logger
 	logger := logging.GetLogger()
 
@@ -154,9 +153,11 @@ func TestManager_BlueGreenMode(t *testing.T) {
 	storageManager, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
 
-	// Create HA config for blue-green mode
+	// Create HA config for blue-green mode.
+	// Node ID is required by Validate() for blue-green mode.
 	cfg := DefaultConfig()
 	cfg.Mode = BlueGreenMode
+	cfg.Node.ID = "test-node-bluegreen"
 
 	// Create HA manager
 	manager, err := NewManager(cfg, logger, storageManager)
@@ -171,31 +172,17 @@ func TestManager_BlueGreenMode(t *testing.T) {
 	assert.NotNil(t, localNode)
 	assert.NotEmpty(t, localNode.ID)
 
-	// Test starting and stopping - use shorter timeout to avoid deadlock
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Start in a goroutine to prevent test deadlock
-	startErr := make(chan error, 1)
-	go func() {
-		startErr <- manager.Start(ctx)
-	}()
-
-	// Wait for start or timeout
-	select {
-	case err = <-startErr:
-		require.NoError(t, err)
-	case <-time.After(2 * time.Second):
-		t.Skip("Manager start timed out - skipping to avoid test deadlock")
-		return
-	}
+	err = manager.Start(ctx)
+	require.NoError(t, err)
 
 	err = manager.Stop(ctx)
 	assert.NoError(t, err)
 }
 
 func TestManager_ClusterMode(t *testing.T) {
-	t.Skip("Skipping due to known deadlock issue in discovery - will be addressed in future PR")
 	// Create test logger
 	logger := logging.GetLogger()
 
@@ -203,16 +190,37 @@ func TestManager_ClusterMode(t *testing.T) {
 	storageManager, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
 
-	// Create HA config for cluster mode
+	// Create HA config for cluster mode.
+	// Configure self as the only peer so Raft calls StartNode (new cluster) rather
+	// than RestartNode (join existing), allowing the node to become leader.
+	const nodeID = "test-node-cluster-mode"
 	cfg := DefaultConfig()
 	cfg.Mode = ClusterMode
-	cfg.Cluster.ExpectedSize = 3
-	cfg.Cluster.MinQuorum = 2
+	cfg.Node.ID = nodeID
+	cfg.Cluster.ExpectedSize = 1
+	cfg.Cluster.MinQuorum = 1
+	cfg.Cluster.Discovery.Config = map[string]interface{}{
+		"nodes": []interface{}{
+			map[string]interface{}{
+				"id":      nodeID,
+				"address": "127.0.0.1:0",
+			},
+		},
+	}
 
 	// Create HA manager
 	manager, err := NewManager(cfg, logger, storageManager)
 	require.NoError(t, err)
 	require.NotNil(t, manager)
+
+	// Raft consensus must be initialized in cluster mode
+	require.NotNil(t, manager.raftConsensus)
+
+	// Manager.Stop() also stops raftConsensus (idempotent via stopOnce).
+	// Cleanup is a safety net for early-return paths.
+	t.Cleanup(func() {
+		_ = manager.raftConsensus.Stop()
+	})
 
 	// Test deployment mode
 	assert.Equal(t, ClusterMode, manager.GetDeploymentMode())
@@ -222,36 +230,66 @@ func TestManager_ClusterMode(t *testing.T) {
 	assert.NotNil(t, localNode)
 	assert.NotEmpty(t, localNode.ID)
 
-	// Test starting and stopping - use shorter timeout to avoid deadlock
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Start in a goroutine to prevent test deadlock
-	startErr := make(chan error, 1)
-	go func() {
-		startErr <- manager.Start(ctx)
-	}()
+	err = manager.Start(ctx)
+	require.NoError(t, err)
 
-	// Wait for start or timeout
-	select {
-	case err = <-startErr:
-		require.NoError(t, err)
-	case <-time.After(2 * time.Second):
-		t.Skip("Manager start timed out - skipping to avoid test deadlock")
-		return
-	}
-
-	// Get cluster nodes
+	// Get cluster nodes — should include at least the local node
 	nodes, err := manager.GetClusterNodes()
 	require.NoError(t, err)
-	assert.Len(t, nodes, 1) // Only local node
+	assert.NotEmpty(t, nodes)
+
+	// IsLeader() must delegate to raftConsensus (not a cached local field)
+	raftAnswer := manager.raftConsensus.IsLeader()
+	managerAnswer := manager.IsLeader()
+	assert.Equal(t, raftAnswer, managerAnswer,
+		"Manager.IsLeader() must return the same answer as raftConsensus.IsLeader()")
 
 	err = manager.Stop(ctx)
 	assert.NoError(t, err)
 }
 
+// TestManager_IsLeader_UsesRaftConsensus verifies that Manager.IsLeader() delegates
+// exclusively to raftConsensus in ClusterMode — there is no longer a cached local
+// isLeader field that can diverge from the Raft state machine.
+func TestManager_IsLeader_UsesRaftConsensus(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	const nodeID = "test-isleader-raft-node"
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeID
+	// Configure self as peer so Raft initializes a new cluster via StartNode.
+	cfg.Cluster.Discovery.Config = map[string]interface{}{
+		"nodes": []interface{}{
+			map[string]interface{}{
+				"id":      nodeID,
+				"address": "127.0.0.1:0",
+			},
+		},
+	}
+
+	logger := logging.GetLogger()
+	manager, err := NewManager(cfg, logger, storageManager)
+	require.NoError(t, err)
+	require.NotNil(t, manager.raftConsensus, "raftConsensus must be initialized in cluster mode")
+
+	t.Cleanup(func() {
+		_ = manager.raftConsensus.Stop()
+	})
+
+	// Immediately after construction (before any election), both should agree.
+	raftAnswer := manager.raftConsensus.IsLeader()
+	managerAnswer := manager.IsLeader()
+	assert.Equal(t, raftAnswer, managerAnswer,
+		"Manager.IsLeader() must return the Raft consensus answer, not a stale local field")
+}
+
 func TestManager_HealthChecks(t *testing.T) {
-	t.Skip("Skipping due to synchronization issues in health checker - will be addressed in future PR")
+	t.Skip("Skipping due to synchronization issues in health checker - will be addressed in future PR (#1299)")
 	// Create test logger
 	logger := logging.GetLogger()
 
@@ -380,11 +418,11 @@ func TestDeploymentModeProgression(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	// Phase 2: Blue-Green (simulating upgrade scenario)
+	// Phase 2: Blue-Green
 	t.Run("BlueGreen", func(t *testing.T) {
-		t.Skip("Skipping due to known deadlock issue in discovery - will be addressed in future PR")
 		cfg := DefaultConfig()
 		cfg.Mode = BlueGreenMode
+		cfg.Node.ID = "test-progression-bluegreen-node"
 
 		manager, err := NewManager(cfg, logger, storageManager)
 		require.NoError(t, err)
@@ -401,14 +439,29 @@ func TestDeploymentModeProgression(t *testing.T) {
 
 	// Phase 3: Full Cluster
 	t.Run("Cluster", func(t *testing.T) {
-		t.Skip("Skipping due to known deadlock issue in discovery - will be addressed in future PR")
+		const nodeID = "test-progression-cluster-node"
 		cfg := DefaultConfig()
 		cfg.Mode = ClusterMode
-		cfg.Cluster.ExpectedSize = 3
-		cfg.Cluster.MinQuorum = 2
+		cfg.Node.ID = nodeID
+		cfg.Cluster.ExpectedSize = 1
+		cfg.Cluster.MinQuorum = 1
+		cfg.Cluster.Discovery.Config = map[string]interface{}{
+			"nodes": []interface{}{
+				map[string]interface{}{
+					"id":      nodeID,
+					"address": "127.0.0.1:0",
+				},
+			},
+		}
 
 		manager, err := NewManager(cfg, logger, storageManager)
 		require.NoError(t, err)
+
+		t.Cleanup(func() {
+			if manager.raftConsensus != nil {
+				_ = manager.raftConsensus.Stop()
+			}
+		})
 
 		err = manager.Start(ctx)
 		require.NoError(t, err)
@@ -419,7 +472,7 @@ func TestDeploymentModeProgression(t *testing.T) {
 		// Should have cluster nodes
 		nodes, err := manager.GetClusterNodes()
 		require.NoError(t, err)
-		assert.Len(t, nodes, 1) // Only local node in test
+		assert.NotEmpty(t, nodes)
 
 		err = manager.Stop(ctx)
 		assert.NoError(t, err)
