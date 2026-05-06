@@ -25,58 +25,6 @@ import (
 	"github.com/cfgis/cfgms/features/saas"
 )
 
-// credentialStoreAdapter adapts auth.CredentialStore to saas.CredentialStore
-type credentialStoreAdapter struct {
-	auth.CredentialStore
-}
-
-// Implement missing methods for saas.CredentialStore compatibility
-func (a *credentialStoreAdapter) StoreTokenSet(provider string, tokens *saas.TokenSet) error {
-	// Convert saas.TokenSet to auth.AccessToken
-	authToken := &auth.AccessToken{
-		Token:        tokens.AccessToken,
-		TokenType:    tokens.TokenType,
-		RefreshToken: tokens.RefreshToken,
-		ExpiresAt:    tokens.ExpiresAt,
-		TenantID:     provider, // Use provider as tenant ID
-	}
-	return a.StoreToken(provider, authToken)
-}
-
-func (a *credentialStoreAdapter) GetTokenSet(provider string) (*saas.TokenSet, error) {
-	token, err := a.GetToken(provider)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert auth.AccessToken to saas.TokenSet
-	tokenSet := &saas.TokenSet{
-		AccessToken:  token.Token,
-		TokenType:    token.TokenType,
-		RefreshToken: token.RefreshToken,
-		ExpiresAt:    token.ExpiresAt,
-	}
-	return tokenSet, nil
-}
-
-func (a *credentialStoreAdapter) DeleteTokenSet(provider string) error {
-	return a.DeleteToken(provider)
-}
-
-func (a *credentialStoreAdapter) StoreClientSecret(provider, clientSecret string) error {
-	// Not implemented in base auth store - would need extension
-	return fmt.Errorf("client secret storage not implemented in auth credential store")
-}
-
-func (a *credentialStoreAdapter) GetClientSecret(provider string) (string, error) {
-	// Not implemented in base auth store - would need extension
-	return "", fmt.Errorf("client secret retrieval not implemented in auth credential store")
-}
-
-func (a *credentialStoreAdapter) IsAvailable() bool {
-	return true // File-based store is always available
-}
-
 // GDAPProvider implements GDAP-aware M365 operations for MSP scenarios
 type GDAPProvider struct {
 	*saas.MicrosoftMultiTenantProvider
@@ -86,9 +34,7 @@ type GDAPProvider struct {
 
 // NewGDAPProvider creates a new GDAP-enabled M365 provider
 func NewGDAPProvider(credStore auth.CredentialStore, httpClient *http.Client, partnerTenantID string) *GDAPProvider {
-	// Adapt auth.CredentialStore to saas.CredentialStore
-	adaptedCredStore := &credentialStoreAdapter{credStore}
-	multiTenant := saas.NewMicrosoftMultiTenantProvider(adaptedCredStore, httpClient)
+	multiTenant := saas.NewMicrosoftMultiTenantProvider(credStore, httpClient)
 
 	return &GDAPProvider{
 		MicrosoftMultiTenantProvider: multiTenant,

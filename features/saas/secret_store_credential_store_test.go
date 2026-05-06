@@ -7,15 +7,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// compile-time assertion: SecretStoreCredentialStore must implement auth.CredentialStore.
+var _ auth.CredentialStore = (*SecretStoreCredentialStore)(nil)
+
 // newTestCredentialStore creates a SecretStoreCredentialStore backed by a real steward
 // store in a temporary directory. Tests are skipped when /etc/machine-id is absent
 // (required for OS-native key derivation on Linux).
-func newTestCredentialStore(t *testing.T) CredentialStore {
+func newTestCredentialStore(t *testing.T) auth.CredentialStore {
 	t.Helper()
 	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
 		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
@@ -38,7 +42,7 @@ func newTestCredentialStore(t *testing.T) CredentialStore {
 
 // newBenchCredentialStore creates a SecretStoreCredentialStore backed by a real steward
 // store for use in benchmarks.
-func newBenchCredentialStore(b *testing.B) CredentialStore {
+func newBenchCredentialStore(b *testing.B) auth.CredentialStore {
 	b.Helper()
 	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
 		b.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
@@ -61,73 +65,136 @@ func newBenchCredentialStore(b *testing.B) CredentialStore {
 	return NewSecretStoreCredentialStore(store)
 }
 
-func TestSecretStoreCredentialStore_StoreAndGetClientSecret(t *testing.T) {
+func TestSecretStoreCredentialStore_StoreAndGetToken(t *testing.T) {
 	cs := newTestCredentialStore(t)
 
-	err := cs.StoreClientSecret("test-provider", "super-secret-value")
-	require.NoError(t, err)
-
-	got, err := cs.GetClientSecret("test-provider")
-	require.NoError(t, err)
-	assert.Equal(t, "super-secret-value", got)
-}
-
-func TestSecretStoreCredentialStore_StoreAndGetTokenSet(t *testing.T) {
-	cs := newTestCredentialStore(t)
-
-	tokens := &TokenSet{
-		AccessToken:  "access-token-abc",
-		RefreshToken: "refresh-token-xyz",
-		TokenType:    "Bearer",
-		ExpiresAt:    time.Now().Add(1 * time.Hour).Truncate(time.Second),
-		Scopes:       []string{"read", "write"},
+	token := &auth.AccessToken{
+		Token:         "access-token-abc",
+		RefreshToken:  "refresh-token-xyz",
+		TokenType:     "Bearer",
+		ExpiresAt:     time.Now().Add(1 * time.Hour).Truncate(time.Second),
+		TenantID:      "test-tenant",
+		GrantedScopes: []string{"read", "write"},
 	}
 
-	err := cs.StoreTokenSet("test-provider", tokens)
+	err := cs.StoreToken("test-tenant", token)
 	require.NoError(t, err)
 
-	got, err := cs.GetTokenSet("test-provider")
+	got, err := cs.GetToken("test-tenant")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
-	assert.Equal(t, tokens.AccessToken, got.AccessToken)
-	assert.Equal(t, tokens.RefreshToken, got.RefreshToken)
-	assert.Equal(t, tokens.TokenType, got.TokenType)
-	assert.Equal(t, tokens.Scopes, got.Scopes)
-	assert.Equal(t, tokens.ExpiresAt.Unix(), got.ExpiresAt.Unix())
+	assert.Equal(t, token.Token, got.Token)
+	assert.Equal(t, token.RefreshToken, got.RefreshToken)
+	assert.Equal(t, token.TokenType, got.TokenType)
+	assert.Equal(t, token.TenantID, got.TenantID)
+	assert.Equal(t, token.GrantedScopes, got.GrantedScopes)
+	assert.Equal(t, token.ExpiresAt.Unix(), got.ExpiresAt.Unix())
 }
 
-func TestSecretStoreCredentialStore_DeleteTokenSet(t *testing.T) {
+func TestSecretStoreCredentialStore_DeleteToken(t *testing.T) {
 	cs := newTestCredentialStore(t)
 
-	tokens := &TokenSet{
-		AccessToken: "access-token",
+	token := &auth.AccessToken{
+		Token:     "access-token",
+		TokenType: "Bearer",
+		TenantID:  "del-tenant",
+	}
+
+	require.NoError(t, cs.StoreToken("del-tenant", token))
+
+	got, err := cs.GetToken("del-tenant")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	require.NoError(t, cs.DeleteToken("del-tenant"))
+
+	_, err = cs.GetToken("del-tenant")
+	require.Error(t, err)
+}
+
+func TestSecretStoreCredentialStore_GetToken_NotFound(t *testing.T) {
+	cs := newTestCredentialStore(t)
+
+	_, err := cs.GetToken("nonexistent-tenant")
+	require.Error(t, err)
+}
+
+func TestSecretStoreCredentialStore_StoreDelegatedToken(t *testing.T) {
+	cs := newTestCredentialStore(t)
+
+	token := &auth.AccessToken{
+		Token:       "delegated-token",
 		TokenType:   "Bearer",
+		TenantID:    "tenant-1",
+		IsDelegated: true,
 	}
 
-	require.NoError(t, cs.StoreTokenSet("del-provider", tokens))
+	err := cs.StoreDelegatedToken("tenant-1", "user-1", token)
+	require.NoError(t, err)
 
-	got, err := cs.GetTokenSet("del-provider")
+	got, err := cs.GetDelegatedToken("tenant-1", "user-1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
+	assert.Equal(t, "delegated-token", got.Token)
+	assert.True(t, got.IsDelegated)
 
-	require.NoError(t, cs.DeleteTokenSet("del-provider"))
-
-	_, err = cs.GetTokenSet("del-provider")
+	require.NoError(t, cs.DeleteDelegatedToken("tenant-1", "user-1"))
+	_, err = cs.GetDelegatedToken("tenant-1", "user-1")
 	require.Error(t, err)
 }
 
-func TestSecretStoreCredentialStore_GetClientSecret_NotFound(t *testing.T) {
+func TestSecretStoreCredentialStore_StoreUserContext(t *testing.T) {
 	cs := newTestCredentialStore(t)
 
-	_, err := cs.GetClientSecret("nonexistent-provider")
+	userCtx := &auth.UserContext{
+		UserID:            "user-1",
+		UserPrincipalName: "user@example.com",
+		DisplayName:       "Test User",
+		Roles:             []string{"admin"},
+	}
+
+	err := cs.StoreUserContext("tenant-1", "user-1", userCtx)
+	require.NoError(t, err)
+
+	got, err := cs.GetUserContext("tenant-1", "user-1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "user-1", got.UserID)
+	assert.Equal(t, "user@example.com", got.UserPrincipalName)
+	assert.Equal(t, []string{"admin"}, got.Roles)
+
+	require.NoError(t, cs.DeleteUserContext("tenant-1", "user-1"))
+	_, err = cs.GetUserContext("tenant-1", "user-1")
 	require.Error(t, err)
 }
 
-func TestSecretStoreCredentialStore_GetTokenSet_NotFound(t *testing.T) {
+func TestSecretStoreCredentialStore_StoreConfig(t *testing.T) {
 	cs := newTestCredentialStore(t)
 
-	_, err := cs.GetTokenSet("nonexistent-provider")
+	config := &auth.OAuth2Config{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-secret",
+		TenantID:     "tenant-1",
+		Scopes:       []string{"https://graph.microsoft.com/.default"},
+	}
+
+	err := cs.StoreConfig("tenant-1", config)
+	require.NoError(t, err)
+
+	got, err := cs.GetConfig("tenant-1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "test-client-id", got.ClientID)
+	assert.Equal(t, "test-secret", got.ClientSecret)
+	assert.Equal(t, "tenant-1", got.TenantID)
+	assert.Equal(t, config.Scopes, got.Scopes)
+}
+
+func TestSecretStoreCredentialStore_GetConfig_NotFound(t *testing.T) {
+	cs := newTestCredentialStore(t)
+
+	_, err := cs.GetConfig("nonexistent-tenant")
 	require.Error(t, err)
 }
 
@@ -137,17 +204,20 @@ func TestSecretStoreCredentialStore_IsAvailable(t *testing.T) {
 	assert.True(t, cs.IsAvailable())
 }
 
-func TestSecretStoreCredentialStore_IsolatedPerProvider(t *testing.T) {
+func TestSecretStoreCredentialStore_IsolatedPerTenant(t *testing.T) {
 	cs := newTestCredentialStore(t)
 
-	require.NoError(t, cs.StoreClientSecret("provider-a", "secret-a"))
-	require.NoError(t, cs.StoreClientSecret("provider-b", "secret-b"))
+	tokenA := &auth.AccessToken{Token: "token-a", TenantID: "tenant-a"}
+	tokenB := &auth.AccessToken{Token: "token-b", TenantID: "tenant-b"}
 
-	gotA, err := cs.GetClientSecret("provider-a")
-	require.NoError(t, err)
-	assert.Equal(t, "secret-a", gotA)
+	require.NoError(t, cs.StoreToken("tenant-a", tokenA))
+	require.NoError(t, cs.StoreToken("tenant-b", tokenB))
 
-	gotB, err := cs.GetClientSecret("provider-b")
+	gotA, err := cs.GetToken("tenant-a")
 	require.NoError(t, err)
-	assert.Equal(t, "secret-b", gotB)
+	assert.Equal(t, "token-a", gotA.Token)
+
+	gotB, err := cs.GetToken("tenant-b")
+	require.NoError(t, err)
+	assert.Equal(t, "token-b", gotB.Token)
 }

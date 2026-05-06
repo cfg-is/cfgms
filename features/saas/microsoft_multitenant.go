@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -33,7 +34,7 @@ type MicrosoftMultiTenantProvider struct {
 }
 
 // NewMicrosoftMultiTenantProvider creates a new multi-tenant Microsoft provider
-func NewMicrosoftMultiTenantProvider(credStore CredentialStore, httpClient *http.Client) *MicrosoftMultiTenantProvider {
+func NewMicrosoftMultiTenantProvider(credStore auth.CredentialStore, httpClient *http.Client) *MicrosoftMultiTenantProvider {
 	info := ProviderInfo{
 		Name:               "microsoft-multitenant",
 		DisplayName:        "Microsoft Graph Multi-Tenant",
@@ -419,20 +420,20 @@ func (p *MicrosoftMultiTenantProvider) rawAPIWithToken(ctx context.Context, meth
 // Standard Provider interface implementation (delegates to first tenant or requires tenant specification)
 
 // Authenticate performs multi-tenant authentication
-func (p *MicrosoftMultiTenantProvider) Authenticate(ctx context.Context, config ProviderConfig, credStore CredentialStore) error {
+func (p *MicrosoftMultiTenantProvider) Authenticate(ctx context.Context, config ProviderConfig, credStore auth.CredentialStore) error {
 	// For multi-tenant, authentication is handled via admin consent flow
 	// This method could initiate that flow or return an error directing to use StartAdminConsent
 	return fmt.Errorf("multi-tenant provider requires admin consent flow - use StartAdminConsent() method")
 }
 
 // IsAuthenticated checks if multi-tenant consent has been granted
-func (p *MicrosoftMultiTenantProvider) IsAuthenticated(ctx context.Context, credStore CredentialStore) bool {
+func (p *MicrosoftMultiTenantProvider) IsAuthenticated(ctx context.Context, credStore auth.CredentialStore) bool {
 	status, err := p.multiTenantManager.GetConsentStatus(ctx, p.GetInfo().Name)
 	return err == nil && status.HasAdminConsent
 }
 
 // RefreshAuth refreshes authentication (for multi-tenant, this refreshes tenant discovery)
-func (p *MicrosoftMultiTenantProvider) RefreshAuth(ctx context.Context, credStore CredentialStore) error {
+func (p *MicrosoftMultiTenantProvider) RefreshAuth(ctx context.Context, credStore auth.CredentialStore) error {
 	return p.multiTenantManager.RefreshTenantDiscovery(ctx, p.GetInfo().Name)
 }
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	saas "github.com/cfgis/cfgms/features/saas"
 	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 	"github.com/stretchr/testify/require"
@@ -16,7 +17,7 @@ import (
 // newTestCredentialStore creates a SecretStoreCredentialStore backed by a real steward
 // store in a temporary directory. Tests are skipped when /etc/machine-id is absent
 // (required for OS-native key derivation on Linux).
-func newTestCredentialStore(t *testing.T) saas.CredentialStore {
+func newTestCredentialStore(t *testing.T) auth.CredentialStore {
 	t.Helper()
 	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
 		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
@@ -39,7 +40,7 @@ func newTestCredentialStore(t *testing.T) saas.CredentialStore {
 
 // newBenchCredentialStore creates a SecretStoreCredentialStore backed by a real steward
 // store for use in benchmarks.
-func newBenchCredentialStore(b *testing.B) saas.CredentialStore {
+func newBenchCredentialStore(b *testing.B) auth.CredentialStore {
 	b.Helper()
 	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
 		b.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
