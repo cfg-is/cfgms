@@ -20,6 +20,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 	"github.com/cfgis/cfgms/pkg/version"
 )
 
@@ -42,6 +43,9 @@ type Manager struct {
 	startTime      time.Time
 	ctx            context.Context
 	cancel         context.CancelFunc
+
+	// Session registry for steward connect/disconnect replication
+	registry registry.Registry
 
 	// Cluster state
 	clusterNodes map[string]*NodeInfo
@@ -169,6 +173,25 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 	case SingleServerMode:
 		m.logger.Info("Running in single server mode - no additional HA components needed")
+	}
+
+	// Register session hooks so steward connect/disconnect events are replicated
+	// through the Raft log when running in cluster mode.
+	if m.raftConsensus != nil && m.registry != nil {
+		rc := m.raftConsensus
+		nodeID := m.nodeInfo.ID
+		m.registry.OnConnect(func(stewardID string) {
+			if err := rc.ProposeSessionUpdate(stewardID, nodeID, true); err != nil {
+				m.logger.Warn("Failed to propose session connect",
+					"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+			}
+		})
+		m.registry.OnDisconnect(func(stewardID string) {
+			if err := rc.ProposeSessionUpdate(stewardID, nodeID, false); err != nil {
+				m.logger.Warn("Failed to propose session disconnect",
+					"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+			}
+		})
 	}
 
 	m.isStarted = true
@@ -374,6 +397,15 @@ func (m *Manager) GetRaftTransport() RaftTransport {
 	rc.mu.RLock()
 	defer rc.mu.RUnlock()
 	return rc.transport
+}
+
+// SetRegistry wires the active-steward connection registry so that connect and
+// disconnect events are replicated through the Raft log (Issue #1326).
+// Call this after NewManager returns but before Start is called.
+func (m *Manager) SetRegistry(r registry.Registry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.registry = r
 }
 
 // initializeComponents initializes HA components based on deployment mode

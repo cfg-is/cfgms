@@ -65,6 +65,7 @@ type ClusterState struct {
 	mu           sync.RWMutex
 	Leader       uint64
 	Nodes        map[uint64]*NodeInfo
+	Sessions     map[string]SessionUpdateCommand
 	LastModified time.Time
 }
 
@@ -78,6 +79,14 @@ type RaftCommand struct {
 type NodeUpdateCommand struct {
 	NodeID   uint64    `json:"node_id"`
 	NodeInfo *NodeInfo `json:"node_info"`
+}
+
+// SessionUpdateCommand is sent when a steward connects or disconnects
+type SessionUpdateCommand struct {
+	StewardID string    `json:"steward_id"`
+	NodeID    string    `json:"node_id"`
+	Connected bool      `json:"connected"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // NewRaftConsensus creates a new Raft consensus instance. clusterCfg provides the
@@ -125,7 +134,8 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 		config:       config,
 		tickInterval: tickInterval,
 		clusterState: &ClusterState{
-			Nodes: make(map[uint64]*NodeInfo),
+			Nodes:    make(map[uint64]*NodeInfo),
+			Sessions: make(map[string]SessionUpdateCommand),
 		},
 		proposeC:       make(chan []byte, 16),
 		confChangeC:    make(chan raftpb.ConfChange, 16),
@@ -406,6 +416,8 @@ func (rc *RaftConsensus) applyCommand(data []byte) error {
 	switch cmd.Type {
 	case "node_update":
 		return rc.applyNodeUpdate(cmd.Data)
+	case "session_update":
+		return rc.applySessionUpdate(cmd.Data)
 	default:
 		return fmt.Errorf("unknown command type: %s", cmd.Type)
 	}
@@ -431,6 +443,59 @@ func (rc *RaftConsensus) applyNodeUpdate(data interface{}) error {
 	rc.logger.Debug("Applied node update", "node_id", update.NodeID, "node_info", update.NodeInfo)
 
 	return nil
+}
+
+// applySessionUpdate updates session state in the cluster state machine
+func (rc *RaftConsensus) applySessionUpdate(data interface{}) error {
+	dataBytes, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+
+	var update SessionUpdateCommand
+	if err := json.Unmarshal(dataBytes, &update); err != nil {
+		return err
+	}
+
+	rc.clusterState.mu.Lock()
+	if update.Connected {
+		rc.clusterState.Sessions[update.StewardID] = update
+	} else {
+		delete(rc.clusterState.Sessions, update.StewardID)
+	}
+	rc.clusterState.LastModified = time.Now()
+	rc.clusterState.mu.Unlock()
+
+	rc.logger.Debug("Applied session update",
+		"steward_id", logging.SanitizeLogValue(update.StewardID),
+		"node_id", logging.SanitizeLogValue(update.NodeID),
+		"connected", update.Connected)
+
+	return nil
+}
+
+// ProposeSessionUpdate replicates a steward connect/disconnect event through the Raft log.
+// It is non-blocking: if proposeC is at capacity it returns an error immediately.
+func (rc *RaftConsensus) ProposeSessionUpdate(stewardID, nodeID string, connected bool) error {
+	cmd := RaftCommand{
+		Type: "session_update",
+		Data: SessionUpdateCommand{
+			StewardID: stewardID,
+			NodeID:    nodeID,
+			Connected: connected,
+			Timestamp: time.Now(),
+		},
+	}
+	data, err := json.Marshal(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to marshal session update command: %w", err)
+	}
+	select {
+	case rc.proposeC <- data:
+		return nil
+	default:
+		return fmt.Errorf("propose channel full, cannot enqueue session update")
+	}
 }
 
 // publishSnapshot applies a snapshot to the state machine
