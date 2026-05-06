@@ -9,11 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/features/rbac/zerotrust"
 	"github.com/cfgis/cfgms/features/tenant"
 )
 
-// TenantSecurityPolicyEngine manages and enforces tenant-specific security policies with zero-trust overlay
+// TenantSecurityPolicyEngine manages and enforces tenant-specific security policies
 type TenantSecurityPolicyEngine struct {
 	tenantManager   *tenant.Manager
 	policies        map[string]*TenantSecurityPolicy
@@ -21,12 +20,6 @@ type TenantSecurityPolicyEngine struct {
 	auditLogger     *TenantSecurityAuditLogger
 	isolationEngine *TenantIsolationEngine
 	mutex           sync.RWMutex
-
-	// Zero-trust policy overlay integration
-	zeroTrustEngine    *zerotrust.ZeroTrustPolicyEngine
-	zeroTrustEnabled   bool
-	zeroTrustMode      TenantZeroTrustMode
-	policyCoordination *TenantPolicyCoordination
 }
 
 // TenantSecurityPolicy defines comprehensive security policies for a tenant
@@ -159,26 +152,6 @@ type MonitoringRule struct {
 	Conditions      []RuleCondition `json:"conditions"`
 }
 
-// TenantZeroTrustMode defines how zero-trust policies overlay tenant security policies
-type TenantZeroTrustMode string
-
-const (
-	// TenantZeroTrustModeDisabled disables zero-trust policy overlay for tenant security
-	TenantZeroTrustModeDisabled TenantZeroTrustMode = "disabled"
-
-	// TenantZeroTrustModeOverlay applies zero-trust policies as an additional security layer
-	TenantZeroTrustModeOverlay TenantZeroTrustMode = "overlay"
-
-	// TenantZeroTrustModeEnforced uses zero-trust policies to override tenant security decisions
-	TenantZeroTrustModeEnforced TenantZeroTrustMode = "enforced"
-
-	// TenantZeroTrustModeGoverning makes zero-trust policies the primary security control with tenant policies as fallback
-	TenantZeroTrustModeGoverning TenantZeroTrustMode = "governing"
-
-	// TenantZeroTrustModeIntegrated deeply integrates zero-trust and tenant policies into unified decisions
-	TenantZeroTrustModeIntegrated TenantZeroTrustMode = "integrated"
-)
-
 // Supporting types
 type PolicyStatus string
 
@@ -269,43 +242,7 @@ func NewTenantSecurityPolicyEngine(tenantManager *tenant.Manager, auditLogger *T
 		auditLogger:     auditLogger,
 		isolationEngine: isolationEngine,
 		mutex:           sync.RWMutex{},
-
-		// Zero-trust defaults
-		zeroTrustEngine:    nil,
-		zeroTrustEnabled:   false,
-		zeroTrustMode:      TenantZeroTrustModeDisabled,
-		policyCoordination: NewDefaultTenantPolicyCoordination(),
 	}
-}
-
-// EnableZeroTrustOverlay enables zero-trust policy overlay integration
-func (tspe *TenantSecurityPolicyEngine) EnableZeroTrustOverlay(engine *zerotrust.ZeroTrustPolicyEngine, mode TenantZeroTrustMode, coordination *TenantPolicyCoordination) {
-	tspe.mutex.Lock()
-	defer tspe.mutex.Unlock()
-
-	tspe.zeroTrustEngine = engine
-	tspe.zeroTrustMode = mode
-	tspe.zeroTrustEnabled = (mode != TenantZeroTrustModeDisabled && engine != nil)
-
-	if coordination != nil {
-		tspe.policyCoordination = coordination
-	}
-}
-
-// SetZeroTrustMode updates the zero-trust overlay mode
-func (tspe *TenantSecurityPolicyEngine) SetZeroTrustMode(mode TenantZeroTrustMode) {
-	tspe.mutex.Lock()
-	defer tspe.mutex.Unlock()
-
-	tspe.zeroTrustMode = mode
-	tspe.zeroTrustEnabled = (mode != TenantZeroTrustModeDisabled && tspe.zeroTrustEngine != nil)
-}
-
-// GetZeroTrustMode returns the current zero-trust overlay mode
-func (tspe *TenantSecurityPolicyEngine) GetZeroTrustMode() TenantZeroTrustMode {
-	tspe.mutex.RLock()
-	defer tspe.mutex.RUnlock()
-	return tspe.zeroTrustMode
 }
 
 // CreateSecurityPolicy creates a new tenant security policy
@@ -350,36 +287,17 @@ func (tspe *TenantSecurityPolicyEngine) CreateSecurityPolicy(ctx context.Context
 	return nil
 }
 
-// EvaluateSecurityPolicy evaluates a security request against tenant policies with zero-trust overlay
+// EvaluateSecurityPolicy evaluates a security request against tenant policies
 func (tspe *TenantSecurityPolicyEngine) EvaluateSecurityPolicy(ctx context.Context, request *SecurityEvaluationRequest) (*SecurityEvaluationResult, error) {
 	startTime := time.Now()
 
-	// Step 1: Evaluate standard tenant security policy
-	tenantResult, err := tspe.evaluateTenantSecurityPolicy(ctx, request)
+	result, err := tspe.evaluateTenantSecurityPolicy(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to evaluate tenant security policy: %w", err)
 	}
 
-	// Step 2: Apply zero-trust policy overlay if enabled
-	if tspe.zeroTrustEnabled && tspe.zeroTrustEngine != nil {
-		overlayResult, err := tspe.evaluateZeroTrustOverlay(ctx, request, tenantResult)
-		if err != nil {
-			if tspe.policyCoordination.FailSecure {
-				tenantResult.Allowed = false
-				tenantResult.Decision = "deny_on_zero_trust_error"
-				tenantResult.BlockReason = fmt.Sprintf("Zero-trust overlay evaluation failed: %v", err)
-			}
-			// Log error but continue with tenant policy result if not fail-secure
-		} else {
-			// Coordinate tenant and zero-trust policy results
-			finalResult := tspe.coordinatePolicyResults(ctx, tenantResult, overlayResult)
-			finalResult.ProcessingTime = time.Since(startTime)
-			return finalResult, nil
-		}
-	}
-
-	tenantResult.ProcessingTime = time.Since(startTime)
-	return tenantResult, nil
+	result.ProcessingTime = time.Since(startTime)
+	return result, nil
 }
 
 // evaluateTenantSecurityPolicy performs standard tenant security policy evaluation
@@ -604,16 +522,15 @@ func (ser *SecurityEvaluationRequest) HasPermission(permission string) bool {
 
 // SecurityEvaluationResult contains the results of a security policy evaluation
 type SecurityEvaluationResult struct {
-	Request          *SecurityEvaluationRequest `json:"request"`
-	EvaluationTime   time.Time                  `json:"evaluation_time"`
-	Allowed          bool                       `json:"allowed"`
-	Decision         string                     `json:"decision"`
-	BlockReason      string                     `json:"block_reason,omitempty"`
-	WarningMessage   string                     `json:"warning_message,omitempty"`
-	AppliedRules     []string                   `json:"applied_rules"`
-	Violations       []RuleViolation            `json:"violations"`
-	ZeroTrustOverlay *ZeroTrustOverlayResult    `json:"zero_trust_overlay,omitempty"`
-	ProcessingTime   time.Duration              `json:"processing_time"`
+	Request        *SecurityEvaluationRequest `json:"request"`
+	EvaluationTime time.Time                  `json:"evaluation_time"`
+	Allowed        bool                       `json:"allowed"`
+	Decision       string                     `json:"decision"`
+	BlockReason    string                     `json:"block_reason,omitempty"`
+	WarningMessage string                     `json:"warning_message,omitempty"`
+	AppliedRules   []string                   `json:"applied_rules"`
+	Violations     []RuleViolation            `json:"violations"`
+	ProcessingTime time.Duration              `json:"processing_time"`
 }
 
 // RuleViolation represents a security rule violation
