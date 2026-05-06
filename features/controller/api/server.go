@@ -329,9 +329,10 @@ func (s *Server) setupRouter() {
 	// No route is pre-registered here; the endpoint only exists when a git-sync
 	// handler is explicitly wired in after server creation.
 
-	// Raft consensus endpoints (no auth required - internal cluster communication)
+	// Raft message endpoint: mTLS peer CN verification is enforced inside HandleMessage
 	s.router.HandleFunc("/raft/message", s.handleRaftMessage).Methods("POST")
-	s.router.HandleFunc("/raft/status", s.handleRaftStatus).Methods("GET")
+	// Raft status endpoint: requires HA read-status permission via API authentication
+	api.Handle("/raft/status", s.requirePermission("ha", "read-status")(http.HandlerFunc(s.handleRaftStatus))).Methods("GET")
 
 	// Rollback management endpoints (Story #416)
 	if s.rollbackManager != nil {

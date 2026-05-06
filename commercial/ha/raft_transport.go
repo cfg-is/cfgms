@@ -41,6 +41,10 @@ type raftTransport struct {
 	// Consensus engine
 	consensus *RaftConsensus
 
+	// allowedCNs is the set of TLS peer certificate CNs permitted to send Raft
+	// messages. Includes the local node's CN so single-node loopback works.
+	allowedCNs []string
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -50,7 +54,7 @@ type raftTransport struct {
 }
 
 // newRaftTransport creates a new Raft transport
-func newRaftTransport(nodeID uint64, address string, consensus *RaftConsensus, caCertPEM []byte, logger logging.Logger) *raftTransport {
+func newRaftTransport(nodeID uint64, address string, consensus *RaftConsensus, caCertPEM []byte, allowedCNs []string, logger logging.Logger) *raftTransport {
 	var tlsConfig *tls.Config
 	var err error
 
@@ -76,11 +80,12 @@ func newRaftTransport(nodeID uint64, address string, consensus *RaftConsensus, c
 	}
 
 	return &raftTransport{
-		nodeID:    nodeID,
-		address:   address,
-		peers:     make(map[uint64]string),
-		consensus: consensus,
-		useTLS:    true, // Default to TLS for cluster communication
+		nodeID:     nodeID,
+		address:    address,
+		peers:      make(map[uint64]string),
+		consensus:  consensus,
+		allowedCNs: allowedCNs,
+		useTLS:     true, // Default to TLS for cluster communication
 		client: &http.Client{
 			Timeout:   3 * time.Second,
 			Transport: transport,
@@ -88,6 +93,22 @@ func newRaftTransport(nodeID uint64, address string, consensus *RaftConsensus, c
 		stopC:  make(chan struct{}),
 		logger: logger,
 	}
+}
+
+// verifyPeerCN checks that the TLS peer certificate CN in r matches one of the
+// allowedCNs. It returns an error when r.TLS is nil, when no peer certificate
+// was presented, or when the CN is not in the allowed set.
+func verifyPeerCN(r *http.Request, allowedCNs []string) error {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return fmt.Errorf("mTLS required: no peer certificate presented")
+	}
+	cn := r.TLS.PeerCertificates[0].Subject.CommonName
+	for _, allowed := range allowedCNs {
+		if cn == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("peer certificate CN %q is not a known cluster node", cn)
 }
 
 // Start begins the transport layer
@@ -188,6 +209,13 @@ func (t *raftTransport) sendMessage(msg raftpb.Message) {
 
 // HandleMessage processes incoming Raft messages (HTTP handler)
 func (t *raftTransport) HandleMessage(w http.ResponseWriter, r *http.Request) {
+	if err := verifyPeerCN(r, t.allowedCNs); err != nil {
+		t.logger.Warn("RAFT_TRANSPORT: Rejected message from unauthorized peer",
+			"remote_addr", r.RemoteAddr, "error", err)
+		http.Error(w, "Forbidden: peer certificate verification failed", http.StatusForbidden)
+		return
+	}
+
 	t.logger.Debug("RAFT_TRANSPORT: Received message HTTP request", "node_id", t.nodeID, "remote_addr", r.RemoteAddr)
 
 	// Read message body
