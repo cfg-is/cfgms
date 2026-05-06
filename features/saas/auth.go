@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -36,13 +37,13 @@ import (
 // Not safe for concurrent calls to Authenticate/RefreshAuth on the same instance
 // (oauth2Client is replaced per-provider; add a mutex if concurrent use is required).
 type UniversalAuthenticator struct {
-	credStore    CredentialStore
+	credStore    auth.CredentialStore
 	httpClient   *http.Client
 	oauth2Client OAuth2Client
 }
 
 // NewUniversalAuthenticator creates a new universal authenticator
-func NewUniversalAuthenticator(credStore CredentialStore, httpClient *http.Client) *UniversalAuthenticator {
+func NewUniversalAuthenticator(credStore auth.CredentialStore, httpClient *http.Client) *UniversalAuthenticator {
 	return &UniversalAuthenticator{
 		credStore:    credStore,
 		httpClient:   httpClient,
@@ -78,13 +79,14 @@ func (ua *UniversalAuthenticator) Authenticate(ctx context.Context, provider str
 func (ua *UniversalAuthenticator) IsAuthenticated(ctx context.Context, provider string, method AuthMethod) bool {
 	switch method {
 	case AuthMethodOAuth2:
-		tokenSet, err := ua.credStore.GetTokenSet(provider)
+		authToken, err := ua.credStore.GetToken(provider)
 		if err != nil {
 			return false
 		}
+		tokenSet := accessTokenToTokenSet(authToken)
 		return tokenSet != nil && tokenSet.IsValid(5*time.Minute) // 5 min threshold
 	case AuthMethodAPIKey, AuthMethodBasicAuth, AuthMethodBearerToken, AuthMethodJWT:
-		_, err := ua.credStore.GetClientSecret(provider)
+		_, err := ua.credStore.GetToken(provider + ":secret")
 		return err == nil
 	default:
 		return false
@@ -106,10 +108,11 @@ func (ua *UniversalAuthenticator) RefreshAuth(ctx context.Context, provider stri
 func (ua *UniversalAuthenticator) GetAuthHeaders(ctx context.Context, provider string, method AuthMethod) (map[string]string, error) {
 	switch method {
 	case AuthMethodOAuth2:
-		tokenSet, err := ua.credStore.GetTokenSet(provider)
+		authToken, err := ua.credStore.GetToken(provider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get OAuth2 token: %w", err)
 		}
+		tokenSet := accessTokenToTokenSet(authToken)
 		return map[string]string{
 			"Authorization": tokenSet.GetAuthorizationHeader(),
 		}, nil
@@ -157,7 +160,7 @@ func (ua *UniversalAuthenticator) authenticateOAuth2(ctx context.Context, provid
 			return fmt.Errorf("client credentials grant failed: %w", err)
 		}
 
-		return ua.credStore.StoreTokenSet(provider, tokenSet)
+		return ua.credStore.StoreToken(provider, tokenSetToAccessToken(tokenSet, provider))
 	}
 
 	// For authorization code flow, return the authorization URL
@@ -166,10 +169,11 @@ func (ua *UniversalAuthenticator) authenticateOAuth2(ctx context.Context, provid
 }
 
 func (ua *UniversalAuthenticator) refreshOAuth2Token(ctx context.Context, provider string) error {
-	tokenSet, err := ua.credStore.GetTokenSet(provider)
+	authToken, err := ua.credStore.GetToken(provider)
 	if err != nil {
 		return fmt.Errorf("failed to get token set: %w", err)
 	}
+	tokenSet := accessTokenToTokenSet(authToken)
 
 	if tokenSet.RefreshToken == "" {
 		return fmt.Errorf("no refresh token available")
@@ -180,7 +184,7 @@ func (ua *UniversalAuthenticator) refreshOAuth2Token(ctx context.Context, provid
 		return fmt.Errorf("failed to refresh token: %w", err)
 	}
 
-	return ua.credStore.StoreTokenSet(provider, newTokenSet)
+	return ua.credStore.StoreToken(provider, tokenSetToAccessToken(newTokenSet, provider))
 }
 
 // API Key Authentication Implementation
@@ -204,11 +208,11 @@ func (ua *UniversalAuthenticator) authenticateAPIKey(ctx context.Context, provid
 	if err != nil {
 		return fmt.Errorf("failed to marshal API key config: %w", err)
 	}
-	return ua.credStore.StoreClientSecret(provider, string(data))
+	return ua.credStore.StoreToken(provider+":secret", &auth.AccessToken{Token: string(data), TenantID: provider})
 }
 
 func (ua *UniversalAuthenticator) getAPIKeyHeaders(provider string) (map[string]string, error) {
-	configData, err := ua.credStore.GetClientSecret(provider)
+	secretToken, err := ua.credStore.GetToken(provider + ":secret")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get API key config: %w", err)
 	}
@@ -218,7 +222,7 @@ func (ua *UniversalAuthenticator) getAPIKeyHeaders(provider string) (map[string]
 		Header     string `json:"header"`
 		QueryParam string `json:"query_param"`
 	}
-	if err := json.Unmarshal([]byte(configData), &apiKey); err != nil {
+	if err := json.Unmarshal([]byte(secretToken.Token), &apiKey); err != nil {
 		return nil, fmt.Errorf("invalid API key config: %w", err)
 	}
 
@@ -247,11 +251,11 @@ func (ua *UniversalAuthenticator) authenticateBasicAuth(ctx context.Context, pro
 	if err != nil {
 		return fmt.Errorf("failed to marshal basic auth config: %w", err)
 	}
-	return ua.credStore.StoreClientSecret(provider, string(data))
+	return ua.credStore.StoreToken(provider+":secret", &auth.AccessToken{Token: string(data), TenantID: provider})
 }
 
 func (ua *UniversalAuthenticator) getBasicAuthHeaders(provider string) (map[string]string, error) {
-	configData, err := ua.credStore.GetClientSecret(provider)
+	secretToken, err := ua.credStore.GetToken(provider + ":secret")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get basic auth config: %w", err)
 	}
@@ -260,7 +264,7 @@ func (ua *UniversalAuthenticator) getBasicAuthHeaders(provider string) (map[stri
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := json.Unmarshal([]byte(configData), &basicAuth); err != nil {
+	if err := json.Unmarshal([]byte(secretToken.Token), &basicAuth); err != nil {
 		return nil, fmt.Errorf("invalid basic auth config: %w", err)
 	}
 
@@ -278,17 +282,17 @@ func (ua *UniversalAuthenticator) authenticateBearerToken(ctx context.Context, p
 		return fmt.Errorf("invalid bearer token config: %w", err)
 	}
 
-	return ua.credStore.StoreClientSecret(provider, bearerConfig.Token)
+	return ua.credStore.StoreToken(provider+":secret", &auth.AccessToken{Token: bearerConfig.Token, TenantID: provider})
 }
 
 func (ua *UniversalAuthenticator) getBearerTokenHeaders(provider string) (map[string]string, error) {
-	token, err := ua.credStore.GetClientSecret(provider)
+	secretToken, err := ua.credStore.GetToken(provider + ":secret")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bearer token: %w", err)
 	}
 
 	return map[string]string{
-		"Authorization": "Bearer " + token,
+		"Authorization": "Bearer " + secretToken.Token,
 	}, nil
 }
 
@@ -306,17 +310,17 @@ func (ua *UniversalAuthenticator) authenticateJWT(ctx context.Context, provider 
 		return fmt.Errorf("failed to generate JWT: %w", err)
 	}
 
-	return ua.credStore.StoreClientSecret(provider, token)
+	return ua.credStore.StoreToken(provider+":secret", &auth.AccessToken{Token: token, TenantID: provider})
 }
 
 func (ua *UniversalAuthenticator) getJWTHeaders(provider string) (map[string]string, error) {
-	token, err := ua.credStore.GetClientSecret(provider)
+	secretToken, err := ua.credStore.GetToken(provider + ":secret")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get JWT token: %w", err)
 	}
 
 	return map[string]string{
-		"Authorization": "Bearer " + token,
+		"Authorization": "Bearer " + secretToken.Token,
 	}, nil
 }
 

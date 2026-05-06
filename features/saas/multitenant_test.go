@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	saas "github.com/cfgis/cfgms/features/saas"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
@@ -205,10 +206,10 @@ func TestMultiTenantManager_CompleteAdminConsent(t *testing.T) {
 			assert.True(t, updatedStatus.HasAdminConsent)
 
 			// Confirm stored token came from the httptest server, not hardcoded literals.
-			storedTokens, err := credStore.GetTokenSet(provider)
+			storedToken, err := credStore.GetToken(provider)
 			require.NoError(t, err)
-			assert.Equal(t, "real-access-token", storedTokens.AccessToken)
-			assert.Equal(t, "real-refresh-token", storedTokens.RefreshToken)
+			assert.Equal(t, "real-access-token", storedToken.Token)
+			assert.Equal(t, "real-refresh-token", storedToken.RefreshToken)
 
 			// Confirm the tenants returned by the stub discoverer were persisted
 			// unchanged — no fabrication occurs between discovery and storage.
@@ -418,14 +419,13 @@ func TestMultiTenantManager_GetTenantToken(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Store a valid token for the tenant
-	tenantKey := saas.GetTenantKey(mtm, provider, tenantID)
-	validToken := &saas.TokenSet{
-		AccessToken: "valid-token",
-		TokenType:   "Bearer",
-		ExpiresAt:   time.Now().Add(1 * time.Hour),
-	}
-	err = credStore.StoreTokenSet(tenantKey, validToken)
+	// Store a valid token for the tenant (keyed by tenantID directly)
+	err = credStore.StoreToken(tenantID, &auth.AccessToken{
+		Token:     "valid-token",
+		TokenType: "Bearer",
+		TenantID:  tenantID,
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	})
 	require.NoError(t, err)
 
 	// Test getting the tenant token
@@ -488,11 +488,11 @@ func TestMultiTenantManager_GetTenantToken_TIDMismatch(t *testing.T) {
 
 	// Craft a JWT whose tid claim is a different tenant than the one being requested.
 	mismatchedJWT := makeTestJWT("wrong-tenant")
-	tenantKey := saas.GetTenantKey(mtm, provider, tenantID)
-	require.NoError(t, credStore.StoreTokenSet(tenantKey, &saas.TokenSet{
-		AccessToken: mismatchedJWT,
-		TokenType:   "Bearer",
-		ExpiresAt:   time.Now().Add(1 * time.Hour),
+	require.NoError(t, credStore.StoreToken(tenantID, &auth.AccessToken{
+		Token:     mismatchedJWT,
+		TokenType: "Bearer",
+		TenantID:  tenantID,
+		ExpiresAt: time.Now().Add(1 * time.Hour),
 	}))
 
 	token, err := mtm.GetTenantToken(ctx, provider, tenantID)
@@ -519,11 +519,11 @@ func TestMultiTenantManager_GetTenantToken_OpaqueToken(t *testing.T) {
 	}))
 
 	// Opaque (non-JWT) access token; GetTenantToken must succeed (fail-open policy).
-	tenantKey := saas.GetTenantKey(mtm, provider, tenantID)
-	require.NoError(t, credStore.StoreTokenSet(tenantKey, &saas.TokenSet{
-		AccessToken: "opaque-access-token-not-a-jwt",
-		TokenType:   "Bearer",
-		ExpiresAt:   time.Now().Add(1 * time.Hour),
+	require.NoError(t, credStore.StoreToken(tenantID, &auth.AccessToken{
+		Token:     "opaque-access-token-not-a-jwt",
+		TokenType: "Bearer",
+		TenantID:  tenantID,
+		ExpiresAt: time.Now().Add(1 * time.Hour),
 	}))
 
 	token, err := mtm.GetTenantToken(ctx, provider, tenantID)
@@ -550,11 +550,11 @@ func TestMultiTenantManager_GetTenantToken_ExpiredToken_RefreshNotImplemented(t 
 	}))
 
 	// Store an expired token; refreshTenantToken is called and must return an error.
-	tenantKey := saas.GetTenantKey(mtm, provider, tenantID)
-	require.NoError(t, credStore.StoreTokenSet(tenantKey, &saas.TokenSet{
-		AccessToken: "expired-token",
-		TokenType:   "Bearer",
-		ExpiresAt:   time.Now().Add(-1 * time.Hour),
+	require.NoError(t, credStore.StoreToken(tenantID, &auth.AccessToken{
+		Token:     "expired-token",
+		TokenType: "Bearer",
+		TenantID:  tenantID,
+		ExpiresAt: time.Now().Add(-1 * time.Hour),
 	}))
 
 	token, err := mtm.GetTenantToken(ctx, provider, tenantID)
@@ -627,17 +627,12 @@ func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 	err := consentStore.StoreConsent(provider, status)
 	require.NoError(t, err)
 
-	// Store some tenant tokens
-	tenantKey := saas.GetTenantKey(mtm, provider, "tenant-1")
-	err = credStore.StoreTokenSet(tenantKey, &saas.TokenSet{
-		AccessToken: "tenant-token",
-	})
+	// Store some tenant tokens (keyed by tenantID directly)
+	err = credStore.StoreToken("tenant-1", &auth.AccessToken{Token: "tenant-token", TenantID: "tenant-1"})
 	require.NoError(t, err)
 
-	// Store base provider token
-	err = credStore.StoreTokenSet(provider, &saas.TokenSet{
-		AccessToken: "base-token",
-	})
+	// Store base provider token (keyed by provider name)
+	err = credStore.StoreToken(provider, &auth.AccessToken{Token: "base-token", TenantID: provider})
 	require.NoError(t, err)
 
 	// Test revoking consent
@@ -651,10 +646,10 @@ func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 	assert.Empty(t, newStatus.AccessibleTenants)
 
 	// Verify tokens were cleaned up
-	_, err = credStore.GetTokenSet(tenantKey)
+	_, err = credStore.GetToken("tenant-1")
 	assert.Error(t, err)
 
-	_, err = credStore.GetTokenSet(provider)
+	_, err = credStore.GetToken(provider)
 	assert.Error(t, err)
 }
 
@@ -751,14 +746,12 @@ func TestMicrosoftMultiTenantProvider_CreateInTenant(t *testing.T) {
 			provider := saas.NewMicrosoftProviderWithConsentStore(credStore, server.Client(), cs)
 			saas.SetProviderBaseURL(provider, server.URL)
 
-			// Compute tenant key using the GetTenantKey bridge on a helper MTM.
-			// getTenantKey is deterministic so any MTM instance produces the same key.
-			helperMTM := saas.NewMultiTenantManager(credStore, cs, server.Client(), nil, nil)
-			tenantKey := saas.GetTenantKey(helperMTM, provider.GetInfo().Name, tenantID)
-			require.NoError(t, credStore.StoreTokenSet(tenantKey, &saas.TokenSet{
-				AccessToken: "test-token",
-				TokenType:   "Bearer",
-				ExpiresAt:   time.Now().Add(1 * time.Hour),
+			// Store tenant token keyed by tenantID directly (no compound key needed).
+			require.NoError(t, credStore.StoreToken(tenantID, &auth.AccessToken{
+				Token:     "test-token",
+				TokenType: "Bearer",
+				TenantID:  tenantID,
+				ExpiresAt: time.Now().Add(1 * time.Hour),
 			}))
 
 			result, err := provider.CreateInTenant(ctx, tenantID, "users", map[string]interface{}{
@@ -798,10 +791,11 @@ func TestMultiTenantManager_TenantCacheConcurrency(t *testing.T) {
 
 	// Pre-populate the base token. Only reads occur on this key during concurrent
 	// execution — concurrent map reads in Go are safe without a mutex.
-	err := credStore.StoreTokenSet(provider, &saas.TokenSet{
-		AccessToken:  "base-token",
+	err := credStore.StoreToken(provider, &auth.AccessToken{
+		Token:        "base-token",
 		RefreshToken: "base-refresh-token",
 		TokenType:    "Bearer",
+		TenantID:     provider,
 		ExpiresAt:    time.Now().Add(1 * time.Hour),
 	})
 	require.NoError(t, err)
@@ -935,13 +929,12 @@ func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	tenantKey := saas.GetTenantKey(mtm, provider, tenantID)
-	validToken := &saas.TokenSet{
-		AccessToken: "benchmark-token",
-		TokenType:   "Bearer",
-		ExpiresAt:   time.Now().Add(1 * time.Hour),
-	}
-	if err := credStore.StoreTokenSet(tenantKey, validToken); err != nil {
+	if err := credStore.StoreToken(tenantID, &auth.AccessToken{
+		Token:     "benchmark-token",
+		TokenType: "Bearer",
+		TenantID:  tenantID,
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	}); err != nil {
 		b.Fatal(err)
 	}
 
@@ -983,15 +976,12 @@ func BenchmarkMicrosoftMultiTenantProvider_CreateInTenant(b *testing.B) {
 
 	provider := saas.NewMicrosoftProviderWithConsentStore(credStore, httpClient, cs)
 
-	// Compute tenant key using the GetTenantKey bridge.
-	helperMTM := saas.NewMultiTenantManager(credStore, cs, httpClient, nil, nil)
-	tenantKey := saas.GetTenantKey(helperMTM, provider.GetInfo().Name, tenantID)
-	validToken := &saas.TokenSet{
-		AccessToken: "benchmark-token",
-		TokenType:   "Bearer",
-		ExpiresAt:   time.Now().Add(1 * time.Hour),
-	}
-	if err := credStore.StoreTokenSet(tenantKey, validToken); err != nil {
+	if err := credStore.StoreToken(tenantID, &auth.AccessToken{
+		Token:     "benchmark-token",
+		TokenType: "Bearer",
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+		TenantID:  tenantID,
+	}); err != nil {
 		b.Fatal(err)
 	}
 
@@ -1025,11 +1015,11 @@ func TestMultiTenantManager_GetTenantToken_logsOnTIDFailure(t *testing.T) {
 	}))
 
 	// Store an opaque (non-JWT) token; extractJWTTenantID will fail, triggering the warn.
-	tenantKey := saas.GetTenantKey(mtm, provider, tenantID)
-	require.NoError(t, credStore.StoreTokenSet(tenantKey, &saas.TokenSet{
-		AccessToken: "opaque-not-a-jwt",
-		TokenType:   "Bearer",
-		ExpiresAt:   time.Now().Add(1 * time.Hour),
+	require.NoError(t, credStore.StoreToken(tenantID, &auth.AccessToken{
+		Token:     "opaque-not-a-jwt",
+		TokenType: "Bearer",
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+		TenantID:  tenantID,
 	}))
 
 	token, err := mtm.GetTenantToken(ctx, provider, tenantID)
