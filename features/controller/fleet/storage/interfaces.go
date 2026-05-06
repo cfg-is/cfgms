@@ -354,7 +354,7 @@ type PerformanceReport struct {
 	DecompressionTime time.Duration `json:"decompression_time"` // Average decompression time
 	ThroughputWrites  float64       `json:"throughput_writes"`  // Writes per second
 	ThroughputReads   float64       `json:"throughput_reads"`   // Reads per second
-	CpuUsage          float64       `json:"cpu_usage"`          // CPU usage percentage
+	CPUUsage          float64       `json:"cpu_usage"`          // CPU usage percentage
 	MemoryUsage       int64         `json:"memory_usage"`       // Memory usage in bytes
 	DiskIOPS          float64       `json:"disk_iops"`          // Disk I/O operations per second
 }

@@ -162,7 +162,7 @@ func (c *HTTPClient) GetUserLicenses(ctx context.Context, token *auth.AccessToke
 		Value []struct {
 			SkuID        string `json:"skuId"`
 			ServicePlans []struct {
-				ServicePlanId      string `json:"servicePlanId"`
+				ServicePlanID      string `json:"servicePlanId"`
 				ProvisioningStatus string `json:"provisioningStatus"`
 			} `json:"servicePlans"`
 		} `json:"value"`
@@ -181,7 +181,7 @@ func (c *HTTPClient) GetUserLicenses(ctx context.Context, token *auth.AccessToke
 		// Collect disabled service plans
 		for _, plan := range license.ServicePlans {
 			if plan.ProvisioningStatus == "Disabled" {
-				assignment.DisabledPlans = append(assignment.DisabledPlans, plan.ServicePlanId)
+				assignment.DisabledPlans = append(assignment.DisabledPlans, plan.ServicePlanID)
 			}
 		}
 
