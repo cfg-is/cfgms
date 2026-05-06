@@ -25,10 +25,11 @@ type splitBrainDetector struct {
 	started bool
 
 	// Split-brain detection state
-	handlers       []SplitBrainHandler
-	lastDetection  time.Time
-	currentStatus  *SplitBrainStatus
-	partitionTrack map[string]*partitionInfo
+	handlers         []SplitBrainHandler
+	lastDetection    time.Time
+	currentStatus    *SplitBrainStatus
+	partitionTrack   map[string]*partitionInfo
+	reachabilityFunc func(fromID, toID string) bool
 }
 
 // partitionInfo tracks information about a network partition
@@ -61,6 +62,9 @@ func NewSplitBrainDetector(cfg *SplitBrainConfig, logger logging.Logger, manager
 			Details:   make(map[string]interface{}),
 		},
 		partitionTrack: make(map[string]*partitionInfo),
+		// Conservative default: treat all node pairs as reachable until a real
+		// probe mechanism is wired in, so detection never false-positives.
+		reachabilityFunc: func(_, _ string) bool { return true },
 	}, nil
 }
 
@@ -141,6 +145,15 @@ func (sbd *splitBrainDetector) RegisterSplitBrainHandler(handler SplitBrainHandl
 	sbd.logger.Debug("Split-brain handler registered")
 }
 
+// SetReachabilityFunc injects a custom node-reachability probe for testing or
+// future live-probe implementations. The production default always returns true
+// (conservative: no false partition reports until a real probe is wired in).
+func (sbd *splitBrainDetector) SetReachabilityFunc(f func(fromID, toID string) bool) {
+	sbd.mu.Lock()
+	defer sbd.mu.Unlock()
+	sbd.reachabilityFunc = f
+}
+
 // periodicDetection performs periodic split-brain detection
 func (sbd *splitBrainDetector) periodicDetection() {
 	ticker := time.NewTicker(sbd.cfg.DetectionInterval)
@@ -214,7 +227,7 @@ func (sbd *splitBrainDetector) performSplitBrainCheck() *SplitBrainStatus {
 
 	// Count leaders and analyze partitions
 	leaderCount := 0
-	partitions := sbd.analyzePartitions(nodes)
+	partitions := sbd.analyzePartitions(nodes, sbd.reachabilityFunc)
 
 	for _, node := range nodes {
 		if node.Role == NodeRoleLeader {
@@ -254,35 +267,72 @@ func (sbd *splitBrainDetector) performSplitBrainCheck() *SplitBrainStatus {
 	return status
 }
 
-// analyzePartitions analyzes the cluster for potential network partitions
-func (sbd *splitBrainDetector) analyzePartitions(nodes []*NodeInfo) []*partitionInfo {
-	// Simple partition detection based on node connectivity
-	// In a production implementation, this would use more sophisticated
-	// network connectivity analysis
+// analyzePartitions groups nodes into connected components using BFS over the
+// reachability graph. Nodes that can mutually reach each other belong to the
+// same partition. The reachable function is injected so tests can simulate
+// network splits without actual network access.
+//
+// This method must NOT acquire sbd.mu — callers pass already-fetched NodeInfo
+// slices and a reachability function with no new lock dependencies.
+func (sbd *splitBrainDetector) analyzePartitions(nodes []*NodeInfo, reachable func(fromID, toID string) bool) []*partitionInfo {
+	if len(nodes) == 0 {
+		return nil
+	}
 
-	partitions := make([]*partitionInfo, 0)
-	processed := make(map[string]bool)
+	// component[nodeID] = component index (-1 = unvisited)
+	component := make(map[string]int, len(nodes))
+	for _, n := range nodes {
+		component[n.ID] = -1
+	}
 
-	for _, node := range nodes {
-		if processed[node.ID] {
+	numComponents := 0
+	for _, seed := range nodes {
+		if component[seed.ID] >= 0 {
 			continue
 		}
 
-		partition := &partitionInfo{
-			ID:        fmt.Sprintf("partition-%s", node.ID[:8]),
-			Nodes:     []string{node.ID},
+		compIdx := numComponents
+		numComponents++
+
+		queue := []string{seed.ID}
+		component[seed.ID] = compIdx
+
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+			for _, other := range nodes {
+				if component[other.ID] >= 0 {
+					continue
+				}
+				if reachable(cur, other.ID) {
+					component[other.ID] = compIdx
+					queue = append(queue, other.ID)
+				}
+			}
+		}
+	}
+
+	// Build a partitionInfo per component
+	partitions := make([]*partitionInfo, numComponents)
+	for i := range partitions {
+		partitions[i] = &partitionInfo{
 			FirstSeen: time.Now(),
 			LastSeen:  time.Now(),
 		}
+	}
 
+	for _, node := range nodes {
+		p := partitions[component[node.ID]]
+		p.Nodes = append(p.Nodes, node.ID)
 		if node.Role == NodeRoleLeader {
-			partition.LeaderClaims = 1
+			p.LeaderClaims++
 		}
+	}
 
-		// For now, each node is in its own partition
-		// This is a simplified implementation
-		processed[node.ID] = true
-		partitions = append(partitions, partition)
+	for _, p := range partitions {
+		if len(p.Nodes) > 0 {
+			p.ID = fmt.Sprintf("partition-%s", p.Nodes[0])
+		}
 	}
 
 	return partitions
