@@ -172,12 +172,26 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	activeSessions := 0
+	connectionState := "disconnected"
+	s.mu.RLock()
+	reg := s.registry
+	s.mu.RUnlock()
+	if reg != nil {
+		if _, ok := reg.Get(stewardID); ok {
+			activeSessions = 1
+			connectionState = "connected"
+		}
+	}
+
 	apiStewardInfo := StewardInfo{
-		ID:       stewardInfo.ID,
-		Status:   stewardInfo.Status,
-		LastSeen: stewardInfo.LastHeartbeat,
-		Version:  stewardInfo.Version,
-		Metrics:  stewardInfo.Metrics,
+		ID:              stewardInfo.ID,
+		Status:          stewardInfo.Status,
+		LastSeen:        stewardInfo.LastHeartbeat,
+		Version:         stewardInfo.Version,
+		Metrics:         stewardInfo.Metrics,
+		ActiveSessions:  activeSessions,
+		ConnectionState: connectionState,
 	}
 
 	// Include DNA information if available
