@@ -217,6 +217,28 @@ func TestHeartbeatService_GetAllStatusesDNAHash(t *testing.T) {
 	assert.Equal(t, "h3", all["s3"].DNAHash)
 }
 
+func TestHeartbeatService_ActiveSessionsAndConnectionState(t *testing.T) {
+	svc, cp := newTestService(t)
+	ctx := context.Background()
+
+	hb := &controlplaneTypes.Heartbeat{
+		StewardID:       "steward-ac",
+		TenantID:        "tenant-ac",
+		Status:          controlplaneTypes.StatusHealthy,
+		Timestamp:       time.Now(),
+		ActiveSessions:  1,
+		ConnectionState: "connected",
+	}
+	require.NoError(t, cp.sendHeartbeat(ctx, hb))
+
+	status, ok := svc.GetStatus("steward-ac")
+	require.True(t, ok, "steward must be registered after heartbeat")
+	assert.Equal(t, 1, status.ActiveSessions,
+		"StewardStatus.ActiveSessions must equal the heartbeat active_sessions value")
+	assert.Equal(t, "connected", status.ConnectionState,
+		"StewardStatus.ConnectionState must equal the heartbeat connection_state value")
+}
+
 func TestSetExpectedDNAHash_UnknownSteward(t *testing.T) {
 	svc, _ := newTestService(t)
 

@@ -694,13 +694,22 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 	currentDNAHash := c.currentDNAHash
 	c.dnaMu.RUnlock()
 
+	activeSessions := int32(0)
+	connectionState := "disconnected"
+	if cp.IsConnected() {
+		activeSessions = 1
+		connectionState = "connected"
+	}
+
 	heartbeat := &cpTypes.Heartbeat{
-		StewardID: stewardID,
-		TenantID:  tenantID,
-		Status:    cpTypes.HeartbeatStatus(status),
-		Timestamp: time.Now(),
-		Metrics:   metricsMap,
-		DNAHash:   currentDNAHash,
+		StewardID:       stewardID,
+		TenantID:        tenantID,
+		Status:          cpTypes.HeartbeatStatus(status),
+		Timestamp:       time.Now(),
+		Metrics:         metricsMap,
+		DNAHash:         currentDNAHash,
+		ActiveSessions:  activeSessions,
+		ConnectionState: connectionState,
 	}
 
 	if err := cp.SendHeartbeat(ctx, heartbeat); err != nil {
