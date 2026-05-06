@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"sync"
 	"time"
@@ -464,6 +465,10 @@ func (m *Manager) initializeRaftConsensus() error {
 	// Parse cluster nodes from config
 	m.logger.Debug("RAFT_INIT: Parsing cluster nodes from config", "config_nil", m.cfg.Cluster.Discovery.Config == nil)
 
+	// seenHashes guards against node ID hash collisions before they can silently alias
+	// two distinct nodes to the same Raft peer ID.
+	seenHashes := make(map[uint64]string) // hash → original string ID
+
 	if clusterNodes := m.cfg.Cluster.Discovery.Config["nodes"]; clusterNodes != nil {
 		m.logger.Debug("RAFT_INIT: Found cluster nodes in config", "type", fmt.Sprintf("%T", clusterNodes))
 		// Try both []interface{} and []map[string]interface{} type assertions
@@ -473,6 +478,10 @@ func (m *Manager) initializeRaftConsensus() error {
 				if nodeMap, ok := n.(map[string]interface{}); ok {
 					if id, ok := nodeMap["id"].(string); ok {
 						peerID := hashStringToUint64(id)
+						if existing, dup := seenHashes[peerID]; dup {
+							return fmt.Errorf("node ID hash collision: %q and %q both hash to %d", existing, id, peerID)
+						}
+						seenHashes[peerID] = id
 						peers = append(peers, raft.Peer{
 							ID:      peerID,
 							Context: []byte(id), // Store original string ID
@@ -486,6 +495,10 @@ func (m *Manager) initializeRaftConsensus() error {
 			for i, nodeMap := range nodes {
 				if id, ok := nodeMap["id"].(string); ok {
 					peerID := hashStringToUint64(id)
+					if existing, dup := seenHashes[peerID]; dup {
+						return fmt.Errorf("node ID hash collision: %q and %q both hash to %d", existing, id, peerID)
+					}
+					seenHashes[peerID] = id
 					peers = append(peers, raft.Peer{
 						ID:      peerID,
 						Context: []byte(id), // Store original string ID
@@ -502,7 +515,7 @@ func (m *Manager) initializeRaftConsensus() error {
 
 	// Create Raft consensus
 	var err error
-	m.raftConsensus, err = NewRaftConsensus(context.Background(), nodeID, m.nodeInfo, peers, m.logger)
+	m.raftConsensus, err = NewRaftConsensus(context.Background(), nodeID, m.nodeInfo, peers, &m.cfg.Cluster, m.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create Raft consensus: %w", err)
 	}
@@ -575,13 +588,13 @@ func (m *Manager) initializeRaftConsensus() error {
 	return nil
 }
 
-// hashStringToUint64 converts a string to a deterministic uint64
+// hashStringToUint64 converts a string to a deterministic uint64 using FNV-1a 64-bit.
+// FNV-1a has negligible collision probability for the node-count range (3–50 nodes)
+// and avoids the aliasing risk of the old polynomial (31-based) hash.
 func hashStringToUint64(s string) uint64 {
-	var hash uint64
-	for i := 0; i < len(s); i++ {
-		hash = hash*31 + uint64(s[i])
-	}
-	return hash
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	return h.Sum64()
 }
 
 // initializeBlueGreenComponents initializes components for blue-green mode.

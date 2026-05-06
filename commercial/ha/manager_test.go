@@ -193,10 +193,13 @@ func TestManager_ClusterMode(t *testing.T) {
 	// Create HA config for cluster mode.
 	// Configure self as the only peer so Raft calls StartNode (new cluster) rather
 	// than RestartNode (join existing), allowing the node to become leader.
+	// Use fast timing so elections complete well within the 10-second Eventually window.
 	const nodeID = "test-node-cluster-mode"
 	cfg := DefaultConfig()
 	cfg.Mode = ClusterMode
 	cfg.Node.ID = nodeID
+	cfg.Cluster.HeartbeatInterval = 100 * time.Millisecond
+	cfg.Cluster.ElectionTimeout = 1 * time.Second
 	cfg.Cluster.ExpectedSize = 1
 	cfg.Cluster.MinQuorum = 1
 	cfg.Cluster.Discovery.Config = map[string]interface{}{
@@ -269,6 +272,8 @@ func TestManager_IsLeader_UsesRaftConsensus(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Mode = ClusterMode
 	cfg.Node.ID = nodeID
+	cfg.Cluster.HeartbeatInterval = 100 * time.Millisecond
+	cfg.Cluster.ElectionTimeout = 1 * time.Second
 	// Configure self as peer so Raft initializes a new cluster via StartNode.
 	cfg.Cluster.Discovery.Config = map[string]interface{}{
 		"nodes": []interface{}{
@@ -397,6 +402,43 @@ func TestConfig_LoadFromEnvironment_InvalidQuorum(t *testing.T) {
 	assert.Contains(t, err.Error(), "quorum")
 }
 
+// TestHashStringToUint64_DistinguishesKnownPolynomialColliders verifies that the
+// fnv-based hash distinguishes "Aa" and "BB", which are known colliders under the
+// old polynomial hash (both produce 2112: 65*31+97 == 66*31+66).
+func TestHashStringToUint64_DistinguishesKnownPolynomialColliders(t *testing.T) {
+	h1 := hashStringToUint64("Aa")
+	h2 := hashStringToUint64("BB")
+	assert.NotEqual(t, h1, h2,
+		"fnv hash must distinguish strings that collide under the old polynomial hash")
+}
+
+// TestManager_InitRaftConsensus_DuplicateNodeIDReturnsError verifies that
+// initializeRaftConsensus returns a non-nil error when two configured peer nodes
+// produce the same uint64 hash — surfacing misconfiguration before any silent aliasing.
+func TestManager_InitRaftConsensus_DuplicateNodeIDReturnsError(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "collision-self-node"
+	cfg.Cluster.ExpectedSize = 1
+	cfg.Cluster.MinQuorum = 1
+	// Two peers with identical ID strings: same string → same hash → collision detected.
+	cfg.Cluster.Discovery.Config = map[string]interface{}{
+		"nodes": []interface{}{
+			map[string]interface{}{"id": "duplicate-peer-id", "address": "127.0.0.1:9001"},
+			map[string]interface{}{"id": "duplicate-peer-id", "address": "127.0.0.1:9002"},
+		},
+	}
+
+	logger := logging.GetLogger()
+	_, err = NewManager(cfg, logger, storageManager)
+	require.Error(t, err, "NewManager must return an error when two peer IDs produce the same hash")
+	assert.Contains(t, err.Error(), "collision",
+		"error message must mention collision so operators understand the misconfiguration")
+}
+
 func TestDeploymentModeProgression(t *testing.T) {
 	// This test verifies the progressive deployment model works correctly
 	logger := logging.GetLogger()
@@ -450,6 +492,9 @@ func TestDeploymentModeProgression(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.Mode = ClusterMode
 		cfg.Node.ID = nodeID
+		// Fast timing so elections complete well within the 10-second Eventually window.
+		cfg.Cluster.HeartbeatInterval = 100 * time.Millisecond
+		cfg.Cluster.ElectionTimeout = 1 * time.Second
 		cfg.Cluster.ExpectedSize = 1
 		cfg.Cluster.MinQuorum = 1
 		cfg.Cluster.Discovery.Config = map[string]interface{}{

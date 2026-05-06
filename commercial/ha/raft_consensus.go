@@ -26,9 +26,10 @@ type RaftConsensus struct {
 	wg       sync.WaitGroup // tracks the runRaft goroutine; Stop() waits on it
 
 	// Raft core
-	node    raft.Node
-	storage *raft.MemoryStorage
-	config  *raft.Config
+	node         raft.Node
+	storage      *raft.MemoryStorage
+	config       *raft.Config
+	tickInterval time.Duration // derived from ClusterConfig.HeartbeatInterval
 
 	// Node identity
 	nodeID   uint64
@@ -79,14 +80,36 @@ type NodeUpdateCommand struct {
 	NodeInfo *NodeInfo `json:"node_info"`
 }
 
-// NewRaftConsensus creates a new Raft consensus instance
-func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, peers []raft.Peer, logger logging.Logger) (*RaftConsensus, error) {
+// NewRaftConsensus creates a new Raft consensus instance. clusterCfg provides the
+// timing source: tickInterval = HeartbeatInterval, HeartbeatTick = 1, and
+// ElectionTick = ElectionTimeout / HeartbeatInterval. ElectionTick must be >= 5.
+func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, peers []raft.Peer, clusterCfg *ClusterConfig, logger logging.Logger) (*RaftConsensus, error) {
+	if clusterCfg == nil {
+		return nil, fmt.Errorf("clusterCfg must not be nil")
+	}
+	if clusterCfg.HeartbeatInterval <= 0 {
+		return nil, fmt.Errorf("ClusterConfig.HeartbeatInterval must be positive, got %v", clusterCfg.HeartbeatInterval)
+	}
+	if clusterCfg.ElectionTimeout <= 0 {
+		return nil, fmt.Errorf("ClusterConfig.ElectionTimeout must be positive, got %v", clusterCfg.ElectionTimeout)
+	}
+
+	tickInterval := clusterCfg.HeartbeatInterval
+	heartbeatTick := 1
+	electionTick := int(clusterCfg.ElectionTimeout / clusterCfg.HeartbeatInterval)
+	if electionTick < 5*heartbeatTick {
+		return nil, fmt.Errorf(
+			"ElectionTimeout (%v) must be at least 5× HeartbeatInterval (%v): got ElectionTick=%d, need ≥%d",
+			clusterCfg.ElectionTimeout, clusterCfg.HeartbeatInterval, electionTick, 5*heartbeatTick,
+		)
+	}
+
 	storage := raft.NewMemoryStorage()
 
 	config := &raft.Config{
 		ID:              nodeID,
-		ElectionTick:    10, // 1 second (with 100ms tick)
-		HeartbeatTick:   1,  // 100ms heartbeat
+		ElectionTick:    electionTick,
+		HeartbeatTick:   heartbeatTick,
 		Storage:         storage,
 		MaxSizePerMsg:   4096,
 		MaxInflightMsgs: 256,
@@ -96,10 +119,11 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 	}
 
 	rc := &RaftConsensus{
-		nodeID:   nodeID,
-		nodeInfo: nodeInfo,
-		storage:  storage,
-		config:   config,
+		nodeID:       nodeID,
+		nodeInfo:     nodeInfo,
+		storage:      storage,
+		config:       config,
+		tickInterval: tickInterval,
 		clusterState: &ClusterState{
 			Nodes: make(map[uint64]*NodeInfo),
 		},
@@ -194,7 +218,7 @@ func (rc *RaftConsensus) Stop() error {
 func (rc *RaftConsensus) runRaft() {
 	defer rc.wg.Done()
 
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(rc.tickInterval)
 	defer ticker.Stop()
 
 	rc.logger.Debug("RAFT: Main Raft loop started", "node_id", rc.nodeID)
