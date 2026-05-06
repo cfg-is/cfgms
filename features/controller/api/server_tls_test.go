@@ -55,3 +55,23 @@ func TestSetupManagedTLS_NilHAManager_NoClientAuth(t *testing.T) {
 	assert.Equal(t, tls.NoClientCert, tlsConfig.ClientAuth,
 		"nil haManager must not request or require client certificates")
 }
+
+// TestSetupManagedTLS_SingleServerMode_NoClientAuth verifies that when haManager is
+// non-nil but configured in SingleServerMode, setupManagedTLS returns a tls.Config
+// with no client auth. This exercises the GetDeploymentMode() != ClusterMode branch
+// (distinct from the nil haManager short-circuit path), ensuring a bug in the mode
+// comparison cannot hide behind the nil check.
+func TestSetupManagedTLS_SingleServerMode_NoClientAuth(t *testing.T) {
+	certMgr := newTLSTestCertManager(t)
+
+	haManager, err := ha.NewManager(ha.DefaultConfig(), logging.NewNoopLogger(), nil)
+	require.NoError(t, err)
+
+	server := newMinimalTLSServer(t, certMgr, haManager)
+
+	tlsConfig, err := server.setupManagedTLS()
+	require.NoError(t, err)
+	require.NotNil(t, tlsConfig)
+	assert.Equal(t, tls.NoClientCert, tlsConfig.ClientAuth,
+		"SingleServerMode manager must not request or require client certificates")
+}
