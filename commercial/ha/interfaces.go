@@ -143,37 +143,6 @@ type HealthStatus struct {
 	Details   map[string]string    `json:"details,omitempty"`
 }
 
-// SessionStateHandler handles session state change notifications
-type SessionStateHandler interface {
-	OnSessionStateChanged(sessionID string, state interface{}) error
-	OnSessionRemoved(sessionID string) error
-}
-
-// LoadBalancingStrategy represents different load balancing strategies
-type LoadBalancingStrategy int
-
-const (
-	RoundRobinStrategy LoadBalancingStrategy = iota
-	LeastConnectionsStrategy
-	HealthBasedStrategy
-	GeographicStrategy
-)
-
-func (s LoadBalancingStrategy) String() string {
-	switch s {
-	case RoundRobinStrategy:
-		return "round-robin"
-	case LeastConnectionsStrategy:
-		return "least-connections"
-	case HealthBasedStrategy:
-		return "health-based"
-	case GeographicStrategy:
-		return "geographic"
-	default:
-		return "unknown"
-	}
-}
-
 // FailoverHandler handles failover events
 type FailoverHandler interface {
 	OnFailoverStarted(event *FailoverEvent) error

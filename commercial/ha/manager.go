@@ -1,8 +1,8 @@
 //go:build commercial
+// +build commercial
 
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright 2026 Jordan Ritz
-// +build commercial
 
 package ha
 
@@ -33,10 +33,8 @@ type Manager struct {
 	nodeInfo      *NodeInfo
 	healthChecker *HealthChecker
 	raftConsensus *RaftConsensus
-	loadBalancer  *loadBalancer
 	failover      *failoverManager
 	splitBrain    *splitBrainDetector
-	sessionSync   *sessionSynchronizer
 
 	// State management
 	storageManager *interfaces.StorageManager
@@ -242,12 +240,6 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 
-	if m.sessionSync != nil {
-		if err := m.sessionSync.Stop(ctx); err != nil {
-			stopErrors = append(stopErrors, fmt.Errorf("session sync stop: %w", err))
-		}
-	}
-
 	m.isStarted = false
 
 	if len(stopErrors) > 0 {
@@ -415,15 +407,6 @@ func (m *Manager) initializeClusterComponents() error {
 	}
 	m.logger.Info("DEBUG: Raft consensus initialization completed successfully")
 
-	// Re-enabled LoadBalancer component - Step 2 of systematic HA re-enabling
-	m.logger.Info("DEBUG: About to initialize load balancer...")
-	m.loadBalancer, err = NewLoadBalancer(m.cfg.LoadBalancing, m.logger)
-	if err != nil {
-		return fmt.Errorf("failed to initialize load balancer: %w", err)
-	}
-	m.logger.Info("DEBUG: Load balancer initialization completed successfully")
-
-	// Re-enabled FailoverManager component - Step 3 of systematic HA re-enabling
 	m.logger.Info("DEBUG: About to initialize failover manager...")
 	m.failover, err = NewFailoverManager(m.cfg.Failover, m.logger, m)
 	if err != nil {
@@ -431,21 +414,12 @@ func (m *Manager) initializeClusterComponents() error {
 	}
 	m.logger.Info("DEBUG: Failover manager initialization completed successfully")
 
-	// Re-enabled SplitBrainDetector component - Step 4 of systematic HA re-enabling
 	m.logger.Info("DEBUG: About to initialize split-brain detector...")
 	m.splitBrain, err = NewSplitBrainDetector(m.cfg.SplitBrain, m.logger, m)
 	if err != nil {
 		return fmt.Errorf("failed to initialize split-brain detector: %w", err)
 	}
 	m.logger.Info("DEBUG: Split-brain detector initialization completed successfully")
-
-	// Re-enabled SessionSynchronizer component - Step 5 of systematic HA re-enabling (FINAL COMPONENT!)
-	m.logger.Info("DEBUG: About to initialize session synchronizer...")
-	m.sessionSync, err = NewSessionSynchronizer(m.cfg.Cluster.SessionSync, m.logger, m.storageManager, m)
-	if err != nil {
-		return fmt.Errorf("failed to initialize session synchronizer: %w", err)
-	}
-	m.logger.Info("DEBUG: Session synchronizer initialization completed successfully")
 
 	return nil
 }
@@ -679,12 +653,6 @@ func (m *Manager) startClusterMode() error {
 		m.logger.Info("DEBUG: Split-brain detector component started successfully")
 	} else {
 		m.logger.Info("DEBUG: Split-brain detector component is nil (disabled), skipping start")
-	}
-
-	if m.sessionSync != nil {
-		m.logger.Info("DEBUG: Session synchronizer component enabled and ready")
-	} else {
-		m.logger.Info("DEBUG: Session synchronizer component is nil (disabled), skipping")
 	}
 
 	m.logger.Info("DEBUG: All cluster mode components started successfully")

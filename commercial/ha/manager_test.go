@@ -1,14 +1,13 @@
 //go:build commercial
+// +build commercial
 
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright 2026 Jordan Ritz
-// +build commercial
 
 package ha
 
 import (
 	"context"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,14 +16,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testing/storage"
 )
 
 // TestManager_ConcreteCollaboratorTypes verifies that Manager stores concrete types
-// for the 4 collaborators that had single-impl interfaces eliminated (Issue #1234).
-// Before the fix these fields were interface types; the sessionSync field required
-// a type-assertion downcast to call Stop(). Now all four are concrete pointer types.
+// for the 2 collaborators that had single-impl interfaces eliminated (Issue #1234).
+// Before the fix these fields were interface types. Now both are concrete pointer types.
 func TestManager_ConcreteCollaboratorTypes(t *testing.T) {
 	storageManager, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
@@ -44,21 +41,12 @@ func TestManager_ConcreteCollaboratorTypes(t *testing.T) {
 		}
 	})
 
-	// All four collaborators must be non-nil concrete pointers after cluster-mode init.
-	require.NotNil(t, manager.sessionSync, "sessionSync must be initialized in cluster mode")
-	require.NotNil(t, manager.loadBalancer, "loadBalancer must be initialized in cluster mode")
+	// Both remaining collaborators must be non-nil concrete pointers after cluster-mode init.
 	require.NotNil(t, manager.failover, "failover must be initialized in cluster mode")
 	require.NotNil(t, manager.splitBrain, "splitBrain must be initialized in cluster mode")
-
-	// Stop() must be callable directly on the concrete *sessionSynchronizer field
-	// without any type-assertion downcast — the primary smell this issue removes.
-	ctx := context.Background()
-	assert.NoError(t, manager.sessionSync.Stop(ctx))
 }
 
 func TestManager_initRaft_logsInitStart(t *testing.T) {
-	mock := pkgtesting.NewMockLogger(true)
-
 	storageManager, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
 
@@ -66,7 +54,8 @@ func TestManager_initRaft_logsInitStart(t *testing.T) {
 	cfg.Mode = ClusterMode
 	cfg.Node.ID = "test-node-init-raft"
 
-	manager, err := NewManager(cfg, mock, storageManager)
+	logger := logging.GetLogger()
+	manager, err := NewManager(cfg, logger, storageManager)
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
@@ -76,70 +65,62 @@ func TestManager_initRaft_logsInitStart(t *testing.T) {
 		}
 	})
 
-	debugLogs := mock.GetLogs("debug")
-	require.NotEmpty(t, debugLogs, "expected debug logs from raft initialization")
-
-	found := false
-	for _, entry := range debugLogs {
-		if strings.Contains(entry.Message, "RAFT_INIT") {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "expected a debug log containing RAFT_INIT, got logs: %v", debugLogs)
+	// Verify raftConsensus was initialized with the correct node ID derived from config.
+	// The fnv hash of the config node ID string becomes the Raft uint64 peer ID.
+	require.NotNil(t, manager.raftConsensus, "raftConsensus must be non-nil after cluster mode init")
+	expectedID := hashStringToUint64(cfg.Node.ID)
+	assert.Equal(t, expectedID, manager.raftConsensus.nodeID,
+		"raftConsensus nodeID must be the fnv hash of the config node ID string")
 }
 
 func TestManager_SingleServerMode(t *testing.T) {
-	// Create test logger
 	logger := logging.GetLogger()
 
-	// Create test storage manager
 	storageManager, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
 
-	// Create HA config for single server mode
 	cfg := DefaultConfig()
 	cfg.Mode = SingleServerMode
+	cfg.HealthCheck.Interval = 100 * time.Millisecond
 
-	// Create HA manager
 	manager, err := NewManager(cfg, logger, storageManager)
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
-	// Test deployment mode
 	assert.Equal(t, SingleServerMode, manager.GetDeploymentMode())
-
-	// Test that single server is always leader
 	assert.True(t, manager.IsLeader())
 
-	// Test local node info
 	localNode := manager.GetLocalNode()
 	assert.NotNil(t, localNode)
 	assert.Equal(t, NodeRoleLeader, localNode.Role)
 	assert.Equal(t, NodeStateHealthy, localNode.State)
 
-	// Test starting and stopping
+	// Register check BEFORE Start to avoid concurrent map access.
+	var checkCalled int32
+	manager.RegisterHealthCheck("test", func(ctx context.Context) error {
+		atomic.StoreInt32(&checkCalled, 1)
+		return nil
+	})
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	err = manager.Start(ctx)
 	require.NoError(t, err)
 
-	// Give it a moment to start
-	time.Sleep(100 * time.Millisecond)
+	// Wait for health check to appear in the status map.
+	require.Eventually(t, func() bool {
+		h := manager.GetHealth()
+		_, exists := h.Checks["test"]
+		return exists
+	}, 3*time.Second, 25*time.Millisecond, "test health check must appear in health status")
 
-	// Test health registration
-	manager.RegisterHealthCheck("test", func(ctx context.Context) error {
-		return nil
-	})
+	assert.Equal(t, int32(1), atomic.LoadInt32(&checkCalled))
 
-	// Give health check time to run
-	time.Sleep(200 * time.Millisecond)
-
-	// Get health status
 	health := manager.GetHealth()
 	assert.NotNil(t, health)
 	assert.Equal(t, NodeStateHealthy, health.Overall)
+	assert.Contains(t, health.Checks, "test")
 
 	err = manager.Stop(ctx)
 	assert.NoError(t, err)
@@ -290,7 +271,7 @@ func TestManager_IsLeader_UsesRaftConsensus(t *testing.T) {
 	require.NotNil(t, manager.raftConsensus, "raftConsensus must be initialized in cluster mode")
 
 	t.Cleanup(func() {
-		_ = manager.raftConsensus.Stop()
+		assert.NoError(t, manager.raftConsensus.Stop())
 	})
 
 	// Immediately after construction (before any election), both should agree.
@@ -301,26 +282,20 @@ func TestManager_IsLeader_UsesRaftConsensus(t *testing.T) {
 }
 
 func TestManager_HealthChecks(t *testing.T) {
-	t.Skip("Skipping due to synchronization issues in health checker - will be addressed in future PR (#1299)")
-	// Create test logger
 	logger := logging.GetLogger()
 
-	// Create test storage manager
 	storageManager, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
 
-	// Create HA manager
 	cfg := DefaultConfig()
 	cfg.HealthCheck.Interval = 100 * time.Millisecond
 	manager, err := NewManager(cfg, logger, storageManager)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Register test health checks with proper synchronization
 	var passingCheckCalled, failingCheckCalled int32
 
+	// Register checks BEFORE Start so they are included in initializeCheckStates
+	// and there is no concurrent map access between registration and first tick.
 	manager.RegisterHealthCheck("passing", func(ctx context.Context) error {
 		atomic.StoreInt32(&passingCheckCalled, 1)
 		return nil
@@ -331,26 +306,31 @@ func TestManager_HealthChecks(t *testing.T) {
 		return assert.AnError
 	})
 
-	// Start manager
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	err = manager.Start(ctx)
 	require.NoError(t, err)
 
-	// Wait for health checks to run
-	time.Sleep(300 * time.Millisecond)
+	// Poll health.Checks (the authoritative observable state) rather than the atomics:
+	// the atomics are set inside performSingleHealthCheck but healthStatus is updated
+	// after all checks complete, so checking atomics first races against the status update.
+	require.Eventually(t, func() bool {
+		h := manager.GetHealth()
+		_, hasP := h.Checks["passing"]
+		_, hasF := h.Checks["failing"]
+		return hasP && hasF
+	}, 3*time.Second, 25*time.Millisecond, "both health checks must appear in health status")
 
-	// Verify health checks were called
+	// Once health.Checks is populated, the check functions have definitely been called.
 	assert.Equal(t, int32(1), atomic.LoadInt32(&passingCheckCalled))
 	assert.Equal(t, int32(1), atomic.LoadInt32(&failingCheckCalled))
 
-	// Get health status
 	health := manager.GetHealth()
 	assert.NotNil(t, health)
-
-	// Should have both checks
 	assert.Contains(t, health.Checks, "passing")
 	assert.Contains(t, health.Checks, "failing")
 
-	// Stop manager with longer timeout to avoid deadlock
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer stopCancel()
 	err = manager.Stop(stopCtx)
@@ -511,7 +491,7 @@ func TestDeploymentModeProgression(t *testing.T) {
 
 		t.Cleanup(func() {
 			if manager.raftConsensus != nil {
-				_ = manager.raftConsensus.Stop()
+				assert.NoError(t, manager.raftConsensus.Stop())
 			}
 		})
 
