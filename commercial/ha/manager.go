@@ -601,6 +601,51 @@ func (m *Manager) startClusterMode() error {
 			return fmt.Errorf("failed to start Raft consensus: %w", err)
 		}
 		m.logger.Info("DEBUG: Raft consensus started successfully")
+
+		// Replicate local node metadata through the Raft log once a leader exists.
+		// Proposals sent before leader election are dropped, so we wait for
+		// leaderElectedC (closed by the Raft loop on first leader detection)
+		// before calling ProposeNodeUpdate. The goroutine is bounded by m.ctx.
+		rc := m.raftConsensus
+		nodeInfo := m.nodeInfo
+		go func() {
+			select {
+			case <-rc.leaderElectedC:
+				if err := rc.ProposeNodeUpdate(nodeInfo); err != nil {
+					m.logger.Warn("Failed to propose initial node update", "error", err)
+				}
+			case <-m.ctx.Done():
+				return
+			}
+		}()
+
+		// Propose add-node ConfChanges for each peer known at startup.
+		// These are non-critical (initial membership is bootstrapped via StartNode);
+		// failures are logged but do not block cluster startup.
+		localNodeID := hashStringToUint64(m.nodeInfo.ID)
+		if nodes := m.cfg.Cluster.Discovery.Config["nodes"]; nodes != nil {
+			if nodeList, ok := nodes.([]interface{}); ok {
+				for _, n := range nodeList {
+					nodeMap, ok := n.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					id, ok := nodeMap["id"].(string)
+					if !ok {
+						continue
+					}
+					peerID := hashStringToUint64(id)
+					if peerID == localNodeID {
+						continue
+					}
+					addr, _ := nodeMap["address"].(string)
+					peerInfo := &NodeInfo{ID: id, Address: addr}
+					if err := m.raftConsensus.ProposeAddNode(peerID, peerInfo); err != nil {
+						m.logger.Warn("Failed to propose add-node for peer", "peer_id", peerID, "error", err)
+					}
+				}
+			}
+		}
 	}
 
 	if m.failover != nil {

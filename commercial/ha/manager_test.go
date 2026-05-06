@@ -219,7 +219,7 @@ func TestManager_ClusterMode(t *testing.T) {
 	// Manager.Stop() also stops raftConsensus (idempotent via stopOnce).
 	// Cleanup is a safety net for early-return paths.
 	t.Cleanup(func() {
-		_ = manager.raftConsensus.Stop()
+		assert.NoError(t, manager.raftConsensus.Stop())
 	})
 
 	// Test deployment mode
@@ -236,10 +236,17 @@ func TestManager_ClusterMode(t *testing.T) {
 	err = manager.Start(ctx)
 	require.NoError(t, err)
 
-	// Get cluster nodes — should include at least the local node
-	nodes, err := manager.GetClusterNodes()
-	require.NoError(t, err)
-	assert.NotEmpty(t, nodes)
+	// ProposeNodeUpdate is called during Start(). Because the construction-time seed
+	// was removed, GetClusterNodes() returns the local node only after that proposal
+	// is committed and applied via the Raft log. If ProposeNodeUpdate is never called,
+	// this Eventually will time out and fail, proving the wiring is correct.
+	var nodes []*NodeInfo
+	require.Eventually(t, func() bool {
+		var getErr error
+		nodes, getErr = manager.GetClusterNodes()
+		return getErr == nil && len(nodes) > 0
+	}, 10*time.Second, 25*time.Millisecond,
+		"local node must appear in GetClusterNodes via the Raft apply path after ProposeNodeUpdate")
 
 	// IsLeader() must delegate to raftConsensus (not a cached local field)
 	raftAnswer := manager.raftConsensus.IsLeader()
@@ -469,10 +476,11 @@ func TestDeploymentModeProgression(t *testing.T) {
 		// Should support cluster operations
 		assert.Equal(t, ClusterMode, manager.GetDeploymentMode())
 
-		// Should have cluster nodes
-		nodes, err := manager.GetClusterNodes()
-		require.NoError(t, err)
-		assert.NotEmpty(t, nodes)
+		// Wait for ProposeNodeUpdate (sent during Start) to be applied via the Raft log.
+		require.Eventually(t, func() bool {
+			nodes, getErr := manager.GetClusterNodes()
+			return getErr == nil && len(nodes) > 0
+		}, 10*time.Second, 25*time.Millisecond, "local node must appear in GetClusterNodes via Raft apply path")
 
 		err = manager.Stop(ctx)
 		assert.NoError(t, err)

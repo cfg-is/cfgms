@@ -23,6 +23,7 @@ import (
 type RaftConsensus struct {
 	mu       sync.RWMutex
 	stopOnce sync.Once
+	wg       sync.WaitGroup // tracks the runRaft goroutine; Stop() waits on it
 
 	// Raft core
 	node    raft.Node
@@ -40,9 +41,13 @@ type RaftConsensus struct {
 	// Channels for coordination
 	proposeC    chan []byte
 	confChangeC chan raftpb.ConfChange
-	commitC     chan *commit
 	errorC      chan error
 	stopC       chan struct{}
+
+	// leaderElectedC is closed once the first leader is known; callers that need
+	// to propose (which requires a leader) can select on this channel.
+	leaderElectedC chan struct{}
+	leaderOnce     sync.Once
 
 	// Transport
 	transport *raftTransport
@@ -60,13 +65,6 @@ type ClusterState struct {
 	Leader       uint64
 	Nodes        map[uint64]*NodeInfo
 	LastModified time.Time
-}
-
-// commit represents a committed log entry
-type commit struct {
-	data  [][]byte //nolint:unused // Reserved for future use
-	index uint64   //nolint:unused // Reserved for future use
-	term  uint64   //nolint:unused // Reserved for future use
 }
 
 // RaftCommand represents commands sent through Raft
@@ -105,18 +103,15 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 		clusterState: &ClusterState{
 			Nodes: make(map[uint64]*NodeInfo),
 		},
-		proposeC:    make(chan []byte),
-		confChangeC: make(chan raftpb.ConfChange),
-		commitC:     make(chan *commit, 128),
-		errorC:      make(chan error),
-		stopC:       make(chan struct{}),
-		logger:      logger,
+		proposeC:       make(chan []byte, 16),
+		confChangeC:    make(chan raftpb.ConfChange, 16),
+		errorC:         make(chan error),
+		stopC:          make(chan struct{}),
+		leaderElectedC: make(chan struct{}),
+		logger:         logger,
 	}
 
 	rc.ctx, rc.cancel = context.WithCancel(ctx)
-
-	// Initialize cluster state with local node
-	rc.clusterState.Nodes[nodeID] = nodeInfo
 
 	// Start Raft node
 	if len(peers) > 0 {
@@ -137,6 +132,7 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 	// CRITICAL: Start the Raft processing loop IMMEDIATELY
 	// The Ready channel must be consumed or Raft will block
 	logger.Debug("RAFT: Starting Raft processing loop immediately", "node_id", nodeID)
+	rc.wg.Add(1)
 	go rc.runRaft()
 
 	return rc, nil
@@ -175,6 +171,8 @@ func (rc *RaftConsensus) Start() error {
 }
 
 // Stop gracefully stops the Raft consensus engine. Safe to call multiple times.
+// Blocks until the runRaft goroutine has exited so callers can safely inspect
+// internal channels (e.g. proposeC) once Stop returns.
 func (rc *RaftConsensus) Stop() error {
 	rc.stopOnce.Do(func() {
 		rc.logger.Info("RAFT: Stopping Raft consensus engine", "node_id", rc.nodeID)
@@ -188,11 +186,14 @@ func (rc *RaftConsensus) Stop() error {
 		}
 		rc.node.Stop()
 	})
+	rc.wg.Wait() // all callers block until runRaft has exited
 	return nil
 }
 
 // runRaft is the main Raft processing loop
 func (rc *RaftConsensus) runRaft() {
+	defer rc.wg.Done()
+
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -466,6 +467,7 @@ func (rc *RaftConsensus) updateLeadership(ss *raft.SoftState) {
 
 	if ss.Lead != raft.None {
 		rc.clusterState.Leader = ss.Lead
+		rc.leaderOnce.Do(func() { close(rc.leaderElectedC) })
 	}
 }
 
@@ -515,6 +517,63 @@ func (rc *RaftConsensus) GetClusterNodes() []*NodeInfo {
 	}
 
 	return nodes
+}
+
+// ProposeNodeUpdate replicates updated NodeInfo for this node through the Raft log.
+// It is non-blocking: if proposeC is at capacity it returns an error immediately.
+func (rc *RaftConsensus) ProposeNodeUpdate(nodeInfo *NodeInfo) error {
+	cmd := RaftCommand{
+		Type: "node_update",
+		Data: NodeUpdateCommand{
+			NodeID:   rc.nodeID,
+			NodeInfo: nodeInfo,
+		},
+	}
+	data, err := json.Marshal(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to marshal node update command: %w", err)
+	}
+	select {
+	case rc.proposeC <- data:
+		return nil
+	default:
+		return fmt.Errorf("propose channel full, cannot enqueue node update")
+	}
+}
+
+// ProposeAddNode proposes a ConfChangeAddNode for the given node.
+// It is non-blocking: if confChangeC is at capacity it returns an error immediately.
+func (rc *RaftConsensus) ProposeAddNode(nodeID uint64, nodeInfo *NodeInfo) error {
+	contextData, err := json.Marshal(nodeInfo)
+	if err != nil {
+		return fmt.Errorf("failed to marshal node info for add-node conf change: %w", err)
+	}
+	cc := raftpb.ConfChange{
+		Type:    raftpb.ConfChangeAddNode,
+		NodeID:  nodeID,
+		Context: contextData,
+	}
+	select {
+	case rc.confChangeC <- cc:
+		return nil
+	default:
+		return fmt.Errorf("conf change channel full, cannot enqueue add-node for %d", nodeID)
+	}
+}
+
+// ProposeRemoveNode proposes a ConfChangeRemoveNode for the given node.
+// It is non-blocking: if confChangeC is at capacity it returns an error immediately.
+func (rc *RaftConsensus) ProposeRemoveNode(nodeID uint64) error {
+	cc := raftpb.ConfChange{
+		Type:   raftpb.ConfChangeRemoveNode,
+		NodeID: nodeID,
+	}
+	select {
+	case rc.confChangeC <- cc:
+		return nil
+	default:
+		return fmt.Errorf("conf change channel full, cannot enqueue remove-node for %d", nodeID)
+	}
 }
 
 // Process receives and processes Raft messages from peers
