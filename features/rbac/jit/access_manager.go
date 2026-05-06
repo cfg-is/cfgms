@@ -111,19 +111,6 @@ func (jam *JITAccessManager) recordJITAccessRevocation(ctx context.Context, gran
 	}
 }
 
-// recordJITAccessUsage emits a jit_access usage audit event. No-op when auditManager is nil.
-func (jam *JITAccessManager) recordJITAccessUsage(ctx context.Context, grant *JITAccessGrant, action, resourceID string) {
-	if jam.auditManager == nil {
-		return
-	}
-	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
-		grant.TenantID, grant.RequesterID, "jit_access", grant.ID, action,
-		business.AuditResultSuccess,
-	).Detail("resource_id", resourceID)); err != nil {
-		slog.Warn("failed to record jit access usage audit event", "error", err)
-	}
-}
-
 // RequestAccess creates a new JIT access request
 func (jam *JITAccessManager) RequestAccess(ctx context.Context, req *JITAccessRequestSpec) (*JITAccessRequest, error) {
 	jam.mutex.Lock()
