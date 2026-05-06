@@ -21,6 +21,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/authdefense"
@@ -65,6 +66,9 @@ type Server struct {
 	fleetQuery              fleet.FleetQuery               // Issue #603: Single query path for device filtering
 	gitSyncWebhookHandler   http.Handler                   // Issue #666: git-sync webhook endpoint (optional)
 	auditManager            *audit.Manager                 // Issue #775: registration audit events
+	scriptTracker           script.ExecutionTracker        // Issue #708: durable execution audit records
+	scriptAuditLogger       *script.AuditLogger            // Issue #708: in-memory execution metrics
+	scriptMonitor           *script.ExecutionMonitor       // Issue #708: active execution tracking
 	stopCleanup             chan struct{}                  // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                  // closed when cleanup goroutine exits
 	closeOnce               sync.Once                      // idempotent Close
@@ -525,6 +529,17 @@ func (s *Server) SetApprovalHook(hook RegistrationApprovalHook) {
 	if hook != nil {
 		s.approvalHook = hook
 	}
+}
+
+// SetScriptModule wires the script module components so the script API handlers
+// return real execution data (Issue #708). Call this after New() returns but
+// before Start() is called.
+func (s *Server) SetScriptModule(tracker script.ExecutionTracker, auditLogger *script.AuditLogger, monitor *script.ExecutionMonitor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scriptTracker = tracker
+	s.scriptAuditLogger = auditLogger
+	s.scriptMonitor = monitor
 }
 
 // SetGitSyncWebhookHandler registers the git-sync push-event webhook handler.
