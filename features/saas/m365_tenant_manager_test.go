@@ -15,28 +15,29 @@ import (
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	gdaptypes "github.com/cfgis/cfgms/features/modules/m365/gdap/types"
 	"github.com/cfgis/cfgms/features/tenant"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // Mock implementations
 
 type mockTenantStore struct {
-	tenants map[string]*tenant.Tenant
+	tenants map[string]*business.TenantData
 }
 
 func newMockTenantStore() *mockTenantStore {
 	return &mockTenantStore{
-		tenants: make(map[string]*tenant.Tenant),
+		tenants: make(map[string]*business.TenantData),
 	}
 }
 
-func (m *mockTenantStore) CreateTenant(ctx context.Context, t *tenant.Tenant) error {
+func (m *mockTenantStore) CreateTenant(ctx context.Context, t *business.TenantData) error {
 	t.CreatedAt = time.Now()
 	t.UpdatedAt = time.Now()
 	m.tenants[t.ID] = t
 	return nil
 }
 
-func (m *mockTenantStore) GetTenant(ctx context.Context, tenantID string) (*tenant.Tenant, error) {
+func (m *mockTenantStore) GetTenant(ctx context.Context, tenantID string) (*business.TenantData, error) {
 	t, exists := m.tenants[tenantID]
 	if !exists {
 		return nil, tenant.ErrTenantNotFound
@@ -44,7 +45,7 @@ func (m *mockTenantStore) GetTenant(ctx context.Context, tenantID string) (*tena
 	return t, nil
 }
 
-func (m *mockTenantStore) UpdateTenant(ctx context.Context, t *tenant.Tenant) error {
+func (m *mockTenantStore) UpdateTenant(ctx context.Context, t *business.TenantData) error {
 	if _, exists := m.tenants[t.ID]; !exists {
 		return tenant.ErrTenantNotFound
 	}
@@ -58,8 +59,8 @@ func (m *mockTenantStore) DeleteTenant(ctx context.Context, tenantID string) err
 	return nil
 }
 
-func (m *mockTenantStore) ListTenants(ctx context.Context, filter *tenant.TenantFilter) ([]*tenant.Tenant, error) {
-	var result []*tenant.Tenant
+func (m *mockTenantStore) ListTenants(ctx context.Context, filter *tenant.TenantFilter) ([]*business.TenantData, error) {
+	var result []*business.TenantData
 	for _, t := range m.tenants {
 		if filter != nil {
 			if filter.Status != "" && t.Status != filter.Status {
@@ -83,8 +84,8 @@ func (m *mockTenantStore) GetTenantHierarchy(ctx context.Context, tenantID strin
 	}, nil
 }
 
-func (m *mockTenantStore) GetChildTenants(ctx context.Context, parentID string) ([]*tenant.Tenant, error) {
-	var children []*tenant.Tenant
+func (m *mockTenantStore) GetChildTenants(ctx context.Context, parentID string) ([]*business.TenantData, error) {
+	var children []*business.TenantData
 	for _, t := range m.tenants {
 		if t.ParentID == parentID {
 			children = append(children, t)
@@ -230,7 +231,7 @@ func TestGetM365Metadata(t *testing.T) {
 	metadataJSON, err := json.Marshal(m365Metadata)
 	require.NoError(t, err)
 
-	cfgmsTenant := &tenant.Tenant{
+	cfgmsTenant := &business.TenantData{
 		ID:   "cfgms-123",
 		Name: "Test-Tenant",
 		Metadata: map[string]string{
@@ -250,7 +251,7 @@ func TestGetM365Metadata(t *testing.T) {
 func TestGetM365Metadata_NotFound(t *testing.T) {
 	manager, _, _ := setupTestManager(t)
 
-	cfgmsTenant := &tenant.Tenant{
+	cfgmsTenant := &business.TenantData{
 		ID:       "cfgms-123",
 		Name:     "Test Tenant",
 		Metadata: map[string]string{},
@@ -400,7 +401,7 @@ func TestListM365Tenants(t *testing.T) {
 	}
 	metadataJSON, _ := json.Marshal(m365Metadata)
 
-	m365Tenant := &tenant.Tenant{
+	m365Tenant := &business.TenantData{
 		ID:   "tenant-1",
 		Name: "M365-Tenant",
 		Metadata: map[string]string{
@@ -410,7 +411,7 @@ func TestListM365Tenants(t *testing.T) {
 	}
 
 	// Create non-M365 tenant
-	regularTenant := &tenant.Tenant{
+	regularTenant := &business.TenantData{
 		ID:       "tenant-2",
 		Name:     "Regular-Tenant",
 		Metadata: map[string]string{},
@@ -439,7 +440,7 @@ func TestGetTenantByM365ID(t *testing.T) {
 	}
 	metadataJSON, _ := json.Marshal(m365Metadata)
 
-	targetTenant := &tenant.Tenant{
+	targetTenant := &business.TenantData{
 		ID:   "cfgms-target",
 		Name: "Target-Tenant",
 		Metadata: map[string]string{
@@ -472,7 +473,7 @@ func TestUpdateTenantMetadata(t *testing.T) {
 	}
 	metadataJSON, _ := json.Marshal(originalMetadata)
 
-	existingTenant := &tenant.Tenant{
+	existingTenant := &business.TenantData{
 		ID:   "tenant-1",
 		Name: "Test-Tenant",
 		Metadata: map[string]string{
@@ -523,7 +524,7 @@ type countingTenantStore struct {
 	listTenantsCallCount int
 }
 
-func (c *countingTenantStore) ListTenants(ctx context.Context, filter *tenant.TenantFilter) ([]*tenant.Tenant, error) {
+func (c *countingTenantStore) ListTenants(ctx context.Context, filter *tenant.TenantFilter) ([]*business.TenantData, error) {
 	c.listTenantsCallCount++
 	return c.mockTenantStore.ListTenants(ctx, filter)
 }
@@ -551,7 +552,7 @@ func TestM365TenantManager_GetTenantByM365ID_Index(t *testing.T) {
 		}
 		metaJSON, err := json.Marshal(meta)
 		require.NoError(t, err)
-		require.NoError(t, counting.CreateTenant(ctx, &tenant.Tenant{
+		require.NoError(t, counting.CreateTenant(ctx, &business.TenantData{
 			ID:   fmt.Sprintf("cfgms-idx-%d", i),
 			Name: fmt.Sprintf("Tenant-%d", i),
 			Metadata: map[string]string{
@@ -582,7 +583,7 @@ type failingTenantStore struct {
 	listErr error
 }
 
-func (f *failingTenantStore) ListTenants(ctx context.Context, filter *tenant.TenantFilter) ([]*tenant.Tenant, error) {
+func (f *failingTenantStore) ListTenants(ctx context.Context, filter *tenant.TenantFilter) ([]*business.TenantData, error) {
 	return nil, f.listErr
 }
 
@@ -662,7 +663,7 @@ func BenchmarkM365TenantManager_DiscoverAndSyncTenants(b *testing.B) {
 			if err != nil {
 				b.Fatalf("failed to marshal metadata for tenant %d: %v", i, err)
 			}
-			if err := mockStore.CreateTenant(ctx, &tenant.Tenant{
+			if err := mockStore.CreateTenant(ctx, &business.TenantData{
 				ID:   fmt.Sprintf("cfgms-bench-%d", i),
 				Name: fmt.Sprintf("Bench-Tenant-%d", i),
 				Metadata: map[string]string{
