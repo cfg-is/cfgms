@@ -69,6 +69,7 @@ type Server struct {
 	scriptTracker           script.ExecutionTracker        // Issue #708: durable execution audit records
 	scriptAuditLogger       *script.AuditLogger            // Issue #708: in-memory execution metrics
 	scriptMonitor           *script.ExecutionMonitor       // Issue #708: active execution tracking
+	pushLeaderStatus        leaderStatus                   // Issue #1318: leader check for config push (nil = leader)
 	stopCleanup             chan struct{}                  // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                  // closed when cleanup goroutine exits
 	closeOnce               sync.Once                      // idempotent Close
@@ -147,6 +148,11 @@ func New(
 		auditManager:            auditManager,             // Issue #775: registration audit events
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
+	}
+
+	// Issue #1318: wire leader-check for config push; nil haManager = OSS single-node = always leader
+	if haManager != nil {
+		server.pushLeaderStatus = haManager
 	}
 
 	// Story #380: Initialize three-tier auth defense system
@@ -253,6 +259,10 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/scripts/executions/{execution_id}/retry", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostScriptRetry))).Methods("POST")
 	stewards.Handle("/{id}/scripts/metrics", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptMetrics))).Methods("GET")
 	stewards.Handle("/{id}/scripts/status", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptStatus))).Methods("GET")
+
+	// Configuration push endpoint (Issue #1318)
+	cfgPush := api.PathPrefix("/config").Subrouter()
+	cfgPush.Handle("/push", s.requirePermission("config", "push")(http.HandlerFunc(s.handleConfigPush))).Methods("POST")
 
 	// Certificate management endpoints
 	certs := api.PathPrefix("/certificates").Subrouter()

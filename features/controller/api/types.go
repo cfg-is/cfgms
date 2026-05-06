@@ -189,6 +189,13 @@ type HealthStatus struct {
 	Services  map[string]string `json:"services"`
 }
 
+// ConfigPushResponse is returned by POST /api/v1/config/push on acceptance.
+type ConfigPushResponse struct {
+	PushID   string    `json:"push_id"`
+	Status   string    `json:"status"`
+	QueuedAt time.Time `json:"queued_at"`
+}
+
 // Helper functions to convert protobuf messages to API types
 
 // DNAFromProto converts a protobuf DNA message to DNAInfo
