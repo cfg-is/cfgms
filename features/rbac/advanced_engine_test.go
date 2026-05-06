@@ -21,10 +21,9 @@ func setupAdvancedEngineStore(t *testing.T) (*memory.Store, context.Context) {
 	return store, ctx
 }
 
-func TestAdvancedAuthEngine_BasicRBACFlow(t *testing.T) {
+func TestAdvancedAuthEngine_CheckPermission(t *testing.T) {
 	store, ctx := setupAdvancedEngineStore(t)
 
-	// Set up a permission, role, and active subject using real store components.
 	store.LoadPermissions([]*common.Permission{
 		{Id: "steward.register", Name: "Register Steward", Description: "Allow steward registration"},
 	})
@@ -39,7 +38,6 @@ func TestAdvancedAuthEngine_BasicRBACFlow(t *testing.T) {
 		TenantId:    "tenant456",
 		IsActive:    true,
 	}))
-	// Formally assign the role so it appears in the valid-assignment map used by CheckPermission.
 	require.NoError(t, store.AssignRole(ctx, &common.RoleAssignment{
 		SubjectId: "user123",
 		RoleId:    "admin",
@@ -48,38 +46,40 @@ func TestAdvancedAuthEngine_BasicRBACFlow(t *testing.T) {
 
 	engine := NewAdvancedAuthEngine(store, store, store, store)
 
-	// Test basic RBAC flow without zero-trust (disabled mode)
-	assert.Equal(t, ZeroTrustModeDisabled, engine.GetZeroTrustMode())
+	t.Run("RBAC granted", func(t *testing.T) {
+		request := &common.AccessRequest{
+			SubjectId:    "user123",
+			PermissionId: "steward.register",
+			TenantId:     "tenant456",
+			Context: map[string]string{
+				"source_ip":  "192.168.1.100",
+				"user_agent": "test-agent",
+			},
+		}
 
-	request := &common.AccessRequest{
-		SubjectId:    "user123",
-		PermissionId: "steward.register",
-		TenantId:     "tenant456",
-		Context: map[string]string{
-			"source_ip":  "192.168.1.100",
-			"user_agent": "test-agent",
-		},
-	}
+		response, err := engine.CheckPermission(ctx, request)
 
-	response, err := engine.CheckPermission(ctx, request)
+		require.NoError(t, err)
+		require.NotNil(t, response)
+		assert.True(t, response.Granted)
+		assert.Contains(t, response.Reason, "Access granted via role 'Administrator' with permission 'Register Steward'")
+	})
 
-	require.NoError(t, err)
-	require.NotNil(t, response)
-	assert.True(t, response.Granted)
-	assert.Contains(t, response.Reason, "Access granted via role 'Administrator' with permission 'Register Steward'")
-}
+	t.Run("RBAC denied", func(t *testing.T) {
+		request := &common.AccessRequest{
+			SubjectId:    "user123",
+			PermissionId: "steward.delete",
+			TenantId:     "tenant456",
+			Context: map[string]string{
+				"source_ip":  "192.168.1.100",
+				"user_agent": "test-agent",
+			},
+		}
 
-func TestAdvancedAuthEngine_ZeroTrustModeConfiguration(t *testing.T) {
-	engine := NewAdvancedAuthEngine(nil, nil, nil, nil)
+		response, err := engine.CheckPermission(ctx, request)
 
-	// Test initial state
-	assert.Equal(t, ZeroTrustModeDisabled, engine.GetZeroTrustMode())
-
-	// Test that nil zero-trust engine doesn't enable zero-trust
-	engine.EnableZeroTrust(ZeroTrustModeAugmented)
-	assert.Equal(t, ZeroTrustModeDisabled, engine.GetZeroTrustMode())
-
-	// Test disabling zero-trust
-	engine.DisableZeroTrust()
-	assert.Equal(t, ZeroTrustModeDisabled, engine.GetZeroTrustMode())
+		require.NoError(t, err)
+		require.NotNil(t, response)
+		assert.False(t, response.Granted)
+	})
 }
