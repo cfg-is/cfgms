@@ -5,9 +5,13 @@ package directory
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/directory/dna"
+	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/directory/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -28,6 +32,19 @@ type DirectoryService struct {
 
 	// Module integration (will be set by controller)
 	moduleRegistry ModuleRegistry
+
+	// Per-provider operational metrics
+	metricsMu sync.RWMutex
+	metrics   map[string]*providerMetrics
+}
+
+// providerMetrics tracks per-provider operational counters.
+type providerMetrics struct {
+	mu           sync.Mutex
+	requestCount int64
+	errorCount   int64
+	totalLatency time.Duration
+	callCount    int64
 }
 
 // ModuleRegistry defines how the directory service integrates with CFGMS modules
@@ -47,6 +64,7 @@ func NewDirectoryService(logger logging.Logger) *DirectoryService {
 	return &DirectoryService{
 		providers: make(map[string]Provider),
 		logger:    logger,
+		metrics:   make(map[string]*providerMetrics),
 	}
 }
 
@@ -75,6 +93,11 @@ func (s *DirectoryService) RegisterProvider(provider Provider) error {
 		s.defaultProvider = name
 		s.logger.Info("Set default directory provider", "name", name)
 	}
+
+	// Initialize metrics tracker for this provider
+	s.metricsMu.Lock()
+	s.metrics[name] = &providerMetrics{}
+	s.metricsMu.Unlock()
 
 	return nil
 }
@@ -152,7 +175,9 @@ func (s *DirectoryService) GetUser(ctx context.Context, providerName, userID str
 		return nil, err
 	}
 
+	start := time.Now()
 	user, err := provider.GetUser(ctx, userID)
+	s.recordProviderOp(provider.Name(), time.Since(start), err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user from provider '%s': %w", provider.Name(), err)
 	}
@@ -235,7 +260,9 @@ func (s *DirectoryService) SearchUsers(ctx context.Context, providerName string,
 		return nil, err
 	}
 
+	start := time.Now()
 	users, err := provider.SearchUsers(ctx, query)
+	s.recordProviderOp(provider.Name(), time.Since(start), err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search users in provider '%s': %w", provider.Name(), err)
 	}
@@ -259,7 +286,9 @@ func (s *DirectoryService) GetGroup(ctx context.Context, providerName, groupID s
 		return nil, err
 	}
 
+	start := time.Now()
 	group, err := provider.GetGroup(ctx, groupID)
+	s.recordProviderOp(provider.Name(), time.Since(start), err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get group from provider '%s': %w", provider.Name(), err)
 	}
@@ -342,7 +371,9 @@ func (s *DirectoryService) SearchGroups(ctx context.Context, providerName string
 		return nil, err
 	}
 
+	start := time.Now()
 	groups, err := provider.SearchGroups(ctx, query)
+	s.recordProviderOp(provider.Name(), time.Since(start), err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search groups in provider '%s': %w", provider.Name(), err)
 	}
@@ -635,19 +666,67 @@ func (s *DirectoryService) SyncGroup(ctx context.Context, sourceProvider, target
 	return nil
 }
 
-// CompareDirectories compares two directories and returns differences
+// CompareDirectories compares two directories and returns differences.
+// It fetches all users and groups from each provider, builds DNA snapshots, and uses
+// the drift detector to identify objects that exist only in one provider or differ
+// in their attributes.
 func (s *DirectoryService) CompareDirectories(ctx context.Context, provider1, provider2 string) (*DirectoryComparison, error) {
-	// This is a complex operation that would compare users and groups between providers
-	// Implementation would involve fetching all objects from both providers and comparing
-	// For now, return a placeholder
-	return &DirectoryComparison{
+	p1, err := s.GetProvider(provider1)
+	if err != nil {
+		return nil, fmt.Errorf("provider '%s': %w", provider1, err)
+	}
+	p2, err := s.GetProvider(provider2)
+	if err != nil {
+		return nil, fmt.Errorf("provider '%s': %w", provider2, err)
+	}
+
+	detector := dna.NewDirectoryDriftDetector(s.logger)
+	comparison := &DirectoryComparison{
 		Provider1:      provider1,
 		Provider2:      provider2,
 		ComparisonTime: time.Now(),
-		Summary: DirectoryComparisonSummary{
-			TotalDifferences: 0, // Would be calculated
-		},
-	}, fmt.Errorf("directory comparison not yet implemented")
+	}
+
+	// Compare users: treat provider1 as current, provider2 as baseline
+	p1Users, err := p1.SearchUsers(ctx, &SearchQuery{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list users from provider '%s': %w", provider1, err)
+	}
+	p2Users, err := p2.SearchUsers(ctx, &SearchQuery{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list users from provider '%s': %w", provider2, err)
+	}
+
+	userDrifts, err := detector.DetectBulkDrift(ctx, buildUserDNASet(p1Users), buildUserDNASet(p2Users))
+	if err != nil {
+		return nil, fmt.Errorf("user comparison failed: %w", err)
+	}
+
+	// Compare groups
+	p1Groups, err := p1.SearchGroups(ctx, &SearchQuery{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list groups from provider '%s': %w", provider1, err)
+	}
+	p2Groups, err := p2.SearchGroups(ctx, &SearchQuery{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list groups from provider '%s': %w", provider2, err)
+	}
+
+	groupDrifts, err := detector.DetectBulkDrift(ctx, buildGroupDNASet(p1Groups), buildGroupDNASet(p2Groups))
+	if err != nil {
+		return nil, fmt.Errorf("group comparison failed: %w", err)
+	}
+
+	comparison.UserDifferences = driftsToObjectDifferences(userDrifts, ObjectTypeUser)
+	comparison.GroupDifferences = driftsToObjectDifferences(groupDrifts, ObjectTypeGroup)
+	comparison.Summary = buildComparisonSummary(userDrifts, groupDrifts)
+
+	s.logger.Info("Directory comparison completed",
+		"provider1", provider1,
+		"provider2", provider2,
+		"total_differences", comparison.Summary.TotalDifferences)
+
+	return comparison, nil
 }
 
 // Health and Statistics
@@ -662,15 +741,47 @@ func (s *DirectoryService) GetProviderHealth(ctx context.Context, providerName s
 	return provider.HealthCheck(ctx)
 }
 
-// GetProviderStatistics gets statistics for a provider
+// GetProviderStatistics gets statistics for a provider.
+// It returns tracked request/error counters accumulated since the provider was registered,
+// combined with a live count of users and groups fetched from the provider.
 func (s *DirectoryService) GetProviderStatistics(ctx context.Context, providerName string) (*ProviderStatistics, error) {
-	// This would be implemented to gather statistics from the provider
-	// For now, return placeholder
+	provider, err := s.getProviderOrDefault(providerName)
+	if err != nil {
+		return nil, err
+	}
+
+	users, err := provider.SearchUsers(ctx, &SearchQuery{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to count users in provider '%s': %w", provider.Name(), err)
+	}
+	groups, err := provider.SearchGroups(ctx, &SearchQuery{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to count groups in provider '%s': %w", provider.Name(), err)
+	}
+
+	s.metricsMu.RLock()
+	m := s.metrics[provider.Name()]
+	s.metricsMu.RUnlock()
+
+	var requestCount, errorCount int64
+	var avgLatency time.Duration
+	if m != nil {
+		m.mu.Lock()
+		requestCount = m.requestCount
+		errorCount = m.errorCount
+		if m.callCount > 0 {
+			avgLatency = m.totalLatency / time.Duration(m.callCount)
+		}
+		m.mu.Unlock()
+	}
+
 	return &ProviderStatistics{
-		RequestCount:   0,
-		ErrorCount:     0,
-		AverageLatency: 0,
-	}, fmt.Errorf("provider statistics not yet implemented")
+		TotalUsers:     int64(len(users)),
+		TotalGroups:    int64(len(groups)),
+		RequestCount:   requestCount,
+		ErrorCount:     errorCount,
+		AverageLatency: avgLatency,
+	}, nil
 }
 
 // Helper methods
@@ -681,4 +792,175 @@ func (s *DirectoryService) getProviderOrDefault(providerName string) (Provider, 
 		return s.GetDefaultProvider()
 	}
 	return s.GetProvider(providerName)
+}
+
+// buildUserDNASet converts a slice of users into DirectoryDNA records keyed by UPN for
+// cross-provider comparison. Only stable, semantic attributes are included so that
+// provider-specific metadata does not create spurious differences.
+func buildUserDNASet(users []*types.DirectoryUser) []*dna.DirectoryDNA {
+	dnaSet := make([]*dna.DirectoryDNA, 0, len(users))
+	for _, u := range users {
+		dnaSet = append(dnaSet, userToComparisonDNA(u))
+	}
+	return dnaSet
+}
+
+func userToComparisonDNA(u *types.DirectoryUser) *dna.DirectoryDNA {
+	key := u.UserPrincipalName
+	if key == "" {
+		key = u.ID
+	}
+	attrs := map[string]string{
+		"display_name":    u.DisplayName,
+		"account_enabled": strconv.FormatBool(u.AccountEnabled),
+	}
+	if u.SAMAccountName != "" {
+		attrs["sam_account_name"] = u.SAMAccountName
+	}
+	if u.EmailAddress != "" {
+		attrs["email_address"] = u.EmailAddress
+	}
+	if u.Department != "" {
+		attrs["department"] = u.Department
+	}
+	if u.JobTitle != "" {
+		attrs["job_title"] = u.JobTitle
+	}
+	if u.Manager != "" {
+		attrs["manager"] = u.Manager
+	}
+	if len(u.Groups) > 0 {
+		attrs["groups"] = strings.Join(u.Groups, ",")
+	}
+	now := time.Now()
+	return &dna.DirectoryDNA{
+		ObjectID:    key,
+		ObjectType:  interfaces.DirectoryObjectTypeUser,
+		ID:          key,
+		Attributes:  attrs,
+		LastUpdated: &now,
+	}
+}
+
+// buildGroupDNASet converts a slice of groups into DirectoryDNA records keyed by Name
+// for cross-provider comparison.
+func buildGroupDNASet(groups []*types.DirectoryGroup) []*dna.DirectoryDNA {
+	dnaSet := make([]*dna.DirectoryDNA, 0, len(groups))
+	for _, g := range groups {
+		dnaSet = append(dnaSet, groupToComparisonDNA(g))
+	}
+	return dnaSet
+}
+
+func groupToComparisonDNA(g *types.DirectoryGroup) *dna.DirectoryDNA {
+	key := g.Name
+	if key == "" {
+		key = g.ID
+	}
+	attrs := map[string]string{
+		"display_name": g.DisplayName,
+		"group_type":   string(g.GroupType),
+		"group_scope":  string(g.GroupScope),
+	}
+	if g.Description != "" {
+		attrs["description"] = g.Description
+	}
+	if len(g.Members) > 0 {
+		attrs["members"] = strings.Join(g.Members, ",")
+	}
+	now := time.Now()
+	return &dna.DirectoryDNA{
+		ObjectID:    key,
+		ObjectType:  interfaces.DirectoryObjectTypeGroup,
+		ID:          key,
+		Attributes:  attrs,
+		LastUpdated: &now,
+	}
+}
+
+// driftsToObjectDifferences maps drift detection results to ObjectDifference entries.
+// Creates/deletes produce a single entry per object; attribute changes produce one entry
+// per changed field so callers can inspect exactly what differed.
+func driftsToObjectDifferences(drifts []*dna.DirectoryDrift, objectType ObjectType) []ObjectDifference {
+	var diffs []ObjectDifference
+	for _, drift := range drifts {
+		switch drift.DriftType {
+		case dna.DirectoryDriftTypeObjectCreation:
+			diffs = append(diffs, ObjectDifference{
+				ObjectType: objectType,
+				ObjectID:   drift.ObjectID,
+				Action:     "create",
+			})
+		case dna.DirectoryDriftTypeObjectDeletion:
+			diffs = append(diffs, ObjectDifference{
+				ObjectType: objectType,
+				ObjectID:   drift.ObjectID,
+				Action:     "delete",
+			})
+		default:
+			for _, change := range drift.Changes {
+				oldVal, _ := change.OldValue.(string)
+				newVal, _ := change.NewValue.(string)
+				diffs = append(diffs, ObjectDifference{
+					ObjectType: objectType,
+					ObjectID:   drift.ObjectID,
+					Action:     "update",
+					Field:      change.Field,
+					OldValue:   oldVal,
+					NewValue:   newVal,
+				})
+			}
+		}
+	}
+	return diffs
+}
+
+// buildComparisonSummary aggregates drift results into per-object counts.
+func buildComparisonSummary(userDrifts, groupDrifts []*dna.DirectoryDrift) DirectoryComparisonSummary {
+	summary := DirectoryComparisonSummary{}
+	for _, drift := range userDrifts {
+		switch drift.DriftType {
+		case dna.DirectoryDriftTypeObjectCreation:
+			summary.UsersToCreate++
+		case dna.DirectoryDriftTypeObjectDeletion:
+			summary.UsersToDelete++
+		default:
+			if len(drift.Changes) > 0 {
+				summary.UsersToUpdate++
+			}
+		}
+	}
+	for _, drift := range groupDrifts {
+		switch drift.DriftType {
+		case dna.DirectoryDriftTypeObjectCreation:
+			summary.GroupsToCreate++
+		case dna.DirectoryDriftTypeObjectDeletion:
+			summary.GroupsToDelete++
+		default:
+			if len(drift.Changes) > 0 {
+				summary.GroupsToUpdate++
+			}
+		}
+	}
+	summary.TotalDifferences = summary.UsersToCreate + summary.UsersToUpdate + summary.UsersToDelete +
+		summary.GroupsToCreate + summary.GroupsToUpdate + summary.GroupsToDelete
+	return summary
+}
+
+// recordProviderOp increments the request/error counters and accumulates latency for a provider.
+func (s *DirectoryService) recordProviderOp(name string, latency time.Duration, err error) {
+	s.metricsMu.RLock()
+	m, ok := s.metrics[name]
+	s.metricsMu.RUnlock()
+	if !ok {
+		return
+	}
+	m.mu.Lock()
+	m.requestCount++
+	m.callCount++
+	m.totalLatency += latency
+	if err != nil {
+		m.errorCount++
+	}
+	m.mu.Unlock()
 }

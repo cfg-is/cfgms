@@ -261,6 +261,11 @@ func (d *DefaultDirectoryDriftDetector) DetectBulkDrift(ctx context.Context, cur
 		}
 	}
 
+	// Wait for all concurrent comparisons before appending serially below.
+	// The creation/deletion loops append to allDrifts without holding mutex,
+	// so all goroutines must be done first to avoid a data race.
+	wg.Wait()
+
 	// Detect new objects (objects in current but not in baseline)
 	for objectID, current := range currentMap {
 		if _, exists := baselineMap[objectID]; !exists {
@@ -308,9 +313,6 @@ func (d *DefaultDirectoryDriftDetector) DetectBulkDrift(ctx context.Context, cur
 			allDrifts = append(allDrifts, drift)
 		}
 	}
-
-	// Wait for all comparisons to complete
-	wg.Wait()
 
 	duration := time.Since(startTime)
 
