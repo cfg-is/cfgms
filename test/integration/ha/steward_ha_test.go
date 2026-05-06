@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/features/controller/push"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,17 +30,6 @@ type StewardStatus struct {
 	LastHeartbeat     time.Time `json:"last_heartbeat"`
 	ConfigurationHash string    `json:"configuration_hash"` // Hash of current configuration
 	ActiveSessions    int       `json:"active_sessions"`    // Number of active gRPC streams
-}
-
-// StewardConfiguration represents a configuration push to steward
-type StewardConfiguration struct {
-	ConfigID  string                 `json:"config_id"`
-	Version   string                 `json:"version"`
-	TenantID  string                 `json:"tenant_id"`
-	Policies  map[string]interface{} `json:"policies"`
-	Modules   []string               `json:"modules"`
-	AppliedAt time.Time              `json:"applied_at"`
-	Source    string                 `json:"source"` // Which controller applied it
 }
 
 // TestStewardControllerHA tests steward High Availability with real controller cluster
@@ -232,7 +222,7 @@ func testConfigurationContinuity(t *testing.T, ctx context.Context, helper *Dock
 	t.Log("Testing configuration push continuity during failover...")
 
 	// Push a test configuration to all stewards
-	testConfig := StewardConfiguration{
+	testConfig := push.StewardConfiguration{
 		ConfigID: "test-config-continuity",
 		Version:  "1.0.0",
 		TenantID: "test-tenant",
@@ -506,7 +496,7 @@ func getStewardStatus(ctx context.Context, helper *DockerComposeHelper, stewardN
 }
 
 // pushConfigurationToStewards pushes configuration to stewards via controller
-func pushConfigurationToStewards(controllerURL string, config StewardConfiguration) error {
+func pushConfigurationToStewards(controllerURL string, config push.StewardConfiguration) error {
 	// Call the controller's config push API and return actual errors
 	client := &http.Client{Timeout: 10 * time.Second}
 
