@@ -793,3 +793,93 @@ func (c *HTTPClient) DeleteGroup(ctx context.Context, token *auth.AccessToken, g
 	}
 	return nil
 }
+
+// ListAdminUnitUserMembers retrieves user members of an administrative unit
+func (c *HTTPClient) ListAdminUnitUserMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error) {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/members/microsoft.graph.user", unitID)
+	var response struct {
+		Value []struct {
+			ID string `json:"id"`
+		} `json:"value"`
+	}
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list user members for admin unit %s: %w", unitID, err)
+	}
+	ids := make([]string, 0, len(response.Value))
+	for _, u := range response.Value {
+		ids = append(ids, u.ID)
+	}
+	return ids, nil
+}
+
+// ListAdminUnitGroupMembers retrieves group members of an administrative unit
+func (c *HTTPClient) ListAdminUnitGroupMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error) {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/members/microsoft.graph.group", unitID)
+	var response struct {
+		Value []struct {
+			ID string `json:"id"`
+		} `json:"value"`
+	}
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list group members for admin unit %s: %w", unitID, err)
+	}
+	ids := make([]string, 0, len(response.Value))
+	for _, g := range response.Value {
+		ids = append(ids, g.ID)
+	}
+	return ids, nil
+}
+
+// ListAdminUnitScopedRoleMembers retrieves scoped role members of an administrative unit
+func (c *HTTPClient) ListAdminUnitScopedRoleMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]AdminUnitScopedRoleMember, error) {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/scopedRoleMembers", unitID)
+	var response struct {
+		Value []AdminUnitScopedRoleMember `json:"value"`
+	}
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list scoped role members for admin unit %s: %w", unitID, err)
+	}
+	return response.Value, nil
+}
+
+// AddAdminUnitMember adds a user or group to an administrative unit
+func (c *HTTPClient) AddAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/members/$ref", unitID)
+	request := struct {
+		ODataID string `json:"@odata.id"`
+	}{
+		ODataID: fmt.Sprintf("https://graph.microsoft.com/v1.0/directoryObjects/%s", memberID),
+	}
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to add member %s to admin unit %s: %w", memberID, unitID, err)
+	}
+	return nil
+}
+
+// AddAdminUnitScopedRoleMember assigns a scoped role to a principal in an administrative unit
+func (c *HTTPClient) AddAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID string, request *AddScopedRoleMemberRequest) (*AdminUnitScopedRoleMember, error) {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/scopedRoleMembers", unitID)
+	var result AdminUnitScopedRoleMember
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, &result); err != nil {
+		return nil, fmt.Errorf("failed to add scoped role member to admin unit %s: %w", unitID, err)
+	}
+	return &result, nil
+}
+
+// RemoveAdminUnitMember removes a user or group from an administrative unit
+func (c *HTTPClient) RemoveAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/members/%s/$ref", unitID, memberID)
+	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
+		return fmt.Errorf("failed to remove member %s from admin unit %s: %w", memberID, unitID, err)
+	}
+	return nil
+}
+
+// RemoveAdminUnitScopedRoleMember removes a scoped role assignment from an administrative unit
+func (c *HTTPClient) RemoveAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID, scopedRoleMemberID string) error {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/scopedRoleMembers/%s", unitID, scopedRoleMemberID)
+	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
+		return fmt.Errorf("failed to remove scoped role member %s from admin unit %s: %w", scopedRoleMemberID, unitID, err)
+	}
+	return nil
+}
