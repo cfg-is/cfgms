@@ -15,21 +15,27 @@ import (
 	"github.com/cfgis/cfgms/features/tenant/security"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // newTestAuditManager creates a real audit.Manager backed by OSS storage for tests.
 // Accepts testing.TB so it works in both *testing.T and *testing.B contexts.
 func newTestAuditManager(tb testing.TB) *audit.Manager {
 	tb.Helper()
+	if t, ok := tb.(*testing.T); ok {
+		return pkgtesting.SetupTestAuditManager(t)
+	}
+	// *testing.B path: construct directly; providers are registered via pkgtesting import.
 	tmpDir := tb.TempDir()
 	sm, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
-	require.NoError(tb, err)
+	if err != nil {
+		tb.Fatalf("CreateOSSStorageManager: %v", err)
+	}
 	tb.Cleanup(func() { _ = sm.Close() })
-
 	mgr, err := audit.NewManager(sm.GetAuditStore(), "tenant-security-test")
-	require.NoError(tb, err)
+	if err != nil {
+		tb.Fatalf("audit.NewManager: %v", err)
+	}
 	tb.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

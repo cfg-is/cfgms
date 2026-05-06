@@ -478,6 +478,8 @@ GOEOF
         "cmd/cfg/cmd/storage.go"
         "features/controller/initialization/initialization.go"
         "features/controller/server/server.go"
+        "features/rbac/continuous/providers_test.go"
+        "pkg/audit/providers_test.go"
     )
     local allowed_file
     for allowed_file in "${allowed_paths[@]}"; do

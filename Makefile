@@ -493,6 +493,9 @@ check-architecture:
 		echo ""; \
 		exit 1; \
 	fi
+	@echo ""
+	@echo "📦 Checking storage provider import violations..."
+	@bash ./scripts/check-providers.sh
 	@echo "   Safe to commit - no secrets detected in staged files"
 
 # License Header Verification
