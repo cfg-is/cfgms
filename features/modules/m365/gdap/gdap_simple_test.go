@@ -194,9 +194,10 @@ func TestGDAPRoleRequirements(t *testing.T) {
 	})
 
 	t.Run("UnknownResourceDefault", func(t *testing.T) {
-		// Test that unknown resources default to Global Administrator
-		defaultRoles := []string{"Global Administrator"}
-		assert.Equal(t, defaultRoles, []string{"Global Administrator"})
+		// Verify the production method returns ["Global Administrator"] for unmapped resources.
+		provider := NewGDAPProvider(nil, &http.Client{}, "partner-tenant")
+		roles := provider.GetGDAPRoleRequirements("unknown_resource", "read")
+		assert.Equal(t, []string{"Global Administrator"}, roles)
 	})
 }
 
