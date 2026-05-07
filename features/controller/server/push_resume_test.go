@@ -90,6 +90,10 @@ func (c *recordingControlPlane) SendHeartbeat(_ context.Context, _ *controlplane
 	return nil
 }
 
+func (c *recordingControlPlane) Reconnect(_ context.Context) error {
+	return nil
+}
+
 func (c *recordingControlPlane) SubscribeHeartbeats(_ context.Context, _ controlplaneInterfaces.HeartbeatHandler) error {
 	return nil
 }
