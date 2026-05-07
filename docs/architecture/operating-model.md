@@ -187,3 +187,7 @@ controller ← admin authors workflows
 ```
 
 This is the same controller — it just has no stewards registered. The workflow engine operates independently of steward management.
+
+## Monitoring Export Credentials
+
+OTLP exporter credentials (API keys / bearer tokens) are stored in `pkg/secrets`, not in config files. Configure the secret key name via `config["secret_key"]` and use `NewOTLPExporterWithSecrets` to wire the store at construction time.

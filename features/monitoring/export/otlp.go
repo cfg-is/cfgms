@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	logscollectorpb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	metricscollectorpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	tracecollectorpb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
@@ -28,8 +29,9 @@ import (
 // OTLPExporter exports traces and metrics to OpenTelemetry Protocol (OTLP) endpoints.
 // This enables integration with Jaeger, Zipkin, and other OTLP-compatible backends.
 type OTLPExporter struct {
-	logger logging.Logger
-	config OTLPConfig
+	logger  logging.Logger
+	config  OTLPConfig
+	secrets secretsinterfaces.SecretStore
 
 	// Connection state
 	connected   bool
@@ -70,6 +72,14 @@ func NewOTLPExporter(logger logging.Logger) *OTLPExporter {
 			Headers:             make(map[string]string),
 		},
 	}
+}
+
+// NewOTLPExporterWithSecrets creates an OTLPExporter that retrieves credentials
+// from the provided SecretStore rather than from plaintext ExporterConfig fields.
+func NewOTLPExporterWithSecrets(logger logging.Logger, store secretsinterfaces.SecretStore) *OTLPExporter {
+	oe := NewOTLPExporter(logger)
+	oe.secrets = store
+	return oe
 }
 
 // Name returns the name of this exporter.
@@ -118,8 +128,20 @@ func (oe *OTLPExporter) Configure(config ExporterConfig) error {
 		}
 	}
 
-	// Add authentication headers if provided
-	if config.APIKey != "" {
+	// Resolve the bearer token from the SecretStore when available.
+	// The plaintext APIKey path is skipped when a SecretStore is present to prevent
+	// accidental cleartext credential use.
+	if oe.secrets != nil {
+		if key, ok := config.Config["secret_key"].(string); ok && key != "" {
+			secret, err := oe.secrets.GetSecret(context.Background(), key)
+			if err != nil {
+				oe.logger.WarnCtx(context.Background(), "Failed to retrieve OTLP credential from secret store",
+					"secret_key", logging.SanitizeLogValue(key))
+			} else {
+				oe.config.Headers["Authorization"] = "Bearer " + secret.Value
+			}
+		}
+	} else if config.APIKey != "" {
 		oe.config.Headers["Authorization"] = fmt.Sprintf("Bearer %s", config.APIKey)
 	}
 
