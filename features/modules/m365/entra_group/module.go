@@ -13,19 +13,23 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // entraGroupModule implements the Module interface for Entra ID group management
 type entraGroupModule struct {
-	authProvider auth.Provider
-	graphClient  graph.Client
+	modules.DefaultLoggingSupport
+	authProvider     auth.Provider
+	graphClient      graph.Client
+	propagationDelay time.Duration // wait after CreateGroup before adding members; 0 uses default
 }
 
 // New creates a new instance of the Entra Group module
 func New(authProvider auth.Provider, graphClient graph.Client) modules.Module {
 	return &entraGroupModule{
-		authProvider: authProvider,
-		graphClient:  graphClient,
+		authProvider:     authProvider,
+		graphClient:      graphClient,
+		propagationDelay: 2 * time.Second,
 	}
 }
 
@@ -410,8 +414,13 @@ func (m *entraGroupModule) createGroup(ctx context.Context, token *auth.AccessTo
 		return fmt.Errorf("failed to create group via Graph API: %w", err)
 	}
 
-	// Wait for group creation to propagate
-	time.Sleep(2 * time.Second)
+	// Wait for group creation to propagate before adding members/owners.
+	// Graph replication is eventually consistent; a brief pause avoids spurious 404s.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(m.propagationDelay):
+	}
 
 	// Add members and owners if specified
 	if len(config.Members) > 0 {
@@ -432,7 +441,7 @@ func (m *entraGroupModule) createGroup(ctx context.Context, token *auth.AccessTo
 
 	// Create Microsoft Team if enabled
 	if config.IsTeamEnabled {
-		if err := m.createTeam(ctx, token, group.ID, config.TeamSettings); err != nil {
+		if err := m.createTeam(ctx, token, group.ID, config.GroupType, config.TeamSettings); err != nil {
 			return fmt.Errorf("failed to create team: %w", err)
 		}
 	}
@@ -507,7 +516,7 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 	// Handle team settings if managed
 	if contains(managedFields, "is_team_enabled") && config.IsTeamEnabled {
 		if !m.isTeamGroup(ctx, token, existingGroup.ID) {
-			if err := m.createTeam(ctx, token, existingGroup.ID, config.TeamSettings); err != nil {
+			if err := m.createTeam(ctx, token, existingGroup.ID, config.GroupType, config.TeamSettings); err != nil {
 				return fmt.Errorf("failed to create team: %w", err)
 			}
 		} else if contains(managedFields, "team_settings") {
@@ -608,18 +617,31 @@ func diffUPNSets(current, desired []string) (toAdd, toRemove []string) {
 }
 
 func (m *entraGroupModule) isTeamGroup(ctx context.Context, token *auth.AccessToken, groupID string) bool {
-	// Placeholder - would check if group has an associated team
+	_, err := m.graphClient.GetTeam(ctx, token, groupID)
+	if err == nil {
+		return true
+	}
+	if graph.IsNotFoundError(err) {
+		return false
+	}
+	m.GetEffectiveLogger(logging.NewNoopLogger()).Warn(
+		"could not determine team status for group; treating as non-team",
+		"group_id", groupID, "error", err,
+	)
 	return false
 }
 
-func (m *entraGroupModule) createTeam(ctx context.Context, token *auth.AccessToken, groupID string, settings *TeamSettings) error {
-	// Placeholder - would use Graph API PUT /groups/{id}/team
-	return nil
+func (m *entraGroupModule) createTeam(ctx context.Context, token *auth.AccessToken, groupID, groupType string, settings *TeamSettings) error {
+	if groupType != "Unified" {
+		return fmt.Errorf("team can only be created for a Microsoft 365 (Unified) group, got group_type %q", groupType)
+	}
+	req := mapTeamSettingsToCreateRequest(settings)
+	return m.graphClient.CreateTeam(ctx, token, groupID, req)
 }
 
 func (m *entraGroupModule) updateTeamSettings(ctx context.Context, token *auth.AccessToken, groupID string, settings *TeamSettings) error {
-	// Placeholder - would use Graph API PATCH /teams/{id}
-	return nil
+	req := mapTeamSettingsToUpdateRequest(settings)
+	return m.graphClient.UpdateTeamSettings(ctx, token, groupID, req)
 }
 
 // Utility types and functions
@@ -653,4 +675,87 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// mapFunSettings maps a CFGMS fun level string to a Graph API TeamFunSettings.
+// "strict"   → all fun features disabled
+// "moderate" → Giphy allowed at strict content rating, stickers allowed, custom memes disabled
+// "enabled"  → all fun features enabled with moderate Giphy content rating
+func mapFunSettings(fun string) *graph.TeamFunSettings {
+	t, f := true, false
+	strictRating, moderateRating := "strict", "moderate"
+	switch fun {
+	case "strict":
+		return &graph.TeamFunSettings{
+			AllowGiphy:            &f,
+			AllowStickersAndMemes: &f,
+			AllowCustomMemes:      &f,
+		}
+	case "moderate":
+		return &graph.TeamFunSettings{
+			AllowGiphy:            &t,
+			GiphyContentRating:    &strictRating,
+			AllowStickersAndMemes: &t,
+			AllowCustomMemes:      &f,
+		}
+	case "enabled":
+		return &graph.TeamFunSettings{
+			AllowGiphy:            &t,
+			GiphyContentRating:    &moderateRating,
+			AllowStickersAndMemes: &t,
+			AllowCustomMemes:      &t,
+		}
+	default:
+		return nil
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+func mapTeamSettingsToCreateRequest(settings *TeamSettings) *graph.CreateTeamRequest {
+	req := &graph.CreateTeamRequest{}
+	if settings == nil {
+		return req
+	}
+	req.MemberSettings = &graph.TeamMemberSettings{
+		AllowCreatePrivateChannels: boolPtr(settings.AllowCreatePrivateChannels),
+		AllowCreateUpdateChannels:  boolPtr(settings.AllowCreateUpdateChannels),
+		AllowDeleteChannels:        boolPtr(settings.AllowDeleteChannels),
+		AllowAddRemoveApps:         boolPtr(settings.AllowAddRemoveApps),
+	}
+	req.MessagingSettings = &graph.TeamMessagingSettings{
+		AllowUserEditMessages: boolPtr(settings.AllowUserEditMessages),
+	}
+	req.GuestSettings = &graph.TeamGuestSettings{
+		AllowCreateUpdateChannels: boolPtr(settings.AllowGuestCreateChannels),
+		AllowDeleteChannels:       boolPtr(settings.AllowGuestDeleteChannels),
+	}
+	if settings.Fun != "" {
+		req.FunSettings = mapFunSettings(settings.Fun)
+	}
+	return req
+}
+
+func mapTeamSettingsToUpdateRequest(settings *TeamSettings) *graph.UpdateTeamSettingsRequest {
+	req := &graph.UpdateTeamSettingsRequest{}
+	if settings == nil {
+		return req
+	}
+	req.MemberSettings = &graph.TeamMemberSettings{
+		AllowCreatePrivateChannels: boolPtr(settings.AllowCreatePrivateChannels),
+		AllowCreateUpdateChannels:  boolPtr(settings.AllowCreateUpdateChannels),
+		AllowDeleteChannels:        boolPtr(settings.AllowDeleteChannels),
+		AllowAddRemoveApps:         boolPtr(settings.AllowAddRemoveApps),
+	}
+	req.MessagingSettings = &graph.TeamMessagingSettings{
+		AllowUserEditMessages: boolPtr(settings.AllowUserEditMessages),
+	}
+	req.GuestSettings = &graph.TeamGuestSettings{
+		AllowCreateUpdateChannels: boolPtr(settings.AllowGuestCreateChannels),
+		AllowDeleteChannels:       boolPtr(settings.AllowGuestDeleteChannels),
+	}
+	if settings.Fun != "" {
+		req.FunSettings = mapFunSettings(settings.Fun)
+	}
+	return req
 }

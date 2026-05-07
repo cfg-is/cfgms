@@ -79,6 +79,11 @@ type Client interface {
 	AddAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID string, request *AddScopedRoleMemberRequest) (*AdminUnitScopedRoleMember, error)
 	RemoveAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error
 	RemoveAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID, scopedRoleMemberID string) error
+
+	// Team operations
+	GetTeam(ctx context.Context, token *auth.AccessToken, groupID string) (*Team, error)
+	CreateTeam(ctx context.Context, token *auth.AccessToken, groupID string, request *CreateTeamRequest) error
+	UpdateTeamSettings(ctx context.Context, token *auth.AccessToken, teamID string, request *UpdateTeamSettingsRequest) error
 }
 
 // User represents a Microsoft Graph user object
@@ -595,4 +600,58 @@ type AdminUnitRoleMemberInfo struct {
 type AddScopedRoleMemberRequest struct {
 	RoleID         string                  `json:"roleId"`
 	RoleMemberInfo AdminUnitRoleMemberInfo `json:"roleMemberInfo"`
+}
+
+// Team represents a Microsoft Teams team backed by a Microsoft 365 group
+type Team struct {
+	ID                string                 `json:"id"`
+	DisplayName       string                 `json:"displayName,omitempty"`
+	Description       string                 `json:"description,omitempty"`
+	MemberSettings    *TeamMemberSettings    `json:"memberSettings,omitempty"`
+	MessagingSettings *TeamMessagingSettings `json:"messagingSettings,omitempty"`
+	FunSettings       *TeamFunSettings       `json:"funSettings,omitempty"`
+	GuestSettings     *TeamGuestSettings     `json:"guestSettings,omitempty"`
+}
+
+// CreateTeamRequest represents a request to create a team from an existing Microsoft 365 group
+type CreateTeamRequest struct {
+	MemberSettings    *TeamMemberSettings    `json:"memberSettings,omitempty"`
+	MessagingSettings *TeamMessagingSettings `json:"messagingSettings,omitempty"`
+	FunSettings       *TeamFunSettings       `json:"funSettings,omitempty"`
+	GuestSettings     *TeamGuestSettings     `json:"guestSettings,omitempty"`
+}
+
+// UpdateTeamSettingsRequest represents a request to update team settings via PATCH /teams/{teamId}
+type UpdateTeamSettingsRequest struct {
+	MemberSettings    *TeamMemberSettings    `json:"memberSettings,omitempty"`
+	MessagingSettings *TeamMessagingSettings `json:"messagingSettings,omitempty"`
+	FunSettings       *TeamFunSettings       `json:"funSettings,omitempty"`
+	GuestSettings     *TeamGuestSettings     `json:"guestSettings,omitempty"`
+}
+
+// TeamMemberSettings controls what team members can do
+type TeamMemberSettings struct {
+	AllowCreatePrivateChannels *bool `json:"allowCreatePrivateChannels,omitempty"`
+	AllowCreateUpdateChannels  *bool `json:"allowCreateUpdateChannels,omitempty"`
+	AllowDeleteChannels        *bool `json:"allowDeleteChannels,omitempty"`
+	AllowAddRemoveApps         *bool `json:"allowAddRemoveApps,omitempty"`
+}
+
+// TeamMessagingSettings controls messaging capabilities for team members
+type TeamMessagingSettings struct {
+	AllowUserEditMessages *bool `json:"allowUserEditMessages,omitempty"`
+}
+
+// TeamFunSettings controls use of Giphy, memes, and stickers in the team
+type TeamFunSettings struct {
+	AllowGiphy            *bool   `json:"allowGiphy,omitempty"`
+	GiphyContentRating    *string `json:"giphyContentRating,omitempty"`
+	AllowStickersAndMemes *bool   `json:"allowStickersAndMemes,omitempty"`
+	AllowCustomMemes      *bool   `json:"allowCustomMemes,omitempty"`
+}
+
+// TeamGuestSettings controls what guests can do in the team
+type TeamGuestSettings struct {
+	AllowCreateUpdateChannels *bool `json:"allowCreateUpdateChannels,omitempty"`
+	AllowDeleteChannels       *bool `json:"allowDeleteChannels,omitempty"`
 }
