@@ -336,39 +336,34 @@ func testConfigurationContinuity(t *testing.T, ctx context.Context, helper *Dock
 
 // testSessionPersistence tests gRPC session persistence during failover
 func testSessionPersistence(t *testing.T, ctx context.Context, helper *DockerComposeHelper, controllers []string, stewards []string) {
-	t.Skip("Skipping: session monitoring API not yet implemented — Issue #1255")
 	t.Log("Testing gRPC session persistence during failover...")
 
-	// Record initial session counts
-	initialSessions := make(map[string]int)
+	// Log initial session counts for diagnostic context.
 	for _, stewardName := range stewards {
 		status, err := getStewardStatus(ctx, helper, stewardName, controllers)
 		require.NoError(t, err, "Failed to get status for %s", stewardName)
-		initialSessions[stewardName] = status.ActiveSessions
-		t.Logf("Steward %s has %d active sessions", stewardName, status.ActiveSessions)
+		t.Logf("Steward %s has %d active sessions initially", stewardName, status.ActiveSessions)
 	}
 
-	// Simulate active sessions by starting configuration monitoring
-	t.Log("Establishing active sessions...")
+	// Verify each steward has an active ControlChannel session (the persistent gRPC stream
+	// that is established when a steward connects to a controller).
+	t.Log("Verifying active ControlChannel sessions...")
 	for _, stewardName := range stewards {
-		require.NoError(t, startSessionMonitoring(stewardName))
+		require.NoError(t, startSessionMonitoring(stewardName, controllers))
 	}
 
-	// Wait for sessions to be established
+	// Allow time for any in-flight session state to settle before asserting.
 	time.Sleep(5 * time.Second)
 
-	// Verify active sessions increased
-	activeSessions := make(map[string]int)
+	// Verify active sessions are present before the failover.
 	for _, stewardName := range stewards {
 		status, err := getStewardStatus(ctx, helper, stewardName, controllers)
 		require.NoError(t, err, "Failed to get status for %s", stewardName)
-		activeSessions[stewardName] = status.ActiveSessions
-
-		assert.Greater(t, status.ActiveSessions, initialSessions[stewardName],
-			"Steward %s should have more active sessions", stewardName)
+		assert.Greater(t, status.ActiveSessions, 0,
+			"Steward %s should have active sessions after monitoring established", stewardName)
 	}
 
-	// Trigger controller failover
+	// Trigger controller failover.
 	var leaderService string
 	for i, url := range controllers {
 		instance, err := getControllerState(url)
@@ -378,12 +373,21 @@ func testSessionPersistence(t *testing.T, ctx context.Context, helper *DockerCom
 			break
 		}
 	}
+	require.NotEmpty(t, leaderService, "Could not identify leader service for failover")
 
 	t.Logf("Triggering failover by stopping %s...", leaderService)
 	require.NoError(t, helper.RestartService(ctx, leaderService))
 
-	// Wait for failover to complete
-	time.Sleep(15 * time.Second)
+	// Wait for a new leader to be elected before verifying session restoration.
+	require.Eventually(t, func() bool {
+		for _, url := range controllers {
+			instance, err := getControllerState(url)
+			if err == nil && instance.IsLeader {
+				return true
+			}
+		}
+		return false
+	}, 45*time.Second, 2*time.Second, "New leader not elected after failover")
 
 	// Verify sessions are restored/maintained
 	t.Log("Verifying session restoration after failover...")
@@ -459,18 +463,16 @@ func testAuthenticationPersistence(t *testing.T, ctx context.Context, helper *Do
 
 // Helper functions for steward testing
 
-// getStewardStatus gets the status of a steward via Docker logs and the DNA API.
-// controllers is the list of controller URLs to try when querying the DNA endpoint.
+// getStewardStatus gets the status of a steward via Docker logs and the controller API.
+// ConnectedTo is derived from Docker logs (not available in the stewards API).
+// ActiveSessions and ConnectionState are populated from GET /api/v1/stewards/{id} on the
+// active controller; the function tries each controller and uses the first "connected" response.
 func getStewardStatus(ctx context.Context, helper *DockerComposeHelper, stewardName string, controllers []string) (*StewardStatus, error) {
-	// Check connection via Docker logs
-	connected, connectedTo, err := helper.CheckStewardConnection(ctx, stewardName)
+	// Docker logs provide which controller the steward is connected to — this field
+	// is not available from the stewards API.
+	_, connectedTo, err := helper.CheckStewardConnection(ctx, stewardName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check steward connection: %w", err)
-	}
-
-	connectionState := "disconnected"
-	if connected {
-		connectionState = "connected"
 	}
 
 	// Parse region from steward name (e.g., "steward-east" -> "east")
@@ -480,9 +482,14 @@ func getStewardStatus(ctx context.Context, helper *DockerComposeHelper, stewardN
 		region = parts[1]
 	}
 
-	// Get configuration hash from the DNA endpoint on any reachable controller.
 	stewardID := fmt.Sprintf("%s-1", stewardName)
+
+	// Get configuration hash from the DNA endpoint on any reachable controller.
 	configHash := getStewardConfigHash(ctx, stewardID, controllers)
+
+	// Get active_sessions and connection_state from the stewards API.
+	// Falls back to (0, "disconnected") when no controller API is reachable.
+	activeSessions, connectionState := getStewardSessionInfo(ctx, stewardID, controllers)
 
 	return &StewardStatus{
 		StewardID:         stewardID,
@@ -492,8 +499,53 @@ func getStewardStatus(ctx context.Context, helper *DockerComposeHelper, stewardN
 		ConnectionState:   connectionState,
 		LastHeartbeat:     time.Now(),
 		ConfigurationHash: configHash,
-		ActiveSessions:    0,
+		ActiveSessions:    activeSessions,
 	}, nil
+}
+
+// getStewardSessionInfo calls GET /api/v1/stewards/{id} on each controller in turn and
+// returns (active_sessions, connection_state) from the first controller that reports
+// connection_state == "connected". Falls back to (0, "disconnected") when all controllers
+// are unreachable or none report the steward as connected.
+func getStewardSessionInfo(ctx context.Context, stewardID string, controllers []string) (int, string) {
+	for _, controllerURL := range controllers {
+		client := buildTLSClient(containerNameForURL(controllerURL))
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			fmt.Sprintf("%s/api/v1/stewards/%s", controllerURL, stewardID),
+			nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("X-API-Key", getAPIKeyForURL(controllerURL))
+
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			continue
+		}
+
+		var apiResp struct {
+			Data struct {
+				ActiveSessions  int    `json:"active_sessions"`
+				ConnectionState string `json:"connection_state"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+			_ = resp.Body.Close()
+			continue
+		}
+		_ = resp.Body.Close()
+
+		if apiResp.Data.ConnectionState == "connected" {
+			return apiResp.Data.ActiveSessions, apiResp.Data.ConnectionState
+		}
+	}
+	return 0, "disconnected"
 }
 
 // getStewardConfigHash calls GET /api/v1/stewards/{id}/dna on each controller
@@ -570,8 +622,48 @@ func pushConfigurationToStewards(controllerURL string, config push.StewardConfig
 	return nil
 }
 
-// startSessionMonitoring starts session monitoring for a steward
-func startSessionMonitoring(stewardName string) error {
-	// Session monitoring requires gRPC stream management API (not yet implemented)
-	return fmt.Errorf("session monitoring not implemented: no API available for steward %s", stewardName)
+// startSessionMonitoring verifies that stewardName has an active ControlChannel session by
+// calling GET /api/v1/stewards/{id} on each controller in turn (mTLS via buildTLSClient) and
+// confirming connection_state == "connected". Returns nil when a controller confirms the
+// steward is connected; returns an error immediately otherwise so the caller fails fast.
+func startSessionMonitoring(stewardName string, controllers []string) error {
+	stewardID := fmt.Sprintf("%s-1", stewardName)
+	for _, controllerURL := range controllers {
+		client := buildTLSClient(containerNameForURL(controllerURL))
+
+		req, err := http.NewRequest(http.MethodGet,
+			fmt.Sprintf("%s/api/v1/stewards/%s", controllerURL, stewardID),
+			nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("X-API-Key", getAPIKeyForURL(controllerURL))
+
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			continue
+		}
+
+		var apiResp struct {
+			Data struct {
+				ConnectionState string `json:"connection_state"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+			_ = resp.Body.Close()
+			continue
+		}
+		_ = resp.Body.Close()
+
+		if apiResp.Data.ConnectionState == "connected" {
+			return nil
+		}
+		return fmt.Errorf("steward %s is not connected (connection_state=%q)", stewardName, apiResp.Data.ConnectionState)
+	}
+	return fmt.Errorf("could not reach any controller to verify session for steward %s", stewardName)
 }
