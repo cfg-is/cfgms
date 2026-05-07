@@ -324,6 +324,8 @@ func (c *syncedControlPlane) GetStats(_ context.Context) (*controlplaneTypes.Con
 	return &controlplaneTypes.ControlPlaneStats{}, nil
 }
 
+func (c *syncedControlPlane) Reconnect(_ context.Context) error { return nil }
+
 // registerActiveSteward registers a steward and immediately transitions it to
 // "active" status via a heartbeat, matching the real steward lifecycle.
 // Returns the controller-assigned steward ID (not the DNA ID).

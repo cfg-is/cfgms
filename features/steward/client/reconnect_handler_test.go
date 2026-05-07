@@ -66,25 +66,20 @@ func TestCommandReconnect_TriggersControlPlaneReconnect(t *testing.T) {
 	}
 }
 
-// TestCommandReconnect_NilControlPlane verifies that the handler returns an error
-// rather than panicking when controlPlane is nil at dispatch time.
+// TestCommandReconnect_NilControlPlane verifies that the nil-guard in the
+// CommandReconnect handler prevents a call to Reconnect() when controlPlane
+// is nil. The handler must not panic and must not invoke Reconnect().
 func TestCommandReconnect_NilControlPlane(t *testing.T) {
 	exec, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: newTestLogger(t)})
 	require.NoError(t, err)
 
-	// Create client with no control plane set.
-	c := &TransportClient{
-		stewardID:        "steward-nil-cp",
-		tenantID:         "tenant-nil-cp",
-		heartbeatStop:    make(chan struct{}),
-		convergenceStop:  make(chan struct{}),
-		convergeInterval: 30 * time.Minute,
-		logger:           newTestLogger(t),
-	}
+	// Start with a real reconnectCapture so we can observe whether Reconnect() is called.
+	capture := &reconnectCapture{reconnected: make(chan struct{}, 1)}
+	c := newMinimalClientWithCP(t, newTestSession(), exec, capture, "steward-nil-cp", "tenant-nil-cp")
+
+	// Nil out the control plane to simulate the not-yet-connected state.
 	c.mu.Lock()
-	c.configExecutor = exec
-	// controlPlane intentionally left nil
-	c.dataPlaneSession = newTestSession()
+	c.controlPlane = nil
 	c.mu.Unlock()
 
 	handler, err := c.setupCommandHandler(context.Background(), "steward-nil-cp")
@@ -97,9 +92,15 @@ func TestCommandReconnect_NilControlPlane(t *testing.T) {
 		TenantID:  "tenant-nil-cp",
 		Timestamp: time.Now(),
 	}}
-	// HandleCommand must not panic — the handler returns an error internally
-	// and executeCommand logs it without propagating to the caller.
+	// HandleCommand dispatches async; it returns nil after authentication passes.
 	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
 	handler.Wait()
-	// If we reach here without panic, the nil-guard test passes.
+
+	// Reconnect() must NOT have been called — the nil guard prevents it.
+	select {
+	case <-capture.reconnected:
+		t.Fatal("controlPlane.Reconnect() must not be called when controlPlane is nil")
+	default:
+		// Expected: nil guard prevented the reconnect call.
+	}
 }
