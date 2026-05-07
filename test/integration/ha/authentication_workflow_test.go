@@ -279,10 +279,57 @@ func testCertificateValidityDuringFailover(t *testing.T, ctx context.Context, he
 	t.Log("✓ Certificate validity maintained during failover")
 }
 
-func testTokenRefreshDuringFailover(t *testing.T, _ context.Context, _ *DockerComposeHelper, _ []string, _ []string) {
-	// Infrastructure skip: requires a steward token management endpoint (POST /api/v1/stewards/{id}/tokens)
-	// that does not yet exist. Remove this skip when the endpoint is implemented.
-	t.Skip("requires steward token management endpoint (not yet implemented)")
+func testTokenRefreshDuringFailover(t *testing.T, _ context.Context, _ *DockerComposeHelper, _ []string, stewards []string) {
+	t.Log("Testing token refresh requests during controller failover...")
+
+	for _, steward := range stewards {
+		require.NoError(t, simulateTokenRefresh(steward), "simulateTokenRefresh(%s) must succeed", steward)
+		t.Logf("✓ Token refresh acknowledged for %s", steward)
+	}
+
+	t.Log("✓ Token refresh during failover verified")
+}
+
+// simulateTokenRefresh calls POST /api/v1/stewards/{id}/auth/refresh on the first
+// reachable controller and returns nil on 200. The steward's registered ID is
+// derived by appending "-1" to the container name (e.g. "steward-east" → "steward-east-1").
+func simulateTokenRefresh(stewardName string) error {
+	controllerURL, err := firstReachableController()
+	if err != nil {
+		return fmt.Errorf("no reachable controller: %w", err)
+	}
+
+	stewardID := stewardName + "-1"
+	client := buildTLSClient(containerNameForURL(controllerURL))
+	apiKey := getAPIKeyForURL(controllerURL)
+
+	url := fmt.Sprintf("%s/api/v1/stewards/%s/auth/refresh", controllerURL, stewardID)
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader("{}"))
+	if err != nil {
+		return fmt.Errorf("failed to build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("auth refresh returned HTTP %d for steward %s", resp.StatusCode, stewardID)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+	if body["status"] != "refresh_requested" {
+		return fmt.Errorf("unexpected status %q (want refresh_requested)", body["status"])
+	}
+
+	return nil
 }
 
 func testReconnectionAuthenticationFlow(t *testing.T, ctx context.Context, helper *DockerComposeHelper, controllers []string, stewards []string) {

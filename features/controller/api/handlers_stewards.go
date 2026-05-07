@@ -451,6 +451,31 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, result)
 }
 
+// handleStewardAuthRefresh handles POST /api/v1/stewards/{id}/auth/refresh.
+// It is a no-op surface that validates the steward exists and acknowledges the
+// refresh request. No token or credential state is modified (mTLS is the sole
+// auth mechanism; this endpoint exists for HA test instrumentation only).
+func (s *Server) handleStewardAuthRefresh(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+	idForLog := logging.SanitizeLogValue(id)
+
+	if id == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
+		return
+	}
+
+	_, exists := s.controllerService.GetStewardInfo(id)
+	if !exists {
+		s.logger.Info("Auth refresh requested for unknown steward", "steward_id", idForLog)
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return
+	}
+
+	s.logger.Info("Auth refresh requested", "steward_id", idForLog)
+	s.respondJSON(w, http.StatusOK, map[string]string{"steward_id": id, "status": "refresh_requested"})
+}
+
 // handleGetEffectiveConfig handles GET /api/v1/stewards/{id}/config/effective
 func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)

@@ -464,6 +464,45 @@ func TestHandleGetSteward_NilRegistry(t *testing.T) {
 	assert.Equal(t, "disconnected", resp.Data.ConnectionState)
 }
 
+// TestHandleStewardAuthRefresh_UnknownSteward_Returns404 verifies that POSTing to
+// /api/v1/stewards/{id}/auth/refresh with an unregistered steward ID returns 404.
+func TestHandleStewardAuthRefresh_UnknownSteward_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:auth-refresh"})
+
+	req := httptest.NewRequest("POST", "/api/v1/stewards/nonexistent-steward-id/auth/refresh", strings.NewReader("{}"))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestHandleStewardAuthRefresh_KnownSteward_Returns200 verifies that POSTing to
+// /api/v1/stewards/{id}/auth/refresh with a registered steward returns 200 with
+// {"steward_id":"...","status":"refresh_requested"}.
+func TestHandleStewardAuthRefresh_KnownSteward_Returns200(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:auth-refresh"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "auth-refresh-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/stewards/"+stewardID+"/auth/refresh", strings.NewReader("{}"))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	assert.Equal(t, stewardID, body["steward_id"])
+	assert.Equal(t, "refresh_requested", body["status"])
+}
+
 // TestServer_ConfigStatusRouteDeregistered verifies that GET /api/v1/stewards/{id}/config/status
 // is no longer registered and returns 404 or 405, never 200 with hardcoded "unknown" data.
 func TestServer_ConfigStatusRouteDeregistered(t *testing.T) {
