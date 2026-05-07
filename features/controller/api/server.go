@@ -35,6 +35,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
@@ -73,6 +74,7 @@ type Server struct {
 	scriptMonitor           *script.ExecutionMonitor       // Issue #708: active execution tracking
 	pushLeaderStatus        leaderStatus                   // Issue #1318: leader check for config push (nil = leader)
 	commandPublisher        *commands.Publisher            // Issue #1319: fan-out config push to active stewards
+	pushStore               business.PushStore             // Issue #1320: durable push-state persistence for HA failover
 	registry                registry.Registry              // Issue #1323: active steward connection registry
 	stopCleanup             chan struct{}                  // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                  // closed when cleanup goroutine exits
@@ -121,6 +123,7 @@ func New(
 	healthCollector *health.Collector, // Story #417: CFGMS health monitoring
 	auditManager *audit.Manager, // Issue #775: registration audit events
 	commandPublisher *commands.Publisher, // Issue #1319: fan-out config push to active stewards
+	pushStore business.PushStore, // Issue #1320: durable push-state persistence for HA failover
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -152,6 +155,7 @@ func New(
 		approvalHook:            &DefaultApprovalHook{},   // Issue #422: accept-all default
 		auditManager:            auditManager,             // Issue #775: registration audit events
 		commandPublisher:        commandPublisher,         // Issue #1319: fan-out config push to active stewards
+		pushStore:               pushStore,                // Issue #1320: durable push-state persistence for HA failover
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
 	}
