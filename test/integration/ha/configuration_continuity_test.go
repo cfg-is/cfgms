@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/push"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -43,8 +44,6 @@ func TestConfigurationPushContinuity(t *testing.T) {
 	defer cancel()
 
 	helper := NewDockerComposeHelper()
-
-	t.Skip("Skipping: configuration push API not yet implemented (requires controller config push endpoint)")
 
 	t.Log("Starting full HA cluster for configuration continuity testing...")
 	require.NoError(t, helper.StartCluster(ctx))
@@ -192,30 +191,27 @@ func testLargeConfigurationPushWithFailover(t *testing.T, ctx context.Context, h
 		t.Log("Configuration push timed out - checking final state...")
 	}
 
-	// Verify configuration state consistency across stewards
-	t.Log("Verifying configuration consistency after failover...")
-	time.Sleep(10 * time.Second) // Allow time for cleanup
+	// Verify steward connectivity and configuration state after failover
+	t.Log("Verifying steward connectivity and configuration state after failover...")
+	time.Sleep(10 * time.Second) // Allow time for failover to propagate
 
-	configStates := make(map[string]string)
+	connectedAfterFailover := 0
 	for _, steward := range stewards {
 		state, err := getConfigurationState(ctx, helper, steward)
 		if err != nil {
 			t.Logf("Warning: Could not get config state for %s: %v", steward, err)
-			configStates[steward] = "unknown"
-		} else {
-			configStates[steward] = state
+			continue
+		}
+		t.Logf("Steward %s configuration state: %s", steward, state)
+		// Any state other than "unknown" means the steward is reachable
+		if state != "unknown" {
+			connectedAfterFailover++
 		}
 	}
 
-	// Log configuration states
-	for steward, state := range configStates {
-		t.Logf("Steward %s configuration state: %s", steward, state)
-	}
-
-	// In a real implementation, we'd verify:
-	// 1. Configuration was either fully applied or fully rolled back
-	// 2. No steward is in an inconsistent state
-	// 3. Configuration can be successfully retried
+	// At least one steward must be reachable after failover
+	assert.Greater(t, connectedAfterFailover, 0,
+		"At least one steward must be reachable after large-config-push failover")
 	t.Log("✓ Large configuration push failover behavior verified")
 }
 
@@ -279,16 +275,22 @@ func testMultipleConfigurationPushesWithFailover(t *testing.T, ctx context.Conte
 	// Wait for cluster to stabilize
 	time.Sleep(15 * time.Second)
 
-	// Verify steward states are consistent
-	t.Log("Verifying steward consistency after multiple pushes and failover...")
-	for _, steward := range stewards {
-		connected, controller, err := helper.CheckStewardConnection(ctx, steward)
-		if err != nil {
-			t.Logf("Warning: Could not check %s connection: %v", steward, err)
-		} else {
+	// Verify all stewards reconnected after the failover
+	t.Log("Verifying steward connectivity after multiple pushes and failover...")
+	require.Eventually(t, func() bool {
+		connectedCount := 0
+		for _, steward := range stewards {
+			connected, controller, err := helper.CheckStewardConnection(ctx, steward)
+			if err != nil {
+				continue
+			}
 			t.Logf("Steward %s: connected=%v, controller=%s", steward, connected, controller)
+			if connected {
+				connectedCount++
+			}
 		}
-	}
+		return connectedCount == len(stewards)
+	}, 30*time.Second, 3*time.Second, "All stewards must be connected after multiple-push failover")
 
 	t.Log("✓ Multiple configuration pushes with failover completed")
 }
@@ -318,10 +320,12 @@ func testConfigurationRollbackDuringFailover(t *testing.T, ctx context.Context, 
 	// Apply new configuration that will be rolled back
 	rollbackConfig := createTestConfiguration("rollback-test-new", "rollback-target")
 
-	// Start configuration push
+	// Start configuration push that will be interrupted by failover.
+	// Error is logged but not required since the push may fail mid-flight.
+	rollbackPushErr := make(chan error, 1)
 	go func() {
 		time.Sleep(2 * time.Second)
-		_ = pushConfigurationToStewards(leaderURL, rollbackConfig)
+		rollbackPushErr <- pushConfigurationToStewards(leaderURL, rollbackConfig)
 	}()
 
 	// Trigger failover immediately after push starts
@@ -339,13 +343,24 @@ func testConfigurationRollbackDuringFailover(t *testing.T, ctx context.Context, 
 	t.Logf("Triggering failover to test rollback behavior...")
 	require.NoError(t, helper.RestartService(ctx, leaderService))
 
-	// Wait for failover
-	time.Sleep(20 * time.Second)
+	// Collect push result (may have failed due to failover — that is expected)
+	select {
+	case err := <-rollbackPushErr:
+		t.Logf("Rollback push result: %v", err)
+	case <-time.After(15 * time.Second):
+		t.Log("Rollback push timed out — failover likely interrupted it")
+	}
 
-	// In a real implementation, we would:
-	// 1. Verify configuration rollback was properly handled
-	// 2. Check that stewards are in a consistent state
-	// 3. Verify rollback can be retried if needed
+	// Verify cluster recovered: at least 2 of 3 controllers must be healthy
+	require.Eventually(t, func() bool {
+		healthyCount := 0
+		for _, url := range controllers {
+			if waitForHealthy(ctx, url, 5*time.Second) == nil {
+				healthyCount++
+			}
+		}
+		return healthyCount >= 2
+	}, 45*time.Second, 3*time.Second, "At least 2 controllers must be healthy after rollback-during-failover")
 
 	t.Log("✓ Configuration rollback during failover tested")
 }
@@ -398,25 +413,35 @@ func createTestConfiguration(configID string, category string) push.StewardConfi
 	}
 }
 
-// pushLargeConfiguration pushes a large configuration to the controller
+// pushLargeConfiguration pushes a large configuration to the controller.
+// Uses a TLS-enabled client with the controller CA cert.
 func pushLargeConfiguration(controllerURL string, config push.StewardConfiguration) error {
-	// Call the controller's large config push API and return actual errors
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := buildTLSClient(containerNameForURL(controllerURL))
+	client.Timeout = 30 * time.Second
 
 	configJSON, err := json.Marshal(config)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	resp, err := client.Post(
-		fmt.Sprintf("%s/api/v1/config/push/large", controllerURL),
-		"application/json",
-		strings.NewReader(string(configJSON)),
-	)
+	req, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("%s/api/v1/config/push", controllerURL),
+		strings.NewReader(string(configJSON)))
+	if err != nil {
+		return fmt.Errorf("failed to build large push request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", getAPIKeyForURL(controllerURL))
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("large configuration push API call failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("large config push failed with status %d", resp.StatusCode)
+	}
 
 	return nil
 }
