@@ -231,7 +231,9 @@ func (oe *OTLPExporter) Export(ctx context.Context, data ExportData) error {
 	return nil
 }
 
-// HealthCheck verifies connectivity to the OTLP endpoint.
+// HealthCheck probes the OTLP endpoint by POSTing a minimal empty
+// ExportTraceServiceRequest to /v1/traces. 2xx and 4xx responses indicate
+// the collector is reachable; 5xx responses and connection errors do not.
 func (oe *OTLPExporter) HealthCheck(ctx context.Context) ExporterHealth {
 	health := ExporterHealth{
 		Name:            oe.Name(),
@@ -240,14 +242,54 @@ func (oe *OTLPExporter) HealthCheck(ctx context.Context) ExporterHealth {
 		LastExport:      oe.lastExport,
 	}
 
-	if oe.connected {
-		health.Status = "healthy"
-		health.Message = "OTLP endpoint reachable"
-	} else {
+	probeCtx, cancel := context.WithTimeout(ctx, oe.config.Timeout)
+	defer cancel()
+
+	probePayload, err := proto.Marshal(&tracecollectorpb.ExportTraceServiceRequest{})
+	if err != nil {
 		health.Status = "unhealthy"
-		health.Message = "OTLP endpoint not reachable"
+		health.Message = fmt.Sprintf("failed to marshal probe payload: %v", err)
+		oe.connected = false
+		return health
 	}
 
+	httpReq, err := http.NewRequestWithContext(probeCtx, http.MethodPost,
+		oe.config.Endpoint+"/v1/traces", bytes.NewReader(probePayload))
+	if err != nil {
+		health.Status = "unhealthy"
+		health.Message = fmt.Sprintf("failed to create probe request: %v", err)
+		oe.connected = false
+		return health
+	}
+	httpReq.Header.Set("Content-Type", "application/x-protobuf")
+	for k, v := range oe.config.Headers {
+		httpReq.Header.Set(k, v)
+	}
+
+	client := &http.Client{Timeout: oe.config.Timeout}
+	start := time.Now()
+	resp, err := client.Do(httpReq)
+	health.ResponseTime = time.Since(start)
+
+	if err != nil {
+		health.Status = "unhealthy"
+		health.Message = fmt.Sprintf("OTLP endpoint not reachable: %v", err)
+		oe.connected = false
+		return health
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode >= 500 {
+		health.Status = "unhealthy"
+		health.Message = fmt.Sprintf("OTLP endpoint returned %d", resp.StatusCode)
+		oe.connected = false
+		return health
+	}
+
+	health.Status = "healthy"
+	health.Message = "OTLP endpoint reachable"
+	oe.connected = true
 	return health
 }
 

@@ -577,6 +577,87 @@ func TestOTLPExporter_SecretNotFound(t *testing.T) {
 	assert.True(t, cl.contains(missingKey), "key name must appear in warning log for debuggability")
 }
 
+// TestOTLPExporter_HealthCheck_Healthy verifies that a 200 response causes HealthCheck
+// to return status == "healthy" and sets oe.connected = true.
+func TestOTLPExporter_HealthCheck_Healthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/traces", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "application/x-protobuf", r.Header.Get("Content-Type"))
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	oe := newTestOTLPExporter(srv.URL)
+	health := oe.HealthCheck(context.Background())
+
+	assert.Equal(t, "healthy", health.Status)
+	assert.Equal(t, "otlp", health.Name)
+	assert.NotEmpty(t, health.Message)
+	assert.True(t, oe.connected)
+	assert.Positive(t, health.ResponseTime)
+}
+
+// TestOTLPExporter_HealthCheck_Unhealthy_5xx verifies that a 500 response causes
+// HealthCheck to return status == "unhealthy" and sets oe.connected = false.
+func TestOTLPExporter_HealthCheck_Unhealthy_5xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	oe := newTestOTLPExporter(srv.URL)
+	health := oe.HealthCheck(context.Background())
+
+	assert.Equal(t, "unhealthy", health.Status)
+	assert.NotEmpty(t, health.Message)
+	assert.False(t, oe.connected)
+}
+
+// TestOTLPExporter_HealthCheck_Unhealthy_Timeout verifies that a server that never
+// responds causes HealthCheck to return status == "unhealthy" within the configured timeout.
+func TestOTLPExporter_HealthCheck_Unhealthy_Timeout(t *testing.T) {
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-done
+	}))
+	defer func() {
+		close(done)
+		srv.Close()
+	}()
+
+	oe := newTestOTLPExporter(srv.URL)
+	oe.config.Timeout = 150 * time.Millisecond
+
+	start := time.Now()
+	health := oe.HealthCheck(context.Background())
+	elapsed := time.Since(start)
+
+	assert.Equal(t, "unhealthy", health.Status)
+	assert.NotEmpty(t, health.Message)
+	assert.Less(t, elapsed, 700*time.Millisecond)
+	assert.False(t, oe.connected)
+}
+
+// TestOTLPExporter_HealthCheck_4xx_Reachable verifies that 4xx responses are treated
+// as reachable — the collector responded, which proves connectivity.
+func TestOTLPExporter_HealthCheck_4xx_Reachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	oe := newTestOTLPExporter(srv.URL)
+	health := oe.HealthCheck(context.Background())
+
+	assert.Equal(t, "healthy", health.Status)
+	assert.NotEmpty(t, health.Message)
+	assert.True(t, oe.connected)
+}
+
 // TestOTLPExporter_Export_Integration tests the full Export routing for all three
 // signal types, verifying each is sent to the correct /v1/{signal} endpoint.
 func TestOTLPExporter_Export_Integration(t *testing.T) {
