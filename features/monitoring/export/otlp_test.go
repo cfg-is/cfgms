@@ -5,14 +5,17 @@ package export
 import (
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	logscollectorpb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -22,6 +25,105 @@ import (
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/proto"
 )
+
+// testSecretStore is a real in-memory SecretStore implementation for tests.
+// It is not a mock — it implements the full interface with real lookup logic.
+type testSecretStore struct {
+	mu      sync.RWMutex
+	secrets map[string]string
+}
+
+func newTestSecretStore(secrets map[string]string) *testSecretStore {
+	return &testSecretStore{secrets: secrets}
+}
+
+func (s *testSecretStore) GetSecret(_ context.Context, key string) (*secretsinterfaces.Secret, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.secrets[key]
+	if !ok {
+		return nil, secretsinterfaces.ErrSecretNotFound
+	}
+	return &secretsinterfaces.Secret{Key: key, Value: v}, nil
+}
+
+func (s *testSecretStore) StoreSecret(_ context.Context, _ *secretsinterfaces.SecretRequest) error {
+	return nil
+}
+func (s *testSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
+func (s *testSecretStore) ListSecrets(_ context.Context, _ *secretsinterfaces.SecretFilter) ([]*secretsinterfaces.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *testSecretStore) GetSecrets(_ context.Context, _ []string) (map[string]*secretsinterfaces.Secret, error) {
+	return nil, nil
+}
+func (s *testSecretStore) StoreSecrets(_ context.Context, _ map[string]*secretsinterfaces.SecretRequest) error {
+	return nil
+}
+func (s *testSecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsinterfaces.Secret, error) {
+	return nil, nil
+}
+func (s *testSecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsinterfaces.SecretVersion, error) {
+	return nil, nil
+}
+func (s *testSecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsinterfaces.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *testSecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+func (s *testSecretStore) RotateSecret(_ context.Context, _ string, _ string) error { return nil }
+func (s *testSecretStore) ExpireSecret(_ context.Context, _ string) error           { return nil }
+func (s *testSecretStore) HealthCheck(_ context.Context) error                      { return nil }
+func (s *testSecretStore) Close() error                                             { return nil }
+
+// captureLogger records all log messages for assertion in tests.
+type captureLogger struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (c *captureLogger) record(msg string, kvs ...interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	full := msg
+	for _, kv := range kvs {
+		full += " " + strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprint(kv), "\n", " "), "\r", ""), "\t", " ")
+	}
+	c.msgs = append(c.msgs, full)
+}
+
+func (c *captureLogger) contains(substr string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range c.msgs {
+		if strings.Contains(m, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *captureLogger) Debug(msg string, kvs ...interface{}) { c.record(msg, kvs...) }
+func (c *captureLogger) Info(msg string, kvs ...interface{})  { c.record(msg, kvs...) }
+func (c *captureLogger) Warn(msg string, kvs ...interface{})  { c.record(msg, kvs...) }
+func (c *captureLogger) Error(msg string, kvs ...interface{}) { c.record(msg, kvs...) }
+func (c *captureLogger) Fatal(msg string, kvs ...interface{}) { c.record(msg, kvs...) }
+func (c *captureLogger) DebugCtx(_ context.Context, msg string, kvs ...interface{}) {
+	c.record(msg, kvs...)
+}
+func (c *captureLogger) InfoCtx(_ context.Context, msg string, kvs ...interface{}) {
+	c.record(msg, kvs...)
+}
+func (c *captureLogger) WarnCtx(_ context.Context, msg string, kvs ...interface{}) {
+	c.record(msg, kvs...)
+}
+func (c *captureLogger) ErrorCtx(_ context.Context, msg string, kvs ...interface{}) {
+	c.record(msg, kvs...)
+}
+func (c *captureLogger) FatalCtx(_ context.Context, msg string, kvs ...interface{}) {
+	c.record(msg, kvs...)
+}
 
 func newTestOTLPExporter(endpoint string) *OTLPExporter {
 	oe := NewOTLPExporter(logging.NewNoopLogger())
@@ -389,6 +491,63 @@ func TestOTLPExporter_ServerError(t *testing.T) {
 	err := oe.sendTraces(context.Background(), req)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
+}
+
+// TestOTLPExporter_CredentialsFromSecrets verifies that when a SecretStore is configured,
+// Configure() retrieves the bearer token from the store and sets the Authorization header.
+// It also verifies that the secret value is never written to any log output.
+func TestOTLPExporter_CredentialsFromSecrets(t *testing.T) {
+	const (
+		secretKey   = "otlp/api-key"
+		secretToken = "super-secret-token-xyz"
+	)
+
+	store := newTestSecretStore(map[string]string{
+		secretKey: secretToken,
+	})
+	cl := &captureLogger{}
+
+	oe := NewOTLPExporterWithSecrets(cl, store)
+	oe.config.Compression = "none"
+
+	cfg := ExporterConfig{
+		Config: map[string]interface{}{
+			"secret_key": secretKey,
+		},
+	}
+	require.NoError(t, oe.Configure(cfg))
+
+	assert.Equal(t, "Bearer "+secretToken, oe.config.Headers["Authorization"])
+	assert.False(t, cl.contains(secretToken), "secret token must not appear in any log output")
+}
+
+// TestOTLPExporter_PlaintextAPIKeyDisabled verifies that when a SecretStore is present
+// and secret_key is set, ExporterConfig.APIKey is not used as the credential source.
+func TestOTLPExporter_PlaintextAPIKeyDisabled(t *testing.T) {
+	const (
+		secretKey    = "otlp/api-key"
+		secretToken  = "store-token"
+		plaintextKey = "plaintext-api-key-should-not-be-used"
+	)
+
+	store := newTestSecretStore(map[string]string{
+		secretKey: secretToken,
+	})
+
+	oe := NewOTLPExporterWithSecrets(logging.NewNoopLogger(), store)
+	oe.config.Compression = "none"
+
+	cfg := ExporterConfig{
+		APIKey: plaintextKey,
+		Config: map[string]interface{}{
+			"secret_key": secretKey,
+		},
+	}
+	require.NoError(t, oe.Configure(cfg))
+
+	authHeader := oe.config.Headers["Authorization"]
+	assert.NotEqual(t, "Bearer "+plaintextKey, authHeader, "plaintext APIKey must not be used as credential source when SecretStore is present")
+	assert.Equal(t, "Bearer "+secretToken, authHeader, "secret from store must be used as credential source")
 }
 
 // TestOTLPExporter_Export_Integration tests the full Export routing for all three
