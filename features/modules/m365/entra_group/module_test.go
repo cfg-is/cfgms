@@ -257,6 +257,30 @@ func (m *MockGraphClient) DeleteGroup(ctx context.Context, token *auth.AccessTok
 	return args.Error(0)
 }
 
+func (m *MockGraphClient) ListGroupMembers(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) AddGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error {
+	return nil
+}
+
+func (m *MockGraphClient) RemoveGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error {
+	return nil
+}
+
+func (m *MockGraphClient) ListGroupOwners(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) AddGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error {
+	return nil
+}
+
+func (m *MockGraphClient) RemoveGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error {
+	return nil
+}
+
 func (m *MockGraphClient) ListAdminUnitUserMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error) {
 	return nil, nil
 }
@@ -660,4 +684,52 @@ func TestEntraGroupModule_WorkflowDemo(t *testing.T) {
 	// This test is just demonstrating the workflow structure
 	_ = token  // Use the token variable to avoid unused variable warning
 	_ = module // Use the module variable to avoid unused variable warning
+}
+
+func TestDiffUPNSets_AddOnly(t *testing.T) {
+	current := []string{"a@contoso.com"}
+	desired := []string{"a@contoso.com", "b@contoso.com"}
+	toAdd, toRemove := diffUPNSets(current, desired)
+	assert.ElementsMatch(t, []string{"b@contoso.com"}, toAdd)
+	assert.Empty(t, toRemove)
+}
+
+func TestDiffUPNSets_RemoveOnly(t *testing.T) {
+	current := []string{"a@contoso.com", "b@contoso.com"}
+	desired := []string{"a@contoso.com"}
+	toAdd, toRemove := diffUPNSets(current, desired)
+	assert.Empty(t, toAdd)
+	assert.ElementsMatch(t, []string{"b@contoso.com"}, toRemove)
+}
+
+func TestDiffUPNSets_Mixed(t *testing.T) {
+	current := []string{"a@contoso.com", "b@contoso.com"}
+	desired := []string{"b@contoso.com", "c@contoso.com"}
+	toAdd, toRemove := diffUPNSets(current, desired)
+	assert.ElementsMatch(t, []string{"c@contoso.com"}, toAdd)
+	assert.ElementsMatch(t, []string{"a@contoso.com"}, toRemove)
+}
+
+func TestDiffUPNSets_NoOp(t *testing.T) {
+	current := []string{"a@contoso.com", "b@contoso.com"}
+	desired := []string{"a@contoso.com", "b@contoso.com"}
+	toAdd, toRemove := diffUPNSets(current, desired)
+	assert.Empty(t, toAdd)
+	assert.Empty(t, toRemove)
+}
+
+func TestDiffUPNSets_EmptyCurrent(t *testing.T) {
+	current := []string{}
+	desired := []string{"a@contoso.com", "b@contoso.com"}
+	toAdd, toRemove := diffUPNSets(current, desired)
+	assert.ElementsMatch(t, []string{"a@contoso.com", "b@contoso.com"}, toAdd)
+	assert.Empty(t, toRemove)
+}
+
+func TestDiffUPNSets_EmptyDesired(t *testing.T) {
+	current := []string{"a@contoso.com", "b@contoso.com"}
+	desired := []string{}
+	toAdd, toRemove := diffUPNSets(current, desired)
+	assert.Empty(t, toAdd)
+	assert.ElementsMatch(t, []string{"a@contoso.com", "b@contoso.com"}, toRemove)
 }

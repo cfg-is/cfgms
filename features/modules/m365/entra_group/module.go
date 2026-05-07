@@ -523,33 +523,88 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 // Additional helper methods (placeholders)
 
 func (m *entraGroupModule) getGroupMembers(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
-	// Placeholder - would use Graph API /groups/{id}/members
-	return []string{}, nil
+	upns, err := m.graphClient.ListGroupMembers(ctx, token, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list group members: %w", err)
+	}
+	return upns, nil
 }
 
 func (m *entraGroupModule) getGroupOwners(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
-	// Placeholder - would use Graph API /groups/{id}/owners
-	return []string{}, nil
+	upns, err := m.graphClient.ListGroupOwners(ctx, token, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list group owners: %w", err)
+	}
+	return upns, nil
 }
 
-func (m *entraGroupModule) addGroupMember(ctx context.Context, token *auth.AccessToken, groupID, userID string) error {
-	// Placeholder - would use Graph API POST /groups/{id}/members/$ref
-	return nil
+func (m *entraGroupModule) addGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error {
+	return m.graphClient.AddGroupMember(ctx, token, groupID, memberUPN)
 }
 
-func (m *entraGroupModule) addGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, userID string) error {
-	// Placeholder - would use Graph API POST /groups/{id}/owners/$ref
-	return nil
+func (m *entraGroupModule) addGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error {
+	return m.graphClient.AddGroupOwner(ctx, token, groupID, ownerUPN)
 }
 
 func (m *entraGroupModule) syncGroupMembers(ctx context.Context, token *auth.AccessToken, groupID string, desiredMembers []string) error {
-	// Similar to user license sync logic
+	current, err := m.graphClient.ListGroupMembers(ctx, token, groupID)
+	if err != nil {
+		return fmt.Errorf("failed to list current group members: %w", err)
+	}
+	toAdd, toRemove := diffUPNSets(current, desiredMembers)
+	for _, upn := range toRemove {
+		if err := m.graphClient.RemoveGroupMember(ctx, token, groupID, upn); err != nil {
+			return fmt.Errorf("failed to remove member %s: %w", upn, err)
+		}
+	}
+	for _, upn := range toAdd {
+		if err := m.graphClient.AddGroupMember(ctx, token, groupID, upn); err != nil {
+			return fmt.Errorf("failed to add member %s: %w", upn, err)
+		}
+	}
 	return nil
 }
 
 func (m *entraGroupModule) syncGroupOwners(ctx context.Context, token *auth.AccessToken, groupID string, desiredOwners []string) error {
-	// Similar to user license sync logic
+	current, err := m.graphClient.ListGroupOwners(ctx, token, groupID)
+	if err != nil {
+		return fmt.Errorf("failed to list current group owners: %w", err)
+	}
+	toAdd, toRemove := diffUPNSets(current, desiredOwners)
+	for _, upn := range toRemove {
+		if err := m.graphClient.RemoveGroupOwner(ctx, token, groupID, upn); err != nil {
+			return fmt.Errorf("failed to remove owner %s: %w", upn, err)
+		}
+	}
+	for _, upn := range toAdd {
+		if err := m.graphClient.AddGroupOwner(ctx, token, groupID, upn); err != nil {
+			return fmt.Errorf("failed to add owner %s: %w", upn, err)
+		}
+	}
 	return nil
+}
+
+// diffUPNSets computes the add/remove diff between current and desired UPN sets.
+func diffUPNSets(current, desired []string) (toAdd, toRemove []string) {
+	currentSet := make(map[string]struct{}, len(current))
+	for _, upn := range current {
+		currentSet[upn] = struct{}{}
+	}
+	desiredSet := make(map[string]struct{}, len(desired))
+	for _, upn := range desired {
+		desiredSet[upn] = struct{}{}
+	}
+	for _, upn := range desired {
+		if _, exists := currentSet[upn]; !exists {
+			toAdd = append(toAdd, upn)
+		}
+	}
+	for _, upn := range current {
+		if _, exists := desiredSet[upn]; !exists {
+			toRemove = append(toRemove, upn)
+		}
+	}
+	return toAdd, toRemove
 }
 
 func (m *entraGroupModule) isTeamGroup(ctx context.Context, token *auth.AccessToken, groupID string) bool {

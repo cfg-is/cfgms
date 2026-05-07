@@ -270,6 +270,30 @@ func (m *MockGraphClient) RemoveAdminUnitScopedRoleMember(ctx context.Context, t
 	return nil
 }
 
+func (m *MockGraphClient) ListGroupMembers(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) AddGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error {
+	return nil
+}
+
+func (m *MockGraphClient) RemoveGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error {
+	return nil
+}
+
+func (m *MockGraphClient) ListGroupOwners(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) AddGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error {
+	return nil
+}
+
+func (m *MockGraphClient) RemoveGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error {
+	return nil
+}
+
 func TestNew(t *testing.T) {
 	mockAuth := &MockAuthProvider{}
 	mockGraph := &MockGraphClient{}

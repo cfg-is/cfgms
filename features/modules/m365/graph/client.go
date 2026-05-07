@@ -63,6 +63,14 @@ type Client interface {
 	UpdateGroup(ctx context.Context, token *auth.AccessToken, groupID string, request *UpdateGroupRequest) error
 	DeleteGroup(ctx context.Context, token *auth.AccessToken, groupID string) error
 
+	// Group member and owner operations
+	ListGroupMembers(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error)
+	AddGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error
+	RemoveGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error
+	ListGroupOwners(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error)
+	AddGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error
+	RemoveGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error
+
 	// Administrative Unit member operations
 	ListAdminUnitUserMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error)
 	ListAdminUnitGroupMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error)
