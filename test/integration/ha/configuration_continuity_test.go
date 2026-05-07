@@ -439,7 +439,7 @@ func pushLargeConfiguration(controllerURL string, config push.StewardConfigurati
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusAccepted {
 		return fmt.Errorf("large config push failed with status %d", resp.StatusCode)
 	}
 

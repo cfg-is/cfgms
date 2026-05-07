@@ -563,7 +563,7 @@ func pushConfigurationToStewards(controllerURL string, config push.StewardConfig
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusAccepted {
 		return fmt.Errorf("config push failed with status %d", resp.StatusCode)
 	}
 
