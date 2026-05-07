@@ -49,6 +49,7 @@ type DNAInfo struct {
 	Hostname     string            `json:"hostname"`
 	OS           string            `json:"os"`
 	Architecture string            `json:"architecture"`
+	ConfigHash   string            `json:"config_hash,omitempty"`
 	Attributes   map[string]string `json:"attributes,omitempty"`
 	CollectedAt  time.Time         `json:"collected_at"`
 }
@@ -218,6 +219,7 @@ func DNAFromProto(dna *common.DNA) *DNAInfo {
 		Hostname:     hostname,
 		OS:           os,
 		Architecture: architecture,
+		ConfigHash:   dna.ConfigHash,
 		Attributes:   dna.Attributes,
 		CollectedAt:  dna.LastUpdated.AsTime(),
 	}

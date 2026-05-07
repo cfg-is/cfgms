@@ -580,25 +580,19 @@ func TestHandleConfigPush_PersistenceStatusCompleted(t *testing.T) {
 	server.handleConfigPush(rec, req)
 	require.Equal(t, http.StatusAccepted, rec.Code)
 
-	// Wait for the fire-and-forget goroutine to finish delivery and update status.
+	// Wait for the fire-and-forget goroutine to finish delivery (SendCommand → wg.Done).
 	cp.wg.Wait()
-
-	// Allow the goroutine's UpdatePushStatus call to complete.
 	assert.ElementsMatch(t, []string{stewardID}, cp.ReceivedIDs())
 
-	// Status must be completed since delivery succeeded.
-	ctx := context.Background()
-	pending, err := pushStore.GetPendingPushes(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, pending, "no in_progress records should remain after successful delivery")
-
-	// Retrieve the record by checking for completed status (GetPendingPushes skips completed).
 	var resp ConfigPushResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.NotEmpty(t, resp.PushID)
 
-	// Poll briefly for the status update to land (goroutine runs concurrently with wg.Wait).
+	// UpdatePushStatus runs after wg.Done() inside the goroutine, so poll until
+	// the record reflects completed status before asserting on pending records.
+	ctx := context.Background()
 	var updated *business.PushRecord
+	var err error
 	for i := 0; i < 20; i++ {
 		updated, err = pushStore.GetPush(ctx, resp.PushID)
 		if err == nil && updated.Status == business.PushStatusCompleted {
@@ -609,6 +603,11 @@ func TestHandleConfigPush_PersistenceStatusCompleted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, business.PushStatusCompleted, updated.Status,
 		"push record must be marked completed after successful fan-out delivery")
+
+	// Now that UpdatePushStatus has completed, no in_progress records should remain.
+	pending, err := pushStore.GetPendingPushes(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, pending, "no in_progress records should remain after successful delivery")
 }
 
 // TestHandleConfigPush_PersistenceStatusFailed verifies that when the fan-out goroutine
