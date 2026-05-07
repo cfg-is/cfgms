@@ -84,6 +84,7 @@ func setupTestServer(t *testing.T) *Server {
 		"",       // No signer cert serial for basic tests
 		nil,      // No health collector for basic tests
 		auditMgr, // Issue #775: registration audit events
+		nil,      // No command publisher for basic tests
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -871,6 +872,7 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 		cfg, logger, controllerService, configService,
 		nil, rbacService, nil, tenantManager, rbacManager,
 		nil, nil, nil, "", nil, auditMgr,
+		nil, // No command publisher for basic tests
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

@@ -100,6 +100,7 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 		"",       // No signer cert serial for basic tests
 		nil,      // No health collector for basic tests
 		auditMgr, // Issue #775: registration audit events
+		nil,      // No command publisher for basic tests
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

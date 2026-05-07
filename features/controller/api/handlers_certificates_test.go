@@ -63,6 +63,7 @@ func setupCertTestServer(t *testing.T) (*Server, *cert.Manager) {
 		cfg, logger, controllerService, configService,
 		nil, rbacService, certMgr, tenantManager, rbacManager,
 		nil, nil, nil, "", nil, auditMgr,
+		nil, // No command publisher for basic tests
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
