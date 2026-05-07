@@ -794,6 +794,110 @@ func (c *HTTPClient) DeleteGroup(ctx context.Context, token *auth.AccessToken, g
 	return nil
 }
 
+// ListGroupMembers retrieves the UPNs of members belonging to a group
+func (c *HTTPClient) ListGroupMembers(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
+	endpoint := fmt.Sprintf("/groups/%s/members", groupID)
+	var response struct {
+		Value []struct {
+			ID                string `json:"id"`
+			UserPrincipalName string `json:"userPrincipalName"`
+		} `json:"value"`
+	}
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list members for group %s: %w", groupID, err)
+	}
+	upns := make([]string, 0, len(response.Value))
+	for _, u := range response.Value {
+		if u.UserPrincipalName != "" {
+			upns = append(upns, u.UserPrincipalName)
+		}
+	}
+	return upns, nil
+}
+
+// AddGroupMember adds a user (by UPN) to a group
+func (c *HTTPClient) AddGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error {
+	user, err := c.GetUser(ctx, token, memberUPN)
+	if err != nil {
+		return fmt.Errorf("failed to resolve UPN %s: %w", memberUPN, err)
+	}
+	endpoint := fmt.Sprintf("/groups/%s/members/$ref", groupID)
+	request := struct {
+		ODataID string `json:"@odata.id"`
+	}{
+		ODataID: fmt.Sprintf("https://graph.microsoft.com/v1.0/directoryObjects/%s", user.ID),
+	}
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to add member %s to group %s: %w", memberUPN, groupID, err)
+	}
+	return nil
+}
+
+// RemoveGroupMember removes a user (by UPN) from a group
+func (c *HTTPClient) RemoveGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error {
+	user, err := c.GetUser(ctx, token, memberUPN)
+	if err != nil {
+		return fmt.Errorf("failed to resolve UPN %s: %w", memberUPN, err)
+	}
+	endpoint := fmt.Sprintf("/groups/%s/members/%s/$ref", groupID, user.ID)
+	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
+		return fmt.Errorf("failed to remove member %s from group %s: %w", memberUPN, groupID, err)
+	}
+	return nil
+}
+
+// ListGroupOwners retrieves the UPNs of owners of a group
+func (c *HTTPClient) ListGroupOwners(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
+	endpoint := fmt.Sprintf("/groups/%s/owners", groupID)
+	var response struct {
+		Value []struct {
+			ID                string `json:"id"`
+			UserPrincipalName string `json:"userPrincipalName"`
+		} `json:"value"`
+	}
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list owners for group %s: %w", groupID, err)
+	}
+	upns := make([]string, 0, len(response.Value))
+	for _, u := range response.Value {
+		if u.UserPrincipalName != "" {
+			upns = append(upns, u.UserPrincipalName)
+		}
+	}
+	return upns, nil
+}
+
+// AddGroupOwner adds a user (by UPN) as an owner of a group
+func (c *HTTPClient) AddGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error {
+	user, err := c.GetUser(ctx, token, ownerUPN)
+	if err != nil {
+		return fmt.Errorf("failed to resolve UPN %s: %w", ownerUPN, err)
+	}
+	endpoint := fmt.Sprintf("/groups/%s/owners/$ref", groupID)
+	request := struct {
+		ODataID string `json:"@odata.id"`
+	}{
+		ODataID: fmt.Sprintf("https://graph.microsoft.com/v1.0/directoryObjects/%s", user.ID),
+	}
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to add owner %s to group %s: %w", ownerUPN, groupID, err)
+	}
+	return nil
+}
+
+// RemoveGroupOwner removes a user (by UPN) from the owners of a group
+func (c *HTTPClient) RemoveGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error {
+	user, err := c.GetUser(ctx, token, ownerUPN)
+	if err != nil {
+		return fmt.Errorf("failed to resolve UPN %s: %w", ownerUPN, err)
+	}
+	endpoint := fmt.Sprintf("/groups/%s/owners/%s/$ref", groupID, user.ID)
+	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
+		return fmt.Errorf("failed to remove owner %s from group %s: %w", ownerUPN, groupID, err)
+	}
+	return nil
+}
+
 // ListAdminUnitUserMembers retrieves user members of an administrative unit
 func (c *HTTPClient) ListAdminUnitUserMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error) {
 	endpoint := fmt.Sprintf("/administrativeUnits/%s/members/microsoft.graph.user", unitID)
