@@ -242,11 +242,14 @@ func heartbeatToProto(hb *types.Heartbeat) *transportpb.Heartbeat {
 		return nil
 	}
 	pb := &transportpb.Heartbeat{
-		StewardId: hb.StewardID,
-		TenantId:  hb.TenantID,
-		Status:    heartbeatStatusToProto[hb.Status],
-		Timestamp: timestamppb.New(hb.Timestamp),
-		Version:   hb.Version,
+		StewardId:       hb.StewardID,
+		TenantId:        hb.TenantID,
+		Status:          heartbeatStatusToProto[hb.Status],
+		Timestamp:       timestamppb.New(hb.Timestamp),
+		Version:         hb.Version,
+		DnaHash:         hb.DNAHash,
+		ActiveSessions:  hb.ActiveSessions,
+		ConnectionState: hb.ConnectionState,
 	}
 	if len(hb.Metrics) > 0 {
 		pb.Metrics = interfaceMapToStringMap(hb.Metrics)
@@ -259,11 +262,14 @@ func heartbeatFromProto(pb *transportpb.Heartbeat) *types.Heartbeat {
 		return nil
 	}
 	hb := &types.Heartbeat{
-		StewardID: pb.GetStewardId(),
-		TenantID:  pb.GetTenantId(),
-		Status:    protoToHeartbeatStatus[pb.GetStatus()],
-		Timestamp: protoTimestampToTime(pb.GetTimestamp()),
-		Version:   pb.GetVersion(),
+		StewardID:       pb.GetStewardId(),
+		TenantID:        pb.GetTenantId(),
+		Status:          protoToHeartbeatStatus[pb.GetStatus()],
+		Timestamp:       protoTimestampToTime(pb.GetTimestamp()),
+		Version:         pb.GetVersion(),
+		DNAHash:         pb.GetDnaHash(),
+		ActiveSessions:  pb.GetActiveSessions(),
+		ConnectionState: pb.GetConnectionState(),
 	}
 	if len(pb.GetMetrics()) > 0 {
 		hb.Metrics = stringMapToInterfaceMap(pb.GetMetrics())

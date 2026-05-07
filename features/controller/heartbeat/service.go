@@ -33,6 +33,14 @@ type StewardStatus struct {
 	// Empty when the steward has not yet sent a DNA hash (older steward versions).
 	DNAHash string
 
+	// ActiveSessions is the number of active control-channel streams reported by the steward.
+	// Value is 1 when connected, 0 otherwise.
+	ActiveSessions int
+
+	// ConnectionState is the steward's self-reported connection state string.
+	// Values: "connected", "disconnected", "connecting", "reconnecting".
+	ConnectionState string
+
 	// expectedDNAHash is the hash the controller expects the steward to have,
 	// set after a successful full DNA sync.  Compared against DNAHash on each
 	// heartbeat to detect missed deltas.
@@ -191,6 +199,9 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 		}
 		status.Metrics = metrics
 	}
+
+	status.ActiveSessions = int(hb.ActiveSessions)
+	status.ConnectionState = hb.ConnectionState
 
 	status.MissedBeats = 0
 	status.Healthy = true

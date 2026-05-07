@@ -211,6 +211,17 @@ func TestHeartbeatRoundTrip(t *testing.T) {
 				Timestamp: now,
 			},
 		},
+		{
+			name: "with active_sessions and connection_state",
+			hb: &types.Heartbeat{
+				StewardID:       "steward-3",
+				Status:          types.StatusHealthy,
+				Timestamp:       now,
+				Version:         "3.0.0",
+				ActiveSessions:  1,
+				ConnectionState: "connected",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -226,6 +237,8 @@ func TestHeartbeatRoundTrip(t *testing.T) {
 			assert.Equal(t, tt.hb.Status, result.Status)
 			assert.Equal(t, tt.hb.Timestamp.UTC(), result.Timestamp.UTC())
 			assert.Equal(t, tt.hb.Version, result.Version)
+			assert.Equal(t, tt.hb.ActiveSessions, result.ActiveSessions)
+			assert.Equal(t, tt.hb.ConnectionState, result.ConnectionState)
 
 			if tt.hb.Metrics != nil {
 				require.NotNil(t, result.Metrics)

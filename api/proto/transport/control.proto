@@ -89,6 +89,8 @@ message Heartbeat {
   map<string, string> metrics = 5;
   string version = 6;
   string dna_hash = 7;      // for hash-based sync detection
+  int32 active_sessions = 8;    // number of active control-channel streams (1 when connected, 0 otherwise)
+  string connection_state = 9;  // steward connection state ("connected", "disconnected", "connecting", "reconnecting")
 }
 
 // Response is sent from steward to controller for command acknowledgment.

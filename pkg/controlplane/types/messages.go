@@ -157,6 +157,14 @@ type Heartbeat struct {
 	// sends a CommandSyncDNA to request a full sync over the data plane.
 	// Empty for older stewards that do not support hash-based sync.
 	DNAHash string `json:"dna_hash,omitempty"`
+
+	// ActiveSessions is the number of active control-channel streams the steward holds.
+	// Value is 1 when connected, 0 otherwise.
+	ActiveSessions int32 `json:"active_sessions,omitempty"`
+
+	// ConnectionState is the steward's current connection state string.
+	// Values: "connected", "disconnected", "connecting", "reconnecting".
+	ConnectionState string `json:"connection_state,omitempty"`
 }
 
 // Response represents a command response/acknowledgment.
