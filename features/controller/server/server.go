@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
 	"github.com/cfgis/cfgms/features/controller/initialization"
+	"github.com/cfgis/cfgms/features/controller/push"
 	"github.com/cfgis/cfgms/features/controller/service"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
 	"github.com/cfgis/cfgms/features/rbac"
@@ -55,6 +57,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for OSS composite manager
@@ -519,11 +522,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		rbacManager,
 		nil, // systemMonitor
 		haManager,
-		regStore,         // registrationTokenStore
-		signerCertSerial, // Story #378: signer cert serial for registration
-		healthCollector,  // Story #417: CFGMS health monitoring
-		auditManager,     // Issue #775: registration audit events
-		commandPublisher, // Issue #1319: fan-out config push to active stewards
+		regStore,                      // registrationTokenStore
+		signerCertSerial,              // Story #378: signer cert serial for registration
+		healthCollector,               // Story #417: CFGMS health monitoring
+		auditManager,                  // Issue #775: registration audit events
+		commandPublisher,              // Issue #1319: fan-out config push to active stewards
+		storageManager.GetPushStore(), // Issue #1320: durable push-state for HA failover
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)
@@ -931,6 +935,13 @@ func (s *Server) Start() error {
 		"ha_mode", s.haManager.GetDeploymentMode().String(),
 		"is_leader", s.haManager.IsLeader())
 
+	// Issue #1320: On startup, if this node is the leader, replay any push
+	// operations that were interrupted before a previous leader could complete
+	// delivery. Nil haManager means OSS single-node mode, which is always leader.
+	if (s.haManager == nil || s.haManager.IsLeader()) && s.commandPublisher != nil {
+		go s.resumePendingPushes(context.Background())
+	}
+
 	// Record system startup audit event
 	if s.auditManager != nil {
 		ctx := context.Background()
@@ -1082,6 +1093,55 @@ func (s *Server) Stop() error {
 	}
 
 	return nil
+}
+
+// resumePendingPushes is called on leader startup to re-deliver any push
+// operations that were recorded as in_progress before the previous leader
+// stopped. It unmarshals the stored StewardConfiguration blob and calls
+// push.Fanout for each pending record, updating the final status on completion.
+func (s *Server) resumePendingPushes(ctx context.Context) {
+	if s.storageManager == nil || s.commandPublisher == nil {
+		return
+	}
+	pushStore := s.storageManager.GetPushStore()
+	if pushStore == nil {
+		return
+	}
+	records, err := pushStore.GetPendingPushes(ctx)
+	if err != nil {
+		s.logger.Error("Failed to load pending pushes for leader resume", "error", err)
+		return
+	}
+	if len(records) == 0 {
+		return
+	}
+	s.logger.Info("Resuming pending push operations after leader election", "count", len(records))
+	for _, record := range records {
+		var cfg push.StewardConfiguration
+		if err := json.Unmarshal(record.Data, &cfg); err != nil {
+			s.logger.Error("Failed to unmarshal push data for resume; marking failed",
+				"push_id", record.ID, "error", err)
+			if updateErr := pushStore.UpdatePushStatus(ctx, record.ID, business.PushStatusFailed); updateErr != nil {
+				s.logger.Warn("Failed to mark push as failed after unmarshal error",
+					"push_id", record.ID, "error", updateErr)
+			}
+			continue
+		}
+		stewards := s.controllerService.GetAllStewards()
+		result := push.Fanout(ctx, &cfg, stewards, s.commandPublisher, s.logger)
+		s.logger.Info("Resumed push fan-out complete",
+			"push_id", record.ID,
+			"succeeded", len(result.Succeeded),
+			"failed", len(result.Failed))
+		finalStatus := business.PushStatusCompleted
+		if len(result.Failed) > 0 && len(result.Succeeded) == 0 {
+			finalStatus = business.PushStatusFailed
+		}
+		if updateErr := pushStore.UpdatePushStatus(ctx, record.ID, finalStatus); updateErr != nil {
+			s.logger.Warn("Failed to update push record status after resume",
+				"push_id", record.ID, "error", updateErr)
+		}
+	}
 }
 
 // GetConfigurationService returns the configuration service instance

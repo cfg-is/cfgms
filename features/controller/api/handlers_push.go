@@ -56,6 +56,29 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 
 	s.emitConfigPushAudit(r, cfg.TenantID, cfg.ConfigID, pushID)
 
+	// Durably record the push intent before fan-out begins so that an HA leader
+	// failover can replay any push that was interrupted mid-delivery.
+	if s.pushStore != nil {
+		pushData, marshalErr := json.Marshal(&cfg)
+		if marshalErr == nil {
+			record := &business.PushRecord{
+				ID:        pushID,
+				ConfigID:  cfg.ConfigID,
+				TenantID:  cfg.TenantID,
+				Version:   cfg.Version,
+				Status:    business.PushStatusInProgress,
+				Data:      pushData,
+				CreatedAt: queuedAt,
+				UpdatedAt: queuedAt,
+			}
+			if err := s.pushStore.CreatePush(r.Context(), record); err != nil {
+				s.logger.Warn("Failed to persist push record", "error", err, "push_id", pushID)
+			}
+		} else {
+			s.logger.Warn("Failed to marshal push payload for persistence", "error", marshalErr, "push_id", pushID)
+		}
+	}
+
 	// Fan-out CommandSyncConfig to every active steward. Fire-and-forget: the
 	// goroutine uses context.Background so it is not cancelled when the HTTP
 	// response is written. 202 is returned to the caller immediately.
@@ -73,6 +96,15 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 					"push_id", pushID,
 					"steward_id", logging.SanitizeLogValue(stewardID),
 					"error", err)
+			}
+			if s.pushStore != nil {
+				finalStatus := business.PushStatusCompleted
+				if len(result.Failed) > 0 && len(result.Succeeded) == 0 {
+					finalStatus = business.PushStatusFailed
+				}
+				if updateErr := s.pushStore.UpdatePushStatus(context.Background(), pushID, finalStatus); updateErr != nil {
+					s.logger.Warn("Failed to update push record status", "error", updateErr, "push_id", pushID)
+				}
 			}
 		}()
 	}

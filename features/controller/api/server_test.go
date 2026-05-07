@@ -85,6 +85,7 @@ func setupTestServer(t *testing.T) *Server {
 		nil,      // No health collector for basic tests
 		auditMgr, // Issue #775: registration audit events
 		nil,      // No command publisher for basic tests
+		nil,      // No push store for basic tests
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -873,6 +874,7 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 		nil, rbacService, nil, tenantManager, rbacManager,
 		nil, nil, nil, "", nil, auditMgr,
 		nil, // No command publisher for basic tests
+		nil, // No push store for basic tests
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

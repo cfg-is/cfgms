@@ -95,6 +95,7 @@ func setupPushServer(t *testing.T) (*Server, *audit.Manager) {
 		nil, nil, nil, "", nil,
 		auditMgr,
 		nil, // No command publisher: fanout is out of scope for push handler unit tests
+		nil, // No push store for audit-only push tests
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -406,4 +407,251 @@ func TestHandleConfigPush_FanoutToActiveStewards(t *testing.T) {
 	cp.wg.Wait()
 
 	assert.ElementsMatch(t, []string{stewardID}, cp.ReceivedIDs())
+}
+
+// TestHandleConfigPush_PersistenceRecord verifies that a successful push request
+// creates a PushRecord with status in_progress in the push store before fan-out
+// begins. No commandPublisher is wired so the goroutine never runs and the record
+// stays in_progress — confirming durable capture regardless of delivery state.
+func TestHandleConfigPush_PersistenceRecord(t *testing.T) {
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+	logger := logging.NewNoopLogger()
+
+	storageManager := pkgtesting.SetupTestStorage(t)
+
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacManager.Initialize(context.Background()))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+
+	controllerService := service.NewControllerService(logger)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+	pushStore := storageManager.GetPushStore()
+	require.NotNil(t, pushStore, "push store must be available from test storage")
+
+	server, err := New(
+		cfg, logger, controllerService, configService, nil, rbacService,
+		nil, tenantManager, rbacManager,
+		nil, nil, nil, "", nil,
+		auditMgr,
+		nil,       // No command publisher: goroutine never runs, record stays in_progress
+		pushStore, // Wire real push store
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Close(closeCtx)
+	})
+
+	server.pushLeaderStatus = nil // leader
+
+	payload := validPushPayload()
+	body := marshalPayload(t, payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	// The push record must be durably written before the handler returns 202.
+	// No commandPublisher means the goroutine never runs, so the record
+	// remains in_progress — exactly what GetPendingPushes returns.
+	ctx := context.Background()
+	pending, err := pushStore.GetPendingPushes(ctx)
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "expected exactly one in_progress push record")
+
+	record := pending[0]
+	assert.Equal(t, business.PushStatusInProgress, record.Status)
+	assert.Equal(t, payload.ConfigID, record.ConfigID)
+	assert.Equal(t, payload.TenantID, record.TenantID)
+	assert.Equal(t, payload.Version, record.Version)
+	assert.NotEmpty(t, record.ID)
+	assert.NotEmpty(t, record.Data, "push record must have marshalled payload for replay")
+}
+
+// failingControlPlane is a ControlPlaneProvider whose SendCommand always returns an error,
+// enabling tests that verify the PushStatusFailed branch in the fan-out goroutine.
+type failingControlPlane struct {
+	syncedControlPlane
+	sendErr error
+}
+
+func (c *failingControlPlane) SendCommand(_ context.Context, _ *controlplaneTypes.SignedCommand) error {
+	defer c.wg.Done()
+	return c.sendErr
+}
+
+// makePushServerWithStore creates a test server wired with both a command publisher
+// and a real push store so that the fan-out goroutine's UpdatePushStatus paths can be exercised.
+func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlaneProvider) (*Server, business.PushStore) {
+	t.Helper()
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+	logger := logging.NewNoopLogger()
+
+	storageManager := pkgtesting.SetupTestStorage(t)
+
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacManager.Initialize(context.Background()))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+
+	controllerService := service.NewControllerService(logger)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+	pushStore := storageManager.GetPushStore()
+	require.NotNil(t, pushStore)
+
+	pub, err := commands.New(&commands.Config{ControlPlane: cp, Signer: nil, Logger: logger})
+	require.NoError(t, err)
+
+	server, err := New(
+		cfg, logger, controllerService, configService, nil, rbacService,
+		nil, tenantManager, rbacManager,
+		nil, nil, nil, "", nil,
+		auditMgr,
+		pub,       // real command publisher
+		pushStore, // real push store
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Close(closeCtx)
+	})
+	return server, pushStore
+}
+
+// TestHandleConfigPush_PersistenceStatusCompleted verifies that when the fan-out goroutine
+// succeeds for all active stewards, the push record status is updated to completed.
+func TestHandleConfigPush_PersistenceStatusCompleted(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+	server.pushLeaderStatus = nil // leader
+
+	stewardID := registerActiveSteward(t, server.controllerService, "persist-complete-dna-1")
+	cp.wg.Add(1)
+
+	body := marshalPayload(t, validPushPayload())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	// Wait for the fire-and-forget goroutine to finish delivery and update status.
+	cp.wg.Wait()
+
+	// Allow the goroutine's UpdatePushStatus call to complete.
+	assert.ElementsMatch(t, []string{stewardID}, cp.ReceivedIDs())
+
+	// Status must be completed since delivery succeeded.
+	ctx := context.Background()
+	pending, err := pushStore.GetPendingPushes(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, pending, "no in_progress records should remain after successful delivery")
+
+	// Retrieve the record by checking for completed status (GetPendingPushes skips completed).
+	var resp ConfigPushResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.PushID)
+
+	// Poll briefly for the status update to land (goroutine runs concurrently with wg.Wait).
+	var updated *business.PushRecord
+	for i := 0; i < 20; i++ {
+		updated, err = pushStore.GetPush(ctx, resp.PushID)
+		if err == nil && updated.Status == business.PushStatusCompleted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.NoError(t, err)
+	assert.Equal(t, business.PushStatusCompleted, updated.Status,
+		"push record must be marked completed after successful fan-out delivery")
+}
+
+// TestHandleConfigPush_PersistenceStatusFailed verifies that when the fan-out goroutine
+// fails for all targeted stewards, the push record status is updated to failed.
+func TestHandleConfigPush_PersistenceStatusFailed(t *testing.T) {
+	cp := &failingControlPlane{
+		syncedControlPlane: syncedControlPlane{},
+		sendErr:            fmt.Errorf("simulated delivery failure"),
+	}
+	server, pushStore := makePushServerWithStore(t, cp)
+	server.pushLeaderStatus = nil // leader
+
+	// Register an active steward so the fanout targets it and fails.
+	registerActiveSteward(t, server.controllerService, "persist-fail-dna-1")
+	cp.wg.Add(1)
+
+	body := marshalPayload(t, validPushPayload())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	// Wait for the goroutine to attempt delivery and update the status.
+	cp.wg.Wait()
+
+	var resp ConfigPushResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.PushID)
+
+	// Poll briefly for the status update to land.
+	ctx := context.Background()
+	var updated *business.PushRecord
+	var err error
+	for i := 0; i < 20; i++ {
+		updated, err = pushStore.GetPush(ctx, resp.PushID)
+		if err == nil && updated.Status == business.PushStatusFailed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.NoError(t, err)
+	assert.Equal(t, business.PushStatusFailed, updated.Status,
+		"push record must be marked failed when all targeted stewards fail delivery")
 }
