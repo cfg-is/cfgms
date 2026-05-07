@@ -188,6 +188,20 @@ func New(
 		logger.Warn("Failed to load API keys from store", "error", err)
 	}
 
+	// Seed test API keys only when explicitly requested via environment variable.
+	// Never runs in production — must be set deliberately in test environments.
+	if os.Getenv("CFGMS_SEED_TEST_API_KEYS") == "1" {
+		for _, envVar := range []string{"CFGMS_API_KEY_EAST", "CFGMS_API_KEY_CENTRAL", "CFGMS_API_KEY_WEST"} {
+			if keyVal := os.Getenv(envVar); keyVal != "" {
+				server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+					Key:         keyVal,
+					Permissions: []string{"steward:read", "steward:auth-refresh", "workflow:execute", "workflow:read"},
+					TenantID:    "default",
+				}
+			}
+		}
+	}
+
 	// M-AUTH-1: Do NOT generate default API keys (security anti-pattern)
 	// API keys must be explicitly created by administrators
 

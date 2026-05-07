@@ -166,6 +166,8 @@ services:
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
       CFGMS_API_KEY: "${API_KEY_EAST}"
+      CFGMS_SEED_TEST_API_KEYS: "1"
+      CFGMS_API_KEY_EAST: "test-api-key-east"
     depends_on:
       timescaledb-test:
         condition: service_healthy
@@ -223,6 +225,8 @@ services:
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
       CFGMS_API_KEY: "${API_KEY_CENTRAL}"
+      CFGMS_SEED_TEST_API_KEYS: "1"
+      CFGMS_API_KEY_CENTRAL: "test-api-key-central"
     depends_on:
       timescaledb-test:
         condition: service_healthy
@@ -280,6 +284,8 @@ services:
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
       CFGMS_API_KEY: "${API_KEY_WEST}"
+      CFGMS_SEED_TEST_API_KEYS: "1"
+      CFGMS_API_KEY_WEST: "test-api-key-west"
     depends_on:
       timescaledb-test:
         condition: service_healthy
