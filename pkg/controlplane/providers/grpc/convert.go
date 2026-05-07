@@ -29,12 +29,14 @@ const sigParamKey = "__sig"
 var commandTypeToProto = map[types.CommandType]transportpb.CommandType{
 	types.CommandSyncConfig: transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG,
 	types.CommandSyncDNA:    transportpb.CommandType_COMMAND_TYPE_SYNC_DNA,
+	types.CommandReconnect:  transportpb.CommandType_COMMAND_TYPE_RECONNECT,
 }
 
 // protoToCommandType maps proto enum to semantic CommandType.
 var protoToCommandType = map[transportpb.CommandType]types.CommandType{
 	transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG: types.CommandSyncConfig,
 	transportpb.CommandType_COMMAND_TYPE_SYNC_DNA:    types.CommandSyncDNA,
+	transportpb.CommandType_COMMAND_TYPE_RECONNECT:   types.CommandReconnect,
 }
 
 func commandToProto(cmd *types.Command) *transportpb.Command {

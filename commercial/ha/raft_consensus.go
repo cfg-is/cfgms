@@ -53,6 +53,11 @@ type RaftConsensus struct {
 	// Transport
 	transport *raftTransport
 
+	// onBecomeLeader is called (in a goroutine) when this node transitions from
+	// non-leader to leader. The second argument is the departed leader's string
+	// node ID so the caller can dispatch reconnect commands to orphaned stewards.
+	onBecomeLeader func(ctx context.Context, departedNodeID string)
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -527,7 +532,23 @@ func (rc *RaftConsensus) updateLeadership(ss *raft.SoftState) {
 
 	if !wasLeader && isLeader {
 		rc.logger.Info("Node became LEADER", "node_id", rc.nodeID, "term", rc.node.Status().Term)
+
+		// Capture departed leader's string ID before overwriting clusterState.Leader.
+		departedUint := rc.clusterState.Leader
+		var departedNodeID string
+		rc.clusterState.mu.RLock()
+		if nodeInfo, ok := rc.clusterState.Nodes[departedUint]; ok {
+			departedNodeID = nodeInfo.ID
+		}
+		rc.clusterState.mu.RUnlock()
+
 		rc.clusterState.Leader = rc.nodeID
+
+		if rc.onBecomeLeader != nil {
+			cb := rc.onBecomeLeader
+			ctx := rc.ctx
+			go cb(ctx, departedNodeID)
+		}
 	} else if wasLeader && !isLeader {
 		rc.logger.Info("Node lost LEADER status", "node_id", rc.nodeID, "new_leader", ss.Lead)
 		rc.clusterState.Leader = ss.Lead
@@ -537,6 +558,22 @@ func (rc *RaftConsensus) updateLeadership(ss *raft.SoftState) {
 		rc.clusterState.Leader = ss.Lead
 		rc.leaderOnce.Do(func() { close(rc.leaderElectedC) })
 	}
+}
+
+// GetSessionsForNode returns steward IDs from ClusterState.Sessions whose
+// NodeID matches the given node ID string. Used by the HA leader to identify
+// stewards orphaned by a departed controller node.
+func (rc *RaftConsensus) GetSessionsForNode(nodeID string) []string {
+	rc.clusterState.mu.RLock()
+	defer rc.clusterState.mu.RUnlock()
+
+	var stewardIDs []string
+	for stewardID, session := range rc.clusterState.Sessions {
+		if session.NodeID == nodeID && session.Connected {
+			stewardIDs = append(stewardIDs, stewardID)
+		}
+	}
+	return stewardIDs
 }
 
 // IsLeader returns true if this node is the leader

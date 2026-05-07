@@ -619,6 +619,24 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		return nil
 	})
 
+	// Register reconnect handler — closes the current gRPC connection and launches
+	// the backoff-reconnect loop so the steward re-establishes its ControlChannel
+	// against the new Raft leader after an HA failover.
+	handler.RegisterHandler(cpTypes.CommandReconnect, func(ctx context.Context, cmd *cpTypes.Command) error {
+		c.logger.Info("Received reconnect command, reconnecting to controller",
+			"command_id", logging.SanitizeLogValue(cmd.ID))
+		c.mu.RLock()
+		cp := c.controlPlane
+		c.mu.RUnlock()
+		if cp == nil {
+			return fmt.Errorf("control plane not connected")
+		}
+		if err := cp.Reconnect(ctx); err != nil {
+			return fmt.Errorf("reconnect failed: %w", err)
+		}
+		return nil
+	})
+
 	return handler, nil
 }
 

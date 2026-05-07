@@ -70,7 +70,8 @@ func (n *noopControlPlane) SubscribeHeartbeats(_ context.Context, _ controlplane
 func (n *noopControlPlane) GetStats(_ context.Context) (*cpTypes.ControlPlaneStats, error) {
 	return &cpTypes.ControlPlaneStats{}, nil
 }
-func (n *noopControlPlane) IsConnected() bool { return false }
+func (n *noopControlPlane) IsConnected() bool                 { return false }
+func (n *noopControlPlane) Reconnect(_ context.Context) error { return nil }
 
 // failingControlPlane always returns publishErr from PublishEvent.
 type failingControlPlane struct {

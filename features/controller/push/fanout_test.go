@@ -91,6 +91,8 @@ func (r *recordingControlPlane) GetStats(_ context.Context) (*controlplaneTypes.
 	return &controlplaneTypes.ControlPlaneStats{}, nil
 }
 
+func (r *recordingControlPlane) Reconnect(_ context.Context) error { return nil }
+
 // makePublisher creates a real commands.Publisher backed by the recording control plane.
 func makePublisher(t *testing.T, cp *recordingControlPlane) *commands.Publisher {
 	t.Helper()

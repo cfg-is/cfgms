@@ -520,6 +520,19 @@ func (p *Provider) reconnectLoop() {
 	}
 }
 
+// Reconnect tears down the current connection and re-establishes it without
+// cancelling p.ctx. Only valid in client mode; returns an error in server mode.
+// Closes the gRPC connection (via closeClientConn) then launches reconnectLoop
+// so the provider re-dials and restarts clientReceiveLoop on success.
+func (p *Provider) Reconnect(_ context.Context) error {
+	if p.mode != ModeClient {
+		return fmt.Errorf("Reconnect called on server-mode provider")
+	}
+	p.closeClientConn()
+	go p.reconnectLoop()
+	return nil
+}
+
 // closeClientConn closes the current gRPC connection and clears the stream reference.
 func (p *Provider) closeClientConn() {
 	p.sendMu.Lock()

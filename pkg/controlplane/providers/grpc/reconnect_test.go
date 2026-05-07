@@ -358,6 +358,52 @@ func TestReconnectStatsTracking(t *testing.T) {
 	}, 30*time.Second, 100*time.Millisecond)
 }
 
+// TestProvider_Reconnect verifies that calling Reconnect on a connected client
+// causes it to close the current connection and reach StateConnected again within
+// 5 seconds via the real gRPC-over-QUIC backoff-reconnect loop. No mocks.
+func TestProvider_Reconnect(t *testing.T) {
+	tc := newTestCA(t)
+	reg := registry.NewRegistry()
+	const stewardID = "steward-reconnect-method"
+
+	server := New(ModeServer)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": tc.serverTLSConfig(t),
+		"registry":   reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	t.Cleanup(server.ForceStop)
+
+	client := newTestClient(t, server.ListenAddr(), tc.clientTLSConfig(t, stewardID), stewardID)
+	require.NoError(t, client.Start(context.Background()))
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+
+	// Wait for initial connection
+	require.Eventually(t, func() bool {
+		return GetState(client) == StateConnected
+	}, 5*time.Second, 10*time.Millisecond, "client must reach StateConnected before Reconnect")
+
+	// Calling Reconnect on a server-mode provider must return an error
+	serverErr := server.Reconnect(context.Background())
+	require.Error(t, serverErr, "Reconnect on server-mode provider must return error")
+
+	// Call Reconnect — closes connection, launches reconnectLoop
+	require.NoError(t, client.Reconnect(context.Background()))
+
+	// The client must re-establish the connection within 5 seconds
+	require.Eventually(t, func() bool {
+		return GetState(client) == StateConnected
+	}, 5*time.Second, 10*time.Millisecond, "client must reach StateConnected again after Reconnect")
+
+	// The steward must be present in the server registry after reconnect
+	require.Eventually(t, func() bool {
+		_, ok := reg.Get(stewardID)
+		return ok
+	}, 5*time.Second, 10*time.Millisecond, "steward must be re-registered after Reconnect")
+}
+
 func TestRapidDisconnectReconnectCycles(t *testing.T) {
 	tc := newTestCA(t)
 

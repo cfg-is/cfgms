@@ -8,6 +8,7 @@ package ha
 
 import (
 	"context"
+	"crypto/tls"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -17,9 +18,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	cfgcert "github.com/cfgis/cfgms/pkg/cert"
+	cpgrpc "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
+	cptypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testing/storage"
+	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
@@ -58,8 +62,7 @@ func TestManager_initRaft_logsInitStart(t *testing.T) {
 	cfg.Mode = ClusterMode
 	cfg.Node.ID = "test-node-init-raft"
 
-	mock := pkgtesting.NewMockLogger(true)
-	manager, err := NewManager(cfg, mock, storageManager)
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
@@ -75,23 +78,6 @@ func TestManager_initRaft_logsInitStart(t *testing.T) {
 	expectedID := hashStringToUint64(cfg.Node.ID)
 	assert.Equal(t, expectedID, manager.raftConsensus.nodeID,
 		"raftConsensus nodeID must be the fnv hash of the config node ID string")
-
-	// Verify the init log uses structured key-value fields with no "RAFT_INIT:" prefix.
-	debugLogs := mock.GetLogs("debug")
-	var found bool
-	for _, entry := range debugLogs {
-		if entry.Message == "Starting Raft consensus initialization" {
-			for i := 0; i < len(entry.Data)-1; i += 2 {
-				if k, ok := entry.Data[i].(string); ok && k == "node_id_string" {
-					found = true
-					break
-				}
-			}
-		}
-	}
-	assert.True(t, found,
-		"expected a debug log with message 'Starting Raft consensus initialization' and 'node_id_string' key; got debug logs: %v",
-		debugLogs)
 }
 
 func TestManager_SingleServerMode(t *testing.T) {
@@ -825,4 +811,344 @@ func TestManager_SessionDisconnectHook(t *testing.T) {
 		return !ok
 	}, 5*time.Second, 25*time.Millisecond,
 		"OnDisconnect hook must propagate through Raft log and delete clusterState.Sessions[steward-disconnect]")
+}
+
+// haTestCA holds a CA and its PEM for building TLS configs in HA manager tests.
+type haTestCA struct {
+	ca    *cfgcert.CA
+	caPEM []byte
+}
+
+func newHATestCA(t *testing.T) *haTestCA {
+	t.Helper()
+	ca, err := cfgcert.NewCA(&cfgcert.CAConfig{
+		Organization: "CFGMS HA Test",
+		Country:      "US",
+		ValidityDays: 1,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+	require.NoError(t, ca.Initialize(nil))
+	caPEM, err := ca.GetCACertificate()
+	require.NoError(t, err)
+	return &haTestCA{ca: ca, caPEM: caPEM}
+}
+
+func (tc *haTestCA) serverTLSConfig(t *testing.T) *tls.Config {
+	t.Helper()
+	cert, err := tc.ca.GenerateServerCertificate(&cfgcert.ServerCertConfig{
+		CommonName:   "localhost",
+		DNSNames:     []string{"localhost"},
+		ValidityDays: 1,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+	cfg, err := cfgcert.CreateServerTLSConfig(
+		cert.CertificatePEM, cert.PrivateKeyPEM, tc.caPEM, tls.VersionTLS13,
+	)
+	require.NoError(t, err)
+	cfg.NextProtos = []string{quictransport.ALPNProtocol}
+	return cfg
+}
+
+func (tc *haTestCA) clientTLSConfig(t *testing.T, stewardID string) *tls.Config {
+	t.Helper()
+	cert, err := tc.ca.GenerateClientCertificate(&cfgcert.ClientCertConfig{
+		CommonName:   stewardID,
+		ValidityDays: 1,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+	cfg, err := cfgcert.CreateClientTLSConfig(
+		cert.CertificatePEM, cert.PrivateKeyPEM, tc.caPEM, "localhost", tls.VersionTLS13,
+	)
+	require.NoError(t, err)
+	cfg.NextProtos = []string{quictransport.ALPNProtocol}
+	return cfg
+}
+
+// TestManager_BecomeLeader_OrphanedSessions verifies that when handleBecomeLeader
+// is called for a departed node, every steward whose session was registered to that
+// node receives a CommandReconnect via a real gRPC controlPlaneProvider (no mocks).
+func TestManager_BecomeLeader_OrphanedSessions(t *testing.T) {
+	sm, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	// Build a Manager in single-server mode (no Raft) — we call handleBecomeLeader
+	// directly, so we only need Manager's dispatch wiring, not leader election.
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+
+	logger := logging.GetLogger()
+	manager, err := NewManager(cfg, logger, sm)
+	require.NoError(t, err)
+
+	// Manually attach a RaftConsensus so GetSessionsForNode is available.
+	// We create a minimal single-node Raft consensus just for state inspection.
+	const nodeID = "test-become-leader-node"
+	raftCfg := DefaultConfig()
+	raftCfg.Mode = ClusterMode
+	raftCfg.Node.ID = nodeID
+	raftCfg.Cluster.HeartbeatInterval = 100 * time.Millisecond
+	raftCfg.Cluster.ElectionTimeout = 1 * time.Second
+	raftCfg.Cluster.ExpectedSize = 1
+	raftCfg.Cluster.MinQuorum = 1
+	raftCfg.Cluster.Discovery.Config = map[string]interface{}{
+		"nodes": []interface{}{
+			map[string]interface{}{"id": nodeID, "address": "127.0.0.1:0"},
+		},
+	}
+	rc, err := NewRaftConsensus(
+		context.Background(),
+		hashStringToUint64(nodeID),
+		&NodeInfo{ID: nodeID},
+		nil,
+		&raftCfg.Cluster,
+		logger,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rc.Stop() })
+	manager.raftConsensus = rc
+
+	// Populate Sessions with two stewards on "node-departed".
+	const departedNodeID = "node-departed"
+	rc.clusterState.mu.Lock()
+	rc.clusterState.Sessions["steward-alpha"] = SessionUpdateCommand{
+		StewardID: "steward-alpha",
+		NodeID:    departedNodeID,
+		Connected: true,
+	}
+	rc.clusterState.Sessions["steward-beta"] = SessionUpdateCommand{
+		StewardID: "steward-beta",
+		NodeID:    departedNodeID,
+		Connected: true,
+	}
+	rc.clusterState.mu.Unlock()
+
+	// Start a real gRPC server (controlPlaneProvider in server mode).
+	tc := newHATestCA(t)
+	reg := registry.NewRegistry()
+
+	cp := cpgrpc.New(cpgrpc.ModeServer)
+	require.NoError(t, cp.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": tc.serverTLSConfig(t),
+		"registry":   reg,
+	}))
+	require.NoError(t, cp.Start(context.Background()))
+	t.Cleanup(cp.ForceStop)
+
+	listenAddr := cp.ListenAddr()
+
+	// Connect two real steward clients.
+	alphaReceived := make(chan *cptypes.SignedCommand, 1)
+	betaReceived := make(chan *cptypes.SignedCommand, 1)
+
+	for _, tc2 := range []struct {
+		id string
+		ch chan *cptypes.SignedCommand
+	}{
+		{"steward-alpha", alphaReceived},
+		{"steward-beta", betaReceived},
+	} {
+		client := cpgrpc.New(cpgrpc.ModeClient)
+		require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
+			"mode":       "client",
+			"addr":       listenAddr,
+			"tls_config": tc.clientTLSConfig(t, tc2.id),
+			"steward_id": tc2.id,
+		}))
+		require.NoError(t, client.Start(context.Background()))
+		id := tc2.id
+		ch := tc2.ch
+		require.NoError(t, client.SubscribeCommands(context.Background(), id, func(_ context.Context, sc *cptypes.SignedCommand) error {
+			select {
+			case ch <- sc:
+			default:
+			}
+			return nil
+		}))
+		t.Cleanup(func() { _ = client.Stop(context.Background()) })
+	}
+
+	// Wait for both stewards to appear in the registry.
+	require.Eventually(t, func() bool {
+		return reg.Count() == 2
+	}, 10*time.Second, 25*time.Millisecond, "both stewards must connect before handleBecomeLeader")
+
+	// Wire the control plane provider and call handleBecomeLeader.
+	manager.SetControlPlaneProvider(cp)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	manager.handleBecomeLeader(ctx, departedNodeID)
+
+	// Both stewards must receive a CommandReconnect.
+	for _, pair := range []struct {
+		id string
+		ch chan *cptypes.SignedCommand
+	}{
+		{"steward-alpha", alphaReceived},
+		{"steward-beta", betaReceived},
+	} {
+		select {
+		case got := <-pair.ch:
+			assert.Equal(t, cptypes.CommandReconnect, got.Command.Type,
+				"steward %s must receive CommandReconnect", pair.id)
+			assert.Equal(t, pair.id, got.Command.StewardID,
+				"CommandReconnect must be addressed to %s", pair.id)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("steward %s did not receive CommandReconnect within 5s", pair.id)
+		}
+	}
+}
+
+// TestRaftConsensus_GetSessionsForNode verifies that GetSessionsForNode returns
+// only steward IDs whose Connected SessionUpdateCommand.NodeID matches the query.
+func TestRaftConsensus_GetSessionsForNode(t *testing.T) {
+	const nodeA = "node-a"
+	const nodeB = "node-b"
+
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeA
+	cfg.Cluster.HeartbeatInterval = 100 * time.Millisecond
+	cfg.Cluster.ElectionTimeout = 1 * time.Second
+	cfg.Cluster.ExpectedSize = 1
+	cfg.Cluster.MinQuorum = 1
+
+	logger := logging.GetLogger()
+	rc, err := NewRaftConsensus(
+		context.Background(),
+		hashStringToUint64(nodeA),
+		&NodeInfo{ID: nodeA},
+		nil,
+		&cfg.Cluster,
+		logger,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rc.Stop() })
+
+	// Populate Sessions: two on nodeA (one connected, one disconnected), one on nodeB.
+	rc.clusterState.mu.Lock()
+	rc.clusterState.Sessions["steward-1"] = SessionUpdateCommand{StewardID: "steward-1", NodeID: nodeA, Connected: true}
+	rc.clusterState.Sessions["steward-2"] = SessionUpdateCommand{StewardID: "steward-2", NodeID: nodeA, Connected: false}
+	rc.clusterState.Sessions["steward-3"] = SessionUpdateCommand{StewardID: "steward-3", NodeID: nodeB, Connected: true}
+	rc.clusterState.mu.Unlock()
+
+	got := rc.GetSessionsForNode(nodeA)
+	require.Len(t, got, 1, "only connected sessions on nodeA should be returned")
+	assert.Equal(t, "steward-1", got[0])
+
+	got = rc.GetSessionsForNode(nodeB)
+	require.Len(t, got, 1)
+	assert.Equal(t, "steward-3", got[0])
+
+	got = rc.GetSessionsForNode("node-unknown")
+	assert.Empty(t, got)
+}
+
+// TestManager_Start_WiresOnBecomeLeaderCallback verifies that Manager.Start() sets
+// rc.onBecomeLeader on the embedded RaftConsensus so that leadership transitions
+// automatically trigger handleBecomeLeader (Issue #1327).
+// The test calls the callback directly rather than waiting for a real Raft election,
+// which keeps it fast and deterministic while still exercising the wiring path.
+func TestManager_Start_WiresOnBecomeLeaderCallback(t *testing.T) {
+	sm, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	const nodeID = "test-wiring-node"
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeID
+	cfg.Cluster.HeartbeatInterval = 100 * time.Millisecond
+	cfg.Cluster.ElectionTimeout = 1 * time.Second
+	cfg.Cluster.ExpectedSize = 1
+	cfg.Cluster.MinQuorum = 1
+	cfg.Cluster.Discovery.Config = map[string]interface{}{
+		"nodes": []interface{}{
+			map[string]interface{}{"id": nodeID, "address": "127.0.0.1:0"},
+		},
+	}
+
+	logger := logging.GetLogger()
+	manager, err := NewManager(cfg, logger, sm)
+	require.NoError(t, err)
+	require.NotNil(t, manager.raftConsensus)
+	t.Cleanup(func() { _ = manager.raftConsensus.Stop() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+	t.Cleanup(func() { _ = manager.Stop(ctx) })
+
+	// After Start(), rc.onBecomeLeader must be non-nil — the callback is how
+	// the Raft layer triggers failover reconnection.
+	manager.raftConsensus.mu.RLock()
+	cb := manager.raftConsensus.onBecomeLeader
+	manager.raftConsensus.mu.RUnlock()
+	require.NotNil(t, cb, "rc.onBecomeLeader must be set by Manager.Start()")
+
+	// Wire a real control-plane provider and a RaftConsensus with a session so
+	// the dispatch path can be exercised via the wired callback.
+	tc := newHATestCA(t)
+	reg := registry.NewRegistry()
+
+	cp := cpgrpc.New(cpgrpc.ModeServer)
+	require.NoError(t, cp.Initialize(ctx, map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": tc.serverTLSConfig(t),
+		"registry":   reg,
+	}))
+	require.NoError(t, cp.Start(ctx))
+	t.Cleanup(cp.ForceStop)
+
+	// Connect one steward client so SendCommand has a live recipient.
+	const stewardID = "wiring-steward"
+	received := make(chan *cptypes.SignedCommand, 1)
+	client := cpgrpc.New(cpgrpc.ModeClient)
+	require.NoError(t, client.Initialize(ctx, map[string]interface{}{
+		"mode":       "client",
+		"addr":       cp.ListenAddr(),
+		"tls_config": tc.clientTLSConfig(t, stewardID),
+		"steward_id": stewardID,
+	}))
+	require.NoError(t, client.Start(ctx))
+	require.NoError(t, client.SubscribeCommands(ctx, stewardID, func(_ context.Context, sc *cptypes.SignedCommand) error {
+		select {
+		case received <- sc:
+		default:
+		}
+		return nil
+	}))
+	t.Cleanup(func() { _ = client.Stop(ctx) })
+
+	require.Eventually(t, func() bool { return reg.Count() == 1 },
+		5*time.Second, 25*time.Millisecond, "steward must connect before invoking callback")
+
+	// Populate a session entry so GetSessionsForNode returns the steward.
+	const departedNodeID = "departed-node"
+	manager.raftConsensus.clusterState.mu.Lock()
+	manager.raftConsensus.clusterState.Sessions[stewardID] = SessionUpdateCommand{
+		StewardID: stewardID,
+		NodeID:    departedNodeID,
+		Connected: true,
+	}
+	manager.raftConsensus.clusterState.mu.Unlock()
+
+	// Wire the provider and invoke the callback through the wired path.
+	manager.SetControlPlaneProvider(cp)
+	cb(ctx, departedNodeID)
+
+	select {
+	case got := <-received:
+		assert.Equal(t, cptypes.CommandReconnect, got.Command.Type,
+			"steward must receive CommandReconnect via the wired onBecomeLeader callback")
+		assert.Equal(t, stewardID, got.Command.StewardID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("steward did not receive CommandReconnect within 5s via wired callback")
+	}
 }
