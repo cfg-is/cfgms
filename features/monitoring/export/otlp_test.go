@@ -550,6 +550,33 @@ func TestOTLPExporter_PlaintextAPIKeyDisabled(t *testing.T) {
 	assert.Equal(t, "Bearer "+secretToken, authHeader, "secret from store must be used as credential source")
 }
 
+// TestOTLPExporter_SecretNotFound verifies that when GetSecret fails (the key does not
+// exist in the store), Configure returns nil, the Authorization header is not set, and
+// a warning is logged containing the key name.
+func TestOTLPExporter_SecretNotFound(t *testing.T) {
+	const missingKey = "otlp/missing-key"
+
+	store := newTestSecretStore(map[string]string{}) // store has no entry for missingKey
+	cl := &captureLogger{}
+
+	oe := NewOTLPExporterWithSecrets(cl, store)
+	oe.config.Compression = "none"
+
+	cfg := ExporterConfig{
+		Config: map[string]interface{}{
+			"secret_key": missingKey,
+		},
+	}
+	err := oe.Configure(cfg)
+	require.NoError(t, err, "Configure must return nil even when secret retrieval fails")
+
+	_, headerSet := oe.config.Headers["Authorization"]
+	assert.False(t, headerSet, "Authorization header must not be set when secret retrieval fails")
+
+	assert.True(t, cl.contains("Failed to retrieve OTLP credential"), "warning must be logged when secret retrieval fails")
+	assert.True(t, cl.contains(missingKey), "key name must appear in warning log for debuggability")
+}
+
 // TestOTLPExporter_Export_Integration tests the full Export routing for all three
 // signal types, verifying each is sent to the correct /v1/{signal} endpoint.
 func TestOTLPExporter_Export_Integration(t *testing.T) {
