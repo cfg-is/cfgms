@@ -4,6 +4,7 @@ package entra_group
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -307,6 +308,24 @@ func (m *MockGraphClient) RemoveAdminUnitMember(ctx context.Context, token *auth
 
 func (m *MockGraphClient) RemoveAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID, scopedRoleMemberID string) error {
 	return nil
+}
+
+func (m *MockGraphClient) GetTeam(ctx context.Context, token *auth.AccessToken, groupID string) (*graph.Team, error) {
+	args := m.Called(ctx, token, groupID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.Team), args.Error(1)
+}
+
+func (m *MockGraphClient) CreateTeam(ctx context.Context, token *auth.AccessToken, groupID string, request *graph.CreateTeamRequest) error {
+	args := m.Called(ctx, token, groupID, request)
+	return args.Error(0)
+}
+
+func (m *MockGraphClient) UpdateTeamSettings(ctx context.Context, token *auth.AccessToken, teamID string, request *graph.UpdateTeamSettingsRequest) error {
+	args := m.Called(ctx, token, teamID, request)
+	return args.Error(0)
 }
 
 func TestEntraGroupConfig_Validate(t *testing.T) {
@@ -620,70 +639,74 @@ tenant_id: test-tenant-id
 	assert.Equal(t, "test-tenant-id", config.TenantID)
 }
 
-// Integration-style test demonstrating the module workflow
-func TestEntraGroupModule_WorkflowDemo(t *testing.T) {
+// TestEntraGroupModule_Set_CreateNewGroup verifies Set() creates a group when none exists
+func TestEntraGroupModule_Set_CreateNewGroup(t *testing.T) {
 	mockAuth := &MockAuthProvider{}
 	mockGraph := &MockGraphClient{}
 
-	// Set up mock expectations
 	token := &auth.AccessToken{
 		Token:     "mock-token",
 		TokenType: "Bearer",
 		ExpiresAt: time.Now().Add(1 * time.Hour),
 		TenantID:  "test-tenant-id",
 	}
+	mockAuth.On("GetAccessToken", mock.Anything, "test-tenant-id").Return(token, nil)
 
-	// Remove the mock expectation since New() doesn't call GetAccessToken
-	// mockAuth.On("GetAccessToken", mock.Anything, "test-tenant-id").Return(token, nil)
+	// GetGroup returns not-found → triggers createGroup path
+	mockGraph.On("GetGroup", mock.Anything, token, "new-group").
+		Return((*graph.Group)(nil), &graph.GraphError{StatusCode: 404, Code: "Request_ResourceNotFound", Message: "not found"})
 
-	module := New(mockAuth, mockGraph)
+	createdGroup := &graph.Group{
+		ID:           "new-group",
+		DisplayName:  "Test Security Group",
+		MailNickname: "testsecuritygroup",
+	}
+	mockGraph.On("CreateGroup", mock.Anything, token, mock.Anything).Return(createdGroup, nil)
 
-	// Test configuration
+	// Use zero propagation delay to avoid 2-second stall in unit tests
+	module := &entraGroupModule{
+		authProvider:     mockAuth,
+		graphClient:      mockGraph,
+		propagationDelay: 0,
+	}
+
 	config := &EntraGroupConfig{
 		DisplayName:     "Test Security Group",
-		Description:     "A test security group for unit testing",
 		MailNickname:    "testsecuritygroup",
 		MailEnabled:     false,
 		SecurityEnabled: true,
 		GroupType:       "Security",
-		Visibility:      "Private",
-		Members:         []string{"user1@contoso.com", "user2@contoso.com"},
-		Owners:          []string{"admin@contoso.com"},
 		TenantID:        "test-tenant-id",
 	}
 
-	_ = context.Background()
-	_ = "test-tenant-id:new-group"
-
-	// This would normally call Set() but we can't easily mock the Graph API calls
-	// In a real integration test, we would use real API calls or a more sophisticated mock
-
-	// Verify the configuration is valid
-	err := config.Validate()
+	err := module.Set(context.Background(), "test-tenant-id:new-group", config)
 	assert.NoError(t, err)
+	mockAuth.AssertExpectations(t)
+	mockGraph.AssertExpectations(t)
+}
 
-	// Verify managed fields are correctly identified
-	managedFields := config.GetManagedFields()
-	expectedFields := []string{
-		"display_name", "mail_enabled", "security_enabled",
-		"description", "group_type", "visibility", "members", "owners",
+// TestEntraGroupModule_Set_AuthError verifies Set() returns an error when auth fails
+func TestEntraGroupModule_Set_AuthError(t *testing.T) {
+	mockAuth := &MockAuthProvider{}
+	mockGraph := &MockGraphClient{}
+
+	mockAuth.On("GetAccessToken", mock.Anything, "test-tenant-id").
+		Return((*auth.AccessToken)(nil), fmt.Errorf("auth failure"))
+
+	module := New(mockAuth, mockGraph)
+
+	config := &EntraGroupConfig{
+		DisplayName:     "Test Group",
+		MailNickname:    "testgroup",
+		MailEnabled:     false,
+		SecurityEnabled: true,
+		TenantID:        "test-tenant-id",
 	}
-	assert.ElementsMatch(t, expectedFields, managedFields)
 
-	// Verify configuration can be serialized and deserialized
-	yamlData, err := config.ToYAML()
-	assert.NoError(t, err)
-
-	configFromYAML := &EntraGroupConfig{}
-	err = configFromYAML.FromYAML(yamlData)
-	assert.NoError(t, err)
-	assert.Equal(t, config.DisplayName, configFromYAML.DisplayName)
-	assert.Equal(t, config.TenantID, configFromYAML.TenantID)
-
-	// Since we're not calling any methods that use the mocks in this demo test, don't assert expectations
-	// This test is just demonstrating the workflow structure
-	_ = token  // Use the token variable to avoid unused variable warning
-	_ = module // Use the module variable to avoid unused variable warning
+	err := module.Set(context.Background(), "test-tenant-id:some-group", config)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "auth failure")
+	mockAuth.AssertExpectations(t)
 }
 
 func TestDiffUPNSets_AddOnly(t *testing.T) {
@@ -732,4 +755,183 @@ func TestDiffUPNSets_EmptyDesired(t *testing.T) {
 	toAdd, toRemove := diffUPNSets(current, desired)
 	assert.Empty(t, toAdd)
 	assert.ElementsMatch(t, []string{"a@contoso.com", "b@contoso.com"}, toRemove)
+}
+
+func TestIsTeamGroup_TeamExists(t *testing.T) {
+	mockGraph := &MockGraphClient{}
+	token := &auth.AccessToken{Token: "tok", TenantID: "t1"}
+	mockGraph.On("GetTeam", mock.Anything, token, "group-1").
+		Return(&graph.Team{ID: "group-1"}, nil)
+
+	m := &entraGroupModule{graphClient: mockGraph}
+	result := m.isTeamGroup(context.Background(), token, "group-1")
+	assert.True(t, result)
+	mockGraph.AssertExpectations(t)
+}
+
+func TestIsTeamGroup_NotFound(t *testing.T) {
+	mockGraph := &MockGraphClient{}
+	token := &auth.AccessToken{Token: "tok", TenantID: "t1"}
+	mockGraph.On("GetTeam", mock.Anything, token, "group-2").
+		Return((*graph.Team)(nil), &graph.GraphError{StatusCode: 404, Code: "Request_ResourceNotFound", Message: "not found"})
+
+	m := &entraGroupModule{graphClient: mockGraph}
+	result := m.isTeamGroup(context.Background(), token, "group-2")
+	assert.False(t, result)
+	mockGraph.AssertExpectations(t)
+}
+
+func TestIsTeamGroup_NonNotFoundError(t *testing.T) {
+	mockGraph := &MockGraphClient{}
+	token := &auth.AccessToken{Token: "tok", TenantID: "t1"}
+	mockGraph.On("GetTeam", mock.Anything, token, "group-3").
+		Return((*graph.Team)(nil), &graph.GraphError{StatusCode: 403, Code: "Authorization_RequestDenied", Message: "forbidden"})
+
+	m := &entraGroupModule{graphClient: mockGraph}
+	// Should not panic and should return false
+	result := m.isTeamGroup(context.Background(), token, "group-3")
+	assert.False(t, result)
+	mockGraph.AssertExpectations(t)
+}
+
+func TestMapFunSettings_Strict(t *testing.T) {
+	result := mapFunSettings("strict")
+	assert.NotNil(t, result)
+	assert.Equal(t, false, *result.AllowGiphy)
+	assert.Equal(t, false, *result.AllowStickersAndMemes)
+	assert.Equal(t, false, *result.AllowCustomMemes)
+	assert.Nil(t, result.GiphyContentRating)
+}
+
+func TestMapFunSettings_Moderate(t *testing.T) {
+	result := mapFunSettings("moderate")
+	assert.NotNil(t, result)
+	assert.Equal(t, true, *result.AllowGiphy)
+	assert.Equal(t, "strict", *result.GiphyContentRating)
+	assert.Equal(t, true, *result.AllowStickersAndMemes)
+	assert.Equal(t, false, *result.AllowCustomMemes)
+}
+
+func TestMapFunSettings_Enabled(t *testing.T) {
+	result := mapFunSettings("enabled")
+	assert.NotNil(t, result)
+	assert.Equal(t, true, *result.AllowGiphy)
+	assert.Equal(t, "moderate", *result.GiphyContentRating)
+	assert.Equal(t, true, *result.AllowStickersAndMemes)
+	assert.Equal(t, true, *result.AllowCustomMemes)
+}
+
+func TestMapFunSettings_Unknown(t *testing.T) {
+	result := mapFunSettings("unknown")
+	assert.Nil(t, result)
+}
+
+func TestMapTeamSettingsToCreateRequest_NilSettings(t *testing.T) {
+	req := mapTeamSettingsToCreateRequest(nil)
+	assert.NotNil(t, req)
+	assert.Nil(t, req.MemberSettings)
+	assert.Nil(t, req.MessagingSettings)
+	assert.Nil(t, req.FunSettings)
+	assert.Nil(t, req.GuestSettings)
+}
+
+func TestMapTeamSettingsToCreateRequest_FullSettings(t *testing.T) {
+	settings := &TeamSettings{
+		AllowAddRemoveApps:         true,
+		AllowCreatePrivateChannels: true,
+		AllowCreateUpdateChannels:  false,
+		AllowDeleteChannels:        false,
+		AllowUserEditMessages:      true,
+		AllowGuestCreateChannels:   false,
+		AllowGuestDeleteChannels:   false,
+		Fun:                        "moderate",
+	}
+	req := mapTeamSettingsToCreateRequest(settings)
+	assert.NotNil(t, req.MemberSettings)
+	assert.Equal(t, true, *req.MemberSettings.AllowAddRemoveApps)
+	assert.Equal(t, true, *req.MemberSettings.AllowCreatePrivateChannels)
+	assert.Equal(t, false, *req.MemberSettings.AllowCreateUpdateChannels)
+	assert.NotNil(t, req.MessagingSettings)
+	assert.Equal(t, true, *req.MessagingSettings.AllowUserEditMessages)
+	assert.NotNil(t, req.FunSettings)
+	assert.Equal(t, true, *req.FunSettings.AllowGiphy)
+	assert.NotNil(t, req.GuestSettings)
+	assert.Equal(t, false, *req.GuestSettings.AllowCreateUpdateChannels)
+}
+
+func TestCreateTeam_NonUnifiedGroupType(t *testing.T) {
+	mockGraph := &MockGraphClient{}
+	token := &auth.AccessToken{Token: "tok", TenantID: "t1"}
+
+	m := &entraGroupModule{graphClient: mockGraph}
+	err := m.createTeam(context.Background(), token, "group-1", "Security", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "Unified")
+	// No Graph API calls should be made
+	mockGraph.AssertNotCalled(t, "CreateTeam")
+}
+
+func TestCreateTeam_UnifiedGroup(t *testing.T) {
+	mockGraph := &MockGraphClient{}
+	token := &auth.AccessToken{Token: "tok", TenantID: "t1"}
+	mockGraph.On("CreateTeam", mock.Anything, token, "group-1", mock.Anything).Return(nil)
+
+	m := &entraGroupModule{graphClient: mockGraph}
+	err := m.createTeam(context.Background(), token, "group-1", "Unified", nil)
+	assert.NoError(t, err)
+	mockGraph.AssertExpectations(t)
+}
+
+func TestUpdateTeamSettings_DelegatesToGraphClient(t *testing.T) {
+	mockGraph := &MockGraphClient{}
+	token := &auth.AccessToken{Token: "tok", TenantID: "t1"}
+	mockGraph.On("UpdateTeamSettings", mock.Anything, token, "team-1", mock.Anything).Return(nil)
+
+	m := &entraGroupModule{graphClient: mockGraph}
+	err := m.updateTeamSettings(context.Background(), token, "team-1", &TeamSettings{Fun: "enabled"})
+	assert.NoError(t, err)
+	mockGraph.AssertExpectations(t)
+}
+
+func TestCreateTeam_GraphClientError(t *testing.T) {
+	mockGraph := &MockGraphClient{}
+	token := &auth.AccessToken{Token: "tok", TenantID: "t1"}
+	graphErr := &graph.GraphError{StatusCode: 500, Code: "InternalServerError", Message: "boom"}
+	mockGraph.On("CreateTeam", mock.Anything, token, "group-1", mock.Anything).Return(graphErr)
+
+	m := &entraGroupModule{graphClient: mockGraph}
+	err := m.createTeam(context.Background(), token, "group-1", "Unified", nil)
+	assert.Error(t, err)
+	mockGraph.AssertExpectations(t)
+}
+
+func TestUpdateTeamSettings_GraphClientError(t *testing.T) {
+	mockGraph := &MockGraphClient{}
+	token := &auth.AccessToken{Token: "tok", TenantID: "t1"}
+	graphErr := &graph.GraphError{StatusCode: 403, Code: "Authorization_RequestDenied", Message: "forbidden"}
+	mockGraph.On("UpdateTeamSettings", mock.Anything, token, "team-1", mock.Anything).Return(graphErr)
+
+	m := &entraGroupModule{graphClient: mockGraph}
+	err := m.updateTeamSettings(context.Background(), token, "team-1", nil)
+	assert.Error(t, err)
+	mockGraph.AssertExpectations(t)
+}
+
+func TestUpdateTeamSettings_GraphClientError_WithNonNilSettings(t *testing.T) {
+	mockGraph := &MockGraphClient{}
+	token := &auth.AccessToken{Token: "tok", TenantID: "t1"}
+	graphErr := &graph.GraphError{StatusCode: 500, Code: "InternalServerError", Message: "server error"}
+	mockGraph.On("UpdateTeamSettings", mock.Anything, token, "team-1", mock.Anything).Return(graphErr)
+
+	settings := &TeamSettings{
+		AllowCreateUpdateChannels: true,
+		AllowDeleteChannels:       false,
+		AllowAddRemoveApps:        true,
+		AllowUserEditMessages:     true,
+		Fun:                       "enabled",
+	}
+	m := &entraGroupModule{graphClient: mockGraph}
+	err := m.updateTeamSettings(context.Background(), token, "team-1", settings)
+	assert.Error(t, err)
+	mockGraph.AssertExpectations(t)
 }

@@ -416,6 +416,126 @@ func TestEntraGroup_Integration_MemberOwnerSync(t *testing.T) {
 	t.Log("✅ Member/owner sync integration test passed")
 }
 
+// TestEntraGroup_Integration_TeamOperations verifies team create and settings update
+// against the real Graph API. Requires the target group to be a Microsoft 365 (Unified) group.
+func TestEntraGroup_Integration_TeamOperations(t *testing.T) {
+	checkM365Integration(t)
+
+	authProvider := createRealAuthProvider(t)
+	graphClient := createRealGraphClient(t)
+	module := New(authProvider, graphClient).(*entraGroupModule)
+
+	ctx := context.Background()
+	tenantID := os.Getenv("M365_TENANT_ID")
+	timestamp := time.Now().Format("20060102-150405")
+
+	groupName := fmt.Sprintf("cfgmsteamtest%s", timestamp)
+	createConfig := &EntraGroupConfig{
+		DisplayName:     fmt.Sprintf("CFGMS Team Test %s", timestamp),
+		Description:     "Integration test for team operations",
+		MailNickname:    groupName,
+		MailEnabled:     true,
+		SecurityEnabled: false,
+		GroupType:       "Unified",
+		Visibility:      "Private",
+		TenantID:        tenantID,
+	}
+
+	t.Log("🔄 STEP 1: CREATE Unified group for team provisioning")
+	resourceID := tenantID + ":" + groupName
+	err := module.Set(ctx, resourceID, createConfig)
+	require.NoError(t, err, "Should be able to create Unified group")
+	t.Log("✅ CREATE: Unified group created")
+
+	token, err := authProvider.GetAccessToken(ctx, tenantID)
+	require.NoError(t, err)
+
+	groups, err := graphClient.ListGroups(ctx, token, fmt.Sprintf("displayName eq '%s'", createConfig.DisplayName))
+	require.NoError(t, err)
+	require.NotEmpty(t, groups, "Should find created group")
+
+	var createdGroup *graph.Group
+	for i := range groups {
+		if groups[i].DisplayName == createConfig.DisplayName {
+			createdGroup = &groups[i]
+			break
+		}
+	}
+	require.NotNil(t, createdGroup, "Created group must be findable")
+
+	t.Cleanup(func() {
+		cleanupToken, tokenErr := authProvider.GetAccessToken(ctx, tenantID)
+		if tokenErr != nil {
+			t.Logf("Failed to get token for cleanup: %v", tokenErr)
+			return
+		}
+		if err := graphClient.DeleteGroup(ctx, cleanupToken, createdGroup.ID); err != nil {
+			t.Logf("Failed to cleanup group %s: %v", createdGroup.ID, err)
+		}
+	})
+
+	groupID := createdGroup.ID
+	realResourceID := tenantID + ":" + groupID
+
+	t.Log("🔄 STEP 2: CREATE team from group")
+	teamConfig := &EntraGroupConfig{
+		DisplayName:     createConfig.DisplayName,
+		MailNickname:    createConfig.MailNickname,
+		MailEnabled:     true,
+		SecurityEnabled: false,
+		GroupType:       "Unified",
+		TenantID:        tenantID,
+		IsTeamEnabled:   true,
+		TeamSettings: &TeamSettings{
+			AllowCreateUpdateChannels:  true,
+			AllowDeleteChannels:        false,
+			AllowCreatePrivateChannels: false,
+			AllowAddRemoveApps:         true,
+			AllowUserEditMessages:      true,
+			Fun:                        "moderate",
+		},
+		ManagedFieldsList: []string{
+			"display_name", "mail_enabled", "security_enabled", "is_team_enabled", "team_settings",
+		},
+	}
+	err = module.Set(ctx, realResourceID, teamConfig)
+	require.NoError(t, err, "Should be able to create team from Unified group")
+	t.Log("✅ CREATE TEAM: Team provisioned")
+
+	t.Log("🔄 STEP 3: Verify team exists via isTeamGroup")
+	freshToken, err := authProvider.GetAccessToken(ctx, tenantID)
+	require.NoError(t, err, "Should be able to refresh token before team verification")
+	assert.True(t, module.isTeamGroup(ctx, freshToken, groupID), "isTeamGroup should return true after team creation")
+	t.Log("✅ isTeamGroup: confirmed true")
+
+	t.Log("🔄 STEP 4: UPDATE team settings")
+	updateConfig := &EntraGroupConfig{
+		DisplayName:     createConfig.DisplayName,
+		MailNickname:    createConfig.MailNickname,
+		MailEnabled:     true,
+		SecurityEnabled: false,
+		GroupType:       "Unified",
+		TenantID:        tenantID,
+		IsTeamEnabled:   true,
+		TeamSettings: &TeamSettings{
+			AllowCreateUpdateChannels:  true,
+			AllowDeleteChannels:        true,
+			AllowCreatePrivateChannels: true,
+			AllowAddRemoveApps:         true,
+			AllowUserEditMessages:      true,
+			Fun:                        "enabled",
+		},
+		ManagedFieldsList: []string{
+			"display_name", "mail_enabled", "security_enabled", "is_team_enabled", "team_settings",
+		},
+	}
+	err = module.Set(ctx, realResourceID, updateConfig)
+	require.NoError(t, err, "Should be able to update team settings")
+	t.Log("✅ UPDATE TEAM SETTINGS: Settings updated")
+
+	t.Log("✅ TEAM OPERATIONS INTEGRATION TEST COMPLETED SUCCESSFULLY")
+}
+
 // TestEntraGroup_Integration_FullSuite runs comprehensive integration tests
 func TestEntraGroup_Integration_FullSuite(t *testing.T) {
 	checkM365Integration(t)
@@ -434,6 +554,10 @@ func TestEntraGroup_Integration_FullSuite(t *testing.T) {
 
 	t.Run("AuthenticationFlow", func(t *testing.T) {
 		TestEntraGroup_Integration_AuthenticationFlow(t)
+	})
+
+	t.Run("TeamOperations", func(t *testing.T) {
+		TestEntraGroup_Integration_TeamOperations(t)
 	})
 }
 

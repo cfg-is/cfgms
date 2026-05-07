@@ -294,6 +294,24 @@ func (m *MockGraphClient) RemoveGroupOwner(ctx context.Context, token *auth.Acce
 	return nil
 }
 
+func (m *MockGraphClient) GetTeam(ctx context.Context, token *auth.AccessToken, groupID string) (*graph.Team, error) {
+	args := m.Called(ctx, token, groupID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.Team), args.Error(1)
+}
+
+func (m *MockGraphClient) CreateTeam(ctx context.Context, token *auth.AccessToken, groupID string, request *graph.CreateTeamRequest) error {
+	args := m.Called(ctx, token, groupID, request)
+	return args.Error(0)
+}
+
+func (m *MockGraphClient) UpdateTeamSettings(ctx context.Context, token *auth.AccessToken, teamID string, request *graph.UpdateTeamSettingsRequest) error {
+	args := m.Called(ctx, token, teamID, request)
+	return args.Error(0)
+}
+
 func TestNew(t *testing.T) {
 	mockAuth := &MockAuthProvider{}
 	mockGraph := &MockGraphClient{}

@@ -29,6 +29,10 @@ type HTTPClient struct {
 
 	// Retry configuration
 	retryConfig *RetryConfig
+
+	// Team provisioning poll configuration (overrideable for tests)
+	teamPollMaxRetries int
+	teamPollBackoff    time.Duration
 }
 
 // NewHTTPClient creates a new HTTP-based Graph API client
@@ -37,8 +41,10 @@ func NewHTTPClient(options ...ClientOption) *HTTPClient {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		baseURL:     "https://graph.microsoft.com/v1.0",
-		retryConfig: DefaultRetryConfig(),
+		baseURL:            "https://graph.microsoft.com/v1.0",
+		retryConfig:        DefaultRetryConfig(),
+		teamPollMaxRetries: 10,
+		teamPollBackoff:    3 * time.Second,
 	}
 
 	// Apply options
@@ -984,6 +990,55 @@ func (c *HTTPClient) RemoveAdminUnitScopedRoleMember(ctx context.Context, token 
 	endpoint := fmt.Sprintf("/administrativeUnits/%s/scopedRoleMembers/%s", unitID, scopedRoleMemberID)
 	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
 		return fmt.Errorf("failed to remove scoped role member %s from admin unit %s: %w", scopedRoleMemberID, unitID, err)
+	}
+	return nil
+}
+
+// GetTeam retrieves the team associated with a Microsoft 365 group by its groupID.
+// Returns a not-found error (IsNotFoundError) if the group has no associated team.
+func (c *HTTPClient) GetTeam(ctx context.Context, token *auth.AccessToken, groupID string) (*Team, error) {
+	endpoint := fmt.Sprintf("/teams/%s", groupID)
+	var team Team
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &team); err != nil {
+		return nil, fmt.Errorf("failed to get team for group %s: %w", groupID, err)
+	}
+	return &team, nil
+}
+
+// CreateTeam provisions a Microsoft Teams team from an existing Microsoft 365 group.
+// Graph returns 202 Accepted; this method polls GET /teams/{groupId} until the team
+// is provisioned (200), the context is cancelled, or retries are exhausted.
+func (c *HTTPClient) CreateTeam(ctx context.Context, token *auth.AccessToken, groupID string, request *CreateTeamRequest) error {
+	endpoint := fmt.Sprintf("/groups/%s/team", groupID)
+	if err := c.makeRequest(ctx, token, "PUT", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to initiate team creation for group %s: %w", groupID, err)
+	}
+
+	for i := 0; i < c.teamPollMaxRetries; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(c.teamPollBackoff):
+		}
+
+		_, err := c.GetTeam(ctx, token, groupID)
+		if err == nil {
+			return nil
+		}
+		if IsNotFoundError(err) {
+			continue
+		}
+		return fmt.Errorf("team provisioning failed for group %s: %w", groupID, err)
+	}
+
+	return fmt.Errorf("team provisioning timed out for group %s after %d retries", groupID, c.teamPollMaxRetries)
+}
+
+// UpdateTeamSettings updates team settings for the team identified by teamID
+func (c *HTTPClient) UpdateTeamSettings(ctx context.Context, token *auth.AccessToken, teamID string, request *UpdateTeamSettingsRequest) error {
+	endpoint := fmt.Sprintf("/teams/%s", teamID)
+	if err := c.makeRequest(ctx, token, "PATCH", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to update team settings for team %s: %w", teamID, err)
 	}
 	return nil
 }
