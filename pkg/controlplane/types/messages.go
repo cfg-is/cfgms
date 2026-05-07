@@ -23,6 +23,9 @@ const (
 
 	// CommandSyncDNA requests DNA synchronization via data plane
 	CommandSyncDNA CommandType = "sync_dna"
+
+	// CommandReconnect instructs the steward to reconnect to the controller (HA failover)
+	CommandReconnect CommandType = "reconnect"
 )
 
 // Command represents a command sent from controller to steward.

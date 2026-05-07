@@ -46,6 +46,11 @@ type ControlPlaneProvider interface {
 	// The context can be used to force shutdown if graceful shutdown times out.
 	Stop(ctx context.Context) error
 
+	// Reconnect tears down the current connection and re-establishes it without
+	// cancelling the provider's internal context (client mode only).
+	// Returns an error if called on a server-mode provider.
+	Reconnect(ctx context.Context) error
+
 	// =================================================================
 	// Commands (Controller → Steward)
 	// =================================================================

@@ -77,6 +77,8 @@ func (m *testProvider) GetStats(ctx context.Context) (*types.ControlPlaneStats, 
 	return &types.ControlPlaneStats{}, nil
 }
 
+func (m *testProvider) Reconnect(ctx context.Context) error { return nil }
+
 func TestProviderLifecycle(t *testing.T) {
 	provider := newTestProvider("lifecycle-test")
 

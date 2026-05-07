@@ -36,6 +36,7 @@ const (
 	CommandType_COMMAND_TYPE_EXECUTE_TASK      CommandType = 4
 	CommandType_COMMAND_TYPE_SHUTDOWN          CommandType = 5
 	CommandType_COMMAND_TYPE_VALIDATE_CONFIG   CommandType = 6
+	CommandType_COMMAND_TYPE_RECONNECT         CommandType = 7
 )
 
 // Enum value maps for CommandType.
@@ -48,6 +49,7 @@ var (
 		4: "COMMAND_TYPE_EXECUTE_TASK",
 		5: "COMMAND_TYPE_SHUTDOWN",
 		6: "COMMAND_TYPE_VALIDATE_CONFIG",
+		7: "COMMAND_TYPE_RECONNECT",
 	}
 	CommandType_value = map[string]int32{
 		"COMMAND_TYPE_UNSPECIFIED":       0,
@@ -57,6 +59,7 @@ var (
 		"COMMAND_TYPE_EXECUTE_TASK":      4,
 		"COMMAND_TYPE_SHUTDOWN":          5,
 		"COMMAND_TYPE_VALIDATE_CONFIG":   6,
+		"COMMAND_TYPE_RECONNECT":         7,
 	}
 )
 

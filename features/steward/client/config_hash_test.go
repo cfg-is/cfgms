@@ -88,6 +88,7 @@ func (e *eventCapture) SubscribeHeartbeats(_ context.Context, _ controlplaneInte
 func (e *eventCapture) GetStats(_ context.Context) (*cpTypes.ControlPlaneStats, error) {
 	return &cpTypes.ControlPlaneStats{}, nil
 }
+func (e *eventCapture) Reconnect(_ context.Context) error { return nil }
 
 // drainEvents non-blockingly collects all events currently in the channel.
 // Called after handler.Wait() ensures all goroutines have finished, so there

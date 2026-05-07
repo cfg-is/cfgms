@@ -59,6 +59,7 @@ func (p *testControlPlane) SubscribeHeartbeats(_ context.Context, handler cpinte
 func (p *testControlPlane) GetStats(_ context.Context) (*controlplaneTypes.ControlPlaneStats, error) {
 	return &controlplaneTypes.ControlPlaneStats{}, nil
 }
+func (p *testControlPlane) Reconnect(_ context.Context) error { return nil }
 
 // sendHeartbeat drives the registered handler directly, simulating a steward heartbeat.
 func (p *testControlPlane) sendHeartbeat(ctx context.Context, hb *controlplaneTypes.Heartbeat) error {

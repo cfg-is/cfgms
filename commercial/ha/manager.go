@@ -16,8 +16,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.etcd.io/raft/v3"
 
+	"github.com/cfgis/cfgms/features/config/signature"
+	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	cptypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
@@ -46,6 +50,14 @@ type Manager struct {
 
 	// Session registry for steward connect/disconnect replication
 	registry registry.Registry
+
+	// controlPlaneProvider is used to dispatch reconnect commands to orphaned
+	// stewards when this node becomes the Raft leader after a failover.
+	controlPlaneProvider cpinterfaces.ControlPlaneProvider
+
+	// signer, if set, signs reconnect commands before dispatch so stewards in
+	// secured mode can authenticate them.
+	signer signature.Signer
 
 	// Cluster state
 	clusterNodes map[string]*NodeInfo
@@ -192,6 +204,16 @@ func (m *Manager) Start(ctx context.Context) error {
 					"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
 			}
 		})
+	}
+
+	// Wire the onBecomeLeader callback so the Raft consensus layer notifies the
+	// manager when leadership transitions — the manager then dispatches reconnect
+	// commands to stewards orphaned by the departed leader.
+	if m.raftConsensus != nil {
+		rc := m.raftConsensus
+		rc.onBecomeLeader = func(ctx context.Context, departedNodeID string) {
+			go m.handleBecomeLeader(ctx, departedNodeID)
+		}
 	}
 
 	m.isStarted = true
@@ -406,6 +428,84 @@ func (m *Manager) SetRegistry(r registry.Registry) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.registry = r
+}
+
+// SetControlPlaneProvider wires the control-plane provider so that reconnect
+// commands can be dispatched to orphaned stewards on leadership transition.
+// Call this after NewManager returns but before Start is called.
+func (m *Manager) SetControlPlaneProvider(p cpinterfaces.ControlPlaneProvider) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.controlPlaneProvider = p
+}
+
+// SetSigner wires a command signer so that reconnect commands are cryptographically
+// signed before dispatch. Call this after NewManager returns but before Start is called.
+// When nil (the default), commands are sent unsigned — only suitable for clusters
+// where stewards have not configured a command verifier.
+func (m *Manager) SetSigner(s signature.Signer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.signer = s
+}
+
+// handleBecomeLeader dispatches CommandReconnect to every steward whose session
+// was registered to departedNodeID so they re-establish their ControlChannel
+// against the new leader. Runs in a goroutine to avoid blocking the Raft loop.
+func (m *Manager) handleBecomeLeader(ctx context.Context, departedNodeID string) {
+	if departedNodeID == "" {
+		return
+	}
+
+	m.mu.RLock()
+	cp := m.controlPlaneProvider
+	rc := m.raftConsensus
+	signer := m.signer
+	m.mu.RUnlock()
+
+	if cp == nil || rc == nil {
+		return
+	}
+
+	stewardIDs := rc.GetSessionsForNode(departedNodeID)
+	m.logger.Info("Became leader, dispatching reconnect to orphaned stewards",
+		"departed_node_id", logging.SanitizeLogValue(departedNodeID),
+		"steward_count", len(stewardIDs))
+
+	for _, stewardID := range stewardIDs {
+		cmd := &cptypes.SignedCommand{
+			Command: cptypes.Command{
+				ID:        uuid.New().String(),
+				Type:      cptypes.CommandReconnect,
+				StewardID: stewardID,
+				Timestamp: time.Now(),
+			},
+		}
+		if signer != nil {
+			signingBytes, err := cptypes.CommandSigningBytes(&cmd.Command, nil)
+			if err != nil {
+				m.logger.Warn("Failed to compute signing bytes for reconnect command",
+					"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+				continue
+			}
+			sig, err := signer.Sign(signingBytes)
+			if err != nil {
+				m.logger.Warn("Failed to sign reconnect command",
+					"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+				continue
+			}
+			cmd.Signature = sig
+		}
+		if err := cp.SendCommand(ctx, cmd); err != nil {
+			m.logger.Warn("Failed to send reconnect command to orphaned steward",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", err)
+		} else {
+			m.logger.Info("Dispatched reconnect command to orphaned steward",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"command_id", cmd.Command.ID)
+		}
+	}
 }
 
 // initializeComponents initializes HA components based on deployment mode
