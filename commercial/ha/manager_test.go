@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testing/storage"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
 // TestManager_ConcreteCollaboratorTypes verifies that Manager stores concrete types
@@ -679,4 +680,149 @@ func TestManager_GetCACertPEM_Concurrent(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		<-done
 	}
+}
+
+// noopSender is a minimal registry.MessageSender for tests that only need a non-nil sender.
+type noopSender struct{}
+
+func (noopSender) SendMsg(_ interface{}) error { return nil }
+
+// TestManager_SessionHooks verifies that after Manager.Start() with a real
+// registry.InMemoryRegistry, firing an OnConnect event via registry.Register
+// propagates through the Raft log so raftConsensus.clusterState.Sessions reflects the
+// connected steward (no mocks — real Raft apply path).
+func TestManager_SessionHooks(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	const nodeID = "session-hooks-node"
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeID
+	cfg.Cluster.HeartbeatInterval = 100 * time.Millisecond
+	cfg.Cluster.ElectionTimeout = 1 * time.Second
+	cfg.Cluster.ExpectedSize = 1
+	cfg.Cluster.MinQuorum = 1
+	cfg.Cluster.Discovery.Config = map[string]interface{}{
+		"nodes": []interface{}{
+			map[string]interface{}{
+				"id":      nodeID,
+				"address": "127.0.0.1:0",
+			},
+		},
+	}
+
+	logger := logging.GetLogger()
+	manager, err := NewManager(cfg, logger, storageManager)
+	require.NoError(t, err)
+	require.NotNil(t, manager.raftConsensus)
+
+	t.Cleanup(func() {
+		assert.NoError(t, manager.raftConsensus.Stop())
+	})
+
+	reg := registry.NewRegistry()
+	manager.SetRegistry(reg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	require.NoError(t, manager.Start(ctx))
+	t.Cleanup(func() {
+		assert.NoError(t, manager.Stop(ctx))
+	})
+
+	// Wait for Raft to elect a leader before firing the connect event.
+	require.Eventually(t, func() bool {
+		return manager.raftConsensus.IsLeader()
+	}, 10*time.Second, 50*time.Millisecond, "single-node cluster must elect itself leader")
+
+	// Fire an OnConnect event by registering a steward connection.
+	conn := &registry.StewardConnection{
+		StewardID: "steward-test",
+		Sender:    noopSender{},
+	}
+	require.NoError(t, reg.Register(conn))
+
+	// The hook fires in a goroutine; wait for the Raft apply path to complete.
+	require.Eventually(t, func() bool {
+		manager.raftConsensus.clusterState.mu.RLock()
+		cmd, ok := manager.raftConsensus.clusterState.Sessions["steward-test"]
+		manager.raftConsensus.clusterState.mu.RUnlock()
+		return ok && cmd.Connected
+	}, 5*time.Second, 25*time.Millisecond,
+		"OnConnect hook must propagate through Raft log so clusterState.Sessions[steward-test].Connected == true")
+}
+
+// TestManager_SessionDisconnectHook verifies that the OnDisconnect hook wired in
+// Manager.Start() propagates through the Raft log and removes the session entry from
+// clusterState.Sessions (real Raft apply path — no mocks).
+func TestManager_SessionDisconnectHook(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	const nodeID = "session-disconnect-hooks-node"
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeID
+	cfg.Cluster.HeartbeatInterval = 100 * time.Millisecond
+	cfg.Cluster.ElectionTimeout = 1 * time.Second
+	cfg.Cluster.ExpectedSize = 1
+	cfg.Cluster.MinQuorum = 1
+	cfg.Cluster.Discovery.Config = map[string]interface{}{
+		"nodes": []interface{}{
+			map[string]interface{}{
+				"id":      nodeID,
+				"address": "127.0.0.1:0",
+			},
+		},
+	}
+
+	logger := logging.GetLogger()
+	manager, err := NewManager(cfg, logger, storageManager)
+	require.NoError(t, err)
+	require.NotNil(t, manager.raftConsensus)
+
+	t.Cleanup(func() {
+		assert.NoError(t, manager.raftConsensus.Stop())
+	})
+
+	reg := registry.NewRegistry()
+	manager.SetRegistry(reg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	require.NoError(t, manager.Start(ctx))
+	t.Cleanup(func() {
+		assert.NoError(t, manager.Stop(ctx))
+	})
+
+	require.Eventually(t, func() bool {
+		return manager.raftConsensus.IsLeader()
+	}, 10*time.Second, 50*time.Millisecond, "single-node cluster must elect itself leader")
+
+	// Connect first so there is an entry to disconnect.
+	conn := &registry.StewardConnection{
+		StewardID: "steward-disconnect",
+		Sender:    noopSender{},
+	}
+	require.NoError(t, reg.Register(conn))
+	require.Eventually(t, func() bool {
+		manager.raftConsensus.clusterState.mu.RLock()
+		_, ok := manager.raftConsensus.clusterState.Sessions["steward-disconnect"]
+		manager.raftConsensus.clusterState.mu.RUnlock()
+		return ok
+	}, 5*time.Second, 25*time.Millisecond, "connect must be applied before disconnect is triggered")
+
+	// Trigger the OnDisconnect hook via registry.Unregister.
+	reg.Unregister("steward-disconnect")
+
+	require.Eventually(t, func() bool {
+		manager.raftConsensus.clusterState.mu.RLock()
+		_, ok := manager.raftConsensus.clusterState.Sessions["steward-disconnect"]
+		manager.raftConsensus.clusterState.mu.RUnlock()
+		return !ok
+	}, 5*time.Second, 25*time.Millisecond,
+		"OnDisconnect hook must propagate through Raft log and delete clusterState.Sessions[steward-disconnect]")
 }

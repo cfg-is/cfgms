@@ -311,3 +311,102 @@ func TestRaftConsensus_ProposeRemoveNode_ChannelFull_ReturnsError(t *testing.T) 
 	err = rc.ProposeRemoveNode(99)
 	require.Error(t, err, "ProposeRemoveNode must return an error when confChangeC is full")
 }
+
+// TestRaftConsensus_ProposeSessionUpdate_AppliedViaRaft verifies that
+// ProposeSessionUpdate(connected=true) commits through the Raft log and
+// clusterState.Sessions["steward-1"].Connected becomes true via applySessionUpdate.
+func TestRaftConsensus_ProposeSessionUpdate_AppliedViaRaft(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	nodeInfo := &NodeInfo{
+		ID:      "session-test-node",
+		Address: "127.0.0.1:8111",
+		State:   NodeStateHealthy,
+		Role:    NodeRoleFollower,
+	}
+
+	peers := []raft.Peer{{ID: 1}}
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), logging.GetLogger())
+	require.NoError(t, err)
+	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+
+	require.Eventually(t, func() bool {
+		return rc.IsLeader()
+	}, 10*time.Second, 50*time.Millisecond, "single-node cluster must elect itself leader")
+
+	err = rc.ProposeSessionUpdate("steward-1", "node-1", true)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		rc.clusterState.mu.RLock()
+		cmd, ok := rc.clusterState.Sessions["steward-1"]
+		rc.clusterState.mu.RUnlock()
+		return ok && cmd.Connected
+	}, 5*time.Second, 25*time.Millisecond, "session connect must be committed and applied via the Raft log")
+
+	// Verify all fields are preserved through the apply path.
+	rc.clusterState.mu.RLock()
+	cmd := rc.clusterState.Sessions["steward-1"]
+	rc.clusterState.mu.RUnlock()
+	assert.Equal(t, "steward-1", cmd.StewardID)
+	assert.Equal(t, "node-1", cmd.NodeID)
+	assert.True(t, cmd.Connected)
+	assert.False(t, cmd.Timestamp.IsZero(), "Timestamp must be set")
+}
+
+// TestRaftConsensus_ProposeSessionUpdate_Disconnect_DeletesEntry verifies that
+// ProposeSessionUpdate(connected=false) removes the entry from ClusterState.Sessions
+// after the entry is committed via the Raft log.
+func TestRaftConsensus_ProposeSessionUpdate_Disconnect_DeletesEntry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	nodeInfo := &NodeInfo{ID: "session-disconnect-node", Address: "127.0.0.1:8222", State: NodeStateHealthy, Role: NodeRoleFollower}
+	peers := []raft.Peer{{ID: 1}}
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), logging.GetLogger())
+	require.NoError(t, err)
+	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+
+	require.Eventually(t, func() bool {
+		return rc.IsLeader()
+	}, 10*time.Second, 50*time.Millisecond, "single-node cluster must elect itself leader")
+
+	// First connect, then disconnect.
+	require.NoError(t, rc.ProposeSessionUpdate("steward-2", "node-1", true))
+	require.Eventually(t, func() bool {
+		rc.clusterState.mu.RLock()
+		_, ok := rc.clusterState.Sessions["steward-2"]
+		rc.clusterState.mu.RUnlock()
+		return ok
+	}, 5*time.Second, 25*time.Millisecond, "connect must be applied before disconnect is proposed")
+
+	require.NoError(t, rc.ProposeSessionUpdate("steward-2", "node-1", false))
+	require.Eventually(t, func() bool {
+		rc.clusterState.mu.RLock()
+		_, ok := rc.clusterState.Sessions["steward-2"]
+		rc.clusterState.mu.RUnlock()
+		return !ok
+	}, 5*time.Second, 25*time.Millisecond, "session disconnect must delete the entry via the Raft log")
+}
+
+// TestRaftConsensus_ProposeSessionUpdate_ChannelFull_ReturnsError verifies that
+// ProposeSessionUpdate returns a non-nil error rather than blocking when proposeC is full.
+func TestRaftConsensus_ProposeSessionUpdate_ChannelFull_ReturnsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	nodeInfo := &NodeInfo{ID: "session-full-node", Address: "127.0.0.1:8333"}
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
+	require.NoError(t, err)
+
+	rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+
+	const bufSize = 16
+	for i := 0; i < bufSize; i++ {
+		rc.proposeC <- []byte("fill")
+	}
+
+	err = rc.ProposeSessionUpdate("steward-x", "node-1", true)
+	require.Error(t, err, "ProposeSessionUpdate must return an error when proposeC is full")
+}
