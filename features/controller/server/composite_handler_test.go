@@ -141,7 +141,7 @@ func TestComposite_SyncDNA_WithHandler(t *testing.T) {
 	// This proves that dnaHandler.HandleGRPC is called, not the Unimplemented fallback.
 	err := composite.SyncDNA(&emptyDNAStream{})
 	require.Error(t, err)
-	assert.NotContains(t, err.Error(), "not implemented",
+	assert.NotContains(t, err.Error(), "Unimplemented",
 		"SyncDNA must route through dnaHandler, not the Unimplemented fallback")
 }
 

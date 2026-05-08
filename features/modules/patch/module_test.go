@@ -4,6 +4,9 @@ package patch
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -556,6 +559,10 @@ func TestMockPatchManager(t *testing.T) {
 }
 
 func TestPatchModule_executeScript_logsScript(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "patch-hook.sh")
+	require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0755))
+
 	patchManager := NewMockPatchManager()
 	m, err := NewPatchModule(patchManager)
 	require.NoError(t, err)
@@ -563,12 +570,76 @@ func TestPatchModule_executeScript_logsScript(t *testing.T) {
 	mock := pkgtesting.NewMockLogger(true)
 	require.NoError(t, m.SetLogger(mock))
 
-	err = m.executeScript(context.Background(), "/usr/local/bin/patch-hook.sh")
+	err = m.executeScript(context.Background(), scriptPath)
 	require.NoError(t, err)
 
 	logs := mock.GetLogs("debug")
 	require.NotEmpty(t, logs, "expected debug log from executeScript")
 	assert.Equal(t, "executing script", logs[0].Message)
+}
+
+func TestExecuteScript_RunsRealCommand(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "echo-test.sh")
+	require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\necho hello-from-script\n"), 0755))
+
+	patchManager := NewMockPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	mock := pkgtesting.NewMockLogger(true)
+	require.NoError(t, m.SetLogger(mock))
+
+	err = m.executeScript(context.Background(), scriptPath)
+	require.NoError(t, err)
+
+	// Find the "script completed" log and verify stdout was captured
+	logs := mock.GetLogs("debug")
+	var completedLog *pkgtesting.LogEntry
+	for i := range logs {
+		if logs[i].Message == "script completed" {
+			completedLog = &logs[i]
+			break
+		}
+	}
+	require.NotNil(t, completedLog, "expected 'script completed' log entry")
+
+	// stdout is in Data as key-value pairs: ["script", path, "stdout", output]
+	dataStr := fmt.Sprintf("%v", completedLog.Data)
+	assert.Contains(t, dataStr, "hello-from-script", "stdout should contain the echoed string")
+}
+
+func TestExecuteScript_RejectsRelativePath(t *testing.T) {
+	patchManager := NewMockPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	err = m.executeScript(context.Background(), "relative/path/script.sh")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "absolute")
+}
+
+func TestExecuteScript_RejectsEmptyPath(t *testing.T) {
+	patchManager := NewMockPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	err = m.executeScript(context.Background(), "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty")
+}
+
+func TestExecuteScript_FailedScript(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "fail-script.sh")
+	require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 1\n"), 0755))
+
+	patchManager := NewMockPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	err = m.executeScript(context.Background(), scriptPath)
+	require.Error(t, err, "script with exit code 1 should return error")
 }
 
 func TestPatchModule_DefaultLoggingSupport_embed(t *testing.T) {

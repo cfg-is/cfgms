@@ -3,8 +3,11 @@
 package patch
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -344,16 +347,40 @@ func (m *PatchModule) refreshStatus(ctx context.Context) error {
 	return nil
 }
 
-// executeScript executes a shell script (placeholder implementation)
+// executeScript runs a script file at the given path using os/exec.
+// The path must be absolute; relative paths are rejected to prevent directory
+// traversal when the caller is a privileged patch installer.
 func (m *PatchModule) executeScript(ctx context.Context, script string) error {
-	// In a real implementation, this would execute the script
-	// For now, we'll just validate that it's not empty
 	if strings.TrimSpace(script) == "" {
-		return fmt.Errorf("empty script")
+		return fmt.Errorf("empty script path")
 	}
 
-	// Simulate script execution
-	m.GetEffectiveLogger(logging.NewNoopLogger()).Debug("executing script", "script", logging.SanitizeLogValue(script))
+	scriptPath := filepath.Clean(script)
+	if !filepath.IsAbs(scriptPath) {
+		return fmt.Errorf("script path must be absolute: %s", script)
+	}
+
+	logger := m.GetEffectiveLogger(logging.NewNoopLogger())
+	logger.Debug("executing script", "script", logging.SanitizeLogValue(scriptPath))
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd := exec.CommandContext(ctx, scriptPath) //nolint:gosec // path is cleaned and validated as absolute above
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Run(); err != nil {
+		logger.Warn("script execution failed",
+			"script", logging.SanitizeLogValue(scriptPath),
+			"stderr", logging.SanitizeLogValue(stderrBuf.String()),
+			"error", err,
+		)
+		return fmt.Errorf("script %s failed: %w (stderr: %s)", scriptPath, err, strings.TrimSpace(stderrBuf.String()))
+	}
+
+	logger.Debug("script completed",
+		"script", logging.SanitizeLogValue(scriptPath),
+		"stdout", logging.SanitizeLogValue(stdoutBuf.String()),
+	)
 	return nil
 }
 

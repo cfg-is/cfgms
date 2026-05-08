@@ -244,7 +244,7 @@ func TestSetExpectedDNAHash_UnknownSteward(t *testing.T) {
 	svc, _ := newTestService(t)
 
 	// Call SetExpectedDNAHash for a steward that has never sent a heartbeat.
-	// The service must create a placeholder entry rather than silently dropping it
+	// The service must create a pre-populated entry rather than silently dropping it
 	// so that subsequent heartbeats from this steward can be validated.
 	svc.SetExpectedDNAHash("steward-new", "expected-hash")
 

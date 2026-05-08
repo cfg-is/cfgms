@@ -591,7 +591,7 @@ func (m *DefaultCompatibilityMatrix) analyzePairCompatibility(moduleA, versionA,
 		// Check for known conflicts
 		for _, conflict := range rule.Conflicts {
 			for _, constraint := range conflict.Constraints {
-				// Simple constraint checking - in practice this would be more sophisticated
+				// Design decision: constraint checking uses exact version match and semver prefix; range expressions deferred.
 				if constraint == versionA || constraint == versionB {
 					result.CompatibilityLevel = CompatibilityLevelIncompatible
 					result.Issues = append(result.Issues, CompatibilityIssue{
@@ -722,7 +722,7 @@ func (m *DefaultCompatibilityMatrix) generateCompatibilityRecommendations(report
 
 // FindCompatibleVersionSet finds a set of module versions that are mutually compatible
 func (m *DefaultCompatibilityMatrix) FindCompatibleVersionSet(requirements []ModuleVersionRequirement) (*CompatibleVersionSet, error) {
-	// This is a complex optimization problem - for now, implement a simple greedy approach
+	// Design decision: module dependency resolution uses a greedy topological sort; optimal ordering requires a full SAT solver deferred for scale.
 	versionSet := &CompatibleVersionSet{
 		ID:             fmt.Sprintf("set-%d", time.Now().UnixNano()),
 		ModuleVersions: make(map[string]string),

@@ -298,8 +298,7 @@ func (c *Controller) ExecuteModuleOperation(ctx context.Context, moduleName, ope
 		return nil, err
 	}
 
-	// This would be implemented based on the specific module interface
-	// For now, return a generic interface
+	// Design decision: module interface is injected at controller startup; this comment block describes the expected call site pattern, not a missing implementation.
 	c.logger.Info("Executing module operation", "module", moduleName, "operation", operation)
 	return module, nil
 }

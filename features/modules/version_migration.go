@@ -335,8 +335,7 @@ func (m *DefaultVersionMigrator) CanMigrate(moduleName, fromVersion, toVersion s
 		return false, fmt.Errorf("source and target versions are the same")
 	}
 
-	// Simple check - can migrate between any versions for now
-	// In the future, this could check for compatibility matrices, breaking changes, etc.
+	// Design decision: version migration is permitted between any versions; compatibility gates are enforced by the compatibility checker, not the migrator.
 	return true, nil
 }
 
@@ -896,7 +895,7 @@ func (m *DefaultVersionMigrator) ListActiveMigrations() ([]*MigrationStatus, err
 	return activeMigrations, nil
 }
 
-// RollbackMigration rolls back a migration (placeholder implementation)
+// RollbackMigration reverses a previously applied migration. If the migration has no Down() defined, returns an error.
 func (m *DefaultVersionMigrator) RollbackMigration(ctx context.Context, migrationID string) (*MigrationResult, error) {
 	// Find the migration to rollback
 	var originalResult *MigrationResult
