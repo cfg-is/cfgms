@@ -814,20 +814,16 @@ security-trivy:
 		exit 1; \
 	fi
 	@echo "Running trivy filesystem scan..."
-	@echo "🔍 Vulnerability Scan (Blocking Issues):"
-	@trivy fs . --scanners vuln --format table --severity CRITICAL,HIGH,MEDIUM --skip-dirs .cache --exit-code 1 || { \
-		echo ""; \
-		echo "❌ CRITICAL/HIGH/MEDIUM vulnerabilities found - deployment blocked!"; \
-		echo "   Please update dependencies to fix these security issues."; \
-		echo "   This matches CI/CD severity requirements."; \
-		exit 1; \
+	@bash scripts/security-trivy.sh || { \
+		rc=$$?; \
+		if [ $$rc -eq 2 ]; then \
+			echo ""; \
+			echo "⚠️  Trivy DB download failed — infrastructure issue, not a security finding."; \
+			echo "   Scan skipped; ensure mirror.gcr.io is in the DNS allowlist and re-run."; \
+		else \
+			exit $$rc; \
+		fi; \
 	}
-	@echo "🔍 Complete Security Scan (All Issues):"
-	@trivy fs . --scanners vuln,secret,misconfig --format table --skip-dirs .cache --exit-code 0 || true
-	@echo ""; \
-	echo "✅ Trivy scan completed"; \
-	echo "   Note: Development certificates detected in features/controller/certs/ are expected"; \
-	echo "   Critical/High/Medium vulnerabilities will block deployment (matches CI/CD)"
 
 # Nancy Go dependency vulnerability scanning
 security-deps:
