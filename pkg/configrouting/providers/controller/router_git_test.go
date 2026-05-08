@@ -4,6 +4,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -256,6 +258,167 @@ func TestStoreForSource_ControllerTypeReturnsControllerStore(t *testing.T) {
 
 	store := router.storeForSource(context.Background(), "any-tenant", ctrlSource)
 	assert.Same(t, cs, store, "controller source must route to controllerStore")
+}
+
+// TestSyncTenantWithRemote_NonGitTenantReturnsEmpty verifies that SyncTenantWithRemote
+// returns ("","",nil) for a tenant whose effective source is ConfigSourceTypeController.
+func TestSyncTenantWithRemote_NonGitTenantReturnsEmpty(t *testing.T) {
+	ts := newSimpleTenantStore()
+	ts.add("ctrl-tenant", "", nil)
+
+	flatfileRoot := t.TempDir()
+	cs, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
+	require.NoError(t, err)
+
+	router := NewControllerRouterWithGit(cs, ts, newGitRouterSecretStore(nil), t.TempDir(), logging.NewNoopLogger()).(*controllerRouter)
+
+	prevSHA, newSHA, syncErr := router.SyncTenantWithRemote(context.Background(), "ctrl-tenant")
+	require.NoError(t, syncErr)
+	assert.Empty(t, prevSHA, "non-git tenant must return empty prevSHA")
+	assert.Empty(t, newSHA, "non-git tenant must return empty newSHA")
+}
+
+// TestSyncTenantWithRemote_GitTenantReturnsSHAs verifies that SyncTenantWithRemote returns
+// the SHA before and after the pull for a git-sourced tenant, and that they advance after a
+// new commit is pushed to the remote.
+func TestSyncTenantWithRemote_GitTenantReturnsSHAs(t *testing.T) {
+	remoteDir := createBareRepoForRouterTest(t, map[string][]byte{
+		"configs/default/app.yaml": []byte("version: 1\n"),
+	})
+
+	ts := newSimpleTenantStore()
+	ts.add("git-tenant", "", nil)
+
+	flatfileRoot := t.TempDir()
+	cs, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
+	require.NoError(t, err)
+
+	gitWorkDir := t.TempDir()
+	router := NewControllerRouterWithGit(cs, ts, newGitRouterSecretStore(nil), gitWorkDir, logging.NewNoopLogger()).(*controllerRouter)
+	injectGitSource(router, "git-tenant", pkgconfig.ConfigSourceInfo{
+		Type:    pkgconfig.ConfigSourceTypeGit,
+		URL:     remoteDir,
+		SubPath: "configs",
+	})
+
+	// First call: prevSHA is the initial HEAD (already cloned), newSHA is the same (no new commits yet).
+	prev1, new1, err := router.SyncTenantWithRemote(context.Background(), "git-tenant")
+	require.NoError(t, err)
+	assert.Len(t, prev1, 40, "prevSHA must be a 40-char hex SHA")
+	assert.Equal(t, prev1, new1, "prevSHA and newSHA are equal when there are no new commits")
+
+	// Push a new commit to the remote so the next sync has something to pull.
+	workDir2 := t.TempDir()
+	cloned, cloneErr := gogit.PlainClone(workDir2, false, &gogit.CloneOptions{URL: remoteDir})
+	require.NoError(t, cloneErr)
+	wt, wtErr := cloned.Worktree()
+	require.NoError(t, wtErr)
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir2, "configs", "default"), 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir2, "configs", "default", "app.yaml"), []byte("version: 2\n"), 0600))
+	_, addErr := wt.Add("configs/default/app.yaml")
+	require.NoError(t, addErr)
+	_, commitErr := wt.Commit("bump version", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "t@t.com", When: time.Now()},
+	})
+	require.NoError(t, commitErr)
+	require.NoError(t, cloned.Push(&gogit.PushOptions{RemoteName: "origin"}))
+
+	// Second call: prevSHA is the old HEAD, newSHA is the new HEAD after pull.
+	prev2, new2, err := router.SyncTenantWithRemote(context.Background(), "git-tenant")
+	require.NoError(t, err)
+	assert.Equal(t, new1, prev2, "prevSHA on second call must equal the newSHA from first call")
+	assert.NotEqual(t, prev2, new2, "newSHA must advance after remote receives a new commit")
+	assert.Len(t, new2, 40)
+}
+
+// TestSyncTenantWithRemote_BrokenURLFallsBackToControllerStore verifies the graceful
+// degradation path: when the source URL is updated to a non-existent remote *before* the
+// git store is constructed, storeForSource falls back to controllerStore (clone fails →
+// no GitConfigStore → SyncTenantWithRemote returns ("","",nil), not an error).
+func TestSyncTenantWithRemote_BrokenURLFallsBackToControllerStore(t *testing.T) {
+	remoteDir := createBareRepoForRouterTest(t, map[string][]byte{
+		"configs/default/app.yaml": []byte("v1\n"),
+	})
+
+	ts := newSimpleTenantStore()
+	ts.add("git-tenant", "", nil)
+
+	flatfileRoot := t.TempDir()
+	cs, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
+	require.NoError(t, err)
+
+	gitWorkDir := t.TempDir()
+	router := NewControllerRouterWithGit(cs, ts, newGitRouterSecretStore(nil), gitWorkDir, logging.NewNoopLogger()).(*controllerRouter)
+	injectGitSource(router, "git-tenant", pkgconfig.ConfigSourceInfo{
+		Type:    pkgconfig.ConfigSourceTypeGit,
+		URL:     remoteDir,
+		SubPath: "configs",
+	})
+
+	// Prime the git store so it is cloned.
+	_, _, primeErr := router.SyncTenantWithRemote(context.Background(), "git-tenant")
+	require.NoError(t, primeErr, "initial sync must succeed")
+
+	// Break the remote by pointing the cached source at a non-existent URL.
+	injectGitSource(router, "git-tenant", pkgconfig.ConfigSourceInfo{
+		Type:    pkgconfig.ConfigSourceTypeGit,
+		URL:     remoteDir + "-broken",
+		SubPath: "configs",
+	})
+
+	// The git store cache key changed (URL hash changed) so storeForSource will try to create
+	// a new GitConfigStore pointing at the broken URL — construction will fail (clone error)
+	// and storeForSource falls back to controllerStore, meaning SyncTenantWithRemote returns ("","",nil).
+	// This is the expected graceful-degradation path.
+	prev, newSHA, syncErr := router.SyncTenantWithRemote(context.Background(), "git-tenant")
+	require.NoError(t, syncErr, "broken-URL fallback to controller store must not error")
+	assert.Empty(t, prev)
+	assert.Empty(t, newSHA)
+}
+
+// TestSyncTenantWithRemote_PullErrorPropagatesFromBrokenRemote verifies that when the
+// already-cached git store has its remote URL corrupted in .git/config, the next call
+// to SyncTenantWithRemote propagates the pull error rather than silently swallowing it.
+// This is distinct from BrokenURLFallsBackToControllerStore, which tests a broken URL
+// at construction time — here the git store is already cached so the pull error surfaces.
+func TestSyncTenantWithRemote_PullErrorPropagatesFromBrokenRemote(t *testing.T) {
+	remoteDir := createBareRepoForRouterTest(t, map[string][]byte{
+		"configs/default/app.yaml": []byte("v1\n"),
+	})
+
+	ts := newSimpleTenantStore()
+	ts.add("git-tenant", "", nil)
+
+	flatfileRoot := t.TempDir()
+	cs, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
+	require.NoError(t, err)
+
+	gitWorkDir := t.TempDir()
+	router := NewControllerRouterWithGit(cs, ts, newGitRouterSecretStore(nil), gitWorkDir, logging.NewNoopLogger()).(*controllerRouter)
+	injectGitSource(router, "git-tenant", pkgconfig.ConfigSourceInfo{
+		Type:    pkgconfig.ConfigSourceTypeGit,
+		URL:     remoteDir,
+		SubPath: "configs",
+	})
+
+	// Prime the git store — forces a clone and populates gitStoreCache.
+	_, _, primeErr := router.SyncTenantWithRemote(context.Background(), "git-tenant")
+	require.NoError(t, primeErr, "initial sync must succeed")
+
+	// Locate the cloned repo directory and corrupt its remote URL so the next pull fails.
+	urlHash := fmt.Sprintf("%x", sha256.Sum256([]byte(remoteDir)))
+	repoDir := filepath.Join(gitWorkDir, "git-tenant", urlHash)
+	repo, openErr := gogit.PlainOpen(repoDir)
+	require.NoError(t, openErr, "must be able to open the cloned repo")
+	repoCfg, cfgErr := repo.Config()
+	require.NoError(t, cfgErr)
+	repoCfg.Remotes["origin"].URLs = []string{"/nonexistent/broken/remote"}
+	require.NoError(t, repo.SetConfig(repoCfg))
+
+	// SyncTenantWithRemote must propagate the pull error — the cached git store is used
+	// directly (no fallback), so the broken remote surfaces as a returned error.
+	_, _, syncErr := router.SyncTenantWithRemote(context.Background(), "git-tenant")
+	assert.Error(t, syncErr, "sync must return an error when the cached git store's remote is broken")
 }
 
 // Compile-time check: business.TenantStore is satisfied by simpleTenantStore.

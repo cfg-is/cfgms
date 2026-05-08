@@ -141,6 +141,23 @@ func (s *GitConfigStore) SyncWithRemote(ctx context.Context) (string, error) {
 	return head.Hash().String(), nil
 }
 
+// GetCurrentSHA returns the HEAD commit SHA of the local clone.
+// Returns an empty string (not an error) when the repository has no commits yet.
+func (s *GitConfigStore) GetCurrentSHA() (string, error) {
+	repo, err := gogit.PlainOpen(s.repoDir)
+	if err != nil {
+		return "", fmt.Errorf("get current SHA: failed to open repo: %w", err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		if errors.Is(err, plumbing.ErrReferenceNotFound) {
+			return "", nil
+		}
+		return "", fmt.Errorf("get current SHA: failed to read HEAD: %w", err)
+	}
+	return head.Hash().String(), nil
+}
+
 // --- cfgconfig.ConfigStore read methods ---
 
 // GetConfig reads the config file at <repoDir>/<subPath>/<namespace>/<name>.yaml.
