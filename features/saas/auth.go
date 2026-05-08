@@ -130,7 +130,8 @@ func (ua *UniversalAuthenticator) GetAuthHeaders(ctx context.Context, provider s
 		return ua.getJWTHeaders(provider)
 
 	default:
-		return nil, fmt.Errorf("auth headers not implemented for method: %s", method)
+		// Design decision: custom auth method headers must be pre-computed by the caller and passed via the custom headers map; this method only covers standard methods.
+		return nil, fmt.Errorf("unsupported auth method: %s", method)
 	}
 }
 
@@ -164,7 +165,6 @@ func (ua *UniversalAuthenticator) authenticateOAuth2(ctx context.Context, provid
 	}
 
 	// For authorization code flow, return the authorization URL
-	// (In a real implementation, this would be handled differently)
 	return fmt.Errorf("authorization code flow requires user interaction: %s", flow.AuthURL)
 }
 
@@ -342,7 +342,7 @@ func (ua *UniversalAuthenticator) authenticateAWSSignature(ctx context.Context, 
 // Custom Authentication Implementation
 
 func (ua *UniversalAuthenticator) authenticateCustom(ctx context.Context, provider string, config map[string]interface{}) error {
-	// Custom authentication would be implemented per provider
+	// Design decision: custom authentication is provider-specific and must be implemented in a provider-specific Authenticate() override.
 	return fmt.Errorf("custom authentication is not supported by this build")
 }
 

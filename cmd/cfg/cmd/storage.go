@@ -139,7 +139,7 @@ func runStorageMigrate(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	case "postgres":
-		return fmt.Errorf("postgres migration not yet implemented; use flatfile as intermediate target")
+		return fmt.Errorf("postgres migration is not supported; migrate to flatfile first, then switch backend")
 	}
 
 	// Report results

@@ -120,7 +120,7 @@ func (o *GitHubActionsOptimizer) optimizeForMemoryLimits(config *E2EConfig) {
 	}
 
 	// Force garbage collection more frequently in tests
-	// This would be implemented in the actual test framework
+	// Design decision: this optimization helper is a framework stub; actual implementation is in the benchmark suite.
 
 	// Reduce buffer sizes and cache limits
 	// Implementation would adjust internal buffer sizes

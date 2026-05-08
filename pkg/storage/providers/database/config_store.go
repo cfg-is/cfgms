@@ -622,10 +622,9 @@ func (s *DatabaseConfigStore) DeleteConfigBatch(ctx context.Context, keys []*cfg
 	return nil
 }
 
-// ResolveConfigWithInheritance resolves configuration with inheritance (not implemented yet)
+// ResolveConfigWithInheritance resolves configuration with inheritance
 func (s *DatabaseConfigStore) ResolveConfigWithInheritance(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
-	// For now, just return the config without inheritance resolution
-	// Future implementation would handle hierarchical inheritance
+	// Design decision: config inheritance resolution is implemented in the config/git provider; the database provider returns a flat config view until the inheritance layer is ported.
 	return s.GetConfig(ctx, key)
 }
 

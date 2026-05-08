@@ -237,14 +237,8 @@ func (a *AdvancedAuthEngine) GetSubjectPermissions(ctx context.Context, subjectI
 	for _, delegation := range delegations {
 		for _, permID := range delegation.PermissionIds {
 			if _, exists := permissionMap[permID]; !exists {
-				// Get the permission details
-				// Note: This would require access to the permission store
-				// For now, create a placeholder permission
-				permissionMap[permID] = &common.Permission{
-					Id:          permID,
-					Name:        fmt.Sprintf("Delegated: %s", permID),
-					Description: fmt.Sprintf("Permission delegated by %s", delegation.DelegatorId),
-				}
+				// Look up permission from store; fall back to constructed permission if not found or on error.
+				permissionMap[permID] = a.getPermissionByID(ctx, permID, delegation.DelegatorId)
 			}
 		}
 	}
@@ -352,6 +346,25 @@ func (a *AdvancedAuthEngine) validateTemporaryPermissionRequest(ctx context.Cont
 	}
 
 	return nil
+}
+
+// getPermissionByID looks up a permission from the store with fallback for delegated (potentially synthetic) permissions.
+// Not-found errors are silenced; other errors are logged and the constructed fallback is returned.
+func (a *AdvancedAuthEngine) getPermissionByID(ctx context.Context, permID string, delegatorID string) *common.Permission {
+	perm, err := a.baseEngine.permissionStore.GetPermission(ctx, permID)
+	if err == nil {
+		return perm
+	}
+	if !isNotFoundError(err) {
+		slog.Warn("permission store lookup failed for delegated permission, using synthetic fallback",
+			"permission_id", permID,
+			"error", err)
+	}
+	return &common.Permission{
+		Id:          permID,
+		Name:        fmt.Sprintf("Delegated: %s", permID),
+		Description: fmt.Sprintf("Permission delegated by %s", delegatorID),
+	}
 }
 
 // TemporaryPermissionRequest represents a request for temporary permission

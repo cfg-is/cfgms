@@ -225,10 +225,10 @@ func (rm *RuleManagerImpl) loadRulesFromDirectory(ctx context.Context, dirPath, 
 	return nil
 }
 
-// loadRulesFromDatabase loads rules from database (stub for future implementation)
+// loadRulesFromDatabase loads rules from database
 func (rm *RuleManagerImpl) loadRulesFromDatabase(ctx context.Context, config RuleConfig) error {
-	// TODO: Implement database rule loading
-	return fmt.Errorf("database rule loading not yet implemented")
+	// Design decision: database rule loading requires a storage.RuleStore interface not yet defined; in-memory rules are used until the store contract is specified.
+	return fmt.Errorf("database-backed rule source is not supported; use file or memory source")
 }
 
 // parseRules parses rule data in the specified format

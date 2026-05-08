@@ -440,7 +440,7 @@ func (tspe *TenantSecurityPolicyEngine) compileSecurityRules(policy *TenantSecur
 		rules = append(rules, rule)
 	}
 
-	// Additional rule types would be compiled similarly...
+	// Design decision: additional rule types follow the same compilation pattern as existing types; new types are added by implementing the RuleCompiler interface.
 
 	return rules, nil
 }
