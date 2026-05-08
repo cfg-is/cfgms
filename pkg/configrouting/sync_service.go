@@ -236,7 +236,7 @@ func (s *SyncService) syncOnce(ctx context.Context, tenantID string, info *pkgco
 			"url", logging.SanitizeLogValue(info.URL),
 			"failure_category", category,
 		)
-		_ = s.auditManager.RecordEvent(ctx, audit.NewEventBuilder().
+		if auditErr := s.auditManager.RecordEvent(ctx, audit.NewEventBuilder().
 			Tenant(tenantID).
 			Type(business.AuditEventConfiguration).
 			Action("config_source_sync_failed").
@@ -244,7 +244,12 @@ func (s *SyncService) syncOnce(ctx context.Context, tenantID string, info *pkgco
 			Resource("config_source", tenantID, tenantID).
 			Result(business.AuditResultError).
 			Detail("failure_category", category).
-			Detail("url", logging.SanitizeLogValue(info.URL)))
+			Detail("url", logging.SanitizeLogValue(info.URL))); auditErr != nil {
+			s.logger.Warn("sync-service: failed to record sync_failed audit event",
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"error_category", "audit_failure",
+			)
+		}
 		return
 	}
 
@@ -252,7 +257,7 @@ func (s *SyncService) syncOnce(ctx context.Context, tenantID string, info *pkgco
 		return // no new commits — nothing to cascade
 	}
 
-	_ = s.auditManager.RecordEvent(ctx, audit.NewEventBuilder().
+	if auditErr := s.auditManager.RecordEvent(ctx, audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(business.AuditEventConfiguration).
 		Action("config_source_sync").
@@ -261,7 +266,12 @@ func (s *SyncService) syncOnce(ctx context.Context, tenantID string, info *pkgco
 		Result(business.AuditResultSuccess).
 		Detail("url", logging.SanitizeLogValue(info.URL)).
 		Detail("previous_sha", prevSHA).
-		Detail("new_sha", newSHA))
+		Detail("new_sha", newSHA)); auditErr != nil {
+		s.logger.Warn("sync-service: failed to record sync audit event",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error_category", "audit_failure",
+		)
+	}
 
 	if err := s.cascadeFn(ctx, tenantID); err != nil {
 		s.logger.Warn("sync-service: cascade recompilation failed",

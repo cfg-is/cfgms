@@ -629,6 +629,58 @@ func TestSyncService_NoNewCommitsSkipsCascade(t *testing.T) {
 	assert.Equal(t, 0, store.count(), "no audit events when already up-to-date")
 }
 
+// TestSyncService_RegisterBeforeRunReturnsError verifies that Register called before Run
+// returns an explicit error so callers know the service is not yet started.
+func TestSyncService_RegisterBeforeRunReturnsError(t *testing.T) {
+	ts := newSyncTestTenantStore()
+	ts.add("root", "", nil)
+	ts.add("tenant1", "root", nil)
+
+	router := newSyncTestRouter()
+	router.setSource("tenant1", gitSource(time.Hour))
+
+	auditMgr, _ := newTestAuditManager(t)
+	svc := NewSyncService(router, ts, auditMgr, logging.NewNoopLogger(), noopCascade, "root")
+
+	// Do NOT call svc.Run — Register must fail.
+	err := svc.Register("tenant1")
+	require.Error(t, err, "Register before Run must return an error")
+	assert.Contains(t, err.Error(), "Register called before Run")
+}
+
+// TestSyncService_SyncOnceWithNonSyncerRouter verifies that syncOnce is a no-op
+// when the router does not implement tenantRemoteSyncer — no audit events, no cascade.
+func TestSyncService_SyncOnceWithNonSyncerRouter(t *testing.T) {
+	ts := newSyncTestTenantStore()
+	ts.add("root", "", nil)
+
+	// nonSyncerRouter wraps ConfigSourceRouter by interface embedding so that
+	// SyncTenantWithRemote is NOT promoted and the type assertion in syncOnce returns false.
+	type nonSyncerRouter struct {
+		configroutingiface.ConfigSourceRouter
+	}
+
+	router := &nonSyncerRouter{ConfigSourceRouter: newSyncTestRouter()}
+
+	var cascadeCalled int64
+	cascadeFn := func(_ context.Context, _ string) error {
+		atomic.AddInt64(&cascadeCalled, 1)
+		return nil
+	}
+
+	auditMgr, store := newTestAuditManager(t)
+	svc := NewSyncService(router, ts, auditMgr, logging.NewNoopLogger(), cascadeFn, "root")
+
+	svc.syncOnce(context.Background(), "tenant1", gitSource(time.Hour))
+
+	flushCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, auditMgr.Flush(flushCtx))
+
+	assert.Equal(t, int64(0), atomic.LoadInt64(&cascadeCalled), "cascade must not be called when router has no syncer")
+	assert.Equal(t, 0, store.count(), "no audit events when router has no syncer")
+}
+
 // TestSyncService_RunIsIdempotent verifies that calling Run twice does not start duplicate goroutines.
 func TestSyncService_RunIsIdempotent(t *testing.T) {
 	ts := newSyncTestTenantStore()

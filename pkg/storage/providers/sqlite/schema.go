@@ -85,6 +85,9 @@ func backfillAuditEntries(ctx context.Context, db *sql.DB) error {
 
 // initializeSchema creates all tables and tracks schema version.
 // It is safe to call multiple times (all statements use IF NOT EXISTS).
+// All DDL statements are executed inside a single transaction to reduce WAL
+// write cycles — particularly important on Windows where each individual
+// transaction requires a full file-lock round-trip via the WAL SHM mechanism.
 func initializeSchema(ctx context.Context, db *sql.DB) error {
 	if err := backfillAuditEntries(ctx, db); err != nil {
 		return err
@@ -381,13 +384,29 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_sessions_expires_at   ON sessions(expires_at)`,
 	}
 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("schema: failed to begin initialization transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
 	for _, stmt := range statements {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("schema statement failed: %w\nSQL: %s", err, stmt)
 		}
 	}
 
-	// Record or verify schema version
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("schema: failed to commit initialization: %w", err)
+	}
+	committed = true
+
+	// Record or verify schema version (runs after DDL is committed).
 	if err := recordSchemaVersion(ctx, db); err != nil {
 		return fmt.Errorf("failed to record schema version: %w", err)
 	}
