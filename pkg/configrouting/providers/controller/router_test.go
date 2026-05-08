@@ -9,12 +9,15 @@ import (
 	"testing"
 	"time"
 
+	"path/filepath"
+
 	"github.com/cfgis/cfgms/pkg/cache"
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	flatfile "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -415,15 +418,34 @@ func (s *callCountingTenantStore) IsTenantAncestor(ctx context.Context, a, d str
 	return s.inner.IsTenantAncestor(ctx, a, d)
 }
 
-// --- integration test: real FlatFileConfigStore + simpleTenantStore across 3-level hierarchy ---
+// newSQLiteTSForIntegration creates a real SQLite-backed TenantStore populated with the given tenants.
+// Used by integration tests to validate the router against the production SQLite component.
+func newSQLiteTSForIntegration(t *testing.T, tenants []*business.TenantData) business.TenantStore {
+	t.Helper()
+	dir := t.TempDir()
+	p := sqlite.NewSQLiteProvider(dir)
+	store, err := p.CreateTenantStore(map[string]interface{}{"path": filepath.Join(dir, "tenants.db")})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	for _, td := range tenants {
+		require.NoError(t, store.CreateTenant(context.Background(), td))
+	}
+	return store
+}
+
+// --- integration test: real FlatFileConfigStore + SQLite TenantStore across 3-level hierarchy ---
 
 func TestIntegration_RouterWith3LevelHierarchy(t *testing.T) {
-	ts := newSimpleTenantStore()
-	ts.add("root", "", map[string]string{
-		pkgconfig.MetaKeyConfigSourceType: string(pkgconfig.ConfigSourceTypeController),
+	ts := newSQLiteTSForIntegration(t, []*business.TenantData{
+		{
+			ID: "root", Name: "root", Status: business.TenantStatusActive,
+			Metadata: map[string]string{
+				pkgconfig.MetaKeyConfigSourceType: string(pkgconfig.ConfigSourceTypeController),
+			},
+		},
+		{ID: "msp", Name: "msp", ParentID: "root", Status: business.TenantStatusActive},
+		{ID: "client", Name: "client", ParentID: "msp", Status: business.TenantStatusActive},
 	})
-	ts.add("msp", "root", nil)
-	ts.add("client", "msp", nil)
 
 	flatfileRoot := t.TempDir()
 	cs, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
@@ -463,9 +485,10 @@ func TestIntegration_RouterWith3LevelHierarchy(t *testing.T) {
 }
 
 func TestIntegration_CrossTenantRejectedRealFlatfileStore(t *testing.T) {
-	ts := newSimpleTenantStore()
-	ts.add("org-a", "", nil)
-	ts.add("org-b", "", nil) // completely separate root — no relationship
+	ts := newSQLiteTSForIntegration(t, []*business.TenantData{
+		{ID: "org-a", Name: "org-a", Status: business.TenantStatusActive},
+		{ID: "org-b", Name: "org-b", Status: business.TenantStatusActive}, // completely separate root — no relationship
+	})
 
 	flatfileRoot := t.TempDir()
 	cs, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
