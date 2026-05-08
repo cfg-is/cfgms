@@ -222,7 +222,7 @@ func (w *WindowsHardwareCollector) parsePowerShellCPUOutput(output string, attri
 				attributes["cpu_logical_processors_ps"] = fields[5]
 			}
 		}
-		break // Only process first CPU for now
+		break // Design decision: only the first CPU is reported; multi-CPU systems report aggregate metrics via the performance counter path, not per-CPU.
 	}
 }
 

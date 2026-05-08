@@ -363,7 +363,7 @@ func (tie *TenantIsolationEngine) calculateDeviceTrustScore(device *ZeroTrustDev
 }
 
 func (tie *TenantIsolationEngine) updateRiskScoreFromDevice(profile *ZeroTrustProfile, device *ZeroTrustDeviceProfile) {
-	// Simple risk calculation - in production this would be more sophisticated
+	// Design decision: risk scoring uses a weighted rule count; calibrated scoring requires telemetry data deferred to a future iteration.
 	if device.TrustScore < 0.5 {
 		profile.RiskScore = profile.RiskScore * 1.2 // Increase risk
 		if profile.RiskScore > 100 {

@@ -503,9 +503,9 @@ func (p *MicrosoftMultiTenantProvider) RawAPI(_ context.Context, _, _ string, _ 
 	return nil, ErrNoTenantSelected
 }
 
-// GetAPISchema returns the Microsoft Graph schema
+// Design decision: GetAPISchema for multi-tenant provider returns ErrNoTenantSelected — schema introspection requires a tenant context. Use RawAPIInTenant instead.
 func (p *MicrosoftMultiTenantProvider) GetAPISchema(ctx context.Context) (*APISchema, error) {
-	return nil, fmt.Errorf("API schema not implemented for multi-tenant provider")
+	return nil, ErrNoTenantSelected
 }
 
 // GetSupportedResources returns supported resource types

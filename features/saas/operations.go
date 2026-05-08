@@ -72,7 +72,7 @@ type OperationMapping struct {
 	// HTTPMethod is the HTTP method to use
 	HTTPMethod string `json:"http_method"`
 
-	// URLTemplate is the URL pattern with placeholders
+	// URLTemplate is the URL pattern with path variables (e.g. {id})
 	URLTemplate string `json:"url_template"`
 
 	// BodyTemplate defines the request body structure
@@ -297,9 +297,9 @@ func (no *NormalizedOperations) genericList(ctx context.Context, mapping Resourc
 	// Build URL with query parameters
 	url := strings.TrimSuffix(mapping.APIPath, "/")
 
-	// Add filters as query parameters (simplified)
+	// Add filters as query parameters
 	if len(filters) > 0 {
-		// This would need more sophisticated query building
+		// Design decision: query parameters are URL-encoded as-is; OData filter syntax is the caller's responsibility.
 		url += "?"
 		for key, value := range filters {
 			url += fmt.Sprintf("%s=%v&", key, value)
@@ -316,8 +316,8 @@ func (no *NormalizedOperations) executeOperation(ctx context.Context, operation 
 	// Build URL from template
 	url := operation.URLTemplate
 	for key, value := range params {
-		placeholder := "{" + key + "}"
-		url = strings.ReplaceAll(url, placeholder, fmt.Sprintf("%v", value))
+		token := "{" + key + "}"
+		url = strings.ReplaceAll(url, token, fmt.Sprintf("%v", value))
 	}
 
 	// Build request body

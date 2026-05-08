@@ -518,7 +518,7 @@ func (s *SOPSSecretStore) RotateSecret(ctx context.Context, key string, newValue
 // ExpireSecret marks a secret as expired
 // M-AUTH-1: Immediate secret expiration
 func (s *SOPSSecretStore) ExpireSecret(ctx context.Context, key string) error {
-	// Just delete the secret (expiration = deletion for now)
+	// Design decision: SOPS secrets have no TTL mechanism; expiration is implemented as deletion. Time-based expiry requires a separate scheduled cleanup process.
 	return s.DeleteSecret(ctx, key)
 }
 

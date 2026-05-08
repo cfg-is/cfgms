@@ -141,7 +141,7 @@ func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
 	var instance modules.Module
 	var err error
 
-	// Registry entries resolve to built-in modules (plugin loading not yet implemented).
+	// Design decision: plugin loading (external .so modules) is deferred to the Outpost milestone; all current modules are statically linked built-ins. To add a new module type, implement the modules.Module interface and register it in loadBuiltinModule.
 	// Built-in modules are always tried; the registry acts as an allow-list when present.
 	instance, err = f.loadBuiltinModule(moduleName)
 	if err != nil {

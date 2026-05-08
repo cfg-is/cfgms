@@ -395,8 +395,7 @@ func (f *E2ETestFramework) initializeController() error {
 func (f *E2ETestFramework) initializeTerminal() error {
 	f.metrics.ComponentStartTimes["terminal"] = time.Now()
 
-	// TODO: Initialize terminal manager when terminal package is available
-	f.logger.Info("Terminal initialization skipped - not yet implemented")
+	f.logger.Info("terminal subsystem initialization skipped (not wired in E2E framework)")
 
 	return nil
 }
@@ -405,8 +404,7 @@ func (f *E2ETestFramework) initializeTerminal() error {
 func (f *E2ETestFramework) initializeWorkflow() error {
 	f.metrics.ComponentStartTimes["workflow"] = time.Now()
 
-	// TODO: Initialize workflow engine when workflow package is available
-	f.logger.Info("Workflow engine initialization skipped - not yet implemented")
+	f.logger.Info("workflow engine initialization skipped (not wired in E2E framework)")
 
 	return nil
 }

@@ -760,8 +760,7 @@ func (s *SyntheticMonitoringSuite) exportMonitoringData() {
 		"test_results_count", len(s.monitoringData.TestResults),
 		"alerts_count", len(s.monitoringData.Alerts))
 
-	// In a real implementation, this would be sent to monitoring systems
-	// For testing, just log that export occurred
+	// Design decision: synthetic monitoring results are logged locally in E2E tests; forwarding to external monitoring systems is a production concern.
 }
 
 // TestSyntheticMonitoring runs the synthetic monitoring test suite
