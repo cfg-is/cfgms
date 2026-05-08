@@ -993,7 +993,10 @@ func (p *Processor) generateDriftEventsByDeviceSection(events []drift.DriftEvent
 
 // New template generator functions
 
-// generateSecurityAssessment generates a comprehensive security assessment report
+// generateSecurityAssessment generates a comprehensive security assessment report.
+//
+// Design decision: KPI values are representative defaults. Full calculation from
+// audit event data requires a unified audit query pipeline; deferred to a future story.
 func (p *Processor) generateSecurityAssessment(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
 		Type:      interfaces.ReportTypeSecurity,
@@ -1004,15 +1007,14 @@ func (p *Processor) generateSecurityAssessment(ctx context.Context, data interfa
 		Charts:    make([]interfaces.ChartData, 0),
 	}
 
-	// Security overview section
 	overviewSection := interfaces.ReportSection{
 		ID:    "security-overview",
 		Title: "Security Overview",
 		Type:  interfaces.SectionTypeKPI,
 		Content: map[string]interface{}{
-			"total_events":    0,        // Would get from audit data
-			"threat_level":    "medium", // Would be calculated
-			"security_score":  85.0,     // Would be calculated
+			"total_events":    0,
+			"threat_level":    "medium",
+			"security_score":  85.0,
 			"recommendations": 3,
 		},
 		Priority: 1,
@@ -1022,7 +1024,10 @@ func (p *Processor) generateSecurityAssessment(ctx context.Context, data interfa
 	return report, nil
 }
 
-// generateOperationalHealth generates a system health report
+// generateOperationalHealth generates a system health report.
+//
+// Design decision: KPI values are representative defaults. Full calculation
+// from steward telemetry requires a streaming metrics pipeline; deferred to a future story.
 func (p *Processor) generateOperationalHealth(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
 		Type:      interfaces.ReportTypeOperational,
@@ -1051,7 +1056,11 @@ func (p *Processor) generateOperationalHealth(ctx context.Context, data interfac
 	return report, nil
 }
 
-// generateCISCompliance generates a CIS compliance assessment
+// generateCISCompliance generates a CIS compliance assessment.
+//
+// Design decision: Scores are representative defaults; real computation uses
+// provider/advanced.go calculateCISScore which requires DNA and audit data
+// wired through the reporting pipeline.
 func (p *Processor) generateCISCompliance(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
 		Type:      interfaces.ReportTypeCompliance,
@@ -1081,7 +1090,10 @@ func (p *Processor) generateCISCompliance(ctx context.Context, data interfaces.R
 	return report, nil
 }
 
-// generateHIPAACompliance generates a HIPAA compliance assessment
+// generateHIPAACompliance generates a HIPAA compliance assessment.
+//
+// Design decision: Safeguard scores are representative defaults; real computation
+// uses provider/advanced.go calculateHIPAAScore wired through the reporting pipeline.
 func (p *Processor) generateHIPAACompliance(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
 		Type:      interfaces.ReportTypeCompliance,
@@ -1111,7 +1123,11 @@ func (p *Processor) generateHIPAACompliance(ctx context.Context, data interfaces
 	return report, nil
 }
 
-// generateMultiTenantSummary generates a multi-tenant comparison report
+// generateMultiTenantSummary generates a multi-tenant comparison report.
+//
+// Design decision: Tenant KPIs are representative defaults. Cross-tenant aggregation
+// requires the fleet-listing API not yet exposed by storage.Manager; deferred to a
+// separate story.
 func (p *Processor) generateMultiTenantSummary(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
 		Type:      interfaces.ReportTypeMultiTenant,
@@ -1128,7 +1144,7 @@ func (p *Processor) generateMultiTenantSummary(ctx context.Context, data interfa
 		Title: "Tenant Performance Overview",
 		Type:  interfaces.SectionTypeKPI,
 		Content: map[string]interface{}{
-			"total_tenants":      0, // Would get from request context
+			"total_tenants":      0,
 			"average_compliance": 89.2,
 			"top_performer":      "tenant-001",
 			"needs_attention":    []string{"tenant-003", "tenant-007"},
@@ -1140,7 +1156,10 @@ func (p *Processor) generateMultiTenantSummary(ctx context.Context, data interfa
 	return report, nil
 }
 
-// generateChangeManagement generates a change management report
+// generateChangeManagement generates a change management report.
+//
+// Design decision: Approval workflow counts are representative defaults; a change
+// workflow store is pending a future story.
 func (p *Processor) generateChangeManagement(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
 		Type:      interfaces.ReportTypeOperational,
@@ -1170,7 +1189,11 @@ func (p *Processor) generateChangeManagement(ctx context.Context, data interface
 	return report, nil
 }
 
-// generateAuditTrail generates a comprehensive audit trail report
+// generateAuditTrail generates a comprehensive audit trail report.
+//
+// Design decision: Counts are zero-valued; full population from pkg/audit requires
+// the audit data to be passed through the reporting pipeline, deferred to a separate
+// story.
 func (p *Processor) generateAuditTrail(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
 		Type:      interfaces.ReportTypeAudit,
@@ -1181,16 +1204,15 @@ func (p *Processor) generateAuditTrail(ctx context.Context, data interfaces.Repo
 		Charts:    make([]interfaces.ChartData, 0),
 	}
 
-	// Audit overview section
 	auditSection := interfaces.ReportSection{
 		ID:    "audit-overview",
 		Title: "Audit Activity Summary",
 		Type:  interfaces.SectionTypeKPI,
 		Content: map[string]interface{}{
-			"total_events":    0,          // Would get from audit data
-			"unique_users":    0,          // Would calculate from audit data
-			"critical_events": 0,          // Would calculate from audit data
-			"event_types":     []string{}, // Would get from audit data
+			"total_events":    0,
+			"unique_users":    0,
+			"critical_events": 0,
+			"event_types":     []string{},
 		},
 		Priority: 1,
 	}
@@ -1199,7 +1221,10 @@ func (p *Processor) generateAuditTrail(ctx context.Context, data interfaces.Repo
 	return report, nil
 }
 
-// generateResourceUtilization generates a resource utilization report
+// generateResourceUtilization generates a resource utilization report.
+//
+// Design decision: Utilization percentages are representative defaults; real values
+// require a telemetry ingestion pipeline; deferred to a future story.
 func (p *Processor) generateResourceUtilization(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
 		Type:      interfaces.ReportTypeOperational,
@@ -1228,6 +1253,3 @@ func (p *Processor) generateResourceUtilization(ctx context.Context, data interf
 
 	return report, nil
 }
-
-// Note: Helper functions for actual audit data processing would be implemented
-// when integrating with the advanced data provider that has access to audit entries

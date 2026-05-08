@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,11 +22,12 @@ import (
 
 // CustomReportBuilder implements the CustomReportBuilder interface
 type CustomReportBuilder struct {
-	dataProvider interfaces.DataProvider
-	exporter     interfaces.Exporter
-	cache        interfaces.ReportCache
-	logger       logging.Logger
-	config       interfaces.CustomReportConfig
+	dataProvider  interfaces.DataProvider
+	exporter      interfaces.Exporter
+	cache         interfaces.ReportCache
+	logger        logging.Logger
+	config        interfaces.CustomReportConfig
+	streamQueries sync.Map // keyed by stream token, stores *interfaces.ProcessedQuery
 }
 
 // NewCustomReportBuilder creates a new custom report builder
@@ -86,6 +88,7 @@ func (b *CustomReportBuilder) CreateCustomReport(ctx context.Context, req interf
 		report.IsStreamed = true
 		report.StreamToken = b.generateStreamToken(req)
 		report.TotalPages = (processedQuery.EstimatedRows + b.config.DefaultPageSize - 1) / b.config.DefaultPageSize
+		b.streamQueries.Store(report.StreamToken, processedQuery)
 		b.logger.Info("Using streaming mode for large dataset",
 			"estimated_rows", processedQuery.EstimatedRows,
 			"total_pages", report.TotalPages,
@@ -201,31 +204,52 @@ func (b *CustomReportBuilder) BuildQuery(query interfaces.CustomQuery) (*interfa
 func (b *CustomReportBuilder) GetReportData(ctx context.Context, pagination interfaces.PaginationRequest) ([]byte, bool, error) {
 	b.logger.Debug("Getting paginated report data", "stream_token", pagination.StreamToken, "page", pagination.Page)
 
-	// Validate stream token
 	if pagination.StreamToken == "" {
 		return nil, false, fmt.Errorf("%w: stream token is required", ErrStreamTokenInvalid)
 	}
 
-	// In a real implementation, you would:
-	// 1. Decode the stream token to get the original query
-	// 2. Execute the query with appropriate LIMIT/OFFSET for the requested page
-	// 3. Return the data and whether there are more pages
+	pageSize := pagination.PageSize
+	if pageSize <= 0 {
+		pageSize = b.config.DefaultPageSize
+	}
 
-	// For now, return mock data
+	var records interface{} = []interface{}{}
+	hasMore := false
+
+	if b.dataProvider != nil {
+		// Look up the original query from the stream token if available
+		var timeRange interfaces.TimeRange
+		if qv, ok := b.streamQueries.Load(pagination.StreamToken); ok {
+			q := qv.(*interfaces.ProcessedQuery)
+			timeRange = q.TimeRange
+		}
+
+		dataQuery := interfaces.DataQuery{
+			TimeRange: timeRange,
+			Limit:     pageSize,
+			Offset:    pagination.Page * pageSize,
+		}
+
+		dnaRecords, err := b.dataProvider.GetDNAData(ctx, dataQuery)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to get data for page %d: %w", pagination.Page, err)
+		}
+
+		records = dnaRecords
+		hasMore = len(dnaRecords) >= pageSize
+	}
+
 	data := map[string]interface{}{
 		"page":      pagination.Page,
-		"page_size": pagination.PageSize,
-		"data":      []interface{}{},
+		"page_size": pageSize,
+		"data":      records,
 		"timestamp": time.Now(),
 	}
 
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to marshal data: %w", err)
+		return nil, false, fmt.Errorf("failed to marshal page data: %w", err)
 	}
-
-	// Mock: assume no more data after page 1
-	hasMore := pagination.Page < 1
 
 	return jsonData, hasMore, nil
 }
@@ -484,25 +508,77 @@ func (b *CustomReportBuilder) generateStreamToken(req interfaces.CustomReportReq
 func (b *CustomReportBuilder) generateReportData(ctx context.Context, report *interfaces.CustomReport, query *interfaces.ProcessedQuery) error {
 	startTime := time.Now()
 
-	// Mock data generation for now
-	// In a real implementation, this would execute the query against data providers
+	if b.dataProvider == nil {
+		report.Data = map[string]interface{}{
+			"results":      []interface{}{},
+			"generated_at": time.Now(),
+		}
+		report.Summary = interfaces.ReportSummary{TrendDirection: interfaces.TrendUnknown}
+		report.DataPoints = 0
+		report.GenerationMS = time.Since(startTime).Milliseconds()
+		return nil
+	}
+
+	dataQuery := interfaces.DataQuery{
+		TimeRange: query.TimeRange,
+		Limit:     query.EstimatedRows,
+	}
+	if query.Pagination != nil && query.Pagination.PageSize > 0 {
+		dataQuery.Limit = query.Pagination.PageSize
+	}
+
+	dnaRecords, err := b.dataProvider.GetDNAData(ctx, dataQuery)
+	if err != nil {
+		return fmt.Errorf("failed to get DNA data: %w", err)
+	}
+
+	driftEvents, err := b.dataProvider.GetDriftEvents(ctx, dataQuery)
+	if err != nil {
+		return fmt.Errorf("failed to get drift events: %w", err)
+	}
+
+	criticalCount := 0
+	for i := range driftEvents {
+		if driftEvents[i].Severity == "critical" {
+			criticalCount++
+		}
+	}
+
+	complianceScore := 100.0
+	if len(driftEvents) > 0 && len(dnaRecords) > 0 {
+		complianceScore = float64(len(dnaRecords)-len(driftEvents)) / float64(len(dnaRecords)) * 100.0
+		if complianceScore < 0 {
+			complianceScore = 0
+		}
+	}
+
+	trendDir := interfaces.TrendStable
+	if len(driftEvents) > 10 {
+		trendDir = interfaces.TrendDeclining
+	} else if len(driftEvents) == 0 {
+		trendDir = interfaces.TrendImproving
+	}
+
+	deviceSet := make(map[string]bool)
+	for _, r := range dnaRecords {
+		deviceSet[r.DeviceID] = true
+	}
+
 	report.Data = map[string]interface{}{
-		"query":        query,
-		"results":      []interface{}{},
+		"dna_records":  len(dnaRecords),
+		"drift_events": len(driftEvents),
 		"generated_at": time.Now(),
 	}
 
 	report.Summary = interfaces.ReportSummary{
-		DevicesAnalyzed:    10,
-		DriftEventsTotal:   5,
-		ComplianceScore:    85.5,
-		CriticalIssues:     2,
-		TrendDirection:     interfaces.TrendStable,
-		KeyInsights:        []string{"System performance is stable", "Compliance has improved"},
-		RecommendedActions: []string{"Review critical issues", "Monitor trends"},
+		DevicesAnalyzed:  len(deviceSet),
+		DriftEventsTotal: len(driftEvents),
+		ComplianceScore:  complianceScore,
+		CriticalIssues:   criticalCount,
+		TrendDirection:   trendDir,
 	}
 
-	report.DataPoints = 100
+	report.DataPoints = len(dnaRecords) + len(driftEvents)
 	report.GenerationMS = time.Since(startTime).Milliseconds()
 
 	b.logger.Info("Generated report data",
