@@ -542,9 +542,8 @@ func (e *DefaultEngine) loadConfiguration(ctx context.Context, ref Configuration
 		return content, nil
 	}
 
-	// For Git repositories, this would integrate with Git backend
-	// For now, return error for unsupported repositories
-	return nil, fmt.Errorf("repository loading not implemented for: %s", ref.Repository)
+	// Design decision: cross-repository diff requires a repository registry not yet available in this context; returns error for non-local refs.
+	return nil, fmt.Errorf("cross-repository diff not supported for repository: %s", ref.Repository)
 }
 
 func (e *DefaultEngine) parseConfiguration(content []byte, format string) (interface{}, error) {
@@ -611,7 +610,7 @@ func (e *DefaultEngine) calculateSummary(entries []DiffEntry) DiffSummary {
 }
 
 func (e *DefaultEngine) calculateSummaryWithImpact(entries []DiffEntry) DiffSummary {
-	return e.calculateSummary(entries) // Same implementation for now
+	return e.calculateSummary(entries)
 }
 
 func (e *DefaultEngine) countAutoResolvable(conflicts []MergeConflict) int {

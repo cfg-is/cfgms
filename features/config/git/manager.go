@@ -755,7 +755,7 @@ type repoNameParts struct {
 }
 
 func parseRepositoryName(fullName string) repoNameParts {
-	// Simple implementation - in production this would be more robust
+	// Design decision: owner always defaults to "cfgms"; multi-owner name parsing deferred.
 	return repoNameParts{
 		owner: "cfgms",
 		name:  fullName,

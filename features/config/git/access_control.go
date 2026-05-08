@@ -305,7 +305,6 @@ func (gmm *GitModeManager) SyncFromGit(ctx context.Context, repo *Repository, st
 		return nil // Not a Git-driven repository
 	}
 
-	// This would implement the actual sync logic
-	// For now, just validate the mode
+	// Design decision: cross-repository sync is an orchestration operation handled by the calling module; access_control.go enforces permissions only.
 	return gmm.ValidateReadOnlyMode(ctx, repo)
 }

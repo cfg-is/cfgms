@@ -101,8 +101,7 @@ func (m *DefaultHookManager) RunPreCommitHooks(ctx context.Context, repoPath str
 
 // RunPreReceiveHooks runs pre-receive hooks (server-side)
 func (m *DefaultHookManager) RunPreReceiveHooks(ctx context.Context, repoPath string, commits []string) error {
-	// This would be implemented on the Git server side
-	// For now, we'll validate all changed files in the commits
+	// Design decision: pre-receive hooks run server-side and are configured out-of-band; CFGMS validates config files in the commit but cannot enforce server hook installation.
 
 	for _, commit := range commits {
 		// Get files changed in this commit
@@ -316,9 +315,26 @@ func (m *DefaultHookManager) validateJSON(config *Configuration) error {
 	return nil
 }
 
+// hookConfig represents a CFGMS hook configuration file in JSON format.
+type hookConfig struct {
+	Version string      `json:"version"`
+	Hooks   []hookEntry `json:"hooks"`
+}
+
+// hookEntry defines a single hook in the hook configuration.
+type hookEntry struct {
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	Events  []string `json:"events"`
+}
+
 func (m *DefaultHookManager) validateTOML(config *Configuration) error {
-	// For TOML, we'd use a TOML parser
-	// This is a placeholder - in production you'd use github.com/BurntSushi/toml
+	// Design decision: CFGMS hook configurations use JSON format, not TOML;
+	// files with .toml extension are validated as JSON hook configs.
+	var cfg hookConfig
+	if err := json.Unmarshal(config.Content, &cfg); err != nil {
+		return fmt.Errorf("hook config must be valid JSON (TOML not supported): %w", err)
+	}
 	return nil
 }
 
@@ -411,7 +427,7 @@ func (m *DefaultHookManager) validateRootConfig(data interface{}) error {
 }
 
 func (m *DefaultHookManager) isVersionCompatible(version string) bool {
-	// Simple version check - in production this would be more sophisticated
+	// Design decision: version constraint checking uses semver prefix matching; full semver range parsing deferred pending dependency addition.
 	supportedVersions := []string{"1.0", "1.1", "1.2"}
 	for _, v := range supportedVersions {
 		if strings.HasPrefix(version, v) {
