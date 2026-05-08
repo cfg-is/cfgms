@@ -10,10 +10,11 @@ The file module manages file content, permissions, and ownership on managed endp
 |-------|------|----------|-------------|
 | `state` | string | No | `"present"` (default) or `"absent"` |
 | `content` | string | Yes (when present) | File content |
-| `permissions` | int | No | Unix permission bits (e.g. `0644`). Not supported on Windows. |
+| `permissions` | int | No | Unix permission bits (e.g. `0644`). **Not supported on Windows** — mutually exclusive with `windows_acl`. |
 | `owner` | string | No | File owner username |
 | `group` | string | No | File group name |
 | `allowed_base_path` | string | **Yes** | Absolute path that constrains all filesystem operations |
+| `windows_acl` | object | No | Windows NTFS ACL (owner + entries). **Windows only** — mutually exclusive with `permissions`. See [Windows ACL](#windows-acl). |
 
 ## `allowed_base_path`
 
@@ -88,6 +89,57 @@ modules:
 ```
 
 **Expected Outcome:** `/etc/myapp/settings.yaml` is written with the provided content, mode `0640`, owned by `myapp:myapp`. Any attempt to resolve `path` to a location outside `/etc/myapp` (for example via `../` sequences) is rejected before any OS call is made.
+
+## Windows ACL
+
+The `windows_acl` field declares NTFS access control for the file on Windows endpoints. It is mutually exclusive with `permissions` — you must use one or the other, not both. On non-Windows platforms, specifying `windows_acl` is a validation error.
+
+### Schema
+
+```yaml
+windows_acl:
+  owner: "DOMAIN\\User"          # optional; leave blank to keep the existing owner
+  entries:
+    - principal: "DOMAIN\\User"  # account name accepted by Windows LookupAccountName
+      access: "FullControl"      # FullControl | ReadAndExecute | Modify | Write | Read
+```
+
+### Access levels
+
+| Value | Effective Windows rights |
+|-------|--------------------------|
+| `FullControl` | `GENERIC_ALL` |
+| `ReadAndExecute` | `GENERIC_READ \| GENERIC_EXECUTE` |
+| `Modify` | `GENERIC_WRITE \| GENERIC_READ \| GENERIC_EXECUTE` |
+| `Write` | `GENERIC_WRITE` |
+| `Read` | `GENERIC_READ` |
+
+### Example: Set Windows ACL on a config file
+
+**Use Case:** Restrict a sensitive configuration file to Administrators only on a Windows endpoint.
+
+**Configuration:**
+
+```yaml
+modules:
+  app_config_windows:
+    type: file
+    config:
+      allowed_base_path: C:\ProgramData\MyApp
+      path: C:\ProgramData\MyApp\settings.json
+      state: present
+      content: |
+        {"log_level": "info"}
+      windows_acl:
+        owner: "BUILTIN\\Administrators"
+        entries:
+          - principal: "BUILTIN\\Administrators"
+            access: FullControl
+          - principal: "NT AUTHORITY\\SYSTEM"
+            access: FullControl
+```
+
+**Expected Outcome:** `C:\ProgramData\MyApp\settings.json` is created with the specified content. The DACL is set to grant `FullControl` to `BUILTIN\Administrators` and `NT AUTHORITY\SYSTEM`. No Unix `permissions` field is needed or permitted alongside `windows_acl`. Subsequent `Get()` calls return the actual NTFS ACL so the verifier can detect drift.
 
 ## Migration
 

@@ -185,12 +185,13 @@ func TestDirectoryModule(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		resourceID string
-		configData string
-		setup      func() error
-		cleanup    func() error
-		wantErr    bool
+		name          string
+		resourceID    string
+		configData    string
+		setup         func() error
+		cleanup       func() error
+		wantErr       bool
+		skipOnWindows bool
 	}{
 		{
 			name:       "Create new directory",
@@ -199,10 +200,11 @@ func TestDirectoryModule(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "Create directory with ownership",
-			resourceID: filepath.Join(tempDir, "owned-dir"),
-			configData: testDirConfigYAML(tempDir, filepath.Join(tempDir, "owned-dir"), currentUser.Username, currentGroup.Name, ""),
-			wantErr:    false,
+			name:          "Create directory with ownership",
+			resourceID:    filepath.Join(tempDir, "owned-dir"),
+			configData:    testDirConfigYAML(tempDir, filepath.Join(tempDir, "owned-dir"), currentUser.Username, currentGroup.Name, ""),
+			wantErr:       false,
+			skipOnWindows: true, // os.Chown is not supported on Windows
 		},
 		{
 			name:       "Invalid path",
@@ -236,9 +238,8 @@ func TestDirectoryModule(t *testing.T) {
 			// configuredBasePath across subtests.
 			module := New()
 
-			// Skip ownership tests on Windows (chown not supported)
-			if runtime.GOOS == "windows" && tt.name == "Create directory with ownership" {
-				t.Skip("Skipping ownership test on Windows - chown not supported")
+			if tt.skipOnWindows && runtime.GOOS == "windows" {
+				t.Skip("not supported on Windows")
 			}
 
 			if tt.setup != nil {
@@ -281,7 +282,14 @@ func TestDirectoryModule(t *testing.T) {
 					return
 				}
 				if config == nil {
-					t.Error("Get() returned nil config")
+					t.Fatal("Get() returned nil config")
+				}
+				gotMap := config.AsMap()
+				if gotMap["state"] != "present" {
+					t.Errorf("Get() state = %v, want %q", gotMap["state"], "present")
+				}
+				if gotMap["path"] != tt.resourceID {
+					t.Errorf("Get() path = %v, want %v", gotMap["path"], tt.resourceID)
 				}
 			}
 		})
@@ -337,6 +345,25 @@ func TestDirectoryModule_EdgeCases(t *testing.T) {
 			t.Errorf("Set() with non-existent parent and recursive=true error = %v", err)
 		}
 	})
+}
+
+// TestDirectoryConfig_Validate_WindowsACL_MutualExclusion verifies that specifying
+// both permissions and windows_acl in the same config returns a validation error.
+func TestDirectoryConfig_Validate_WindowsACL_MutualExclusion(t *testing.T) {
+	cfg := &directoryConfig{
+		AllowedBasePath: "/tmp",
+		Path:            "/tmp/testdir",
+		Permissions:     0755,
+		WindowsACL: &modules.WindowsACL{
+			Entries: []modules.ACLEntry{
+				{Principal: `BUILTIN\Administrators`, Access: "FullControl"},
+			},
+		},
+	}
+	err := cfg.validate()
+	if err == nil {
+		t.Fatal("validate() with both permissions and windows_acl should return an error")
+	}
 }
 
 func TestDirectoryModule_PermissionsRejectedOnWindows(t *testing.T) {

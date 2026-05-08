@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 
 	"gopkg.in/yaml.v3"
@@ -50,13 +51,14 @@ func (m *directoryModule) Configure(config modules.ConfigState) error {
 
 // directoryConfig represents the configuration for a directory
 type directoryConfig struct {
-	AllowedBasePath string `yaml:"allowed_base_path"`     // Security boundary for all OS calls
-	State           string `yaml:"state"`                 // "present" or "absent"
-	Path            string `yaml:"path"`                  // Directory path
-	Permissions     int    `yaml:"permissions,omitempty"` // Directory permissions (e.g., 0755)
-	Owner           string `yaml:"owner,omitempty"`       // Directory owner
-	Group           string `yaml:"group,omitempty"`       // Directory group
-	Recursive       bool   `yaml:"recursive,omitempty"`   // Create parent directories if needed
+	AllowedBasePath string              `yaml:"allowed_base_path"`     // Security boundary for all OS calls
+	State           string              `yaml:"state"`                 // "present" or "absent"
+	Path            string              `yaml:"path"`                  // Directory path
+	Permissions     int                 `yaml:"permissions,omitempty"` // Directory permissions (e.g., 0755); mutually exclusive with WindowsACL
+	Owner           string              `yaml:"owner,omitempty"`       // Directory owner
+	Group           string              `yaml:"group,omitempty"`       // Directory group
+	Recursive       bool                `yaml:"recursive,omitempty"`   // Create parent directories if needed
+	WindowsACL      *modules.WindowsACL `yaml:"windows_acl,omitempty"` // Windows NTFS ACL; mutually exclusive with Permissions; Windows only
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
@@ -88,6 +90,9 @@ func (c *directoryConfig) AsMap() map[string]interface{} {
 	}
 	if c.Recursive {
 		result["recursive"] = c.Recursive
+	}
+	if c.WindowsACL != nil {
+		result["windows_acl"] = c.WindowsACL
 	}
 
 	return result
@@ -123,6 +128,10 @@ func (c *directoryConfig) GetManagedFields() []string {
 		fields = append(fields, "group")
 	}
 
+	if c.WindowsACL != nil && runtime.GOOS == "windows" {
+		fields = append(fields, "windows_acl")
+	}
+
 	return fields
 }
 
@@ -132,6 +141,16 @@ func (c *directoryConfig) validate() error {
 	// security boundary error first.
 	if c.AllowedBasePath == "" || !filepath.IsAbs(c.AllowedBasePath) {
 		return ErrAllowedBasePathRequired
+	}
+
+	// windows_acl and permissions are mutually exclusive.
+	if c.Permissions != 0 && c.WindowsACL != nil {
+		return fmt.Errorf("windows_acl and permissions are mutually exclusive; use windows_acl on Windows or permissions on Unix")
+	}
+
+	// windows_acl is only valid on Windows.
+	if c.WindowsACL != nil && runtime.GOOS != "windows" {
+		return fmt.Errorf("windows_acl is only supported on Windows (GOOS=%s); use the permissions field instead", runtime.GOOS)
 	}
 
 	// Validate path is always required
@@ -213,14 +232,18 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 	if recursive, ok := configMap["recursive"].(bool); ok {
 		dirConfig.Recursive = recursive
 	}
+	if aclData, ok := configMap["windows_acl"].(*modules.WindowsACL); ok {
+		dirConfig.WindowsACL = aclData
+	}
 
 	// Step 2: Platform-specific permissions handling (must remain before validate)
 	if !platformSupportsPermissions() && dirConfig.Permissions != 0 {
 		return fmt.Errorf("unix-style permissions are not supported on this platform (NTFS uses ACLs); remove the permissions field from your configuration")
 	}
 
-	// Apply default permissions if not specified
-	if dirConfig.Permissions == 0 {
+	// Apply default permissions only when windows_acl is not set; avoids a false mutual-exclusion
+	// error in validate() when the operator omits both fields.
+	if dirConfig.Permissions == 0 && dirConfig.WindowsACL == nil {
 		dirConfig.Permissions = int(defaultDirectoryMode())
 	}
 
@@ -341,6 +364,20 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		}
 	}
 
+	// Apply Windows ACL if specified (platform stub returns nil on non-Windows).
+	if dirConfig.WindowsACL != nil {
+		if err := setDirectoryACL(cleanPath, dirConfig.WindowsACL); err != nil {
+			logger.ErrorCtx(ctx, "Failed to set Windows ACL",
+				"operation", "directory_set",
+				"resource_id", resourceID,
+				"tenant_id", tenantID,
+				"resource_type", "directory",
+				"error_code", "WINDOWS_ACL_FAILED",
+				"error_details", err.Error())
+			return fmt.Errorf("setDirectoryACL: %w", err)
+		}
+	}
+
 	logger.InfoCtx(ctx, "Directory configuration completed successfully",
 		"operation", "directory_set",
 		"resource_id", resourceID,
@@ -392,6 +429,12 @@ func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.C
 		return nil, fmt.Errorf("failed to get file ownership: %w", err)
 	}
 
+	// Read Windows ACL; nil on non-Windows platforms.
+	aclData, err := getDirectoryACL(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("getDirectoryACL: %w", err)
+	}
+
 	config := &directoryConfig{
 		AllowedBasePath: m.configuredBasePath,
 		State:           "present",
@@ -399,6 +442,7 @@ func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.C
 		Permissions:     perms,
 		Owner:           ownerName,
 		Group:           groupName,
+		WindowsACL:      aclData,
 	}
 
 	return config, nil

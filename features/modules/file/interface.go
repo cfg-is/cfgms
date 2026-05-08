@@ -3,7 +3,9 @@
 package file
 
 import (
+	"fmt"
 	"path/filepath"
+	"runtime"
 
 	"gopkg.in/yaml.v3"
 
@@ -12,12 +14,13 @@ import (
 
 // FileConfig represents the configuration for a file resource
 type FileConfig struct {
-	State           string `yaml:"state"`                 // "present" or "absent"
-	Content         string `yaml:"content,omitempty"`     // File content (required when state is "present")
-	Permissions     int    `yaml:"permissions,omitempty"` // File permissions (e.g., 0644)
-	Owner           string `yaml:"owner,omitempty"`       // File owner
-	Group           string `yaml:"group,omitempty"`       // File group
-	AllowedBasePath string `yaml:"allowed_base_path"`     // Required: absolute base path constraining all OS calls
+	State           string              `yaml:"state"`                 // "present" or "absent"
+	Content         string              `yaml:"content,omitempty"`     // File content (required when state is "present")
+	Permissions     int                 `yaml:"permissions,omitempty"` // File permissions (e.g., 0644); mutually exclusive with WindowsACL
+	Owner           string              `yaml:"owner,omitempty"`       // File owner
+	Group           string              `yaml:"group,omitempty"`       // File group
+	AllowedBasePath string              `yaml:"allowed_base_path"`     // Required: absolute base path constraining all OS calls
+	WindowsACL      *modules.WindowsACL `yaml:"windows_acl,omitempty"` // Windows NTFS ACL; mutually exclusive with Permissions; Windows only
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
@@ -47,6 +50,10 @@ func (c *FileConfig) AsMap() map[string]interface{} {
 		result["group"] = c.Group
 	}
 
+	if c.WindowsACL != nil {
+		result["windows_acl"] = c.WindowsACL
+	}
+
 	return result
 }
 
@@ -65,6 +72,16 @@ func (c *FileConfig) Validate() error {
 	// AllowedBasePath is required and must be an absolute path for all states.
 	if c.AllowedBasePath == "" || !filepath.IsAbs(c.AllowedBasePath) {
 		return ErrAllowedBasePathRequired
+	}
+
+	// windows_acl and permissions are mutually exclusive.
+	if c.Permissions != 0 && c.WindowsACL != nil {
+		return fmt.Errorf("windows_acl and permissions are mutually exclusive; use windows_acl on Windows or permissions on Unix")
+	}
+
+	// windows_acl is only valid on Windows.
+	if c.WindowsACL != nil && runtime.GOOS != "windows" {
+		return fmt.Errorf("windows_acl is only supported on Windows (GOOS=%s); use the permissions field instead", runtime.GOOS)
 	}
 
 	// State "absent" doesn't require content or permissions
@@ -102,6 +119,10 @@ func (c *FileConfig) GetManagedFields() []string {
 	}
 	if c.Group != "" {
 		fields = append(fields, "group")
+	}
+
+	if c.WindowsACL != nil && runtime.GOOS == "windows" {
+		fields = append(fields, "windows_acl")
 	}
 
 	return fields
