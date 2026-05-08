@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -427,13 +428,16 @@ func (s *GitConfigStore) DeleteConfigBatch(_ context.Context, _ []*cfgconfig.Con
 
 // keyToRelativePath builds the relative path within the repo for a ConfigKey.
 // Result: <subPath>/<namespace>/<name>.yaml (subPath may be empty)
+// Uses path.Join (always forward slashes) so the result is valid for both git
+// tree operations (go-git always uses forward slashes) and security.ValidateAndCleanPath
+// (filepath.Clean normalises forward slashes on all platforms).
 func (s *GitConfigStore) keyToRelativePath(key *cfgconfig.ConfigKey) (string, error) {
 	parts := []string{}
 	if s.source.SubPath != "" {
 		parts = append(parts, s.source.SubPath)
 	}
 	parts = append(parts, key.Namespace, key.Name+".yaml")
-	return filepath.Join(parts...), nil
+	return path.Join(parts...), nil
 }
 
 // keyToPath builds and validates the absolute filesystem path for a ConfigKey.

@@ -73,10 +73,12 @@ func (s *gitRouterMemorySecretStore) GetSecretMetadata(_ context.Context, _ stri
 func (s *gitRouterMemorySecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
 	return nil
 }
-func (s *gitRouterMemorySecretStore) RotateSecret(_ context.Context, _ string, _ string) error { return nil }
-func (s *gitRouterMemorySecretStore) ExpireSecret(_ context.Context, _ string) error           { return nil }
-func (s *gitRouterMemorySecretStore) HealthCheck(_ context.Context) error                      { return nil }
-func (s *gitRouterMemorySecretStore) Close() error                                             { return nil }
+func (s *gitRouterMemorySecretStore) RotateSecret(_ context.Context, _ string, _ string) error {
+	return nil
+}
+func (s *gitRouterMemorySecretStore) ExpireSecret(_ context.Context, _ string) error { return nil }
+func (s *gitRouterMemorySecretStore) HealthCheck(_ context.Context) error            { return nil }
+func (s *gitRouterMemorySecretStore) Close() error                                   { return nil }
 
 // createBareRepoForRouterTest creates a bare git repo with the given files.
 func createBareRepoForRouterTest(t *testing.T, files map[string][]byte) string {
