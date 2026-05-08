@@ -14,6 +14,7 @@ import (
 	"github.com/cfgis/cfgms/features/config/rollback"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/config"
+	controllerrouter "github.com/cfgis/cfgms/pkg/configrouting/providers/controller"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -31,12 +32,19 @@ type ConfigurationServiceV2 struct {
 	storageManager      *interfaces.StorageManager
 }
 
-// NewConfigurationServiceV2 creates a new Epic 6 compliant Configuration service
+// NewConfigurationServiceV2 creates a new Epic 6 compliant Configuration service.
+// A ConfigSourceRouter wrapping the storage manager's config and tenant stores is
+// constructed here and injected into the InheritanceResolver so that SnapshotSources
+// is called once per cascade (atomic source resolution, per story #1393).
 func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces.StorageManager, controllerSvc *ControllerService) *ConfigurationServiceV2 {
+	router := controllerrouter.NewControllerRouter(
+		storageManager.GetConfigStore(),
+		storageManager.GetTenantStore(),
+	)
 	return &ConfigurationServiceV2{
 		logger:              logger,
 		configManager:       config.NewManagerWithStorageManager(storageManager),
-		inheritanceResolver: config.NewInheritanceResolverWithStorageManager(storageManager),
+		inheritanceResolver: config.NewInheritanceResolver(router, storageManager.GetClientTenantStore(), storageManager.GetTenantStore()),
 		validationManager:   config.NewValidationManager(storageManager.GetConfigStore()),
 		controllerSvc:       controllerSvc,
 		storageManager:      storageManager,
