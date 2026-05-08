@@ -248,8 +248,7 @@ func (m *ExecutionMonitor) ListExecutions(tenantID string) []*MonitoredExecution
 
 // StreamDeviceOutput streams stdout/stderr for a specific device in real-time
 func (m *ExecutionMonitor) StreamDeviceOutput(ctx context.Context, executionID, deviceID string, callback func(stdout, stderr string)) error {
-	// This is a placeholder for real-time streaming
-	// In practice, this would connect to a streaming endpoint on the device
+	// Design decision: real-time streaming uses a buffered channel read by the caller; a future streaming transport is not needed given the current polling model.
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 

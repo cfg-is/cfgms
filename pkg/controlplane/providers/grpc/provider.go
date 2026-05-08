@@ -82,6 +82,7 @@ type Provider struct {
 	grpcClient    transportpb.StewardTransportClient
 	controlStream grpc.BidiStreamingClient[transportpb.ControlMessage, transportpb.ControlMessage]
 	sendMu        sync.Mutex // serializes writes to controlStream
+	reconnectMu   sync.Mutex // ensures only one reconnectLoop runs at a time
 	connState     atomic.Int32
 	onStateChange func(ConnectionState)
 
@@ -447,7 +448,15 @@ func (p *Provider) clientReceiveLoop() {
 
 // reconnectLoop attempts to re-establish the ControlChannel with exponential backoff.
 // It runs until either a connection is established or the provider context is cancelled.
+// TryLock ensures only one reconnectLoop is active at a time: when Reconnect() closes
+// the connection, both the new goroutine and the existing clientReceiveLoop race to call
+// reconnectLoop; the loser returns immediately, letting the winner own reconnection.
 func (p *Provider) reconnectLoop() {
+	if !p.reconnectMu.TryLock() {
+		return
+	}
+	defer p.reconnectMu.Unlock()
+
 	bo := defaultBackoff()
 	if p.backoffOverride != nil {
 		bo = &backoff{

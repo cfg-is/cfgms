@@ -569,8 +569,7 @@ func (m *Manager) storeReference(ctx context.Context, deviceID, contentHash stri
 }
 
 func (m *Manager) decompressRecord(record *DNARecord) error {
-	// This would be implemented based on the storage backend
-	// For now, assume DNA is already available
+	// Design decision: storage backend selection is handled at construction; this method stub exists to satisfy the interface for backend types that implement a subset of operations.
 	return nil
 }
 

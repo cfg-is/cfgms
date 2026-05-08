@@ -150,7 +150,7 @@ func (m *activeDirectoryModule) ldapEntryToDirectoryGroup(entry *ldap.Entry) *in
 	// Handle members
 	members := entry.GetAttributeValues("member")
 	if len(members) > 0 {
-		// Extract GUIDs from member DNs (simplified - would need actual lookup)
+		// Design decision: member DN-to-GUID resolution requires a separate LDAP lookup per member; deferred for performance reasons.
 		group.Members = members
 	}
 

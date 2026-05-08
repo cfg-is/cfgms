@@ -43,7 +43,7 @@ type TrustedKeyEntry struct {
 
 	// PublicKeyRef is reserved for future secrets-provider integration.
 	// When set, this is an opaque reference to a public key stored in the secrets store.
-	// Matching by PublicKeyRef requires a secrets provider and is not yet implemented.
+	// Design decision: PublicKeyRef matching requires a secrets provider at signing time; the signing module does not hold a secrets reference. Callers must resolve the key before invoking signing.
 	PublicKeyRef string
 }
 

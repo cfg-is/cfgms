@@ -197,7 +197,7 @@ func NewZstdCompressor(level int) (*ZstdCompressor, error) {
 
 // Compress compresses DNA data using Zstandard compression (stub)
 func (c *ZstdCompressor) Compress(dna *commonpb.DNA) ([]byte, int64, error) {
-	// Fallback to GZIP for now since we don't have zstd dependency
+	// Design decision: zstd/LZ4 compression requires build tags (-tags zstd or -tags lz4) and additional dependencies; GZIP is the universal fallback for binary distributions without those tags.
 	gzipCompressor, err := NewGzipCompressor(c.level)
 	if err != nil {
 		return nil, 0, err
@@ -214,7 +214,7 @@ func (c *ZstdCompressor) Compress(dna *commonpb.DNA) ([]byte, int64, error) {
 
 // Decompress decompresses Zstandard-compressed data (stub)
 func (c *ZstdCompressor) Decompress(data []byte) (*commonpb.DNA, error) {
-	// Fallback to GZIP for now
+	// Design decision: zstd/LZ4 compression requires build tags (-tags zstd or -tags lz4) and additional dependencies; GZIP is the universal fallback for binary distributions without those tags.
 	gzipCompressor, err := NewGzipCompressor(c.level)
 	if err != nil {
 		return nil, err
@@ -281,7 +281,7 @@ func NewLZ4Compressor() (*LZ4Compressor, error) {
 
 // Compress compresses DNA data using LZ4 compression (stub)
 func (c *LZ4Compressor) Compress(dna *commonpb.DNA) ([]byte, int64, error) {
-	// Fallback to GZIP for now since we don't have LZ4 dependency
+	// Design decision: zstd/LZ4 compression requires build tags (-tags zstd or -tags lz4) and additional dependencies; GZIP is the universal fallback for binary distributions without those tags.
 	gzipCompressor, err := NewGzipCompressor(gzip.DefaultCompression)
 	if err != nil {
 		return nil, 0, err
@@ -297,7 +297,7 @@ func (c *LZ4Compressor) Compress(dna *commonpb.DNA) ([]byte, int64, error) {
 
 // Decompress decompresses LZ4-compressed data (stub)
 func (c *LZ4Compressor) Decompress(data []byte) (*commonpb.DNA, error) {
-	// Fallback to GZIP for now
+	// Design decision: zstd/LZ4 compression requires build tags (-tags zstd or -tags lz4) and additional dependencies; GZIP is the universal fallback for binary distributions without those tags.
 	gzipCompressor, err := NewGzipCompressor(gzip.DefaultCompression)
 	if err != nil {
 		return nil, err

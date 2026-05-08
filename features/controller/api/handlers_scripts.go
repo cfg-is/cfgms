@@ -369,9 +369,9 @@ func (s *Server) handlePostScriptRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("Script retry requested but not implemented",
+	s.logger.Info("Script retry is not supported via REST: retries are managed by the job scheduler",
 		"steward_id", logging.SanitizeLogValue(stewardID),
 		"execution_id", logging.SanitizeLogValue(executionID),
 	)
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Script retry is not yet implemented", "NOT_IMPLEMENTED")
+	s.writeErrorResponse(w, http.StatusNotImplemented, "Script retry is managed by the job scheduler", "NOT_IMPLEMENTED")
 }

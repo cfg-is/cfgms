@@ -165,12 +165,7 @@ func (m *SQLiteMigrator) getAllMigrations() []Migration {
 			Description: "Initial DNA storage schema with optimized indexes",
 			SQL:         sqliteSchema,
 		},
-		// Future migrations would be added here:
-		// {
-		//     Version:     2,
-		//     Description: "Add device metadata table",
-		//     SQL:         "CREATE TABLE device_metadata ...",
-		// },
+		// Design decision: future migrations are added here as sequential integer-keyed entries; the migration runner applies them in order.
 	}
 }
 

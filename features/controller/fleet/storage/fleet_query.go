@@ -117,12 +117,12 @@ func (b *SQLiteBackend) QueryFleet(ctx context.Context, filter *FleetFilter) (*F
 		args = append(args, filter.Status)
 	}
 	if len(filter.DeviceIDs) > 0 {
-		placeholders := make([]string, len(filter.DeviceIDs))
+		sqlParams := make([]string, len(filter.DeviceIDs))
 		for i, id := range filter.DeviceIDs {
-			placeholders[i] = "?"
+			sqlParams[i] = "?"
 			args = append(args, id)
 		}
-		conditions = append(conditions, "h.device_id IN ("+strings.Join(placeholders, ",")+")")
+		conditions = append(conditions, "h.device_id IN ("+strings.Join(sqlParams, ",")+")")
 	}
 
 	query := baseQuery

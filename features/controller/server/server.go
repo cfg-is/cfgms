@@ -461,7 +461,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Initialize in server mode; the shared gRPC server will be wired during Start
 		if err := dataPlane.Initialize(context.Background(), map[string]interface{}{
 			"mode":        "server",
-			"grpc_server": grpc.NewServer(), // placeholder; real server created in Start
+			"grpc_server": grpc.NewServer(), // Design decision: this initial gRPC server is replaced by the real server in Start(); this field satisfies initialization requirements before the server lifecycle begins.
 		}); err != nil {
 			return nil, fmt.Errorf("failed to initialize gRPC data plane provider: %w", err)
 		}

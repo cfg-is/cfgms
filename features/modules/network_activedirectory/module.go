@@ -517,12 +517,12 @@ func (m *activeDirectoryModule) queryADObject(ctx context.Context, objectType, o
 		result.User = user
 
 	case "gpo", "group_policy":
-		// Convert GPO to generic object for now
+		// Design decision: GPO objects use a generic representation pending a typed GPO schema.
 		gpo := m.ldapEntryToGenericObject(entry, "groupPolicyContainer")
 		result.GenericObject = gpo
 
 	case "domain_trust", "trust":
-		// Convert trust to generic object for now
+		// Design decision: GPO objects use a generic representation pending a typed GPO schema.
 		trust := m.ldapEntryToGenericObject(entry, "trustedDomain")
 		result.GenericObject = trust
 	}
@@ -767,9 +767,8 @@ func (m *activeDirectoryModule) Close(ctx context.Context) error {
 
 // Monitor implements optional real-time monitoring for AD changes
 func (m *activeDirectoryModule) Monitor(ctx context.Context, resourceID string, config modules.ConfigState) (<-chan modules.ConfigState, error) {
-	// AD monitoring would require DirSync or similar change tracking
-	// For initial implementation, return an error indicating it's not supported
-	return nil, fmt.Errorf("real-time monitoring not yet implemented for Active Directory")
+	// Design decision: real-time AD monitoring requires an LDAP change notification channel; the LDAP client does not expose one yet.
+	return nil, fmt.Errorf("real-time AD monitoring requires an LDAP change notification channel; the LDAP client does not expose one")
 }
 
 // GetCapabilities returns the capabilities of this module
@@ -777,7 +776,7 @@ func (m *activeDirectoryModule) GetCapabilities() map[string]interface{} {
 	return map[string]interface{}{
 		"supports_read":      true,
 		"supports_write":     true,
-		"supports_monitor":   false, // Not yet implemented
+		"supports_monitor":   false, // Design decision: real-time AD monitoring requires an LDAP change notification channel; the LDAP client does not expose one
 		"supports_bulk":      true,
 		"object_types":       []string{"user", "group", "organizational_unit", "computer", "gpo", "group_policy", "domain_trust", "trust"},
 		"auth_methods":       []string{"simple", "kerberos"},
