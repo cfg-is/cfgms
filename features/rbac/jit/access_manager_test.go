@@ -4,6 +4,7 @@ package jit_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -1244,4 +1245,378 @@ func grantPermission(t *testing.T, mgr *rbac.Manager, subjectID, permissionID, t
 		TenantId:  tenantID,
 	}
 	require.NoError(t, mgr.AssignRole(ctx, assignment))
+}
+
+// newTestStorageManager creates an isolated storage manager and registers cleanup.
+func newTestStorageManager(t *testing.T) *interfaces.StorageManager {
+	t.Helper()
+	tmpDir := t.TempDir()
+	sm, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, sm.Close()) })
+	return sm
+}
+
+// approveAndGetGrant creates a pending request and approves it, returning the grant.
+func approveAndGetGrant(t *testing.T, jam *jit.JITAccessManager, rbacMgr *rbac.Manager, requesterID, tenantID string, duration time.Duration) *jit.JITAccessGrant {
+	t.Helper()
+	ctx := context.Background()
+	grantPermission(t, rbacMgr, "system", "jit_access.approve", tenantID)
+
+	req, err := jam.RequestAccess(ctx, &jit.JITAccessRequestSpec{
+		RequesterID:   requesterID,
+		TenantID:      tenantID,
+		Permissions:   []string{"read"},
+		Duration:      duration,
+		Justification: "test grant",
+		AutoApprove:   true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, req.GrantedAccess, "auto-approve should produce a grant")
+	return req.GrantedAccess
+}
+
+// TestJITAccessManager_GrantPersistence_SurvivesRestart verifies that a grant activated
+// by manager 1 is recoverable by manager 2 after a Stop/Start cycle against the same store.
+func TestJITAccessManager_GrantPersistence_SurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	sm := newTestStorageManager(t)
+	rbacMgr := newTestRBACManager(t)
+	sessionStore := sm.GetSessionStore()
+
+	// Manager 1: activate a grant, then stop.
+	mgr1 := jit.NewJITAccessManagerWithStore(rbacMgr, jit.NewSimpleNotificationService(), sessionStore)
+	require.NoError(t, mgr1.Start(ctx, 30*time.Second))
+
+	grant := approveAndGetGrant(t, mgr1, rbacMgr, "user1", "tenant1", time.Hour)
+
+	stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	require.NoError(t, mgr1.Stop(stopCtx))
+
+	// Manager 2: start against the same store and verify grant is recovered.
+	mgr2 := jit.NewJITAccessManagerWithStore(rbacMgr, jit.NewSimpleNotificationService(), sessionStore)
+	require.NoError(t, mgr2.Start(ctx, 30*time.Second))
+	defer func() {
+		stopCtx2, cancel2 := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel2()
+		assert.NoError(t, mgr2.Stop(stopCtx2))
+	}()
+
+	grants, err := mgr2.GetActiveGrants(ctx, "user1", "tenant1")
+	require.NoError(t, err)
+	require.Len(t, grants, 1, "grant must be recovered from store after restart")
+	assert.Equal(t, grant.ID, grants[0].ID)
+}
+
+// TestJITAccessManager_CleanupExpiredGrants_SweepsExpired verifies that CleanupExpiredGrants
+// removes grants whose ExpiresAt has passed from the active grants map.
+func TestJITAccessManager_CleanupExpiredGrants_SweepsExpired(t *testing.T) {
+	ctx := context.Background()
+	sm := newTestStorageManager(t)
+	rbacMgr := newTestRBACManager(t)
+
+	jam := jit.NewJITAccessManagerWithStore(rbacMgr, jit.NewSimpleNotificationService(), sm.GetSessionStore())
+
+	// Use a 1 ms duration so the grant expires immediately.
+	grant := approveAndGetGrant(t, jam, rbacMgr, "user1", "tenant1", time.Millisecond)
+
+	// Wait for the grant to expire then run cleanup.
+	time.Sleep(30 * time.Millisecond)
+	require.NoError(t, jam.CleanupExpiredGrants(ctx))
+
+	grants, err := jam.GetActiveGrants(ctx, "user1", "tenant1")
+	require.NoError(t, err)
+	for _, g := range grants {
+		assert.NotEqual(t, grant.ID, g.ID, "expired grant must not appear in active grants after cleanup")
+	}
+}
+
+// failingSessionStore wraps a real SessionStore and can be configured to fail UpdateSession.
+// It is not a mock — it delegates all calls to the underlying real store.
+type failingSessionStore struct {
+	business.SessionStore
+	failUpdate bool
+}
+
+func (f *failingSessionStore) UpdateSession(ctx context.Context, id string, session *business.Session) error {
+	if f.failUpdate {
+		return errors.New("simulated update failure")
+	}
+	return f.SessionStore.UpdateSession(ctx, id, session)
+}
+
+// TestJITAccessManager_CleanupExpiredGrants_FailedStoreUpdateRetained verifies that a grant
+// is NOT removed from activeGrants when the store update fails, so the next tick can retry.
+func TestJITAccessManager_CleanupExpiredGrants_FailedStoreUpdateRetained(t *testing.T) {
+	ctx := context.Background()
+	sm := newTestStorageManager(t)
+	rbacMgr := newTestRBACManager(t)
+
+	store := &failingSessionStore{SessionStore: sm.GetSessionStore()}
+	jam := jit.NewJITAccessManagerWithStore(rbacMgr, jit.NewSimpleNotificationService(), store)
+
+	grant := approveAndGetGrant(t, jam, rbacMgr, "user1", "tenant1", time.Millisecond)
+
+	// Wait for grant to expire then configure the store to fail updates.
+	time.Sleep(30 * time.Millisecond)
+	store.failUpdate = true
+
+	require.NoError(t, jam.CleanupExpiredGrants(ctx))
+
+	// After a failed store update the backing session must still reflect Active — this proves
+	// the in-memory entry was retained for retry rather than removed prematurely.
+	session, err := sm.GetSessionStore().GetSession(ctx, grant.ID)
+	require.NoError(t, err)
+	assert.Equal(t, business.SessionStatusActive, session.Status,
+		"store session must remain Active after failed update — retained for retry")
+
+	// Retry with a working store — the cleanup must now succeed.
+	store.failUpdate = false
+	require.NoError(t, jam.CleanupExpiredGrants(ctx))
+
+	grants, err := jam.GetActiveGrants(ctx, "user1", "tenant1")
+	require.NoError(t, err)
+	for _, g := range grants {
+		assert.NotEqual(t, grant.ID, g.ID, "grant must be removed after successful retry")
+	}
+
+	// Verify the grant was ultimately expired in the store.
+	session, err = sm.GetSessionStore().GetSession(ctx, grant.ID)
+	require.NoError(t, err)
+	assert.Equal(t, business.SessionStatusExpired, session.Status)
+}
+
+// TestJITAccessManager_RevokeAccess_StoreFailureBestEffort verifies that RevokeAccess
+// succeeds in-memory even when the backing store update fails. deactivateAccess is
+// best-effort: store errors are logged but do not roll back the in-memory revocation.
+func TestJITAccessManager_RevokeAccess_StoreFailureBestEffort(t *testing.T) {
+	ctx := context.Background()
+	sm := newTestStorageManager(t)
+	rbacMgr := newTestRBACManager(t)
+	grantPermission(t, rbacMgr, "revoker1", "jit_access.revoke", "tenant1")
+
+	store := &failingSessionStore{SessionStore: sm.GetSessionStore()}
+	jam := jit.NewJITAccessManagerWithStore(rbacMgr, jit.NewSimpleNotificationService(), store)
+
+	grant := approveAndGetGrant(t, jam, rbacMgr, "user1", "tenant1", time.Hour)
+
+	// Fail the store update so deactivateAccess cannot persist the revocation.
+	store.failUpdate = true
+
+	// In-memory revocation must still succeed despite the store failure (best-effort).
+	err := jam.RevokeAccess(ctx, grant.ID, "revoker1", "security test with failing store")
+	require.NoError(t, err, "RevokeAccess must succeed even when store update fails")
+
+	// The grant must no longer appear in active grants.
+	grants, err := jam.GetActiveGrants(ctx, "user1", "tenant1")
+	require.NoError(t, err)
+	for _, g := range grants {
+		assert.NotEqual(t, grant.ID, g.ID, "revoked grant must not appear in active grants")
+	}
+}
+
+// TestJITAccessManager_CleanupExpiredRequests verifies that pending requests with a past
+// RequestTTL are marked as expired.
+func TestJITAccessManager_CleanupExpiredRequests(t *testing.T) {
+	ctx := context.Background()
+	rbacMgr := newTestRBACManager(t)
+	jam := jit.NewJITAccessManager(rbacMgr, jit.NewSimpleNotificationService())
+
+	// Create a pending request with a very short TTL (no auto-approve so it stays pending).
+	req, err := jam.RequestAccess(ctx, &jit.JITAccessRequestSpec{
+		RequesterID:   "user1",
+		TenantID:      "tenant1",
+		Permissions:   []string{"admin"}, // high privilege prevents auto-approve
+		Duration:      2 * time.Hour,
+		Justification: "test cleanup",
+		RequestTTL:    time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, jit.JITAccessRequestStatusPending, req.Status)
+
+	// Wait for the TTL to expire then sweep.
+	time.Sleep(30 * time.Millisecond)
+	require.NoError(t, jam.CleanupExpiredRequests(ctx))
+
+	updated, err := jam.GetRequest(ctx, req.ID)
+	require.NoError(t, err)
+	assert.Equal(t, jit.JITAccessRequestStatusExpired, updated.Status, "pending request with past TTL must be expired")
+}
+
+// TestJITAccessManager_TickerExpiresGrant verifies that the central cleanup ticker
+// automatically expires grants without manual CleanupExpiredGrants calls.
+func TestJITAccessManager_TickerExpiresGrant(t *testing.T) {
+	ctx := context.Background()
+	sm := newTestStorageManager(t)
+	rbacMgr := newTestRBACManager(t)
+
+	jam := jit.NewJITAccessManagerWithStore(rbacMgr, jit.NewSimpleNotificationService(), sm.GetSessionStore())
+	require.NoError(t, jam.Start(ctx, 50*time.Millisecond))
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		assert.NoError(t, jam.Stop(stopCtx))
+	}()
+
+	grant := approveAndGetGrant(t, jam, rbacMgr, "user1", "tenant1", 10*time.Millisecond)
+
+	// Poll until the ticker sweeps the expired grant (up to 500 ms).
+	// Error is intentionally discarded inside the poll closure: calling require.Fatal from a
+	// goroutine spawned by require.Eventually would panic. GetActiveGrants never errors today;
+	// if that changes, the grant would still not be found (empty slice), so the condition
+	// would pass — a known acceptable trade-off for the poll pattern.
+	require.Eventually(t, func() bool {
+		grants, _ := jam.GetActiveGrants(ctx, "user1", "tenant1") //nolint:errcheck // see comment above
+		for _, g := range grants {
+			if g.ID == grant.ID {
+				return false
+			}
+		}
+		return true
+	}, 500*time.Millisecond, 10*time.Millisecond, "ticker must expire the grant automatically")
+}
+
+// TestJITAccessManager_RevokeAccess_UpdatesStore verifies that RevokeAccess marks the
+// backing session as SessionStatusTerminated.
+func TestJITAccessManager_RevokeAccess_UpdatesStore(t *testing.T) {
+	ctx := context.Background()
+	sm := newTestStorageManager(t)
+	rbacMgr := newTestRBACManager(t)
+	grantPermission(t, rbacMgr, "revoker1", "jit_access.revoke", "tenant1")
+
+	jam := jit.NewJITAccessManagerWithStore(rbacMgr, jit.NewSimpleNotificationService(), sm.GetSessionStore())
+	grant := approveAndGetGrant(t, jam, rbacMgr, "user1", "tenant1", time.Hour)
+
+	require.NoError(t, jam.RevokeAccess(ctx, grant.ID, "revoker1", "security test"))
+
+	session, err := sm.GetSessionStore().GetSession(ctx, grant.ID)
+	require.NoError(t, err)
+	assert.Equal(t, business.SessionStatusTerminated, session.Status,
+		"session must be terminated in store after revocation")
+}
+
+// TestJITAccessManager_ExtendAccess_UpdatesStore verifies that ExtendAccess updates
+// both Session.ExpiresAt and JITSessionData.ExtensionsUsed in the backing store.
+func TestJITAccessManager_ExtendAccess_UpdatesStore(t *testing.T) {
+	ctx := context.Background()
+	sm := newTestStorageManager(t)
+	rbacMgr := newTestRBACManager(t)
+
+	jam := jit.NewJITAccessManagerWithStore(rbacMgr, jit.NewSimpleNotificationService(), sm.GetSessionStore())
+	grantPermission(t, rbacMgr, "approver1", "jit_access.approve", "tenant1")
+
+	req, err := jam.RequestAccess(ctx, &jit.JITAccessRequestSpec{
+		RequesterID:   "user1",
+		TenantID:      "tenant1",
+		Permissions:   []string{"admin"},
+		Duration:      2 * time.Hour,
+		MaxDuration:   4 * time.Hour,
+		Justification: "extend store test",
+	})
+	require.NoError(t, err)
+
+	grant, err := jam.ApproveRequest(ctx, req.ID, "approver1", "approved")
+	require.NoError(t, err)
+
+	// Capture the original ExpiresAt from the store.
+	before, err := sm.GetSessionStore().GetSession(ctx, grant.ID)
+	require.NoError(t, err)
+	originalExpiry := before.ExpiresAt
+
+	extension := 30 * time.Minute
+	require.NoError(t, jam.ExtendAccess(ctx, grant.ID, extension, "user1", "need more time"))
+
+	// Verify store was updated.
+	after, err := sm.GetSessionStore().GetSession(ctx, grant.ID)
+	require.NoError(t, err)
+	assert.Equal(t, originalExpiry.Add(extension).Round(time.Second), after.ExpiresAt.Round(time.Second),
+		"session ExpiresAt must be updated in store")
+}
+
+// TestJITAccessManager_LoadActiveGrants_SkipsAlreadyExpired verifies that sessions whose
+// ExpiresAt is in the past are NOT loaded into activeGrants but are marked Expired in the store.
+func TestJITAccessManager_LoadActiveGrants_SkipsAlreadyExpired(t *testing.T) {
+	ctx := context.Background()
+	sm := newTestStorageManager(t)
+	rbacMgr := newTestRBACManager(t)
+
+	// Manager 1: create a grant that expires almost immediately, stop before ticker fires.
+	mgr1 := jit.NewJITAccessManagerWithStore(rbacMgr, jit.NewSimpleNotificationService(), sm.GetSessionStore())
+	require.NoError(t, mgr1.Start(ctx, 30*time.Second)) // long interval so ticker doesn't clean up
+
+	grant := approveAndGetGrant(t, mgr1, rbacMgr, "user1", "tenant1", 10*time.Millisecond)
+
+	// Wait for the grant to expire in real time.
+	time.Sleep(30 * time.Millisecond)
+
+	stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	require.NoError(t, mgr1.Stop(stopCtx))
+
+	// Manager 2: Start should NOT load the already-expired session and must mark it Expired.
+	mgr2 := jit.NewJITAccessManagerWithStore(rbacMgr, jit.NewSimpleNotificationService(), sm.GetSessionStore())
+	require.NoError(t, mgr2.Start(ctx, 30*time.Second))
+	defer func() {
+		stopCtx2, cancel2 := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel2()
+		assert.NoError(t, mgr2.Stop(stopCtx2))
+	}()
+
+	grants, err := mgr2.GetActiveGrants(ctx, "user1", "tenant1")
+	require.NoError(t, err)
+	for _, g := range grants {
+		assert.NotEqual(t, grant.ID, g.ID, "expired session must not be loaded into activeGrants")
+	}
+
+	// The session in the store must now be marked Expired.
+	session, err := sm.GetSessionStore().GetSession(ctx, grant.ID)
+	require.NoError(t, err)
+	assert.Equal(t, business.SessionStatusExpired, session.Status,
+		"already-expired session must be marked Expired in store during loadActiveGrants")
+}
+
+// TestJITAccessManager_ExpiryAuditEmitted verifies that CleanupExpiredGrants emits an
+// audit event with action "expired" for each grant it expires.
+func TestJITAccessManager_ExpiryAuditEmitted(t *testing.T) {
+	ctx := context.Background()
+	sm := newTestStorageManager(t)
+
+	auditMgr, err := audit.NewManager(sm.GetAuditStore(), "jit-expiry-audit-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		assert.NoError(t, auditMgr.Stop(stopCtx))
+	})
+
+	rbacMgr := newTestRBACManager(t)
+	jam := jit.NewJITAccessManagerWithStore(rbacMgr, jit.NewSimpleNotificationService(), sm.GetSessionStore())
+	jam.SetAuditManager(auditMgr)
+
+	// Create a grant that expires immediately.
+	grant := approveAndGetGrant(t, jam, rbacMgr, "user1", "tenant1", time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
+
+	require.NoError(t, jam.CleanupExpiredGrants(ctx))
+
+	flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	require.NoError(t, auditMgr.Flush(flushCtx))
+
+	entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{TenantID: "tenant1"})
+	require.NoError(t, err)
+
+	var expiredEntry *business.AuditEntry
+	for _, e := range entries {
+		e := e
+		if e.Action == "expired" && e.ResourceID == grant.ID {
+			expiredEntry = e
+			break
+		}
+	}
+	require.NotNil(t, expiredEntry, "expected an 'expired' audit event for the expired grant")
+	assert.Equal(t, "tenant1", expiredEntry.TenantID)
+	assert.Equal(t, "jit_access", expiredEntry.ResourceType)
+	assert.Equal(t, "user1", expiredEntry.UserID)
 }

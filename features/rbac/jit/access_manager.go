@@ -4,6 +4,7 @@ package jit
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -32,19 +33,231 @@ type JITAccessManager struct {
 	auditManager        *audit.Manager
 	notificationService NotificationService
 	workflowProvider    WorkflowProvider
+	grantStore          business.SessionStore
+	stopCh              chan struct{}
+	doneCh              chan struct{}
 	mutex               sync.RWMutex
 }
 
-// NewJITAccessManager creates a new JIT access manager
+// NewJITAccessManager creates a new JIT access manager without a backing store (memory-only).
 func NewJITAccessManager(rbacManager rbac.RBACManager, notificationService NotificationService) *JITAccessManager {
+	return NewJITAccessManagerWithStore(rbacManager, notificationService, nil)
+}
+
+// NewJITAccessManagerWithStore creates a new JIT access manager backed by a durable session store.
+// Pass nil for store to operate memory-only (equivalent to NewJITAccessManager).
+func NewJITAccessManagerWithStore(rbacManager rbac.RBACManager, notificationService NotificationService, store business.SessionStore) *JITAccessManager {
 	return &JITAccessManager{
 		rbacManager:         rbacManager,
 		requests:            make(map[string]*JITAccessRequest),
 		activeGrants:        make(map[string]*JITAccessGrant),
 		approvalWorkflows:   make(map[string]*ApprovalWorkflow),
 		notificationService: notificationService,
+		grantStore:          store,
 		mutex:               sync.RWMutex{},
 	}
+}
+
+// Start loads active JIT grants from the store into memory and starts the central cleanup ticker.
+// The ticker calls CleanupExpiredGrants and CleanupExpiredRequests on the given interval.
+// On a nil store, Start still runs the ticker for in-memory cleanup.
+func (jam *JITAccessManager) Start(ctx context.Context, cleanupInterval time.Duration) error {
+	jam.mutex.Lock()
+	if jam.stopCh != nil {
+		jam.mutex.Unlock()
+		return fmt.Errorf("JIT access manager already started")
+	}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	jam.stopCh = stopCh
+	jam.doneCh = doneCh
+	jam.mutex.Unlock()
+
+	if err := jam.loadActiveGrants(ctx); err != nil {
+		jam.mutex.Lock()
+		jam.stopCh = nil
+		jam.doneCh = nil
+		jam.mutex.Unlock()
+		return fmt.Errorf("failed to load active grants: %w", err)
+	}
+
+	ticker := time.NewTicker(cleanupInterval)
+	go func() {
+		defer close(doneCh)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				bgCtx := context.Background()
+				if err := jam.CleanupExpiredGrants(bgCtx); err != nil {
+					slog.Warn("jit cleanup expired grants failed", "error", err)
+				}
+				if err := jam.CleanupExpiredRequests(bgCtx); err != nil {
+					slog.Warn("jit cleanup expired requests failed", "error", err)
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+// Stop signals the cleanup ticker to stop and blocks until any in-flight cleanup cycle completes.
+func (jam *JITAccessManager) Stop(ctx context.Context) error {
+	jam.mutex.Lock()
+	stopCh := jam.stopCh
+	doneCh := jam.doneCh
+	jam.stopCh = nil
+	jam.doneCh = nil
+	jam.mutex.Unlock()
+
+	if stopCh == nil {
+		return nil
+	}
+
+	close(stopCh)
+
+	select {
+	case <-doneCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// loadActiveGrants populates activeGrants from the store using ListSessions scoped to
+// SessionTypeJIT + SessionStatusActive. Sessions whose ExpiresAt is already past are
+// immediately marked SessionStatusExpired in the store and are NOT added to activeGrants.
+func (jam *JITAccessManager) loadActiveGrants(ctx context.Context) error {
+	if jam.grantStore == nil {
+		return nil
+	}
+
+	sessions, err := jam.grantStore.ListSessions(ctx, &business.SessionFilter{
+		Type:   business.SessionTypeJIT,
+		Status: business.SessionStatusActive,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list active JIT sessions: %w", err)
+	}
+
+	now := time.Now()
+	jam.mutex.Lock()
+	defer jam.mutex.Unlock()
+
+	for _, session := range sessions {
+		jitData, ok := extractJITSessionData(session)
+		if !ok {
+			slog.Warn("skipping JIT session with unreadable session data", "session_id", session.SessionID)
+			continue
+		}
+
+		if session.ExpiresAt.Before(now) {
+			// Already expired — mark in store and skip
+			session.Status = business.SessionStatusExpired
+			modAt := now
+			session.ModifiedAt = &modAt
+			if updateErr := jam.grantStore.UpdateSession(ctx, session.SessionID, session); updateErr != nil {
+				slog.Warn("failed to expire already-past session on load", "session_id", session.SessionID, "error", updateErr)
+			}
+			continue
+		}
+
+		grant := &JITAccessGrant{
+			ID:                 session.SessionID,
+			RequestID:          jitData.RequestID,
+			RequesterID:        session.UserID,
+			TargetID:           jitData.TargetID,
+			TenantID:           session.TenantID,
+			Permissions:        jitData.Permissions,
+			Roles:              jitData.Roles,
+			ResourceIDs:        jitData.ResourceIDs,
+			ApprovedBy:         jitData.ApprovedBy,
+			ApprovalReason:     jitData.ApprovalReason,
+			GrantedAt:          jitData.GrantedAt,
+			ExpiresAt:          session.ExpiresAt,
+			Status:             JITAccessGrantStatusActive,
+			ExtensionsUsed:     jitData.ExtensionsUsed,
+			MaxExtensions:      jitData.MaxExtensions,
+			ActivationMethod:   ActivationMethodImmediate,
+			DeactivationMethod: DeactivationMethodAutomatic,
+		}
+		jam.activeGrants[grant.ID] = grant
+	}
+
+	return nil
+}
+
+// CleanupExpiredGrants sweeps activeGrants for grants whose ExpiresAt has passed,
+// updates the store to SessionStatusExpired, then removes them from activeGrants.
+// A failed store update retains the in-memory entry so the next tick can retry.
+func (jam *JITAccessManager) CleanupExpiredGrants(ctx context.Context) error {
+	now := time.Now()
+
+	type expiredEntry struct {
+		id    string
+		grant *JITAccessGrant
+	}
+
+	jam.mutex.RLock()
+	var expired []expiredEntry
+	for id, grant := range jam.activeGrants {
+		if grant.Status == JITAccessGrantStatusActive && !grant.ExpiresAt.After(now) {
+			expired = append(expired, expiredEntry{id, grant})
+		}
+	}
+	jam.mutex.RUnlock()
+
+	for _, eg := range expired {
+		if jam.grantStore != nil {
+			session, err := jam.grantStore.GetSession(ctx, eg.id)
+			if err != nil {
+				slog.Warn("failed to get session for expiry cleanup", "grant_id", eg.id, "error", err)
+				continue // retry next tick
+			}
+			session.Status = business.SessionStatusExpired
+			modAt := time.Now()
+			session.ModifiedAt = &modAt
+			if err := jam.grantStore.UpdateSession(ctx, eg.id, session); err != nil {
+				slog.Warn("failed to update session to expired", "grant_id", eg.id, "error", err)
+				continue // store update failed — retain in-memory entry, retry next tick
+			}
+		}
+
+		// Store update succeeded (or no store); remove from activeGrants under mutex.
+		jam.mutex.Lock()
+		grant, exists := jam.activeGrants[eg.id]
+		if exists && grant.Status == JITAccessGrantStatusActive {
+			grant.Status = JITAccessGrantStatusExpired
+			deactivatedAt := time.Now()
+			grant.DeactivatedAt = &deactivatedAt
+			delete(jam.activeGrants, eg.id)
+			jam.mutex.Unlock()
+			jam.recordJITAccessExpiry(ctx, grant)
+		} else {
+			jam.mutex.Unlock()
+		}
+	}
+
+	return nil
+}
+
+// CleanupExpiredRequests marks pending requests whose RequestTTL has passed as expired.
+func (jam *JITAccessManager) CleanupExpiredRequests(ctx context.Context) error {
+	now := time.Now()
+
+	jam.mutex.Lock()
+	defer jam.mutex.Unlock()
+
+	for _, request := range jam.requests {
+		if request.Status == JITAccessRequestStatusPending && request.RequestTTL.Before(now) {
+			request.Status = JITAccessRequestStatusExpired
+		}
+	}
+
+	return nil
 }
 
 // SetAuditManager wires a durable audit manager for recording JIT access events.
@@ -127,6 +340,19 @@ func (jam *JITAccessManager) recordJITAccessRevocation(ctx context.Context, gran
 	}
 }
 
+// recordJITAccessExpiry emits a jit_access expiry audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessExpiry(ctx context.Context, grant *JITAccessGrant) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		grant.TenantID, grant.RequesterID, "jit_access", grant.ID, "expired",
+		business.AuditResultSuccess,
+	)); err != nil {
+		slog.Warn("failed to record jit access expiry audit event", "error", err)
+	}
+}
+
 // RequestAccess creates a new JIT access request
 func (jam *JITAccessManager) RequestAccess(ctx context.Context, req *JITAccessRequestSpec) (*JITAccessRequest, error) {
 	jam.mutex.Lock()
@@ -144,6 +370,12 @@ func (jam *JITAccessManager) RequestAccess(ctx context.Context, req *JITAccessRe
 	}
 	if hasAccess {
 		return nil, fmt.Errorf("requester already has the requested permissions")
+	}
+
+	// Compute request TTL
+	requestTTL := 24 * time.Hour
+	if req.RequestTTL > 0 {
+		requestTTL = req.RequestTTL
 	}
 
 	// Create the access request
@@ -166,7 +398,7 @@ func (jam *JITAccessManager) RequestAccess(ctx context.Context, req *JITAccessRe
 		Status:            JITAccessRequestStatusPending,
 		CreatedAt:         time.Now(),
 		ExpiresAt:         time.Now().Add(req.Duration),
-		RequestTTL:        time.Now().Add(24 * time.Hour), // Request expires in 24 hours if not processed
+		RequestTTL:        time.Now().Add(requestTTL),
 	}
 
 	// Determine approval workflow
@@ -338,7 +570,7 @@ func (jam *JITAccessManager) approveRequest(ctx context.Context, requestID, appr
 	// Send notifications
 	_ = jam.sendNotifications(ctx, request, "request_approved")
 
-	// Schedule automatic deactivation
+	// scheduleDeactivation is a no-op; the central ticker handles expiry.
 	jam.scheduleDeactivation(ctx, grant)
 
 	return grant, nil
@@ -413,7 +645,7 @@ func (jam *JITAccessManager) ExtendAccess(ctx context.Context, grantID string, d
 		}
 	}
 
-	// Extend the grant
+	// Extend the grant in memory
 	grant.ExpiresAt = grant.ExpiresAt.Add(duration)
 	grant.ExtensionsUsed++
 	grant.LastExtensionAt = &[]time.Time{time.Now()}[0]
@@ -425,13 +657,29 @@ func (jam *JITAccessManager) ExtendAccess(ctx context.Context, grantID string, d
 		Reason:     reason,
 	})
 
+	// Update store record: Session.ExpiresAt and JITSessionData.ExtensionsUsed must both be updated.
+	if jam.grantStore != nil {
+		session, err := jam.grantStore.GetSession(ctx, grantID)
+		if err == nil {
+			session.ExpiresAt = grant.ExpiresAt
+			jitData, _ := extractJITSessionData(session)
+			jitData.ExtensionsUsed = grant.ExtensionsUsed
+			session.SessionData = jitData
+			if updateErr := jam.grantStore.UpdateSession(ctx, grantID, session); updateErr != nil {
+				slog.Warn("failed to update session for extension", "grant_id", grantID, "error", updateErr)
+			}
+		} else {
+			slog.Warn("failed to get session for extension update", "grant_id", grantID, "error", err)
+		}
+	}
+
 	// Audit the extension
 	jam.recordJITAccessExtension(ctx, grant, requesterID, duration, reason)
 
 	// Send notifications
 	_ = jam.sendExtensionNotifications(ctx, grant, duration, reason)
 
-	// Reschedule deactivation
+	// scheduleDeactivation is a no-op; the central ticker handles expiry.
 	jam.scheduleDeactivation(ctx, grant)
 
 	return nil
@@ -456,7 +704,7 @@ func (jam *JITAccessManager) RevokeAccess(ctx context.Context, grantID, revokerI
 		return fmt.Errorf("revoker validation failed: %w", err)
 	}
 
-	// Deactivate the access
+	// Deactivate the access (updates store to SessionStatusTerminated)
 	err := jam.deactivateAccess(ctx, grant)
 	if err != nil {
 		return fmt.Errorf("failed to deactivate access: %w", err)
@@ -811,55 +1059,83 @@ func (jam *JITAccessManager) advanceWorkflowStage(ctx context.Context, request *
 	}
 }
 
+// activateAccess sets the grant active and persists it to the SessionStore.
+// On nil grantStore, operates memory-only with no panic.
 func (jam *JITAccessManager) activateAccess(ctx context.Context, grant *JITAccessGrant) error {
-	// Update grant status
 	now := time.Now()
 	grant.Status = JITAccessGrantStatusActive
 	grant.ActivatedAt = &now
 
-	// Note: In a full implementation, this would create temporary role assignments
-	// or integrate with the delegation system once it's exposed via the RBACManager interface
-	// For now, the grant is tracked internally and can be checked via GetActiveGrants
+	if jam.grantStore == nil {
+		return nil
+	}
+
+	session := &business.Session{
+		SessionID:    grant.ID,
+		UserID:       grant.RequesterID, // required by Session.Validate()
+		TenantID:     grant.TenantID,
+		SessionType:  business.SessionTypeJIT,
+		CreatedAt:    grant.GrantedAt,
+		LastActivity: grant.GrantedAt,
+		ExpiresAt:    grant.ExpiresAt,
+		Status:       business.SessionStatusActive,
+		Persistent:   true,
+		SessionData: &business.JITSessionData{
+			RequestID:      grant.RequestID,
+			TargetID:       grant.TargetID,
+			Permissions:    grant.Permissions,
+			Roles:          grant.Roles,
+			ResourceIDs:    grant.ResourceIDs,
+			ApprovedBy:     grant.ApprovedBy,
+			ApprovalReason: grant.ApprovalReason,
+			GrantedAt:      grant.GrantedAt,
+			ExtensionsUsed: grant.ExtensionsUsed,
+			MaxExtensions:  grant.MaxExtensions,
+		},
+	}
+
+	if err := jam.grantStore.CreateSession(ctx, session); err != nil {
+		return fmt.Errorf("failed to persist JIT grant to session store: %w", err)
+	}
 
 	return nil
 }
 
+// deactivateAccess updates the grant's in-memory state and sets the store session to
+// SessionStatusTerminated. On nil store, operates memory-only.
+// Store errors are best-effort: a connectivity failure is logged but does not fail the
+// in-memory revocation. The caller (RevokeAccess) remains authoritative; a subsequent
+// restart will reload the session from the store — callers requiring strict durability
+// should layer their own retry or saga logic.
 func (jam *JITAccessManager) deactivateAccess(ctx context.Context, grant *JITAccessGrant) error {
-	// Note: In a full implementation, this would revoke temporary role assignments
-	// or revoke delegations once the delegation system is exposed via RBACManager interface
-
-	// Update grant status
 	now := time.Now()
 	grant.Status = JITAccessGrantStatusDeactivated
 	grant.DeactivatedAt = &now
 
+	if jam.grantStore == nil {
+		return nil
+	}
+
+	session, err := jam.grantStore.GetSession(ctx, grant.ID)
+	if err != nil {
+		slog.Warn("failed to get session for deactivation", "grant_id", grant.ID, "error", err)
+		return nil
+	}
+
+	session.Status = business.SessionStatusTerminated
+	modAt := time.Now()
+	session.ModifiedAt = &modAt
+
+	if err := jam.grantStore.UpdateSession(ctx, grant.ID, session); err != nil {
+		slog.Warn("failed to update session to terminated", "grant_id", grant.ID, "error", err)
+	}
+
 	return nil
 }
 
-func (jam *JITAccessManager) scheduleDeactivation(ctx context.Context, grant *JITAccessGrant) {
-	// In a real implementation, this would schedule a background job
-	// For now, we'll implement a simple goroutine
-	go func() {
-		// Read ExpiresAt under mutex protection to avoid race condition
-		jam.mutex.RLock()
-		expiresAt := grant.ExpiresAt
-		jam.mutex.RUnlock()
-
-		duration := time.Until(expiresAt)
-		if duration > 0 {
-			time.Sleep(duration)
-
-			// Check if grant is still active
-			jam.mutex.Lock()
-			currentGrant, exists := jam.activeGrants[grant.ID]
-			if exists && currentGrant.Status == JITAccessGrantStatusActive {
-				_ = jam.deactivateAccess(context.Background(), currentGrant)
-				currentGrant.Status = JITAccessGrantStatusExpired
-			}
-			jam.mutex.Unlock()
-		}
-	}()
-}
+// scheduleDeactivation is intentionally a no-op. The central ticker loop (started via Start)
+// calls CleanupExpiredGrants on a configurable interval to handle expiry for all grants.
+func (jam *JITAccessManager) scheduleDeactivation(_ context.Context, _ *JITAccessGrant) {}
 
 func (jam *JITAccessManager) sendNotifications(ctx context.Context, request *JITAccessRequest, eventType string) error {
 	if jam.notificationService != nil {
@@ -887,4 +1163,29 @@ func (jam *JITAccessManager) sendRevocationNotifications(ctx context.Context, gr
 		return jam.notificationService.SendRevocationNotification(ctx, grant, reason)
 	}
 	return nil
+}
+
+// extractJITSessionData converts session.SessionData to *business.JITSessionData.
+// Returns the extracted data and true on success, or an empty struct and false on failure.
+// Handles both direct pointer and the map[string]interface{} form produced by JSON round-trips.
+func extractJITSessionData(session *business.Session) (*business.JITSessionData, bool) {
+	if session.SessionData == nil {
+		return &business.JITSessionData{}, false
+	}
+	switch v := session.SessionData.(type) {
+	case *business.JITSessionData:
+		return v, true
+	case map[string]interface{}:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return &business.JITSessionData{}, false
+		}
+		var jd business.JITSessionData
+		if err := json.Unmarshal(b, &jd); err != nil {
+			return &business.JITSessionData{}, false
+		}
+		return &jd, true
+	default:
+		return &business.JITSessionData{}, false
+	}
 }
