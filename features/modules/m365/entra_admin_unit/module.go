@@ -261,9 +261,18 @@ func (m *entraAdminUnitModule) Set(ctx context.Context, resourceID string, confi
 		auConfig.GroupMembers = groupMembers
 	}
 
-	// Map scoped role members (simplified - would need proper type conversion)
+	// Map scoped role members using direct type assertion; graph.AdminUnitScopedRoleMember converts
+	// via the ScopedRoleMember local type which shares the same principal/role fields.
 	if scopedRoleMembers, ok := configMap["scoped_role_members"].([]ScopedRoleMember); ok {
 		auConfig.ScopedRoleMembers = scopedRoleMembers
+	} else if rawMembers, ok := configMap["scoped_role_members"].([]graph.AdminUnitScopedRoleMember); ok {
+		auConfig.ScopedRoleMembers = make([]ScopedRoleMember, 0, len(rawMembers))
+		for _, rm := range rawMembers {
+			auConfig.ScopedRoleMembers = append(auConfig.ScopedRoleMembers, ScopedRoleMember{
+				PrincipalID:      rm.RoleMemberInfo.ID,
+				RoleDefinitionID: rm.RoleID,
+			})
+		}
 	}
 
 	// Validate configuration

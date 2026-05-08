@@ -12,7 +12,6 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
-	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // intunePolicyModule implements the Module interface for Intune device configuration management
@@ -299,8 +298,14 @@ func (m *intunePolicyModule) Get(ctx context.Context, resourceID string) (module
 		DeviceConfigurationType: deviceConfig.DeviceConfigurationType,
 		Settings:                deviceConfig.Settings,
 		TenantID:                tenantID,
-		// Note: Assignments would need separate API calls to retrieve
 	}
+
+	// Retrieve assignments via GET /deviceManagement/deviceConfigurations/{id}/assignments
+	graphAssignments, err := m.graphClient.ListDeviceConfigurationAssignments(ctx, token, configurationID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get configuration assignments: %w", err)
+	}
+	config.Assignments = graphAssignmentsToPolicyAssignments(graphAssignments)
 
 	return config, nil
 }
@@ -347,7 +352,7 @@ func (m *intunePolicyModule) updateConfiguration(ctx context.Context, token *aut
 				updateRequest.Description = &config.Description
 			}
 		case "settings":
-			// Always update settings if managed (complex comparison would be needed for partial updates)
+			// Design decision: settings are replaced wholesale on update; partial-field diff requires deep-equal on map[string]interface{} which is deferred.
 			updateRequest.Settings = config.Settings
 		}
 	}
@@ -369,28 +374,53 @@ func (m *intunePolicyModule) updateConfiguration(ctx context.Context, token *aut
 	return nil
 }
 
-// assignConfiguration assigns the configuration to the specified targets
+// assignConfiguration calls POST /deviceManagement/deviceConfigurations/{id}/assign with the
+// converted assignment targets.
 func (m *intunePolicyModule) assignConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, assignments []PolicyAssignment) error {
-	// Note: In a real implementation, this would use the Graph API assignments endpoint
-	// For now, this is a placeholder that demonstrates the structure
+	graphAssignments := policyAssignmentsToGraphAssignments(assignments)
+	return m.graphClient.AssignDeviceConfiguration(ctx, token, configurationID, graphAssignments)
+}
 
-	for _, assignment := range assignments {
-		// Convert our assignment format to Graph API format and make assignment calls
-		// This would involve calling something like:
-		// POST /deviceManagement/deviceConfigurations/{id}/assign
-
-		m.GetEffectiveLogger(logging.NewNoopLogger()).Info("assigning configuration",
-			"configuration_id", configurationID,
-			"target_type", assignment.Target.TargetType,
-		)
-
-		// In real implementation:
-		// - Build assignment request based on assignment.Target
-		// - Call Graph API to create assignment
-		// - Handle assignment-specific errors
+// policyAssignmentsToGraphAssignments converts local PolicyAssignment slice to graph assignments.
+func policyAssignmentsToGraphAssignments(assignments []PolicyAssignment) []graph.DeviceConfigurationAssignment {
+	result := make([]graph.DeviceConfigurationAssignment, 0, len(assignments))
+	for _, a := range assignments {
+		odataType := "#microsoft.graph.groupAssignmentTarget"
+		switch a.Target.TargetType {
+		case "allUsers":
+			odataType = "#microsoft.graph.allLicensedUsersAssignmentTarget"
+		case "allDevices":
+			odataType = "#microsoft.graph.allDevicesAssignmentTarget"
+		}
+		result = append(result, graph.DeviceConfigurationAssignment{
+			Target: graph.DeviceConfigurationAssignmentTarget{
+				ODataType: odataType,
+				GroupID:   a.Target.GroupID,
+			},
+		})
 	}
+	return result
+}
 
-	return nil
+// graphAssignmentsToPolicyAssignments converts graph assignments to local PolicyAssignment slice.
+func graphAssignmentsToPolicyAssignments(assignments []graph.DeviceConfigurationAssignment) []PolicyAssignment {
+	result := make([]PolicyAssignment, 0, len(assignments))
+	for _, a := range assignments {
+		targetType := "groupAssignmentTarget"
+		switch a.Target.ODataType {
+		case "#microsoft.graph.allLicensedUsersAssignmentTarget":
+			targetType = "allUsers"
+		case "#microsoft.graph.allDevicesAssignmentTarget":
+			targetType = "allDevices"
+		}
+		result = append(result, PolicyAssignment{
+			Target: PolicyAssignmentTarget{
+				TargetType: targetType,
+				GroupID:    a.Target.GroupID,
+			},
+		})
+	}
+	return result
 }
 
 // parseIntuneResourceID parses a resource ID into tenant ID and configuration ID

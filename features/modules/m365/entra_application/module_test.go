@@ -155,6 +155,14 @@ func (m *MockGraphClient) DeleteDeviceConfiguration(ctx context.Context, token *
 	return args.Error(0)
 }
 
+func (m *MockGraphClient) ListDeviceConfigurationAssignments(ctx context.Context, token *auth.AccessToken, configurationID string) ([]graph.DeviceConfigurationAssignment, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) AssignDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, assignments []graph.DeviceConfigurationAssignment) error {
+	return nil
+}
+
 // Application operations
 func (m *MockGraphClient) GetApplication(ctx context.Context, token *auth.AccessToken, applicationID string) (*graph.Application, error) {
 	args := m.Called(ctx, token, applicationID)

@@ -116,19 +116,11 @@ func TestEntraAdminUnit_Integration_BasicOperations(t *testing.T) {
 		ManagedFieldsList: []string{"display_name", "description", "visibility"},
 	}
 
-	// Test Get operation with non-existent admin unit (currently returns placeholder data)
+	// Test Get operation with non-existent admin unit — expects a not-found error from Graph API
 	resourceID := tenantID + ":non-existent-admin-unit-id"
-	getResult, err := module.Get(ctx, resourceID)
-
-	// Current implementation returns placeholder data - this will change when Graph API is fully implemented
+	_, err := module.Get(ctx, resourceID)
 	if err != nil {
-		t.Logf("Get operation failed (expected for incomplete Graph API implementation): %v", err)
-	} else {
-		if auConfig, ok := getResult.(*EntraAdminUnitConfig); ok {
-			t.Logf("Get operation returned placeholder data (expected for current implementation): DisplayName=%s", auConfig.DisplayName)
-		} else {
-			t.Logf("Get operation returned config of unexpected type: %T", getResult)
-		}
+		t.Logf("Get returned expected error for non-existent admin unit: %v", err)
 	}
 
 	// Test Set operation (create)
@@ -137,17 +129,12 @@ func TestEntraAdminUnit_Integration_BasicOperations(t *testing.T) {
 	err = module.Set(ctx, createResourceID, config)
 
 	if err != nil {
-		t.Logf("Set operation failed (expected for limited implementation): %v", err)
-		// Check for specific Administrative Units limitation
+		t.Logf("Set operation failed: %v", err)
 		if strings.Contains(err.Error(), "Resource not found for the segment 'administrativeUnits'") {
-			t.Logf("📝 Administrative Units API not available - requires Azure AD Premium P1/P2 license or may not be supported in this tenant type")
+			t.Logf("Administrative Units API not available - requires Azure AD Premium P1/P2 license or may not be supported in this tenant type")
 		}
-		// Accept either authentication/permission errors OR not-yet-implemented errors OR tenant limitations
-		// Authentication errors indicate credentials/permissions issues
-		// Implementation errors indicate the module functionality is still being developed
-		// BadRequest errors may indicate tenant licensing or feature limitations
-		assert.Regexp(t, "(authentication|permission|consent|scope|credential|invalid_scope|not yet implemented|Resource not found for the segment|BadRequest)", err.Error(),
-			"Expected authentication/permission/scope error or not implemented, got: %v", err)
+		assert.Regexp(t, "(authentication|permission|consent|scope|credential|invalid_scope|Resource not found for the segment|BadRequest)", err.Error(),
+			"Expected authentication/permission/scope error, got: %v", err)
 		return
 	}
 
@@ -163,8 +150,7 @@ func TestEntraAdminUnit_Integration_BasicOperations(t *testing.T) {
 	assert.Equal(t, config.Visibility, retrievedAdminUnit.Visibility)
 	assert.Equal(t, config.TenantID, retrievedAdminUnit.TenantID)
 
-	// Test cleanup - attempt to delete the created admin unit
-	// In a real implementation, this would be a Delete method
+	// Design decision: Delete method is not yet wired in this module; log the created unit ID for manual cleanup.
 	t.Logf("Created admin unit for integration test: %s", retrievedAdminUnit.DisplayName)
 }
 

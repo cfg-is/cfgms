@@ -153,6 +153,19 @@ func (m *MockGraphClient) DeleteDeviceConfiguration(ctx context.Context, token *
 	return args.Error(0)
 }
 
+func (m *MockGraphClient) ListDeviceConfigurationAssignments(ctx context.Context, token *auth.AccessToken, configurationID string) ([]graph.DeviceConfigurationAssignment, error) {
+	args := m.Called(ctx, token, configurationID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]graph.DeviceConfigurationAssignment), args.Error(1)
+}
+
+func (m *MockGraphClient) AssignDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, assignments []graph.DeviceConfigurationAssignment) error {
+	args := m.Called(ctx, token, configurationID, assignments)
+	return args.Error(0)
+}
+
 // Application operations
 func (m *MockGraphClient) GetApplication(ctx context.Context, token *auth.AccessToken, applicationID string) (*graph.Application, error) {
 	args := m.Called(ctx, token, applicationID)
@@ -652,9 +665,12 @@ func TestEntraGroupModule_Set_CreateNewGroup(t *testing.T) {
 	}
 	mockAuth.On("GetAccessToken", mock.Anything, "test-tenant-id").Return(token, nil)
 
-	// GetGroup returns not-found → triggers createGroup path
+	// GetGroup returns not-found → falls back to ListGroups by display name
 	mockGraph.On("GetGroup", mock.Anything, token, "new-group").
 		Return((*graph.Group)(nil), &graph.GraphError{StatusCode: 404, Code: "Request_ResourceNotFound", Message: "not found"})
+	// ListGroups returns empty → no duplicate, proceeds to create
+	mockGraph.On("ListGroups", mock.Anything, token, mock.Anything).
+		Return([]graph.Group{}, nil)
 
 	createdGroup := &graph.Group{
 		ID:           "new-group",
@@ -934,4 +950,294 @@ func TestUpdateTeamSettings_GraphClientError_WithNonNilSettings(t *testing.T) {
 	err := m.updateTeamSettings(context.Background(), token, "team-1", settings)
 	assert.Error(t, err)
 	mockGraph.AssertExpectations(t)
+}
+
+func TestEntraGroupModule_Set_GroupSearch_UsesListGroupsFilter(t *testing.T) {
+	token := &auth.AccessToken{Token: "tok", TenantID: "tenant-1"}
+	var listGroupsCalled bool
+	gc := &stubEntraGroupGC{
+		getGroupFn: func(_ context.Context, _ *auth.AccessToken, _ string) (*graph.Group, error) {
+			return nil, &graph.GraphError{StatusCode: 404, Code: "Request_ResourceNotFound", Message: "not found"}
+		},
+		listGroupsFn: func(_ context.Context, _ *auth.AccessToken, filter string) ([]graph.Group, error) {
+			listGroupsCalled = true
+			assert.Contains(t, filter, "Test Group")
+			return []graph.Group{}, nil
+		},
+		createGroupFn: func(_ context.Context, _ *auth.AccessToken, _ *graph.CreateGroupRequest) (*graph.Group, error) {
+			return &graph.Group{ID: "new-gid", DisplayName: "Test Group", MailNickname: "testgroup"}, nil
+		},
+	}
+	ap := &stubEntraGroupAP{token: token}
+	config := &EntraGroupConfig{
+		DisplayName:     "Test Group",
+		MailNickname:    "testgroup",
+		SecurityEnabled: true,
+		TenantID:        "tenant-1",
+	}
+	m := &entraGroupModule{authProvider: ap, graphClient: gc, propagationDelay: 0}
+	err := m.Set(context.Background(), "tenant-1:new-gid", config)
+	assert.NoError(t, err)
+	assert.True(t, listGroupsCalled, "ListGroups must be called as fallback display-name search")
+}
+
+func TestEntraGroupModule_FindGroupByDisplayName_EscapesQuotes(t *testing.T) {
+	var capturedFilter string
+	gc := &stubEntraGroupGC{
+		listGroupsFn: func(_ context.Context, _ *auth.AccessToken, filter string) ([]graph.Group, error) {
+			capturedFilter = filter
+			return []graph.Group{}, nil
+		},
+	}
+	m := &entraGroupModule{graphClient: gc}
+	_, _ = m.findGroupByDisplayName(context.Background(), &auth.AccessToken{}, "O'Reilly Group")
+	assert.Contains(t, capturedFilter, "O''Reilly Group", "single quotes must be doubled for OData filter safety")
+}
+
+func TestEntraGroupModule_Get_TeamsEnabled_PopulatesTeamFields(t *testing.T) {
+	token := &auth.AccessToken{Token: "tok", TenantID: "tenant-1"}
+	allowPrivate := true
+	gc := &stubEntraGroupGC{
+		getGroupFn: func(_ context.Context, _ *auth.AccessToken, _ string) (*graph.Group, error) {
+			return &graph.Group{
+				ID: "group-1", DisplayName: "Teams Group", MailNickname: "teamsgroup",
+				MailEnabled: true, SecurityEnabled: false,
+			}, nil
+		},
+		listMembersFn: func(_ context.Context, _ *auth.AccessToken, _ string) ([]string, error) {
+			return []string{}, nil
+		},
+		listOwnersFn: func(_ context.Context, _ *auth.AccessToken, _ string) ([]string, error) {
+			return []string{}, nil
+		},
+		getTeamFn: func(_ context.Context, _ *auth.AccessToken, _ string) (*graph.Team, error) {
+			return &graph.Team{
+				ID: "group-1",
+				MemberSettings: &graph.TeamMemberSettings{
+					AllowCreatePrivateChannels: &allowPrivate,
+				},
+			}, nil
+		},
+	}
+	ap := &stubEntraGroupAP{token: token}
+	m := &entraGroupModule{authProvider: ap, graphClient: gc}
+	state, err := m.Get(context.Background(), "tenant-1:group-1")
+	assert.NoError(t, err)
+
+	cfg, ok := state.(*EntraGroupConfig)
+	assert.True(t, ok)
+	assert.True(t, cfg.IsTeamEnabled)
+	assert.NotNil(t, cfg.TeamSettings)
+	assert.True(t, cfg.TeamSettings.AllowCreatePrivateChannels)
+}
+
+// --- struct-based test doubles (no mock framework) ---
+
+// stubEntraGroupAP is a minimal auth.Provider double
+type stubEntraGroupAP struct {
+	token *auth.AccessToken
+}
+
+func (s *stubEntraGroupAP) GetAccessToken(_ context.Context, _ string) (*auth.AccessToken, error) {
+	return s.token, nil
+}
+func (s *stubEntraGroupAP) GetDelegatedAccessToken(_ context.Context, _ string, _ *auth.UserContext) (*auth.AccessToken, error) {
+	return s.token, nil
+}
+func (s *stubEntraGroupAP) RefreshToken(_ context.Context, _ string) (*auth.AccessToken, error) {
+	return s.token, nil
+}
+func (s *stubEntraGroupAP) RefreshDelegatedToken(_ context.Context, _ string, _ *auth.UserContext) (*auth.AccessToken, error) {
+	return s.token, nil
+}
+func (s *stubEntraGroupAP) IsTokenValid(_ *auth.AccessToken) bool { return true }
+func (s *stubEntraGroupAP) ValidatePermissions(_ context.Context, _ *auth.AccessToken, _ []string) error {
+	return nil
+}
+
+// stubEntraGroupGC is a graph.Client double with configurable function fields
+type stubEntraGroupGC struct {
+	getGroupFn    func(ctx context.Context, token *auth.AccessToken, groupID string) (*graph.Group, error)
+	listGroupsFn  func(ctx context.Context, token *auth.AccessToken, filter string) ([]graph.Group, error)
+	createGroupFn func(ctx context.Context, token *auth.AccessToken, req *graph.CreateGroupRequest) (*graph.Group, error)
+	listMembersFn func(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error)
+	listOwnersFn  func(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error)
+	getTeamFn     func(ctx context.Context, token *auth.AccessToken, groupID string) (*graph.Team, error)
+}
+
+func (s *stubEntraGroupGC) GetGroup(ctx context.Context, t *auth.AccessToken, id string) (*graph.Group, error) {
+	if s.getGroupFn != nil {
+		return s.getGroupFn(ctx, t, id)
+	}
+	return nil, fmt.Errorf("group not found")
+}
+func (s *stubEntraGroupGC) ListGroups(ctx context.Context, t *auth.AccessToken, filter string) ([]graph.Group, error) {
+	if s.listGroupsFn != nil {
+		return s.listGroupsFn(ctx, t, filter)
+	}
+	return nil, nil
+}
+func (s *stubEntraGroupGC) CreateGroup(ctx context.Context, t *auth.AccessToken, req *graph.CreateGroupRequest) (*graph.Group, error) {
+	if s.createGroupFn != nil {
+		return s.createGroupFn(ctx, t, req)
+	}
+	return nil, nil
+}
+func (s *stubEntraGroupGC) ListGroupMembers(ctx context.Context, t *auth.AccessToken, id string) ([]string, error) {
+	if s.listMembersFn != nil {
+		return s.listMembersFn(ctx, t, id)
+	}
+	return nil, nil
+}
+func (s *stubEntraGroupGC) ListGroupOwners(ctx context.Context, t *auth.AccessToken, id string) ([]string, error) {
+	if s.listOwnersFn != nil {
+		return s.listOwnersFn(ctx, t, id)
+	}
+	return nil, nil
+}
+func (s *stubEntraGroupGC) GetTeam(ctx context.Context, t *auth.AccessToken, id string) (*graph.Team, error) {
+	if s.getTeamFn != nil {
+		return s.getTeamFn(ctx, t, id)
+	}
+	return nil, fmt.Errorf("not a team")
+}
+
+// Remaining graph.Client methods as no-ops
+func (s *stubEntraGroupGC) GetUser(_ context.Context, _ *auth.AccessToken, _ string) (*graph.User, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) ListUsers(_ context.Context, _ *auth.AccessToken, _ string) ([]graph.User, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) CreateUser(_ context.Context, _ *auth.AccessToken, _ *graph.CreateUserRequest) (*graph.User, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) UpdateUser(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.UpdateUserRequest) error {
+	return nil
+}
+func (s *stubEntraGroupGC) DeleteUser(_ context.Context, _ *auth.AccessToken, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) GetUserLicenses(_ context.Context, _ *auth.AccessToken, _ string) ([]graph.LicenseAssignment, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) AssignLicense(_ context.Context, _ *auth.AccessToken, _, _ string, _ []string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) RemoveLicense(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) GetUserGroups(_ context.Context, _ *auth.AccessToken, _ string) ([]string, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) AddUserToGroup(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) RemoveUserFromGroup(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) GetConditionalAccessPolicy(_ context.Context, _ *auth.AccessToken, _ string) (*graph.ConditionalAccessPolicy, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) CreateConditionalAccessPolicy(_ context.Context, _ *auth.AccessToken, _ *graph.CreateConditionalAccessPolicyRequest) (*graph.ConditionalAccessPolicy, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) UpdateConditionalAccessPolicy(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.UpdateConditionalAccessPolicyRequest) error {
+	return nil
+}
+func (s *stubEntraGroupGC) DeleteConditionalAccessPolicy(_ context.Context, _ *auth.AccessToken, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) GetDeviceConfiguration(_ context.Context, _ *auth.AccessToken, _ string) (*graph.DeviceConfiguration, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) ListDeviceConfigurationAssignments(_ context.Context, _ *auth.AccessToken, _ string) ([]graph.DeviceConfigurationAssignment, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) AssignDeviceConfiguration(_ context.Context, _ *auth.AccessToken, _ string, _ []graph.DeviceConfigurationAssignment) error {
+	return nil
+}
+func (s *stubEntraGroupGC) CreateDeviceConfiguration(_ context.Context, _ *auth.AccessToken, _ *graph.CreateDeviceConfigurationRequest) (*graph.DeviceConfiguration, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) UpdateDeviceConfiguration(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.UpdateDeviceConfigurationRequest) error {
+	return nil
+}
+func (s *stubEntraGroupGC) DeleteDeviceConfiguration(_ context.Context, _ *auth.AccessToken, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) GetApplication(_ context.Context, _ *auth.AccessToken, _ string) (*graph.Application, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) ListApplications(_ context.Context, _ *auth.AccessToken, _ string) ([]graph.Application, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) CreateApplication(_ context.Context, _ *auth.AccessToken, _ *graph.CreateApplicationRequest) (*graph.Application, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) UpdateApplication(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.UpdateApplicationRequest) error {
+	return nil
+}
+func (s *stubEntraGroupGC) DeleteApplication(_ context.Context, _ *auth.AccessToken, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) GetAdministrativeUnit(_ context.Context, _ *auth.AccessToken, _ string) (*graph.AdministrativeUnit, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) ListAdministrativeUnits(_ context.Context, _ *auth.AccessToken, _ string) ([]graph.AdministrativeUnit, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) CreateAdministrativeUnit(_ context.Context, _ *auth.AccessToken, _ *graph.CreateAdministrativeUnitRequest) (*graph.AdministrativeUnit, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) UpdateAdministrativeUnit(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.UpdateAdministrativeUnitRequest) error {
+	return nil
+}
+func (s *stubEntraGroupGC) DeleteAdministrativeUnit(_ context.Context, _ *auth.AccessToken, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) UpdateGroup(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.UpdateGroupRequest) error {
+	return nil
+}
+func (s *stubEntraGroupGC) DeleteGroup(_ context.Context, _ *auth.AccessToken, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) AddGroupMember(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) RemoveGroupMember(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) AddGroupOwner(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) RemoveGroupOwner(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) ListAdminUnitUserMembers(_ context.Context, _ *auth.AccessToken, _ string) ([]string, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) ListAdminUnitGroupMembers(_ context.Context, _ *auth.AccessToken, _ string) ([]string, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) ListAdminUnitScopedRoleMembers(_ context.Context, _ *auth.AccessToken, _ string) ([]graph.AdminUnitScopedRoleMember, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) AddAdminUnitMember(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) AddAdminUnitScopedRoleMember(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.AddScopedRoleMemberRequest) (*graph.AdminUnitScopedRoleMember, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) RemoveAdminUnitMember(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) RemoveAdminUnitScopedRoleMember(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) CreateTeam(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.CreateTeamRequest) error {
+	return nil
+}
+func (s *stubEntraGroupGC) UpdateTeamSettings(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.UpdateTeamSettingsRequest) error {
+	return nil
 }

@@ -302,15 +302,19 @@ func (m *entraGroupModule) Set(ctx context.Context, resourceID string, config mo
 		return fmt.Errorf("failed to authenticate with Microsoft Graph: %w", err)
 	}
 
-	// Check if group exists by searching for it
-	// Note: The graph client would need to be extended with group search capabilities
-	// For now, we'll implement a placeholder
-
-	// Try to get group by display name or ID
+	// Check if group exists: first try GetGroup by ID from resourceID, then fall back to
+	// ListGroups with $filter=displayName eq '...' for cases where the resource ID carries
+	// a display-name slug rather than a Graph object ID.
+	// Design decision: group search uses /groups?$filter=displayName eq '...' via ListGroups;
+	// $search requires ConsistencyLevel:eventual header not yet propagated through the client.
 	groupID := extractGroupID(resourceID)
 	existingGroup, err := m.getGroupByID(ctx, token, groupID)
 	if err != nil {
-		// Group doesn't exist, create it
+		// ID lookup failed; search by display name before creating to avoid duplicates.
+		found, searchErr := m.findGroupByDisplayName(ctx, token, groupConfig.DisplayName)
+		if searchErr == nil && found != nil {
+			return m.updateGroup(ctx, token, groupConfig, found)
+		}
 		return m.createGroup(ctx, token, groupConfig)
 	}
 
@@ -362,10 +366,10 @@ func (m *entraGroupModule) Get(ctx context.Context, resourceID string) (modules.
 		Owners:          owners,
 	}
 
-	// Check if this is a Microsoft Teams-enabled group
-	if m.isTeamGroup(ctx, token, groupID) {
+	// Check if this is a Microsoft Teams-enabled group and populate team settings
+	if team, err := m.graphClient.GetTeam(ctx, token, groupID); err == nil {
 		config.IsTeamEnabled = true
-		// Get team settings and channels would be implemented here
+		config.TeamSettings = graphTeamToTeamSettings(team)
 	}
 
 	return config, nil
@@ -529,7 +533,27 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 	return nil
 }
 
-// Additional helper methods (placeholders)
+// findGroupByDisplayName searches for a group by display name using the $filter OData query.
+func (m *entraGroupModule) findGroupByDisplayName(ctx context.Context, token *auth.AccessToken, displayName string) (*GroupInfo, error) {
+	sanitized := strings.ReplaceAll(displayName, "'", "''")
+	filter := fmt.Sprintf("displayName eq '%s'", sanitized)
+	groups, err := m.graphClient.ListGroups(ctx, token, filter)
+	if err != nil {
+		return nil, err
+	}
+	if len(groups) == 0 {
+		return nil, fmt.Errorf("group with displayName %q not found", displayName)
+	}
+	g := &groups[0]
+	return &GroupInfo{
+		ID:              g.ID,
+		DisplayName:     g.DisplayName,
+		Description:     g.Description,
+		MailNickname:    g.MailNickname,
+		MailEnabled:     g.MailEnabled,
+		SecurityEnabled: g.SecurityEnabled,
+	}, nil
+}
 
 func (m *entraGroupModule) getGroupMembers(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
 	upns, err := m.graphClient.ListGroupMembers(ctx, token, groupID)
@@ -711,6 +735,42 @@ func mapFunSettings(fun string) *graph.TeamFunSettings {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// graphTeamToTeamSettings converts a graph.Team response to the local TeamSettings struct.
+func graphTeamToTeamSettings(team *graph.Team) *TeamSettings {
+	if team == nil {
+		return nil
+	}
+	s := &TeamSettings{}
+	if ms := team.MemberSettings; ms != nil {
+		if ms.AllowCreatePrivateChannels != nil {
+			s.AllowCreatePrivateChannels = *ms.AllowCreatePrivateChannels
+		}
+		if ms.AllowCreateUpdateChannels != nil {
+			s.AllowCreateUpdateChannels = *ms.AllowCreateUpdateChannels
+		}
+		if ms.AllowDeleteChannels != nil {
+			s.AllowDeleteChannels = *ms.AllowDeleteChannels
+		}
+		if ms.AllowAddRemoveApps != nil {
+			s.AllowAddRemoveApps = *ms.AllowAddRemoveApps
+		}
+	}
+	if msg := team.MessagingSettings; msg != nil {
+		if msg.AllowUserEditMessages != nil {
+			s.AllowUserEditMessages = *msg.AllowUserEditMessages
+		}
+	}
+	if gs := team.GuestSettings; gs != nil {
+		if gs.AllowCreateUpdateChannels != nil {
+			s.AllowGuestCreateChannels = *gs.AllowCreateUpdateChannels
+		}
+		if gs.AllowDeleteChannels != nil {
+			s.AllowGuestDeleteChannels = *gs.AllowDeleteChannels
+		}
+	}
+	return s
+}
 
 func mapTeamSettingsToCreateRequest(settings *TeamSettings) *graph.CreateTeamRequest {
 	req := &graph.CreateTeamRequest{}

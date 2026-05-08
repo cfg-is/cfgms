@@ -400,7 +400,7 @@ func (m *conditionalAccessModule) updatePolicy(ctx context.Context, token *auth.
 				updateRequest.State = &config.State
 			}
 		case "conditions":
-			// Always update conditions if managed (complex comparison would be needed for partial updates)
+			// Design decision: conditions are replaced wholesale on update; partial-field diff is deferred.
 			graphConditions := convertToGraphConditions(config.Conditions)
 			updateRequest.Conditions = &graphConditions
 		case "grant_controls":
