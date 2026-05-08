@@ -115,6 +115,46 @@ modules:
       recursive: true
 ```
 
+### Example: Create a log directory with ownership
+
+**Use Case:** Ensure a service's log directory exists on every managed Linux endpoint, owned by the service account so the process can write logs without elevated privileges.
+
+**Configuration:**
+
+```yaml
+modules:
+  app_log_dir:
+    type: directory
+    config:
+      allowed_base_path: /var/log/myapp
+      path: /var/log/myapp
+      state: present
+      permissions: 0750
+      owner: myapp
+      group: myapp
+      recursive: true
+```
+
+**Expected Outcome:** `/var/log/myapp` is created if it does not exist, with mode `0750` and ownership `myapp:myapp`. Parent directories are created automatically because `recursive: true` is set. Subsequent runs are idempotent — the directory is not re-created if it already matches the desired state.
+
+### Example: Ensure a directory is absent
+
+**Use Case:** Remove a legacy working directory that should no longer exist after a service migration.
+
+**Configuration:**
+
+```yaml
+modules:
+  remove_legacy_workdir:
+    type: directory
+    config:
+      allowed_base_path: /var/myapp
+      path: /var/myapp/legacy_cache
+      state: absent
+```
+
+**Expected Outcome:** The module records the desired state as `absent`. On the next convergence cycle, if `/var/myapp/legacy_cache` is detected by `Get()`, the engine omits `Set()` (directory deletion is not implemented by `Set()`); the operator should combine this with a script module to perform the removal. The `allowed_base_path` boundary still applies — no path outside `/var/myapp` can be evaluated.
+
 ## Migration Guide
 
 ### Breaking change in CFGMS Story #876

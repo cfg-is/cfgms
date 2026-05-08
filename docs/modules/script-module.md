@@ -361,6 +361,67 @@ modules:
       signing_policy: optional
 ```
 
+### Example: Simple idempotent health-check script (no signing)
+
+**Use Case:** Run a lightweight health check on every convergence cycle to verify that a critical service is running. No code-signing required because the script performs read-only checks and the risk profile is low.
+
+**Configuration:**
+
+```yaml
+modules:
+  service_health_check:
+    type: script
+    config:
+      content: |
+        #!/bin/bash
+        set -e
+        SERVICE=my-service
+        if systemctl is-active --quiet "$SERVICE"; then
+          echo "$SERVICE is running"
+        else
+          echo "$SERVICE is NOT running" >&2
+          exit 1
+        fi
+      shell: bash
+      timeout: 10s
+      description: Verify that my-service is active
+      signing_policy: none
+```
+
+**Expected Outcome:** The script exits 0 when `my-service` is active. If the service is stopped the script exits 1 and the steward records an execution failure in the audit log. Because the script is idempotent (read-only), re-running it on every cycle is safe and produces no side-effects.
+
+### Example: Production deployment with script signing
+
+**Use Case:** Restart a service after a deployment. The script is signed with an RSA key so the steward rejects any unsigned or tampered version before execution.
+
+**Configuration:**
+
+```yaml
+modules:
+  deploy_restart:
+    type: script
+    config:
+      content: |
+        #!/bin/bash
+        set -e
+        systemctl restart my-service
+        systemctl is-active --quiet my-service
+        echo "my-service restarted successfully"
+      shell: bash
+      timeout: 30s
+      description: Restart my-service after deployment
+      signing_policy: required
+      signature:
+        algorithm: RSA-SHA256
+        signature: "MEQCIBxQ7..."
+        public_key: |
+          -----BEGIN PUBLIC KEY-----
+          MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
+          -----END PUBLIC KEY-----
+```
+
+**Expected Outcome:** The steward validates the RSA-SHA256 signature against the script content before executing. If the signature is missing or invalid the script is rejected with a signing error and no `systemctl` call is made. A valid signature triggers the restart and returns exit 0; the result is recorded in the audit log.
+
 ## Best Practices
 
 ### 1. Script Design
