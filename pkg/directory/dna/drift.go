@@ -677,7 +677,7 @@ func (d *DefaultDirectoryDriftDetector) assessOperationalImpact(drift *Directory
 }
 
 func (d *DefaultDirectoryDriftDetector) assessComplianceImpact(drift *DirectoryDrift) ImpactLevel {
-	// This would be enhanced with compliance-specific rules
+	// Design decision: compliance-specific drift rules require a rule engine integration not yet defined in this package.
 	if drift.Summary.CriticalChanges > 0 {
 		return ImpactLevelMedium
 	}

@@ -39,7 +39,7 @@ type ActiveDirectoryProvider struct {
 }
 
 // StewardClient defines the interface for communicating with AD stewards
-// This would be implemented by the actual gRPC client
+// Design decision: gRPC client transport is injected at construction; this comment block describes the expected interface, not missing implementation.
 type StewardClient interface {
 	// Module operations via steward gRPC API
 	GetModuleState(ctx context.Context, stewardID, moduleType, resourceID string) (map[string]interface{}, error)

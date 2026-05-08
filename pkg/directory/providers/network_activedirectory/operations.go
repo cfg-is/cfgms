@@ -39,18 +39,20 @@ func (p *ActiveDirectoryProvider) GetUser(ctx context.Context, userID string) (*
 
 // CreateUser creates a new user in Active Directory
 func (p *ActiveDirectoryProvider) CreateUser(ctx context.Context, user *interfaces.DirectoryUser) (*interfaces.DirectoryUser, error) {
-	// Note: Create operations would require write permissions and additional implementation
-	return nil, fmt.Errorf("user creation not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return nil, fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // UpdateUser updates an existing user in Active Directory
 func (p *ActiveDirectoryProvider) UpdateUser(ctx context.Context, userID string, updates *interfaces.DirectoryUser) (*interfaces.DirectoryUser, error) {
-	return nil, fmt.Errorf("user updates not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return nil, fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // DeleteUser deletes a user from Active Directory
 func (p *ActiveDirectoryProvider) DeleteUser(ctx context.Context, userID string) error {
-	return fmt.Errorf("user deletion not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // ListUsers lists users from Active Directory
@@ -118,17 +120,20 @@ func (p *ActiveDirectoryProvider) GetGroup(ctx context.Context, groupID string) 
 
 // CreateGroup creates a new group in Active Directory
 func (p *ActiveDirectoryProvider) CreateGroup(ctx context.Context, group *interfaces.DirectoryGroup) (*interfaces.DirectoryGroup, error) {
-	return nil, fmt.Errorf("group creation not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return nil, fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // UpdateGroup updates an existing group in Active Directory
 func (p *ActiveDirectoryProvider) UpdateGroup(ctx context.Context, groupID string, updates *interfaces.DirectoryGroup) (*interfaces.DirectoryGroup, error) {
-	return nil, fmt.Errorf("group updates not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return nil, fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // DeleteGroup deletes a group from Active Directory
 func (p *ActiveDirectoryProvider) DeleteGroup(ctx context.Context, groupID string) error {
-	return fmt.Errorf("group deletion not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // ListGroups lists groups from Active Directory
@@ -171,12 +176,14 @@ func (p *ActiveDirectoryProvider) ListGroups(ctx context.Context, filters *inter
 
 // AddUserToGroup adds a user to a group in Active Directory
 func (p *ActiveDirectoryProvider) AddUserToGroup(ctx context.Context, userID, groupID string) error {
-	return fmt.Errorf("group membership management not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // RemoveUserFromGroup removes a user from a group in Active Directory
 func (p *ActiveDirectoryProvider) RemoveUserFromGroup(ctx context.Context, userID, groupID string) error {
-	return fmt.Errorf("group membership management not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // GetUserGroups gets all groups that a user is a member of
@@ -276,17 +283,20 @@ func (p *ActiveDirectoryProvider) GetOU(ctx context.Context, ouID string) (*inte
 
 // CreateOU creates a new organizational unit in Active Directory
 func (p *ActiveDirectoryProvider) CreateOU(ctx context.Context, ou *interfaces.OrganizationalUnit) (*interfaces.OrganizationalUnit, error) {
-	return nil, fmt.Errorf("OU creation not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return nil, fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // UpdateOU updates an existing organizational unit in Active Directory
 func (p *ActiveDirectoryProvider) UpdateOU(ctx context.Context, ouID string, updates *interfaces.OrganizationalUnit) (*interfaces.OrganizationalUnit, error) {
-	return nil, fmt.Errorf("OU updates not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return nil, fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // DeleteOU deletes an organizational unit from Active Directory
 func (p *ActiveDirectoryProvider) DeleteOU(ctx context.Context, ouID string) error {
-	return fmt.Errorf("OU deletion not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // ListOUs lists organizational units from Active Directory

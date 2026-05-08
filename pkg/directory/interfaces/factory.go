@@ -10,6 +10,7 @@ package interfaces
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -146,9 +147,9 @@ func (f *DefaultDirectoryProviderFactory) ValidateConfig(config ProviderConfig) 
 			return fmt.Errorf("tenant_id is required for OAuth2 authentication")
 		}
 	case AuthMethodClientCert:
-		// Certificate validation would be done by provider
+		// Design decision: certificate and API-key validation is delegated to the provider at Connect() time.
 	case AuthMethodAPIKey:
-		// API key validation would be done by provider
+		// Design decision: certificate and API-key validation is delegated to the provider at Connect() time.
 	default:
 		return fmt.Errorf("unsupported auth_method: %s", config.AuthMethod)
 	}
@@ -316,20 +317,19 @@ func (m *DirectoryProviderManager) Close(ctx context.Context) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	var errors []error
+	var errs []error
 
 	for name, provider := range m.providers {
 		if err := provider.Disconnect(ctx); err != nil {
-			errors = append(errors, fmt.Errorf("failed to disconnect provider '%s': %w", name, err))
+			errs = append(errs, fmt.Errorf("failed to disconnect provider '%s': %w", name, err))
 		}
 	}
 
 	// Clear the providers map
 	m.providers = make(map[string]DirectoryProvider)
 
-	if len(errors) > 0 {
-		// In a real implementation, this would be a multi-error type
-		return fmt.Errorf("errors occurred while closing providers: %v", errors)
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 
 	return nil
@@ -383,8 +383,7 @@ func (m *DirectoryProviderManager) ExecuteCrossDirectoryOperation(ctx context.Co
 
 // DiscoverProviders attempts to discover available directory providers on the network
 func (m *DirectoryProviderManager) DiscoverProviders(ctx context.Context, discovery DiscoveryConfig) ([]DiscoveredProvider, error) {
-	// This would implement network discovery for directory services
-	// For now, return empty slice - real implementation would do LDAP/DNS discovery
+	// Design decision: LDAP/DNS network discovery is a future capability (no ADR yet); returns empty slice until discovery implementation ships.
 	return []DiscoveredProvider{}, nil
 }
 

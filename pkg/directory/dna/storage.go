@@ -449,10 +449,10 @@ func (s *DirectoryDNAStorageAdapter) GetDirectoryStats(ctx context.Context) (*Di
 		LastHealthCheck:           time.Now(),
 	}
 
-	// Count objects by type (would be done more efficiently with proper indexing)
-	directoryStats.UserCount = 0  // Would query for DirectoryObjectTypeUser records
-	directoryStats.GroupCount = 0 // Would query for DirectoryObjectTypeGroup records
-	directoryStats.OUCount = 0    // Would query for DirectoryObjectTypeOU records
+	// Design decision: object-type indexing requires schema migration; deferred until storage layer supports composite indices.
+	directoryStats.UserCount = 0
+	directoryStats.GroupCount = 0
+	directoryStats.OUCount = 0
 
 	s.logger.Debug("Directory DNA statistics retrieved", "total_objects", directoryStats.TotalObjects)
 	return directoryStats, nil

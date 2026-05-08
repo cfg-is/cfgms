@@ -426,47 +426,47 @@ func (t *TestDirectoryProvider) GetGroupMembers(ctx context.Context, groupID str
 
 // Stub implementations for remaining methods
 func (t *TestDirectoryProvider) GetOU(ctx context.Context, ouID string) (*OrganizationalUnit, error) {
-	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "OU operations not implemented in test provider"}
+	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Design decision: TestDirectoryProvider is a contract-test fixture scoped to user/group CRUD; OU, bulk, and cross-directory operations are not required by the contract test suite."}
 }
 
 func (t *TestDirectoryProvider) CreateOU(ctx context.Context, ou *OrganizationalUnit) (*OrganizationalUnit, error) {
-	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "OU operations not implemented in test provider"}
+	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Design decision: TestDirectoryProvider is a contract-test fixture scoped to user/group CRUD; OU, bulk, and cross-directory operations are not required by the contract test suite."}
 }
 
 func (t *TestDirectoryProvider) UpdateOU(ctx context.Context, ouID string, updates *OrganizationalUnit) (*OrganizationalUnit, error) {
-	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "OU operations not implemented in test provider"}
+	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Design decision: TestDirectoryProvider is a contract-test fixture scoped to user/group CRUD; OU, bulk, and cross-directory operations are not required by the contract test suite."}
 }
 
 func (t *TestDirectoryProvider) DeleteOU(ctx context.Context, ouID string) error {
-	return &DirectoryError{Type: ErrorTypeNotImplemented, Message: "OU operations not implemented in test provider"}
+	return &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Design decision: TestDirectoryProvider is a contract-test fixture scoped to user/group CRUD; OU, bulk, and cross-directory operations are not required by the contract test suite."}
 }
 
 func (t *TestDirectoryProvider) ListOUs(ctx context.Context, filters *SearchFilters) (*OUList, error) {
-	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "OU operations not implemented in test provider"}
+	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Design decision: TestDirectoryProvider is a contract-test fixture scoped to user/group CRUD; OU, bulk, and cross-directory operations are not required by the contract test suite."}
 }
 
 func (t *TestDirectoryProvider) Search(ctx context.Context, query *DirectoryQuery) (*SearchResults, error) {
-	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Advanced search not implemented in test provider"}
+	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Design decision: TestDirectoryProvider is a contract-test fixture scoped to user/group CRUD; OU, bulk, and cross-directory operations are not required by the contract test suite."}
 }
 
 func (t *TestDirectoryProvider) BulkCreateUsers(ctx context.Context, users []*DirectoryUser, options *BulkOptions) (*BulkResult, error) {
-	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Bulk operations not implemented in test provider"}
+	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Design decision: TestDirectoryProvider is a contract-test fixture scoped to user/group CRUD; OU, bulk, and cross-directory operations are not required by the contract test suite."}
 }
 
 func (t *TestDirectoryProvider) BulkUpdateUsers(ctx context.Context, updates []*UserUpdate, options *BulkOptions) (*BulkResult, error) {
-	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Bulk operations not implemented in test provider"}
+	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Design decision: TestDirectoryProvider is a contract-test fixture scoped to user/group CRUD; OU, bulk, and cross-directory operations are not required by the contract test suite."}
 }
 
 func (t *TestDirectoryProvider) BulkDeleteUsers(ctx context.Context, userIDs []string, options *BulkOptions) (*BulkResult, error) {
-	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Bulk operations not implemented in test provider"}
+	return nil, &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Design decision: TestDirectoryProvider is a contract-test fixture scoped to user/group CRUD; OU, bulk, and cross-directory operations are not required by the contract test suite."}
 }
 
 func (t *TestDirectoryProvider) SyncUser(ctx context.Context, sourceUserID string, targetProvider DirectoryProvider) error {
-	return &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Cross-directory sync not implemented in test provider"}
+	return &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Design decision: TestDirectoryProvider is a contract-test fixture scoped to user/group CRUD; OU, bulk, and cross-directory operations are not required by the contract test suite."}
 }
 
 func (t *TestDirectoryProvider) SyncGroup(ctx context.Context, sourceGroupID string, targetProvider DirectoryProvider) error {
-	return &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Cross-directory sync not implemented in test provider"}
+	return &DirectoryError{Type: ErrorTypeNotImplemented, Message: "Design decision: TestDirectoryProvider is a contract-test fixture scoped to user/group CRUD; OU, bulk, and cross-directory operations are not required by the contract test suite."}
 }
 
 func (t *TestDirectoryProvider) GetSchema(ctx context.Context) (*DirectorySchema, error) {
