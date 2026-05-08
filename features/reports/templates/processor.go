@@ -996,7 +996,7 @@ func (p *Processor) generateDriftEventsByDeviceSection(events []drift.DriftEvent
 // generateSecurityAssessment generates a comprehensive security assessment report.
 //
 // Design decision: KPI values are representative defaults. Full calculation from
-// audit event data requires a unified audit query pipeline not yet implemented.
+// audit event data requires a unified audit query pipeline; deferred to a future story.
 func (p *Processor) generateSecurityAssessment(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
 		Type:      interfaces.ReportTypeSecurity,
@@ -1027,7 +1027,7 @@ func (p *Processor) generateSecurityAssessment(ctx context.Context, data interfa
 // generateOperationalHealth generates a system health report.
 //
 // Design decision: KPI values are representative defaults. Full calculation
-// from steward telemetry requires a streaming metrics pipeline not yet implemented.
+// from steward telemetry requires a streaming metrics pipeline; deferred to a future story.
 func (p *Processor) generateOperationalHealth(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
 		Type:      interfaces.ReportTypeOperational,
@@ -1159,7 +1159,7 @@ func (p *Processor) generateMultiTenantSummary(ctx context.Context, data interfa
 // generateChangeManagement generates a change management report.
 //
 // Design decision: Approval workflow counts are representative defaults; a change
-// workflow store is not yet implemented.
+// workflow store is pending a future story.
 func (p *Processor) generateChangeManagement(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
 		Type:      interfaces.ReportTypeOperational,
@@ -1224,7 +1224,7 @@ func (p *Processor) generateAuditTrail(ctx context.Context, data interfaces.Repo
 // generateResourceUtilization generates a resource utilization report.
 //
 // Design decision: Utilization percentages are representative defaults; real values
-// require a telemetry ingestion pipeline not yet implemented.
+// require a telemetry ingestion pipeline; deferred to a future story.
 func (p *Processor) generateResourceUtilization(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
 		Type:      interfaces.ReportTypeOperational,
