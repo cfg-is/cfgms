@@ -7,6 +7,47 @@ import (
 	"time"
 )
 
+// Standard test workflows used across nested_workflow_test.go and error_workflow_test.go.
+// Tests that invoke loadWorkflowByName must register these on the engine before executing.
+
+var testNestedWorkflow = Workflow{
+	Name: "test-nested-workflow",
+	Variables: map[string]interface{}{
+		"nested_result": "default",
+	},
+	Steps: []Step{
+		{
+			Name: "nested-delay",
+			Type: StepTypeDelay,
+			Delay: &DelayConfig{
+				Duration: 1 * time.Millisecond,
+				Message:  "Nested workflow executed",
+			},
+		},
+	},
+}
+
+var errorHandlerWorkflow = Workflow{
+	Name: "test-error-handler",
+	Variables: map[string]interface{}{
+		"handled":         "handled",
+		"recovery_status": "handled",
+		"resolution":      "error_resolved",
+		"remediation":     "auto_fix_applied",
+		"next_action":     "continue_execution",
+	},
+	Steps: []Step{
+		{
+			Name: "handle-error-step",
+			Type: StepTypeDelay,
+			Delay: &DelayConfig{
+				Duration: 1 * time.Millisecond,
+				Message:  "Error handled by recovery workflow",
+			},
+		},
+	},
+}
+
 // waitForWorkflowCompletion waits for the workflow execution to fully complete.
 //
 // If the execution has a Done channel (created via ExecuteWorkflow), it waits on

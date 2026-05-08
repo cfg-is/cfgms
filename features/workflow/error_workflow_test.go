@@ -4,6 +4,8 @@ package workflow
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -46,6 +48,7 @@ func TestErrorWorkflowStep(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
 	engine := NewEngine(moduleFactory, logger, nil)
+	engine.RegisterWorkflow(errorHandlerWorkflow)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -65,7 +68,22 @@ func TestErrorWorkflowStep(t *testing.T) {
 }
 
 func TestErrorWorkflowWithPath(t *testing.T) {
-	// Test error workflow execution by file path
+	// Write a real YAML error-handler workflow to a temp dir and load it by path.
+	const yamlContent = `
+name: path-error-handler
+variables:
+  recovery_status: handled
+steps:
+  - name: path-error-step
+    type: delay
+    delay:
+      duration: 1ms
+      message: "Error handler loaded from path"
+`
+	dir := t.TempDir()
+	wfPath := filepath.Join(dir, "error-handler.yaml")
+	require.NoError(t, os.WriteFile(wfPath, []byte(yamlContent), 0600))
+
 	workflow := Workflow{
 		Name: "error-workflow-path-test",
 		Steps: []Step{
@@ -73,7 +91,7 @@ func TestErrorWorkflowWithPath(t *testing.T) {
 				Name: "handle-error-by-path",
 				Type: StepTypeErrorWorkflow,
 				ErrorWorkflow: &ErrorWorkflowConfig{
-					WorkflowPath: "/path/to/error-handler.yaml",
+					WorkflowPath: wfPath,
 					Parameters: map[string]interface{}{
 						"error_type": "validation",
 					},
@@ -102,10 +120,10 @@ func TestErrorWorkflowWithPath(t *testing.T) {
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
 
-	// Verify output mapping worked
+	// Verify output mapping worked from the file-loaded variable
 	status, exists := execution.GetVariable("status")
 	assert.True(t, exists)
-	assert.Equal(t, "handled", status) // From mock error handler
+	assert.Equal(t, "handled", status)
 }
 
 func TestErrorWorkflowAsync(t *testing.T) {
@@ -146,6 +164,7 @@ func TestErrorWorkflowAsync(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
 	engine := NewEngine(moduleFactory, logger, nil)
+	engine.RegisterWorkflow(errorHandlerWorkflow)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -262,6 +281,7 @@ func TestErrorWorkflowWithRecoveryActions(t *testing.T) {
 			moduleFactory := createTestFactory()
 			logger := pkgtesting.NewMockLogger(true)
 			engine := NewEngine(moduleFactory, logger, nil)
+			engine.RegisterWorkflow(errorHandlerWorkflow)
 			ctx := context.Background()
 
 			execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -320,6 +340,7 @@ func TestErrorWorkflowParameterAndOutputMappings(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
 	engine := NewEngine(moduleFactory, logger, nil)
+	engine.RegisterWorkflow(errorHandlerWorkflow)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -337,8 +358,9 @@ func TestErrorWorkflowParameterAndOutputMappings(t *testing.T) {
 	assert.True(t, exists)
 	assert.Equal(t, "important_data", sourceData)
 
-	// Verify output mappings were applied (these would come from the mock error handler)
-	// In a real implementation, the mock handler would set these variables
+	// Verify output mappings were applied from the registered error handler workflow
+	_, exists = execution.GetVariable("error_resolution")
+	assert.True(t, exists)
 }
 
 func TestErrorWorkflowTimeout(t *testing.T) {
@@ -362,6 +384,7 @@ func TestErrorWorkflowTimeout(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
 	engine := NewEngine(moduleFactory, logger, nil)
+	engine.RegisterWorkflow(errorHandlerWorkflow)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
