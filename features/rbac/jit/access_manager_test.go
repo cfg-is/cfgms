@@ -823,6 +823,363 @@ func TestJITAuditManager_NilSafe(t *testing.T) {
 	assert.NotNil(t, request)
 }
 
+// makeMultiStageWorkflow builds a 2-stage sequential workflow for multi-stage tests.
+// Stage approvers are explicit user IDs (ApprovalStageTypeUser).
+func makeMultiStageWorkflow(s1Approvers []string, s1Min int, s2Approvers []string, s2Min int) *jit.ApprovalWorkflow {
+	return &jit.ApprovalWorkflow{
+		ID:   "two-stage",
+		Name: "Two Stage Workflow",
+		Type: jit.ApprovalTypeSequential,
+		Approvers: []jit.ApprovalStage{
+			{
+				ID:           "stage-1",
+				Type:         jit.ApprovalStageTypeUser,
+				Approvers:    s1Approvers,
+				MinApprovals: s1Min,
+				TimeoutHours: 2,
+			},
+			{
+				ID:           "stage-2",
+				Type:         jit.ApprovalStageTypeUser,
+				Approvers:    s2Approvers,
+				MinApprovals: s2Min,
+				TimeoutHours: 2,
+			},
+		},
+	}
+}
+
+func TestJITAccessManager_MultiStageApproval_AdvancesStages(t *testing.T) {
+	rbacManager := newTestRBACManager(t)
+	jam := jit.NewJITAccessManager(rbacManager, jit.NewSimpleNotificationService())
+
+	grantPermission(t, rbacManager, "approver1", "jit_access.approve", "tenant1")
+	grantPermission(t, rbacManager, "approver2", "jit_access.approve", "tenant1")
+
+	workflow := makeMultiStageWorkflow([]string{"approver1"}, 1, []string{"approver2"}, 1)
+	jam.SetWorkflowProvider(func(_ context.Context, _ *jit.JITAccessRequest) (*jit.ApprovalWorkflow, error) {
+		return workflow, nil
+	})
+
+	ctx := context.Background()
+	request, err := jam.RequestAccess(ctx, &jit.JITAccessRequestSpec{
+		RequesterID:   "user1",
+		TenantID:      "tenant1",
+		Permissions:   []string{"admin"},
+		Duration:      2 * time.Hour,
+		Justification: "multi-stage advance test",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, jit.JITAccessRequestStatusPending, request.Status)
+	require.NotNil(t, request.WorkflowState, "WorkflowState must be initialised for multi-stage workflows")
+	assert.Equal(t, 0, request.WorkflowState.CurrentStage)
+
+	// Stage 1 approval — must not produce a grant; stage index advances to 1.
+	grant, err := jam.ApproveRequest(ctx, request.ID, "approver1", "stage 1 ok")
+	require.NoError(t, err)
+	assert.Nil(t, grant)
+
+	afterStage1, err := jam.GetRequest(ctx, request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, jit.JITAccessRequestStatusPending, afterStage1.Status)
+	assert.Equal(t, 1, afterStage1.WorkflowState.CurrentStage)
+
+	// Stage 2 approval — final stage, grant must be created.
+	grant2, err := jam.ApproveRequest(ctx, request.ID, "approver2", "stage 2 ok")
+	require.NoError(t, err)
+	require.NotNil(t, grant2)
+
+	final, err := jam.GetRequest(ctx, request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, jit.JITAccessRequestStatusApproved, final.Status)
+	assert.Equal(t, grant2.ID, final.GrantedAccess.ID)
+}
+
+func TestJITAccessManager_MultiStageApproval_RequiresBothStages(t *testing.T) {
+	rbacManager := newTestRBACManager(t)
+	jam := jit.NewJITAccessManager(rbacManager, jit.NewSimpleNotificationService())
+
+	grantPermission(t, rbacManager, "approver1", "jit_access.approve", "tenant1")
+
+	workflow := makeMultiStageWorkflow([]string{"approver1"}, 1, []string{"approver1"}, 1)
+	jam.SetWorkflowProvider(func(_ context.Context, _ *jit.JITAccessRequest) (*jit.ApprovalWorkflow, error) {
+		return workflow, nil
+	})
+
+	ctx := context.Background()
+	request, err := jam.RequestAccess(ctx, &jit.JITAccessRequestSpec{
+		RequesterID:   "user1",
+		TenantID:      "tenant1",
+		Permissions:   []string{"admin"},
+		Duration:      2 * time.Hour,
+		Justification: "requires-both-stages test",
+	})
+	require.NoError(t, err)
+
+	// Only stage 1 approved — request must remain pending with no grant.
+	grant, err := jam.ApproveRequest(ctx, request.ID, "approver1", "stage 1")
+	require.NoError(t, err)
+	assert.Nil(t, grant, "no grant should be created until all stages complete")
+
+	afterStage1, err := jam.GetRequest(ctx, request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, jit.JITAccessRequestStatusPending, afterStage1.Status)
+	assert.Nil(t, afterStage1.GrantedAccess)
+
+	// Stage 2 approval completes the workflow and creates the grant.
+	grant2, err := jam.ApproveRequest(ctx, request.ID, "approver1", "stage 2")
+	require.NoError(t, err)
+	require.NotNil(t, grant2)
+
+	afterStage2, err := jam.GetRequest(ctx, request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, jit.JITAccessRequestStatusApproved, afterStage2.Status)
+	assert.NotNil(t, afterStage2.GrantedAccess)
+}
+
+func TestJITAccessManager_MultiStageApproval_DuplicateApproverIgnored(t *testing.T) {
+	rbacManager := newTestRBACManager(t)
+	jam := jit.NewJITAccessManager(rbacManager, jit.NewSimpleNotificationService())
+
+	grantPermission(t, rbacManager, "approver1", "jit_access.approve", "tenant1")
+	grantPermission(t, rbacManager, "approver1b", "jit_access.approve", "tenant1")
+
+	// Stage 1 requires 2 distinct approvals so a duplicate call cannot accidentally advance the stage.
+	workflow := makeMultiStageWorkflow([]string{"approver1", "approver1b"}, 2, []string{"approver2"}, 1)
+	jam.SetWorkflowProvider(func(_ context.Context, _ *jit.JITAccessRequest) (*jit.ApprovalWorkflow, error) {
+		return workflow, nil
+	})
+
+	ctx := context.Background()
+	request, err := jam.RequestAccess(ctx, &jit.JITAccessRequestSpec{
+		RequesterID:   "user1",
+		TenantID:      "tenant1",
+		Permissions:   []string{"admin"},
+		Duration:      2 * time.Hour,
+		Justification: "duplicate approver test",
+	})
+	require.NoError(t, err)
+
+	// First approval.
+	grant, err := jam.ApproveRequest(ctx, request.ID, "approver1", "first")
+	require.NoError(t, err)
+	assert.Nil(t, grant)
+
+	afterFirst, err := jam.GetRequest(ctx, request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, len(afterFirst.WorkflowState.StageApprovals[0]))
+	assert.Equal(t, 0, afterFirst.WorkflowState.CurrentStage)
+
+	// Duplicate call — must be silently ignored: no error, no state change.
+	grant2, err := jam.ApproveRequest(ctx, request.ID, "approver1", "duplicate")
+	require.NoError(t, err)
+	assert.Nil(t, grant2)
+
+	afterDup, err := jam.GetRequest(ctx, request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, len(afterDup.WorkflowState.StageApprovals[0]), "set size must not grow on duplicate")
+	assert.Equal(t, 0, afterDup.WorkflowState.CurrentStage, "stage must not advance on duplicate")
+	assert.Equal(t, jit.JITAccessRequestStatusPending, afterDup.Status)
+
+	// Second unique approver completes stage 1 — verifies the idempotency check did not
+	// consume the stage advancement slot.
+	grant3, err := jam.ApproveRequest(ctx, request.ID, "approver1b", "second unique")
+	require.NoError(t, err)
+	assert.Nil(t, grant3)
+
+	afterAdvance, err := jam.GetRequest(ctx, request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, afterAdvance.WorkflowState.CurrentStage, "stage must advance after MinApprovals met")
+	assert.Equal(t, 2, len(afterAdvance.WorkflowState.StageApprovals[0]))
+}
+
+func TestJITAccessManager_MultiStageApproval_MinApprovalsEnforced(t *testing.T) {
+	rbacManager := newTestRBACManager(t)
+	jam := jit.NewJITAccessManager(rbacManager, jit.NewSimpleNotificationService())
+
+	grantPermission(t, rbacManager, "approver1a", "jit_access.approve", "tenant1")
+	grantPermission(t, rbacManager, "approver1b", "jit_access.approve", "tenant1")
+	grantPermission(t, rbacManager, "approver2", "jit_access.approve", "tenant1")
+
+	// Stage 1 requires 2 distinct approvals before advancing.
+	workflow := makeMultiStageWorkflow([]string{"approver1a", "approver1b"}, 2, []string{"approver2"}, 1)
+	jam.SetWorkflowProvider(func(_ context.Context, _ *jit.JITAccessRequest) (*jit.ApprovalWorkflow, error) {
+		return workflow, nil
+	})
+
+	ctx := context.Background()
+	request, err := jam.RequestAccess(ctx, &jit.JITAccessRequestSpec{
+		RequesterID:   "user1",
+		TenantID:      "tenant1",
+		Permissions:   []string{"admin"},
+		Duration:      2 * time.Hour,
+		Justification: "min-approvals test",
+	})
+	require.NoError(t, err)
+
+	// First stage-1 approval — not yet at MinApprovals=2, stage must not advance.
+	grant, err := jam.ApproveRequest(ctx, request.ID, "approver1a", "first of two")
+	require.NoError(t, err)
+	assert.Nil(t, grant)
+
+	afterFirst, err := jam.GetRequest(ctx, request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, afterFirst.WorkflowState.CurrentStage, "stage must not advance before MinApprovals met")
+	assert.Equal(t, jit.JITAccessRequestStatusPending, afterFirst.Status)
+
+	// Second stage-1 approval — meets MinApprovals=2, stage advances to 1.
+	grant2, err := jam.ApproveRequest(ctx, request.ID, "approver1b", "second of two")
+	require.NoError(t, err)
+	assert.Nil(t, grant2, "no grant until final stage completes")
+
+	afterSecond, err := jam.GetRequest(ctx, request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, afterSecond.WorkflowState.CurrentStage, "stage must advance after MinApprovals met")
+
+	// Final stage-2 approval creates the grant.
+	grant3, err := jam.ApproveRequest(ctx, request.ID, "approver2", "final approval")
+	require.NoError(t, err)
+	require.NotNil(t, grant3)
+
+	final, err := jam.GetRequest(ctx, request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, jit.JITAccessRequestStatusApproved, final.Status)
+}
+
+func TestJITAccessManager_MultiStageApproval_NonMemberRejected(t *testing.T) {
+	rbacManager := newTestRBACManager(t)
+	jam := jit.NewJITAccessManager(rbacManager, jit.NewSimpleNotificationService())
+
+	// Intruder has the RBAC permission so the rejection comes from stage membership, not RBAC.
+	grantPermission(t, rbacManager, "intruder", "jit_access.approve", "tenant1")
+
+	workflow := makeMultiStageWorkflow([]string{"approver1"}, 1, []string{"approver2"}, 1)
+	jam.SetWorkflowProvider(func(_ context.Context, _ *jit.JITAccessRequest) (*jit.ApprovalWorkflow, error) {
+		return workflow, nil
+	})
+
+	ctx := context.Background()
+	request, err := jam.RequestAccess(ctx, &jit.JITAccessRequestSpec{
+		RequesterID:   "user1",
+		TenantID:      "tenant1",
+		Permissions:   []string{"admin"},
+		Duration:      2 * time.Hour,
+		Justification: "non-member rejection test",
+	})
+	require.NoError(t, err)
+
+	grant, err := jam.ApproveRequest(ctx, request.ID, "intruder", "trying to approve stage 1")
+
+	require.Error(t, err)
+	assert.Nil(t, grant)
+	// Error must be the stage-membership error, not the RBAC permission error.
+	assert.Contains(t, err.Error(), "not a member of stage")
+	assert.NotContains(t, err.Error(), "does not have permission to approve")
+
+	// Request must still be pending.
+	updated, err := jam.GetRequest(ctx, request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, jit.JITAccessRequestStatusPending, updated.Status)
+}
+
+func TestJITAccessManager_MultiStageApproval_StageAuditEmitted(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "jit-stage-audit-test")
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		assert.NoError(t, auditMgr.Stop(ctx))
+		assert.NoError(t, storageManager.Close())
+	})
+
+	rbacManager := newTestRBACManager(t)
+	grantPermission(t, rbacManager, "approver1", "jit_access.approve", "tenant1")
+
+	jam := jit.NewJITAccessManager(rbacManager, jit.NewSimpleNotificationService())
+	jam.SetAuditManager(auditMgr)
+
+	// Two-stage workflow; approver1 is listed in both stages.
+	workflow := makeMultiStageWorkflow([]string{"approver1"}, 1, []string{"approver1"}, 1)
+	jam.SetWorkflowProvider(func(_ context.Context, _ *jit.JITAccessRequest) (*jit.ApprovalWorkflow, error) {
+		return workflow, nil
+	})
+
+	ctx := context.Background()
+	request, err := jam.RequestAccess(ctx, &jit.JITAccessRequestSpec{
+		RequesterID:   "user1",
+		TenantID:      "tenant1",
+		Permissions:   []string{"admin"},
+		Duration:      2 * time.Hour,
+		Justification: "stage audit test",
+	})
+	require.NoError(t, err)
+
+	// Approve stage 1 (intermediate — not the final stage).
+	grant, err := jam.ApproveRequest(ctx, request.ID, "approver1", "stage 1")
+	require.NoError(t, err)
+	assert.Nil(t, grant)
+
+	flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	require.NoError(t, auditMgr.Flush(flushCtx))
+
+	entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{TenantID: "tenant1"})
+	require.NoError(t, err)
+
+	var stageEntry *business.AuditEntry
+	for _, e := range entries {
+		e := e
+		if e.Action == "stage_approved" {
+			stageEntry = e
+			break
+		}
+	}
+	require.NotNil(t, stageEntry, "expected a stage_approved audit event")
+	assert.Equal(t, "tenant1", stageEntry.TenantID)
+	assert.Equal(t, "jit_access", stageEntry.ResourceType)
+
+	stageID, ok := stageEntry.Details["stage_id"].(string)
+	require.True(t, ok, "stage_id detail must be a string")
+	assert.Equal(t, "stage-1", stageID)
+
+	approverID, ok := stageEntry.Details["approver_id"].(string)
+	require.True(t, ok, "approver_id detail must be a string")
+	assert.Equal(t, "approver1", approverID)
+}
+
+func TestJITAccessManager_AutoApproval_BypassesStageCheck(t *testing.T) {
+	rbacManager := newTestRBACManager(t)
+	jam := jit.NewJITAccessManager(rbacManager, jit.NewSimpleNotificationService())
+
+	// "system" (used by auto-approval) must have the RBAC permission but is intentionally
+	// absent from both stage approvers lists to verify the bypass.
+	grantPermission(t, rbacManager, "system", "jit_access.approve", "tenant1")
+
+	workflow := makeMultiStageWorkflow([]string{"approver1"}, 1, []string{"approver2"}, 1)
+	jam.SetWorkflowProvider(func(_ context.Context, _ *jit.JITAccessRequest) (*jit.ApprovalWorkflow, error) {
+		return workflow, nil
+	})
+
+	ctx := context.Background()
+	request, err := jam.RequestAccess(ctx, &jit.JITAccessRequestSpec{
+		RequesterID:   "user1",
+		TenantID:      "tenant1",
+		Permissions:   []string{"read"},
+		Duration:      time.Hour,
+		Justification: "auto-approve stage bypass test",
+		AutoApprove:   true,
+	})
+
+	require.NoError(t, err, "auto-approval must succeed even when approverID='system' is not in any stage's approvers list")
+	assert.Equal(t, jit.JITAccessRequestStatusApproved, request.Status)
+	assert.NotNil(t, request.GrantedAccess)
+}
+
 func newTestRBACManager(t *testing.T) *rbac.Manager {
 	t.Helper()
 	tmpDir := t.TempDir()
