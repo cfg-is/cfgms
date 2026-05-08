@@ -193,18 +193,19 @@ func TestWriteModuleSpec_RoundTrip(t *testing.T) {
 }
 
 func TestWriteModuleSpec_WriteError(t *testing.T) {
-	// Use a non-existent base path with a read-only parent to trigger write failure
+	// Place a regular file at a path where MkdirAll needs a directory. This blocks
+	// directory creation on all OSes (including Windows, where chmod 0500 is not enforced).
 	root := t.TempDir()
-	readOnlyDir := filepath.Join(root, "readonly")
-	require.NoError(t, os.MkdirAll(readOnlyDir, 0500)) // read + execute, no write
+	blocker := filepath.Join(root, "blocker")
+	require.NoError(t, os.WriteFile(blocker, []byte(""), 0600))
 
 	mrm := newTestMRM(t)
 	module := &CustomModule{
 		Spec: ModuleSpec{Metadata: ModuleMetadata{Name: "test"}},
 	}
 
-	// Attempt to write inside the read-only directory
-	err := mrm.writeModuleSpec(context.Background(), readOnlyDir, "sub/module.yaml", module)
+	// specPath descends through "blocker" (a file), so MkdirAll must fail.
+	err := mrm.writeModuleSpec(context.Background(), root, filepath.Join("blocker", "sub", "module.yaml"), module)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to create directory")
 }
