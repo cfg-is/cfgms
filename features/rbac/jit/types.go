@@ -24,6 +24,13 @@ type JITAccessRequestSpec struct {
 	RequesterMetadata map[string]string `json:"requester_metadata,omitempty"`
 }
 
+// WorkflowState tracks multi-stage approval progression embedded on JITAccessRequest.
+// It is initialised by startApprovalWorkflow for workflows with more than one stage.
+type WorkflowState struct {
+	CurrentStage   int                         `json:"current_stage"`
+	StageApprovals map[int]map[string]struct{} `json:"-"` // not serialised; persistence is a separate story
+}
+
 // JITAccessRequest represents a JIT access request
 type JITAccessRequest struct {
 	ID                string            `json:"id"`
@@ -51,6 +58,9 @@ type JITAccessRequest struct {
 	ReviewedBy       string                 `json:"reviewed_by,omitempty"`
 	ReviewedAt       *time.Time             `json:"reviewed_at,omitempty"`
 	DenialReason     string                 `json:"denial_reason,omitempty"`
+
+	// Multi-stage workflow tracking
+	WorkflowState *WorkflowState `json:"workflow_state,omitempty"`
 
 	// Timestamps
 	CreatedAt  time.Time `json:"created_at"`

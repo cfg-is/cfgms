@@ -17,6 +17,12 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
+// WorkflowProvider selects an approval workflow for a JIT access request.
+// When set on JITAccessManager via SetWorkflowProvider, it replaces the built-in
+// single-stage default with tenant-specific, risk-based, or environment-specific
+// workflow policies without forking the core manager.
+type WorkflowProvider func(ctx context.Context, request *JITAccessRequest) (*ApprovalWorkflow, error)
+
 // JITAccessManager manages Just-In-Time access requests and grants
 type JITAccessManager struct {
 	rbacManager         rbac.RBACManager
@@ -25,6 +31,7 @@ type JITAccessManager struct {
 	approvalWorkflows   map[string]*ApprovalWorkflow
 	auditManager        *audit.Manager
 	notificationService NotificationService
+	workflowProvider    WorkflowProvider
 	mutex               sync.RWMutex
 }
 
@@ -44,6 +51,15 @@ func NewJITAccessManager(rbacManager rbac.RBACManager, notificationService Notif
 // It is a no-op when m is nil.
 func (jam *JITAccessManager) SetAuditManager(m *audit.Manager) {
 	jam.auditManager = m
+}
+
+// SetWorkflowProvider replaces the built-in workflow determination logic with a custom
+// provider. The provider is called once per request creation and must return a non-nil
+// workflow; nil causes request creation to fail.
+func (jam *JITAccessManager) SetWorkflowProvider(provider WorkflowProvider) {
+	jam.mutex.Lock()
+	defer jam.mutex.Unlock()
+	jam.workflowProvider = provider
 }
 
 // recordJITAccessRequest emits a jit_access request audit event. No-op when auditManager is nil.
@@ -187,11 +203,71 @@ func (jam *JITAccessManager) RequestAccess(ctx context.Context, req *JITAccessRe
 	return request, nil
 }
 
-// ApproveRequest approves a JIT access request
+// ApproveRequest approves a JIT access request.
+// For multi-stage workflows it records the stage approval and only creates the
+// grant when the final stage is satisfied. Single-stage workflows grant access
+// immediately (existing behaviour).
 func (jam *JITAccessManager) ApproveRequest(ctx context.Context, requestID, approverID, reason string) (*JITAccessGrant, error) {
 	jam.mutex.Lock()
 	defer jam.mutex.Unlock()
 
+	request, exists := jam.requests[requestID]
+	if !exists {
+		return nil, fmt.Errorf("request %s not found", requestID)
+	}
+
+	if request.Status != JITAccessRequestStatusPending {
+		return nil, fmt.Errorf("request %s is not in pending status", requestID)
+	}
+
+	// Multi-stage path: WorkflowState is only set for workflows with >1 stage.
+	if request.WorkflowState != nil {
+		workflow, exists := jam.approvalWorkflows[requestID]
+		if !exists || workflow == nil {
+			return nil, fmt.Errorf("approval workflow not found for request %s", requestID)
+		}
+
+		// Stage membership check must come before the RBAC permission check so callers
+		// can distinguish the two rejection reasons.
+		if err := jam.validateStageApprover(request, approverID); err != nil {
+			return nil, err
+		}
+
+		stageIdx := request.WorkflowState.CurrentStage
+		stage := workflow.Approvers[stageIdx]
+
+		// Idempotency: silently ignore a duplicate approval from the same approver
+		// in the same stage — no state change, no audit event.
+		if _, already := request.WorkflowState.StageApprovals[stageIdx][approverID]; already {
+			return nil, nil
+		}
+
+		// RBAC check: approver must hold the jit_access.approve permission.
+		if err := jam.validateApprover(ctx, request, approverID); err != nil {
+			return nil, fmt.Errorf("approver validation failed: %w", err)
+		}
+
+		// Record approval in the per-stage set.
+		request.WorkflowState.StageApprovals[stageIdx][approverID] = struct{}{}
+
+		// Emit stage_approved audit event for every new (non-duplicate) approval,
+		// including intermediate stages.
+		jam.recordStageApproval(ctx, request, stage.ID, approverID)
+
+		// Advance when the stage's MinApprovals threshold is met.
+		if len(request.WorkflowState.StageApprovals[stageIdx]) >= stage.MinApprovals {
+			nextIdx := stageIdx + 1
+			if nextIdx >= len(workflow.Approvers) {
+				// Final stage complete — delegate to internal approveRequest for grant creation.
+				return jam.approveRequest(ctx, requestID, approverID, reason)
+			}
+			jam.advanceWorkflowStage(ctx, request, workflow)
+		}
+
+		return nil, nil
+	}
+
+	// Single-stage path: original immediate-grant behaviour.
 	return jam.approveRequest(ctx, requestID, approverID, reason)
 }
 
@@ -497,7 +573,27 @@ func (jam *JITAccessManager) checkCurrentAccess(ctx context.Context, subjectID s
 }
 
 func (jam *JITAccessManager) determineApprovalWorkflow(ctx context.Context, request *JITAccessRequest) (*ApprovalWorkflow, error) {
-	// Default workflow - single approver
+	var (
+		workflow *ApprovalWorkflow
+		err      error
+	)
+
+	if jam.workflowProvider != nil {
+		workflow, err = jam.workflowProvider(ctx, request)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		workflow = jam.defaultApprovalWorkflow(request)
+	}
+
+	// Store the resolved workflow keyed by request ID so multi-stage approval can look it up.
+	jam.approvalWorkflows[request.ID] = workflow
+
+	return workflow, nil
+}
+
+func (jam *JITAccessManager) defaultApprovalWorkflow(request *JITAccessRequest) *ApprovalWorkflow {
 	workflow := &ApprovalWorkflow{
 		ID:   "default-approval",
 		Name: "Default Approval Workflow",
@@ -513,17 +609,15 @@ func (jam *JITAccessManager) determineApprovalWorkflow(ctx context.Context, requ
 		},
 	}
 
-	// Emergency access gets expedited workflow
 	if request.EmergencyAccess {
-		workflow.Approvers[0].TimeoutHours = 0.5 // 30 minutes
+		workflow.Approvers[0].TimeoutHours = 0.5
 	}
 
-	// High-privilege requests require multiple approvers
 	if jam.isHighPrivilegeRequest(request) {
 		workflow.Approvers[0].MinApprovals = 2
 	}
 
-	return workflow, nil
+	return workflow
 }
 
 func (jam *JITAccessManager) shouldAutoApprove(ctx context.Context, request *JITAccessRequest) bool {
@@ -651,13 +745,70 @@ func (jam *JITAccessManager) checkExtensionPermission(ctx context.Context, reque
 }
 
 func (jam *JITAccessManager) startApprovalWorkflow(ctx context.Context, request *JITAccessRequest, workflow *ApprovalWorkflow) error {
-	// Implementation would integrate with workflow engine
-	// For now, simulate by notifying first stage approvers
+	if len(workflow.Approvers) > 1 {
+		// Multi-stage: initialise WorkflowState so ApproveRequest uses the staged path.
+		stageApprovals := make(map[int]map[string]struct{}, len(workflow.Approvers))
+		for i := range workflow.Approvers {
+			stageApprovals[i] = make(map[string]struct{})
+		}
+		request.WorkflowState = &WorkflowState{
+			CurrentStage:   0,
+			StageApprovals: stageApprovals,
+		}
+	}
+
 	if len(workflow.Approvers) > 0 {
-		firstStage := workflow.Approvers[0]
-		return jam.sendApprovalNotifications(ctx, request, firstStage.Approvers)
+		return jam.sendApprovalNotifications(ctx, request, workflow.Approvers[0].Approvers)
 	}
 	return nil
+}
+
+// validateStageApprover checks that approverID is listed in the current pending stage's
+// Approvers slice. It must be called only from the public ApproveRequest path; internal
+// approveRequest (used by auto-approval with approverID="system") is exempt.
+// Returns a distinct error from the RBAC jit_access.approve permission check so callers
+// can tell the two failure modes apart.
+func (jam *JITAccessManager) validateStageApprover(request *JITAccessRequest, approverID string) error {
+	if request.WorkflowState == nil {
+		return nil
+	}
+	workflow, exists := jam.approvalWorkflows[request.ID]
+	if !exists {
+		return nil
+	}
+	stageIdx := request.WorkflowState.CurrentStage
+	if stageIdx >= len(workflow.Approvers) {
+		return nil
+	}
+	stage := workflow.Approvers[stageIdx]
+	for _, a := range stage.Approvers {
+		if a == approverID {
+			return nil
+		}
+	}
+	return fmt.Errorf("approver %s is not a member of stage %s", approverID, stage.ID)
+}
+
+// recordStageApproval emits a stage_approved audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordStageApproval(ctx context.Context, request *JITAccessRequest, stageID, approverID string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		request.TenantID, request.RequesterID, "jit_access", request.ID, "stage_approved",
+		business.AuditResultSuccess,
+	).Detail("stage_id", stageID).Detail("approver_id", approverID)); err != nil {
+		slog.Warn("failed to record jit stage approval audit event", "error", err)
+	}
+}
+
+// advanceWorkflowStage increments the current stage index and notifies the next stage's approvers.
+func (jam *JITAccessManager) advanceWorkflowStage(ctx context.Context, request *JITAccessRequest, workflow *ApprovalWorkflow) {
+	request.WorkflowState.CurrentStage++
+	nextIdx := request.WorkflowState.CurrentStage
+	if nextIdx < len(workflow.Approvers) {
+		_ = jam.sendApprovalNotifications(ctx, request, workflow.Approvers[nextIdx].Approvers)
+	}
 }
 
 func (jam *JITAccessManager) activateAccess(ctx context.Context, grant *JITAccessGrant) error {
