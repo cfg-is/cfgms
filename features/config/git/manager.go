@@ -755,7 +755,7 @@ type repoNameParts struct {
 }
 
 func parseRepositoryName(fullName string) repoNameParts {
-	// Design decision: conflict resolution uses last-write-wins for non-schema fields; schema fields require manual resolution.
+	// Design decision: owner always defaults to "cfgms"; multi-owner name parsing deferred.
 	return repoNameParts{
 		owner: "cfgms",
 		name:  fullName,
