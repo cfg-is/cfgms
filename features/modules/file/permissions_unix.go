@@ -5,7 +5,11 @@
 
 package file
 
-import "os"
+import (
+	"os"
+
+	"github.com/cfgis/cfgms/features/modules"
+)
 
 // platformSupportsPermissions returns true on Unix-like systems where
 // file permission bits are enforced by the filesystem.
@@ -22,3 +26,9 @@ func getFilePermissions(info os.FileInfo) int {
 func defaultFileMode() os.FileMode {
 	return 0644
 }
+
+// getFileACL returns nil on non-Windows platforms (NTFS ACLs are Windows-only).
+func getFileACL(_ string) (*modules.WindowsACL, error) { return nil, nil }
+
+// setFileACL is a no-op on non-Windows platforms.
+func setFileACL(_ string, _ *modules.WindowsACL) error { return nil }

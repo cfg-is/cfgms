@@ -5,7 +5,11 @@
 
 package directory
 
-import "os"
+import (
+	"os"
+
+	"github.com/cfgis/cfgms/features/modules"
+)
 
 // platformSupportsPermissions returns true on Unix-like systems where
 // directory permission bits are enforced by the filesystem.
@@ -22,3 +26,9 @@ func getDirectoryPermissions(info os.FileInfo) int {
 func defaultDirectoryMode() os.FileMode {
 	return 0755
 }
+
+// getDirectoryACL returns nil on non-Windows platforms (NTFS ACLs are Windows-only).
+func getDirectoryACL(_ string) (*modules.WindowsACL, error) { return nil, nil }
+
+// setDirectoryACL is a no-op on non-Windows platforms.
+func setDirectoryACL(_ string, _ *modules.WindowsACL) error { return nil }

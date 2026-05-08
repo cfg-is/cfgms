@@ -36,10 +36,11 @@ modules:
 | `allowed_base_path` | string | **Yes** | Absolute path that acts as the security boundary. All OS calls are validated to remain within this prefix. |
 | `path` | string | Yes | Absolute path of the directory to manage. Must fall within `allowed_base_path`. |
 | `state` | string | No | `"present"` (default) creates or ensures the directory exists. `"absent"` is returned by `Get()` when the directory does not exist; `Set()` does not implement directory deletion. |
-| `permissions` | int | No | Unix permission bits as an integer (e.g., `0750`). Ignored on Windows (NTFS uses ACLs). |
+| `permissions` | int | No | Unix permission bits as an integer (e.g., `0750`). **Not supported on Windows** — mutually exclusive with `windows_acl`. |
 | `owner` | string | No | User name that should own the directory (Unix only). |
 | `group` | string | No | Group name that should own the directory (Unix only). |
 | `recursive` | bool | No | When `true`, creates missing parent directories with `os.MkdirAll`. When `false` (default), fails if the parent does not exist. |
+| `windows_acl` | object | No | Windows NTFS ACL (owner + entries). **Windows only** — mutually exclusive with `permissions`. See [Windows ACL](#windows-acl). |
 
 ## Security: AllowedBasePath
 
@@ -154,6 +155,58 @@ modules:
 ```
 
 **Expected Outcome:** The module records the desired state as `absent`. On the next convergence cycle, if `/var/myapp/legacy_cache` is detected by `Get()`, the engine omits `Set()` (directory deletion is not implemented by `Set()`); the operator should combine this with a script module to perform the removal. The `allowed_base_path` boundary still applies — no path outside `/var/myapp` can be evaluated.
+
+## Windows ACL
+
+The `windows_acl` field declares NTFS access control for the directory on Windows endpoints. It is mutually exclusive with `permissions` — you must use one or the other, not both. On non-Windows platforms, specifying `windows_acl` is a validation error.
+
+### Schema
+
+```yaml
+windows_acl:
+  owner: "DOMAIN\\User"          # optional; leave blank to keep the existing owner
+  entries:
+    - principal: "DOMAIN\\User"  # account name accepted by Windows LookupAccountName
+      access: "FullControl"      # FullControl | ReadAndExecute | Modify | Write | Read
+```
+
+### Access levels
+
+| Value | Effective Windows rights |
+|-------|--------------------------|
+| `FullControl` | `GENERIC_ALL` |
+| `ReadAndExecute` | `GENERIC_READ \| GENERIC_EXECUTE` |
+| `Modify` | `GENERIC_WRITE \| GENERIC_READ \| GENERIC_EXECUTE` |
+| `Write` | `GENERIC_WRITE` |
+| `Read` | `GENERIC_READ` |
+
+### Example: Set Windows ACL on an application data directory
+
+**Use Case:** Restrict a sensitive data directory to the service account and Administrators on Windows endpoints.
+
+**Configuration:**
+
+```yaml
+modules:
+  app_data_dir_windows:
+    type: directory
+    config:
+      allowed_base_path: C:\ProgramData\MyApp
+      path: C:\ProgramData\MyApp\Data
+      state: present
+      recursive: true
+      windows_acl:
+        owner: "BUILTIN\\Administrators"
+        entries:
+          - principal: "BUILTIN\\Administrators"
+            access: FullControl
+          - principal: "NT AUTHORITY\\SYSTEM"
+            access: FullControl
+          - principal: "NT AUTHORITY\\Authenticated Users"
+            access: ReadAndExecute
+```
+
+**Expected Outcome:** `C:\ProgramData\MyApp\Data` is created if absent (with parent directories via `recursive: true`). The DACL grants `FullControl` to Administrators and SYSTEM, and `ReadAndExecute` to all authenticated users. Subsequent `Get()` calls return the actual NTFS ACL so the verifier can detect drift.
 
 ## Migration Guide
 

@@ -88,6 +88,12 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 		return nil, err
 	}
 
+	// Read Windows ACL; nil on non-Windows platforms.
+	aclData, err := getFileACL(cleanPath)
+	if err != nil {
+		return nil, err
+	}
+
 	config := &FileConfig{
 		State:           "present",
 		Content:         string(content),
@@ -95,6 +101,7 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 		Owner:           owner,
 		Group:           group,
 		AllowedBasePath: m.configuredBasePath,
+		WindowsACL:      aclData,
 	}
 
 	return config, nil
@@ -151,6 +158,9 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 	if basePath, ok := configMap["allowed_base_path"].(string); ok {
 		fileConfig.AllowedBasePath = basePath
 	}
+	if aclData, ok := configMap["windows_acl"].(*modules.WindowsACL); ok {
+		fileConfig.WindowsACL = aclData
+	}
 
 	// AllowedBasePath must be validated before any OS call, including os.Remove in the absent branch.
 	if fileConfig.AllowedBasePath == "" || !filepath.IsAbs(fileConfig.AllowedBasePath) {
@@ -194,8 +204,9 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 		return fmt.Errorf("unix-style permissions are not supported on this platform (NTFS uses ACLs); remove the permissions field from your configuration")
 	}
 
-	// Apply default permissions if not specified
-	if fileConfig.Permissions == 0 {
+	// Apply default permissions only when windows_acl is not set; avoids a false mutual-exclusion
+	// error in Validate() when the operator omits both fields.
+	if fileConfig.Permissions == 0 && fileConfig.WindowsACL == nil {
 		fileConfig.Permissions = int(defaultFileMode())
 	}
 
@@ -269,6 +280,18 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 				"error_code", "UNSUPPORTED_PLATFORM",
 				"platform", runtime.GOOS)
 			return modules.ErrUnsupportedPlatform
+		}
+	}
+
+	// Apply Windows ACL if specified (platform stub returns nil on non-Windows).
+	if fileConfig.WindowsACL != nil {
+		if err := setFileACL(cleanPath, fileConfig.WindowsACL); err != nil {
+			logger.ErrorCtx(ctx, "Failed to set Windows ACL",
+				"operation", "file_set",
+				"resource_id", resourceID,
+				"error_code", "WINDOWS_ACL_FAILED",
+				"error_details", err.Error())
+			return err
 		}
 	}
 

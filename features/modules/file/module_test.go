@@ -263,6 +263,26 @@ func TestFileModule_EdgeCases(t *testing.T) {
 	}
 }
 
+// TestFileConfig_Validate_WindowsACL_MutualExclusion verifies that specifying both
+// permissions and windows_acl in the same config returns a validation error.
+func TestFileConfig_Validate_WindowsACL_MutualExclusion(t *testing.T) {
+	cfg := &FileConfig{
+		State:           "present",
+		Content:         "test",
+		AllowedBasePath: "/tmp",
+		Permissions:     0644,
+		WindowsACL: &modules.WindowsACL{
+			Entries: []modules.ACLEntry{
+				{Principal: `BUILTIN\Administrators`, Access: "FullControl"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() with both permissions and windows_acl should return an error")
+	}
+}
+
 func TestFileModule_PermissionsRejectedOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-only test")
