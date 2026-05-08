@@ -337,3 +337,47 @@ func TestDeleteTenant_CascadesRBACCleanup_PartialFailureContinues(t *testing.T) 
 	// DeleteTenant must return nil despite individual cascade errors
 	require.NoError(t, manager.DeleteTenant(ctx, tenant.ID))
 }
+
+// recordingInvalidator records every tenant ID passed to InvalidateTenantCache.
+type recordingInvalidator struct {
+	calls []string
+}
+
+func (r *recordingInvalidator) InvalidateTenantCache(id string) {
+	r.calls = append(r.calls, id)
+}
+
+func TestManager_UpdateTenant_InvalidatesConfigCache(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Cache-Invalidation-Test"})
+	require.NoError(t, err)
+
+	inv := &recordingInvalidator{}
+	manager.WithConfigRouter(inv)
+
+	updateReq := &TenantRequest{
+		Name: tenant.Name,
+		Metadata: map[string]string{
+			"config_source_type": "controller",
+		},
+	}
+	_, err = manager.UpdateTenant(ctx, tenant.ID, updateReq)
+	require.NoError(t, err)
+
+	require.Len(t, inv.calls, 1, "InvalidateTenantCache must be called exactly once after UpdateTenant")
+	assert.Equal(t, tenant.ID, inv.calls[0], "InvalidateTenantCache must receive the updated tenant ID")
+}
+
+func TestManager_UpdateTenant_NoRouterWired_NoError(t *testing.T) {
+	// Manager with no router wired must not panic on UpdateTenant.
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "No-Router-Tenant"})
+	require.NoError(t, err)
+
+	_, err = manager.UpdateTenant(ctx, tenant.ID, &TenantRequest{Name: tenant.Name})
+	require.NoError(t, err, "UpdateTenant without a wired router must succeed")
+}

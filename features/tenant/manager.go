@@ -13,10 +13,17 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
+// cacheInvalidator is the minimal interface required by Manager to invalidate cached
+// config source resolutions after a tenant update. Implemented by ConfigSourceRouter.
+type cacheInvalidator interface {
+	InvalidateTenantCache(tenantID string)
+}
+
 // Manager handles tenant operations and integrates with RBAC
 type Manager struct {
 	store       Store
 	rbacManager *rbac.Manager
+	router      cacheInvalidator // optional; invalidates config source cache on UpdateTenant
 }
 
 // NewManager creates a new tenant manager
@@ -25,6 +32,14 @@ func NewManager(store Store, rbacManager *rbac.Manager) *Manager {
 		store:       store,
 		rbacManager: rbacManager,
 	}
+}
+
+// WithConfigRouter wires a ConfigSourceRouter into the manager so that
+// UpdateTenant can invalidate the per-tenant config source cache immediately
+// after a successful store update.
+func (m *Manager) WithConfigRouter(r cacheInvalidator) *Manager {
+	m.router = r
+	return m
 }
 
 // CreateTenant creates a new tenant with validation and RBAC setup
@@ -94,6 +109,11 @@ func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *Tenant
 	// Update in storage
 	if err := m.store.UpdateTenant(ctx, existing); err != nil {
 		return nil, fmt.Errorf("failed to update tenant: %w", err)
+	}
+
+	// Invalidate the config source cache so the next resolution reflects the new metadata.
+	if m.router != nil {
+		m.router.InvalidateTenantCache(tenantID)
 	}
 
 	return existing, nil

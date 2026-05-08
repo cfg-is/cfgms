@@ -16,15 +16,44 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
+// configSourceRouter is the minimal interface that InheritanceResolver requires from
+// a ConfigSourceRouter. Defined here (not in pkg/configrouting/interfaces) to avoid
+// a circular import: pkg/configrouting/interfaces imports pkg/config for ConfigSourceInfo,
+// so pkg/config cannot import pkg/configrouting/interfaces in return.
+// The concrete *controllerRouter in pkg/configrouting/providers/controller satisfies this
+// interface by duck-typing; no explicit declaration is needed there.
+type configSourceRouter interface {
+	cfgconfig.ConfigStore
+	// SnapshotSources resolves the config source for every tenant in tenantPath atomically.
+	SnapshotSources(ctx context.Context, tenantPath []string) (map[string]*ConfigSourceInfo, error)
+}
+
+// cfgStoreAsRouter wraps a plain ConfigStore to satisfy configSourceRouter.
+// SnapshotSources always returns ConfigSourceTypeController for backward compatibility
+// (used by NewInheritanceResolverWithStorageManager which has no router available).
+type cfgStoreAsRouter struct {
+	cfgconfig.ConfigStore
+}
+
+func (s *cfgStoreAsRouter) SnapshotSources(_ context.Context, tenantPath []string) (map[string]*ConfigSourceInfo, error) {
+	m := make(map[string]*ConfigSourceInfo, len(tenantPath))
+	for _, tid := range tenantPath {
+		m[tid] = &ConfigSourceInfo{Type: ConfigSourceTypeController}
+	}
+	return m, nil
+}
+
 // InheritanceResolver handles configuration inheritance across tenant hierarchy
 type InheritanceResolver struct {
-	configStore       cfgconfig.ConfigStore
+	configStore       configSourceRouter
 	clientTenantStore business.ClientTenantStore
 	tenantStore       business.TenantStore
 }
 
-// NewInheritanceResolver creates a new inheritance resolver
-func NewInheritanceResolver(configStore cfgconfig.ConfigStore, clientTenantStore business.ClientTenantStore, tenantStore business.TenantStore) *InheritanceResolver {
+// NewInheritanceResolver creates an InheritanceResolver backed by a ConfigSourceRouter.
+// Pass a *controllerRouter (or any configSourceRouter implementation) so that
+// SnapshotSources is called once per cascade for atomic source resolution.
+func NewInheritanceResolver(configStore configSourceRouter, clientTenantStore business.ClientTenantStore, tenantStore business.TenantStore) *InheritanceResolver {
 	return &InheritanceResolver{
 		configStore:       configStore,
 		clientTenantStore: clientTenantStore,
@@ -32,10 +61,13 @@ func NewInheritanceResolver(configStore cfgconfig.ConfigStore, clientTenantStore
 	}
 }
 
-// NewInheritanceResolverWithStorageManager creates an inheritance resolver from storage manager
+// NewInheritanceResolverWithStorageManager creates an inheritance resolver from a storage
+// manager. The underlying ConfigStore is wrapped in a cfgStoreAsRouter adapter that always
+// returns ConfigSourceTypeController from SnapshotSources (backward-compatible default).
+// Prefer NewInheritanceResolver with a real ConfigSourceRouter for production deployments.
 func NewInheritanceResolverWithStorageManager(storageManager *interfaces.StorageManager) *InheritanceResolver {
 	return &InheritanceResolver{
-		configStore:       storageManager.GetConfigStore(),
+		configStore:       &cfgStoreAsRouter{ConfigStore: storageManager.GetConfigStore()},
 		clientTenantStore: storageManager.GetClientTenantStore(),
 		tenantStore:       storageManager.GetTenantStore(),
 	}
@@ -70,12 +102,21 @@ const (
 	LevelDevice InheritanceLevel = 3 // Device-specific configurations
 )
 
-// ResolveConfiguration resolves configuration with full tenant hierarchy inheritance
+// ResolveConfiguration resolves configuration with full tenant hierarchy inheritance.
+// SnapshotSources is called once before the cascade loop so that every level in the
+// hierarchy uses the same generation of source routing decisions — preventing a
+// mid-cascade source redirect from causing partial data from two different stores.
 func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantID, stewardID string) (*EffectiveConfiguration, error) {
 	// Get tenant hierarchy path
 	tenantPath, err := ir.getTenantPath(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve tenant hierarchy: %w", err)
+	}
+
+	// Snapshot all config sources atomically before entering the cascade loop.
+	sourcesSnapshot, err := ir.configStore.SnapshotSources(ctx, tenantPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to snapshot config sources: %w", err)
 	}
 
 	// Initialize effective configuration
@@ -87,9 +128,10 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 		GeneratedAt: time.Now(),
 	}
 
-	// Apply configurations from MSP level down to device level
+	// Apply configurations from MSP level down to device level using the pre-snapshotted sources.
 	for level, currentTenantID := range tenantPath {
-		if err := ir.applyConfigurationLevel(ctx, effective, currentTenantID, stewardID, level); err != nil {
+		source := sourcesSnapshot[currentTenantID]
+		if err := ir.applyConfigurationLevel(ctx, effective, currentTenantID, stewardID, level, source); err != nil {
 			return nil, fmt.Errorf("failed to apply configuration at level %d (tenant %s): %w", level, currentTenantID, err)
 		}
 	}
@@ -107,8 +149,13 @@ func (ir *InheritanceResolver) getTenantPath(ctx context.Context, tenantID strin
 	return ir.tenantStore.GetTenantPath(ctx, tenantID)
 }
 
-// applyConfigurationLevel applies configuration from a specific hierarchy level
-func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effective *EffectiveConfiguration, tenantID, stewardID string, level int) error {
+// applyConfigurationLevel applies configuration from a specific hierarchy level.
+// source is the pre-snapshotted ConfigSourceInfo for this tenant, resolved once by
+// ResolveConfiguration before the cascade loop. In Phase 1 the router always returns
+// ConfigSourceTypeController so the configStore.GetConfig call below routes there;
+// Phase 2 (Story C) will use source.Type to dispatch to a git store.
+func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effective *EffectiveConfiguration, tenantID, stewardID string, level int, source *ConfigSourceInfo) error {
+	_ = source // Phase 1: routing handled internally by configStore (always controller)
 	// Try to get configuration at this level
 	var configNamespace string
 	var configName string
@@ -146,7 +193,7 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 	}
 
 	// Create inheritance source tracking
-	source := &InheritanceSource{
+	inheritSrc := &InheritanceSource{
 		Level:      level,
 		TenantID:   tenantID,
 		ConfigName: configName,
@@ -156,7 +203,7 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 	}
 
 	// Apply configuration using declarative merging (named resources replace entirely)
-	ir.applyConfigurationWithSource(effective, &levelConfig, source)
+	ir.applyConfigurationWithSource(effective, &levelConfig, inheritSrc)
 
 	return nil
 }

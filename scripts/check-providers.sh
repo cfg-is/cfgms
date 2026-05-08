@@ -26,6 +26,7 @@ get_files() {
 is_allowed() {
     local file="$1"
     [[ "$file" == pkg/storage/providers/* ]] && return 0
+    [[ "$file" == pkg/configrouting/providers/* ]] && return 0
     [[ "$file" == pkg/testing/* ]] && return 0
     [[ "$file" == test/* ]] && return 0
     [[ "$file" == cmd/controller/main.go ]] && return 0
@@ -64,6 +65,7 @@ else
     echo ""
     echo "Direct pkg/storage/providers/* imports are only allowed in:"
     echo "  pkg/storage/providers/                                      (provider-internal)"
+    echo "  pkg/configrouting/providers/                                (provider-internal)"
     echo "  pkg/testing/                                                (test registration helpers)"
     echo "  test/                                                       (integration and e2e tests)"
     echo "  cmd/controller/main.go                                      (registry bootstrap)"
