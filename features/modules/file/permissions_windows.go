@@ -185,18 +185,37 @@ func accessStringToMask(access string) (windows.ACCESS_MASK, error) {
 	}
 }
 
+// Windows maps generic access rights to file-specific rights when storing ACEs.
+// These are the object-specific values returned by GetNamedSecurityInfo.
+const (
+	// fileACLFullControl = FILE_ALL_ACCESS
+	fileACLFullControl windows.ACCESS_MASK = 0x001F01FF
+	// fileACLRead = FILE_GENERIC_READ
+	fileACLRead windows.ACCESS_MASK = 0x00120089
+	// fileACLWrite = FILE_GENERIC_WRITE
+	fileACLWrite windows.ACCESS_MASK = 0x00120116
+	// fileACLExecute = FILE_GENERIC_EXECUTE
+	fileACLExecute windows.ACCESS_MASK = 0x001200A0
+	// fileACLReadAndExecute = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+	fileACLReadAndExecute windows.ACCESS_MASK = fileACLRead | fileACLExecute
+	// fileACLModify = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE
+	fileACLModify windows.ACCESS_MASK = fileACLRead | fileACLWrite | fileACLExecute
+)
+
 // maskToAccessString converts a Windows ACCESS_MASK to a named access level string.
+// Handles both the generic constants used when setting and the file-specific
+// constants that Windows stores (and returns via GetNamedSecurityInfo).
 func maskToAccessString(mask windows.ACCESS_MASK) string {
 	switch mask {
-	case windows.GENERIC_ALL:
+	case windows.GENERIC_ALL, fileACLFullControl:
 		return "FullControl"
-	case windows.GENERIC_READ | windows.GENERIC_EXECUTE:
+	case windows.GENERIC_READ | windows.GENERIC_EXECUTE, fileACLReadAndExecute:
 		return "ReadAndExecute"
-	case windows.GENERIC_WRITE | windows.GENERIC_READ | windows.GENERIC_EXECUTE:
+	case windows.GENERIC_WRITE | windows.GENERIC_READ | windows.GENERIC_EXECUTE, fileACLModify:
 		return "Modify"
-	case windows.GENERIC_WRITE:
+	case windows.GENERIC_WRITE, fileACLWrite:
 		return "Write"
-	case windows.GENERIC_READ:
+	case windows.GENERIC_READ, fileACLRead:
 		return "Read"
 	default:
 		return fmt.Sprintf("0x%08X", uint32(mask))
