@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// Package controller provides the Phase 1 ConfigSourceRouter implementation that routes
-// all tenant config reads to the controller's own store.
+// Package controller provides the ConfigSourceRouter implementation that routes tenant
+// config reads to the appropriate backing store — controller store or git store.
 //
 // Phase 2 (Story C) extends storeForSource to dispatch git sources without modifying
 // this router's interface or the cache/snapshot machinery defined here.
@@ -9,6 +9,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -17,15 +18,17 @@ import (
 	"github.com/cfgis/cfgms/pkg/cache"
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	routerinterfaces "github.com/cfgis/cfgms/pkg/configrouting/interfaces"
+	gitprovider "github.com/cfgis/cfgms/pkg/configrouting/providers/git"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 const sourceCacheTTL = time.Minute
 
-// controllerRouter implements ConfigSourceRouter routing all reads to controllerStore.
+// controllerRouter implements ConfigSourceRouter routing reads to the appropriate store.
 type controllerRouter struct {
 	controllerStore cfgconfig.ConfigStore
 	tenantStore     business.TenantStore
@@ -34,6 +37,13 @@ type controllerRouter struct {
 	// a snapshot never straddles a cache flush — every entry in the snapshot is
 	// resolved from the same generation of the cache.
 	snapshotMu sync.RWMutex
+
+	// git source fields (nil when not configured — controller-only mode)
+	secretStore   secretsiface.SecretStore
+	gitWorkDir    string
+	logger        logging.Logger
+	gitStoreMu    sync.Mutex
+	gitStoreCache map[string]*gitprovider.GitConfigStore // key: tenantID+":"+sha256(url)
 }
 
 // NewControllerRouter creates a ConfigSourceRouter that delegates all reads and writes
@@ -50,6 +60,33 @@ func NewControllerRouter(controllerStore cfgconfig.ConfigStore, tenantStore busi
 			CleanupInterval: 5 * time.Minute,
 			EvictionPolicy:  cache.EvictionLRU,
 		}),
+	}
+}
+
+// NewControllerRouterWithGit creates a ConfigSourceRouter that supports both controller
+// and external HTTPS git config sources. secretStore is used to fetch git credentials at
+// transport time. gitWorkDir is the base directory for cloned repositories.
+func NewControllerRouterWithGit(
+	controllerStore cfgconfig.ConfigStore,
+	tenantStore business.TenantStore,
+	secretStore secretsiface.SecretStore,
+	gitWorkDir string,
+	logger logging.Logger,
+) routerinterfaces.ConfigSourceRouter {
+	return &controllerRouter{
+		controllerStore: controllerStore,
+		tenantStore:     tenantStore,
+		sourceCache: cache.NewCache(cache.CacheConfig{
+			Name:            "configrouting-source",
+			MaxRuntimeItems: 10000,
+			DefaultTTL:      sourceCacheTTL,
+			CleanupInterval: 5 * time.Minute,
+			EvictionPolicy:  cache.EvictionLRU,
+		}),
+		secretStore:   secretStore,
+		gitWorkDir:    gitWorkDir,
+		logger:        logger,
+		gitStoreCache: make(map[string]*gitprovider.GitConfigStore),
 	}
 }
 
@@ -125,11 +162,41 @@ func (r *controllerRouter) InvalidateTenantCache(tenantID string) {
 	r.sourceCache.Delete(tenantID)
 }
 
-// storeForSource returns the ConfigStore to use for the given source.
-// Phase 1: always returns controllerStore.
-// Phase 2 (Story C): check info.Type == ConfigSourceTypeGit and return GitConfigStore.
-func (r *controllerRouter) storeForSource(_ *pkgconfig.ConfigSourceInfo) cfgconfig.ConfigStore {
-	return r.controllerStore
+// storeForSource returns the ConfigStore to use for the given tenantID and source.
+// Returns controllerStore for controller sources or when git dependencies are not wired.
+// Returns a cached GitConfigStore for git sources; constructs one on first access.
+func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, info *pkgconfig.ConfigSourceInfo) cfgconfig.ConfigStore {
+	if info.Type != pkgconfig.ConfigSourceTypeGit || r.secretStore == nil || r.gitWorkDir == "" {
+		return r.controllerStore
+	}
+
+	urlHash := fmt.Sprintf("%x", sha256.Sum256([]byte(info.URL)))
+	cacheKey := tenantID + ":" + urlHash
+
+	r.gitStoreMu.Lock()
+	defer r.gitStoreMu.Unlock()
+
+	if gs, ok := r.gitStoreCache[cacheKey]; ok {
+		return gs
+	}
+
+	logger := r.logger
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
+
+	gs, err := gitprovider.NewGitConfigStore(ctx, info, tenantID, r.secretStore, r.gitWorkDir, logger)
+	if err != nil {
+		slog.Warn("configrouting: failed to create git store, falling back to controller store",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"url", logging.SanitizeLogValue(info.URL),
+			"error_category", "initialization_failure",
+		)
+		return r.controllerStore
+	}
+
+	r.gitStoreCache[cacheKey] = gs
+	return gs
 }
 
 // checkCrossTenant returns an error if the context tenant cannot access tenantID's config.
@@ -160,8 +227,8 @@ func (r *controllerRouter) checkCrossTenant(ctx context.Context, tenantID string
 	return nil
 }
 
-// routeRead resolves the store for key.TenantID and delegates the actual call to
-// the provided fn. Empty TenantID bypasses resolution and goes to controllerStore.
+// routeRead resolves the store for tenantID and delegates the actual call to fn.
+// Empty TenantID bypasses resolution and goes to controllerStore.
 func (r *controllerRouter) routeRead(ctx context.Context, tenantID string, fn func(cfgconfig.ConfigStore) error) error {
 	if tenantID == "" {
 		return fn(r.controllerStore)
@@ -173,7 +240,7 @@ func (r *controllerRouter) routeRead(ctx context.Context, tenantID string, fn fu
 	if err != nil {
 		return err
 	}
-	return fn(r.storeForSource(info))
+	return fn(r.storeForSource(ctx, tenantID, info))
 }
 
 // --- ConfigStore read methods ---
