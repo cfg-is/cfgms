@@ -533,6 +533,143 @@ GOEOF
     rm -rf "$tmp_dir"
 }
 
+# Tests for scripts/security-trivy.sh — trivy init-error vs real-findings distinction
+
+test_security_trivy_init_error() {
+    log_test "Testing security-trivy.sh: trivy init error → clear DB-download message, NOT vulnerability message..."
+
+    local script
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/security-trivy.sh"
+
+    if [[ ! -f "$script" ]]; then
+        log_fail "security-trivy.sh: Script not found at $script"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    # Mock trivy that emits the exact FATAL init-error output seen in production
+    cat > "$tmp_dir/trivy" << 'MOCKEOF'
+#!/bin/bash
+echo "2026-05-08T00:00:00.000Z	FATAL	Fatal error	run error: init error: DB error: failed to download vulnerability DB:"
+echo "Get \"https://mirror.gcr.io/v2/\": dial tcp: lookup mirror.gcr.io on 127.0.0.1:53: server misbehaving"
+exit 1
+MOCKEOF
+    chmod +x "$tmp_dir/trivy"
+
+    local output exit_code=0
+    output=$(TRIVY_CMD="$tmp_dir/trivy" bash "$script" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "security-trivy.sh: Exits 2 on trivy init error (distinct from findings exit 1)"
+    else
+        log_fail "security-trivy.sh: Expected exit 2 on init error, got $exit_code"
+    fi
+
+    if echo "$output" | grep -q "DB download failed"; then
+        log_pass "security-trivy.sh: Prints clear DB-download-failed message"
+    else
+        log_fail "security-trivy.sh: Missing DB-download-failed message (output: $output)"
+    fi
+
+    if echo "$output" | grep -q "CRITICAL/HIGH/MEDIUM vulnerabilities found"; then
+        log_fail "security-trivy.sh: Must NOT print false vulnerability-found message on init error"
+    else
+        log_pass "security-trivy.sh: Does NOT emit false '❌ CRITICAL/HIGH/MEDIUM vulnerabilities found' on init error"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+test_security_trivy_findings() {
+    log_test "Testing security-trivy.sh: actual vulnerability findings → deployment-blocked message..."
+
+    local script
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/security-trivy.sh"
+
+    if [[ ! -f "$script" ]]; then
+        log_fail "security-trivy.sh: Script not found at $script"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    # Mock trivy that exits 1 with table output (no init-error text)
+    cat > "$tmp_dir/trivy" << 'MOCKEOF'
+#!/bin/bash
+echo "pkg/go.mod (gomod)"
+echo "Total: 1 (CRITICAL: 1)"
+echo "CRITICAL  CVE-2024-99999  some-pkg  1.0.0  1.0.1  Example critical vuln"
+exit 1
+MOCKEOF
+    chmod +x "$tmp_dir/trivy"
+
+    local output exit_code=0
+    output=$(TRIVY_CMD="$tmp_dir/trivy" bash "$script" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -eq 1 ]]; then
+        log_pass "security-trivy.sh: Exits 1 on real vulnerability findings"
+    else
+        log_fail "security-trivy.sh: Expected exit 1 on findings, got $exit_code"
+    fi
+
+    if echo "$output" | grep -q "CRITICAL/HIGH/MEDIUM vulnerabilities found"; then
+        log_pass "security-trivy.sh: Prints deployment-blocked message for real findings"
+    else
+        log_fail "security-trivy.sh: Missing deployment-blocked message for real findings (output: $output)"
+    fi
+
+    if echo "$output" | grep -q "DB download failed"; then
+        log_fail "security-trivy.sh: Must NOT print DB-download-failed message for real findings"
+    else
+        log_pass "security-trivy.sh: Does NOT emit spurious DB-download-failed message for real findings"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+test_security_trivy_clean_scan() {
+    log_test "Testing security-trivy.sh: clean scan → exits 0..."
+
+    local script
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/security-trivy.sh"
+
+    if [[ ! -f "$script" ]]; then
+        log_fail "security-trivy.sh: Script not found at $script"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    # Mock trivy that exits 0 (no vulnerabilities)
+    cat > "$tmp_dir/trivy" << 'MOCKEOF'
+#!/bin/bash
+echo "No vulnerabilities found."
+exit 0
+MOCKEOF
+    chmod +x "$tmp_dir/trivy"
+
+    local output exit_code=0
+    output=$(TRIVY_CMD="$tmp_dir/trivy" bash "$script" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "security-trivy.sh: Exits 0 on clean scan"
+    else
+        log_fail "security-trivy.sh: Expected exit 0 on clean scan, got $exit_code (output: $output)"
+    fi
+
+    if echo "$output" | grep -q "Trivy scan completed"; then
+        log_pass "security-trivy.sh: Prints completion message on clean scan"
+    else
+        log_fail "security-trivy.sh: Missing completion message on clean scan (output: $output)"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
 # Main execution
 echo "🔍 Script Validation Test Suite"
 echo "================================"
@@ -560,6 +697,12 @@ echo ""
 test_create_clone_duplicate_pr_gate
 echo ""
 test_check_providers
+echo ""
+test_security_trivy_init_error
+echo ""
+test_security_trivy_findings
+echo ""
+test_security_trivy_clean_scan
 echo ""
 echo ""
 echo "📊 Test Summary"
