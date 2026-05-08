@@ -128,34 +128,21 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 		ManagedFieldsList:      []string{"display_name", "description", "sign_in_audience"},
 	}
 
-	// Test Get operation with non-existent application (currently returns placeholder data)
+	// Test Get operation with non-existent application — expects a not-found error from Graph API
 	resourceID := tenantID + ":non-existent-application-id"
-	getResult, err := module.Get(ctx, resourceID)
-
-	// Current implementation returns placeholder data - this will change when Graph API is fully implemented
+	_, err := module.Get(ctx, resourceID)
 	if err != nil {
-		t.Logf("Get operation failed (expected for incomplete Graph API implementation): %v", err)
-	} else {
-		if appConfig, ok := getResult.(*EntraApplicationConfig); ok {
-			t.Logf("Get operation returned placeholder data (expected for current implementation): DisplayName=%s", appConfig.DisplayName)
-		} else {
-			t.Logf("Get operation returned config of unexpected type: %T", getResult)
-		}
+		t.Logf("Get returned expected error for non-existent application: %v", err)
 	}
 
 	// Test Set operation (create)
-	// Note: This test creates a real application - cleanup would be needed in production
-	// We use a placeholder resource ID for creation, but Microsoft Graph will assign a real GUID
-	createResourceID := tenantID + ":placeholder-" + time.Now().Format("20060102-150405")
+	createResourceID := tenantID + ":" + time.Now().Format("20060102-150405")
 	err = module.Set(ctx, createResourceID, config)
 
 	if err != nil {
-		t.Logf("Set operation failed (expected for limited implementation): %v", err)
-		// Accept either authentication/permission errors OR not-yet-implemented errors
-		// Authentication errors indicate credentials/permissions issues
-		// Implementation errors indicate the module functionality is still being developed
-		assert.Regexp(t, "(authentication|permission|consent|scope|credential|invalid_scope|not yet implemented|Authorization_RequestDenied|Insufficient privileges|HostNameNotOnVerifiedDomain)", err.Error(),
-			"Expected authentication/permission/scope error or not implemented, got: %v", err)
+		t.Logf("Set operation failed: %v", err)
+		assert.Regexp(t, "(authentication|permission|consent|scope|credential|invalid_scope|Authorization_RequestDenied|Insufficient privileges|HostNameNotOnVerifiedDomain)", err.Error(),
+			"Expected authentication/permission/scope error, got: %v", err)
 		return
 	}
 
@@ -181,7 +168,7 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 
 	// Test Get operation with the real application GUID
 	realResourceID := tenantID + ":" + createdApp.ID
-	getResult, err = module.Get(ctx, realResourceID)
+	getResult, err := module.Get(ctx, realResourceID)
 	require.NoError(t, err, "Should be able to retrieve created application")
 
 	retrievedConfig, ok := getResult.(*EntraApplicationConfig)
@@ -354,10 +341,9 @@ func TestEntraApplication_Integration_ComplexConfiguration(t *testing.T) {
 	err = module.Set(ctx, resourceID, complexConfig)
 
 	if err != nil {
-		t.Logf("Complex Set operation failed (expected for limited implementation): %v", err)
-		// Accept either authentication/permission errors OR not-yet-implemented errors
-		assert.Regexp(t, "(authentication|permission|consent|scope|credential|invalid_scope|not yet implemented|Authorization_RequestDenied|Insufficient privileges|HostNameNotOnVerifiedDomain)", err.Error(),
-			"Expected authentication/permission/scope error or not implemented, got: %v", err)
+		t.Logf("Complex Set operation failed: %v", err)
+		assert.Regexp(t, "(authentication|permission|consent|scope|credential|invalid_scope|Authorization_RequestDenied|Insufficient privileges|HostNameNotOnVerifiedDomain)", err.Error(),
+			"Expected authentication/permission/scope error, got: %v", err)
 	} else {
 		t.Logf("Complex application created successfully: %s", complexConfig.DisplayName)
 

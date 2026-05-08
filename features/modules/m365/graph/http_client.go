@@ -405,6 +405,28 @@ func (c *HTTPClient) DeleteDeviceConfiguration(ctx context.Context, token *auth.
 	return nil
 }
 
+// ListDeviceConfigurationAssignments retrieves assignments for a device configuration
+func (c *HTTPClient) ListDeviceConfigurationAssignments(ctx context.Context, token *auth.AccessToken, configurationID string) ([]DeviceConfigurationAssignment, error) {
+	endpoint := fmt.Sprintf("/deviceManagement/deviceConfigurations/%s/assignments", configurationID)
+	var response struct {
+		Value []DeviceConfigurationAssignment `json:"value"`
+	}
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list assignments for configuration %s: %w", configurationID, err)
+	}
+	return response.Value, nil
+}
+
+// AssignDeviceConfiguration posts an assign action for a device configuration
+func (c *HTTPClient) AssignDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, assignments []DeviceConfigurationAssignment) error {
+	endpoint := fmt.Sprintf("/deviceManagement/deviceConfigurations/%s/assign", configurationID)
+	request := AssignDeviceConfigurationRequest{Assignments: assignments}
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to assign configuration %s: %w", configurationID, err)
+	}
+	return nil
+}
+
 // findGroupByName finds a group ID by its display name
 func (c *HTTPClient) findGroupByName(ctx context.Context, token *auth.AccessToken, groupName string) (string, error) {
 	// Use $filter to search for the group by display name

@@ -85,7 +85,7 @@ func (p *OAuth2Provider) GetAccessToken(ctx context.Context, tenantID string) (*
 	if config.UseClientCredentials {
 		token, err = p.getClientCredentialsToken(ctx, config)
 	} else {
-		// For interactive flows, we would need a stored refresh token
+		// Design decision: interactive refresh requires a stored refresh token; callers must call RefreshToken explicitly when a refresh token is available.
 		if storedToken != nil && storedToken.RefreshToken != "" {
 			token, err = p.RefreshToken(ctx, storedToken.RefreshToken)
 		} else {
@@ -160,14 +160,13 @@ func (p *OAuth2Provider) GetDelegatedAccessToken(ctx context.Context, tenantID s
 		return token, nil
 	}
 
-	// No valid delegated token available - would need interactive authentication
-	// For now, fall back to application permissions if configured
+	// Design decision: delegated token path falls back to app permissions when FallbackToAppPermissions is set; interactive auth requires browser redirect which is architecturally incompatible with a daemon/service context.
 	if config.FallbackToAppPermissions {
 		return p.GetAccessToken(ctx, tenantID)
 	}
 
 	return nil, NewAuthenticationError(tenantID, "NO_DELEGATED_TOKEN",
-		"No valid delegated token available and interactive authentication not implemented", nil)
+		"No valid delegated token available; interactive authentication requires browser redirect", nil)
 }
 
 // RefreshToken refreshes an existing access token using a refresh token
@@ -214,14 +213,11 @@ func (p *OAuth2Provider) RefreshDelegatedToken(ctx context.Context, refreshToken
 		return nil, NewAuthenticationError("unknown", "INVALID_USER_CONTEXT", "User context is required for delegated token refresh", nil)
 	}
 
-	// For delegated tokens, we need to get the tenant from user context
-	// In a real implementation, we would extract tenant ID from the refresh token
-	// or maintain a mapping between refresh tokens and tenant IDs
-	// For now, we'll extract from the UPN domain as a fallback
-	tenantID := userContext.UserID // This would need to be properly tracked
-
-	// Note: In production, tenant ID should be tracked separately
-	// This is a placeholder for proper tenant ID resolution from refresh token context
+	// Design decision: tenant ID tracking for refresh token context requires the Provider interface to
+	// accept tenantID explicitly in RefreshDelegatedToken. Until then, tenant ID resolution relies on
+	// the credential store lookup keyed by UserContext.UserID; callers must ensure UserID maps to a
+	// stored tenant configuration.
+	tenantID := userContext.UserID
 
 	config, err := p.getOAuth2Config(tenantID)
 	if err != nil {

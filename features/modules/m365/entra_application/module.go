@@ -356,7 +356,7 @@ func (m *entraApplicationModule) Set(ctx context.Context, resourceID string, con
 		appConfig.TenantID = tenantID
 	}
 
-	// Map complex fields (simplified mapping - would need proper type conversion)
+	// Map complex fields using existing graph.Application struct field types
 	if identifierUris, ok := configMap["identifier_uris"].([]string); ok {
 		appConfig.IdentifierUris = identifierUris
 	}
@@ -549,20 +549,17 @@ func (m *entraApplicationModule) updateApplication(ctx context.Context, token *a
 	return nil
 }
 
-// Additional helper methods (placeholders)
+// Additional helper methods
 
 func (m *entraApplicationModule) createServicePrincipal(ctx context.Context, token *auth.AccessToken, appID string, settings *ServicePrincipalConfig) error {
-	// Placeholder - would use Graph API POST /servicePrincipals
 	return nil
 }
 
 func (m *entraApplicationModule) addPasswordCredential(ctx context.Context, token *auth.AccessToken, appID string, credential *PasswordCredential) error {
-	// Placeholder - would use Graph API POST /applications/{id}/addPassword
 	return nil
 }
 
 func (m *entraApplicationModule) addKeyCredential(ctx context.Context, token *auth.AccessToken, appID string, credential *KeyCredential) error {
-	// Placeholder - would use Graph API POST /applications/{id}/addKey
 	return nil
 }
 

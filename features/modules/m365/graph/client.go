@@ -38,6 +38,8 @@ type Client interface {
 
 	// Intune operations
 	GetDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string) (*DeviceConfiguration, error)
+	ListDeviceConfigurationAssignments(ctx context.Context, token *auth.AccessToken, configurationID string) ([]DeviceConfigurationAssignment, error)
+	AssignDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, assignments []DeviceConfigurationAssignment) error
 	CreateDeviceConfiguration(ctx context.Context, token *auth.AccessToken, request *CreateDeviceConfigurationRequest) (*DeviceConfiguration, error)
 	UpdateDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, request *UpdateDeviceConfigurationRequest) error
 	DeleteDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string) error
@@ -296,6 +298,23 @@ type UpdateDeviceConfigurationRequest struct {
 	DisplayName *string                `json:"displayName,omitempty"`
 	Description *string                `json:"description,omitempty"`
 	Settings    map[string]interface{} `json:"settings,omitempty"`
+}
+
+// DeviceConfigurationAssignment represents a single assignment of a device configuration to a target
+type DeviceConfigurationAssignment struct {
+	ID     string                              `json:"id,omitempty"`
+	Target DeviceConfigurationAssignmentTarget `json:"target"`
+}
+
+// DeviceConfigurationAssignmentTarget describes what the assignment targets
+type DeviceConfigurationAssignmentTarget struct {
+	ODataType string `json:"@odata.type"`
+	GroupID   string `json:"groupId,omitempty"`
+}
+
+// AssignDeviceConfigurationRequest is the request body for POST /deviceConfigurations/{id}/assign
+type AssignDeviceConfigurationRequest struct {
+	Assignments []DeviceConfigurationAssignment `json:"assignments"`
 }
 
 // GraphError represents an error response from Microsoft Graph API
