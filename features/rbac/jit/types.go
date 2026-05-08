@@ -22,6 +22,9 @@ type JITAccessRequestSpec struct {
 	AutoApprove       bool              `json:"auto_approve,omitempty"`
 	EmergencyAccess   bool              `json:"emergency_access,omitempty"`
 	RequesterMetadata map[string]string `json:"requester_metadata,omitempty"`
+	// RequestTTL is the window in which the request must be approved before it expires.
+	// Defaults to 24h when zero.
+	RequestTTL time.Duration `json:"request_ttl,omitempty"`
 }
 
 // WorkflowState tracks multi-stage approval progression embedded on JITAccessRequest.
