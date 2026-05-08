@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -560,8 +561,14 @@ func TestMockPatchManager(t *testing.T) {
 
 func TestPatchModule_executeScript_logsScript(t *testing.T) {
 	dir := t.TempDir()
-	scriptPath := filepath.Join(dir, "patch-hook.sh")
-	require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0755))
+	var scriptPath string
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(dir, "patch-hook.bat")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("@echo off\r\nexit 0\r\n"), 0755))
+	} else {
+		scriptPath = filepath.Join(dir, "patch-hook.sh")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0755))
+	}
 
 	patchManager := NewMockPatchManager()
 	m, err := NewPatchModule(patchManager)
@@ -580,8 +587,14 @@ func TestPatchModule_executeScript_logsScript(t *testing.T) {
 
 func TestExecuteScript_RunsRealCommand(t *testing.T) {
 	dir := t.TempDir()
-	scriptPath := filepath.Join(dir, "echo-test.sh")
-	require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\necho hello-from-script\n"), 0755))
+	var scriptPath string
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(dir, "echo-test.bat")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("@echo off\r\necho hello-from-script\r\n"), 0755))
+	} else {
+		scriptPath = filepath.Join(dir, "echo-test.sh")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\necho hello-from-script\n"), 0755))
+	}
 
 	patchManager := NewMockPatchManager()
 	m, err := NewPatchModule(patchManager)
@@ -631,8 +644,14 @@ func TestExecuteScript_RejectsEmptyPath(t *testing.T) {
 
 func TestExecuteScript_FailedScript(t *testing.T) {
 	dir := t.TempDir()
-	scriptPath := filepath.Join(dir, "fail-script.sh")
-	require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 1\n"), 0755))
+	var scriptPath string
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(dir, "fail-script.bat")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("@echo off\r\nexit 1\r\n"), 0755))
+	} else {
+		scriptPath = filepath.Join(dir, "fail-script.sh")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 1\n"), 0755))
+	}
 
 	patchManager := NewMockPatchManager()
 	m, err := NewPatchModule(patchManager)

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"time"
 
@@ -364,7 +365,12 @@ func (m *PatchModule) executeScript(ctx context.Context, script string) error {
 	logger.Debug("executing script", "script", logging.SanitizeLogValue(scriptPath))
 
 	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd := exec.CommandContext(ctx, scriptPath) //nolint:gosec // path is cleaned and validated as absolute above
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(ctx, "cmd", "/c", scriptPath) //nolint:gosec // path validated as absolute above
+	} else {
+		cmd = exec.CommandContext(ctx, scriptPath) //nolint:gosec // path is cleaned and validated as absolute above
+	}
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
