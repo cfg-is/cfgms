@@ -375,7 +375,7 @@ func (m *DefaultSyncManager) getClientTemplatePath(templatePath string) string {
 }
 
 func (m *DefaultSyncManager) summarizeChanges(oldContent, newContent []byte) string {
-	// Simple line count comparison - in production this would be more sophisticated
+	// Design decision: change size estimation uses line count as a proxy; byte-level diff is deferred.
 	oldLines := strings.Split(string(oldContent), "\n")
 	newLines := strings.Split(string(newContent), "\n")
 

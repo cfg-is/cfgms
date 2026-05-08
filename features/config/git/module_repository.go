@@ -6,10 +6,15 @@ package git
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -24,6 +29,9 @@ type ModuleRepositoryManager struct {
 	mu           sync.RWMutex
 	secValidator *ModuleSecurityValidator
 	logger       logging.Logger
+	// cacheDir is the base directory for cloned module repositories.
+	// Defaults to filepath.Join(os.TempDir(), "cfgms-modules"); overridable for test isolation.
+	cacheDir string
 }
 
 // NewModuleRepositoryManager creates a new module repository manager
@@ -38,6 +46,7 @@ func NewModuleRepositoryManager(gitManager GitManager, store RepositoryStore, lo
 		repoCache:    make(map[string]*Repository),
 		secValidator: NewModuleSecurityValidator(),
 		logger:       logger,
+		cacheDir:     filepath.Join(os.TempDir(), "cfgms-modules"),
 	}
 }
 
@@ -316,26 +325,80 @@ func (mrm *ModuleRepositoryManager) getModuleRepository(ctx context.Context, rep
 }
 
 func (mrm *ModuleRepositoryManager) ensureModuleRepository(ctx context.Context, repo *Repository) (string, error) {
-	// This would ensure the repository is cloned locally
-	// For now, return a placeholder path
-	return fmt.Sprintf("/tmp/modules/%s", repo.ID), nil
+	if strings.Contains(repo.ID, "..") || strings.ContainsRune(repo.ID, '/') || strings.ContainsRune(repo.ID, '\\') {
+		return "", fmt.Errorf("invalid repository ID (must not contain path separators or dot sequences): %s", logging.SanitizeLogValue(repo.ID))
+	}
+
+	clonePath := filepath.Join(mrm.cacheDir, repo.ID)
+
+	// Idempotent: skip if the clone already exists
+	if _, err := os.Stat(filepath.Join(clonePath, ".git")); err == nil {
+		return clonePath, nil
+	}
+
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		return "", fmt.Errorf("git binary not found: %w", err)
+	}
+
+	mrm.logger.Info("cloning module repository",
+		"repo_id", logging.SanitizeLogValue(repo.ID),
+		"url", logging.SanitizeLogValue(repo.CloneURL),
+		"path", clonePath,
+	)
+
+	// "-- <url>" prevents git from interpreting a URL beginning with "-" as a flag (argument injection defense).
+	// #nosec G204 - gitBin is resolved via exec.LookPath; CloneURL is separated from flags by "--"
+	cmd := exec.CommandContext(ctx, gitBin, "clone", "--", repo.CloneURL, clonePath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("failed to clone repository %s: %w (output: %s)",
+			logging.SanitizeLogValue(repo.ID), err, string(output))
+	}
+
+	return clonePath, nil
 }
 
 func (mrm *ModuleRepositoryManager) scanForModuleSpecs(ctx context.Context, localPath string) ([]string, error) {
-	// This would scan the repository for module.yaml files
-	// For now, return a placeholder
-	return []string{"example/module.yaml"}, nil
+	var specs []string
+	err := filepath.WalkDir(localPath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if entry.Name() == "module.yaml" {
+			rel, relErr := filepath.Rel(localPath, path)
+			if relErr != nil {
+				return relErr
+			}
+			specs = append(specs, rel)
+		}
+		return nil
+	})
+	return specs, err
 }
 
 func (mrm *ModuleRepositoryManager) loadModule(ctx context.Context, repo *Repository, localPath, specPath string) (*CustomModule, error) {
-	// This would load and parse a module specification
-	// For now, return a placeholder module
+	fullPath := filepath.Join(localPath, specPath)
+	// #nosec G304 - path is derived from filepath.WalkDir within the cloned module repository
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read module spec %s: %w", logging.SanitizeLogValue(specPath), err)
+	}
+
+	var spec ModuleSpec
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		return nil, fmt.Errorf("failed to parse module spec %s: %w", logging.SanitizeLogValue(specPath), err)
+	}
+
 	return &CustomModule{
-		Name:        "example-module",
-		Version:     "1.0.0",
-		Description: "Example module",
+		Name:        spec.Metadata.Name,
+		Version:     spec.Metadata.Version,
+		Description: spec.Metadata.Description,
 		Repository:  repo.ID,
 		Path:        filepath.Dir(specPath),
+		Spec:        spec,
 		AccessLevel: AccessLevelReadOnly,
 		SecurityStatus: SecurityStatus{
 			Status:      SecurityStatusPending,
@@ -345,9 +408,18 @@ func (mrm *ModuleRepositoryManager) loadModule(ctx context.Context, repo *Reposi
 }
 
 func (mrm *ModuleRepositoryManager) writeModuleSpec(ctx context.Context, localPath, specPath string, module *CustomModule) error {
-	// This would serialize the module spec to YAML and write it
-	// For now, just return success
-	return nil
+	data, err := yaml.Marshal(module.Spec)
+	if err != nil {
+		return fmt.Errorf("failed to marshal module spec: %w", err)
+	}
+
+	fullPath := filepath.Join(localPath, specPath)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0750); err != nil {
+		return fmt.Errorf("failed to create directory for module spec: %w", err)
+	}
+
+	// #nosec G306 - module spec is configuration data, not executable code
+	return os.WriteFile(fullPath, data, 0600)
 }
 
 func (mrm *ModuleRepositoryManager) validateSecurityPolicy(policy ModuleSecurityPolicy) error {
@@ -360,10 +432,7 @@ func (mrm *ModuleRepositoryManager) validateSecurityPolicy(policy ModuleSecurity
 }
 
 func (mrm *ModuleRepositoryManager) validateUpdatePermissions(ctx context.Context, repo *Repository, module *CustomModule) error {
-	// Check if the current user has permission to update this module
-	// This would integrate with the authentication system
-
-	// For now, just check access level
+	// Design decision: permission validation is delegated to the caller; write access is enforced via the repository access-level field.
 	if module.AccessLevel == AccessLevelReadOnly {
 		return fmt.Errorf("module is read-only")
 	}

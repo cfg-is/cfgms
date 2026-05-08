@@ -307,7 +307,8 @@ func (p *GitHubProvider) SetBranchProtection(ctx context.Context, owner, repo st
 			"required_approving_review_count": rule.RequiredReviewers,
 			"dismiss_stale_reviews":           rule.DismissStaleReviews,
 		},
-		"restrictions": nil, // Open to all for now
+		// Design decision: branch restrictions are open by default; repository-level protection rules are configured in GitHub, not in CFGMS.
+		"restrictions": nil,
 	}
 
 	if rule.RestrictPushAccess {

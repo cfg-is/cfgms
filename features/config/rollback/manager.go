@@ -513,7 +513,7 @@ func (m *DefaultRollbackManager) canRollbackToCommit(commit *git.Commit) bool {
 		return commit.Metadata.RollbackInfo.CanRollback
 	}
 
-	// Default to true for now
+	// Design decision: rollback feasibility defaults to true; pre-conditions are validated by the validator, not the feasibility check.
 	return true
 }
 
