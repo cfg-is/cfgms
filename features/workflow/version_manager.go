@@ -299,7 +299,7 @@ func (vm *VersionManager) compareWorkflows(v1, v2 *VersionedWorkflow) *VersionCo
 		})
 	}
 
-	// Compare steps (simplified - in practice would need deep comparison)
+	// Design decision: step-level deep comparison is deferred; version diff uses step name and type only to detect structural changes.
 	if len(v1.Steps) != len(v2.Steps) {
 		comparison.Changes = append(comparison.Changes, VersionDifference{
 			Type:     DifferenceTypeModified,

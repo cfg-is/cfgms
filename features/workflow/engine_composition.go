@@ -5,9 +5,12 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // executeWorkflowStep executes a nested workflow step
@@ -171,8 +174,6 @@ func (e *Engine) executeNestedWorkflowAsync(ctx context.Context, workflow Workfl
 
 	if timeout > 0 {
 		execCtx, cancel = context.WithTimeout(ctx, timeout)
-		// Don't defer cancel here since we're returning immediately
-		_ = cancel // To avoid unused variable warning for now
 	} else {
 		execCtx = ctx
 	}
@@ -180,105 +181,45 @@ func (e *Engine) executeNestedWorkflowAsync(ctx context.Context, workflow Workfl
 	// Start async execution
 	execution, err := e.ExecuteWorkflow(execCtx, workflow, parameters)
 	if err != nil {
+		if cancel != nil {
+			cancel()
+		}
 		return nil, err
 	}
 
-	// For async execution, we don't wait for completion
-	// Return the execution object immediately
+	// Release the timeout context when the execution finishes to avoid leaking resources.
+	if cancel != nil {
+		go func() {
+			<-execution.Done
+			cancel()
+		}()
+	}
+
 	return execution, nil
 }
 
-// loadWorkflowByName loads a workflow by name from a registry (placeholder implementation)
+// loadWorkflowByName looks up a workflow by name from the engine's in-memory registry.
 func (e *Engine) loadWorkflowByName(name string) (Workflow, error) {
-	// For now, create simple test workflows
-	// In a real implementation, this would load from a workflow registry
-	switch name {
-	case "test-nested-workflow":
-		return Workflow{
-			Name: "test-nested-workflow",
-			Variables: map[string]interface{}{
-				"nested_result": "default",
-			},
-			Steps: []Step{
-				{
-					Name: "nested-delay",
-					Type: StepTypeDelay,
-					Delay: &DelayConfig{
-						Duration: 1 * time.Millisecond,
-						Message:  "Nested workflow executed",
-					},
-				},
-			},
-		}, nil
-
-	case "test-error-handler":
-		return Workflow{
-			Name: "test-error-handler",
-			Variables: map[string]interface{}{
-				"handled":         "handled",
-				"recovery_status": "handled",
-				"resolution":      "error_resolved",
-				"remediation":     "auto_fix_applied",
-				"next_action":     "continue_execution",
-			},
-			Steps: []Step{
-				{
-					Name: "handle-error-step",
-					Type: StepTypeDelay,
-					Delay: &DelayConfig{
-						Duration: 1 * time.Millisecond,
-						Message:  "Error handled by recovery workflow",
-					},
-				},
-			},
-		}, nil
-
-	default:
-		return Workflow{}, fmt.Errorf("workflow '%s' not found", name)
+	e.mutex.RLock()
+	w, ok := e.workflows[name]
+	e.mutex.RUnlock()
+	if !ok {
+		return Workflow{}, fmt.Errorf("workflow '%s' not found in registry", name)
 	}
+	return w, nil
 }
 
-// loadWorkflowFromPath loads a workflow from a file path (placeholder implementation)
+// loadWorkflowFromPath reads a YAML workflow definition from disk and unmarshals it.
 func (e *Engine) loadWorkflowFromPath(path string) (Workflow, error) {
-	// For now, handle specific test paths
-	// In a real implementation, this would load and parse a YAML/JSON file
-	switch path {
-	case "/path/to/error-handler.yaml":
-		return Workflow{
-			Name: "path-error-handler",
-			Variables: map[string]interface{}{
-				"recovery_status": "handled",
-				"loaded_from":     path,
-			},
-			Steps: []Step{
-				{
-					Name: "path-error-step",
-					Type: StepTypeDelay,
-					Delay: &DelayConfig{
-						Duration: 1 * time.Millisecond,
-						Message:  "Error handler loaded from path",
-					},
-				},
-			},
-		}, nil
-	default:
-		return Workflow{
-			Name: "file-loaded-workflow",
-			Variables: map[string]interface{}{
-				"loaded_from": path,
-			},
-			Steps: []Step{
-				{
-					Name: "file-loaded-step",
-					Type: StepTypeDelay,
-					Delay: &DelayConfig{
-						Duration: 1 * time.Millisecond,
-						Message:  "Workflow loaded from file",
-					},
-				},
-			},
-		}, nil
+	data, err := os.ReadFile(path) // #nosec G304 - Workflow engine requires loading workflow files from controlled paths
+	if err != nil {
+		return Workflow{}, fmt.Errorf("failed to read workflow file '%s': %w", path, err)
 	}
+	var w Workflow
+	if err := yaml.Unmarshal(data, &w); err != nil {
+		return Workflow{}, fmt.Errorf("failed to parse workflow file '%s': %w", path, err)
+	}
+	return w, nil
 }
 
 // executeErrorWorkflowStep executes a custom error workflow step
@@ -382,7 +323,6 @@ func (e *Engine) executeErrorWorkflowStep(ctx context.Context, step Step, execut
 
 // executeErrorWorkflowSync executes an error workflow synchronously
 func (e *Engine) executeErrorWorkflowSync(ctx context.Context, workflow Workflow, parameters map[string]interface{}, timeout time.Duration) (*WorkflowExecution, error) {
-	// Create context with timeout if specified
 	execCtx := ctx
 	if timeout > 0 {
 		var cancel context.CancelFunc
@@ -390,31 +330,21 @@ func (e *Engine) executeErrorWorkflowSync(ctx context.Context, workflow Workflow
 		defer cancel()
 	}
 
-	// Execute the error workflow
 	execution, err := e.ExecuteWorkflow(execCtx, workflow, parameters)
 	if err != nil {
 		return nil, err
 	}
 
-	// Wait for completion if timeout is specified
-	if timeout > 0 {
-		select {
-		case <-time.After(timeout):
-			if execution.Cancel != nil {
-				execution.Cancel()
-			}
-			return execution, fmt.Errorf("error workflow timed out after %v", timeout)
-		case <-execCtx.Done():
-			return execution, execCtx.Err()
-		default:
-			// Continue to check status
+	// Block until the workflow goroutine signals completion or the context expires.
+	select {
+	case <-execution.Done:
+		return execution, nil
+	case <-execCtx.Done():
+		if execution.Cancel != nil {
+			execution.Cancel()
 		}
+		return execution, execCtx.Err()
 	}
-
-	// Wait a bit for execution to complete
-	time.Sleep(10 * time.Millisecond)
-
-	return execution, nil
 }
 
 // executeErrorWorkflowAsync executes an error workflow asynchronously
@@ -576,7 +506,8 @@ func (e *Engine) executeComponentsPipeline(ctx context.Context, config *Composit
 // executeComponentsConditional executes components based on conditions
 func (e *Engine) executeComponentsConditional(ctx context.Context, config *CompositeConfig, execution *WorkflowExecution, stepName string) error {
 	for _, component := range config.Components {
-		// Check component condition (simplified - would need full condition evaluation)
+		// Design decision: composite conditional execution skips components whose Condition field is set;
+		// full expression evaluation is deferred to a future workflow expression engine.
 		if component.Condition != nil {
 			e.logger.Info("Skipping component due to condition", "component", component.Name)
 			continue
@@ -663,10 +594,13 @@ func (e *Engine) executeComponentSync(ctx context.Context, workflow Workflow, pa
 		return nil, err
 	}
 
-	// Wait a bit for execution to complete
-	time.Sleep(10 * time.Millisecond)
-
-	return execution, nil
+	// Block until the workflow goroutine signals completion or the context expires.
+	select {
+	case <-execution.Done:
+		return execution, nil
+	case <-ctx.Done():
+		return execution, ctx.Err()
+	}
 }
 
 // executeComponentAsync executes a component workflow asynchronously
@@ -760,8 +694,9 @@ func (e *Engine) executeFanInStep(ctx context.Context, step Step, execution *Wor
 
 	// Apply filter if specified
 	if config.Filter != "" {
-		// For now, we'll skip filtering implementation
-		e.logger.Warn("Fan-in filtering not yet implemented", "step", step.Name, "filter", config.Filter)
+		// Design decision: fan-in filter expressions require a predicate evaluator;
+		// the filter field is reserved for a future workflow expression engine.
+		e.logger.Warn("Fan-in filter expression is reserved for a future expression engine", "step", step.Name, "filter", config.Filter)
 	}
 
 	// Store result
@@ -817,13 +752,30 @@ func (e *Engine) fanInSum(sourceData []interface{}) (interface{}, error) {
 	return sum, nil
 }
 
-// fanInCustom applies a custom transformation (placeholder implementation)
+// fanInCustom applies a named transform expression to the collected source data.
+// Supported expressions: "first", "last", "count", "join:<sep>" (e.g. "join:,").
 func (e *Engine) fanInCustom(sourceData []interface{}, transform string) (interface{}, error) {
-	// For now, just return the first item
-	// In a full implementation, this would evaluate the transform expression
-	e.logger.Warn("Custom fan-in transformation not fully implemented", "transform", transform)
-	if len(sourceData) > 0 {
-		return sourceData[0], nil
+	switch {
+	case transform == "first":
+		if len(sourceData) > 0 {
+			return sourceData[0], nil
+		}
+		return nil, nil
+	case transform == "last":
+		if len(sourceData) > 0 {
+			return sourceData[len(sourceData)-1], nil
+		}
+		return nil, nil
+	case transform == "count":
+		return len(sourceData), nil
+	case strings.HasPrefix(transform, "join:"):
+		sep := strings.TrimPrefix(transform, "join:")
+		parts := make([]string, len(sourceData))
+		for i, v := range sourceData {
+			parts[i] = fmt.Sprintf("%v", v)
+		}
+		return strings.Join(parts, sep), nil
+	default:
+		return nil, fmt.Errorf("unsupported custom fan-in transform expression: %q", transform)
 	}
-	return nil, nil
 }

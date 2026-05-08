@@ -4,6 +4,8 @@ package workflow
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -41,6 +43,7 @@ func TestNestedWorkflowByName(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
 	engine := NewEngine(moduleFactory, logger, nil)
+	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -60,7 +63,22 @@ func TestNestedWorkflowByName(t *testing.T) {
 }
 
 func TestNestedWorkflowByPath(t *testing.T) {
-	// Test nested workflow execution by file path
+	// Write a real YAML workflow file to a temp dir and load it by path.
+	const yamlContent = `
+name: path-loaded-workflow
+variables:
+  path_result: from_file
+steps:
+  - name: path-step
+    type: delay
+    delay:
+      duration: 1ms
+      message: "loaded from path"
+`
+	dir := t.TempDir()
+	wfPath := filepath.Join(dir, "workflow.yaml")
+	require.NoError(t, os.WriteFile(wfPath, []byte(yamlContent), 0600))
+
 	workflow := Workflow{
 		Name: "parent-workflow-path",
 		Variables: map[string]interface{}{
@@ -71,12 +89,12 @@ func TestNestedWorkflowByPath(t *testing.T) {
 				Name: "call-nested-workflow",
 				Type: StepTypeWorkflow,
 				WorkflowCall: &WorkflowCallConfig{
-					WorkflowPath: "/path/to/workflow.yaml",
+					WorkflowPath: wfPath,
 					Parameters: map[string]interface{}{
 						"input_param": "test_value",
 					},
 					OutputMappings: map[string]string{
-						"loaded_path": "loaded_from",
+						"loaded_path": "path_result",
 					},
 				},
 			},
@@ -99,10 +117,10 @@ func TestNestedWorkflowByPath(t *testing.T) {
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
 
-	// Verify output mapping worked
+	// Verify output mapping worked from the file-loaded variable
 	loadedPath, exists := execution.GetVariable("loaded_path")
 	assert.True(t, exists)
-	assert.Equal(t, "/path/to/workflow.yaml", loadedPath)
+	assert.Equal(t, "from_file", loadedPath)
 }
 
 func TestNestedWorkflowParameterMapping(t *testing.T) {
@@ -135,6 +153,7 @@ func TestNestedWorkflowParameterMapping(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
 	engine := NewEngine(moduleFactory, logger, nil)
+	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -169,6 +188,7 @@ func TestNestedWorkflowTimeout(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
 	engine := NewEngine(moduleFactory, logger, nil)
+	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -213,6 +233,7 @@ func TestNestedWorkflowAsync(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
 	engine := NewEngine(moduleFactory, logger, nil)
+	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -358,6 +379,7 @@ func TestNestedWorkflowComplexParameterMapping(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
 	engine := NewEngine(moduleFactory, logger, nil)
+	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)

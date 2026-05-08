@@ -436,3 +436,61 @@ func getKeys(m map[string]interface{}) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// --- fanInCustom expression tests ---
+
+func TestFanInCustom_First(t *testing.T) {
+	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil)
+	result, err := engine.fanInCustom([]interface{}{"alpha", "beta", "gamma"}, "first")
+	require.NoError(t, err)
+	assert.Equal(t, "alpha", result)
+}
+
+func TestFanInCustom_First_Empty(t *testing.T) {
+	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil)
+	result, err := engine.fanInCustom([]interface{}{}, "first")
+	require.NoError(t, err)
+	assert.Nil(t, result)
+}
+
+func TestFanInCustom_Last(t *testing.T) {
+	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil)
+	result, err := engine.fanInCustom([]interface{}{"alpha", "beta", "gamma"}, "last")
+	require.NoError(t, err)
+	assert.Equal(t, "gamma", result)
+}
+
+func TestFanInCustom_Last_Empty(t *testing.T) {
+	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil)
+	result, err := engine.fanInCustom([]interface{}{}, "last")
+	require.NoError(t, err)
+	assert.Nil(t, result)
+}
+
+func TestFanInCustom_Count(t *testing.T) {
+	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil)
+	result, err := engine.fanInCustom([]interface{}{"a", "b", "c", "d"}, "count")
+	require.NoError(t, err)
+	assert.Equal(t, 4, result)
+}
+
+func TestFanInCustom_JoinWithSep(t *testing.T) {
+	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil)
+	result, err := engine.fanInCustom([]interface{}{"apple", "banana", "cherry"}, "join:,")
+	require.NoError(t, err)
+	assert.Equal(t, "apple,banana,cherry", result)
+}
+
+func TestFanInCustom_JoinWithMultiCharSep(t *testing.T) {
+	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil)
+	result, err := engine.fanInCustom([]interface{}{"x", "y", "z"}, "join: | ")
+	require.NoError(t, err)
+	assert.Equal(t, "x | y | z", result)
+}
+
+func TestFanInCustom_UnknownExpression(t *testing.T) {
+	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil)
+	_, err := engine.fanInCustom([]interface{}{"a", "b"}, "unknown")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown")
+}

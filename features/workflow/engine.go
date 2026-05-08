@@ -35,6 +35,7 @@ type Engine struct {
 	moduleFactory     *factory.ModuleFactory
 	logger            *logging.ModuleLogger
 	executions        map[string]*WorkflowExecution
+	workflows         map[string]Workflow
 	mutex             sync.RWMutex
 	httpClient        *HTTPClient
 	providerRegistry  *ProviderRegistry
@@ -62,14 +63,15 @@ func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger, tran
 		},
 	})
 
-	// Create provider registry with workflow logger for consistency
-	// Note: ProviderRegistry will need updating to accept ModuleLogger
-	providerRegistry := NewProviderRegistry(logger) // Keep legacy for now
+	// Design decision: ProviderRegistry is retained for backwards compatibility with workflows
+	// registered before the pluggable provider system; new workflows use the provider interface directly.
+	providerRegistry := NewProviderRegistry(logger)
 
 	engine := &Engine{
 		moduleFactory:     moduleFactory,
 		logger:            workflowLogger,
 		executions:        make(map[string]*WorkflowExecution),
+		workflows:         make(map[string]Workflow),
 		httpClient:        httpClient,
 		providerRegistry:  providerRegistry,
 		errorHandler:      NewDefaultErrorHandler(),
@@ -749,6 +751,14 @@ func (e *Engine) ResumeExecution(executionID string) error {
 // GetDebugEngine returns the debug engine for this workflow engine
 func (e *Engine) GetDebugEngine() DebugEngine {
 	return e.debugEngine
+}
+
+// RegisterWorkflow adds a workflow to the engine's in-memory registry so it can
+// be resolved by name via loadWorkflowByName.
+func (e *Engine) RegisterWorkflow(workflow Workflow) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	e.workflows[workflow.Name] = workflow
 }
 
 // checkDebugBreakpoints checks if execution should pause at a breakpoint

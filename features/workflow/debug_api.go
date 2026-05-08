@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -508,42 +509,107 @@ func (api *DebugAPI) GetStepHistory(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Helper functions for extracting URL parameters
+// Helper functions for extracting URL path parameters.
+// The standard library ServeMux does not support named path segments, so these
+// helpers parse the raw URL path directly.
 
 func extractSessionID(r *http.Request) string {
-	// This would typically use a router like gorilla/mux to extract path parameters
-	// For now, return a placeholder - in real implementation this would extract from URL path
-	return r.Header.Get("X-Session-ID") // Temporary workaround
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	for i, p := range parts {
+		if p == "sessions" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
 
 func extractBreakpointID(r *http.Request) string {
-	return r.Header.Get("X-Breakpoint-ID") // Temporary workaround
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	for i, p := range parts {
+		if p == "breakpoints" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
 
 func extractVariableName(r *http.Request) string {
-	return r.Header.Get("X-Variable-Name") // Temporary workaround
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	for i, p := range parts {
+		if p == "variables" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
 
 func extractCallID(r *http.Request) string {
-	return r.Header.Get("X-Call-ID") // Temporary workaround
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	for i, p := range parts {
+		if p == "api-calls" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
 
-// RegisterDebugRoutes registers all debug API routes with the given mux
-// This is a placeholder - in real implementation would integrate with the actual router
-func (api *DebugAPI) RegisterRoutes() {
-	// POST /debug/sessions - Start debug session
-	// GET /debug/sessions - List debug sessions
-	// GET /debug/sessions/{sessionId} - Get debug session
-	// DELETE /debug/sessions/{sessionId} - Stop debug session
-	// POST /debug/sessions/{sessionId}/step - Execute debug step
-	// POST /debug/sessions/{sessionId}/breakpoints - Set breakpoint
-	// GET /debug/sessions/{sessionId}/breakpoints - List breakpoints
-	// DELETE /debug/sessions/{sessionId}/breakpoints/{breakpointId} - Remove breakpoint
-	// GET /debug/sessions/{sessionId}/variables - Inspect variables
-	// PUT /debug/sessions/{sessionId}/variables/{variableName} - Update variable
-	// POST /debug/sessions/{sessionId}/variables/{variableName}/watch - Watch variable
-	// DELETE /debug/sessions/{sessionId}/variables/{variableName}/watch - Unwatch variable
-	// GET /debug/sessions/{sessionId}/api-calls - Get API call history
-	// POST /debug/sessions/{sessionId}/api-calls/{callId}/replay - Replay API call
-	// GET /debug/sessions/{sessionId}/steps - Get step history
+// RegisterRoutes registers all debug API routes on the supplied mux.
+// Route dispatch is performed by method + path-segment inspection because the
+// standard library ServeMux does not support named path parameters.
+//
+// SECURITY: these routes expose execution control (variable mutation, breakpoints,
+// step control). Callers MUST mount this mux behind authenticated middleware —
+// no authentication is enforced within RegisterRoutes itself.
+func (api *DebugAPI) RegisterRoutes(mux *http.ServeMux) {
+	// /debug/sessions — collection endpoint
+	mux.HandleFunc("/debug/sessions", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			api.StartDebugSession(w, r)
+		case http.MethodGet:
+			api.ListDebugSessions(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// /debug/sessions/ — item and sub-resource endpoints
+	mux.HandleFunc("/debug/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		// parts: ["debug", "sessions", "{sessionId}", ...]
+		if len(parts) < 3 {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
+		}
+
+		sub := ""
+		if len(parts) > 3 {
+			sub = parts[3]
+		}
+
+		switch {
+		case sub == "" && r.Method == http.MethodGet:
+			api.GetDebugSession(w, r)
+		case sub == "" && r.Method == http.MethodDelete:
+			api.StopDebugSession(w, r)
+		case sub == "step" && r.Method == http.MethodPost:
+			api.StepExecution(w, r)
+		case sub == "breakpoints" && r.Method == http.MethodPost:
+			api.SetBreakpoint(w, r)
+		case sub == "breakpoints" && r.Method == http.MethodGet:
+			api.ListBreakpoints(w, r)
+		case sub == "breakpoints" && r.Method == http.MethodDelete:
+			api.RemoveBreakpoint(w, r)
+		case sub == "variables" && r.Method == http.MethodGet:
+			api.InspectVariables(w, r)
+		case sub == "variables" && r.Method == http.MethodPut:
+			api.UpdateVariable(w, r)
+		case sub == "api-calls" && r.Method == http.MethodGet:
+			api.GetAPICallHistory(w, r)
+		case sub == "steps" && r.Method == http.MethodGet:
+			api.GetStepHistory(w, r)
+		default:
+			http.Error(w, "Not found", http.StatusNotFound)
+		}
+	})
 }
