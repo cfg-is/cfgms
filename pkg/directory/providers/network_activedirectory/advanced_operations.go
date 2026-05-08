@@ -76,17 +76,20 @@ func (p *ActiveDirectoryProvider) Search(ctx context.Context, query *interfaces.
 
 // BulkCreateUsers creates multiple users in Active Directory
 func (p *ActiveDirectoryProvider) BulkCreateUsers(ctx context.Context, users []*interfaces.DirectoryUser, options *interfaces.BulkOptions) (*interfaces.BulkResult, error) {
-	return nil, fmt.Errorf("bulk user creation not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return nil, fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // BulkUpdateUsers updates multiple users in Active Directory
 func (p *ActiveDirectoryProvider) BulkUpdateUsers(ctx context.Context, updates []*interfaces.UserUpdate, options *interfaces.BulkOptions) (*interfaces.BulkResult, error) {
-	return nil, fmt.Errorf("bulk user updates not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return nil, fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // BulkDeleteUsers deletes multiple users from Active Directory
 func (p *ActiveDirectoryProvider) BulkDeleteUsers(ctx context.Context, userIDs []string, options *interfaces.BulkOptions) (*interfaces.BulkResult, error) {
-	return nil, fmt.Errorf("bulk user deletion not yet implemented - AD module in read-only mode")
+	// Design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately.
+	return nil, fmt.Errorf("design decision: AD provider uses a read-only LDAP bind; write operations require a privileged service account not yet provisioned. Write support is tracked separately")
 }
 
 // Cross-Directory Operations

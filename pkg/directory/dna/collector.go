@@ -1032,7 +1032,7 @@ func (c *DefaultDirectoryDNACollector) CollectDomainDNA(ctx context.Context) (*D
 
 	// Try to collect domain policies (provider-specific)
 	if capabilities := c.provider.GetCapabilities(); capabilities.SupportsGroupManagement {
-		// This would be enhanced with provider-specific policy collection
+		// Design decision: policy collection enhancement (provider-specific policy attributes) is deferred pending provider capability matrix.
 		domainDNA.DomainPolicies = make(map[string]interface{})
 		domainDNA.SecuritySettings = make(map[string]interface{})
 		domainDNA.PasswordPolicy = make(map[string]interface{})

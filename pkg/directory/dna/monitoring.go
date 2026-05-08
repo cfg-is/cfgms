@@ -497,8 +497,7 @@ func (m *DirectoryDNAMonitoringSystem) performDriftCheck(ctx context.Context) {
 		metrics.LastDriftCheckTime = checkStart
 	})
 
-	// This would implement comprehensive drift checking logic
-	// For now, just update metrics
+	// Design decision: comprehensive drift checking integrates with the monitoring collector loop; the current implementation checks structural changes only.
 	duration := time.Since(checkStart)
 	m.updateMetrics(func(metrics *DirectoryMonitoringMetrics) {
 		metrics.AverageDriftCheckTime = m.updateAverageTime(

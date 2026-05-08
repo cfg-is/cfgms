@@ -587,8 +587,7 @@ func TestDriftHandlerExecution(t *testing.T) {
 	// Allow some time for handlers to process (in a real implementation)
 	time.Sleep(100 * time.Millisecond)
 
-	// Verify handlers would be called (in real implementation)
-	// For this test, we're verifying the drift was detected correctly
+	// Verify the drift was detected correctly
 	assert.NotNil(t, drift)
 	assert.Len(t, drift.Changes, 1)
 }

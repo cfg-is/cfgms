@@ -32,6 +32,7 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // DirectoryDNACollector defines the interface for collecting DNA from directory objects.
@@ -559,14 +560,24 @@ type HierarchicalDNA struct {
 
 // ToDNA converts a DirectoryDNA to a standard DNA structure for compatibility.
 func (d *DirectoryDNA) ToDNA() *commonpb.DNA {
-	// Note: This is a placeholder implementation - protobuf timestamps would be handled properly
+	// Design decision: the Attributes map carries string-encoded values only; timestamps
+	// are encoded in dedicated proto fields, not duplicated in the attributes map.
+	var lastUpdated *timestamppb.Timestamp
+	if d.LastUpdated != nil {
+		lastUpdated = timestamppb.New(*d.LastUpdated)
+	}
+	var lastSyncTime *timestamppb.Timestamp
+	if d.LastSyncTime != nil {
+		lastSyncTime = timestamppb.New(*d.LastSyncTime)
+	}
 	return &commonpb.DNA{
 		Id:              d.ID,
 		Attributes:      d.Attributes,
 		ConfigHash:      d.ConfigHash,
 		AttributeCount:  d.AttributeCount,
 		SyncFingerprint: d.SyncFingerprint,
-		// LastUpdated and LastSyncTime would be properly converted in real implementation
+		LastUpdated:     lastUpdated,
+		LastSyncTime:    lastSyncTime,
 	}
 }
 
@@ -577,18 +588,32 @@ func FromDNA(dna *commonpb.DNA, objectID string, objectType interfaces.Directory
 		ObjectType:      objectType,
 		ID:              dna.Id,
 		Attributes:      dna.Attributes,
-		LastUpdated:     convertProtobufToTime(dna.LastUpdated),
+		LastUpdated:     convertTimestamp(dna.LastUpdated),
 		ConfigHash:      dna.ConfigHash,
-		LastSyncTime:    convertProtobufToTime(dna.LastSyncTime),
+		LastSyncTime:    convertTimestamp(dna.LastSyncTime),
 		AttributeCount:  dna.AttributeCount,
 		SyncFingerprint: dna.SyncFingerprint,
 	}
 }
 
-// Helper functions for protobuf time conversion (to be implemented)
+// convertTimestamp converts a *timestamppb.Timestamp to a *time.Time.
+func convertTimestamp(ts *timestamppb.Timestamp) *time.Time {
+	if ts == nil {
+		return nil
+	}
+	t := ts.AsTime()
+	return &t
+}
 
+// convertProtobufToTime converts an interface{} protobuf Timestamp to *time.Time.
+// The interface{} parameter is kept to avoid breaking existing callers.
 func convertProtobufToTime(pb interface{}) *time.Time {
-	// Implementation depends on protobuf version - returning nil for now
-	// In a real implementation, this would convert from *timestamppb.Timestamp
+	if pb == nil {
+		return nil
+	}
+	if ts, ok := pb.(*timestamppb.Timestamp); ok {
+		t := ts.AsTime()
+		return &t
+	}
 	return nil
 }
