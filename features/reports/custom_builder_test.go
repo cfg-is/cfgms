@@ -4,13 +4,17 @@ package reports
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
+	"github.com/cfgis/cfgms/features/steward/dna/drift"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestCustomReportBuilder(t *testing.T) {
@@ -19,7 +23,7 @@ func TestCustomReportBuilder(t *testing.T) {
 		config := interfaces.DefaultCustomReportConfig()
 		builder := &CustomReportBuilder{
 			config: config,
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		req := interfaces.CustomReportRequest{
@@ -69,7 +73,7 @@ func TestCustomReportBuilder(t *testing.T) {
 		config := interfaces.DefaultCustomReportConfig()
 		builder := &CustomReportBuilder{
 			config: config,
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		template := &interfaces.CustomReportTemplate{
@@ -95,7 +99,7 @@ func TestCustomReportBuilder(t *testing.T) {
 		config := interfaces.DefaultCustomReportConfig()
 		builder := &CustomReportBuilder{
 			config: config,
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		template := &interfaces.CustomReportTemplate{
@@ -120,7 +124,7 @@ func TestCustomReportBuilder(t *testing.T) {
 		config := interfaces.DefaultCustomReportConfig()
 		builder := &CustomReportBuilder{
 			config: config,
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		template := &interfaces.CustomReportTemplate{
@@ -146,7 +150,7 @@ func TestCustomReportBuilder(t *testing.T) {
 		config := interfaces.DefaultCustomReportConfig()
 		builder := &CustomReportBuilder{
 			config: config,
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		template := &interfaces.CustomReportTemplate{
@@ -173,7 +177,7 @@ func TestCustomReportBuilder(t *testing.T) {
 		config := interfaces.DefaultCustomReportConfig()
 		builder := &CustomReportBuilder{
 			config: config,
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		req := interfaces.CustomReportRequest{
@@ -207,7 +211,7 @@ func TestCustomReportTemplate(t *testing.T) {
 		store := &MockCustomTemplateStore{}
 		manager := &CustomTemplateManager{
 			store:  store,
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		template := &interfaces.CustomReportTemplate{
@@ -244,7 +248,7 @@ func TestCustomReportTemplate(t *testing.T) {
 		store := &MockCustomTemplateStore{}
 		manager := &CustomTemplateManager{
 			store:  store,
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		// Pre-populate store with template
@@ -276,7 +280,7 @@ func TestCustomReportTemplate(t *testing.T) {
 		store := &MockCustomTemplateStore{}
 		manager := &CustomTemplateManager{
 			store:  store,
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		// Setup test templates
@@ -317,7 +321,7 @@ func TestPaginatedReportGeneration(t *testing.T) {
 		config.StreamThreshold = 1000 // Lower threshold to ensure streaming is triggered
 		builder := &CustomReportBuilder{
 			config: config,
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		req := interfaces.CustomReportRequest{
@@ -345,10 +349,6 @@ func TestPaginatedReportGeneration(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotNil(t, report)
 
-		// Debug output to see why streaming isn't triggered
-		t.Logf("Report IsStreamed: %v, StreamToken: %s", report.IsStreamed, report.StreamToken)
-		t.Logf("Config StreamThreshold: %d", config.StreamThreshold)
-
 		// Should use streaming for large datasets
 		assert.True(t, report.IsStreamed)
 		assert.NotEmpty(t, report.StreamToken)
@@ -358,7 +358,7 @@ func TestPaginatedReportGeneration(t *testing.T) {
 		config := interfaces.DefaultCustomReportConfig()
 		builder := &CustomReportBuilder{
 			config: config,
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		pagination := interfaces.PaginationRequest{
@@ -375,19 +375,6 @@ func TestPaginatedReportGeneration(t *testing.T) {
 }
 
 // Mock implementations for testing
-
-type MockLogger struct{}
-
-func (m *MockLogger) Debug(msg string, fields ...interface{})                         {}
-func (m *MockLogger) Info(msg string, fields ...interface{})                          {}
-func (m *MockLogger) Warn(msg string, fields ...interface{})                          {}
-func (m *MockLogger) Error(msg string, fields ...interface{})                         {}
-func (m *MockLogger) Fatal(msg string, fields ...interface{})                         {}
-func (m *MockLogger) DebugCtx(ctx context.Context, msg string, fields ...interface{}) {}
-func (m *MockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{})  {}
-func (m *MockLogger) WarnCtx(ctx context.Context, msg string, fields ...interface{})  {}
-func (m *MockLogger) ErrorCtx(ctx context.Context, msg string, fields ...interface{}) {}
-func (m *MockLogger) FatalCtx(ctx context.Context, msg string, fields ...interface{}) {}
 
 type MockCustomTemplateStore struct {
 	templates []*interfaces.CustomReportTemplate
@@ -460,4 +447,78 @@ func (m *MockCustomTemplateStore) UpdateSharing(ctx context.Context, templateID 
 		}
 	}
 	return ErrTemplateNotFound
+}
+
+// --- generateReportData error paths ---
+
+// testDataProvider is a minimal DataProvider implementation for error-path testing.
+type testDataProvider struct {
+	dnaErr   error
+	driftErr error
+}
+
+func (p *testDataProvider) GetDNAData(_ context.Context, _ interfaces.DataQuery) ([]storage.DNARecord, error) {
+	return nil, p.dnaErr
+}
+
+func (p *testDataProvider) GetDriftEvents(_ context.Context, _ interfaces.DataQuery) ([]drift.DriftEvent, error) {
+	if p.dnaErr != nil {
+		// should never be reached when dnaErr is set
+		return nil, nil
+	}
+	return nil, p.driftErr
+}
+
+func (p *testDataProvider) GetDeviceStats(_ context.Context, _ []string, _ interfaces.TimeRange) (map[string]interfaces.DeviceStats, error) {
+	return nil, nil
+}
+
+func (p *testDataProvider) GetTrendData(_ context.Context, _ string, _ interfaces.DataQuery) ([]interfaces.TrendPoint, error) {
+	return nil, nil
+}
+
+func TestGenerateReportData_GetDNADataError(t *testing.T) {
+	config := interfaces.DefaultCustomReportConfig()
+	dp := &testDataProvider{dnaErr: fmt.Errorf("storage unavailable")}
+	builder := &CustomReportBuilder{
+		config:       config,
+		logger:       logging.NewNoopLogger(),
+		dataProvider: dp,
+	}
+
+	report := &interfaces.CustomReport{ID: "r1"}
+	query := &interfaces.ProcessedQuery{
+		TimeRange: interfaces.TimeRange{
+			Start: time.Now().Add(-time.Hour),
+			End:   time.Now(),
+		},
+		EstimatedRows: 10,
+	}
+
+	err := builder.generateReportData(context.Background(), report, query)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get DNA data")
+}
+
+func TestGenerateReportData_GetDriftEventsError(t *testing.T) {
+	config := interfaces.DefaultCustomReportConfig()
+	dp := &testDataProvider{driftErr: fmt.Errorf("drift store unavailable")}
+	builder := &CustomReportBuilder{
+		config:       config,
+		logger:       logging.NewNoopLogger(),
+		dataProvider: dp,
+	}
+
+	report := &interfaces.CustomReport{ID: "r2"}
+	query := &interfaces.ProcessedQuery{
+		TimeRange: interfaces.TimeRange{
+			Start: time.Now().Add(-time.Hour),
+			End:   time.Now(),
+		},
+		EstimatedRows: 10,
+	}
+
+	err := builder.generateReportData(context.Background(), report, query)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get drift events")
 }

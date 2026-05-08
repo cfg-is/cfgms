@@ -30,6 +30,14 @@ func NewMemoryCache() *MemoryCache {
 	}
 }
 
+// newMemoryCacheWithConfig creates a MemoryCache with a custom pkgcache config.
+// Used in tests to configure short TTL and cleanup intervals.
+func newMemoryCacheWithConfig(config pkgcache.CacheConfig) *MemoryCache {
+	return &MemoryCache{
+		cache: pkgcache.NewCache(config),
+	}
+}
+
 // Get retrieves a report from the cache
 func (c *MemoryCache) Get(ctx context.Context, key string) (*interfaces.Report, error) {
 	value, found := c.cache.Get(key)
@@ -69,13 +77,9 @@ func (c *MemoryCache) Size() int {
 // Stats returns cache statistics
 func (c *MemoryCache) Stats() CacheStats {
 	pkgStats := c.cache.Stats()
-
-	// Calculate expired entries by checking if they would be removed
-	// pkg/cache removes expired entries automatically during cleanup
-	// so we just return the current size as active
 	return CacheStats{
 		Entries: pkgStats.Size,
-		Expired: 0, // pkg/cache auto-removes expired entries
+		Expired: int(pkgStats.ItemsExpired),
 		Active:  pkgStats.Size,
 	}
 }
