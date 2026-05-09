@@ -76,6 +76,9 @@ type Server struct {
 	commandPublisher        *commands.Publisher            // Issue #1319: fan-out config push to active stewards
 	pushStore               business.PushStore             // Issue #1320: durable push-state persistence for HA failover
 	registry                registry.Registry              // Issue #1323: active steward connection registry
+	mountPointValidator     MountPointValidator            // Issue #1396: config source connection test
+	configSourceSecretStore secretsif.SecretStore          // Issue #1396: secrets for config source validator
+	configSourceRateLimits  sync.Map                       // Issue #1396: per-tenant rate-limit counters
 	stopCleanup             chan struct{}                  // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                  // closed when cleanup goroutine exits
 	closeOnce               sync.Once                      // idempotent Close
@@ -349,6 +352,11 @@ func (s *Server) setupRouter() {
 	// System-wide compliance endpoints
 	compliance := api.PathPrefix("/compliance").Subrouter()
 	compliance.Handle("/summary", s.requirePermission("compliance", "read-summary")(http.HandlerFunc(s.handleGetComplianceSummary))).Methods("GET")
+
+	// Tenant config-source management endpoints (Issue #1396)
+	tenants := api.PathPrefix("/tenants").Subrouter()
+	tenants.Handle("/{id}/config-source/test",
+		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
 
 	// Git-sync webhook is registered lazily by SetGitSyncWebhookHandler (Issue #666).
 	// No route is pre-registered here; the endpoint only exists when a git-sync

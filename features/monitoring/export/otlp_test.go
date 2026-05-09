@@ -596,7 +596,8 @@ func TestOTLPExporter_HealthCheck_Healthy(t *testing.T) {
 	assert.Equal(t, "otlp", health.Name)
 	assert.NotEmpty(t, health.Message)
 	assert.True(t, oe.connected)
-	assert.Positive(t, health.ResponseTime)
+	// ResponseTime is measured but may read as 0 on coarse-grained clocks (e.g., Windows ~15ms).
+	assert.GreaterOrEqual(t, health.ResponseTime, time.Duration(0))
 }
 
 // TestOTLPExporter_HealthCheck_Unhealthy_5xx verifies that a 500 response causes
