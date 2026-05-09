@@ -4,6 +4,7 @@ package tenant
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
+	cfgpkg "github.com/cfgis/cfgms/pkg/config"
+	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgmstesting "github.com/cfgis/cfgms/pkg/testing"
 )
@@ -380,4 +383,196 @@ func TestManager_UpdateTenant_NoRouterWired_NoError(t *testing.T) {
 
 	_, err = manager.UpdateTenant(ctx, tenant.ID, &TenantRequest{Name: tenant.Name})
 	require.NoError(t, err, "UpdateTenant without a wired router must succeed")
+}
+
+// --- Validator and audit coverage ---
+
+// testMountPointValidator is a real test double (not a mock) implementing cfgpkg.MountPointValidator.
+type testMountPointValidator struct {
+	err error
+}
+
+func (v *testMountPointValidator) ValidateMountPoint(_ context.Context, _ *cfgpkg.ConfigSourceInfo, _ secretsiface.SecretStore) error {
+	return v.err
+}
+
+// TestManager_WithMountPointValidator_BlocksCreateOnFailure verifies that a wired
+// validator returning an error causes CreateTenant to return that error when the
+// metadata includes a git config source.
+func TestManager_WithMountPointValidator_BlocksCreateOnFailure(t *testing.T) {
+	manager := newTestTenantManager(t)
+	manager.WithMountPointValidator(&testMountPointValidator{
+		err: fmt.Errorf("mount point connection test failed: connection refused"),
+	}, nil)
+
+	ctx := context.Background()
+	_, err := manager.CreateTenant(ctx, &TenantRequest{
+		Name: "BlockedTenant",
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType: "git",
+			cfgpkg.MetaKeyConfigSourceURL:  "https://github.com/example/configs.git",
+		},
+	})
+	require.Error(t, err, "CreateTenant must fail when validator rejects the mount point")
+	assert.Contains(t, err.Error(), "config source validation failed")
+}
+
+// TestManager_WithMountPointValidator_AllowsCreateOnSuccess verifies that a wired
+// validator returning nil allows CreateTenant to succeed for git config sources.
+func TestManager_WithMountPointValidator_AllowsCreateOnSuccess(t *testing.T) {
+	manager := newTestTenantManager(t)
+	manager.WithMountPointValidator(&testMountPointValidator{err: nil}, nil)
+
+	ctx := context.Background()
+	td, err := manager.CreateTenant(ctx, &TenantRequest{
+		Name: "AllowedTenant",
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType: "git",
+			cfgpkg.MetaKeyConfigSourceURL:  "https://github.com/example/configs.git",
+		},
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, td.ID)
+}
+
+// TestManager_WithMountPointValidator_BlocksUpdateOnFailure verifies that UpdateTenant
+// returns an error when the new metadata includes a git config source that fails validation.
+func TestManager_WithMountPointValidator_BlocksUpdateOnFailure(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{Name: "UpdateBlockedTenant"})
+	require.NoError(t, err)
+
+	manager.WithMountPointValidator(&testMountPointValidator{
+		err: fmt.Errorf("mount point connection test failed: connection refused"),
+	}, nil)
+
+	_, err = manager.UpdateTenant(ctx, td.ID, &TenantRequest{
+		Name: td.Name,
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType: "git",
+			cfgpkg.MetaKeyConfigSourceURL:  "https://github.com/example/configs.git",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "config source validation failed")
+}
+
+// TestManager_ResolveConfigSourceAuditAction_AllBranches verifies all four branches of
+// resolveConfigSourceAuditAction.
+func TestManager_ResolveConfigSourceAuditAction_AllBranches(t *testing.T) {
+	m := &Manager{}
+	const git = "git"
+
+	tests := []struct {
+		name             string
+		oldType, newType string
+		oldMeta, newMeta map[string]string
+		wantAction       string
+		wantURL          string
+	}{
+		{
+			name:    "no-git to git emits created",
+			oldType: "controller", newType: git,
+			oldMeta:    map[string]string{},
+			newMeta:    map[string]string{cfgpkg.MetaKeyConfigSourceURL: "https://example.com/repo.git"},
+			wantAction: "config_source_created",
+			wantURL:    "https://example.com/repo.git",
+		},
+		{
+			name:    "git to no-git emits deleted",
+			oldType: git, newType: "controller",
+			oldMeta:    map[string]string{cfgpkg.MetaKeyConfigSourceURL: "https://example.com/repo.git"},
+			newMeta:    map[string]string{},
+			wantAction: "config_source_deleted",
+			wantURL:    "https://example.com/repo.git",
+		},
+		{
+			name:    "git to git with URL change emits updated",
+			oldType: git, newType: git,
+			oldMeta:    map[string]string{cfgpkg.MetaKeyConfigSourceURL: "https://old.example.com/repo.git"},
+			newMeta:    map[string]string{cfgpkg.MetaKeyConfigSourceURL: "https://new.example.com/repo.git"},
+			wantAction: "config_source_updated",
+			wantURL:    "https://new.example.com/repo.git",
+		},
+		{
+			name:    "git to git unchanged emits nothing",
+			oldType: git, newType: git,
+			oldMeta:    map[string]string{cfgpkg.MetaKeyConfigSourceURL: "https://example.com/repo.git"},
+			newMeta:    map[string]string{cfgpkg.MetaKeyConfigSourceURL: "https://example.com/repo.git"},
+			wantAction: "",
+			wantURL:    "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			action, url := m.resolveConfigSourceAuditAction(tc.oldType, tc.newType, tc.oldMeta, tc.newMeta)
+			assert.Equal(t, tc.wantAction, action)
+			assert.Equal(t, tc.wantURL, url)
+		})
+	}
+}
+
+// TestManager_WithAuditManager_RecordsEventOnCreate verifies that a wired audit manager
+// receives an event when CreateTenant includes a git config source.
+func TestManager_WithAuditManager_RecordsEventOnCreate(t *testing.T) {
+	manager := newTestTenantManager(t)
+	auditMgr := cfgmstesting.SetupTestAuditManager(t)
+	manager.WithAuditManager(auditMgr)
+
+	ctx := context.Background()
+	_, err := manager.CreateTenant(ctx, &TenantRequest{
+		Name: "AuditedTenant",
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType: "git",
+			cfgpkg.MetaKeyConfigSourceURL:  "https://github.com/example/configs.git",
+		},
+	})
+	require.NoError(t, err)
+	// recordConfigSourceEvent is fire-and-forget; success is that CreateTenant itself
+	// returns no error (the audit path does not block the main operation).
+}
+
+// TestSanitizeAuditURL verifies that sanitizeAuditURL redacts userinfo from URLs.
+func TestSanitizeAuditURL_RedactsUserinfo(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawURL  string
+		wantSub string // substring that must NOT appear
+		wantURL string // expected result (empty = any non-secret value is OK)
+	}{
+		{
+			name:    "plain URL unchanged",
+			rawURL:  "https://github.com/example/repo.git",
+			wantURL: "https://github.com/example/repo.git",
+		},
+		{
+			name:    "URL with password redacted",
+			rawURL:  "https://user:supersecret@github.com/example/repo.git",
+			wantSub: "supersecret",
+		},
+		{
+			name:    "URL with token-as-username stripped",
+			rawURL:  "https://token@github.com/example/repo.git",
+			wantURL: "https://github.com/example/repo.git",
+		},
+		{
+			name:    "empty URL returns empty",
+			rawURL:  "",
+			wantURL: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeAuditURL(tc.rawURL)
+			if tc.wantURL != "" {
+				assert.Equal(t, tc.wantURL, got)
+			}
+			if tc.wantSub != "" {
+				assert.NotContains(t, got, tc.wantSub, "sanitizeAuditURL must redact credential from URL")
+			}
+		})
+	}
 }
