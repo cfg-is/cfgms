@@ -105,8 +105,8 @@ func (s *Server) handleConfigSourceTest(w http.ResponseWriter, r *http.Request) 
 	tenant, err := s.tenantManager.GetTenant(r.Context(), tenantID)
 	if err != nil {
 		s.logger.Error("config-source test: failed to fetch tenant",
-			"tenant_id", tenantID,
-			"error", err)
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
 		return
 	}
@@ -116,7 +116,7 @@ func (s *Server) handleConfigSourceTest(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		s.logger.Error("config-source test: invalid config source metadata",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeResponse(w, http.StatusOK, configSourceTestResponse{
 			Reachable: false,
 			Error:     "invalid config source metadata: " + err.Error(),
@@ -155,7 +155,7 @@ func (s *Server) handleConfigSourceTest(w http.ResponseWriter, r *http.Request) 
 		s.logger.Info("config-source test: remote not reachable",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
 			"url", logging.SanitizeLogValue(info.URL),
-			"error", testErr)
+			"error", logging.SanitizeLogValue(testErr.Error()))
 		s.writeResponse(w, http.StatusOK, configSourceTestResponse{
 			Reachable: false,
 			Error:     testErr.Error(),

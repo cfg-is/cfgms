@@ -516,14 +516,14 @@ func TestManager_ResolveConfigSourceAuditAction_AllBranches(t *testing.T) {
 }
 
 // TestManager_WithAuditManager_RecordsEventOnCreate verifies that a wired audit manager
-// receives an event when CreateTenant includes a git config source.
+// durably records a config_source_created event when CreateTenant includes a git config source.
 func TestManager_WithAuditManager_RecordsEventOnCreate(t *testing.T) {
 	manager := newTestTenantManager(t)
 	auditMgr := cfgmstesting.SetupTestAuditManager(t)
 	manager.WithAuditManager(auditMgr)
 
 	ctx := context.Background()
-	_, err := manager.CreateTenant(ctx, &TenantRequest{
+	td, err := manager.CreateTenant(ctx, &TenantRequest{
 		Name: "AuditedTenant",
 		Metadata: map[string]string{
 			cfgpkg.MetaKeyConfigSourceType: "git",
@@ -531,8 +531,18 @@ func TestManager_WithAuditManager_RecordsEventOnCreate(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	// recordConfigSourceEvent is fire-and-forget; success is that CreateTenant itself
-	// returns no error (the audit path does not block the main operation).
+
+	// Flush drains the async audit queue so the event is durable before querying.
+	require.NoError(t, auditMgr.Flush(ctx))
+
+	entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: td.ID,
+		Actions:  []string{"config_source_created"},
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "expected exactly one config_source_created audit entry")
+	assert.Equal(t, "config_source_created", entries[0].Action)
+	assert.Equal(t, td.ID, entries[0].TenantID)
 }
 
 // TestSanitizeAuditURL verifies that sanitizeAuditURL redacts userinfo from URLs.
