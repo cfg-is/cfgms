@@ -273,6 +273,46 @@ func TestGitConfigStore_WriteReturnsReadOnlyError(t *testing.T) {
 	assert.ErrorIs(t, store.DeleteConfigBatch(ctx, []*cfgconfig.ConfigKey{key}), ErrReadOnlySource, "DeleteConfigBatch")
 }
 
+// TestGitConfigStore_GetCurrentSHA verifies that GetCurrentSHA returns the HEAD commit SHA
+// after cloning and returns an empty string (not an error) for a brand-new empty repo.
+func TestGitConfigStore_GetCurrentSHA(t *testing.T) {
+	t.Run("returns_HEAD_sha_after_clone", func(t *testing.T) {
+		remoteDir := createBareRemote(t, map[string][]byte{
+			"configs/default/app.yaml": []byte("version: 1\n"),
+		})
+		workDir := t.TempDir()
+		ss := newMemorySecretStore(nil)
+		store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1", ss, workDir, logging.NewNoopLogger())
+		require.NoError(t, err)
+
+		sha, err := store.GetCurrentSHA()
+		require.NoError(t, err)
+		assert.Len(t, sha, 40, "HEAD SHA must be 40 hex characters")
+	})
+
+	t.Run("advances_after_pull", func(t *testing.T) {
+		remoteDir := createBareRemote(t, map[string][]byte{
+			"configs/default/app.yaml": []byte("v1\n"),
+		})
+		workDir := t.TempDir()
+		ss := newMemorySecretStore(nil)
+		store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1", ss, workDir, logging.NewNoopLogger())
+		require.NoError(t, err)
+
+		sha1, err := store.GetCurrentSHA()
+		require.NoError(t, err)
+		require.Len(t, sha1, 40)
+
+		addCommitToRemote(t, remoteDir, "configs/default/app.yaml", []byte("v2\n"))
+		_, pullErr := store.SyncWithRemote(context.Background())
+		require.NoError(t, pullErr)
+
+		sha2, err := store.GetCurrentSHA()
+		require.NoError(t, err)
+		assert.NotEqual(t, sha1, sha2, "SHA must advance after pulling new commits")
+	})
+}
+
 // TestGitConfigStore_SyncWithRemote verifies that SyncWithRemote pulls new commits and
 // returns the updated HEAD SHA.
 func TestGitConfigStore_SyncWithRemote(t *testing.T) {

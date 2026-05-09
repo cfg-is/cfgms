@@ -199,6 +199,37 @@ func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, 
 	return gs
 }
 
+// SyncTenantWithRemote pulls the remote for tenantID's git source and returns the
+// SHA before and after the pull. Returns ("","",nil) for non-git tenants or when
+// git dependencies are not configured. Implements the tenantRemoteSyncer interface
+// consumed by SyncService in pkg/configrouting.
+func (r *controllerRouter) SyncTenantWithRemote(ctx context.Context, tenantID string) (prevSHA, newSHA string, err error) {
+	info, err := r.GetEffectiveConfigSource(ctx, tenantID)
+	if err != nil {
+		return "", "", fmt.Errorf("sync: failed to get source info for %q: %w", tenantID, err)
+	}
+	if info.Type != pkgconfig.ConfigSourceTypeGit {
+		return "", "", nil
+	}
+
+	store := r.storeForSource(ctx, tenantID, info)
+	gitStore, ok := store.(*gitprovider.GitConfigStore)
+	if !ok {
+		return "", "", nil // git dependencies not configured or store init failed
+	}
+
+	prevSHA, err = gitStore.GetCurrentSHA()
+	if err != nil {
+		slog.Warn("sync: failed to read pre-pull HEAD SHA",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error_category", "sha_read_failure",
+		)
+		return "", "", fmt.Errorf("sync: failed to read pre-pull HEAD for %q: %w", tenantID, err)
+	}
+	newSHA, err = gitStore.SyncWithRemote(ctx)
+	return prevSHA, newSHA, err
+}
+
 // checkCrossTenant returns an error if the context tenant cannot access tenantID's config.
 // Rules (skip check when either side is unset/default for backward compatibility):
 //   - same tenant → allowed
