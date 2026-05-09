@@ -248,18 +248,16 @@ func testConfigurationContinuity(t *testing.T, ctx context.Context, helper *Dock
 	t.Log("Pushing configuration to stewards...")
 	require.NoError(t, pushConfigurationToStewards(leaderURL, testConfig))
 
-	// Wait for configuration to be applied
-	time.Sleep(5 * time.Second)
-
-	// Verify initial configuration applied
-	for _, stewardName := range stewards {
-		status, err := getStewardStatus(ctx, helper, stewardName, controllers)
-		require.NoError(t, err, "Failed to get status for %s", stewardName)
-
-		// Configuration hash should be non-empty indicating config was applied
-		assert.NotEmpty(t, status.ConfigurationHash,
-			"Steward %s should have configuration applied", stewardName)
-	}
+	// Wait for configuration to propagate to all stewards.
+	require.Eventually(t, func() bool {
+		for _, stewardName := range stewards {
+			status, err := getStewardStatus(ctx, helper, stewardName, controllers)
+			if err != nil || status.ConfigurationHash == "" {
+				return false
+			}
+		}
+		return true
+	}, 30*time.Second, 2*time.Second, "Configuration not applied to all stewards within timeout")
 
 	// Trigger failover during configuration update
 	updatedConfig := testConfig
@@ -313,24 +311,15 @@ func testConfigurationContinuity(t *testing.T, ctx context.Context, helper *Dock
 
 	// Verify configuration consistency after failover
 	t.Log("Verifying configuration consistency after failover...")
-	time.Sleep(10 * time.Second) // Allow time for configuration to propagate
-
-	configurationConsistent := true
-	for _, stewardName := range stewards {
-		status, err := getStewardStatus(ctx, helper, stewardName, controllers)
-		if err != nil {
-			configurationConsistent = false
-			continue
+	require.Eventually(t, func() bool {
+		for _, stewardName := range stewards {
+			status, err := getStewardStatus(ctx, helper, stewardName, controllers)
+			if err != nil || status.ConfigurationHash == "" {
+				return false
+			}
 		}
-
-		// All stewards should have some configuration applied
-		if status.ConfigurationHash == "" {
-			configurationConsistent = false
-			t.Logf("Steward %s missing configuration after failover", stewardName)
-		}
-	}
-
-	assert.True(t, configurationConsistent, "Configuration should be consistent across all stewards after failover")
+		return true
+	}, 30*time.Second, 2*time.Second, "Configuration not consistent across all stewards after failover")
 	t.Log("✓ Configuration continuity maintained during failover")
 }
 
@@ -352,16 +341,16 @@ func testSessionPersistence(t *testing.T, ctx context.Context, helper *DockerCom
 		require.NoError(t, startSessionMonitoring(stewardName, controllers))
 	}
 
-	// Allow time for any in-flight session state to settle before asserting.
-	time.Sleep(5 * time.Second)
-
-	// Verify active sessions are present before the failover.
-	for _, stewardName := range stewards {
-		status, err := getStewardStatus(ctx, helper, stewardName, controllers)
-		require.NoError(t, err, "Failed to get status for %s", stewardName)
-		assert.Greater(t, status.ActiveSessions, 0,
-			"Steward %s should have active sessions after monitoring established", stewardName)
-	}
+	// Wait for session state to be observable on every steward.
+	require.Eventually(t, func() bool {
+		for _, stewardName := range stewards {
+			status, err := getStewardStatus(ctx, helper, stewardName, controllers)
+			if err != nil || status.ActiveSessions == 0 {
+				return false
+			}
+		}
+		return true
+	}, 30*time.Second, 2*time.Second, "Not all stewards have active sessions after monitoring established")
 
 	// Trigger controller failover.
 	var leaderService string
@@ -624,8 +613,10 @@ func pushConfigurationToStewards(controllerURL string, config push.StewardConfig
 
 // startSessionMonitoring verifies that stewardName has an active ControlChannel session by
 // calling GET /api/v1/stewards/{id} on each controller in turn (mTLS via buildTLSClient) and
-// confirming connection_state == "connected". Returns nil when a controller confirms the
-// steward is connected; returns an error immediately otherwise so the caller fails fast.
+// confirming connection_state == "connected". Returns nil when any controller confirms the
+// steward is connected; returns an error only when no controller reports it as connected.
+// A non-"connected" response from one controller does not fail fast — the steward may be
+// connected to a different node in the cluster.
 func startSessionMonitoring(stewardName string, controllers []string) error {
 	stewardID := fmt.Sprintf("%s-1", stewardName)
 	for _, controllerURL := range controllers {
@@ -663,7 +654,6 @@ func startSessionMonitoring(stewardName string, controllers []string) error {
 		if apiResp.Data.ConnectionState == "connected" {
 			return nil
 		}
-		return fmt.Errorf("steward %s is not connected (connection_state=%q)", stewardName, apiResp.Data.ConnectionState)
 	}
 	return fmt.Errorf("could not reach any controller to verify session for steward %s", stewardName)
 }
