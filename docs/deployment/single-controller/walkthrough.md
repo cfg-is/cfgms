@@ -100,7 +100,7 @@ sudo systemctl daemon-reload
 
 ### Initialize the controller
 
-This is a one-time operation that creates the CA, server certificates, and storage backend:
+This is a one-time operation that creates the CA, server certificates, storage backend, and admin credential bundle:
 
 ```bash
 sudo cfgms-controller --init --config /etc/cfgms/controller.cfg
@@ -109,15 +109,45 @@ sudo cfgms-controller --init --config /etc/cfgms/controller.cfg
 You should see:
 
 ```
-Initializing storage backend... provider=git
+Initializing storage backend... provider=flatfile
 Storage backend initialized
 Creating Certificate Authority... ca_path=/var/lib/cfgms/certs/ca
 Certificate Authority created
+Admin bundle issued path=/etc/cfgms/admin.bundle.yaml serial=<serial>
 Controller initialized successfully
   CA fingerprint: SHA256:xxxx...
 ```
 
 Save the CA fingerprint — stewards verify it during registration.
+
+### Admin credential bundle
+
+`--init` writes an admin credential bundle to `/etc/cfgms/admin.bundle.yaml` (mode `0600`, owned by the `cfgms` daemon user). The bundle contains:
+
+- The admin mTLS client certificate and private key
+- The CA certificate for server verification
+- The controller URL
+- The cert serial number and fingerprint (for revocation lookup)
+
+**Protect this file.** It grants full admin access to the controller REST API. Treat it like a root SSH key.
+
+| Platform | Default path |
+|----------|-------------|
+| Linux    | `/etc/cfgms/admin.bundle.yaml` |
+| Windows  | `%ProgramData%\cfgms\admin.bundle.yaml` |
+
+An idempotency marker is written alongside the bundle at `/etc/cfgms/.admin-bundle-issued`. If `--init` is re-run and the bundle file already exists, issuance is skipped and the existing bundle is preserved.
+
+### Bundle recovery
+
+If the bundle file is accidentally deleted after a successful `--init`, the controller detects this on the next `--init` run and refuses to start:
+
+```
+controller is initialized (CA fingerprint: <fp>) but admin bundle is missing at /etc/cfgms/admin.bundle.yaml.
+To regenerate the bundle, run: cfgms-controller bootstrap-admin --regenerate
+```
+
+Run `cfgms-controller bootstrap-admin --regenerate` to re-issue the admin bundle without reinitializing the CA or storage. (This command is implemented in Story D.)
 
 ### Start the controller
 

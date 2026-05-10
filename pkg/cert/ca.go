@@ -343,17 +343,25 @@ func (ca *CA) GenerateClientCertificate(config *ClientCertConfig) (*Certificate,
 	}
 
 	// Create client certificate template
+	subject := pkix.Name{
+		Organization: []string{config.Organization},
+		CommonName:   config.CommonName,
+	}
+	if config.OrganizationalUnit != "" {
+		subject.OrganizationalUnit = []string{config.OrganizationalUnit}
+	}
+
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			Organization:       []string{config.Organization},
-			OrganizationalUnit: []string{config.OrganizationalUnit},
-			CommonName:         config.CommonName,
-		},
-		NotBefore:   time.Now(),
-		NotAfter:    time.Now().Add(time.Duration(config.ValidityDays) * 24 * time.Hour),
-		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		Subject:      subject,
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Duration(config.ValidityDays) * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	if config.TemplateModifier != nil {
+		config.TemplateModifier(template)
 	}
 
 	// Create the client certificate

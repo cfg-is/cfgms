@@ -13,12 +13,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
@@ -51,12 +55,25 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		return nil, fmt.Errorf("certificate CA path is required for initialization (certificate.ca_path)")
 	}
 
+	bundlePath := cfg.AdminBundlePath
+	if bundlePath == "" {
+		bundlePath = defaultAdminBundlePath()
+	}
+
 	// Idempotent guard: refuse if already initialized
 	if IsInitialized(caPath) {
 		existing, err := ReadInitMarker(caPath)
 		if err != nil {
 			return nil, fmt.Errorf("controller is already initialized but marker is unreadable: %w", err)
 		}
+
+		// Check if bundle was issued but bundle file is now missing (external deletion).
+		if isBundleMarkerPresent(bundlePath) && !fileExists(bundlePath) {
+			return nil, fmt.Errorf("controller is initialized (CA fingerprint: %s) but admin bundle is missing at %s.\n"+
+				"To regenerate the bundle, run: cfgms-controller bootstrap-admin --regenerate",
+				existing.CAFingerprint, bundlePath)
+		}
+
 		return nil, fmt.Errorf("controller is already initialized (initialized at %s with CA fingerprint %s). "+
 			"To re-initialize, remove the CA directory at %s and run --init again",
 			existing.InitializedAt.Format(time.RFC3339), existing.CAFingerprint, caPath)
@@ -81,6 +98,11 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", err)
 	}
+	defer func() {
+		if cErr := storageManager.Close(); cErr != nil {
+			logger.Error("Failed to close storage manager during initialization", "error", cErr)
+		}
+	}()
 	logger.Info("OSS composite storage backend initialized")
 
 	// Step 2: Create CA and certificates
@@ -216,6 +238,16 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		return nil, fmt.Errorf("failed to write initialization marker: %w", err)
 	}
 
+	// Step 6: Issue admin credential bundle
+	logger.Info("Checking admin bundle...", "path", bundlePath)
+	if fileExists(bundlePath) {
+		logger.Info("Admin bundle already exists, skipping issuance", "path", bundlePath)
+	} else {
+		if err := issueAdminBundle(bundlePath, cfg, certManager, logger); err != nil {
+			return nil, err
+		}
+	}
+
 	logger.Info("Initialization complete",
 		"ca_fingerprint", caInfo.Fingerprint,
 		"storage_provider", cfg.Storage.Provider,
@@ -226,6 +258,94 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		StorageProvider: cfg.Storage.Provider,
 		InitializedAt:   marker.InitializedAt,
 	}, nil
+}
+
+// issueAdminBundle generates an admin client certificate with the CFGMS admin marker,
+// writes the bundle file, and writes the idempotency marker.
+func issueAdminBundle(bundlePath string, cfg *config.Config, certManager *cert.Manager, logger logging.Logger) error {
+	// Issue an admin client cert with the CFGMS admin X.509 extension.
+	// Subject: CN=cfgms-admin, O=CFGMS (no OU — the extension OID is the identity marker).
+	// Validity: 365 days hard cap (Story D enforces renewal).
+	adminCert, err := certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "cfgms-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     365,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to issue admin certificate: %w", err)
+	}
+
+	caPEM, err := certManager.GetCACertificate()
+	if err != nil {
+		return fmt.Errorf("failed to get CA certificate PEM: %w", err)
+	}
+
+	controllerURL := cfg.ExternalURL
+
+	b := &bundle.Bundle{
+		CertPEM:         string(adminCert.CertificatePEM),
+		KeyPEM:          string(adminCert.PrivateKeyPEM),
+		CAPEM:           string(caPEM),
+		ControllerURL:   controllerURL,
+		AuditSubject:    "admin:cfgms-admin",
+		CertSerial:      adminCert.SerialNumber,
+		CertFingerprint: adminCert.Fingerprint,
+	}
+
+	if err := bundle.Write(bundlePath, b); err != nil {
+		return fmt.Errorf("failed to write admin bundle: %w", err)
+	}
+
+	// Write the idempotency marker AFTER bundle.Write succeeds.
+	// Marker presence implies the bundle was successfully written at BundlePath.
+	bundleMarker := &BundleMarker{
+		Serial:      adminCert.SerialNumber,
+		Fingerprint: adminCert.Fingerprint,
+		IssuedAt:    time.Now().UTC(),
+		BundlePath:  bundlePath,
+	}
+	if err := writeBundleMarker(bundlePath, bundleMarker); err != nil {
+		return fmt.Errorf("failed to write bundle issuance marker: %w", err)
+	}
+
+	chownBundleFiles(bundlePath, logger)
+
+	logger.Info("Admin bundle issued",
+		"path", bundlePath,
+		"serial", adminCert.SerialNumber)
+	return nil
+}
+
+// chownBundleFiles transfers ownership of the bundle and marker files to the
+// cfgms daemon user on Linux when running as root. No-op on Windows.
+func chownBundleFiles(bundlePath string, logger logging.Logger) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if os.Getuid() != 0 {
+		return
+	}
+	u, err := user.Lookup("cfgms")
+	if err != nil {
+		logger.Warn("cfgms user not found, skipping chown on bundle files", "error", err.Error())
+		return
+	}
+	uid, uidErr := strconv.Atoi(u.Uid)
+	if uidErr != nil {
+		logger.Warn("Invalid UID for cfgms user, skipping chown", "uid", u.Uid, "error", uidErr.Error())
+		return
+	}
+	gid, gidErr := strconv.Atoi(u.Gid)
+	if gidErr != nil {
+		logger.Warn("Invalid GID for cfgms user, skipping chown", "gid", u.Gid, "error", gidErr.Error())
+		return
+	}
+	for _, path := range []string{bundlePath, bundleMarkerPath(bundlePath)} {
+		if chownErr := os.Chown(path, uid, gid); chownErr != nil {
+			logger.Warn("Failed to chown bundle file", "path", path, "error", chownErr.Error())
+		}
+	}
 }
 
 // CAFilesExist checks whether the CA certificate and key files exist at the given path.
