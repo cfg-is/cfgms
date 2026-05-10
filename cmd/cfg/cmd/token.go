@@ -179,24 +179,34 @@ func init() {
 	tokenCmd.AddCommand(tokenGetCmd)
 }
 
-// getAPIClient creates an API client using flags or environment variables
+// getAPIClient creates an API client using bundle auth (mTLS) when available,
+// falling back to API key auth when no bundle is found or discovery is opted out.
 func getAPIClient() (*APIClient, error) {
-	// Resolve API URL
+	// Resolve API URL (without default — bundle ControllerURL fills the gap)
 	apiURL := tokenAPIURL
 	if apiURL == "" {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
+
+	// Try admin bundle first (mTLS auto-discovery)
+	client, err := resolveBundleClient(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("bundle lookup failed: %w", err)
+	}
+	if client != nil {
+		return client, nil
+	}
+
+	// Fallback: API key path (unchanged from pre-bundle behavior)
 	if apiURL == "" {
 		apiURL = "http://localhost:9080"
 	}
 
-	// Resolve API key
 	apiKey := tokenAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
 	}
 
-	// Resolve TLS settings
 	tlsInsecure := tokenTLSInsecure
 	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
 		tlsInsecure = true
