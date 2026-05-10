@@ -94,6 +94,11 @@ type Config struct {
 
 	// Transport is the unified, protocol-agnostic transport configuration.
 	Transport *TransportConfig `yaml:"transport"`
+
+	// AdminBundlePath is the path where --init writes the admin credential bundle.
+	// Default: /etc/cfgms/admin.bundle.yaml (Linux) or %ProgramData%\cfgms\admin.bundle.yaml (Windows).
+	// Mode 0600, daemon-user-owned. Contains the admin mTLS cert, key, CA, and controller URL.
+	AdminBundlePath string `yaml:"admin_bundle_path,omitempty"`
 }
 
 // CertificateConfig contains certificate management settings

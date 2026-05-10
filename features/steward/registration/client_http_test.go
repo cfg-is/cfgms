@@ -3,6 +3,7 @@
 package registration
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +14,31 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestRegistrationResponse_JSONFieldNames is a regression guard that ensures
+// the wire format of RegistrationResponse has not changed. The JSON field names
+// client_cert, client_key, and ca_cert are consumed by stewards in production;
+// any rename would silently break existing deployments.
+func TestRegistrationResponse_JSONFieldNames(t *testing.T) {
+	resp := RegistrationResponse{
+		ClientCert: "cert-pem",
+		ClientKey:  "key-pem",
+		CACert:     "ca-pem",
+	}
+
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &raw))
+
+	assert.Contains(t, raw, "client_cert", "wire field client_cert must not be renamed")
+	assert.Contains(t, raw, "client_key", "wire field client_key must not be renamed")
+	assert.Contains(t, raw, "ca_cert", "wire field ca_cert must not be renamed")
+	assert.Equal(t, "cert-pem", raw["client_cert"])
+	assert.Equal(t, "key-pem", raw["client_key"])
+	assert.Equal(t, "ca-pem", raw["ca_cert"])
+}
 
 func TestNewHTTPClientAlwaysVerifiesTLS(t *testing.T) {
 	logger := logging.NewLogger("debug")

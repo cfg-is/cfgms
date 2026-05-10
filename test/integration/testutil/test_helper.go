@@ -131,10 +131,11 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	require.NoError(t, err)
 
 	controllerCfg := &config.Config{
-		ListenAddr: "127.0.0.1:0",   // Use random port
-		CertPath:   certStoragePath, // Legacy cert path for backward compatibility
-		DataDir:    filepath.Join(tempDir, "controller-data"),
-		LogLevel:   "debug",
+		ListenAddr:      "127.0.0.1:0",   // Use random port
+		CertPath:        certStoragePath, // Legacy cert path for backward compatibility
+		DataDir:         filepath.Join(tempDir, "controller-data"),
+		LogLevel:        "debug",
+		AdminBundlePath: filepath.Join(tempDir, "admin.bundle.yaml"),
 		Storage: &config.StorageConfig{
 			Provider:     "flatfile",
 			FlatfileRoot: filepath.Join(tempDir, "storage-flatfile"),

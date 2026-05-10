@@ -41,6 +41,7 @@
 package cert
 
 import (
+	"crypto/x509"
 	"time"
 )
 
@@ -168,6 +169,10 @@ type ClientCertConfig struct {
 
 	// Client identifier for tracking
 	ClientID string
+
+	// TemplateModifier is an optional function applied to the certificate template
+	// before signing. Pass SetAdminMarker (from the cert package) to issue admin certificates.
+	TemplateModifier func(*x509.Certificate)
 }
 
 // Certificate represents a generated certificate with its metadata
