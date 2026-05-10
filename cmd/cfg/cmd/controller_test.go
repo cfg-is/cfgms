@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -125,6 +126,91 @@ func TestGetControllerClient_TLSInsecureEnvWired(t *testing.T) {
 func TestControllerCmd_TLSFlagsRegistered(t *testing.T) {
 	assert.NotNil(t, controllerCmd.PersistentFlags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered on controllerCmd")
 	assert.NotNil(t, controllerCmd.PersistentFlags().Lookup("tls-insecure"), "--tls-insecure flag must be registered on controllerCmd")
+}
+
+func TestGetControllerClient_BundleFound_UsesMTLS(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundleFilePath := filepath.Join(tmpDir, "admin.bundle.yaml")
+	generateTestBundleFile(t, bundleFilePath, "https://bundle-controller.local:9443")
+
+	origUserConfigDirFn := userConfigDirFn
+	origSystemBundlePathFn := systemBundlePathFn
+	origBundlePath := bundlePath
+	origNoBundle := noBundle
+	origHealthURL := healthURL
+	t.Cleanup(func() {
+		userConfigDirFn = origUserConfigDirFn
+		systemBundlePathFn = origSystemBundlePathFn
+		bundlePath = origBundlePath
+		noBundle = origNoBundle
+		healthURL = origHealthURL
+	})
+	userConfigDirFn = func() (string, error) { return filepath.Join(tmpDir, "no-userconfig"), nil }
+	systemBundlePathFn = func() string { return filepath.Join(tmpDir, "no-system.bundle.yaml") }
+
+	// Ensure env var is not set
+	origEnv, wasSet := os.LookupEnv("CFGMS_ADMIN_BUNDLE")
+	require.NoError(t, os.Unsetenv("CFGMS_ADMIN_BUNDLE"))
+	t.Cleanup(func() {
+		if wasSet {
+			require.NoError(t, os.Setenv("CFGMS_ADMIN_BUNDLE", origEnv))
+		} else {
+			require.NoError(t, os.Unsetenv("CFGMS_ADMIN_BUNDLE"))
+		}
+	})
+
+	bundlePath = bundleFilePath
+	noBundle = false
+	healthURL = "https://flag-url.local:9443" // --url flag takes precedence over bundle URL
+
+	client, err := getControllerClient()
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	// Bundle was used: client must have mTLS certificates loaded
+	transport := client.httpClient.Transport.(*http.Transport)
+	assert.NotEmpty(t, transport.TLSClientConfig.Certificates)
+	// URL comes from the flag (not the bundle), since healthURL was set
+	assert.Equal(t, "https://flag-url.local:9443", client.baseURL)
+}
+
+func TestGetControllerClient_NoBundleFlag_FallsBackToAPIKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundleFilePath := filepath.Join(tmpDir, "admin.bundle.yaml")
+	generateTestBundleFile(t, bundleFilePath, "https://bundle-controller.local:9443")
+
+	origUserConfigDirFn := userConfigDirFn
+	origSystemBundlePathFn := systemBundlePathFn
+	origBundlePath := bundlePath
+	origNoBundle := noBundle
+	origHealthURL := healthURL
+	origHealthAPIKey := healthAPIKey
+	t.Cleanup(func() {
+		userConfigDirFn = origUserConfigDirFn
+		systemBundlePathFn = origSystemBundlePathFn
+		bundlePath = origBundlePath
+		noBundle = origNoBundle
+		healthURL = origHealthURL
+		healthAPIKey = origHealthAPIKey
+	})
+	userConfigDirFn = func() (string, error) { return filepath.Join(tmpDir, "no-userconfig"), nil }
+	systemBundlePathFn = func() string { return filepath.Join(tmpDir, "no-system.bundle.yaml") }
+	t.Setenv("CFGMS_ADMIN_BUNDLE", bundleFilePath)
+
+	bundlePath = bundleFilePath
+	noBundle = true // explicit opt-out
+	healthURL = "https://api-key-controller.local:9080"
+	healthAPIKey = "ctrl-test-key"
+
+	client, err := getControllerClient()
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	// --no-bundle means API key path; no mTLS certificates
+	assert.Equal(t, "https://api-key-controller.local:9080", client.baseURL)
+	assert.Equal(t, "ctrl-test-key", client.apiKey)
+	transport := client.httpClient.Transport.(*http.Transport)
+	assert.Empty(t, transport.TLSClientConfig.Certificates)
 }
 
 func newControllerHealthServer(t *testing.T) *httptest.Server {

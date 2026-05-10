@@ -12,6 +12,10 @@ var (
 	// Global flags
 	verbose bool
 	output  string
+
+	// Admin bundle flags (persistent — available to all subcommands)
+	bundlePath string
+	noBundle   bool
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -35,6 +39,10 @@ func init() {
 	// Global flags
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
 	rootCmd.PersistentFlags().StringVarP(&output, "output", "o", "text", "output format (text, json, html, unified, side-by-side, markdown)")
+
+	// Admin bundle flags for mTLS authentication
+	rootCmd.PersistentFlags().StringVar(&bundlePath, "bundle", "", "Path to admin bundle file for mTLS auth (env: CFGMS_ADMIN_BUNDLE)")
+	rootCmd.PersistentFlags().BoolVar(&noBundle, "no-bundle", false, "Skip admin bundle auto-discovery and use API key auth")
 
 	// Add subcommands
 	rootCmd.AddCommand(diffCmd)

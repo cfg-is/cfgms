@@ -24,11 +24,13 @@ type APIClient struct {
 
 // APIClientConfig contains configuration for creating an API client
 type APIClientConfig struct {
-	BaseURL     string
-	APIKey      string
-	CACertPEM   []byte // CA certificate for server verification (nil to skip verification)
-	TLSInsecure bool   // Skip TLS verification (development only)
-	ServerName  string // Server name for TLS verification (extracted from URL if empty)
+	BaseURL       string
+	APIKey        string
+	CACertPEM     []byte // CA certificate for server verification (nil to skip verification)
+	ClientCertPEM []byte // Client certificate for mTLS authentication
+	ClientKeyPEM  []byte // Client private key for mTLS authentication
+	TLSInsecure   bool   // Skip TLS verification (development only)
+	ServerName    string // Server name for TLS verification (extracted from URL if empty)
 }
 
 // TokenCreateRequest represents the request body for creating a registration token
@@ -79,8 +81,14 @@ func NewAPIClient(cfg *APIClientConfig) (*APIClient, error) {
 			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: true,
 		}
+	} else if cfg.ClientCertPEM != nil && cfg.ClientKeyPEM != nil {
+		// mTLS mode: mutual TLS with client certificate and optional CA cert
+		tlsConfig, err = cert.CreateClientTLSConfig(cfg.ClientCertPEM, cfg.ClientKeyPEM, cfg.CACertPEM, cfg.ServerName, tls.VersionTLS12)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create mTLS config: %w", err)
+		}
 	} else if cfg.CACertPEM != nil {
-		// Production mode: use CA cert for verification via pkg/cert helper
+		// Server-auth only: use CA cert for server verification via pkg/cert helper
 		tlsConfig, err = cert.CreateClientTLSConfig(nil, nil, cfg.CACertPEM, cfg.ServerName, tls.VersionTLS12)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create TLS config: %w", err)

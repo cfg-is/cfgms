@@ -103,13 +103,24 @@ func init() {
 	controllerCmd.AddCommand(controllerMetricsCmd)
 }
 
-// getControllerClient creates an API client using controller flags or environment variables
+// getControllerClient creates an API client using bundle auth (mTLS) when available,
+// falling back to API key auth when no bundle is found or discovery is opted out.
 func getControllerClient() (*APIClient, error) {
 	apiURL := strings.TrimSuffix(healthURL, "/")
 	if apiURL == "" {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
+	// Try admin bundle first (mTLS auto-discovery)
+	client, err := resolveBundleClient(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("bundle lookup failed: %w", err)
+	}
+	if client != nil {
+		return client, nil
+	}
+
+	// Fallback: API key path
 	apiKey := healthAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")

@@ -812,18 +812,91 @@ Current monitoring system configuration and export status.
    curl http://localhost:9080/api/v1/health
    ```
 
-3. **Get the default API key from the controller logs:**
-   Look for a log message like:
-
-   ```
-   Generated default API key id=xxx key=yyy
-   ```
-
-4. **List stewards:**
+3. **List stewards:**
 
    ```bash
    curl -H "X-API-Key: your-api-key" http://localhost:9080/api/v1/stewards
    ```
+
+## mTLS Authentication (admin bundle)
+
+The `cfg` CLI authenticates to the controller REST API using a mutual TLS (mTLS) admin
+bundle file. The bundle contains the client certificate, client private key, CA certificate,
+and the controller URL — everything needed for a full mTLS handshake.
+
+### Bundle file location
+
+The `cfg` CLI walks the following lookup chain in order and uses the first bundle it finds:
+
+| Priority | Source |
+|----------|--------|
+| 1 (highest) | `--bundle <path>` CLI flag |
+| 2 | `CFGMS_ADMIN_BUNDLE` environment variable (non-empty) |
+| 3 | `$XDG_CONFIG_HOME/cfgms/admin.bundle.yaml` (Linux/macOS: `~/.config/cfgms/admin.bundle.yaml`) |
+| 4 (lowest) | `/etc/cfgms/admin.bundle.yaml` (Linux/macOS) · `%ProgramData%\cfgms\admin.bundle.yaml` (Windows) |
+
+### Bundle YAML schema
+
+The bundle file (`admin.bundle.yaml`) is a YAML document with the following fields,
+as defined in `pkg/cert/bundle`:
+
+```yaml
+cert_pem: |
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+key_pem: |
+  -----BEGIN EC PRIVATE KEY-----
+  ...
+  -----END EC PRIVATE KEY-----
+ca_pem: |
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+controller_url: "https://controller.example.com:9443"
+audit_subject: "admin:cfgms-admin"
+cert_serial: "1234567890"
+cert_fingerprint: "sha256:..."
+```
+
+### Opting out of bundle discovery
+
+To force API key auth and skip bundle auto-discovery entirely:
+
+```bash
+# Explicit flag
+cfg --no-bundle token list
+
+# Set env var to empty string (explicit opt-out; unset env var still triggers lookup)
+CFGMS_ADMIN_BUNDLE="" cfg token list
+```
+
+### Workstation security guidance
+
+**Treat `admin.bundle.yaml` exactly like an SSH private key.** The file contains a
+private key that grants administrative access to your controller. Compromise of this
+file is a full controller compromise.
+
+**Do not:**
+- Commit it to git. Dotfile repos (`~/.config` is frequently committed) are a common
+  footgun. Add `admin.bundle.yaml` to your global `.gitignore`.
+- Store it in Dropbox, OneDrive, Google Drive, or any cloud-synced folder.
+- Store it in a Windows roaming profile — it will be transmitted to every machine
+  you log into.
+- Email it, paste it into Slack, or store it in a secrets manager that logs values
+  (only use secret managers with envelope encryption and audit-only access logs).
+
+**Do:**
+- Keep it `chmod 600` on Linux/macOS (the controller writes it this way automatically):
+  ```bash
+  chmod 600 ~/.config/cfgms/admin.bundle.yaml
+  ```
+- On Windows, restrict the file to your user account only with `icacls`:
+  ```powershell
+  icacls "$env:APPDATA\cfgms\admin.bundle.yaml" /inheritance:r /grant:r "${env:USERNAME}:(R,W)"
+  ```
+- Rotate the bundle by re-running `cfgms-controller --init` or the admin re-enrollment
+  procedure when you suspect compromise.
 
 ## Configuration
 

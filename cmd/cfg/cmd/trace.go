@@ -57,13 +57,24 @@ func init() {
 	_ = traceCmd.MarkFlagRequired("url")
 }
 
-// getTraceClient creates an API client using trace flags or environment variables
+// getTraceClient creates an API client using bundle auth (mTLS) when available,
+// falling back to API key auth when no bundle is found or discovery is opted out.
 func getTraceClient() (*APIClient, error) {
 	apiURL := strings.TrimSuffix(traceURL, "/")
 	if apiURL == "" {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
+	// Try admin bundle first (mTLS auto-discovery)
+	client, err := resolveBundleClient(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("bundle lookup failed: %w", err)
+	}
+	if client != nil {
+		return client, nil
+	}
+
+	// Fallback: API key path
 	apiKey := traceAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")

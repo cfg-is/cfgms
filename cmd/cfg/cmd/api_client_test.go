@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -563,6 +564,47 @@ func TestAPIClientRequestHeaders(t *testing.T) {
 
 		_, err = client.CreateToken(context.Background(), req)
 		require.NoError(t, err)
+	})
+}
+
+func TestNewAPIClient_MTLSConfig(t *testing.T) {
+	t.Run("client cert and key populate TLS config with certificate", func(t *testing.T) {
+		manager, err := cert.NewManager(&cert.ManagerConfig{
+			CAConfig: &cert.CAConfig{
+				Organization: "Test CA",
+				Country:      "US",
+				ValidityDays: 365,
+			},
+			StoragePath: t.TempDir(),
+		})
+		require.NoError(t, err)
+
+		caCertPEM, err := manager.GetCACertificate()
+		require.NoError(t, err)
+
+		clientCert, err := manager.GenerateClientCertificate(&cert.ClientCertConfig{
+			CommonName:   "test-admin",
+			Organization: "Test Admin",
+			ValidityDays: 1,
+		})
+		require.NoError(t, err)
+
+		cfg := &APIClientConfig{
+			BaseURL:       "https://controller.example.com:9443",
+			ClientCertPEM: clientCert.CertificatePEM,
+			ClientKeyPEM:  clientCert.PrivateKeyPEM,
+			CACertPEM:     caCertPEM,
+			ServerName:    "controller.example.com",
+		}
+
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+		require.NotNil(t, client)
+
+		transport := client.httpClient.Transport.(*http.Transport)
+		assert.NotEmpty(t, transport.TLSClientConfig.Certificates)
+		assert.NotNil(t, transport.TLSClientConfig.RootCAs)
+		assert.Equal(t, "controller.example.com", transport.TLSClientConfig.ServerName)
 	})
 }
 

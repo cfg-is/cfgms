@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -125,6 +126,91 @@ func TestGetTraceClient_TLSInsecureEnvWired(t *testing.T) {
 func TestTraceCmd_TLSFlagsRegistered(t *testing.T) {
 	assert.NotNil(t, traceCmd.Flags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered on traceCmd")
 	assert.NotNil(t, traceCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered on traceCmd")
+}
+
+func TestGetTraceClient_BundleFound_UsesMTLS(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundleFilePath := filepath.Join(tmpDir, "admin.bundle.yaml")
+	generateTestBundleFile(t, bundleFilePath, "https://bundle-trace-controller.local:9443")
+
+	origUserConfigDirFn := userConfigDirFn
+	origSystemBundlePathFn := systemBundlePathFn
+	origBundlePath := bundlePath
+	origNoBundle := noBundle
+	origTraceURL := traceURL
+	t.Cleanup(func() {
+		userConfigDirFn = origUserConfigDirFn
+		systemBundlePathFn = origSystemBundlePathFn
+		bundlePath = origBundlePath
+		noBundle = origNoBundle
+		traceURL = origTraceURL
+	})
+	userConfigDirFn = func() (string, error) { return filepath.Join(tmpDir, "no-userconfig"), nil }
+	systemBundlePathFn = func() string { return filepath.Join(tmpDir, "no-system.bundle.yaml") }
+
+	// Ensure env var is not set
+	origEnv, wasSet := os.LookupEnv("CFGMS_ADMIN_BUNDLE")
+	require.NoError(t, os.Unsetenv("CFGMS_ADMIN_BUNDLE"))
+	t.Cleanup(func() {
+		if wasSet {
+			require.NoError(t, os.Setenv("CFGMS_ADMIN_BUNDLE", origEnv))
+		} else {
+			require.NoError(t, os.Unsetenv("CFGMS_ADMIN_BUNDLE"))
+		}
+	})
+
+	bundlePath = bundleFilePath
+	noBundle = false
+	traceURL = "https://flag-trace-url.local:9443" // --url flag takes precedence over bundle URL
+
+	client, err := getTraceClient()
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	// Bundle was used: client must have mTLS certificates loaded
+	transport := client.httpClient.Transport.(*http.Transport)
+	assert.NotEmpty(t, transport.TLSClientConfig.Certificates)
+	// URL comes from the flag (not the bundle), since traceURL was set
+	assert.Equal(t, "https://flag-trace-url.local:9443", client.baseURL)
+}
+
+func TestGetTraceClient_NoBundleFlag_FallsBackToAPIKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundleFilePath := filepath.Join(tmpDir, "admin.bundle.yaml")
+	generateTestBundleFile(t, bundleFilePath, "https://bundle-trace-controller.local:9443")
+
+	origUserConfigDirFn := userConfigDirFn
+	origSystemBundlePathFn := systemBundlePathFn
+	origBundlePath := bundlePath
+	origNoBundle := noBundle
+	origTraceURL := traceURL
+	origTraceAPIKey := traceAPIKey
+	t.Cleanup(func() {
+		userConfigDirFn = origUserConfigDirFn
+		systemBundlePathFn = origSystemBundlePathFn
+		bundlePath = origBundlePath
+		noBundle = origNoBundle
+		traceURL = origTraceURL
+		traceAPIKey = origTraceAPIKey
+	})
+	userConfigDirFn = func() (string, error) { return filepath.Join(tmpDir, "no-userconfig"), nil }
+	systemBundlePathFn = func() string { return filepath.Join(tmpDir, "no-system.bundle.yaml") }
+	t.Setenv("CFGMS_ADMIN_BUNDLE", bundleFilePath)
+
+	bundlePath = bundleFilePath
+	noBundle = true // explicit opt-out
+	traceURL = "https://api-key-trace.local:9080"
+	traceAPIKey = "trace-test-key"
+
+	client, err := getTraceClient()
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	// --no-bundle means API key path; no mTLS certificates
+	assert.Equal(t, "https://api-key-trace.local:9080", client.baseURL)
+	assert.Equal(t, "trace-test-key", client.apiKey)
+	transport := client.httpClient.Transport.(*http.Transport)
+	assert.Empty(t, transport.TLSClientConfig.Certificates)
 }
 
 func newTraceServer(t *testing.T, requestID string) *httptest.Server {

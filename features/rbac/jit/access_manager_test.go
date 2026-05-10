@@ -268,7 +268,10 @@ func TestJITAccessManager_ApproveRequest(t *testing.T) {
 	assert.Equal(t, "Approved for testing", grant.ApprovalReason)
 	assert.Equal(t, jit.JITAccessGrantStatusActive, grant.Status)
 	assert.NotZero(t, grant.GrantedAt)
-	assert.Equal(t, request.ExpiresAt, grant.ExpiresAt)
+	// ExpiresAt is computed as GrantedAt+Duration (not request.ExpiresAt) so that
+	// it is always strictly after CreatedAt even on low-resolution clocks (e.g. Windows).
+	assert.True(t, grant.ExpiresAt.After(grant.GrantedAt), "grant must expire after it was granted")
+	assert.WithinDuration(t, grant.GrantedAt.Add(requestSpec.Duration), grant.ExpiresAt, time.Second)
 
 	// Check request was updated
 	updatedRequest, err := jam.GetRequest(ctx, request.ID)
