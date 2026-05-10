@@ -135,15 +135,22 @@ func (s *Server) contentTypeMiddleware(next http.Handler) http.Handler {
 }
 
 // extractAdminPrincipal inspects r.TLS.PeerCertificates[0] for the CFGMS admin extension.
-// Returns a non-nil *Principal when the cert carries the admin marker. Chain verification
-// is done at the TLS layer (VerifyClientCertIfGiven + ClientCAs); this function only checks
-// the extension. Returns nil when no cert is presented or the cert lacks the admin marker.
-func extractAdminPrincipal(r *http.Request) *Principal {
+// Returns a non-nil *Principal when the cert carries the admin marker AND is not revoked.
+// Chain verification is done at the TLS layer (VerifyClientCertIfGiven + ClientCAs).
+// Returns nil when no cert is presented, the cert lacks the admin marker, or the cert
+// serial is in the revoked-serials list (Story D: C2 fix).
+func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return nil
 	}
 	peerCert := r.TLS.PeerCertificates[0]
 	if !cert.HasAdminMarker(peerCert) {
+		return nil
+	}
+	serial := peerCert.SerialNumber.String()
+	// Story D: C2 fix — check revocation on every cert-auth request.
+	// certManager may be nil in OSS deployments that haven't initialised cert management.
+	if s.certManager != nil && s.certManager.IsRevoked(serial) {
 		return nil
 	}
 	fpSum := sha256.Sum256(peerCert.Raw)
@@ -152,7 +159,7 @@ func extractAdminPrincipal(r *http.Request) *Principal {
 		Name:            "mtls-admin:" + peerCert.Subject.CommonName,
 		IsAdmin:         true,
 		TenantID:        "default",
-		CertSerial:      peerCert.SerialNumber.String(),
+		CertSerial:      serial,
 		CertFingerprint: hex.EncodeToString(fpSum[:]),
 		CertNotAfter:    peerCert.NotAfter,
 	}
@@ -191,7 +198,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		}
 
 		// H2: mTLS-presented identity always wins.
-		if adminPrincipal := extractAdminPrincipal(r); adminPrincipal != nil {
+		if adminPrincipal := s.extractAdminPrincipal(r); adminPrincipal != nil {
 			// H2/L5: Conflicting credentials — cert AND header present → reject.
 			if hasHeaderCredentials(r) {
 				s.writeErrorResponse(w, http.StatusBadRequest,

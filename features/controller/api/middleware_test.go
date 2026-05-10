@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -21,9 +22,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // auditCapturingLogger records Info and Warn calls for audit log assertions.
@@ -623,4 +630,125 @@ func TestMTLSAuth_AuditFields_APIKeyAuth(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "api_key", capLog.kvValue("auth_method"), "API-key auth must log auth_method=api_key")
+}
+
+// setupTestServerWithCertMgr creates a test server wired with a real cert.Manager
+// so that extractAdminPrincipal can check the revocation list.
+func setupTestServerWithCertMgr(t *testing.T, certManager *cert.Manager) *Server {
+	t.Helper()
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+
+	storageManager := pkgtesting.SetupTestStorage(t)
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacManager.Initialize(context.Background()))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	controllerService := service.NewControllerService(logging.NewNoopLogger())
+	configService := service.NewConfigurationServiceV2(logging.NewNoopLogger(), storageManager, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+	server, err := New(
+		cfg, logging.NewNoopLogger(),
+		controllerService, configService,
+		nil, rbacService, certManager, tenantManager, rbacManager,
+		nil, nil, nil, "", nil, auditMgr, nil, nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
+	})
+	return server
+}
+
+// issueCertAndBuildRequest issues a cert via certManager (storing it so Revoke can find it),
+// applies the admin marker, and builds a TLS request presenting that cert.
+// Returns the request and the cert serial number for revocation tests.
+func issueCertAndBuildRequest(t *testing.T, method, path string, certManager *cert.Manager) (*http.Request, string) {
+	t.Helper()
+
+	issuedCert, err := certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "test-admin-revoke",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+
+	certBlock, _ := pem.Decode(issuedCert.CertificatePEM)
+	require.NotNil(t, certBlock)
+	x509Cert, err := x509.ParseCertificate(certBlock.Bytes)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(method, path, nil)
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{x509Cert},
+	}
+	return req, issuedCert.SerialNumber
+}
+
+// TestExtractAdminPrincipal_ChecksRevocation verifies that a chain-valid admin-marked
+// cert whose serial is in the revoked-serials list returns nil (request rejected).
+// This is the Story D C2 fix: the revocation check must occur on every cert-auth request.
+func TestExtractAdminPrincipal_ChecksRevocation(t *testing.T) {
+	tempDir := t.TempDir()
+	certManager, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: tempDir,
+		CAConfig: &cert.CAConfig{
+			Organization: "Test",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+
+	server := setupTestServerWithCertMgr(t, certManager)
+
+	// Issue an admin-marked cert via the Manager (stored in certManager for Revoke lookup)
+	req, serial := issueCertAndBuildRequest(t, http.MethodGet, "/api/v1/test", certManager)
+
+	// Before revocation: extractAdminPrincipal must return a non-nil principal
+	principal := server.extractAdminPrincipal(req)
+	require.NotNil(t, principal, "admin-marked cert must be accepted before revocation")
+	assert.True(t, principal.IsAdmin)
+
+	// Revoke the cert
+	require.NoError(t, certManager.Revoke(serial))
+
+	// After revocation: extractAdminPrincipal must return nil (CERT_REVOKED)
+	principal = server.extractAdminPrincipal(req)
+	assert.Nil(t, principal, "revoked admin cert must be rejected by extractAdminPrincipal")
+}
+
+// TestExtractAdminPrincipal_NilCertManager_AllowsUnrevoked verifies that when
+// certManager is nil (disabled cert management), certs are accepted without
+// revocation checking (graceful degradation).
+func TestExtractAdminPrincipal_NilCertManager_AllowsUnrevoked(t *testing.T) {
+	server := setupTestServer(t) // no certManager set
+	adminCert := makeSelfSignedAdminCert(t)
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", adminCert)
+	principal := server.extractAdminPrincipal(req)
+	require.NotNil(t, principal, "admin cert must be accepted when certManager is nil (no revocation checking)")
+	assert.True(t, principal.IsAdmin)
 }

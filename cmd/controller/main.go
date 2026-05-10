@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/controller/server"
+	certpkg "github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/version"
@@ -71,6 +72,7 @@ Entry paths:
 		buildInstallCommand(),
 		buildUninstallCommand(),
 		buildStatusCommand(),
+		buildBootstrapAdminCommand(),
 	)
 
 	return root
@@ -411,6 +413,174 @@ func resolveInstallCAPath(cfg *config.Config, configPath string) (string, error)
 		return "", fmt.Errorf("certificate configuration is required for initialization; set certificate.ca_path in %s", configPath)
 	}
 	return cfg.Certificate.CAPath, nil
+}
+
+// buildBootstrapAdminCommand builds the `cfgms-controller bootstrap-admin` subcommand.
+// Exactly one of --name, --regenerate, --revoke, or --list must be specified.
+func buildBootstrapAdminCommand() *cobra.Command {
+	var (
+		configPath string
+		name       string
+		outputPath string
+		regenerate bool
+		revoke     string
+		list       bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "bootstrap-admin",
+		Short: "Issue, regenerate, or revoke admin credential bundles",
+		Long: `bootstrap-admin manages admin mTLS credential bundles for the CFGMS controller.
+
+Each bundle contains the admin client certificate, key, CA certificate, and controller
+URL. The holder of a bundle can authenticate to the controller REST API as a full admin.
+
+Operations:
+  --name <name> --output <path>   Issue a new bundle for a named operator or system.
+                                  Name must be alphanumeric+hyphens, max 64 chars.
+  --regenerate                    Regenerate the system admin bundle at the configured
+                                  path. Requires interactive confirmation (type 'yes').
+                                  After regenerating, revoke the old bundle serial:
+                                    cfgms-controller bootstrap-admin --revoke <old-serial>
+  --revoke <serial>               Revoke a previously-issued bundle by serial number.
+                                  The serial is printed at issuance time and stored in
+                                  the bundle file (cert_serial field).
+  --list                          List all issued and revoked admin certs.
+
+Bundles are written with mode 0600. Treat them like root SSH keys.`,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBootstrapAdmin(configPath, name, outputPath, regenerate, revoke, list)
+		},
+	}
+
+	cmd.Flags().StringVar(&configPath, "config", "", "Path to configuration file (default: search /etc/cfgms/controller.cfg)")
+	cmd.Flags().StringVar(&name, "name", "", "Operator or system name for the new bundle (alphanumeric+hyphens, max 64)")
+	cmd.Flags().StringVar(&outputPath, "output", "", "Output path for the bundle file (required with --name)")
+	cmd.Flags().BoolVar(&regenerate, "regenerate", false, "Regenerate the system admin bundle (requires confirmation)")
+	cmd.Flags().StringVar(&revoke, "revoke", "", "Revoke a bundle by serial number")
+	cmd.Flags().BoolVar(&list, "list", false, "List all issued and revoked admin certs")
+
+	return cmd
+}
+
+// runBootstrapAdmin executes the bootstrap-admin operation.
+func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, revoke string, list bool) error {
+	// Exactly one operation must be specified.
+	active := 0
+	if name != "" {
+		active++
+	}
+	if regenerate {
+		active++
+	}
+	if revoke != "" {
+		active++
+	}
+	if list {
+		active++
+	}
+	if active == 0 {
+		return fmt.Errorf("one of --name, --regenerate, --revoke, or --list is required")
+	}
+	if active > 1 {
+		return fmt.Errorf("only one of --name, --regenerate, --revoke, or --list may be specified at a time")
+	}
+	if name != "" && outputPath == "" {
+		return fmt.Errorf("--output is required with --name")
+	}
+
+	cfg, err := config.LoadWithPath(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	logger := logging.NewNoopLogger()
+
+	switch {
+	case name != "":
+		if err := initialization.IssueAdminBundle(cfg, logger, name, outputPath); err != nil {
+			return err
+		}
+		fmt.Printf("Admin bundle issued: %s\n", outputPath)
+		return nil
+
+	case regenerate:
+		return initialization.RunRegenerate(cfg, logger, os.Stdin, os.Stdout)
+
+	case revoke != "":
+		if err := initialization.RevokeAdminBundle(cfg, logger, revoke); err != nil {
+			return err
+		}
+		fmt.Printf("Bundle revoked: serial=%s\n", revoke)
+		return nil
+
+	case list:
+		return runBootstrapAdminList(cfg)
+	}
+
+	return nil
+}
+
+// runBootstrapAdminList prints all issued admin certs and their revocation status.
+func runBootstrapAdminList(cfg *config.Config) error {
+	certPath := cfg.CertPath
+	if certPath == "" && cfg.Certificate != nil {
+		certPath = cfg.Certificate.CAPath
+	}
+	if certPath == "" {
+		return fmt.Errorf("certificate path not configured (cert_path or certificate.ca_path required)")
+	}
+
+	certManager, err := certpkg.NewManager(&certpkg.ManagerConfig{
+		StoragePath:    certPath,
+		LoadExistingCA: true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to load cert manager: %w", err)
+	}
+
+	certs, err := certManager.GetCertificatesByType(certpkg.CertificateTypeClient)
+	if err != nil {
+		return fmt.Errorf("failed to list certificates: %w", err)
+	}
+
+	revoked, err := certManager.ListRevoked()
+	if err != nil {
+		return fmt.Errorf("failed to list revoked serials: %w", err)
+	}
+
+	revokedSet := make(map[string]bool, len(revoked))
+	for _, e := range revoked {
+		revokedSet[e.Serial] = true
+	}
+
+	fmt.Printf("%-20s  %-30s  %-12s  %s\n", "SERIAL (last 12)", "COMMON NAME", "STATUS", "EXPIRES")
+	fmt.Printf("%s\n", strings.Repeat("-", 80))
+	for _, c := range certs {
+		status := "active"
+		if revokedSet[c.SerialNumber] {
+			status = "REVOKED"
+		}
+		short := c.SerialNumber
+		if len(short) > 12 {
+			short = "..." + short[len(short)-12:]
+		}
+		fmt.Printf("%-20s  %-30s  %-12s  %s\n",
+			short,
+			truncate(c.CommonName, 30),
+			status,
+			c.ExpiresAt.Format("2006-01-02"),
+		)
+	}
+	return nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-3] + "..."
 }
 
 // buildLoggingConfig constructs a complete LoggingConfig for the given component.
