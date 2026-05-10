@@ -44,10 +44,10 @@ func TestNewEscalationPreventionManager_AcceptsStoreAccessor(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	t.Cleanup(func() {
-		_ = manager.Close(ctx)
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer closeCancel()
+		_ = manager.Close(closeCtx)
 	})
 
 	// *Manager satisfies both RBACManager and RBACStoreAccessor; construction must not panic.
@@ -76,7 +76,11 @@ func TestValidateAndSetRoleParent_NoTypeAssertion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	t.Cleanup(func() {
-		_ = manager.Close(ctx)
+		// Use a fresh context: defer cancel() fires when the test function returns,
+		// which is before t.Cleanup runs, so ctx is already cancelled here.
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer closeCancel()
+		_ = manager.Close(closeCtx)
 	})
 
 	require.NoError(t, manager.Initialize(ctx))
@@ -126,7 +130,11 @@ func TestOperationLog_UsesEscalationOperationType(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	t.Cleanup(func() {
-		_ = manager.Close(ctx)
+		// Use a fresh context: defer cancel() fires when the test function returns,
+		// which is before t.Cleanup runs, so ctx is already cancelled here.
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer closeCancel()
+		_ = manager.Close(closeCtx)
 	})
 
 	require.NoError(t, manager.Initialize(ctx))

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -89,8 +90,10 @@ func TestIssueAdminBundle_CreatesFile(t *testing.T) {
 	info, err := os.Stat(outputPath)
 	require.NoError(t, err, "bundle file must exist")
 
-	// Mode must be 0600
-	assert.Equal(t, os.FileMode(0600), info.Mode().Perm(), "bundle file must have mode 0600")
+	// Mode must be 0600 (Unix only — Windows does not enforce Unix permission bits)
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm(), "bundle file must have mode 0600")
+	}
 
 	x509cert := parseX509FromBundle(t, outputPath)
 
