@@ -12,6 +12,7 @@ package bundle
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -28,8 +29,13 @@ type Bundle struct {
 }
 
 // Write serializes b to YAML and atomically writes it to path with mode 0600.
+// The parent directory is created with mode 0700 if it does not exist.
 // The caller is responsible for chown on Linux if daemon-user ownership is required.
 func Write(path string, b *Bundle) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("failed to create bundle directory: %w", err)
+	}
+
 	data, err := yaml.Marshal(b)
 	if err != nil {
 		return fmt.Errorf("failed to marshal bundle: %w", err)

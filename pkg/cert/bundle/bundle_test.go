@@ -55,6 +55,32 @@ func TestBundle_FileMode(t *testing.T) {
 	assert.Equal(t, os.FileMode(0600), info.Mode().Perm(), "bundle file must be mode 0600")
 }
 
+func TestBundle_Write_CreatesParentDirectory(t *testing.T) {
+	// Verify Write creates intermediate directories that do not yet exist.
+	// This is the regression test for the CI failure where /etc/cfgms/ was absent.
+	path := filepath.Join(t.TempDir(), "nested", "subdir", "admin.bundle.yaml")
+
+	require.NoError(t, Write(path, &Bundle{AuditSubject: "admin:cfgms-admin"}))
+
+	_, err := os.Stat(path)
+	require.NoError(t, err, "bundle file must exist after Write to nested path")
+}
+
+func TestBundle_Write_InvalidDirectory_Error(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.MkdirAll path-as-file behavior differs on Windows")
+	}
+	// Create a regular file and then try to use it as a directory component.
+	// MkdirAll fails with ENOTDIR, which Write must surface.
+	dir := t.TempDir()
+	blockingFile := filepath.Join(dir, "notadir")
+	require.NoError(t, os.WriteFile(blockingFile, []byte("x"), 0600))
+
+	path := filepath.Join(blockingFile, "admin.bundle.yaml")
+	err := Write(path, &Bundle{AuditSubject: "admin:cfgms-admin"})
+	assert.Error(t, err, "Write must return error when parent directory cannot be created")
+}
+
 func TestBundle_Read_MissingFile(t *testing.T) {
 	_, err := Read(filepath.Join(t.TempDir(), "nonexistent.yaml"))
 	assert.Error(t, err)
