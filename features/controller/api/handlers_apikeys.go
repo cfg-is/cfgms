@@ -67,6 +67,15 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// C1: Validate permissions against the known allow-list. "*" and unknown IDs are rejected.
+	for _, p := range createReq.Permissions {
+		if !isKnownPermission(p) {
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				"Unknown or reserved permission ID: "+p, "INVALID_PERMISSION")
+			return
+		}
+	}
+
 	// Set default tenant if not specified
 	tenantID := createReq.TenantID
 	if tenantID == "" {

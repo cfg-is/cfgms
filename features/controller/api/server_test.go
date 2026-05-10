@@ -263,7 +263,7 @@ func TestAPIKeyManagement(t *testing.T) {
 	// Test creating a new API key
 	createReq := APIKeyCreateRequest{
 		Name:        "Test Key",
-		Permissions: []string{"stewards:read"},
+		Permissions: []string{"steward:read"},
 		TenantID:    "test-tenant",
 	}
 
@@ -735,7 +735,7 @@ func TestEphemeralAPIKeys(t *testing.T) {
 	})
 
 	t.Run("JIT key convenience function", func(t *testing.T) {
-		permissions := []string{"stewards:execute-scripts"}
+		permissions := []string{"steward:read"}
 
 		// Use convenience function for 1-hour JIT key
 		jitKey := NewJITTestKey(t, server, permissions)
@@ -751,6 +751,15 @@ func TestEphemeralAPIKeys(t *testing.T) {
 		// Should expire in approximately 1 hour (within 10 seconds tolerance for CI)
 		expectedExpiry := time.Now().Add(1 * time.Hour)
 		assert.WithinDuration(t, expectedExpiry, *keyInfo.ExpiresAt, 10*time.Second)
+
+		// Verify the JIT key actually grants access to an authorized endpoint
+		req := httptest.NewRequest("GET", "/api/v1/stewards/test-steward-id", nil)
+		req.Header.Set("X-API-Key", jitKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		// 404 means auth passed and the endpoint was reached (no steward with that ID exists)
+		assert.NotEqual(t, http.StatusUnauthorized, rec.Code, "JIT key must authenticate the request")
+		assert.NotEqual(t, http.StatusForbidden, rec.Code, "JIT key must have steward:read permission")
 	})
 
 	t.Run("automatic cleanup removes expired keys", func(t *testing.T) {

@@ -649,7 +649,7 @@ func (s *Server) setupTLS() (*tls.Config, error) {
 	return s.setupLegacyTLS()
 }
 
-// setupManagedTLS configures TLS using managed certificates
+// setupManagedTLS configures TLS using managed certificates.
 func (s *Server) setupManagedTLS() (*tls.Config, error) {
 	// Story #377: In separated mode with external source, load from disk
 	if s.cfg.Certificate != nil && s.cfg.Certificate.IsSeparatedArchitecture() {
@@ -666,26 +666,31 @@ func (s *Server) setupManagedTLS() (*tls.Config, error) {
 		return nil, fmt.Errorf("failed to get server certificate: %w", err)
 	}
 
-	// In ClusterMode, supply the HA CA cert so the TLS listener can request (but not
-	// require) a client certificate from HA peers, populating r.TLS.PeerCertificates
-	// for the application-layer CN check without breaking non-HA clients.
-	var caCertPEM []byte
-	inClusterMode := s.haManager != nil && s.haManager.GetDeploymentMode() == ha.ClusterMode
-	if inClusterMode {
-		caCertPEM = s.haManager.GetCACertPEM()
+	// Populate ClientCAs with the controller CA so that presented admin certs
+	// are chain-verified at the TLS handshake layer (Story #1415).
+	controllerCACertPEM, err := s.certManager.GetCACertificate()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get controller CA certificate: %w", err)
 	}
 
-	tlsConfig, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, caCertPEM, tls.VersionTLS12)
+	tlsConfig, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, controllerCACertPEM, tls.VersionTLS12)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
 
-	// Override to RequestClientCert: peers may present a cert (which the app layer
-	// inspects via r.TLS.PeerCertificates), but non-HA clients without a cert are
-	// still accepted. CreateServerTLSConfig sets RequireAndVerifyClientCert when
-	// caCertPEM != nil; this overrides that to the softer policy.
+	// Use VerifyClientCertIfGiven (not RequireAndVerifyClientCert): when a client
+	// presents a cert the TLS stack verifies it against ClientCAs; clients without
+	// a cert fall through to API-key auth in the application layer. This implements
+	// mTLS admin auth alongside the existing API-key path (H2).
+	tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
+
+	// Cluster mode (HA): merge the HA peer CA into ClientCAs so that both admin
+	// certs (controller CA) and HA peer certs (HA CA) pass TLS chain verification.
+	inClusterMode := s.haManager != nil && s.haManager.GetDeploymentMode() == ha.ClusterMode
 	if inClusterMode {
-		tlsConfig.ClientAuth = tls.RequestClientCert
+		if haCACertPEM := s.haManager.GetCACertPEM(); len(haCACertPEM) > 0 {
+			tlsConfig.ClientCAs.AppendCertsFromPEM(haCACertPEM)
+		}
 	}
 
 	return tlsConfig, nil

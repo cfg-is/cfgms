@@ -42,26 +42,29 @@ func newMinimalTLSServer(t *testing.T, certMgr *cert.Manager, haManager *ha.Mana
 	}
 }
 
-// TestSetupManagedTLS_NilHAManager_NoClientAuth verifies that when haManager is nil,
-// setupManagedTLS returns a tls.Config with no client auth — non-HA API consumers
-// must not be required or requested to present client certificates.
-func TestSetupManagedTLS_NilHAManager_NoClientAuth(t *testing.T) {
+// TestSetupManagedTLS_RequestsClientCertWhenCertManagerSet verifies that when certManager
+// is non-nil (regardless of HA mode), setupManagedTLS sets ClientAuth = VerifyClientCertIfGiven
+// and populates ClientCAs from the controller CA. This enables mTLS admin cert auth while
+// allowing clients without certs to fall through to API-key auth.
+func TestSetupManagedTLS_RequestsClientCertWhenCertManagerSet(t *testing.T) {
 	certMgr := newTLSTestCertManager(t)
 	server := newMinimalTLSServer(t, certMgr, nil)
 
 	tlsConfig, err := server.setupManagedTLS()
 	require.NoError(t, err)
 	require.NotNil(t, tlsConfig)
-	assert.Equal(t, tls.NoClientCert, tlsConfig.ClientAuth,
-		"nil haManager must not request or require client certificates")
+	assert.Equal(t, tls.VerifyClientCertIfGiven, tlsConfig.ClientAuth,
+		"certManager != nil must set ClientAuth = VerifyClientCertIfGiven: "+
+			"presented certs are chain-verified; missing cert falls through to API-key auth")
+	assert.NotNil(t, tlsConfig.ClientCAs,
+		"ClientCAs must be populated from the controller CA when certManager is set")
 }
 
-// TestSetupManagedTLS_SingleServerMode_NoClientAuth verifies that when haManager is
-// non-nil but configured in SingleServerMode, setupManagedTLS returns a tls.Config
-// with no client auth. This exercises the GetDeploymentMode() != ClusterMode branch
-// (distinct from the nil haManager short-circuit path), ensuring a bug in the mode
-// comparison cannot hide behind the nil check.
-func TestSetupManagedTLS_SingleServerMode_NoClientAuth(t *testing.T) {
+// TestSetupManagedTLS_SingleServerMode_VerifyClientCertIfGiven verifies that when haManager
+// is non-nil but configured in SingleServerMode, setupManagedTLS still sets
+// ClientAuth = VerifyClientCertIfGiven because cert management (not HA mode) is the
+// determining factor. This exercises the GetDeploymentMode() != ClusterMode branch.
+func TestSetupManagedTLS_SingleServerMode_VerifyClientCertIfGiven(t *testing.T) {
 	certMgr := newTLSTestCertManager(t)
 
 	haManager, err := ha.NewManager(ha.DefaultConfig(), logging.NewNoopLogger(), nil)
@@ -72,6 +75,8 @@ func TestSetupManagedTLS_SingleServerMode_NoClientAuth(t *testing.T) {
 	tlsConfig, err := server.setupManagedTLS()
 	require.NoError(t, err)
 	require.NotNil(t, tlsConfig)
-	assert.Equal(t, tls.NoClientCert, tlsConfig.ClientAuth,
-		"SingleServerMode manager must not request or require client certificates")
+	assert.Equal(t, tls.VerifyClientCertIfGiven, tlsConfig.ClientAuth,
+		"SingleServerMode manager must set VerifyClientCertIfGiven (certManager drives the policy)")
+	assert.NotNil(t, tlsConfig.ClientCAs,
+		"ClientCAs must be populated from the controller CA")
 }

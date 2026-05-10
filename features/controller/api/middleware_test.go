@@ -4,8 +4,15 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
+	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +21,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -375,4 +384,243 @@ func TestAuditAuthorizationDecision_SanitizesNestedConditionalVars(t *testing.T)
 	mMap, ok := cvMap["m"].(map[string]interface{})
 	require.True(t, ok, "conditional_vars[m] must be a nested map")
 	assert.Equal(t, "v_x", mMap["deep"], "null byte in nested map value must be replaced")
+}
+
+// --- mTLS auth middleware tests (Story #1415) ---
+
+// makeSelfSignedAdminCert creates a self-signed cert with the CFGMS admin marker.
+// The TLS chain verification is bypassed in middleware unit tests (done at TLS layer in prod).
+func makeSelfSignedAdminCert(t *testing.T) *x509.Certificate {
+	t.Helper()
+	return makeAdminTestCert(t, true)
+}
+
+// makeSelfSignedCert creates a self-signed cert WITHOUT the admin marker.
+func makeSelfSignedCert(t *testing.T) *x509.Certificate {
+	t.Helper()
+	return makeAdminTestCert(t, false)
+}
+
+func makeAdminTestCert(t *testing.T, withMarker bool) *x509.Certificate {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1234),
+		Subject:      pkix.Name{CommonName: "test-admin"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	if withMarker {
+		cert.SetAdminMarker(template)
+	}
+
+	// Self-signed for unit test purposes; chain verification is done at TLS layer in prod.
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err)
+	parsed, err := x509.ParseCertificate(certDER)
+	require.NoError(t, err)
+	return parsed
+}
+
+// requestWithTLSCert returns an httptest.Request with r.TLS set to present peerCert.
+func requestWithTLSCert(method, path string, peerCert *x509.Certificate) *http.Request {
+	req := httptest.NewRequest(method, path, nil)
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{peerCert},
+	}
+	return req
+}
+
+// wrapWithAuth wraps handler with authenticationMiddleware then requirePermission.
+func wrapWithAuth(s *Server, resourceType, action string, inner http.HandlerFunc) http.Handler {
+	return s.authenticationMiddleware(
+		s.requirePermission(resourceType, action)(inner),
+	)
+}
+
+// TestMTLSAuth_AdminMarker_Granted verifies that a request presenting a cert with the
+// CFGMS admin extension is authenticated as an admin principal and passes requirePermission.
+func TestMTLSAuth_AdminMarker_Granted(t *testing.T) {
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+
+	var capturedPrincipal *Principal
+	handler := wrapWithAuth(server, "steward", "read",
+		func(w http.ResponseWriter, r *http.Request) {
+			capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+			w.WriteHeader(http.StatusOK)
+		})
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/stewards/test", adminCert)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "admin cert must be granted access")
+	require.NotNil(t, capturedPrincipal)
+	assert.True(t, capturedPrincipal.IsAdmin, "principal from admin cert must have IsAdmin == true")
+	assert.NotEmpty(t, capturedPrincipal.CertSerial)
+	assert.NotEmpty(t, capturedPrincipal.CertFingerprint)
+	assert.False(t, capturedPrincipal.CertNotAfter.IsZero())
+}
+
+// TestMTLSAuth_NoMarker_FallsThrough verifies that when a cert without the admin marker
+// is presented alongside a valid API key, the API-key auth path handles the request normally.
+func TestMTLSAuth_NoMarker_FallsThrough(t *testing.T) {
+	server := setupTestServer(t)
+	apiKeyStr := NewTestKey(t, server, []string{"steward:read"})
+
+	regularCert := makeSelfSignedCert(t)
+
+	var capturedPrincipal *Principal
+	handler := wrapWithAuth(server, "steward", "read",
+		func(w http.ResponseWriter, r *http.Request) {
+			capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+			w.WriteHeader(http.StatusOK)
+		})
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/stewards/test", regularCert)
+	req.Header.Set("X-API-Key", apiKeyStr)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "cert without marker + valid API key must succeed via API-key path")
+	require.NotNil(t, capturedPrincipal)
+	assert.False(t, capturedPrincipal.IsAdmin, "principal from API-key path must not be admin")
+}
+
+// TestMTLSAuth_ConflictingCredentials_Rejected verifies that presenting an admin cert AND
+// an API-key header together returns 400 CONFLICTING_CREDENTIALS (H2/L5).
+func TestMTLSAuth_ConflictingCredentials_Rejected(t *testing.T) {
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+	apiKeyStr := NewTestKey(t, server, []string{"steward:read"})
+
+	handler := server.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/stewards/test", adminCert)
+	req.Header.Set("X-API-Key", apiKeyStr)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "admin cert + API key header must return 400")
+	assert.Contains(t, rec.Body.String(), "CONFLICTING_CREDENTIALS")
+}
+
+// TestMTLSAuth_ConflictingCredentials_BearerToken verifies that admin cert + Bearer token
+// also returns 400 CONFLICTING_CREDENTIALS.
+func TestMTLSAuth_ConflictingCredentials_BearerToken(t *testing.T) {
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+	apiKeyStr := NewTestKey(t, server, []string{"steward:read"})
+
+	handler := server.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/stewards/test", adminCert)
+	req.Header.Set("Authorization", "Bearer "+apiKeyStr)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "admin cert + Bearer token must return 400")
+	assert.Contains(t, rec.Body.String(), "CONFLICTING_CREDENTIALS")
+}
+
+// TestMTLSAuth_NoCert_FallsBackToAPIKey verifies that when no cert is presented,
+// the middleware falls back to API-key auth unchanged.
+func TestMTLSAuth_NoCert_FallsBackToAPIKey(t *testing.T) {
+	server := setupTestServer(t)
+	apiKeyStr := NewTestKey(t, server, []string{"steward:read"})
+
+	var capturedPrincipal *Principal
+	handler := wrapWithAuth(server, "steward", "read",
+		func(w http.ResponseWriter, r *http.Request) {
+			capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+			w.WriteHeader(http.StatusOK)
+		})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/test", nil)
+	req.Header.Set("X-API-Key", apiKeyStr)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "no cert + valid API key must succeed")
+	require.NotNil(t, capturedPrincipal)
+	assert.False(t, capturedPrincipal.IsAdmin)
+}
+
+// TestHasPermission_AdminPrincipal verifies that hasPermission returns true for any
+// permissionID when the principal has IsAdmin == true.
+func TestHasPermission_AdminPrincipal(t *testing.T) {
+	server := setupTestServer(t)
+	admin := &Principal{IsAdmin: true}
+
+	assert.True(t, server.hasPermission(admin, "steward:read"))
+	assert.True(t, server.hasPermission(admin, "rbac:delete-role"))
+	assert.True(t, server.hasPermission(admin, "some-future:permission"))
+}
+
+// TestHasPermission_WildcardStringRejected verifies that an API-key principal with
+// Permissions: []string{"*"} does not short-circuit — "*" is treated as a literal
+// permission name (C1: no wildcard in permission strings).
+func TestHasPermission_WildcardStringRejected(t *testing.T) {
+	server := setupTestServer(t)
+	wildcardPrincipal := &Principal{
+		IsAdmin:     false,
+		Permissions: []string{"*"},
+	}
+
+	// "*" must not match any real permissionID
+	assert.False(t, server.hasPermission(wildcardPrincipal, "steward:read"),
+		"wildcard string must not grant steward:read")
+	assert.False(t, server.hasPermission(wildcardPrincipal, "rbac:admin"),
+		"wildcard string must not grant rbac:admin")
+}
+
+// TestMTLSAuth_AuditFields_CertAuth verifies that audit log entries from cert-auth
+// requests carry auth_method=cert and cert detail fields (H3).
+func TestMTLSAuth_AuditFields_CertAuth(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+	adminCert := makeSelfSignedAdminCert(t)
+
+	handler := wrapWithAuth(server, "steward", "read",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/stewards/test", adminCert)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "cert", capLog.kvValue("auth_method"), "cert-auth must log auth_method=cert")
+	assert.NotNil(t, capLog.kvValue("cert_serial"), "must log cert_serial")
+	assert.NotNil(t, capLog.kvValue("cert_fingerprint"), "must log cert_fingerprint")
+	assert.NotNil(t, capLog.kvValue("cert_not_after"), "must log cert_not_after")
+}
+
+// TestMTLSAuth_AuditFields_APIKeyAuth verifies that audit log entries from API-key
+// auth requests carry auth_method=api_key (H3).
+func TestMTLSAuth_AuditFields_APIKeyAuth(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+	apiKeyStr := NewTestKey(t, server, []string{"steward:read"})
+
+	handler := wrapWithAuth(server, "steward", "read",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/test", nil)
+	req.Header.Set("X-API-Key", apiKeyStr)
+	// Inject tenant context so requirePermission finds it.
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "test-tenant"))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "api_key", capLog.kvValue("auth_method"), "API-key auth must log auth_method=api_key")
 }
