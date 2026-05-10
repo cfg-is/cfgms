@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -151,4 +152,57 @@ func TestHandleListAPIKeys_RouterPath_FiltersByAuthenticatedTenant(t *testing.T)
 		assert.NotEqual(t, "tenant-b-key-id", keyMap["id"],
 			"tenant-b key must not be visible through the router to tenant-a")
 	}
+}
+
+// callHandleCreateAPIKey posts body to handleCreateAPIKey with the given context tenant.
+func callHandleCreateAPIKey(server *Server, body []byte, contextTenantID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/api-keys", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if contextTenantID != "" {
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, contextTenantID))
+	}
+	rec := httptest.NewRecorder()
+	server.handleCreateAPIKey(rec, req)
+	return rec
+}
+
+// TestHandleCreateAPIKey_RejectsWildcard verifies that POST /api/v1/api-keys with
+// permissions: ["*"] returns 400 INVALID_PERMISSION and does not persist the key (C1).
+func TestHandleCreateAPIKey_RejectsWildcard(t *testing.T) {
+	server := setupTestServer(t)
+
+	body := []byte(`{"name":"test-key","permissions":["*"]}`)
+	rec := callHandleCreateAPIKey(server, body, "default")
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "wildcard permission must be rejected")
+	assert.Contains(t, rec.Body.String(), "INVALID_PERMISSION")
+
+	// Secret store must be unchanged — key was not persisted.
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+	for _, key := range server.apiKeys {
+		assert.NotEqual(t, "test-key", key.Name, "key with wildcard permission must not be stored")
+	}
+}
+
+// TestHandleCreateAPIKey_RejectsUnknownPermission verifies that an unrecognized permission
+// ID is rejected with 400 INVALID_PERMISSION (C1).
+func TestHandleCreateAPIKey_RejectsUnknownPermission(t *testing.T) {
+	server := setupTestServer(t)
+
+	body := []byte(`{"name":"test-key","permissions":["does-not-exist:action"]}`)
+	rec := callHandleCreateAPIKey(server, body, "default")
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "unknown permission must be rejected")
+	assert.Contains(t, rec.Body.String(), "INVALID_PERMISSION")
+}
+
+// TestHandleCreateAPIKey_AcceptsKnownPermissions verifies that valid permission IDs are accepted.
+func TestHandleCreateAPIKey_AcceptsKnownPermissions(t *testing.T) {
+	server := setupTestServer(t)
+
+	body := []byte(`{"name":"valid-key","permissions":["steward:read","api-key:list"]}`)
+	rec := callHandleCreateAPIKey(server, body, "default")
+
+	assert.Equal(t, http.StatusCreated, rec.Code, "known permissions must be accepted")
 }

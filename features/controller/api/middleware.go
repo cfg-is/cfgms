@@ -4,6 +4,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -27,7 +30,23 @@ const (
 	apiKeyContextKey       contextKey = "api_key"
 	userIDContextKey       contextKey = "user_id"
 	authDecisionContextKey contextKey = "auth_decision"
+	principalContextKey    contextKey = "principal"
 )
+
+// Principal represents an authenticated entity — either an mTLS admin cert or an API key.
+// Admin principals (IsAdmin == true) are set exclusively by the cert-auth path after
+// admin-extension verification. API-key principals are converted from APIKey structs.
+type Principal struct {
+	ID          string
+	Name        string
+	IsAdmin     bool
+	Permissions []string
+	TenantID    string
+	// Cert-auth fields — non-empty only when IsAdmin == true (H3)
+	CertSerial      string
+	CertFingerprint string
+	CertNotAfter    time.Time
+}
 
 // loggingMiddleware logs HTTP requests
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
@@ -115,8 +134,42 @@ func (s *Server) contentTypeMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// authenticationMiddleware validates API keys for protected endpoints
-// M-AUTH-1: Load API keys from secret store on-demand if not in cache
+// extractAdminPrincipal inspects r.TLS.PeerCertificates[0] for the CFGMS admin extension.
+// Returns a non-nil *Principal when the cert carries the admin marker. Chain verification
+// is done at the TLS layer (VerifyClientCertIfGiven + ClientCAs); this function only checks
+// the extension. Returns nil when no cert is presented or the cert lacks the admin marker.
+func extractAdminPrincipal(r *http.Request) *Principal {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return nil
+	}
+	peerCert := r.TLS.PeerCertificates[0]
+	if !cert.HasAdminMarker(peerCert) {
+		return nil
+	}
+	fpSum := sha256.Sum256(peerCert.Raw)
+	return &Principal{
+		ID:              peerCert.Subject.CommonName,
+		Name:            "mtls-admin:" + peerCert.Subject.CommonName,
+		IsAdmin:         true,
+		TenantID:        "default",
+		CertSerial:      peerCert.SerialNumber.String(),
+		CertFingerprint: hex.EncodeToString(fpSum[:]),
+		CertNotAfter:    peerCert.NotAfter,
+	}
+}
+
+// hasHeaderCredentials reports whether the request carries an API key or Bearer token header.
+func hasHeaderCredentials(r *http.Request) bool {
+	if r.Header.Get("X-API-Key") != "" {
+		return true
+	}
+	return strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")
+}
+
+// authenticationMiddleware validates incoming requests via mTLS admin cert or API key.
+// States: (a) admin-marked cert only → admin principal; (b) admin-marked cert + header → 400;
+// (c) cert without admin marker → fall through to API-key auth; (d) no cert → API-key auth.
+// M-AUTH-1: Load API keys from secret store on-demand if not in cache.
 func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Test endpoints require explicit opt-in via CFGMS_ENABLE_TEST_ENDPOINTS=true.
@@ -137,29 +190,48 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
+		// H2: mTLS-presented identity always wins.
+		if adminPrincipal := extractAdminPrincipal(r); adminPrincipal != nil {
+			// H2/L5: Conflicting credentials — cert AND header present → reject.
+			if hasHeaderCredentials(r) {
+				s.writeErrorResponse(w, http.StatusBadRequest,
+					"Conflicting credentials: mTLS admin cert and API key header cannot both be present",
+					"CONFLICTING_CREDENTIALS")
+				return
+			}
+			// Cert-auth success: set principal context and proceed.
+			ctx := context.WithValue(r.Context(), principalContextKey, adminPrincipal)
+			ctx = context.WithValue(ctx, userIDContextKey, logging.SanitizeLogValue(adminPrincipal.ID))
+			ctx = context.WithValue(ctx, ctxkeys.TenantID, adminPrincipal.TenantID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// State (c)/(d): no admin cert presented — use API-key path.
+
 		// Extract API key from header
-		apiKey := r.Header.Get("X-API-Key")
-		if apiKey == "" {
+		apiKeyStr := r.Header.Get("X-API-Key")
+		if apiKeyStr == "" {
 			// Also check Authorization header for Bearer token
 			authHeader := r.Header.Get("Authorization")
 			if strings.HasPrefix(authHeader, "Bearer ") {
-				apiKey = strings.TrimPrefix(authHeader, "Bearer ")
+				apiKeyStr = strings.TrimPrefix(authHeader, "Bearer ")
 			}
 		}
 
-		if apiKey == "" {
+		if apiKeyStr == "" {
 			s.writeErrorResponse(w, http.StatusUnauthorized, "API key required", "MISSING_API_KEY")
 			return
 		}
 
 		// Check memory cache first
 		s.mu.RLock()
-		keyInfo, exists := s.apiKeys[apiKey]
+		keyInfo, exists := s.apiKeys[apiKeyStr]
 		s.mu.RUnlock()
 
 		// M-AUTH-1: If not in cache, try to load from secret store
 		if !exists {
-			loadedKey, err := s.loadAPIKeyFromStore(r.Context(), apiKey)
+			loadedKey, err := s.loadAPIKeyFromStore(r.Context(), apiKeyStr)
 			if err != nil {
 				s.logger.Debug("Failed to load API key from store", "error", err)
 				s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
@@ -174,8 +246,18 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Add key info to request context
+		// Convert API key to Principal for uniform authorization handling.
+		principal := &Principal{
+			ID:          keyInfo.ID,
+			Name:        keyInfo.Name,
+			IsAdmin:     false,
+			Permissions: keyInfo.Permissions,
+			TenantID:    keyInfo.TenantID,
+		}
+
+		// Add key info and principal to request context
 		ctx := context.WithValue(r.Context(), apiKeyContextKey, keyInfo)
+		ctx = context.WithValue(ctx, principalContextKey, principal)
 		ctx = context.WithValue(ctx, userIDContextKey, keyInfo.ID)
 		ctx = context.WithValue(ctx, ctxkeys.TenantID, keyInfo.TenantID)
 
@@ -276,7 +358,8 @@ type AuthorizationDecision struct {
 	ConditionalVars map[string]interface{} `json:"conditional_vars,omitempty"`
 }
 
-// requirePermission creates middleware that enforces specific permission requirements
+// requirePermission creates middleware that enforces specific permission requirements.
+// Admin principals (IsAdmin == true) short-circuit to ALLOW for any permission.
 func (s *Server) requirePermission(resourceType, action string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -287,8 +370,8 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				return
 			}
 
-			// Get authentication context
-			apiKey, ok := r.Context().Value(apiKeyContextKey).(*APIKey)
+			// Get authenticated principal from context (set by authenticationMiddleware).
+			principal, ok := r.Context().Value(principalContextKey).(*Principal)
 			if !ok {
 				s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 				return
@@ -300,16 +383,15 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// Build resource identifier from URL path variables
 			resource := s.buildResourceIdentifier(r, resourceType)
 
-			// Check API key permissions first (simple permission check)
 			permissionID := s.buildPermissionID(resourceType, action)
-			if !s.hasAPIKeyPermission(apiKey, permissionID) {
+			if !s.hasPermission(principal, permissionID) {
 				decision := &AuthorizationDecision{
 					Granted:      false,
 					PermissionID: permissionID,
 					Resource:     resource,
 					Action:       action,
 					Decision:     "DENY",
-					Reason:       "API key lacks required permission: " + permissionID,
+					Reason:       "Principal lacks required permission: " + permissionID,
 					CheckedAt:    time.Now(),
 					SubjectID:    userID,
 					TenantID:     tenantID,
@@ -320,14 +402,18 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				return
 			}
 
-			// API key has correct permissions - grant access and skip RBAC check
+			// Principal has required permission — grant access.
+			reason := "API key has required permission: " + permissionID
+			if principal.IsAdmin {
+				reason = "Admin principal granted full access"
+			}
 			decision := &AuthorizationDecision{
 				Granted:      true,
 				PermissionID: permissionID,
 				Resource:     resource,
 				Action:       action,
 				Decision:     "ALLOW",
-				Reason:       "API key has required permission: " + permissionID,
+				Reason:       reason,
 				CheckedAt:    time.Now(),
 				SubjectID:    userID,
 				TenantID:     tenantID,
@@ -336,8 +422,9 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// Add decision to context
 			ctx := context.WithValue(r.Context(), authDecisionContextKey, decision)
 
-			s.logger.Debug("Access granted via API key permission",
+			s.logger.Debug("Access granted",
 				"subject_id", userID,
+				"is_admin", principal.IsAdmin,
 				"permission_id", permissionID,
 				"resource", resource,
 			)
@@ -411,7 +498,7 @@ func (s *Server) writeAuthorizationError(w http.ResponseWriter, message, code st
 	_ = json.NewEncoder(w).Encode(errorResponse)
 }
 
-// auditAuthorizationDecision logs authorization decisions for security auditing
+// auditAuthorizationDecision logs authorization decisions for security auditing (H3).
 func (s *Server) auditAuthorizationDecision(r *http.Request, decision *AuthorizationDecision) {
 	auditFields := map[string]interface{}{
 		"event_type":     "api_authorization",
@@ -431,6 +518,17 @@ func (s *Server) auditAuthorizationDecision(r *http.Request, decision *Authoriza
 		"user_agent":     logging.SanitizeLogValue(r.Header.Get("User-Agent")),
 		"request_id":     logging.SanitizeLogValue(s.getRequestID(r)),
 		"severity":       s.getAuditSeverity(decision),
+	}
+
+	// H3: Include auth method and cert details in audit log.
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if principal != nil && principal.IsAdmin {
+		auditFields["auth_method"] = "cert"
+		auditFields["cert_serial"] = logging.SanitizeLogValue(principal.CertSerial)
+		auditFields["cert_fingerprint"] = logging.SanitizeLogValue(principal.CertFingerprint)
+		auditFields["cert_not_after"] = principal.CertNotAfter.UTC().Format(time.RFC3339)
+	} else {
+		auditFields["auth_method"] = "api_key"
 	}
 
 	if decision.ConditionalVars != nil {
@@ -493,36 +591,20 @@ func (s *Server) getAuditSeverity(decision *AuthorizationDecision) string {
 	return "LOW" // Regular authorized operations
 }
 
-// hasAPIKeyPermission checks if an API key has a specific permission
-func (s *Server) hasAPIKeyPermission(apiKey *APIKey, permissionID string) bool {
-	if apiKey == nil || apiKey.Permissions == nil {
-		s.logger.Debug("API key permission check failed - nil key or permissions",
-			"key_id", func() string {
-				if apiKey != nil {
-					return apiKey.ID
-				}
-				return "nil"
-			}())
+// hasPermission checks whether principal has permissionID.
+// Admin principals (IsAdmin == true) short-circuit to true regardless of permissionID.
+// C1: "*" is treated as a literal permission name — it will not match any real permissionID.
+func (s *Server) hasPermission(principal *Principal, permissionID string) bool {
+	if principal == nil {
 		return false
 	}
-
-	s.logger.Debug("Checking API key permission",
-		"key_id", apiKey.ID,
-		"required_permission", permissionID,
-		"available_permissions", apiKey.Permissions)
-
-	for _, permission := range apiKey.Permissions {
-		if permission == permissionID {
-			s.logger.Debug("API key permission granted",
-				"key_id", apiKey.ID,
-				"permission", permissionID)
+	if principal.IsAdmin {
+		return true
+	}
+	for _, p := range principal.Permissions {
+		if p == permissionID {
 			return true
 		}
 	}
-
-	s.logger.Debug("API key permission denied",
-		"key_id", apiKey.ID,
-		"required_permission", permissionID,
-		"available_permissions", apiKey.Permissions)
 	return false
 }

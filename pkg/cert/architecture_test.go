@@ -3,7 +3,11 @@
 package cert
 
 import (
+	"bytes"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -232,4 +236,65 @@ func setupTestManager(t *testing.T) *Manager {
 	require.NoError(t, err)
 
 	return manager
+}
+
+// TestSetAdminMarker_Architecture enforces the restricted-caller rule for SetAdminMarker.
+// Any production file outside the allow-list that calls cert.SetAdminMarker fails this test.
+// Test files (_test.go) are excluded — they are test infrastructure, not production code paths.
+func TestSetAdminMarker_Architecture(t *testing.T) {
+	allowList := map[string]bool{
+		// Story B: admin cert issuance during controller initialization
+		"features/controller/initialization/initialization.go": true,
+		// Story D: admin bundle packaging
+		"features/controller/initialization/admin_bundle.go": true,
+	}
+
+	repoRoot := findRepoRoot(t)
+
+	var violations []string
+	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		content, err := os.ReadFile(path) // #nosec G304 -- repo scan reads controlled source files
+		if err != nil {
+			return nil
+		}
+		if bytes.Contains(content, []byte("cert.SetAdminMarker")) {
+			rel, relErr := filepath.Rel(repoRoot, path)
+			if relErr != nil {
+				rel = path
+			}
+			rel = filepath.ToSlash(rel)
+			if !allowList[rel] {
+				violations = append(violations, rel)
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, violations,
+		"unauthorized production callers of cert.SetAdminMarker; "+
+			"add to allow-list or move to an allowed file: %v", violations)
+}
+
+// findRepoRoot walks up from the working directory to find the repository root (go.mod presence).
+func findRepoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+	for {
+		if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not find repo root (go.mod not found)")
+		}
+		dir = parent
+	}
 }
