@@ -98,6 +98,11 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", err)
 	}
+	defer func() {
+		if cErr := storageManager.Close(); cErr != nil {
+			logger.Error("Failed to close storage manager during initialization", "error", cErr)
+		}
+	}()
 	logger.Info("OSS composite storage backend initialized")
 
 	// Step 2: Create CA and certificates
