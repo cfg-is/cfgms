@@ -268,6 +268,69 @@ sudo cfgms-steward --config /etc/cfgms/controller-steward.cfg 2>&1 | grep -i err
 | Package install fails | No internet or package manager issue | `sudo apt update` and retry |
 | Firewall module fails | `ufw` or `iptables` not available | Install your distro's firewall tooling |
 
+## Adding Operators
+
+After initialization, you can issue additional admin credential bundles for team members
+or automation systems. Each bundle grants full admin access to the controller REST API.
+
+```bash
+sudo cfgms-controller bootstrap-admin \
+  --config /etc/cfgms/controller.cfg \
+  --name alice \
+  --output /etc/cfgms/alice.bundle.yaml
+```
+
+Copy `alice.bundle.yaml` to the operator securely (treat it like a root SSH key). The
+bundle contains the mTLS client certificate and key, the CA certificate, and the
+controller URL.
+
+**Name rules:** Alphanumeric characters and hyphens only, max 64 characters. Names must
+not begin or end with a hyphen. The following names are reserved and will be rejected:
+`system`, `cfgms`, `cfgms-internal`, `cfgms-admin`, and any UUID-format string (reserved
+for steward certificates).
+
+**Validity:** Admin certificates are valid for 365 days. When a bundle expires, issue a
+new one and revoke the old serial.
+
+### Listing bundles
+
+```bash
+cfgms-controller bootstrap-admin --config /etc/cfgms/controller.cfg --list
+```
+
+This shows all issued admin certs with their serial numbers and revocation status.
+
+## Revoking Access
+
+When an operator leaves, a machine is decommissioned, or a bundle is compromised,
+revoke the cert immediately using the serial number printed at issuance time (also
+stored in the bundle file under `cert_serial`).
+
+```bash
+cfgms-controller bootstrap-admin \
+  --config /etc/cfgms/controller.cfg \
+  --revoke <serial>
+```
+
+The revocation takes effect immediately — the serial is added to the persistent
+revoked-serials list and all subsequent authentication attempts with that cert are
+rejected with `CERT_REVOKED`.
+
+**After regenerating the system bundle**, also revoke the old serial:
+
+```bash
+# Step 1: note the old serial from the current bundle
+OLD_SERIAL=$(grep cert_serial /etc/cfgms/admin.bundle.yaml | awk '{print $2}')
+
+# Step 2: regenerate (follow the interactive confirmation)
+sudo cfgms-controller bootstrap-admin --config /etc/cfgms/controller.cfg --regenerate
+
+# Step 3: revoke the old bundle
+sudo cfgms-controller bootstrap-admin \
+  --config /etc/cfgms/controller.cfg \
+  --revoke "$OLD_SERIAL"
+```
+
 ## Next Steps
 
 - **Connect stewards**: Create a registration token and deploy stewards to your endpoints.

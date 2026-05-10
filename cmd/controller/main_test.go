@@ -39,6 +39,7 @@ func TestBuildRootCommand(t *testing.T) {
 	assert.Contains(t, names, "install")
 	assert.Contains(t, names, "uninstall")
 	assert.Contains(t, names, "status")
+	assert.Contains(t, names, "bootstrap-admin")
 }
 
 func TestBuildRootCommandFlags(t *testing.T) {
@@ -385,4 +386,29 @@ func TestRunControllerSignalPath(t *testing.T) {
 		t.Fatal("runControllerServer did not return after signal")
 	}
 	assert.Len(t, srv.stopCalled, 1, "Stop() must be called exactly once")
+}
+
+func TestRunBootstrapAdmin_RequiresOneOperation(t *testing.T) {
+	err := runBootstrapAdmin("", "", "", false, "", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--name, --regenerate, --revoke, or --list is required")
+}
+
+func TestRunBootstrapAdmin_RejectsMultipleOperations(t *testing.T) {
+	err := runBootstrapAdmin("", "alice", "", false, "some-serial", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "only one of")
+}
+
+func TestRunBootstrapAdmin_RequiresOutputWithName(t *testing.T) {
+	err := runBootstrapAdmin("", "alice", "", false, "", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--output is required with --name")
+}
+
+func TestRunBootstrapAdminList_RequiresCertPath(t *testing.T) {
+	// A config with no cert path must return an error rather than panic.
+	err := runBootstrapAdminList(&config.Config{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "certificate path not configured")
 }

@@ -49,6 +49,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"time"
 )
 
 // ManagerConfig contains configuration for the certificate manager
@@ -69,11 +70,12 @@ type ManagerConfig struct {
 
 // Manager provides high-level certificate management functionality
 type Manager struct {
-	ca        *CA
-	store     *FileStore
-	validator *Validator
-	renewer   *Renewer
-	config    *ManagerConfig
+	ca         *CA
+	store      *FileStore
+	validator  *Validator
+	renewer    *Renewer
+	config     *ManagerConfig
+	revocation *revocationStore
 }
 
 // NewManager creates a new certificate manager
@@ -132,12 +134,19 @@ func NewManager(config *ManagerConfig) (*Manager, error) {
 	// Initialize renewer
 	renewer := NewRenewer(ca, store, validator)
 
+	// Initialize revocation store (reads existing list if present, empty list if not)
+	revStore, err := newRevocationStore(config.StoragePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize revocation store: %w", err)
+	}
+
 	manager := &Manager{
-		ca:        ca,
-		store:     store,
-		validator: validator,
-		renewer:   renewer,
-		config:    config,
+		ca:         ca,
+		store:      store,
+		validator:  validator,
+		renewer:    renewer,
+		config:     config,
+		revocation: revStore,
 	}
 
 	// Store the CA certificate in the certificate store for easy retrieval
@@ -514,4 +523,28 @@ func (m *Manager) GetClientCertificate(_ context.Context) (*tls.Certificate, err
 // GetStoragePath returns the certificate storage path
 func (m *Manager) GetStoragePath() string {
 	return m.store.GetStoragePath()
+}
+
+// Revoke adds serial to the revoked-serials list and persists it atomically.
+// Returns an error if the serial is not found in the certificate store — revoking
+// an unknown serial is an operator error that must surface explicitly.
+func (m *Manager) Revoke(serial string) error {
+	if _, err := m.store.GetCertificate(serial); err != nil {
+		return fmt.Errorf("cannot revoke unknown serial %q: %w", serial, err)
+	}
+	return m.revocation.addAndPersist(RevocationEntry{
+		Serial:    serial,
+		RevokedAt: time.Now().UTC(),
+	})
+}
+
+// IsRevoked reports whether the given certificate serial number appears in the
+// revoked-serials list. Called on every mTLS admin cert authentication request.
+func (m *Manager) IsRevoked(serial string) bool {
+	return m.revocation.isRevoked(serial)
+}
+
+// ListRevoked returns all revocation entries for auditing and --list output.
+func (m *Manager) ListRevoked() ([]RevocationEntry, error) {
+	return m.revocation.allEntries(), nil
 }
