@@ -520,6 +520,11 @@ func (jam *JITAccessManager) approveRequest(ctx context.Context, requestID, appr
 	}
 
 	// Create the access grant
+	// ExpiresAt is computed from grantedAt + request.Duration (not request.ExpiresAt) so that
+	// the session's ExpiresAt is always strictly after CreatedAt, even on Windows where
+	// timer resolution (~15ms) can make a pre-computed request.ExpiresAt fall before the
+	// later time.Now() call used for GrantedAt.
+	grantedAt := time.Now()
 	grant := &JITAccessGrant{
 		ID:                 uuid.New().String(),
 		RequestID:          requestID,
@@ -531,8 +536,8 @@ func (jam *JITAccessManager) approveRequest(ctx context.Context, requestID, appr
 		ResourceIDs:        request.ResourceIDs,
 		ApprovedBy:         approverID,
 		ApprovalReason:     reason,
-		GrantedAt:          time.Now(),
-		ExpiresAt:          request.ExpiresAt,
+		GrantedAt:          grantedAt,
+		ExpiresAt:          grantedAt.Add(request.Duration),
 		Status:             JITAccessGrantStatusActive,
 		MaxExtensions:      3, // Allow up to 3 extensions
 		ExtensionsUsed:     0,
