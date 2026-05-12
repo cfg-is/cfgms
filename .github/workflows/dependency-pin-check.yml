@@ -65,6 +65,7 @@ jobs:
       contents: read
       issues: write
     steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
     - name: Check for outdated pinned tools
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -102,6 +103,51 @@ jobs:
         check_version "trivy"       "aquasecurity/trivy"                      "v0.70.0"
         check_version "go-licenses" "google/go-licenses"                      "v2.0.1"
         check_version "golangci-lint" "golangci/golangci-lint"                "v2.12.1"
+
+        # Go toolchain freshness check. Go's release index doesn't fit the
+        # GitHub Releases pattern of check_version above, so it gets its own
+        # handler. The toolchain version is pinned in go.mod and in workflow
+        # GO_VERSION env vars; the freshness check uses go.mod as the source
+        # of truth, and lockstep-check below catches drift across files.
+        echo "Checking Go toolchain version..."
+        go_pinned=$(grep -E "^toolchain go" go.mod | sed 's/^toolchain go//')
+        go_latest=$(curl -fsSL "https://go.dev/dl/?mode=json" 2>/dev/null \
+                    | jq -r '[.[] | select(.stable)][0].version' 2>/dev/null \
+                    | sed 's/^go//')
+        if [ -z "$go_latest" ] || [ "$go_latest" = "null" ]; then
+          echo "  WARN: Could not fetch latest Go version from go.dev/dl"
+          warnings="${warnings}- **Go toolchain**: could not fetch latest from go.dev/dl?mode=json\n"
+        elif [ "$go_pinned" != "$go_latest" ]; then
+          echo "  OUTDATED: Go toolchain pinned=${go_pinned} latest=${go_latest}"
+          outdated="${outdated}- **Go toolchain**: pinned \`${go_pinned}\`, latest \`${go_latest}\` ([release notes](https://go.dev/doc/devel/release))\n"
+        else
+          echo "  OK: Go toolchain ${go_pinned}"
+        fi
+
+        # Lockstep validator. The Go toolchain version is pinned in MULTIPLE
+        # places (go.mod, workflow GO_VERSION/go-version, cmd/*/Dockerfile FROM
+        # golang:X-alpine, .devcontainer/Dockerfile). All must move together.
+        # This check caught the 2026-05-12 drift where go.mod was bumped to
+        # 1.25.10 but the Dockerfile FROM lines were still at 1.25.9, causing
+        # Trivy to keep reporting stdlib CVEs on PRs against develop.
+        echo "Checking Go toolchain lockstep across all pin locations..."
+        lockstep_versions=$(
+          {
+            grep -hoE "^toolchain go[0-9.]+" go.mod | sed 's/^toolchain go//'
+            grep -hoE "(GO_VERSION|go-version):[[:space:]]*['\"]?[0-9]+\.[0-9]+\.[0-9]+['\"]?" .github/workflows/*.yml \
+              | grep -oE "[0-9]+\.[0-9]+\.[0-9]+"
+            grep -hoE "^FROM golang:[0-9]+\.[0-9]+\.[0-9]+" cmd/*/Dockerfile .devcontainer/Dockerfile 2>/dev/null \
+              | grep -oE "[0-9]+\.[0-9]+\.[0-9]+"
+          } | sort -u
+        )
+        lockstep_count=$(printf '%s\n' "$lockstep_versions" | grep -c .)
+        if [ "$lockstep_count" -gt 1 ]; then
+          echo "  ERROR: Go toolchain pin drift — multiple versions in use:"
+          printf '%s\n' "$lockstep_versions" | sed 's/^/    /'
+          outdated="${outdated}- **Go toolchain (lockstep drift)**: multiple versions present in repo — \`$(printf '%s, ' $lockstep_versions | sed 's/, $//')\`. Bump all locations to the same version (run \`./.claude/skills/refresh-pins/scripts/discover-pins.py\` to see every file:line).\n"
+        else
+          echo "  OK: Go toolchain lockstep version=${lockstep_versions}"
+        fi
 
         if [ -z "$outdated" ] && [ -z "$warnings" ]; then
           echo ""
