@@ -112,11 +112,47 @@ def discover_go_toolchain(root: Path) -> dict:
     }
 
 
+def discover_tool_usage_locations(version: str, root: Path) -> list[dict]:
+    """Grep in-scope paths for additional usage locations of a tool version string.
+
+    Searches for the literal version string across workflow files (excluding the
+    dependency-pin-check.yml declaration file itself), devcontainer Dockerfile,
+    Makefile, cmd Dockerfiles, and shell scripts. Returns location dicts for
+    every match — these are the install/usage pins that must move lockstep with
+    the check_version declaration.
+    """
+    search_files: list[Path] = []
+
+    for f in sorted((root / ".github/workflows").glob("*.yml")):
+        if f.name != "dependency-pin-check.yml":
+            search_files.append(f)
+
+    devcontainer_df = root / ".devcontainer" / "Dockerfile"
+    if devcontainer_df.exists():
+        search_files.append(devcontainer_df)
+
+    makefile = root / "Makefile"
+    if makefile.exists():
+        search_files.append(makefile)
+
+    for f in sorted((root / "cmd").glob("*/Dockerfile")):
+        search_files.append(f)
+
+    for f in sorted((root / "scripts").glob("*.sh")):
+        search_files.append(f)
+
+    return grep_files(re.compile(re.escape(version)), search_files, root)
+
+
 def discover_tool_pins(root: Path) -> list[dict]:
     """Tool pins listed in .github/workflows/dependency-pin-check.yml.
 
     Parses lines of the form:
       check_version "<name>" "<repo>" "<version>"
+
+    For each pin the locations[] array contains the check_version declaration
+    plus every additional install/usage site discovered by grepping the in-scope
+    paths for the literal version string.
     """
     pins = []
     pin_file = root / ".github/workflows/dependency-pin-check.yml"
@@ -132,6 +168,12 @@ def discover_tool_pins(root: Path) -> list[dict]:
         if not m:
             continue
         name, repo, version = m.group(1), m.group(2), m.group(3)
+        locations = [{
+            "file": ".github/workflows/dependency-pin-check.yml",
+            "line": i,
+            "match": line.strip(),
+        }]
+        locations.extend(discover_tool_usage_locations(version, root))
         pins.append({
             "name": name,
             "kind": "tool",
@@ -139,11 +181,7 @@ def discover_tool_pins(root: Path) -> list[dict]:
             "release_source": f"gh:{repo}",
             "ecosystem": None,  # GHSA query needs case-by-case mapping for tools
             "package": None,
-            "locations": [{
-                "file": ".github/workflows/dependency-pin-check.yml",
-                "line": i,
-                "match": line.strip(),
-            }],
+            "locations": locations,
         })
     return pins
 

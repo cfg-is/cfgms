@@ -22,7 +22,7 @@
 ## `kind` values
 
 - **`lockstep`** — the pin appears in multiple files that must all move together. The dev agent's story must update every entry in `locations[]` in a single PR. The acceptance verification AC must grep for the old version (expect 0) and new version (expect `len(locations)`).
-- **`tool`** — pin is enumerated in `dependency-pin-check.yml` and may appear in additional usage locations (Dockerfile installs, Makefile targets). The single `locations[]` entry points at the check_version declaration; the bump story discovers the actual usage locations by grepping for the version string.
+- **`tool`** — pin is enumerated in `dependency-pin-check.yml` and appears in additional usage locations (Dockerfile installs, workflow install steps, shell scripts). The `locations[]` array contains the `check_version` declaration as its first entry, followed by every additional install/usage site discovered by grepping the in-scope paths (`.github/workflows/`, `.devcontainer/Dockerfile`, `Makefile`, `cmd/*/Dockerfile`, `scripts/*.sh`) for the literal version string. All entries must move together in a single bump PR — the dispatcher uses this array to compute file-overlap conflicts.
 
 ## `release_source` values
 
@@ -46,5 +46,6 @@ Common mappings (extend as needed):
 ## Notes on the discover script's output
 
 - The script does NOT verify lockstep consistency — if `go.mod` is at 1.25.10 but one workflow is still on 1.25.9, both versions appear in the same `go-toolchain` pin's `locations[]`. The CONSUMER (Claude in Phase 3) is expected to detect this and surface it as a lockstep-drift finding. This is the bug class that bit us on 2026-05-12 with PR #1433.
+- For `kind: tool` pins, `locations[]` includes the `check_version` declaration in `dependency-pin-check.yml` plus every additional install/usage site found by grepping for the literal version string across `.github/workflows/` (excluding `dependency-pin-check.yml`), `.devcontainer/Dockerfile`, `Makefile`, `cmd/*/Dockerfile`, and `scripts/*.sh`. A dispatched dev agent must update all listed locations to avoid lockstep drift.
 - The order of `locations[]` is deterministic (alphabetical by file path), which makes diffs of the inventory readable.
 - The script is read-only; no side effects.
