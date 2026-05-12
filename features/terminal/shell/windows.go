@@ -168,7 +168,7 @@ func (e *WindowsExecutor) Resize(ctx context.Context, cols, rows int) error {
 	e.config.Cols = cols
 	e.config.Rows = rows
 
-	// Windows resize requires SetConsoleScreenBufferSize via syscall; config is updated for now.
+	// Windows resize requires SetConsoleScreenBufferSize via syscall; only in-memory config is updated here.
 
 	return nil
 }
