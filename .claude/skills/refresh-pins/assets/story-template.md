@@ -6,7 +6,7 @@ Bump `{{NAME}}` from `{{FROM}}` to `{{TO}}`.
 
 {{JUSTIFICATION}}
 
-## Files to update ({{LOCATION_COUNT}} occurrences — lockstep required)
+## Files In Scope ({{LOCATION_COUNT}} occurrences — lockstep required)
 
 {{LOCATION_LIST}}
 
