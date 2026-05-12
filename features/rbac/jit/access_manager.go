@@ -488,8 +488,7 @@ func (jam *JITAccessManager) ApproveRequest(ctx context.Context, requestID, appr
 
 		// Advance when the stage's MinApprovals threshold is met.
 		if len(request.WorkflowState.StageApprovals[stageIdx]) >= stage.MinApprovals {
-			nextIdx := stageIdx + 1
-			if nextIdx >= len(workflow.Approvers) {
+			if jam.isWorkflowComplete(request, workflow) {
 				// Final stage complete — delegate to internal approveRequest for grant creation.
 				return jam.approveRequest(ctx, requestID, approverID, reason)
 			}
@@ -1062,6 +1061,15 @@ func (jam *JITAccessManager) advanceWorkflowStage(ctx context.Context, request *
 	if nextIdx < len(workflow.Approvers) {
 		_ = jam.sendApprovalNotifications(ctx, request, workflow.Approvers[nextIdx].Approvers)
 	}
+}
+
+// isWorkflowComplete reports whether the current stage is the final stage of the workflow.
+// Called before stage advancement: returns true when stageIdx+1 equals the total stage count.
+func (jam *JITAccessManager) isWorkflowComplete(request *JITAccessRequest, workflow *ApprovalWorkflow) bool {
+	if request.WorkflowState == nil {
+		return false
+	}
+	return request.WorkflowState.CurrentStage+1 >= len(workflow.Approvers)
 }
 
 // activateAccess sets the grant active and persists it to the SessionStore.
