@@ -1,6 +1,6 @@
 ---
 name: story-complete
-description: Complete story with parallel adversarial team review (QA test runner + QA code reviewer + Security), Developer on-demand, and PR creation
+description: Complete story with parallel adversarial team review (acceptance checker + QA test runner + QA code reviewer + Security), Developer on-demand, and PR creation
 parameters:
   - name: story_number
     description: Story number to complete (optional - auto-detects from branch)
@@ -9,7 +9,7 @@ parameters:
 
 # Story Complete Command
 
-Final validation gate before PR creation. Orchestrates a **parallel adversarial team review** where test execution, code quality review, and security review run simultaneously. A Developer agent fixes any issues found.
+Final validation gate before PR creation. Orchestrates a **parallel adversarial team review** where AC verification, test execution, code quality review, and security review run simultaneously. A Developer agent fixes any issues found.
 
 ## Execution Flow
 
@@ -23,14 +23,22 @@ Auto-detect story from branch and fetch issue details. Verify all acceptance cri
 TeamCreate(team_name: "story-review")
 ```
 
-Create three tasks on the team task list:
-1. **Run test-quality** — Tests, linting, and builds (no security scans)
-2. **QA code review** — Review changed files for test quality
-3. **Security review** — All security scans + security code review
+Create four tasks on the team task list:
+1. **Acceptance check** — Verify the working tree delivers the story's named code references
+2. **Run test-quality** — Tests, linting, and builds (no security scans)
+3. **QA code review** — Review changed files for test quality
+4. **Security review** — All security scans + security code review
 
 ### 3. Spawn Review Teammates (ALL IN PARALLEL)
 
-Spawn three teammates simultaneously via the Task tool. For each, use `subagent_type: general-purpose` with the `team_name` and `name` parameters. Read the corresponding agent file in `.claude/agents/` and include its instructions in the prompt.
+Spawn four teammates simultaneously via the Task tool. For each, use `subagent_type: general-purpose` with the `team_name` and `name` parameters. Read the corresponding agent file in `.claude/agents/` and include its instructions in the prompt.
+
+**acceptance-checker** (sonnet):
+- Agent file: `.claude/agents/acceptance-checker.md`
+- Reads the story body, extracts concrete code references (file paths, function names, line numbers, banned-phrase quotes, required test names), and verifies each against the working tree
+- Catches "AC names a stub function but the stub is still there" before the PR is created
+- Reports blocking issues with file:line references and AC numbers
+- See `docs/development/acceptance-reviewer-verification.md` for the verification model and regression scenarios
 
 **qa-test-runner** (sonnet):
 - Agent file: `.claude/agents/qa-test-runner.md`
@@ -42,6 +50,7 @@ Spawn three teammates simultaneously via the Task tool. For each, use `subagent_
 - Reviews all changed files for test quality issues
 - Catches mocks, t.Skip(), empty assertions, hacky workarounds
 - Reports blocking issues with file:line references
+- Does NOT check AC alignment — that's acceptance-checker's concern
 
 **security-engineer** (opus):
 - Agent file: `.claude/agents/security-engineer.md`
@@ -52,7 +61,7 @@ Spawn three teammates simultaneously via the Task tool. For each, use `subagent_
 
 ### 4. Collect Results
 
-Wait for all three teammates to complete and send their reports. Collect findings from each.
+Wait for all four teammates to complete and send their reports. Collect findings from each.
 
 ### 5. Fix Issues (if any blocking issues found)
 
@@ -61,6 +70,7 @@ If ANY teammate reported blocking issues, spawn a **developer** teammate:
 - Agent file: `.claude/agents/developer.md`
 - Model: opus
 - Provide combined findings from all reviewers with file:line references
+- For acceptance-checker FAILs specifically, tell the developer the AC number, the named symbol/file/line, and the AC's "after" behavior — and remind them that adding helper functions elsewhere is NOT a valid fix when the AC names existing code that must change
 - Developer fixes root causes properly (NO mocks, NO skips, NO hacks)
 
 After developer completes, re-spawn the reviewers that reported failures to verify fixes. Maximum 3 fix iterations. If issues persist after 3 rounds, shut down team and report to user for manual intervention.
