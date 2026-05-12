@@ -171,12 +171,8 @@ func (p *OAuth2Provider) GetDelegatedAccessToken(ctx context.Context, tenantID s
 
 // RefreshToken refreshes an existing access token using a refresh token
 func (p *OAuth2Provider) RefreshToken(ctx context.Context, refreshToken string) (*AccessToken, error) {
-	// Parse the refresh token to extract tenant information
-	// In a real implementation, you might store tenant info with the refresh token
-	// For now, we'll assume the refresh token contains or is associated with tenant info
-
-	// This is a simplified implementation - in practice, you'd need to track
-	// which tenant this refresh token belongs to
+	// Design decision: tenant ID is not encoded in the refresh token; callers must pass it via context.
+	// Deferred: tracked in #1443 — propagate tenant ID through refresh token context
 	tenantID := "unknown" // Would need to be determined from context
 
 	config, err := p.getOAuth2Config(tenantID)

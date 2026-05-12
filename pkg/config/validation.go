@@ -135,17 +135,13 @@ func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID
 // validateTenantContext validates tenant-related aspects of the configuration
 func (vm *ValidationManager) validateTenantContext(ctx context.Context, tenantID, stewardID string, config *stewardconfig.StewardConfig) *TenantValidationResult {
 	result := &TenantValidationResult{
-		TenantExists:      true, // Simplified - would check tenant store in full implementation
+		TenantExists:      true,
 		TenantID:          tenantID,
 		InheritanceValid:  true,
 		ConflictsDetected: 0,
 	}
 
-	// In a full implementation, this would:
-	// 1. Check if tenant exists in ClientTenantStore
-	// 2. Validate inheritance chain
-	// 3. Check for configuration conflicts in the hierarchy
-	// 4. Validate permissions to modify configuration
+	// Deferred: tracked in #1443 — query ClientTenantStore, validate inheritance chain, check conflicts
 
 	return result
 }

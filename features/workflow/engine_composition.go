@@ -491,14 +491,14 @@ func (e *Engine) executeComponentsParallel(ctx context.Context, config *Composit
 
 // executeComponentsDependency executes components based on dependencies (simplified implementation)
 func (e *Engine) executeComponentsDependency(ctx context.Context, config *CompositeConfig, execution *WorkflowExecution, stepName string) error {
-	// For now, just execute sequentially - a full implementation would build a dependency graph
+	// Deferred: tracked in #1442 — build dependency graph and topological sort for component ordering
 	e.logger.Warn("Dependency-based composition not fully implemented, falling back to sequential")
 	return e.executeComponentsSequential(ctx, config, execution, stepName)
 }
 
 // executeComponentsPipeline executes components as a data processing pipeline
 func (e *Engine) executeComponentsPipeline(ctx context.Context, config *CompositeConfig, execution *WorkflowExecution, stepName string) error {
-	// For now, just execute sequentially with data flow - a full implementation would handle complex pipelines
+	// Deferred: tracked in #1442 — implement data-flow pipeline composition with inter-component streaming
 	e.logger.Warn("Pipeline composition not fully implemented, falling back to sequential")
 	return e.executeComponentsSequential(ctx, config, execution, stepName)
 }

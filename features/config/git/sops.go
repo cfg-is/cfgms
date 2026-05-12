@@ -203,8 +203,7 @@ func (s *SOPSManager) ShouldEncryptFile(filePath string, config *SOPSConfig) (bo
 
 	// Check for sensitive fields if auto-encrypt is enabled
 	if config.AutoEncrypt {
-		// This would require parsing the content to check for sensitive fields
-		// For now, we'll use file naming conventions
+		// Sensitive-field detection uses file naming conventions; content parsing is deferred.
 		lowerPath := strings.ToLower(filePath)
 		if strings.Contains(lowerPath, "secret") ||
 			strings.Contains(lowerPath, "password") ||

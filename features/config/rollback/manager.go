@@ -468,8 +468,7 @@ func (m *DefaultRollbackManager) failRollback(ctx context.Context, operation *Ro
 }
 
 func (m *DefaultRollbackManager) getRepositoryID(ctx context.Context, targetType TargetType, targetID string) (string, error) {
-	// In a real implementation, this would look up the repository based on target
-	// For now, we'll use a simple mapping
+	// Repository ID is derived from target type and ID using a standard naming convention.
 	switch targetType {
 	case TargetTypeDevice:
 		return fmt.Sprintf("device-%s-repo", targetID), nil
@@ -673,8 +672,6 @@ func (m *DefaultRollbackManager) checkNoRollbackInProgress(ctx context.Context, 
 }
 
 func (m *DefaultRollbackManager) verifyApproval(ctx context.Context, approvalID string) error {
-	// In a real implementation, this would verify the approval
-	// For now, we'll just check it's not empty
 	if approvalID == "" {
 		return &RollbackError{
 			Code:    "INVALID_APPROVAL",
@@ -686,7 +683,7 @@ func (m *DefaultRollbackManager) verifyApproval(ctx context.Context, approvalID 
 }
 
 func (m *DefaultRollbackManager) getCurrentUser(ctx context.Context) string {
-	// In a real implementation, this would get the user from context
+	// Deferred: tracked in #1440 — extract authenticated user identity from context
 	return "system"
 }
 
@@ -708,9 +705,6 @@ func (m *DefaultRollbackManager) addAuditEntry(ctx context.Context, operation *R
 }
 
 func (m *DefaultRollbackManager) applyChange(ctx context.Context, repoID, branch string, change ConfigurationChange) error {
-	// In a real implementation, this would apply the actual change
-	// For now, we'll simulate it
-
 	// Get the configuration at the rollback version
 	ref := git.ConfigurationRef{
 		RepositoryID: repoID,

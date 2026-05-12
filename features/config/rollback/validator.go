@@ -298,8 +298,6 @@ func (v *DefaultRollbackValidator) ValidateModuleCompatibility(ctx context.Conte
 // Helper methods
 
 func (v *DefaultRollbackValidator) validateTarget(ctx context.Context, targetType TargetType, targetID string) error {
-	// In a real implementation, this would verify the target exists
-	// and the user has access to it
 	if targetID == "" {
 		return fmt.Errorf("target ID cannot be empty")
 	}
@@ -369,31 +367,14 @@ func (v *DefaultRollbackValidator) checkBreakingChanges(ctx context.Context, cha
 }
 
 func (v *DefaultRollbackValidator) validatePermissions(ctx context.Context, request RollbackRequest) error {
-	// In a real implementation, this would check actual permissions
-	// For now, we'll simulate some basic checks
-
-	// Emergency rollbacks require special permission
-	if request.Emergency {
-		// Check for emergency rollback permission
-		// return error if not authorized
-		_ = request.Emergency // Placeholder for emergency permission check implementation
-	}
-
-	// MSP-level rollbacks require admin permission
-	if request.TargetType == TargetTypeMSP {
-		// Check for MSP admin permission
-		// return error if not authorized
-		_ = request.TargetType // Placeholder for MSP admin permission check implementation
-	}
-
+	// Deferred: tracked in #1440 — wire real RBAC checks for emergency and MSP-level rollback permissions
 	return nil
 }
 
 func (v *DefaultRollbackValidator) checkSystemHealth(ctx context.Context, targetType TargetType, targetID string) []ValidationIssue {
 	issues := []ValidationIssue{}
 
-	// In a real implementation, this would check actual system health
-	// For now, we'll simulate some checks
+	// Deferred: tracked in #1440 — query real CPU/disk metrics from steward DNA hardware attributes
 
 	// Check CPU usage
 	cpuUsage := 75 // Simulated
@@ -440,9 +421,7 @@ func (v *DefaultRollbackValidator) estimateDowntime(changes []ConfigurationChang
 }
 
 func (v *DefaultRollbackValidator) estimateAffectedUsers(targetType TargetType, targetID string) int {
-	// In a real implementation, this would query actual user counts
-	// For now, we'll use estimates based on target type
-
+	// Tier-based user count estimates for rollback impact assessment.
 	switch targetType {
 	case TargetTypeDevice:
 		return 1

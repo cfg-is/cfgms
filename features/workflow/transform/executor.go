@@ -529,13 +529,12 @@ func (e *DefaultTransformExecutor) generateCacheKey(transformName string, config
 
 // evaluateCondition evaluates a condition string (basic implementation)
 func (e *DefaultTransformExecutor) evaluateCondition(condition string, data map[string]interface{}, variables map[string]interface{}) (bool, error) {
-	// This is a simplified implementation
-	// In production, you might want to use a proper expression evaluator
+	// Supports exists() checks; a proper expression evaluator is deferred.
 	if condition == "" {
 		return true, nil
 	}
 
-	// For now, just support simple variable existence checks
+	// Simple variable existence check only
 	if strings.HasPrefix(condition, "exists(") && strings.HasSuffix(condition, ")") {
 		varName := condition[7 : len(condition)-1]
 		_, existsInData := data[varName]

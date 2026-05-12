@@ -297,7 +297,7 @@ func (ai *DefaultApprovalIntegration) generateDescription(result *ComparisonResu
 
 // getCurrentUser gets the current user from context
 func (ai *DefaultApprovalIntegration) getCurrentUser(ctx context.Context) string {
-	// In a real implementation, this would extract user from context
+	// Deferred: tracked in #1440 — extract authenticated user identity from context
 	return "system"
 }
 
@@ -382,7 +382,7 @@ func (ai *DefaultApprovalIntegration) allApproved(request *ApprovalRequest) bool
 
 // notifyApprovers sends notifications to required approvers
 func (ai *DefaultApprovalIntegration) notifyApprovers(ctx context.Context, request *ApprovalRequest) error {
-	// In a real implementation, this would send emails, Slack messages, etc.
+	// Deferred: tracked in #1441 — deliver via email, Slack, and webhook channels
 	ai.logger.Info("notifying approvers",
 		"request_id", logging.SanitizeLogValue(request.ID),
 		"approver_count", len(request.RequiredApprovers),

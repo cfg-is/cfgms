@@ -758,8 +758,7 @@ func (m *DefaultVersionMigrator) executeStep(ctx context.Context, step Migration
 		result.Duration = result.EndTime.Sub(result.StartTime)
 	}()
 
-	// Simulate step execution based on step type
-	// In a real implementation, this would call actual migration logic
+	// Deferred: tracked in #1443 — dispatch each step type to real migration logic
 	switch step.Type {
 	case MigrationStepValidation:
 		result.Output = "Validation completed successfully"

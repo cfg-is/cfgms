@@ -44,7 +44,7 @@ type MemoryIndexer struct {
 
 // NewIndexer creates a new indexer based on the configuration
 func NewIndexer(config *Config, logger logging.Logger) (Indexer, error) {
-	// For now, only memory indexer is implemented
+	// MemoryIndexer is the only available indexer; additional backends can be registered here.
 	return NewMemoryIndexer(config, logger)
 }
 

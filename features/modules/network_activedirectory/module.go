@@ -500,8 +500,7 @@ func (m *activeDirectoryModule) queryADObject(ctx context.Context, objectType, o
 		result.OU = ou
 
 	case "computer":
-		// For now, represent computer as a special user object
-		// In a full implementation, we'd have a DirectoryComputer type
+		// Deferred: tracked in #1443 — introduce a DirectoryComputer type; represented as user for now
 		user := m.ldapEntryToDirectoryUser(entry)
 		user.ProviderAttributes["object_class"] = "computer"
 		// Add computer-specific attributes

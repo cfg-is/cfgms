@@ -563,7 +563,7 @@ func (sm *SessionMonitor) isPrivilegedCommand(command string) bool {
 }
 
 func (sm *SessionMonitor) getBaselineMetrics(userID string) BaselineMetrics {
-	// In a real implementation, this would load from historical data
+	// Deferred: tracked in #1443 — load per-user baseline from historical session data
 	return BaselineMetrics{
 		AvgCommandRate:     10.0, // 10 commands per minute
 		AvgSessionDuration: 30 * time.Minute,

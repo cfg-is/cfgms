@@ -17,8 +17,7 @@ import (
 func (p *ActiveDirectoryProvider) Search(ctx context.Context, query *interfaces.DirectoryQuery) (*interfaces.SearchResults, error) {
 	p.logger.Debug("Performing AD search", "filter", query.Filter, "search_base", query.SearchBase)
 
-	// For initial implementation, convert advanced query to simple operations
-	// In a full implementation, this would pass the LDAP filter directly to the module
+	// Deferred: tracked in #1443 — pass LDAP filter directly to the module for native query execution
 
 	results := &interfaces.SearchResults{
 		TotalCount: 0,

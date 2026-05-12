@@ -10,7 +10,7 @@ import (
 
 // DefaultRollbackNotifier provides a default implementation of RollbackNotifier
 type DefaultRollbackNotifier struct {
-	// In a real implementation, this would have email, webhook, or message queue clients
+	// Deferred: tracked in #1441 — add email, webhook, and message queue clients
 	logger logging.Logger
 }
 
@@ -35,11 +35,7 @@ func (n *DefaultRollbackNotifier) NotifyRollbackStarted(ctx context.Context, ope
 		"initiated_by", logging.SanitizeLogValue(operation.InitiatedBy),
 	)
 
-	// In a real implementation, this would:
-	// - Send email notifications to stakeholders
-	// - Post to webhook endpoints
-	// - Send to message queues (Slack, Teams, etc.)
-	// - Update monitoring dashboards
+	// Deferred: tracked in #1441 — deliver via email, webhooks, and message queues
 
 	return nil
 }
@@ -53,8 +49,7 @@ func (n *DefaultRollbackNotifier) NotifyRollbackProgress(ctx context.Context, op
 		"current_action", logging.SanitizeLogValue(operation.Progress.CurrentAction),
 	)
 
-	// In a real implementation, this would send progress updates
-	// only at significant milestones to avoid notification spam
+	// Milestone throttling not implemented; all progress events are logged.
 
 	return nil
 }
@@ -74,7 +69,7 @@ func (n *DefaultRollbackNotifier) NotifyRollbackCompleted(ctx context.Context, o
 		"devices_affected", operation.Result.DevicesAffected,
 	)
 
-	// In a real implementation, this would send detailed completion reports
+	// Deferred: tracked in #1441 — deliver completion reports via external channels
 
 	return nil
 }
@@ -102,10 +97,7 @@ func (n *DefaultRollbackNotifier) NotifyRollbackFailed(ctx context.Context, oper
 		}
 	}
 
-	// In a real implementation, this would:
-	// - Send high-priority alerts
-	// - Page on-call personnel for critical failures
-	// - Create incident tickets
+	// Deferred: tracked in #1441 — send alerts, page on-call, create incident tickets
 
 	return nil
 }
@@ -180,11 +172,7 @@ func (w *WebhookNotifier) NotifyRollbackFailed(ctx context.Context, operation *R
 }
 
 func (w *WebhookNotifier) sendWebhook(ctx context.Context, payload interface{}) error {
-	// In a real implementation, this would:
-	// - Marshal payload to JSON
-	// - Send HTTP POST to webhook URL
-	// - Handle retries and failures
-	// - Respect rate limits
+	// Deferred: tracked in #1441 — implement HTTP POST with retry and rate-limit handling
 
 	w.logger.Debug("webhook notification sent", "payload", payload)
 	return nil

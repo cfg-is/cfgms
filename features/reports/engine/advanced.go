@@ -582,8 +582,7 @@ func (e *AdvancedEngine) ValidateAdvancedRequest(ctx context.Context, req interf
 }
 
 func (e *AdvancedEngine) validateTenantAccess(ctx context.Context, tenantIDs []string) error {
-	// This would typically get the user ID from the context
-	// For now, we'll skip detailed RBAC validation
+	// Deferred: tracked in #1441 — enforce per-user RBAC on tenant list; cap enforced below
 	if len(tenantIDs) > e.config.MaxTenantsPerReport {
 		return fmt.Errorf("too many tenants requested: %d (max: %d)", len(tenantIDs), e.config.MaxTenantsPerReport)
 	}

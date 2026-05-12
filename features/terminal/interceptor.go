@@ -110,8 +110,7 @@ func (ci *CommandInterceptor) InterceptInput(ctx context.Context, input []byte) 
 
 // InterceptOutput processes output data from the shell (for audit purposes)
 func (ci *CommandInterceptor) InterceptOutput(ctx context.Context, output []byte) ([]byte, error) {
-	// For now, just pass through output
-	// In future versions, we could filter sensitive output
+	// Deferred: tracked in #1443 — filter sensitive values from shell output before audit logging
 	return output, nil
 }
 
@@ -356,8 +355,7 @@ func (cf *CommandFilter) handleBlockedCommand(command string, reason string) err
 
 // handleAuditCommand handles when a command requires auditing
 func (cf *CommandFilter) handleAuditCommand(event *CommandAuditEvent) error {
-	// For now, just log audit events
-	// In production, this would send to audit logging system
+	// Deferred: tracked in #1443 — forward audit events to the central audit logging system
 	return nil
 }
 

@@ -498,8 +498,7 @@ func (b *CustomReportBuilder) generateCacheKey(query interfaces.CustomQuery) str
 }
 
 func (b *CustomReportBuilder) generateStreamToken(req interfaces.CustomReportRequest) string {
-	// In a real implementation, this would encode the query parameters
-	// and store them temporarily for retrieval during pagination
+	// Token encodes tenant, name, and timestamp; server-side pagination state storage is deferred.
 	data := fmt.Sprintf("%s-%s-%d", req.TenantID, req.Name, time.Now().Unix())
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:16]) // Use first 16 bytes for shorter token

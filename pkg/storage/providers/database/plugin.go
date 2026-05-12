@@ -54,8 +54,7 @@ func (p *DatabaseProvider) GetCapabilities() interfaces.ProviderCapabilities {
 
 // Available checks if PostgreSQL is available and accessible
 func (p *DatabaseProvider) Available() (bool, error) {
-	// For production use, this would ping a test database connection
-	// For now, we assume PostgreSQL driver availability
+	// Assumes PostgreSQL driver is available; live connection ping is deferred.
 	return true, nil
 }
 

@@ -126,8 +126,8 @@ func (a *AuthenticationManager) authenticateKerberos(ctx context.Context, conn *
 
 	// For LDAP, we can use the TGT to get a service ticket
 	// However, go-ldap doesn't directly support Kerberos SASL
-	// For now, fall back to simple bind with the same credentials
-	// In a production implementation, this would use SASL GSSAPI
+	// go-ldap lacks native SASL/GSSAPI support; uses simple bind with the Kerberos-authenticated principal.
+	// A future implementation would use SASL GSSAPI for proper Kerberos-based LDAP binding.
 
 	userPrincipal := fmt.Sprintf("%s@%s", a.config.Username, strings.ToUpper(a.config.Domain))
 	if err := conn.Bind(userPrincipal, password); err != nil {
@@ -139,10 +139,7 @@ func (a *AuthenticationManager) authenticateKerberos(ctx context.Context, conn *
 
 // authenticateNTLM performs NTLM authentication
 func (a *AuthenticationManager) authenticateNTLM(ctx context.Context, conn *ldap.Conn) error {
-	// NTLM authentication using Azure/go-ntlmssp
-	// This would require implementing NTLM SASL mechanism for LDAP
-	// For now, return an informative error
-
+	// NTLM for LDAP requires SASL/NTLM binding not available in go-ldap; callers must use 'simple' or 'kerberos'.
 	return fmt.Errorf("NTLM authentication requires SASL implementation - use 'simple' or 'kerberos' authentication methods")
 }
 
