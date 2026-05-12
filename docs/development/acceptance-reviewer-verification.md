@@ -1,6 +1,11 @@
-# Acceptance Reviewer — Code-Reference Verification
+# Code-Reference Verification (Acceptance Checking)
 
-This document describes the verification model the Acceptance Reviewer (`.claude/agents/acceptance-reviewer.md`) uses to prevent PASS verdicts on PRs that ship undelivered acceptance criteria.
+This document describes the verification model used by two agents to prevent PASS verdicts on work that ships undelivered acceptance criteria:
+
+- **`.claude/agents/acceptance-checker.md`** — runs **pre-PR**, inside the dev agent's container, as part of `/story-complete`'s parallel review team. Reads files from the working tree directly.
+- **`.claude/agents/acceptance-reviewer.md`** — runs **post-PR**, in a dedicated review container spawned by the PO autonomous cycle. Reads files from the PR's HEAD ref via `gh api`.
+
+Both agents use the same Phase 2.5 extraction + Phase 3 verification model. The fetch mechanism and the verdict actions differ (the in-container checker reports to a team lead and routes failures to the developer agent; the post-PR reviewer posts a PR comment and enqueues or applies fix labels). The verification semantics — what counts as a FAIL — are identical and documented below.
 
 ## The failure mode this prevents
 
@@ -12,16 +17,23 @@ Closed stories #1380, #1381, #1321, #1295 all received `## Acceptance Review —
 4. The reviewer searches `gh pr diff` for evidence the AC is met. The diff shows +500 lines of new code containing the relevant domain words. The reviewer marks the AC met.
 5. The named stub function is still there. The AC is not delivered.
 
-The root cause is **diff blindness**: `gh pr diff` only shows additions and deletions. An unchanged stub is invisible to a diff search. The reviewer needs to verify the post-change state of named code by reading the file on the PR's head ref, not by searching the diff.
+The root cause is **diff blindness**: `gh pr diff` only shows additions and deletions. An unchanged stub is invisible to a diff search. The reviewer needs to verify the post-change state of named code by reading the file directly — from the working tree (pre-PR) or from the PR's head ref (post-PR), but never from the diff alone.
+
+A secondary contributing failure was that the story-complete in-container review team had no AC-alignment reviewer at all. The team's three reviewers (qa-test-runner, qa-code-reviewer, security-engineer) judge the diff against test-quality and security standards but never read the story body. So the failure was a two-layer miss: in-container team didn't catch it, and the post-PR reviewer couldn't either. Adding `acceptance-checker` to the in-container team plus tightening `acceptance-reviewer`'s post-PR check restores defense in depth.
 
 ## Verification mechanism
 
-The reviewer's prompt enforces two anchors:
+Both agents enforce two anchors:
 
-1. **Phase 2.5** extracts every concrete reference from the story body (file paths, function/symbol names, line numbers, banned-phrase quotes, required test names).
-2. **Phase 3** fetches each named file from the PR's HEAD ref and mechanically checks each reference. Banned phrases that remain in still-stubbed locations are FAIL.
+1. **Phase 2 (extraction)** parses the story body for every concrete reference (file paths, function/symbol names, line numbers, banned-phrase quotes, required test names).
+2. **Phase 3 (verification)** reads each named file and mechanically checks each reference. Banned phrases that remain in still-stubbed locations are FAIL.
 
-A Code-Reference Verification table appears in every review comment listing each check and its outcome. Any FAIL row forces an overall `## Acceptance Review — FAIL` verdict — the reviewer cannot reach PASS while any reference is unverified.
+The fetch mechanism differs:
+
+- **acceptance-checker (in-container, pre-PR)**: reads files directly from the working tree on the agent's clone. No `gh api` calls — the working tree IS the would-be post-change state.
+- **acceptance-reviewer (post-PR)**: fetches files from the PR's HEAD ref via `gh api repos/cfg-is/cfgms/contents/<path>?ref=$HEAD_SHA`. The diff alone is not sufficient (unchanged stubs are invisible to a diff).
+
+Both agents report a Code-Reference Verification table listing each check and its outcome. Any FAIL row forces an overall FAIL verdict. The post-PR reviewer renders this as a PR comment; the in-container checker sends it to the team lead, which routes failures to the developer agent for fixing.
 
 ## Banned-phrase canonical list
 
