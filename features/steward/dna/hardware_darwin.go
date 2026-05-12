@@ -91,8 +91,7 @@ func (d *DarwinHardwareCollector) CollectDisk(ctx context.Context, attributes ma
 	// Get disk information using diskutil
 	cmdCtx, cancel := context.WithTimeout(ctx, darwinHwCmdTimeout)
 	if _, err := exec.CommandContext(cmdCtx, "diskutil", "list", "-plist").Output(); err == nil {
-		// For now, just indicate we have disk info available
-		// Could parse the plist output for detailed disk information
+		// diskutil plist output is available; set presence flag (detailed parsing is deferred).
 		attributes["disk_info_available"] = "true"
 		attributes["disk_collection_method"] = "diskutil"
 	}

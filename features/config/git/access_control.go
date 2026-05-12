@@ -288,13 +288,9 @@ func (gmm *GitModeManager) processPullRequestEvent(ctx context.Context, repo *Re
 
 // validatePullRequest validates pull request changes
 func (gmm *GitModeManager) validatePullRequest(ctx context.Context, repo *Repository, data map[string]interface{}) error {
-	// This would validate that PR changes comply with policies
-	// For now, just log the validation
-
 	gmm.logger.Info("validating pull request", "repo", logging.SanitizeLogValue(repo.Name))
 
-	// Validation stub - would check that changes don't modify read-only paths,
-	// validate configuration syntax, check against policies, and run security scans
+	// Logs validation intent; path/syntax/policy/security checks are deferred.
 
 	return nil
 }

@@ -609,8 +609,8 @@ func (s *Server) SetGitSyncWebhookHandler(h http.Handler) {
 	}
 }
 
-// getHTTPListenAddr determines the HTTP listen address
-// For now, we'll use the gRPC port + 1000 to avoid conflicts
+// getHTTPListenAddr determines the HTTP listen address.
+// HTTP port defaults to 9080; override with CFGMS_HTTP_LISTEN_ADDR.
 func (s *Server) getHTTPListenAddr() string {
 	// If environment variable is set, use it
 	if addr := os.Getenv("CFGMS_HTTP_LISTEN_ADDR"); addr != "" {

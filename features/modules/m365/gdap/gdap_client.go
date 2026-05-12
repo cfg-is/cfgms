@@ -365,8 +365,7 @@ func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*auth.AccessTok
 		return token, nil
 	}
 
-	// Need to get new Partner Center token - this would require partner credentials
-	// In a real implementation, this would use the Partner Center OAuth2 flow
+	// Deferred: tracked in #1443 — implement Partner Center OAuth2 flow for token acquisition
 	return nil, fmt.Errorf("partner Center token acquisition not implemented - requires partner credentials")
 }
 

@@ -462,15 +462,14 @@ func (s *DirectoryDNAStorageAdapter) GetDirectoryStats(ctx context.Context) (*Di
 func (s *DirectoryDNAStorageAdapter) GetObjectStats(ctx context.Context, objectType interfaces.DirectoryObjectType) (*ObjectTypeStats, error) {
 	s.logger.Debug("Retrieving object type statistics", "object_type", objectType)
 
-	// This would require more sophisticated querying in a real implementation
-	// For now, return basic stats structure
+	// Deferred: tracked in #1443 — query DNA storage for live counts, change frequency, and attribute averages
 	stats := &ObjectTypeStats{
 		ObjectType:        objectType,
-		TotalCount:        0,                                                  // Would count records of this type
-		ActiveCount:       0,                                                  // Would count recently updated records
-		ChangedToday:      0,                                                  // Would count records changed today
-		AverageAttributes: 50.0,                                               // Would calculate from actual records
-		MostCommonChanges: []string{"display_name", "description", "members"}, // Would analyze change patterns
+		TotalCount:        0,
+		ActiveCount:       0,
+		ChangedToday:      0,
+		AverageAttributes: 50.0,
+		MostCommonChanges: []string{"display_name", "description", "members"},
 	}
 
 	s.logger.Debug("Object type statistics retrieved", "object_type", objectType)

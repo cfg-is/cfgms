@@ -741,8 +741,7 @@ func (m *DefaultCompatibilityMatrix) FindCompatibleVersionSet(requirements []Mod
 			return nil, fmt.Errorf("no compatible versions found for module %s with constraint %s", req.ModuleName, req.Constraint)
 		}
 
-		// For now, select the latest compatible version
-		// In practice, this would involve more sophisticated constraint solving
+		// Selects latest compatible version; full constraint-solving is deferred.
 		versionSet.ModuleVersions[req.ModuleName] = compatibleVersions[len(compatibleVersions)-1]
 	}
 

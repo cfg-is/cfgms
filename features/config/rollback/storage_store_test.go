@@ -567,6 +567,42 @@ func TestStorageRollbackStore_ConcurrentAuditEntries(t *testing.T) {
 	assert.Len(t, retrieved.AuditTrail, 11, "Should have 11 audit entries (1 initial + 10 concurrent)")
 }
 
+func TestInMemoryRollbackStore_ListOperations_SortedNewestFirst(t *testing.T) {
+	store := rollback.NewInMemoryRollbackStore()
+	ctx := context.Background()
+
+	now := time.Now()
+	op1 := createSampleOperation()
+	op1.InitiatedAt = now.Add(-2 * time.Hour)
+
+	op2 := createSampleOperation()
+	op2.InitiatedAt = now.Add(-1 * time.Hour)
+
+	op3 := createSampleOperation()
+	op3.InitiatedAt = now
+
+	// Save in non-chronological order to confirm sort is applied regardless of insertion order
+	require.NoError(t, store.SaveOperation(ctx, op2))
+	require.NoError(t, store.SaveOperation(ctx, op3))
+	require.NoError(t, store.SaveOperation(ctx, op1))
+
+	operations, err := store.ListOperations(ctx, rollback.RollbackFilters{})
+	require.NoError(t, err, "ListOperations should succeed")
+	require.Len(t, operations, 3, "Should return all 3 operations")
+
+	// Verify newest-first ordering
+	for i := 0; i < len(operations)-1; i++ {
+		assert.True(t,
+			operations[i].InitiatedAt.After(operations[i+1].InitiatedAt) ||
+				operations[i].InitiatedAt.Equal(operations[i+1].InitiatedAt),
+			"operations[%d].InitiatedAt (%v) should be >= operations[%d].InitiatedAt (%v)",
+			i, operations[i].InitiatedAt, i+1, operations[i+1].InitiatedAt)
+	}
+	// Explicitly verify the first result is the newest
+	assert.True(t, operations[0].InitiatedAt.Equal(op3.InitiatedAt),
+		"first result should be the most recent operation")
+}
+
 func TestStorageRollbackStore_PersistenceAfterReload(t *testing.T) {
 	// This test verifies durability by creating a new store instance
 	fixture := teststorage.NewStorageTestFixture(t)

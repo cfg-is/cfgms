@@ -507,8 +507,7 @@ type ADModuleQueryResult struct {
 // init registers this provider with the global factory
 func init() {
 	interfaces.RegisterDirectoryProviderConstructor("network_activedirectory", func() interfaces.DirectoryProvider {
-		// In a real implementation, this would get the steward client from a registry
-		// For now, return a provider that will need to be configured with a client
+		// Returns an unconfigured provider; the caller must inject a steward client via Configure().
 		return &ActiveDirectoryProvider{
 			logger: logging.NewNoopLogger(),
 		}

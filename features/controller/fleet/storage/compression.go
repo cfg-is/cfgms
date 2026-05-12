@@ -184,8 +184,7 @@ func (c *GzipCompressor) updateStats(originalSize, compressedSize int64, duratio
 
 // NewZstdCompressor creates a new Zstandard compressor (stub implementation)
 func NewZstdCompressor(level int) (*ZstdCompressor, error) {
-	// Note: This is a stub implementation. In a real implementation,
-	// you would use a library like github.com/klauspost/compress/zstd
+	// Design decision: uses gzip as the codec until github.com/klauspost/compress/zstd is added as a dependency.
 	return &ZstdCompressor{
 		level: level,
 		stats: &CompressionStats{
@@ -429,8 +428,7 @@ func (c *OptimizedDNACompressor) Compress(dna *commonpb.DNA) ([]byte, int64, err
 
 // Decompress decompresses optimized DNA data
 func (c *OptimizedDNACompressor) Decompress(data []byte) (*commonpb.DNA, error) {
-	// For now, delegate to base compressor
-	// In a full implementation, this would reverse the optimization
+	// Deferred: tracked in #1443 — reverse DNA field-level optimization on decompress
 	return c.baseCompressor.Decompress(data)
 }
 

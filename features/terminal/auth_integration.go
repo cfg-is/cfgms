@@ -687,7 +687,7 @@ func (atm *AuthenticatedTerminalManager) rotateTokensIfNeeded() {
 	now := time.Now()
 	for _, token := range atm.sessionTokens {
 		if now.Sub(token.LastRotated) > atm.config.TokenRotationInterval {
-			// In a real implementation, this would notify the client to refresh the token
+			// Deferred: tracked in #1441 — push token-refresh signal to client over WebSocket
 			token.LastRotated = now
 		}
 	}

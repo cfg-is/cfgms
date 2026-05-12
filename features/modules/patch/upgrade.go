@@ -489,8 +489,7 @@ func (um *UpgradeManager) PerformUpgrade(ctx context.Context, dna *commonpb.DNA)
 
 // GetUpgradeStatus returns the current upgrade status
 func (um *UpgradeManager) GetUpgradeStatus(ctx context.Context) (string, error) {
-	// This would query Windows Update API for upgrade status
-	// For now, return basic status based on policy
+	// Returns policy-derived status; live Windows Update API query is deferred.
 	if !um.policy.Enabled {
 		return "disabled", nil
 	}

@@ -347,7 +347,5 @@ func (sm *SyncManager) Cleanup() {
 		}
 	}
 
-	// For now, we keep semaphores, locks, and wait groups as they might be reused
-	// In a production system, you might want to implement reference counting
-	// or time-based cleanup
+	// Semaphores, locks, and wait groups are retained; reference counting cleanup is deferred.
 }

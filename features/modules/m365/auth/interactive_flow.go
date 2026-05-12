@@ -396,8 +396,7 @@ func (f *InteractiveAuthFlow) storeTokens(tenantID string, accessToken *AccessTo
 // State management
 
 func (f *InteractiveAuthFlow) storeFlowState(state string, flowState *AuthFlowState) error {
-	// In a real implementation, this would use a secure temporary store
-	// For now, implement in-memory storage (not production ready)
+	// Deferred: tracked in #1443 — persist flow state in a secure temporary store
 	return f.callbackHandler.StoreFlowState(state, flowState)
 }
 

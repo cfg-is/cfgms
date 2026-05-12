@@ -10,7 +10,7 @@ import (
 
 // SimpleNotificationService provides a basic implementation of NotificationService
 type SimpleNotificationService struct {
-	// In a real implementation, this would integrate with email, Slack, etc.
+	// Deferred: tracked in #1441 — integrate with email, Slack, and other delivery channels
 	notifications []NotificationRecord
 }
 
@@ -244,7 +244,7 @@ func (sns *SimpleNotificationService) SendEscalationNotification(ctx context.Con
 		request.Permissions,
 	)
 
-	// In a real implementation, this would determine escalation recipients based on the level
+	// Deferred: tracked in #1441 — resolve escalation recipients from configurable approver registry
 	recipients := []string{"security-admin", "compliance-officer"}
 
 	return sns.sendNotification(ctx, NotificationTypeEscalation, recipients, subject, message, map[string]interface{}{
@@ -272,12 +272,7 @@ func (sns *SimpleNotificationService) sendNotification(ctx context.Context, noti
 
 	sns.notifications = append(sns.notifications, record)
 
-	// In a real implementation, this would:
-	// 1. Determine the best channel for each recipient
-	// 2. Format the message appropriately for each channel
-	// 3. Send via the appropriate service (email, Slack, etc.)
-	// 4. Handle failures and retries
-	// 5. Track delivery status
+	// Deferred: tracked in #1441 — implement multi-channel delivery with retry and delivery tracking
 
 	return nil
 }

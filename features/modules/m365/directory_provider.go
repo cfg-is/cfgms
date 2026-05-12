@@ -306,8 +306,7 @@ func (p *EntraIDDirectoryProvider) SearchUsers(ctx context.Context, query *direc
 		return nil, fmt.Errorf("not connected to Entra ID")
 	}
 
-	// For now, return empty slice - full implementation would use Graph API search
-	// This would involve constructing OData filter queries from the SearchQuery
+	// Deferred: tracked in #1443 — construct OData filter queries and call Graph API
 	p.logger.Info("SearchUsers called", "query", query.Query, "limit", query.Limit)
 	return []*types.DirectoryUser{}, nil
 }

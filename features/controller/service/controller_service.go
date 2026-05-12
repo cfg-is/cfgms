@@ -115,8 +115,7 @@ func (s *ControllerService) Authenticate(ctx context.Context, creds *common.Cred
 		tenantID = "default" // Default to "default" tenant if not specified
 	}
 
-	// Basic authentication implementation
-	// In a real implementation, this would validate certificates and tenant access
+	// Deferred: tracked in #1440 — validate client mTLS certificate and tenant access rights
 	token, err := s.generateToken()
 	if err != nil {
 		s.logger.Error("Failed to generate authentication token", "error", err)

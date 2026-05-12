@@ -372,8 +372,7 @@ func (l *LinuxHardwareCollector) parseProcMemInfo(output string, attributes map[
 
 // parseDMIDecodeMemory parses dmidecode memory output
 func (l *LinuxHardwareCollector) parseDMIDecodeMemory(output string, attributes map[string]string) {
-	// This would parse dmidecode output for memory module details
-	// For now, just indicate that dmidecode info is available
+	// Sets presence flag from dmidecode output; detailed field parsing is deferred.
 	if strings.Contains(output, "Memory Device") {
 		attributes["memory_dmidecode_available"] = "true"
 

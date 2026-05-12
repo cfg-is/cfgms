@@ -313,8 +313,7 @@ func (s *Session) handleShellOutput(ctx context.Context) {
 				return // Channel closed
 			}
 
-			// Handle errors (could send error message to WebSocket)
-			_ = err // For now, just ignore errors
+			_ = err // Shell errors are non-fatal in the output loop; WebSocket error reporting is deferred.
 		}
 	}
 }

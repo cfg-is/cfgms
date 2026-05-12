@@ -590,8 +590,7 @@ func (s *DatabaseAuditStore) GetLastAuditEntry(ctx context.Context, tenantID str
 
 // ArchiveAuditEntries archives old audit entries (for compliance, implement as needed)
 func (s *DatabaseAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
-	// For PostgreSQL, this could move entries to an archive table or partition
-	// For now, return 0 as no physical archival is implemented
+	// Physical archival to a partition or archive table is deferred; returns zero rows.
 	return 0, nil
 }
 

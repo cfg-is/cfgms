@@ -275,8 +275,7 @@ func (h *DefaultWebSocketHandler) writeMessages(ctx context.Context, conn *webso
 				h.logger.Warn("Failed to send ping", "session_id", logging.RedactedID(session.ID), "error", err)
 				return
 			}
-			// In a real implementation, this would include a channel for receiving
-			// output data from the steward and sending it to the WebSocket client
+			// Deferred: tracked in #1443 — stream steward output channel to the WebSocket client
 		}
 	}
 }

@@ -206,7 +206,7 @@ func (e *Engine) evaluateSwitchExpression(expression string, variables map[strin
 		return value, nil
 	}
 
-	// For now, return the resolved expression as-is
+	// Falls back to the resolved expression string; a full expression evaluator is deferred.
 	return resolved, nil
 }
 

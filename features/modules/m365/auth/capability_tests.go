@@ -24,8 +24,7 @@ func (f *InteractiveAuthFlow) extractUserContext(idToken, tenantID string) (*Use
 		return nil, fmt.Errorf("no ID token provided")
 	}
 
-	// In a real implementation, you would parse and validate the JWT
-	// For now, return a basic user context that can be enhanced
+	// Deferred: tracked in #1443 — parse and validate the ID token JWT claims
 	return &UserContext{
 		UserID:            "extracted-from-id-token",
 		UserPrincipalName: "user@" + tenantID + ".onmicrosoft.com",

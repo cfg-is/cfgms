@@ -267,10 +267,7 @@ func (m *DirectoryProviderManager) RemoveProvider(name string) error {
 	defer cancel()
 
 	if err := provider.Disconnect(ctx); err != nil {
-		// Log warning but continue with removal - disconnect errors are non-fatal
-		// as the provider is being removed from the registry regardless
-		// In a real implementation, this would use structured logging
-		_ = err // Acknowledge error but continue with removal
+		_ = err // Disconnect errors are non-fatal; provider is removed from registry regardless.
 	}
 
 	delete(m.providers, name)

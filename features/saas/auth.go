@@ -335,7 +335,7 @@ func (ua *UniversalAuthenticator) authenticateClientCert(ctx context.Context, pr
 // AWS Signature V4 Authentication Implementation
 
 func (ua *UniversalAuthenticator) authenticateAWSSignature(ctx context.Context, provider string, config map[string]interface{}) error {
-	// AWS Signature V4 signing is complex and would require dedicated implementation
+	// Deferred: tracked in #1443 — implement AWS Signature V4 signing
 	return fmt.Errorf("AWS signature authentication is not supported by this build")
 }
 
