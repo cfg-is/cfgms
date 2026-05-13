@@ -46,8 +46,8 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
-// ErrNotSupported is returned by store factory methods that are not implemented
-// by the flat-file provider. These stores belong to the business-data tier.
+// ErrNotSupported is returned by store factory methods not supported by the flat-file provider.
+// These stores belong to the business-data tier.
 var ErrNotSupported = errors.New("flatfile: operation not supported by flat-file provider")
 
 // ErrImmutable is returned when attempting to mutate immutable data, such as

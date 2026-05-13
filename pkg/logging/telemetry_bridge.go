@@ -48,7 +48,7 @@ func (t *TelemetryBridge) GetTraceInfoFromContext(ctx context.Context) (string, 
 	return spanCtx.TraceID().String(), spanCtx.SpanID().String()
 }
 
-// Initialize sets up the telemetry bridge to replace placeholder functions.
+// Initialize activates the telemetry bridge for correlation ID and trace extraction.
 // This should be called during application initialization after telemetry setup.
 // It is safe to call concurrently and from multiple goroutines.
 func (t *TelemetryBridge) Initialize() {
