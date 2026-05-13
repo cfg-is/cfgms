@@ -49,7 +49,7 @@ func (n *DefaultRollbackNotifier) NotifyRollbackProgress(ctx context.Context, op
 		"current_action", logging.SanitizeLogValue(operation.Progress.CurrentAction),
 	)
 
-	// Milestone throttling not implemented; all progress events are logged.
+	// Deferred: tracked in #1441 — milestone throttling; all progress events are logged
 
 	return nil
 }

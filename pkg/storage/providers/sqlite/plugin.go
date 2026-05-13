@@ -229,7 +229,7 @@ func (p *SQLiteProvider) CreateSessionStore(config map[string]interface{}) (busi
 	return &SQLiteSessionStore{db: db}, nil
 }
 
-// CreateConfigStore is not implemented by the SQLite provider.
+// CreateConfigStore is not supported by the SQLite provider.
 // Config data uses the flat-file provider (OSS) or PostgreSQL (commercial).
 func (p *SQLiteProvider) CreateConfigStore(config map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	return nil, business.ErrNotSupported
