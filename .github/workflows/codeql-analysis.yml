@@ -78,7 +78,6 @@ jobs:
         key: ${{ runner.os }}-go-codeql-${{ hashFiles('**/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go-codeql-
-          ${{ runner.os }}-go-
 
     - name: Download dependencies
       run: go mod download
