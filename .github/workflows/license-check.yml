@@ -49,7 +49,6 @@ jobs:
         key: ${{ runner.os }}-go-licenses-${{ hashFiles('**/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go-licenses-
-          ${{ runner.os }}-go-
 
     - name: Install go-licenses tool
       run: go install github.com/google/go-licenses/v2@v2.0.1
