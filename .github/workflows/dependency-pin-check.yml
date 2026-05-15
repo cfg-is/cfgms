@@ -76,15 +76,30 @@ jobs:
         check_version() {
           local name="$1" repo="$2" pinned="$3"
           local owner="${repo%/*}" repo_name="${repo#*/}"
+          local latest
 
+          # GraphQL first (preferred — official API, lightweight). On failure,
+          # stderr is preserved in the workflow log for diagnostics, then we
+          # fall through. `|| latest=""` prevents `set -e` from killing the job
+          # when one tool fails (so the other seven still get checked).
           latest=$(gh api graphql \
             -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){latestRelease{tagName}}}' \
             -f owner="$owner" -f name="$repo_name" \
-            --jq '.data.repository.latestRelease.tagName')
+            --jq '.data.repository.latestRelease.tagName') || latest=""
 
           if [ -z "$latest" ] || [ "$latest" = "null" ]; then
-            echo "  WARN: GraphQL latestRelease returned empty/null for ${repo}"
-            warnings="${warnings}- **${name}**: \`latestRelease\` returned empty/null from \`${repo}\` (GraphQL)\n"
+            # Fallback: HTTP HEAD against the public release-redirect URL.
+            # Bypasses org IP allowlists (e.g. aquasecurity blocks GitHub
+            # Actions runner IPs from authenticated API access) since this is
+            # an unauthenticated public web request, not an api.github.com call.
+            echo "  INFO: ${repo} GraphQL returned empty/null or failed — trying redirect parse"
+            latest=$(curl -sI "https://github.com/${repo}/releases/latest" \
+                     | sed -n 's|^location: .*/tag/||Ip' | tr -d '\r\n')
+          fi
+
+          if [ -z "$latest" ]; then
+            echo "  WARN: Both GraphQL and redirect-parse failed for ${repo}"
+            warnings="${warnings}- **${name}**: could not fetch latest version from \`${repo}\` (GraphQL + redirect parse both failed)\n"
             return
           fi
 
