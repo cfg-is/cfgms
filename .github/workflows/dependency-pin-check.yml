@@ -75,17 +75,19 @@ jobs:
 
         check_version() {
           local name="$1" repo="$2" pinned="$3"
-          latest=$(gh api "repos/${repo}/releases/latest" --jq '.tag_name' 2>/dev/null) || latest=""
-          # Fallback to tags API if releases API fails (e.g. org IP allowlists)
+          local owner="${repo%/*}" repo_name="${repo#*/}"
+
+          latest=$(gh api graphql \
+            -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){latestRelease{tagName}}}' \
+            -f owner="$owner" -f name="$repo_name" \
+            --jq '.data.repository.latestRelease.tagName')
+
           if [ -z "$latest" ] || [ "$latest" = "null" ]; then
-            echo "  WARN: releases API failed for ${repo}, trying tags API..."
-            latest=$(gh api "repos/${repo}/tags" --jq '.[0].name' 2>/dev/null) || latest=""
-          fi
-          if [ -z "$latest" ] || [ "$latest" = "null" ]; then
-            echo "  WARN: Could not fetch latest version for ${repo} via releases or tags API"
-            warnings="${warnings}- **${name}**: could not fetch latest version from \`${repo}\` (both releases and tags API failed)\n"
+            echo "  WARN: GraphQL latestRelease returned empty/null for ${repo}"
+            warnings="${warnings}- **${name}**: \`latestRelease\` returned empty/null from \`${repo}\` (GraphQL)\n"
             return
           fi
+
           if [ "$pinned" != "$latest" ]; then
             echo "  OUTDATED: ${name} pinned=${pinned} latest=${latest}"
             outdated="${outdated}- **${name}**: pinned \`${pinned}\`, latest \`${latest}\` ([releases](https://github.com/${repo}/releases))\n"
