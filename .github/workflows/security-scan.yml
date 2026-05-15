@@ -32,9 +32,14 @@ on:
 env:
   GO_VERSION: '1.25.10'
 
+permissions: {}
+
 jobs:
   # Parallel security scanning jobs for optimal performance
   trivy-scan:
+    permissions:
+      contents: read
+      security-events: write
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -90,6 +95,8 @@ jobs:
         retention-days: 30
 
   nancy-scan:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -132,6 +139,8 @@ jobs:
         fi
 
   gosec-scan:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -140,12 +149,12 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-    
+
     - name: Set up Go
       uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
-    
+
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
     #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
@@ -207,6 +216,8 @@ jobs:
         retention-days: 30
 
   staticcheck-scan:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -250,6 +261,8 @@ jobs:
 
   # Consolidated security validation job
   security-validation:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     needs: [trivy-scan, nancy-scan, gosec-scan, staticcheck-scan]
     timeout-minutes: 5
@@ -337,6 +350,8 @@ jobs:
 
   # Production Deployment Gate
   production-gate:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     needs: security-validation
     if: github.ref == 'refs/heads/main'
@@ -370,6 +385,7 @@ jobs:
 
   # Summary Report
   security-summary:
+    permissions: {}
     runs-on: ubuntu-latest
     needs: security-validation
     if: always()

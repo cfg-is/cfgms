@@ -24,9 +24,13 @@ on:
 env:
   NODE_VERSION: '20'
 
+permissions: {}
+
 jobs:
   # Quick markdown linting
   lint-markdown:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -51,6 +55,8 @@ jobs:
 
   # Validate markdown link integrity
   check-links:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -77,6 +83,8 @@ jobs:
 
   # Validate CLAUDE.md structure and links
   validate-claude-md:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: contains(github.event.pull_request.changed_files, 'CLAUDE.md') || github.event_name == 'push'
@@ -151,6 +159,8 @@ jobs:
 
   # Validate roadmap structure
   validate-roadmap:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: contains(github.event.pull_request.changed_files, 'docs/product/roadmap.md') || github.event_name == 'push'
@@ -195,6 +205,8 @@ jobs:
 
   # Documentation summary
   documentation-summary:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     needs: [lint-markdown, check-links]
     if: always()
@@ -229,6 +241,7 @@ jobs:
 
   unit-tests:
     name: unit-tests
+    permissions: {}
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
@@ -240,6 +253,7 @@ jobs:
 
   security-deployment-gate:
     name: security-deployment-gate
+    permissions: {}
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
@@ -251,6 +265,7 @@ jobs:
 
   build-gate:
     name: Build Gate
+    permissions: {}
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
@@ -262,6 +277,7 @@ jobs:
 
   integration-tests:
     name: integration-tests
+    permissions: {}
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
@@ -273,6 +289,7 @@ jobs:
 
   integration-tests-controller:
     name: Controller Integration Tests (Linux)
+    permissions: {}
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:

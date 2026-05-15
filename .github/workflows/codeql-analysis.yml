@@ -43,6 +43,8 @@ on:
 env:
   GO_VERSION: '1.25.10'
 
+permissions: {}
+
 jobs:
   analyze:
     name: CodeQL Analysis
