@@ -27,16 +27,15 @@ on:
 env:
   GO_VERSION: '1.25.10'
 
-permissions:
-  contents: write
-  packages: write
-  id-token: write
+permissions: {}
 
 jobs:
   # Create GitHub Release
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     timeout-minutes: 5
     outputs:
       version: ${{ steps.get_version.outputs.version }}
@@ -100,6 +99,8 @@ jobs:
   build-binaries:
     name: Build ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     timeout-minutes: 30
     needs: create-release
     strategy:
@@ -192,6 +193,8 @@ jobs:
   generate-sbom:
     name: Generate SBOM
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     timeout-minutes: 15
     needs: create-release
     steps:
@@ -269,6 +272,8 @@ jobs:
   back-merge-to-develop:
     name: Back-merge to Develop
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     needs: [create-release, build-binaries]
     if: success()
     steps:
@@ -324,6 +329,7 @@ jobs:
   release-summary:
     name: Release Summary
     runs-on: ubuntu-latest
+    permissions: {}
     needs: [create-release, build-binaries, generate-sbom, back-merge-to-develop]
     if: always()
     steps:
