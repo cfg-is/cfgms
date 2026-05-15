@@ -489,11 +489,18 @@ func (e *Engine) executeComponentsParallel(ctx context.Context, config *Composit
 	return nil
 }
 
-// executeComponentsDependency executes components based on dependencies (simplified implementation)
+// executeComponentsDependency executes components based on their DependsOn fields.
+// It builds a DAG, detects cycles before any component runs, then executes
+// independent components in parallel using topological-order scheduling.
 func (e *Engine) executeComponentsDependency(ctx context.Context, config *CompositeConfig, execution *WorkflowExecution, stepName string) error {
-	// Deferred: tracked in #1442 — build dependency graph and topological sort for component ordering
-	e.logger.Warn("Dependency-based composition not fully implemented, falling back to sequential")
-	return e.executeComponentsSequential(ctx, config, execution, stepName)
+	adjList, inDegree, err := buildDependencyGraph(config.Components)
+	if err != nil {
+		return err
+	}
+	if err := detectDependencyCycle(config.Components, adjList); err != nil {
+		return err
+	}
+	return e.executeTopological(ctx, config, execution, stepName, adjList, inDegree)
 }
 
 // executeComponentsPipeline executes components as a data processing pipeline
@@ -631,6 +638,138 @@ func (e *Engine) handleComponentFailure(err error, component WorkflowComponent, 
 	default:
 		return err
 	}
+}
+
+// buildDependencyGraph returns an adjacency list and in-degree slice for the given components.
+// adjList[i] holds the indices of components that list component i in their DependsOn,
+// meaning those components become unblocked when component i completes.
+// Returns an error if any DependsOn name does not match a component in the slice.
+func buildDependencyGraph(components []WorkflowComponent) (adjList [][]int, inDegree []int, err error) {
+	n := len(components)
+	nameToIdx := make(map[string]int, n)
+	for i, c := range components {
+		nameToIdx[c.Name] = i
+	}
+
+	adjList = make([][]int, n)
+	inDegree = make([]int, n)
+
+	for i, c := range components {
+		for _, dep := range c.DependsOn {
+			depIdx, ok := nameToIdx[dep]
+			if !ok {
+				return nil, nil, fmt.Errorf("component %q depends on unknown component %q", c.Name, dep)
+			}
+			adjList[depIdx] = append(adjList[depIdx], i)
+			inDegree[i]++
+		}
+	}
+	return adjList, inDegree, nil
+}
+
+// detectDependencyCycle runs a DFS over the dependency graph and returns an error
+// describing the cycle path if one is found, or nil if the graph is acyclic.
+func detectDependencyCycle(components []WorkflowComponent, adjList [][]int) error {
+	n := len(components)
+	// color: 0=unvisited, 1=in-progress, 2=done
+	color := make([]int, n)
+	path := make([]int, 0, n)
+
+	var dfs func(u int) error
+	dfs = func(u int) error {
+		color[u] = 1
+		path = append(path, u)
+		for _, v := range adjList[u] {
+			if color[v] == 1 {
+				// Back edge found — locate where the cycle starts in path.
+				start := 0
+				for start < len(path) && path[start] != v {
+					start++
+				}
+				parts := make([]string, 0, len(path)-start+1)
+				for _, idx := range path[start:] {
+					parts = append(parts, components[idx].Name)
+				}
+				parts = append(parts, components[v].Name)
+				return fmt.Errorf("dependency cycle detected: %s", strings.Join(parts, " → "))
+			}
+			if color[v] == 0 {
+				if err := dfs(v); err != nil {
+					return err
+				}
+			}
+		}
+		path = path[:len(path)-1]
+		color[u] = 2
+		return nil
+	}
+
+	for i := 0; i < n; i++ {
+		if color[i] == 0 {
+			if err := dfs(i); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// compResult carries the outcome of a single component execution.
+type compResult struct {
+	idx int
+	err error
+}
+
+// executeTopological runs components in topological order, dispatching all
+// zero-in-degree components in parallel and unlocking dependents as each finishes.
+func (e *Engine) executeTopological(ctx context.Context, config *CompositeConfig, execution *WorkflowExecution, stepName string, adjList [][]int, inDegree []int) error {
+	n := len(config.Components)
+	if n == 0 {
+		return nil
+	}
+
+	// Work on a copy so the original slice is not mutated.
+	curInDegree := make([]int, n)
+	copy(curInDegree, inDegree)
+
+	// Buffer accommodates one result per component so goroutines never block on send.
+	resultChan := make(chan compResult, n)
+
+	dispatch := func(idx int) {
+		go func(i int) {
+			err := e.executeComponent(ctx, config.Components[i], execution, stepName)
+			if err != nil {
+				err = e.handleComponentFailure(err, config.Components[i], config.FailurePolicy)
+			}
+			resultChan <- compResult{idx: i, err: err}
+		}(idx)
+	}
+
+	// Enqueue all components that have no dependencies.
+	for i := 0; i < n; i++ {
+		if curInDegree[i] == 0 {
+			dispatch(i)
+		}
+	}
+
+	for completed := 0; completed < n; completed++ {
+		select {
+		case res := <-resultChan:
+			if res.err != nil {
+				return res.err
+			}
+			// Unlock dependents whose last dependency just completed.
+			for _, next := range adjList[res.idx] {
+				curInDegree[next]--
+				if curInDegree[next] == 0 {
+					dispatch(next)
+				}
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 // executeFanInStep executes a fan-in step that collects and combines results from multiple sources
