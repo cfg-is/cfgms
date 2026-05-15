@@ -129,9 +129,9 @@ jobs:
         # Lockstep validator. The Go toolchain version is pinned in MULTIPLE
         # places (go.mod, workflow GO_VERSION/go-version, cmd/*/Dockerfile FROM
         # golang:X-alpine, .devcontainer/Dockerfile). All must move together.
-        # This check caught the 2026-05-12 drift where go.mod was bumped to
-        # 1.25.10 but the Dockerfile FROM lines were still at 1.25.9, causing
-        # Trivy to keep reporting stdlib CVEs on PRs against develop.
+        # This check caught the 2026-05-12 drift where go.mod was bumped ahead
+        # of the Dockerfile FROM lines, causing Trivy to keep reporting stdlib
+        # CVEs on PRs against develop.
         echo "Checking Go toolchain lockstep across all pin locations..."
         lockstep_versions=$(
           {
