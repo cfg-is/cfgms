@@ -477,7 +477,7 @@ func assertNoCredentialInStruct(t *testing.T, v interface{}, credential, path st
 		return
 	}
 	val := reflect.ValueOf(v)
-	if val.Kind() == reflect.Ptr {
+	if val.Kind() == reflect.Pointer {
 		if val.IsNil() {
 			return
 		}
