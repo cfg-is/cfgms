@@ -21,8 +21,8 @@ Subcommands:
   list-by-status <status>                         List items by status (JSON array)
   get-item <item_id>                              Get full item JSON
   update-field <item_id> <field> <value>          Update a field value
-  link-issue <item_id> <issue_num>                Add a GitHub issue to the project
-  link-pr <item_id> <pr_num>                      Add a GitHub PR to the project
+  link-issue <issue_num>                           Add a GitHub issue to the project
+  link-pr <pr_num>                                Add a GitHub PR to the project
   delete-item <item_id>                           Remove an item from the project
 EOF
     exit 2
@@ -310,20 +310,24 @@ node = data['node']
 content = node.get('content') or {}
 
 status = None
+text_fields = {}
 for fv in (node.get('fieldValues') or {}).get('nodes', []):
     if not fv:
         continue
     field = (fv.get('field') or {})
-    if field.get('name', '').lower() == 'status':
+    field_name = field.get('name', '')
+    if field_name.lower() == 'status':
         status = fv.get('name', '')
-        break
+    elif 'text' in fv and field_name:
+        text_fields[field_name] = fv.get('text', '')
 
 print(json.dumps({
     'item_id': node['id'],
     'title': content.get('title', ''),
     'body': content.get('body', ''),
     'status': status,
-    'issue_num': content.get('number', None)
+    'issue_num': content.get('number', None),
+    'fields': text_fields
 }))
 PYEOF
 }
@@ -470,11 +474,11 @@ PYEOF
 }
 
 cmd_link_issue() {
-    [[ $# -ge 2 ]] || {
-        printf 'Usage: %s link-issue <item_id> <issue_num>\n' "$0" >&2
+    [[ $# -ge 1 ]] || {
+        printf 'Usage: %s link-issue <issue_num>\n' "$0" >&2
         exit 2
     }
-    local item_id="$1" issue_num="$2"
+    local issue_num="$1"
     _require_yaml
 
     local project_id
@@ -536,11 +540,11 @@ PYEOF
 }
 
 cmd_link_pr() {
-    [[ $# -ge 2 ]] || {
-        printf 'Usage: %s link-pr <item_id> <pr_num>\n' "$0" >&2
+    [[ $# -ge 1 ]] || {
+        printf 'Usage: %s link-pr <pr_num>\n' "$0" >&2
         exit 2
     }
-    local item_id="$1" pr_num="$2"
+    local pr_num="$1"
     _require_yaml
 
     local project_id

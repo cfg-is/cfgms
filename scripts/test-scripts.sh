@@ -957,6 +957,40 @@ print('yes' if d.get('updated') == True else 'no')
         fi
     fi
 
+    # ── AC 4 (text field): update-field Title → exercises text branch ────────
+    exit_code=0
+    local text_field_out
+    text_field_out=$(bash "$script" update-field "$item_id" Title "test story pq-sh updated" 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "project-queue.sh update-field text: failed (exit $exit_code): $text_field_out"
+    else
+        local text_field_ok
+        text_field_ok=$(echo "$text_field_out" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('yes' if d.get('updated') == True else 'no')
+" 2>/dev/null) || text_field_ok="parse-error"
+        if [[ "$text_field_ok" == "yes" ]]; then
+            log_pass "project-queue.sh update-field text: returns updated=true JSON (AC 4 text field)"
+        else
+            log_fail "project-queue.sh update-field text: unexpected output: $text_field_out"
+        fi
+
+        # Verify via get-item fields dict (project field values, not content.title)
+        local text_get_out text_get_field
+        text_get_out=$(bash "$script" get-item "$item_id" 2>/dev/null) || text_get_out=""
+        text_get_field=$(echo "$text_get_out" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(d.get('fields',{}).get('Title',''))
+" 2>/dev/null) || text_get_field=""
+        if [[ "$text_get_field" == "test story pq-sh updated" ]]; then
+            log_pass "project-queue.sh update-field text: title change reflected in get-item fields dict (AC 4 text field)"
+        else
+            log_fail "project-queue.sh update-field text: get-item fields[Title]='$text_get_field' instead of 'test story pq-sh updated'"
+        fi
+    fi
+
     # ── AC 2: list-by-status Ready (item moved from Draft) ───────────────────
     exit_code=0
     local ready_list
@@ -980,7 +1014,7 @@ print('yes' if any(i.get('item_id') == '$item_id' for i in items) else 'no')
     # ── link-issue: add a real cfgms issue to the project ────────────────────
     exit_code=0
     local link_issue_out link_issue_item_id
-    link_issue_out=$(bash "$script" link-issue "$item_id" 1477 2>&1) || exit_code=$?
+    link_issue_out=$(bash "$script" link-issue 1477 2>&1) || exit_code=$?
     if [[ $exit_code -ne 0 ]]; then
         log_fail "project-queue.sh link-issue: failed (exit $exit_code): $link_issue_out"
     else
@@ -1022,7 +1056,7 @@ print(d.get('linked_issue', ''))
     if [[ -n "$test_pr_num" ]]; then
         exit_code=0
         local link_pr_out link_pr_item_id
-        link_pr_out=$(bash "$script" link-pr "$item_id" "$test_pr_num" 2>&1) || exit_code=$?
+        link_pr_out=$(bash "$script" link-pr "$test_pr_num" 2>&1) || exit_code=$?
         if [[ $exit_code -ne 0 ]]; then
             log_fail "project-queue.sh link-pr: failed (exit $exit_code): $link_pr_out"
         else
@@ -1060,9 +1094,13 @@ print(d.get('deleted_item_id', ''))
             # Remove from cleanup list since it's already deleted
             local new_items=()
             for cid in "${created_items[@]:-}"; do
-                [[ "$cid" != "$item_id" ]] && new_items+=("$cid")
+                [[ -n "$cid" && "$cid" != "$item_id" ]] && new_items+=("$cid")
             done
-            created_items=("${new_items[@]:-}")
+            if [[ ${#new_items[@]} -gt 0 ]]; then
+                created_items=("${new_items[@]}")
+            else
+                created_items=()
+            fi
         else
             log_fail "project-queue.sh delete-item: no deleted_item_id in output: $delete_out"
         fi
