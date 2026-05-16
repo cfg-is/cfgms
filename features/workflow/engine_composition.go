@@ -503,11 +503,45 @@ func (e *Engine) executeComponentsDependency(ctx context.Context, config *Compos
 	return e.executeTopological(ctx, config, execution, stepName, adjList, inDegree)
 }
 
-// executeComponentsPipeline executes components as a data processing pipeline
+// executeComponentsPipeline executes components sequentially in declaration order,
+// threading each component's output into the next via DataFlow mappings.
 func (e *Engine) executeComponentsPipeline(ctx context.Context, config *CompositeConfig, execution *WorkflowExecution, stepName string) error {
-	// Deferred: tracked in #1442 — implement data-flow pipeline composition with inter-component streaming
-	e.logger.Warn("Pipeline composition not fully implemented, falling back to sequential")
-	return e.executeComponentsSequential(ctx, config, execution, stepName)
+	if len(config.Components) == 0 {
+		return nil
+	}
+
+	for i, component := range config.Components {
+		e.logger.Info("Executing pipeline component", "component", component.Name, "index", i)
+
+		err := e.executeComponent(ctx, component, execution, stepName)
+		if err != nil {
+			return e.handleComponentFailure(err, component, config.FailurePolicy)
+		}
+
+		e.applyDataFlowMappings(config.DataFlow, component.Name, execution)
+	}
+	return nil
+}
+
+// applyDataFlowMappings copies variables from the completed component's outputs into
+// the execution context so the next pipeline component can pick them up as inputs.
+// Missing source variables are logged as warnings and skipped (non-fatal).
+func (e *Engine) applyDataFlowMappings(dataFlow []DataFlowMapping, fromComponent string, execution *WorkflowExecution) {
+	for _, mapping := range dataFlow {
+		if mapping.FromComponent != fromComponent {
+			continue
+		}
+		value, exists := execution.GetVariable(mapping.FromVariable)
+		if !exists {
+			e.logger.Warn("DataFlow mapping source variable not found",
+				"from_component", mapping.FromComponent,
+				"from_variable", mapping.FromVariable,
+				"to_component", mapping.ToComponent,
+				"to_variable", mapping.ToVariable)
+			continue
+		}
+		execution.SetVariable(mapping.ToVariable, value)
+	}
 }
 
 // executeComponentsConditional executes components based on conditions
