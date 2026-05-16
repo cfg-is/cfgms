@@ -734,6 +734,54 @@ test_project_queue_invalid_args() {
     else
         log_fail "project-queue.sh: create-draft with missing args should exit 2, got $exit_code"
     fi
+
+    exit_code=0
+    bash "$script" list-by-status 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "project-queue.sh: list-by-status with missing args exits 2"
+    else
+        log_fail "project-queue.sh: list-by-status with missing args should exit 2, got $exit_code"
+    fi
+
+    exit_code=0
+    bash "$script" get-item 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "project-queue.sh: get-item with missing args exits 2"
+    else
+        log_fail "project-queue.sh: get-item with missing args should exit 2, got $exit_code"
+    fi
+
+    exit_code=0
+    bash "$script" update-field 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "project-queue.sh: update-field with missing args exits 2"
+    else
+        log_fail "project-queue.sh: update-field with missing args should exit 2, got $exit_code"
+    fi
+
+    exit_code=0
+    bash "$script" link-issue 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "project-queue.sh: link-issue with missing args exits 2"
+    else
+        log_fail "project-queue.sh: link-issue with missing args should exit 2, got $exit_code"
+    fi
+
+    exit_code=0
+    bash "$script" link-pr 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "project-queue.sh: link-pr with missing args exits 2"
+    else
+        log_fail "project-queue.sh: link-pr with missing args should exit 2, got $exit_code"
+    fi
+
+    exit_code=0
+    bash "$script" delete-item 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "project-queue.sh: delete-item with missing args exits 2"
+    else
+        log_fail "project-queue.sh: delete-item with missing args should exit 2, got $exit_code"
+    fi
 }
 
 test_project_queue_integration() {

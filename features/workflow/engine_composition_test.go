@@ -282,7 +282,7 @@ func TestExecuteComponentsPipeline_OutputThreaded(t *testing.T) {
 	})
 	// comp2 is a minimal delay; its role is to be the DataFlow target.
 	engine.RegisterWorkflow(Workflow{
-		Name:  "pipe-comp2",
+		Name: "pipe-comp2",
 		Steps: []Step{{
 			Name:  "step2",
 			Type:  StepTypeDelay,
@@ -364,7 +364,7 @@ func TestExecuteComponentsPipeline_MissingDataFlowVariable(t *testing.T) {
 	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil)
 
 	engine.RegisterWorkflow(Workflow{
-		Name:  "pipe-missing-src",
+		Name: "pipe-missing-src",
 		Steps: []Step{{
 			Name:  "step",
 			Type:  StepTypeDelay,
