@@ -670,6 +670,357 @@ MOCKEOF
     rm -rf "$tmp_dir"
 }
 
+# ── Tests for scripts/project-queue.sh ───────────────────────────────────────
+
+test_project_queue_no_gh_issue_calls() {
+    log_test "Testing project-queue.sh: no subcommand calls gh issue or modifies labels..."
+
+    local script
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-queue.sh"
+
+    if [[ ! -f "$script" ]]; then
+        log_fail "project-queue.sh: Script not found at $script"
+        return
+    fi
+
+    # Verify script does not call 'gh issue' anywhere (exclude comment-only lines)
+    # grep -n output format is "linenum:content"; filter lines where content starts with optional whitespace then #
+    if grep -n 'gh issue' "$script" 2>/dev/null | grep -vE ':[[:space:]]*#' | grep -q .; then
+        log_fail "project-queue.sh: Contains 'gh issue' call (AC 5 violation)"
+        grep -n 'gh issue' "$script" | grep -vE ':[[:space:]]*#'
+    else
+        log_pass "project-queue.sh: No 'gh issue' calls found (AC 5)"
+    fi
+
+    # Verify script does not manipulate issue labels
+    if grep -n '\-\-add-label\|--remove-label\|--label' "$script" 2>/dev/null | grep -v '^\s*#' | grep -q .; then
+        log_fail "project-queue.sh: Contains label manipulation (AC 5 violation)"
+    else
+        log_pass "project-queue.sh: No issue label manipulation found (AC 5)"
+    fi
+}
+
+test_project_queue_invalid_args() {
+    log_test "Testing project-queue.sh: invalid arguments return exit code 2..."
+
+    local script
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-queue.sh"
+
+    if [[ ! -f "$script" ]]; then
+        log_skip "project-queue.sh: Script not found"
+        return
+    fi
+
+    local exit_code=0
+    bash "$script" 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "project-queue.sh: No-args exits 2 (invalid args code)"
+    else
+        log_fail "project-queue.sh: No-args should exit 2, got $exit_code"
+    fi
+
+    exit_code=0
+    bash "$script" unknown-command 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "project-queue.sh: Unknown subcommand exits 2"
+    else
+        log_fail "project-queue.sh: Unknown subcommand should exit 2, got $exit_code"
+    fi
+
+    exit_code=0
+    bash "$script" create-draft 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "project-queue.sh: create-draft with missing args exits 2"
+    else
+        log_fail "project-queue.sh: create-draft with missing args should exit 2, got $exit_code"
+    fi
+}
+
+test_project_queue_integration() {
+    log_test "Testing project-queue.sh: integration against live cfgms-pipeline project..."
+
+    local script
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-queue.sh"
+
+    if [[ ! -f "$script" ]]; then
+        log_skip "project-queue.sh: Script not found"
+        return
+    fi
+
+    # Skip if gh is not available or not authenticated
+    if ! command -v gh >/dev/null 2>&1; then
+        log_skip "project-queue.sh integration: gh CLI not available"
+        return
+    fi
+    if ! gh auth status >/dev/null 2>&1; then
+        log_skip "project-queue.sh integration: gh not authenticated — skipping live tests"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    # Accumulate item IDs to clean up on exit, even if the test fails partway
+    local created_items=()
+    cleanup_items() {
+        for cid in "${created_items[@]:-}"; do
+            [[ -z "$cid" ]] && continue
+            bash "$script" delete-item "$cid" >/dev/null 2>&1 || true
+        done
+        rm -rf "$tmp_dir"
+    }
+    trap cleanup_items RETURN
+
+    # Write a test body file
+    local body_content="Integration test body content for project-queue.sh test run."
+    echo "$body_content" > "$tmp_dir/body.md"
+
+    # ── AC 1: create-draft ────────────────────────────────────────────────────
+    local create_out exit_code=0
+    create_out=$(bash "$script" create-draft 42 "test story pq-sh" "$tmp_dir/body.md" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "project-queue.sh create-draft: failed (exit $exit_code): $create_out"
+        return
+    fi
+
+    local item_id
+    item_id=$(echo "$create_out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['item_id'])" 2>/dev/null) || {
+        log_fail "project-queue.sh create-draft: output is not valid JSON with item_id key: $create_out"
+        return
+    }
+    created_items+=("$item_id")
+
+    if [[ -n "$item_id" ]]; then
+        log_pass "project-queue.sh create-draft: returns item_id in JSON (AC 1)"
+    else
+        log_fail "project-queue.sh create-draft: item_id is empty"
+        return
+    fi
+
+    # ── AC 3: get-item ────────────────────────────────────────────────────────
+    local get_out
+    exit_code=0
+    get_out=$(bash "$script" get-item "$item_id" 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "project-queue.sh get-item: failed (exit $exit_code): $get_out"
+        return
+    fi
+
+    # Verify required JSON keys exist
+    local has_keys
+    has_keys=$(echo "$get_out" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+missing = [k for k in ['item_id', 'title', 'body', 'status'] if k not in d]
+print(','.join(missing) if missing else 'ok')
+" 2>/dev/null) || has_keys="parse-error"
+
+    if [[ "$has_keys" == "ok" ]]; then
+        log_pass "project-queue.sh get-item: returns JSON with item_id, title, body, status (AC 3)"
+    else
+        log_fail "project-queue.sh get-item: missing keys [$has_keys] in: $get_out"
+    fi
+
+    # Verify body content matches what was passed to create-draft
+    local returned_body
+    returned_body=$(echo "$get_out" | python3 -c "import json,sys; print(json.load(sys.stdin).get('body',''))" 2>/dev/null) || returned_body=""
+    if [[ "$returned_body" == *"$body_content"* ]]; then
+        log_pass "project-queue.sh get-item: body field matches create-draft body_file content (AC 3)"
+    else
+        log_fail "project-queue.sh get-item: body mismatch — expected '$body_content', got '$returned_body'"
+    fi
+
+    # Verify status is Draft (set by create-draft)
+    local returned_status
+    returned_status=$(echo "$get_out" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || returned_status=""
+    if [[ "$returned_status" == "Draft" ]]; then
+        log_pass "project-queue.sh create-draft: Status=Draft confirmed via get-item (AC 1)"
+    else
+        log_fail "project-queue.sh create-draft: Status should be Draft, got '$returned_status'"
+    fi
+
+    # ── AC 2: list-by-status Draft ────────────────────────────────────────────
+    # GitHub Projects V2 has ~2s eventual consistency for newly created items.
+    # Retry up to 5 times with 1s delay to let the item become visible.
+    local list_out found is_array attempt
+    exit_code=0
+    list_out=$(bash "$script" list-by-status Draft 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "project-queue.sh list-by-status Draft: failed (exit $exit_code): $list_out"
+    else
+        is_array=$(echo "$list_out" | python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if isinstance(d,list) else 'no')" 2>/dev/null) || is_array="parse-error"
+        if [[ "$is_array" == "yes" ]]; then
+            log_pass "project-queue.sh list-by-status: returns valid JSON array (AC 2)"
+        else
+            log_fail "project-queue.sh list-by-status: output is not a JSON array: $list_out"
+        fi
+
+        # Retry until item is visible (accounts for GitHub API eventual consistency)
+        found="no"
+        for attempt in 1 2 3 4 5; do
+            list_out=$(bash "$script" list-by-status Draft 2>&1) || true
+            found=$(echo "$list_out" | python3 -c "
+import json, sys
+try:
+    items = json.load(sys.stdin)
+    print('yes' if any(i.get('item_id') == '$item_id' for i in items) else 'no')
+except Exception:
+    print('no')
+" 2>/dev/null) || found="no"
+            [[ "$found" == "yes" ]] && break
+            sleep 1
+        done
+
+        if [[ "$found" == "yes" ]]; then
+            log_pass "project-queue.sh list-by-status: created item appears in Draft list (AC 2)"
+        else
+            log_fail "project-queue.sh list-by-status: created item $item_id not found in Draft list after retries"
+        fi
+    fi
+
+    # ── AC 4: update-field status → Ready ────────────────────────────────────
+    exit_code=0
+    local update_out
+    update_out=$(bash "$script" update-field "$item_id" status "Ready" 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "project-queue.sh update-field status: failed (exit $exit_code): $update_out"
+    else
+        local update_ok
+        update_ok=$(echo "$update_out" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('yes' if d.get('updated') == True else 'no')
+" 2>/dev/null) || update_ok="parse-error"
+        if [[ "$update_ok" == "yes" ]]; then
+            log_pass "project-queue.sh update-field: returns updated=true JSON (AC 4)"
+        else
+            log_fail "project-queue.sh update-field: unexpected output: $update_out"
+        fi
+
+        # Verify the change via get-item
+        local verify_out verify_status
+        verify_out=$(bash "$script" get-item "$item_id" 2>/dev/null) || verify_out=""
+        verify_status=$(echo "$verify_out" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || verify_status=""
+        if [[ "$verify_status" == "Ready" ]]; then
+            log_pass "project-queue.sh update-field: status change reflected in get-item (AC 4)"
+        else
+            log_fail "project-queue.sh update-field: get-item shows status='$verify_status' instead of Ready"
+        fi
+    fi
+
+    # ── AC 2: list-by-status Ready (item moved from Draft) ───────────────────
+    exit_code=0
+    local ready_list
+    ready_list=$(bash "$script" list-by-status Ready 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "project-queue.sh list-by-status Ready: failed (exit $exit_code): $ready_list"
+    else
+        local found_ready
+        found_ready=$(echo "$ready_list" | python3 -c "
+import json, sys
+items = json.load(sys.stdin)
+print('yes' if any(i.get('item_id') == '$item_id' for i in items) else 'no')
+" 2>/dev/null) || found_ready="parse-error"
+        if [[ "$found_ready" == "yes" ]]; then
+            log_pass "project-queue.sh list-by-status Ready: item appears after status update (AC 2)"
+        else
+            log_fail "project-queue.sh list-by-status Ready: item $item_id not found in Ready list"
+        fi
+    fi
+
+    # ── link-issue: add a real cfgms issue to the project ────────────────────
+    exit_code=0
+    local link_issue_out link_issue_item_id
+    link_issue_out=$(bash "$script" link-issue "$item_id" 1477 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "project-queue.sh link-issue: failed (exit $exit_code): $link_issue_out"
+    else
+        link_issue_item_id=$(echo "$link_issue_out" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('item_id', ''))
+" 2>/dev/null) || link_issue_item_id=""
+
+        if [[ -n "$link_issue_item_id" ]]; then
+            log_pass "project-queue.sh link-issue: returns item_id for linked issue"
+            created_items+=("$link_issue_item_id")
+        else
+            log_fail "project-queue.sh link-issue: no item_id in output: $link_issue_out"
+        fi
+
+        local linked_num
+        linked_num=$(echo "$link_issue_out" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('linked_issue', ''))
+" 2>/dev/null) || linked_num=""
+        if [[ "$linked_num" == "1477" ]]; then
+            log_pass "project-queue.sh link-issue: linked_issue field matches requested issue number"
+        else
+            log_fail "project-queue.sh link-issue: linked_issue='$linked_num' (expected 1477)"
+        fi
+    fi
+
+    # ── link-pr: add a PR to the project ─────────────────────────────────────
+    # Find an open PR to use for the test
+    local test_pr_num
+    test_pr_num=$(gh api graphql \
+        -f query='query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){pullRequests(first:1,states:[OPEN]){nodes{number}}}}' \
+        -f owner="cfg-is" -f repo="cfgms" 2>/dev/null \
+        | python3 -c "import json,sys; nodes=json.load(sys.stdin)['data']['repository']['pullRequests']['nodes']; print(nodes[0]['number'] if nodes else '')" \
+        2>/dev/null) || test_pr_num=""
+
+    if [[ -n "$test_pr_num" ]]; then
+        exit_code=0
+        local link_pr_out link_pr_item_id
+        link_pr_out=$(bash "$script" link-pr "$item_id" "$test_pr_num" 2>&1) || exit_code=$?
+        if [[ $exit_code -ne 0 ]]; then
+            log_fail "project-queue.sh link-pr: failed (exit $exit_code): $link_pr_out"
+        else
+            link_pr_item_id=$(echo "$link_pr_out" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('item_id', ''))
+" 2>/dev/null) || link_pr_item_id=""
+            if [[ -n "$link_pr_item_id" ]]; then
+                log_pass "project-queue.sh link-pr: returns item_id for linked PR"
+                created_items+=("$link_pr_item_id")
+            else
+                log_fail "project-queue.sh link-pr: no item_id in output: $link_pr_out"
+            fi
+        fi
+    else
+        log_skip "project-queue.sh link-pr: no open PRs available for test"
+    fi
+
+    # ── delete-item ───────────────────────────────────────────────────────────
+    exit_code=0
+    local delete_out
+    delete_out=$(bash "$script" delete-item "$item_id" 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "project-queue.sh delete-item: failed (exit $exit_code): $delete_out"
+    else
+        local deleted_id
+        deleted_id=$(echo "$delete_out" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('deleted_item_id', ''))
+" 2>/dev/null) || deleted_id=""
+        if [[ -n "$deleted_id" ]]; then
+            log_pass "project-queue.sh delete-item: returns deleted_item_id in JSON"
+            # Remove from cleanup list since it's already deleted
+            local new_items=()
+            for cid in "${created_items[@]:-}"; do
+                [[ "$cid" != "$item_id" ]] && new_items+=("$cid")
+            done
+            created_items=("${new_items[@]:-}")
+        else
+            log_fail "project-queue.sh delete-item: no deleted_item_id in output: $delete_out"
+        fi
+    fi
+}
+
 # Main execution
 echo "🔍 Script Validation Test Suite"
 echo "================================"
@@ -703,6 +1054,12 @@ echo ""
 test_security_trivy_findings
 echo ""
 test_security_trivy_clean_scan
+echo ""
+test_project_queue_no_gh_issue_calls
+echo ""
+test_project_queue_invalid_args
+echo ""
+test_project_queue_integration
 echo ""
 echo ""
 echo "📊 Test Summary"
