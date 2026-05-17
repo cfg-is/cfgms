@@ -369,7 +369,7 @@ agent, fresh budget. No retry counter is incremented at the cron level.
 **Find PRs that need review.** A PR is review-eligible when:
 - branch is `feature/story-*`
 - state is OPEN
-- has no comment from `acceptance-reviewer`
+- has no comment from `cfg-agent` with "acceptance review" in the body
 - does NOT have label `pipeline:reviewing` (in flight)
 - does NOT have label `pipeline:fix` (waiting on dev fix; review re-runs after fix lands)
 
@@ -379,7 +379,7 @@ rebase churn.
 ```bash
 gh pr list --repo cfg-is/cfgms --search "head:feature/story-" --state open \
   --json number,headRefName,createdAt,comments,labels \
-  --jq '[.[] | select((.comments | map(.author.login) | contains(["acceptance-reviewer"]) | not)
+  --jq '[.[] | select(([.comments[] | select(.author.login == "cfg-agent") | select(.body | test("acceptance review"; "i"))] | length == 0)
         and ([.labels[].name] | contains(["pipeline:reviewing"]) | not)
         and ([.labels[].name] | contains(["pipeline:fix"]) | not))] | sort_by(.createdAt)'
 ```
