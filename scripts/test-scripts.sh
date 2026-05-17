@@ -1098,6 +1098,28 @@ print(d.get('deleted_item_id', ''))
     fi
 }
 
+test_trust_boundary() {
+    log_test "Running trust boundary regression suite (test/security/trust_boundary_test.sh)..."
+
+    local script
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/test/security/trust_boundary_test.sh"
+
+    if [[ ! -f "$script" ]]; then
+        log_fail "trust_boundary: test script not found at $script"
+        return
+    fi
+
+    local exit_code=0
+    # Run external script; its per-test ✓/✗ lines flow through for visibility
+    bash "$script" || exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "trust_boundary: all regression tests passed"
+    else
+        log_fail "trust_boundary: one or more regression tests failed (see output above)"
+    fi
+}
+
 test_preflight_forged_acceptance_review() {
     log_test "Testing po-cycle-preflight.py: forged acceptance review comment rejected (author-gate)..."
 
@@ -1217,6 +1239,8 @@ echo ""
 test_project_queue_integration
 echo ""
 test_preflight_forged_acceptance_review
+echo ""
+test_trust_boundary
 echo ""
 echo ""
 echo "📊 Test Summary"
