@@ -1,0 +1,46 @@
+name: label-decommission-gate
+
+on:
+  push:
+    branches: [develop, main, 'feature/**', 'fix/**']
+  pull_request:
+    branches: [develop, main]
+
+jobs:
+  no-pipeline-labels:
+    name: No pipeline/agent label references in executable code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert zero executable label references
+        run: |
+          # Detect code-path references to decommissioned pipeline:* and agent:* labels.
+          # Exclusions:
+          #   - Lines that are pure shell comments (^\s*#)
+          #   - Lines in markdown files that are HTML comments, blockquotes, or list items
+          #     prefixed with *, since those are documentation prose
+          #   - The docs/ directory entirely (historical records are fine)
+          #   - This workflow file itself (the pattern strings above are in a comment)
+          matches=$(grep -rn \
+            -E "pipeline:(draft|ready|fix|reviewing|epic|story|blocked)|agent:(ready|in-progress|failed|success)" \
+            .claude/ scripts/ .devcontainer/ \
+            --include="*.sh" --include="*.py" --include="*.md" --include="*.json" \
+            --include="*.yml" --include="*.yaml" \
+            | grep -v -E "^[^:]+:[0-9]+:[[:space:]]*#" \
+            | grep -v -E "^[^:]+\.md:[0-9]+:[[:space:]]*(<!--|>[[:space:]]|\*[[:space:]])" \
+            | grep -v "^docs/" \
+            | grep -v "label-decommission-gate.yml" \
+            | grep -v "scripts/migrate-queue-to-project.sh" \
+            || true)
+
+          if [ -n "$matches" ]; then
+            echo "FAIL: Found executable references to decommissioned labels:"
+            echo "$matches"
+            echo ""
+            echo "All pipeline/agent work queue state is now in GitHub Projects V2."
+            echo "Update references to use project-queue.sh status values instead."
+            exit 1
+          fi
+
+          echo "PASS: No decommissioned label references found in executable code paths."

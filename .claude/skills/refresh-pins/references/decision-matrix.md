@@ -75,7 +75,7 @@ Verdict: **BUMP**. Story body explains: routine refresh, past cooldown, no urgen
 - CI signal: yes (Trivy is flagging it)
 - No newer release exists
 
-Verdict: **INVESTIGATE**. Don't create a bump story (there's nowhere to bump to). Create a `pipeline:blocked` issue describing the pin, the CVE, and the lack of upstream fix — assign to founder. The skill should print this case explicitly in the report so the founder can escalate to the upstream or accept the risk.
+Verdict: **INVESTIGATE**. Don't create a bump story (there's nowhere to bump to). Create a `high-priority` tracking issue describing the pin, the CVE, and the lack of upstream fix — assign to founder and set Blocked status via `po-act.sh block`. The skill should print this case explicitly in the report so the founder can escalate to the upstream or accept the risk.
 
 ## Multiple CVEs in one pin
 

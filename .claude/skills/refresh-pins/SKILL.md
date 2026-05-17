@@ -105,10 +105,15 @@ For each pin with verdict BUMP or BUMP NOW:
    ```bash
    gh issue create --repo cfg-is/cfgms \
      --title "deps: bump <name> <from> → <to> (<short-reason>)" \
-     --label "pipeline:story,agent:ready,dependencies" \
+     --label "story,dependencies" \
      --body-file /tmp/refresh-pins-<slug>.md
    ```
-5. Capture the returned URL/number for the report
+5. Add the new story to the project queue at Draft status:
+   ```bash
+   item_id=$(bash ./scripts/project-queue.sh add-issue <STORY_NUM> | python3 -c "import json,sys; print(json.load(sys.stdin)['item_id'])")
+   bash ./scripts/project-queue.sh update-field "$item_id" status "Draft"
+   ```
+6. Capture the returned URL/number for the report
 
 If a story for the same pin+version already exists (search by title with `gh issue list --search "deps: bump <name> <from> → <to>"`), update it in place via `gh issue comment` rather than duplicating.
 
