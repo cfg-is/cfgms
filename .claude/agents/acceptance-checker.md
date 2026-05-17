@@ -21,7 +21,8 @@ You are spawned by `/story-complete` with:
 
 - Working directory: the agent's clone of the repo, on the story branch
 - Story number: derivable from the branch (`feature/story-<N>-*`) or via `git config --get branch.$(git branch --show-current).description` if set
-- Story body: fetch via `gh issue view <STORY_NUM> --repo cfg-is/cfgms --json title,body`
+- Project item ID: passed as `--project-item <ITEM_ID>` at invocation (retained alongside `STORY_NUM` which is used for reference only)
+- Story body: fetch via `./scripts/project-queue.sh get-item <ITEM_ID>` — returns JSON with `.body` (story body, ACs), `.title`, `.issue_num`
 - Changed files: `git diff --name-only develop...HEAD`
 
 You do NOT have a PR number — the PR doesn't exist yet. That's the whole point of running here.
@@ -29,12 +30,16 @@ You do NOT have a PR number — the PR doesn't exist yet. That's the whole point
 ## Phase 1: Fetch story and identify changes
 
 ```bash
-# Determine story number from current branch
+# Determine story number from current branch (retained for reference)
 BRANCH=$(git branch --show-current)
 STORY_NUM=$(echo "$BRANCH" | sed -nE 's|^feature/story-([0-9]+)-.*|\1|p')
 
-# Fetch story body
-gh issue view "$STORY_NUM" --repo cfg-is/cfgms --json title,body
+# Project item ID is passed via --project-item flag at invocation
+# ITEM_ID=<value from --project-item argument>
+
+# Fetch story body from the private project (avoids public issue injection surface)
+./scripts/project-queue.sh get-item "$ITEM_ID"
+# Returns JSON with .body (story body, ACs), .title, .issue_num
 
 # Identify changed files on this branch
 git diff --name-only develop...HEAD
@@ -89,7 +94,7 @@ For each reference recorded in Phase 2:
 If a banned-phrase match is preceded by `// Deferred: tracked in #NNN`, verify the tracking issue is valid:
 
 ```bash
-gh issue view <NNN> --repo cfg-is/cfgms --json state,labels --jq '{state, labels: [.labels[].name]}'
+gh api "repos/cfg-is/cfgms/issues/<NNN>" --jq '{state, labels: [.labels[].name]}'
 ```
 
 Requirements:

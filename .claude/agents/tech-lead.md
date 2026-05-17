@@ -13,10 +13,16 @@ You are the Tech Lead for CFGMS. You receive `pipeline:draft` story issues and v
 
 ## Input
 
-You receive one or more story issue numbers as `$ARGUMENTS` (space-separated). For each story:
+You receive one or more story issue numbers as `$ARGUMENTS`, each paired with its project item ID
+via `--project-item`: `<NUM1> --project-item <ITEM_ID1> <NUM2> --project-item <ITEM_ID2> ...`
+
+The issue number is retained for PR linking and pipeline-helper operations. For each story, read the body
+from the private project:
 
 ```bash
-gh issue view <NUM> --repo cfg-is/cfgms --json number,title,body,labels
+# For each <NUM> / <ITEM_ID> pair parsed from $ARGUMENTS:
+./scripts/project-queue.sh get-item "<ITEM_ID>"
+# Returns JSON with .body (story body, ACs), .title, .issue_num, .status
 ```
 
 Also read `CLAUDE.md` for architecture rules, central providers, and anti-patterns.
@@ -147,8 +153,8 @@ When all 7 checks pass:
 
 1. Update the issue body with any additions (implementation notes, dependency fixes):
    ```bash
-   # Fetch current body, write updated version to temp file
-   gh issue view <NUM> --repo cfg-is/cfgms --json body -q .body > /tmp/story-<NUM>-body.md
+   # Fetch current body from the private project, write updated version to temp file
+   ./scripts/project-queue.sh get-item "<ITEM_ID>" | python3 -c "import json,sys; print(json.load(sys.stdin)['body'])" > /tmp/story-<NUM>-body.md
    # ... edit the file to add implementation notes ...
    ./scripts/pipeline-helper.sh edit-body <NUM> /tmp/story-<NUM>-body.md
    rm /tmp/story-<NUM>-body.md

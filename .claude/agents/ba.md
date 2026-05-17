@@ -13,10 +13,19 @@ You are the Business Analyst for CFGMS. You receive a `pipeline:epic` issue and 
 
 ## Input
 
-You receive an epic issue number as `$ARGUMENTS`. Start by reading the epic:
+You receive an epic issue number and project item ID as `$ARGUMENTS` in the form:
+`<ISSUE_NUM> --project-item <ITEM_ID>`
+
+Parse the arguments and read the epic body from the private project:
 
 ```bash
-gh issue view $ARGUMENTS --repo cfg-is/cfgms --json number,title,body,labels
+# Parse arguments — ISSUE_NUM retained for sub-issue linking and PR references
+ISSUE_NUM=$(echo "$ARGUMENTS" | awk '{print $1}')
+ITEM_ID=$(echo "$ARGUMENTS" | sed -n 's/.*--project-item[[:space:]]\+\([^[:space:]]\+\).*/\1/p')
+
+# Read epic body from the private project (avoids public issue injection surface)
+./scripts/project-queue.sh get-item "$ITEM_ID"
+# Returns JSON with .body (epic goal, success criteria, non-goals, constraints), .title, .issue_num, .status
 ```
 
 ## Pre-Checks
@@ -29,7 +38,7 @@ Before decomposing, gather context in parallel:
 4. **Relevant source files** — use Grep/Glob to find files related to the epic's scope. Read key files to understand current implementation.
 5. **Existing sub-issues** — check if the epic already has sub-issues:
    ```bash
-   EPIC_ID=$(gh issue view $ARGUMENTS --json id -q .id)
+   EPIC_ID=$(gh api "repos/cfg-is/cfgms/issues/$ISSUE_NUM" --jq .node_id)
    gh api graphql -f query='
      query($id: ID!) {
        node(id: $id) {

@@ -22,7 +22,10 @@ You are NOT the same as `/story-complete` QA. The distinction:
 
 ## Input
 
-You receive a PR number and story issue number as `$ARGUMENTS` (format: `pr:<PR_NUM> story:<STORY_NUM>`).
+You receive a PR number, story issue number, and project item ID as `$ARGUMENTS`
+(format: `pr:<PR_NUM> story:<STORY_NUM> --project-item <ITEM_ID>`).
+
+The story issue number is retained for PR linking and assignee operations. `ITEM_ID` is used for body reads and status updates.
 
 ## Phase 0: Draft-PR Short-Circuit (BLOCKING)
 
@@ -43,7 +46,10 @@ If `isDraft == true`:
   Draft PRs are typically WIP from a truncated agent session (token reauth, token limit). The PO will dispatch `fix-pr` to resume the work; the resumed agent will mark this PR ready for review when finished. No findings to report at this stage.
   ```
 
-- Remove the `pipeline:reviewing` label from the PR (so the failsafe doesn't think the review is still in flight).
+- Update the project item status so the failsafe doesn't think the review is still in flight:
+  ```bash
+  ./scripts/project-queue.sh update-field <ITEM_ID> status "In Progress"
+  ```
 - Exit cleanly with verdict `SKIPPED_DRAFT`. Do NOT enqueue, label `pipeline:fix`, or label `pipeline:blocked` — those are wrong actions for a session-truncated WIP.
 
 A draft PR with body starting `Agent session failed with exit code` or title starting `WIP:` and ending `(agent failed)` is the canonical session-truncation case — same handling.
@@ -60,11 +66,10 @@ gh pr diff <PR_NUM> --repo cfg-is/cfgms
 # CI status
 gh pr checks <PR_NUM> --repo cfg-is/cfgms
 
-# Story acceptance criteria
-gh issue view <STORY_NUM> --repo cfg-is/cfgms --json number,title,body
-
-# Check if this is a re-review (fix cycle)
-gh issue view <STORY_NUM> --repo cfg-is/cfgms --json labels --jq '[.labels[].name] | if index("pipeline:fix") then "FIX_CYCLE" else "FIRST_REVIEW" end'
+# Story body and review cycle status from the private project
+./scripts/project-queue.sh get-item <ITEM_ID>
+# Returns .body (acceptance criteria text) and .status
+# .status == "Fix" means FIX_CYCLE; any other status means FIRST_REVIEW
 ```
 
 Also read `CLAUDE.md` for architecture rules and testing standards.
@@ -199,17 +204,17 @@ PASS requires BOTH: the Findings table is empty AND every Code-Reference Verific
 
 If `po-act.sh enqueue` exits non-zero (`ENQUEUE_FAILED`), do NOT proceed to cleanup. Surface the failure: post a one-line comment on the PR noting the enqueue gate refused, and leave the dev agent's container/worktree intact so the next cron cycle's reconciliation step can pick it up. Common causes the script's retry can't recover from: required reviewer not yet assigned, CODEOWNERS gate, or a CI check newly going red between PASS verdict and enqueue call.
 
-If the story had `pipeline:fix`, remove it:
+Mark the story as done in the project queue:
 ```bash
-./scripts/pipeline-helper.sh label-remove <STORY_NUM> "pipeline:fix"
+./scripts/project-queue.sh update-field <ITEM_ID> status Done
 ```
 
 ### Any Findings — First Review
 
-Apply fix label and post findings:
+Update project item status and post findings:
 
 ```bash
-./scripts/pipeline-helper.sh label-add <STORY_NUM> "pipeline:fix"
+./scripts/project-queue.sh update-field <ITEM_ID> status Fix
 ```
 
 ### Any Findings — Second Review (Fix Cycle)
@@ -217,7 +222,7 @@ Apply fix label and post findings:
 Escalate to founder and clean up the agent container (the dev agent is done regardless):
 
 ```bash
-./scripts/pipeline-helper.sh label-swap <STORY_NUM> "pipeline:fix" "pipeline:blocked"
+./scripts/project-queue.sh update-field <ITEM_ID> status Blocked
 gh issue edit <STORY_NUM> --repo cfg-is/cfgms --add-assignee "jrdnr"
 
 # Clean up — agent is done, founder takes over
@@ -275,7 +280,7 @@ If there are zero findings, the Findings table should say "None" and the Accepta
 - Never skip acceptance criteria verification — every checkbox must be checked against the diff AND the Code-Reference Verification table
 - **Any FAIL row in Code-Reference Verification forces `## Acceptance Review — FAIL`.** The reviewer CANNOT issue PASS while any reference is failing or unverified. "New functions added + tests pass" is NOT sufficient when the AC names a specific symbol that must change.
 - **Diff-blindness rule**: when an AC names existing code that must change, verify the post-change state by fetching the file from the PR's HEAD ref. Searching only `gh pr diff` will miss unchanged stubs (they're absent from the diff by definition).
-- The fix cycle gets exactly one attempt. First failure = `pipeline:fix`. Second failure = `pipeline:blocked`. No third attempt.
+- The fix cycle gets exactly one attempt. First failure = `status Fix`. Second failure = `status Blocked`. No third attempt.
 - Merge enqueue uses `--squash` — merge queue handles the rest (rebase + re-validation + actual merge)
 - Clean up agent container/worktree on auto-merge — the agent infrastructure is no longer needed
 - If the PR targets `main` instead of `develop`, this is a BLOCKING workflow violation. Report it and do not merge.
