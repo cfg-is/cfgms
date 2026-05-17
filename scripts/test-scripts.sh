@@ -760,19 +760,19 @@ test_project_queue_invalid_args() {
     fi
 
     exit_code=0
-    bash "$script" link-issue 2>/dev/null || exit_code=$?
+    bash "$script" add-issue 2>/dev/null || exit_code=$?
     if [[ $exit_code -eq 2 ]]; then
-        log_pass "project-queue.sh: link-issue with missing args exits 2"
+        log_pass "project-queue.sh: add-issue with missing args exits 2"
     else
-        log_fail "project-queue.sh: link-issue with missing args should exit 2, got $exit_code"
+        log_fail "project-queue.sh: add-issue with missing args should exit 2, got $exit_code"
     fi
 
     exit_code=0
-    bash "$script" link-pr 2>/dev/null || exit_code=$?
+    bash "$script" add-pr 2>/dev/null || exit_code=$?
     if [[ $exit_code -eq 2 ]]; then
-        log_pass "project-queue.sh: link-pr with missing args exits 2"
+        log_pass "project-queue.sh: add-pr with missing args exits 2"
     else
-        log_fail "project-queue.sh: link-pr with missing args should exit 2, got $exit_code"
+        log_fail "project-queue.sh: add-pr with missing args should exit 2, got $exit_code"
     fi
 
     exit_code=0
@@ -1011,12 +1011,12 @@ print('yes' if any(i.get('item_id') == '$item_id' for i in items) else 'no')
         fi
     fi
 
-    # ── link-issue: add a real cfgms issue to the project ────────────────────
+    # ── add-issue: add a real cfgms issue to the project ─────────────────────
     exit_code=0
     local link_issue_out link_issue_item_id
-    link_issue_out=$(bash "$script" link-issue 1477 2>&1) || exit_code=$?
+    link_issue_out=$(bash "$script" add-issue 1477 2>&1) || exit_code=$?
     if [[ $exit_code -ne 0 ]]; then
-        log_fail "project-queue.sh link-issue: failed (exit $exit_code): $link_issue_out"
+        log_fail "project-queue.sh add-issue: failed (exit $exit_code): $link_issue_out"
     else
         link_issue_item_id=$(echo "$link_issue_out" | python3 -c "
 import json, sys
@@ -1025,10 +1025,10 @@ print(d.get('item_id', ''))
 " 2>/dev/null) || link_issue_item_id=""
 
         if [[ -n "$link_issue_item_id" ]]; then
-            log_pass "project-queue.sh link-issue: returns item_id for linked issue"
+            log_pass "project-queue.sh add-issue: returns item_id for added issue"
             created_items+=("$link_issue_item_id")
         else
-            log_fail "project-queue.sh link-issue: no item_id in output: $link_issue_out"
+            log_fail "project-queue.sh add-issue: no item_id in output: $link_issue_out"
         fi
 
         local linked_num
@@ -1038,42 +1038,33 @@ d = json.load(sys.stdin)
 print(d.get('linked_issue', ''))
 " 2>/dev/null) || linked_num=""
         if [[ "$linked_num" == "1477" ]]; then
-            log_pass "project-queue.sh link-issue: linked_issue field matches requested issue number"
+            log_pass "project-queue.sh add-issue: linked_issue field matches requested issue number"
         else
-            log_fail "project-queue.sh link-issue: linked_issue='$linked_num' (expected 1477)"
+            log_fail "project-queue.sh add-issue: linked_issue='$linked_num' (expected 1477)"
         fi
     fi
 
-    # ── link-pr: add a PR to the project ─────────────────────────────────────
-    # Find an open PR to use for the test
-    local test_pr_num
-    test_pr_num=$(gh api graphql \
-        -f query='query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){pullRequests(first:1,states:[OPEN]){nodes{number}}}}' \
-        -f owner="cfg-is" -f repo="cfgms" 2>/dev/null \
-        | python3 -c "import json,sys; nodes=json.load(sys.stdin)['data']['repository']['pullRequests']['nodes']; print(nodes[0]['number'] if nodes else '')" \
-        2>/dev/null) || test_pr_num=""
-
-    if [[ -n "$test_pr_num" ]]; then
-        exit_code=0
-        local link_pr_out link_pr_item_id
-        link_pr_out=$(bash "$script" link-pr "$test_pr_num" 2>&1) || exit_code=$?
-        if [[ $exit_code -ne 0 ]]; then
-            log_fail "project-queue.sh link-pr: failed (exit $exit_code): $link_pr_out"
-        else
-            link_pr_item_id=$(echo "$link_pr_out" | python3 -c "
+    # ── add-pr: add a PR to the project ──────────────────────────────────────
+    # Use a known-merged PR so this test is unconditional (no dynamic lookup,
+    # no skip path). PR #1484 is permanently merged in cfgms.
+    local test_pr_num=1484
+    exit_code=0
+    local link_pr_out link_pr_item_id
+    link_pr_out=$(bash "$script" add-pr "$test_pr_num" 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "project-queue.sh add-pr: failed (exit $exit_code): $link_pr_out"
+    else
+        link_pr_item_id=$(echo "$link_pr_out" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 print(d.get('item_id', ''))
 " 2>/dev/null) || link_pr_item_id=""
-            if [[ -n "$link_pr_item_id" ]]; then
-                log_pass "project-queue.sh link-pr: returns item_id for linked PR"
-                created_items+=("$link_pr_item_id")
-            else
-                log_fail "project-queue.sh link-pr: no item_id in output: $link_pr_out"
-            fi
+        if [[ -n "$link_pr_item_id" ]]; then
+            log_pass "project-queue.sh add-pr: returns item_id for added PR"
+            created_items+=("$link_pr_item_id")
+        else
+            log_fail "project-queue.sh add-pr: no item_id in output: $link_pr_out"
         fi
-    else
-        log_skip "project-queue.sh link-pr: no open PRs available for test"
     fi
 
     # ── delete-item ───────────────────────────────────────────────────────────

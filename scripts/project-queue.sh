@@ -21,8 +21,8 @@ Subcommands:
   list-by-status <status>                         List items by status (JSON array)
   get-item <item_id>                              Get full item JSON
   update-field <item_id> <field> <value>          Update a field value
-  link-issue <issue_num>                           Add a GitHub issue to the project
-  link-pr <pr_num>                                Add a GitHub PR to the project
+  add-issue <issue_num>                            Add a GitHub issue to the project
+  add-pr <pr_num>                                 Add a GitHub PR to the project
   delete-item <item_id>                           Remove an item from the project
 EOF
     exit 2
@@ -473,9 +473,9 @@ print(json.dumps({
 PYEOF
 }
 
-cmd_link_issue() {
+cmd_add_issue() {
     [[ $# -ge 1 ]] || {
-        printf 'Usage: %s link-issue <issue_num>\n' "$0" >&2
+        printf 'Usage: %s add-issue <issue_num>\n' "$0" >&2
         exit 2
     }
     local issue_num="$1"
@@ -539,9 +539,9 @@ print(json.dumps({
 PYEOF
 }
 
-cmd_link_pr() {
+cmd_add_pr() {
     [[ $# -ge 1 ]] || {
-        printf 'Usage: %s link-pr <pr_num>\n' "$0" >&2
+        printf 'Usage: %s add-pr <pr_num>\n' "$0" >&2
         exit 2
     }
     local pr_num="$1"
@@ -665,8 +665,8 @@ case "$subcommand" in
     list-by-status) cmd_list_by_status "$@" ;;
     get-item)       cmd_get_item "$@" ;;
     update-field)   cmd_update_field "$@" ;;
-    link-issue)     cmd_link_issue "$@" ;;
-    link-pr)        cmd_link_pr "$@" ;;
+    add-issue)      cmd_add_issue "$@" ;;
+    add-pr)         cmd_add_pr "$@" ;;
     delete-item)    cmd_delete_item "$@" ;;
     *)
         printf 'Error: unknown subcommand: %s\n' "$subcommand" >&2
