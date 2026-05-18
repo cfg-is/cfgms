@@ -149,11 +149,13 @@ The controller is the authoring and distribution point for steward cfgs. It does
 Author → Validate → Store → Distribute → Monitor Compliance
 ```
 
-1. **Author** — Cfgs are created or updated via REST API, workflow output, or direct storage edit
-2. **Validate** — Controller validates cfg syntax, module references, and tenant scoping before accepting
-3. **Store** — Cfg is persisted in durable, version-controlled storage. Every change is a new version with full audit trail
-4. **Distribute** — Controller pushes the cfg to the target steward(s) over the QUIC data plane. Cfgs are signed with the controller's signing certificate so stewards can verify authenticity
-5. **Monitor** — Controller receives convergence results from stewards and tracks per-device compliance status
+1. **Author** — Cfgs are created or updated via the `cfg` CLI (`cfg config upload`), the commercial web UI, a GitOps webhook, or workflow output. All sources write through the same ConfigStore — there is no separate "fast path".
+2. **Validate** — Controller validates cfg syntax, module references, and tenant scoping before accepting. Validation is part of the write path; an invalid cfg never lands in storage.
+3. **Store** — Cfg is persisted in durable, version-controlled ConfigStore. Every change is a new version with full audit trail.
+4. **Distribute** — A successful ConfigStore write triggers automatic distribution. A storage-watch trigger fires after a ~500ms debounce window (absorbing burst saves) and publishes fanout jobs to the controller's durable job queue. Fanout sends `CommandSyncConfig` to all stewards whose targeting matches; the job survives controller restarts and HA failover replay. Cfgs are signed with the controller's signing certificate so stewards can verify authenticity. Fanout is bounded by controller capacity (CPU, outbound bandwidth) to prevent thundering-herd saturation.
+5. **Monitor** — Controller receives convergence results from stewards and tracks per-device compliance status. Operators view propagation via `cfg config deployments <id>`.
+
+**Save = Deploy:** there is no separate "push" verb. Save IS deploy. See [system operating model — Save = Deploy](operating-model.md#save--deploy) for the cross-component view.
 
 ### Cfg Targeting
 
@@ -161,8 +163,12 @@ The controller decides which steward gets which cfg based on:
 
 - **Direct assignment** — a cfg explicitly targets a steward by ID
 - **Group membership** — a cfg targets a group; all stewards in that group receive it
+- **Tag-based targeting** — stewards can carry arbitrary tags (e.g., `ring=canary`, `role=web-server`, `region=us-east`); a cfg targets stewards by tag expression
+- **DNA-attribute matching** — a cfg can target stewards whose DNA attributes match a predicate (e.g., `os=linux`, `cpu_arch=arm64`)
 - **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings at any depth
 - **Effective cfg** — the controller resolves inheritance and produces the effective cfg for each steward, merging all applicable layers
+
+**Deployment rings (convention):** operators commonly tag stewards with ring identifiers (`ring=canary`, `ring=prod-early`, `ring=prod-broad`) and author phased rollouts as separate cfgs or staged target lists. v1 is convention; auto-progressive ring machinery (with bake time + health gating) is a future enhancement.
 
 ### Config Signing
 
@@ -212,7 +218,7 @@ The controller can send commands to stewards over the gRPC control plane service
 
 | Command | Purpose |
 |---------|---------|
-| `sync_config` | Tell steward to fetch its latest cfg now (optimization — steward also checks on schedule) |
+| `sync_config` | Tell steward to fetch its latest cfg now (optimization — steward also checks on schedule). Save=deploy automatically issues this command for affected stewards after a ConfigStore write. |
 | `sync_dna` | Request fresh DNA collection and upload |
 | `execute_script` | Run an ad-hoc script (outside the cfg) |
 
@@ -403,13 +409,32 @@ The workflow engine must support the following capabilities to fulfill its role 
 
 ### Steward Registration
 
-The controller is the certificate authority and identity provider for stewards:
+The controller is the certificate authority and identity provider for stewards. Two credential flavors support different deployment workflows:
 
-1. Admin creates a **registration token** via REST API (scoped to tenant/group, with expiry)
-2. Steward presents token during registration
-3. Controller validates token, generates steward ID, issues mTLS client certificate
-4. Controller distributes CA cert, signing cert, and connection details
-5. Steward is now a trusted member of the fleet
+**Short-lived / single-use registration tokens**
+- Generated via REST API or `cfg token create --expires=<duration> --single-use`
+- Scoped to tenant/group, with expiry
+- Consumed on use (single-use enforces one-time pairing; expiry enforces time bounds)
+- Suitable for: manual onboarding, small fleets, time-bounded provisioning
+
+**Long-lived tenant/group registration codes**
+- Durable random opaque strings stored as a join field on the tenant/group record
+- On registration, the controller looks up the code and assigns the steward to the matching tenant/group
+- Suitable for: RMM/GPO mass deployment where the same code is baked into deployment scripts and used by many devices
+- Renaming a tenant/group does not break previously issued codes (the code is independent of the human-readable name)
+
+**Registration flow:**
+
+1. Admin creates a token or code on the controller (scoped to tenant/group, with optional expiry for tokens).
+2. Steward presents the token/code during registration via the compile-time controller URL.
+3. Controller validates the credential — single-use: consume; long-lived code: look up matching record.
+4. Controller runs the registration approval workflow via `RegistrationApprovalHook`:
+   - **`auto-approve`** (development default): accepts immediately
+   - **`manual-review`** (production): pauses pending operator action via `cfg registration approve <id>` / `cfg registration deny <id> [--reason ...]`
+   - Custom workflows can implement arbitrary policy (e.g., approve `tenant=lab` registrations, manual-review everything else)
+5. On approval, controller generates the steward ID and issues an mTLS client certificate scoped to the steward's tenant/group identity.
+6. Controller distributes the CA cert, signing cert, and connection details.
+7. Steward is now a trusted member of the fleet and stores its cert for subsequent startups.
 
 ### RBAC
 
@@ -429,8 +454,27 @@ If a cache invalidation call fails transiently (e.g., transient error), the oper
 
 ### API Authentication
 
-- **API keys** — stored encrypted, used for programmatic access
-- **Registration tokens** — scoped, expirable tokens for steward bootstrap only
+Three authentication mechanisms, used for different purposes.
+
+**Admin mTLS bundle (primary operator path)**
+- Single-file YAML containing admin cert + key + CA inline
+- Generated on `--init` and written to a platform-default path:
+  - Linux/macOS: `/etc/cfgms/admin.bundle.yaml`
+  - Windows: `%ProgramData%\cfgms\admin.bundle.yaml`
+- The `cfg` CLI auto-discovers via: `--bundle <path>` flag → `CFGMS_ADMIN_BUNDLE` env → `~/.config/cfgms/admin.bundle.yaml` → system path
+- `cfgms-controller bootstrap-admin` manages bundles:
+  - Issue named bundles per operator (`bootstrap-admin --name <op> --output <path>`)
+  - Regenerate the system bundle (`bootstrap-admin --regenerate`)
+  - List issued bundles (`bootstrap-admin --list`)
+  - Revoke by serial (`bootstrap-admin --revoke <serial>`)
+
+**API keys (programmatic access)**
+- Stored encrypted, used for service-to-service integration and scripted automation
+- Scoped to specific permissions via RBAC
+
+**Registration tokens (steward bootstrap only)**
+- Scoped, expirable tokens for the steward registration flow described in [Steward Registration](#steward-registration)
+- Not usable for general API authentication after bootstrap
 
 ## Multi-Tenancy
 
