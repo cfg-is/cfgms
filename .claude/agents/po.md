@@ -100,7 +100,7 @@ Display sections in this order. **Omit any section with zero items.**
 
 **Section 1: NEEDS ATTENTION** — project items with `Blocked` status. Flag items older than 7 days as stale.
 
-**Section 2: MERGE DECISIONS** — PRs with `pipeline:review` label. Show QA verdict summary and CI status.
+**Section 2: MERGE DECISIONS** — Open PRs where `has_acceptance_review_comment: false` and CI is not failing (read from `review_recommendations` in the preflight output). Show QA verdict summary and CI status.
 
 **Section 3: ACTIVE MILESTONE** — current roadmap milestone, open item count, blockers.
 
@@ -430,8 +430,10 @@ Both gates are computed by the preflight script (`dispatch_recommendations` with
 
 For each story the preflight recommends dispatching:
 ```bash
-./.claude/scripts/po-act.sh dispatch <NUM>
+./.claude/scripts/po-act.sh dispatch <ITEM_ID>
 ```
+
+where `<ITEM_ID>` comes from `dispatch_recommendations[*].item_id` in the preflight output. Note: the `dispatch` subcommand handles both issue_nums (all-digits, legacy path) and item_ids (non-numeric) transparently — Story B wired this.
 
 **This step is intentionally last in priority order.** If the 5-container cap is exhausted by Steps 3-5 (rebase, review, fix-cycle), defer dispatch to the next cycle. Existing in-flight PRs unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them.
 
@@ -473,25 +475,24 @@ The conversation follows this protocol:
 
 **Maximum 3 revision rounds.** A round = BA revises + Tech Lead re-reviews. After 3 rounds, any remaining REVISION NEEDED stories are resolved by PO decision: either accept with a PO note, or drop and document in a Blocked tracking issue (use `po-act.sh block`).
 
-**7f. Create stories on GitHub (after consensus):**
+**7f. Create stories in the project queue (after consensus):**
 
 Story bodies must conform to the parser spec in **Reference: Story Body Conventions** below — in particular the `## Dependencies` and `## Files In Scope` rules. Stories that fail those rules are flagged with `parse_warnings` and skipped by the dispatcher. Both classes of bug (prose-only Dependencies, parent-epic-as-dep) have surfaced repeatedly during decompositions; produce parser-compliant bodies on first try rather than relying on a Tech Lead fix-up step.
 
-Once all stories are APPROVED (or PO-decided), create them on GitHub. For each story:
+Once all stories are APPROVED (or PO-decided), create them in the project queue. For each story:
 ```bash
 cat > /tmp/story-body.md <<'STORY_EOF'
 <full story body from final agreed proposal>
 STORY_EOF
 
 ./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md
+# Returns: CREATED_DRAFT:<item_id>
 rm /tmp/story-body.md
 ```
 
-Then immediately add each story to the project queue at Ready status (skipping Draft — the Tech Lead already validated them during the planning conversation):
+Then immediately mark each story as Ready (skipping Draft — the Tech Lead already validated them during the planning conversation):
 ```bash
-PROJECT_QUEUE="./scripts/project-queue.sh"
-item_id=$(bash "$PROJECT_QUEUE" add-issue <STORY_NUM> | python3 -c "import json,sys; print(json.load(sys.stdin)['item_id'])")
-bash "$PROJECT_QUEUE" update-field "$item_id" status "Ready"
+bash ./scripts/project-queue.sh update-field <item_id> status "Ready"
 ```
 
 **7g. Post summary on epic:**
