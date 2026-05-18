@@ -101,6 +101,17 @@ Failed resources are reported individually — a failure on one resource does no
 
 Every convergence run must be safe to repeat. Modules implement Get/Set such that applying a cfg that is already converged results in zero changes. This is fundamental — the scheduled re-check depends on it.
 
+### Drift Modes
+
+The cfg's `mode` field selects how the steward responds to drift detected during convergence or scheduled re-checks:
+
+- **`apply` mode** (default for managed devices): the steward attempts local convergence and reports the outcome as a single combined message containing `{drift_detected, drift_setting, convergence_result, final_state}` — one message per drift event. The controller sees the drift and its resolution together.
+- **`monitor` mode**: the steward detects drift but does not act. Emits a non-compliance event upstream; operator action (or a separate `apply` workflow) decides whether to correct.
+
+Mode is set at the steward level (`steward.mode` in the cfg) — a single steward operates in one mode at a time across all its managed resources. Per-resource override is not in scope for v1.
+
+Controller-side logging captures both the drift event and convergence result regardless of mode, enabling flapping detection (a future enhancement) without wire-protocol changes.
+
 ## Modules
 
 Modules are the code packages that manage resources. Each resource block in the cfg references a module by name and provides module-specific configuration.
@@ -123,13 +134,16 @@ Compare and Verify are performed by the execution engine (not the module) — it
 
 ### Event Hooks
 
-Modules can optionally implement the `Monitor` interface to watch for real-time changes to their managed resources. The monitor provides a `Changes()` channel that emits `ChangeEvent` values (created, modified, deleted, permissions changed).
+Modules **should, when possible, implement the `Monitor` interface** to watch for real-time changes to their managed resources. The monitor provides a `Changes()` channel that emits `ChangeEvent` values (created, modified, deleted, permissions changed). When a change event fires, it triggers a convergence check for that specific resource rather than waiting for the next scheduled run — near-real-time drift correction for critical resources.
 
-For example:
-- The `file` module watches for filesystem changes to managed files
-- The `service` module monitors service state changes
+Some resources don't have a feasible event-source (no OS-level watcher, no vendor API hook); those modules fall back to the scheduled re-check interval (`steward.converge_interval`). Event-driven Monitor support is preferred and should be added where the underlying platform permits it.
 
-When a change event fires, it triggers a convergence check for that specific resource rather than waiting for the next scheduled run. This provides near-real-time drift correction for critical resources.
+Current adoption (as of v0.9.x):
+
+- **Implemented**: `activedirectory` module
+- **Polling-only (no Monitor yet)**: `file`, `directory`, `script`, `firewall`, `package`, `patch`
+
+Adding `Monitor` support to additional modules is an ongoing enhancement, prioritized by user impact (security-sensitive resources benefit most from event-driven detection).
 
 ## Self-Awareness
 
@@ -263,7 +277,14 @@ These behaviors require an active controller connection and are not available in
 
 ### Cfg Delivery
 
-The controller pushes cfg updates to the steward over the gRPC data plane service. Cfgs are signed by the controller's signing certificate — the steward verifies the signature before applying, ensuring cfgs cannot be tampered with in transit or injected by a rogue source. The steward stores the verified cfg locally and triggers a convergence run. If the connection is later lost, the steward continues using the last-received cfg.
+The steward receives new cfgs via two paths, both arriving over the gRPC data plane service:
+
+- **Controller-initiated sync** — after a save-IS-deploy ConfigStore write on the controller, the controller fans out a `CommandSyncConfig` to the steward, prompting it to fetch the new cfg immediately.
+- **Heartbeat-driven discovery** — every heartbeat carries the steward's current cfg version. If the controller's view diverges (newer cfg available), the next heartbeat response triggers the same sync path.
+
+Either path lands the same outcome: the steward fetches the new cfg, verifies the controller's signature, stores it locally, and triggers a convergence run. Cfgs are signed by the controller's signing certificate — the steward verifies the signature before applying, ensuring cfgs cannot be tampered with in transit or injected by a rogue source.
+
+If the controller connection is later lost, the steward continues using the last-received cfg.
 
 ### Ad-Hoc Script Execution
 
@@ -286,15 +307,41 @@ The steward participates in multi-node operations coordinated by the controller 
 
 How a steward joins a controller.
 
-1. Administrator creates a **registration token** on the controller (via REST API)
-2. Steward is started with `--regtoken <token>`
-3. Steward contacts controller, submits token
-4. Controller validates token, provisions steward identity, issues mTLS certificates
-5. Steward stores certificates locally and establishes a gRPC-over-QUIC transport connection
-6. Steward checks for a cfg from the controller
-7. Normal operation begins
+### Controller Anchor (Build Time)
 
-The `--regtoken` flag must be supplied each time the steward starts — there is no stored-certificate resume path in the current implementation. Every invocation re-registers via HTTP and receives fresh mTLS certificates from the controller.
+The steward binary is built with the controller's URL compiled in at link time (`-ldflags="-X main.ControllerURL=..."`). A given steward binary will only ever talk to its compile-time controller. Scope: per controller (or controller cluster), not per tenant — one steward binary serves all tenants the controller manages.
+
+A steward binary today connects to exactly one controller URL. Multi-controller deployments — where a steward might fail over between geographically distributed controllers (e.g., `east.cfg.ms`, `west.cfg.ms`) — are not yet supported. [GAP: multi-controller / subdomain-matching binary support — see issue #1517]
+
+### Registration Credentials
+
+Two credential flavors, both flow through the same registration API:
+
+1. **Short-lived / single-use registration tokens** — generated on the controller via `cfg token create --expires=<duration> --single-use`. Suitable for manual onboarding, small fleets, or time-bounded provisioning windows. The token is consumed on use; expiry enforces time bounds.
+2. **Long-lived tenant/group registration codes** — durable, non-single-use random opaque strings stored as a join field on the controller's tenant/group record. Suitable for RMM/GPO mass deployment where the same code is baked into a deployment script and reused by many devices. On registration the controller looks up the code in its records and assigns the steward to the matching tenant/group; the code itself carries no meaning, so renames of the tenant/group don't break previously issued codes.
+
+The administrator chooses which flavor fits the deployment workflow. Both arrive at the steward as a plain string passed via `--regtoken <token>` (or `cfgms-steward install --regtoken <token>` for the OS-service install).
+
+### Registration Flow
+
+1. Administrator creates a registration token or code on the controller.
+2. Steward is started with `--regtoken <token>`.
+3. Steward contacts its compile-time controller URL (HTTPS), submits the token.
+4. Controller validates the token (single-use: consume; long-lived code: look up the matching tenant/group record), applies the registration approval workflow (`auto-approve` or `manual-review`), and on approval issues mTLS certificates scoped to the steward's tenant/group identity.
+5. Steward stores its issued cert + node ID locally and establishes a gRPC-over-QUIC transport connection.
+6. Steward checks for a cfg from the controller.
+7. Normal operation begins.
+
+On subsequent startups the steward reuses its stored mTLS cert — no re-registration required unless the cert expires or is revoked. Cert renewal is automatic via the certificate manager.
+
+### Approval Workflow
+
+Registration approval runs through the controller's workflow engine via the `RegistrationApprovalHook`. Built-in workflows:
+
+- **`auto-approve`** (development default): accepts any valid token immediately.
+- **`manual-review`** (production): pauses the registration workflow pending operator action via `cfg registration approve <id>` or `cfg registration deny <id>`.
+
+Operators can also write custom workflows that implement arbitrary policy (e.g., auto-approve `tenant=lab` registrations, manual-review everything else).
 
 ### Bootstrap TLS Trust
 
