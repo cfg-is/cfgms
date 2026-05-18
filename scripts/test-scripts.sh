@@ -1567,6 +1567,365 @@ PYEOF
     fi
 }
 
+test_agent_dispatch_create_clone_item() {
+    log_test "Testing agent-dispatch.sh create-clone-item: LAST12 derivation and clone creation..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local remote_dir="${tmp_dir}/remote.git"
+    local host_dir="${tmp_dir}/host"
+    local worktree_dir="${tmp_dir}/worktrees"
+    # item_id from AC: PVTI_lADOtest000000012345
+    # Strip non-alphanumeric → PVTIlADOtest000000012345 (24 chars)
+    # Rightmost 12 → 000000012345
+    local item_id="PVTI_lADOtest000000012345"
+    local expected_last12="000000012345"
+    local expected_branch="feature/item-${expected_last12}-agent"
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    git init --bare -b develop "$remote_dir" >/dev/null 2>&1
+    git init -b develop "$host_dir" >/dev/null 2>&1
+    git -C "$host_dir" config user.email "test@test.com"
+    git -C "$host_dir" config user.name "Test"
+    git -C "$host_dir" remote add origin "$remote_dir"
+    git -C "$host_dir" commit --allow-empty -m "initial commit" >/dev/null 2>&1
+    git -C "$host_dir" push origin develop >/dev/null 2>&1
+
+    mkdir -p "$worktree_dir"
+
+    local output exit_code=0
+    output=$(CFGMS_TEST_REPO_ROOT="$host_dir" CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+        bash "$dispatch_script" create-clone-item "$item_id" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "agent_dispatch_create_clone_item: exits 0 for item_id ${item_id}"
+    else
+        log_fail "agent_dispatch_create_clone_item: exited ${exit_code}: ${output}"
+        rm -rf "$tmp_dir"
+        return
+    fi
+
+    # Full match: verifies correct LAST12 and branch name, not just prefix
+    if echo "$output" | grep -q "CLONE_OK:item-${expected_last12}:${expected_branch}"; then
+        log_pass "agent_dispatch_create_clone_item: stdout contains full CLONE_OK:item-${expected_last12}:${expected_branch}"
+    else
+        log_fail "agent_dispatch_create_clone_item: expected 'CLONE_OK:item-${expected_last12}:${expected_branch}' in output: ${output}"
+    fi
+
+    local clone_dir="${worktree_dir}/item-${expected_last12}"
+    if [[ -d "$clone_dir" ]]; then
+        log_pass "agent_dispatch_create_clone_item: clone directory created at item-${expected_last12}"
+    else
+        log_fail "agent_dispatch_create_clone_item: clone directory '${clone_dir}' not created"
+    fi
+
+    # Verify checked-out branch matches expected item branch name
+    local actual_branch
+    actual_branch=$(git -C "$clone_dir" branch --show-current 2>/dev/null || echo "(unknown)")
+    if [[ "$actual_branch" == "$expected_branch" ]]; then
+        log_pass "agent_dispatch_create_clone_item: cloned repo is on expected branch ${expected_branch}"
+    else
+        log_fail "agent_dispatch_create_clone_item: expected branch '${expected_branch}', got '${actual_branch}'"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+test_cleanup_issue_item_mode() {
+    log_test "Testing agent-dispatch.sh cleanup-issue: non-numeric item_id targets item container/clone..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local worktree_dir="${tmp_dir}/worktrees"
+    # item_id: PVTI_itemcleanup123 → strip non-alnum → PVTIitemcleanup123 (18) → last 12 = itemcleanup123... wait
+    # PVTIitemcleanup123: P(1)V(2)T(3)I(4)i(5)t(6)e(7)m(8)c(9)l(10)e(11)a(12)n(13)u(14)p(15)1(16)2(17)3(18)
+    # last 12 = cleanup123...
+    # Actually: nup123 is wrong. Let me use a simpler example.
+    # PVTI_testclean99 → PVTItestclean99 (15 chars) → last 12 = testclean99... that's 11...
+    # PVTItestclean99: P(1)V(2)T(3)I(4)t(5)e(6)s(7)t(8)c(9)l(10)e(11)a(12)n(13)9(14)9(15) → last 12: testclean99 (only 11 after index 4)
+    # Let me use PVTI_abcdefghij0123 → PVTIabcdefghij0123 (18 chars) → last 12 = bcdefghij0123...
+    # Wait that's 13. Let me count: PVTIabcdefghij0123: P,V,T,I,a,b,c,d,e,f,g,h,i,j,0,1,2,3 = 18 chars
+    # last 12 = chars 7-18 = efghij0123... that's 12 chars: e,f,g,h,i,j,0,1,2,3 = only 10
+    # OK let me just compute it properly:
+    # Strip non-alnum from PVTI_testcleanXY123 → PVTItestcleanXY123 → 18 chars
+    # Last 12: chars 7-18 = "eanXY123" ... hmm let me just pick a clear item_id
+    # PVTI_item000000000042 → strip non-alnum → PVTIitem000000000042 (20 chars) → last 12 = 000000000042
+    local item_id="PVTI_item000000000042"
+    local expected_last12="000000000042"
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    mkdir -p "$worktree_dir"
+    local clone_dir="${worktree_dir}/item-${expected_last12}"
+    # Pre-create the clone directory so cleanup can remove it and we can verify
+
+    mkdir -p "$clone_dir"
+
+    local output exit_code=0
+    output=$(CFGMS_TEST_REPO_ROOT="$(pwd)" CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+        bash "$dispatch_script" cleanup-issue "$item_id" 2>&1) || exit_code=$?
+
+    # Container removal will fail (not found is fine — docker not available or container absent)
+    # We check the SKIP or CLEANED message uses the correct item container name
+
+    if echo "$output" | grep -q "cfg-agent-item-${expected_last12}"; then
+        log_pass "cleanup_issue_item_mode: targets correct container name cfg-agent-item-${expected_last12}"
+    else
+        log_fail "cleanup_issue_item_mode: expected container name 'cfg-agent-item-${expected_last12}' in output: ${output}"
+    fi
+
+    if echo "$output" | grep -q "CLEANED:clone:${clone_dir}"; then
+        log_pass "cleanup_issue_item_mode: clone directory ${clone_dir} cleaned"
+    else
+        log_fail "cleanup_issue_item_mode: expected 'CLEANED:clone:${clone_dir}' in output: ${output}"
+    fi
+
+    if [[ ! -d "$clone_dir" ]]; then
+        log_pass "cleanup_issue_item_mode: clone directory removed on disk"
+    else
+        log_fail "cleanup_issue_item_mode: clone directory still exists after cleanup"
+    fi
+
+    if echo "$output" | grep -q "CLEANUP_DONE:${item_id}"; then
+        log_pass "cleanup_issue_item_mode: CLEANUP_DONE reports original item_id"
+    else
+        log_fail "cleanup_issue_item_mode: expected 'CLEANUP_DONE:${item_id}' in output: ${output}"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+test_review_pr_item_branch() {
+    log_test "Testing review-pr item-branch: scans project queue and refuses when item_id not found..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local worktree_dir="${tmp_dir}/worktrees"
+    local pq_calls_file="${tmp_dir}/pq-calls.txt"
+    touch "$pq_calls_file"
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    mkdir -p "$worktree_dir"
+
+    # Fake repo root with a scripts/project-queue.sh that records calls and returns empty
+    local fake_repo="${tmp_dir}/repo"
+    mkdir -p "${fake_repo}/scripts"
+    cat > "${fake_repo}/scripts/project-queue.sh" << PQEOF
+#!/usr/bin/env bash
+echo "\$@" >> "${pq_calls_file}"
+printf '[]\n'
+exit 0
+PQEOF
+    chmod +x "${fake_repo}/scripts/project-queue.sh"
+
+    # Mock gh: returns an open item-branch PR
+    cat > "${tmp_dir}/gh" << 'GHEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "pr" && "$2" == "view" ]]; then
+    printf '{"state":"OPEN","headRefName":"feature/item-ABCD12345678-agent","body":"No fixes link","labels":[],"headRepositoryOwner":{"login":"cfg-is"}}\n'
+elif [[ "$1" == "auth" && "$2" == "token" ]]; then
+    echo "fake-token"
+else
+    printf '{}\n'
+fi
+exit 0
+GHEOF
+    chmod +x "${tmp_dir}/gh"
+
+    # Mock docker: returns empty (no existing containers or images)
+    cat > "${tmp_dir}/docker" << 'DOCKEREOF'
+#!/usr/bin/env bash
+exit 0
+DOCKEREOF
+    chmod +x "${tmp_dir}/docker"
+
+    local output exit_code=0
+    output=$(
+        PATH="${tmp_dir}:${PATH}" \
+        CFGMS_TEST_REPO_ROOT="$fake_repo" \
+        CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+        bash "$dispatch_script" review-pr 77 2>&1
+    ) || exit_code=$?
+
+    if [[ $exit_code -eq 3 ]]; then
+        log_pass "review_pr_item_branch: exits 3 when no item_id found for item branch"
+    else
+        log_fail "review_pr_item_branch: expected exit 3, got ${exit_code}: ${output}"
+    fi
+
+    if echo "$output" | grep -q "REVIEW_REFUSED:77:no_story_link"; then
+        log_pass "review_pr_item_branch: emits REVIEW_REFUSED:77:no_story_link after scans find nothing"
+    else
+        log_fail "review_pr_item_branch: expected 'REVIEW_REFUSED:77:no_story_link' in: ${output}"
+    fi
+
+    # Verify that the item-branch scan path was actually executed (list-by-status called)
+    if grep -q "list-by-status" "$pq_calls_file" 2>/dev/null; then
+        log_pass "review_pr_item_branch: project-queue list-by-status was called (scan attempted)"
+    else
+        log_fail "review_pr_item_branch: list-by-status not called — item-branch scan path not exercised"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+test_entrypoint_set_pr_call() {
+    log_test "Testing entrypoint.sh: set-pr called after PR creation with CFGMS_PROJECT_ITEM_ID..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    local calls_file="${tmp_dir}/pq-calls.txt"
+    touch "$calls_file"
+
+    # Fake HOME with credentials (far-future expiry so token check passes)
+    local fake_home="${tmp_dir}/home"
+    mkdir -p "${fake_home}/.claude"
+    cat > "${fake_home}/.claude/.credentials.json" << 'CREDEOF'
+{"claudeAiOauth":{"expiresAt":9999999999999,"accessToken":"fake","refreshToken":"fake"}}
+CREDEOF
+    cat > "${fake_home}/.claude.json" << 'CONFIGEOF'
+{"hasCompletedOnboarding":true}
+CONFIGEOF
+
+    # Git repo with correct branch so git branch --show-current returns story branch
+    local git_dir="${tmp_dir}/repo"
+    git init -b develop "$git_dir" >/dev/null 2>&1
+    git -C "$git_dir" config user.email "test@test.com"
+    git -C "$git_dir" config user.name "Test"
+    git -C "$git_dir" commit --allow-empty -m "initial" >/dev/null 2>&1
+    git -C "$git_dir" checkout -b "feature/story-999-agent" >/dev/null 2>&1
+
+    # Mock setup-env.sh — minimal: just git config (no firewall/credentials setup needed)
+    cat > "${tmp_dir}/setup-env.sh" << 'SETUPEOF'
+#!/usr/bin/env bash
+git config --global user.name "test-agent" 2>/dev/null || true
+git config --global user.email "agent@test.com" 2>/dev/null || true
+SETUPEOF
+    chmod +x "${tmp_dir}/setup-env.sh"
+
+    # Mock claude: creates validation marker and exits 0
+    cat > "${tmp_dir}/claude" << 'CLAUDEOF'
+#!/usr/bin/env bash
+touch /tmp/agent-validation-passed
+exit 0
+CLAUDEOF
+    chmod +x "${tmp_dir}/claude"
+
+    # Mock gh: returns PR URL for pr list, {} for everything else
+    cat > "${tmp_dir}/gh" << 'GHEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "pr" && "$2" == "list" ]]; then
+    echo "https://github.com/cfg-is/cfgms/pull/42"
+else
+    echo "{}"
+fi
+exit 0
+GHEOF
+    chmod +x "${tmp_dir}/gh"
+
+    # Mock project-queue.sh: records all calls, responds to get-item and set-pr
+    local pq_recorder="${tmp_dir}/pq-recorder.sh"
+    cat > "$pq_recorder" << PQEOF
+#!/usr/bin/env bash
+echo "\$@" >> "${calls_file}"
+subcmd="\${1:-}"
+case "\$subcmd" in
+    get-item)
+        printf '{"item_id":"PVTI_testitem","title":"Test Story 999","body":"Test body content.","status":"In Progress","fields":{}}\n'
+        ;;
+    set-pr)
+        printf '{"updated":true}\n'
+        ;;
+    *)
+        printf '[]\n'
+        ;;
+esac
+exit 0
+PQEOF
+    chmod +x "$pq_recorder"
+
+    local entrypoint_script
+    entrypoint_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.devcontainer/entrypoint.sh"
+
+    if [[ ! -f "$entrypoint_script" ]]; then
+        log_fail "entrypoint_set_pr_call: entrypoint.sh not found at ${entrypoint_script}"
+        return
+    fi
+
+    # Run entrypoint.sh from the temp git repo (so git branch --show-current works)
+    rm -f /tmp/agent-validation-passed
+    local output exit_code=0
+    output=$(
+        cd "$git_dir"
+        PATH="${tmp_dir}:${PATH}" \
+        HOME="${fake_home}" \
+        CFGMS_PROJECT_ITEM_ID="PVTI_testitem" \
+        CFGMS_TEST_PROJECT_QUEUE="$pq_recorder" \
+        bash "$entrypoint_script" 999 2>&1
+    ) || exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "entrypoint_set_pr_call: entrypoint exits 0 with valid mocks"
+    else
+        log_fail "entrypoint_set_pr_call: entrypoint exited ${exit_code}: ${output}"
+        return
+    fi
+
+    if grep -q "set-pr PVTI_testitem 42" "$calls_file" 2>/dev/null; then
+        log_pass "entrypoint_set_pr_call: set-pr called with correct item_id and PR number (42)"
+    else
+        log_fail "entrypoint_set_pr_call: set-pr not called correctly (calls: $(cat "$calls_file" 2>/dev/null))"
+    fi
+
+    # Non-fatal assertion: set-pr failure must not cause entrypoint to fail
+    local fail_pq="${tmp_dir}/fail-pq.sh"
+    cat > "$fail_pq" << FAILPQEOF
+#!/usr/bin/env bash
+subcmd="\${1:-}"
+case "\$subcmd" in
+    get-item)
+        printf '{"item_id":"PVTI_testitem","title":"Test Story 999","body":"Test body.","status":"In Progress","fields":{}}\n'
+        ;;
+    set-pr)
+        echo "simulated set-pr failure" >&2
+        exit 1
+        ;;
+    *)
+        printf '[]\n'
+        ;;
+esac
+FAILPQEOF
+    chmod +x "$fail_pq"
+
+    rm -f /tmp/agent-validation-passed
+    local fail_exit=0
+    local fail_output
+    fail_output=$(
+        cd "$git_dir"
+        PATH="${tmp_dir}:${PATH}" \
+        HOME="${fake_home}" \
+        CFGMS_PROJECT_ITEM_ID="PVTI_testitem" \
+        CFGMS_TEST_PROJECT_QUEUE="$fail_pq" \
+        bash "$entrypoint_script" 999 2>&1
+    ) || fail_exit=$?
+
+    if [[ $fail_exit -eq 0 ]]; then
+        log_pass "entrypoint_set_pr_call: entrypoint exits 0 even when set-pr fails (non-fatal)"
+    else
+        log_fail "entrypoint_set_pr_call: entrypoint should exit 0 when set-pr fails, got ${fail_exit}"
+    fi
+
+    if echo "$fail_output" | grep -q "WARN"; then
+        log_pass "entrypoint_set_pr_call: entrypoint emits WARN when set-pr fails"
+    else
+        log_fail "entrypoint_set_pr_call: should emit WARN when set-pr fails (output: ${fail_output})"
+    fi
+}
+
 # Main execution
 echo "🔍 Script Validation Test Suite"
 echo "================================"
@@ -1610,6 +1969,14 @@ echo ""
 test_project_queue_set_pr
 echo ""
 test_create_clone_item
+echo ""
+test_agent_dispatch_create_clone_item
+echo ""
+test_cleanup_issue_item_mode
+echo ""
+test_review_pr_item_branch
+echo ""
+test_entrypoint_set_pr_call
 echo ""
 test_preflight_item_dispatch
 echo ""
