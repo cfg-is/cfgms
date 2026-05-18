@@ -1236,6 +1236,48 @@ test_trust_boundary() {
     fi
 }
 
+test_no_pipeline_label_refs() {
+    log_test "Testing: no pipeline:* or agent:* label references in .claude/ or scripts/..."
+
+    local root
+    root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
+
+    # Falsifiability check: inject a prohibited label into a temp file and verify
+    # the grep pattern fires, so a broken grep doesn't silently always pass.
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' RETURN
+    printf '# prohibited: pipeline:story label reference\n' > "$tmp_dir/probe.sh"
+    local probe_matches
+    probe_matches=$(grep -rn \
+        "pipeline:story\|pipeline:draft\|pipeline:review\|pipeline:ready\|agent:ready\|agent:success\|agent:in-progress\|agent:failed" \
+        "$tmp_dir/" \
+        2>/dev/null) || true
+    if [[ -n "$probe_matches" ]]; then
+        log_pass "no_pipeline_label_refs: grep pattern correctly detects violations (falsifiability)"
+    else
+        log_fail "no_pipeline_label_refs: grep pattern failed to detect injected violation — grep is broken"
+        return
+    fi
+
+    # Real check: assert zero matches in the actual codebase directories.
+    local matches
+    matches=$(grep -rn \
+        "pipeline:story\|pipeline:draft\|pipeline:review\|pipeline:ready\|agent:ready\|agent:success\|agent:in-progress\|agent:failed" \
+        "${root}/.claude/" "${root}/scripts/" \
+        --exclude="test-scripts.sh" \
+        2>/dev/null) || true
+
+    if [[ -z "$matches" ]]; then
+        log_pass "no_pipeline_label_refs: zero prohibited label references in .claude/ and scripts/"
+    else
+        log_fail "no_pipeline_label_refs: found prohibited label references (remove them):"
+        while IFS= read -r line; do
+            echo "    $line"
+        done <<< "$matches"
+    fi
+}
+
 test_preflight_item_dispatch() {
     log_test "Testing po-cycle-preflight.py: project_queue_list_by_status includes pure draft items via CFGMS_TEST_PROJECT_QUEUE..."
 
@@ -1985,6 +2027,8 @@ echo ""
 test_preflight_forged_acceptance_review
 echo ""
 test_trust_boundary
+echo ""
+test_no_pipeline_label_refs
 echo ""
 echo ""
 echo "📊 Test Summary"

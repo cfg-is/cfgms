@@ -210,9 +210,9 @@ cat > /tmp/story-body.md <<'STORY_EOF'
 ...full story body...
 STORY_EOF
 
-# Create the story issue AND link as sub-issue (helper does both)
+# Create the story as a project draft item (not a GitHub issue)
 ./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md
-# Output: CREATED:<NUM>:<URL> then LINKED:<NUM>:epic-<EPIC_NUM>
+# Output: CREATED_DRAFT:<item_id>
 
 rm /tmp/story-body.md
 ```
