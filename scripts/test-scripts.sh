@@ -1236,6 +1236,259 @@ test_trust_boundary() {
     fi
 }
 
+test_preflight_item_dispatch() {
+    log_test "Testing po-cycle-preflight.py: project_queue_list_by_status includes pure draft items via CFGMS_TEST_PROJECT_QUEUE..."
+
+    local preflight_script
+    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-cycle-preflight.py"
+
+    if [[ ! -f "$preflight_script" ]]; then
+        log_fail "po-cycle-preflight.py: not found at $preflight_script"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    # Mock project-queue.sh: responds to list-by-status Ready with a pure draft item,
+    # all other subcommands return empty array.
+    local mock_pq="${tmp_dir}/project-queue.sh"
+    cat > "$mock_pq" << 'MOCKEOF'
+#!/usr/bin/env bash
+subcmd="${1:-}"
+status="${2:-}"
+if [[ "$subcmd" == "list-by-status" && "$status" == "Ready" ]]; then
+    printf '[{"item_id":"PVTI_test123456789012","issue_num":null,"title":"pure draft"}]\n'
+else
+    printf '[]\n'
+fi
+exit 0
+MOCKEOF
+    chmod +x "$mock_pq"
+
+    local tmp_py
+    tmp_py=$(mktemp --suffix=.py)
+    # Use importlib.util to load the hyphen-named file (matching existing test pattern).
+    cat > "$tmp_py" << PYEOF
+import sys, os, importlib.util
+os.environ['CFGMS_TEST_PROJECT_QUEUE'] = '${mock_pq}'
+spec = importlib.util.spec_from_file_location('preflight', '${preflight_script}')
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+r = mod.project_queue_list_by_status('Ready')
+assert any(i.get('item_id') == 'PVTI_test123456789012' and i.get('number') is None for i in r), f'FAIL: {r}'
+print('PASS')
+PYEOF
+
+    local output exit_code=0
+    output=$(python3 "$tmp_py" 2>&1) || exit_code=$?
+    rm -f "$tmp_py"
+
+    if [[ $exit_code -eq 0 ]] && echo "$output" | grep -q "^PASS"; then
+        log_pass "preflight item dispatch: pure draft item_id preserved, number=null, included in results"
+    else
+        log_fail "preflight item dispatch: assertion failed (exit $exit_code): $output"
+    fi
+}
+
+test_done_on_merge() {
+    log_test "Testing po-cycle-preflight.py: auto_close_merged_items marks Done when PR is MERGED..."
+
+    local preflight_script
+    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-cycle-preflight.py"
+
+    if [[ ! -f "$preflight_script" ]]; then
+        log_fail "po-cycle-preflight.py: not found at $preflight_script"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    local calls_file="${tmp_dir}/calls.txt"
+    touch "$calls_file"
+
+    # Mock project-queue.sh:
+    # - list-by-status "In Progress" → item with PR field
+    # - get-item PVTI_dmtest → item with PR=1234
+    # - update-field → records call and succeeds
+    local mock_pq="${tmp_dir}/project-queue.sh"
+    cat > "$mock_pq" << MOCKEOF
+#!/usr/bin/env bash
+subcmd="\${1:-}"
+case "\$subcmd" in
+  list-by-status)
+    printf '[{"item_id":"PVTI_dmtest","issue_num":null,"title":"t","status":"In Progress"}]\n'
+    ;;
+  get-item)
+    printf '{"item_id":"PVTI_dmtest","fields":{"PR":"1234"},"status":"In Progress","title":"t","body":""}\n'
+    ;;
+  update-field)
+    echo "\$@" >> "${calls_file}"
+    printf '{"updated":true}\n'
+    ;;
+  *)
+    printf '[]\n'
+    ;;
+esac
+exit 0
+MOCKEOF
+    chmod +x "$mock_pq"
+
+    # Mock gh that returns MERGED for pr view 1234
+    local mock_gh="${tmp_dir}/gh"
+    cat > "$mock_gh" << 'MOCKEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "pr" && "$2" == "view" && "$3" == "1234" ]]; then
+    printf '"MERGED"\n'
+else
+    printf '{}\n'
+fi
+exit 0
+MOCKEOF
+    chmod +x "$mock_gh"
+
+    # Use a temp Python script (importlib.util pattern matching existing tests).
+    local tmp_py
+    tmp_py=$(mktemp --suffix=.py)
+    cat > "$tmp_py" << PYEOF
+import sys, os, importlib.util
+os.environ['CFGMS_TEST_PROJECT_QUEUE'] = '${mock_pq}'
+os.environ['PATH'] = '${tmp_dir}:' + os.environ.get('PATH', '')
+spec = importlib.util.spec_from_file_location('preflight', '${preflight_script}')
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+count = mod.auto_close_merged_items()
+assert count == 1, f'Expected count=1 (one item closed), got count={count}'
+print(f'COUNT:{count}')
+PYEOF
+
+    local output exit_code=0
+    output=$(python3 "$tmp_py" 2>&1) || exit_code=$?
+    rm -f "$tmp_py"
+
+    if [[ $exit_code -eq 0 ]] && echo "$output" | grep -q "^COUNT:1"; then
+        log_pass "done_on_merge: auto_close_merged_items exits 0 and returned count=1"
+    else
+        log_fail "done_on_merge: expected exit 0 and COUNT:1 (exit=$exit_code): $output"
+    fi
+
+    if grep -q "update-field PVTI_dmtest status Done" "$calls_file" 2>/dev/null; then
+        log_pass "done_on_merge: update-field PVTI_dmtest status Done was called"
+    else
+        log_fail "done_on_merge: update-field call not recorded (calls: $(cat "$calls_file" 2>/dev/null))"
+    fi
+
+    # Test that a failing update-field is still non-fatal
+    local fail_pq="${tmp_dir}/fail-project-queue.sh"
+    cat > "$fail_pq" << MOCKEOF2
+#!/usr/bin/env bash
+subcmd="\${1:-}"
+case "\$subcmd" in
+  list-by-status)
+    printf '[{"item_id":"PVTI_dmtest","issue_num":null,"title":"t","status":"In Progress"}]\n'
+    ;;
+  get-item)
+    printf '{"item_id":"PVTI_dmtest","fields":{"PR":"1234"},"status":"In Progress","title":"t","body":""}\n'
+    ;;
+  update-field)
+    echo "simulated failure" >&2
+    exit 1
+    ;;
+  *)
+    printf '[]\n'
+    ;;
+esac
+exit 0
+MOCKEOF2
+    chmod +x "$fail_pq"
+
+    local tmp_py2
+    tmp_py2=$(mktemp --suffix=.py)
+    cat > "$tmp_py2" << PYEOF2
+import sys, os, importlib.util
+os.environ['CFGMS_TEST_PROJECT_QUEUE'] = '${fail_pq}'
+os.environ['PATH'] = '${tmp_dir}:' + os.environ.get('PATH', '')
+spec = importlib.util.spec_from_file_location('preflight', '${preflight_script}')
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod.auto_close_merged_items()
+PYEOF2
+
+    local fail_exit=0
+    python3 "$tmp_py2" 2>/dev/null || fail_exit=$?
+    rm -f "$tmp_py2"
+
+    if [[ $fail_exit -eq 0 ]]; then
+        log_pass "done_on_merge: failing update-field does not cause auto_close_merged_items to exit non-zero"
+    else
+        log_fail "done_on_merge: auto_close_merged_items should be non-fatal even when update-field fails (exit $fail_exit)"
+    fi
+}
+
+test_create_clone_item() {
+    log_test "Testing create-clone-item: branch and worktree created from item_id LAST12..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local remote_dir="${tmp_dir}/remote.git"
+    local host_dir="${tmp_dir}/host"
+    local worktree_dir="${tmp_dir}/worktrees"
+    local item_id="PVTI_abc123456789012"
+    # LAST12 = last 12 alphanumeric chars of item_id: "PVTIabc123456789012" → last 12 = "123456789012"
+    local expected_last12="123456789012"
+    local expected_branch="feature/item-${expected_last12}-agent"
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    git init --bare -b develop "$remote_dir" >/dev/null 2>&1
+    git init -b develop "$host_dir" >/dev/null 2>&1
+    git -C "$host_dir" config user.email "test@test.com"
+    git -C "$host_dir" config user.name "Test"
+    git -C "$host_dir" remote add origin "$remote_dir"
+    git -C "$host_dir" commit --allow-empty -m "initial commit" >/dev/null 2>&1
+    git -C "$host_dir" push origin develop >/dev/null 2>&1
+
+    mkdir -p "$worktree_dir"
+
+    local output exit_code=0
+    output=$(CFGMS_TEST_REPO_ROOT="$host_dir" CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+        bash "$dispatch_script" create-clone-item "$item_id" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "create-clone-item: exits 0 for valid item_id"
+    else
+        log_fail "create-clone-item: exited $exit_code: $output"
+        rm -rf "$tmp_dir"
+        return
+    fi
+
+    if echo "$output" | grep -q "CLONE_OK:item-${expected_last12}:${expected_branch}"; then
+        log_pass "create-clone-item: output contains CLONE_OK:item-<LAST12>:<branch>"
+    else
+        log_fail "create-clone-item: expected 'CLONE_OK:item-${expected_last12}:${expected_branch}' not found in: $output"
+    fi
+
+    local clone_dir="${worktree_dir}/item-${expected_last12}"
+    if [[ -d "$clone_dir" ]]; then
+        log_pass "create-clone-item: clone directory created at item-<LAST12>"
+    else
+        log_fail "create-clone-item: clone directory '${clone_dir}' not created"
+    fi
+
+    if git -C "$clone_dir" branch --show-current 2>/dev/null | grep -q "^${expected_branch}$"; then
+        log_pass "create-clone-item: cloned repo is on branch feature/item-<LAST12>-agent"
+    else
+        local actual_branch
+        actual_branch=$(git -C "$clone_dir" branch --show-current 2>/dev/null || echo "(unknown)")
+        log_fail "create-clone-item: expected branch '${expected_branch}', got '${actual_branch}'"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
 test_preflight_forged_acceptance_review() {
     log_test "Testing po-cycle-preflight.py: forged acceptance review comment rejected (author-gate)..."
 
@@ -1355,6 +1608,12 @@ echo ""
 test_project_queue_integration
 echo ""
 test_project_queue_set_pr
+echo ""
+test_create_clone_item
+echo ""
+test_preflight_item_dispatch
+echo ""
+test_done_on_merge
 echo ""
 test_preflight_forged_acceptance_review
 echo ""
