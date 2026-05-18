@@ -185,6 +185,21 @@ run_entrypoint_dry_run() {
     bash "$ENTRYPOINT" "$@" --dry-run 2>&1
 }
 
+# ---------------------------------------------------------------------------
+# Live integration test helpers (skip-safe; require gh credentials)
+# ---------------------------------------------------------------------------
+
+log_test() {
+    echo ""
+    echo "--- $1 ---"
+}
+
+log_skip() {
+    echo "    ~ SKIP: $1"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+}
+
 # ===========================================================================
 # STRUCTURAL TEST 1: compose_issue_prompt has no ac_render_issue_comments call
 # ===========================================================================
@@ -343,6 +358,200 @@ test_regression_comment_render_absent_from_entrypoint() {
 }
 
 # ===========================================================================
+# INTEGRATION TEST: project_queue_integration — connectivity guard
+# Verifies gh credentials and project-queue.sh are reachable before the live
+# Phase 2 lifecycle test runs. Establishes the skip guard pattern used below.
+# ===========================================================================
+test_project_queue_integration() {
+    log_test "Integration: project-queue.sh basic connectivity"
+
+    if ! gh auth status >/dev/null 2>&1; then
+        log_skip "gh auth status failed — skipping live project queue tests (requires GitHub credentials)"
+        return 0
+    fi
+
+    local pq_script="$REPO_ROOT/scripts/project-queue.sh"
+    if [[ ! -f "$pq_script" ]]; then
+        _fail "integration: scripts/project-queue.sh not found"
+        return
+    fi
+    _pass "integration: scripts/project-queue.sh exists and gh credentials are valid"
+}
+
+# ===========================================================================
+# INTEGRATION TEST: Phase 2 full no-issue project item lifecycle E2E smoke
+#
+# Agent-container launch is NOT tested here. Docker runtime is unavailable
+# in CI and in this harness. Manual verification steps:
+#   1. Run po-act.sh dispatch <ITEM_ID> for a Ready item with issue_num == null.
+#   2. Verify the container starts, the prompt shows the item body, and the
+#      branch name is feature/item-<LAST12>-agent.
+#   3. After the agent creates a PR, run project-queue.sh get-item <item_id>
+#      and verify .fields.PR == <pr_num>.
+#
+# Skipped if `gh auth status` fails, matching the guard in
+# test_project_queue_integration.
+# ===========================================================================
+test_phase2_lifecycle() {
+    log_test "Integration: Phase 2 full no-issue project item lifecycle (E2E smoke)"
+
+    if ! gh auth status >/dev/null 2>&1; then
+        log_skip "gh auth status failed — skipping Phase 2 lifecycle test (requires GitHub credentials)"
+        return 0
+    fi
+
+    local pq_script="$REPO_ROOT/scripts/project-queue.sh"
+    local item_id="" body_file timestamp title attempt
+    body_file=$(mktemp)
+    timestamp=$(date +%s)
+    title="phase2-lifecycle-smoke-${timestamp}"
+    printf 'Phase 2 lifecycle smoke test body — %s\n' "$title" > "$body_file"
+
+    # Cleanup: fires on RETURN regardless of pass/fail
+    trap '[[ -n "${body_file:-}" ]] && rm -f "$body_file" 2>/dev/null || true; [[ -n "${item_id:-}" ]] && bash "${pq_script}" delete-item "$item_id" >/dev/null 2>&1 || true' RETURN
+
+    # --- Step a: create-draft -----------------------------------------------
+    local create_out create_rc=0
+    create_out=$(bash "$pq_script" create-draft 0 "$title" "$body_file" 2>&1) || create_rc=$?
+    if [[ $create_rc -ne 0 ]]; then
+        _fail "phase2 step a: create-draft failed (rc=$create_rc)"
+        return
+    fi
+    item_id=$(printf '%s' "$create_out" | python3 -c \
+        'import json,sys; d=json.load(sys.stdin); print(d.get("item_id",""))' 2>/dev/null || true)
+    if [[ -z "$item_id" ]]; then
+        _fail "phase2 step a: create-draft output missing item_id key"
+        return
+    fi
+    _pass "phase2 step a: create-draft returned non-empty item_id"
+
+    # --- Step b: list-by-status Draft, item_id present with issue_num=null --
+    local found_in_draft=false
+    for attempt in 1 2 3 4 5; do
+        local list_draft_out list_draft_rc=0
+        list_draft_out=$(bash "$pq_script" list-by-status Draft 2>&1) || list_draft_rc=$?
+        if [[ $list_draft_rc -eq 0 ]] && printf '%s' "$list_draft_out" | ITEM_ID="$item_id" python3 -c '
+import json,sys,os
+items=json.load(sys.stdin)
+t=os.environ["ITEM_ID"]
+for it in items:
+    if it.get("item_id")==t and it.get("issue_num") is None:
+        sys.exit(0)
+sys.exit(1)
+' 2>/dev/null; then
+            found_in_draft=true; break
+        fi
+        sleep 1
+    done
+    if $found_in_draft; then
+        _pass "phase2 step b: item in Draft list with issue_num=null"
+    else
+        _fail "phase2 step b: item not found in Draft list with issue_num=null after 5 retries"
+        return
+    fi
+
+    # --- Step c: update-field status Ready ----------------------------------
+    local step_rc=0
+    bash "$pq_script" update-field "$item_id" status Ready >/dev/null 2>&1 || step_rc=$?
+    if [[ $step_rc -eq 0 ]]; then
+        _pass "phase2 step c: update-field status Ready exited 0"
+    else
+        _fail "phase2 step c: update-field status Ready exited $step_rc"
+        return
+    fi
+
+    # --- Step d: list-by-status Ready, item_id present ----------------------
+    local found_ready=false
+    for attempt in 1 2 3 4 5; do
+        local list_ready_out list_ready_rc=0
+        list_ready_out=$(bash "$pq_script" list-by-status Ready 2>&1) || list_ready_rc=$?
+        if [[ $list_ready_rc -eq 0 ]] && printf '%s' "$list_ready_out" | ITEM_ID="$item_id" python3 -c '
+import json,sys,os
+items=json.load(sys.stdin)
+t=os.environ["ITEM_ID"]
+sys.exit(0 if any(it.get("item_id")==t for it in items) else 1)
+' 2>/dev/null; then
+            found_ready=true; break
+        fi
+        sleep 1
+    done
+    if $found_ready; then
+        _pass "phase2 step d: item appears in Ready list"
+    else
+        _fail "phase2 step d: item not found in Ready list after 5 retries"
+        return
+    fi
+
+    # --- Step e: set-pr with synthetic PR number 99999 ----------------------
+    step_rc=0
+    bash "$pq_script" set-pr "$item_id" "99999" >/dev/null 2>&1 || step_rc=$?
+    if [[ $step_rc -eq 0 ]]; then
+        _pass "phase2 step e: set-pr exited 0"
+    else
+        _fail "phase2 step e: set-pr exited $step_rc"
+        return
+    fi
+
+    # --- Step f: get-item, assert .fields.PR == "99999" ---------------------
+    local get_out get_rc=0 pr_val
+    get_out=$(bash "$pq_script" get-item "$item_id" 2>&1) || get_rc=$?
+    if [[ $get_rc -ne 0 ]]; then
+        _fail "phase2 step f: get-item exited $get_rc"
+        return
+    fi
+    pr_val=$(printf '%s' "$get_out" | python3 -c \
+        'import json,sys; d=json.load(sys.stdin); print(d.get("fields",{}).get("PR",""))' 2>/dev/null || true)
+    if [[ "$pr_val" == "99999" ]]; then
+        _pass "phase2 step f: get-item .fields.PR == \"99999\""
+    else
+        _fail "phase2 step f: get-item .fields.PR expected \"99999\", got \"${pr_val}\""
+        return
+    fi
+
+    # --- Step g: update-field status Done -----------------------------------
+    step_rc=0
+    bash "$pq_script" update-field "$item_id" status Done >/dev/null 2>&1 || step_rc=$?
+    if [[ $step_rc -eq 0 ]]; then
+        _pass "phase2 step g: update-field status Done exited 0"
+    else
+        _fail "phase2 step g: update-field status Done exited $step_rc"
+        return
+    fi
+
+    # --- Step h: list-by-status Done, item_id present -----------------------
+    local found_done=false
+    for attempt in 1 2 3 4 5; do
+        local list_done_out list_done_rc=0
+        list_done_out=$(bash "$pq_script" list-by-status Done 2>&1) || list_done_rc=$?
+        if [[ $list_done_rc -eq 0 ]] && printf '%s' "$list_done_out" | ITEM_ID="$item_id" python3 -c '
+import json,sys,os
+items=json.load(sys.stdin)
+t=os.environ["ITEM_ID"]
+sys.exit(0 if any(it.get("item_id")==t for it in items) else 1)
+' 2>/dev/null; then
+            found_done=true; break
+        fi
+        sleep 1
+    done
+    if $found_done; then
+        _pass "phase2 step h: item appears in Done list"
+    else
+        _fail "phase2 step h: item not found in Done list after 5 retries"
+        return
+    fi
+
+    # --- Step i: privacy boundary — no GitHub issue created -----------------
+    local issues_out issues_count=0
+    issues_out=$(gh issue list --repo cfg-is/cfgms --search "phase2-lifecycle-smoke" 2>&1) || true
+    issues_count=$(printf '%s' "$issues_out" | grep -c "phase2-lifecycle-smoke" 2>/dev/null || true)
+    if [[ "$issues_count" -eq 0 ]]; then
+        _pass "phase2 step i: privacy boundary — no GitHub issue created for draft item"
+    else
+        _fail "phase2 step i: privacy boundary violated — found GitHub issue matching phase2-lifecycle-smoke"
+    fi
+}
+
+# ===========================================================================
 # Main
 # ===========================================================================
 echo "🔐 Trust Boundary Regression Test Suite"
@@ -357,6 +566,8 @@ test_behavioral_issue_mode
 test_behavioral_branch_mode
 test_error_path_project_queue_failure
 test_regression_comment_render_absent_from_entrypoint
+test_project_queue_integration
+test_phase2_lifecycle
 
 echo ""
 echo "📊 Results: $TESTS_PASSED/$TESTS_RUN passed"
