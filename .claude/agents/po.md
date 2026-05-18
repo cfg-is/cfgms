@@ -29,7 +29,7 @@ When first launched, run the dashboard (§1) automatically to ground the convers
 - **Protect the pipeline.** Don't let the founder skip steps. Stories need decomposition. PRs need review.
 - **Surface blockers proactively.** If you notice stale blocked items or failing agents, mention them.
 - **Be concise.** The founder is time-constrained. Lead with what needs attention, not summaries of what's fine.
-- **CLAUDE.md and roadmap.md are read-only.** Never modify them. If they need changes, create a `pipeline:blocked` issue.
+- **CLAUDE.md and roadmap.md are read-only.** Never modify them. If they need changes, create a `high-priority` tracking issue and set it to Blocked status via `po-act.sh block`.
 
 ## Recognizing Founder Intent
 
@@ -51,29 +51,26 @@ Bootstrap pipeline state from GitHub, then display a prioritized dashboard. All 
 ### 1.1 GitHub Reads (run in parallel)
 
 ```bash
-# Blocked items assigned to founder
-gh issue list --repo cfg-is/cfgms --label "pipeline:blocked" --assignee "@me" --state open --json number,title,createdAt,assignees
+# Blocked items — project status Blocked
+./scripts/project-queue.sh list-by-status Blocked
 
-# PRs awaiting merge decision
-gh pr list --repo cfg-is/cfgms --label "pipeline:review" --json number,title,headRefName,reviewDecision,statusCheckRollup
+# PRs in fix cycle — project status Fix
+./scripts/project-queue.sh list-by-status Fix
 
-# PRs in fix cycle
-gh pr list --repo cfg-is/cfgms --label "pipeline:fix" --json number,title,headRefName
+# Active dev agents — project status In Progress
+./scripts/project-queue.sh list-by-status "In Progress"
 
-# Active dev agents
-gh issue list --repo cfg-is/cfgms --label "agent:in-progress" --state open --json number,title
+# Failed dev agents — project status Failed
+./scripts/project-queue.sh list-by-status Failed
 
-# Failed dev agents
-gh issue list --repo cfg-is/cfgms --label "agent:failed" --state open --json number,title
+# Draft stories awaiting Tech Lead — project status Draft
+./scripts/project-queue.sh list-by-status Draft
 
-# Draft stories awaiting Tech Lead
-gh issue list --repo cfg-is/cfgms --label "pipeline:draft" --state open --json number,title
+# Ready stories queued for dispatch — project status Ready
+./scripts/project-queue.sh list-by-status Ready
 
-# Ready stories queued for dispatch
-gh issue list --repo cfg-is/cfgms --label "agent:ready" --state open --json number,title
-
-# Active epics
-gh issue list --repo cfg-is/cfgms --label "pipeline:epic" --state open --json number,title,id
+# Active epics — GitHub issues with epic label
+gh issue list --repo cfg-is/cfgms --label "epic" --state open --json number,title,id
 ```
 
 For each epic, query sub-issue completion:
@@ -101,7 +98,7 @@ Also read:
 
 Display sections in this order. **Omit any section with zero items.**
 
-**Section 1: NEEDS ATTENTION** — `pipeline:blocked` issues assigned to founder. Flag items older than 7 days as stale.
+**Section 1: NEEDS ATTENTION** — project items with `Blocked` status. Flag items older than 7 days as stale.
 
 **Section 2: MERGE DECISIONS** — PRs with `pipeline:review` label. Show QA verdict summary and CI status.
 
@@ -129,7 +126,7 @@ Structured conversation to capture founder intent and create a GitHub epic issue
 ### 2.1 Pre-Checks (before starting conversation)
 
 Run in parallel:
-- Check existing `pipeline:epic` issues for overlap
+- Check existing epic issues (`epic` label) for overlap
 - Read `docs/product/roadmap.md` for milestone overlap
 - Read `docs/product/feature-boundaries.md` for licensing boundary
 
@@ -159,7 +156,7 @@ On confirmation, create the issue:
 ```bash
 gh issue create --repo cfg-is/cfgms \
   --title "<concise title, <70 chars>" \
-  --label "pipeline:epic" \
+  --label "epic" \
   --body "<structured body>"
 ```
 
@@ -217,7 +214,7 @@ Analyze pipeline state and recommend the single most valuable action.
 
 Run the full autonomous pipeline cycle once. Use when the founder says "cron", "run cycle", "run pipeline", or via `/loop 20m /po cron`.
 
-This runs **locally** with full Docker access for dispatch and fix cycles. The remote `po-cron` trigger runs the same logic but creates `pipeline:blocked` for Docker-dependent steps (3 and 4) since it has no Docker access.
+This runs **locally** with full Docker access for dispatch and fix cycles. The remote `po-cron` trigger runs the same logic but sets project status `Blocked` for Docker-dependent steps (3 and 4) since it has no Docker access.
 
 ### Helper scripts (prefer these — one approval per action, no `/tmp` writes)
 
@@ -226,13 +223,13 @@ This runs **locally** with full Docker access for dispatch and fix cycles. The r
   - `state [jq_filter]` — read cached state with optional jq filter
   - `dispatch <STORY>` — check-conflicts + clone + launch + label swap
   - `dispatch-fix <PR>` — clean stale container + clone-pr + launch-generic
-  - `close-merged <ISSUE> <PR>` — close + clear stale `agent:*` labels (for PRs that missed `Fixes #NNN`)
+  - `close-merged <ISSUE> <PR>` — close issue that missed `Fixes #NNN` auto-close keyword
   - `enqueue <PR>` / `dequeue <PR>` — merge queue management
   - `diagnose <PR>` — extract FAIL/panic lines from failed CI jobs
   - `rerun <PR> [comment]` — rerun failed jobs, optionally post audit comment
   - `log <ISSUE> <text>` — post timestamped session log (stdin if text is `-`)
   - `merge-queue` — queue state as JSON
-  - `block <ISSUE> <reason>` — escalate to founder with `pipeline:blocked`
+  - `block <ISSUE> <reason>` — set project status Blocked, post escalation comment
 - `./.claude/scripts/po-cycle-preflight.py` — the underlying preflight (called by `po-act.sh preflight`). Accepts `--stdout` for raw JSON or `--path` for the cache path.
 - `./.claude/scripts/agent-dispatch.sh` — lower-level primitives (called by `po-act.sh`)
 
@@ -260,7 +257,7 @@ When `dispatch_blocked == true`:
    ```bash
    gh issue create --repo cfg-is/cfgms \
      --title "[broken-develop] preflight failure on $(date -u +%Y-%m-%dT%H:%MZ)" \
-     --label "pipeline:blocked,priority:high" \
+     --label "high-priority" \
      --body-file <(./.claude/scripts/po-act.sh state '.code_health')
    ```
 3. Skip dispatch (Steps 5 and 6). You may still process review (Step 4), merge-queue maintenance, and acceptance-reviewer findings on PRs that were merged before the breakage — those are unaffected.
@@ -274,26 +271,26 @@ The preflight handles all label queries, PR CI summaries, merge queue state, cod
 
 ### 4.1 Processing Order
 
-Each step creates a `pipeline:blocked` issue on unrecoverable failure and continues to the next.
+Each step sets project status `Blocked` on unrecoverable failure and continues to the next.
 
 **Priority order (cap-constrained):** in-flight work is processed before new work. The 5-container cap is shared across all autonomous activity (dev agents, fix-pr, review containers), so when slots are scarce the cycle finishes existing PRs first — they unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them. The numbered steps below reflect this priority: Step 3 (rebase) → Step 4 (review) → Step 5 (fix-cycle) → Step 6 (dispatch new dev). If the cap is exhausted by Steps 3-5, defer Step 6 to the next cycle.
 
 **Step 1 — Unblock check:**
-Find recently merged PRs. Check if any `pipeline:draft` stories had `## Dependencies` referencing the merged story. If satisfied, they're eligible for Tech Lead review.
+Find recently merged PRs. Check if any `Draft` stories had `## Dependencies` referencing the merged story. If satisfied, they're eligible for Tech Lead review.
 
 **Step 1.5 — Agent cleanup:**
 Remove stale agent containers and clones. Run:
 ```bash
 ./.claude/scripts/agent-dispatch.sh cleanup-stale
 ```
-This finds containers whose stories are closed, `agent:failed`, or `pipeline:blocked` and removes them. Runs before dispatch so re-dispatched stories start with a clean environment. Safe to run every cycle — idempotent, skips containers whose stories are still active.
+This finds containers whose stories are closed, have project status `Failed`, or project status `Blocked` and removes them. Runs before dispatch so re-dispatched stories start with a clean environment. Safe to run every cycle — idempotent, skips containers whose stories are still active.
 
 **Step 2 — Tech Lead pass (legacy only):**
-Handles `pipeline:draft` stories that were created before the Planning Team was introduced. New epics go through Step 7 (Planning Team) and produce `agent:ready` stories directly. Once the backlog of legacy drafts clears, this step becomes a no-op.
+Handles `Draft` stories that were created before the Planning Team was introduced. New epics go through Step 7 (Planning Team) and produce `Ready` stories directly. Once the backlog of legacy drafts clears, this step becomes a no-op.
 
-Find `pipeline:draft` stories. Collect their issue numbers, then use the **Agent tool** (not Bash) to spawn the Tech Lead: subagent_type `tech-lead`, prompt `"Review draft stories for dev agent executability: #NNN #NNN #NNN"`, mode `auto`.
+Find `Draft` stories via `./scripts/project-queue.sh list-by-status Draft`. Collect their issue numbers and item IDs, then use the **Agent tool** (not Bash) to spawn the Tech Lead: subagent_type `tech-lead`, prompt `"Review draft stories for dev agent executability: #NNN --project-item <ITEM_ID_NNN> #NNN --project-item <ITEM_ID_NNN>"`, mode `auto`.
 
-The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency ordering, implementation notes, scope, constraints, and ambiguity. Passing stories get promoted (`pipeline:draft` → `agent:ready`). Failing stories get a `pipeline:blocked` issue.
+The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency ordering, implementation notes, scope, constraints, and ambiguity. Passing stories get their project status set to `Ready`. Failing stories get their project status set to `Blocked`.
 
 **Step 3 — Rebase stuck PRs:**
 
@@ -324,11 +321,11 @@ Outcomes:
 - `REBASE_NOOP:<PR>` — branch was already up-to-date with develop. For `rebase` action: rare — investigate via `po-act.sh block`. For `rebase_then_investigate`: the failure is real, fall through to diagnose + dispatch-fix as if action were `investigate`:
   ```bash
   ./.claude/scripts/po-act.sh diagnose <PR>
-  ./scripts/pipeline-helper.sh label-add <STORY> "pipeline:fix"
+  ./scripts/project-queue.sh update-field <ITEM_ID> status Fix
   ```
-- `REBASE_CONFLICT:<PR>` — real conflicts that need code changes. Apply `pipeline:fix` and post a comment on the PR with the conflicting files (the script prints them):
+- `REBASE_CONFLICT:<PR>` — real conflicts that need code changes. Set status to Fix and post a comment on the PR with the conflicting files (the script prints them):
   ```bash
-  ./scripts/pipeline-helper.sh label-add <STORY> "pipeline:fix"
+  ./scripts/project-queue.sh update-field <ITEM_ID> status Fix
   ```
   Step 5 will pick it up next cycle for dispatch-fix.
 - `REBASE_REFUSED:<PR>:<reason>` — PR closed/merged/from a fork. Skip; next cycle will resync.
@@ -370,19 +367,19 @@ agent, fresh budget. No retry counter is incremented at the cron level.
 - branch is `feature/story-*`
 - state is OPEN
 - has no comment from `cfg-agent` with "acceptance review" in the body
-- does NOT have label `pipeline:reviewing` (in flight)
-- does NOT have label `pipeline:fix` (waiting on dev fix; review re-runs after fix lands)
+- no review container (`cfg-agent-review-pr-<N>`) is currently running (the dispatch script checks this)
+- story does NOT have project status `Fix` (waiting on dev fix; review re-runs after fix lands)
 
 Sorted by creation timestamp ascending (oldest first) — FIFO order minimizes
 rebase churn.
 
 ```bash
 gh pr list --repo cfg-is/cfgms --search "head:feature/story-" --state open \
-  --json number,headRefName,createdAt,comments,labels \
-  --jq '[.[] | select(([.comments[] | select(.author.login == "cfg-agent") | select(.body | test("acceptance review"; "i"))] | length == 0)
-        and ([.labels[].name] | contains(["pipeline:reviewing"]) | not)
-        and ([.labels[].name] | contains(["pipeline:fix"]) | not))] | sort_by(.createdAt)'
+  --json number,headRefName,createdAt,comments \
+  --jq '[.[] | select(([.comments[] | select(.author.login == "cfg-agent") | select(.body | test("acceptance review"; "i"))] | length == 0))] | sort_by(.createdAt)'
 ```
+
+Cross-check the story's project status: skip any story with status `Fix`. Use `preflight` data (`review_recommendations`) to filter — the preflight already tracks Fix-status stories and excludes them from `spawn_acceptance_reviewer` actions.
 
 **Dispatch one review per cycle in FIFO order.** Do not dispatch multiple in
 parallel — even though headless containers make it cheap, parallel reviews can
@@ -395,7 +392,7 @@ eligible PR:
 
 Output is one of:
 - `REVIEW_DISPATCHED:<PR>:<STORY>:<container_id>` — running headless. Move on; the comment will appear on the PR when done.
-- `REVIEW_REFUSED:<PR>:<reason>` — see Section 4e of `.claude/commands/dispatch.md` for reasons. Common cases: `pr_state_<X>` (PR closed), `no_story_link` (manually associate), `already_in_flight` (skip — another review is running).
+- `REVIEW_REFUSED:<PR>:<reason>` — see Section 4e of `.claude/commands/dispatch.md` for reasons. Common cases: `pr_state_<X>` (PR closed), `no_story_link` (manually associate), `container_exists` (skip — another review is running).
 
 After dispatch, **do NOT wait**. The next cron cycle will see the
 `acceptance-reviewer` comment on the PR (if review completed) and move on to
@@ -407,30 +404,27 @@ other work. The dispatch is fire-and-forget on the host side.
 ./.claude/scripts/agent-dispatch.sh cleanup-stale-reviews
 ```
 
-This removes review containers that exited >30 minutes ago without stripping
-the `pipeline:reviewing` label, archives their `agent-result.json`, and frees
-the PR for re-dispatch. Without it, a single crashed review wedges the PR
+This removes review containers that exited >30 minutes ago without cleaning up
+their clone directory, archives their `agent-result.json`, and frees the
+PR for re-dispatch. Without it, a single crashed review wedges the PR
 indefinitely.
 
-**What the headless reviewer does** (`.claude/agents/acceptance-reviewer.md`,
-unchanged): verifies CI, checks acceptance criteria against the diff, posts
-the structured comment, and:
-- Zero findings: enqueues via `gh pr merge <PR> --squash` (merge queue handles rebase + re-validation), cleans up the dev agent's container/worktree
-- Any findings (first review): applies `pipeline:fix` to the story
-- Any findings (second review): applies `pipeline:blocked`, assigns to founder
-Final step in all cases: removes `pipeline:reviewing` from the PR. The
-container's `review-entrypoint.sh` has a failsafe that strips the label even
-if the agent crashes before getting to it.
+**What the headless reviewer does** (`.claude/agents/acceptance-reviewer.md`):
+verifies CI, checks acceptance criteria against the diff, posts the structured
+comment, and:
+- Zero findings: enqueues via `./.claude/scripts/po-act.sh enqueue <PR> <STORY>`, sets project status `Done`, cleans up the dev agent's container/worktree
+- Any findings (first review): sets project status `Fix`
+- Any findings (second review): sets project status `Blocked`, assigns to founder
 
 **Step 5 — Fix cycle:**
-For each `pipeline:fix` story, find its PR and dispatch the fix agent in one call:
+For each story with project status `Fix`, find its PR and dispatch the fix agent in one call:
 ```bash
 ./.claude/scripts/po-act.sh dispatch-fix <PR_NUM>
 ```
 This cleans any stale container from a prior failed attempt, re-clones, and launches.
 
 **Step 6 — Dispatch:**
-Find `agent:ready` issues without `agent:in-progress`. Before dispatching, check for file conflicts with in-flight agents:
+Find stories with project status `Ready` that are not `In Progress`. Before dispatching, check for file conflicts with in-flight agents:
 
 Both gates are computed by the preflight script (`dispatch_recommendations` with `action: "dispatch"` vs `"hold"` and a `reason` string). Trust its recommendation by default, override only if `parse_warnings` are non-empty on the story.
 
@@ -442,7 +436,7 @@ For each story the preflight recommends dispatching:
 **This step is intentionally last in priority order.** If the 5-container cap is exhausted by Steps 3-5 (rebase, review, fix-cycle), defer dispatch to the next cycle. Existing in-flight PRs unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them.
 
 **Step 7 — Planning Team (BA + Tech Lead collaboration):**
-Find `pipeline:epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each epic, orchestrate a collaborative planning session where BA and Tech Lead work together to produce stories that are ready on the first try.
+Find `epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each epic, orchestrate a collaborative planning session where BA and Tech Lead work together to produce stories that are ready on the first try.
 
 **7a. Read the epic and gather context:**
 ```bash
@@ -477,7 +471,7 @@ The conversation follows this protocol:
 4. **If revisions needed** — PO relays Tech Lead feedback to BA: `SendMessage(to: "ba", message: <feedback>)`. BA revises and re-proposes. PO relays to Tech Lead for re-review. Only unresolved stories iterate — approved stories are locked.
 5. **PO product decisions** — if BA and Tech Lead disagree on scope, priority, or approach, PO makes the product call and sends the decision to both: `SendMessage(to: "*", message: "PO DECISION: ...")`
 
-**Maximum 3 revision rounds.** A round = BA revises + Tech Lead re-reviews. After 3 rounds, any remaining REVISION NEEDED stories are resolved by PO decision: either accept with a PO note, or drop and document in a `pipeline:blocked` issue.
+**Maximum 3 revision rounds.** A round = BA revises + Tech Lead re-reviews. After 3 rounds, any remaining REVISION NEEDED stories are resolved by PO decision: either accept with a PO note, or drop and document in a Blocked tracking issue (use `po-act.sh block`).
 
 **7f. Create stories on GitHub (after consensus):**
 
@@ -489,18 +483,23 @@ cat > /tmp/story-body.md <<'STORY_EOF'
 <full story body from final agreed proposal>
 STORY_EOF
 
-./scripts/pipeline-helper.sh create-ready-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md
+./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md
 rm /tmp/story-body.md
 ```
 
-Stories are created with `pipeline:story` + `agent:ready` labels — they skip `pipeline:draft` entirely since the Tech Lead already validated them during the planning conversation.
+Then immediately add each story to the project queue at Ready status (skipping Draft — the Tech Lead already validated them during the planning conversation):
+```bash
+PROJECT_QUEUE="./scripts/project-queue.sh"
+item_id=$(bash "$PROJECT_QUEUE" add-issue <STORY_NUM> | python3 -c "import json,sys; print(json.load(sys.stdin)['item_id'])")
+bash "$PROJECT_QUEUE" update-field "$item_id" status "Ready"
+```
 
 **7g. Post summary on epic:**
 ```bash
 cat > /tmp/planning-summary.md <<'SUMMARY_EOF'
 ## Planning Team — Decomposition Complete
 
-Stories created (agent:ready):
+Stories created (Ready status in project queue):
 - #NNN — <title>
 - #NNN — <title>
 
@@ -522,7 +521,7 @@ TeamDelete()
 ```
 
 **7i. Fallback — convergence failure:**
-If the PO drops any stories (couldn't converge after 3 rounds), create a single `pipeline:blocked` issue:
+If the PO drops any stories (couldn't converge after 3 rounds), create a tracking issue and add it to the project queue as Blocked:
 ```bash
 cat > /tmp/blocked-body.md <<'BLOCK_EOF'
 ## Planning Team: Could Not Converge
@@ -530,18 +529,21 @@ cat > /tmp/blocked-body.md <<'BLOCK_EOF'
 Epic: #<NUM> — <title>
 
 ## Stories Agreed
-- #NNN — <title> (created as agent:ready)
+- #NNN — <title> (created, Ready status in project queue)
 
 ## Stories Disputed
 - "<story title>": BA proposed: <summary>. Tech Lead objected: <objection>. PO recommendation: <what the founder should decide>.
 BLOCK_EOF
 
-./scripts/pipeline-helper.sh block <EPIC_NUM> "Planning team: convergence failure on epic #<NUM>" /tmp/blocked-body.md
+gh issue create --repo cfg-is/cfgms --label "high-priority" \
+  --title "BLOCKED: planning convergence failure on epic #<NUM>" \
+  --body-file /tmp/blocked-body.md
 rm /tmp/blocked-body.md
 ```
+Then set the new issue to Blocked status via `po-act.sh block <ISSUE_NUM> "Planning team: convergence failure on epic #<NUM>"`.
 
 **Step 8 — Forward edge:**
-If active milestone >80% complete and next milestone has no epics, create `pipeline:blocked` requesting intent capture.
+If active milestone >80% complete and next milestone has no epics, create a `high-priority` tracking issue requesting intent capture and add it to the project queue as Blocked.
 
 **Step 9 — Session log:**
 Post timestamped summary on each active epic. Skip if no actions taken.
@@ -549,18 +551,18 @@ Post timestamped summary on each active epic. Skip if no actions taken.
 ### 4.2 Idempotency
 
 Safe to run multiple times:
-- Don't dispatch for `agent:in-progress` issues
+- Don't dispatch for stories with "In Progress" project status
 - Don't spawn Planning Team for epics with existing sub-issues
 - Don't re-review PRs with existing Acceptance Reviewer comment
-- Check `pipeline:fix` history before fix vs. blocked decision
+- Check "Fix" project status history before fix vs. blocked decision
 
 -----
 
 ## 5. Targeted Unblock
 
-When the founder resolves a `pipeline:blocked` item during conversation:
+When the founder resolves a Blocked item during conversation:
 
-1. Remove `pipeline:blocked` label from the issue
+1. Update project queue status away from Blocked via `po-act.sh unblock <ISSUE_NUM> "<reason>"` (sets Ready) or `po-act.sh unblock <ISSUE_NUM> "<reason>" --as-fix` (sets Fix)
 2. Determine what was blocked:
    - A story draft → spawn Tech Lead subagent to re-review
    - A PR fix → dispatch fix agent or re-run Acceptance Reviewer
@@ -575,9 +577,10 @@ When the founder resolves a `pipeline:blocked` item during conversation:
 When the founder asks about a specific issue or PR:
 
 1. Fetch current state: `gh issue view <NUM> --json title,state,labels,body`
-2. Check for related PR: `gh pr list --search "head:feature/story-<NUM>" --json number,state,title`
-3. Check parent epic via sub-issue relationship
-4. Report: current label state, any blockers, related PR status, position in pipeline
+2. Check project queue status: `bash ./scripts/project-queue.sh get-item <ITEM_ID>` (or `list-by-status` to locate the item)
+3. Check for related PR: `gh pr list --search "head:feature/story-<NUM>" --json number,state,title`
+4. Check parent epic via sub-issue relationship
+5. Report: project status, any blockers, related PR status, position in pipeline
 
 -----
 
@@ -647,17 +650,24 @@ The parser is strict on purpose — it's a gate, not a lint. If a story body loo
 
 -----
 
-## Reference: Pipeline Label Taxonomy
+## Reference: Pipeline Status Taxonomy
 
+Work queue is managed via GitHub Projects V2 (see `scripts/project-queue.sh` and `scripts/pipeline.yaml`).
+
+| Project Status | Meaning |
+|----------------|---------|
+| Draft | Story awaiting Tech Lead review |
+| Ready | Story approved — eligible for dispatch |
+| In Progress | Dev agent container running |
+| Reviewing | PR under acceptance review (container-gated, no label) |
+| Fix | PR failed QA — fix agent dispatched |
+| Failed | Dev agent failed, draft PR created |
+| Blocked | Escalation — agents could not resolve; needs founder decision |
+| Done | PR merged, story complete |
+
+GitHub issue labels still in use:
 | Label | Meaning |
 |-------|---------|
-| `pipeline:epic` | Top-level epic issue |
-| `pipeline:story` | Story sub-issue of an epic |
-| `pipeline:draft` | Story awaiting Tech Lead review |
-| `pipeline:blocked` | Escalation — agents could not resolve |
-| `pipeline:review` | PR passed QA — awaiting founder merge |
-| `pipeline:fix` | PR failed QA — fix agent dispatched |
-| `agent:ready` | Story promoted — eligible for dispatch |
-| `agent:in-progress` | Dev agent container running |
-| `agent:success` | Dev agent completed, PR opened |
-| `agent:failed` | Dev agent failed, draft PR created |
+| `epic` | Top-level epic issue |
+| `story` | Story sub-issue of an epic |
+| `high-priority` | Escalation tracking issue requiring founder attention |

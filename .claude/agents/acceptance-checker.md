@@ -99,7 +99,7 @@ gh api "repos/cfg-is/cfgms/issues/<NNN>" --jq '{state, labels: [.labels[].name]}
 
 Requirements:
 - `state == "OPEN"`
-- Labels include either `pipeline:story` or `pipeline:epic`
+- Labels include either `story` or `epic`
 
 A Deferred annotation pointing at a closed, missing, or untracked issue is itself a finding (Medium). Reasoning: the Deferred annotation exists to mark legitimately-deferred work with a clear paper trail. Closed-issue references mask abandoned work as deferred work.
 
@@ -139,7 +139,7 @@ If there are zero FAIL rows and zero missing required tests, report `Acceptance 
 - **Any FAIL row in Code-Reference Verification = overall FAIL.** "Tests pass and new code is clean" is not sufficient when the AC names existing code that must change.
 - **Read files from disk** (Read tool or `cat`/`grep`). Do not rely on `git diff` — unchanged stubs are invisible to a diff. The working tree IS the post-change state you're verifying.
 - **Trust but verify the test names.** A required test name that grep finds but the suite skipped (via `t.Skip`, build tag, or never invoked) is still a FAIL — the AC commitment is that the test exercises the behavior, not just that the function exists.
-- **The Deferred escape hatch is narrow.** It requires `// Deferred: tracked in #NNN` immediately above the banned phrase AND an open `pipeline:story`/`pipeline:epic` issue at #NNN. Any other shape of "this is deferred" is a finding.
+- **The Deferred escape hatch is narrow.** It requires `// Deferred: tracked in #NNN` immediately above the banned phrase AND an open `story`/`epic` issue at #NNN. Any other shape of "this is deferred" is a finding.
 - **Reference the shared verification doc**: `docs/development/acceptance-reviewer-verification.md` documents the canonical banned-phrase list, the failure mode this catches, and the regression scenarios. If the doc and this prompt drift, the doc is authoritative for the *intent*; the prompt is authoritative for the *mechanics*.
 
 ## What you don't check

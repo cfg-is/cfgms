@@ -66,12 +66,11 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 
 8. **Verify GitHub labels exist** (idempotent):
    ```bash
-   gh label create "agent:ready" --color "0E8A16" --description "Story ready for agent dispatch" --force
-   gh label create "agent:in-progress" --color "FBCA04" --description "Agent container running" --force
-   gh label create "agent:success" --color "0075CA" --description "Agent completed, PR created" --force
-   gh label create "agent:failed" --color "D73A4A" --description "Agent failed, draft PR created" --force
-   gh label create "agent:blocked" --color "E4E669" --description "Needs human intervention" --force
+   gh label create "epic" --color "3E4B9E" --description "Top-level epic issue" --force
+   gh label create "story" --color "0E8A16" --description "Story sub-issue of an epic" --force
+   gh label create "high-priority" --color "D73A4A" --description "Escalation tracking issue requiring founder attention" --force
    ```
+   Note: `pipeline:*` and `agent:*` labels were decommissioned (Story #1482). Work queue state is now in GitHub Projects V2 — see `scripts/project-queue.sh`.
 
 9. **Verify setup** (after image build completes):
    ```bash

@@ -36,7 +36,7 @@ None
 ## Implementation Notes
 
 - This is a mechanical change. Edit every location in the list, run `make test`, commit, open PR targeting `develop`.
-- If `make test` fails on the new version, that's a real regression — STOP, do not paper over it. Open a `pipeline:blocked` issue describing the failure and assign to the founder. Do NOT add `t.Skip()` or otherwise mask the failure.
+- If `make test` fails on the new version, that's a real regression — STOP, do not paper over it. Open a `high-priority` issue describing the failure, assign to the founder, and set Blocked status via `po-act.sh block`. Do NOT add `t.Skip()` or otherwise mask the failure.
 - For Docker `FROM` lines: the tag format is `<image>:<version>-<base>`. Preserve the `-alpine3.23` (or whatever) suffix exactly — only the version segment changes.
 - For Go toolchain bumps specifically: `go.mod` uses `toolchain go1.X.Y` (no leading `v`); workflows use `GO_VERSION: '1.X.Y'` and `go-version: '1.X.Y'`; Dockerfiles use `FROM golang:1.X.Y-alpine...`. Same numeric value, three different surrounding syntaxes — all must move together.
 

@@ -77,10 +77,8 @@ For each issue number:
       ./.claude/scripts/agent-dispatch.sh launch <NUM>
       ```
 
-   f. **Update labels** (skip in dry-run):
-      ```bash
-      gh issue edit <NUM> --remove-label "agent:ready" --add-label "agent:in-progress"
-      ```
+   f. **Update project queue status** (skip in dry-run):
+      The launch step (`po-act.sh dispatch`) handles the Ready → In Progress status transition via `project-queue.sh update-field`. No label update needed.
 
 ### 4b. Branch Dispatch
 
@@ -211,12 +209,12 @@ For each `acceptance-review <PR_NUM>`:
       - `pr_not_found` / `pr_state_<X>` — PR is closed/merged or doesn't exist
       - `fork_branch_<owner>` — PR is from a fork; reviews of fork PRs aren't supported (no push rights)
       - `no_story_link` — PR has no `Fixes #N` and no `feature/story-N` branch; manually associate or skip
-      - `already_in_flight` — `pipeline:reviewing` already on PR; another review is running. Use `/isoagents` to check on it.
+      - `already_in_flight` — review container `cfg-agent-review-pr-<N>` already exists; another review is running. Use `/isoagents` to check on it.
       - `container_exists` — a stale container exists; run `./.claude/scripts/agent-dispatch.sh cleanup-stale-reviews` first
 
    d. **Tell the user**:
       "Acceptance Reviewer dispatched headless for PR #<NUM>. Container: cfg-agent-review-pr-<NUM>. The review comment will appear on the PR when it's done (~5-15 min). Use `/isoagents` to check progress."
-      No label updates needed — the dispatch script applies `pipeline:reviewing` and the container strips it on exit.
+      No label updates needed — the dispatch script sets project status to "Reviewing" and the container updates it on exit.
 
 5. **Print full agent dashboard** (skip in dry-run): After launch, gather state for ALL agents (not just the ones dispatched this run):
 

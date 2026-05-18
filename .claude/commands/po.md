@@ -27,7 +27,7 @@ If `$ARGUMENTS` starts with any of `cron`, `cycle`, `decompose`, or `plan`, do *
 |------|--------|
 | `cron` | Pipeline Cycle (§4) — **skip Step 7 (Planning Team)**. Autonomous; cheap; runs every interval. |
 | `cycle` | Pipeline Cycle (§4) — **including Step 7**. Manual; full cycle on demand. |
-| `decompose [<epic#>]` | Run §4.1 Step 7 (Planning Team) only — for the named epic, or every `pipeline:epic` with no sub-issues if no number is given. |
+| `decompose [<epic#>]` | Run §4.1 Step 7 (Planning Team) only — for the named epic, or every `epic` with no sub-issues if no number is given. |
 | `plan [<epic#>]` | Alias for `decompose`. |
 
 **How:**

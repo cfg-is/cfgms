@@ -50,7 +50,7 @@ If `isDraft == true`:
   ```bash
   ./scripts/project-queue.sh update-field <ITEM_ID> status "In Progress"
   ```
-- Exit cleanly with verdict `SKIPPED_DRAFT`. Do NOT enqueue, label `pipeline:fix`, or label `pipeline:blocked` — those are wrong actions for a session-truncated WIP.
+- Exit cleanly with verdict `SKIPPED_DRAFT`. Do NOT enqueue, set Fix status, or set Blocked status — those are wrong actions for a session-truncated WIP.
 
 A draft PR with body starting `Agent session failed with exit code` or title starting `WIP:` and ending `(agent failed)` is the canonical session-truncation case — same handling.
 
@@ -173,7 +173,7 @@ Review the PR diff for:
    - `In a real implementation`
    - `In a full implementation`
 
-   Any newly-introduced match outside of a `// Deferred: tracked in #NNN — ...` annotation is a finding (catches agents shipping fresh stubs). Severity: **High** if the matched file is named by the story AC; **Medium** otherwise. A Deferred annotation must reference an open issue labeled `pipeline:story` or `pipeline:epic` — closed-issue references are themselves a Medium finding.
+   Any newly-introduced match outside of a `// Deferred: tracked in #NNN — ...` annotation is a finding (catches agents shipping fresh stubs). Severity: **High** if the matched file is named by the story AC; **Medium** otherwise. A Deferred annotation must reference an open issue labeled `story` or `epic` — closed-issue references are themselves a Medium finding.
 
    Pre-existing markers in unchanged lines are out of scope for this scan — they're handled by the sweep story (#1430) and by Phase 3's file-state check for AC-named files.
 
@@ -264,7 +264,7 @@ Example FAIL row (replace with real verification — every row above is an examp
 All checks passing / Check X failing
 
 ### Verdict
-[Auto-merged / Fix required — pipeline:fix applied / Blocked — escalated to founder]
+[Auto-merged / Fix required — status set to Fix / Blocked — escalated to founder]
 REVIEW_EOF
 
 ./scripts/pipeline-helper.sh comment <PR_NUM> /tmp/review-<PR_NUM>.md
