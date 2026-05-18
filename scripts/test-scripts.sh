@@ -782,6 +782,22 @@ test_project_queue_invalid_args() {
     else
         log_fail "project-queue.sh: delete-item with missing args should exit 2, got $exit_code"
     fi
+
+    exit_code=0
+    bash "$script" set-pr 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "project-queue.sh: set-pr with no args exits 2"
+    else
+        log_fail "project-queue.sh: set-pr with no args should exit 2, got $exit_code"
+    fi
+
+    exit_code=0
+    bash "$script" set-pr "ITEM_ID_ONLY" 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "project-queue.sh: set-pr with one arg exits 2"
+    else
+        log_fail "project-queue.sh: set-pr with one arg should exit 2, got $exit_code"
+    fi
 }
 
 test_project_queue_integration() {
@@ -1098,6 +1114,106 @@ print(d.get('deleted_item_id', ''))
     fi
 }
 
+test_project_queue_set_pr() {
+    log_test "Testing project-queue.sh: set-pr integration against live cfgms-pipeline project..."
+
+    local script
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-queue.sh"
+
+    if [[ ! -f "$script" ]]; then
+        log_skip "project-queue.sh set-pr: Script not found"
+        return
+    fi
+
+    # Skip if gh is not available or not authenticated
+    if ! command -v gh >/dev/null 2>&1; then
+        log_skip "project-queue.sh set-pr integration: gh CLI not available"
+        return
+    fi
+    if ! gh auth status >/dev/null 2>&1; then
+        log_skip "project-queue.sh set-pr integration: gh not authenticated — skipping live tests"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    local created_item_id=""
+    cleanup_set_pr() {
+        if [[ -n "$created_item_id" ]]; then
+            bash "$script" delete-item "$created_item_id" >/dev/null 2>&1 || true
+        fi
+        rm -rf "$tmp_dir"
+    }
+    trap cleanup_set_pr RETURN
+
+    echo "Integration test body for set-pr test." > "$tmp_dir/body.md"
+
+    # Create a draft item
+    local create_out exit_code=0
+    create_out=$(bash "$script" create-draft 0 "set-pr integration test" "$tmp_dir/body.md" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "project-queue.sh set-pr: create-draft failed (exit $exit_code): $create_out"
+        return
+    fi
+
+    created_item_id=$(echo "$create_out" | python3 -c "import json,sys; print(json.load(sys.stdin)['item_id'])" 2>/dev/null) || {
+        log_fail "project-queue.sh set-pr: create-draft output not valid JSON: $create_out"
+        return
+    }
+
+    if [[ -z "$created_item_id" ]]; then
+        log_fail "project-queue.sh set-pr: create-draft returned empty item_id"
+        return
+    fi
+
+    # Call set-pr with PR number 9999
+    local set_pr_out
+    exit_code=0
+    set_pr_out=$(bash "$script" set-pr "$created_item_id" "9999" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "project-queue.sh set-pr: failed (exit $exit_code): $set_pr_out"
+        return
+    fi
+
+    local set_pr_ok
+    set_pr_ok=$(echo "$set_pr_out" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('yes' if d.get('updated') == True else 'no')
+" 2>/dev/null) || set_pr_ok="parse-error"
+
+    if [[ "$set_pr_ok" == "yes" ]]; then
+        log_pass "project-queue.sh set-pr: returns updated=true JSON"
+    else
+        log_fail "project-queue.sh set-pr: unexpected output: $set_pr_out"
+    fi
+
+    # Verify via get-item that .fields.PR == "9999"
+    local get_out pr_field
+    exit_code=0
+    get_out=$(bash "$script" get-item "$created_item_id" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_fail "project-queue.sh set-pr: get-item failed (exit $exit_code): $get_out"
+        return
+    fi
+
+    pr_field=$(echo "$get_out" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(d.get('fields',{}).get('PR',''))
+" 2>/dev/null) || pr_field=""
+
+    if [[ "$pr_field" == "9999" ]]; then
+        log_pass "project-queue.sh set-pr: get-item fields.PR == '9999' (round-trip verified)"
+    else
+        log_fail "project-queue.sh set-pr: get-item fields.PR='$pr_field' (expected '9999')"
+    fi
+}
+
 test_trust_boundary() {
     log_test "Running trust boundary regression suite (test/security/trust_boundary_test.sh)..."
 
@@ -1237,6 +1353,8 @@ echo ""
 test_project_queue_invalid_args
 echo ""
 test_project_queue_integration
+echo ""
+test_project_queue_set_pr
 echo ""
 test_preflight_forged_acceptance_review
 echo ""
