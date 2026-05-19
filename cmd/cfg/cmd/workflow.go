@@ -10,12 +10,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
+
+// workflowNameRE bounds workflow names to a safe character set so they cannot
+// inject path segments or query fragments when used to construct request URLs.
+// Matches the controller's accepted name pattern: alphanumerics plus a small
+// punctuation set, length 1–128. Enforced at parse time (defense in depth)
+// AND the path segment is url.PathEscape'd at the sink (defense at the call).
+var workflowNameRE = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,128}$`)
 
 var (
 	workflowURL         string
@@ -122,6 +131,9 @@ func runWorkflow(cmd *cobra.Command, args []string) error {
 	if def.Name == "" {
 		return fmt.Errorf("workflow YAML must include a non-empty 'name' field")
 	}
+	if !workflowNameRE.MatchString(def.Name) {
+		return fmt.Errorf("workflow name %q invalid: must match %s (alphanumerics, dot, underscore, hyphen; length 1–128)", def.Name, workflowNameRE.String())
+	}
 
 	client, err := getWorkflowClient()
 	if err != nil {
@@ -148,7 +160,10 @@ func runWorkflow(cmd *cobra.Command, args []string) error {
 	_, _ = io.Copy(io.Discard, createResp.Body)
 
 	// POST /api/v1/workflows/{name}/execute
-	executeResp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/workflows/"+def.Name+"/execute", bytes.NewReader([]byte("{}")))
+	// url.PathEscape on def.Name closes the SSRF path-injection sink (CWE-918);
+	// defense-in-depth with the workflowNameRE validation above.
+	executePath := "/api/v1/workflows/" + url.PathEscape(def.Name) + "/execute"
+	executeResp, err := client.doRequest(context.Background(), http.MethodPost, executePath, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return fmt.Errorf("failed to execute workflow: %w", err)
 	}
