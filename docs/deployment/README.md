@@ -2,6 +2,13 @@
 
 Choose the deployment that matches your scenario.
 
+## Canonical Config Examples
+
+Two fully-commented config files to copy and customize:
+
+- [`controller.cfg`](controller.cfg) — canonical controller boot config. Copy to `/etc/cfgms/controller.cfg`.
+- [`steward.cfg`](steward.cfg) — canonical steward boot config. Copy to `/etc/cfgms/steward.cfg` on each endpoint.
+
 ## Deployment Modes
 
 ### [Single Controller](single-controller/walkthrough.md)
@@ -18,11 +25,16 @@ Geo-redundant controller deployment with failover. Starts from a working single-
 
 **Use when**: You need high availability or regional distribution.
 
-## Steward Examples
+## Role Config Recipes
 
-### [Steward Examples](steward-examples/README.md)
+### [Role Config Recipes](../examples/role-configs/README.md)
 
-Example steward configurations for common server roles — domain controller, file server, SQL server, Hyper-V host, web server, database server, Docker host. Each example can be used standalone or pushed from a controller.
+Ready-to-use fleet configs for common server roles — domain controller, file server,
+SQL server, Hyper-V host, web server, database server, Docker host. Push these to
+stewards from the controller once your environment is set up.
+
+**These are NOT steward boot configs.** See [`steward.cfg`](steward.cfg) for the
+canonical boot config.
 
 **Use when**: You have a working controller and want a starting point for managing specific server roles.
 
