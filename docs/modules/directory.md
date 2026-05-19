@@ -4,6 +4,21 @@
 
 The Directory Module manages filesystem directories on CFGMS-managed endpoints. It creates and configures directories while enforcing a security boundary through the required `allowed_base_path` field. Every OS call is routed through `pkg/security.ValidateAndCleanPath` to prevent path traversal attacks.
 
+## Implementation References
+
+- Schema: [`features/modules/directory/module.yaml`](../../features/modules/directory/module.yaml)
+- Implementation: [`features/modules/directory/module.go`](../../features/modules/directory/module.go)
+
+## Platform Support
+
+| Platform | State management | Unix permissions | Ownership (`owner`/`group`) | Windows ACL |
+|----------|-----------------|------------------|-----------------------------|-------------|
+| Linux    | ✓ | ✓ (mode bits) | ✓ (`uid`/`gid` via `os.Chown`) | — |
+| macOS    | ✓ | ✓ (mode bits) | ✓ (`uid`/`gid` via `os.Chown`) | — |
+| Windows  | ✓ | — (returns error if set; use `windows_acl`) | — | ✓ (NTFS DACL) |
+
+> **Note:** `Set()` always creates or ensures the directory. Directory deletion is not implemented — `Set()` does not read the `state` field and will not delete a directory even if `state: absent` is passed.
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)
@@ -55,6 +70,10 @@ Before any `os.Stat`, `os.MkdirAll`, `os.Mkdir`, `os.Chmod`, or `os.Chown` call,
 3. Returns an error if the resolved path escapes the boundary.
 
 This prevents `path` values containing `../` sequences (or equivalent) from reaching the OS.
+
+### `mode` alias
+
+The implementation also accepts `mode` as an alias for `permissions` (parsed as an octal string such as `"0755"`, or as an integer). The `permissions` field name is preferred in operator-facing YAML.
 
 ### Symlink limitation
 
