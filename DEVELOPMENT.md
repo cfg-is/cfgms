@@ -553,7 +553,7 @@ make build-steward
 
 # 3. Use CLI to manage fleet
 make build-cli
-# [GAP: cfg steward list not implemented — see issue #1543]
+cfg steward list --url=http://localhost:9080
 # [GAP: cfg config apply not implemented — see issue #1543]
 # Fleet management via REST API: GET http://localhost:9080/api/v1/stewards
 ```

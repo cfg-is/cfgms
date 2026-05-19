@@ -52,6 +52,7 @@ func init() {
 	rootCmd.AddCommand(controllerCmd)
 	rootCmd.AddCommand(traceCmd)
 	rootCmd.AddCommand(storageCmd)
+	rootCmd.AddCommand(stewardCmd)
 	rootCmd.AddCommand(workflowCmd)
 }
 
