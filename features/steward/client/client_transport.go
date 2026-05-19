@@ -507,6 +507,11 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		c.convergeInterval = newInterval
 		c.mu.Unlock()
 
+		// Thread drift mode from the controller-delivered cfg into the executor.
+		// This is the only authorised source of DriftMode — local steward.cfg
+		// cannot set it (the local-file loading path clears the field).
+		executor.SetDriftMode(goConfig.Steward.DriftMode)
+
 		// Marshal to YAML for executor
 		configYAML, err := yaml.Marshal(goConfig)
 		if err != nil {

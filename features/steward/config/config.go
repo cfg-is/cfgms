@@ -170,6 +170,12 @@ type StewardSettings struct {
 	// in bytes. Commands whose Params serialise to more than this limit are rejected
 	// before dispatch. Defaults to 65536 (64 KiB) when zero.
 	SignedCommandMaxParamsBytes int `yaml:"signed_command_max_params_bytes,omitempty"`
+
+	// DriftMode controls how the steward responds to detected configuration drift.
+	// Must be sourced exclusively from the controller-delivered cfg — the local-file
+	// loading path (loadFromPath) clears this field after parsing so that editing
+	// hostname.cfg cannot flip a controller-connected steward into monitor mode.
+	DriftMode DriftMode `yaml:"drift_mode,omitempty"`
 }
 
 // SecretsConfig defines configuration for steward-side secret storage.
@@ -271,6 +277,21 @@ const (
 	ModeController OperationMode = "controller"
 )
 
+// DriftMode defines how the steward responds to detected configuration drift.
+// Set exclusively from controller-delivered cfg bytes — never from local steward.cfg —
+// so a tampered local file cannot bypass the authenticated delivery channel.
+type DriftMode string
+
+const (
+	// DriftModeApply corrects detected drift by calling module.Set() and Verify().
+	// This is the default behavior when drift_mode is absent.
+	DriftModeApply DriftMode = "apply"
+
+	// DriftModeMonitor emits a non-compliance event upstream but does not call
+	// module.Set() or module.Verify(). Drift is observed, not corrected.
+	DriftModeMonitor DriftMode = "monitor"
+)
+
 // LoggingConfig defines logging output settings.
 type LoggingConfig struct {
 	// Level sets the logging verbosity (debug, info, warn, error)
@@ -368,6 +389,11 @@ func loadFromPath(configPath string) (StewardConfig, error) {
 	if err := yaml.Unmarshal([]byte(expandedData), &config); err != nil {
 		return config, fmt.Errorf("failed to parse configuration: %w", err)
 	}
+
+	// Security invariant: DriftMode must come from controller-delivered cfg only.
+	// Clear any local-file value so a tampered hostname.cfg cannot flip a
+	// controller-connected steward into monitor mode.
+	config.Steward.DriftMode = ""
 
 	// Apply defaults
 	applyDefaults(&config)

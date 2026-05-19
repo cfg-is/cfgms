@@ -41,6 +41,11 @@ type ExecutorConfig struct {
 	// ErrorHandling controls resource failure behaviour. Zero value applies when
 	// Factory is provided by the caller; defaults are used otherwise.
 	ErrorHandling config.ErrorHandlingConfig
+
+	// DriftMode controls how the executor responds to detected drift.
+	// Defaults to DriftModeApply (current behavior) when not set.
+	// Thread from controller-delivered cfg via SetDriftMode; never from local files.
+	DriftMode config.DriftMode
 }
 
 // Executor applies configurations using the unified Get→Compare→Set→Verify workflow.
@@ -53,6 +58,7 @@ type Executor struct {
 	tenantID     string
 	logger       logging.Logger
 	driftHandler DriftEventHandler
+	driftMode    config.DriftMode
 }
 
 // NewExecutor creates an Executor. When cfg.Factory is nil, an empty registry and
@@ -86,6 +92,7 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 		config:     errCfg,
 		tenantID:   cfg.TenantID,
 		logger:     cfg.Logger,
+		driftMode:  cfg.DriftMode,
 	}, nil
 }
 
@@ -93,6 +100,13 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 // drift on a managed resource, before Set corrects it. Pass nil to remove a handler.
 func (e *Executor) SetDriftEventHandler(handler DriftEventHandler) {
 	e.driftHandler = handler
+}
+
+// SetDriftMode updates the executor's drift mode. Call this when the
+// controller delivers a new cfg with an updated drift_mode field.
+// An empty string is treated as DriftModeApply (default behavior).
+func (e *Executor) SetDriftMode(mode config.DriftMode) {
+	e.driftMode = mode
 }
 
 // ExecuteConfiguration executes the complete configuration for all resources.
@@ -124,6 +138,8 @@ func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardC
 				report.FailedCount++
 			case StatusSkipped:
 				report.SkippedCount++
+			case StatusNonCompliant:
+				report.NonCompliantCount++
 			}
 		}
 	}
@@ -135,6 +151,7 @@ func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardC
 		"successful", report.SuccessfulCount,
 		"failed", report.FailedCount,
 		"skipped", report.SkippedCount,
+		"non_compliant", report.NonCompliantCount,
 		"duration", report.EndTime.Sub(report.StartTime))
 
 	return report
@@ -230,9 +247,28 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 		"resource", resource.Name,
 		"changes_required", len(stateDiff.ChangedFields))
 
-	// Emit drift event before Set corrects the drift.
+	// Tag the event type for upstream telemetry before invoking the handler.
+	// "drift.detected.monitor" lets the controller distinguish monitor-mode stewards
+	// from apply-mode stewards that simply have not drifted.
+	if e.driftMode == config.DriftModeMonitor {
+		stateDiff.EventType = "drift.detected.monitor"
+	} else {
+		stateDiff.EventType = "drift.detected"
+	}
+
+	// Emit drift event. Handler fires in both modes — ordering is always preserved.
 	if e.driftHandler != nil {
 		e.driftHandler(resource.Name, resource.Module, &stateDiff)
+	}
+
+	// In monitor mode, report non-compliance without correcting the drift.
+	if e.driftMode == config.DriftModeMonitor {
+		result.Status = StatusNonCompliant
+		result.ExecutionTime = time.Since(startTime)
+		e.logger.Info("Monitor mode: drift detected, skipping Set",
+			"resource", resource.Name,
+			"event_type", stateDiff.EventType)
+		return result
 	}
 
 	if err := module.Set(ctx, resourceID, desiredState); err != nil {
@@ -367,6 +403,7 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 	report.ExecutionTimeMs = execReport.EndTime.Sub(execReport.StartTime).Milliseconds()
 
 	hasErrors := false
+	hasNonCompliant := false
 
 	// Group per-resource results into per-module statuses
 	for _, result := range execReport.ResourceResults {
@@ -384,6 +421,7 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 
 		successCount, _ := moduleStatus.Details["success_count"].(int)
 		errorCount, _ := moduleStatus.Details["error_count"].(int)
+		nonCompliantCount, _ := moduleStatus.Details["non_compliant_count"].(int)
 		totalCount, _ := moduleStatus.Details["total_count"].(int)
 		totalCount++
 
@@ -400,14 +438,24 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 			}
 		case StatusSkipped:
 			// Skipped resources are counted but don't set ERROR status
+		case StatusNonCompliant:
+			// Drift detected in monitor mode — not corrected, not an execution error.
+			nonCompliantCount++
+			hasNonCompliant = true
+			if moduleStatus.Status == "OK" {
+				moduleStatus.Status = "NON_COMPLIANT"
+			}
 		}
 
 		moduleStatus.Details["success_count"] = successCount
 		moduleStatus.Details["error_count"] = errorCount
+		moduleStatus.Details["non_compliant_count"] = nonCompliantCount
 		moduleStatus.Details["total_count"] = totalCount
 
 		if errorCount > 0 {
 			moduleStatus.Message = fmt.Sprintf("Applied %d/%d resources (%d errors)", successCount, totalCount, errorCount)
+		} else if nonCompliantCount > 0 {
+			moduleStatus.Message = fmt.Sprintf("Monitored %d resources (%d non-compliant)", totalCount, nonCompliantCount)
 		} else {
 			moduleStatus.Message = fmt.Sprintf("Applied %d resources", totalCount)
 		}
@@ -422,6 +470,9 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 	if hasErrors {
 		report.Status = "ERROR"
 		report.Message = "Configuration applied with errors"
+	} else if hasNonCompliant {
+		report.Status = "NON_COMPLIANT"
+		report.Message = "Configuration monitored: drift detected but not corrected"
 	}
 
 	report.ExecutionTimeMs = time.Since(startTime).Milliseconds()

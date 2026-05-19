@@ -51,14 +51,15 @@ type DriftEventHandler func(resourceName string, moduleName string, diff *stewar
 
 // ExecutionReport contains the results of configuration execution
 type ExecutionReport struct {
-	StartTime       time.Time
-	EndTime         time.Time
-	TotalResources  int
-	SuccessfulCount int
-	FailedCount     int
-	SkippedCount    int
-	ResourceResults []ResourceResult
-	Errors          []string
+	StartTime         time.Time
+	EndTime           time.Time
+	TotalResources    int
+	SuccessfulCount   int
+	FailedCount       int
+	SkippedCount      int
+	NonCompliantCount int
+	ResourceResults   []ResourceResult
+	Errors            []string
 }
 
 // ResourceResult contains the result of executing a single resource
@@ -81,6 +82,9 @@ const (
 	StatusFailed
 	StatusSkipped
 	StatusNoChange
+	// StatusNonCompliant indicates drift was detected in monitor mode.
+	// module.Set() and module.Verify() were NOT called; the drift is reported but not corrected.
+	StatusNonCompliant
 )
 
 // genericConfigState is a simple map-backed ConfigState implementation used
