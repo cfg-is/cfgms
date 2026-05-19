@@ -245,6 +245,9 @@ EOF
 # In another terminal
 # Verify the controller is ready:
 curl -s http://localhost:9080/api/v1/health
+
+# Run the workflow you created in Step 4:
+./bin/cfg workflow run example-workflow.yaml --url=http://localhost:9080
 ```
 
 ### Step 6: Try an M365 Workflow (Optional)
