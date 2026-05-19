@@ -33,7 +33,7 @@ If `$ARGUMENTS` starts with any of `cron`, `cycle`, `decompose`, or `plan`, do *
 **How:**
 1. Read `.claude/agents/po.md` to load the PO's behavioral rules and the relevant section.
 2. Execute the section directly in the main session in priority order — preflight, unblock check, agent cleanup, Tech Lead pass, rebase (§4.1 Step 3), Acceptance Reviewer (§4.1 Step 4), fix cycle (§4.1 Step 5), dispatch (§4.1 Step 6), Planning Team (§4.1 Step 7 — see routing table above), forward edge, session log.
-3. Honor the 5-container cap from `feedback_max_running_agents.md` — the cap is on docker containers (`./.claude/scripts/agent-dispatch.sh list-running` count) shared across all autonomous activity (dev, fix-pr, review). When slots are scarce, finish in-flight work first (Steps 3-5) and defer new dev dispatch (Step 6) to the next cycle.
+3. Honor the 7-container cap from `feedback_max_running_agents.md` — the cap is on docker containers (`./.claude/scripts/agent-dispatch.sh list-running` count) shared across all autonomous activity (dev, fix-pr, review). When slots are scarce, finish in-flight work first (Steps 3-5) and defer new dev dispatch (Step 6) to the next cycle.
 4. Spawn nested subagents via the Agent tool with `mode: auto`. Spawn the Planning Team via `TeamCreate` + Agent calls with `team_name` (per `.claude/agents/po.md` §4.1 Step 7c).
 5. Report the summary back to the founder using the same format the PO subagent uses.
 
