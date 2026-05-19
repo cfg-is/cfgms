@@ -273,7 +273,7 @@ The preflight handles all label queries, PR CI summaries, merge queue state, cod
 
 Each step sets project status `Blocked` on unrecoverable failure and continues to the next.
 
-**Priority order (cap-constrained):** in-flight work is processed before new work. The 5-container cap is shared across all autonomous activity (dev agents, fix-pr, review containers), so when slots are scarce the cycle finishes existing PRs first — they unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them. The numbered steps below reflect this priority: Step 3 (rebase) → Step 4 (review) → Step 5 (fix-cycle) → Step 6 (dispatch new dev). If the cap is exhausted by Steps 3-5, defer Step 6 to the next cycle.
+**Priority order (cap-constrained):** in-flight work is processed before new work. The 7-container cap is shared across all autonomous activity (dev agents, fix-pr, review containers), so when slots are scarce the cycle finishes existing PRs first — they unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them. The numbered steps below reflect this priority: Step 3 (rebase) → Step 4 (review) → Step 5 (fix-cycle) → Step 6 (dispatch new dev). If the cap is exhausted by Steps 3-5, defer Step 6 to the next cycle.
 
 **Step 1 — Unblock check:**
 Find recently merged PRs. Check if any `Draft` stories had `## Dependencies` referencing the merged story. If satisfied, they're eligible for Tech Lead review.
@@ -435,7 +435,7 @@ For each story the preflight recommends dispatching:
 
 where `<ITEM_ID>` comes from `dispatch_recommendations[*].item_id` in the preflight output. Note: the `dispatch` subcommand handles both issue_nums (all-digits, legacy path) and item_ids (non-numeric) transparently — Story B wired this.
 
-**This step is intentionally last in priority order.** If the 5-container cap is exhausted by Steps 3-5 (rebase, review, fix-cycle), defer dispatch to the next cycle. Existing in-flight PRs unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them.
+**This step is intentionally last in priority order.** If the 7-container cap is exhausted by Steps 3-5 (rebase, review, fix-cycle), defer dispatch to the next cycle. Existing in-flight PRs unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them.
 
 **Step 7 — Planning Team (BA + Tech Lead collaboration):**
 Find `epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each epic, orchestrate a collaborative planning session where BA and Tech Lead work together to produce stories that are ready on the first try.
