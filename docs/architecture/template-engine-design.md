@@ -34,7 +34,7 @@ This document outlines the design for the CFGMS configuration template engine. T
 
 ### Data Flow
 
-1. **Template Definition** → Stored in Git (MSP global or client repo)
+1. **Template Definition** → Stored in `ConfigStore` (optionally synced from external git via `pkg/gitsync`)
 2. **Value Resolution** → Merge inheritance + DNA + external data
 3. **Template Execution** → Render with security sandbox
 4. **Validation** → Check output before deployment
@@ -418,12 +418,12 @@ test_cases:
 
 ## Integration Points
 
-### With Git Backend (Story #74)
+### With Config Storage
 
-- Templates stored in Git repositories
-- Version control for template evolution
-- Template discovery and loading
-- Cross-repository template references
+- Templates stored in `ConfigStore` (flat-file for OSS, PostgreSQL for commercial)
+- Git is available as an *optional sync source* for admin-designated config scopes via `pkg/gitsync` (see [Storage Architecture](storage-architecture.md))
+- Template discovery and loading via the config store API
+- The git storage backend was removed in Issue #664; the older "Story #74 git backend" reference is superseded
 
 ### With Rollback (Story #75)
 

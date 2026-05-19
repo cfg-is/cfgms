@@ -37,6 +37,8 @@ All HA code is located in `commercial/ha/` with Go build tags controlling which 
   - Basic health checking
   - No clustering functionality
   - Compiles by default (without build tags)
+- `config_oss.go` - OSS-only configuration stubs
+- `manager_oss_test.go` - Tests for OSS stub behaviour
 
 **Commercial Only** (`//go:build commercial`):
 
@@ -45,13 +47,11 @@ All HA code is located in `commercial/ha/` with Go build tags controlling which 
 - `health.go` - Health checking implementation
 - `raft_consensus.go` - Raft-based consensus
 - `raft_transport.go` - Raft HTTP transport
-- `discovery.go` - Node discovery
 - `failover.go` - Automatic failover
-- `load_balancer.go` - Load balancing
-- `session_sync.go` - Session synchronization
 - `split_brain.go` - Split-brain detection
+- `types.go` - HA-specific type definitions
 - `manager_test.go` - HA manager tests
-- All implementation files requiring clustering
+- `raft_consensus_test.go`, `raft_transport_test.go`, `failover_test.go`, `split_brain_test.go` - Tests
 
 **Commercial HA Integration Tests** (`//go:build commercial`):
 
