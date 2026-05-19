@@ -146,7 +146,7 @@ Some resources don't have a feasible event-source (no OS-level watcher, no vendo
 
 Current adoption (as of v0.9.x):
 
-- **Implemented**: none [GAP: `network_activedirectory` module has a `Monitor()` method stub but it does not satisfy the `modules.Monitor` interface (wrong return type, always returns an error, missing `Changes()` and correctly-signed `Close()` methods, `GetCapabilities()` reports `supports_monitor: false`). See issue #1520]
+- **Implemented**: none
 - **Polling-only (no Monitor yet)**: `activedirectory`, `file`, `directory`, `script`, `firewall`, `package`, `patch`
 
 Adding `Monitor` support to additional modules is an ongoing enhancement, prioritized by user impact (security-sensitive resources benefit most from event-driven detection).

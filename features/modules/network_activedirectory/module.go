@@ -764,12 +764,6 @@ func (m *activeDirectoryModule) Close(ctx context.Context) error {
 	return nil
 }
 
-// Monitor implements optional real-time monitoring for AD changes
-func (m *activeDirectoryModule) Monitor(ctx context.Context, resourceID string, config modules.ConfigState) (<-chan modules.ConfigState, error) {
-	// Design decision: real-time AD monitoring requires an LDAP change notification channel; the LDAP client does not expose one yet.
-	return nil, fmt.Errorf("real-time AD monitoring requires an LDAP change notification channel; the LDAP client does not expose one")
-}
-
 // GetCapabilities returns the capabilities of this module
 func (m *activeDirectoryModule) GetCapabilities() map[string]interface{} {
 	return map[string]interface{}{
