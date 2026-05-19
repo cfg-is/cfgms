@@ -9,12 +9,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/execution"
+	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -255,6 +258,166 @@ func TestExecutor_GetCompareSetVerify_Workflow(t *testing.T) {
 	report2, err := executor.ApplyConfiguration(ctx, []byte(configJSON), "v1.0")
 	require.NoError(t, err)
 	assert.Equal(t, "OK", report2.Status)
+}
+
+// TestExecuteResource_ApplyMode_CallsSet asserts that module.Set() is called when
+// drift is detected in apply mode, preserving existing behavior bit-for-bit.
+func TestExecuteResource_ApplyMode_CallsSet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions not applicable on Windows; no Windows equivalent for this test")
+	}
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "apply_test.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("initial content\n"), 0644))
+
+	logger := logging.ForModule("executor_test")
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:    logger,
+		DriftMode: stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	var handlerFired int32
+	executor.SetDriftEventHandler(func(rn, mn string, diff *stewardtesting.StateDiff) {
+		atomic.AddInt32(&handlerFired, 1)
+		assert.Equal(t, "drift.detected", diff.EventType, "apply mode must emit drift.detected event type")
+	})
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "apply-test-file",
+		Module: "file",
+		Config: map[string]interface{}{
+			"path":              filepath.ToSlash(filePath),
+			"content":           "desired content\n",
+			"permissions":       420, // 0644 octal
+			"allowed_base_path": filepath.ToSlash(tempDir),
+		},
+	}
+
+	ctx := context.Background()
+	result := executor.ExecuteResource(ctx, resource)
+
+	assert.Equal(t, execution.StatusSuccess, result.Status, "apply mode must correct drift and return StatusSuccess")
+	assert.True(t, result.DriftDetected, "drift must be detected")
+	assert.True(t, result.ChangesApplied, "Set() must be called in apply mode")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&handlerFired), "DriftEventHandler must fire once")
+
+	// Verify Set() actually ran — file must contain desired content.
+	got, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+	assert.Equal(t, "desired content\n", string(got), "file content must be updated by Set()")
+}
+
+// TestExecuteResource_MonitorMode_SkipsSet asserts that in monitor mode:
+//   - module.Set() and module.Verify() are NOT called
+//   - ResourceResult.Status is StatusNonCompliant
+//   - DriftEventHandler fires before the early return (ordering preserved)
+//   - The emitted event type is "drift.detected.monitor"
+func TestExecuteResource_MonitorMode_SkipsSet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions not applicable on Windows; no Windows equivalent for this test")
+	}
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "monitor_test.txt")
+	initialContent := "initial content\n"
+	require.NoError(t, os.WriteFile(filePath, []byte(initialContent), 0644))
+
+	logger := logging.ForModule("executor_test")
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:    logger,
+		DriftMode: stewardconfig.DriftModeMonitor,
+	})
+	require.NoError(t, err)
+
+	var handlerFired int32
+	var capturedEventType string
+	executor.SetDriftEventHandler(func(rn, mn string, diff *stewardtesting.StateDiff) {
+		atomic.AddInt32(&handlerFired, 1)
+		capturedEventType = diff.EventType
+	})
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "monitor-test-file",
+		Module: "file",
+		Config: map[string]interface{}{
+			"path":              filepath.ToSlash(filePath),
+			"content":           "desired content\n",
+			"permissions":       420, // 0644 octal
+			"allowed_base_path": filepath.ToSlash(tempDir),
+		},
+	}
+
+	ctx := context.Background()
+	result := executor.ExecuteResource(ctx, resource)
+
+	assert.Equal(t, execution.StatusNonCompliant, result.Status, "monitor mode must return StatusNonCompliant")
+	assert.True(t, result.DriftDetected, "drift must be detected")
+	assert.False(t, result.ChangesApplied, "Set() must NOT be called in monitor mode")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&handlerFired), "DriftEventHandler must fire before the early return")
+	assert.Equal(t, "drift.detected.monitor", capturedEventType, "monitor mode must emit drift.detected.monitor event type")
+
+	// Verify Set() was NOT called — file must still contain initial content.
+	got, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+	assert.Equal(t, initialContent, string(got), "file content must be unchanged in monitor mode (Set() skipped)")
+}
+
+// TestApplyConfiguration_MonitorMode verifies that when the executor is configured
+// with DriftModeMonitor and a config with drifted resources is applied:
+//   - The overall report status is "NON_COMPLIANT"
+//   - Drifted resources have StatusNonCompliant
+//   - The file on disk is NOT modified (Set() was not called)
+//   - ExecutorDriftMode confirms the mode was threaded from ExecutorConfig
+func TestApplyConfiguration_MonitorMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions not applicable on Windows; no Windows equivalent for this test")
+	}
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "monitor_apply_test.txt")
+	initialContent := "initial content\n"
+	require.NoError(t, os.WriteFile(filePath, []byte(initialContent), 0644))
+
+	logger := logging.ForModule("executor_test")
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:    logger,
+		DriftMode: stewardconfig.DriftModeMonitor,
+	})
+	require.NoError(t, err)
+
+	// ExecutorDriftMode confirms the mode was threaded from ExecutorConfig.
+	assert.Equal(t, stewardconfig.DriftModeMonitor, execution.ExecutorDriftMode(executor),
+		"DriftMode must be threaded from ExecutorConfig into Executor")
+
+	configJSON := `{
+  "steward": {"id": "test-steward", "mode": "controller"},
+  "resources": [
+    {
+      "name": "monitor-apply-file",
+      "module": "file",
+      "config": ` + testFileConfig(filePath, "desired content\\n") + `
+    }
+  ]
+}`
+
+	ctx := context.Background()
+	report, err := executor.ApplyConfiguration(ctx, []byte(configJSON), "v-monitor-1")
+	require.NoError(t, err)
+	require.NotNil(t, report)
+
+	assert.Equal(t, "NON_COMPLIANT", report.Status,
+		"monitor mode with drifted resources must produce NON_COMPLIANT report status")
+
+	fileStatus, ok := report.Modules["file"]
+	assert.True(t, ok, "file module must be present in report")
+	assert.Equal(t, "NON_COMPLIANT", fileStatus.Status, "file module status must be NON_COMPLIANT")
+
+	nonCompliantCount, _ := fileStatus.Details["non_compliant_count"].(int)
+	assert.Equal(t, 1, nonCompliantCount, "non_compliant_count must be 1")
+
+	// Verify Set() was NOT called — file must still contain initial content.
+	got, readErr := os.ReadFile(filePath)
+	require.NoError(t, readErr)
+	assert.Equal(t, initialContent, string(got), "file must be unchanged in monitor mode")
 }
 
 func TestExecutor_ApplyConfiguration_PermissionsRejectedOnWindows(t *testing.T) {

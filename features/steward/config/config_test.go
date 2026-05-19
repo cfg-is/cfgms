@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadConfiguration(t *testing.T) {
@@ -913,4 +914,69 @@ resources:
 	_, err := LoadConfiguration(configFile)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "trusted_keys")
+}
+
+// TestDriftModeFromControllerCfgBytes asserts that DriftMode is correctly parsed
+// from controller-delivered cfg bytes (YAML), and that absence of drift_mode
+// results in an empty field (treated as DriftModeApply by the executor).
+func TestDriftModeFromControllerCfgBytes(t *testing.T) {
+	// Simulate controller-delivered YAML bytes containing drift_mode: monitor.
+	yamlMonitor := []byte(`
+steward:
+  id: test-steward
+  drift_mode: monitor
+resources: []
+`)
+	var cfgMonitor StewardConfig
+	require.NoError(t, yaml.Unmarshal(yamlMonitor, &cfgMonitor))
+	assert.Equal(t, DriftModeMonitor, cfgMonitor.Steward.DriftMode,
+		"drift_mode: monitor must parse to DriftModeMonitor")
+
+	// Simulate controller-delivered YAML bytes with drift_mode: apply.
+	yamlApply := []byte(`
+steward:
+  id: test-steward
+  drift_mode: apply
+resources: []
+`)
+	var cfgApply StewardConfig
+	require.NoError(t, yaml.Unmarshal(yamlApply, &cfgApply))
+	assert.Equal(t, DriftModeApply, cfgApply.Steward.DriftMode,
+		"drift_mode: apply must parse to DriftModeApply")
+
+	// Absence of drift_mode field defaults to empty (executor treats empty as apply).
+	yamlNoMode := []byte(`
+steward:
+  id: test-steward
+resources: []
+`)
+	var cfgNoMode StewardConfig
+	require.NoError(t, yaml.Unmarshal(yamlNoMode, &cfgNoMode))
+	assert.Empty(t, cfgNoMode.Steward.DriftMode,
+		"missing drift_mode must be empty (executor default: apply)")
+}
+
+// TestDriftMode_LocalFileCannotSetIt asserts the security invariant:
+// LoadConfiguration clears DriftMode so a tampered local file cannot flip
+// a controller-connected steward into monitor mode.
+func TestDriftMode_LocalFileCannotSetIt(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  drift_mode: monitor
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err, "config with drift_mode must load without error")
+	assert.Empty(t, cfg.Steward.DriftMode,
+		"DriftMode must be cleared after loading from local file (security invariant)")
 }

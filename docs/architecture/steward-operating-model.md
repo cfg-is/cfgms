@@ -15,7 +15,7 @@ The steward is a daemon that maintains a device in the state described by its cf
 
 1. **Load cfg** — Find and parse the `hostname.cfg` file (local file, or last-known cfg from controller)
 2. **Discover modules** — Scan module paths and register available modules. Modules referenced in the cfg are loaded on-demand during convergence (not validated at startup)
-3. **Initial convergence** — Evaluate every resource in the cfg immediately (apply or monitor, depending on mode) [GAP: apply/monitor toggle not yet wired — see issue #1519; current code always applies changes]
+3. **Initial convergence** — Evaluate every resource in the cfg immediately (apply or monitor, depending on `drift_mode` received from the controller)
 4. **Start convergence schedule** — Begin the compliance re-check loop at the interval defined by `converge_interval` in the cfg (default: 30 minutes). DNA is collected as part of each convergence run (not a separate startup step)
 5. **Connect to controller** (if configured) — Establish a gRPC-over-QUIC transport connection. Check for cfg updates
 
@@ -76,7 +76,7 @@ Get → Compare → Set → Verify
 
 1. **Get**: Call `module.Get()` to read current state from the system
 2. **Compare**: Engine compares current state against desired state from the cfg (using `StateComparator`)
-3. **Set**: If drifted and in `apply` mode, call `module.Set()` to converge [GAP: apply/monitor toggle not yet wired — see issue #1519; current code always calls Set when drift is detected]
+3. **Set**: If drifted and in `apply` mode, call `module.Set()` to converge. In `monitor` mode, emit `drift.detected.monitor` event upstream and skip Set/Verify.
 4. **Verify**: Call `module.Get()` again to confirm the change took effect
 
 **In `apply` mode:**
@@ -85,9 +85,7 @@ Get → Compare → Set → Verify
 
 **In `monitor` mode:**
 - If current matches desired: report compliant
-- If drifted: report drift (skip Set and Verify, no changes made)
-
-[GAP: apply/monitor toggle not implemented — `steward.mode` in the cfg currently controls connectivity mode (standalone/controller), not drift behavior. The execution engine always calls Set() when drift is detected regardless of mode. See issue #1519]
+- If drifted: emit `drift.detected.monitor` upstream event; skip Set and Verify; report `StatusNonCompliant`
 
 ### Error Handling
 
@@ -107,16 +105,18 @@ Every convergence run must be safe to repeat. Modules implement Get/Set such tha
 
 ### Drift Modes
 
-The cfg's `mode` field selects how the steward responds to drift detected during convergence or scheduled re-checks:
+The `drift_mode` field in the controller-delivered cfg selects how the steward responds to drift detected during convergence or scheduled re-checks:
 
-- **`apply` mode** (default for managed devices): the steward attempts local convergence and reports the outcome as a single combined message containing `{drift_detected, drift_setting, convergence_result, final_state}` — one message per drift event. The controller sees the drift and its resolution together.
-- **`monitor` mode**: the steward detects drift but does not act. Emits a non-compliance event upstream; operator action (or a separate `apply` workflow) decides whether to correct.
+- **`apply` mode** (default — matches current behavior when `drift_mode` is absent): the steward attempts local convergence and reports the outcome. The controller sees the drift and its resolution together.
+- **`monitor` mode**: the steward detects drift but does not act. Emits a `drift.detected.monitor` event upstream with `ResourceResult.Status = StatusNonCompliant`; operator action (or a separate `apply` workflow) decides whether to correct.
 
-Mode is set at the steward level (`steward.mode` in the cfg) — a single steward operates in one mode at a time across all its managed resources. Per-resource override is not in scope for v1.
+`drift_mode` is set exclusively from the controller-delivered cfg — a separate field from `steward.mode` (which controls connectivity: `standalone` or `controller`). A single steward operates in one drift mode at a time across all its managed resources. Per-resource override is not in scope for v1.
+
+**Security invariant**: `drift_mode` is sourced from the authenticated controller-delivered cfg only. The local-file loading path (`loadFromPath` in `features/steward/config/config.go`) clears the field after parsing so a tampered `hostname.cfg` cannot flip a controller-connected steward into monitor mode.
+
+**Distinguishable event type**: in monitor mode the executor sets `StateDiff.EventType = "drift.detected.monitor"` before invoking the `DriftEventHandler`. This lets the controller distinguish monitor-mode stewards (which simply haven't drifted) from apply-mode stewards via fleet-wide telemetry. Handler ordering is preserved: `DriftEventHandler` always fires before any mode-specific branch.
 
 Controller-side logging captures both the drift event and convergence result regardless of mode, enabling flapping detection (a future enhancement) without wire-protocol changes.
-
-[GAP: apply/monitor toggle not implemented — the `steward.mode` cfg field currently accepts `standalone` or `controller` (connectivity mode), not `apply` or `monitor`. A separate `drift_mode` field (or renamed `mode` field) needs to be added. The execution engine always applies changes when drift is detected regardless of any mode setting. See issue #1519]
 
 ## Modules
 
@@ -370,6 +370,7 @@ The convergence loop behaviour is controlled by fields in the cfg:
 | Field | Default | Description |
 |-------|---------|-------------|
 | `steward.converge_interval` | `30m` | How often the steward re-converges against the cfg. Accepts any Go duration string: `"5m"`, `"30m"`, `"1h"`, etc. |
+| `steward.drift_mode` | `apply` | How the steward handles detected drift. `apply`: correct drift with `Set()` + `Verify()`. `monitor`: emit `drift.detected.monitor` event, skip `Set()` and `Verify()`. **Controller-delivered only** — local file value is ignored. |
 
 Industry reference intervals: CFEngine 5 min, DSC 15 min, Chef/Puppet 30 min.
 
@@ -380,7 +381,7 @@ The steward binary is the same in every deployment. The table below shows which 
 | Behavior | Standalone | Controller-Connected |
 |----------|------------|---------------------|
 | Load and parse cfg | Local file | Pushed by controller, stored locally |
-| Convergence loop (apply/monitor) [GAP: toggle not wired, see #1519] | Yes | Yes |
+| Convergence loop (apply/monitor) | Yes | Yes |
 | Scheduled re-check (`converge_interval`) | Yes | Yes (default 30m until cfg received) |
 | Event hooks | Yes | Yes |
 | DNA collection | Yes | Yes |
