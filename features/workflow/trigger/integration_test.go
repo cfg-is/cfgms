@@ -258,10 +258,11 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	// Create API handler
 	apiHandler := NewAPIHandler(manager)
 
-	// Set up router
+	// Set up router — subrouter mirrors server.go: api.PathPrefix("/triggers").Subrouter()
 	router := mux.NewRouter()
 	router.Use(TriggerAPIMiddleware)
-	apiHandler.RegisterRoutes(router)
+	sub := router.PathPrefix("/triggers").Subrouter()
+	apiHandler.RegisterRoutes(sub)
 
 	// Create test server
 	server := httptest.NewServer(router)
