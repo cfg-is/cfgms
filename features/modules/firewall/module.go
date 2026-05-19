@@ -139,7 +139,10 @@ func (c *firewallConfig) validate() error {
 		return ErrInvalidAction
 	}
 
-	// Validate protocol or service
+	// Validate protocol or service — exactly one must be set, not both
+	if c.Service != "" && c.Protocol != "" {
+		return ErrInvalidProtocol
+	}
 	if c.Service == "" {
 		if c.Protocol == "" {
 			return ErrInvalidProtocol

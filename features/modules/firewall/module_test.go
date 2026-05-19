@@ -502,6 +502,27 @@ enabled: true
 	}
 }
 
+// TestFirewallConfig_Validate_BothProtocolAndService verifies that validate()
+// rejects a config where both protocol and service are non-empty, since exactly
+// one selector must be provided.
+func TestFirewallConfig_Validate_BothProtocolAndService(t *testing.T) {
+	cfg := &firewallConfig{
+		Name:        "ambiguous-rule",
+		Action:      "allow",
+		Direction:   "input",
+		Protocol:    "tcp",
+		Service:     "https",
+		Port:        443,
+		Source:      "0.0.0.0/0",
+		Destination: "10.0.0.0/24",
+	}
+
+	err := cfg.validate()
+	if !errors.Is(err, ErrInvalidProtocol) {
+		t.Errorf("validate() with both protocol and service set: got %v, want ErrInvalidProtocol", err)
+	}
+}
+
 // TestSet_AbsentState_NotFound returns ErrRuleNotFound when deleting a
 // rule that was never installed.
 func TestSet_AbsentState_NotFound(t *testing.T) {
