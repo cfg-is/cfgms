@@ -1379,29 +1379,18 @@ exit 0
 MOCKEOF
     chmod +x "$mock_pq"
 
-    # Mock gh that returns MERGED for pr view 1234
-    local mock_gh="${tmp_dir}/gh"
-    cat > "$mock_gh" << 'MOCKEOF'
-#!/usr/bin/env bash
-if [[ "$1" == "pr" && "$2" == "view" && "$3" == "1234" ]]; then
-    printf '"MERGED"\n'
-else
-    printf '{}\n'
-fi
-exit 0
-MOCKEOF
-    chmod +x "$mock_gh"
-
     # Use a temp Python script (importlib.util pattern matching existing tests).
+    # auto_close_merged_items now batches PR state checks via GraphQL (Issue
+    # #1581) so we stub gh_graphql_pr_states instead of mocking `gh pr view`.
     local tmp_py
     tmp_py=$(mktemp --suffix=.py)
     cat > "$tmp_py" << PYEOF
 import sys, os, importlib.util
 os.environ['CFGMS_TEST_PROJECT_QUEUE'] = '${mock_pq}'
-os.environ['PATH'] = '${tmp_dir}:' + os.environ.get('PATH', '')
 spec = importlib.util.spec_from_file_location('preflight', '${preflight_script}')
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+mod.gh_graphql_pr_states = lambda nums: {int(n): 'MERGED' for n in nums}
 count = mod.auto_close_merged_items()
 assert count == 1, f'Expected count=1 (one item closed), got count={count}'
 print(f'COUNT:{count}')
@@ -1452,10 +1441,10 @@ MOCKEOF2
     cat > "$tmp_py2" << PYEOF2
 import sys, os, importlib.util
 os.environ['CFGMS_TEST_PROJECT_QUEUE'] = '${fail_pq}'
-os.environ['PATH'] = '${tmp_dir}:' + os.environ.get('PATH', '')
 spec = importlib.util.spec_from_file_location('preflight', '${preflight_script}')
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+mod.gh_graphql_pr_states = lambda nums: {int(n): 'MERGED' for n in nums}
 mod.auto_close_merged_items()
 PYEOF2
 
@@ -1529,6 +1518,120 @@ test_create_clone_item() {
     fi
 
     rm -rf "$tmp_dir"
+}
+
+test_preflight_gh_call_budget() {
+    log_test "Testing po-cycle-preflight.py: ≤3 direct gh invocations per cycle (Issue #1581)..."
+
+    local preflight_script
+    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-cycle-preflight.py"
+
+    if [[ ! -f "$preflight_script" ]]; then
+        log_fail "po-cycle-preflight.py: not found at $preflight_script"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    # Mock project-queue.sh: returns one Ready issue (#9001) referencing dep #9002.
+    local mock_pq="${tmp_dir}/project-queue.sh"
+    cat > "$mock_pq" << 'MOCKEOF'
+#!/usr/bin/env bash
+subcmd="${1:-}"
+status="${2:-}"
+case "$subcmd" in
+  list-by-status)
+    if [[ "$status" == "Ready" ]]; then
+      printf '[{"item_id":"PVTI_test001","issue_num":9001,"title":"ready story"}]\n'
+    elif [[ "$status" == "In Progress" ]]; then
+      printf '[{"item_id":"PVTI_test002","issue_num":9003,"title":"in-progress story"}]\n'
+    else
+      printf '[]\n'
+    fi
+    ;;
+  get-item)
+    printf '{"item_id":"%s","fields":{},"status":"","title":"","body":""}\n' "${2:-}"
+    ;;
+  *)
+    printf '[]\n'
+    ;;
+esac
+exit 0
+MOCKEOF
+    chmod +x "$mock_pq"
+
+    # Run preflight via importlib, counting how many times the gh() / tolerant
+    # wrappers were entered. The two wrappers share the _GH_CALL_COUNT global.
+    local tmp_py
+    tmp_py=$(mktemp --suffix=.py)
+    cat > "$tmp_py" << PYEOF
+import os, sys, importlib.util
+os.environ['CFGMS_TEST_PROJECT_QUEUE'] = '${mock_pq}'
+
+spec = importlib.util.spec_from_file_location('preflight', '${preflight_script}')
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# Stub the four gh entrypoints so no network call is made. Each stub records
+# the request via the real counter (incremented inside gh / gh_graphql_tolerant
+# before they return), so we measure call sites, not network requests.
+def fake_gh(*args, check=True):
+    mod._GH_CALL_COUNT += 1
+    a = list(args)
+    # gh api graphql query=...
+    if a[:2] == ['api', 'graphql']:
+        query = ''
+        for tok in a:
+            if tok.startswith('query='):
+                query = tok[len('query='):]
+        if 'mergeQueue' in query:
+            # pipeline_overview shape
+            return {'data': {'repository': {
+                'issues': {'nodes': []},
+                'mergeQueue': {'entries': {'nodes': []}},
+            }, 'storyPRs': {'nodes': []}, 'bodyRefs': {'nodes': []}}}
+        return {'data': {'repository': {}}}
+    return None
+
+def fake_tolerant(query):
+    mod._GH_CALL_COUNT += 1
+    # Aliased issues batch — return CLOSED state for #9002 so dep gating works.
+    if 'i9002' in query:
+        return {'data': {'repository': {
+            'i9002': {'number': 9002, 'title': 'dep', 'body': '', 'state': 'CLOSED', 'labels': {'nodes': []}},
+        }}}
+    # Aliased issues batch for story bodies
+    return {'data': {'repository': {
+        'i9001': {'number': 9001, 'title': 'ready', 'body': '## Dependencies\n#9002\n', 'state': 'OPEN', 'labels': {'nodes': []}},
+        'i9003': {'number': 9003, 'title': 'in-progress', 'body': '', 'state': 'OPEN', 'labels': {'nodes': []}},
+    }}}
+
+mod.gh = fake_gh
+mod.gh_graphql_tolerant = fake_tolerant
+
+# Stub code_health_check so we don't run make + go build in the test.
+mod.code_health_check = lambda: {'ok': True, 'skipped': True, 'skipped_reason': 'stub', 'develop_sha': None, 'checks': {}}
+
+mod._GH_CALL_COUNT = 0
+data = mod.main()
+print(f'GH_CALL_COUNT={mod._GH_CALL_COUNT}')
+assert mod._GH_CALL_COUNT <= 3, f'gh call budget exceeded: {mod._GH_CALL_COUNT} > 3'
+print('PASS')
+PYEOF
+
+    local output exit_code=0
+    output=$(python3 "$tmp_py" 2>&1) || exit_code=$?
+    rm -f "$tmp_py"
+
+    if [[ $exit_code -eq 0 ]] && echo "$output" | grep -q "^PASS$"; then
+        local count
+        count=$(echo "$output" | grep -oE 'GH_CALL_COUNT=[0-9]+' | head -1)
+        log_pass "preflight gh call budget: ${count} (≤3 enforced by AC #1581)"
+    else
+        log_fail "preflight gh call budget: exceeded or test crashed (exit $exit_code): $output"
+    fi
 }
 
 test_preflight_forged_acceptance_review() {
@@ -2025,6 +2128,8 @@ echo ""
 test_done_on_merge
 echo ""
 test_preflight_forged_acceptance_review
+echo ""
+test_preflight_gh_call_budget
 echo ""
 test_trust_boundary
 echo ""
