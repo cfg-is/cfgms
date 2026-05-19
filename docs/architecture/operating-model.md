@@ -185,7 +185,12 @@ Two credential flavors:
 - **Short-lived / single-use registration tokens** — manual onboarding, small fleets, time-bounded provisioning. Generated on the controller, handed to the steward as a string. Consumed at registration; expiry enforces time bounds.
 - **Long-lived tenant/group registration codes** — RMM/GPO mass deployment. Same string-on-the-wire pattern, baked into deployment scripts and reused by many devices. Encodes tenant/group target.
 
-Both flow through the controller's registration approval workflow (`RegistrationApprovalHook`). The default hook auto-approves all valid registrations. To customize approval, deploy a workflow named `steward-registration-approval`; a workflow with `Variables: {policy: accept}` short-circuits to auto-approve. [GAP: built-in named workflow templates (`auto-approve`, `manual-review`) not yet shipped — see issue #1527] Custom workflows implement arbitrary policy via the workflow engine.
+Both flow through the controller's registration approval workflow (`RegistrationApprovalHook`). The controller ships two built-in workflows selectable via `registration.workflow` in `controller.cfg`:
+
+- **`auto-approve`** (default) — approves all valid registrations immediately. Uses `Variables: {policy: accept}` to short-circuit the engine without running steps. Safe for development and small trusted fleets.
+- **`manual-review`** — quarantines each new steward pending operator action via `cfg registration approve`. Sets `registration_decision: quarantine` so the hook restricts the steward to baseline config only until promoted.
+
+Custom workflows implement arbitrary policy via the workflow engine by deploying a workflow named `steward-registration-approval`.
 
 **Admin identity is a single-file mTLS bundle.**
 On `--init`, the controller writes the bundle to a known path:

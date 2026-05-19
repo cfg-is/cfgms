@@ -30,6 +30,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
 	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/controller/push"
+	controllerRegistration "github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
 	"github.com/cfgis/cfgms/features/rbac"
@@ -62,6 +63,7 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for OSS composite manager
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"gopkg.in/yaml.v3"
 )
 
 // buildVersionCheck is a compile-time constant to verify code version in Docker
@@ -581,6 +583,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		srv.triggerManager = triggerMgr
 		logger.Info("Workflow engine wired to HTTP API server")
 
+		// Issue #1527: Seed the built-in registration approval workflow before wiring the hook.
+		seedBuiltinRegistrationWorkflow(cfg, storageManager.GetConfigStore(), logger)
+
 		// Issue #422: Wire registration approval hook backed by the workflow engine.
 		// Operators configure the "steward-registration-approval" workflow to customise policy.
 		approvalHook := workflowHandler.NewRegistrationApprovalHook(logger)
@@ -630,6 +635,61 @@ func initializeGitSync(
 	}
 	webhookHandler := gitsync.NewWebhookHandler(syncer, bindingStore, logger)
 	return syncer, webhookHandler
+}
+
+// builtinWorkflowTenantID is the tenant scope used when seeding built-in registration
+// approval workflows. "root" is the standard root tenant in CFGMS multi-tenant deployments.
+// Registrations using tokens with TenantID "root" will find the built-in workflow.
+// Sub-tenants requiring the manual-review policy must deploy their own per-tenant workflow.
+const builtinWorkflowTenantID = "root"
+
+// seedBuiltinRegistrationWorkflow seeds the appropriate built-in registration approval
+// workflow into the config store under the root tenant scope based on
+// cfg.Registration.Workflow (Issue #1527).
+//
+// If the workflow field is empty and a custom "steward-registration-approval" workflow
+// already exists in the root scope, seeding is skipped to preserve operator-authored workflows.
+func seedBuiltinRegistrationWorkflow(cfg *config.Config, configStore cfgconfig.ConfigStore, logger logging.Logger) {
+	ctx := context.Background()
+
+	// Root-tenant workflow store.
+	store := workflow.NewWorkflowStore(configStore, builtinWorkflowTenantID)
+
+	workflowChoice := "auto-approve"
+	if cfg.Registration != nil && cfg.Registration.Workflow != "" {
+		workflowChoice = cfg.Registration.Workflow
+	} else {
+		// No explicit workflow configured: skip seeding if a custom workflow already exists.
+		if _, err := store.GetLatestWorkflow(ctx, "steward-registration-approval"); err == nil {
+			logger.Info("Custom registration approval workflow found, skipping built-in seeding (Issue #1527)")
+			return
+		}
+	}
+
+	var rawYAML []byte
+	switch workflowChoice {
+	case "auto-approve":
+		rawYAML = controllerRegistration.AutoApproveYAML
+	case "manual-review":
+		rawYAML = controllerRegistration.ManualReviewYAML
+	default:
+		logger.Warn("Unknown registration.workflow value, defaulting to auto-approve (Issue #1527)",
+			"workflow", workflowChoice)
+		rawYAML = controllerRegistration.AutoApproveYAML
+	}
+
+	var vw workflow.VersionedWorkflow
+	if err := yaml.Unmarshal(rawYAML, &vw); err != nil {
+		logger.Warn("Failed to parse built-in registration workflow YAML (Issue #1527)", "error", err)
+		return
+	}
+
+	if err := store.StoreWorkflow(ctx, &vw); err != nil {
+		logger.Warn("Failed to seed built-in registration workflow (Issue #1527)", "error", err)
+		return
+	}
+
+	logger.Info("Built-in registration approval workflow seeded (Issue #1527)", "workflow", workflowChoice)
 }
 
 // noOpModuleRegistry is a minimal ModuleRegistry for controller wiring.
@@ -1219,6 +1279,13 @@ func (s *Server) GetRegistrationTokenStore() pkgRegistration.Store {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.registrationTokenStore
+}
+
+// GetConfigStore returns the controller's config store (Issue #1527: used to verify built-in workflow seeding in tests).
+func (s *Server) GetConfigStore() cfgconfig.ConfigStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.storageManager.GetConfigStore()
 }
 
 // GetHTTPListenAddr returns the HTTP API server's listen address after binding.

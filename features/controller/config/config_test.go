@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 // TestDefaultConfig_TransportPopulated verifies DefaultConfig returns a Transport section with sensible defaults.
@@ -243,4 +244,41 @@ func TestLoadWithPath_NoConfigFileUsesDefaults(t *testing.T) {
 	assert.Equal(t, defaults.Transport.MaxConnections, cfg.Transport.MaxConnections)
 	assert.Equal(t, defaults.Transport.KeepalivePeriod, cfg.Transport.KeepalivePeriod)
 	assert.Equal(t, defaults.Transport.IdleTimeout, cfg.Transport.IdleTimeout)
+}
+
+// TestRegistrationConfigDefaults verifies that a config YAML with no registration block
+// leaves Registration nil, signalling the server to seed the auto-approve workflow (Issue #1527).
+func TestRegistrationConfigDefaults(t *testing.T) {
+	yamlInput := `listen_addr: "127.0.0.1:8080"` + "\n"
+
+	cfg := &Config{}
+	err := yaml.Unmarshal([]byte(yamlInput), cfg)
+	require.NoError(t, err)
+
+	assert.Nil(t, cfg.Registration, "Registration should be nil when no registration block is present")
+}
+
+// TestRegistrationConfigManualReview verifies that a config YAML with registration.workflow: manual-review
+// is parsed correctly (Issue #1527).
+func TestRegistrationConfigManualReview(t *testing.T) {
+	yamlInput := "registration:\n  workflow: manual-review\n"
+
+	cfg := &Config{}
+	err := yaml.Unmarshal([]byte(yamlInput), cfg)
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Registration)
+	assert.Equal(t, "manual-review", cfg.Registration.Workflow)
+}
+
+// TestRegistrationConfigAutoApprove verifies that an explicit auto-approve workflow value is parsed (Issue #1527).
+func TestRegistrationConfigAutoApprove(t *testing.T) {
+	yamlInput := "registration:\n  workflow: auto-approve\n"
+
+	cfg := &Config{}
+	err := yaml.Unmarshal([]byte(yamlInput), cfg)
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Registration)
+	assert.Equal(t, "auto-approve", cfg.Registration.Workflow)
 }
