@@ -7,8 +7,13 @@ set -euo pipefail
 # shellcheck source=./agent-context.sh
 source "$(dirname "${BASH_SOURCE[0]}")/agent-context.sh"
 
-# Path to the Projects V2 queue helper (configurable for testing).
-PROJECT_QUEUE="${CFGMS_TEST_PROJECT_QUEUE:-$(dirname "${BASH_SOURCE[0]}")/../scripts/project-queue.sh}"
+# Path to the Projects V2 queue helper. The default is the workspace bind-mount
+# (every dev container mounts the repo at /workspace, and Dockerfile sets
+# WORKDIR /workspace). `dirname "${BASH_SOURCE[0]}")/../scripts/...` would
+# resolve to /usr/local/scripts/... — which doesn't exist; entrypoint.sh lives
+# at /usr/local/bin/ with no sibling scripts/ dir. Test harness overrides via
+# CFGMS_TEST_PROJECT_QUEUE to point at the host repo.
+PROJECT_QUEUE="${CFGMS_TEST_PROJECT_QUEUE:-/workspace/scripts/project-queue.sh}"
 
 # --- Argument parsing ---
 MODE="issue"
