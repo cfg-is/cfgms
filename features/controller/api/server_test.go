@@ -15,15 +15,59 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
+	cpInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// testControlPlane is a minimal in-process ControlPlaneProvider for server-wiring tests.
+// sendCommandCh receives a struct{} each time SendCommand is called, allowing tests to
+// observe fanout delivery without requiring a real gRPC connection.
+type testControlPlane struct {
+	sendCommandCh chan struct{}
+}
+
+var _ cpInterfaces.ControlPlaneProvider = (*testControlPlane)(nil)
+
+func (p *testControlPlane) Name() string                                                 { return "test" }
+func (p *testControlPlane) IsConnected() bool                                            { return true }
+func (p *testControlPlane) Initialize(_ context.Context, _ map[string]interface{}) error { return nil }
+func (p *testControlPlane) Start(_ context.Context) error                                { return nil }
+func (p *testControlPlane) Stop(_ context.Context) error                                 { return nil }
+func (p *testControlPlane) Reconnect(_ context.Context) error                            { return nil }
+func (p *testControlPlane) SendCommand(_ context.Context, _ *cpTypes.SignedCommand) error {
+	select {
+	case p.sendCommandCh <- struct{}{}:
+	default:
+	}
+	return nil
+}
+func (p *testControlPlane) FanOutCommand(_ context.Context, _ *cpTypes.SignedCommand, ids []string) (*cpTypes.FanOutResult, error) {
+	return &cpTypes.FanOutResult{Succeeded: ids, Failed: map[string]error{}}, nil
+}
+func (p *testControlPlane) SubscribeCommands(_ context.Context, _ string, _ cpInterfaces.CommandHandler) error {
+	return nil
+}
+func (p *testControlPlane) PublishEvent(_ context.Context, _ *cpTypes.Event) error { return nil }
+func (p *testControlPlane) SubscribeEvents(_ context.Context, _ *cpTypes.EventFilter, _ cpInterfaces.EventHandler) error {
+	return nil
+}
+func (p *testControlPlane) SendHeartbeat(_ context.Context, _ *cpTypes.Heartbeat) error { return nil }
+func (p *testControlPlane) SubscribeHeartbeats(_ context.Context, _ cpInterfaces.HeartbeatHandler) error {
+	return nil
+}
+func (p *testControlPlane) GetStats(_ context.Context) (*cpTypes.ControlPlaneStats, error) {
+	return &cpTypes.ControlPlaneStats{}, nil
+}
 
 func setupTestServer(t *testing.T) *Server {
 	// Isolate secrets storage per test. initializeSecretStore() defaults to a
@@ -1285,3 +1329,139 @@ func TestServer_MonitoringStubRoutesDeregistered(t *testing.T) {
 		})
 	}
 }
+
+// setupServerWithPublisher creates a server with a real commands.Publisher backed by
+// the provided testControlPlane. Returns the server, configService, and controllerService
+// so tests can interact with them directly.
+func setupServerWithPublisher(t *testing.T, cp *testControlPlane) (*Server, *service.ConfigurationServiceV2, *service.ControllerService) {
+	t.Helper()
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+	logger := logging.NewNoopLogger()
+	storageManager := pkgtesting.SetupTestStorage(t)
+
+	controllerSvc := service.NewControllerService(logger)
+	configSvc := service.NewConfigurationServiceV2(logger, storageManager, controllerSvc)
+
+	rbacMgr := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacMgr.Initialize(context.Background()))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacMgr.Close(closeCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantMgr := tenant.NewManager(tenantStore, rbacMgr)
+	rbacSvc := service.NewRBACService(rbacMgr)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+	publisher, err := commands.New(&commands.Config{ControlPlane: cp, Logger: logger})
+	require.NoError(t, err)
+
+	server, err := New(
+		cfg, logger, controllerSvc, configSvc, nil, rbacSvc,
+		nil, tenantMgr, rbacMgr, nil, nil, nil, "", nil, auditMgr, publisher, nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Close(closeCtx)
+	})
+
+	return server, configSvc, controllerSvc
+}
+
+// TestNew_FanoutCallbackWired verifies that New() registers a save=deploy fanout callback
+// on the config service when commandPublisher is non-nil, and that the callback correctly
+// dispatches push.Fanout() to active stewards of the affected tenant only.
+func TestNew_FanoutCallbackWired(t *testing.T) {
+	minimalStewardCfg := func(id string) *stewardconfig.StewardConfig {
+		return &stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ID:      id,
+				Mode:    stewardconfig.ModeController,
+				Logging: stewardconfig.LoggingConfig{Level: "info", Format: "text"},
+				ErrorHandling: stewardconfig.ErrorHandlingConfig{
+					ModuleLoadFailure:  stewardconfig.ActionContinue,
+					ResourceFailure:    stewardconfig.ActionWarn,
+					ConfigurationError: stewardconfig.ActionFail,
+				},
+			},
+			Modules: map[string]string{"file": "file"},
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "f", Module: "file", Config: map[string]interface{}{"path": "/tmp/f", "content": "x"}},
+			},
+		}
+	}
+
+	t.Run("fanout dispatched to active steward of matching tenant", func(t *testing.T) {
+		cp := &testControlPlane{sendCommandCh: make(chan struct{}, 1)}
+		_, configSvc, controllerSvc := setupServerWithPublisher(t, cp)
+
+		// Register an active steward in the same tenant used for SetConfiguration.
+		require.NoError(t, controllerSvc.RegisterSteward("steward-1", "tenant-a", "", "active"))
+
+		err := configSvc.SetConfiguration(context.Background(), "tenant-a", "steward-1", minimalStewardCfg("steward-1"))
+		require.NoError(t, err)
+
+		// The goroutine inside the callback calls push.Fanout → TriggerConfigSync → SendCommand.
+		select {
+		case <-cp.sendCommandCh:
+			// success: fanout reached the steward
+		case <-time.After(3 * time.Second):
+			t.Fatal("save=deploy fanout did not deliver to active steward within timeout")
+		}
+	})
+
+	t.Run("fanout skipped for steward of different tenant", func(t *testing.T) {
+		cp := &testControlPlane{sendCommandCh: make(chan struct{}, 1)}
+		_, configSvc, controllerSvc := setupServerWithPublisher(t, cp)
+
+		// Register a steward in tenant-b; SetConfiguration is for tenant-a.
+		require.NoError(t, controllerSvc.RegisterSteward("steward-b", "tenant-b", "", "active"))
+
+		err := configSvc.SetConfiguration(context.Background(), "tenant-a", "steward-1", minimalStewardCfg("steward-1"))
+		require.NoError(t, err)
+
+		// No steward in tenant-a → fanout sends to nobody → SendCommand never called.
+		select {
+		case <-cp.sendCommandCh:
+			t.Fatal("cross-tenant fanout must not occur: SendCommand was called for a different tenant's steward")
+		case <-time.After(200 * time.Millisecond):
+			// success: no cross-tenant fanout
+		}
+	})
+
+	t.Run("leader check: follower skips fanout", func(t *testing.T) {
+		cp := &testControlPlane{sendCommandCh: make(chan struct{}, 1)}
+		server, configSvc, controllerSvc := setupServerWithPublisher(t, cp)
+
+		require.NoError(t, controllerSvc.RegisterSteward("steward-1", "tenant-a", "", "active"))
+
+		// Override the leader check to report this node as a follower.
+		server.pushLeaderStatus = &stubLeaderStatus{leader: false}
+
+		err := configSvc.SetConfiguration(context.Background(), "tenant-a", "steward-1", minimalStewardCfg("steward-1"))
+		require.NoError(t, err)
+
+		select {
+		case <-cp.sendCommandCh:
+			t.Fatal("follower node must not perform fanout")
+		case <-time.After(200 * time.Millisecond):
+			// success: fanout suppressed on follower
+		}
+	})
+}
+
+// stubLeaderStatus is defined in handlers_push_test.go (shared across api package tests).
