@@ -529,8 +529,7 @@ The controller will start on default ports:
 make build-cli
 
 # Run a workflow
-# [GAP: cfg workflow run not implemented — see issue #1542]
-# Use REST API: POST http://localhost:9080/api/v1/workflows/{id}/execute
+./bin/cfg workflow run my-workflow.yaml --url=http://localhost:9080
 ```
 
 **No stewards needed for cloud-only automation!**
