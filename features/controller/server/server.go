@@ -673,8 +673,10 @@ func seedBuiltinRegistrationWorkflow(cfg *config.Config, configStore cfgconfig.C
 	case "manual-review":
 		rawYAML = controllerRegistration.ManualReviewYAML
 	default:
+		// Sanitize workflowChoice: it flows from user-supplied config into the log,
+		// which CodeQL's go/log-injection query flags. Per CLAUDE.md convention.
 		logger.Warn("Unknown registration.workflow value, defaulting to auto-approve (Issue #1527)",
-			"workflow", workflowChoice)
+			"workflow", logging.SanitizeLogValue(workflowChoice))
 		rawYAML = controllerRegistration.AutoApproveYAML
 	}
 
@@ -689,7 +691,8 @@ func seedBuiltinRegistrationWorkflow(cfg *config.Config, configStore cfgconfig.C
 		return
 	}
 
-	logger.Info("Built-in registration approval workflow seeded (Issue #1527)", "workflow", workflowChoice)
+	// Sanitize workflowChoice (user-supplied config) — closes go/log-injection.
+	logger.Info("Built-in registration approval workflow seeded (Issue #1527)", "workflow", logging.SanitizeLogValue(workflowChoice))
 }
 
 // noOpModuleRegistry is a minimal ModuleRegistry for controller wiring.
