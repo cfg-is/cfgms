@@ -41,7 +41,7 @@ For each story, run all 7 checks. A story must pass ALL checks to be promoted.
   ```
   If multiple PRs match, list all candidates with their state and let the dev agent pick the merged one.
 - If a dependency is missing, add it to the story body
-- If a circular dependency exists, create a Blocked tracking issue
+- If a circular dependency exists, set the offending story to Blocked (see "Failing a Story" section) and describe the cycle in the comment — do NOT create a parallel tracking issue
 
 **File overlap check (required when reviewing multiple stories in the same epic):**
 
@@ -78,7 +78,7 @@ For each story, run all 7 checks. A story must pass ALL checks to be promoted.
 - **AC ceiling**: more than 6 acceptance criteria (excluding `make test-complete`) means the story is too broad — block and recommend a split
 - **Module ceiling**: files in scope spanning more than 2 packages means the story is too broad — block and recommend a split by package or capability
 - **Out of Scope section required**: every story must have a `## Out of Scope` section. Block any story missing it. Issue #957 shipped a WIP because the agent refactored `examples/` which was implicitly out of scope but never explicitly excluded
-- Create a Blocked tracking issue recommending a split, with specific suggested boundaries
+- For story-too-broad cases (AC or module ceiling exceeded), set the existing story to Blocked (see "Failing a Story" section) and put the suggested split boundaries in the comment — do NOT create a parallel tracking issue
 
 ### 4. Constraint Flagging
 

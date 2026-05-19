@@ -221,26 +221,12 @@ rm /tmp/story-body.md
 
 If you encounter ambiguity that prevents correct decomposition:
 
-1. Create a tracking issue and mark it Blocked:
+1. Block the **epic itself** with an explanation — do NOT create a parallel tracking issue. The epic's Blocked status + explanatory comment IS the escalation; the founder unblocks the epic when ready.
    ```bash
-   cat > /tmp/blocked-body.md <<'BLOCK_EOF'
-   ## Blocked Story
-   #<NUM> — <story title>
-   ## Issue
-   <What specifically prevents decomposition>
-   ## Recommendation
-   <What the founder should do>
-   BLOCK_EOF
-
-   # Create issue then set Blocked status via po-act.sh
-   gh issue create --repo cfg-is/cfgms --label "high-priority" \
-     --title "BLOCKED: BA decomposition on epic #<NUM>" \
-     --body-file /tmp/blocked-body.md
-   rm /tmp/blocked-body.md
-   # Then: ./.claude/scripts/po-act.sh block <NEW_ISSUE_NUM> "BA blocked: <specific question>"
+   ./.claude/scripts/po-act.sh block <EPIC_NUM> "BA decomposition blocked: <specific question / ambiguity>. Affected scope: <which part of the epic this prevents decomposing>. Recommendation: <what the founder should clarify or decide>."
    ```
 2. Continue decomposing stories you CAN write. Partial decomposition is acceptable.
-3. Report back what was created and what is blocked.
+3. Report back what was created and which aspect of the epic was blocked.
 
 ## Completion
 
