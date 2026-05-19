@@ -132,7 +132,7 @@ The project follows a feature-based organization:
 
 ## Quick Start
 
-**Prerequisites**: Go 1.21+, Git
+**Prerequisites**: Go 1.25+, Git
 
 ```bash
 # Clone and build
