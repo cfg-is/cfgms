@@ -343,6 +343,16 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 					SingleUse:     true,
 					Revoked:       false,
 				},
+				{
+					Token:         "dockertest_fleet", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "test-tenant-fleet",
+					ControllerURL: "fleet-controller:4433",
+					Group:         "test-group",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					SingleUse:     false,
+					Revoked:       false,
+				},
 			}
 
 			for _, testToken := range testTokens {

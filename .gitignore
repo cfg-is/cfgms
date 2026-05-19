@@ -69,6 +69,7 @@ certs/
 !docs/examples/**/*.cfg
 !docs/deployment/**/*.cfg
 !examples/**/*.cfg
+!test/**/*.cfg
 *.env
 .env.local
 

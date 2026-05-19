@@ -654,6 +654,107 @@ services:
     profiles:
       - standalone  # NEW profile for Tier 1 testing
 
+  # ============================================================================
+  # FLEET TEST SERVICES
+  # 1 controller + 2 Debian stewards for fleet test framework validation
+  # Start with: docker compose --profile fleet -f docker-compose.test.yml up -d
+  # ============================================================================
+
+  fleet-controller:
+    container_name: fleet-controller
+    build:
+      context: .
+      dockerfile: cmd/controller/Dockerfile
+    ports:
+      - "4437:4433/udp"   # gRPC-over-QUIC transport
+      - "8090:9080"       # HTTP API
+    environment:
+      CFGMS_SEED_TEST_TOKENS: "1"
+      CFGMS_ENABLE_TEST_ENDPOINTS: "true"
+      CFGMS_TRANSPORT_USE_CERT_MANAGER: "true"
+      CFGMS_LOG_LEVEL: "info"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    user: root
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms /app/data && ./controller --init 2>/dev/null; exec ./controller"]
+    volumes:
+      - fleet_controller_certs:/app/certs
+      - ./test/e2e/fleet/configs/controller.cfg:/app/controller.cfg:ro
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cfgms-fleet
+    profiles:
+      - fleet
+
+  fleet-steward-1:
+    container_name: fleet-steward-1
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile.debian
+      args:
+        STEWARD_CONTROLLER_URL: "https://fleet-controller:9080"
+    environment:
+      CFGMS_REGISTRATION_TOKEN: "dockertest_fleet"
+      CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    volumes:
+      - fleet_steward1_data:/app/data
+      - fleet_controller_certs:/app/controller-certs:ro
+    tmpfs:
+      - /test-workspace:uid=1001,gid=1001,mode=0755,exec
+    depends_on:
+      fleet-controller:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cfgms-fleet
+    profiles:
+      - fleet
+
+  fleet-steward-2:
+    container_name: fleet-steward-2
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile.debian
+      args:
+        STEWARD_CONTROLLER_URL: "https://fleet-controller:9080"
+    environment:
+      CFGMS_REGISTRATION_TOKEN: "dockertest_fleet"
+      CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    volumes:
+      - fleet_steward2_data:/app/data
+      - fleet_controller_certs:/app/controller-certs:ro
+    tmpfs:
+      - /test-workspace:uid=1001,gid=1001,mode=0755,exec
+    depends_on:
+      fleet-controller:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cfgms-fleet
+    profiles:
+      - fleet
+
   # OpenBao dev-mode instance for secrets provider integration tests.
   # Uses host port 8201 to avoid collision with any local Vault/OpenBao on 8200.
   # Start with: docker compose --profile openbao -f docker-compose.test.yml up -d openbao-test
@@ -747,6 +848,22 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: size=256m
+  fleet_controller_certs:
+    driver: local
+    # CA must persist across container restarts (no tmpfs)
+    # Stewards hold client certs issued by this CA — cert validity requires persistence
+  fleet_steward1_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m
+  fleet_steward2_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m
 
 networks:
   cfgms-test:
@@ -756,3 +873,6 @@ networks:
       config:
         - subnet: 172.20.0.0/16
     name: cfgms-test  # Explicit network name to avoid name conflicts
+  cfgms-fleet:
+    driver: bridge
+    name: cfgms-fleet  # Isolated network for fleet test services
