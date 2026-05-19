@@ -19,6 +19,14 @@ One controller with a controller-steward managing the node. Stewards across your
 
 **You'll deploy**: controller binary, controller-steward, config files, systemd service.
 
+### [Fleet Deployment](fleet/walkthrough.md)
+
+Controller with remote stewards: register two Linux endpoints, push a fleet config, and
+observe convergence and drift correction end to end.
+
+**Use when**: You have a working single-controller deployment and want to connect remote
+stewards, push configs, and verify the full fleet management loop.
+
 ### [Controller Cluster](controller-cluster/walkthrough.md) *(planned)*
 
 Geo-redundant controller deployment with failover. Starts from a working single-controller environment.
