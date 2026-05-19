@@ -243,12 +243,11 @@ EOF
 
 ```bash
 # In another terminal
-# [GAP: cfg workflow run not implemented — see issue #1542]
-# Workflows are submitted and executed via the REST API:
-#   1. Create: POST http://localhost:9080/api/v1/workflows
-#   2. Execute: POST http://localhost:9080/api/v1/workflows/{id}/execute
 # Verify the controller is ready:
 curl -s http://localhost:9080/api/v1/health
+
+# Run the workflow you created in Step 4:
+./bin/cfg workflow run example-workflow.yaml --url=http://localhost:9080
 ```
 
 ### Step 6: Try an M365 Workflow (Optional)
@@ -274,8 +273,7 @@ steps:
       message: "Found {{ steps.list-users.count }} test users"
 EOF
 
-# [GAP: cfg workflow run not implemented — see issue #1542]
-# Submit via REST API: POST http://localhost:9080/api/v1/workflows
+./bin/cfg workflow run m365-workflow.yaml --url=http://localhost:9080
 ```
 
 ### What's Next?
