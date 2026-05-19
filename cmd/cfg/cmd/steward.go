@@ -18,10 +18,11 @@ import (
 )
 
 var (
-	stewardURL         string
-	stewardAPIKey      string
-	stewardTLSCACert   string
-	stewardTLSInsecure bool
+	stewardURL              string
+	stewardAPIKey           string
+	stewardTLSCACert        string
+	stewardTLSInsecure      bool
+	stewardStatusJSONOutput bool
 )
 
 // stewardCmd is the parent command for steward subcommands.
@@ -57,7 +58,14 @@ func init() {
 	stewardListCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardListCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 
+	stewardStatusCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardStatusCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardStatusCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	stewardStatusCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	stewardStatusCmd.Flags().BoolVar(&stewardStatusJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
+
 	stewardCmd.AddCommand(stewardListCmd)
+	stewardCmd.AddCommand(stewardStatusCmd)
 }
 
 // getStewardClient creates an API client using bundle auth (mTLS) when available,
@@ -103,6 +111,116 @@ type stewardEntry struct {
 	DNA      *struct {
 		Hostname string `json:"hostname"`
 	} `json:"dna,omitempty"`
+}
+
+// stewardStatusCmd shows detailed status for a single steward.
+var stewardStatusCmd = &cobra.Command{
+	Use:   "status <id>",
+	Short: "Show detailed status for a steward",
+	Long: `Display full details for a single steward registered with the controller.
+
+Prints labelled fields including id, status, last_seen, version, hostname, OS,
+connection state, and other available metadata.
+
+Examples:
+  # Show status using admin bundle (mTLS auto-discovery)
+  cfg steward status <steward-id>
+
+  # Show status with explicit URL
+  cfg steward status <steward-id> --url=https://controller.example.com
+
+  # Show status as JSON
+  cfg steward status <steward-id> --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardStatus,
+}
+
+// stewardStatusInfo is a local representation of a steward detail from the API response.
+type stewardStatusInfo struct {
+	ID              string            `json:"id"`
+	Status          string            `json:"status"`
+	LastSeen        time.Time         `json:"last_seen"`
+	Version         string            `json:"version"`
+	ConnectionState string            `json:"connection_state"`
+	ActiveSessions  int               `json:"active_sessions"`
+	TenantID        string            `json:"tenant_id,omitempty"`
+	Group           string            `json:"group,omitempty"`
+	Metrics         map[string]string `json:"metrics,omitempty"`
+	DNA             *struct {
+		Hostname     string `json:"hostname"`
+		OS           string `json:"os"`
+		Architecture string `json:"architecture"`
+	} `json:"dna,omitempty"`
+}
+
+func runStewardStatus(cmd *cobra.Command, args []string) error {
+	stewardID := args[0]
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/stewards/"+stewardID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch steward: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("steward %s not found", stewardID)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if stewardStatusJSONOutput {
+		_, err := os.Stdout.Write(body)
+		return err
+	}
+
+	var apiResp struct {
+		Data stewardStatusInfo `json:"data"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	s := apiResp.Data
+	fmt.Printf("ID:               %s\n", s.ID)
+	fmt.Printf("Status:           %s\n", s.Status)
+	fmt.Printf("Connection:       %s\n", s.ConnectionState)
+	lastSeen := ""
+	if !s.LastSeen.IsZero() {
+		lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
+	}
+	fmt.Printf("Last Seen:        %s\n", lastSeen)
+	fmt.Printf("Version:          %s\n", s.Version)
+	if s.DNA != nil {
+		fmt.Printf("Hostname:         %s\n", s.DNA.Hostname)
+		fmt.Printf("OS:               %s\n", s.DNA.OS)
+		if s.DNA.Architecture != "" {
+			fmt.Printf("Architecture:     %s\n", s.DNA.Architecture)
+		}
+	}
+	if s.TenantID != "" {
+		fmt.Printf("Tenant ID:        %s\n", s.TenantID)
+	}
+	if s.Group != "" {
+		fmt.Printf("Group:            %s\n", s.Group)
+	}
+	return nil
 }
 
 func runStewardList(cmd *cobra.Command, args []string) error {

@@ -328,68 +328,74 @@ Configuration executor initialized  tenant_id=default
 
 ## Phase 5 — Verify Fleet
 
-> **[GAP: `cfg steward list` and `cfg steward status` not yet implemented — see Epic #1501]**
-> These CLI verbs will wrap the REST API endpoints below. Until Epic #1501 lands, use
-> the `curl` fallback.
-
-### REST API fallback — list all stewards
-
-Extract your admin bundle's certs once for use with curl:
+### List registered stewards
 
 ```bash
-# Run on your workstation where admin.bundle.yaml is present
-python3 - <<'EOF'
-import os, yaml
-b = yaml.safe_load(open(os.path.expanduser('~/.config/cfgms/admin.bundle.yaml')))
-open('/tmp/admin.crt','w').write(b['cert_pem'])
-open('/tmp/admin.key','w').write(b['key_pem'])
-open('/tmp/admin-ca.crt','w').write(b['ca_pem'])
-EOF
-chmod 600 /tmp/admin.key
+cfg steward list
 ```
 
-List all registered stewards:
+Expected output (two stewards registered, both `connected`):
+
+```
+ID              STATUS     VERSION  LAST SEEN             HOSTNAME
+--              ------     -------  ---------             --------
+steward-abc123  connected  1.0.0    2026-05-19 00:00:30   steward-1
+steward-def456  connected  1.0.0    2026-05-19 00:00:31   steward-2
+```
+
+Note the `ID` values for each steward — you'll need them in Phase 6.
+
+### Inspect a specific steward
 
 ```bash
-curl \
-  --cacert /tmp/admin-ca.crt \
-  --cert /tmp/admin.crt \
-  --key /tmp/admin.key \
-  https://<CONTROLLER_IP>:9080/api/v1/stewards
+cfg steward status <STEWARD_ID>
 ```
 
-Expected response (two stewards registered, both `connected`):
+Expected output:
 
-```json
-{
-  "data": [
-    {
-      "id": "steward-abc123",
-      "status": "connected",
-      "last_seen": "2026-05-19T00:00:30Z",
-      "dna": { "hostname": "steward-1", "os": "linux" }
-    },
-    {
-      "id": "steward-def456",
-      "status": "connected",
-      "last_seen": "2026-05-19T00:00:31Z",
-      "dna": { "hostname": "steward-2", "os": "linux" }
-    }
-  ]
-}
+```
+ID:               steward-abc123
+Status:           connected
+Connection:       connected
+Last Seen:        2026-05-19 00:00:30
+Version:          1.0.0
+Hostname:         steward-1
+OS:               linux
+Architecture:     amd64
 ```
 
-Note the `id` values for each steward — you'll need them in Phase 6.
-
-Get details for a specific steward:
+Use `--json` to get the full machine-readable response:
 
 ```bash
-curl \
-  --cacert /tmp/admin-ca.crt \
-  --cert /tmp/admin.crt \
-  --key /tmp/admin.key \
-  https://<CONTROLLER_IP>:9080/api/v1/stewards/<STEWARD_ID>
+cfg steward status <STEWARD_ID> --json
 ```
+
+> **Alternative — REST API via curl**
+> If you prefer direct API access or need to script around the controller, the REST
+> endpoints are also available. First extract your admin bundle's certs:
+>
+> ```bash
+> python3 - <<'EOF'
+> import os, yaml
+> b = yaml.safe_load(open(os.path.expanduser('~/.config/cfgms/admin.bundle.yaml')))
+> open('/tmp/admin.crt','w').write(b['cert_pem'])
+> open('/tmp/admin.key','w').write(b['key_pem'])
+> open('/tmp/admin-ca.crt','w').write(b['ca_pem'])
+> EOF
+> chmod 600 /tmp/admin.key
+> ```
+>
+> List all stewards:
+> ```bash
+> curl --cacert /tmp/admin-ca.crt --cert /tmp/admin.crt --key /tmp/admin.key \
+>   https://<CONTROLLER_IP>:9080/api/v1/stewards
+> ```
+>
+> Get a specific steward:
+> ```bash
+> curl --cacert /tmp/admin-ca.crt --cert /tmp/admin.crt --key /tmp/admin.key \
+>   https://<CONTROLLER_IP>:9080/api/v1/stewards/<STEWARD_ID>
+> ```
 
 ### Controller-side visibility
 
@@ -514,14 +520,10 @@ cat /etc/myapp/config.yaml
 > This command will show applied/pending/failed counts and per-steward status.
 > Until #1526 lands, observe convergence via steward logs (above) and the REST API.
 
-Poll steward status via REST API to confirm `last_seen` advances with each heartbeat:
+Poll steward status to confirm `last_seen` advances with each heartbeat:
 
 ```bash
-curl \
-  --cacert /tmp/admin-ca.crt \
-  --cert /tmp/admin.crt \
-  --key /tmp/admin.key \
-  https://<CONTROLLER_IP>:9080/api/v1/stewards/<STEWARD_1_ID>
+cfg steward status <STEWARD_1_ID>
 ```
 
 A `last_seen` timestamp that advances every 30 minutes (the default convergence interval)
@@ -712,8 +714,6 @@ The table below collects all `[GAP: ...]` markers from this walkthrough for easy
 
 | Gap | Issue | Phase affected |
 |-----|-------|----------------|
-| `cfg steward list` not implemented | [Epic #1501](https://github.com/cfg-is/cfgms/issues/1501) | Phase 5 |
-| `cfg steward status` not implemented | [Epic #1501](https://github.com/cfg-is/cfgms/issues/1501) | Phase 5 |
 | `cfg config upload` not implemented | [Epic #1501](https://github.com/cfg-is/cfgms/issues/1501) | Phase 6 |
 | `cfg config deployments <id>` not implemented | [#1526](https://github.com/cfg-is/cfgms/issues/1526) | Phase 7 |
 | save=deploy auto-distribution not wired | [#1525](https://github.com/cfg-is/cfgms/issues/1525) | Phase 6 |
