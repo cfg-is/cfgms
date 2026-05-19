@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -438,6 +439,50 @@ func TestWorkflowHandler_RegisterTriggerRoutes_NilManager_NoRegistration(t *test
 	assert.NotPanics(t, func() {
 		h.RegisterTriggerRoutes(sub)
 	})
+}
+
+// TestTriggerRouteRegistration verifies that all 10 documented trigger paths are
+// registered (non-404 from mux) when the workflow handler is wired with a real trigger
+// manager. This guards against the double-prefix bug where /triggers/triggers/... was
+// registered instead of /triggers/...
+//
+// Route-registration is verified via router.Match rather than a live ServeHTTP call
+// because several routes correctly return HTTP 404 for non-existent resource IDs — that
+// is handler-level 404, not mux-level 404.  router.Match returns false only when no
+// route matches, which is the exact condition the double-prefix bug would trigger.
+func TestTriggerRouteRegistration(t *testing.T) {
+	logger := logging.NewNoopLogger()
+	mgr := trigger.NewControllerTriggerManager(nil, nil)
+	h := NewWorkflowHandler(nil, nil, mgr, logger)
+
+	router := mux.NewRouter()
+	sub := router.PathPrefix("/triggers").Subrouter()
+	h.RegisterTriggerRoutes(sub)
+
+	paths := []struct {
+		method string
+		path   string
+	}{
+		{"GET", "/triggers/health"},
+		{"POST", "/triggers"},
+		{"GET", "/triggers"},
+		{"GET", "/triggers/test-id"},
+		{"PUT", "/triggers/test-id"},
+		{"DELETE", "/triggers/test-id"},
+		{"POST", "/triggers/test-id/enable"},
+		{"POST", "/triggers/test-id/disable"},
+		{"POST", "/triggers/test-id/execute"},
+		{"GET", "/triggers/test-id/executions"},
+	}
+
+	for _, tc := range paths {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			var match mux.RouteMatch
+			assert.True(t, router.Match(req, &match),
+				"route %s %s must be registered (no match — likely double-prefix bug)", tc.method, tc.path)
+		})
+	}
 }
 
 // --- log injection safety ----------------------------------------------------

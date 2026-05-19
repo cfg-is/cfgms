@@ -32,25 +32,27 @@ func NewAPIHandler(triggerManager TriggerManager) *APIHandler {
 	}
 }
 
-// RegisterRoutes registers all trigger API routes with the router
+// RegisterRoutes registers all trigger API routes with the router.
+// Expects router to be a subrouter already scoped to the /triggers prefix
+// (e.g. api.PathPrefix("/triggers").Subrouter()), so all paths here are relative.
 func (api *APIHandler) RegisterRoutes(router *mux.Router) {
 	// Health check (must be before {id} routes to avoid conflicts)
-	router.HandleFunc("/triggers/health", api.handleHealthCheck).Methods("GET")
+	router.HandleFunc("/health", api.handleHealthCheck).Methods("GET")
 
 	// Trigger management endpoints
-	router.HandleFunc("/triggers", api.handleCreateTrigger).Methods("POST")
-	router.HandleFunc("/triggers", api.handleListTriggers).Methods("GET")
-	router.HandleFunc("/triggers/{id}", api.handleGetTrigger).Methods("GET")
-	router.HandleFunc("/triggers/{id}", api.handleUpdateTrigger).Methods("PUT")
-	router.HandleFunc("/triggers/{id}", api.handleDeleteTrigger).Methods("DELETE")
+	router.HandleFunc("", api.handleCreateTrigger).Methods("POST")
+	router.HandleFunc("", api.handleListTriggers).Methods("GET")
+	router.HandleFunc("/{id}", api.handleGetTrigger).Methods("GET")
+	router.HandleFunc("/{id}", api.handleUpdateTrigger).Methods("PUT")
+	router.HandleFunc("/{id}", api.handleDeleteTrigger).Methods("DELETE")
 
 	// Trigger control endpoints
-	router.HandleFunc("/triggers/{id}/enable", api.handleEnableTrigger).Methods("POST")
-	router.HandleFunc("/triggers/{id}/disable", api.handleDisableTrigger).Methods("POST")
-	router.HandleFunc("/triggers/{id}/execute", api.handleExecuteTrigger).Methods("POST")
+	router.HandleFunc("/{id}/enable", api.handleEnableTrigger).Methods("POST")
+	router.HandleFunc("/{id}/disable", api.handleDisableTrigger).Methods("POST")
+	router.HandleFunc("/{id}/execute", api.handleExecuteTrigger).Methods("POST")
 
 	// Trigger execution history
-	router.HandleFunc("/triggers/{id}/executions", api.handleGetTriggerExecutions).Methods("GET")
+	router.HandleFunc("/{id}/executions", api.handleGetTriggerExecutions).Methods("GET")
 }
 
 // handleCreateTrigger creates a new trigger

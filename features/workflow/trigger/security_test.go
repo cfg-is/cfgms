@@ -519,7 +519,8 @@ func TestSecurityEdgeCases_APIEndpointSecurity(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 	handler := NewAPIHandler(mockTriggerManager)
 	router := mux.NewRouter()
-	handler.RegisterRoutes(router)
+	sub := router.PathPrefix("/triggers").Subrouter()
+	handler.RegisterRoutes(sub)
 
 	tests := []struct {
 		name           string
