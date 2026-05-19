@@ -7,10 +7,30 @@ module instance represents a single named rule — `action`, `direction`, `proto
 and address constraints — that the steward applies to the operating-system firewall.
 
 **Platform Support:** This module is **Linux only**. The implementation ships two
-executors: `executor_linux.go` (iptables/nftables) and `executor_stub.go` for all
-other platforms. On Windows and macOS the stub executor accepts all calls silently
-without applying any rules. Use platform targeting in your CFGMS configuration to
-restrict firewall modules to Linux steward endpoints.
+executors: `executor_linux.go` (iptables, via `exec.Command("iptables", ...)`) and
+`executor_stub.go` for all other platforms. On Windows and macOS the stub executor
+returns `modules.ErrUnsupportedPlatform` — all calls fail immediately. Use platform
+targeting in your CFGMS configuration to restrict firewall modules to Linux steward
+endpoints.
+
+> **Note:** `module.yaml` lists `darwin` and `windows` under `platforms:`, but the
+> stub executor actively rejects all operations on those platforms at runtime.
+> nftables is **not** currently supported; the Linux executor uses iptables only.
+
+## Implementation References
+
+- Schema: [`features/modules/firewall/module.yaml`](../../features/modules/firewall/module.yaml)
+- Implementation: [`features/modules/firewall/module.go`](../../features/modules/firewall/module.go)
+- Linux executor: [`features/modules/firewall/executor_linux.go`](../../features/modules/firewall/executor_linux.go)
+- Non-Linux stub: [`features/modules/firewall/executor_stub.go`](../../features/modules/firewall/executor_stub.go)
+
+## Platform Support
+
+| Platform | `applyRule` | `deleteRule` | `ruleExists` | Backend |
+|----------|------------|--------------|--------------|---------|
+| Linux    | ✓ | ✓ | ✓ | iptables |
+| macOS    | ✗ (`ErrUnsupportedPlatform`) | ✗ | ✗ | — |
+| Windows  | ✗ (`ErrUnsupportedPlatform`) | ✗ | ✗ | — |
 
 ## Configuration
 
@@ -26,7 +46,7 @@ restrict firewall modules to Linux steward endpoints.
 | `port` | int | Conditional | Single port number (0–65535). Required when `protocol` is set and `service` is not. |
 | `ports` | []int | Conditional | List of port numbers. Use instead of `port` to match multiple ports in one rule. |
 | `description` | string | No | Human-readable description of the rule. Max 256 characters. |
-| `enabled` | bool | No | Whether the rule is active. Default: `true`. |
+| `enabled` | bool | No | Whether the rule is active. Default: `false` (Go zero value; omit this field or set `enabled: true` to activate). |
 | `state` | string | No | `present` (default) creates or updates the rule; `absent` deletes it. |
 
 ### Validation Rules
@@ -61,7 +81,7 @@ modules:
       enabled: true
 ```
 
-**Expected Outcome:** An iptables/nftables rule is inserted that accepts inbound TCP
+**Expected Outcome:** An iptables rule is inserted that accepts inbound TCP
 traffic on port 443 originating from `10.10.0.0/16`. Traffic from sources outside that
 CIDR is not matched by this rule and falls through to the next rule in the chain.
 Subsequent convergence cycles are idempotent — the rule is not duplicated if it already

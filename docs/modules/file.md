@@ -4,6 +4,19 @@
 
 The file module manages file content, permissions, and ownership on managed endpoints. It enforces path-traversal protection via a required `allowed_base_path` field.
 
+## Implementation References
+
+- Schema: [`features/modules/file/module.yaml`](../../features/modules/file/module.yaml)
+- Implementation: [`features/modules/file/implementation.go`](../../features/modules/file/implementation.go)
+
+## Platform Support
+
+| Platform | State management | Unix permissions | Ownership (`owner`/`group`) | Windows ACL |
+|----------|-----------------|------------------|-----------------------------|-------------|
+| Linux    | ✓ | ✓ (mode bits) | ✓ (`uid`/`gid` via `os.Chown`) | — |
+| macOS    | ✓ | ✓ (mode bits) | ✓ (`uid`/`gid` via `os.Chown`) | — |
+| Windows  | ✓ | — (returns error if set; use `windows_acl`) | Limited (user lookup only; `os.Chown` not called) | ✓ (NTFS DACL) |
+
 ## Configuration
 
 | Field | Type | Required | Description |
@@ -23,6 +36,20 @@ The file module manages file content, permissions, and ownership on managed endp
 If the field is absent or not an absolute path, the module returns `ErrAllowedBasePathRequired` and performs no filesystem operations.
 
 **Note:** `allowed_base_path` uses `filepath.Clean` + `filepath.Abs` internally. Symlink escapes outside the base path are **not** blocked.
+
+### Initialization via `Configure()`
+
+`fileModule` implements the `modules.Configurable` interface. The execution engine calls `Configure(desiredState)` before the `Get→Compare→Set→Verify` cycle begins. `Configure()` extracts `allowed_base_path` from the desired config and stores it in `configuredBasePath`, allowing `Get()` to validate resource paths before any `Set()` has run.
+
+If `Configure()` is never called (or returns an error), `configuredBasePath` is empty and `Get()` returns `ErrAllowedBasePathRequired`. The engine surfaces this as a module configuration failure and does not proceed to `Set()`.
+
+### `path` in YAML examples
+
+In the CFGMS module system, the file path is the **resource identifier** — it is passed to `Get()` and `Set()` as the `resourceID` parameter. The `path` field shown in YAML examples below is read by the CFGMS framework and used as the resource identifier; it is not stored inside the module's `FileConfig` struct. The `FileConfig` type does not have a `path` field.
+
+### `mode` alias
+
+The implementation also accepts `mode` as an alias for `permissions` (parsed as an octal string such as `"0644"`, or as an integer). The `permissions` field name is preferred in operator-facing YAML.
 
 ### Example: Ensure a configuration file exists with permissions and owner
 
