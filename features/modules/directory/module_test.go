@@ -366,6 +366,28 @@ func TestDirectoryConfig_Validate_WindowsACL_MutualExclusion(t *testing.T) {
 	}
 }
 
+// TestDirectoryModule_Set_StateAbsent verifies that Set() returns an explicit error when
+// state: absent is passed, and does not create the directory at the target path.
+func TestDirectoryModule_Set_StateAbsent(t *testing.T) {
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "should-not-be-created")
+
+	m := New()
+	cfg := createConfigFromYAML("allowed_base_path: " + base + "\npath: " + targetPath + "\nstate: absent")
+	err := m.Set(context.Background(), targetPath, cfg)
+	if err == nil {
+		t.Fatal("Set() with state: absent must return a non-nil error")
+	}
+	if !errors.Is(err, modules.ErrNotImplemented) {
+		t.Errorf("Set() with state: absent error = %v, want errors.Is(err, modules.ErrNotImplemented) true", err)
+	}
+
+	// The directory must NOT have been created
+	if _, statErr := os.Stat(targetPath); !os.IsNotExist(statErr) {
+		t.Error("Set() with state: absent must not create any directory")
+	}
+}
+
 func TestDirectoryModule_PermissionsRejectedOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-only test")

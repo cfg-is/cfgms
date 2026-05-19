@@ -17,7 +17,7 @@ The Directory Module manages filesystem directories on CFGMS-managed endpoints. 
 | macOS    | ✓ | ✓ (mode bits) | ✓ (`uid`/`gid` via `os.Chown`) | — |
 | Windows  | ✓ | — (returns error if set; use `windows_acl`) | — | ✓ (NTFS DACL) |
 
-> **Note:** `Set()` always creates or ensures the directory. Directory deletion is not implemented — `Set()` does not read the `state` field and will not delete a directory even if `state: absent` is passed.
+> **Note:** Directory deletion is not implemented. Passing `state: absent` to `Set()` returns an error (`operation not implemented`) — the directory is never created or deleted. To remove a directory, use the file module or a script module for the removal step.
 
 ## Table of Contents
 
@@ -50,7 +50,7 @@ modules:
 |-------|------|----------|-------------|
 | `allowed_base_path` | string | **Yes** | Absolute path that acts as the security boundary. All OS calls are validated to remain within this prefix. |
 | `path` | string | Yes | Absolute path of the directory to manage. Must fall within `allowed_base_path`. |
-| `state` | string | No | `"present"` (default) creates or ensures the directory exists. `"absent"` is returned by `Get()` when the directory does not exist; `Set()` does not implement directory deletion. |
+| `state` | string | No | `"present"` (default) creates or ensures the directory exists. `"absent"` is returned by `Get()` when the directory does not exist; passing `state: absent` to `Set()` returns an explicit error — directory deletion is not supported (see [Deletion not supported](#deletion-not-supported)). |
 | `permissions` | int | No | Unix permission bits as an integer (e.g., `0750`). **Not supported on Windows** — mutually exclusive with `windows_acl`. |
 | `owner` | string | No | User name that should own the directory (Unix only). |
 | `group` | string | No | Group name that should own the directory (Unix only). |
@@ -157,23 +157,17 @@ modules:
 
 **Expected Outcome:** `/var/log/myapp` is created if it does not exist, with mode `0750` and ownership `myapp:myapp`. Parent directories are created automatically because `recursive: true` is set. Subsequent runs are idempotent — the directory is not re-created if it already matches the desired state.
 
-### Example: Ensure a directory is absent
+### Deletion not supported
 
-**Use Case:** Remove a legacy working directory that should no longer exist after a service migration.
+`Set()` does not support `state: absent`. Passing it returns:
 
-**Configuration:**
-
-```yaml
-modules:
-  remove_legacy_workdir:
-    type: directory
-    config:
-      allowed_base_path: /var/myapp
-      path: /var/myapp/legacy_cache
-      state: absent
+```
+directory deletion is not supported: operation not implemented
 ```
 
-**Expected Outcome:** The module records the desired state as `absent`. On the next convergence cycle, if `/var/myapp/legacy_cache` is detected by `Get()`, the engine omits `Set()` (directory deletion is not implemented by `Set()`); the operator should combine this with a script module to perform the removal. The `allowed_base_path` boundary still applies — no path outside `/var/myapp` can be evaluated.
+`Get()` still returns `state: absent` when the directory does not exist on disk — this is how the execution engine detects that `Set()` should be called to create it. The `state` field in `Get()` output is read-only state reporting, not a deletion request.
+
+To remove a directory, use a script module or a dedicated removal workflow. Directory deletion via `os.RemoveAll` requires separate safety gating and is tracked as a future capability story.
 
 ## Windows ACL
 
@@ -285,3 +279,4 @@ modules:
 | `ErrInvalidGroup` | Specified `group` does not exist on the system | Create the group or correct the `group` value |
 | `ErrInvalidPermissions` | `permissions` value is outside `0`–`0777` | Use a valid Unix permission integer |
 | `path security check failed` | `path` resolves outside `allowed_base_path` | Ensure `path` is within `allowed_base_path`; check for `../` sequences |
+| `directory deletion is not supported` | `state: absent` was passed to `Set()` | Directory deletion is not implemented; use a script module or remove the `state: absent` field |
