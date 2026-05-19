@@ -529,7 +529,8 @@ The controller will start on default ports:
 make build-cli
 
 # Run a workflow
-./bin/cfg workflow run examples/m365-user-provisioning.yaml
+# [GAP: cfg workflow run not implemented — see issue #1542]
+# Use REST API: POST http://localhost:9080/api/v1/workflows/{id}/execute
 ```
 
 **No stewards needed for cloud-only automation!**
@@ -553,8 +554,9 @@ make build-steward
 
 # 3. Use CLI to manage fleet
 make build-cli
-./bin/cfg steward list
-./bin/cfg config apply fleet-config.cfg
+# [GAP: cfg steward list not implemented — see issue #1543]
+# [GAP: cfg config apply not implemented — see issue #1543]
+# Fleet management via REST API: GET http://localhost:9080/api/v1/stewards
 ```
 
 **For production**: See [docs/development/security-setup.md](docs/development/security-setup.md) for proper certificate management.
