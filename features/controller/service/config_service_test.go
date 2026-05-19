@@ -373,13 +373,17 @@ func TestSetConfiguration_DoesNotFireFanoutCallback_OnError(t *testing.T) {
 		var callCount int
 		svc.RegisterFanoutCallback(func(_ context.Context, _, _ string) { callCount++ })
 
-		// Make rootDir read-only so the storage layer cannot create config subdirectories.
-		// Restore before t.TempDir cleanup (LIFO: this cleanup runs first).
-		require.NoError(t, os.Chmod(rootDir, 0555))
-		t.Cleanup(func() { _ = os.Chmod(rootDir, 0755) })
+		// Replace the storage root with a regular file so that writeAtomic's
+		// os.MkdirAll call fails with ENOTDIR on all platforms.  os.Chmod
+		// read-only is not honoured by the Windows filesystem layer, making
+		// this the only reliable cross-platform approach.
+		require.NoError(t, os.RemoveAll(rootDir))
+		f, ferr := os.Create(rootDir)
+		require.NoError(t, ferr)
+		require.NoError(t, f.Close())
 
-		err := svc.SetConfiguration(ctx, "tenant-a", "steward-1", createTestStewardConfig("steward-1"))
-		require.Error(t, err, "storage write should fail when rootDir is read-only")
+		writeErr := svc.SetConfiguration(ctx, "tenant-a", "steward-1", createTestStewardConfig("steward-1"))
+		require.Error(t, writeErr, "storage write should fail when rootDir is a file not a directory")
 		assert.Equal(t, 0, callCount, "callback must not fire on storage error")
 	})
 }
