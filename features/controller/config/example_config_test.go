@@ -28,5 +28,7 @@ func TestLoadWithPath_ParsesCanonicalExample(t *testing.T) {
 	assert.Equal(t, "0.0.0.0:9080", cfg.ListenAddr, "listen_addr must match controller.cfg")
 	assert.Equal(t, "0.0.0.0:4433", cfg.Transport.ListenAddr, "transport.listen_addr must match controller.cfg")
 	assert.Equal(t, "controller.example.com", cfg.Certificate.Server.CommonName, "certificate.server.common_name must match controller.cfg")
-	assert.Equal(t, "git", cfg.Storage.Provider, "storage.provider must match controller.cfg")
+	assert.Equal(t, "flatfile", cfg.Storage.Provider, "storage.provider defaults to flatfile when not specified")
+	assert.Equal(t, "/var/lib/cfgms/storage", cfg.Storage.FlatfileRoot, "storage.flatfile_root must match controller.cfg")
+	assert.Equal(t, "/var/lib/cfgms/cfgms.db", cfg.Storage.SQLitePath, "storage.sqlite_path must match controller.cfg")
 }
