@@ -6,7 +6,11 @@ Deploy a geo-redundant CFGMS controller cluster for high availability and region
 
 ## Status
 
-This deployment mode is planned. The walkthrough will be added when controller clustering is implemented.
+This deployment mode is planned. Documentation will be added when controller clustering is implemented.
+
+**Tracking**: [Issue #1517](https://github.com/cfg-is/cfgms/issues/1517) — steward multi-controller/failover support (one binary = one controller URL is the current constraint).
+
+For current cluster formation and steward HA test patterns, see `test/integration/ha/` in the repository.
 
 ## What this will cover
 

@@ -89,6 +89,16 @@ Open `/etc/cfgms/controller.cfg` in your editor and verify the following variabl
 
 The REST API listens on port 9080 by default. To change it, set `CFGMS_HTTP_LISTEN_ADDR` in the systemd unit's `Environment=` directive.
 
+> **Storage**: If `controller.cfg` contains `storage.provider: "git"`, replace the entire `storage:` block with the OSS composite backend before running `--init`. The `git` provider has been removed and the controller will refuse to start with it configured:
+>
+> ```yaml
+> storage:
+>   flatfile_root: "/var/lib/cfgms/storage"
+>   sqlite_path: "/var/lib/cfgms/cfgms.db"
+> ```
+>
+> See issue [#1547](https://github.com/cfg-is/cfgms/issues/1547) to track the canonical config update.
+
 ### Install the systemd service
 
 Copy [cfgms-controller.service](cfgms-controller.service) to `/etc/systemd/system/`:
@@ -109,16 +119,17 @@ sudo cfgms-controller --init --config /etc/cfgms/controller.cfg
 You should see:
 
 ```
-Initializing storage backend... provider=flatfile
-Storage backend initialized
-Creating Certificate Authority... ca_path=/var/lib/cfgms/certs/ca
-Certificate Authority created
-Admin bundle issued path=/etc/cfgms/admin.bundle.yaml serial=<serial>
-Controller initialized successfully
-  CA fingerprint: SHA256:xxxx...
+Controller initialization complete:
+  CA Fingerprint:    SHA256:xxxx...
+  Storage Provider:  flatfile
+  Initialized At:    2026-05-19T00:00:00Z
+
+The controller is now ready to start with: cfgms-controller --config <path>
 ```
 
-Save the CA fingerprint — stewards verify it during registration.
+Save the CA fingerprint — stewards verify it during registration. Detailed initialization
+logs (CA creation, storage setup, RBAC, bundle issuance) are written to
+`/var/log/cfgms/cfgms.log`.
 
 ### Admin credential bundle
 
@@ -147,7 +158,7 @@ controller is initialized (CA fingerprint: <fp>) but admin bundle is missing at 
 To regenerate the bundle, run: cfgms-controller bootstrap-admin --regenerate
 ```
 
-Run `cfgms-controller bootstrap-admin --regenerate` to re-issue the admin bundle without reinitializing the CA or storage. (This command is implemented in Story D.)
+Run `cfgms-controller bootstrap-admin --regenerate` to re-issue the admin bundle without reinitializing the CA or storage.
 
 ### Start the controller
 
