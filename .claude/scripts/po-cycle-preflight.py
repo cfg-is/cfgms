@@ -470,6 +470,16 @@ def auto_close_merged_items(degraded_reasons=None):
     except Exception as e:
         degraded_reasons.append(f"auto_close_merged_items: batched PR state query failed: {e}")
         return count
+    # gh_graphql_pr_states returns {} on a transient network/JSON failure
+    # rather than raising — surface that explicitly so a silent zero-count
+    # cycle doesn't look like "nothing to do" when it was actually a fetch
+    # miss. Caught by qa-code-reviewer on PR #1581.
+    if not pr_states and item_pr_map:
+        degraded_reasons.append(
+            f"auto_close_merged_items: batched PR state query returned no results "
+            f"for {len(item_pr_map)} item(s) — likely transient gh/network failure"
+        )
+        return count
 
     # Phase 3: update items whose PR is MERGED.
     for item_id, pr_num in item_pr_map.items():
