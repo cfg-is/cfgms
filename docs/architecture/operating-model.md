@@ -37,7 +37,7 @@ A cfg is a YAML file (`hostname.cfg`) that declares the desired state of a devic
 
 - **Resource configurations**: each block references a module and describes the desired state for that resource (e.g., a `file` module block declares a file's path, content, and permissions)
 - **Schedule**: how often to re-check compliance
-- **Mode**: whether to enforce desired state (`apply`) or only monitor and report drift (`monitor`)
+- **Mode**: whether to enforce desired state (`apply`) or only monitor and report drift (`monitor`) [GAP: apply/monitor mode toggle not yet implemented in steward cfg or execution engine — see issue #1524]
 
 The cfg is the single source of truth for a steward. Whether it came from a local file or was pushed by a controller, the steward treats it the same way.
 
@@ -55,7 +55,7 @@ If a feature can use an existing primitive, that's the path. Building a parallel
 
 ## Save = Deploy
 
-Any source that writes a cfg to the controller's ConfigStore (CLI, web UI, GitOps webhook, workflow output) triggers automatic distribution to matched stewards. There is no separate "push" action — save IS deploy.
+Any source that writes a cfg to the controller's ConfigStore (CLI, web UI, GitOps webhook, workflow output) triggers automatic distribution to matched stewards. There is no separate "push" action — save IS deploy. [GAP: storage-watch auto-trigger not yet wired; config saves currently require an explicit `POST /api/v1/config/push` call — see issue #1525]
 
 ```
  ┌───────────────┐   write   ┌─────────────┐  storage-watch  ┌──────────┐
@@ -71,7 +71,7 @@ Any source that writes a cfg to the controller's ConfigStore (CLI, web UI, GitOp
 ```
 
 - **Single write path.** All sources write to ConfigStore via the same path.
-- **Debounce.** Storage-watch waits ~500ms (configurable) before triggering fanout. Absorbs burst edits invisibly.
+- **Debounce.** Storage-watch waits ~500ms (configurable) before triggering fanout. Absorbs burst edits invisibly. [GAP: debounce not yet implemented — see issue #1525]
 - **Durable queue.** Fanout uses the controller's durable job queue — the same primitive used for retries, deferred operations, and HA failover replay.
 - **Idempotency carries load.** A steward already at the target DNA hash treats a sync command as a no-op.
 - **Resource-bounded fanout.** Fanout is bounded by controller capacity (CPU, outbound bandwidth) to prevent thundering-herd saturation.
@@ -84,7 +84,7 @@ Safety against bad configs comes from operator-controllable primitives:
 
 - **Targeting precision** — a cfg explicitly lists which stewards / groups / tenant paths / DNA-attributes it applies to. A bad change is bounded by what it was authored to target.
 - **Deployment rings (convention)** — steward tags (`ring=canary`, `ring=prod-early`, `ring=prod-broad`) let operators author phased rollouts as separate configs or staged target lists. v1 is convention; auto-progressive ring machinery is a future enhancement.
-- **Deployment visibility** — `cfg config deployments <id>` shows applied / pending / failed / halted counts and per-steward status.
+- **Deployment visibility** — `cfg config deployments <id>` shows applied / pending / failed / halted counts and per-steward status. [GAP: command not yet implemented — see issue #1526]
 - **E-stop (planned)** — `cfg config halt <id>` cancels remaining queued sends for a config.
 - **Rollback (planned CLI; underlying infrastructure exists)** — restore a previous cfg version via `features/controller/api/rollback_handler.go`.
 
@@ -96,12 +96,12 @@ The steward is a daemon that maintains a device in the state described by its cf
 
 **Core behaviors:**
 
-1. **Apply** — On startup and when the cfg changes, evaluate each resource's current state against desired state. In `apply` mode, converge the device (Get → Compare → Set → Verify). In `monitor` mode, detect and report drift without making changes
+1. **Apply** — On startup and when the cfg changes, evaluate each resource's current state against desired state. In `apply` mode, converge the device (Get → Compare → Set → Verify). In `monitor` mode, detect and report drift without making changes [GAP: monitor mode not yet implemented — see issue #1524]
 2. **Maintain** — Re-check compliance on the schedule defined in the cfg. In `apply` mode, correct any drift. In `monitor` mode, report drift. Respond to module-defined event hooks (e.g., file change triggers re-check of that resource)
 3. **Know itself** — Collect DNA (hardware, software, network, security attributes). Monitor its own health and performance
 4. **Report** — Always log locally. When connected to a controller, also report events, status, and DNA upstream. When disconnected, queue reports locally and resync on reconnect
 
-**Apply mode vs Monitor mode (configurable per steward):**
+**Apply mode vs Monitor mode (configurable per steward):** [GAP: apply/monitor mode toggle not yet implemented — see issue #1524]
 
 - **`apply` mode** (default for managed devices): the steward actively converges the device to match its cfg. When drift is detected, the steward attempts local convergence and reports the outcome as a single combined message containing `{drift_detected, drift_setting, convergence_result, final_state}` — one message per drift event.
 - **`monitor` mode**: the steward detects drift but does not act. Emits a non-compliance event upstream; operator action (or a separate `apply` workflow) decides whether to correct.
@@ -185,7 +185,7 @@ Two credential flavors:
 - **Short-lived / single-use registration tokens** — manual onboarding, small fleets, time-bounded provisioning. Generated on the controller, handed to the steward as a string. Consumed at registration; expiry enforces time bounds.
 - **Long-lived tenant/group registration codes** — RMM/GPO mass deployment. Same string-on-the-wire pattern, baked into deployment scripts and reused by many devices. Encodes tenant/group target.
 
-Both flow through the controller's registration approval workflow. Built-in: `auto-approve` (development default) and `manual-review` (production). Custom workflows implement arbitrary policy via the workflow engine.
+Both flow through the controller's registration approval workflow (`RegistrationApprovalHook`). The default hook auto-approves all valid registrations. To customize approval, deploy a workflow named `steward-registration-approval`; a workflow with `Variables: {policy: accept}` short-circuits to auto-approve. [GAP: built-in named workflow templates (`auto-approve`, `manual-review`) not yet shipped — see issue #1527] Custom workflows implement arbitrary policy via the workflow engine.
 
 **Admin identity is a single-file mTLS bundle.**
 On `--init`, the controller writes the bundle to a known path:
