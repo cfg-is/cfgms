@@ -14,11 +14,10 @@ The steward is a daemon that maintains a device in the state described by its cf
 ### Startup
 
 1. **Load cfg** — Find and parse the `hostname.cfg` file (local file, or last-known cfg from controller)
-2. **Discover modules** — Scan module paths, load available modules, validate that all modules referenced in the cfg are available
-3. **Initial convergence** — Evaluate every resource in the cfg immediately (apply or monitor, depending on mode)
-4. **Start convergence schedule** — Begin the compliance re-check loop at the interval defined by `converge_interval` in the cfg (default: 30 minutes)
-5. **Collect DNA** — Gather device identity and attributes (hardware, software, network, security)
-6. **Connect to controller** (if configured) — Establish a gRPC-over-QUIC transport connection. Check for cfg updates
+2. **Discover modules** — Scan module paths and register available modules. Modules referenced in the cfg are loaded on-demand during convergence (not validated at startup)
+3. **Initial convergence** — Evaluate every resource in the cfg immediately (apply or monitor, depending on mode) [GAP: apply/monitor toggle not yet wired — see issue #1519; current code always applies changes]
+4. **Start convergence schedule** — Begin the compliance re-check loop at the interval defined by `converge_interval` in the cfg (default: 30 minutes). DNA is collected as part of each convergence run (not a separate startup step)
+5. **Connect to controller** (if configured) — Establish a gRPC-over-QUIC transport connection. Check for cfg updates
 
 ### Normal Operation
 
@@ -77,7 +76,7 @@ Get → Compare → Set → Verify
 
 1. **Get**: Call `module.Get()` to read current state from the system
 2. **Compare**: Engine compares current state against desired state from the cfg (using `StateComparator`)
-3. **Set**: If drifted and in `apply` mode, call `module.Set()` to converge
+3. **Set**: If drifted and in `apply` mode, call `module.Set()` to converge [GAP: apply/monitor toggle not yet wired — see issue #1519; current code always calls Set when drift is detected]
 4. **Verify**: Call `module.Get()` again to confirm the change took effect
 
 **In `apply` mode:**
@@ -88,12 +87,17 @@ Get → Compare → Set → Verify
 - If current matches desired: report compliant
 - If drifted: report drift (skip Set and Verify, no changes made)
 
+[GAP: apply/monitor toggle not implemented — `steward.mode` in the cfg currently controls connectivity mode (standalone/controller), not drift behavior. The execution engine always calls Set() when drift is detected regardless of mode. See issue #1519]
+
 ### Error Handling
 
-Controlled by the cfg's `error_handling` settings:
+Controlled by the cfg's `error_handling` settings (three independent fields: `module_load_failure`, `resource_failure`, `configuration_error`):
 
-- **continue** (default): Log the error, skip the failed resource, process remaining resources
-- **fail**: Stop execution on the first error
+- **continue**: Log the error, skip the failed resource, process remaining resources
+- **warn** (default for `resource_failure`): Log a warning, skip the failed resource, continue with remaining resources
+- **fail** (default for `configuration_error`): Stop execution on the first error
+
+The default for `resource_failure` is `warn` (not `continue`). `module_load_failure` defaults to `continue`; `configuration_error` defaults to `fail`.
 
 Failed resources are reported individually — a failure on one resource does not mask the status of others.
 
@@ -111,6 +115,8 @@ The cfg's `mode` field selects how the steward responds to drift detected during
 Mode is set at the steward level (`steward.mode` in the cfg) — a single steward operates in one mode at a time across all its managed resources. Per-resource override is not in scope for v1.
 
 Controller-side logging captures both the drift event and convergence result regardless of mode, enabling flapping detection (a future enhancement) without wire-protocol changes.
+
+[GAP: apply/monitor toggle not implemented — the `steward.mode` cfg field currently accepts `standalone` or `controller` (connectivity mode), not `apply` or `monitor`. A separate `drift_mode` field (or renamed `mode` field) needs to be added. The execution engine always applies changes when drift is detected regardless of any mode setting. See issue #1519]
 
 ## Modules
 
@@ -140,8 +146,8 @@ Some resources don't have a feasible event-source (no OS-level watcher, no vendo
 
 Current adoption (as of v0.9.x):
 
-- **Implemented**: `activedirectory` module
-- **Polling-only (no Monitor yet)**: `file`, `directory`, `script`, `firewall`, `package`, `patch`
+- **Implemented**: none [GAP: `network_activedirectory` module has a `Monitor()` method stub but it does not satisfy the `modules.Monitor` interface (wrong return type, always returns an error, missing `Changes()` and correctly-signed `Close()` methods, `GetCapabilities()` reports `supports_monitor: false`). See issue #1520]
+- **Polling-only (no Monitor yet)**: `activedirectory`, `file`, `directory`, `script`, `firewall`, `package`, `patch`
 
 Adding `Monitor` support to additional modules is an ongoing enhancement, prioritized by user impact (security-sensitive resources benefit most from event-driven detection).
 
@@ -328,11 +334,11 @@ The administrator chooses which flavor fits the deployment workflow. Both arrive
 2. Steward is started with `--regtoken <token>`.
 3. Steward contacts its compile-time controller URL (HTTPS), submits the token.
 4. Controller validates the token (single-use: consume; long-lived code: look up the matching tenant/group record), applies the registration approval workflow (`auto-approve` or `manual-review`), and on approval issues mTLS certificates scoped to the steward's tenant/group identity.
-5. Steward stores its issued cert + node ID locally and establishes a gRPC-over-QUIC transport connection.
+5. Steward imports the issued cert into its local `cert.Manager` (stored under the platform cert dir) for use in TLS handshakes, records the node ID, and establishes a gRPC-over-QUIC transport connection.
 6. Steward checks for a cfg from the controller.
 7. Normal operation begins.
 
-On subsequent startups the steward reuses its stored mTLS cert — no re-registration required unless the cert expires or is revoked. Cert renewal is automatic via the certificate manager.
+On every subsequent startup the steward re-registers via the same HTTP REST endpoint — HTTP registration is called on every invocation and there is no stored-certificate resume path that skips it. The cert stored by `cert.Manager` is used for TLS handshakes within the session but does not replace the HTTP registration call.
 
 ### Approval Workflow
 
@@ -374,7 +380,7 @@ The steward binary is the same in every deployment. The table below shows which 
 | Behavior | Standalone | Controller-Connected |
 |----------|------------|---------------------|
 | Load and parse cfg | Local file | Pushed by controller, stored locally |
-| Convergence loop (apply/monitor) | Yes | Yes |
+| Convergence loop (apply/monitor) [GAP: toggle not wired, see #1519] | Yes | Yes |
 | Scheduled re-check (`converge_interval`) | Yes | Yes (default 30m until cfg received) |
 | Event hooks | Yes | Yes |
 | DNA collection | Yes | Yes |
