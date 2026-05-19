@@ -4,27 +4,41 @@ The CFGMS controller provides a REST API for external system integration and man
 
 ## Base URL
 
-By default, the REST API runs on port 9080:
+By default, the REST API listens on port 9080. In production the server uses TLS when a certificate manager is configured:
 
 ```
-http://localhost:9080/api/v1
+https://controller.example.com:9080/api/v1
 ```
+
+In development (no cert manager, or self-signed cert), use `curl -k` to skip certificate verification:
+
+```bash
+curl -k https://localhost:9080/api/v1/health
+```
+
+Override the listen address with `CFGMS_HTTP_LISTEN_ADDR` (default: `0.0.0.0:9080`).
 
 ## Authentication
 
-All API endpoints (except `/health`) require authentication via API key. API keys can be provided in two ways:
+All API endpoints (except `/api/v1/health`, `/api/v1/register`, and `/api/v1/webhooks/git-push`) require authentication via API key. The `cfg` CLI authenticates using an mTLS admin bundle (see [mTLS Authentication](#mtls-authentication-admin-bundle) below). Raw API keys are supported for machine-to-machine use cases.
+
+API keys can be provided in two ways:
 
 ### X-API-Key Header
 
 ```bash
-curl -H "X-API-Key: your-api-key" http://localhost:9080/api/v1/stewards
+curl -k -H "X-API-Key: your-api-key" https://localhost:9080/api/v1/stewards
 ```
 
 ### Authorization Bearer Token
 
 ```bash
-curl -H "Authorization: Bearer your-api-key" http://localhost:9080/api/v1/stewards
+curl -k -H "Authorization: Bearer your-api-key" https://localhost:9080/api/v1/stewards
 ```
+
+### Permission Scopes
+
+Each endpoint requires a specific permission scope. Scopes follow the format `resource:action`. A key must hold the exact permission listed in each endpoint's **Required permission** field. The permission is checked by the `requirePermission(scope, action)` middleware registered in `server.go setupRouter()`.
 
 ## Response Format
 
@@ -83,13 +97,36 @@ Check the health status of the CFGMS controller.
 }
 ```
 
+### Steward Self-Registration
+
+#### POST /api/v1/register
+
+Steward-initiated self-registration. Called by the steward agent on first boot. Uses a pre-issued registration token instead of an API key. The token encodes the target tenant, group membership, and controller URL.
+
+**Authentication:** None required (registration token in request body)
+
+**Request Body:**
+
+```json
+{
+  "token": "reg-token-value",
+  "steward_id": "server-001",
+  "hostname": "server-001.example.com"
+}
+```
+
+**Response:** Returns controller URL, issued mTLS certificate, and tenant assignment.
+
 ### Steward Management
+
+All steward management endpoints require an API key. The `cfg steward list/status` CLI (Epic #1501) wraps these endpoints.
 
 #### GET /api/v1/stewards
 
 List all registered stewards.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `steward:list`
 
 **Response:**
 
@@ -125,9 +162,10 @@ List all registered stewards.
 
 #### GET /api/v1/stewards/{id}
 
-Get information about a specific steward.
+Get information about a specific steward, including connection state and active sessions from the connection registry.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `steward:read`
 
 **Parameters:**
 
@@ -142,6 +180,8 @@ Get information about a specific steward.
     "status": "connected",
     "last_seen": "2025-01-12T10:29:30Z",
     "version": "0.2.0",
+    "connection_state": "active",
+    "active_sessions": 2,
     "metrics": {
       "cpu_usage": "45%",
       "memory_usage": "512MB"
@@ -166,7 +206,8 @@ Get information about a specific steward.
 
 Get DNA information for a specific steward.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `steward:read-dna`
 
 **Parameters:**
 
@@ -193,13 +234,25 @@ Get DNA information for a specific steward.
 }
 ```
 
+#### POST /api/v1/stewards/{id}/auth/refresh
+
+Refresh the mTLS credentials for a steward. Called when the steward's certificate approaches expiry.
+
+**Authentication:** Required  
+**Required permission:** `steward:auth-refresh`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+
 ### Configuration Management
 
 #### GET /api/v1/stewards/{id}/config
 
 Get configuration for a specific steward.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `steward:read-config`
 
 **Parameters:**
 
@@ -236,11 +289,36 @@ Get configuration for a specific steward.
 }
 ```
 
+#### PUT /api/v1/stewards/{id}/config
+
+Update configuration for a specific steward.
+
+**Authentication:** Required  
+**Required permission:** `steward:write-config`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+
+**Request Body:** Same structure as the GET response `data` field.
+
+#### GET /api/v1/stewards/{id}/config/effective
+
+Get the effective (merged/inherited) configuration for a specific steward, resolving tenant hierarchy inheritance.
+
+**Authentication:** Required  
+**Required permission:** `steward:read-config`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+
 #### POST /api/v1/stewards/{id}/config/validate
 
-Validate configuration for a steward.
+Validate configuration for a steward without applying it.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `steward:validate-config`
 
 **Parameters:**
 
@@ -279,13 +357,107 @@ Validate configuration for a steward.
 }
 ```
 
+#### POST /api/v1/config/push
+
+Trigger an immediate fan-out of a configuration version to all currently active stewards. Returns `202 Accepted` immediately; delivery is fire-and-forget in a background goroutine. The leader node returns `503 Service Unavailable` for follower nodes in an HA cluster.
+
+**Authentication:** Required  
+**Required permission:** `config:push`
+
+**Request Body:**
+
+```json
+{
+  "config_id": "cfg-001",
+  "version": "1.2.3",
+  "tenant_id": "default"
+}
+```
+
+**Response (202 Accepted):**
+
+```json
+{
+  "data": {
+    "push_id": "push-1705051800000000000",
+    "status": "accepted",
+    "queued_at": "2025-01-12T10:30:00Z"
+  },
+  "timestamp": "2025-01-12T10:30:00Z"
+}
+```
+
+> **[GAP: save=deploy auto-distribution not yet wired to ConfigStore]** The push endpoint fans out `CommandSyncConfig` to active stewards but does not write through the ConfigStore. Once Epic #1501 lands, save=deploy will automatically trigger distribution on config write, making explicit pushes unnecessary for most workflows.
+
+### Script Management
+
+Script execution endpoints let operators inspect and retry steward-side script runs.
+
+#### GET /api/v1/stewards/{id}/scripts/executions
+
+List script executions for a steward.
+
+**Authentication:** Required  
+**Required permission:** `steward:read-scripts`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+
+#### GET /api/v1/stewards/{id}/scripts/executions/{execution_id}
+
+Get details of a specific script execution.
+
+**Authentication:** Required  
+**Required permission:** `steward:read-scripts`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+- `execution_id` (path): Execution ID
+
+#### POST /api/v1/stewards/{id}/scripts/executions/{execution_id}/retry
+
+Retry a failed script execution.
+
+**Authentication:** Required  
+**Required permission:** `steward:execute-scripts`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+- `execution_id` (path): Execution ID
+
+#### GET /api/v1/stewards/{id}/scripts/metrics
+
+Get script execution metrics for a steward (aggregated counts, success/failure rates).
+
+**Authentication:** Required  
+**Required permission:** `steward:read-scripts`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+
+#### GET /api/v1/stewards/{id}/scripts/status
+
+Get the current script execution status for a steward.
+
+**Authentication:** Required  
+**Required permission:** `steward:read-scripts`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+
 ### Certificate Management
 
 #### GET /api/v1/certificates
 
 List certificates.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `certificate:list`
 
 **Parameters:**
 
@@ -314,7 +486,8 @@ List certificates.
 
 Provision a new certificate for a steward.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `certificate:provision`
 
 **Request Body:**
 
@@ -348,7 +521,8 @@ Provision a new certificate for a steward.
 
 List available permissions.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `rbac:list-permissions`
 
 **Parameters:**
 
@@ -371,11 +545,23 @@ List available permissions.
 }
 ```
 
+#### GET /api/v1/rbac/permissions/{id}
+
+Get a specific permission by ID.
+
+**Authentication:** Required  
+**Required permission:** `rbac:read-permission`
+
+**Parameters:**
+
+- `id` (path): Permission ID
+
 #### GET /api/v1/rbac/roles
 
 List roles.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `rbac:list-roles`
 
 **Parameters:**
 
@@ -404,7 +590,8 @@ List roles.
 
 Create a new role.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `rbac:create-role`
 
 **Request Body:**
 
@@ -434,13 +621,49 @@ Create a new role.
 }
 ```
 
+#### GET /api/v1/rbac/roles/{id}
+
+Get a specific role by ID.
+
+**Authentication:** Required  
+**Required permission:** `rbac:read-role`
+
+**Parameters:**
+
+- `id` (path): Role ID
+
+#### PUT /api/v1/rbac/roles/{id}
+
+Update an existing role.
+
+**Authentication:** Required  
+**Required permission:** `rbac:update-role`
+
+**Parameters:**
+
+- `id` (path): Role ID
+
+**Request Body:** Same structure as POST /api/v1/rbac/roles.
+
+#### DELETE /api/v1/rbac/roles/{id}
+
+Delete a role.
+
+**Authentication:** Required  
+**Required permission:** `rbac:delete-role`
+
+**Parameters:**
+
+- `id` (path): Role ID
+
 ### API Key Management
 
 #### GET /api/v1/api-keys
 
 List API keys.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `api-key:list`
 
 **Response:**
 
@@ -464,7 +687,8 @@ List API keys.
 
 Create a new API key.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `api-key:create`
 
 **Request Body:**
 
@@ -496,15 +720,91 @@ Create a new API key.
 
 **Note:** The actual API key is only returned upon creation. Store it securely as it cannot be retrieved later.
 
+#### GET /api/v1/api-keys/{id}
+
+Get a specific API key (metadata only — the key value is not returned after creation).
+
+**Authentication:** Required  
+**Required permission:** `api-key:read`
+
+**Parameters:**
+
+- `id` (path): API key ID
+
+#### DELETE /api/v1/api-keys/{id}
+
+Delete an API key. The key is immediately invalidated.
+
+**Authentication:** Required  
+**Required permission:** `api-key:delete`
+
+**Parameters:**
+
+- `id` (path): API key ID
+
+### Registration Token Management
+
+Registration tokens authorise steward self-registration. The token encodes the target tenant and is consumed by `POST /api/v1/register`.
+
+**Note:** The path is `/api/v1/registration/tokens` — NOT `/admin/registration-tokens`.
+
+#### GET /api/v1/registration/tokens
+
+List registration tokens.
+
+**Authentication:** Required  
+**Required permission:** `registration:list-tokens`
+
+#### POST /api/v1/registration/tokens
+
+Create a new registration token.
+
+**Authentication:** Required  
+**Required permission:** `registration:create-token`
+
+#### GET /api/v1/registration/tokens/{token}
+
+Get a specific registration token's metadata.
+
+**Authentication:** Required  
+**Required permission:** `registration:read-token`
+
+**Parameters:**
+
+- `token` (path): Registration token value
+
+#### DELETE /api/v1/registration/tokens/{token}
+
+Delete a registration token.
+
+**Authentication:** Required  
+**Required permission:** `registration:delete-token`
+
+**Parameters:**
+
+- `token` (path): Registration token value
+
+#### POST /api/v1/registration/tokens/{token}/revoke
+
+Revoke a registration token without deleting it. A revoked token remains in the store but is rejected on use.
+
+**Authentication:** Required  
+**Required permission:** `registration:revoke-token`
+
+**Parameters:**
+
+- `token` (path): Registration token value
+
 ### Monitoring
 
-CFGMS provides comprehensive monitoring capabilities through dedicated endpoints. These endpoints enable integration with external monitoring systems like Prometheus, Grafana, ELK stack, and others.
+CFGMS provides monitoring capabilities through dedicated endpoints.
 
 #### GET /api/v1/monitoring/health
 
-System health overview including service status and resource utilization.
+System health overview including service status and resource utilisation.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `monitoring:read-health`
 
 **Response:**
 
@@ -531,9 +831,10 @@ System health overview including service status and resource utilization.
 
 #### GET /api/v1/monitoring/metrics
 
-System performance metrics in a format suitable for time-series databases.
+System performance metrics.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `monitoring:read-metrics`
 
 **Response:**
 
@@ -545,8 +846,6 @@ System performance metrics in a format suitable for time-series databases.
       "cpu_percent": 25.5,
       "memory_bytes": 134217728,
       "disk_usage_bytes": 1073741824,
-      "network_bytes_received": 524288000,
-      "network_bytes_sent": 262144000,
       "goroutines": 156,
       "gc_cycles": 42,
       "heap_objects": 125000
@@ -557,180 +856,7 @@ System performance metrics in a format suitable for time-series databases.
       "api_requests_total": 1250,
       "grpc_requests_total": 3500,
       "errors_total": 5
-    },
-    "export_status": {
-      "prometheus": "active",
-      "otlp": "disabled",
-      "elasticsearch": "error"
     }
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
-
-#### GET /api/v1/monitoring/resources
-
-Resource utilization metrics for stewards and system components.
-
-**Authentication:** Required
-
-**Parameters:**
-
-- `steward_id` (query, optional): Filter metrics by specific steward
-- `since` (query, optional): RFC3339 timestamp to filter metrics since
-
-**Response:**
-
-```json
-{
-  "data": {
-    "timestamp": "2025-01-12T10:30:00Z",
-    "controller": {
-      "cpu_percent": 25.5,
-      "memory_bytes": 134217728,
-      "connections": 45
-    },
-    "stewards": [
-      {
-        "id": "steward-001",
-        "cpu_percent": 15.2,
-        "memory_bytes": 67108864,
-        "disk_usage_bytes": 536870912,
-        "last_updated": "2025-01-12T10:29:30Z"
-      }
-    ],
-    "aggregated": {
-      "total_stewards": 45,
-      "avg_cpu_percent": 18.7,
-      "total_memory_bytes": 3019898880
-    }
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
-
-#### GET /api/v1/monitoring/logs
-
-Recent system logs with filtering and correlation capabilities.
-
-**Authentication:** Required
-
-**Parameters:**
-
-- `level` (query, optional): Filter by log level (debug, info, warn, error)
-- `component` (query, optional): Filter by component (controller, steward, monitoring)
-- `correlation_id` (query, optional): Filter by correlation ID
-- `limit` (query, optional): Maximum number of logs to return (default: 100, max: 1000)
-- `since` (query, optional): RFC3339 timestamp to filter logs since
-
-**Response:**
-
-```json
-{
-  "data": {
-    "logs": [
-      {
-        "timestamp": "2025-01-12T10:29:45Z",
-        "level": "info",
-        "component": "controller",
-        "message": "Steward registered successfully",
-        "correlation_id": "req-123e4567-e89b-12d3-a456-426614174000",
-        "metadata": {
-          "steward_id": "steward-001",
-          "operation": "steward.register"
-        }
-      }
-    ],
-    "total_count": 1,
-    "has_more": false
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
-
-#### GET /api/v1/monitoring/traces
-
-Distributed tracing information for request correlation and debugging.
-
-**Authentication:** Required
-
-**Parameters:**
-
-- `correlation_id` (query, optional): Filter by correlation ID
-- `operation` (query, optional): Filter by operation name
-- `limit` (query, optional): Maximum number of traces to return (default: 50, max: 500)
-- `since` (query, optional): RFC3339 timestamp to filter traces since
-
-**Response:**
-
-```json
-{
-  "data": {
-    "traces": [
-      {
-        "trace_id": "550e8400e29b41d4a716446655440000",
-        "correlation_id": "req-123e4567-e89b-12d3-a456-426614174000",
-        "operation": "steward.register",
-        "start_time": "2025-01-12T10:29:45.123456Z",
-        "duration_ms": 150.5,
-        "status": "ok",
-        "spans": [
-          {
-            "span_id": "7a085853722dc6c2",
-            "operation": "validate_certificate",
-            "start_time": "2025-01-12T10:29:45.125000Z",
-            "duration_ms": 45.2,
-            "status": "ok"
-          }
-        ],
-        "metadata": {
-          "steward_id": "steward-001",
-          "component": "controller"
-        }
-      }
-    ],
-    "total_count": 1,
-    "has_more": false
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
-
-#### GET /api/v1/monitoring/events
-
-System events and alerts for operational awareness.
-
-**Authentication:** Required
-
-**Parameters:**
-
-- `severity` (query, optional): Filter by severity (info, warning, error, critical)
-- `component` (query, optional): Filter by component
-- `limit` (query, optional): Maximum number of events to return (default: 100, max: 1000)
-- `since` (query, optional): RFC3339 timestamp to filter events since
-
-**Response:**
-
-```json
-{
-  "data": {
-    "events": [
-      {
-        "id": "evt-550e8400-e29b-41d4-a716-446655440001",
-        "timestamp": "2025-01-12T10:29:45Z",
-        "severity": "warning",
-        "component": "monitoring",
-        "event_type": "export_failure",
-        "message": "Failed to export metrics to Elasticsearch",
-        "metadata": {
-          "exporter": "elasticsearch",
-          "error": "connection timeout",
-          "retry_count": 3
-        }
-      }
-    ],
-    "total_count": 1,
-    "has_more": false
   },
   "timestamp": "2025-01-12T10:30:00Z"
 }
@@ -738,9 +864,10 @@ System events and alerts for operational awareness.
 
 #### GET /api/v1/monitoring/config
 
-Current monitoring system configuration and export status.
+Current monitoring system configuration and exporter status.
 
-**Authentication:** Required
+**Authentication:** Required  
+**Required permission:** `monitoring:read-config`
 
 **Response:**
 
@@ -754,35 +881,305 @@ Current monitoring system configuration and export status.
       "prometheus": {
         "enabled": true,
         "endpoint": "http://prometheus:9090/api/v1/write",
-        "status": "active",
-        "last_export": "2025-01-12T10:29:30Z",
-        "export_count": 1250,
-        "error_count": 0
+        "status": "active"
       },
       "otlp": {
         "enabled": false,
         "endpoint": "http://jaeger:14268/api/traces"
-      },
-      "elasticsearch": {
-        "enabled": true,
-        "endpoint": "http://elasticsearch:9200",
-        "status": "error",
-        "last_export": "2025-01-12T10:25:15Z",
-        "export_count": 500,
-        "error_count": 15,
-        "last_error": "connection timeout"
       }
-    },
-    "telemetry": {
-      "enabled": true,
-      "service_name": "cfgms-controller",
-      "sample_rate": 1.0,
-      "correlation_tracking": true
     }
   },
   "timestamp": "2025-01-12T10:30:00Z"
 }
 ```
+
+#### GET /api/v1/monitoring/anomalies
+
+Platform-detected anomalies.
+
+**Authentication:** Required  
+**Required permission:** `monitoring:read-anomalies`
+
+#### GET /api/v1/monitoring/components/{component}/health
+
+Health status for a specific component.
+
+**Authentication:** Required  
+**Required permission:** `monitoring:read-component-health`
+
+**Parameters:**
+
+- `component` (path): Component name (e.g., `controller`, `storage`)
+
+#### GET /api/v1/monitoring/components/{component}/metrics
+
+Metrics for a specific component.
+
+**Authentication:** Required  
+**Required permission:** `monitoring:read-component-metrics`
+
+**Parameters:**
+
+- `component` (path): Component name
+
+### High Availability
+
+HA endpoints expose cluster topology and leadership state. These are only meaningful in multi-node deployments; single-node OSS deployments always report as leader.
+
+#### GET /api/v1/ha/status
+
+Overall HA cluster status.
+
+**Authentication:** Required  
+**Required permission:** `ha:read-status`
+
+#### GET /api/v1/ha/cluster
+
+Full cluster topology.
+
+**Authentication:** Required  
+**Required permission:** `ha:read-cluster`
+
+#### GET /api/v1/ha/leader
+
+Current leader identity.
+
+**Authentication:** Required  
+**Required permission:** `ha:read-leader`
+
+#### GET /api/v1/ha/nodes
+
+List of all cluster nodes and their state.
+
+**Authentication:** Required  
+**Required permission:** `ha:read-nodes`
+
+#### GET /api/v1/raft/status
+
+Raft consensus state for the local node (operational/debugging endpoint).
+
+**Authentication:** Required  
+**Required permission:** `ha:read-status`
+
+### Compliance
+
+#### GET /api/v1/stewards/{id}/compliance
+
+Compliance status for a specific steward.
+
+**Authentication:** Required  
+**Required permission:** `steward:read-compliance`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+
+#### GET /api/v1/stewards/{id}/compliance/report
+
+Full compliance report for a specific steward.
+
+**Authentication:** Required  
+**Required permission:** `steward:read-compliance`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+
+#### GET /api/v1/compliance/summary
+
+Fleet-wide compliance summary across all stewards.
+
+**Authentication:** Required  
+**Required permission:** `compliance:read-summary`
+
+### Tenants
+
+#### POST /api/v1/tenants/{id}/config-source/test
+
+Test connectivity to a tenant's config source (e.g., validate git repository access credentials before saving them).
+
+**Authentication:** Required  
+**Required permission:** `tenant:manage`
+
+**Parameters:**
+
+- `id` (path): Tenant ID
+
+### Webhooks
+
+#### POST /api/v1/webhooks/git-push
+
+Receive a git push event from an upstream SCM and trigger a config sync. Registered lazily when a git-sync handler is configured via `SetGitSyncWebhookHandler()`.
+
+**Authentication:** HMAC-SHA256 signature validation (no API key). The signature is checked by the webhook handler, not the standard auth middleware.
+
+**Headers:**
+
+- `X-Hub-Signature-256`: HMAC-SHA256 of the request body using the configured webhook secret.
+
+### Rollback Management
+
+Rollback endpoints are registered only when a `RollbackManager` is wired in (`SetRollbackManager()`). They are available in all deployments that include the rollback feature.
+
+#### GET /api/v1/rollback/points
+
+List available rollback points.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `target_type` (query, optional): Filter by target type
+- `target_id` (query, optional): Filter by target ID
+- `limit` (query, optional): Maximum results to return
+
+#### POST /api/v1/rollback/preview
+
+Preview the effect of a rollback before executing it.
+
+**Authentication:** Required
+
+#### POST /api/v1/rollback/execute
+
+Execute a rollback to a specific point.
+
+**Authentication:** Required
+
+#### GET /api/v1/rollback/{rollback_id}/status
+
+Get the status of a running or completed rollback operation.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `rollback_id` (path): Rollback operation ID
+
+#### POST /api/v1/rollback/{rollback_id}/cancel
+
+Cancel a rollback operation in progress.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `rollback_id` (path): Rollback operation ID
+
+#### GET /api/v1/rollback/history
+
+List rollback operation history.
+
+**Authentication:** Required
+
+### Reports Engine
+
+Reports endpoints are registered only when a `ReportsHandler` is wired in (`SetReportsHandler()`).
+
+#### POST /api/v1/reports/generate
+
+Generate a report on demand.
+
+**Authentication:** Required
+
+#### GET /api/v1/reports/templates
+
+List available report templates.
+
+**Authentication:** Required
+
+#### GET /api/v1/reports/templates/{template}
+
+Get a specific report template.
+
+**Authentication:** Required
+
+#### GET /api/v1/reports/dashboard/overview
+
+Dashboard overview report.
+
+**Authentication:** Required
+
+#### GET /api/v1/reports/dashboard/trends
+
+Dashboard trend data.
+
+**Authentication:** Required
+
+#### GET /api/v1/reports/dashboard/alerts
+
+Dashboard alert summary.
+
+**Authentication:** Required
+
+#### GET /api/v1/reports/compliance/status
+
+Compliance status report.
+
+**Authentication:** Required
+
+#### GET /api/v1/reports/drift/summary
+
+Configuration drift summary report.
+
+**Authentication:** Required
+
+### Workflow Engine
+
+Workflow endpoints are registered only when a `WorkflowHandler` is wired in (`SetWorkflowHandler()`).
+
+> **[GAP: workflow/trigger route registration]** The workflow handler's `RegisterTriggerRoutes` is called with a subrouter already scoped to `/api/v1/triggers`, but the trigger API's `RegisterRoutes` adds `/triggers` as an additional prefix, producing `/api/v1/triggers/triggers/...` paths. The trigger routes are currently unreachable at their intended paths. See follow-up issue for the code fix.
+
+#### GET /api/v1/workflows
+
+List workflows.
+
+**Authentication:** Required (inherits api subrouter auth middleware)
+
+#### POST /api/v1/workflows
+
+Create a workflow.
+
+**Authentication:** Required
+
+#### GET /api/v1/workflows/{id}
+
+Get a workflow by ID.
+
+**Authentication:** Required
+
+#### PUT /api/v1/workflows/{id}
+
+Update a workflow.
+
+**Authentication:** Required
+
+#### DELETE /api/v1/workflows/{id}
+
+Delete a workflow.
+
+**Authentication:** Required
+
+#### POST /api/v1/workflows/{id}/execute
+
+Execute a workflow immediately.
+
+**Authentication:** Required
+
+#### GET /api/v1/workflows/{id}/executions
+
+List execution history for a workflow.
+
+**Authentication:** Required
+
+### Internal Endpoints (not for external use)
+
+#### POST /raft/message
+
+Internal Raft consensus message endpoint. mTLS peer CN verification is enforced inside the handler. Not accessible via the external API — intentionally omits API-key auth middleware.
+
+## Internal Test Endpoint (not for external use)
+
+`PUT /api/v1/test/stewards/{id}/config` is registered without authentication for integration test use only. It must not be reachable in production deployments. The endpoint is gated by the absence of normal auth middleware and is documented here only to note its existence in the route table.
 
 ## Error Codes
 
@@ -806,16 +1203,16 @@ Current monitoring system configuration and export status.
    ./bin/controller
    ```
 
-2. **Check health:**
+2. **Check health (dev mode — self-signed cert):**
 
    ```bash
-   curl http://localhost:9080/api/v1/health
+   curl -k https://localhost:9080/api/v1/health
    ```
 
 3. **List stewards:**
 
    ```bash
-   curl -H "X-API-Key: your-api-key" http://localhost:9080/api/v1/stewards
+   curl -k -H "X-API-Key: your-api-key" https://localhost:9080/api/v1/stewards
    ```
 
 ## mTLS Authentication (admin bundle)
@@ -902,12 +1299,13 @@ file is a full controller compromise.
 
 The REST API server can be configured via environment variables:
 
-- `CFGMS_HTTP_LISTEN_ADDR`: HTTP listen address (default: `127.0.0.1:9080`)
+- `CFGMS_HTTP_LISTEN_ADDR`: HTTP/HTTPS listen address (default: `0.0.0.0:9080`)
 
 ## Security Considerations
 
-- Always use HTTPS in production
-- Rotate API keys regularly
-- Use least-privilege permissions for API keys
-- Monitor API access logs
-- Consider rate limiting for production deployments
+- The server uses TLS automatically when a certificate manager is configured (`pkg/cert.Manager`). In development without a cert manager, it falls back to plain HTTP — use only on loopback.
+- Always use HTTPS in production.
+- Rotate API keys regularly.
+- Use least-privilege permissions for API keys.
+- Monitor API access logs.
+- Consider rate limiting for production deployments.
