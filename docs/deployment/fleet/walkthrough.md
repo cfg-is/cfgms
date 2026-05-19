@@ -411,39 +411,39 @@ Look for `Connected Stewards: 2` in the Transport section.
 
 ## Phase 6 — Upload a Fleet Config
 
-> **[GAP: `cfg config upload` not yet implemented — see Epic #1501]**
-> This CLI verb will wrap the `PUT /api/v1/stewards/{id}/config` REST endpoint below.
-> Until Epic #1501 lands, use the `curl` fallback.
-
 An example fleet config is in [`example-fleet-config.yaml`](example-fleet-config.yaml).
 It demonstrates a simple file and directory deployment. Edit it to match your environment
 before uploading.
 
-### REST API fallback — upload config to a steward
-
 Upload the config to each registered steward using the steward IDs from Phase 5:
 
 ```bash
-# Upload to steward-1 (Content-Type: application/yaml triggers YAML parsing in the handler)
-curl \
-  --cacert /tmp/admin-ca.crt \
-  --cert /tmp/admin.crt \
-  --key /tmp/admin.key \
-  -X PUT \
-  -H "Content-Type: application/yaml" \
-  -d @example-fleet-config.yaml \
-  https://<CONTROLLER_IP>:9080/api/v1/stewards/<STEWARD_1_ID>/config
+# Upload to steward-1
+cfg config upload example-fleet-config.yaml --steward <STEWARD_1_ID>
 
 # Upload to steward-2
-curl \
-  --cacert /tmp/admin-ca.crt \
-  --cert /tmp/admin.crt \
-  --key /tmp/admin.key \
-  -X PUT \
-  -H "Content-Type: application/yaml" \
-  -d @example-fleet-config.yaml \
-  https://<CONTROLLER_IP>:9080/api/v1/stewards/<STEWARD_2_ID>/config
+cfg config upload example-fleet-config.yaml --steward <STEWARD_2_ID>
 ```
+
+Expected output:
+
+```
+Configuration stored for steward <STEWARD_1_ID> (status: stored)
+```
+
+> **Alternative (curl)**: If you prefer the REST API directly, you can upload using
+> `PUT /api/v1/stewards/{id}/config` with `Content-Type: application/yaml`:
+>
+> ```bash
+> curl \
+>   --cacert /tmp/admin-ca.crt \
+>   --cert /tmp/admin.crt \
+>   --key /tmp/admin.key \
+>   -X PUT \
+>   -H "Content-Type: application/yaml" \
+>   -d @example-fleet-config.yaml \
+>   https://<CONTROLLER_IP>:9080/api/v1/stewards/<STEWARD_1_ID>/config
+> ```
 
 ### Trigger distribution
 
@@ -714,7 +714,6 @@ The table below collects all `[GAP: ...]` markers from this walkthrough for easy
 
 | Gap | Issue | Phase affected |
 |-----|-------|----------------|
-| `cfg config upload` not implemented | [Epic #1501](https://github.com/cfg-is/cfgms/issues/1501) | Phase 6 |
 | `cfg config deployments <id>` not implemented | [#1526](https://github.com/cfg-is/cfgms/issues/1526) | Phase 7 |
 | save=deploy auto-distribution not wired | [#1525](https://github.com/cfg-is/cfgms/issues/1525) | Phase 6 |
 | apply/monitor mode toggle not implemented | [#1524](https://github.com/cfg-is/cfgms/issues/1524) | Phase 8 |
