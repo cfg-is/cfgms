@@ -27,12 +27,13 @@ The `initialization.Run()` function performs the following steps in order:
 
 1. **Pre-flight validation** — verifies that config is present, certificate management is enabled (`certificate.enable_cert_management: true`), and `certificate.ca_path` is set
 2. **Idempotent guard** — reads the CA directory for an existing `.cfgms-initialized` marker. If the marker exists, init refuses to run and reports when and with what CA the controller was previously initialized. To re-initialize, the operator must remove the CA directory and run `--init` again
-3. **Storage backend creation** — initializes the configured storage provider (git or database) via `interfaces.CreateAllStoresFromConfig()`
+3. **Storage backend creation** — initializes the storage backend. OSS deployments use the composite flatfile + SQLite backend via `interfaces.CreateOSSStorageManager()`; commercial single-provider deployments use a database backend via `interfaces.CreateAllStoresFromConfig()`
 4. **CA directory and CA generation** — creates the CA directory (`os.MkdirAll` with `0700`), then creates a new Certificate Authority via `pkg/cert.Manager` with `LoadExistingCA: false`
 5. **Internal mTLS certificate** — if separated certificate architecture is configured, generates the `cfgms-internal` certificate used for gRPC-over-QUIC inter-component communication
 6. **Config signing certificate** — if separated architecture, generates the `cfgms-config-signer` certificate used to sign cfgs distributed to stewards (4096-bit RSA key)
 7. **RBAC store initialization** — initializes default permissions, roles, and subjects via `rbac.NewManagerWithStorage()`
 8. **Init marker written last** — the `.cfgms-initialized` marker is the final step. If any earlier step fails, no marker is written, and the installation is not considered initialized
+9. **Admin credential bundle** — issues the admin mTLS client certificate and writes the bundle to the platform-default path (`/etc/cfgms/admin.bundle.yaml` on Linux/macOS, `%ProgramData%\cfgms\admin.bundle.yaml` on Windows). If a bundle already exists at that path, issuance is skipped (idempotent). The bundle is the operator's credential for all subsequent REST API access
 
 Server certificates (for the transport listener) are **not** created during `--init`. Those are generated during normal startup by the transport subsystem, which knows the specific certificate names and file paths it requires.
 
@@ -43,7 +44,7 @@ The marker is a JSON file named `.cfgms-initialized` placed in the CA directory.
 - `version` — marker format version (for future migration)
 - `initialized_at` — UTC timestamp of initialization
 - `controller_version` — version of the controller binary that ran `--init`
-- `storage_provider` — storage backend used (e.g., `git`, `database`)
+- `storage_provider` — storage backend used (e.g., `flatfile`, `database`)
 - `ca_fingerprint` — SHA-256 fingerprint of the generated CA certificate
 
 The marker is written atomically using a temp file + rename pattern (`WriteInitMarker` writes to `.cfgms-initialized.tmp`, then renames). Placing the marker in the CA directory is intentional: if the CA mount is missing, both CA files and marker are absent, producing the correct failure mode on startup.
@@ -98,7 +99,7 @@ For production fleets, a steward runs alongside the controller on each node. The
 | CA and certificates | Controller | Generated during `--init`, managed in-memory |
 | RBAC and tenant data | Controller | Stored in durable storage backend |
 | Fleet registry | Controller | Steward registrations and heartbeats persisted in `StewardStore` — survives controller restarts (Issue #663) |
-| Storage backend | Controller | Git repo or PostgreSQL operations |
+| Storage backend | Controller | Flatfile + SQLite (OSS) or PostgreSQL (commercial) operations |
 | Fleet orchestration | Controller | Config distribution, steward registration, workflows |
 
 See [Single Controller Deployment](../../deployment/single-controller/walkthrough.md) for the deployment guide and [ADR-002](decisions/002-steward-bootstrap-for-controllers.md) for the architectural decision.
@@ -153,20 +154,22 @@ Author → Validate → Store → Distribute → Monitor Compliance
 2. **Validate** — Controller validates cfg syntax, module references, and tenant scoping before accepting. Validation is part of the write path; an invalid cfg never lands in storage.
 3. **Store** — Cfg is persisted in durable, version-controlled ConfigStore. Every change is a new version with full audit trail.
 4. **Distribute** — A successful ConfigStore write triggers automatic distribution. A storage-watch trigger fires after a ~500ms debounce window (absorbing burst saves) and publishes fanout jobs to the controller's durable job queue. Fanout sends `CommandSyncConfig` to all stewards whose targeting matches; the job survives controller restarts and HA failover replay. Cfgs are signed with the controller's signing certificate so stewards can verify authenticity. Fanout is bounded by controller capacity (CPU, outbound bandwidth) to prevent thundering-herd saturation.
+
+   > [GAP: storage-watch trigger not implemented — see issue #1521. The current explicit-push path (`POST /api/v1/config/push`) triggers fan-out independently of `ConfigStore` writes and is not connected to the storage layer. Epic #1501 will implement the wired save=deploy flow.]
 5. **Monitor** — Controller receives convergence results from stewards and tracks per-device compliance status. Operators view propagation via `cfg config deployments <id>`.
 
-**Save = Deploy:** there is no separate "push" verb. Save IS deploy. See [system operating model — Save = Deploy](operating-model.md#save--deploy) for the cross-component view.
+**Save = Deploy (desired state):** once issue #1521 is resolved, there will be no separate "push" verb — save IS deploy. Currently, `POST /api/v1/config/push` is the explicit distribution trigger; it is not connected to `ConfigStore` writes. See [system operating model — Save = Deploy](operating-model.md#save--deploy) for the cross-component view.
 
 ### Cfg Targeting
 
 The controller decides which steward gets which cfg based on:
 
-- **Direct assignment** — a cfg explicitly targets a steward by ID
-- **Group membership** — a cfg targets a group; all stewards in that group receive it
-- **Tag-based targeting** — stewards can carry arbitrary tags (e.g., `ring=canary`, `role=web-server`, `region=us-east`); a cfg targets stewards by tag expression
-- **DNA-attribute matching** — a cfg can target stewards whose DNA attributes match a predicate (e.g., `os=linux`, `cpu_arch=arm64`)
-- **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings at any depth
-- **Effective cfg** — the controller resolves inheritance and produces the effective cfg for each steward, merging all applicable layers
+- **Direct assignment** — a cfg explicitly targets a steward by ID ✓ implemented (`config_service_v2.go`: per-steward config stored and retrieved by steward ID)
+- **Group membership** — a cfg targets a group; all stewards in that group receive it ✓ implemented (tenant/group path used in inheritance resolution)
+- **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings at any depth ✓ implemented (`InheritanceResolver.ResolveConfiguration()`)
+- **Effective cfg** — the controller resolves inheritance and produces the effective cfg for each steward, merging all applicable layers ✓ implemented (`GetEffectiveConfiguration()`)
+- **Tag-based targeting** — stewards can carry arbitrary tags (e.g., `ring=canary`, `role=web-server`, `region=us-east`); a cfg targets stewards by tag expression — tags exist on steward records (fleet query supports tag filtering for device lists), but tag-based cfg distribution fanout is not yet implemented; the current fanout sends to all active stewards
+- **DNA-attribute matching** — a cfg can target stewards whose DNA attributes match a predicate (e.g., `os=linux`, `cpu_arch=arm64`) — desired state; not currently implemented in cfg distribution
 
 **Deployment rings (convention):** operators commonly tag stewards with ring identifiers (`ring=canary`, `ring=prod-early`, `ring=prod-broad`) and author phased rollouts as separate cfgs or staged target lists. v1 is convention; auto-progressive ring machinery (with bake time + health gating) is a future enhancement.
 
@@ -184,7 +187,7 @@ The fleet registry is backed by a `StewardStore` (see `pkg/storage/interfaces/st
 
 **Steward lifecycle states**: `registered` → `active` → `lost` / `deregistered`. Records are retained indefinitely for audit; a `lost` steward can re-register and will have its record updated in place.
 
-**Implementation**: `features/controller/fleet/fleet.HealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`: task latency counters, config error counts, recovery attempts) in-memory only. The in-memory metrics are not persisted and reset on restart — this is by design.
+**Implementation**: `features/controller/fleet/fleet.HealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`: task latency counters, config error counts) in-memory only. The in-memory metrics are not persisted and reset on restart — this is by design.
 
 **After a restart**: On startup, the controller can call `ListStewards()` or `ListStewardsByStatus()` to enumerate the fleet without waiting for stewards to check in. The stored `last_seen` and `last_heartbeat_at` timestamps allow the controller to identify stewards that went silent before or during the restart.
 
@@ -218,15 +221,18 @@ The controller can send commands to stewards over the gRPC control plane service
 
 | Command | Purpose |
 |---------|---------|
-| `sync_config` | Tell steward to fetch its latest cfg now (optimization — steward also checks on schedule). Save=deploy automatically issues this command for affected stewards after a ConfigStore write. |
+| `sync_config` | Tell steward to fetch its latest cfg now (optimization — steward also checks on schedule). Save=deploy will automatically issue this command for affected stewards once the storage-watch trigger is wired (see issue #1521). |
 | `sync_dna` | Request fresh DNA collection and upload |
-| `execute_script` | Run an ad-hoc script (outside the cfg) |
+| `reconnect` | Instruct the steward to reconnect to the controller (used during HA failover) |
+| `execute_script` | Run an ad-hoc script (outside the cfg) — [GAP: not implemented as a control-plane command — see issue #1523. Script execution is available via the REST API (`POST /api/v1/stewards/{id}/scripts`).] |
 
 Commands are fire-and-forget with completion tracking — the controller publishes the command and monitors for completion/failure events.
 
 ## Orchestration
 
 The controller coordinates operations that span multiple stewards. Individual stewards apply their own cfgs; the controller determines sequencing and timing.
+
+> [GAP: No orchestration engine is implemented in the current codebase. This section describes the desired-state design for multi-node operation coordination. The REST API category and model below are aspirational — they define the intended behavior for future implementation tracking.]
 
 ### Orchestration Model
 
@@ -429,10 +435,12 @@ The controller is the certificate authority and identity provider for stewards. 
 2. Steward presents the token/code during registration via the compile-time controller URL.
 3. Controller validates the credential — single-use: consume; long-lived code: look up matching record.
 4. Controller runs the registration approval workflow via `RegistrationApprovalHook`:
-   - **`auto-approve`** (development default): accepts immediately
-   - **`manual-review`** (production): pauses pending operator action via `cfg registration approve <id>` / `cfg registration deny <id> [--reason ...]`
-   - Custom workflows can implement arbitrary policy (e.g., approve `tenant=lab` registrations, manual-review everything else)
-5. On approval, controller generates the steward ID and issues an mTLS client certificate scoped to the steward's tenant/group identity.
+   - **`auto-approve`** (`DefaultApprovalHook`): accepts every valid registration unconditionally. Default when no workflow is configured.
+   - **`manual-review`** (production): pauses pending operator action via `cfg registration approve <id>` / `cfg registration deny <id> [--reason ...]` — [GAP: built-in manual-review mode not implemented — see issue #1522. The `WorkflowApprovalHook` delegates to the `steward-registration-approval` workflow, which can return `approve`, `reject`, or `quarantine`, but a pending-queue and CLI approval/deny commands do not exist yet.]
+   - Custom workflows can implement arbitrary policy (e.g., approve `tenant=lab` registrations, reject everything else)
+5. On approval (`approve`): controller generates the steward ID and issues an mTLS client certificate scoped to the steward's tenant/group identity.
+   On quarantine (`quarantine`): controller issues certificates but restricts the steward to baseline configuration only (no secrets, no scripts) until an administrator promotes it.
+   On rejection (`reject`): registration is denied.
 6. Controller distributes the CA cert, signing cert, and connection details.
 7. Steward is now a trusted member of the fleet and stores its cert for subsequent startups.
 
@@ -634,4 +642,4 @@ The REST API is the admin interface to the controller. All operations are authen
 | **Compliance** | Compliance status, reports |
 | **HA** | Cluster status, leader info, node list |
 | **Workflows** | Create, trigger, monitor workflows |
-| **Orchestration** | Initiate and monitor multi-node operations |
+| **Orchestration** | Initiate and monitor multi-node operations [GAP: not implemented — see Orchestration section above] |
