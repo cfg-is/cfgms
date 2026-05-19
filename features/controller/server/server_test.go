@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -206,4 +207,74 @@ func TestInitializeHAManager_UsesDefaultConfig(t *testing.T) {
 	node := haManager.GetLocalNode()
 	require.NotNil(t, node)
 	assert.NotEmpty(t, node.ID, "auto-generated node ID must not be empty")
+}
+
+// TestBuiltinWorkflowSeedingAutoApprove verifies that a controller started with no
+// registration config seeds the auto-approve built-in workflow (Issue #1527).
+func TestBuiltinWorkflowSeedingAutoApprove(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: false,
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: tempDir + "/flatfile",
+			SQLitePath:   tempDir + "/cfgms.db",
+		},
+		// No Registration block: defaults to auto-approve seeding.
+	}
+
+	srv, err := New(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+	require.NotNil(t, srv)
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	ctx := context.Background()
+	// Built-in workflows are seeded under the root tenant scope.
+	store := workflow.NewWorkflowStore(srv.GetConfigStore(), builtinWorkflowTenantID)
+	vw, err := store.GetLatestWorkflow(ctx, "steward-registration-approval")
+	require.NoError(t, err, "auto-approve workflow must be seeded in root tenant scope on startup")
+	require.NotNil(t, vw)
+
+	policy, ok := vw.Variables["policy"].(string)
+	require.True(t, ok, "auto-approve workflow must have a string 'policy' variable")
+	assert.Equal(t, "accept", policy, "auto-approve workflow must set policy=accept for short-circuit approval")
+}
+
+// TestBuiltinWorkflowSeedingManualReview verifies that a controller started with
+// registration.workflow: manual-review seeds the manual-review built-in workflow (Issue #1527).
+func TestBuiltinWorkflowSeedingManualReview(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: false,
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: tempDir + "/flatfile",
+			SQLitePath:   tempDir + "/cfgms.db",
+		},
+		Registration: &config.RegistrationConfig{
+			Workflow: "manual-review",
+		},
+	}
+
+	srv, err := New(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+	require.NotNil(t, srv)
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	ctx := context.Background()
+	// Built-in workflows are seeded under the root tenant scope.
+	store := workflow.NewWorkflowStore(srv.GetConfigStore(), builtinWorkflowTenantID)
+	vw, err := store.GetLatestWorkflow(ctx, "steward-registration-approval")
+	require.NoError(t, err, "manual-review workflow must be seeded in root tenant scope on startup")
+	require.NotNil(t, vw)
+
+	decision, ok := vw.Variables["registration_decision"].(string)
+	require.True(t, ok, "manual-review workflow must have a string 'registration_decision' variable")
+	assert.Equal(t, "quarantine", decision, "manual-review workflow must set registration_decision=quarantine")
 }

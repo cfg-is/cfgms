@@ -95,10 +95,26 @@ type Config struct {
 	// Transport is the unified, protocol-agnostic transport configuration.
 	Transport *TransportConfig `yaml:"transport"`
 
+	// Registration holds registration approval workflow settings.
+	// When nil or when Workflow is empty and no custom workflow exists in the store,
+	// the controller seeds the built-in "auto-approve" workflow (Issue #1527).
+	Registration *RegistrationConfig `yaml:"registration,omitempty"`
+
 	// AdminBundlePath is the path where --init writes the admin credential bundle.
 	// Default: /etc/cfgms/admin.bundle.yaml (Linux) or %ProgramData%\cfgms\admin.bundle.yaml (Windows).
 	// Mode 0600, daemon-user-owned. Contains the admin mTLS cert, key, CA, and controller URL.
 	AdminBundlePath string `yaml:"admin_bundle_path,omitempty"`
+}
+
+// RegistrationConfig holds registration approval workflow settings.
+type RegistrationConfig struct {
+	// Workflow selects the built-in registration approval workflow.
+	// Valid values:
+	//   "auto-approve" (default) — all registrations approved immediately; safe for development.
+	//   "manual-review"          — stewards quarantined pending operator approval via `cfg registration approve`.
+	// If empty and no "steward-registration-approval" workflow exists in the config store,
+	// the controller defaults to "auto-approve" behaviour.
+	Workflow string `yaml:"workflow"`
 }
 
 // CertificateConfig contains certificate management settings
