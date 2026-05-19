@@ -473,7 +473,7 @@ The conversation follows this protocol:
 4. **If revisions needed** — PO relays Tech Lead feedback to BA: `SendMessage(to: "ba", message: <feedback>)`. BA revises and re-proposes. PO relays to Tech Lead for re-review. Only unresolved stories iterate — approved stories are locked.
 5. **PO product decisions** — if BA and Tech Lead disagree on scope, priority, or approach, PO makes the product call and sends the decision to both: `SendMessage(to: "*", message: "PO DECISION: ...")`
 
-**Maximum 3 revision rounds.** A round = BA revises + Tech Lead re-reviews. After 3 rounds, any remaining REVISION NEEDED stories are resolved by PO decision: either accept with a PO note, or drop and document in a Blocked tracking issue (use `po-act.sh block`).
+**Maximum 3 revision rounds.** A round = BA revises + Tech Lead re-reviews. After 3 rounds, any remaining REVISION NEEDED stories are resolved by PO decision: either accept with a PO note, or drop and document the convergence failure by blocking the epic (use `po-act.sh block <EPIC_NUM> "<reason>"`). Do NOT create a parallel tracking issue — the epic's Blocked status + comment IS the escalation.
 
 **7f. Create stories in the project queue (after consensus):**
 
@@ -557,26 +557,26 @@ TeamDelete()
 ```
 
 **7i. Fallback — convergence failure:**
-If the PO drops any stories (couldn't converge after 3 rounds), create a tracking issue and add it to the project queue as Blocked:
+If the PO drops any stories (couldn't converge after 3 rounds), block the **epic itself** with the convergence summary — do NOT create a parallel tracking issue. The epic's Blocked status + explanatory comment IS the escalation; the founder unblocks the epic when ready.
+
+Build the comment body (stories-agreed + stories-disputed summary) and pass it to `po-act.sh block` via stdin:
 ```bash
-cat > /tmp/blocked-body.md <<'BLOCK_EOF'
+cat > /tmp/convergence-failure-<EPIC_NUM>.md <<'BLOCK_EOF'
 ## Planning Team: Could Not Converge
 
-Epic: #<NUM> — <title>
+Epic: #<EPIC_NUM> — <title>
 
-## Stories Agreed
-- #NNN — <title> (created, Ready status in project queue)
+## Stories Agreed (created at Ready status)
+- #NNN — <title>
 
-## Stories Disputed
+## Stories Disputed (dropped after 3 revision rounds)
 - "<story title>": BA proposed: <summary>. Tech Lead objected: <objection>. PO recommendation: <what the founder should decide>.
 BLOCK_EOF
 
-gh issue create --repo cfg-is/cfgms --label "high-priority" \
-  --title "BLOCKED: planning convergence failure on epic #<NUM>" \
-  --body-file /tmp/blocked-body.md
-rm /tmp/blocked-body.md
+./.claude/scripts/po-act.sh block <EPIC_NUM> - < /tmp/convergence-failure-<EPIC_NUM>.md
+rm /tmp/convergence-failure-<EPIC_NUM>.md
 ```
-Then set the new issue to Blocked status via `po-act.sh block <ISSUE_NUM> "Planning team: convergence failure on epic #<NUM>"`.
+`po-act.sh block <ISSUE> -` reads the reason from stdin so multi-line summaries don't need command-line argument escaping. The block subcommand idempotently adds the epic to the project queue (if not present) and sets status to Blocked.
 
 **Step 8 — Forward edge:**
 If active milestone >80% complete and next milestone has no epics, create a `high-priority` tracking issue requesting intent capture and add it to the project queue as Blocked.
