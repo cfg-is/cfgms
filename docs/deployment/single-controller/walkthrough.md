@@ -21,7 +21,7 @@ Deploy one CFGMS controller and set up the controller-steward to keep the node i
 │  │  REST API (HTTPS)       :9080/TCP     │  │
 │  │  gRPC-over-QUIC (mTLS) :4433/UDP     │  │
 │  │  Auto-generated CA + certificates     │  │
-│  │  Git+SOPS config storage              │  │
+│  │  Flatfile+SQLite config storage       │  │
 │  └───────────────────────────────────────┘  │
 │                                             │
 │  ┌───────────────────────────────────────┐  │
@@ -88,16 +88,6 @@ Open `/etc/cfgms/controller.cfg` in your editor and verify the following variabl
 | `listen_addr` | `transport` | Transport bind address and port (default `0.0.0.0:4433`) |
 
 The REST API listens on port 9080 by default. To change it, set `CFGMS_HTTP_LISTEN_ADDR` in the systemd unit's `Environment=` directive.
-
-> **Storage**: If `controller.cfg` contains `storage.provider: "git"`, replace the entire `storage:` block with the OSS composite backend before running `--init`. The `git` provider has been removed and the controller will refuse to start with it configured:
->
-> ```yaml
-> storage:
->   flatfile_root: "/var/lib/cfgms/storage"
->   sqlite_path: "/var/lib/cfgms/cfgms.db"
-> ```
->
-> See issue [#1547](https://github.com/cfg-is/cfgms/issues/1547) to track the canonical config update.
 
 ### Install the systemd service
 
