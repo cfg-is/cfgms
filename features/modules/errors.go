@@ -11,4 +11,6 @@ var (
 	ErrInvalidInput = errors.New("invalid input")
 	// ErrUnsupportedPlatform is returned when a feature is not supported on the current platform
 	ErrUnsupportedPlatform = errors.New("unsupported platform")
+	// ErrNotImplemented is returned when a requested operation is not yet supported.
+	ErrNotImplemented = errors.New("operation not implemented")
 )

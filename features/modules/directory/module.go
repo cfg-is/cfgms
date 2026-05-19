@@ -235,6 +235,14 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 	if aclData, ok := configMap["windows_acl"].(*modules.WindowsACL); ok {
 		dirConfig.WindowsACL = aclData
 	}
+	if state, ok := configMap["state"].(string); ok {
+		dirConfig.State = state
+	}
+
+	// Deletion is not implemented; return an explicit error rather than silently creating the dir.
+	if dirConfig.State == "absent" {
+		return fmt.Errorf("directory deletion is not supported: %w", modules.ErrNotImplemented)
+	}
 
 	// Step 2: Platform-specific permissions handling (must remain before validate)
 	if !platformSupportsPermissions() && dirConfig.Permissions != 0 {
