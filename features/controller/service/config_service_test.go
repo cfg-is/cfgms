@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,8 +17,11 @@ import (
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
+
+var configSvcTestSeq int64
 
 func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
 	return &stewardconfig.StewardConfig{
@@ -66,6 +71,19 @@ func createTestServiceV2(t *testing.T) *ConfigurationServiceV2 {
 	logger := logging.NewNoopLogger()
 	storageManager := pkgtesting.SetupTestStorage(t)
 	return NewConfigurationServiceV2(logger, storageManager, nil)
+}
+
+// createTestServiceV2WithFlatfileRoot creates a ConfigurationServiceV2 backed by real
+// git storage at rootDir. Use this when a test needs to manipulate the storage directory
+// (e.g. chmod to read-only) to simulate storage write errors.
+func createTestServiceV2WithFlatfileRoot(t *testing.T, rootDir string) *ConfigurationServiceV2 {
+	t.Helper()
+	seq := atomic.AddInt64(&configSvcTestSeq, 1)
+	sqlitePath := fmt.Sprintf("file:cfgms-test-svc-%d?mode=memory&cache=shared", seq)
+	storageManager, err := interfaces.CreateOSSStorageManager(rootDir, sqlitePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+	return NewConfigurationServiceV2(logging.NewNoopLogger(), storageManager, nil)
 }
 
 func TestNewConfigurationServiceV2(t *testing.T) {
@@ -313,6 +331,81 @@ func TestFilterConfigByModules(t *testing.T) {
 		assert.Equal(t, cfg.Steward, filtered.Steward)
 		assert.Len(t, filtered.Resources, 0)
 	})
+}
+
+func TestSetConfiguration_FiresFanoutCallback_OnSuccess(t *testing.T) {
+	ctx := context.Background()
+	svc := createTestServiceV2(t)
+
+	var callCount int
+	var gotTenantID, gotCfgID string
+	svc.RegisterFanoutCallback(func(_ context.Context, tenantID, cfgID string) {
+		callCount++
+		gotTenantID = tenantID
+		gotCfgID = cfgID
+	})
+
+	err := svc.SetConfiguration(ctx, "tenant-a", "steward-1", createTestStewardConfig("steward-1"))
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, callCount)
+	assert.Equal(t, "tenant-a", gotTenantID)
+	assert.Equal(t, "steward-1", gotCfgID)
+}
+
+func TestSetConfiguration_DoesNotFireFanoutCallback_OnError(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("validation error", func(t *testing.T) {
+		svc := createTestServiceV2(t)
+		var callCount int
+		svc.RegisterFanoutCallback(func(_ context.Context, _, _ string) { callCount++ })
+
+		// Empty StewardConfig fails validation (missing ID, invalid mode)
+		err := svc.SetConfiguration(ctx, "tenant-a", "steward-1", &stewardconfig.StewardConfig{})
+		require.Error(t, err)
+		assert.Equal(t, 0, callCount, "callback must not fire on validation error")
+	})
+
+	t.Run("storage error", func(t *testing.T) {
+		rootDir := t.TempDir()
+		svc := createTestServiceV2WithFlatfileRoot(t, rootDir)
+		var callCount int
+		svc.RegisterFanoutCallback(func(_ context.Context, _, _ string) { callCount++ })
+
+		// Replace the storage root with a regular file so that writeAtomic's
+		// os.MkdirAll call fails with ENOTDIR on all platforms.  os.Chmod
+		// read-only is not honoured by the Windows filesystem layer, making
+		// this the only reliable cross-platform approach.
+		require.NoError(t, os.RemoveAll(rootDir))
+		f, ferr := os.Create(rootDir)
+		require.NoError(t, ferr)
+		require.NoError(t, f.Close())
+
+		writeErr := svc.SetConfiguration(ctx, "tenant-a", "steward-1", createTestStewardConfig("steward-1"))
+		require.Error(t, writeErr, "storage write should fail when rootDir is a file not a directory")
+		assert.Equal(t, 0, callCount, "callback must not fire on storage error")
+	})
+}
+
+func TestSetConfiguration_FanoutCallback_IsTenantScoped(t *testing.T) {
+	ctx := context.Background()
+	svc := createTestServiceV2(t)
+
+	var gotTenantIDs []string
+	svc.RegisterFanoutCallback(func(_ context.Context, tenantID, _ string) {
+		gotTenantIDs = append(gotTenantIDs, tenantID)
+	})
+
+	err := svc.SetConfiguration(ctx, "tenant-a", "steward-1", createTestStewardConfig("steward-1"))
+	require.NoError(t, err)
+
+	err = svc.SetConfiguration(ctx, "tenant-b", "steward-2", createTestStewardConfig("steward-2"))
+	require.NoError(t, err)
+
+	require.Len(t, gotTenantIDs, 2)
+	assert.Equal(t, "tenant-a", gotTenantIDs[0], "first callback must receive tenant-a")
+	assert.Equal(t, "tenant-b", gotTenantIDs[1], "second callback must receive tenant-b; cross-tenant fanout is structurally impossible from a single write")
 }
 
 func TestConfigurationServiceV2Concurrency(t *testing.T) {

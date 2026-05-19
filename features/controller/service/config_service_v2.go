@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
@@ -20,6 +21,11 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
+// FanoutCallback is invoked inside SetConfiguration after a successful ConfigStore write.
+// tenantID matches the authenticated tenant that issued the write; cfgID is the steward
+// config identifier. The callback must not block — hand off expensive work to a goroutine.
+type FanoutCallback func(ctx context.Context, tenantID string, cfgID string)
+
 // ConfigurationServiceV2 implements Epic 6 compliant Configuration service
 // This replaces the in-memory storage with persistent ConfigStore
 type ConfigurationServiceV2 struct {
@@ -30,6 +36,8 @@ type ConfigurationServiceV2 struct {
 	validationManager   *config.ValidationManager
 	controllerSvc       *ControllerService
 	storageManager      *interfaces.StorageManager
+	fanoutCallback      FanoutCallback
+	callbackMu          sync.RWMutex
 }
 
 // NewConfigurationServiceV2 creates a new Epic 6 compliant Configuration service.
@@ -54,6 +62,15 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 // SetRollbackManager wires the canonical rollback manager into the service.
 func (s *ConfigurationServiceV2) SetRollbackManager(m rollback.RollbackManager) {
 	s.rollbackManager = m
+}
+
+// RegisterFanoutCallback registers a callback that is invoked once, synchronously,
+// after every successful ConfigStore write in SetConfiguration. The callback is
+// unreachable from any other code path. Pass nil to deregister.
+func (s *ConfigurationServiceV2) RegisterFanoutCallback(fn FanoutCallback) {
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
+	s.fanoutCallback = fn
 }
 
 // GetConfiguration retrieves configuration for a specific steward using ConfigStore
@@ -169,6 +186,13 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 	s.logger.Info("Configuration stored successfully",
 		"tenant_id", logging.SanitizeLogValue(tenantID),
 		"steward_id", logging.SanitizeLogValue(stewardID))
+
+	s.callbackMu.RLock()
+	cb := s.fanoutCallback
+	s.callbackMu.RUnlock()
+	if cb != nil {
+		cb(ctx, tenantID, stewardID)
+	}
 
 	return nil
 }

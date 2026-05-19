@@ -153,12 +153,10 @@ Author → Validate → Store → Distribute → Monitor Compliance
 1. **Author** — Cfgs are created or updated via the `cfg` CLI (`cfg config upload`), the commercial web UI, a GitOps webhook, or workflow output. All sources write through the same ConfigStore — there is no separate "fast path".
 2. **Validate** — Controller validates cfg syntax, module references, and tenant scoping before accepting. Validation is part of the write path; an invalid cfg never lands in storage.
 3. **Store** — Cfg is persisted in durable, version-controlled ConfigStore. Every change is a new version with full audit trail.
-4. **Distribute** — A successful ConfigStore write triggers automatic distribution. A storage-watch trigger fires after a ~500ms debounce window (absorbing burst saves) and publishes fanout jobs to the controller's durable job queue. Fanout sends `CommandSyncConfig` to all stewards whose targeting matches; the job survives controller restarts and HA failover replay. Cfgs are signed with the controller's signing certificate so stewards can verify authenticity. Fanout is bounded by controller capacity (CPU, outbound bandwidth) to prevent thundering-herd saturation.
-
-   > [GAP: storage-watch trigger not implemented — see issue #1521. The current explicit-push path (`POST /api/v1/config/push`) triggers fan-out independently of `ConfigStore` writes and is not connected to the storage layer. Epic #1501 will implement the wired save=deploy flow.]
+4. **Distribute** — A successful `ConfigStore` write inside `SetConfiguration()` triggers automatic distribution via a service-level callback (Issue #1521, Option A). The callback is registered at server startup (`server.go`) and invokes `push.Fanout()` scoped to the tenant from the write context. Distribution is fire-and-forget: `SetConfiguration()` returns without blocking on fanout completion. Cfgs are signed with the controller's signing certificate so stewards can verify authenticity. Note: debounce (burst-save absorption) and per-steward targeting evaluation are tracked as follow-on stories.
 5. **Monitor** — Controller receives convergence results from stewards and tracks per-device compliance status. Operators view propagation via `cfg config deployments <id>`.
 
-**Save = Deploy (desired state):** once issue #1521 is resolved, there will be no separate "push" verb — save IS deploy. Currently, `POST /api/v1/config/push` is the explicit distribution trigger; it is not connected to `ConfigStore` writes. See [system operating model — Save = Deploy](operating-model.md#save--deploy) for the cross-component view.
+**Save = Deploy:** `SetConfiguration()` automatically triggers fan-out to all active stewards of the affected tenant via the registered `FanoutCallback`. `POST /api/v1/config/push` is retained as an explicit-override / force-push endpoint. See [system operating model — Save = Deploy](operating-model.md#save--deploy) for the cross-component view.
 
 ### Cfg Targeting
 

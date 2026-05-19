@@ -21,6 +21,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/health"
+	"github.com/cfgis/cfgms/features/controller/push"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/monitoring"
@@ -210,6 +211,39 @@ func New(
 
 	// Issue #603: Initialize fleet query using the controller service as the steward provider
 	server.fleetQuery = fleet.NewMemoryQuery(&controllerServiceAdapter{svc: controllerService})
+
+	// Issue #1521: register save=deploy fanout callback so every successful SetConfiguration
+	// automatically distributes to all active stewards of the affected tenant.
+	if configService != nil && commandPublisher != nil {
+		configService.RegisterFanoutCallback(func(ctx context.Context, tenantID, cfgID string) {
+			if checker := server.pushLeaderStatus; checker != nil && !checker.IsLeader() {
+				return
+			}
+			cfg := &push.StewardConfiguration{
+				ConfigID:  cfgID,
+				TenantID:  tenantID,
+				Version:   fmt.Sprintf("%d", time.Now().UnixNano()),
+				AppliedAt: time.Now().UTC(),
+				Source:    "save-deploy",
+			}
+			allStewards := controllerService.GetAllStewards()
+			var tenantStewards []*service.StewardInfo
+			for _, st := range allStewards {
+				if st.TenantID == tenantID {
+					tenantStewards = append(tenantStewards, st)
+				}
+			}
+			go func() {
+				result := push.Fanout(context.Background(), cfg, tenantStewards, commandPublisher, logger)
+				logger.Info("Save=deploy fan-out complete",
+					"tenant_id", logging.SanitizeLogValue(tenantID),
+					"cfg_id", logging.SanitizeLogValue(cfgID),
+					"succeeded", len(result.Succeeded),
+					"failed", len(result.Failed))
+			}()
+		})
+		logger.Info("Save=deploy fanout callback registered on config service")
+	}
 
 	// Start background cleanup for expired API keys
 	server.startAPIKeyCleanup()
