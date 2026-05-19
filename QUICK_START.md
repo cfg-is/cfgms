@@ -8,7 +8,7 @@ CFGMS is flexible - you can use it three different ways. Pick the one that match
 
 - [Option A: Standalone Steward](#option-a-standalone-steward) (5 minutes) - **Start here if you're new!**
 - [Option B: Standalone Controller](#option-b-standalone-controller-cloud-apis) (10 minutes) - Cloud automation only
-- [Option C: Controller + Stewards](#option-c-controller--stewards-full-platform) (15 minutes) - Fleet management
+- [Option C: Controller + Stewards](#option-c-controller--stewards-full-platform) (30–60 min) - Fleet management
 
 ---
 
@@ -288,196 +288,35 @@ EOF
 
 **Perfect for**: Fleet management, MSP operations, enterprise scale
 
-**Time**: 15 minutes
+**Time**: 30–60 minutes (see dedicated walkthrough)
 
-### What You'll Learn
+### Overview
 
-- Set up centralized management
-- Auto-register stewards with automatic certificates
-- Push configurations to multiple endpoints
-- Monitor fleet health
+Option C is full platform mode — a controller managing one or more remote stewards.
+Setup is more involved than Options A or B and is documented in a dedicated walkthrough.
 
 ### Prerequisites
 
 - Go 1.25+ installed
 - At least 2 machines (or VMs) for testing
 - Network connectivity between machines
+- Familiarity with Options A or B (recommended)
 
-### Step 1: Build Everything
+### What You'll Achieve
 
-```bash
-# Clone if you haven't already
-git clone https://github.com/cfg-is/cfgms.git
-cd cfgms
+- Centralized controller managing multiple stewards
+- Automatic certificate issuance and renewal for each steward
+- Configuration pushed fleet-wide
+- Drift detection across all endpoints
 
-# Build all components
-make build
-```
+### Follow the Fleet Walkthrough
 
-### Step 2: Start the Controller
-
-First, create the controller configuration (same as Option B):
-
-```bash
-# Create config file
-cat > controller.cfg <<EOF
-storage:
-  provider: git
-  config:
-    repository_path: ./data/cfgms-storage
-    branch: main
-    auto_init: true
-
-certificate:
-  enable_cert_management: true
-  auto_generate: true
-  ca_path: ./certs/ca
-
-logging:
-  provider: file
-  level: INFO
-  file:
-    directory: ./logs
-
-transport:
-  listen_addr: "0.0.0.0:4433"
-  use_cert_manager: true
-EOF
-
-# Create required directories and start controller
-mkdir -p ./data ./certs ./logs
-./bin/controller
-
-# You should see:
-# INFO: Initializing storage provider: git
-# INFO: Starting transport server
-# INFO: Controller ready
-```
-
-### Step 3: Create Registration Token
-
-Registration tokens allow stewards to authenticate with the controller:
-
-```bash
-# In another terminal, create a registration token
-# Note: cfgcli token management will be available in a future release
-# For now, tokens are created via direct API calls:
-
-curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_id": "default",
-    "group": "production",
-    "validity_days": 7,
-    "single_use": false
-  }'
-
-# Returns JSON with token and metadata:
-# {
-#   "token": "abcdefghijklmnopqrstuvwxyz",
-#   "tenant_id": "default",
-#   "controller_url": "...",
-#   "group": "production",
-#   "created_at": "...",
-#   "single_use": false
-# }
-
-# Save the "token" value for the next step
-```
-
-### Step 4: Register First Steward
-
-```bash
-# On the controller machine (for testing)
-# Use the token from Step 3
-./bin/cfgms-steward -regtoken abcdefghijklmnopqrstuvwxyz
-
-# You should see:
-# INFO: Registering with controller via gRPC-over-QUIC
-# INFO: Certificate obtained
-# INFO: Connected to controller
-# INFO: Steward ready
-```
-
-### Step 5: Register Second Steward (Different Machine)
-
-```bash
-# On another machine
-# Use the same token (if single_use was false)
-./bin/cfgms-steward -regtoken abcdefghijklmnopqrstuvwxyz
-
-# Same automatic process!
-```
-
-### Step 6: List Your Fleet
-
-```bash
-# On controller machine
-./bin/cfg steward list
-
-# Output:
-# HOSTNAME         STATUS   LAST SEEN        PLATFORM
-# test-steward-1   healthy  2s ago           linux/amd64
-# test-steward-2   healthy  5s ago           linux/arm64
-```
-
-### Step 7: Push Configuration to Fleet
-
-```bash
-# Create fleet-wide configuration
-cat > fleet-config.yaml <<EOF
-# Apply to all stewards
-targets:
-  - all
-
-resources:
-  - name: motd-file
-    module: file
-    config:
-      path: /etc/motd
-      content: |
-        ========================================
-        Managed by CFGMS Controller
-        Last updated: {{ now }}
-        ========================================
-      state: present
-
-  - name: log-directory
-    module: directory
-    config:
-      path: /var/log/cfgms
-      state: present
-      mode: "0755"
-EOF
-
-# Apply to entire fleet
-./bin/cfg config apply fleet-config.yaml
-
-# Output:
-# Applying configuration to 2 stewards...
-# test-steward-1: OK (2 changes)
-# test-steward-2: OK (2 changes)
-# Fleet configuration applied successfully
-```
-
-### Step 8: Check Steward Health
-
-```bash
-# Get detailed status
-./bin/cfg steward status test-steward-1
-
-# Output:
-# Hostname: test-steward-1
-# Status: healthy
-# Platform: linux/amd64
-# CPU: 15%
-# Memory: 512MB / 4GB
-# Uptime: 5m 32s
-# Last config: 1m ago (2 changes)
-# Drift detected: No
-```
+All steps — controller start-up, steward registration, and first configuration push —
+are covered in the [fleet deployment walkthrough](docs/deployment/fleet/walkthrough.md).
 
 ### What's Next?
+
+After completing the fleet walkthrough:
 
 - Learn about [multi-tenancy](docs/guides/configuration-inheritance.md)
 - Set up [production certificates](docs/development/security-setup.md)
@@ -495,7 +334,7 @@ EOF
 | **Network Required** | No | No | Yes |
 | **Endpoint Management** | Yes (local) | No | Yes (centralized) |
 | **Cloud APIs (M365, AWS)** | No | Yes | Yes |
-| **Fleet Management** | No | No | Yes |
+| **Fleet Management** | No | No | Yes — see [walkthrough](docs/deployment/fleet/walkthrough.md) |
 | **Drift Detection** | Local only | No | Yes |
 | **Certificate Management** | None | Auto | Auto (like Salt) |
 | **Multi-Tenant** | No | Yes | Yes |
@@ -621,7 +460,7 @@ mkdir -p ~/.cfgms
 
 ```bash
 # Check controller is running
-curl http://localhost:9080/api/v1/health
+curl -k https://localhost:9080/api/v1/health
 
 # Check firewall allows port 9080
 sudo ufw allow 9080
@@ -633,9 +472,8 @@ sudo ufw allow 9080
 # In development mode, controller auto-approves registrations
 # Make sure controller is running in dev mode (default)
 
-# For production, manually approve:
-./bin/cfg cert requests list
-./bin/cfg cert requests approve <steward-hostname>
+# For production, review the controller logs for registration events
+# and consult docs/deployment/fleet/walkthrough.md for cert management steps
 ```
 
 ## Next Steps
