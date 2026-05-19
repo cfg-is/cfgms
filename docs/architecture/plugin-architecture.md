@@ -20,26 +20,31 @@ Based on CFGMS's documented "Pluggable Infrastructure Design Paradigm":
 
 ## Directory Structure
 
+Storage interfaces are organized into five sub-packages (the five-type taxonomy from ADR-003):
+
 ```
 pkg/
-├── storage/                   # Global storage system
-│   ├── interfaces/           # Storage contracts (used by all modules)
-│   │   ├── client_tenant.go # MSP client tenant storage interface
-│   │   ├── config.go        # Configuration storage interface
-│   │   └── audit.go         # Audit log storage interface
-│   └── providers/           # Storage implementations (controller selects one)
-│       ├── memory/
-│       │   ├── plugin.go    # Plugin registration
-│       │   ├── client_tenant.go
-│       │   ├── config.go
-│       │   └── audit.go
-│       ├── file/
-│       ├── database/
-│       └── git/
+├── storage/
+│   ├── interfaces/           # Storage contracts (used by all features)
+│   │   ├── business/         # Business data: TenantStore, ClientTenantStore,
+│   │   │                     #   StewardStore, CommandStore, AuditStore,
+│   │   │                     #   RBACStore, SessionStore, RegistrationTokenStore,
+│   │   │                     #   TriggerStore, PushStore, DNAHistoryStore
+│   │   ├── config/           # ConfigStore — human-editable configs
+│   │   ├── blob/             # BlobStore — installer binaries, script bodies
+│   │   ├── secrets/          # SecretStore — credentials, API keys
+│   │   └── timeseries/       # MetricsStore, LogStore — append-only metrics
+│   └── providers/            # Storage implementations (one per type)
+│       ├── sqlite/           # Business data OSS default
+│       ├── flatfile/         # Config + audit OSS default
+│       ├── database/         # PostgreSQL (commercial/SaaS)
+│       └── blobstore/
+│           ├── filesystem/   # Blob storage OSS default
+│           └── s3/           # Blob storage commercial/SaaS
 features/
-├── controller/              # Controller configures global storage
-├── modules/m365/auth/       # Uses pkg/storage/interfaces only
-└── modules/firewall/        # Uses pkg/storage/interfaces only
+├── controller/               # Controller wires storage providers
+├── modules/m365/auth/        # Uses pkg/storage/interfaces only
+└── modules/firewall/         # Uses pkg/storage/interfaces only
 ```
 
 ## Implementation Pattern
@@ -110,7 +115,7 @@ func (p *DatabaseProvider) CreateAuditStore(config map[string]interface{}) (inte
 }
 
 func (p *DatabaseProvider) Description() string {
-    return "In-memory storage for development and testing"
+    return "PostgreSQL-backed storage for production and commercial deployments"
 }
 
 // Salt-style auto-registration
@@ -143,63 +148,37 @@ func NewAdminConsentFlow(clientStore interfaces.ClientTenantStore) *AdminConsent
 
 ### Step 4: Controller-Level Storage Configuration
 
+Storage is configured per data type (five-type composition). See [Storage Architecture](storage-architecture.md) for the full reference.
+
 ```yaml
-# cfgms.yaml - Controller configuration
+# cfgms.yaml - Controller configuration (OSS example)
 controller:
   storage:
-    provider: memory  # Single choice for ALL storage needs
+    business:
+      provider: sqlite
+      config:
+        path: /var/lib/cfgms/business.db
     config:
-      # Provider-specific config
-      database_url: postgresql://...  # for database provider
-      file_path: /var/lib/cfgms       # for file provider  
-      git_repository: https://...     # for git provider
+      provider: flatfile
+      config:
+        root: /var/lib/cfgms/configs
+    secrets:
+      provider: sops
+      config:
+        root: /var/lib/cfgms/secrets
+    timeseries:
+      provider: filelog
+      config:
+        root: /var/lib/cfgms/timeseries
+    blobs:
+      provider: filesystem
+      config:
+        root: /var/lib/cfgms/blobs
 ```
 
-```go
-// features/controller/storage.go
-type StorageManager struct {
-    provider          interfaces.StorageProvider
-    clientTenantStore interfaces.ClientTenantStore
-    configStore       interfaces.ConfigStore
-    auditStore        interfaces.AuditStore
-}
+The actual `StorageManager` in `pkg/storage/interfaces` composes providers for each data type. Features receive the specific store interface they need — they never import providers directly.
 
-func NewStorageManager(providerName string, config map[string]interface{}) (*StorageManager, error) {
-    // Get the configured provider
-    provider, err := interfaces.GetStorageProvider(providerName)
-    if err != nil {
-        return nil, fmt.Errorf("storage provider '%s' not available: %v", providerName, err)
-    }
-    
-    // Create ALL storage interfaces from the same provider
-    clientStore, err := provider.CreateClientTenantStore(config)
-    if err != nil {
-        return nil, err
-    }
-    
-    configStore, err := provider.CreateConfigStore(config)
-    if err != nil {
-        return nil, err
-    }
-    
-    auditStore, err := provider.CreateAuditStore(config)
-    if err != nil {
-        return nil, err
-    }
-    
-    return &StorageManager{
-        provider:          provider,
-        clientTenantStore: clientStore,
-        configStore:       configStore,
-        auditStore:        auditStore,
-    }, nil
-}
-
-// Modules get injected with the specific interface they need
-func (sm *StorageManager) GetClientTenantStore() interfaces.ClientTenantStore {
-    return sm.clientTenantStore
-}
-```
+See `pkg/storage/interfaces/provider.go` for the `StorageManager` and `CreateOSSStorageManager` wiring.
 
 ## Plugin Discovery and Management
 
@@ -210,25 +189,31 @@ cfg plugins list storage
 ```
 
 ```
-Available Storage Plugins:
-  ✅ memory      - In-memory storage (development/testing)
-  ✅ file        - Local file storage (simple deployments)
-  ❌ database    - PostgreSQL storage (requires: postgresql client)
-  ❌ git         - Git-based storage (requires: git, mozilla-sops)
+Available Storage Plugins (business data):
+  ✅ sqlite      - SQLite storage (OSS default)
+  ✅ database    - PostgreSQL storage (requires: postgresql client)
+
+Available Storage Plugins (config storage):
+  ✅ flatfile    - Flat-file storage (OSS default)
+  ✅ database    - PostgreSQL storage (commercial/SaaS)
+
+Available Storage Plugins (blob storage):
+  ✅ filesystem  - Local filesystem (OSS default)
+  ✅ s3          - S3-compatible object storage
 ```
 
 ### Runtime Plugin Information
 
 ```go
-// Get all available plugins
-available := interfaces.GetAvailableStoragePlugins()
+// Get all registered storage providers
+available := interfaces.GetRegisteredProviders()
 
-// Check specific plugin
-plugin, err := interfaces.GetStoragePlugin("database")
+// Check specific provider by name
+provider, err := interfaces.GetStorageProvider("sqlite")
 if err != nil {
-    log.Printf("Database plugin unavailable: %v", err)
-    // Fall back to file storage
-    plugin, _ = interfaces.GetStoragePlugin("file")
+    log.Printf("SQLite provider unavailable: %v", err)
+    // Fall back to database provider
+    provider, _ = interfaces.GetStorageProvider("database")
 }
 ```
 
@@ -255,15 +240,19 @@ func TestStoragePluginCompliance(t *testing.T) {
 
 ### Business Logic Testing
 
+Business logic tests use real CFGMS provider implementations (e.g. SQLite for business data, flat-file for config storage) — never in-memory substitutes or mocks. The pluggable interface makes it trivial to inject the appropriate real provider in tests:
+
 ```go
 // features/modules/m365/auth/admin_consent_test.go
 func TestAdminConsentFlow(t *testing.T) {
-    // Use any available storage plugin
-    plugin, _ := interfaces.GetStoragePlugin("memory")
-    store, _ := plugin.Create(nil)
-    
-    flow := NewAdminConsentFlow(store)
-    // Test business logic without caring about storage implementation
+    // Use a real storage provider (sqlite) — no mocks or in-memory substitutes
+    provider, err := interfaces.GetStorageProvider("sqlite")
+    require.NoError(t, err)
+    bundle, err := provider.OpenBusinessStores(t.TempDir() + "/test.db")
+    require.NoError(t, err)
+
+    flow := NewAdminConsentFlow(bundle.ClientTenant)
+    // Test business logic with a real provider; isolation via t.TempDir()
 }
 ```
 
@@ -327,26 +316,30 @@ func CreateStorageFromConfig(backendType string, config map[string]interface{}) 
 
 ## Architecture Summary
 
-### Key Concept: Global Storage Decision
+### Key Concept: Five-Type Storage Composition
 
-- **Controller** chooses ONE storage provider for the entire system
-- **All modules** use the same storage backend automatically  
-- **Users** configure storage once at the controller level
-- **No per-module storage decisions** - everything is consistent
+Per [ADR-003](decisions/003-storage-data-taxonomy.md), storage is split into five independent data types. Each type is configured with its own provider — there is no single global storage backend.
+
+- **Business data** (tenants, RBAC, sessions, commands, audit): `sqlite` (OSS), `database`/PostgreSQL (commercial)
+- **Config storage** (templates, policies, firewall rules): `flatfile` (OSS), `database`/PostgreSQL (commercial)
+- **Secrets** (credentials, certificates): `sops` (OSS), key vault (commercial)
+- **Timeseries** (metrics, logs): local files (OSS), ClickHouse/Timescale (commercial)
+- **Blobs** (installers, script bodies): `filesystem` (OSS), `s3` (commercial)
 
 ### Configuration Flow
 
 ```
-cfgms.yaml (controller.storage.provider: "database")
+cfgms.yaml (controller.storage.* with per-type providers)
     ↓
-Controller creates DatabaseProvider 
-    ↓  
-All storage interfaces use database:
-  ├── ClientTenantStore → PostgreSQL tables
-  ├── ConfigStore → PostgreSQL tables  
-  └── AuditStore → PostgreSQL tables
+Controller creates one provider per data type:
+  ├── business.provider: sqlite  → SQLite tables for tenants, RBAC, etc.
+  ├── config.provider: flatfile  → Flat files for human-editable configs
+  ├── secrets.provider: sops     → SOPS-encrypted files
+  ├── timeseries.provider: filelog → Append-only log files
+  └── blobs.provider: filesystem → Local filesystem blobs
     ↓
-Modules get injected with interfaces (don't know it's PostgreSQL)
+Modules get injected with the specific interface they need
+(don't know which backend serves it)
 ```
 
 ## Benefits
@@ -363,12 +356,15 @@ Modules get injected with interfaces (don't know it's PostgreSQL)
 
 Current implementations following this pattern:
 
-- **Storage Backends**: DNA storage (interfaces.go + backends.go)
-- **Compression**: GZIP, ZSTD, LZ4 compressors
-- **Git Providers**: GitHub, GitLab, Bitbucket integration
+- **Business data**: `pkg/storage/providers/sqlite` (TenantStore, ClientTenantStore, AuditStore, RBACStore, SessionStore, CommandStore, StewardStore, RegistrationTokenStore, TriggerStore, PushStore)
+- **Config storage**: `pkg/storage/providers/flatfile` (ConfigStore, AuditStore, StewardStore)
+- **Blob storage**: `pkg/storage/providers/blobstore/filesystem` and `blobstore/s3`
+- **PostgreSQL**: `pkg/storage/providers/database` (business + config stores for commercial)
+- **Git sync**: `pkg/gitsync` — optional read-only import from external git repos into ConfigStore
+- **Control/data plane**: `pkg/controlplane/providers/grpc`, `pkg/dataplane/providers/grpc`
+- **Secrets**: `pkg/secrets` (SOPS-based for OSS)
+- **Logging**: `pkg/logging` (file, timescale)
 
-Future implementations:
-
-- **MSP Client Storage**: Memory, File, Git, Database backends
+Future:
 - **KMS Providers**: Vault, AWS KMS, Azure Key Vault
-- **Database Providers**: PostgreSQL, MySQL, SQLite adapters
+- **Timeseries backends**: ClickHouse, InfluxDB, Timescale

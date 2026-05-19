@@ -10,37 +10,39 @@ The Steward searches for configuration files in the following priority order:
 
 1. **Command-line specified**: `--config /path/to/hostname.cfg`
 2. **Environment variable**: `CFGMS_CONFIG=/path/to/hostname.cfg`
-3. **Default locations**:
-   - `./<hostname>.cfg` (current directory)
-   - `/etc/cfgms/<hostname>.cfg` (Linux/macOS)
-   - `C:\ProgramData\cfgms\<hostname>.cfg` (Windows)
+3. **Default locations** (searched in order per platform):
+   - `./<hostname>.cfg` (current working directory — all platforms)
+   - Linux: `/etc/cfgms/<hostname>.cfg`, `/usr/local/etc/cfgms/<hostname>.cfg`, `~/.config/cfgms/<hostname>.cfg`, `~/.cfgms/<hostname>.cfg`
+   - macOS: `/Library/Application Support/cfgms/<hostname>.cfg`, `/usr/local/etc/cfgms/<hostname>.cfg`, `~/Library/Application Support/cfgms/<hostname>.cfg`, `~/.cfgms/<hostname>.cfg`
+   - Windows: `%PROGRAMDATA%\cfgms\<hostname>.cfg`, `%USERPROFILE%\.cfgms\<hostname>.cfg`
 
 ## Configuration Format
 
 ```yaml
 # hostname.cfg - Steward standalone configuration
 steward:
-  name: "hostname-steward"
-  log_level: "info"
-  
-  # Module discovery paths (searched in order)
+  id: "hostname-steward"
+  mode: "standalone"               # "standalone" or "controller"
+
+  # Logging settings
+  logging:
+    level: "info"                  # "debug", "info", "warn", or "error"
+    format: "text"                 # "text" or "json"
+
+  # Module discovery paths (searched in order, in addition to built-in paths)
   module_paths:
     - "./modules"
     - "/opt/cfgms/modules"          # Linux/macOS
     - "C:\\Program Files\\cfgms\\modules"  # Windows
-  
+
+  # How often the steward re-converges against the cfg (default: 30m)
+  converge_interval: "30m"
+
   # Error handling behavior
   error_handling:
-    module_load_failure: "continue"        # "continue" or "fail"
-    config_validation_failure: "fail"      # "fail" or "continue"
-    runtime_error_behavior: "continue"     # "continue" or "fail"
-  
-  # Execution settings
-  execution:
-    mode: "apply"                    # "apply", "check", or "drift"
-    timeout: "300s"                  # Default operation timeout
-    retry_attempts: 3                # Number of retry attempts for transient errors
-    retry_delay: "5s"               # Delay between retry attempts
+    module_load_failure: "continue"   # "continue", "warn", or "fail"
+    resource_failure: "warn"          # "continue", "warn", or "fail"
+    configuration_error: "fail"       # "continue", "warn", or "fail"
 
 # Resource configurations
 resources:
@@ -114,34 +116,36 @@ resources:
 
 **Basic Settings:**
 
-- `name`: Unique identifier for this Steward instance
-- `log_level`: Logging verbosity (`debug`, `info`, `warn`, `error`)
+- `id`: Unique identifier for this Steward instance (defaults to the system hostname)
+- `mode`: Operation mode — `standalone` (local config files) or `controller` (connected to controller)
+
+**Logging:**
+
+- `logging.level`: Logging verbosity (`debug`, `info`, `warn`, `error`); default `info`
+- `logging.format`: Log output format (`text` or `json`); default `text`
 
 **Module Discovery:**
 
-- `module_paths`: List of directories to search for modules (searched in order)
+- `module_paths`: Additional directories to search for modules beyond built-in locations
+
+**Convergence:**
+
+- `converge_interval`: How often the steward re-converges against the config (e.g. `30m`, `5m`, `1h`); default `30m`
 
 **Error Handling:**
 
 - `module_load_failure`: How to handle module loading failures
   - `continue`: Skip failed modules, continue with available ones (default)
+  - `warn`: Log a warning and continue
   - `fail`: Stop execution if any module fails to load
-- `config_validation_failure`: How to handle configuration validation errors
+- `resource_failure`: How to handle errors during resource execution
+  - `continue`: Continue with remaining resources after errors
+  - `warn`: Log a warning and continue (default)
+  - `fail`: Stop execution on any resource error
+- `configuration_error`: How to handle configuration validation errors
   - `fail`: Stop execution on validation errors (default)
+  - `warn`: Log a warning and continue
   - `continue`: Skip invalid configurations, process valid ones
-- `runtime_error_behavior`: How to handle runtime errors during execution
-  - `continue`: Continue with remaining modules after errors (default)
-  - `fail`: Stop execution on any runtime error
-
-**Execution Settings:**
-
-- `mode`: Execution mode
-  - `apply`: Execute Set operations to achieve desired state (default)
-  - `check`: Execute Get operations and compare (dry-run)
-  - `drift`: Execute Get operations to detect configuration drift
-- `timeout`: Default timeout for module operations
-- `retry_attempts`: Number of retry attempts for transient errors
-- `retry_delay`: Delay between retry attempts
 
 ### Resources Section
 
@@ -159,17 +163,24 @@ The `resources` section contains an array of resource configurations. Each resou
 
 ## Platform-Specific Considerations
 
-### Linux/macOS
+### Linux
 
-- Configuration files stored in `/etc/cfgms/`
-- Modules installed in `/opt/cfgms/modules/`
+- System config path: `/etc/cfgms/<hostname>.cfg`
+- Module paths: `/opt/cfgms/modules/`
+- Use forward slashes in paths
+- Owner/group settings supported for file and directory modules
+
+### macOS
+
+- System config path: `/Library/Application Support/cfgms/<hostname>.cfg`
+- Module paths: `/opt/cfgms/modules/` or custom `module_paths`
 - Use forward slashes in paths
 - Owner/group settings supported for file and directory modules
 
 ### Windows
 
-- Configuration files stored in `C:\ProgramData\cfgms\`
-- Modules installed in `C:\Program Files\cfgms\modules\`
+- System config path: `C:\ProgramData\cfgms\<hostname>.cfg`
+- Module paths: `C:\Program Files\cfgms\modules\`
 - Use double backslashes in paths: `"C:\\path\\to\\file"`
 - Limited owner/group support (owner only)
 
@@ -188,7 +199,7 @@ The Steward validates configuration files on startup:
 
 ```yaml
 steward:
-  name: "web-server-01"
+  id: "web-server-01"
 
 resources:
   - name: "web-dir"
@@ -202,16 +213,16 @@ resources:
 
 ```yaml
 steward:
-  name: "dev-machine"
-  log_level: "debug"
+  id: "dev-machine"
+  logging:
+    level: "debug"
   module_paths:
     - "./local-modules"
     - "./modules"
+  converge_interval: "5m"
   error_handling:
     module_load_failure: "fail"
-    config_validation_failure: "fail"
-  execution:
-    mode: "check"  # Dry-run mode for development
+    configuration_error: "fail"
 
 resources:
   - name: "dev-tools"
@@ -225,6 +236,5 @@ resources:
 
 ## Related Documentation
 
-- [Standalone Steward Architecture](modules/standalone-steward.md): Complete architecture overview
 - [Module Interface](modules/interface.md): Module interface and ConfigState details
-- [Module Development](modules/development.md): Guide for developing new modules
+- [Module System](modules/README.md): Available modules overview

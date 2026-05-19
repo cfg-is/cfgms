@@ -52,7 +52,7 @@ The unified transport is configured via the `transport` block in `controller.cfg
 transport:
   listen_addr: "0.0.0.0:4433"   # Single port for all controller-steward traffic
   use_cert_manager: true          # Use controller's cert manager for TLS (recommended)
-  max_connections: 10000          # Maximum concurrent steward connections
+  max_connections: 50000          # Maximum concurrent steward connections
   keepalive_period: 30s           # How often keepalive probes are sent
   idle_timeout: 5m                # Connection idle timeout
 ```
@@ -63,7 +63,7 @@ transport:
 |----------|-------------|---------|
 | `CFGMS_TRANSPORT_LISTEN_ADDR` | Transport listen address | `0.0.0.0:4433` |
 | `CFGMS_TRANSPORT_USE_CERT_MANAGER` | Use cert manager for TLS | `true` |
-| `CFGMS_TRANSPORT_MAX_CONNECTIONS` | Maximum concurrent connections | `10000` |
+| `CFGMS_TRANSPORT_MAX_CONNECTIONS` | Maximum concurrent connections | `50000` |
 | `CFGMS_TRANSPORT_KEEPALIVE_PERIOD` | Keepalive probe interval | `30s` |
 | `CFGMS_TRANSPORT_IDLE_TIMEOUT` | Connection idle timeout | `5m` |
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document outlines the design for implementing configuration rollback capabilities in CFGMS. The rollback system integrates with the Git backend to provide reliable, auditable, and safe configuration rollback functionality.
+This document outlines the design for implementing configuration rollback capabilities in CFGMS. The rollback system integrates with the durable storage layer (`ConfigStore`, `CommandStore`, `AuditStore`) to provide reliable, auditable, and safe configuration rollback functionality. Note: the git storage backend was removed in Issue #664; rollback points are version IDs in the config store, not git commit SHAs.
 
 ## Goals
 
@@ -10,7 +10,7 @@ This document outlines the design for implementing configuration rollback capabi
 2. **Audit Trail**: Maintain complete audit trail of all rollback operations
 3. **Safety Checks**: Implement validation to prevent dangerous rollbacks
 4. **Multi-Level Support**: Support rollback at device, group, client, and MSP levels
-5. **Integration**: Seamless integration with Git backend and existing module system
+5. **Integration**: Seamless integration with config storage and existing module system
 
 ## Architecture
 
@@ -20,7 +20,7 @@ This document outlines the design for implementing configuration rollback capabi
 
 Central component that orchestrates rollback operations:
 
-- Interfaces with Git backend to retrieve historical configurations
+- Interfaces with `ConfigStore` to retrieve historical configuration versions
 - Validates rollback safety and dependencies
 - Coordinates with Steward for configuration deployment
 - Maintains rollback audit logs
@@ -128,11 +128,11 @@ graph TD
 
 ### Integration Points
 
-1. **Git Backend Integration**
-   - Retrieve historical configurations
-   - Create rollback commits
-   - Maintain version history
-   - Support branch-based rollbacks
+1. **Storage Integration**
+   - Rollback points are persisted in `CommandStore` and `AuditStore` (durable business-data stores)
+   - Historical configurations are retrieved from `ConfigStore`
+   - The git storage backend was removed in Issue #664; rollback history is now durable storage-backed, not git-commit-based
+   - See [Storage Architecture](storage-architecture.md) for the current five-type storage model
 
 2. **Module System Integration**
    - Module-aware rollback
@@ -163,7 +163,7 @@ Response:
 {
   "rollback_points": [
     {
-      "commit_sha": "abc123",
+      "version_id": "abc123",
       "timestamp": "2024-07-29T10:00:00Z",
       "author": "john.doe",
       "message": "Update firewall rules",
@@ -194,8 +194,8 @@ Response:
     "changes": [
       {
         "path": "firewall.yaml",
-        "current_version": "def456",
-        "rollback_version": "abc123",
+        "current_version_id": "def456",
+        "rollback_version_id": "abc123",
         "diff": "...",
         "risk": "low"
       }
@@ -272,8 +272,8 @@ CREATE TABLE rollback_operations (
     target_type VARCHAR(50) NOT NULL,
     target_id VARCHAR(255) NOT NULL,
     rollback_type VARCHAR(50) NOT NULL,
-    from_commit VARCHAR(40) NOT NULL,
-    to_commit VARCHAR(40) NOT NULL,
+    from_version VARCHAR(255) NOT NULL,
+    to_version VARCHAR(255) NOT NULL,
     initiated_by VARCHAR(255) NOT NULL,
     initiated_at TIMESTAMP NOT NULL,
     completed_at TIMESTAMP,
@@ -351,7 +351,7 @@ CREATE TABLE rollback_validations (
 ### Performance Considerations
 
 1. **Efficient History Retrieval**
-   - Indexed Git operations
+   - Indexed queries against `ConfigStore` and `CommandStore`
    - Caching of recent configurations
    - Pagination of rollback points
    - Optimized diff generation
@@ -377,7 +377,7 @@ CREATE TABLE rollback_validations (
    - Database operations
 
 2. **Integration Tests**
-   - Git backend integration
+   - Config storage integration (ConfigStore, CommandStore, AuditStore)
    - Module system interaction
    - Steward communication
    - End-to-end workflows
@@ -399,7 +399,7 @@ CREATE TABLE rollback_validations (
 ### Phase 1: Core Rollback (Week 1)
 
 - Implement RollbackManager
-- Basic Git integration
+- ConfigStore integration for version history retrieval
 - Simple rollback operations
 - Unit tests
 

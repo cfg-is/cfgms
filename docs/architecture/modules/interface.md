@@ -6,9 +6,8 @@ This document defines the standard interface that all CFGMS modules must impleme
 
 The module interface provides a consistent way for CFGMS to interact with modules, ensuring that all modules behave in a predictable and reliable manner. The interface is designed to be simple yet powerful, allowing modules to be developed independently and integrated seamlessly into the CFGMS workflow.
 
-For information about module lifecycle management, see [Module Lifecycle](lifecycle.md).
-For information about module security requirements, see [Module Security Requirements](security.md).
-For information about module testing requirements, see [Module Testing Requirements](testing.md).
+For module system overview and available modules, see [Module System](README.md).
+For steward configuration and error handling, see [Steward Configuration](../steward-configuration.md).
 
 ## Core Interface
 
@@ -255,6 +254,16 @@ func compareConfigurations(current, desired ConfigState) bool {
 - **Flexibility**: Comparison algorithms can be improved system-wide
 - **Safety**: Drift detection prevents unnecessary Set operations
 
+## Optional Configurable Interface
+
+Modules that require initialization from operator config before `Get()` can safely read the current resource state may implement `Configurable`. The execution engine calls `Configure(desiredState)` before `Get()` when the module implements this interface, allowing security boundaries to be established without modifying any files.
+
+```go
+type Configurable interface {
+    Configure(config ConfigState) error
+}
+```
+
 ## Optional Monitor Interface
 
 While not part of the core Module interface, modules may optionally implement monitoring capabilities for real-time configuration drift detection:
@@ -263,20 +272,20 @@ While not part of the core Module interface, modules may optionally implement mo
 // Monitor interface for modules that support real-time monitoring
 type Monitor interface {
     // Monitor watches for changes to a resource and triggers events
-    Monitor(ctx context.Context, resourceID string, configData string) error
-    
+    Monitor(ctx context.Context, resourceID string, config ConfigState) error
+
     // Changes returns a channel for receiving change notifications
     Changes() <-chan ChangeEvent
-    
+
     // Close stops monitoring and releases resources
     Close() error
 }
 
 type ChangeEvent struct {
     ResourceID string
-    Timestamp  time.Time
+    Timestamp  int64      // Unix timestamp (nanoseconds)
     ChangeType ChangeType
-    Details    string // YAML describing the change
+    Details    ConfigState
 }
 
 type ChangeType int
@@ -426,11 +435,8 @@ Modules should use the provided context for cancellation and timeout:
 
 ## Related Documentation
 
-- [Module Lifecycle](lifecycle.md): How modules are loaded, initialized, and managed
-- [Module Core Principles](core-principles.md): Fundamental principles that guide module design
-- [Module Security Requirements](security.md): Security considerations for module implementation
-- [Module Testing Requirements](testing.md): Testing standards and requirements for modules
-- [Standalone Steward Architecture](standalone-steward.md): Complete architecture for standalone operation
+- [Module System Overview](README.md): Available modules and module structure
+- [Steward Configuration](../steward-configuration.md): Configuration file format and error handling settings
 
 ## Version Information
 

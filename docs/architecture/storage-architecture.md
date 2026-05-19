@@ -280,7 +280,7 @@ Blobs are large, immutable artifacts: installer binaries, script bodies, report 
 
 ### Interface
 
-`pkg/storage/interfaces/blob_store.go` defines the `BlobStore` interface and associated types:
+`pkg/storage/interfaces/blob/blob_store.go` defines the `BlobStore` interface and associated types:
 
 ```go
 // BlobKey uniquely identifies a blob within CFGMS.

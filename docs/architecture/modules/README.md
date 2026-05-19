@@ -32,9 +32,12 @@ modules/
 ## Available Modules
 
 - `directory` - Directory creation and permissions
-- `file` - File content and attributes  
+- `file` - File content and attributes
 - `firewall` - Firewall rules and policies
 - `package` - Software package management
+- `acme` - ACME/Let's Encrypt certificate management
+- `activedirectory` - Active Directory integration
+- `m365/*` - Microsoft 365 modules (auth, conditional access, Entra groups/users/apps/admin units, Intune policy, GDAP)
 
 ## Documentation
 
