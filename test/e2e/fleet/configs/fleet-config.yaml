@@ -1,0 +1,36 @@
+# Fleet E2E test configuration.
+# Used by TestConfigUploadAndConvergence, TestPerModuleConvergence, and TestDriftAutoCorrection.
+# Covers file, directory, and script modules on the /test-workspace tmpfs mount.
+# Drift mode defaults to apply — required for TestDriftAutoCorrection.
+
+steward:
+  id: ""
+  mode: controller
+
+resources:
+  - name: managed-file
+    module: file
+    config:
+      path: /test-workspace/managed-file
+      state: present
+      content: "fleet-managed-content\n"
+      mode: "0644"
+      allowed_base_path: /test-workspace
+
+  - name: managed-dir
+    module: directory
+    config:
+      path: /test-workspace/managed-dir
+      state: present
+      mode: "0755"
+      allowed_base_path: /test-workspace
+
+  - name: script-runner
+    module: script
+    config:
+      shell: sh
+      signing_policy: none
+      content: |
+        #!/bin/sh
+        echo "fleet-script-executed" > /test-workspace/script-output.txt
+      timeout: 30s
