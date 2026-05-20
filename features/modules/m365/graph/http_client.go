@@ -103,9 +103,11 @@ func (c *HTTPClient) GetUser(ctx context.Context, token *auth.AccessToken, userP
 	return &user, nil
 }
 
-// ListUsers retrieves users with optional OData filter
+// ListUsers retrieves users with optional OData filter. It follows @odata.nextLink
+// pages transparently and caps the total at 1000 results.
 func (c *HTTPClient) ListUsers(ctx context.Context, token *auth.AccessToken, filter string) ([]User, error) {
-	// Explicitly select all the fields we need to ensure they're returned
+	const maxResults = 1000
+
 	selectFields := "id,userPrincipalName,displayName,mailNickname,accountEnabled,mail,mobilePhone,officeLocation,jobTitle,department,companyName,createdDateTime"
 
 	var endpoint string
@@ -115,15 +117,36 @@ func (c *HTTPClient) ListUsers(ctx context.Context, token *auth.AccessToken, fil
 		endpoint = fmt.Sprintf("/users?$select=%s", selectFields)
 	}
 
-	var response struct {
-		Value []User `json:"value"`
+	var allUsers []User
+	for {
+		var response struct {
+			Value    []User `json:"value"`
+			NextLink string `json:"@odata.nextLink"`
+		}
+
+		if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+			return nil, fmt.Errorf("failed to list users: %w", err)
+		}
+
+		allUsers = append(allUsers, response.Value...)
+
+		if response.NextLink == "" || len(allUsers) >= maxResults {
+			break
+		}
+
+		// Extract the relative path from the absolute nextLink URL so makeRequest
+		// can prepend its own baseURL (which may differ in tests).
+		if !strings.HasPrefix(response.NextLink, c.baseURL) {
+			break
+		}
+		endpoint = response.NextLink[len(c.baseURL):]
 	}
 
-	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
-		return nil, fmt.Errorf("failed to list users: %w", err)
+	if len(allUsers) > maxResults {
+		allUsers = allUsers[:maxResults]
 	}
 
-	return response.Value, nil
+	return allUsers, nil
 }
 
 // CreateUser creates a new user

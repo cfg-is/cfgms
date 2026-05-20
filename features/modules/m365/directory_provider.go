@@ -300,15 +300,54 @@ func (p *EntraIDDirectoryProvider) DeleteUser(ctx context.Context, userID string
 	return nil
 }
 
-// SearchUsers searches for users in Entra ID
+// SearchUsers searches for users in Entra ID using OData startswith filters on
+// displayName and userPrincipalName. Paging is handled transparently (up to 1000
+// results). An empty query is rejected to prevent accidentally fetching all users.
 func (p *EntraIDDirectoryProvider) SearchUsers(ctx context.Context, query *directory.SearchQuery) ([]*types.DirectoryUser, error) {
 	if !p.connected {
 		return nil, fmt.Errorf("not connected to Entra ID")
 	}
 
-	// Deferred: tracked in #1443 — construct OData filter queries and call Graph API
-	p.logger.Info("SearchUsers called", "query", query.Query, "limit", query.Limit)
-	return []*types.DirectoryUser{}, nil
+	if strings.TrimSpace(query.Query) == "" {
+		return nil, fmt.Errorf("search query must not be empty")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sanitize single quotes to prevent OData injection.
+	sanitized := strings.ReplaceAll(query.Query, "'", "''")
+	filter := fmt.Sprintf(
+		"startswith(displayName,'%s') or startswith(userPrincipalName,'%s')",
+		sanitized, sanitized,
+	)
+
+	users, err := p.graphClient.ListUsers(ctx, token, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search users in Entra ID: %w", err)
+	}
+
+	result := make([]*types.DirectoryUser, 0, len(users))
+	for i := range users {
+		graphUserType := &types.GraphUser{
+			ID:                users[i].ID,
+			UserPrincipalName: users[i].UserPrincipalName,
+			DisplayName:       users[i].DisplayName,
+			MailNickname:      users[i].MailNickname,
+			AccountEnabled:    users[i].AccountEnabled,
+			Mail:              users[i].Mail,
+			MobilePhone:       users[i].MobilePhone,
+			OfficeLocation:    users[i].OfficeLocation,
+			JobTitle:          users[i].JobTitle,
+			Department:        users[i].Department,
+			CompanyName:       users[i].CompanyName,
+			CreatedDateTime:   users[i].CreatedDateTime,
+		}
+		result = append(result, types.FromGraphUser(graphUserType, p.name))
+	}
+	return result, nil
 }
 
 // Group Operations
