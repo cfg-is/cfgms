@@ -62,15 +62,15 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
       with:
         go-version: ${{ env.GO_VERSION }}
 
     - name: Cache Go modules
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
       with:
         path: |
           ~/go/pkg/mod
@@ -85,7 +85,7 @@ jobs:
     # or a non-Go change in the same series get a fast restore + analyze.
     # Cache scope: the CodeQL action stores its DB under runner.temp by default.
     - name: Cache CodeQL database
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
       with:
         path: ${{ runner.temp }}/codeql_databases
         key: ${{ runner.os }}-codeql-db-${{ matrix.language }}-${{ hashFiles('**/*.go', '**/go.sum') }}
@@ -97,7 +97,7 @@ jobs:
 
     # Initialize CodeQL tools for scanning
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@480db559a14342288b67e54bd959dd52dc3ee68f # v3
+      uses: github/codeql-action/init@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4
       with:
         languages: ${{ matrix.language }}
         # Pull queries (security-extended) AND data-extension packs from a
@@ -111,7 +111,7 @@ jobs:
         dependency-caching: true
         db-location: ${{ runner.temp }}/codeql_databases
         # Enable automatic language detection
-        setup-python-dependencies: false
+
 
     # Build the Go code for CodeQL to analyze
     # CodeQL needs to trace the build to understand code flow
@@ -124,7 +124,7 @@ jobs:
 
     # Perform CodeQL Analysis
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@480db559a14342288b67e54bd959dd52dc3ee68f # v3
+      uses: github/codeql-action/analyze@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4
       with:
         category: "/language:${{ matrix.language }}"
         # Upload results to GitHub Security tab (SARIF format)
@@ -136,7 +136,7 @@ jobs:
         # fail-on: high
 
     - name: Upload CodeQL Results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
       if: always()
       with:
         name: codeql-results-${{ matrix.language }}

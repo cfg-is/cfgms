@@ -79,7 +79,7 @@ jobs:
         fi
     
     - name: Upload Trivy SARIF
-      uses: github/codeql-action/upload-sarif@480db559a14342288b67e54bd959dd52dc3ee68f # v3
+      uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4
       if: always() && hashFiles('sarif-results/trivy.sarif') != ''
       with:
         sarif_file: sarif-results/trivy.sarif
@@ -200,7 +200,7 @@ jobs:
     # configuration, and results are still available via workflow artifacts.
     #
     # - name: Upload gosec SARIF
-    #   uses: github/codeql-action/upload-sarif@480db559a14342288b67e54bd959dd52dc3ee68f # v3
+    #   uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4
     #   if: always() && hashFiles('sarif-results/gosec.sarif') != ''
     #   with:
     #     sarif_file: sarif-results/gosec.sarif
