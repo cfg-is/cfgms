@@ -20,6 +20,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Do not leave the GITHUB_TOKEN in .git/config — this job only builds
+          # and runs tests, so persisted git credentials are an unnecessary
+          # exposure (flagged by zizmor: credential persistence via artifacts).
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5

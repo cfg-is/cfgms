@@ -672,6 +672,12 @@ services:
       CFGMS_SEED_TEST_TOKENS: "1"
       CFGMS_ENABLE_TEST_ENDPOINTS: "true"
       CFGMS_TRANSPORT_USE_CERT_MANAGER: "true"
+      # Transport listen addr is 0.0.0.0:4433; the controller rewrites the
+      # 0.0.0.0 bind address in the registration response to this hostname so
+      # stewards on the cfgms-fleet network connect to "fleet-controller:4433"
+      # instead of "localhost:4433". Without this the steward connects to its
+      # own loopback, fails the gRPC-over-QUIC handshake, and exits 1.
+      CFGMS_EXTERNAL_HOSTNAME: "fleet-controller"
       CFGMS_LOG_LEVEL: "info"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"

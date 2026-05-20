@@ -1893,7 +1893,7 @@ test-e2e-fleet: build-cli
 	@echo "Starting fleet docker-compose profile and running test/e2e/fleet/..."
 	@echo ""
 	@set -e; \
-	trap 'echo ""; echo "🧹 Tearing down fleet compose..."; docker compose --profile fleet -f docker-compose.test.yml down -v' EXIT; \
+	trap 'rc=$$?; if [ $$rc -ne 0 ]; then echo ""; echo "❌ Fleet E2E failed (exit $$rc) — dumping container logs before teardown:"; docker compose --profile fleet -f docker-compose.test.yml logs --no-color --tail=200 || true; fi; echo ""; echo "🧹 Tearing down fleet compose..."; docker compose --profile fleet -f docker-compose.test.yml down -v' EXIT; \
 	docker compose --profile fleet -f docker-compose.test.yml up -d --wait; \
 	echo ""; \
 	echo "Running fleet E2E tests..."; \
