@@ -11,18 +11,21 @@ import (
 	"gopkg.in/yaml.v3"
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // ValidationManager handles configuration validation before storage
 type ValidationManager struct {
 	configStore cfgconfig.ConfigStore
+	tenantStore business.TenantStore
 }
 
 // NewValidationManager creates a new validation manager
-func NewValidationManager(configStore cfgconfig.ConfigStore) *ValidationManager {
+func NewValidationManager(configStore cfgconfig.ConfigStore, tenantStore business.TenantStore) *ValidationManager {
 	return &ValidationManager{
 		configStore: configStore,
+		tenantStore: tenantStore,
 	}
 }
 
@@ -88,7 +91,19 @@ func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID
 	}
 
 	// Validate tenant context
-	result.TenantChecks = vm.validateTenantContext(ctx, tenantID, stewardID, config)
+	tenantChecks, tenantErr := vm.validateTenantContext(ctx, tenantID, stewardID, config)
+	if tenantErr != nil {
+		result.Valid = false
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "tenant_id",
+			Message: fmt.Sprintf("Tenant lookup failed: %v", tenantErr),
+			Code:    "TENANT_LOOKUP_ERROR",
+			Level:   "error",
+		})
+		result.TenantChecks = &TenantValidationResult{TenantID: tenantID}
+	} else {
+		result.TenantChecks = tenantChecks
+	}
 
 	// Validate module dependencies
 	result.DependencyChecks = vm.validateDependencies(ctx, config)
@@ -132,18 +147,31 @@ func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID
 	return result
 }
 
-// validateTenantContext validates tenant-related aspects of the configuration
-func (vm *ValidationManager) validateTenantContext(ctx context.Context, tenantID, stewardID string, config *stewardconfig.StewardConfig) *TenantValidationResult {
+// validateTenantContext validates tenant-related aspects of the configuration.
+// Returns (result, nil) when the tenant exists or is simply absent from the store.
+// Returns (nil, err) only on a real store error (not a not-found condition).
+func (vm *ValidationManager) validateTenantContext(ctx context.Context, tenantID, stewardID string, config *stewardconfig.StewardConfig) (*TenantValidationResult, error) {
 	result := &TenantValidationResult{
-		TenantExists:      true,
+		TenantExists:      false,
 		TenantID:          tenantID,
 		InheritanceValid:  true,
 		ConflictsDetected: 0,
 	}
 
-	// Deferred: tracked in #1443 — query ClientTenantStore, validate inheritance chain, check conflicts
+	if tenantID == "" {
+		return result, nil
+	}
 
-	return result
+	_, err := vm.tenantStore.GetTenant(ctx, tenantID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return result, nil
+		}
+		return nil, fmt.Errorf("tenant store lookup failed: %w", err)
+	}
+
+	result.TenantExists = true
+	return result, nil
 }
 
 // validateDependencies validates module dependencies and availability
