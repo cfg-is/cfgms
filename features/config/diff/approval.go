@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -42,6 +43,11 @@ func NewDefaultApprovalIntegration(logger logging.Logger) *DefaultApprovalIntegr
 
 // CreateApprovalRequest creates an approval request for changes
 func (ai *DefaultApprovalIntegration) CreateApprovalRequest(ctx context.Context, result *ComparisonResult, assessment *RiskAssessment) (*ApprovalRequest, error) {
+	requester, err := ai.getCurrentUser(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create approval request: %w", err)
+	}
+
 	// Generate unique request ID
 	requestID, err := generateRequestID()
 	if err != nil {
@@ -58,7 +64,7 @@ func (ai *DefaultApprovalIntegration) CreateApprovalRequest(ctx context.Context,
 		Description:       ai.generateDescription(result, assessment),
 		Changes:           result,
 		RiskAssessment:    assessment,
-		Requester:         ai.getCurrentUser(ctx),
+		Requester:         requester,
 		RequiredApprovers: requiredApprovers,
 		Status: ApprovalStatus{
 			Status:           "pending",
@@ -296,9 +302,12 @@ func (ai *DefaultApprovalIntegration) generateDescription(result *ComparisonResu
 }
 
 // getCurrentUser gets the current user from context
-func (ai *DefaultApprovalIntegration) getCurrentUser(ctx context.Context) string {
-	// Deferred: tracked in #1440 — extract authenticated user identity from context
-	return "system"
+func (ai *DefaultApprovalIntegration) getCurrentUser(ctx context.Context) (string, error) {
+	userID, ok := ctx.Value(ctxkeys.UserIDKey).(string)
+	if !ok || userID == "" {
+		return "", fmt.Errorf("unauthenticated: no user identity in context")
+	}
+	return userID, nil
 }
 
 // determineRequiredApprovers determines who needs to approve based on risk assessment

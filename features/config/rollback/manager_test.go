@@ -9,9 +9,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/config/git"
 	"github.com/cfgis/cfgms/features/config/rollback"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // Mock implementations
@@ -337,7 +339,7 @@ func TestRollbackManager_PreviewRollback(t *testing.T) {
 }
 
 func TestRollbackManager_ExecuteRollback_RequiresApproval(t *testing.T) {
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "test-user")
 
 	// Setup mocks
 	gitManager := new(MockGitManager)
@@ -501,4 +503,62 @@ func (m *MockConfigParser) GetRequiredFields(schema string) []string {
 		return nil
 	}
 	return args.Get(0).([]string)
+}
+
+func TestRollbackManager_ExecuteRollback_ErrorWithoutUserInContext(t *testing.T) {
+	// CancelRollback and ExecuteRollback both call getCurrentUser first;
+	// use a context with no user ID to assert the auth guard is in place.
+	ctx := context.Background()
+
+	store := rollback.NewInMemoryRollbackStore()
+	manager := rollback.NewRollbackManager(nil, nil, store, nil)
+
+	request := rollback.RollbackRequest{
+		TargetType:   rollback.TargetTypeDevice,
+		TargetID:     "123",
+		RollbackType: rollback.RollbackTypeFull,
+		RollbackTo:   "abc123",
+		Reason:       "test",
+	}
+
+	_, err := manager.ExecuteRollback(ctx, request)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unauthenticated")
+}
+
+func TestRollbackManager_CancelRollback_UserIDFromContext(t *testing.T) {
+	// Seeds an operation directly in the store, then cancels it with a known user in context.
+	// Verifies that getCurrentUser reads the user ID from context and records it in the audit trail.
+	ctx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "cancel-actor")
+
+	store := rollback.NewInMemoryRollbackStore()
+	manager := rollback.NewRollbackManager(nil, nil, store, nil)
+
+	op := &rollback.RollbackOperation{
+		ID:          "op-ctx-test",
+		Status:      rollback.RollbackStatusPending,
+		InitiatedBy: "original-user",
+		AuditTrail:  []rollback.AuditEntry{},
+	}
+	require.NoError(t, store.SaveOperation(ctx, op))
+
+	require.NoError(t, manager.CancelRollback(ctx, "op-ctx-test", "context test"))
+
+	updated, err := store.GetOperation(ctx, "op-ctx-test")
+	require.NoError(t, err)
+	require.NotEmpty(t, updated.AuditTrail)
+	assert.Equal(t, "cancel-actor", updated.AuditTrail[len(updated.AuditTrail)-1].Actor)
+}
+
+func TestRollbackManager_CancelRollback_ErrorWithoutUserInContext(t *testing.T) {
+	ctx := context.Background() // No user ID in context
+
+	store := rollback.NewInMemoryRollbackStore()
+	manager := rollback.NewRollbackManager(nil, nil, store, nil)
+
+	err := manager.CancelRollback(ctx, "any-op-id", "reason")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unauthenticated")
 }
