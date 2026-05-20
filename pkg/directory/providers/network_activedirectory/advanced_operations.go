@@ -9,66 +9,72 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // Advanced Search Operations
 
-// Search performs an advanced search query in Active Directory
-func (p *ActiveDirectoryProvider) Search(ctx context.Context, query *interfaces.DirectoryQuery) (*interfaces.SearchResults, error) {
-	p.logger.Debug("Performing AD search", "filter", query.Filter, "search_base", query.SearchBase)
-
-	// Deferred: tracked in #1443 — pass LDAP filter directly to the module for native query execution
-
-	results := &interfaces.SearchResults{
-		TotalCount: 0,
-		HasMore:    false,
-	}
-
-	// If no specific attributes requested, search all object types
-	objectTypes := []string{"user", "group", "organizational_unit"}
-
-	// Search each object type
-	for _, objType := range objectTypes {
-		switch objType {
-		case "user":
-			userList, err := p.ListUsers(ctx, &interfaces.SearchFilters{
-				Query: "", // Would need to convert LDAP filter to simple query
-				Limit: 1000,
-			})
-			if err != nil {
-				p.logger.Warn("Failed to search users", "error", err)
-				continue
+// validateLDAPFilter checks that an LDAP filter has balanced parentheses.
+// This is the minimum structural check needed to catch obviously malformed
+// filters before forwarding them to the steward module.
+func validateLDAPFilter(filter string) error {
+	depth := 0
+	for _, ch := range filter {
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth < 0 {
+				return fmt.Errorf("malformed LDAP filter: unbalanced parentheses")
 			}
-			results.Users = userList.Users
-			results.TotalCount += userList.TotalCount
-
-		case "group":
-			groupList, err := p.ListGroups(ctx, &interfaces.SearchFilters{
-				Query: "",
-				Limit: 1000,
-			})
-			if err != nil {
-				p.logger.Warn("Failed to search groups", "error", err)
-				continue
-			}
-			results.Groups = groupList.Groups
-			results.TotalCount += groupList.TotalCount
-
-		case "organizational_unit":
-			ouList, err := p.ListOUs(ctx, &interfaces.SearchFilters{
-				Query: "",
-				Limit: 1000,
-			})
-			if err != nil {
-				p.logger.Warn("Failed to search OUs", "error", err)
-				continue
-			}
-			results.OUs = ouList.OUs
-			results.TotalCount += ouList.TotalCount
 		}
 	}
+	if depth != 0 {
+		return fmt.Errorf("malformed LDAP filter: unbalanced parentheses")
+	}
+	return nil
+}
 
-	return results, nil
+// Search performs an advanced LDAP search in Active Directory.
+// The caller's filter string is forwarded unchanged to the steward module so
+// that compound operators (&, |, !), extensible match, and other LDAP syntax
+// are preserved exactly as supplied.
+func (p *ActiveDirectoryProvider) Search(ctx context.Context, query *interfaces.DirectoryQuery) (*interfaces.SearchResults, error) {
+	if query == nil {
+		return nil, fmt.Errorf("query is required")
+	}
+	if query.Filter == "" {
+		return nil, fmt.Errorf("LDAP filter is required")
+	}
+	if err := validateLDAPFilter(query.Filter); err != nil {
+		return nil, err
+	}
+
+	p.logger.Debug("Performing AD search", "filter", logging.SanitizeLogValue(query.Filter), "search_base", logging.SanitizeLogValue(query.SearchBase))
+
+	result, err := p.executeADQuery(ctx, fmt.Sprintf("search:%s", query.Filter))
+	if err != nil {
+		return nil, fmt.Errorf("LDAP search failed: %w", err)
+	}
+
+	queryResult, err := p.parseADQueryResult(result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse search result: %w", err)
+	}
+
+	if !queryResult.Success {
+		return nil, fmt.Errorf("LDAP search failed: %s", queryResult.Error)
+	}
+
+	return &interfaces.SearchResults{
+		Users:      queryResult.Users,
+		Groups:     queryResult.Groups,
+		OUs:        queryResult.OUs,
+		TotalCount: queryResult.TotalCount,
+		HasMore:    queryResult.HasMore,
+		NextToken:  queryResult.NextToken,
+	}, nil
 }
 
 // Bulk Operations
