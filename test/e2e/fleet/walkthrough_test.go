@@ -9,8 +9,10 @@ import (
 	"time"
 )
 
-// testVanillaState verifies both stewards are connected before any config is applied.
-// The /test-workspace tmpfs is empty at container start, so managed resources should not exist.
+// testVanillaState verifies both stewards are connected before any config is applied
+// and asserts that no managed resources exist yet — the /test-workspace tmpfs is
+// empty at container start, so managed-file, managed-dir, and script-output.txt
+// must all be absent until a config is uploaded.
 func (s *FleetTestSuite) testVanillaState(t *testing.T) {
 	t.Helper()
 
@@ -19,8 +21,25 @@ func (s *FleetTestSuite) testVanillaState(t *testing.T) {
 		if !s.waitForConvergence(t, stewardID, 30*time.Second) {
 			t.Errorf("steward %s (%s) not connected in vanilla state", container, stewardID)
 		}
+		s.assertNoManagedResources(t, container)
 	}
-	t.Log("VanillaState: both stewards connected, baseline established")
+	t.Log("VanillaState: both stewards connected with no managed resources")
+}
+
+// assertNoManagedResources fails if any managed resource path exists in the container.
+func (s *FleetTestSuite) assertNoManagedResources(t *testing.T, container string) {
+	t.Helper()
+	for _, path := range []string{
+		"/test-workspace/managed-file",
+		"/test-workspace/managed-dir",
+		"/test-workspace/script-output.txt",
+	} {
+		// `test -e` exits non-zero (dockerExec returns an error) when the path
+		// is absent — which is the expected vanilla state.
+		if _, err := s.dockerExec(t, container, "test", "-e", path); err == nil {
+			t.Errorf("%s: %s exists before config upload — expected vanilla state with no managed resources", container, path)
+		}
+	}
 }
 
 // testConfigUploadAndConvergence uploads fleet-config.yaml to both stewards and verifies
@@ -78,14 +97,18 @@ func (s *FleetTestSuite) testIdempotentReUpload(t *testing.T, configPath string)
 	t.Log("IdempotentReUpload: resources unchanged after second upload")
 }
 
-// testPerModuleConvergence verifies each module type individually on fleet-steward-1.
+// testPerModuleConvergence verifies each module type individually on both stewards.
 func (s *FleetTestSuite) testPerModuleConvergence(t *testing.T) {
 	t.Helper()
 
-	container := "fleet-steward-1"
-	t.Run("FileModule", func(t *testing.T) { s.verifyManagedFile(t, container) })
-	t.Run("DirectoryModule", func(t *testing.T) { s.verifyManagedDir(t, container) })
-	t.Run("ScriptModule", func(t *testing.T) { s.verifyScriptOutput(t, container) })
+	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
+		container := container
+		t.Run(container, func(t *testing.T) {
+			t.Run("FileModule", func(t *testing.T) { s.verifyManagedFile(t, container) })
+			t.Run("DirectoryModule", func(t *testing.T) { s.verifyManagedDir(t, container) })
+			t.Run("ScriptModule", func(t *testing.T) { s.verifyScriptOutput(t, container) })
+		})
+	}
 }
 
 // testControllerRestart restarts fleet-controller, waits for stewards to reconnect,
@@ -131,15 +154,19 @@ func (s *FleetTestSuite) testStewardRestart(t *testing.T, configPath string) {
 
 	s.containerRestart(t, container, 60*time.Second)
 
-	// The steward may re-register with a new ID after restart.
+	// AC6: the steward must reuse its stored cert and reconnect with the SAME ID.
+	// A docker restart preserves the container's writable layer (where the cert
+	// lives), so re-registration with a new ID indicates the stored-cert reuse
+	// path is broken.
 	newID, err := s.getStewardIDFromLogs(t, container)
 	if err != nil {
 		t.Fatalf("steward ID not found after %s restart: %v", container, err)
 	}
-	s.stewardIDs[container] = newID
 	if newID != oldID {
-		t.Logf("Steward re-registered: %s → %s", oldID, newID)
+		t.Errorf("steward %s re-registered after restart: %s → %s; expected stored-cert reuse (no re-registration)",
+			container, oldID, newID)
 	}
+	s.stewardIDs[container] = newID
 
 	if err := s.uploadConfig(t, newID, configPath); err != nil {
 		t.Fatalf("upload config to %s after restart: %v", container, err)
@@ -158,27 +185,55 @@ func (s *FleetTestSuite) testStewardRestart(t *testing.T, configPath string) {
 	t.Logf("StewardRestart: %s reconnected and converged (steward ID: %s)", container, newID)
 }
 
-// testDeferredConfig uploads a config for fleet-steward-2 and verifies the controller
-// stores it and the steward applies it — confirming config delivery works end-to-end
-// for a steward that may have just become available.
+// testDeferredConfig stops fleet-steward-2, uploads a config while it is offline,
+// then restarts it and verifies the controller-stored config is delivered and
+// applied on reconnect. The config upload cannot reach the steward live — it must
+// be deferred by the controller until the steward comes back online.
 func (s *FleetTestSuite) testDeferredConfig(t *testing.T, configPath string) {
 	t.Helper()
 
 	container := "fleet-steward-2"
 	stewardID := s.stewardIDs[container]
 
+	// Take steward-2 offline before uploading so the config cannot be delivered live.
+	s.containerStop(t, container)
+
+	// Upload while steward-2 is offline — the controller must store the config and
+	// hold it for delivery when the steward reconnects.
 	if err := s.uploadConfig(t, stewardID, configPath); err != nil {
-		t.Fatalf("deferred config upload to %s: %v", container, err)
+		// Restart before failing so later scenarios are not left with a dead container.
+		s.containerStart(t, container, 90*time.Second)
+		t.Fatalf("deferred config upload to %s while offline: %v", container, err)
+	}
+	t.Logf("DeferredConfig: config uploaded for %s while it was offline", container)
+
+	// Bring steward-2 back online. Its /test-workspace tmpfs is recreated empty,
+	// so any managed resources that appear are proof the deferred config was applied.
+	s.containerStart(t, container, 90*time.Second)
+
+	// The stored cert survives docker stop/start, so the ID must be unchanged.
+	newID, err := s.getStewardIDFromLogs(t, container)
+	if err != nil {
+		t.Fatalf("steward ID not found after %s restart: %v", container, err)
+	}
+	if newID != stewardID {
+		t.Errorf("steward %s re-registered after restart: %s → %s; expected stored-cert reuse",
+			container, stewardID, newID)
+	}
+	s.stewardIDs[container] = newID
+
+	if !s.waitForConvergence(t, newID, 90*time.Second) {
+		t.Fatalf("steward %s (%s) did not reconnect after coming back online", container, newID)
 	}
 
-	if !s.waitForConvergence(t, stewardID, 60*time.Second) {
-		t.Errorf("steward %s (%s) did not converge after deferred config", container, stewardID)
-		return
+	// The deferred config must now be applied even though it was uploaded offline.
+	if !s.waitForManagedFile(t, container, 60*time.Second) {
+		t.Errorf("%s: deferred config not applied — managed-file absent after restart", container)
+	} else {
+		s.verifyManagedFile(t, container)
 	}
-
-	s.verifyManagedFile(t, container)
 	s.verifyManagedDir(t, container)
-	t.Logf("DeferredConfig: %s applied config (steward ID: %s)", container, stewardID)
+	t.Logf("DeferredConfig: %s applied config uploaded while offline (steward ID: %s)", container, newID)
 }
 
 // --- shared resource verification helpers ---

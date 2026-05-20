@@ -3,7 +3,6 @@
 package fleet
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -13,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,8 +31,18 @@ var validFleetContainers = map[string]bool{
 type FleetTestSuite struct {
 	controllerURL string
 	httpClient    *http.Client      // mTLS client (admin bundle) for authenticated endpoints
-	noAuthClient  *http.Client      // CA-only client for unauthenticated test endpoints
 	stewardIDs    map[string]string // container name → steward ID
+	tmpDir        string            // scratch dir for the admin bundle and patched config files
+	bundlePath    string            // admin bundle file on disk, passed to `cfg --bundle`
+}
+
+// cfgBinary returns the path to the cfg CLI binary. CFG_BINARY is exported by
+// make test-e2e-fleet; it falls back to "cfg" on PATH for ad-hoc local runs.
+func cfgBinary() string {
+	if b := os.Getenv("CFG_BINARY"); b != "" {
+		return b
+	}
+	return "cfg"
 }
 
 // adminBundle mirrors the YAML structure of /etc/cfgms/admin.bundle.yaml.
@@ -63,6 +73,7 @@ func setupFleetSuite(t *testing.T) *FleetTestSuite {
 	s := &FleetTestSuite{
 		controllerURL: "https://localhost:8090",
 		stewardIDs:    make(map[string]string),
+		tmpDir:        t.TempDir(),
 	}
 
 	for _, name := range []string{"fleet-controller", "fleet-steward-1", "fleet-steward-2"} {
@@ -106,6 +117,14 @@ func (s *FleetTestSuite) rebuildClients(t *testing.T) error {
 			bundle.CertPEM != "", bundle.KeyPEM != "", bundle.CAPEM != "")
 	}
 
+	// Persist the bundle to disk so the `cfg` CLI can authenticate via --bundle.
+	// The controller regenerates the bundle on every init, so this is rewritten
+	// after each controller restart.
+	s.bundlePath = filepath.Join(s.tmpDir, "admin.bundle.yaml")
+	if err := os.WriteFile(s.bundlePath, []byte(bundleYAML), 0o600); err != nil {
+		return fmt.Errorf("write admin bundle file: %w", err)
+	}
+
 	clientCert, err := tls.X509KeyPair([]byte(bundle.CertPEM), []byte(bundle.KeyPEM))
 	if err != nil {
 		return fmt.Errorf("load admin cert/key pair: %w", err)
@@ -123,16 +142,6 @@ func (s *FleetTestSuite) rebuildClients(t *testing.T) error {
 				Certificates: []tls.Certificate{clientCert},
 				RootCAs:      caPool,
 				MinVersion:   tls.VersionTLS13,
-			},
-		},
-	}
-
-	s.noAuthClient = &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				RootCAs:    caPool,
-				MinVersion: tls.VersionTLS13,
 			},
 		},
 	}
@@ -250,11 +259,16 @@ func (s *FleetTestSuite) getStewardConnectionState(t *testing.T, stewardID strin
 	return apiResp.Data.ConnectionState, nil
 }
 
-// uploadConfig reads configPath, patches the steward ID, and sends to the test endpoint.
-// The test endpoint (PUT /api/v1/test/stewards/{id}/config) bypasses authentication
-// when CFGMS_ENABLE_TEST_ENDPOINTS=true, which is set in the fleet docker-compose profile.
+// uploadConfig uploads configPath to a steward using the `cfg config upload` CLI —
+// the same user-facing command an operator runs. The config's steward.id is patched
+// to stewardID in a temp copy first, and the admin bundle extracted from
+// fleet-controller authenticates the mTLS request.
 func (s *FleetTestSuite) uploadConfig(t *testing.T, stewardID, configPath string) error {
 	t.Helper()
+
+	if s.bundlePath == "" {
+		return fmt.Errorf("admin bundle path not set; call rebuildClients first")
+	}
 
 	rawYAML, err := os.ReadFile(configPath)
 	if err != nil {
@@ -265,35 +279,35 @@ func (s *FleetTestSuite) uploadConfig(t *testing.T, stewardID, configPath string
 	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
 		return fmt.Errorf("parse config YAML: %w", err)
 	}
-
 	if section, ok := cfg["steward"].(map[string]interface{}); ok {
 		section["id"] = stewardID
 	}
-
-	body, err := json.Marshal(cfg)
+	patched, err := yaml.Marshal(cfg)
 	if err != nil {
-		return fmt.Errorf("marshal config to JSON: %w", err)
+		return fmt.Errorf("marshal patched config: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/test/stewards/%s/config", s.controllerURL, stewardID)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, url, bytes.NewReader(body))
+	tmpConfig := filepath.Join(s.tmpDir, "upload-"+stewardID+".yaml")
+	if err := os.WriteFile(tmpConfig, patched, 0o600); err != nil {
+		return fmt.Errorf("write temp config: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// #nosec G204 - cfgBinary() and all args are test-controlled, not user input.
+	cmd := exec.CommandContext(ctx, cfgBinary(),
+		"config", "upload", tmpConfig,
+		"--steward", stewardID,
+		"--bundle", s.bundlePath,
+		"--url", s.controllerURL)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.noAuthClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("PUT test config: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("config upload returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return fmt.Errorf("cfg config upload for %s: %w (output: %s)",
+			stewardID, err, strings.TrimSpace(string(out)))
 	}
 
-	t.Logf("Config uploaded for steward %s", stewardID)
+	t.Logf("Config uploaded for steward %s via cfg config upload: %s",
+		stewardID, strings.TrimSpace(string(out)))
 	return nil
 }
 
@@ -312,6 +326,47 @@ func (s *FleetTestSuite) containerRestart(t *testing.T, container string, health
 	if !s.waitForContainerHealthy(t, container, healthTimeout) {
 		t.Fatalf("container %s did not reach healthy after restart", container)
 	}
+}
+
+// containerStop stops a fleet container (its writable layer — including the
+// stored steward cert — survives; only the /test-workspace tmpfs is cleared).
+func (s *FleetTestSuite) containerStop(t *testing.T, container string) {
+	t.Helper()
+	if err := validateFleetContainer(container); err != nil {
+		t.Fatalf("containerStop: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "docker", "stop", container).CombinedOutput(); err != nil {
+		t.Fatalf("docker stop %s: %v (output: %s)", container, err, strings.TrimSpace(string(out)))
+	}
+	t.Logf("Stopped %s", container)
+}
+
+// containerStart starts a previously stopped fleet container and waits for healthy.
+func (s *FleetTestSuite) containerStart(t *testing.T, container string, healthTimeout time.Duration) {
+	t.Helper()
+	if err := validateFleetContainer(container); err != nil {
+		t.Fatalf("containerStart: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "docker", "start", container).CombinedOutput(); err != nil {
+		t.Fatalf("docker start %s: %v (output: %s)", container, err, strings.TrimSpace(string(out)))
+	}
+	t.Logf("Started %s; waiting for healthy...", container)
+	if !s.waitForContainerHealthy(t, container, healthTimeout) {
+		t.Fatalf("container %s did not reach healthy after start", container)
+	}
+}
+
+// readStewardLog returns the contents of the most recent steward log file.
+// The steward exposes no HTTP status endpoint; its structured log is the
+// authoritative local record of convergence and drift events.
+func (s *FleetTestSuite) readStewardLog(t *testing.T, container string) (string, error) {
+	t.Helper()
+	return s.dockerExec(t, container, "sh", "-c",
+		`ls -t /tmp/cfgms/cfgms-*.log 2>/dev/null | head -1 | xargs cat 2>/dev/null`)
 }
 
 // TestFleetWalkthrough is the single ordered entry point for all fleet walkthrough scenarios.

@@ -6,6 +6,12 @@
 steward:
   id: ""
   mode: controller
+  # Short convergence interval so TestDriftAutoCorrection observes a correction
+  # within its 90s window (default is 30m).
+  converge_interval: "10s"
+  # Apply mode auto-corrects detected drift via module.Set()/Verify().
+  # Required for TestDriftAutoCorrection's drift_setting assertion.
+  drift_mode: apply
 
 resources:
   - name: managed-file
