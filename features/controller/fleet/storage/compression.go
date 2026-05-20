@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 )
@@ -46,6 +47,8 @@ func NewCompressor(algorithm string, level int) (Compressor, error) {
 		return NewZstdCompressor(level)
 	case "lz4":
 		return NewLZ4Compressor()
+	case "dna-optimized":
+		return NewOptimizedDNACompressor("gzip", level)
 	default:
 		return nil, fmt.Errorf("unsupported compression algorithm: %s", algorithm)
 	}
@@ -386,50 +389,146 @@ func NewOptimizedDNACompressor(algorithm string, level int) (*OptimizedDNACompre
 
 // OptimizedDNAData represents DNA data optimized for compression
 type OptimizedDNAData struct {
-	ID              string `json:"id"`
-	AttributeKeys   []int  `json:"attribute_keys"`   // Indices into attribute dictionary
-	AttributeValues []int  `json:"attribute_values"` // Indices into value dictionary
-	LastUpdated     int64  `json:"last_updated"`     // Unix timestamp
-	ConfigHash      string `json:"config_hash"`
-	LastSyncTime    int64  `json:"last_sync_time"` // Unix timestamp
-	AttributeCount  int32  `json:"attribute_count"`
-	SyncFingerprint string `json:"sync_fingerprint"`
+	ID                string `json:"id"`
+	AttributeKeys     []int  `json:"attribute_keys"`   // Indices into attribute dictionary
+	AttributeValues   []int  `json:"attribute_values"` // Indices into value dictionary
+	LastUpdated       int64  `json:"last_updated"`     // Unix timestamp seconds
+	LastUpdatedNanos  int32  `json:"last_updated_nanos,omitempty"`
+	ConfigHash        string `json:"config_hash"`
+	LastSyncTime      int64  `json:"last_sync_time"` // Unix timestamp seconds
+	LastSyncTimeNanos int32  `json:"last_sync_time_nanos,omitempty"`
+	AttributeCount    int32  `json:"attribute_count"`
+	SyncFingerprint   string `json:"sync_fingerprint"`
+}
+
+// serializedOptimizedPayload is the on-wire format produced by OptimizedDNACompressor.
+// It embeds the reverse dictionaries so each payload is self-contained.
+type serializedOptimizedPayload struct {
+	Data          *OptimizedDNAData `json:"d"`
+	AttributeDict []string          `json:"ak"` // index → attribute key string
+	ValueDict     []string          `json:"vk"` // index → value string
 }
 
 // Compress compresses DNA data using dictionary-based optimization
 func (c *OptimizedDNACompressor) Compress(dna *commonpb.DNA) ([]byte, int64, error) {
 	start := time.Now()
 
-	// Build dictionaries and convert to optimized format
 	optimized := c.optimizeDNA(dna)
 
-	// Serialize optimized data
-	optimizedData, err := json.Marshal(optimized)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to marshal optimized DNA: %w", err)
+	// Build reverse dictionaries to embed in the payload so Decompress is self-contained.
+	c.dictMutex.RLock()
+	attrDict := make([]string, len(c.attributeDict))
+	for k, idx := range c.attributeDict {
+		attrDict[idx] = k
+	}
+	valDict := make([]string, len(c.valueDict))
+	for k, idx := range c.valueDict {
+		valDict[idx] = k
+	}
+	c.dictMutex.RUnlock()
+
+	payload := &serializedOptimizedPayload{
+		Data:          optimized,
+		AttributeDict: attrDict,
+		ValueDict:     valDict,
 	}
 
-	originalSize := int64(len(optimizedData))
-
-	// Compress using base compressor
-	compressed, _, err := c.baseCompressor.Compress(dna)
+	payloadData, err := json.Marshal(payload)
 	if err != nil {
-		return nil, originalSize, err
+		return nil, 0, fmt.Errorf("failed to marshal optimized DNA payload: %w", err)
 	}
 
-	compressedSize := int64(len(compressed))
+	originalSize := int64(len(payloadData))
+
+	var buf bytes.Buffer
+	gzipWriter, err := gzip.NewWriterLevel(&buf, gzip.DefaultCompression)
+	if err != nil {
+		return nil, originalSize, fmt.Errorf("failed to create gzip writer: %w", err)
+	}
+
+	if _, err := gzipWriter.Write(payloadData); err != nil {
+		_ = gzipWriter.Close()
+		return nil, originalSize, fmt.Errorf("failed to compress optimized DNA payload: %w", err)
+	}
+
+	if err := gzipWriter.Close(); err != nil {
+		return nil, originalSize, fmt.Errorf("failed to finalize gzip compression: %w", err)
+	}
+
+	compressedData := buf.Bytes()
+	compressedSize := int64(len(compressedData))
 	compressionTime := time.Since(start)
 
-	// Update statistics
 	c.updateStats(originalSize, compressedSize, compressionTime)
 
-	return compressed, originalSize, nil
+	return compressedData, originalSize, nil
 }
 
-// Decompress decompresses optimized DNA data
+// Decompress decompresses optimized DNA data, reversing the dictionary optimization.
 func (c *OptimizedDNACompressor) Decompress(data []byte) (*commonpb.DNA, error) {
-	// Deferred: tracked in #1443 — reverse DNA field-level optimization on decompress
-	return c.baseCompressor.Decompress(data)
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	var raw bytes.Buffer
+	if _, err := raw.ReadFrom(reader); err != nil {
+		return nil, fmt.Errorf("failed to decompress optimized DNA payload: %w", err)
+	}
+
+	var payload serializedOptimizedPayload
+	if err := json.Unmarshal(raw.Bytes(), &payload); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal optimized DNA payload: %w", err)
+	}
+
+	optimized := payload.Data
+	if optimized == nil {
+		return nil, fmt.Errorf("missing DNA data in optimized payload")
+	}
+
+	dna := &commonpb.DNA{
+		Id:              optimized.ID,
+		ConfigHash:      optimized.ConfigHash,
+		AttributeCount:  optimized.AttributeCount,
+		SyncFingerprint: optimized.SyncFingerprint,
+	}
+
+	if optimized.LastUpdated != 0 || optimized.LastUpdatedNanos != 0 {
+		dna.LastUpdated = &timestamppb.Timestamp{
+			Seconds: optimized.LastUpdated,
+			Nanos:   optimized.LastUpdatedNanos,
+		}
+	}
+
+	if optimized.LastSyncTime != 0 || optimized.LastSyncTimeNanos != 0 {
+		dna.LastSyncTime = &timestamppb.Timestamp{
+			Seconds: optimized.LastSyncTime,
+			Nanos:   optimized.LastSyncTimeNanos,
+		}
+	}
+
+	// Reverse the dictionary optimization to reconstruct the attributes map.
+	if len(optimized.AttributeKeys) > 0 {
+		if len(optimized.AttributeKeys) != len(optimized.AttributeValues) {
+			return nil, fmt.Errorf("attribute keys/values length mismatch: %d keys, %d values",
+				len(optimized.AttributeKeys), len(optimized.AttributeValues))
+		}
+
+		dna.Attributes = make(map[string]string, len(optimized.AttributeKeys))
+		for i, keyIdx := range optimized.AttributeKeys {
+			if keyIdx < 0 || keyIdx >= len(payload.AttributeDict) {
+				return nil, fmt.Errorf("attribute key index %d out of range (dict size %d)", keyIdx, len(payload.AttributeDict))
+			}
+			valueIdx := optimized.AttributeValues[i]
+			if valueIdx < 0 || valueIdx >= len(payload.ValueDict) {
+				return nil, fmt.Errorf("attribute value index %d out of range (dict size %d)", valueIdx, len(payload.ValueDict))
+			}
+			dna.Attributes[payload.AttributeDict[keyIdx]] = payload.ValueDict[valueIdx]
+		}
+	}
+
+	return dna, nil
 }
 
 // GetCompressionRatio returns the current average compression ratio
@@ -471,10 +570,12 @@ func (c *OptimizedDNACompressor) optimizeDNA(dna *commonpb.DNA) *OptimizedDNADat
 
 	if dna.LastUpdated != nil {
 		optimized.LastUpdated = dna.LastUpdated.Seconds
+		optimized.LastUpdatedNanos = dna.LastUpdated.Nanos
 	}
 
 	if dna.LastSyncTime != nil {
 		optimized.LastSyncTime = dna.LastSyncTime.Seconds
+		optimized.LastSyncTimeNanos = dna.LastSyncTime.Nanos
 	}
 
 	// Convert attributes using dictionaries
