@@ -12,8 +12,8 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/features/rbac"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // ctxWithCaller injects the UserIDKey and TenantID context values that validatePermissions reads.
