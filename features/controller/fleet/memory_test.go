@@ -138,6 +138,31 @@ func TestMemoryQuery_FilterByHostname_SubstringMatch(t *testing.T) {
 	assert.Len(t, results, 2)
 }
 
+func TestMemoryQuery_FilterByHostname_GlobMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"hostname": "es-hv01"}),
+		testSteward("s2", "t", "online", map[string]string{"hostname": "es-hv02"}),
+		testSteward("s3", "t", "online", map[string]string{"hostname": "db-server-01"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{Hostname: "es-hv0*"})
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+	for _, r := range results {
+		assert.Equal(t, "t", r.TenantID)
+	}
+}
+
+func TestMemoryQuery_FilterByHostname_GlobNoMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"hostname": "web-01"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{Hostname: "es-hv*"})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
 func TestMemoryQuery_FilterByTags_SingleTag(t *testing.T) {
 	q := newQuery(
 		testSteward("s1", "t", "online", map[string]string{"tags": "production,web"}),
