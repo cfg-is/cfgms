@@ -353,6 +353,11 @@ func (s *Session) GetErrorChannel() <-chan error {
 // WebSocket write loops. The channel is buffered; messages are dropped (with a
 // warning log) when the buffer is full so a slow consumer never stalls the
 // steward output path.
+//
+// The channel is intentionally never closed: HandleOutput may be invoked from
+// handleShellOutput after Close, so closing would risk a send-on-closed panic.
+// Readers must detect session termination via context cancellation, not a
+// channel-close signal.
 func (s *Session) OutputChan() <-chan []byte {
 	return s.outputCh
 }
