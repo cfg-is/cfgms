@@ -54,6 +54,7 @@ func init() {
 	rootCmd.AddCommand(storageCmd)
 	rootCmd.AddCommand(stewardCmd)
 	rootCmd.AddCommand(workflowCmd)
+	rootCmd.AddCommand(configCmd)
 }
 
 // versionCmd represents the version command

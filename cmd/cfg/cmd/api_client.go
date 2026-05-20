@@ -226,6 +226,11 @@ func (c *APIClient) Get(ctx context.Context, path string) (*http.Response, error
 
 // doRequest performs an HTTP request with authentication
 func (c *APIClient) doRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+	return c.doRequestWithContentType(ctx, method, path, body, "application/json")
+}
+
+// doRequestWithContentType performs an HTTP request with the specified Content-Type.
+func (c *APIClient) doRequestWithContentType(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
 	url := c.baseURL + path
 
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
@@ -233,7 +238,7 @@ func (c *APIClient) doRequest(ctx context.Context, method, path string, body io.
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
