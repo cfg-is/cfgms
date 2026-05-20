@@ -573,7 +573,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 
 	// Story #416: Wire rollback manager into API server
-	rollbackManager := initializeRollbackManager(storageManager, logger)
+	rollbackManager := initializeRollbackManager(storageManager, logger, rbacManager)
 	httpServer.SetRollbackManager(rollbackManager)
 	configService.SetRollbackManager(rollbackManager)
 	logger.Info("Rollback manager wired to HTTP API server and gRPC config service")
@@ -722,12 +722,12 @@ func (r *noOpModuleRegistry) IsModuleCompatible(_ context.Context, _, _ string) 
 }
 
 // initializeRollbackManager creates and wires the rollback manager.
-func initializeRollbackManager(storageManager *interfaces.StorageManager, logger logging.Logger) rollback.RollbackManager {
+func initializeRollbackManager(storageManager *interfaces.StorageManager, logger logging.Logger, rbacManager rbac.RBACManager) rollback.RollbackManager {
 	// Use durable storage for rollback operations
 	rollbackStore := rollback.NewStorageRollbackStore(storageManager.GetConfigStore())
 
 	// Create validator with no-op module registry (full module registry requires separate story)
-	rollbackValidator := rollback.NewRollbackValidator(&noOpModuleRegistry{}, nil)
+	rollbackValidator := rollback.NewRollbackValidator(&noOpModuleRegistry{}, nil, rbacManager)
 
 	// Create notifier using standard logger
 	rollbackNotifier := rollback.NewDefaultRollbackNotifier(logger)

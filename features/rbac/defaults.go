@@ -221,6 +221,22 @@ var DefaultPermissions = []*common.Permission{
 		ResourceType: "system",
 		Actions:      []string{"emergency.access"},
 	},
+
+	// Rollback Permissions
+	{
+		Id:           "rollback.emergency",
+		Name:         "Emergency Rollback",
+		Description:  "Perform emergency configuration rollback without the normal approval flow",
+		ResourceType: "rollback",
+		Actions:      []string{"emergency"},
+	},
+	{
+		Id:           "rollback.msp",
+		Name:         "MSP-Level Rollback",
+		Description:  "Perform configuration rollback at MSP scope",
+		ResourceType: "rollback",
+		Actions:      []string{"rollback"},
+	},
 }
 
 // Default system roles that combine permissions logically

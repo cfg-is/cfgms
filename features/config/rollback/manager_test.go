@@ -386,10 +386,8 @@ func TestRollbackManager_ExecuteRollback_RequiresApproval(t *testing.T) {
 func TestRollbackValidator_ValidateRollback(t *testing.T) {
 	ctx := context.Background()
 
-	// Create validator with mocks
-	moduleRegistry := new(MockModuleRegistry)
-	configParser := new(MockConfigParser)
-	validator := rollback.NewRollbackValidator(moduleRegistry, configParser)
+	// Use no-op implementations for interfaces not exercised by these test cases.
+	validator := rollback.NewRollbackValidator(&noopModuleRegistry{}, &noopConfigParser{}, nil)
 
 	// Test cases
 	tests := []struct {
@@ -454,51 +452,34 @@ func TestRollbackValidator_ValidateRollback(t *testing.T) {
 	}
 }
 
-// Mock module registry for validator tests
-type MockModuleRegistry struct {
-	mock.Mock
+// noopModuleRegistry satisfies rollback.ModuleRegistry for tests that don't exercise
+// module-compatibility paths.
+type noopModuleRegistry struct{}
+
+func (r *noopModuleRegistry) GetModuleVersion(_ context.Context, _ string) (string, error) {
+	return "1.0.0", nil
 }
 
-func (m *MockModuleRegistry) GetModuleVersion(ctx context.Context, moduleName string) (string, error) {
-	args := m.Called(ctx, moduleName)
-	return args.String(0), args.Error(1)
+func (r *noopModuleRegistry) GetModuleDependencies(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
 }
 
-func (m *MockModuleRegistry) GetModuleDependencies(ctx context.Context, moduleName string) ([]string, error) {
-	args := m.Called(ctx, moduleName)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).([]string), args.Error(1)
+func (r *noopModuleRegistry) IsModuleCompatible(_ context.Context, _, _ string) (bool, error) {
+	return true, nil
 }
 
-func (m *MockModuleRegistry) IsModuleCompatible(ctx context.Context, moduleName, version string) (bool, error) {
-	args := m.Called(ctx, moduleName, version)
-	return args.Bool(0), args.Error(1)
+// noopConfigParser satisfies rollback.ConfigurationParser for tests that don't exercise
+// configuration-parsing paths.
+type noopConfigParser struct{}
+
+func (p *noopConfigParser) ParseConfiguration(_ []byte, _ string) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
 }
 
-// Mock config parser for validator tests
-type MockConfigParser struct {
-	mock.Mock
+func (p *noopConfigParser) ValidateSchema(_ map[string]interface{}, _ string) error {
+	return nil
 }
 
-func (m *MockConfigParser) ParseConfiguration(content []byte, format string) (map[string]interface{}, error) {
-	args := m.Called(content, format)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(map[string]interface{}), args.Error(1)
-}
-
-func (m *MockConfigParser) ValidateSchema(config map[string]interface{}, schema string) error {
-	args := m.Called(config, schema)
-	return args.Error(0)
-}
-
-func (m *MockConfigParser) GetRequiredFields(schema string) []string {
-	args := m.Called(schema)
-	if args.Get(0) == nil {
-		return nil
-	}
-	return args.Get(0).([]string)
+func (p *noopConfigParser) GetRequiredFields(_ string) []string {
+	return nil
 }
