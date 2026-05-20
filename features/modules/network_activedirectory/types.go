@@ -190,9 +190,11 @@ type ADQueryResult struct {
 	User           *interfaces.DirectoryUser       `json:"user,omitempty"`
 	Group          *interfaces.DirectoryGroup      `json:"group,omitempty"`
 	OU             *interfaces.OrganizationalUnit  `json:"ou,omitempty"`
+	Computer       *interfaces.DirectoryComputer   `json:"computer,omitempty"`
 	Users          []interfaces.DirectoryUser      `json:"users,omitempty"`
 	Groups         []interfaces.DirectoryGroup     `json:"groups,omitempty"`
 	OUs            []interfaces.OrganizationalUnit `json:"ous,omitempty"`
+	Computers      []interfaces.DirectoryComputer  `json:"computers,omitempty"`
 	GenericObject  *interfaces.DirectoryUser       `json:"generic_object,omitempty"`
 	GenericObjects []map[string]interface{}        `json:"generic_objects,omitempty"`
 
@@ -246,6 +248,12 @@ func (r *ADQueryResult) AsMap() map[string]interface{} {
 	}
 	if len(r.OUs) > 0 {
 		result["ous"] = r.OUs
+	}
+	if r.Computer != nil {
+		result["computer"] = r.Computer
+	}
+	if len(r.Computers) > 0 {
+		result["computers"] = r.Computers
 	}
 	if r.GenericObject != nil {
 		result["generic_object"] = r.GenericObject
