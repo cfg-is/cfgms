@@ -4,6 +4,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,19 +17,55 @@ const (
 	GraphBaseURL = "https://graph.microsoft.com/v1.0"
 )
 
-// extractUserContext extracts user information from ID token
-// NOTE: This function is deprecated for MSP scenarios using application permissions
-// MSP applications don't use user context since they operate with application permissions
+// extractUserContext parses the JWT payload from the M365 access token and extracts
+// user identity claims. Signature validation is intentionally omitted — the token
+// is already validated by the M365 auth flow before this function is called.
 func (f *InteractiveAuthFlow) extractUserContext(idToken, tenantID string) (*UserContext, error) {
 	if idToken == "" {
 		return nil, fmt.Errorf("no ID token provided")
 	}
 
-	// Deferred: tracked in #1443 — parse and validate the ID token JWT claims
+	// JWTs are three base64url segments: header.payload.signature
+	parts := strings.Split(idToken, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("malformed JWT: expected 3 parts, got %d", len(parts))
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("malformed JWT: failed to decode payload: %w", err)
+	}
+
+	var claims struct {
+		OID   string   `json:"oid"`
+		UPN   string   `json:"upn"`
+		TID   string   `json:"tid"`
+		Roles []string `json:"roles"`
+		Name  string   `json:"name"`
+	}
+
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, fmt.Errorf("malformed JWT: failed to parse claims: %w", err)
+	}
+
+	if claims.OID == "" {
+		return nil, fmt.Errorf("JWT missing required claim: oid")
+	}
+	if claims.UPN == "" {
+		return nil, fmt.Errorf("JWT missing required claim: upn")
+	}
+	if claims.TID == "" {
+		return nil, fmt.Errorf("JWT missing required claim: tid")
+	}
+	if tenantID != "" && claims.TID != tenantID {
+		return nil, fmt.Errorf("JWT tid claim does not match expected tenant")
+	}
+
 	return &UserContext{
-		UserID:            "extracted-from-id-token",
-		UserPrincipalName: "user@" + tenantID + ".onmicrosoft.com",
-		DisplayName:       "Authenticated User",
+		UserID:            claims.OID,
+		UserPrincipalName: claims.UPN,
+		DisplayName:       claims.Name,
+		Roles:             claims.Roles,
 		LastAuthenticated: time.Now(),
 	}, nil
 }
@@ -50,12 +87,7 @@ func (f *InteractiveAuthFlow) testUserReadAccess(ctx context.Context, token *Acc
 		test.Error = fmt.Sprintf("API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -97,12 +129,7 @@ func (f *InteractiveAuthFlow) testDirectoryReadAccess(ctx context.Context, token
 		test.Error = fmt.Sprintf("Organization API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -152,12 +179,7 @@ func (f *InteractiveAuthFlow) testGroupManagementAccess(ctx context.Context, tok
 		test.Error = fmt.Sprintf("Group read API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -209,12 +231,7 @@ func (f *InteractiveAuthFlow) testConditionalAccessAccess(ctx context.Context, t
 		test.Error = fmt.Sprintf("Conditional Access API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -262,12 +279,7 @@ func (f *InteractiveAuthFlow) testIntuneManagementAccess(ctx context.Context, to
 		test.Error = fmt.Sprintf("Intune managed devices API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -315,12 +327,7 @@ func (f *InteractiveAuthFlow) testOrganizationManagementAccess(ctx context.Conte
 		test.Error = fmt.Sprintf("Organization API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -373,12 +380,7 @@ func (f *InteractiveAuthFlow) testAuditLogAccess(ctx context.Context, token *Acc
 		test.Error = fmt.Sprintf("Audit log API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -420,12 +422,7 @@ func (f *InteractiveAuthFlow) testUsageReportsAccess(ctx context.Context, token 
 		test.Error = fmt.Sprintf("Usage reports API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
