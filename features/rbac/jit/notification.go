@@ -5,6 +5,7 @@ package jit
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -12,12 +13,23 @@ import (
 type SimpleNotificationService struct {
 	// Deferred: tracked in #1441 — integrate with email, Slack, and other delivery channels
 	notifications []NotificationRecord
+	registry      ApproverRegistry
 }
 
-// NewSimpleNotificationService creates a new simple notification service
+// NewSimpleNotificationService creates a new simple notification service without a registry.
+// SendEscalationNotification will log a warning and record the notification with no recipients.
 func NewSimpleNotificationService() *SimpleNotificationService {
 	return &SimpleNotificationService{
 		notifications: make([]NotificationRecord, 0),
+	}
+}
+
+// NewSimpleNotificationServiceWithRegistry creates a notification service that resolves
+// escalation recipients from the provided ApproverRegistry.
+func NewSimpleNotificationServiceWithRegistry(registry ApproverRegistry) *SimpleNotificationService {
+	return &SimpleNotificationService{
+		notifications: make([]NotificationRecord, 0),
+		registry:      registry,
 	}
 }
 
@@ -233,7 +245,9 @@ func (sns *SimpleNotificationService) SendRevocationNotification(ctx context.Con
 	})
 }
 
-// SendEscalationNotification sends escalation notifications
+// SendEscalationNotification sends escalation notifications.
+// Recipients are resolved from the ApproverRegistry; if none are configured a warning is
+// logged and the notification is still recorded so the event is not silently dropped.
 func (sns *SimpleNotificationService) SendEscalationNotification(ctx context.Context, request *JITAccessRequest, escalationLevel int) error {
 	subject := fmt.Sprintf("[ESCALATION LEVEL %d] JIT Access Approval Required", escalationLevel)
 	message := fmt.Sprintf(
@@ -244,8 +258,22 @@ func (sns *SimpleNotificationService) SendEscalationNotification(ctx context.Con
 		request.Permissions,
 	)
 
-	// Deferred: tracked in #1441 — resolve escalation recipients from configurable approver registry
-	recipients := []string{"security-admin", "compliance-officer"}
+	var recipients []string
+	if sns.registry != nil {
+		resolved, err := sns.registry.GetApprovers(ctx, EscalationTypeDefault)
+		if err != nil {
+			return fmt.Errorf("approver registry lookup failed: %w", err)
+		}
+		recipients = resolved
+	}
+
+	if len(recipients) == 0 {
+		slog.Warn("no escalation recipients configured; notification recorded with empty recipient list",
+			"request_id", request.ID,
+			"tenant_id", request.TenantID,
+			"escalation_level", escalationLevel,
+		)
+	}
 
 	return sns.sendNotification(ctx, NotificationTypeEscalation, recipients, subject, message, map[string]interface{}{
 		"request_id":         request.ID,
