@@ -159,6 +159,10 @@ func (t *TestStorageProvider) CreatePushStore(_ map[string]interface{}) (busines
 	return nil, business.ErrNotSupported
 }
 
+func (t *TestStorageProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{
 		MaxBatchSize:          100,

@@ -357,6 +357,23 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_push_records_status    ON push_records(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_push_records_tenant_id ON push_records(tenant_id)`,
 
+		// Pending registrations — durable queue for manual-review approval mode (Issue #1599)
+		// Records are created by ManualReviewApprovalHook and acted upon by the CLI approve/deny commands.
+		`CREATE TABLE IF NOT EXISTS pending_registrations (
+			id           TEXT PRIMARY KEY,
+			steward_id   TEXT NOT NULL,
+			tenant_id    TEXT NOT NULL,
+			source_ip    TEXT NOT NULL DEFAULT '',
+			token_prefix TEXT NOT NULL DEFAULT '',
+			status       TEXT NOT NULL DEFAULT 'pending',
+			deny_reason  TEXT NOT NULL DEFAULT '',
+			created_at   TEXT NOT NULL,
+			expires_at   TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_registrations_tenant_id  ON pending_registrations(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_registrations_status     ON pending_registrations(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_registrations_expires_at ON pending_registrations(expires_at)`,
+
 		// Durable sessions (Persistent=true only)
 		`CREATE TABLE IF NOT EXISTS sessions (
 			session_id       TEXT PRIMARY KEY,

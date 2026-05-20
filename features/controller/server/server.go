@@ -100,6 +100,7 @@ type Server struct {
 	gitSyncer               *gitsync.Syncer                     // Issue #666: git-sync write-through component
 	webhookHandler          *gitsync.WebhookHandler             // Issue #681: drain in-flight webhook syncs on shutdown
 	storageManager          *interfaces.StorageManager          // Main storage manager (must be closed on Stop to release SQLite handles)
+	manualReviewHook        *api.ManualReviewApprovalHook       // Issue #1599: manual-review approval hook (nil if not in use)
 }
 
 // New creates a new server instance
@@ -596,11 +597,29 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Issue #1527: Seed the built-in registration approval workflow before wiring the hook.
 		seedBuiltinRegistrationWorkflow(cfg, storageManager.GetConfigStore(), logger)
 
-		// Issue #422: Wire registration approval hook backed by the workflow engine.
-		// Operators configure the "steward-registration-approval" workflow to customise policy.
-		approvalHook := workflowHandler.NewRegistrationApprovalHook(logger)
-		httpServer.SetApprovalHook(approvalHook)
-		logger.Info("Registration approval hook wired (Issue #422)")
+		// Issue #1599: When approval_mode = "manual-review", use ManualReviewApprovalHook
+		// which persists requests to PendingRegistrationStore for CLI approve/deny (#1522-B).
+		// Otherwise fall back to the workflow-engine hook (Issue #422).
+		if cfg.Registration != nil && cfg.Registration.ApprovalMode == "manual-review" {
+			pendingStore := storageManager.GetPendingRegistrationStore()
+			if pendingStore != nil {
+				hook := api.NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logger)
+				httpServer.SetApprovalHook(hook)
+				srv.manualReviewHook = hook
+				logger.Info("Manual-review registration approval hook wired (Issue #1599)")
+			} else {
+				logger.Warn("approval_mode=manual-review requested but PendingRegistrationStore unavailable, falling back to workflow hook")
+				approvalHook := workflowHandler.NewRegistrationApprovalHook(logger)
+				httpServer.SetApprovalHook(approvalHook)
+				logger.Info("Registration approval hook wired (Issue #422)")
+			}
+		} else {
+			// Issue #422: Wire registration approval hook backed by the workflow engine.
+			// Operators configure the "steward-registration-approval" workflow to customise policy.
+			approvalHook := workflowHandler.NewRegistrationApprovalHook(logger)
+			httpServer.SetApprovalHook(approvalHook)
+			logger.Info("Registration approval hook wired (Issue #422)")
+		}
 	}
 
 	// Issue #666: Wire git-sync component when a data directory is configured.
@@ -1045,6 +1064,11 @@ func (s *Server) Stop() error {
 		if err := s.alertManager.Stop(); err != nil {
 			s.logger.Warn("Failed to stop alert manager", "error", err)
 		}
+	}
+
+	// Stop manual-review approval hook background goroutine (Issue #1599)
+	if s.manualReviewHook != nil {
+		s.manualReviewHook.Stop()
 	}
 
 	// Stop workflow trigger manager (Issue #414)

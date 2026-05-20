@@ -115,6 +115,14 @@ type RegistrationConfig struct {
 	// If empty and no "steward-registration-approval" workflow exists in the config store,
 	// the controller defaults to "auto-approve" behaviour.
 	Workflow string `yaml:"workflow"`
+
+	// ApprovalMode selects the registration approval hook implementation.
+	// Valid values:
+	//   "" (default) — use the workflow engine hook (WorkflowApprovalHook).
+	//   "manual-review" — use ManualReviewApprovalHook which stores requests in
+	//     PendingRegistrationStore and holds the steward in quarantine until an
+	//     operator acts via `cfg registration approve/deny` (#1522-B).
+	ApprovalMode string `yaml:"approval_mode,omitempty"`
 }
 
 // CertificateConfig contains certificate management settings
