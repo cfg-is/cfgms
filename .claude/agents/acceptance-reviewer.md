@@ -237,6 +237,7 @@ Post this comment on the PR regardless of verdict:
 
 ```bash
 cat > /tmp/review-<PR_NUM>.md <<'REVIEW_EOF'
+<!-- cfgms-acceptance-review -->
 ## Acceptance Review — [PASS/FAIL]
 
 ### Acceptance Criteria

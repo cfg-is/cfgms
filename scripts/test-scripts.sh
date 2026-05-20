@@ -1891,6 +1891,7 @@ DOCKEREOF
         PATH="${tmp_dir}:${PATH}" \
         CFGMS_TEST_REPO_ROOT="$fake_repo" \
         CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+        CFGMS_TEST_CREDS_STATUS="CREDS_OK:60" \
         bash "$dispatch_script" review-pr 77 2>&1
     ) || exit_code=$?
 
@@ -2071,6 +2072,183 @@ FAILPQEOF
     fi
 }
 
+test_dispatch_creds_gate() {
+    log_test "Testing agent-dispatch.sh: launch/review-pr gate on CREDS_LOW/EXPIRED, emit DISPATCH_DEFERRED..."
+
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    if [[ ! -f "$dispatch_script" ]]; then
+        log_fail "dispatch_creds_gate: script not found at $dispatch_script"
+        return
+    fi
+
+    # CREDS_LOW causes launch to exit non-zero with DISPATCH_DEFERRED token
+    local output exit_code=0
+    output=$(CFGMS_TEST_CREDS_STATUS="CREDS_LOW:5" bash "$dispatch_script" launch 99 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_pass "dispatch_creds_gate launch CREDS_LOW: exits non-zero"
+    else
+        log_fail "dispatch_creds_gate launch CREDS_LOW: expected non-zero exit, got 0: ${output}"
+    fi
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_low:CREDS_LOW:5"; then
+        log_pass "dispatch_creds_gate launch CREDS_LOW: emits DISPATCH_DEFERRED:creds_low:CREDS_LOW:5"
+    else
+        log_fail "dispatch_creds_gate launch CREDS_LOW: expected DISPATCH_DEFERRED:creds_low:CREDS_LOW:5 in output: ${output}"
+    fi
+
+    # CREDS_EXPIRED causes launch to exit non-zero with DISPATCH_DEFERRED token
+    exit_code=0
+    output=$(CFGMS_TEST_CREDS_STATUS="CREDS_EXPIRED:-3" bash "$dispatch_script" launch 99 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_pass "dispatch_creds_gate launch CREDS_EXPIRED: exits non-zero"
+    else
+        log_fail "dispatch_creds_gate launch CREDS_EXPIRED: expected non-zero exit, got 0: ${output}"
+    fi
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_low:CREDS_EXPIRED:-3"; then
+        log_pass "dispatch_creds_gate launch CREDS_EXPIRED: emits DISPATCH_DEFERRED:creds_low:CREDS_EXPIRED:-3"
+    else
+        log_fail "dispatch_creds_gate launch CREDS_EXPIRED: expected DISPATCH_DEFERRED:creds_low:CREDS_EXPIRED:-3 in output: ${output}"
+    fi
+
+    # CREDS_LOW causes review-pr to exit non-zero with DISPATCH_DEFERRED token
+    exit_code=0
+    output=$(CFGMS_TEST_CREDS_STATUS="CREDS_LOW:2" bash "$dispatch_script" review-pr 1589 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_pass "dispatch_creds_gate review-pr CREDS_LOW: exits non-zero"
+    else
+        log_fail "dispatch_creds_gate review-pr CREDS_LOW: expected non-zero exit, got 0: ${output}"
+    fi
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_low:CREDS_LOW:2"; then
+        log_pass "dispatch_creds_gate review-pr CREDS_LOW: emits DISPATCH_DEFERRED:creds_low:CREDS_LOW:2"
+    else
+        log_fail "dispatch_creds_gate review-pr CREDS_LOW: expected DISPATCH_DEFERRED:creds_low:CREDS_LOW:2 in output: ${output}"
+    fi
+
+    # CREDS_LOW causes launch-generic to exit non-zero with DISPATCH_DEFERRED token
+    exit_code=0
+    output=$(CFGMS_TEST_CREDS_STATUS="CREDS_LOW:8" bash "$dispatch_script" launch-generic "cfg-agent-test" "/tmp/nonexistent" 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_pass "dispatch_creds_gate launch-generic CREDS_LOW: exits non-zero"
+    else
+        log_fail "dispatch_creds_gate launch-generic CREDS_LOW: expected non-zero exit, got 0: ${output}"
+    fi
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_low:CREDS_LOW:8"; then
+        log_pass "dispatch_creds_gate launch-generic CREDS_LOW: emits DISPATCH_DEFERRED:creds_low:CREDS_LOW:8"
+    else
+        log_fail "dispatch_creds_gate launch-generic CREDS_LOW: expected DISPATCH_DEFERRED:creds_low:CREDS_LOW:8 in output: ${output}"
+    fi
+}
+
+test_preflight_acceptance_review_comment_match() {
+    log_test "Testing po-cycle-preflight.py: is_trusted_review_comment matches sentinel and heading, not just author..."
+
+    local preflight_script
+    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-cycle-preflight.py"
+
+    if [[ ! -f "$preflight_script" ]]; then
+        log_fail "po-cycle-preflight.py: not found at $preflight_script"
+        return
+    fi
+
+    local tmp_py
+    tmp_py=$(mktemp --suffix=.py)
+    trap 'rm -f "$tmp_py"' RETURN
+
+    cat > "$tmp_py" << 'PYEOF'
+import sys, importlib.util, os
+
+script_path = os.environ["PREFLIGHT_SCRIPT"]
+spec = importlib.util.spec_from_file_location("preflight", script_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# Part A: sentinel in body matches regardless of author (forward-compat path)
+sentinel_comment = {
+    "author": {"login": "jrdnr"},
+    "body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — PASS\n\nAll checks passing.",
+}
+result = mod.is_trusted_review_comment(sentinel_comment)
+if result:
+    print("PASS_A: sentinel match accepted (author=jrdnr, sentinel present)")
+else:
+    print("FAIL_A: sentinel comment rejected — expected True")
+    sys.exit(1)
+
+# Part B: ## Acceptance Review heading from jrdnr matches (backward compat, PR #1589 scenario)
+heading_comment = {
+    "author": {"login": "jrdnr"},
+    "body": "## Acceptance Review — FAIL\n\n### Findings\n| 1 | High | ... |",
+}
+result = mod.is_trusted_review_comment(heading_comment)
+if result:
+    print("PASS_B: heading match accepted (author=jrdnr, ## Acceptance Review heading present)")
+else:
+    print("FAIL_B: heading-only comment rejected — expected True for backward compat")
+    sys.exit(1)
+
+# Part C: plain body with 'acceptance review' but no ## heading or sentinel is rejected
+plain_comment = {
+    "author": {"login": "anyone"},
+    "body": "acceptance review: LGTM",
+}
+result = mod.is_trusted_review_comment(plain_comment)
+if not result:
+    print("PASS_C: plain 'acceptance review' body (no ## heading, no sentinel) correctly rejected")
+else:
+    print("FAIL_C: plain comment accepted as trusted — expected False")
+    sys.exit(1)
+
+# Part D: compute_review_recommendations does NOT recommend spawn_acceptance_reviewer
+# for a PR whose comment matches the heading (PR #1589 regression test)
+pr_summary = {
+    "pr": 1589,
+    "story_number": 1570,
+    "has_acceptance_review_comment": True,  # already set by preflight using new logic
+    "wip_session_failed": False,
+    "merge_state_status": "MERGEABLE",
+    "mergeable": "MERGEABLE",
+    "auto_merge_enabled": False,
+    "ci_summary": {
+        "overall": "green",
+        "pass": 4, "pending": 0, "fail": 0, "skipped": 0,
+        "pending_checks": [], "failed_checks": [],
+    },
+}
+recs = mod.compute_review_recommendations([pr_summary], set(), set())
+if not recs:
+    print("FAIL_D: compute_review_recommendations returned empty list")
+    sys.exit(1)
+action = recs[0].get("action", "")
+if action != "spawn_acceptance_reviewer":
+    print(f"PASS_D: PR #1589 with existing review comment gets action={action!r} (not spawn_acceptance_reviewer)")
+else:
+    print("FAIL_D: PR #1589 recommended spawn_acceptance_reviewer despite existing review comment")
+    sys.exit(1)
+PYEOF
+
+    local exit_code=0
+    local output
+    output=$(PREFLIGHT_SCRIPT="$preflight_script" python3 "$tmp_py" 2>&1) || exit_code=$?
+
+    while IFS= read -r line; do
+        case "$line" in
+            PASS_A:*) log_pass "preflight review match: ${line#PASS_A: }" ;;
+            PASS_B:*) log_pass "preflight review match: ${line#PASS_B: }" ;;
+            PASS_C:*) log_pass "preflight review match: ${line#PASS_C: }" ;;
+            PASS_D:*) log_pass "preflight review match: ${line#PASS_D: }" ;;
+            FAIL_A:*) log_fail "preflight review match: ${line#FAIL_A: }" ;;
+            FAIL_B:*) log_fail "preflight review match: ${line#FAIL_B: }" ;;
+            FAIL_C:*) log_fail "preflight review match: ${line#FAIL_C: }" ;;
+            FAIL_D:*) log_fail "preflight review match: ${line#FAIL_D: }" ;;
+        esac
+    done <<< "$output"
+
+    if [[ $exit_code -ne 0 ]] && ! grep -q "^FAIL" <<< "$output"; then
+        log_fail "preflight acceptance review comment match: Python test crashed (exit $exit_code): $output"
+    fi
+}
+
 # Main execution
 echo "🔍 Script Validation Test Suite"
 echo "================================"
@@ -2130,6 +2308,10 @@ echo ""
 test_preflight_forged_acceptance_review
 echo ""
 test_preflight_gh_call_budget
+echo ""
+test_dispatch_creds_gate
+echo ""
+test_preflight_acceptance_review_comment_match
 echo ""
 test_trust_boundary
 echo ""
