@@ -235,11 +235,22 @@ This runs **locally** with full Docker access for dispatch and fix cycles. The r
 
 ### 4.0 Pre-Flight
 
+First fast-forward the local checkout so the cycle runs current pipeline
+scripts, then run preflight:
+
 ```bash
+./.claude/scripts/po-act.sh sync
 ./.claude/scripts/po-act.sh preflight
 ```
 
-Emits a compact summary (counts, running containers, merge queue, recommendations). Full JSON cached at `~/.cache/cfgms-po/preflight.json` for further `po-act.sh state '.some.jq.filter'` queries.
+`sync` fast-forwards `develop` (it self-skips on a dirty tree or a
+non-`develop` branch, and never creates a merge commit). Run it as its own
+command before `preflight` — never folded into preflight, since the script
+must not rewrite itself mid-run. Outcomes: `SYNC_OK` / `SYNC_SKIP` — proceed
+normally; `SYNC_FAILED` — note it in the cycle report and continue on the
+current scripts.
+
+`preflight` emits a compact summary (counts, running containers, merge queue, recommendations). Full JSON cached at `~/.cache/cfgms-po/preflight.json` for further `po-act.sh state '.some.jq.filter'` queries.
 
 **Code-health gate (check this BEFORE dispatch decisions):**
 
