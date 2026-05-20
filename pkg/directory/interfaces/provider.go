@@ -151,6 +151,9 @@ type DirectoryUser = types.DirectoryUser
 // DirectoryGroup is an alias for types.DirectoryGroup — types is the canonical definition.
 type DirectoryGroup = types.DirectoryGroup
 
+// DirectoryComputer is an alias for types.DirectoryComputer — types is the canonical definition.
+type DirectoryComputer = types.DirectoryComputer
+
 // OrganizationalUnit represents a normalized OU object (primarily for AD compatibility)
 type OrganizationalUnit struct {
 	// Core Identity
@@ -178,9 +181,10 @@ type OrganizationalUnit struct {
 type DirectoryObjectType string
 
 const (
-	DirectoryObjectTypeUser  DirectoryObjectType = "user"
-	DirectoryObjectTypeGroup DirectoryObjectType = "group"
-	DirectoryObjectTypeOU    DirectoryObjectType = "organizational_unit"
+	DirectoryObjectTypeUser     DirectoryObjectType = "user"
+	DirectoryObjectTypeGroup    DirectoryObjectType = "group"
+	DirectoryObjectTypeOU       DirectoryObjectType = "organizational_unit"
+	DirectoryObjectTypeComputer DirectoryObjectType = "computer"
 )
 
 // GroupType is an alias for types.GroupType — types is the canonical definition.

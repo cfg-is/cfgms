@@ -500,20 +500,8 @@ func (m *activeDirectoryModule) queryADObject(ctx context.Context, objectType, o
 		result.OU = ou
 
 	case "computer":
-		// Deferred: tracked in #1443 — introduce a DirectoryComputer type; represented as user for now
-		user := m.ldapEntryToDirectoryUser(entry)
-		user.ProviderAttributes["object_class"] = "computer"
-		// Add computer-specific attributes
-		if os := entry.GetAttributeValue("operatingSystem"); os != "" {
-			user.ProviderAttributes["operating_system"] = os
-		}
-		if osVer := entry.GetAttributeValue("operatingSystemVersion"); osVer != "" {
-			user.ProviderAttributes["operating_system_version"] = osVer
-		}
-		if spn := entry.GetAttributeValues("servicePrincipalName"); len(spn) > 0 {
-			user.ProviderAttributes["service_principal_names"] = spn
-		}
-		result.User = user
+		computer := m.ldapEntryToDirectoryComputer(entry)
+		result.Computer = computer
 
 	case "gpo", "group_policy":
 		// Design decision: GPO objects use a generic representation pending a typed GPO schema.
@@ -668,18 +656,9 @@ func (m *activeDirectoryModule) listADObjects(ctx context.Context, objectType st
 		}
 
 	case "computer":
-		result.Users = make([]interfaces.DirectoryUser, len(searchResult.Entries))
+		result.Computers = make([]interfaces.DirectoryComputer, len(searchResult.Entries))
 		for i, entry := range searchResult.Entries {
-			user := m.ldapEntryToDirectoryUser(entry)
-			user.ProviderAttributes["object_class"] = "computer"
-			// Add computer-specific attributes
-			if os := entry.GetAttributeValue("operatingSystem"); os != "" {
-				user.ProviderAttributes["operating_system"] = os
-			}
-			if spn := entry.GetAttributeValues("servicePrincipalName"); len(spn) > 0 {
-				user.ProviderAttributes["service_principal_names"] = spn
-			}
-			result.Users[i] = *user
+			result.Computers[i] = *m.ldapEntryToDirectoryComputer(entry)
 		}
 
 	case "gpo", "group_policy":
