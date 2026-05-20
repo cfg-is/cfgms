@@ -270,6 +270,11 @@ func (s *ConfigurationServiceV2) ListConfigurations(ctx context.Context, tenantI
 	return s.configManager.ListConfigurations(ctx, tenantID)
 }
 
+// DeleteConfiguration removes a stored steward configuration
+func (s *ConfigurationServiceV2) DeleteConfiguration(ctx context.Context, tenantID, stewardID string) error {
+	return s.configManager.DeleteConfiguration(ctx, tenantID, stewardID)
+}
+
 // GetConfigurationHistory retrieves version history for a configuration
 func (s *ConfigurationServiceV2) GetConfigurationHistory(ctx context.Context, tenantID, stewardID string, limit int) ([]*config.ConfigurationVersion, error) {
 	return s.configManager.GetConfigurationHistory(ctx, tenantID, stewardID, limit)

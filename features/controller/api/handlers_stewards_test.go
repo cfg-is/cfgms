@@ -518,3 +518,59 @@ func TestServer_ConfigStatusRouteDeregistered(t *testing.T) {
 	assert.True(t, rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed,
 		"expected 404 or 405, got %d", rec.Code)
 }
+
+func TestHandleDeleteStewardConfig(t *testing.T) {
+	t.Run("success 204 when config exists", func(t *testing.T) {
+		server := setupTestServer(t)
+		apiKey := NewEphemeralTestKey(t, server, []string{"steward:delete-config"}, "test-tenant", 5*time.Minute)
+
+		storeTestConfig(t, server, "test-tenant", "steward-to-delete")
+
+		req := httptest.NewRequest("DELETE", "/api/v1/stewards/steward-to-delete/config", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+	})
+
+	t.Run("not-found 404 when config does not exist", func(t *testing.T) {
+		server := setupTestServer(t)
+		apiKey := NewEphemeralTestKey(t, server, []string{"steward:delete-config"}, "test-tenant", 5*time.Minute)
+
+		req := httptest.NewRequest("DELETE", "/api/v1/stewards/nonexistent-steward/config", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		var errResp ErrorResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+		assert.Equal(t, "CONFIG_NOT_FOUND", errResp.Error.Code)
+	})
+
+	t.Run("bad steward ID 400", func(t *testing.T) {
+		server := setupTestServer(t)
+		apiKey := NewEphemeralTestKey(t, server, []string{"steward:delete-config"}, "test-tenant", 5*time.Minute)
+
+		// Dots and colons are URL-safe but fail identifierRegex (^[a-zA-Z0-9_-]+$)
+		req := httptest.NewRequest("DELETE", "/api/v1/stewards/steward.invalid:id/config", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("missing permission returns 403", func(t *testing.T) {
+		server := setupTestServer(t)
+		apiKey := NewTestKey(t, server, []string{"steward:read-config"})
+
+		req := httptest.NewRequest("DELETE", "/api/v1/stewards/some-steward/config", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+}

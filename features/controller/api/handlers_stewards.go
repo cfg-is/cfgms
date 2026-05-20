@@ -476,6 +476,39 @@ func (s *Server) handleStewardAuthRefresh(w http.ResponseWriter, r *http.Request
 	s.respondJSON(w, http.StatusOK, map[string]string{"steward_id": id, "status": "refresh_requested"})
 }
 
+// handleDeleteStewardConfig handles DELETE /api/v1/stewards/{id}/config
+func (s *Server) handleDeleteStewardConfig(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
+
+	if !identifierRegex.MatchString(stewardID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
+	tenantID := "default"
+	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
+		tenantID = tid
+	}
+
+	err := s.configService.DeleteConfiguration(r.Context(), tenantID, stewardID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			s.logger.Debug("Configuration not found for deletion", "steward_id", stewardIDForLog)
+			s.writeErrorResponse(w, http.StatusNotFound, "Configuration not found", "CONFIG_NOT_FOUND")
+		} else {
+			s.logger.Error("Failed to delete configuration", "steward_id", stewardIDForLog, "error", err)
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete configuration", "INTERNAL_ERROR")
+		}
+		return
+	}
+
+	s.logger.Info("Configuration deleted", "steward_id", stewardIDForLog)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleGetEffectiveConfig handles GET /api/v1/stewards/{id}/config/effective
 func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)

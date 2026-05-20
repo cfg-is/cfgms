@@ -17,6 +17,321 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestConfigListCommand(t *testing.T) {
+	t.Run("happy path prints table with configs", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "GET", r.Method)
+			assert.Equal(t, "/api/v1/configs", r.URL.Path)
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": []map[string]interface{}{
+					{
+						"steward_id": "steward-abc",
+						"tenant_id":  "acme-corp",
+						"version":    3,
+						"updated_at": "2026-05-20T10:00:00Z",
+						"updated_by": "admin",
+					},
+				},
+				"timestamp": "2026-05-20T10:00:00Z",
+			})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origJSON := configListJSON
+		origTenant := configListTenantID
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configListJSON = origJSON
+			configListTenantID = origTenant
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configListJSON = false
+		configListTenantID = ""
+
+		output := captureStdout(t, func() {
+			err := runConfigList(configListCmd, []string{})
+			require.NoError(t, err)
+		})
+
+		assert.Contains(t, output, "steward-abc")
+		assert.Contains(t, output, "acme-corp")
+	})
+
+	t.Run("empty list prints no configurations found", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data":      []interface{}{},
+				"timestamp": "2026-05-20T10:00:00Z",
+			})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origJSON := configListJSON
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configListJSON = origJSON
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configListJSON = false
+
+		output := captureStdout(t, func() {
+			err := runConfigList(configListCmd, []string{})
+			require.NoError(t, err)
+		})
+
+		assert.Contains(t, output, "No configurations found")
+	})
+
+	t.Run("tenant flag appended as query param", func(t *testing.T) {
+		var capturedQuery string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedQuery = r.URL.RawQuery
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data":      []interface{}{},
+				"timestamp": "2026-05-20T10:00:00Z",
+			})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origTenant := configListTenantID
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configListTenantID = origTenant
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configListTenantID = "my-tenant"
+
+		_ = captureStdout(t, func() {
+			err := runConfigList(configListCmd, []string{})
+			require.NoError(t, err)
+		})
+
+		assert.Equal(t, "tenant_id=my-tenant", capturedQuery)
+	})
+
+	t.Run("API error propagated", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+
+		err := runConfigList(configListCmd, []string{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unauthorized")
+	})
+}
+
+func TestConfigShowCommand(t *testing.T) {
+	t.Run("happy path prints config for steward", func(t *testing.T) {
+		var capturedPath string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedPath = r.URL.Path
+			assert.Equal(t, "GET", r.Method)
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"steward_id": "steward-xyz",
+					"version":    2,
+					"config": map[string]interface{}{
+						"steward": map[string]interface{}{"id": "steward-xyz"},
+					},
+				},
+				"timestamp": "2026-05-20T10:00:00Z",
+			})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origJSON := configShowJSON
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configShowJSON = origJSON
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configShowJSON = false
+
+		output := captureStdout(t, func() {
+			err := runConfigShow(configShowCmd, []string{"steward-xyz"})
+			require.NoError(t, err)
+		})
+
+		assert.Equal(t, "/api/v1/stewards/steward-xyz/config", capturedPath)
+		assert.Contains(t, output, "steward-xyz")
+	})
+
+	t.Run("404 not found propagated as error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "config not found"})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+
+		err := runConfigShow(configShowCmd, []string{"missing-steward"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "config not found")
+	})
+
+	t.Run("json flag emits raw response", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data":      map[string]interface{}{"steward_id": "s1"},
+				"timestamp": "2026-05-20T10:00:00Z",
+			})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origJSON := configShowJSON
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configShowJSON = origJSON
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configShowJSON = true
+
+		output := captureStdout(t, func() {
+			err := runConfigShow(configShowCmd, []string{"s1"})
+			require.NoError(t, err)
+		})
+
+		var parsed interface{}
+		require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed), "output should be valid JSON")
+	})
+}
+
+func TestConfigDeleteCommand(t *testing.T) {
+	t.Run("happy path prints confirmation on 204", func(t *testing.T) {
+		var capturedMethod, capturedPath string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedMethod = r.Method
+			capturedPath = r.URL.Path
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+
+		output := captureStdout(t, func() {
+			err := runConfigDelete(configDeleteCmd, []string{"steward-del"})
+			require.NoError(t, err)
+		})
+
+		assert.Equal(t, "DELETE", capturedMethod)
+		assert.Equal(t, "/api/v1/stewards/steward-del/config", capturedPath)
+		assert.Contains(t, output, "deleted")
+	})
+
+	t.Run("404 not found propagated as error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "config not found"})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+
+		err := runConfigDelete(configDeleteCmd, []string{"nonexistent"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "config not found")
+	})
+
+	t.Run("API error propagated", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+
+		err := runConfigDelete(configDeleteCmd, []string{"some-steward"})
+		require.Error(t, err)
+	})
+}
+
 func TestConfigUploadCommand(t *testing.T) {
 	t.Run("happy path sends PUT with yaml content type", func(t *testing.T) {
 		var (
