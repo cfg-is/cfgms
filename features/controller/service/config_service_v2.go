@@ -53,7 +53,7 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 		logger:              logger,
 		configManager:       config.NewManagerWithStorageManager(storageManager),
 		inheritanceResolver: config.NewInheritanceResolver(router, storageManager.GetClientTenantStore(), storageManager.GetTenantStore()),
-		validationManager:   config.NewValidationManager(storageManager.GetConfigStore()),
+		validationManager:   config.NewValidationManager(storageManager.GetConfigStore(), storageManager.GetTenantStore()),
 		controllerSvc:       controllerSvc,
 		storageManager:      storageManager,
 	}

@@ -25,7 +25,7 @@ func newTestManager(t *testing.T) *Manager {
 func newTestValidationManager(t *testing.T) *ValidationManager {
 	t.Helper()
 	sm := pkgtesting.SetupTestStorage(t)
-	return NewValidationManager(sm.GetConfigStore())
+	return NewValidationManager(sm.GetConfigStore(), sm.GetTenantStore())
 }
 
 func TestManagerStoreAndGetConfiguration(t *testing.T) {
