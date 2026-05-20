@@ -434,7 +434,7 @@ The controller is the certificate authority and identity provider for stewards. 
 3. Controller validates the credential — single-use: consume; long-lived code: look up matching record.
 4. Controller runs the registration approval workflow via `RegistrationApprovalHook`. The active workflow is selected by `registration.workflow` in `controller.cfg`:
    - **`auto-approve`** (default): approves every valid registration unconditionally. Implemented as a built-in workflow with `Variables: {policy: accept}` which short-circuits the engine. Equivalent to the legacy `DefaultApprovalHook`.
-   - **`manual-review`** (production): quarantines the steward pending operator action via `cfg registration approve <id>` / `cfg registration deny <id> [--reason ...]`. Sets `registration_decision: quarantine` so the steward is restricted to baseline config until promoted. (Pending-queue and CLI approval/deny commands are tracked under issue #1522.)
+   - **`manual-review`** (production): quarantines the steward pending operator action. Sets `registration_decision: quarantine` so the steward is restricted to baseline config until promoted. Operators use `cfg registration pending` to list quarantined stewards, `cfg registration approve <id>` to promote, and `cfg registration deny <id> [--reason ...]` to reject.
    - Custom workflows can implement arbitrary policy (e.g., approve `tenant=lab` registrations, reject everything else)
 5. On approval (`approve`): controller generates the steward ID and issues an mTLS client certificate scoped to the steward's tenant/group identity.
    On quarantine (`quarantine`): controller issues certificates but restricts the steward to baseline configuration only (no secrets, no scripts) until an administrator promotes it.
@@ -452,9 +452,34 @@ registration:
 | Value | Behavior |
 |---|---|
 | `auto-approve` (default) | Approves all valid registrations immediately. Seeds a built-in workflow with `Variables: {policy: accept}` that short-circuits the approval engine. |
-| `manual-review` | Quarantines every new steward pending operator action. Seeds a built-in workflow with `Variables: {registration_decision: quarantine}`. Use `cfg registration approve <id>` to promote (tracked under issue #1522). |
+| `manual-review` | Quarantines every new steward pending operator action. Seeds a built-in workflow with `Variables: {registration_decision: quarantine}`. Use `cfg registration pending` / `approve` / `deny` to manage the queue. |
 
 If `registration.workflow` is omitted and no `steward-registration-approval` workflow exists in the config store, the controller defaults to `auto-approve`. If a custom workflow already exists in the store, seeding is skipped to preserve operator-authored policy.
+
+**Managing pending registrations with `cfg registration`:**
+
+When using `manual-review`, quarantined stewards accumulate in the controller's in-memory pending queue until approved or denied. Use the `cfg registration` CLI commands to manage them:
+
+```bash
+# List all quarantined stewards awaiting approval
+cfg registration pending
+
+# Approve a steward (promotes from quarantined → registered)
+cfg registration approve <steward-id>
+
+# Deny a steward (removes from queue; steward must re-register to retry)
+cfg registration deny <steward-id> --reason "Unauthorized deployment"
+```
+
+| Command | HTTP call | Effect |
+|---|---|---|
+| `cfg registration pending` | `GET /api/v1/registration/pending` | Lists all quarantined stewards |
+| `cfg registration approve <id>` | `POST /api/v1/registration/{id}/approve` | Promotes steward status to `registered` |
+| `cfg registration deny <id>` | `POST /api/v1/registration/{id}/deny` | Removes steward from pending queue |
+
+Required API key permissions: `registration:list-pending`, `registration:approve`, `registration:deny`.
+
+The pending queue is in-memory only — it does not survive controller restarts. Quarantined stewards must re-register after a controller restart to reappear in the queue.
 
 ### RBAC
 

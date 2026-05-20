@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/mux"
+
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -50,6 +52,73 @@ type RegistrationResponse struct {
 	// Quarantined stewards receive certificates but are restricted to baseline configuration
 	// (no secrets, no scripts) until an administrator promotes them.
 	Quarantined bool `json:"quarantined,omitempty"`
+}
+
+// PendingRegistration represents a quarantined steward awaiting admin approval.
+type PendingRegistration struct {
+	StewardID    string    `json:"steward_id"`
+	TenantID     string    `json:"tenant_id"`
+	SourceIP     string    `json:"source_ip"`
+	RegisteredAt time.Time `json:"registered_at"`
+}
+
+// denyRegistrationRequest is the optional request body for the deny endpoint.
+type denyRegistrationRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// handleListPendingRegistrations handles GET /api/v1/registration/pending.
+// Returns all quarantined stewards awaiting operator approval.
+func (s *Server) handleListPendingRegistrations(w http.ResponseWriter, r *http.Request) {
+	var pending []PendingRegistration
+	s.registrationQueue.Range(func(_, value interface{}) bool {
+		if pr, ok := value.(PendingRegistration); ok {
+			pending = append(pending, pr)
+		}
+		return true
+	})
+	if pending == nil {
+		pending = []PendingRegistration{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(pending); err != nil {
+		s.logger.Error("Failed to encode pending registrations", "error", err)
+	}
+}
+
+// handleApproveRegistration handles POST /api/v1/registration/{id}/approve.
+// Promotes a quarantined steward to registered status.
+func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Request) {
+	stewardID := mux.Vars(r)["id"]
+	if _, ok := s.registrationQueue.Load(stewardID); !ok {
+		http.Error(w, "steward not found in pending queue", http.StatusNotFound)
+		return
+	}
+	if err := s.controllerService.UpdateStewardStatus(stewardID, "registered"); err != nil {
+		s.logger.Error("Failed to update steward status", "steward_id", stewardID, "error", err)
+		http.Error(w, "Failed to update steward status", http.StatusInternalServerError)
+		return
+	}
+	s.registrationQueue.Delete(stewardID)
+	s.logger.Info("Steward registration approved", "steward_id", stewardID)
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleDenyRegistration handles POST /api/v1/registration/{id}/deny.
+// Removes a quarantined steward from the pending queue without promoting it.
+func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) {
+	stewardID := mux.Vars(r)["id"]
+	if _, ok := s.registrationQueue.Load(stewardID); !ok {
+		http.Error(w, "steward not found in pending queue", http.StatusNotFound)
+		return
+	}
+	var req denyRegistrationRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	s.registrationQueue.Delete(stewardID)
+	s.logger.Info("Steward registration denied",
+		"steward_id", stewardID,
+		"reason", logging.SanitizeLogValue(req.Reason))
+	w.WriteHeader(http.StatusOK)
 }
 
 // handleRegister handles steward registration via REST API
@@ -291,6 +360,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, resp.TransportAddress, initialStatus); err != nil {
 		s.logger.Error("Failed to register steward in controller service",
 			"steward_id", stewardID, "error", err)
+	} else if quarantined {
+		// Issue #1568: Track quarantined steward in the pending approval queue.
+		s.registrationQueue.Store(stewardID, PendingRegistration{
+			StewardID:    stewardID,
+			TenantID:     token.TenantID,
+			SourceIP:     extractSourceIP(r),
+			RegisteredAt: time.Now().UTC(),
+		})
 	}
 
 	// Emit success audit event before writing the response

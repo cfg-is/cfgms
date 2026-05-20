@@ -80,6 +80,7 @@ type Server struct {
 	mountPointValidator     MountPointValidator            // Issue #1396: config source connection test
 	configSourceSecretStore secretsif.SecretStore          // Issue #1396: secrets for config source validator
 	configSourceRateLimits  sync.Map                       // Issue #1396: per-tenant rate-limit counters
+	registrationQueue       sync.Map                       // Issue #1568: quarantined stewards awaiting approval
 	stopCleanup             chan struct{}                  // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                  // closed when cleanup goroutine exits
 	closeOnce               sync.Once                      // idempotent Close
@@ -359,6 +360,11 @@ func (s *Server) setupRouter() {
 	regTokens.Handle("/{token}", s.requirePermission("registration", "read-token")(http.HandlerFunc(s.handleGetRegistrationToken))).Methods("GET")
 	regTokens.Handle("/{token}", s.requirePermission("registration", "delete-token")(http.HandlerFunc(s.handleDeleteRegistrationToken))).Methods("DELETE")
 	regTokens.Handle("/{token}/revoke", s.requirePermission("registration", "revoke-token")(http.HandlerFunc(s.handleRevokeRegistrationToken))).Methods("POST")
+
+	// Registration approval endpoints (Issue #1568)
+	api.Handle("/registration/pending", s.requirePermission("registration", "list-pending")(http.HandlerFunc(s.handleListPendingRegistrations))).Methods("GET")
+	api.Handle("/registration/{id}/approve", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveRegistration))).Methods("POST")
+	api.Handle("/registration/{id}/deny", s.requirePermission("registration", "deny")(http.HandlerFunc(s.handleDenyRegistration))).Methods("POST")
 
 	// Monitoring endpoints
 	monitoring := api.PathPrefix("/monitoring").Subrouter()

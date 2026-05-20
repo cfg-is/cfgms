@@ -378,6 +378,19 @@ func (s *ControllerService) RegisterSteward(stewardID, tenantID, transportAddr, 
 	return nil
 }
 
+// UpdateStewardStatus updates the status of a registered steward.
+// Returns an error if the steward is not found.
+func (s *ControllerService) UpdateStewardStatus(stewardID, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	steward, exists := s.stewards[stewardID]
+	if !exists {
+		return fmt.Errorf("steward %s not found", stewardID)
+	}
+	steward.Status = status
+	return nil
+}
+
 // GetAllStewards returns a list of all registered stewards
 func (s *ControllerService) GetAllStewards() []*StewardInfo {
 	s.mu.RLock()

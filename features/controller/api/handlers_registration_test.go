@@ -607,3 +607,187 @@ func TestHandleRegister_ValidToken_LogsRedactedPrefixNotFullToken(t *testing.T) 
 	assert.True(t, capLogger.allKVKeyHasValue("token_prefix", expectedPrefix),
 		"token_prefix key must hold the 8-char+ellipsis redacted form on the success path")
 }
+
+// newRegistrationApprovalServer creates a minimal server with a test API key that has
+// all three registration approval permissions, wired to a real httptest.Server.
+// Returns the server and the httptest.Server (caller must close the httptest.Server).
+func newRegistrationApprovalServer(t *testing.T) (*Server, *httptest.Server) {
+	t.Helper()
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	// Add a test API key with all registration approval permissions.
+	server.apiKeys["reg-approval-key"] = &APIKey{
+		ID:          "reg-approval-key-id",
+		Key:         "reg-approval-key",
+		Permissions: []string{"registration:list-pending", "registration:approve", "registration:deny"},
+		TenantID:    "default",
+	}
+
+	ts := httptest.NewServer(server.router)
+	return server, ts
+}
+
+func TestHandleListPendingRegistrations(t *testing.T) {
+	server, ts := newRegistrationApprovalServer(t)
+	defer ts.Close()
+
+	makeRequest := func(t *testing.T) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(context.Background(), "GET", ts.URL+"/api/v1/registration/pending", nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer reg-approval-key")
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+
+	t.Run("empty queue returns empty array", func(t *testing.T) {
+		resp := makeRequest(t)
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var pending []PendingRegistration
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&pending))
+		assert.Empty(t, pending)
+	})
+
+	t.Run("returns queued registrations", func(t *testing.T) {
+		now := time.Now().UTC()
+		server.registrationQueue.Store("steward-test-list-1", PendingRegistration{
+			StewardID:    "steward-test-list-1",
+			TenantID:     "tenant-a",
+			SourceIP:     "192.168.1.1",
+			RegisteredAt: now,
+		})
+		t.Cleanup(func() { server.registrationQueue.Delete("steward-test-list-1") })
+
+		resp := makeRequest(t)
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var pending []PendingRegistration
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&pending))
+		require.Len(t, pending, 1)
+		assert.Equal(t, "steward-test-list-1", pending[0].StewardID)
+		assert.Equal(t, "tenant-a", pending[0].TenantID)
+		assert.Equal(t, "192.168.1.1", pending[0].SourceIP)
+	})
+}
+
+func TestHandleApproveRegistration(t *testing.T) {
+	server, ts := newRegistrationApprovalServer(t)
+	defer ts.Close()
+
+	makeApprove := func(t *testing.T, stewardID string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(context.Background(), "POST",
+			ts.URL+"/api/v1/registration/"+stewardID+"/approve", nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer reg-approval-key")
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+
+	t.Run("happy path - promotes quarantined steward to registered", func(t *testing.T) {
+		// Register steward in controller service so UpdateStewardStatus can find it.
+		require.NoError(t, server.controllerService.RegisterSteward("steward-approve-1", "tenant-a", "", "quarantined"))
+		server.registrationQueue.Store("steward-approve-1", PendingRegistration{
+			StewardID:    "steward-approve-1",
+			TenantID:     "tenant-a",
+			SourceIP:     "10.0.0.1",
+			RegisteredAt: time.Now().UTC(),
+		})
+
+		resp := makeApprove(t, "steward-approve-1")
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		// Steward must be removed from the pending queue.
+		_, inQueue := server.registrationQueue.Load("steward-approve-1")
+		assert.False(t, inQueue, "approved steward must be removed from pending queue")
+
+		// Steward status must be updated to "registered".
+		info, exists := server.controllerService.GetStewardInfo("steward-approve-1")
+		require.True(t, exists)
+		assert.Equal(t, "registered", info.Status)
+	})
+
+	t.Run("not found returns 404", func(t *testing.T) {
+		resp := makeApprove(t, "nonexistent-steward")
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+		assert.Contains(t, resp.Header.Get("Content-Type"), "text/plain")
+	})
+}
+
+func TestHandleDenyRegistration(t *testing.T) {
+	server, ts := newRegistrationApprovalServer(t)
+	defer ts.Close()
+
+	makeDeny := func(t *testing.T, stewardID, body string) *http.Response {
+		t.Helper()
+		var reqBody *bytes.Reader
+		if body != "" {
+			reqBody = bytes.NewReader([]byte(body))
+		} else {
+			reqBody = bytes.NewReader(nil)
+		}
+		req, err := http.NewRequestWithContext(context.Background(), "POST",
+			ts.URL+"/api/v1/registration/"+stewardID+"/deny", reqBody)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer reg-approval-key")
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+
+	t.Run("happy path - removes steward from pending queue", func(t *testing.T) {
+		server.registrationQueue.Store("steward-deny-1", PendingRegistration{
+			StewardID:    "steward-deny-1",
+			TenantID:     "tenant-b",
+			SourceIP:     "10.0.0.2",
+			RegisteredAt: time.Now().UTC(),
+		})
+
+		resp := makeDeny(t, "steward-deny-1", "")
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		_, inQueue := server.registrationQueue.Load("steward-deny-1")
+		assert.False(t, inQueue, "denied steward must be removed from pending queue")
+	})
+
+	t.Run("deny with reason - removes from queue", func(t *testing.T) {
+		server.registrationQueue.Store("steward-deny-2", PendingRegistration{
+			StewardID:    "steward-deny-2",
+			TenantID:     "tenant-b",
+			SourceIP:     "10.0.0.3",
+			RegisteredAt: time.Now().UTC(),
+		})
+
+		resp := makeDeny(t, "steward-deny-2", `{"reason":"Unauthorized deployment"}`)
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		_, inQueue := server.registrationQueue.Load("steward-deny-2")
+		assert.False(t, inQueue, "denied steward must be removed from pending queue")
+	})
+
+	t.Run("not found returns 404", func(t *testing.T) {
+		resp := makeDeny(t, "nonexistent-steward", "")
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	})
+}
