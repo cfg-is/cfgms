@@ -392,22 +392,33 @@ gh pr list --repo cfg-is/cfgms --search "head:feature/story-" --state open \
 
 Cross-check the story's project status: skip any story with status `Fix`. Use `preflight` data (`review_recommendations`) to filter — the preflight already tracks Fix-status stories and excludes them from `spawn_acceptance_reviewer` actions.
 
-**Dispatch one review per cycle in FIFO order.** Do not dispatch multiple in
-parallel — even though headless containers make it cheap, parallel reviews can
-both decide to auto-merge PRs that conflict at the file level. Pick the oldest
-eligible PR:
+**Dispatch reviews for ALL eligible PRs each cycle, in parallel.** Iterate the
+`spawn_acceptance_reviewer` PRs in FIFO order (oldest `createdAt` first) and
+dispatch a headless review container for each, up to the 7-container cap
+(`feedback_max_running_agents`). The cap is shared with dev and fix containers;
+reviews are in-flight work, so they claim their slots before Step 6 dispatches
+any new dev. If eligible reviews exceed the free slots, dispatch up to the cap
+and the rest are picked up next cycle.
 
 ```bash
 ./.claude/scripts/agent-dispatch.sh review-pr <PR_NUM>
 ```
 
-Output is one of:
+Run one `review-pr` call per PR — sequential Bash calls, one pre-approved
+helper per call. Do NOT serialize on completion: never wait for one review to
+finish before dispatching the next, and never wait for the merge queue to
+drain. Parallel reviews are safe — the dispatcher's file-overlap gate keeps
+file-conflicting stories from being in flight together, and the merge queue
+auto-rebases and re-runs CI as the merge-time safety net. FIFO *merge* order is
+a nice-to-have, not load-bearing.
+
+Each call returns one of:
 - `REVIEW_DISPATCHED:<PR>:<STORY>:<container_id>` — running headless. Move on; the comment will appear on the PR when done.
 - `REVIEW_REFUSED:<PR>:<reason>` — see Section 4e of `.claude/commands/dispatch.md` for reasons. Common cases: `pr_state_<X>` (PR closed), `no_story_link` (manually associate), `container_exists` (skip — another review is running).
 
-After dispatch, **do NOT wait**. The next cron cycle will see the
-`acceptance-reviewer` comment on the PR (if review completed) and move on to
-other work. The dispatch is fire-and-forget on the host side.
+After dispatch, **do NOT wait**. Later cron cycles will see the
+`acceptance-reviewer` comment on each PR (if review completed) and move on to
+other work. The dispatches are fire-and-forget on the host side.
 
 **Failsafe cleanup.** Run once per cron cycle, near the start (before Step 4):
 
