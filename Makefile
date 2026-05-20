@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -1881,6 +1881,25 @@ test-e2e-local:
 	@echo "- ✅ Comprehensive E2E scenarios passed"
 	@echo ""
 	@echo "🎯 Full E2E validation complete - ready for PR"
+
+# Fleet E2E tests — builds cfg CLI, spins up the fleet docker-compose profile,
+# runs ./test/e2e/fleet/... with required env vars, and tears down regardless of result.
+# Mirrors the fleet-e2e-tests GH Actions job exactly.
+.PHONY: test-e2e-fleet
+test-e2e-fleet: build-cli
+	@echo ""
+	@echo "🚢 FLEET E2E TEST SUITE"
+	@echo "======================="
+	@echo "Starting fleet docker-compose profile and running test/e2e/fleet/..."
+	@echo ""
+	@set -e; \
+	trap 'echo ""; echo "🧹 Tearing down fleet compose..."; docker compose --profile fleet -f docker-compose.test.yml down -v' EXIT; \
+	docker compose --profile fleet -f docker-compose.test.yml up -d --wait; \
+	echo ""; \
+	echo "Running fleet E2E tests..."; \
+	CFG_BINARY=$(CURDIR)/bin/cfg CFGMS_FLEET_TEST=1 go test -v -timeout 300s ./test/e2e/fleet/...
+	@echo ""
+	@echo "✅ FLEET E2E TESTS PASSED"
 
 # Story completion validation - comprehensive validation for /story-complete
 # Story #315: Now matches ALL CI required checks (100% parity except Windows/macOS native builds)

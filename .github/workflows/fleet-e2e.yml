@@ -1,0 +1,42 @@
+name: Fleet E2E Tests
+
+on:
+  pull_request:
+    branches: [ develop ]
+  merge_group:
+
+env:
+  GO_VERSION: '1.26.3'
+
+permissions: {}
+
+jobs:
+  fleet-e2e-tests:
+    name: fleet-e2e-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Cache Go modules
+        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-modules-
+        continue-on-error: true
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run fleet E2E tests
+        run: make test-e2e-fleet
