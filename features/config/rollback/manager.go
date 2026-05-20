@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cfgis/cfgms/features/config/git"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // DefaultRollbackManager implements the RollbackManager interface
@@ -156,6 +157,11 @@ func (m *DefaultRollbackManager) PreviewRollback(ctx context.Context, request Ro
 
 // ExecuteRollback performs the rollback operation
 func (m *DefaultRollbackManager) ExecuteRollback(ctx context.Context, request RollbackRequest) (*RollbackOperation, error) {
+	userID, err := m.getCurrentUser(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cannot execute rollback: %w", err)
+	}
+
 	// Check for existing rollback in progress
 	if err := m.checkNoRollbackInProgress(ctx, request.TargetType, request.TargetID); err != nil {
 		return nil, err
@@ -191,7 +197,7 @@ func (m *DefaultRollbackManager) ExecuteRollback(ctx context.Context, request Ro
 		ID:          uuid.New().String(),
 		Request:     request,
 		Status:      RollbackStatusPending,
-		InitiatedBy: m.getCurrentUser(ctx),
+		InitiatedBy: userID,
 		InitiatedAt: time.Now(),
 		Progress: RollbackProgress{
 			Stage:      "initializing",
@@ -238,6 +244,11 @@ func (m *DefaultRollbackManager) GetRollbackStatus(ctx context.Context, rollback
 
 // CancelRollback cancels an in-progress rollback
 func (m *DefaultRollbackManager) CancelRollback(ctx context.Context, rollbackID string, reason string) error {
+	userID, err := m.getCurrentUser(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot cancel rollback: %w", err)
+	}
+
 	operation, err := m.store.GetOperation(ctx, rollbackID)
 	if err != nil {
 		return err
@@ -264,7 +275,7 @@ func (m *DefaultRollbackManager) CancelRollback(ctx context.Context, rollbackID 
 
 	// Add audit entry
 	m.addAuditEntry(ctx, operation, "rollback_cancelled", reason, map[string]interface{}{
-		"cancelled_by": m.getCurrentUser(ctx),
+		"cancelled_by": userID,
 	})
 
 	// Update operation
@@ -682,16 +693,24 @@ func (m *DefaultRollbackManager) verifyApproval(ctx context.Context, approvalID 
 	return nil
 }
 
-func (m *DefaultRollbackManager) getCurrentUser(ctx context.Context) string {
-	// Deferred: tracked in #1440 — extract authenticated user identity from context
-	return "system"
+func (m *DefaultRollbackManager) getCurrentUser(ctx context.Context) (string, error) {
+	userID, ok := ctx.Value(ctxkeys.UserIDKey).(string)
+	if !ok || userID == "" {
+		return "", fmt.Errorf("unauthenticated: no user identity in context")
+	}
+	return userID, nil
 }
 
 func (m *DefaultRollbackManager) addAuditEntry(ctx context.Context, operation *RollbackOperation, eventType, action string, details map[string]interface{}) {
+	actor, err := m.getCurrentUser(ctx)
+	if err != nil {
+		// Async operations run with context.Background(); use the authenticated initiator recorded at operation start.
+		actor = operation.InitiatedBy
+	}
 	entry := AuditEntry{
 		Timestamp: time.Now(),
 		EventType: eventType,
-		Actor:     m.getCurrentUser(ctx),
+		Actor:     actor,
 		Action:    action,
 		Details:   details,
 		Result:    "success",
