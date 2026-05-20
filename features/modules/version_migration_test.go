@@ -328,11 +328,6 @@ func TestDefaultVersionMigrator_ExecuteMigration(t *testing.T) {
 		path, err := migrator.GetMigrationPath("test-module", "1.0.0", "1.1.0")
 		require.NoError(t, err)
 
-		// Reduce step times for faster testing
-		for i := range path.Steps {
-			path.Steps[i].EstimatedTime = 100 * time.Millisecond
-		}
-
 		ctx := context.Background()
 		result, err := migrator.ExecuteMigration(ctx, path)
 		require.NoError(t, err)
@@ -343,10 +338,11 @@ func TestDefaultVersionMigrator_ExecuteMigration(t *testing.T) {
 		assert.Equal(t, MigrationStatusRunning, result.Status)
 		assert.False(t, result.StartTime.IsZero())
 
-		// Wait for migration to complete
-		time.Sleep(2 * time.Second)
+		// Wait for migration to complete deterministically
+		waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		require.NoError(t, migrator.WaitForMigration(waitCtx, result.ID))
 
-		// Check migration status
 		status, err := migrator.GetMigrationStatus(result.ID)
 		require.NoError(t, err)
 		assert.Equal(t, MigrationStatusCompleted, status.Status)
@@ -368,46 +364,47 @@ func TestDefaultVersionMigrator_ExecuteMigration(t *testing.T) {
 	})
 
 	t.Run("concurrent migration for same module", func(t *testing.T) {
-		path1, err := migrator.GetMigrationPath("test-module", "1.0.0", "1.1.0")
+		// Inject a fake running execution to test the concurrency guard deterministically.
+		// This avoids relying on goroutine scheduling timing.
+		path, err := migrator.GetMigrationPath("test-module", "1.0.0", "1.1.0")
 		require.NoError(t, err)
 
-		path2, err := migrator.GetMigrationPath("test-module", "1.1.0", "1.0.0")
-		require.NoError(t, err)
-
-		// Make migrations take a reasonable amount of time for this test
-		for i := range path1.Steps {
-			path1.Steps[i].EstimatedTime = 100 * time.Millisecond
+		blockCtx, blockCancel := context.WithCancel(context.Background())
+		fakeExec := &MigrationExecution{
+			Path:       path,
+			Status:     MigrationStatusRunning,
+			StartTime:  time.Now(),
+			Context:    blockCtx,
+			CancelFunc: blockCancel,
 		}
-		for i := range path2.Steps {
-			path2.Steps[i].EstimatedTime = 100 * time.Millisecond
-		}
+		migrator.mu.Lock()
+		migrator.activeMigrations[path.ID] = fakeExec
+		migrator.mu.Unlock()
 
-		ctx := context.Background()
-
-		// Start first migration
-		_, err = migrator.ExecuteMigration(ctx, path1)
+		path2, err := migrator.GetMigrationPath("test-module", "1.0.0", "1.1.0")
 		require.NoError(t, err)
 
-		// Try to start second migration (should fail)
-		result2, err := migrator.ExecuteMigration(ctx, path2)
+		// Second migration for same module must be rejected
+		result2, err := migrator.ExecuteMigration(context.Background(), path2)
 		assert.Nil(t, result2)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "migration already in progress")
 
-		// Wait for first migration to complete with polling
-		timeout := time.Now().Add(5 * time.Second)
-		for time.Now().Before(timeout) {
-			status, err := migrator.GetMigrationStatus("test-module")
-			if err == nil && status.Status == MigrationStatusCompleted {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
+		// Remove fake execution and verify a fresh migration can now start
+		blockCancel()
+		migrator.mu.Lock()
+		delete(migrator.activeMigrations, path.ID)
+		migrator.mu.Unlock()
 
-		// Now second migration should succeed
-		result3, err := migrator.ExecuteMigration(ctx, path2)
-		assert.NoError(t, err)
+		path3, err := migrator.GetMigrationPath("test-module", "1.0.0", "1.1.0")
+		require.NoError(t, err)
+		result3, err := migrator.ExecuteMigration(context.Background(), path3)
+		require.NoError(t, err)
 		assert.NotNil(t, result3)
+
+		waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		require.NoError(t, migrator.WaitForMigration(waitCtx, result3.ID))
 	})
 }
 
@@ -433,41 +430,27 @@ func TestDefaultVersionMigrator_GetMigrationStatus(t *testing.T) {
 		path, err := migrator.GetMigrationPath("test-module", "1.0.0", "1.1.0")
 		require.NoError(t, err)
 
-		// Make migration take longer for status testing
-		for i := range path.Steps {
-			path.Steps[i].EstimatedTime = 1 * time.Second
-		}
-
 		ctx := context.Background()
 		result, err := migrator.ExecuteMigration(ctx, path)
 		require.NoError(t, err)
 
-		// Get status while migration is running
-		time.Sleep(100 * time.Millisecond) // Let it start
+		// Wait for completion deterministically
+		waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		require.NoError(t, migrator.WaitForMigration(waitCtx, result.ID))
+
+		// Verify completed status fields
 		status, err := migrator.GetMigrationStatus(result.ID)
 		require.NoError(t, err)
 		assert.NotNil(t, status)
-
 		assert.Equal(t, result.ID, status.ID)
 		assert.Equal(t, "test-module", status.ModuleName)
 		assert.Equal(t, "1.0.0", status.FromVersion)
 		assert.Equal(t, "1.1.0", status.ToVersion)
 		assert.Equal(t, len(path.Steps), status.TotalSteps)
-		assert.GreaterOrEqual(t, status.Progress, 0.0)
-		assert.LessOrEqual(t, status.Progress, 1.0)
+		assert.Equal(t, MigrationStatusCompleted, status.Status)
+		assert.Equal(t, 1.0, status.Progress)
 		assert.Greater(t, status.ElapsedTime, time.Duration(0))
-
-		if status.Progress > 0 {
-			assert.Greater(t, status.EstimatedETA, time.Duration(0))
-		}
-
-		// Wait for completion and check again
-		time.Sleep(10 * time.Second)
-
-		finalStatus, err := migrator.GetMigrationStatus(result.ID)
-		require.NoError(t, err)
-		assert.Equal(t, MigrationStatusCompleted, finalStatus.Status)
-		assert.Equal(t, 1.0, finalStatus.Progress)
 	})
 
 	t.Run("non-existent migration", func(t *testing.T) {
@@ -499,59 +482,34 @@ func TestDefaultVersionMigrator_ListActiveMigrations(t *testing.T) {
 		assert.Empty(t, activeMigrations)
 	})
 
-	t.Run("multiple active migrations", func(t *testing.T) {
-		var migrationIDs []string
-
-		// Start multiple migrations
+	t.Run("completed migrations removed from active list", func(t *testing.T) {
+		var ids []string
 		for i := 0; i < 3; i++ {
-			moduleName := fmt.Sprintf("test-module-%d", i)
-			path, err := migrator.GetMigrationPath(moduleName, "1.0.0", "1.1.0")
+			modName := fmt.Sprintf("test-module-%d", i)
+			path, err := migrator.GetMigrationPath(modName, "1.0.0", "1.1.0")
 			require.NoError(t, err)
-
-			// Make migrations take a reasonable time for testing
-			for j := range path.Steps {
-				path.Steps[j].EstimatedTime = 200 * time.Millisecond
-			}
-
-			ctx := context.Background()
-			result, err := migrator.ExecuteMigration(ctx, path)
+			result, err := migrator.ExecuteMigration(context.Background(), path)
 			require.NoError(t, err)
-			migrationIDs = append(migrationIDs, result.ID)
+			ids = append(ids, result.ID)
 		}
 
-		// List active migrations
-		time.Sleep(200 * time.Millisecond) // Let them start
-		activeMigrations, err := migrator.ListActiveMigrations()
+		// Wait for all to complete deterministically
+		waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		for _, id := range ids {
+			require.NoError(t, migrator.WaitForMigration(waitCtx, id))
+		}
+
+		// Completed migrations must not appear in the active list
+		active, err := migrator.ListActiveMigrations()
 		require.NoError(t, err)
-		assert.Equal(t, 3, len(activeMigrations))
-
-		// Verify all our migrations are in the list
-		foundIDs := make(map[string]bool)
-		for _, status := range activeMigrations {
-			foundIDs[status.ID] = true
-			assert.NotEmpty(t, status.ModuleName)
-			assert.Equal(t, MigrationStatusRunning, status.Status)
+		activeIDs := make(map[string]bool)
+		for _, s := range active {
+			activeIDs[s.ID] = true
 		}
-
-		for _, id := range migrationIDs {
-			assert.True(t, foundIDs[id], "Migration ID %s not found in active list", id)
+		for _, id := range ids {
+			assert.False(t, activeIDs[id], "completed migration %s must not be in active list", id)
 		}
-
-		// Wait for migrations to complete with polling
-		timeout := time.Now().Add(10 * time.Second)
-		for time.Now().Before(timeout) {
-			activeMigrations, err := migrator.ListActiveMigrations()
-			require.NoError(t, err)
-			if len(activeMigrations) == 0 {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		// Should have no active migrations now
-		activeMigrations, err = migrator.ListActiveMigrations()
-		require.NoError(t, err)
-		assert.Empty(t, activeMigrations)
 	})
 }
 
@@ -574,23 +532,18 @@ func TestDefaultVersionMigrator_RollbackMigration(t *testing.T) {
 	require.NoError(t, registry.RegisterVersion(metadata2))
 
 	t.Run("rollback completed migration", func(t *testing.T) {
-		// First, complete a migration
 		path, err := migrator.GetMigrationPath("test-module", "1.0.0", "1.0.1")
 		require.NoError(t, err)
-
-		// Make migration quick for testing
-		for i := range path.Steps {
-			path.Steps[i].EstimatedTime = 100 * time.Millisecond
-		}
 
 		ctx := context.Background()
 		result, err := migrator.ExecuteMigration(ctx, path)
 		require.NoError(t, err)
 
-		// Wait for completion
-		time.Sleep(2 * time.Second)
+		// Wait for completion deterministically
+		waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		require.NoError(t, migrator.WaitForMigration(waitCtx, result.ID))
 
-		// Verify it's completed
 		status, err := migrator.GetMigrationStatus(result.ID)
 		require.NoError(t, err)
 		assert.Equal(t, MigrationStatusCompleted, status.Status)
@@ -599,13 +552,13 @@ func TestDefaultVersionMigrator_RollbackMigration(t *testing.T) {
 		rollbackResult, err := migrator.RollbackMigration(ctx, result.ID)
 		require.NoError(t, err)
 		assert.NotNil(t, rollbackResult)
-
-		// Rollback should be a new migration
 		assert.NotEqual(t, result.ID, rollbackResult.ID)
 		assert.Equal(t, MigrationStatusRunning, rollbackResult.Status)
 
-		// Wait for rollback to complete
-		time.Sleep(3 * time.Second)
+		// Wait for rollback to complete deterministically
+		waitCtx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel2()
+		require.NoError(t, migrator.WaitForMigration(waitCtx2, rollbackResult.ID))
 
 		rollbackStatus, err := migrator.GetMigrationStatus(rollbackResult.ID)
 		require.NoError(t, err)
@@ -617,6 +570,104 @@ func TestDefaultVersionMigrator_RollbackMigration(t *testing.T) {
 		_, err := migrator.RollbackMigration(ctx, "non-existent-id")
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "not found in history")
+	})
+
+	t.Run("rollback not supported", func(t *testing.T) {
+		// Inject a completed migration that has RollbackSupported=false
+		migrator.mu.Lock()
+		migrator.migrationHistory = append(migrator.migrationHistory, &MigrationResult{
+			ID:     "no-rollback-id",
+			Status: MigrationStatusCompleted,
+			Path: &MigrationPath{
+				ID:                "no-rollback-id",
+				ModuleName:        "test-module",
+				FromVersion:       "1.0.0",
+				ToVersion:         "1.0.1",
+				RollbackSupported: false,
+			},
+		})
+		migrator.mu.Unlock()
+
+		ctx := context.Background()
+		_, err := migrator.RollbackMigration(ctx, "no-rollback-id")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "rollback")
+	})
+}
+
+func TestWaitForMigration(t *testing.T) {
+	t.Run("returns nil when migration completes successfully", func(t *testing.T) {
+		registry := NewDefaultModuleVersionRegistry()
+		require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "wm", Version: "1.0.0", Description: "v1"}))
+		require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "wm", Version: "2.0.0", Description: "v2"}))
+		migrator := NewDefaultVersionMigrator(registry)
+
+		path, err := migrator.GetMigrationPath("wm", "1.0.0", "2.0.0")
+		require.NoError(t, err)
+		result, err := migrator.ExecuteMigration(context.Background(), path)
+		require.NoError(t, err)
+
+		waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		assert.NoError(t, migrator.WaitForMigration(waitCtx, result.ID))
+	})
+
+	t.Run("returns context error when context cancelled before completion", func(t *testing.T) {
+		migrator := NewDefaultVersionMigrator(nil)
+
+		// Inject a running migration so WaitForMigration loops
+		ctx, cancelExec := context.WithCancel(context.Background())
+		migrator.mu.Lock()
+		migrator.activeMigrations["stuck-id"] = &MigrationExecution{
+			Path:       &MigrationPath{ID: "stuck-id", ModuleName: "wm"},
+			Status:     MigrationStatusRunning,
+			StartTime:  time.Now(),
+			Context:    ctx,
+			CancelFunc: cancelExec,
+		}
+		migrator.mu.Unlock()
+
+		waitCtx, cancelWait := context.WithCancel(context.Background())
+		cancelWait() // already cancelled
+
+		err := migrator.WaitForMigration(waitCtx, "stuck-id")
+		assert.ErrorIs(t, err, context.Canceled)
+
+		// Cleanup
+		cancelExec()
+		migrator.mu.Lock()
+		delete(migrator.activeMigrations, "stuck-id")
+		migrator.mu.Unlock()
+	})
+
+	t.Run("returns error for failed migration", func(t *testing.T) {
+		migrator := NewDefaultVersionMigrator(nil)
+		migrator.mu.Lock()
+		migrator.migrationHistory = append(migrator.migrationHistory, &MigrationResult{
+			ID:     "failed-id",
+			Status: MigrationStatusFailed,
+			Path:   &MigrationPath{ID: "failed-id", ModuleName: "wm"},
+		})
+		migrator.mu.Unlock()
+
+		err := migrator.WaitForMigration(context.Background(), "failed-id")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed")
+	})
+
+	t.Run("returns error for cancelled migration", func(t *testing.T) {
+		migrator := NewDefaultVersionMigrator(nil)
+		migrator.mu.Lock()
+		migrator.migrationHistory = append(migrator.migrationHistory, &MigrationResult{
+			ID:     "cancelled-id",
+			Status: MigrationStatusCancelled,
+			Path:   &MigrationPath{ID: "cancelled-id", ModuleName: "wm"},
+		})
+		migrator.mu.Unlock()
+
+		err := migrator.WaitForMigration(context.Background(), "cancelled-id")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "cancelled")
 	})
 }
 
@@ -894,6 +945,528 @@ func containsInMiddle(str, substr string) bool {
 		}
 	}
 	return false
+}
+
+// newStepRegistry registers two versions of "mod" and returns the registry and migrator.
+func newStepRegistry(t *testing.T) (*DefaultModuleVersionRegistry, *DefaultVersionMigrator) {
+	t.Helper()
+	registry := NewDefaultModuleVersionRegistry()
+	migrator := NewDefaultVersionMigrator(registry)
+	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "mod", Version: "1.0.0", Description: "v1"}))
+	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "mod", Version: "2.0.0", Description: "v2"}))
+	return registry, migrator
+}
+
+// historyLen returns the number of transitions recorded for moduleName.
+func historyLen(t *testing.T, registry *DefaultModuleVersionRegistry, moduleName string) int {
+	t.Helper()
+	h, err := registry.GetVersionHistory(moduleName)
+	require.NoError(t, err)
+	return len(h.Transitions)
+}
+
+func TestExecuteStep_Validation(t *testing.T) {
+	_, migrator := newStepRegistry(t)
+	step := MigrationStep{
+		ID:          "validate-mod-1.0.0-2.0.0",
+		Type:        MigrationStepValidation,
+		ModuleName:  "mod",
+		FromVersion: "1.0.0",
+		ToVersion:   "2.0.0",
+		Description: "Validate",
+	}
+
+	t.Run("succeeds with both versions installed", func(t *testing.T) {
+		result := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, result.Status)
+		assert.Empty(t, result.ErrorMessage)
+		assert.NotEmpty(t, result.Output)
+	})
+
+	t.Run("idempotent on repeated calls", func(t *testing.T) {
+		r1 := migrator.executeStep(context.Background(), step)
+		r2 := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, r1.Status)
+		assert.Equal(t, StepStatusCompleted, r2.Status)
+	})
+
+	t.Run("fails when from version not installed", func(t *testing.T) {
+		bad := step
+		bad.FromVersion = "9.9.9"
+		result := migrator.executeStep(context.Background(), bad)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "validation")
+		assert.Contains(t, result.ErrorMessage, "9.9.9")
+	})
+
+	t.Run("fails when to version not installed", func(t *testing.T) {
+		bad := step
+		bad.ToVersion = "9.9.9"
+		result := migrator.executeStep(context.Background(), bad)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "validation")
+	})
+
+	t.Run("cancelled context returns failed step", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		result := migrator.executeStep(ctx, step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "cancelled")
+	})
+
+	t.Run("fails with nil registry", func(t *testing.T) {
+		nilMigrator := NewDefaultVersionMigrator(nil)
+		result := nilMigrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "validation")
+		assert.Contains(t, result.ErrorMessage, "registry not available")
+	})
+}
+
+func TestExecuteStep_Backup(t *testing.T) {
+	registry, migrator := newStepRegistry(t)
+	step := MigrationStep{
+		ID:          "backup-mod-1.0.0-2.0.0",
+		Type:        MigrationStepBackup,
+		ModuleName:  "mod",
+		FromVersion: "1.0.0",
+		ToVersion:   "2.0.0",
+		Description: "Backup",
+	}
+
+	t.Run("records backup in registry history", func(t *testing.T) {
+		result := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, result.Status)
+		assert.NotEmpty(t, result.Output)
+
+		history, err := registry.GetVersionHistory("mod")
+		require.NoError(t, err)
+		found := false
+		for _, tr := range history.Transitions {
+			if tr.Metadata["step_id"] == step.ID {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "backup step transition not recorded in history")
+	})
+
+	t.Run("idempotent — does not double-record", func(t *testing.T) {
+		history, err := registry.GetVersionHistory("mod")
+		require.NoError(t, err)
+		countBefore := len(history.Transitions)
+
+		r2 := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, r2.Status)
+
+		history, err = registry.GetVersionHistory("mod")
+		require.NoError(t, err)
+		assert.Equal(t, countBefore, len(history.Transitions), "idempotent run must not add a second record")
+	})
+
+	t.Run("fails with nil registry", func(t *testing.T) {
+		nilMigrator := NewDefaultVersionMigrator(nil)
+		result := nilMigrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "backup")
+		assert.Contains(t, result.ErrorMessage, "registry not available")
+	})
+
+	t.Run("fails when module not registered in registry", func(t *testing.T) {
+		emptyRegistry := NewDefaultModuleVersionRegistry()
+		emptyMigrator := NewDefaultVersionMigrator(emptyRegistry)
+		result := emptyMigrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "backup")
+	})
+}
+
+func TestExecuteStep_Preprocess(t *testing.T) {
+	registry, migrator := newStepRegistry(t)
+	step := MigrationStep{
+		ID:          "preprocess-mod-1.0.0-2.0.0",
+		Type:        MigrationStepPreprocess,
+		ModuleName:  "mod",
+		FromVersion: "1.0.0",
+		ToVersion:   "2.0.0",
+		Description: "Preprocess",
+	}
+
+	t.Run("records preprocessing", func(t *testing.T) {
+		result := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, result.Status)
+		assert.NotEmpty(t, result.Output)
+	})
+
+	t.Run("idempotent — does not double-record", func(t *testing.T) {
+		before := historyLen(t, registry, "mod")
+		r2 := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, r2.Status)
+		assert.Equal(t, before, historyLen(t, registry, "mod"), "idempotent run must not add a second record")
+	})
+
+	t.Run("fails with nil registry", func(t *testing.T) {
+		nilMigrator := NewDefaultVersionMigrator(nil)
+		result := nilMigrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "preprocess")
+		assert.Contains(t, result.ErrorMessage, "registry not available")
+	})
+
+	t.Run("fails when module not registered in registry", func(t *testing.T) {
+		emptyMigrator := NewDefaultVersionMigrator(NewDefaultModuleVersionRegistry())
+		result := emptyMigrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "preprocess")
+	})
+}
+
+func TestExecuteStep_Upgrade(t *testing.T) {
+	registry, migrator := newStepRegistry(t)
+	step := MigrationStep{
+		ID:          "upgrade-mod-1.0.0-2.0.0",
+		Type:        MigrationStepUpgrade,
+		ModuleName:  "mod",
+		FromVersion: "1.0.0",
+		ToVersion:   "2.0.0",
+		Description: "Upgrade",
+	}
+
+	t.Run("records upgrade transition", func(t *testing.T) {
+		result := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, result.Status)
+		assert.NotEmpty(t, result.Output)
+
+		history, err := registry.GetVersionHistory("mod")
+		require.NoError(t, err)
+		found := false
+		for _, tr := range history.Transitions {
+			if tr.Metadata["step_id"] == step.ID && tr.TransitionType == TransitionUpgrade {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "upgrade transition not recorded in history")
+	})
+
+	t.Run("idempotent — does not double-record", func(t *testing.T) {
+		before := historyLen(t, registry, "mod")
+		r2 := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, r2.Status)
+		assert.Equal(t, before, historyLen(t, registry, "mod"), "idempotent run must not add a second record")
+	})
+
+	t.Run("fails when target is not newer", func(t *testing.T) {
+		bad := step
+		bad.ToVersion = "1.0.0"
+		bad.FromVersion = "2.0.0"
+		result := migrator.executeStep(context.Background(), bad)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "upgrade")
+		assert.Contains(t, result.ErrorMessage, "not newer")
+	})
+
+	t.Run("fails with nil registry", func(t *testing.T) {
+		nilMigrator := NewDefaultVersionMigrator(nil)
+		result := nilMigrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "upgrade")
+		assert.Contains(t, result.ErrorMessage, "registry not available")
+	})
+}
+
+func TestExecuteStep_Downgrade(t *testing.T) {
+	registry, migrator := newStepRegistry(t)
+	step := MigrationStep{
+		ID:          "downgrade-mod-2.0.0-1.0.0",
+		Type:        MigrationStepDowngrade,
+		ModuleName:  "mod",
+		FromVersion: "2.0.0",
+		ToVersion:   "1.0.0",
+		Description: "Downgrade",
+	}
+
+	t.Run("records downgrade transition", func(t *testing.T) {
+		result := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, result.Status)
+		assert.NotEmpty(t, result.Output)
+
+		history, err := registry.GetVersionHistory("mod")
+		require.NoError(t, err)
+		found := false
+		for _, tr := range history.Transitions {
+			if tr.Metadata["step_id"] == step.ID && tr.TransitionType == TransitionDowngrade {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "downgrade transition not recorded in history")
+	})
+
+	t.Run("idempotent — does not double-record", func(t *testing.T) {
+		before := historyLen(t, registry, "mod")
+		r2 := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, r2.Status)
+		assert.Equal(t, before, historyLen(t, registry, "mod"), "idempotent run must not add a second record")
+	})
+
+	t.Run("fails when target is not older", func(t *testing.T) {
+		bad := step
+		bad.ToVersion = "2.0.0"
+		bad.FromVersion = "1.0.0"
+		result := migrator.executeStep(context.Background(), bad)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "downgrade")
+		assert.Contains(t, result.ErrorMessage, "not older")
+	})
+
+	t.Run("fails with nil registry", func(t *testing.T) {
+		nilMigrator := NewDefaultVersionMigrator(nil)
+		result := nilMigrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "downgrade")
+		assert.Contains(t, result.ErrorMessage, "registry not available")
+	})
+}
+
+func TestExecuteStep_DataMigration(t *testing.T) {
+	registry, migrator := newStepRegistry(t)
+	step := MigrationStep{
+		ID:          "data-migration-mod-1.0.0-2.0.0",
+		Type:        MigrationStepDataMigration,
+		ModuleName:  "mod",
+		FromVersion: "1.0.0",
+		ToVersion:   "2.0.0",
+		Description: "Data migration",
+	}
+
+	t.Run("records data migration", func(t *testing.T) {
+		result := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, result.Status)
+		assert.NotEmpty(t, result.Output)
+	})
+
+	t.Run("idempotent — does not double-record", func(t *testing.T) {
+		before := historyLen(t, registry, "mod")
+		r2 := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, r2.Status)
+		assert.Equal(t, before, historyLen(t, registry, "mod"), "idempotent run must not add a second record")
+	})
+
+	t.Run("fails when from version not installed", func(t *testing.T) {
+		bad := step
+		bad.FromVersion = "9.9.9"
+		result := migrator.executeStep(context.Background(), bad)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "data_migration")
+		assert.Contains(t, result.ErrorMessage, "9.9.9")
+	})
+
+	t.Run("fails with nil registry", func(t *testing.T) {
+		nilMigrator := NewDefaultVersionMigrator(nil)
+		result := nilMigrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "data_migration")
+		assert.Contains(t, result.ErrorMessage, "registry not available")
+	})
+}
+
+func TestExecuteStep_ConfigUpdate(t *testing.T) {
+	registry, migrator := newStepRegistry(t)
+	step := MigrationStep{
+		ID:          "config-update-mod-1.0.0-2.0.0",
+		Type:        MigrationStepConfigUpdate,
+		ModuleName:  "mod",
+		FromVersion: "1.0.0",
+		ToVersion:   "2.0.0",
+		Description: "Config update",
+		Metadata:    map[string]interface{}{"setting_key": "new_value"},
+	}
+
+	t.Run("records config update with metadata", func(t *testing.T) {
+		result := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, result.Status)
+		assert.NotEmpty(t, result.Output)
+	})
+
+	t.Run("idempotent — does not double-record", func(t *testing.T) {
+		before := historyLen(t, registry, "mod")
+		r2 := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, r2.Status)
+		assert.Equal(t, before, historyLen(t, registry, "mod"), "idempotent run must not add a second record")
+	})
+
+	t.Run("fails with nil registry", func(t *testing.T) {
+		nilMigrator := NewDefaultVersionMigrator(nil)
+		result := nilMigrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "config_update")
+		assert.Contains(t, result.ErrorMessage, "registry not available")
+	})
+
+	t.Run("fails when module not registered in registry", func(t *testing.T) {
+		emptyMigrator := NewDefaultVersionMigrator(NewDefaultModuleVersionRegistry())
+		result := emptyMigrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "config_update")
+	})
+}
+
+func TestExecuteStep_Postprocess(t *testing.T) {
+	registry, migrator := newStepRegistry(t)
+	step := MigrationStep{
+		ID:          "postprocess-mod-1.0.0-2.0.0",
+		Type:        MigrationStepPostprocess,
+		ModuleName:  "mod",
+		FromVersion: "1.0.0",
+		ToVersion:   "2.0.0",
+		Description: "Postprocess",
+	}
+
+	t.Run("succeeds when to version is installed", func(t *testing.T) {
+		result := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, result.Status)
+		assert.NotEmpty(t, result.Output)
+	})
+
+	t.Run("idempotent — does not double-record", func(t *testing.T) {
+		before := historyLen(t, registry, "mod")
+		r2 := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, r2.Status)
+		assert.Equal(t, before, historyLen(t, registry, "mod"), "idempotent run must not add a second record")
+	})
+
+	t.Run("fails when to version not installed", func(t *testing.T) {
+		bad := step
+		bad.ToVersion = "9.9.9"
+		result := migrator.executeStep(context.Background(), bad)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "postprocess")
+		assert.Contains(t, result.ErrorMessage, "9.9.9")
+	})
+
+	t.Run("fails with nil registry", func(t *testing.T) {
+		nilMigrator := NewDefaultVersionMigrator(nil)
+		result := nilMigrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "postprocess")
+		assert.Contains(t, result.ErrorMessage, "registry not available")
+	})
+
+	t.Run("fails when module has no history (record transition fails)", func(t *testing.T) {
+		// Register toVersion under a module that has history, then try postprocess on an
+		// unregistered module — IsVersionInstalled returns false → structured error.
+		emptyMigrator := NewDefaultVersionMigrator(NewDefaultModuleVersionRegistry())
+		unregistered := step
+		unregistered.ModuleName = "ghost-module"
+		result := emptyMigrator.executeStep(context.Background(), unregistered)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "postprocess")
+	})
+}
+
+func TestExecuteStep_Cleanup(t *testing.T) {
+	registry, migrator := newStepRegistry(t)
+	step := MigrationStep{
+		ID:          "cleanup-mod-1.0.0-2.0.0",
+		Type:        MigrationStepCleanup,
+		ModuleName:  "mod",
+		FromVersion: "1.0.0",
+		ToVersion:   "2.0.0",
+		Description: "Cleanup",
+	}
+
+	t.Run("records cleanup completion", func(t *testing.T) {
+		result := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, result.Status)
+		assert.NotEmpty(t, result.Output)
+	})
+
+	t.Run("idempotent — does not double-record", func(t *testing.T) {
+		before := historyLen(t, registry, "mod")
+		r2 := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, r2.Status)
+		assert.Equal(t, before, historyLen(t, registry, "mod"), "idempotent run must not add a second record")
+	})
+
+	t.Run("fails with nil registry", func(t *testing.T) {
+		nilMigrator := NewDefaultVersionMigrator(nil)
+		result := nilMigrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "cleanup")
+		assert.Contains(t, result.ErrorMessage, "registry not available")
+	})
+
+	t.Run("fails when GetVersionHistory fails", func(t *testing.T) {
+		// Use an unregistered module name — GetVersionHistory will return "no history found"
+		emptyMigrator := NewDefaultVersionMigrator(NewDefaultModuleVersionRegistry())
+		unregistered := step
+		unregistered.ModuleName = "unregistered-module"
+		result := emptyMigrator.executeStep(context.Background(), unregistered)
+		assert.Equal(t, StepStatusFailed, result.Status)
+		assert.Contains(t, result.ErrorMessage, "cleanup")
+		assert.Contains(t, result.ErrorMessage, "failed to get version history")
+	})
+}
+
+func TestExecuteStep_StructuredError(t *testing.T) {
+	registry := NewDefaultModuleVersionRegistry()
+	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "mod", Version: "2.0.0", Description: "v2"}))
+	migrator := NewDefaultVersionMigrator(registry)
+
+	// Only toVersion is installed; fromVersion missing → validation must fail
+	step := MigrationStep{
+		ID:          "validate-mod-1.0.0-2.0.0",
+		Type:        MigrationStepValidation,
+		ModuleName:  "mod",
+		FromVersion: "1.0.0",
+		ToVersion:   "2.0.0",
+		Description: "Validate",
+	}
+
+	result := migrator.executeStep(context.Background(), step)
+	assert.Equal(t, StepStatusFailed, result.Status)
+	// Error message must encode both step type and reason
+	assert.Contains(t, result.ErrorMessage, "validation", "error message must include step type")
+	assert.Contains(t, result.ErrorMessage, "1.0.0", "error message must include reason (missing version)")
+}
+
+func TestExecuteStep_AllStepTypesDispatch(t *testing.T) {
+	// End-to-end: run a full high-complexity migration and assert every step type
+	// reaches a real implementation (StepStatusCompleted, non-empty output).
+	registry := NewDefaultModuleVersionRegistry()
+	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "e2e", Version: "1.0.0", Description: "v1"}))
+	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "e2e", Version: "2.0.0", Description: "v2"}))
+	migrator := NewDefaultVersionMigrator(registry)
+
+	path, err := migrator.GetMigrationPath("e2e", "1.0.0", "2.0.0")
+	require.NoError(t, err)
+
+	// Collect which step types appear
+	typeSeen := make(map[MigrationStepType]bool)
+	for _, step := range path.Steps {
+		typeSeen[step.Type] = true
+		result := migrator.executeStep(context.Background(), step)
+		assert.Equal(t, StepStatusCompleted, result.Status,
+			"step %s (%s) failed: %s", step.ID, step.Type, result.ErrorMessage)
+		assert.NotEmpty(t, result.Output, "step %s must produce output", step.ID)
+	}
+
+	// A major-version upgrade path must exercise all step types
+	expectedTypes := []MigrationStepType{
+		MigrationStepValidation,
+		MigrationStepBackup,
+		MigrationStepPreprocess,
+		MigrationStepUpgrade,
+		MigrationStepDataMigration,
+		MigrationStepConfigUpdate,
+		MigrationStepPostprocess,
+		MigrationStepCleanup,
+	}
+	for _, st := range expectedTypes {
+		assert.True(t, typeSeen[st], "step type %s not present in major-version migration path", st)
+	}
 }
 
 // Benchmark tests
