@@ -431,7 +431,7 @@ func TestLDAPEntryToDirectoryUser_NoRegression(t *testing.T) {
 		assert.Nil(t, result.Computer)
 		assert.Nil(t, result.User)
 
-		// Simulate setting a computer result
+		// Set up a computer result
 		result.Computer = &interfaces.DirectoryComputer{
 			ID:             "guid-001",
 			Name:           "WORKSTATION01",
