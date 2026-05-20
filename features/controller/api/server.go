@@ -327,6 +327,9 @@ func (s *Server) setupRouter() {
 	// Configuration list endpoint (Issue #1570)
 	api.Handle("/configs", s.requirePermission("config", "list")(http.HandlerFunc(s.handleListConfigs))).Methods("GET")
 
+	// Configuration deployments endpoint (Issue #1598)
+	api.Handle("/configs/{id}/deployments", s.requirePermission("config", "list-deployments")(http.HandlerFunc(s.handleGetConfigDeployments))).Methods("GET")
+
 	// Configuration push endpoint (Issue #1318)
 	cfgPush := api.PathPrefix("/config").Subrouter()
 	cfgPush.Handle("/push", s.requirePermission("config", "push")(http.HandlerFunc(s.handleConfigPush))).Methods("POST")

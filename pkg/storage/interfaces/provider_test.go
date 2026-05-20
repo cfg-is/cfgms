@@ -507,6 +507,9 @@ func (m *MockPushStore) GetPendingPushes(_ context.Context) ([]*business.PushRec
 func (m *MockPushStore) GetPush(_ context.Context, _ string) (*business.PushRecord, error) {
 	return nil, nil
 }
+func (m *MockPushStore) ListPushesByConfigID(_ context.Context, _, _ string) ([]*business.PushRecord, error) {
+	return []*business.PushRecord{}, nil
+}
 
 // Test provider registration
 func TestRegisterStorageProvider(t *testing.T) {

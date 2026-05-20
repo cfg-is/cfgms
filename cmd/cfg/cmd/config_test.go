@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -329,6 +330,205 @@ func TestConfigDeleteCommand(t *testing.T) {
 
 		err := runConfigDelete(configDeleteCmd, []string{"some-steward"})
 		require.Error(t, err)
+	})
+}
+
+func TestConfigDeploymentsCommand(t *testing.T) {
+	t.Run("happy path prints summary and steward table", func(t *testing.T) {
+		var capturedPath string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedPath = r.URL.Path
+			assert.Equal(t, "GET", r.Method)
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"config_id": "cfg-prod",
+					"summary": map[string]interface{}{
+						"applied": 2,
+						"pending": 1,
+						"failed":  0,
+						"halted":  0,
+						"total":   3,
+					},
+					"stewards": []map[string]interface{}{
+						{
+							"steward_id":   "steward-001",
+							"status":       "applied",
+							"last_updated": time.Now().UTC().Format(time.RFC3339),
+						},
+					},
+					"push_history": []map[string]interface{}{},
+				},
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+			})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origJSON := configDeploymentsJSON
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configDeploymentsJSON = origJSON
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configDeploymentsJSON = false
+
+		output := captureStdout(t, func() {
+			err := runConfigDeployments(configDeploymentsCmd, []string{"cfg-prod"})
+			require.NoError(t, err)
+		})
+
+		assert.Equal(t, "/api/v1/configs/cfg-prod/deployments", capturedPath)
+		assert.Contains(t, output, "cfg-prod")
+		assert.Contains(t, output, "Applied:")
+		assert.Contains(t, output, "2")
+		assert.Contains(t, output, "steward-001")
+		assert.Contains(t, output, "applied")
+	})
+
+	t.Run("config ID with special chars is path-escaped", func(t *testing.T) {
+		var capturedRawPath string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// r.URL.RawPath preserves the original percent-encoded path;
+			// r.URL.Path is the decoded form — use RawPath to verify encoding.
+			capturedRawPath = r.URL.RawPath
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"config_id":    "cfg/prod env",
+					"summary":      map[string]interface{}{"applied": 0, "pending": 0, "failed": 0, "halted": 0, "total": 0},
+					"stewards":     []interface{}{},
+					"push_history": []interface{}{},
+				},
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+			})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origJSON := configDeploymentsJSON
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configDeploymentsJSON = origJSON
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configDeploymentsJSON = false
+
+		_ = captureStdout(t, func() {
+			_ = runConfigDeployments(configDeploymentsCmd, []string{"cfg/prod env"})
+		})
+
+		assert.Equal(t, "/api/v1/configs/cfg%2Fprod%20env/deployments", capturedRawPath)
+	})
+
+	t.Run("empty stewards prints no stewards found", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"config_id":    "cfg-empty",
+					"summary":      map[string]interface{}{"applied": 0, "pending": 0, "failed": 0, "halted": 0, "total": 0},
+					"stewards":     []interface{}{},
+					"push_history": []interface{}{},
+				},
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+			})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origJSON := configDeploymentsJSON
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configDeploymentsJSON = origJSON
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configDeploymentsJSON = false
+
+		output := captureStdout(t, func() {
+			err := runConfigDeployments(configDeploymentsCmd, []string{"cfg-empty"})
+			require.NoError(t, err)
+		})
+
+		assert.Contains(t, output, "No stewards found")
+	})
+
+	t.Run("json flag emits raw API response", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"config_id":    "cfg-prod",
+					"summary":      map[string]interface{}{"applied": 1, "pending": 0, "failed": 0, "halted": 0, "total": 1},
+					"stewards":     []interface{}{},
+					"push_history": []interface{}{},
+				},
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+			})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origJSON := configDeploymentsJSON
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configDeploymentsJSON = origJSON
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configDeploymentsJSON = true
+
+		output := captureStdout(t, func() {
+			err := runConfigDeployments(configDeploymentsCmd, []string{"cfg-prod"})
+			require.NoError(t, err)
+		})
+
+		var parsed interface{}
+		require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed), "output should be valid JSON")
+		assert.Contains(t, output, "config_id")
+	})
+
+	t.Run("API error propagated", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+
+		err := runConfigDeployments(configDeploymentsCmd, []string{"cfg-prod"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unauthorized")
 	})
 }
 

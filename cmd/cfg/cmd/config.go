@@ -38,6 +38,9 @@ var (
 
 	// Show command flags
 	configShowJSON bool
+
+	// Deployments command flags
+	configDeploymentsJSON bool
 )
 
 var configCmd = &cobra.Command{
@@ -79,6 +82,23 @@ Examples:
   cfg config delete steward-abc123`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConfigDelete,
+}
+
+var configDeploymentsCmd = &cobra.Command{
+	Use:   "deployments <config-id>",
+	Short: "Show deployment status for a config",
+	Long: `Show applied / pending / failed / halted aggregate counts and per-steward
+deployment status for a given config ID.
+
+The config-id is the identifier used when the configuration was pushed (the
+config_id field in the push payload). Use 'cfg config list' to enumerate
+stored configs and their IDs.
+
+Examples:
+  cfg config deployments my-prod-config
+  cfg config deployments my-prod-config --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runConfigDeployments,
 }
 
 var configUploadCmd = &cobra.Command{
@@ -134,10 +154,18 @@ func init() {
 	configDeleteCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configDeleteCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 
+	// Deployments command flags
+	configDeploymentsCmd.Flags().BoolVar(&configDeploymentsJSON, "json", false, "Emit raw JSON instead of human-readable output")
+	configDeploymentsCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	configDeploymentsCmd.Flags().StringVar(&configAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
+	configDeploymentsCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	configDeploymentsCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+
 	configCmd.AddCommand(configUploadCmd)
 	configCmd.AddCommand(configListCmd)
 	configCmd.AddCommand(configShowCmd)
 	configCmd.AddCommand(configDeleteCmd)
+	configCmd.AddCommand(configDeploymentsCmd)
 }
 
 func getConfigClient() (*APIClient, error) {
@@ -416,5 +444,105 @@ func runConfigUpload(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Configuration stored for steward %s (status: %s)\n", configUploadStewardID, status)
+	return nil
+}
+
+// apiDeploymentSummary mirrors the server-side DeploymentSummary for JSON decoding.
+type apiDeploymentSummary struct {
+	Applied int `json:"applied"`
+	Pending int `json:"pending"`
+	Failed  int `json:"failed"`
+	Halted  int `json:"halted"`
+	Total   int `json:"total"`
+}
+
+// apiStewardDeploymentStatus mirrors the server-side StewardDeploymentStatus.
+type apiStewardDeploymentStatus struct {
+	StewardID   string    `json:"steward_id"`
+	Status      string    `json:"status"`
+	LastUpdated time.Time `json:"last_updated"`
+}
+
+// apiPushSummary mirrors the server-side PushSummary.
+type apiPushSummary struct {
+	PushID      string    `json:"push_id"`
+	Status      string    `json:"status"`
+	Version     string    `json:"version"`
+	InitiatedBy string    `json:"initiated_by"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+func runConfigDeployments(cmd *cobra.Command, args []string) error {
+	configID := args[0]
+
+	client, err := getConfigAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	path := "/api/v1/configs/" + url.PathEscape(configID) + "/deployments"
+	resp, err := client.doRequest(context.Background(), "GET", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get deployments: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return client.parseError(resp)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if configDeploymentsJSON {
+		_, err := os.Stdout.Write(bodyBytes)
+		return err
+	}
+
+	var apiResp struct {
+		Data struct {
+			ConfigID    string                       `json:"config_id"`
+			Summary     apiDeploymentSummary         `json:"summary"`
+			Stewards    []apiStewardDeploymentStatus `json:"stewards"`
+			PushHistory []apiPushSummary             `json:"push_history"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	d := apiResp.Data
+	fmt.Printf("Deployment status for config: %s\n\n", d.ConfigID)
+	fmt.Printf("Summary:\n")
+	fmt.Printf("  Applied: %d\n", d.Summary.Applied)
+	fmt.Printf("  Pending: %d\n", d.Summary.Pending)
+	fmt.Printf("  Failed:  %d\n", d.Summary.Failed)
+	fmt.Printf("  Halted:  %d\n", d.Summary.Halted)
+	fmt.Printf("  Total:   %d\n\n", d.Summary.Total)
+
+	if len(d.Stewards) > 0 {
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		if _, err := fmt.Fprintln(w, "STEWARD ID\tSTATUS\tLAST UPDATED"); err != nil {
+			return err
+		}
+		for _, st := range d.Stewards {
+			lastUpdated := "-"
+			if !st.LastUpdated.IsZero() {
+				lastUpdated = st.LastUpdated.Format(time.RFC3339)
+			}
+			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\n", st.StewardID, st.Status, lastUpdated); err != nil {
+				return err
+			}
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	} else {
+		fmt.Println("No stewards found.")
+	}
+
 	return nil
 }
