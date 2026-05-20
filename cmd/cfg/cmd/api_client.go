@@ -75,12 +75,13 @@ func NewAPIClient(cfg *APIClientConfig) (*APIClient, error) {
 	var err error
 
 	if cfg.TLSInsecure {
-		// Development mode: skip verification (requires explicit opt-in)
-		// #nosec G402 - TLS InsecureSkipVerify explicitly requested via --tls-insecure flag
-		tlsConfig = &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: true,
-		}
+		// Development mode: skip verification (requires explicit opt-in).
+		// pkg/cert has no insecure helper; build config via field assignment.
+		// #nosec G402 - InsecureSkipVerify explicitly requested via --tls-insecure flag
+		var insecureCfg tls.Config
+		insecureCfg.MinVersion = tls.VersionTLS12
+		insecureCfg.InsecureSkipVerify = true // #nosec G402
+		tlsConfig = &insecureCfg
 	} else if cfg.ClientCertPEM != nil && cfg.ClientKeyPEM != nil {
 		// mTLS mode: mutual TLS with client certificate and optional CA cert
 		tlsConfig, err = cert.CreateClientTLSConfig(cfg.ClientCertPEM, cfg.ClientKeyPEM, cfg.CACertPEM, cfg.ServerName, tls.VersionTLS12)
@@ -94,10 +95,10 @@ func NewAPIClient(cfg *APIClientConfig) (*APIClient, error) {
 			return nil, fmt.Errorf("failed to create TLS config: %w", err)
 		}
 	} else {
-		// Default: use system CA pool
-		tlsConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			ServerName: cfg.ServerName,
+		// Default: use system CA pool via pkg/cert helper (nil certs, nil CA)
+		tlsConfig, err = cert.CreateClientTLSConfig(nil, nil, nil, cfg.ServerName, tls.VersionTLS12)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create TLS config: %w", err)
 		}
 	}
 
@@ -216,6 +217,71 @@ func (c *APIClient) RevokeToken(ctx context.Context, tokenStr string) (*APIToken
 	}
 
 	return &tokenResp, nil
+}
+
+// APIPendingRegistration represents a quarantined steward awaiting approval in API responses.
+type APIPendingRegistration struct {
+	StewardID    string    `json:"steward_id"`
+	TenantID     string    `json:"tenant_id"`
+	SourceIP     string    `json:"source_ip"`
+	RegisteredAt time.Time `json:"registered_at"`
+}
+
+// ListPendingRegistrations lists quarantined stewards awaiting admin approval.
+func (c *APIClient) ListPendingRegistrations(ctx context.Context) ([]APIPendingRegistration, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/registration/pending", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var pending []APIPendingRegistration
+	if err := json.NewDecoder(resp.Body).Decode(&pending); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return pending, nil
+}
+
+// ApproveRegistration approves a quarantined steward, promoting it to registered status.
+func (c *APIClient) ApproveRegistration(ctx context.Context, stewardID string) error {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/registration/"+stewardID+"/approve", nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return c.parseError(resp)
+	}
+
+	return nil
+}
+
+// DenyRegistration denies a quarantined steward registration with an optional reason.
+func (c *APIClient) DenyRegistration(ctx context.Context, stewardID, reason string) error {
+	body, err := json.Marshal(struct {
+		Reason string `json:"reason,omitempty"`
+	}{Reason: reason})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/registration/"+stewardID+"/deny", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return c.parseError(resp)
+	}
+
+	return nil
 }
 
 // Get performs an HTTP GET request and returns the response.
