@@ -66,8 +66,15 @@ func matchesFilter(s StewardData, f Filter) bool {
 	if f.Status != "" && f.Status != "any" && s.Status != f.Status {
 		return false
 	}
-	if f.Hostname != "" && !strings.Contains(attrs["hostname"], f.Hostname) {
-		return false
+	if f.Hostname != "" {
+		h := attrs["hostname"]
+		if strings.HasSuffix(f.Hostname, "*") {
+			if !strings.HasPrefix(h, strings.TrimSuffix(f.Hostname, "*")) {
+				return false
+			}
+		} else if !strings.Contains(h, f.Hostname) {
+			return false
+		}
 	}
 	for _, tag := range f.Tags {
 		if !stewardHasTag(attrs, tag) {

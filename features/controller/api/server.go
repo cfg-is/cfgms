@@ -330,6 +330,10 @@ func (s *Server) setupRouter() {
 	// Configuration deployments endpoint (Issue #1598)
 	api.Handle("/configs/{id}/deployments", s.requirePermission("config", "list-deployments")(http.HandlerFunc(s.handleGetConfigDeployments))).Methods("GET")
 
+	// Fleet selector resolve endpoint (Issue #1640)
+	fleetRouter := api.PathPrefix("/fleet").Subrouter()
+	fleetRouter.Handle("/resolve", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleResolveSelector))).Methods("POST")
+
 	// Configuration push endpoint (Issue #1318)
 	cfgPush := api.PathPrefix("/config").Subrouter()
 	cfgPush.Handle("/push", s.requirePermission("config", "push")(http.HandlerFunc(s.handleConfigPush))).Methods("POST")
