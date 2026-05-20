@@ -266,6 +266,19 @@ func (h *DefaultWebSocketHandler) writeMessages(ctx context.Context, conn *webso
 			return
 		case <-done:
 			return
+		case data := <-session.OutputChan():
+			if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				_ = err // Explicitly ignore deadline errors for resilience
+			}
+			msg := &TerminalMessage{
+				Type:      MessageTypeData,
+				Data:      data,
+				Timestamp: time.Now(),
+			}
+			if err := conn.WriteJSON(msg); err != nil {
+				h.logger.Warn("Failed to send terminal output", "session_id", logging.RedactedID(session.ID), "error", err)
+				return
+			}
 		case <-ticker.C:
 			if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 				// Log error but continue
@@ -275,7 +288,6 @@ func (h *DefaultWebSocketHandler) writeMessages(ctx context.Context, conn *webso
 				h.logger.Warn("Failed to send ping", "session_id", logging.RedactedID(session.ID), "error", err)
 				return
 			}
-			// Deferred: tracked in #1443 — stream steward output channel to the WebSocket client
 		}
 	}
 }

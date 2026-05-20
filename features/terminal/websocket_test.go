@@ -636,6 +636,120 @@ func (l *failListener) setAllFailWrites(v bool) {
 	}
 }
 
+// TestWebSocketStewardOutputRelay verifies that data injected via session.HandleOutput
+// is forwarded to the connected WebSocket client in real time.
+func TestWebSocketStewardOutputRelay(t *testing.T) {
+	capLogger := &kvCapturingLogger{}
+	config := &Config{
+		SessionTimeout: 30 * time.Minute,
+		MaxSessions:    100,
+		RecordSessions: true,
+	}
+
+	manager, err := NewSessionManager(config, capLogger)
+	require.NoError(t, err)
+
+	handler, err := NewWebSocketHandler(manager, capLogger, nil)
+	require.NoError(t, err)
+
+	server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	headers := http.Header{"Origin": {server.URL}}
+	conn, _, err := websocket.DefaultDialer.Dial(
+		wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(),
+		headers,
+	)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	waitForActiveSessions(t, manager, 1)
+	sessions := manager.GetActiveSessions()
+	require.Len(t, sessions, 1)
+	session := sessions[0]
+
+	// Inject steward output directly; simulates data arriving from the steward.
+	testOutput := []byte("CFGMS_TEST_OUTPUT_SENTINEL_12345")
+	err = session.HandleOutput(context.Background(), testOutput)
+	require.NoError(t, err)
+
+	// Poll WebSocket messages until the sentinel arrives.
+	deadline := time.Now().Add(2 * time.Second)
+	found := false
+	for time.Now().Before(deadline) && !found {
+		if setErr := conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); setErr != nil {
+			t.Logf("Failed to set read deadline: %v", setErr)
+		}
+		var msg TerminalMessage
+		if readErr := conn.ReadJSON(&msg); readErr != nil {
+			continue
+		}
+		if msg.Type == MessageTypeData && string(msg.Data) == string(testOutput) {
+			found = true
+		}
+	}
+	assert.True(t, found, "steward output must be relayed to the WebSocket client")
+}
+
+// TestWebSocketSlowClientDoesNotBlockOutput verifies that HandleOutput returns
+// without blocking even when the output channel buffer is saturated, so a slow
+// WebSocket consumer cannot stall the steward output path.
+func TestWebSocketSlowClientDoesNotBlockOutput(t *testing.T) {
+	capLogger := &kvCapturingLogger{}
+	config := &Config{
+		SessionTimeout: 30 * time.Minute,
+		MaxSessions:    100,
+		RecordSessions: true,
+	}
+
+	manager, err := NewSessionManager(config, capLogger)
+	require.NoError(t, err)
+
+	handler, err := NewWebSocketHandler(manager, capLogger, nil)
+	require.NoError(t, err)
+
+	server := httptest.NewServer(withTestTenant(http.HandlerFunc(handler.HandleWebSocket)))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	headers := http.Header{"Origin": {server.URL}}
+	conn, _, err := websocket.DefaultDialer.Dial(
+		wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(),
+		headers,
+	)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	waitForActiveSessions(t, manager, 1)
+	sessions := manager.GetActiveSessions()
+	require.Len(t, sessions, 1)
+	session := sessions[0]
+
+	// Flood HandleOutput with far more messages than the channel buffer capacity.
+	// A blocking implementation would deadlock here once outputCh is full.
+	// The non-blocking select/default must return for every call regardless of
+	// how fast the WebSocket consumer drains the buffer.
+	ctx := context.Background()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			if err := session.HandleOutput(ctx, []byte("x")); err != nil {
+				t.Errorf("HandleOutput returned unexpected error: %v", err)
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		// All 1000 calls completed — non-blocking behaviour confirmed.
+	case <-time.After(10 * time.Second):
+		t.Fatal("HandleOutput blocked: 1000 iterations did not complete within 10 s; likely blocking on full output channel")
+	}
+}
+
 // TestWebSocketSessionIDRedaction_Established verifies that the Info log
 // "WebSocket terminal session established" passes session_id through RedactedID.
 func TestWebSocketSessionIDRedaction_Established(t *testing.T) {

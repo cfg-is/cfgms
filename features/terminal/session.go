@@ -56,6 +56,8 @@ func NewSession(req *SessionRequest, logger logging.Logger) (*Session, error) {
 		LastActivity: now,
 		Environment:  req.Env,
 		closed:       false,
+		outputCh:     make(chan []byte, 64),
+		logger:       logger,
 	}
 
 	// Initialize shell executor
@@ -132,6 +134,14 @@ func (s *Session) HandleOutput(ctx context.Context, data []byte) error {
 			// Log error but don't fail the operation
 			_ = err // Explicitly ignore recording errors for resilience
 		}
+	}
+
+	// Relay to WebSocket client. Non-blocking: drop and warn when the consumer is slow.
+	select {
+	case s.outputCh <- data:
+	default:
+		s.logger.Warn("Terminal output dropped; WebSocket client is not consuming output fast enough",
+			"session_id", logging.RedactedID(s.ID))
 	}
 
 	return nil
@@ -336,4 +346,13 @@ func (s *Session) GetErrorChannel() <-chan error {
 		return nil
 	}
 	return s.executor.ErrorChannel()
+}
+
+// OutputChan returns the session-level relay channel that carries steward output
+// destined for the WebSocket client. Writers use HandleOutput; readers are
+// WebSocket write loops. The channel is buffered; messages are dropped (with a
+// warning log) when the buffer is full so a slow consumer never stalls the
+// steward output path.
+func (s *Session) OutputChan() <-chan []byte {
+	return s.outputCh
 }
