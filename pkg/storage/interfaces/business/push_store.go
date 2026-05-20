@@ -81,4 +81,11 @@ type PushStore interface {
 	// GetPush retrieves the push record for the given ID.
 	// Returns ErrPushNotFound if no record exists.
 	GetPush(ctx context.Context, id string) (*PushRecord, error)
+
+	// ListPushesByConfigID returns all push records for the given config ID scoped
+	// to the given tenant, ordered by created_at descending (most recent first).
+	// Both configID and tenantID are required — a non-empty tenantID prevents
+	// cross-tenant data disclosure. Returns an empty slice (not an error) when no
+	// records exist for the config within the tenant.
+	ListPushesByConfigID(ctx context.Context, configID, tenantID string) ([]*PushRecord, error)
 }

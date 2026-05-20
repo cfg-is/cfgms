@@ -19,7 +19,8 @@ var knownPermissions = map[string]bool{
 	"steward:read-compliance": true,
 	"steward:delete-config":   true,
 	// Config management
-	"config:list": true,
+	"config:list":             true,
+	"config:list-deployments": true,
 	// Config push
 	"config:push": true,
 	// Certificate management

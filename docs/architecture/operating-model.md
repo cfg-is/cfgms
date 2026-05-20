@@ -84,7 +84,7 @@ Safety against bad configs comes from operator-controllable primitives:
 
 - **Targeting precision** — a cfg explicitly lists which stewards / groups / tenant paths / DNA-attributes it applies to. A bad change is bounded by what it was authored to target.
 - **Deployment rings (convention)** — steward tags (`ring=canary`, `ring=prod-early`, `ring=prod-broad`) let operators author phased rollouts as separate configs or staged target lists. v1 is convention; auto-progressive ring machinery is a future enhancement.
-- **Deployment visibility** — `cfg config deployments <id>` shows applied / pending / failed / halted counts and per-steward status. [GAP: command not yet implemented — see issue #1526]
+- **Deployment visibility** — `cfg config deployments <id>` shows applied / pending / failed / halted counts and per-steward status.
 - **E-stop (planned)** — `cfg config halt <id>` cancels remaining queued sends for a config.
 - **Rollback (planned CLI; underlying infrastructure exists)** — restore a previous cfg version via `features/controller/api/rollback_handler.go`.
 

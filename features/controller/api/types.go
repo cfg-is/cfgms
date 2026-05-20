@@ -202,6 +202,40 @@ type ConfigPushResponse struct {
 	QueuedAt time.Time `json:"queued_at"`
 }
 
+// DeploymentSummary holds aggregate counts for a config deployment query.
+type DeploymentSummary struct {
+	Applied int `json:"applied"`
+	Pending int `json:"pending"`
+	Failed  int `json:"failed"`
+	Halted  int `json:"halted"`
+	Total   int `json:"total"`
+}
+
+// StewardDeploymentStatus captures per-steward deployment state for a config.
+type StewardDeploymentStatus struct {
+	StewardID   string    `json:"steward_id"`
+	Status      string    `json:"status"`
+	LastUpdated time.Time `json:"last_updated"`
+}
+
+// PushSummary is a compact view of a push record for the deployments response.
+type PushSummary struct {
+	PushID      string    `json:"push_id"`
+	Status      string    `json:"status"`
+	Version     string    `json:"version"`
+	InitiatedBy string    `json:"initiated_by"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// ConfigDeploymentsResponse is returned by GET /api/v1/configs/{id}/deployments.
+type ConfigDeploymentsResponse struct {
+	ConfigID    string                    `json:"config_id"`
+	Summary     DeploymentSummary         `json:"summary"`
+	Stewards    []StewardDeploymentStatus `json:"stewards"`
+	PushHistory []PushSummary             `json:"push_history"`
+}
+
 // Helper functions to convert protobuf messages to API types
 
 // DNAFromProto converts a protobuf DNA message to DNAInfo

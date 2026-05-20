@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -296,13 +298,45 @@ func (c *APIClient) doRequest(ctx context.Context, method, path string, body io.
 }
 
 // doRequestWithContentType performs an HTTP request with the specified Content-Type.
+// The path argument must already be percent-encoded (e.g. via url.PathEscape) and
+// may include a query string (e.g. "/api/v1/foo?bar=baz").
+//
+// Go's http.NewRequestWithContext normalizes percent-encoded slashes (%2F → /)
+// in path segments when it re-parses the URL string.  To prevent this we build
+// the request URL manually: parse the base URL, split path from query, apply the
+// pre-encoded path via RawPath, and restore RawPath after NewRequestWithContext.
 func (c *APIClient) doRequestWithContentType(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
-	url := c.baseURL + path
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse base URL: %w", err)
+	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	// Split path from query string — only the path portion needs RawPath treatment.
+	rawPath := path
+	rawQuery := ""
+	if idx := strings.IndexByte(path, '?'); idx >= 0 {
+		rawPath = path[:idx]
+		rawQuery = path[idx+1:]
+	}
+
+	// Decode the path-only portion so we can set both Path and RawPath correctly.
+	// url.URL.RequestURI() uses RawPath when set (and when it differs from the
+	// escaped form of Path), which is exactly what we need to preserve %2F.
+	decodedPath, decErr := url.PathUnescape(rawPath)
+	if decErr != nil {
+		decodedPath = rawPath
+	}
+	base.Path = base.Path + decodedPath
+	base.RawPath = base.RawPath + rawPath
+	base.RawQuery = rawQuery
+
+	req, err := http.NewRequestWithContext(ctx, method, base.String(), body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+	// NewRequestWithContext re-parses the URL string and may normalise %2F.
+	// Restore our pre-encoded RawPath so the HTTP client sends the correct wire path.
+	req.URL.RawPath = base.RawPath
 
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")

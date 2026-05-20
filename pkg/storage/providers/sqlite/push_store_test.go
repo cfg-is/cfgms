@@ -175,3 +175,73 @@ func TestPushStore_Initialize(t *testing.T) {
 	assert.NoError(t, store.Initialize(context.Background()))
 	assert.NoError(t, store.Initialize(context.Background()))
 }
+
+func TestPushStore_ListPushesByConfigID(t *testing.T) {
+	t.Run("returns pushes in descending created_at order", func(t *testing.T) {
+		store := newTestPushStore(t)
+		ctx := context.Background()
+
+		r1 := testPushRecord("push-a")
+		r1.ConfigID = "cfg-target"
+		r1.Status = business.PushStatusCompleted
+		require.NoError(t, store.CreatePush(ctx, r1))
+
+		r2 := testPushRecord("push-b")
+		r2.ConfigID = "cfg-target"
+		r2.Status = business.PushStatusFailed
+		require.NoError(t, store.CreatePush(ctx, r2))
+
+		results, err := store.ListPushesByConfigID(ctx, "cfg-target", "tenant-1")
+		require.NoError(t, err)
+		require.Len(t, results, 2)
+		// Most recent (push-b was inserted last) comes first.
+		assert.Equal(t, "push-b", results[0].ID)
+		assert.Equal(t, "push-a", results[1].ID)
+	})
+
+	t.Run("returns empty slice for unknown config ID", func(t *testing.T) {
+		store := newTestPushStore(t)
+		results, err := store.ListPushesByConfigID(context.Background(), "no-such-config", "tenant-1")
+		require.NoError(t, err)
+		assert.Empty(t, results)
+	})
+
+	t.Run("does not return pushes for other config IDs", func(t *testing.T) {
+		store := newTestPushStore(t)
+		ctx := context.Background()
+
+		target := testPushRecord("push-target")
+		target.ConfigID = "cfg-target"
+		require.NoError(t, store.CreatePush(ctx, target))
+
+		other := testPushRecord("push-other")
+		other.ConfigID = "cfg-other"
+		require.NoError(t, store.CreatePush(ctx, other))
+
+		results, err := store.ListPushesByConfigID(ctx, "cfg-target", "tenant-1")
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, "push-target", results[0].ID)
+	})
+
+	t.Run("does not return pushes for other tenants (cross-tenant isolation)", func(t *testing.T) {
+		store := newTestPushStore(t)
+		ctx := context.Background()
+
+		tenantA := testPushRecord("push-tenant-a")
+		tenantA.ConfigID = "cfg-shared"
+		tenantA.TenantID = "tenant-a"
+		require.NoError(t, store.CreatePush(ctx, tenantA))
+
+		tenantB := testPushRecord("push-tenant-b")
+		tenantB.ConfigID = "cfg-shared"
+		tenantB.TenantID = "tenant-b"
+		require.NoError(t, store.CreatePush(ctx, tenantB))
+
+		results, err := store.ListPushesByConfigID(ctx, "cfg-shared", "tenant-a")
+		require.NoError(t, err)
+		require.Len(t, results, 1, "must not return records from other tenants")
+		assert.Equal(t, "push-tenant-a", results[0].ID)
+		assert.Equal(t, "tenant-a", results[0].TenantID)
+	})
+}
