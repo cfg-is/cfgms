@@ -127,7 +127,7 @@ func (s *SQLitePushStore) ListPushesByConfigID(ctx context.Context, configID, te
 		configID, tenantID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: failed to list push records for config %s: %w", configID, err)
+		return nil, fmt.Errorf("sqlite: failed to list push records: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	records, err := scanPushRows(rows)
