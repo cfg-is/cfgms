@@ -7,6 +7,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -582,10 +584,34 @@ func (e *AdvancedEngine) ValidateAdvancedRequest(ctx context.Context, req interf
 }
 
 func (e *AdvancedEngine) validateTenantAccess(ctx context.Context, tenantIDs []string) error {
-	// Deferred: tracked in #1441 — enforce per-user RBAC on tenant list; cap enforced below
 	if len(tenantIDs) > e.config.MaxTenantsPerReport {
 		return fmt.Errorf("too many tenants requested: %d (max: %d)", len(tenantIDs), e.config.MaxTenantsPerReport)
 	}
+
+	if e.rbacManager == nil {
+		return nil
+	}
+
+	uid, _ := ctx.Value(ctxkeys.UserIDKey).(string)
+	if uid == "" {
+		return errors.New("permission denied")
+	}
+
+	for _, tenantID := range tenantIDs {
+		resp, err := e.rbacManager.CheckPermission(ctx, &common.AccessRequest{
+			SubjectId:    uid,
+			PermissionId: "reports:read",
+			ResourceId:   tenantID,
+			TenantId:     tenantID,
+		})
+		if err != nil {
+			return errors.New("permission denied")
+		}
+		if !resp.Granted {
+			return errors.New("permission denied")
+		}
+	}
+
 	return nil
 }
 
