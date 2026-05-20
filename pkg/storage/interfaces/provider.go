@@ -505,20 +505,20 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 
 // StorageManager provides unified access to all storage interfaces.
 type StorageManager struct {
-	providerName                string
-	provider                    StorageProvider
-	clientTenantStore           business.ClientTenantStore
-	configStore                 cfgconfig.ConfigStore
-	auditStore                  business.AuditStore
-	rbacStore                   business.RBACStore
-	tenantStore                 business.TenantStore
-	registrationTokenStore      business.RegistrationTokenStore
-	sessionStore                business.SessionStore
-	stewardStore                business.StewardStore
-	commandStore                business.CommandStore
-	triggerStore                business.TriggerStore
-	pushStore                   business.PushStore
-	pendingRegistrationStore    business.PendingRegistrationStore
+	providerName             string
+	provider                 StorageProvider
+	clientTenantStore        business.ClientTenantStore
+	configStore              cfgconfig.ConfigStore
+	auditStore               business.AuditStore
+	rbacStore                business.RBACStore
+	tenantStore              business.TenantStore
+	registrationTokenStore   business.RegistrationTokenStore
+	sessionStore             business.SessionStore
+	stewardStore             business.StewardStore
+	commandStore             business.CommandStore
+	triggerStore             business.TriggerStore
+	pushStore                business.PushStore
+	pendingRegistrationStore business.PendingRegistrationStore
 }
 
 // GetProviderName returns the name of the storage provider.

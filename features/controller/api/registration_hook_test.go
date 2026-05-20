@@ -433,15 +433,33 @@ func TestManualReviewApprovalHook_ExpiresAtSetToTimeout(t *testing.T) {
 		"expires_at must be at most 25h from now, got %v", records[0].ExpiresAt)
 }
 
-func TestManualReviewApprovalHook_ContextCancelled_FailsOpen(t *testing.T) {
+func TestManualReviewApprovalHook_ContextCancelled_FailsClosed(t *testing.T) {
 	hook, _ := newTestManualReviewHook(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel
 
-	decision, _, _ := hook.Evaluate(ctx, sampleInput())
-	assert.Equal(t, DecisionApprove, decision,
-		"cancelled context must fail open (approve) to avoid blocking registrations")
+	decision, _, err := hook.Evaluate(ctx, sampleInput())
+	require.NoError(t, err,
+		"a nil error must be returned so the handler honours the quarantine decision")
+	assert.Equal(t, DecisionQuarantine, decision,
+		"cancelled context must fail closed (quarantine) — never admit without operator review")
+}
+
+func TestManualReviewApprovalHook_StoreError_FailsClosed(t *testing.T) {
+	hook, pendingStore := newTestManualReviewHook(t)
+	ctx := context.Background()
+
+	// Close the underlying store so CreatePending fails.
+	if closer, ok := pendingStore.(interface{ Close() error }); ok {
+		require.NoError(t, closer.Close())
+	}
+
+	decision, _, err := hook.Evaluate(ctx, sampleInput())
+	require.NoError(t, err,
+		"a nil error must be returned so the handler honours the quarantine decision")
+	assert.Equal(t, DecisionQuarantine, decision,
+		"a store error must fail closed (quarantine) — never admit without operator review")
 }
 
 func TestManualReviewApprovalHook_MultipleRegistrationsSameTenant(t *testing.T) {

@@ -226,10 +226,20 @@ func (h *ManualReviewApprovalHook) Stop() {
 // Evaluate stores the registration request in the pending queue and returns
 // DecisionQuarantine so the steward receives certificates but is restricted to
 // baseline configuration until an operator acts.
+//
+// Manual-review mode fails closed: when the hook cannot record the request
+// (cancelled context or store error) it still returns DecisionQuarantine with a
+// nil error, so the steward is held in a restricted state rather than admitted.
+// Returning a non-nil error here would cause the registration handler to default
+// to approve, which would silently bypass the operator review this mode exists to
+// enforce.
 func (h *ManualReviewApprovalHook) Evaluate(ctx context.Context, input RegistrationInput) (ApprovalDecision, string, error) {
 	if err := ctx.Err(); err != nil {
-		// Fail open on cancelled context to avoid blocking legitimate registrations.
-		return DecisionApprove, "", ctx.Err()
+		// Fail closed: quarantine rather than admit when the context is cancelled.
+		h.logger.Warn("ManualReviewApprovalHook: context cancelled before queueing, quarantining",
+			"error", err,
+			"tenant_id", input.Token.TenantID)
+		return DecisionQuarantine, "", nil
 	}
 
 	now := time.Now().UTC()
@@ -237,7 +247,7 @@ func (h *ManualReviewApprovalHook) Evaluate(ctx context.Context, input Registrat
 
 	record := &business.PendingRegistrationData{
 		ID:          id,
-		StewardID:   "",  // assigned after approval; left empty until operator acts (#1522-B)
+		StewardID:   "", // assigned after approval; left empty until operator acts (#1522-B)
 		TenantID:    input.Token.TenantID,
 		SourceIP:    input.SourceIP,
 		TokenPrefix: logging.RedactedID(input.Token.Token),
@@ -247,11 +257,13 @@ func (h *ManualReviewApprovalHook) Evaluate(ctx context.Context, input Registrat
 	}
 
 	if err := h.store.CreatePending(ctx, record); err != nil {
-		// Non-fatal: log and fail open so a store error doesn't block registrations.
-		h.logger.Warn("ManualReviewApprovalHook: failed to store pending registration, defaulting to approve",
+		// Fail closed: quarantine rather than admit when the request cannot be
+		// recorded. A nil error is returned so the handler honours the quarantine
+		// decision instead of defaulting to approve.
+		h.logger.Warn("ManualReviewApprovalHook: failed to store pending registration, quarantining",
 			"error", err,
 			"tenant_id", input.Token.TenantID)
-		return DecisionApprove, "", fmt.Errorf("pending registration store error: %w", err)
+		return DecisionQuarantine, "", nil
 	}
 
 	h.logger.Info("Registration queued for manual review",
