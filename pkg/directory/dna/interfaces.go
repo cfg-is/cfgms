@@ -455,6 +455,7 @@ type ObjectTypeStats struct {
 	ChangedToday      int64                          `json:"changed_today"`
 	AverageAttributes float64                        `json:"avg_attributes"`
 	MostCommonChanges []string                       `json:"most_common_changes"`
+	LastUpdated       time.Time                      `json:"last_updated"`
 }
 
 // ProviderStats provides statistics for a specific directory provider.
