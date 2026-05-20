@@ -71,6 +71,9 @@ paths = [
     '''test/.*/fixtures/.*''',
     '''.*/testdata/.*''',
 
+    # Feature test files (contain deliberate test-fixture credentials for scrubber/validator tests)
+    '''features/.*_test\.go$''',
+
     # Environment and configuration examples
     '''\.env\..*\.example$''',
     '''\.env\.test$''',

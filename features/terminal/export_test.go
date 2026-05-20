@@ -5,3 +5,4 @@ package terminal
 var GetApplicableFilterRules = (*SecurityValidator).getApplicableFilterRules
 var GenerateAlert = (*SessionMonitor).generateAlert
 var UpdateThreatLevel = (*SessionMonitor).updateThreatLevel
+var HandleAuditCommand = (*CommandFilter).handleAuditCommand
