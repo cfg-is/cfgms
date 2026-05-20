@@ -90,7 +90,7 @@ func (s *inMemoryTokenStore) ConsumeToken(_ context.Context, tokenStr, stewardID
 }
 
 func (s *inMemoryTokenStore) Initialize(_ context.Context) error { return nil }
-func (s *inMemoryTokenStore) Close() error                        { return nil }
+func (s *inMemoryTokenStore) Close() error                       { return nil }
 
 // compile-time assertion
 var _ business.RegistrationTokenStore = (*inMemoryTokenStore)(nil)
