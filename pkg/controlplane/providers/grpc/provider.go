@@ -979,10 +979,12 @@ type transportServer struct {
 }
 
 func (s *transportServer) Register(ctx context.Context, req *controllerpb.RegisterRequest) (*controllerpb.RegisterResponse, error) {
-	// Extract steward identity from the request
-	stewardID := req.GetCredentials().GetClientId()
-	if stewardID == "" {
-		return nil, status.Error(codes.InvalidArgument, "client_id is required in credentials")
+	// Derive steward identity from the mTLS-verified peer certificate CN.
+	// req.GetCredentials().GetClientId() is caller-supplied and forgeable;
+	// it must never be used as the authoritative identity source.
+	stewardID, err := extractStewardIDFromPeer(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "failed to extract steward identity from mTLS certificate: %v", err)
 	}
 
 	s.provider.logger.Info("steward registered", "steward_id", logging.SanitizeLogValue(stewardID), "version", logging.SanitizeLogValue(req.GetVersion()))
