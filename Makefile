@@ -1893,7 +1893,7 @@ test-e2e-fleet: build-cli
 	@echo "Starting fleet docker-compose profile and running test/e2e/fleet/..."
 	@echo ""
 	@set -e; \
-	trap 'rc=$$?; if [ $$rc -ne 0 ]; then echo ""; echo "❌ Fleet E2E failed (exit $$rc) — dumping container logs before teardown:"; docker compose --profile fleet -f docker-compose.test.yml logs --no-color --tail=200 || true; fi; echo ""; echo "🧹 Tearing down fleet compose..."; docker compose --profile fleet -f docker-compose.test.yml down -v' EXIT; \
+	trap 'rc=$$?; if [ $$rc -ne 0 ]; then echo ""; echo "❌ Fleet E2E failed (exit $$rc) — dumping container logs before teardown:"; docker compose --profile fleet -f docker-compose.test.yml logs --no-color --tail=200 || true; for c in fleet-controller fleet-steward-1 fleet-steward-2; do echo ""; echo "----- $$c : /tmp/cfgms file logs -----"; docker cp "$$c:/tmp/cfgms/." - 2>/dev/null | tar -xOf - 2>/dev/null || echo "(no file logs)"; done; fi; echo ""; echo "🧹 Tearing down fleet compose..."; docker compose --profile fleet -f docker-compose.test.yml down -v' EXIT; \
 	docker compose --profile fleet -f docker-compose.test.yml up -d --wait; \
 	echo ""; \
 	echo "Running fleet E2E tests..."; \
