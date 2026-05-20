@@ -7,13 +7,17 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // DefaultRollbackValidator implements the RollbackValidator interface
 type DefaultRollbackValidator struct {
-	// Dependencies for validation
 	moduleRegistry ModuleRegistry
 	configParser   ConfigurationParser
+	rbacManager    rbac.RBACManager
 }
 
 // ModuleRegistry provides module information for validation
@@ -30,11 +34,13 @@ type ConfigurationParser interface {
 	GetRequiredFields(schema string) []string
 }
 
-// NewRollbackValidator creates a new rollback validator
-func NewRollbackValidator(moduleRegistry ModuleRegistry, configParser ConfigurationParser) RollbackValidator {
+// NewRollbackValidator creates a new rollback validator. Pass nil for rbacManager to disable
+// permission checks (useful for no-op or test contexts that only exercise other validations).
+func NewRollbackValidator(moduleRegistry ModuleRegistry, configParser ConfigurationParser, rbacManager rbac.RBACManager) RollbackValidator {
 	return &DefaultRollbackValidator{
 		moduleRegistry: moduleRegistry,
 		configParser:   configParser,
+		rbacManager:    rbacManager,
 	}
 }
 
@@ -367,7 +373,41 @@ func (v *DefaultRollbackValidator) checkBreakingChanges(ctx context.Context, cha
 }
 
 func (v *DefaultRollbackValidator) validatePermissions(ctx context.Context, request RollbackRequest) error {
-	// Deferred: tracked in #1440 — wire real RBAC checks for emergency and MSP-level rollback permissions
+	if v.rbacManager == nil {
+		return nil
+	}
+
+	userID, _ := ctx.Value(ctxkeys.UserIDKey).(string)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+
+	if request.Emergency || request.RollbackType == RollbackTypeEmergency {
+		resp, err := v.rbacManager.CheckPermission(ctx, &common.AccessRequest{
+			SubjectId:    userID,
+			PermissionId: "rollback.emergency",
+			TenantId:     tenantID,
+		})
+		if err != nil {
+			return fmt.Errorf("permission check failed: %w", err)
+		}
+		if !resp.Granted {
+			return fmt.Errorf("caller does not have permission to perform emergency rollbacks")
+		}
+	}
+
+	if request.TargetType == TargetTypeMSP {
+		resp, err := v.rbacManager.CheckPermission(ctx, &common.AccessRequest{
+			SubjectId:    userID,
+			PermissionId: "rollback.msp",
+			TenantId:     tenantID,
+		})
+		if err != nil {
+			return fmt.Errorf("permission check failed: %w", err)
+		}
+		if !resp.Granted {
+			return fmt.Errorf("caller does not have permission to perform MSP-level rollbacks")
+		}
+	}
+
 	return nil
 }
 
