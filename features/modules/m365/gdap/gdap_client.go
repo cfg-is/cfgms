@@ -20,9 +20,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // GDAPClient provides methods for interacting with Microsoft Partner Center API
@@ -31,6 +33,13 @@ type GDAPClient struct {
 	partnerTenantID string
 	credStore       auth.CredentialStore
 	baseURL         string
+	// tokenBaseURL is the Microsoft login base URL used to construct the OAuth2 token
+	// endpoint. Defaults to "https://login.microsoftonline.com"; overrideable in tests.
+	tokenBaseURL string
+
+	tokenMu     sync.Mutex
+	cachedToken *auth.AccessToken
+	logger      logging.Logger
 }
 
 // NewGDAPClient creates a new GDAP client
@@ -45,6 +54,8 @@ func NewGDAPClient(httpClient *http.Client, partnerTenantID string) *GDAPClient 
 		httpClient:      httpClient,
 		partnerTenantID: partnerTenantID,
 		baseURL:         "https://api.partnercenter.microsoft.com/v1",
+		tokenBaseURL:    "https://login.microsoftonline.com",
+		logger:          logging.NewNoopLogger(),
 	}
 }
 
@@ -82,8 +93,7 @@ func (c *GDAPClient) GetGDAPRelationships(ctx context.Context) ([]GDAPRelationsh
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			// Log error but continue
-			_ = closeErr
+			c.logger.Warn("failed to close Partner Center API response body", "error", closeErr)
 		}
 	}()
 
@@ -177,7 +187,7 @@ func (c *GDAPClient) GetGDAPRelationship(ctx context.Context, relationshipID str
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			_ = closeErr
+			c.logger.Warn("failed to close Partner Center API response body", "error", closeErr)
 		}
 	}()
 
@@ -312,7 +322,7 @@ func (c *GDAPClient) GetCustomerInformation(ctx context.Context, customerTenantI
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			_ = closeErr
+			c.logger.Warn("failed to close Partner Center API response body", "error", closeErr)
 		}
 	}()
 
@@ -353,20 +363,131 @@ func (c *GDAPClient) GetCustomerInformation(ctx context.Context, customerTenantI
 	return customerInfo, nil
 }
 
-// getPartnerCenterToken gets an access token for Partner Center API
+// getPartnerCenterToken returns a valid Partner Center access token, fetching a new
+// one via the OAuth2 client-credentials flow when the cached token has expired.
+//
+// Credentials (client_id, client_secret) are loaded from the credential store using
+// the partner tenant ID as the key. The token is cached in memory and also persisted
+// back to the credential store for reuse across process restarts.
 func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*auth.AccessToken, error) {
 	if c.credStore == nil {
 		return nil, fmt.Errorf("credential store not configured for GDAP client")
 	}
 
-	// Try to get cached Partner Center token
-	token, err := c.credStore.GetToken(c.partnerTenantID)
-	if err == nil && token != nil && time.Now().Before(token.ExpiresAt.Add(-5*time.Minute)) {
-		return token, nil
+	// Check in-memory cache (fastest path — avoids secrets-store I/O on every call).
+	c.tokenMu.Lock()
+	if c.cachedToken != nil && time.Now().Before(c.cachedToken.ExpiresAt.Add(-60*time.Second)) {
+		tok := c.cachedToken
+		c.tokenMu.Unlock()
+		return tok, nil
+	}
+	c.tokenMu.Unlock()
+
+	// Check persisted token (valid across process restarts).
+	if stored, err := c.credStore.GetToken(c.partnerTenantID); err == nil && stored != nil &&
+		time.Now().Before(stored.ExpiresAt.Add(-60*time.Second)) {
+		c.tokenMu.Lock()
+		c.cachedToken = stored
+		c.tokenMu.Unlock()
+		return stored, nil
 	}
 
-	// Deferred: tracked in #1443 — implement Partner Center OAuth2 flow for token acquisition
-	return nil, fmt.Errorf("partner Center token acquisition not implemented - requires partner credentials")
+	// Load partner credentials from the secrets store.
+	config, err := c.credStore.GetConfig(c.partnerTenantID)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"partner Center credentials not found for tenant %s: "+
+				"partner credentials (client_id and client_secret) must be stored in the "+
+				"secrets store before Partner Center token acquisition can proceed: %w",
+			c.partnerTenantID, err,
+		)
+	}
+	if config.ClientID == "" {
+		return nil, fmt.Errorf(
+			"partner Center client_id is not configured for tenant %s: "+
+				"store an OAuth2Config with a non-empty ClientID in the secrets store",
+			c.partnerTenantID,
+		)
+	}
+	if config.ClientSecret == "" {
+		return nil, fmt.Errorf(
+			"partner Center client_secret is not configured for tenant %s: "+
+				"store an OAuth2Config with a non-empty ClientSecret in the secrets store",
+			c.partnerTenantID,
+		)
+	}
+
+	// Build the tenant-specific token endpoint URL.
+	tokenURL := fmt.Sprintf("%s/%s/oauth2/v2.0/token", c.tokenBaseURL, c.partnerTenantID)
+
+	// Prepare client-credentials grant parameters.
+	data := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {config.ClientID},
+		"client_secret": {config.ClientSecret},
+		"scope":         {"https://api.partnercenter.microsoft.com/.default"},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Partner Center token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("partner center token request failed: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Warn("failed to close Partner Center token response body", "error", closeErr)
+		}
+	}()
+
+	var tokenResp struct {
+		AccessToken      string `json:"access_token"`
+		TokenType        string `json:"token_type"`
+		ExpiresIn        int    `json:"expires_in"`
+		Scope            string `json:"scope,omitempty"`
+		Error            string `json:"error,omitempty"`
+		ErrorDescription string `json:"error_description,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to parse Partner Center token response: %w", err)
+	}
+	if tokenResp.Error != "" {
+		return nil, fmt.Errorf("partner center OAuth2 error: %s - %s", tokenResp.Error, tokenResp.ErrorDescription)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("partner center token request failed with status %d", resp.StatusCode)
+	}
+
+	token := &auth.AccessToken{
+		Token:     tokenResp.AccessToken,
+		TokenType: tokenResp.TokenType,
+		ExpiresIn: tokenResp.ExpiresIn,
+		ExpiresAt: time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+		Scope:     tokenResp.Scope,
+		TenantID:  c.partnerTenantID,
+	}
+	if token.TokenType == "" {
+		token.TokenType = "Bearer"
+	}
+
+	// Update in-memory cache.
+	c.tokenMu.Lock()
+	c.cachedToken = token
+	c.tokenMu.Unlock()
+
+	// Persist to credential store for cross-process reuse (best-effort).
+	if storeErr := c.credStore.StoreToken(c.partnerTenantID, token); storeErr != nil {
+		c.logger.Warn("failed to persist Partner Center token to credential store",
+			"tenant_id", logging.SanitizeLogValue(c.partnerTenantID),
+			"error", storeErr)
+	}
+
+	return token, nil
 }
 
 // generateRequestID generates a unique request ID for Partner Center API calls
