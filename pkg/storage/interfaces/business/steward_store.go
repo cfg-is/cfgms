@@ -42,6 +42,11 @@ type StewardRecord struct {
 	// ID is the unique steward identifier, assigned at registration.
 	ID string `json:"id"`
 
+	// TenantID is the tenant this steward belongs to, derived from the registration token
+	// used during HTTP registration. Set at first registration; authoritative source is
+	// RegistrationToken.TenantID from the RegistrationTokenStore.
+	TenantID string `json:"tenant_id"`
+
 	// Hostname is the DNS hostname of the steward's machine.
 	Hostname string `json:"hostname"`
 

@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 	quicgo "github.com/quic-go/quic-go"
@@ -103,6 +104,11 @@ type Provider struct {
 
 	// Subscription handlers (client mode)
 	commandHandler interfaces.CommandHandler
+
+	// Server-side tenant binding store. When non-nil, Register() enforces that
+	// the registration token (creds.ClientId) maps to a tenant matching creds.TenantId.
+	// Injected via Initialize config key "registration_token_store".
+	registrationTokenStore business.RegistrationTokenStore
 
 	// Subscription handlers (server mode)
 	eventHandlers     []eventSubscription
@@ -236,6 +242,10 @@ func (p *Provider) initializeServer(config map[string]interface{}) error {
 		p.registry = reg
 	} else {
 		p.registry = registry.NewRegistry()
+	}
+
+	if ts, ok := config["registration_token_store"].(business.RegistrationTokenStore); ok {
+		p.registrationTokenStore = ts
 	}
 
 	return nil
@@ -985,6 +995,39 @@ func (s *transportServer) Register(ctx context.Context, req *controllerpb.Regist
 	stewardID, err := extractStewardIDFromPeer(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "failed to extract steward identity from mTLS certificate: %v", err)
+	}
+
+	// Tenant binding: enforced when a registration token store is wired in.
+	// The authoritative tenant comes from the server-side RegistrationTokenStore lookup
+	// using the token string the steward supplies in creds.ClientId. creds.TenantId is only
+	// a post-derivation consistency check and must never be the source of truth.
+	if ts := s.provider.registrationTokenStore; ts != nil {
+		creds := req.GetCredentials()
+
+		claimedTenantID := creds.GetTenantId()
+		if claimedTenantID == "" {
+			return nil, status.Error(codes.PermissionDenied, "registration rejected: creds.tenant_id must not be empty")
+		}
+
+		// creds.ClientId carries the registration token issued at HTTP registration time.
+		// The identity (stewardID) is authoritative from the mTLS cert CN above; ClientId
+		// is reused here as the token-string key into the server-side RegistrationTokenStore.
+		tokenStr := creds.GetClientId()
+		if tokenStr == "" {
+			return nil, status.Error(codes.PermissionDenied, "registration rejected: no registration token provided in creds.client_id")
+		}
+
+		tokenData, lookupErr := ts.GetToken(ctx, tokenStr)
+		if lookupErr != nil || tokenData == nil || !tokenData.IsValid() {
+			return nil, status.Error(codes.PermissionDenied, "registration rejected: invalid or expired registration token")
+		}
+
+		if claimedTenantID != tokenData.TenantID {
+			s.provider.logger.Warn("registration tenant mismatch",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"claimed_tenant", logging.SanitizeLogValue(claimedTenantID))
+			return nil, status.Error(codes.PermissionDenied, "registration rejected: creds.tenant_id does not match registration token")
+		}
 	}
 
 	s.provider.logger.Info("steward registered", "steward_id", logging.SanitizeLogValue(stewardID), "version", logging.SanitizeLogValue(req.GetVersion()))
