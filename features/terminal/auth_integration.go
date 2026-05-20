@@ -20,6 +20,10 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
+// tokenRefreshNotifyTimeout is the maximum time rotateTokensIfNeeded will wait
+// to deliver a token-refresh message before dropping it for a slow client.
+const tokenRefreshNotifyTimeout = 100 * time.Millisecond
+
 // AuthenticatedTerminalManager manages terminal sessions with mTLS authentication and continuous authorization
 type AuthenticatedTerminalManager struct {
 	baseManager       SessionManager
@@ -32,6 +36,10 @@ type AuthenticatedTerminalManager struct {
 	// Anti-hijacking measures
 	sessionTokens map[string]*SessionToken
 	tokenMutex    sync.RWMutex
+
+	// Per-session channels for token-refresh notifications (session ID → channel).
+	// Protected by tokenMutex.
+	notifyChannels map[string]chan<- *TerminalMessage
 
 	// Configuration
 	config               *AuthConfig
@@ -156,6 +164,7 @@ func NewAuthenticatedTerminalManager(
 		auditManager:         auditManager,
 		sessionMonitor:       sessionMonitor,
 		sessionTokens:        make(map[string]*SessionToken),
+		notifyChannels:       make(map[string]chan<- *TerminalMessage),
 		config:               config,
 		continuousAuthConfig: DefaultContinuousAuthConfig(),
 	}
@@ -680,15 +689,79 @@ func (atm *AuthenticatedTerminalManager) cleanupExpiredTokens() {
 	}
 }
 
-func (atm *AuthenticatedTerminalManager) rotateTokensIfNeeded() {
+// RegisterTokenRefreshChannel registers ch to receive token-refresh messages for
+// the given session. The caller owns the channel and must call
+// UnregisterTokenRefreshChannel when the session ends.
+func (atm *AuthenticatedTerminalManager) RegisterTokenRefreshChannel(sessionID string, ch chan<- *TerminalMessage) {
 	atm.tokenMutex.Lock()
 	defer atm.tokenMutex.Unlock()
+	atm.notifyChannels[sessionID] = ch
+}
 
+// UnregisterTokenRefreshChannel removes the token-refresh notification channel
+// for sessionID so the rotation loop no longer attempts to deliver to it.
+func (atm *AuthenticatedTerminalManager) UnregisterTokenRefreshChannel(sessionID string) {
+	atm.tokenMutex.Lock()
+	defer atm.tokenMutex.Unlock()
+	delete(atm.notifyChannels, sessionID)
+}
+
+func (atm *AuthenticatedTerminalManager) rotateTokensIfNeeded() {
+	type pendingNotification struct {
+		ch        chan<- *TerminalMessage
+		sessionID string
+		newToken  string
+		expiresAt time.Time
+	}
+
+	atm.tokenMutex.Lock()
 	now := time.Now()
-	for _, token := range atm.sessionTokens {
-		if now.Sub(token.LastRotated) > atm.config.TokenRotationInterval {
-			// Deferred: tracked in #1441 — push token-refresh signal to client over WebSocket
-			token.LastRotated = now
+	var notifications []pendingNotification
+
+	for oldTokenStr, token := range atm.sessionTokens {
+		if now.Sub(token.LastRotated) <= atm.config.TokenRotationInterval {
+			continue
+		}
+
+		newTokenStr, err := generateSecureToken()
+		if err != nil {
+			continue
+		}
+
+		// Build the replacement entry (copy then update token-specific fields).
+		newEntry := *token
+		newEntry.Token = newTokenStr
+		newEntry.LastRotated = now
+		newEntry.ExpiresAt = now.Add(atm.config.SessionTimeout)
+
+		delete(atm.sessionTokens, oldTokenStr)
+		atm.sessionTokens[newTokenStr] = &newEntry
+
+		if ch, ok := atm.notifyChannels[token.SessionID]; ok {
+			notifications = append(notifications, pendingNotification{
+				ch:        ch,
+				sessionID: token.SessionID,
+				newToken:  newTokenStr,
+				expiresAt: newEntry.ExpiresAt,
+			})
+		}
+	}
+	atm.tokenMutex.Unlock()
+
+	// Deliver notifications outside the lock so a slow client cannot stall rotation.
+	for _, n := range notifications {
+		expiresAt := n.expiresAt
+		msg := &TerminalMessage{
+			Type:      MessageTypeTokenRefresh,
+			SessionID: n.sessionID,
+			Token:     n.newToken,
+			ExpiresAt: &expiresAt,
+			Timestamp: time.Now(),
+		}
+		select {
+		case n.ch <- msg:
+		case <-time.After(tokenRefreshNotifyTimeout):
+			// slow or disconnected client — drop the notification
 		}
 	}
 }

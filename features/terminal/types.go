@@ -15,10 +15,11 @@ import (
 type MessageType string
 
 const (
-	MessageTypeData   MessageType = "data"
-	MessageTypeResize MessageType = "resize"
-	MessageTypeClose  MessageType = "close"
-	MessageTypeError  MessageType = "error"
+	MessageTypeData         MessageType = "data"
+	MessageTypeResize       MessageType = "resize"
+	MessageTypeClose        MessageType = "close"
+	MessageTypeError        MessageType = "error"
+	MessageTypeTokenRefresh MessageType = "token-refresh"
 )
 
 // DataDirection represents the direction of terminal data flow
@@ -35,6 +36,8 @@ type TerminalMessage struct {
 	SessionID string      `json:"session_id,omitempty"`
 	Data      []byte      `json:"data,omitempty"`
 	Error     string      `json:"error,omitempty"`
+	Token     string      `json:"token,omitempty"`
+	ExpiresAt *time.Time  `json:"expires_at,omitempty"`
 	Timestamp time.Time   `json:"timestamp,omitempty"`
 }
 
