@@ -69,8 +69,8 @@ func TestEntraIDDirectoryProvider_Connect(t *testing.T) {
 		expectConnect bool
 	}{
 		{
-			name:   "successful connection",
-			config: validConnectConfig(),
+			name:         "successful connection",
+			config:       validConnectConfig(),
 			authProvider: &stubAuthProvider{},
 			graphClient: &stubGraphClient{
 				getUserFn: func(_ context.Context, _ *auth.AccessToken, _ string) (*graph.User, error) {
