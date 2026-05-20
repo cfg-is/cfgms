@@ -8,12 +8,18 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
+
+// ErrFlowStateExpired is returned when the retrieved auth flow state has passed its TTL.
+var ErrFlowStateExpired = errors.New("m365 auth flow state expired")
 
 // InteractiveAuthFlow manages the OAuth2 authorization code flow with PKCE
 type InteractiveAuthFlow struct {
@@ -21,6 +27,10 @@ type InteractiveAuthFlow struct {
 	config          *OAuth2Config
 	httpClient      *http.Client
 	callbackHandler *CallbackHandler
+
+	// flowStore, when set, persists flow state to a durable encrypted store instead of memory.
+	flowStore    secretsif.SecretStore
+	flowStateTTL time.Duration
 }
 
 // AuthFlowState represents the state of an ongoing authorization flow
@@ -61,6 +71,26 @@ func NewInteractiveAuthFlow(provider *OAuth2Provider, config *OAuth2Config) *Int
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
 		callbackHandler: NewCallbackHandler(),
 	}
+}
+
+// NewInteractiveAuthFlowWithStore creates an interactive auth flow manager that persists
+// flow state to a durable encrypted store instead of memory. Flow state survives restarts
+// and expires after flowStateTTL (default 10 minutes).
+func NewInteractiveAuthFlowWithStore(provider *OAuth2Provider, config *OAuth2Config, store secretsif.SecretStore) *InteractiveAuthFlow {
+	return &InteractiveAuthFlow{
+		provider:        provider,
+		config:          config,
+		httpClient:      &http.Client{Timeout: 30 * time.Second},
+		callbackHandler: NewCallbackHandler(),
+		flowStore:       store,
+		flowStateTTL:    10 * time.Minute,
+	}
+}
+
+// flowStateKey returns the secret store key for an M365 auth flow state entry.
+// The key includes the flow ID (state parameter) to namespace entries per flow.
+func flowStateKey(state string) string {
+	return "m365/flow-state/" + sanitizeSegment(state)
 }
 
 // StartAuthFlow initiates the OAuth2 authorization code flow
@@ -396,12 +426,58 @@ func (f *InteractiveAuthFlow) storeTokens(tenantID string, accessToken *AccessTo
 // State management
 
 func (f *InteractiveAuthFlow) storeFlowState(state string, flowState *AuthFlowState) error {
-	// Deferred: tracked in #1443 — persist flow state in a secure temporary store
+	if f.flowStore != nil {
+		data, err := json.Marshal(flowState)
+		if err != nil {
+			return fmt.Errorf("marshal flow state: %w", err)
+		}
+		return f.flowStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
+			Key:       flowStateKey(state),
+			Value:     string(data),
+			TenantID:  "m365",
+			CreatedBy: "m365-auth",
+			TTL:       f.flowStateTTL,
+			Metadata: map[string]string{
+				"tenant_id": flowState.TenantID,
+				"flow_id":   state,
+			},
+			Description: fmt.Sprintf("M365 OAuth flow state for tenant %s", flowState.TenantID),
+		})
+	}
 	return f.callbackHandler.StoreFlowState(state, flowState)
 }
 
 func (f *InteractiveAuthFlow) getFlowState(state string) (*AuthFlowState, error) {
+	if f.flowStore != nil {
+		return f.loadFlowStateFromStore(state)
+	}
 	return f.callbackHandler.GetFlowState(state)
+}
+
+// loadFlowStateFromStore retrieves flow state from the durable encrypted store,
+// returning ErrFlowStateExpired when the state has passed its TTL.
+func (f *InteractiveAuthFlow) loadFlowStateFromStore(state string) (*AuthFlowState, error) {
+	secret, err := f.flowStore.GetSecret(context.Background(), flowStateKey(state))
+	if err != nil {
+		if errors.Is(err, secretsif.ErrSecretNotFound) {
+			return nil, fmt.Errorf("auth flow state not found: %w", err)
+		}
+		if strings.Contains(err.Error(), "expired") {
+			return nil, ErrFlowStateExpired
+		}
+		return nil, fmt.Errorf("auth flow state retrieval failed: %w", err)
+	}
+
+	var flowState AuthFlowState
+	if err := json.Unmarshal([]byte(secret.Value), &flowState); err != nil {
+		return nil, fmt.Errorf("unmarshal auth flow state: %w", err)
+	}
+
+	if time.Now().After(flowState.ExpiresAt) {
+		return nil, ErrFlowStateExpired
+	}
+
+	return &flowState, nil
 }
 
 func (f *InteractiveAuthFlow) validateFlowState(flowState *AuthFlowState) error {
@@ -417,6 +493,10 @@ func (f *InteractiveAuthFlow) validateFlowState(flowState *AuthFlowState) error 
 }
 
 func (f *InteractiveAuthFlow) cleanupFlowState(state string) {
+	if f.flowStore != nil {
+		_ = f.flowStore.DeleteSecret(context.Background(), flowStateKey(state))
+		return
+	}
 	f.callbackHandler.CleanupFlowState(state)
 }
 
