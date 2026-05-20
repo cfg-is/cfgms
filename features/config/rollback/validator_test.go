@@ -12,8 +12,8 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/features/rbac"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // ctxWithCaller injects the UserIDKey and TenantID context values that validatePermissions reads.
@@ -214,6 +214,78 @@ func TestValidatePermissions_MSPRollback_Granted(t *testing.T) {
 			"caller with rollback.msp must not receive a permission error")
 	}
 	assert.True(t, result.Passed)
+}
+
+// TestCheckSystemHealth_ReturnsRealMetrics verifies that ValidateRollback populates
+// cpu_usage_percent and disk_usage_percent in Metadata from real OS probes (not hardcoded).
+func TestCheckSystemHealth_ReturnsRealMetrics(t *testing.T) {
+	validator := rollback.NewRollbackValidator(&noopModuleRegistry{}, nil, nil)
+
+	request := rollback.RollbackRequest{
+		TargetType:   rollback.TargetTypeDevice,
+		TargetID:     "device-1",
+		RollbackType: rollback.RollbackTypeFull,
+		RollbackTo:   "v1.0",
+	}
+
+	result, err := validator.ValidateRollback(context.Background(), request, nil)
+	require.NoError(t, err)
+
+	cpuVal, ok := result.Metadata["cpu_usage_percent"]
+	require.True(t, ok, "cpu_usage_percent must be present in Metadata")
+	cpuPct, ok := cpuVal.(float64)
+	require.True(t, ok, "cpu_usage_percent must be float64")
+	assert.GreaterOrEqual(t, cpuPct, 0.0, "CPU percent must be >= 0")
+	assert.LessOrEqual(t, cpuPct, 100.0, "CPU percent must be <= 100")
+
+	diskVal, ok := result.Metadata["disk_usage_percent"]
+	require.True(t, ok, "disk_usage_percent must be present in Metadata")
+	diskPct, ok := diskVal.(float64)
+	require.True(t, ok, "disk_usage_percent must be float64")
+	assert.Greater(t, diskPct, 0.0, "disk percent must be > 0 (container has data on disk)")
+	assert.LessOrEqual(t, diskPct, 100.0, "disk percent must be <= 100")
+}
+
+// TestEvaluateSystemHealthMetrics_HighCPU verifies that CPU usage above 90% produces a warning.
+func TestEvaluateSystemHealthMetrics_HighCPU(t *testing.T) {
+	issues := rollback.EvaluateSystemHealthMetrics(91.5, 50.0)
+	require.Len(t, issues, 1)
+	assert.Equal(t, "system_health", issues[0].Type)
+	assert.Equal(t, "warning", issues[0].Severity)
+	assert.Contains(t, issues[0].Message, "CPU")
+}
+
+// TestEvaluateSystemHealthMetrics_HighDisk verifies that disk usage above 95% produces a warning.
+func TestEvaluateSystemHealthMetrics_HighDisk(t *testing.T) {
+	issues := rollback.EvaluateSystemHealthMetrics(50.0, 96.0)
+	require.Len(t, issues, 1)
+	assert.Equal(t, "system_health", issues[0].Type)
+	assert.Equal(t, "warning", issues[0].Severity)
+	assert.Contains(t, issues[0].Message, "disk")
+}
+
+// TestEvaluateSystemHealthMetrics_Healthy verifies that normal CPU and disk usage produces no issues.
+func TestEvaluateSystemHealthMetrics_Healthy(t *testing.T) {
+	issues := rollback.EvaluateSystemHealthMetrics(50.0, 60.0)
+	assert.Empty(t, issues)
+}
+
+// TestEvaluateSystemHealthMetrics_BothUnhealthy verifies that CPU and disk thresholds can both trigger.
+func TestEvaluateSystemHealthMetrics_BothUnhealthy(t *testing.T) {
+	issues := rollback.EvaluateSystemHealthMetrics(95.0, 97.0)
+	require.Len(t, issues, 2)
+	assert.Equal(t, "system_health", issues[0].Type)
+	assert.Equal(t, "system_health", issues[1].Type)
+}
+
+// TestEvaluateSystemHealthMetrics_AtThreshold verifies behavior exactly at the threshold boundaries.
+func TestEvaluateSystemHealthMetrics_AtThreshold(t *testing.T) {
+	// Exactly at threshold — not unhealthy (>90, not >=90)
+	assert.Empty(t, rollback.EvaluateSystemHealthMetrics(90.0, 95.0))
+	// One tick above CPU threshold
+	assert.Len(t, rollback.EvaluateSystemHealthMetrics(90.1, 50.0), 1)
+	// One tick above disk threshold
+	assert.Len(t, rollback.EvaluateSystemHealthMetrics(50.0, 95.1), 1)
 }
 
 // TestValidatePermissions_StandardRollback_NoCheck verifies that a standard (non-emergency,

@@ -11,6 +11,8 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/disk"
 )
 
 // DefaultRollbackValidator implements the RollbackValidator interface
@@ -133,7 +135,7 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 	}
 
 	// Check system health
-	healthIssues := v.checkSystemHealth(ctx, request.TargetType, request.TargetID)
+	healthIssues, cpuUsage, diskUsage := v.checkSystemHealth(ctx, request.TargetType, request.TargetID)
 	if len(healthIssues) > 0 {
 		results.Warnings = append(results.Warnings, healthIssues...)
 	}
@@ -141,6 +143,8 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 	// Add validation metadata
 	results.Metadata["validation_time"] = time.Now()
 	results.Metadata["validator_version"] = "1.0.0"
+	results.Metadata["cpu_usage_percent"] = cpuUsage
+	results.Metadata["disk_usage_percent"] = diskUsage
 
 	return results, nil
 }
@@ -411,35 +415,44 @@ func (v *DefaultRollbackValidator) validatePermissions(ctx context.Context, requ
 	return nil
 }
 
-func (v *DefaultRollbackValidator) checkSystemHealth(ctx context.Context, targetType TargetType, targetID string) []ValidationIssue {
-	issues := []ValidationIssue{}
+func (v *DefaultRollbackValidator) checkSystemHealth(_ context.Context, _ TargetType, _ string) ([]ValidationIssue, float64, float64) {
+	cpuPercents, err := cpu.Percent(500*time.Millisecond, false)
+	var cpuUsage float64
+	if err == nil && len(cpuPercents) > 0 {
+		cpuUsage = cpuPercents[0]
+	}
 
-	// Deferred: tracked in #1440 — query real CPU/disk metrics from steward DNA hardware attributes
+	var diskUsage float64
+	if stat, err := disk.Usage("/"); err == nil {
+		diskUsage = stat.UsedPercent
+	}
 
-	// Check CPU usage
-	cpuUsage := 75 // Simulated
-	if cpuUsage > 80 {
+	return EvaluateSystemHealthMetrics(cpuUsage, diskUsage), cpuUsage, diskUsage
+}
+
+// EvaluateSystemHealthMetrics applies health thresholds to CPU and disk usage values and
+// returns any validation issues. Exported so tests can exercise threshold logic directly
+// without requiring a live OS probe.
+func EvaluateSystemHealthMetrics(cpuPercent, diskPercent float64) []ValidationIssue {
+	var issues []ValidationIssue
+	if cpuPercent > 90 {
 		issues = append(issues, ValidationIssue{
 			Type:       "system_health",
 			Severity:   "warning",
-			Message:    fmt.Sprintf("High CPU usage detected: %d%%", cpuUsage),
+			Message:    fmt.Sprintf("High CPU usage detected: %.1f%%", cpuPercent),
 			Resolvable: true,
 			Resolution: "Wait for CPU usage to decrease or proceed with caution",
 		})
 	}
-
-	// Check available disk space
-	diskFree := 15 // Simulated percentage
-	if diskFree < 20 {
+	if diskPercent > 95 {
 		issues = append(issues, ValidationIssue{
 			Type:       "system_health",
 			Severity:   "warning",
-			Message:    fmt.Sprintf("Low disk space: %d%% free", diskFree),
+			Message:    fmt.Sprintf("High disk usage detected: %.1f%% used", diskPercent),
 			Resolvable: true,
 			Resolution: "Free up disk space before proceeding",
 		})
 	}
-
 	return issues
 }
 
