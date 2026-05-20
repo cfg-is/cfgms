@@ -466,7 +466,7 @@ func TestManualReviewApprovalHook_MultipleRegistrationsSameTenant(t *testing.T) 
 	hook, pendingStore := newTestManualReviewHook(t)
 	ctx := context.Background()
 
-	// Simulate two stewards registering.
+	// Three stewards register concurrently.
 	for i := 0; i < 3; i++ {
 		decision, _, err := hook.Evaluate(ctx, sampleInput())
 		require.NoError(t, err)
@@ -494,9 +494,7 @@ func TestManualReviewApprovalHook_ExpireTimedOut(t *testing.T) {
 	}
 	require.NoError(t, pendingStore.CreatePending(ctx, record))
 
-	// Create the hook with a very short sweep interval — we'll call expiry directly
-	// via a hook with access to its internal method, but here we simulate by using
-	// the store's filter. Use a fresh hook to trigger expiry via expireTimedOut.
+	// Use a fresh hook to trigger expiry via expireTimedOut directly.
 	hook := NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logging.NewNoopLogger())
 	defer hook.Stop()
 
