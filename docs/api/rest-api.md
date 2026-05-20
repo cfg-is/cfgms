@@ -1127,8 +1127,6 @@ Configuration drift summary report.
 
 Workflow endpoints are registered only when a `WorkflowHandler` is wired in (`SetWorkflowHandler()`).
 
-> **[GAP: workflow/trigger route registration]** The workflow handler's `RegisterTriggerRoutes` is called with a subrouter already scoped to `/api/v1/triggers`, but the trigger API's `RegisterRoutes` adds `/triggers` as an additional prefix, producing `/api/v1/triggers/triggers/...` paths. The trigger routes are currently unreachable at their intended paths. See follow-up issue for the code fix.
-
 #### GET /api/v1/workflows
 
 List workflows.

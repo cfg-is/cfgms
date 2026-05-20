@@ -580,7 +580,7 @@ cat /etc/myapp/config.yaml
 > setting. The current `steward.mode` field in the cfg controls connectivity mode
 > (`standalone` vs `controller`), not drift behavior.
 >
-> **[GAP: modules.Monitor() interface not yet implemented by any steward module]**
+> **[GAP: modules.Monitor() not implemented by any steward module — see issue #1590]**
 > The `Monitor` interface in `features/modules/module.go` defines real-time
 > change-detection for modules that support it. As of the #1511 audit, no steward module
 > implements this interface. All modules use the polling-based convergence loop
@@ -717,7 +717,7 @@ The table below collects all `[GAP: ...]` markers from this walkthrough for easy
 | `cfg config deployments <id>` not implemented | [#1526](https://github.com/cfg-is/cfgms/issues/1526) | Phase 7 |
 | save=deploy auto-distribution not wired | [#1525](https://github.com/cfg-is/cfgms/issues/1525) | Phase 6 |
 | apply/monitor mode toggle not implemented | [#1524](https://github.com/cfg-is/cfgms/issues/1524) | Phase 8 |
-| `modules.Monitor()` not implemented by any module | (no filed issue — module interface exists, no implementors) | Phase 8 |
+| `modules.Monitor()` not implemented by any module | [#1590](https://github.com/cfg-is/cfgms/issues/1590) | Phase 8 |
 | Multi-controller / failover not supported | [#1517](https://github.com/cfg-is/cfgms/issues/1517) | Phase 4 |
 
 ---
