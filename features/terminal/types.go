@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/terminal/shell"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // MessageType represents the type of WebSocket message
@@ -66,6 +67,8 @@ type Session struct {
 	closed       bool
 	recorder     Recorder
 	executor     shell.Executor
+	outputCh     chan []byte // buffered relay channel: steward → WebSocket client
+	logger       logging.Logger
 	mu           sync.RWMutex // Mutex for thread-safe access to session fields
 }
 
