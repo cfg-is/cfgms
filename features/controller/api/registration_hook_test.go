@@ -374,3 +374,135 @@ func TestHandleRegister_HookError_FailsOpen(t *testing.T) {
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
 		"hook error must fail open — not treated as a rejection")
 }
+
+// --- ManualReviewApprovalHook ---
+
+// newTestManualReviewHook builds a ManualReviewApprovalHook backed by a real SQLite store.
+func newTestManualReviewHook(t *testing.T) (*ManualReviewApprovalHook, business.PendingRegistrationStore) {
+	t.Helper()
+	sm := pkgtesting.SetupTestStorage(t)
+	pendingStore := sm.GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore, "OSS storage manager must provide a PendingRegistrationStore")
+	hook := NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logging.NewNoopLogger())
+	t.Cleanup(func() { hook.Stop() })
+	return hook, pendingStore
+}
+
+func TestManualReviewApprovalHook_StoresPendingAndReturnsQuarantine(t *testing.T) {
+	hook, pendingStore := newTestManualReviewHook(t)
+
+	decision, reason, err := hook.Evaluate(context.Background(), sampleInput())
+	require.NoError(t, err)
+	assert.Equal(t, DecisionQuarantine, decision, "manual-review hook must return quarantine")
+	assert.Empty(t, reason)
+
+	// Verify the pending record was created in the store.
+	pending := business.PendingRegistrationStatusPending
+	records, err := pendingStore.ListPending(context.Background(), &business.PendingRegistrationFilter{Status: &pending})
+	require.NoError(t, err)
+	require.Len(t, records, 1, "one pending registration must be stored")
+	assert.Equal(t, "test-tenant", records[0].TenantID)
+	assert.Equal(t, "192.168.1.100", records[0].SourceIP)
+	assert.Equal(t, business.PendingRegistrationStatusPending, records[0].Status)
+	// The full token must NOT be stored — only the redacted prefix.
+	assert.Empty(t, records[0].StewardID, "StewardID must be empty until operator approves")
+	assert.NotEmpty(t, records[0].TokenPrefix, "TokenPrefix must hold the redacted token prefix")
+	assert.NotContains(t, records[0].TokenPrefix, "testtoken12345", "full token must not appear in TokenPrefix")
+}
+
+func TestManualReviewApprovalHook_ExpiresAtSetToTimeout(t *testing.T) {
+	hook, pendingStore := newTestManualReviewHook(t)
+	before := time.Now().UTC()
+
+	_, _, err := hook.Evaluate(context.Background(), sampleInput())
+	require.NoError(t, err)
+
+	after := time.Now().UTC()
+
+	pending := business.PendingRegistrationStatusPending
+	records, err := pendingStore.ListPending(context.Background(), &business.PendingRegistrationFilter{Status: &pending})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	// ExpiresAt should be approximately 24 hours from now.
+	expectedMin := before.Add(23 * time.Hour)
+	expectedMax := after.Add(25 * time.Hour)
+	assert.True(t, records[0].ExpiresAt.After(expectedMin),
+		"expires_at must be at least 23h from now, got %v", records[0].ExpiresAt)
+	assert.True(t, records[0].ExpiresAt.Before(expectedMax),
+		"expires_at must be at most 25h from now, got %v", records[0].ExpiresAt)
+}
+
+func TestManualReviewApprovalHook_ContextCancelled_FailsClosed(t *testing.T) {
+	hook, _ := newTestManualReviewHook(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel
+
+	decision, _, err := hook.Evaluate(ctx, sampleInput())
+	require.NoError(t, err,
+		"a nil error must be returned so the handler honours the quarantine decision")
+	assert.Equal(t, DecisionQuarantine, decision,
+		"cancelled context must fail closed (quarantine) — never admit without operator review")
+}
+
+func TestManualReviewApprovalHook_StoreError_FailsClosed(t *testing.T) {
+	hook, pendingStore := newTestManualReviewHook(t)
+	ctx := context.Background()
+
+	// Close the underlying store so CreatePending fails.
+	if closer, ok := pendingStore.(interface{ Close() error }); ok {
+		require.NoError(t, closer.Close())
+	}
+
+	decision, _, err := hook.Evaluate(ctx, sampleInput())
+	require.NoError(t, err,
+		"a nil error must be returned so the handler honours the quarantine decision")
+	assert.Equal(t, DecisionQuarantine, decision,
+		"a store error must fail closed (quarantine) — never admit without operator review")
+}
+
+func TestManualReviewApprovalHook_MultipleRegistrationsSameTenant(t *testing.T) {
+	hook, pendingStore := newTestManualReviewHook(t)
+	ctx := context.Background()
+
+	// Three stewards register concurrently.
+	for i := 0; i < 3; i++ {
+		decision, _, err := hook.Evaluate(ctx, sampleInput())
+		require.NoError(t, err)
+		assert.Equal(t, DecisionQuarantine, decision)
+	}
+
+	records, err := pendingStore.ListPending(ctx, nil)
+	require.NoError(t, err)
+	assert.Len(t, records, 3, "each registration must create a separate pending record")
+}
+
+func TestManualReviewApprovalHook_ExpireTimedOut(t *testing.T) {
+	_, pendingStore := newTestManualReviewHook(t)
+	ctx := context.Background()
+
+	// Manually create a record that already expired.
+	record := &business.PendingRegistrationData{
+		ID:        "pr-expired-test",
+		StewardID: "steward-x",
+		TenantID:  "test-tenant",
+		SourceIP:  "10.0.0.1",
+		Status:    business.PendingRegistrationStatusPending,
+		CreatedAt: time.Now().UTC().Add(-25 * time.Hour),
+		ExpiresAt: time.Now().UTC().Add(-1 * time.Hour),
+	}
+	require.NoError(t, pendingStore.CreatePending(ctx, record))
+
+	// Use a fresh hook to trigger expiry via expireTimedOut directly.
+	hook := NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logging.NewNoopLogger())
+	defer hook.Stop()
+
+	// Manually invoke the expiry sweep.
+	hook.expireTimedOut(ctx)
+
+	// The expired record must now be timed-out.
+	got, err := pendingStore.GetPending(ctx, "pr-expired-test")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusTimedOut, got.Status)
+}

@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
@@ -171,5 +174,145 @@ func (h *WorkflowApprovalHook) Evaluate(ctx context.Context, input RegistrationI
 	default:
 		// "approve" and any unrecognised value → approve.
 		return DecisionApprove, "", nil
+	}
+}
+
+// defaultManualReviewTimeout is the default period after which a pending registration
+// is automatically rejected if no operator action is taken.
+const defaultManualReviewTimeout = 24 * time.Hour
+
+// ManualReviewApprovalHook stores incoming registration requests in the durable
+// PendingRegistrationStore and returns DecisionQuarantine so the steward is held
+// in a restricted state until an operator approves or denies via the CLI (#1522-B).
+//
+// A background goroutine sweeps for expired records every minute and marks them
+// as timed-out so operators can distinguish expired requests from active ones.
+type ManualReviewApprovalHook struct {
+	store   business.PendingRegistrationStore
+	timeout time.Duration
+	logger  logging.Logger
+	cancel  context.CancelFunc
+	done    chan struct{}
+}
+
+// NewManualReviewApprovalHook creates a ManualReviewApprovalHook and starts
+// the background expiry goroutine. Call Stop() when the server shuts down.
+func NewManualReviewApprovalHook(
+	store business.PendingRegistrationStore,
+	timeout time.Duration,
+	logger logging.Logger,
+) *ManualReviewApprovalHook {
+	if timeout <= 0 {
+		timeout = defaultManualReviewTimeout
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	h := &ManualReviewApprovalHook{
+		store:   store,
+		timeout: timeout,
+		logger:  logger,
+		cancel:  cancel,
+		done:    make(chan struct{}),
+	}
+	go h.runExpiry(ctx)
+	return h
+}
+
+// Stop shuts down the background expiry goroutine and waits for it to exit.
+func (h *ManualReviewApprovalHook) Stop() {
+	h.cancel()
+	<-h.done
+}
+
+// Evaluate stores the registration request in the pending queue and returns
+// DecisionQuarantine so the steward receives certificates but is restricted to
+// baseline configuration until an operator acts.
+//
+// Manual-review mode fails closed: when the hook cannot record the request
+// (cancelled context or store error) it still returns DecisionQuarantine with a
+// nil error, so the steward is held in a restricted state rather than admitted.
+// Returning a non-nil error here would cause the registration handler to default
+// to approve, which would silently bypass the operator review this mode exists to
+// enforce.
+func (h *ManualReviewApprovalHook) Evaluate(ctx context.Context, input RegistrationInput) (ApprovalDecision, string, error) {
+	if err := ctx.Err(); err != nil {
+		// Fail closed: quarantine rather than admit when the context is cancelled.
+		h.logger.Warn("ManualReviewApprovalHook: context cancelled before queueing, quarantining",
+			"error", err,
+			"tenant_id", input.Token.TenantID)
+		return DecisionQuarantine, "", nil
+	}
+
+	now := time.Now().UTC()
+	id := fmt.Sprintf("pr-%s", uuid.New().String())
+
+	record := &business.PendingRegistrationData{
+		ID:          id,
+		StewardID:   "", // assigned after approval; left empty until operator acts (#1522-B)
+		TenantID:    input.Token.TenantID,
+		SourceIP:    input.SourceIP,
+		TokenPrefix: logging.RedactedID(input.Token.Token),
+		Status:      business.PendingRegistrationStatusPending,
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(h.timeout),
+	}
+
+	if err := h.store.CreatePending(ctx, record); err != nil {
+		// Fail closed: quarantine rather than admit when the request cannot be
+		// recorded. A nil error is returned so the handler honours the quarantine
+		// decision instead of defaulting to approve.
+		h.logger.Warn("ManualReviewApprovalHook: failed to store pending registration, quarantining",
+			"error", err,
+			"tenant_id", input.Token.TenantID)
+		return DecisionQuarantine, "", nil
+	}
+
+	h.logger.Info("Registration queued for manual review",
+		"pending_id", id,
+		"tenant_id", input.Token.TenantID,
+		"source_ip", logging.SanitizeLogValue(input.SourceIP),
+		"expires_at", record.ExpiresAt.Format(time.RFC3339))
+
+	return DecisionQuarantine, "", nil
+}
+
+// runExpiry periodically marks pending registrations that have passed their
+// expiry deadline as timed-out. This prevents the pending queue from growing
+// indefinitely when operators do not act on incoming requests.
+func (h *ManualReviewApprovalHook) runExpiry(ctx context.Context) {
+	defer close(h.done)
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			h.expireTimedOut(ctx)
+		}
+	}
+}
+
+// expireTimedOut finds all pending records whose expires_at has passed and
+// transitions them to the timed-out status.
+func (h *ManualReviewApprovalHook) expireTimedOut(ctx context.Context) {
+	now := time.Now().UTC()
+	pending := business.PendingRegistrationStatusPending
+	records, err := h.store.ListPending(ctx, &business.PendingRegistrationFilter{
+		Status:            &pending,
+		ExpiresBeforeOrAt: &now,
+	})
+	if err != nil {
+		if ctx.Err() == nil {
+			h.logger.Warn("ManualReviewApprovalHook: failed to list expired pending registrations", "error", err)
+		}
+		return
+	}
+	for _, r := range records {
+		if err := h.store.UpdatePendingStatus(ctx, r.ID, business.PendingRegistrationStatusTimedOut, "auto-rejected: review timeout exceeded"); err != nil {
+			if ctx.Err() == nil {
+				h.logger.Warn("ManualReviewApprovalHook: failed to expire pending registration",
+					"pending_id", r.ID, "error", err)
+			}
+		}
 	}
 }

@@ -377,6 +377,10 @@ func (p *mockProvider) CreatePushStore(_ map[string]interface{}) (business.PushS
 	return nil, business.ErrNotSupported
 }
 
+func (p *mockProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:   true,

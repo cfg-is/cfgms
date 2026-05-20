@@ -214,6 +214,12 @@ func (p *FlatFileProvider) CreatePushStore(config map[string]interface{}) (busin
 	return nil, ErrNotSupported
 }
 
+// CreatePendingRegistrationStore returns ErrNotSupported.
+// Pending registration state belongs in the business-data tier (SQLite).
+func (p *FlatFileProvider) CreatePendingRegistrationStore(config map[string]interface{}) (business.PendingRegistrationStore, error) {
+	return nil, ErrNotSupported
+}
+
 // init auto-registers the flat-file provider so that a blank import is sufficient.
 func init() {
 	interfaces.RegisterStorageProvider(&FlatFileProvider{})

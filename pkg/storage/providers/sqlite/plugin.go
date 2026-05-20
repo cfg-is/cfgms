@@ -271,6 +271,15 @@ func (p *SQLiteProvider) CreatePushStore(config map[string]interface{}) (busines
 	return &SQLitePushStore{db: db}, nil
 }
 
+// CreatePendingRegistrationStore returns a SQLite-backed PendingRegistrationStore (Issue #1599).
+func (p *SQLiteProvider) CreatePendingRegistrationStore(config map[string]interface{}) (business.PendingRegistrationStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLitePendingRegistrationStore{db: db}, nil
+}
+
 // OpenBusinessStores implements interfaces.BusinessStoreOpener.
 // It opens the SQLite database at path exactly once, runs schema initialisation,
 // and returns all seven business stores sharing the same *sql.DB connection pool.
@@ -284,14 +293,15 @@ func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessSt
 		return nil, err
 	}
 	return &interfaces.BusinessStoreBundle{
-		RBAC:              &SQLiteRBACStore{db: db},
-		Tenant:            &SQLiteTenantStore{db: db},
-		ClientTenant:      &SQLiteClientTenantStore{db: db},
-		RegistrationToken: &SQLiteRegistrationTokenStore{db: db},
-		Session:           &SQLiteSessionStore{db: db},
-		Command:           &SQLiteCommandStore{db: db},
-		Trigger:           &SQLiteTriggerStore{db: db},
-		Push:              &SQLitePushStore{db: db},
+		RBAC:                &SQLiteRBACStore{db: db},
+		Tenant:              &SQLiteTenantStore{db: db},
+		ClientTenant:        &SQLiteClientTenantStore{db: db},
+		RegistrationToken:   &SQLiteRegistrationTokenStore{db: db},
+		Session:             &SQLiteSessionStore{db: db},
+		Command:             &SQLiteCommandStore{db: db},
+		Trigger:             &SQLiteTriggerStore{db: db},
+		Push:                &SQLitePushStore{db: db},
+		PendingRegistration: &SQLitePendingRegistrationStore{db: db},
 	}, nil
 }
 

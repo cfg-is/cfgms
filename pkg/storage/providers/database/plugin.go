@@ -171,6 +171,12 @@ func (p *DatabaseProvider) CreatePushStore(config map[string]interface{}) (busin
 	return nil, business.ErrNotSupported
 }
 
+// CreatePendingRegistrationStore is not supported by the database provider.
+// Pending registration state belongs in the business-data tier (SQLite for OSS).
+func (p *DatabaseProvider) CreatePendingRegistrationStore(config map[string]interface{}) (business.PendingRegistrationStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)

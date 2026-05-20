@@ -164,6 +164,10 @@ func (m *MockStorageProvider) CreatePushStore(_ map[string]interface{}) (busines
 	return nil, business.ErrNotSupported
 }
 
+func (m *MockStorageProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 // Mock implementations of store interfaces
 type MockClientTenantStore struct {
 	tenants map[string]*business.ClientTenant
@@ -1054,6 +1058,10 @@ func (m *MockOSSProvider) CreatePushStore(_ map[string]interface{}) (business.Pu
 	return nil, business.ErrNotSupported
 }
 
+func (m *MockOSSProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 // MockOSSProviderWithError is an interface stub that returns an error from a designated Create* method.
 // It is used to test that CreateOSSStorageManager propagates store-creation errors correctly.
 // Real providers cannot be used here because pkg/storage/providers/* imports this package
@@ -1140,6 +1148,13 @@ func (m *MockOSSProviderWithError) CreateTriggerStore(_ map[string]interface{}) 
 }
 func (m *MockOSSProviderWithError) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
 	if err := m.mayFail("CreatePushStore"); err != nil {
+		return nil, err
+	}
+	return nil, business.ErrNotSupported
+}
+
+func (m *MockOSSProviderWithError) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
+	if err := m.mayFail("CreatePendingRegistrationStore"); err != nil {
 		return nil, err
 	}
 	return nil, business.ErrNotSupported

@@ -38,14 +38,15 @@ func getRegistryLogger() logging.Logger {
 // BusinessStoreBundle groups all business-data stores that a single-connection
 // provider can return from one shared database handle. Used by BusinessStoreOpener.
 type BusinessStoreBundle struct {
-	RBAC              business.RBACStore
-	Tenant            business.TenantStore
-	ClientTenant      business.ClientTenantStore
-	RegistrationToken business.RegistrationTokenStore
-	Session           business.SessionStore
-	Command           business.CommandStore
-	Trigger           business.TriggerStore
-	Push              business.PushStore
+	RBAC                business.RBACStore
+	Tenant              business.TenantStore
+	ClientTenant        business.ClientTenantStore
+	RegistrationToken   business.RegistrationTokenStore
+	Session             business.SessionStore
+	Command             business.CommandStore
+	Trigger             business.TriggerStore
+	Push                business.PushStore
+	PendingRegistration business.PendingRegistrationStore
 }
 
 // BusinessStoreOpener is an optional StorageProvider extension. A provider that
@@ -76,6 +77,7 @@ type StorageProvider interface {
 	CreateCommandStore(config map[string]interface{}) (business.CommandStore, error)
 	CreateTriggerStore(config map[string]interface{}) (business.TriggerStore, error)
 	CreatePushStore(config map[string]interface{}) (business.PushStore, error)
+	CreatePendingRegistrationStore(config map[string]interface{}) (business.PendingRegistrationStore, error)
 
 	// Provider capabilities and metadata
 	GetCapabilities() ProviderCapabilities
@@ -503,19 +505,20 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 
 // StorageManager provides unified access to all storage interfaces.
 type StorageManager struct {
-	providerName           string
-	provider               StorageProvider
-	clientTenantStore      business.ClientTenantStore
-	configStore            cfgconfig.ConfigStore
-	auditStore             business.AuditStore
-	rbacStore              business.RBACStore
-	tenantStore            business.TenantStore
-	registrationTokenStore business.RegistrationTokenStore
-	sessionStore           business.SessionStore
-	stewardStore           business.StewardStore
-	commandStore           business.CommandStore
-	triggerStore           business.TriggerStore
-	pushStore              business.PushStore
+	providerName             string
+	provider                 StorageProvider
+	clientTenantStore        business.ClientTenantStore
+	configStore              cfgconfig.ConfigStore
+	auditStore               business.AuditStore
+	rbacStore                business.RBACStore
+	tenantStore              business.TenantStore
+	registrationTokenStore   business.RegistrationTokenStore
+	sessionStore             business.SessionStore
+	stewardStore             business.StewardStore
+	commandStore             business.CommandStore
+	triggerStore             business.TriggerStore
+	pushStore                business.PushStore
+	pendingRegistrationStore business.PendingRegistrationStore
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -583,6 +586,18 @@ func (sm *StorageManager) GetPushStore() business.PushStore {
 	return sm.pushStore
 }
 
+// GetPendingRegistrationStore returns the pending registration storage interface (Issue #1599).
+// Returns nil if not supported by the current storage provider.
+func (sm *StorageManager) GetPendingRegistrationStore() business.PendingRegistrationStore {
+	return sm.pendingRegistrationStore
+}
+
+// SetPendingRegistrationStore wires the pending registration store after construction.
+// Used by CreateOSSStorageManager when the SQLite bundle path is taken.
+func (sm *StorageManager) SetPendingRegistrationStore(s business.PendingRegistrationStore) {
+	sm.pendingRegistrationStore = s
+}
+
 // GetCapabilities returns the provider's capabilities.
 // Returns a zero-value ProviderCapabilities when the manager has no backing provider
 // (e.g. a composite manager created with NewStorageManagerFromStores).
@@ -625,6 +640,7 @@ func (sm *StorageManager) Close() error {
 		sm.commandStore,
 		sm.triggerStore,
 		sm.pushStore,
+		sm.pendingRegistrationStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -762,12 +778,14 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		if err != nil {
 			return nil, fmt.Errorf("failed to open SQLite business stores: %w", err)
 		}
-		return NewStorageManagerFromStores(
+		sm := NewStorageManagerFromStores(
 			configStore, auditStore,
 			bundle.RBAC, bundle.Tenant, bundle.ClientTenant,
 			bundle.RegistrationToken, bundle.Session,
 			stewardStore, bundle.Command, bundle.Trigger, bundle.Push,
-		), nil
+		)
+		sm.SetPendingRegistrationStore(bundle.PendingRegistration)
+		return sm, nil
 	}
 
 	rbacStore, err := sqProvider.CreateRBACStore(sqliteCfg)
@@ -802,10 +820,16 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create push store (sqlite): %w", err)
 	}
+	pendingRegStore, err := sqProvider.CreatePendingRegistrationStore(sqliteCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create pending registration store (sqlite): %w", err)
+	}
 
-	return NewStorageManagerFromStores(
+	sm := NewStorageManagerFromStores(
 		configStore, auditStore, rbacStore,
 		tenantStore, clientTenantStore, registrationTokenStore,
 		sessionStore, stewardStore, commandStore, triggerStore, pushStore,
-	), nil
+	)
+	sm.SetPendingRegistrationStore(pendingRegStore)
+	return sm, nil
 }
