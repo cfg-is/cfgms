@@ -573,4 +573,20 @@ func TestHandleDeleteStewardConfig(t *testing.T) {
 
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
+
+	t.Run("internal error 500 when storage backend fails", func(t *testing.T) {
+		server := setupTestServer(t)
+		apiKey := NewEphemeralTestKey(t, server, []string{"steward:delete-config"}, "test-tenant", 5*time.Minute)
+		useFailingConfigService(t, server)
+
+		req := httptest.NewRequest("DELETE", "/api/v1/stewards/steward-x/config", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
+		var errResp ErrorResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+		assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+	})
 }

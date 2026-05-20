@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,8 +14,52 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/service"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/logging"
+	storageifaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// failingConfigStore is a real ConfigStore implementation whose ListConfigs and
+// DeleteConfig operations always fail. All other operations delegate to the
+// embedded real store. It exercises the 500 INTERNAL_ERROR handler branches
+// without mocking CFGMS components.
+type failingConfigStore struct {
+	cfgconfig.ConfigStore
+}
+
+func (f *failingConfigStore) ListConfigs(context.Context, *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
+	return nil, errors.New("storage backend unavailable")
+}
+
+func (f *failingConfigStore) DeleteConfig(context.Context, *cfgconfig.ConfigKey) error {
+	return errors.New("storage backend unavailable")
+}
+
+// useFailingConfigService swaps the server's configuration service for one
+// backed by a config store that fails list/delete operations, so handler tests
+// can exercise the internal-error (500) branch with real components.
+func useFailingConfigService(t *testing.T, server *Server) {
+	t.Helper()
+	sm := pkgtesting.SetupTestStorage(t)
+	composite := storageifaces.NewStorageManagerFromStores(
+		&failingConfigStore{ConfigStore: sm.GetConfigStore()},
+		sm.GetAuditStore(),
+		sm.GetRBACStore(),
+		sm.GetTenantStore(),
+		sm.GetClientTenantStore(),
+		sm.GetRegistrationTokenStore(),
+		sm.GetSessionStore(),
+		sm.GetStewardStore(),
+		sm.GetCommandStore(),
+		sm.GetTriggerStore(),
+		sm.GetPushStore(),
+	)
+	logger := logging.NewNoopLogger()
+	server.configService = service.NewConfigurationServiceV2(logger, composite, service.NewControllerService(logger))
+}
 
 // storeTestConfig stores a minimal valid StewardConfig for the given tenant and steward.
 func storeTestConfig(t *testing.T, server *Server, tenantID, stewardID string) {
@@ -131,5 +176,21 @@ func TestHandleListConfigs(t *testing.T) {
 		server.router.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("500 INTERNAL_ERROR when storage backend fails", func(t *testing.T) {
+		server := setupTestServer(t)
+		apiKey := NewTestKey(t, server, []string{"config:list"})
+		useFailingConfigService(t, server)
+
+		req := httptest.NewRequest("GET", "/api/v1/configs", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
+		var errResp ErrorResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+		assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
 	})
 }
