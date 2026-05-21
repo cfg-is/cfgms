@@ -119,10 +119,32 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 		tenantID = stewardInfo.TenantID
 	}
 
-	// Get configuration with inheritance from storage
-	stewardConfig, err := s.configManager.GetConfigurationWithInheritance(ctx, tenantID, req.StewardId)
+	// Resolve full tenant-cascade-merged effective config via InheritanceResolver.
+	// ResolveConfiguration walks the ancestor chain (MSP→Client→Group→Device),
+	// child resources overriding parent resources of the same name (Issue #1722).
+	effective, err := s.inheritanceResolver.ResolveConfiguration(ctx, tenantID, req.StewardId)
 	if err != nil {
-		s.logger.Debug("No configuration found for steward", "steward_id", logging.SanitizeLogValue(req.StewardId), "error", err)
+		// ResolveConfiguration walks the steward's tenant ancestor chain, which
+		// requires the tenant to exist as a full tenant-hierarchy record. A
+		// steward can be registered under a tenant that exists only as an
+		// identifier — created from a registration token, never promoted to a
+		// TenantData record — and such a tenant has no ancestor chain to walk.
+		// Fall back to delivering the device-level config directly so SyncConfig
+		// still serves the steward; the full cascade still applies whenever the
+		// tenant hierarchy is known. (Issue #1722)
+		effective = s.resolveDeviceLevelFallback(ctx, tenantID, req.StewardId)
+		if effective == nil {
+			s.logger.Debug("No configuration found for steward", "steward_id", logging.SanitizeLogValue(req.StewardId), "error", err)
+			return &controller.ConfigResponse{
+				Status: &common.Status{
+					Code:    common.Status_NOT_FOUND,
+					Message: "No configuration found for steward",
+				},
+			}, nil
+		}
+	}
+	if len(effective.Sources) == 0 {
+		s.logger.Debug("No configuration found for steward at any hierarchy level", "steward_id", logging.SanitizeLogValue(req.StewardId))
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_NOT_FOUND,
@@ -132,7 +154,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 	}
 
 	// Filter configuration by requested modules if specified
-	filteredConfig := s.filterConfigByModules(stewardConfig, req.Modules)
+	filteredConfig := s.filterConfigByModules(effective.Config, req.Modules)
 
 	// Convert Go struct to protobuf
 	protoConfig, err := stewardconfig.ToProto(filteredConfig)
@@ -163,6 +185,39 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 		Config:  &controller.SignedConfig{Config: protoConfig}, // Unsigned, QUIC handler will sign
 		Version: version,
 	}, nil
+}
+
+// resolveDeviceLevelFallback returns the steward's device-level configuration as an
+// EffectiveConfiguration when the full tenant cascade cannot be resolved because the
+// steward's tenant has no tenant-hierarchy record. It returns nil — leaving the caller
+// to report NOT_FOUND — when the tenant does exist (the cascade error is then a genuine
+// failure that must not be masked) or when no device-level config is stored for the
+// steward. (Issue #1722)
+func (s *ConfigurationServiceV2) resolveDeviceLevelFallback(ctx context.Context, tenantID, stewardID string) *config.EffectiveConfiguration {
+	if _, err := s.storageManager.GetTenantStore().GetTenant(ctx, tenantID); err == nil {
+		// The tenant exists as a full record, so the cascade failure is a real
+		// error — do not paper over it with a device-only fallback.
+		return nil
+	}
+
+	deviceCfg, err := s.configManager.GetConfiguration(ctx, tenantID, stewardID)
+	if err != nil {
+		return nil
+	}
+
+	return &config.EffectiveConfiguration{
+		StewardID: stewardID,
+		TenantID:  tenantID,
+		Config:    deviceCfg,
+		Sources: map[string]*config.InheritanceSource{
+			"steward.config": {
+				Level:    int(config.LevelDevice),
+				TenantID: tenantID,
+				Source:   "Device Configuration (tenant has no hierarchy record)",
+			},
+		},
+		GeneratedAt: time.Now(),
+	}
 }
 
 // SetConfiguration stores a configuration for a specific steward using ConfigStore
