@@ -11,6 +11,7 @@ package client
 import (
 	"context"
 	"encoding/base64"
+	"runtime"
 	"testing"
 	"time"
 
@@ -19,6 +20,25 @@ import (
 	"github.com/cfgis/cfgms/features/steward/execution"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 )
+
+// platformShell returns a shell supported by the current OS. bash is unavailable
+// on Windows runners, so Windows uses powershell; both are recognised by the
+// script-module executor (Issue #1669).
+func platformShell() string {
+	if runtime.GOOS == "windows" {
+		return "powershell"
+	}
+	return "bash"
+}
+
+// echoScriptBody returns a script body that writes s to stdout using the syntax
+// of the current platform's shell (see platformShell).
+func echoScriptBody(s string) string {
+	if runtime.GOOS == "windows" {
+		return "Write-Output '" + s + "'"
+	}
+	return "echo '" + s + "'"
+}
 
 // TestSetupCommandHandler_RegistersExecuteScript verifies that the command
 // handler built by setupCommandHandler dispatches CommandExecuteScript through
@@ -41,8 +61,8 @@ func TestSetupCommandHandler_RegistersExecuteScript(t *testing.T) {
 		TenantID:  "tenant-exec-script",
 		Timestamp: time.Now(),
 		Params: map[string]interface{}{
-			"script_content": base64.StdEncoding.EncodeToString([]byte("echo hello")),
-			"shell":          "bash",
+			"script_content": base64.StdEncoding.EncodeToString([]byte(echoScriptBody("hello"))),
+			"shell":          platformShell(),
 			"execution_id":   "exec-1669-test",
 		},
 	}}
