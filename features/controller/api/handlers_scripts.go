@@ -125,7 +125,7 @@ func (s *Server) handleGetScriptLibraryItem(w http.ResponseWriter, r *http.Reque
 
 	vs, err := s.scriptRepo.Get(id, "")
 	if err != nil {
-		s.logger.Warn("Script not found", "id", sanitizedID, "error", err)
+		s.logger.Warn("Script not found", "id", sanitizedID, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusNotFound, "Script not found", "NOT_FOUND")
 		return
 	}

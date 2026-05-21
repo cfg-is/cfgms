@@ -879,6 +879,22 @@ resources:
 	require.Error(t, err, "config with removed script_repo_url field must fail to load")
 }
 
+// TestLoadConfiguration_EmptyFileAppliesDefaults verifies that a completely empty
+// configuration file loads without error and falls through to default application.
+// The streaming YAML decoder returns io.EOF on an empty document; loadFromPath must
+// treat that as an empty config rather than a parse failure.
+func TestLoadConfiguration_EmptyFileAppliesDefaults(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "empty.cfg")
+	require.NoError(t, os.WriteFile(configFile, []byte(""), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err, "empty config file must load without error")
+
+	assert.Equal(t, ModeStandalone, cfg.Steward.Mode, "empty config defaults to standalone mode")
+	assert.NotEmpty(t, cfg.Steward.ID, "empty config defaults ID to hostname")
+}
+
 func TestScriptSigningConfigValidationInLoadConfiguration(t *testing.T) {
 	tempDir := t.TempDir()
 	configFile := filepath.Join(tempDir, "test.cfg")

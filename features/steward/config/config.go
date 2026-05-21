@@ -50,7 +50,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -386,7 +388,12 @@ func loadFromPath(configPath string) (StewardConfig, error) {
 	dec := yaml.NewDecoder(strings.NewReader(expandedData))
 	dec.KnownFields(true)
 	if err := dec.Decode(&config); err != nil {
-		return config, fmt.Errorf("failed to parse configuration: %w", err)
+		// An empty (or whitespace-only) configuration file yields io.EOF from the
+		// streaming decoder. Treat it as an empty config: defaults are applied below
+		// and ID falls back to the hostname.
+		if !errors.Is(err, io.EOF) {
+			return config, fmt.Errorf("failed to parse configuration: %w", err)
+		}
 	}
 
 	// Security invariant: DriftMode must come from controller-delivered cfg only.
