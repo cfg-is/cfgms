@@ -628,6 +628,41 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 	return nil
 }
 
+// CreateIPTrustRangesTable creates the cfgms_ip_trust_ranges table for tenant-scoped IP trust.
+func (s DatabaseSchemas) CreateIPTrustRangesTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS cfgms_ip_trust_ranges (
+			id              TEXT PRIMARY KEY,
+			tenant_id       TEXT NOT NULL,
+			cidr            TEXT NOT NULL,
+			pre_seeded      BOOLEAN NOT NULL DEFAULT FALSE,
+			trusted_since   TIMESTAMP WITH TIME ZONE NOT NULL,
+			last_activity   TIMESTAMP WITH TIME ZONE,
+			last_activity_ip TEXT,
+			revoked         BOOLEAN NOT NULL DEFAULT FALSE,
+			revoked_at      TIMESTAMP WITH TIME ZONE,
+			UNIQUE(tenant_id, cidr)
+		);
+	`
+
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_ip_trust_ranges table: %w", err)
+	}
+
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_ip_trust_tenant_revoked ON cfgms_ip_trust_ranges(tenant_id, revoked);",
+		"CREATE INDEX IF NOT EXISTS idx_ip_trust_tenant_cidr    ON cfgms_ip_trust_ranges(tenant_id, cidr);",
+	}
+
+	for _, indexQuery := range indexes {
+		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
+			return fmt.Errorf("failed to create cfgms_ip_trust_ranges index: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // CreateAllTables creates all necessary database tables and indexes
 func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error {
 	// Create tables in dependency order

@@ -220,6 +220,12 @@ func (p *FlatFileProvider) CreatePendingRegistrationStore(config map[string]inte
 	return nil, ErrNotSupported
 }
 
+// CreateIPTrustStore returns ErrNotSupported.
+// IP trust storage belongs in the business-data tier (Issue #1691).
+func (p *FlatFileProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, ErrNotSupported
+}
+
 // init auto-registers the flat-file provider so that a blank import is sufficient.
 func init() {
 	interfaces.RegisterStorageProvider(&FlatFileProvider{})

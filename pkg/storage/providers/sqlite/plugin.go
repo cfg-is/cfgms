@@ -280,6 +280,12 @@ func (p *SQLiteProvider) CreatePendingRegistrationStore(config map[string]interf
 	return &SQLitePendingRegistrationStore{db: db}, nil
 }
 
+// CreateIPTrustStore is not yet supported by the SQLite provider.
+// IP trust storage is implemented by the database (PostgreSQL) provider (Issue #1691).
+func (p *SQLiteProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 // OpenBusinessStores implements interfaces.BusinessStoreOpener.
 // It opens the SQLite database at path exactly once, runs schema initialisation,
 // and returns all seven business stores sharing the same *sql.DB connection pool.

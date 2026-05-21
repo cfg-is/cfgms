@@ -168,6 +168,10 @@ func (m *MockStorageProvider) CreatePendingRegistrationStore(_ map[string]interf
 	return nil, business.ErrNotSupported
 }
 
+func (m *MockStorageProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 // Mock implementations of store interfaces
 type MockClientTenantStore struct {
 	tenants map[string]*business.ClientTenant
@@ -1065,6 +1069,10 @@ func (m *MockOSSProvider) CreatePendingRegistrationStore(_ map[string]interface{
 	return nil, business.ErrNotSupported
 }
 
+func (m *MockOSSProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 // MockOSSProviderWithError is an interface stub that returns an error from a designated Create* method.
 // It is used to test that CreateOSSStorageManager propagates store-creation errors correctly.
 // Real providers cannot be used here because pkg/storage/providers/* imports this package
@@ -1160,6 +1168,10 @@ func (m *MockOSSProviderWithError) CreatePendingRegistrationStore(_ map[string]i
 	if err := m.mayFail("CreatePendingRegistrationStore"); err != nil {
 		return nil, err
 	}
+	return nil, business.ErrNotSupported
+}
+
+func (m *MockOSSProviderWithError) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
 	return nil, business.ErrNotSupported
 }
 

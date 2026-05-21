@@ -177,6 +177,19 @@ func (p *DatabaseProvider) CreatePendingRegistrationStore(config map[string]inte
 	return nil, business.ErrNotSupported
 }
 
+// CreateIPTrustStore creates a PostgreSQL-backed IPTrustStore.
+func (p *DatabaseProvider) CreateIPTrustStore(config map[string]interface{}) (business.IPTrustStore, error) {
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseIPTrustStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database ip trust store: %w", err)
+	}
+	return store, nil
+}
+
 func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)

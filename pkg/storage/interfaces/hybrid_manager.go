@@ -33,6 +33,7 @@ type HybridStorageManager struct {
 	clientTenantStore business.ClientTenantStore
 	auditStore        business.AuditStore
 	configStore       cfgconfig.ConfigStore
+	ipTrustStore      business.IPTrustStore
 
 	config HybridStorageConfig
 }
@@ -95,6 +96,11 @@ func (h *HybridStorageManager) GetAuditStore() business.AuditStore {
 // GetConfigStore returns the configuration storage interface (configuration backend).
 func (h *HybridStorageManager) GetConfigStore() cfgconfig.ConfigStore {
 	return h.configStore
+}
+
+// GetIPTrustStore returns the IP trust storage interface (operational backend).
+func (h *HybridStorageManager) GetIPTrustStore() business.IPTrustStore {
+	return h.ipTrustStore
 }
 
 // GetOperationalProvider returns the operational storage provider.

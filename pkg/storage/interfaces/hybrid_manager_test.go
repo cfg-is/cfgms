@@ -381,6 +381,10 @@ func (p *mockProvider) CreatePendingRegistrationStore(_ map[string]interface{}) 
 	return nil, business.ErrNotSupported
 }
 
+func (p *mockProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:   true,
