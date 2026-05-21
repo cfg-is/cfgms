@@ -293,6 +293,16 @@ func (s *RunStoreSQL) UpdateRunCounts(runID string, completedJobs, failedJobs in
 	return err
 }
 
+// Close releases the underlying database connection. After Close, the store
+// must not be used. Safe to call on a store backed by a shared *sql.DB only
+// when that connection is dedicated to the run store.
+func (s *RunStoreSQL) Close() error {
+	if s.db == nil {
+		return nil
+	}
+	return s.db.Close()
+}
+
 func nullableStr(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
 }
@@ -358,4 +368,13 @@ func (m *Manager) CancelRun(_ context.Context, runID string) error {
 	}
 
 	return m.store.UpdateRunStatus(runID, RunStatusCancelled)
+}
+
+// Close releases resources held by the Manager's store. If the store does not
+// own a closable resource, Close is a no-op.
+func (m *Manager) Close() error {
+	if closer, ok := m.store.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
 }

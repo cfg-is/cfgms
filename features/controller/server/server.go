@@ -113,6 +113,7 @@ type Server struct {
 	manualReviewHook        *api.ManualReviewApprovalHook       // Issue #1599: manual-review approval hook (nil if not in use)
 	executionQueue          *scriptmodule.ExecutionQueue        // Issue #1672: persistent queue for script executions
 	jobDispatcher           *dispatcher.Dispatcher              // Issue #1672: job dispatcher for script executions
+	runManager              *controllerrun.Manager              // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
 }
 
 // New creates a new server instance
@@ -658,6 +659,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Issue #1673: Wire run/job/execution model into API server.
 	// The run store opens a dedicated connection to the same SQLite database.
 	if runManager := initializeRunManager(context.Background(), cfg, executionQueue, logger); runManager != nil {
+		srv.runManager = runManager
 		httpServer.SetRunManager(runManager, executionQueue)
 		logger.Info("Run manager wired to HTTP API server")
 	}
@@ -1260,6 +1262,14 @@ func (s *Server) Stop() error {
 	if s.dnaStorageManager != nil {
 		if err := s.dnaStorageManager.Close(); err != nil {
 			s.logger.Warn("Failed to close DNA storage manager", "error", err)
+		}
+	}
+
+	// Close run manager — releases the dedicated SQLite connection so temp-directory
+	// cleanup succeeds on Windows (Issue #1673).
+	if s.runManager != nil {
+		if err := s.runManager.Close(); err != nil {
+			s.logger.Warn("Failed to close run manager", "error", err)
 		}
 	}
 

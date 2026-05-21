@@ -6,6 +6,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -387,4 +389,58 @@ func TestManager_CancelRun_AlreadyCancelled(t *testing.T) {
 	err := manager.CancelRun(context.Background(), "run-already-cancelled")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrAlreadyTerminal))
+}
+
+// ---- Close tests ------------------------------------------------------------
+
+// TestRunStoreSQL_Close_ReleasesDBHandle verifies that Close releases the
+// underlying connection. A leaked file-backed connection blocks temp-directory
+// cleanup on Windows (Issue #1673 CI regression), so the file must be removable
+// once Close has run.
+func TestRunStoreSQL_Close_ReleasesDBHandle(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "runs.db")
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err, "open file-backed sqlite")
+
+	store := NewRunStoreSQL(db)
+	require.NoError(t, store.Init(context.Background()), "Init must succeed")
+	require.NoError(t, store.CreateRun(sampleRun("run-close-1", "tenant-abc")))
+
+	require.NoError(t, store.Close(), "Close must succeed")
+
+	// After Close the connection is released — operations must fail.
+	_, err = store.GetRun("run-close-1")
+	require.Error(t, err, "GetRun must fail after Close")
+
+	// The DB file must be removable now that no handle is held open.
+	require.NoError(t, os.Remove(dbPath), "db file must be removable after Close")
+}
+
+// TestRunStoreSQL_Close_NilDB verifies Close is safe on a zero-value store.
+func TestRunStoreSQL_Close_NilDB(t *testing.T) {
+	store := &RunStoreSQL{}
+	require.NoError(t, store.Close())
+}
+
+// TestManager_Close_ClosesStore verifies Manager.Close propagates to a store
+// that implements io.Closer.
+func TestManager_Close_ClosesStore(t *testing.T) {
+	store := newTestRunStore(t)
+	manager := NewManager(store, nil)
+
+	require.NoError(t, manager.Close(), "Manager.Close must succeed")
+
+	_, err := store.GetRun("anything")
+	require.Error(t, err, "store must be closed after Manager.Close")
+}
+
+// closerlessStore is a RunStore that does not implement io.Closer; used to
+// verify Manager.Close is a no-op for non-closable stores.
+type closerlessStore struct{ RunStore }
+
+func TestManager_Close_NonClosableStore(t *testing.T) {
+	manager := NewManager(closerlessStore{}, nil)
+	require.NoError(t, manager.Close(), "Manager.Close must be a no-op for non-closable store")
 }
