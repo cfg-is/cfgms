@@ -564,6 +564,51 @@ func TestGetConfiguration_CascadeMergedDelivery(t *testing.T) {
 	})
 }
 
+// TestGetConfiguration_TenantWithoutHierarchyRecord verifies that a steward whose tenant
+// exists only as an identifier — e.g. registered via a registration token but never
+// promoted to a full TenantData hierarchy record — still receives its device-level
+// config from the delivery path.
+//
+// Regression: routing GetConfiguration through InheritanceResolver.ResolveConfiguration
+// makes it walk the tenant ancestor chain, which fails when the tenant has no
+// TenantData record. The fleet E2E stewards register under registration-token tenants
+// with no hierarchy record, so the delivery path must degrade gracefully instead of
+// returning NOT_FOUND for an already-configured steward.
+func TestGetConfiguration_TenantWithoutHierarchyRecord(t *testing.T) {
+	ctx := context.Background()
+	sm := pkgtesting.SetupTestStorage(t)
+	svc := NewConfigurationServiceV2(logging.NewNoopLogger(), sm, nil)
+
+	// Deliberately do NOT create a TenantData record for this tenant — it exists
+	// only as the identifier carried by the steward's registration.
+	const tenantID = "registration-token-tenant"
+	tenantCtx := context.WithValue(ctx, ctxkeys.TenantID, tenantID)
+
+	t.Run("device config delivered when tenant has no hierarchy record", func(t *testing.T) {
+		deviceCfg := createTestStewardConfig("fleet-steward-1")
+		require.NoError(t, svc.SetConfiguration(ctx, tenantID, "fleet-steward-1", deviceCfg))
+
+		resp, err := svc.GetConfiguration(tenantCtx, &controller.ConfigRequest{StewardId: "fleet-steward-1"})
+		require.NoError(t, err)
+		require.Equal(t, common.Status_OK, resp.Status.Code,
+			"steward must receive device config even when its tenant has no hierarchy record")
+
+		require.NotNil(t, resp.Config)
+		require.NotNil(t, resp.Config.Config)
+		retrieved, err := stewardconfig.FromProto(resp.Config.Config)
+		require.NoError(t, err)
+		assert.Equal(t, "fleet-steward-1", retrieved.Steward.ID)
+		assert.Len(t, retrieved.Resources, 2)
+	})
+
+	t.Run("NOT_FOUND when tenant has no hierarchy record and steward has no config", func(t *testing.T) {
+		resp, err := svc.GetConfiguration(tenantCtx, &controller.ConfigRequest{StewardId: "unconfigured-steward"})
+		require.NoError(t, err)
+		assert.Equal(t, common.Status_NOT_FOUND, resp.Status.Code,
+			"an unconfigured steward must still resolve to NOT_FOUND, not a device-level fallback")
+	})
+}
+
 // TestGetConfiguration_TenantIsolation verifies that the cascade merges only the steward's
 // own ancestor chain and never includes resources from sibling or unrelated tenants.
 //
@@ -605,6 +650,10 @@ func TestGetConfiguration_TenantIsolation(t *testing.T) {
 
 	retrieved, err := stewardconfig.FromProto(resp.Config.Config)
 	require.NoError(t, err)
+
+	// steward-b must receive its own device config — without this the isolation
+	// loop below would pass vacuously on an empty resource slice.
+	require.NotEmpty(t, retrieved.Resources, "steward-b must receive its own device config")
 
 	for _, r := range retrieved.Resources {
 		assert.NotEqual(t, "msp-a-policy", r.Name,
