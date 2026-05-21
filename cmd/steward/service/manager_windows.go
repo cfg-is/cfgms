@@ -8,6 +8,7 @@ package service
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
@@ -21,6 +22,22 @@ const (
 	windowsDisplayName = "CFGMS Steward"
 	windowsDescription = "CFGMS endpoint configuration management agent"
 )
+
+// platformCACertPath returns the path where the CA cert is written, respecting
+// CFGMS_INSTALL_PREFIX for test isolation.
+func platformCACertPath() string {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	dest := filepath.Join(programData, "cfgms", "controller-ca.crt")
+	if prefix := os.Getenv("CFGMS_INSTALL_PREFIX"); prefix != "" {
+		// Strip the volume name (e.g. "C:") so the path nests under the prefix.
+		vol := filepath.VolumeName(dest)
+		return filepath.Join(prefix, dest[len(vol):])
+	}
+	return dest
+}
 
 func newManager(binaryPath string) Manager {
 	return &windowsManager{binaryPath: binaryPath}
@@ -49,9 +66,21 @@ func (m *windowsManager) IsElevated() bool {
 //
 // Uses the native Windows Service API via golang.org/x/sys/windows/svc/mgr.
 // Does NOT shell out to sc.exe.
-func (m *windowsManager) Install(token string) error {
+//
+// If caCertPEM is non-empty, the CA cert is written to the platform-standard
+// path before the service is started. When expectedFingerprint is also non-empty,
+// fingerprint verification runs first — a mismatch returns an error without any
+// disk writes or service changes.
+func (m *windowsManager) Install(token, caCertPEM, expectedFingerprint string) error {
 	if err := validateToken(token); err != nil {
 		return err
+	}
+	// Verify fingerprint before any privileged operations so the caller gets a
+	// clear error without needing to undo partial changes.
+	if caCertPEM != "" && expectedFingerprint != "" {
+		if err := verifyCACertFingerprint(caCertPEM, expectedFingerprint); err != nil {
+			return err
+		}
 	}
 	if !m.IsElevated() {
 		return fmt.Errorf("install requires Administrator privileges: right-click the binary and select 'Run as administrator'")
@@ -86,6 +115,14 @@ func (m *windowsManager) Install(token string) error {
 	fmt.Printf("Installing to %s...\n", windowsInstallPath)
 	if err := copyBinary(m.binaryPath, windowsInstallPath); err != nil {
 		return fmt.Errorf("failed to copy binary: %w", err)
+	}
+
+	// Write CA cert before registering the service so the service finds it on first start.
+	if caCertPEM != "" {
+		fmt.Printf("Writing CA cert to %s...\n", platformCACertPath())
+		if err := writeCACert(caCertPEM, platformCACertPath()); err != nil {
+			return fmt.Errorf("failed to write CA cert: %w", err)
+		}
 	}
 
 	fmt.Println("Registering Windows service...")

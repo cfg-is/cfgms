@@ -31,7 +31,12 @@ type Manager interface {
 	// Install is idempotent: if the service already exists it is stopped, the
 	// binary replaced, and the service restarted.
 	// Requires elevated privileges (root on Linux/macOS, Administrator on Windows).
-	Install(token string) error
+	//
+	// When caCertPEM is non-empty, Install writes the CA cert to the platform-standard
+	// path before registering the service. When expectedFingerprint is also non-empty,
+	// the cert's SHA-256 fingerprint is verified first and Install returns an error
+	// without writing the cert or registering the service if it does not match.
+	Install(token, caCertPEM, expectedFingerprint string) error
 
 	// Uninstall stops and removes the OS service definition.
 	// If purge is true the installed binary is also deleted.

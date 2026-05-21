@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -16,7 +17,17 @@ const (
 	linuxInstallPath = "/usr/local/bin/cfgms-steward"
 	linuxSystemdUnit = "/etc/systemd/system/cfgms-steward.service"
 	linuxServiceName = "cfgms-steward"
+	linuxCACertPath  = "/etc/cfgms/controller-ca.crt"
 )
+
+// platformCACertPath returns the path where the CA cert is written, respecting
+// CFGMS_INSTALL_PREFIX for test isolation.
+func platformCACertPath() string {
+	if prefix := os.Getenv("CFGMS_INSTALL_PREFIX"); prefix != "" {
+		return filepath.Join(prefix, linuxCACertPath)
+	}
+	return linuxCACertPath
+}
 
 func newManager(binaryPath string) Manager {
 	return &linuxManager{binaryPath: binaryPath}
@@ -33,9 +44,21 @@ func (m *linuxManager) IsElevated() bool {
 // Install copies the binary to /usr/local/bin, writes the systemd unit, and
 // enables/starts the service. Running Install on an already-installed service
 // stops it first, replaces the binary, then restarts.
-func (m *linuxManager) Install(token string) error {
+//
+// If caCertPEM is non-empty, the CA cert is written to the platform-standard
+// path before the service is registered. When expectedFingerprint is also
+// non-empty, fingerprint verification runs first — a mismatch returns an error
+// without any disk writes or service changes.
+func (m *linuxManager) Install(token, caCertPEM, expectedFingerprint string) error {
 	if err := validateToken(token); err != nil {
 		return err
+	}
+	// Verify fingerprint before any privileged operations so the caller gets a
+	// clear error without needing to undo partial changes.
+	if caCertPEM != "" && expectedFingerprint != "" {
+		if err := verifyCACertFingerprint(caCertPEM, expectedFingerprint); err != nil {
+			return err
+		}
 	}
 	if !m.IsElevated() {
 		return fmt.Errorf("install requires root privileges: re-run with sudo")
@@ -47,6 +70,14 @@ func (m *linuxManager) Install(token string) error {
 	fmt.Printf("Installing to %s...\n", linuxInstallPath)
 	if err := copyBinary(m.binaryPath, linuxInstallPath); err != nil {
 		return fmt.Errorf("failed to copy binary: %w", err)
+	}
+
+	// Write CA cert before registering the service so the service finds it on first start.
+	if caCertPEM != "" {
+		fmt.Printf("Writing CA cert to %s...\n", platformCACertPath())
+		if err := writeCACert(caCertPEM, platformCACertPath()); err != nil {
+			return fmt.Errorf("failed to write CA cert: %w", err)
+		}
 	}
 
 	fmt.Println("Writing systemd unit...")

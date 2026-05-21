@@ -7,6 +7,7 @@ package service
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,9 +33,47 @@ func TestDarwinManagerInstallRequiresElevation(t *testing.T) {
 		t.Skip("skipping elevation check — running as root")
 	}
 	m := New("/usr/local/bin/cfgms-steward")
-	err := m.Install("tok_test123")
+	err := m.Install("tok_test123", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "root")
+}
+
+// TestDarwinInstallFingerprintMismatch verifies that a mismatched CA fingerprint causes
+// Install to return an error before writing the cert or registering the daemon.
+// Runs without root because fingerprint verification is checked before the elevation gate.
+func TestDarwinInstallFingerprintMismatch(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("skipping — running as root would proceed past fingerprint check to service ops")
+	}
+	dir := t.TempDir()
+	t.Setenv("CFGMS_INSTALL_PREFIX", dir)
+
+	certPEM, _ := generateTestCACert(t)
+	m := New("/usr/local/bin/cfgms-steward")
+	err := m.Install("tok_test123", certPEM, "deadbeefdeadbeefdeadbeef")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fingerprint mismatch")
+
+	// Cert must NOT be written on fingerprint mismatch.
+	certPath := filepath.Join(dir, "etc", "cfgms", "controller-ca.crt")
+	_, statErr := os.Stat(certPath)
+	assert.True(t, os.IsNotExist(statErr), "cert file must not exist after fingerprint mismatch")
+}
+
+// TestDarwinInstallCACertWritten verifies that the CA cert is written to the prefixed
+// platform path with mode 0644 when a correct fingerprint is provided.
+func TestDarwinInstallCACertWritten(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, fingerprint := generateTestCACert(t)
+
+	require.NoError(t, verifyCACertFingerprint(certPEM, fingerprint))
+
+	destPath := filepath.Join(dir, "etc", "cfgms", "controller-ca.crt")
+	require.NoError(t, writeCACert(certPEM, destPath))
+
+	info, err := os.Stat(destPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0644), info.Mode().Perm(), "CA cert must be written with mode 0644")
 }
 
 func TestDarwinManagerUninstallRequiresElevation(t *testing.T) {
