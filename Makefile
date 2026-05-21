@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -211,6 +211,29 @@ build-msi-windows:
 		-Version "$(or $(VERSION),0.0.0)" \
 		$$SIGN_ARG
 	@echo "✅ MSI built: bin/cfgms-steward-windows-amd64.msi"
+
+# Build macOS .pkg installer for cfgms-steward (amd64 and arm64).
+# Requires Xcode Command Line Tools (pkgbuild + productbuild).
+# Must be run on macOS; cross-building is not supported by pkgbuild.
+#
+# Optional env vars (see build/darwin/build-pkg.sh for details):
+#   APPLE_SIGNING_IDENTITY  — Developer ID Installer certificate name (code signing)
+#   APPLE_NOTARIZATION_PROFILE — keychain profile name (notarization, requires signing)
+#
+# Examples:
+#   make build-pkg-darwin VERSION=v1.0.0
+#   APPLE_SIGNING_IDENTITY="Developer ID Installer: Acme (XXXXXXXXXX)" \
+#     make build-pkg-darwin VERSION=v1.0.0
+build-pkg-darwin:
+	@echo "🍎 Building macOS .pkg installer"
+	@echo "================================="
+	@if [[ "$$(uname)" != "Darwin" ]]; then \
+		echo "❌ build-pkg-darwin must be run on macOS (pkgbuild requires macOS)."; \
+		exit 1; \
+	fi
+	@bash build/darwin/build-pkg.sh --arch amd64 --version "$(or $(VERSION),0.0.0)"
+	@bash build/darwin/build-pkg.sh --arch arm64 --version "$(or $(VERSION),0.0.0)"
+	@echo "✅ Packages built: bin/cfgms-steward-darwin-amd64.pkg  bin/cfgms-steward-darwin-arm64.pkg"
 
 # Smart test - core modules + changed modules only
 test: fix-git-bare
