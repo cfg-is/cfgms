@@ -16,6 +16,7 @@ import (
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/config"
 	controllerrouter "github.com/cfgis/cfgms/pkg/configrouting/providers/controller"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -81,10 +82,12 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 	}
 	s.logger.Debug("Configuration request received", "steward_id", logging.SanitizeLogValue(req.StewardId), "modules", sanitizedModules)
 
-	// Extract tenant context
+	// Resolve the tenant the configuration is stored under. Per-steward config
+	// lives under the steward's own tenant, so look the steward up first and
+	// use its tenant for retrieval — not the ctx tenant, which the
+	// mTLS-authenticated data-plane sync path does not set. (Issue #1572)
 	tenantID := extractTenantID(ctx)
 
-	// Verify steward exists and belongs to the tenant
 	if s.controllerSvc != nil {
 		stewardInfo, exists := s.controllerSvc.GetStewardInfo(req.StewardId)
 		if !exists {
@@ -97,12 +100,15 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 			}, nil
 		}
 
-		// Check tenant isolation
-		if stewardInfo.TenantID != tenantID {
+		// Cross-tenant guard: a caller presenting an explicit, non-empty tenant
+		// context must match the steward's tenant. The data-plane sync path
+		// (steward authenticated by its mTLS CN) carries no tenant context and
+		// is trusted to resolve to the steward's own tenant. (Issue #1572)
+		if reqTenant, ok := ctx.Value(ctxkeys.TenantID).(string); ok && reqTenant != "" && reqTenant != stewardInfo.TenantID {
 			s.logger.Warn("Configuration request cross-tenant access denied",
 				"steward_id", logging.SanitizeLogValue(req.StewardId),
 				"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
-				"request_tenant", logging.SanitizeLogValue(tenantID))
+				"request_tenant", logging.SanitizeLogValue(reqTenant))
 			return &controller.ConfigResponse{
 				Status: &common.Status{
 					Code:    common.Status_UNAUTHORIZED,
@@ -110,6 +116,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 				},
 			}, nil
 		}
+		tenantID = stewardInfo.TenantID
 	}
 
 	// Get configuration with inheritance from storage

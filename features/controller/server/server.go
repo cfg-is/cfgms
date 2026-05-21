@@ -181,8 +181,28 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Initialize tenant management with durable storage
 	tenantManager := tenant.NewManager(storageManager.GetTenantStore(), rbacManager)
 
-	// Create the controller service
-	controllerService := service.NewControllerService(logger)
+	// DNA storage — durable steward DNA + fleet registry. Shared by the
+	// controller service (warm-loading the steward registry after a restart)
+	// and the reports engine. (Issue #1572)
+	dnaStorageConfig := dnaStorage.DefaultConfig()
+	dnaStorageConfig.DataDir = filepath.Join(cfg.DataDir, "dna-reports")
+	dnaStorageManager, dnaErr := dnaStorage.NewManager(dnaStorageConfig, logger)
+	if dnaErr != nil {
+		logger.Warn("Failed to initialize DNA storage; steward registry will not survive a controller restart", "error", dnaErr)
+	}
+
+	// Create the controller service. With durable DNA storage its in-memory
+	// steward registry is warm-loaded from a previous run on startup, so a
+	// controller restart does not lose track of connected stewards. (Issue #1572)
+	var controllerService *service.ControllerService
+	if dnaStorageManager != nil {
+		controllerService = service.NewControllerServiceWithStorage(logger, dnaStorageManager)
+		if loadErr := controllerService.LoadFromStorage(context.Background()); loadErr != nil {
+			logger.Warn("Failed to warm-load steward registry from DNA storage", "error", loadErr)
+		}
+	} else {
+		controllerService = service.NewControllerService(logger)
+	}
 
 	// Create the configuration service (V2: durable storage via StorageManager)
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
@@ -598,11 +618,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	configService.SetRollbackManager(rollbackManager)
 	logger.Info("Rollback manager wired to HTTP API server and gRPC config service")
 
-	// Story #416: Wire reports engine into API server
-	reportsHandler, reportsDNAManager := initializeReportsHandler(cfg, logger)
+	// Story #416: Wire reports engine into API server over the shared DNA
+	// storage manager. The controller server owns the manager's lifecycle
+	// (closed on Stop).
+	srv.dnaStorageManager = dnaStorageManager
+	reportsHandler := initializeReportsHandler(dnaStorageManager, logger)
 	if reportsHandler != nil {
 		httpServer.SetReportsHandler(reportsHandler)
-		srv.dnaStorageManager = reportsDNAManager
 		logger.Info("Reports engine wired to HTTP API server")
 	}
 
@@ -784,24 +806,19 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 	return manager
 }
 
-// initializeReportsHandler creates the reports API handler with its dependencies.
-// Returns both the handler and the DNA storage manager (which must be closed on shutdown).
-func initializeReportsHandler(cfg *config.Config, logger logging.Logger) (*reportapi.Handler, *dnaStorage.Manager) {
-	// Initialize DNA storage with SQLite backend in a dedicated directory
-	dnaStorageConfig := dnaStorage.DefaultConfig()
-	dnaStorageConfig.DataDir = filepath.Join(cfg.DataDir, "dna-reports")
-
-	dnaStorageManager, err := dnaStorage.NewManager(dnaStorageConfig, logger)
-	if err != nil {
-		logger.Warn("Failed to initialize DNA storage for reports engine", "error", err)
-		return nil, nil
+// initializeReportsHandler creates the reports API handler over the shared DNA
+// storage manager. Returns nil when DNA storage is unavailable (reports engine
+// disabled) — the manager's lifecycle is owned by the caller. (Issue #1572)
+func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, logger logging.Logger) *reportapi.Handler {
+	if dnaStorageManager == nil {
+		return nil
 	}
 
 	// Initialize drift detector with default configuration
 	driftDetector, err := dnadrift.NewDetector(nil, logger)
 	if err != nil {
 		logger.Warn("Failed to initialize drift detector for reports engine", "error", err)
-		return nil, nil
+		return nil
 	}
 
 	// Build the reports engine from its components
@@ -812,7 +829,7 @@ func initializeReportsHandler(cfg *config.Config, logger logging.Logger) (*repor
 	reportEngine := reportsengine.New(dataProvider, templateProcessor, exporter, reportsCache, logger)
 
 	logger.Info("Reports engine initialized")
-	return reportapi.New(reportEngine, exporter, logger), dnaStorageManager
+	return reportapi.New(reportEngine, exporter, logger)
 }
 
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.

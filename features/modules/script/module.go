@@ -98,17 +98,28 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 		"tenant_id", tenantID,
 		"resource_type", "script")
 
+	if config == nil {
+		return modules.ErrInvalidInput
+	}
+
 	scriptConfig, ok := config.(*ScriptConfig)
 	if !ok {
-		logger.ErrorCtx(ctx, "Invalid configuration type provided",
-			"operation", "script_execute",
-			"resource_id", resourceID,
-			"tenant_id", tenantID,
-			"resource_type", "script",
-			"error_code", "INVALID_CONFIG_TYPE",
-			"expected_type", "ScriptConfig",
-			"actual_type", fmt.Sprintf("%T", config))
-		return fmt.Errorf("%w: expected ScriptConfig, got %T", modules.ErrInvalidInput, config)
+		// The convergence executor passes a generic map-backed ConfigState
+		// rather than a typed *ScriptConfig — the file and directory modules
+		// likewise decode from config.AsMap(). Rebuild the typed config from
+		// the map instead of rejecting it. (Issue #1572)
+		var convErr error
+		scriptConfig, convErr = scriptConfigFromMap(config.AsMap())
+		if convErr != nil {
+			logger.ErrorCtx(ctx, "Invalid script configuration provided",
+				"operation", "script_execute",
+				"resource_id", resourceID,
+				"tenant_id", tenantID,
+				"resource_type", "script",
+				"error_code", "INVALID_CONFIG_TYPE",
+				"error_details", convErr.Error())
+			return fmt.Errorf("%w: %v", modules.ErrInvalidInput, convErr)
+		}
 	}
 
 	// Validate the configuration

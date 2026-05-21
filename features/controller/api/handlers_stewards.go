@@ -360,10 +360,19 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		s.logger.Info("Received configuration in JSON format", "steward_id", stewardIDForLog, "resources", len(config.Resources))
 	}
 
-	// Extract tenant from context or use default
+	// Resolve the tenant the config is stored under. This endpoint targets a
+	// specific steward, so the config must be stored under THAT steward's
+	// tenant — not the caller's. An admin in tenant "default" may push config
+	// to a steward in any tenant; using the caller's tenant would store the
+	// config where neither the save=deploy fanout nor the steward's own sync
+	// can find it. Fall back to the caller's tenant (then "default") only when
+	// the steward is not yet known. (Issue #1572)
 	tenantID := "default"
 	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
 		tenantID = tid
+	}
+	if info, ok := s.controllerService.GetStewardInfo(stewardID); ok && info.TenantID != "" {
+		tenantID = info.TenantID
 	}
 
 	tenantIDForLog := logging.SanitizeLogValue(tenantID)
