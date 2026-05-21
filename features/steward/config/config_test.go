@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules/script"
 )
 
 func TestLoadConfiguration(t *testing.T) {
@@ -907,6 +909,133 @@ func TestLoadConfiguration_EmptyFileAppliesDefaults(t *testing.T) {
 
 	assert.Equal(t, ModeStandalone, cfg.Steward.Mode, "empty config defaults to standalone mode")
 	assert.NotEmpty(t, cfg.Steward.ID, "empty config defaults ID to hostname")
+}
+
+func TestValidateScriptSigningConfig_RequireSignedAdhoc_PolicyNone_Rejected(t *testing.T) {
+	cfg := ScriptSigningConfig{
+		Policy:             ScriptSigningPolicyNone,
+		RequireSignedAdhoc: true,
+	}
+	err := validateScriptSigningConfig(cfg)
+	require.Error(t, err, "require_signed_adhoc with policy:none must fail validation")
+	assert.Contains(t, err.Error(), "require_signed_adhoc")
+}
+
+func TestValidateScriptSigningConfig_RequireSignedAdhoc_EmptyPolicy_Rejected(t *testing.T) {
+	cfg := ScriptSigningConfig{
+		// Policy is empty (equivalent to none)
+		RequireSignedAdhoc: true,
+	}
+	err := validateScriptSigningConfig(cfg)
+	require.Error(t, err, "require_signed_adhoc with empty policy must fail validation")
+	assert.Contains(t, err.Error(), "require_signed_adhoc")
+}
+
+func TestValidateScriptSigningConfig_RequireSignedAdhoc_PolicyOptional_Valid(t *testing.T) {
+	cfg := ScriptSigningConfig{
+		Policy:             ScriptSigningPolicyOptional,
+		RequireSignedAdhoc: true,
+	}
+	err := validateScriptSigningConfig(cfg)
+	assert.NoError(t, err, "require_signed_adhoc with policy:optional must be valid")
+}
+
+func TestValidateScriptSigningConfig_RequireSignedAdhoc_PolicyRequired_Valid(t *testing.T) {
+	cfg := ScriptSigningConfig{
+		Policy:             ScriptSigningPolicyRequired,
+		TrustMode:          TrustModeAnyValid,
+		RequireSignedAdhoc: true,
+	}
+	err := validateScriptSigningConfig(cfg)
+	assert.NoError(t, err, "require_signed_adhoc with policy:required must be valid")
+}
+
+func TestMergeScriptSigningConfig_RequireSignedAdhoc_InheritedFromParent(t *testing.T) {
+	parent := ScriptSigningConfig{
+		Policy:             ScriptSigningPolicyOptional,
+		TrustMode:          TrustModeAnyValid,
+		RequireSignedAdhoc: true,
+	}
+	child := ScriptSigningConfig{
+		// Child does not set RequireSignedAdhoc
+	}
+	result, err := MergeScriptSigningConfig(parent, child)
+	require.NoError(t, err)
+	assert.True(t, result.RequireSignedAdhoc, "child must inherit RequireSignedAdhoc from parent")
+}
+
+func TestMergeScriptSigningConfig_RequireSignedAdhoc_ChildKeepsOwnTrue(t *testing.T) {
+	parent := ScriptSigningConfig{
+		Policy:             ScriptSigningPolicyOptional,
+		RequireSignedAdhoc: false,
+	}
+	child := ScriptSigningConfig{
+		Policy:             ScriptSigningPolicyOptional,
+		RequireSignedAdhoc: true,
+	}
+	result, err := MergeScriptSigningConfig(parent, child)
+	require.NoError(t, err)
+	assert.True(t, result.RequireSignedAdhoc, "child's explicit RequireSignedAdhoc=true must be preserved")
+}
+
+func TestMergeScriptSigningConfig_RequireSignedAdhoc_ParentFalseChildFalse(t *testing.T) {
+	parent := ScriptSigningConfig{
+		Policy: ScriptSigningPolicyOptional,
+	}
+	child := ScriptSigningConfig{}
+	result, err := MergeScriptSigningConfig(parent, child)
+	require.NoError(t, err)
+	assert.False(t, result.RequireSignedAdhoc, "RequireSignedAdhoc must be false when neither parent nor child sets it")
+}
+
+func TestBuildModuleSigningConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  ScriptSigningConfig
+		want script.ModuleSigningConfig
+	}{
+		{
+			name: "empty config maps to zero-value module config",
+			cfg:  ScriptSigningConfig{},
+			want: script.ModuleSigningConfig{TrustedKeys: []script.TrustedKeyEntry{}},
+		},
+		{
+			name: "trust mode and allow_public_ca pass through",
+			cfg: ScriptSigningConfig{
+				TrustMode:     TrustModeTrustedKeysAndPublic,
+				AllowPublicCA: true,
+			},
+			want: script.ModuleSigningConfig{
+				TrustMode:     script.TrustMode("trusted_keys_and_public"),
+				TrustedKeys:   []script.TrustedKeyEntry{},
+				AllowPublicCA: true,
+			},
+		},
+		{
+			name: "trusted key fields are mapped per entry",
+			cfg: ScriptSigningConfig{
+				TrustMode: TrustModeTrustedKeys,
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "ci-key", Thumbprint: "abc123"},
+					{Name: "ref-key", PublicKeyRef: "secret://ref"},
+				},
+			},
+			want: script.ModuleSigningConfig{
+				TrustMode: script.TrustMode("trusted_keys"),
+				TrustedKeys: []script.TrustedKeyEntry{
+					{Name: "ci-key", Thumbprint: "abc123"},
+					{Name: "ref-key", PublicKeyRef: "secret://ref"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildModuleSigningConfig(tt.cfg)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 func TestScriptSigningConfigValidationInLoadConfiguration(t *testing.T) {

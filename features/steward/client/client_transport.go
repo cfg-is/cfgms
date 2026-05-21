@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -85,6 +86,11 @@ type TransportClient struct {
 	// Command authentication settings (Story #919)
 	commandReplayWindow   time.Duration
 	commandMaxParamsBytes int
+
+	// Script signature verification policy (Issue #1671). Wired into the command
+	// handler by setupCommandHandler so CommandExecuteScript signature enforcement
+	// is active in controller-connected deployments, not just standalone mode.
+	scriptSigning stewardconfig.ScriptSigningConfig
 
 	// Last configuration received from the controller (for scheduled re-convergence)
 	lastConfigYAML    []byte
@@ -171,6 +177,14 @@ type TransportConfig struct {
 	// Zero means the commands.Handler default (65536 bytes) applies.
 	SignedCommandMaxParamsBytes int
 
+	// ScriptSigning is the steward-level script signing policy loaded from the
+	// local steward config. It is wired into the command handler so that
+	// CommandExecuteScript signature verification (library-script TrustedKeys
+	// enforcement, require_signed_adhoc, operator-cert CA chaining) is active in
+	// controller-connected production deployments (Issue #1671). The zero value
+	// means signing enforcement is inactive (policy: none).
+	ScriptSigning stewardconfig.ScriptSigningConfig
+
 	// CertManager provides on-demand client certificate loading for TLS handshakes
 	// (Issue #920). When non-nil, GetClientCertificate is used per handshake so
 	// certificate rotations are picked up automatically. When nil the client falls
@@ -230,6 +244,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		offlineQueue:          offlineQueue,
 		commandReplayWindow:   cfg.SignedCommandReplayWindow,
 		commandMaxParamsBytes: cfg.SignedCommandMaxParamsBytes,
+		scriptSigning:         cfg.ScriptSigning,
 		logger:                cfg.Logger,
 	}
 
@@ -404,13 +419,48 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// Not cached — Issue #920 removes the configVerifier field.
 	verifier := c.buildVerifierOnDemand()
 
+	// Wire script signature verification into the command handler (Issue #1671).
+	// Without this, CommandExecuteScript signing enforcement is inactive in
+	// controller-connected deployments: require_signed_adhoc is ignored, library
+	// scripts fail TrustedKeys verification, and operator-cert CA chaining is skipped.
+	c.mu.RLock()
+	scriptSigning := c.scriptSigning
+	caCertPEM := c.caCertPEM
+	c.mu.RUnlock()
+
+	signingConfig := stewardconfig.BuildModuleSigningConfig(scriptSigning)
+
+	// controllerCARoots verifies operator-signed inline command certs chain to the
+	// controller CA — the same CA bundle used for mTLS. Left nil when no CA PEM is
+	// available, which the handler treats as "skip operator-cert CA verification".
+	var controllerCARoots *x509.CertPool
+	if caCertPEM != "" {
+		pool := x509.NewCertPool()
+		if pool.AppendCertsFromPEM([]byte(caCertPEM)) {
+			controllerCARoots = pool
+		} else {
+			c.logger.Warn("Failed to parse controller CA PEM for operator certificate verification")
+		}
+	}
+
+	// Surface the weaker security posture when require_signed_adhoc is enabled but
+	// no CA roots could be built: inline operator-cert CA-chain verification is then
+	// skipped (cryptographic signature verification still runs).
+	if controllerCARoots == nil && scriptSigning.RequireSignedAdhoc {
+		c.logger.Warn("require_signed_adhoc is enabled but no controller CA roots are available; " +
+			"operator certificate CA-chain verification of inline signed commands will be skipped")
+	}
+
 	handler, err := commands.New(&commands.Config{
-		StewardID:      stewardID,
-		OnStatus:       statusCallback,
-		Logger:         c.logger,
-		Verifier:       verifier,
-		ReplayWindow:   c.commandReplayWindow,
-		MaxParamsBytes: c.commandMaxParamsBytes,
+		StewardID:          stewardID,
+		OnStatus:           statusCallback,
+		Logger:             c.logger,
+		Verifier:           verifier,
+		ReplayWindow:       c.commandReplayWindow,
+		MaxParamsBytes:     c.commandMaxParamsBytes,
+		SigningConfig:      signingConfig,
+		RequireSignedAdhoc: scriptSigning.RequireSignedAdhoc,
+		ControllerCARoots:  controllerCARoots,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create command handler: %w", err)

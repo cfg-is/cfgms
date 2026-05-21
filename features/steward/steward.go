@@ -32,6 +32,7 @@ import (
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/dna"
@@ -179,6 +180,16 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 				"error", err)
 		}
 		driftDetector = nil
+	}
+
+	// Wire script module signing config from steward config (Story #1671).
+	// This ensures the signing policy is live before any convergence run executes scripts.
+	if scriptMod, loadErr := moduleFactory.LoadModule("script"); loadErr == nil {
+		if sm, ok := scriptMod.(*script.Module); ok {
+			sm.SetSigningConfig(config.BuildModuleSigningConfig(cfg.Steward.ScriptSigning))
+		}
+	} else if logger != nil {
+		logger.Warn("Failed to load script module for signing config wiring", "error", loadErr)
 	}
 
 	return &Steward{

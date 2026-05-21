@@ -4,10 +4,17 @@ package commands
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -18,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -923,4 +931,366 @@ func TestExecuteScriptHandler_NoContentLogged(t *testing.T) {
 		"executor stdout log must not contain script body")
 	assert.NotContains(t, allOutput, secretMarker,
 		"executor stdout log must not contain stdout marker (script output)")
+}
+
+// ---------------------------------------------------------------------------
+// Story #1671: Script signature verification tests
+// ---------------------------------------------------------------------------
+
+// sigTestHelper groups helpers for script signature verification tests.
+
+// sigTestRSAKey generates a fresh RSA-2048 key.
+func sigTestRSAKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	return key
+}
+
+// sigTestPubKeyPEM encodes the RSA public key as PKIX PEM.
+func sigTestPubKeyPEM(key *rsa.PrivateKey) string {
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		panic(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+}
+
+// sigTestSignRSASHA256 signs content with key using RSA-SHA256 and returns base64.
+func sigTestSignRSASHA256(t *testing.T, key *rsa.PrivateKey, content []byte) string {
+	t.Helper()
+	h := sha256.Sum256(content)
+	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, h[:])
+	require.NoError(t, err)
+	return base64.StdEncoding.EncodeToString(sig)
+}
+
+// sigTestCA creates a test CA and returns (CA, *x509.CertPool of CA cert).
+func sigTestCA(t *testing.T) (*cert.CA, *x509.CertPool) {
+	t.Helper()
+	ca, err := cert.NewCA(&cert.CAConfig{
+		Organization: "Test Controller CA",
+		Country:      "US",
+		ValidityDays: 365,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+	require.NoError(t, ca.Initialize(nil))
+
+	caCertPEM, err := ca.GetCACertificate()
+	require.NoError(t, err)
+
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(caCertPEM)
+	return ca, pool
+}
+
+// sigTestOperatorCert creates a client cert signed by ca with optional TemplateModifier.
+func sigTestOperatorCert(t *testing.T, ca *cert.CA, modifier func(*x509.Certificate)) *cert.Certificate {
+	t.Helper()
+	c, err := ca.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator.test",
+		ValidityDays:     365,
+		KeySize:          2048,
+		TemplateModifier: modifier,
+	})
+	require.NoError(t, err)
+	return c
+}
+
+// sigTestSignWithCert signs content using the RSA private key in certPEM and keyPEM.
+func sigTestSignWithCert(t *testing.T, keyPEM []byte, content []byte) string {
+	t.Helper()
+	block, _ := pem.Decode(keyPEM)
+	require.NotNil(t, block)
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+	return sigTestSignRSASHA256(t, key, content)
+}
+
+// newHandlerWithSigning creates a handler configured for script signature enforcement.
+func newHandlerWithSigning(t *testing.T, trustedKeys []script.TrustedKeyEntry, requireSignedAdhoc bool, caRoots *x509.CertPool) *Handler {
+	t.Helper()
+	h, err := New(&Config{
+		StewardID: "steward-test",
+		OnStatus:  noopStatus,
+		Logger:    newTestLogger(t),
+		SigningConfig: script.ModuleSigningConfig{
+			TrustMode:   script.TrustModeTrustedKeys,
+			TrustedKeys: trustedKeys,
+		},
+		RequireSignedAdhoc: requireSignedAdhoc,
+		ControllerCARoots:  caRoots,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+	return h
+}
+
+// createMarkerScript returns a script body that creates a marker file,
+// plus the path to the marker file.
+func createMarkerScript(t *testing.T) (scriptBody string, markerPath string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	markerPath = filepath.Join(tmpDir, "marker.txt")
+	if runtime.GOOS == "windows" {
+		scriptBody = fmt.Sprintf(`New-Item -ItemType File -Path "%s" -Force`, markerPath)
+	} else {
+		scriptBody = fmt.Sprintf("touch '%s'", markerPath)
+	}
+	return scriptBody, markerPath
+}
+
+// TestExecuteScriptHandler_RequireSignedAdhoc_Unsigned_Rejected verifies AC2:
+// when require_signed_adhoc is true and no signature params are present,
+// HandleCommand returns ErrUnauthenticatedCommand and the executor is never invoked.
+// Verified by checking that a script that would write a temp file did not execute.
+func TestExecuteScriptHandler_RequireSignedAdhoc_Unsigned_Rejected(t *testing.T) {
+	h := newHandlerWithSigning(t, nil, true, nil)
+
+	scriptBody, markerPath := createMarkerScript(t)
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(scriptBody))
+
+	sc := testSignedCommandWithParams("sig-ac2-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content": scriptContent,
+		"shell":          platformShell(),
+		"execution_id":   "sig-ac2-001",
+		// No signature params — should be rejected
+	})
+
+	err := h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+
+	// The executor was never invoked — marker file must not exist.
+	_, statErr := os.Stat(markerPath)
+	assert.True(t, os.IsNotExist(statErr), "executor must not have run: marker file exists at %s", markerPath)
+}
+
+// TestExecuteScriptHandler_RequireSignedAdhoc_False_Unsigned_Accepted verifies
+// that unsigned inline commands are accepted when require_signed_adhoc is false.
+func TestExecuteScriptHandler_RequireSignedAdhoc_False_Unsigned_Accepted(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{
+		StewardID:          "steward-test",
+		OnStatus:           cb,
+		Logger:             newTestLogger(t),
+		RequireSignedAdhoc: false, // signing not required
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(echoScriptBody("hello")))
+	sc := testSignedCommandWithParams("sig-notsigned-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content": scriptContent,
+		"shell":          platformShell(),
+		"execution_id":   "sig-notsigned-001",
+	})
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "expected EventScriptCompleted for unsigned command when require_signed_adhoc=false")
+}
+
+// TestExecuteScriptHandler_LibraryScript_UntrustedKey_Rejected verifies AC3:
+// a library script (non-empty script_id) with a key NOT in TrustedKeys is rejected
+// unexecuted, even when require_signed_adhoc is false; the library path forces trusted_keys.
+func TestExecuteScriptHandler_LibraryScript_UntrustedKey_Rejected(t *testing.T) {
+	// TrustedKeys holds a placeholder thumbprint that no real key will ever compute to.
+	trustedEntry := script.TrustedKeyEntry{
+		Name:       "trusted-ci-key",
+		Thumbprint: "trusted-thumb",
+	}
+	h := newHandlerWithSigning(t, []script.TrustedKeyEntry{trustedEntry}, false, nil)
+
+	// Sign with a key whose computed thumbprint won't match "trusted-thumb".
+	untrustedKey := sigTestRSAKey(t)
+	content := []byte("#!/bin/bash\necho library")
+	scriptContent := base64.StdEncoding.EncodeToString(content)
+	sigValue := sigTestSignRSASHA256(t, untrustedKey, content)
+
+	sc := testSignedCommandWithParams("sig-lib-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content":       scriptContent,
+		"shell":                platformShell(),
+		"execution_id":         "sig-lib-001",
+		"script_id":            "lib-script-001", // non-empty → library script
+		"signature_algorithm":  "rsa-sha256",
+		"signature_value":      sigValue,
+		"signature_public_key": sigTestPubKeyPEM(untrustedKey),
+	})
+
+	err := h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"library script with untrusted key must be rejected")
+}
+
+// TestExecuteScriptHandler_TamperedContent_Rejected verifies AC4:
+// a signature_value that is valid base64 but is a signature over DIFFERENT content
+// is rejected with ErrUnauthenticatedCommand; executor not invoked.
+func TestExecuteScriptHandler_TamperedContent_Rejected(t *testing.T) {
+	key := sigTestRSAKey(t)
+	thumbprint := "corp-thumb"
+	trustedEntry := script.TrustedKeyEntry{Name: "corp-cert", Thumbprint: thumbprint}
+	h := newHandlerWithSigning(t, []script.TrustedKeyEntry{trustedEntry}, true, nil)
+
+	// Sign original content, but send tampered content in the command.
+	original := []byte("#!/bin/bash\necho hello")
+	tampered := []byte("#!/bin/bash\nrm -rf /")
+	sigValue := sigTestSignRSASHA256(t, key, original) // signed original
+
+	sc := testSignedCommandWithParams("sig-tamper-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content":       base64.StdEncoding.EncodeToString(tampered), // different content
+		"shell":                platformShell(),
+		"execution_id":         "sig-tamper-001",
+		"signature_algorithm":  "rsa-sha256",
+		"signature_value":      sigValue,
+		"signature_public_key": sigTestPubKeyPEM(key),
+		"signature_thumbprint": thumbprint,
+	})
+
+	err := h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"signature over different content must be rejected")
+}
+
+// TestExecuteScriptHandler_InlineScript_CertNotChainedToCA_Rejected verifies AC5 (part 1):
+// an inline command signed by a cert that does NOT chain to the controller CA is rejected
+// when require_signed_adhoc is true, even if cryptographic signature verification succeeds.
+func TestExecuteScriptHandler_InlineScript_CertNotChainedToCA_Rejected(t *testing.T) {
+	_, caPool := sigTestCA(t)
+
+	// Create a DIFFERENT CA — certs from this CA will not chain to caPool.
+	differentCA, _ := sigTestCA(t)
+	operatorCert := sigTestOperatorCert(t, differentCA, nil)
+
+	content := []byte(echoScriptBody("hello"))
+	sigValue := sigTestSignWithCert(t, operatorCert.PrivateKeyPEM, content)
+
+	h := newHandlerWithSigning(t, nil, true, caPool) // caPool is the controller CA
+
+	sc := testSignedCommandWithParams("sig-wrongca-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content":       base64.StdEncoding.EncodeToString(content),
+		"shell":                platformShell(),
+		"execution_id":         "sig-wrongca-001",
+		"signature_algorithm":  "rsa-sha256",
+		"signature_value":      sigValue,
+		"signature_public_key": string(operatorCert.CertificatePEM), // cert from different CA
+	})
+
+	err := h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"cert not chaining to controller CA must be rejected")
+}
+
+// TestExecuteScriptHandler_InlineScript_ExpiredCert_Rejected verifies AC5 (part 2):
+// an inline command signed by an expired operator cert is rejected.
+func TestExecuteScriptHandler_InlineScript_ExpiredCert_Rejected(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+
+	// Create an operator cert that expired in the past.
+	expiredCert := sigTestOperatorCert(t, ca, func(tmpl *x509.Certificate) {
+		tmpl.NotBefore = time.Now().Add(-48 * time.Hour)
+		tmpl.NotAfter = time.Now().Add(-24 * time.Hour) // already expired
+	})
+
+	content := []byte(echoScriptBody("hello"))
+	sigValue := sigTestSignWithCert(t, expiredCert.PrivateKeyPEM, content)
+
+	h := newHandlerWithSigning(t, nil, true, caPool)
+
+	sc := testSignedCommandWithParams("sig-expired-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content":       base64.StdEncoding.EncodeToString(content),
+		"shell":                platformShell(),
+		"execution_id":         "sig-expired-001",
+		"signature_algorithm":  "rsa-sha256",
+		"signature_value":      sigValue,
+		"signature_public_key": string(expiredCert.CertificatePEM),
+	})
+
+	err := h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"expired operator cert must be rejected")
+}
+
+// TestExecuteScriptHandler_LibraryScript_ValidTrustedKey_Accepted verifies AC6 (library):
+// a library script with a valid RSA-SHA256 detached signature from a TrustedKeys-enrolled
+// key is accepted.
+func TestExecuteScriptHandler_LibraryScript_ValidTrustedKey_Accepted(t *testing.T) {
+	cb, getEvents := collectEvents()
+	key := sigTestRSAKey(t)
+	// Thumbprint is computed from the PEM the same way preflightScriptSignature does,
+	// ensuring TrustedKeys contains the real SHA-256 fingerprint of the signing key.
+	pubKeyPEM := sigTestPubKeyPEM(key)
+	thumbprint := computeThumbprintFromPEM(pubKeyPEM)
+	trustedEntry := script.TrustedKeyEntry{Name: "ci-signing-key", Thumbprint: thumbprint}
+
+	h, err := New(&Config{
+		StewardID: "steward-test",
+		OnStatus:  cb,
+		Logger:    newTestLogger(t),
+		SigningConfig: script.ModuleSigningConfig{
+			TrustMode:   script.TrustModeTrustedKeys,
+			TrustedKeys: []script.TrustedKeyEntry{trustedEntry},
+		},
+		RequireSignedAdhoc: false,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	content := []byte(echoScriptBody("lib-hello"))
+	scriptContent := base64.StdEncoding.EncodeToString(content)
+	sigValue := sigTestSignRSASHA256(t, key, content)
+
+	sc := testSignedCommandWithParams("sig-lib-valid-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content":       scriptContent,
+		"shell":                platformShell(),
+		"execution_id":         "sig-lib-valid-001",
+		"script_id":            "trusted-lib-001",
+		"signature_algorithm":  "rsa-sha256",
+		"signature_value":      sigValue,
+		"signature_public_key": pubKeyPEM,
+	})
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "library script with valid trusted-key signature must be accepted and executed")
+}
+
+// TestExecuteScriptHandler_InlineScript_ValidOperatorCert_Accepted verifies AC6 (inline):
+// an inline command signed by a cert chaining to the controller CA is accepted.
+func TestExecuteScriptHandler_InlineScript_ValidOperatorCert_Accepted(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	operatorCert := sigTestOperatorCert(t, ca, nil) // valid, chained, not expired
+
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{
+		StewardID:          "steward-test",
+		OnStatus:           cb,
+		Logger:             newTestLogger(t),
+		RequireSignedAdhoc: true,
+		ControllerCARoots:  caPool,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	content := []byte(echoScriptBody("operator-hello"))
+	sigValue := sigTestSignWithCert(t, operatorCert.PrivateKeyPEM, content)
+
+	sc := testSignedCommandWithParams("sig-op-valid-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content":       base64.StdEncoding.EncodeToString(content),
+		"shell":                platformShell(),
+		"execution_id":         "sig-op-valid-001",
+		"signature_algorithm":  "rsa-sha256",
+		"signature_value":      sigValue,
+		"signature_public_key": string(operatorCert.CertificatePEM),
+	})
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "inline command signed by valid controller-CA-chained cert must be accepted")
 }

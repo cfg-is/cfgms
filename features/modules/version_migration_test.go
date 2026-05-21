@@ -450,7 +450,12 @@ func TestDefaultVersionMigrator_GetMigrationStatus(t *testing.T) {
 		assert.Equal(t, len(path.Steps), status.TotalSteps)
 		assert.Equal(t, MigrationStatusCompleted, status.Status)
 		assert.Equal(t, 1.0, status.Progress)
-		assert.Greater(t, status.ElapsedTime, time.Duration(0))
+		// ElapsedTime must be a valid, non-negative measurement. A completed migration
+		// can legitimately finish within a single clock tick on platforms with coarse
+		// monotonic-clock resolution (notably Windows), so the frozen Duration may be
+		// exactly 0; asserting strictly greater than 0 is flaky. A negative value would
+		// indicate a genuine bug (EndTime before StartTime).
+		assert.GreaterOrEqual(t, status.ElapsedTime, time.Duration(0))
 	})
 
 	t.Run("non-existent migration", func(t *testing.T) {
