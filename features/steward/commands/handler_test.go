@@ -4,7 +4,11 @@ package commands
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -620,4 +624,267 @@ func TestHandleCommand_NilStore_StillWorks(t *testing.T) {
 	sc := testSignedCommand("no-store-001", cpTypes.CommandSyncConfig)
 	require.NoError(t, h.HandleCommand(ctx, sc))
 	h.Wait()
+}
+
+// ---------------------------------------------------------------------------
+// capturingLogger — real Logger implementation that records every log call.
+// Used by execute_script security tests to assert on handler log output.
+// ---------------------------------------------------------------------------
+
+type capturingLogger struct {
+	mu    sync.Mutex
+	lines []string // all logged lines (message + all key-value args as strings)
+}
+
+func (l *capturingLogger) record(msg string, keysAndValues ...interface{}) {
+	parts := []string{msg}
+	for _, v := range keysAndValues {
+		parts = append(parts, fmt.Sprintf("%v", v))
+	}
+	l.mu.Lock()
+	l.lines = append(l.lines, strings.Join(parts, " "))
+	l.mu.Unlock()
+}
+
+func (l *capturingLogger) Lines() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, len(l.lines))
+	copy(out, l.lines)
+	return out
+}
+
+func (l *capturingLogger) Debug(msg string, kv ...interface{}) { l.record(msg, kv...) }
+func (l *capturingLogger) Info(msg string, kv ...interface{})  { l.record(msg, kv...) }
+func (l *capturingLogger) Warn(msg string, kv ...interface{})  { l.record(msg, kv...) }
+func (l *capturingLogger) Error(msg string, kv ...interface{}) { l.record(msg, kv...) }
+func (l *capturingLogger) Fatal(msg string, kv ...interface{}) { l.record(msg, kv...) }
+
+func (l *capturingLogger) DebugCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+func (l *capturingLogger) InfoCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+func (l *capturingLogger) WarnCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+func (l *capturingLogger) ErrorCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+func (l *capturingLogger) FatalCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+
+var _ logging.Logger = (*capturingLogger)(nil)
+
+// collectEvents returns a StatusCallback + a function that returns all collected events.
+func collectEvents() (StatusCallback, func() []*cpTypes.Event) {
+	var mu sync.Mutex
+	var events []*cpTypes.Event
+	cb := func(_ context.Context, e *cpTypes.Event) {
+		mu.Lock()
+		events = append(events, e)
+		mu.Unlock()
+	}
+	get := func() []*cpTypes.Event {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]*cpTypes.Event, len(events))
+		copy(out, events)
+		return out
+	}
+	return cb, get
+}
+
+// firstEventOfType returns the first event with the given type, or nil.
+func firstEventOfType(events []*cpTypes.Event, typ cpTypes.EventType) *cpTypes.Event {
+	for _, e := range events {
+		if e.Type == typ {
+			return e
+		}
+	}
+	return nil
+}
+
+// testSignedCommandWithParams builds a SignedCommand with custom params (no signature).
+func testSignedCommandWithParams(id string, cmdType cpTypes.CommandType, params map[string]interface{}) *cpTypes.SignedCommand {
+	return &cpTypes.SignedCommand{
+		Command: cpTypes.Command{
+			ID:        id,
+			Type:      cmdType,
+			StewardID: "steward-test",
+			Timestamp: time.Now(),
+			Params:    params,
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// execute_script handler tests
+// ---------------------------------------------------------------------------
+
+// TestExecuteScriptHandler_Success verifies that a zero-exit script produces
+// EventScriptCompleted with exit_code 0 and the expected stdout_preview content.
+func TestExecuteScriptHandler_Success(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{
+		StewardID: "steward-test",
+		OnStatus:  cb,
+		Logger:    newTestLogger(t),
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	scriptContent := base64.StdEncoding.EncodeToString([]byte("echo hello"))
+	sc := testSignedCommandWithParams("es-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content": scriptContent,
+		"shell":          "bash",
+		"execution_id":   "exec-001",
+	})
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "expected EventScriptCompleted event")
+	assert.Equal(t, "steward-test", evt.StewardID)
+	assert.Equal(t, "es-001", evt.CommandID)
+
+	exitCode, ok := evt.Details["exit_code"].(int)
+	require.True(t, ok, "exit_code must be an int")
+	assert.Equal(t, 0, exitCode)
+
+	stdoutPreview, ok := evt.Details["stdout_preview"].(string)
+	require.True(t, ok, "stdout_preview must be a string")
+	assert.Contains(t, stdoutPreview, "hello")
+}
+
+// TestExecuteScriptHandler_NonZeroExitCode verifies that a script exiting non-zero
+// still produces EventScriptCompleted (not EventCommandFailed) with the actual exit code.
+func TestExecuteScriptHandler_NonZeroExitCode(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{
+		StewardID: "steward-test",
+		OnStatus:  cb,
+		Logger:    newTestLogger(t),
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	// Script exits with code 42.
+	scriptContent := base64.StdEncoding.EncodeToString([]byte("exit 42"))
+	sc := testSignedCommandWithParams("es-002", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content": scriptContent,
+		"shell":          "bash",
+		"execution_id":   "exec-002",
+	})
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	events := getEvents()
+
+	// Must emit EventScriptCompleted, not EventCommandFailed.
+	failEvt := firstEventOfType(events, cpTypes.EventCommandFailed)
+	assert.Nil(t, failEvt, "non-zero exit should not produce EventCommandFailed")
+
+	evt := firstEventOfType(events, cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "expected EventScriptCompleted event")
+
+	exitCode, ok := evt.Details["exit_code"].(int)
+	require.True(t, ok, "exit_code must be an int")
+	assert.Equal(t, 42, exitCode)
+}
+
+// TestExecuteScriptHandler_StdoutTruncated verifies that stdout longer than 4096 bytes
+// is silently truncated to exactly 4096 bytes in the stdout_preview.
+func TestExecuteScriptHandler_StdoutTruncated(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{
+		StewardID: "steward-test",
+		OnStatus:  cb,
+		Logger:    newTestLogger(t),
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	// Generate >4096 bytes of output using a portable bash loop (500 iter × 10 bytes = 5000 bytes).
+	scriptBody := "i=0; while [ $i -lt 500 ]; do printf 'AAAAAAAAAA'; i=$((i+1)); done"
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(scriptBody))
+	sc := testSignedCommandWithParams("es-003", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content": scriptContent,
+		"shell":          "bash",
+		"execution_id":   "exec-003",
+	})
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "expected EventScriptCompleted event")
+
+	stdoutPreview, ok := evt.Details["stdout_preview"].(string)
+	require.True(t, ok, "stdout_preview must be a string")
+	assert.Equal(t, scriptPreviewMaxBytes, len(stdoutPreview),
+		"stdout_preview must be exactly %d bytes", scriptPreviewMaxBytes)
+}
+
+// TestExecuteScriptHandler_NoContentLogged verifies that no log line emitted by the
+// execute_script handler — including the script executor's own logger which writes to
+// os.Stdout — contains raw script content, stdout output, or stderr output.
+func TestExecuteScriptHandler_NoContentLogged(t *testing.T) {
+	// Capture the handler's structured logs via capturingLogger.
+	capLog := &capturingLogger{}
+	cb, _ := collectEvents()
+
+	h, err := New(&Config{
+		StewardID: "steward-test",
+		OnStatus:  cb,
+		Logger:    capLog,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	// Redirect os.Stdout to capture the script executor's internal logger output
+	// (script.NewExecutor creates its own logging.NewLogger("info") that writes to Stdout).
+	origStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	// Use a recognizable marker that would be visible in logs if content were leaked.
+	secretMarker := "CFGMS_SECRET_MARKER_XYZ_12345"
+	scriptBody := fmt.Sprintf("echo '%s'", secretMarker)
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(scriptBody))
+
+	sc := testSignedCommandWithParams("es-004", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content": scriptContent,
+		"shell":          "bash",
+		"execution_id":   "exec-004",
+	})
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	// Restore stdout and read captured output.
+	require.NoError(t, w.Close())
+	os.Stdout = origStdout
+	stdoutBytes, readErr := io.ReadAll(r)
+	require.NoError(t, readErr)
+	allOutput := string(stdoutBytes)
+
+	// Assert handler's own structured log lines.
+	for _, line := range capLog.Lines() {
+		assert.NotContains(t, line, scriptBody,
+			"handler log line must not contain script body: %q", line)
+		assert.NotContains(t, line, secretMarker,
+			"handler log line must not contain stdout marker: %q", line)
+	}
+
+	// Assert captured os.Stdout output (executor's logger writes here).
+	assert.NotContains(t, allOutput, scriptBody,
+		"executor stdout log must not contain script body")
+	assert.NotContains(t, allOutput, secretMarker,
+		"executor stdout log must not contain stdout marker (script output)")
 }
