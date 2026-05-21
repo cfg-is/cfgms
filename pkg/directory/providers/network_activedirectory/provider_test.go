@@ -539,11 +539,11 @@ func TestNewFromRegistry_WithRegistry_ReturnsConfiguredProvider(t *testing.T) {
 
 	client := NewMockStewardClient()
 	client.AddSteward(StewardInfo{
-		ID:       "steward-dc01",
-		Hostname: "dc01.example.com",
-		Platform: "windows",
-		Modules:  []string{"activedirectory"},
-		Tags:     map[string]string{"ad_domain": "example.com"},
+		ID:        "steward-dc01",
+		Hostname:  "dc01.example.com",
+		Platform:  "windows",
+		Modules:   []string{"activedirectory"},
+		Tags:      map[string]string{"ad_domain": "example.com"},
 		IsHealthy: true,
 	})
 
