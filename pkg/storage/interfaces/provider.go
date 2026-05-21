@@ -47,6 +47,7 @@ type BusinessStoreBundle struct {
 	Trigger             business.TriggerStore
 	Push                business.PushStore
 	PendingRegistration business.PendingRegistrationStore
+	IPTrust             business.IPTrustStore
 }
 
 // BusinessStoreOpener is an optional StorageProvider extension. A provider that
@@ -78,6 +79,7 @@ type StorageProvider interface {
 	CreateTriggerStore(config map[string]interface{}) (business.TriggerStore, error)
 	CreatePushStore(config map[string]interface{}) (business.PushStore, error)
 	CreatePendingRegistrationStore(config map[string]interface{}) (business.PendingRegistrationStore, error)
+	CreateIPTrustStore(config map[string]interface{}) (business.IPTrustStore, error)
 
 	// Provider capabilities and metadata
 	GetCapabilities() ProviderCapabilities

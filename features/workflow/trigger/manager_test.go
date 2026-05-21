@@ -132,6 +132,10 @@ func (m *MockStorageProvider) CreatePendingRegistrationStore(_ map[string]interf
 	return nil, business.ErrNotSupported
 }
 
+func (m *MockStorageProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (m *MockStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	args := m.Called()
 	return args.Get(0).(interfaces.ProviderCapabilities)

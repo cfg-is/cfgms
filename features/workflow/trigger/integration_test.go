@@ -163,6 +163,10 @@ func (t *TestStorageProvider) CreatePendingRegistrationStore(_ map[string]interf
 	return nil, business.ErrNotSupported
 }
 
+func (t *TestStorageProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{
 		MaxBatchSize:          100,
