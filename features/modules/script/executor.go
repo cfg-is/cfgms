@@ -3,6 +3,7 @@
 package script
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -127,15 +128,15 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		ActualUser: actualUser,
 	}
 
-	// Capture stdout and stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
+	// Capture stdout and stderr into buffers. Assigning *bytes.Buffer directly to
+	// cmd.Stdout/cmd.Stderr lets exec.Cmd own the output-copy goroutines: cmd.Wait
+	// blocks until that copying finishes, so there is no race between draining the
+	// output and Wait closing the underlying pipes. The StdoutPipe/StderrPipe
+	// contract explicitly forbids reading the pipe concurrently with Wait, which
+	// silently truncated output from fast-exiting scripts.
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
 
 	// Start the command
 	if err := cmd.Start(); err != nil {
@@ -147,43 +148,7 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 
 	result.PID = cmd.Process.Pid
 
-	// Read output
-	stdoutData := make([]byte, 0)
-	stderrData := make([]byte, 0)
-
-	// Use goroutines to read stdout and stderr concurrently
-	stdoutDone := make(chan error, 1)
-	stderrDone := make(chan error, 1)
-
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := stdout.Read(buf)
-			if n > 0 {
-				stdoutData = append(stdoutData, buf[:n]...)
-			}
-			if err != nil {
-				stdoutDone <- err
-				return
-			}
-		}
-	}()
-
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := stderr.Read(buf)
-			if n > 0 {
-				stderrData = append(stderrData, buf[:n]...)
-			}
-			if err != nil {
-				stderrDone <- err
-				return
-			}
-		}
-	}()
-
-	// Wait for command completion or timeout
+	// Wait for command completion or timeout.
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
@@ -191,14 +156,11 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 
 	select {
 	case err := <-done:
-		// Command completed
-		<-stdoutDone
-		<-stderrDone
-
+		// Command completed; cmd.Wait has flushed all output into the buffers.
 		result.EndTime = time.Now()
 		result.Duration = result.EndTime.Sub(result.StartTime)
-		result.Stdout = string(stdoutData)
-		result.Stderr = string(stderrData)
+		result.Stdout = stdoutBuf.String()
+		result.Stderr = stderrBuf.String()
 
 		if err != nil {
 			if exitError, ok := err.(*exec.ExitError); ok {
@@ -217,6 +179,9 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		if err := cmd.Process.Kill(); err != nil {
 			e.logger.Warn("failed to kill timed-out script process", "error", err)
 		}
+		// Reap the killed process so cmd.Wait returns and its output-copy
+		// goroutines exit; partial output is discarded on timeout.
+		<-done
 		result.EndTime = time.Now()
 		result.Duration = result.EndTime.Sub(result.StartTime)
 		result.ExitCode = -1
