@@ -2249,6 +2249,117 @@ PYEOF
     fi
 }
 
+test_preflight_review_verdict_routing() {
+    log_test "Testing po-cycle-preflight.py: review-FAIL PRs route to re-review, never enqueue/clear-stale (Issue #1657)..."
+
+    local preflight_script
+    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-cycle-preflight.py"
+
+    if [[ ! -f "$preflight_script" ]]; then
+        log_fail "po-cycle-preflight.py: not found at $preflight_script"
+        return
+    fi
+
+    local tmp_py
+    tmp_py=$(mktemp --suffix=.py)
+    trap 'rm -f "$tmp_py"' RETURN
+
+    cat > "$tmp_py" << 'PYEOF'
+import sys, importlib.util, os
+
+script_path = os.environ["PREFLIGHT_SCRIPT"]
+spec = importlib.util.spec_from_file_location("preflight", script_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+fail_c = {"body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — FAIL\n"}
+pass_c = {"body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — PASS\n"}
+
+# Part A: latest_review_verdict extracts fail/pass/None
+if (mod.latest_review_verdict([fail_c]) == "fail"
+        and mod.latest_review_verdict([pass_c]) == "pass"
+        and mod.latest_review_verdict([]) is None):
+    print("PASS_A: latest_review_verdict extracts fail/pass/None")
+else:
+    print("FAIL_A: latest_review_verdict extraction wrong")
+    sys.exit(1)
+
+# Part A2: most recent verdict wins (FAIL then PASS -> pass)
+if mod.latest_review_verdict([fail_c, pass_c]) == "pass":
+    print("PASS_A2: latest_review_verdict takes the most recent verdict")
+else:
+    print("FAIL_A2: latest_review_verdict did not take the latest")
+    sys.exit(1)
+
+pr_fail_green = {
+    "pr": 2001, "story_number": 3001,
+    "has_acceptance_review_comment": True,
+    "latest_review_verdict": "fail",
+    "wip_session_failed": False,
+    "merge_state_status": "MERGEABLE", "mergeable": "MERGEABLE",
+    "auto_merge_enabled": False,
+    "ci_summary": {"overall": "green", "pass": 4, "pending": 0, "fail": 0,
+                   "skipped": 0, "pending_checks": [], "failed_checks": []},
+}
+
+# Part B: review FAIL + CI green -> re-review, NOT enqueue_merge
+recs = mod.compute_review_recommendations([pr_fail_green], set(), set())
+action = recs[0].get("action") if recs else None
+if action == "spawn_acceptance_reviewer":
+    print("PASS_B: review FAIL + CI green -> spawn_acceptance_reviewer (re-review)")
+else:
+    print(f"FAIL_B: review FAIL + CI green got action={action!r}, expected spawn_acceptance_reviewer")
+    sys.exit(1)
+
+# Part C: review PASS + CI green + mergeable -> enqueue_merge (unchanged)
+pr_pass_green = dict(pr_fail_green, pr=2002, latest_review_verdict="pass")
+recs = mod.compute_review_recommendations([pr_pass_green], set(), set())
+action = recs[0].get("action") if recs else None
+if action == "enqueue_merge":
+    print("PASS_C: review PASS + CI green -> enqueue_merge")
+else:
+    print(f"FAIL_C: review PASS + CI green got action={action!r}, expected enqueue_merge")
+    sys.exit(1)
+
+# Part D: Fix story whose PR FAILED review + CI green must NOT clear_stale_status
+fix_story = {"number": 3001, "title": "t", "item_id": "X"}
+recs = mod.compute_fix_recommendations([fix_story], [pr_fail_green], set(), set())
+action = recs[0].get("action") if recs else None
+if action and action != "clear_stale_status":
+    print(f"PASS_D: review-FAIL Fix story + CI green -> action={action!r} (not clear_stale_status)")
+else:
+    print(f"FAIL_D: review-FAIL Fix story got action={action!r}, must not be clear_stale_status")
+    sys.exit(1)
+
+# Part E: CI-driven Fix (no review FAIL) + CI green still clears stale status
+pr_noreview_green = dict(pr_fail_green, pr=2003, story_number=3002,
+                         has_acceptance_review_comment=False, latest_review_verdict=None)
+fix_story2 = {"number": 3002, "title": "t", "item_id": "Y"}
+recs = mod.compute_fix_recommendations([fix_story2], [pr_noreview_green], set(), set())
+action = recs[0].get("action") if recs else None
+if action == "clear_stale_status":
+    print("PASS_E: CI-driven Fix (no review FAIL) + CI green -> clear_stale_status retained")
+else:
+    print(f"FAIL_E: CI-driven Fix got action={action!r}, expected clear_stale_status")
+    sys.exit(1)
+PYEOF
+
+    local exit_code=0
+    local output
+    output=$(PREFLIGHT_SCRIPT="$preflight_script" python3 "$tmp_py" 2>&1) || exit_code=$?
+
+    while IFS= read -r line; do
+        case "$line" in
+            PASS_*) log_pass "preflight verdict routing: ${line#*: }" ;;
+            FAIL_*) log_fail "preflight verdict routing: ${line#*: }" ;;
+        esac
+    done <<< "$output"
+
+    if [[ $exit_code -ne 0 ]] && ! grep -q "^FAIL" <<< "$output"; then
+        log_fail "preflight review verdict routing: Python test crashed (exit $exit_code): $output"
+    fi
+}
+
 # Main execution
 echo "🔍 Script Validation Test Suite"
 echo "================================"
@@ -2312,6 +2423,8 @@ echo ""
 test_dispatch_creds_gate
 echo ""
 test_preflight_acceptance_review_comment_match
+echo ""
+test_preflight_review_verdict_routing
 echo ""
 test_trust_boundary
 echo ""
