@@ -5,7 +5,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -187,29 +186,15 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate steward ID before the atomic claim so it is recorded inside ConsumeToken
 	stewardID := fmt.Sprintf("steward-%d", time.Now().UnixNano())
 
-	// Atomically claim the token. For single-use tokens this is the TOCTOU gate:
-	// if two goroutines both pass GetToken and the revoke/expire checks, only the
-	// first ConsumeToken caller wins; the second gets ErrTokenAlreadyUsed.
-	if err := s.registrationTokenStore.ConsumeToken(r.Context(), req.Token, stewardID); err != nil {
-		if errors.Is(err, business.ErrTokenAlreadyUsed) {
-			s.logger.Warn("Single-use token already consumed",
-				"token_prefix", logging.RedactedID(req.Token))
-			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
-			s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
-				business.AuditEventSecurityEvent, "registration_rejected",
-				business.AuditResultFailure, business.AuditSeverityCritical, nil)
-			http.Error(w, "Registration token has already been used", http.StatusConflict)
-			return
-		}
-		s.logger.Error("Failed to consume registration token", "error", err)
-		http.Error(w, "Registration service error", http.StatusInternalServerError)
-		return
-	}
+	// Perennial tokens survive registration; log the use for auditability.
+	s.logger.Info("Token used for registration",
+		"token_prefix", logging.RedactedID(req.Token),
+		"tenant_id", token.TenantID,
+		"steward_id", stewardID)
 
-	// Issue #422: Run registration approval hook after token consumption.
+	// Issue #422: Run registration approval hook.
 	// The token is consumed before the hook runs, preventing a second attempt while
 	// the hook is evaluating. Hook errors are non-fatal: we log and fall back to approve
 	// so transient failures do not block legitimate registrations.

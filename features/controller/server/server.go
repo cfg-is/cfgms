@@ -328,7 +328,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 					Group:         "test-group",
 					CreatedAt:     now,
 					ExpiresAt:     nil,
-					SingleUse:     false,
 					Revoked:       false,
 				},
 				{
@@ -338,7 +337,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 					Group:         "production",
 					CreatedAt:     now,
 					ExpiresAt:     nil,
-					SingleUse:     false,
 					Revoked:       false,
 				},
 				{
@@ -348,7 +346,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 					Group:         "production",
 					CreatedAt:     now.Add(-2 * time.Hour),
 					ExpiresAt:     &expiredTime,
-					SingleUse:     true,
 					Revoked:       false,
 				},
 				{
@@ -358,19 +355,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 					Group:         "production",
 					CreatedAt:     now,
 					ExpiresAt:     nil,
-					SingleUse:     true,
 					Revoked:       true,
 					RevokedAt:     &now,
-				},
-				{
-					Token:         "integration_singleuse", //nolint:gosec // test-only seeding, env-gated
-					TenantID:      "test-tenant-integration",
-					ControllerURL: "tcp://localhost:1886",
-					Group:         "production",
-					CreatedAt:     now,
-					ExpiresAt:     nil,
-					SingleUse:     true,
-					Revoked:       false,
 				},
 				{
 					Token:         "dockertest_fleet", //nolint:gosec // test-only seeding, env-gated
@@ -379,7 +365,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 					Group:         "test-group",
 					CreatedAt:     now,
 					ExpiresAt:     nil,
-					SingleUse:     false,
 					Revoked:       false,
 				},
 			}

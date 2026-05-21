@@ -49,10 +49,9 @@ func newTestApprovalHook(t *testing.T) (*WorkflowApprovalHook, cfgconfig.ConfigS
 func sampleInput() RegistrationInput {
 	return RegistrationInput{
 		Token: &registration.Token{
-			Token:     "testtoken12345",
-			TenantID:  "test-tenant",
-			Group:     "prod",
-			SingleUse: false,
+			Token:    "testtoken12345",
+			TenantID: "test-tenant",
+			Group:    "prod",
 		},
 		SourceIP: "192.168.1.100",
 	}
@@ -263,7 +262,6 @@ func TestWorkflowApprovalHook_TokenWithExpiry_WorkflowRuns(t *testing.T) {
 			Token:     "sometoken",
 			TenantID:  "test-tenant", // must match stored workflow tenant
 			Group:     "servers",
-			SingleUse: true,
 			ExpiresAt: &exp,
 		},
 		SourceIP: "10.0.0.1",
@@ -316,7 +314,6 @@ func TestHandleRegister_HookRejects_Returns403(t *testing.T) {
 		TenantID:  "test-tenant",
 		Group:     "prod",
 		CreatedAt: time.Now(),
-		SingleUse: false,
 	}
 	err := tokenStore.SaveToken(context.Background(), token)
 	require.NoError(t, err)
@@ -355,7 +352,6 @@ func TestHandleRegister_HookError_FailsOpen(t *testing.T) {
 		TenantID:  "test-tenant",
 		Group:     "prod",
 		CreatedAt: time.Now(),
-		SingleUse: false,
 	}
 	err := tokenStore.SaveToken(context.Background(), token)
 	require.NoError(t, err)

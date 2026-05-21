@@ -142,7 +142,6 @@ func (s *ControllerTestSuite) TestStewardRegistration() {
 		ControllerURL: fmt.Sprintf("quic://%s", s.env.Controller.GetListenAddr()),
 		Group:         "test-group",
 		ExpiresIn:     "1h",
-		SingleUse:     false,
 	})
 	require.NoError(s.T(), err, "Should create registration token")
 

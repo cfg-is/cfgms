@@ -127,7 +127,6 @@ func TestCreateRegistrationToken(t *testing.T) {
 			ControllerURL: "grpc://controller.example.com:7443",
 			Group:         "production",
 			ExpiresIn:     "7d",
-			SingleUse:     false,
 		}
 
 		body, err := json.Marshal(reqBody)
@@ -151,19 +150,12 @@ func TestCreateRegistrationToken(t *testing.T) {
 		assert.Equal(t, "test-tenant", resp.TenantID)
 		assert.Equal(t, "grpc://controller.example.com:7443", resp.ControllerURL)
 		assert.Equal(t, "production", resp.Group)
-		assert.False(t, resp.SingleUse)
 		assert.NotNil(t, resp.ExpiresAt)
 	})
 
-	t.Run("single-use token creation", func(t *testing.T) {
-		reqBody := registration.TokenCreateRequest{
-			TenantID:      "test-tenant",
-			ControllerURL: "grpc://controller.example.com:7443",
-			SingleUse:     true,
-		}
-
-		body, err := json.Marshal(reqBody)
-		require.NoError(t, err)
+	t.Run("single_use field returns 400", func(t *testing.T) {
+		// single_use was removed in Issue #1690; sending it must return 400
+		body := []byte(`{"tenant_id":"test-tenant","controller_url":"grpc://controller.example.com:7443","single_use":true}`)
 
 		req := httptest.NewRequest("POST", "/api/v1/registration/tokens", bytes.NewReader(body))
 		req.Header.Set("X-API-Key", apiKey)
@@ -172,13 +164,8 @@ func TestCreateRegistrationToken(t *testing.T) {
 
 		server.router.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusCreated, rec.Code)
-
-		var resp TokenResponse
-		err = json.Unmarshal(rec.Body.Bytes(), &resp)
-		require.NoError(t, err)
-
-		assert.True(t, resp.SingleUse)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "single_use")
 	})
 
 	t.Run("missing tenant_id returns error", func(t *testing.T) {
@@ -528,6 +515,70 @@ func TestRevokeRegistrationToken(t *testing.T) {
 	})
 }
 
+func TestRotateRegistrationToken(t *testing.T) {
+	server, tokenStore := setupTestServerWithTokenStore(t)
+
+	// Create API key with rotate permission
+	apiKey := NewTestKey(t, server, []string{"registration:rotate-token"})
+	ctx := context.Background()
+
+	// Seed a token for rotation
+	seed, err := registration.CreateToken(&registration.TokenCreateRequest{
+		TenantID:      "rotate-tenant",
+		ControllerURL: "grpc://controller.example.com:7443",
+		Group:         "rotate-group",
+	})
+	require.NoError(t, err)
+	require.NoError(t, tokenStore.SaveToken(ctx, seed))
+
+	t.Run("rotate returns new token and revokes old", func(t *testing.T) {
+		body := []byte(`{"group":"rotate-group"}`)
+		req := httptest.NewRequest("POST", "/api/v1/registration/tokens/rotate-tenant/rotate", bytes.NewReader(body))
+		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusCreated, rec.Code)
+
+		var resp TokenResponse
+		err := json.Unmarshal(rec.Body.Bytes(), &resp)
+		require.NoError(t, err)
+
+		assert.NotEmpty(t, resp.Token)
+		assert.NotEqual(t, seed.Token, resp.Token, "rotated token must differ from seed")
+		assert.Equal(t, "rotate-tenant", resp.TenantID)
+		assert.Equal(t, "grpc://controller.example.com:7443", resp.ControllerURL)
+		assert.Equal(t, "rotate-group", resp.Group)
+		assert.False(t, resp.Revoked)
+
+		// Old token must be revoked in the store
+		old, err := tokenStore.GetToken(ctx, seed.Token)
+		require.NoError(t, err)
+		assert.True(t, old.Revoked, "seed token must be revoked after rotation")
+	})
+
+	t.Run("rotate with no active tokens returns 404", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/registration/tokens/nonexistent-tenant/rotate", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("unauthorized without API key", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/registration/tokens/rotate-tenant/rotate", nil)
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
+}
+
 func TestRegistrationTokenCRUDFlow(t *testing.T) {
 	server, _ := setupTestServerWithTokenStore(t)
 
@@ -549,7 +600,6 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 			ControllerURL: "grpc://controller.example.com:7443",
 			Group:         "crud-test-group",
 			ExpiresIn:     "24h",
-			SingleUse:     false,
 		}
 
 		body, err := json.Marshal(reqBody)
@@ -686,7 +736,6 @@ func TestTokenResponseFormat(t *testing.T) {
 	// Create a token with all fields populated
 	now := time.Now()
 	expiresAt := now.Add(24 * time.Hour)
-	usedAt := now.Add(1 * time.Hour)
 	revokedAt := now.Add(2 * time.Hour)
 
 	token := &registration.Token{
@@ -696,9 +745,6 @@ func TestTokenResponseFormat(t *testing.T) {
 		Group:         "format-group",
 		CreatedAt:     now,
 		ExpiresAt:     &expiresAt,
-		SingleUse:     true,
-		UsedAt:        &usedAt,
-		UsedBy:        "steward-001",
 		Revoked:       true,
 		RevokedAt:     &revokedAt,
 	}
@@ -725,9 +771,6 @@ func TestTokenResponseFormat(t *testing.T) {
 	assert.Equal(t, "format-group", resp.Group)
 	assert.NotEmpty(t, resp.CreatedAt)
 	assert.NotNil(t, resp.ExpiresAt)
-	assert.True(t, resp.SingleUse)
-	assert.NotNil(t, resp.UsedAt)
-	assert.Equal(t, "steward-001", resp.UsedBy)
 	assert.True(t, resp.Revoked)
 	assert.NotNil(t, resp.RevokedAt)
 

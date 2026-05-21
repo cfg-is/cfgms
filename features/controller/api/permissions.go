@@ -45,6 +45,7 @@ var knownPermissions = map[string]bool{
 	"registration:read-token":   true,
 	"registration:delete-token": true,
 	"registration:revoke-token": true,
+	"registration:rotate-token": true,
 	// Registration approval management (Issue #1568)
 	"registration:list-pending": true,
 	"registration:approve":      true,

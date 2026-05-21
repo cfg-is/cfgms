@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
@@ -78,15 +79,24 @@ func (s *inMemoryTokenStore) ListTokens(_ context.Context, filter *business.Regi
 	return result, nil
 }
 
-func (s *inMemoryTokenStore) ConsumeToken(_ context.Context, tokenStr, stewardID string) error {
+func (s *inMemoryTokenStore) RotateToken(_ context.Context, tenantID, group string) (*business.RegistrationTokenData, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	token, ok := s.tokens[tokenStr]
-	if !ok {
-		return fmt.Errorf("token not found")
+	for _, t := range s.tokens {
+		if t.TenantID == tenantID && t.Group == group && !t.Revoked {
+			now := time.Now()
+			t.Revoked = true
+			t.RevokedAt = &now
+		}
 	}
-	token.MarkUsed(stewardID)
-	return nil
+	newTok := &business.RegistrationTokenData{
+		Token:     fmt.Sprintf("rotated-%d", len(s.tokens)),
+		TenantID:  tenantID,
+		Group:     group,
+		CreatedAt: time.Now(),
+	}
+	s.tokens[newTok.Token] = newTok
+	return newTok, nil
 }
 
 func (s *inMemoryTokenStore) Initialize(_ context.Context) error { return nil }

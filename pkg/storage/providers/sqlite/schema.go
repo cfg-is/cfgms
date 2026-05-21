@@ -249,7 +249,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_rbac_role_assignments_role_id    ON rbac_role_assignments(role_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_rbac_role_assignments_tenant_id  ON rbac_role_assignments(tenant_id)`,
 
-		// Registration tokens
+		// Registration tokens — perennial model (Issue #1690)
+		// Migration note: single_use, used_at, and used_by columns were removed in Issue #1690.
+		// Pre-existing deployments must DROP these columns before upgrading.
 		`CREATE TABLE IF NOT EXISTS registration_tokens (
 			token          TEXT PRIMARY KEY,
 			tenant_id      TEXT NOT NULL,
@@ -257,9 +259,6 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			group_name     TEXT NOT NULL DEFAULT '',
 			created_at     TEXT NOT NULL,
 			expires_at     TEXT,
-			single_use     INTEGER NOT NULL DEFAULT 0,
-			used_at        TEXT,
-			used_by        TEXT NOT NULL DEFAULT '',
 			revoked        INTEGER NOT NULL DEFAULT 0,
 			revoked_at     TEXT
 		)`,

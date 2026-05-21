@@ -335,8 +335,8 @@ A steward binary today connects to exactly one controller URL. Multi-controller 
 
 Two credential flavors, both flow through the same registration API:
 
-1. **Short-lived / single-use registration tokens** — generated on the controller via `cfg token create --expires=<duration> --single-use`. Suitable for manual onboarding, small fleets, or time-bounded provisioning windows. The token is consumed on use; expiry enforces time bounds.
-2. **Long-lived tenant/group registration codes** — durable, non-single-use random opaque strings stored as a join field on the controller's tenant/group record. Suitable for RMM/GPO mass deployment where the same code is baked into a deployment script and reused by many devices. On registration the controller looks up the code in its records and assigns the steward to the matching tenant/group; the code itself carries no meaning, so renames of the tenant/group don't break previously issued codes.
+1. **Perennial registration tokens** — generated on the controller via `cfg token create --expires=<duration>`. Suitable for manual onboarding, small fleets, or time-bounded provisioning windows. Tokens survive multiple registrations (never consumed on use); rotate with `cfg token rotate --tenant-id <id>` to atomically invalidate all prior tokens and issue a new one. Expiry enforces time bounds.
+2. **Long-lived tenant/group registration codes** — durable random opaque strings stored as a join field on the controller's tenant/group record. Suitable for RMM/GPO mass deployment where the same code is baked into a deployment script and reused by many devices. On registration the controller looks up the code in its records and assigns the steward to the matching tenant/group; the code itself carries no meaning, so renames of the tenant/group don't break previously issued codes.
 
 The administrator chooses which flavor fits the deployment workflow. Both arrive at the steward as a plain string passed via `--regtoken <token>` (or `cfgms-steward install --regtoken <token>` for the OS-service install).
 
@@ -345,7 +345,7 @@ The administrator chooses which flavor fits the deployment workflow. Both arrive
 1. Administrator creates a registration token or code on the controller.
 2. Steward is started with `--regtoken <token>`.
 3. Steward contacts its compile-time controller URL (HTTPS), submits the token.
-4. Controller validates the token (single-use: consume; long-lived code: look up the matching tenant/group record), applies the registration approval workflow (`auto-approve` or `manual-review`), and on approval issues mTLS certificates scoped to the steward's tenant/group identity.
+4. Controller validates the token (perennial token: check expiry and revocation; long-lived code: look up the matching tenant/group record), applies the registration approval workflow (`auto-approve` or `manual-review`), and on approval issues mTLS certificates scoped to the steward's tenant/group identity.
 5. Steward imports the issued cert into its local `cert.Manager` (stored under the platform cert dir) for use in TLS handshakes, records the node ID, and establishes a gRPC-over-QUIC transport connection.
 6. Steward checks for a cfg from the controller.
 7. Normal operation begins.

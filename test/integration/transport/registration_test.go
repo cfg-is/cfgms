@@ -93,24 +93,19 @@ func (s *RegistrationTestSuite) TestRevokedToken() {
 	s.Equal(http.StatusUnauthorized, resp.StatusCode, "Revoked token should return 401")
 }
 
-// TestSingleUseToken tests that single-use tokens can only be used once.
-func (s *RegistrationTestSuite) TestSingleUseToken() {
-	reqBody := map[string]string{"token": "integration_singleuse"}
+// TestPerennialToken tests that perennial tokens can be used multiple times (Issue #1690).
+func (s *RegistrationTestSuite) TestPerennialToken() {
+	reqBody := map[string]string{"token": "integration_reusable"}
 	reqJSON, err := json.Marshal(reqBody)
 	s.NoError(err)
 
 	registrationURL := fmt.Sprintf("%s/api/v1/register", s.helper.baseURL)
-	resp1, err := s.helper.httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
-	s.NoError(err)
-	defer func() { _ = resp1.Body.Close() }()
-
-	s.Equal(http.StatusOK, resp1.StatusCode, "First registration should succeed")
-
-	resp2, err := s.helper.httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
-	s.NoError(err)
-	defer func() { _ = resp2.Body.Close() }()
-
-	s.Equal(http.StatusConflict, resp2.StatusCode, "Second registration with single-use token should be rejected with 409 Conflict (token already consumed)")
+	for i := 0; i < 3; i++ {
+		resp, postErr := s.helper.httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
+		s.NoError(postErr)
+		_ = resp.Body.Close()
+		s.Equal(http.StatusOK, resp.StatusCode, "Registration #%d with perennial token must succeed", i+1)
+	}
 }
 
 // TestStewardIDUniqueness tests that each registration produces a unique steward ID.

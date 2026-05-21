@@ -212,7 +212,6 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		ControllerURL: "grpc://localhost:0",
 		Group:         "test-group",
 		ExpiresIn:     "",
-		SingleUse:     false,
 	}
 	regTokenObj, regTokenErr := registration.CreateToken(tokenReq)
 	if regTokenErr != nil {

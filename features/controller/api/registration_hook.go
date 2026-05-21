@@ -127,10 +127,9 @@ func (h *WorkflowApprovalHook) Evaluate(ctx context.Context, input RegistrationI
 
 	// Build input variables passed to the workflow execution.
 	vars := map[string]interface{}{
-		"tenant_id":  input.Token.TenantID,
-		"group":      input.Token.Group,
-		"single_use": input.Token.SingleUse,
-		"source_ip":  input.SourceIP,
+		"tenant_id": input.Token.TenantID,
+		"group":     input.Token.Group,
+		"source_ip": input.SourceIP,
 	}
 	if input.Token.ExpiresAt != nil {
 		vars["token_expiry"] = input.Token.ExpiresAt.UTC().Format(time.RFC3339)

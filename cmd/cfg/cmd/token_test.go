@@ -59,7 +59,6 @@ func newTokenServer(t *testing.T) *httptest.Server {
 		Group:         "production",
 		CreatedAt:     "2026-05-01T00:00:00Z",
 		ExpiresAt:     &expiresAt,
-		SingleUse:     false,
 		Revoked:       false,
 	}
 
@@ -95,7 +94,6 @@ func TestRunTokenCreate_JSONOutput(t *testing.T) {
 	origControllerURL := tokenControllerURL
 	origGroup := tokenGroup
 	origExpiresIn := tokenExpiresIn
-	origSingleUse := tokenSingleUse
 	origJSON := tokenJSONOutput
 	t.Cleanup(func() {
 		tokenAPIURL = origAPIURL
@@ -105,7 +103,6 @@ func TestRunTokenCreate_JSONOutput(t *testing.T) {
 		tokenControllerURL = origControllerURL
 		tokenGroup = origGroup
 		tokenExpiresIn = origExpiresIn
-		tokenSingleUse = origSingleUse
 		tokenJSONOutput = origJSON
 	})
 
@@ -115,7 +112,6 @@ func TestRunTokenCreate_JSONOutput(t *testing.T) {
 	tokenControllerURL = "controller.example.com:4433"
 	tokenGroup = ""
 	tokenExpiresIn = ""
-	tokenSingleUse = false
 	tokenJSONOutput = true
 
 	output := captureStdout(t, func() {
@@ -147,7 +143,6 @@ func TestRunTokenCreate_TextOutput(t *testing.T) {
 	origControllerURL := tokenControllerURL
 	origGroup := tokenGroup
 	origExpiresIn := tokenExpiresIn
-	origSingleUse := tokenSingleUse
 	origJSON := tokenJSONOutput
 	t.Cleanup(func() {
 		tokenAPIURL = origAPIURL
@@ -157,7 +152,6 @@ func TestRunTokenCreate_TextOutput(t *testing.T) {
 		tokenControllerURL = origControllerURL
 		tokenGroup = origGroup
 		tokenExpiresIn = origExpiresIn
-		tokenSingleUse = origSingleUse
 		tokenJSONOutput = origJSON
 	})
 
@@ -167,7 +161,6 @@ func TestRunTokenCreate_TextOutput(t *testing.T) {
 	tokenControllerURL = "controller.example.com:4433"
 	tokenGroup = ""
 	tokenExpiresIn = ""
-	tokenSingleUse = false
 	tokenJSONOutput = false
 
 	output := captureStdout(t, func() {

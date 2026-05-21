@@ -35,16 +35,15 @@ type APIClientConfig struct {
 	ServerName    string // Server name for TLS verification (extracted from URL if empty)
 }
 
-// TokenCreateRequest represents the request body for creating a registration token
+// APITokenCreateRequest represents the request body for creating a registration token
 type APITokenCreateRequest struct {
 	TenantID      string `json:"tenant_id"`
 	ControllerURL string `json:"controller_url"`
 	Group         string `json:"group,omitempty"`
 	ExpiresIn     string `json:"expires_in,omitempty"`
-	SingleUse     bool   `json:"single_use,omitempty"`
 }
 
-// TokenResponse represents a registration token in API responses
+// APITokenResponse represents a registration token in API responses
 type APITokenResponse struct {
 	Token         string  `json:"token"`
 	TenantID      string  `json:"tenant_id"`
@@ -52,9 +51,6 @@ type APITokenResponse struct {
 	Group         string  `json:"group,omitempty"`
 	CreatedAt     string  `json:"created_at"`
 	ExpiresAt     *string `json:"expires_at,omitempty"`
-	SingleUse     bool    `json:"single_use"`
-	UsedAt        *string `json:"used_at,omitempty"`
-	UsedBy        string  `json:"used_by,omitempty"`
 	Revoked       bool    `json:"revoked"`
 	RevokedAt     *string `json:"revoked_at,omitempty"`
 }
@@ -210,6 +206,37 @@ func (c *APIClient) RevokeToken(ctx context.Context, tokenStr string) (*APIToken
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var tokenResp APITokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &tokenResp, nil
+}
+
+// APIRotateTokenRequest is the optional request body for the rotate endpoint.
+type APIRotateTokenRequest struct {
+	Group string `json:"group,omitempty"`
+}
+
+// RotateToken atomically revokes all prior tokens for a tenant+group and returns the new token.
+func (c *APIClient) RotateToken(ctx context.Context, tenantID, group string) (*APITokenResponse, error) {
+	req := &APIRotateTokenRequest{Group: group}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/registration/tokens/"+tenantID+"/rotate", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
 		return nil, c.parseError(resp)
 	}
 

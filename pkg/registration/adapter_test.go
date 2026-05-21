@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	_ "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -44,7 +43,6 @@ func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
 			ControllerURL: "tcp://localhost:1883",
 			Group:         "adapter-group",
 			CreatedAt:     now,
-			SingleUse:     false,
 			Revoked:       false,
 		}
 
@@ -67,8 +65,8 @@ func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
 		token, err := adapter.GetToken(ctx, "adapter_test_token")
 		require.NoError(t, err)
 
-		// Mark as used using the Token method
-		token.MarkUsed("steward-adapter-001")
+		// Revoke the token to test mutable state update
+		token.Revoke()
 
 		err = adapter.UpdateToken(ctx, token)
 		require.NoError(t, err)
@@ -76,8 +74,8 @@ func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
 		// Verify update
 		updated, err := adapter.GetToken(ctx, "adapter_test_token")
 		require.NoError(t, err)
-		assert.NotNil(t, updated.UsedAt)
-		assert.Equal(t, "steward-adapter-001", updated.UsedBy)
+		assert.True(t, updated.Revoked)
+		assert.NotNil(t, updated.RevokedAt)
 	})
 
 	// Test ListTokens
@@ -90,7 +88,6 @@ func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
 			ControllerURL: "tcp://localhost:1883",
 			Group:         "adapter-group-2",
 			CreatedAt:     now,
-			SingleUse:     true,
 			Revoked:       false,
 		}
 		err := adapter.SaveToken(ctx, token2)
@@ -112,30 +109,23 @@ func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	// Test Token.IsValid method
-	t.Run("Token_IsValid", func(t *testing.T) {
-		token, err := adapter.GetToken(ctx, "adapter_test_token")
-		require.NoError(t, err)
-		// Token was marked as used but it's not single-use, so still valid
-		assert.True(t, token.IsValid())
-	})
-
-	// Test Token.Revoke method
-	t.Run("Token_Revoke", func(t *testing.T) {
-		token, err := adapter.GetToken(ctx, "adapter_test_token")
-		require.NoError(t, err)
-
-		// Revoke the token
-		token.Revoke()
-		err = adapter.UpdateToken(ctx, token)
+	// Test Token.IsValid method (non-revoked token with future expiry)
+	t.Run("Token_IsValid_FutureExpiry", func(t *testing.T) {
+		future := time.Now().Add(24 * time.Hour)
+		tok := &Token{
+			Token:         "adapter_valid_token",
+			TenantID:      "tenant-adapter",
+			ControllerURL: "tcp://localhost:1883",
+			Group:         "valid-group",
+			CreatedAt:     time.Now(),
+			ExpiresAt:     &future,
+		}
+		err := adapter.SaveToken(ctx, tok)
 		require.NoError(t, err)
 
-		// Verify it's no longer valid
-		updated, err := adapter.GetToken(ctx, "adapter_test_token")
+		got, err := adapter.GetToken(ctx, "adapter_valid_token")
 		require.NoError(t, err)
-		assert.True(t, updated.Revoked)
-		assert.NotNil(t, updated.RevokedAt)
-		assert.False(t, updated.IsValid())
+		assert.True(t, got.IsValid())
 	})
 }
 
@@ -163,7 +153,6 @@ func TestStorageAdapter_InterfaceCompliance(t *testing.T) {
 		Group:         "compliance-group",
 		CreatedAt:     now,
 		ExpiresAt:     &expiresAt,
-		SingleUse:     true,
 		Revoked:       false,
 	}
 
@@ -179,14 +168,11 @@ func TestStorageAdapter_InterfaceCompliance(t *testing.T) {
 	assert.WithinDuration(t, original.CreatedAt, got.CreatedAt, time.Second)
 	require.NotNil(t, got.ExpiresAt)
 	assert.WithinDuration(t, *original.ExpiresAt, *got.ExpiresAt, time.Second)
-	assert.Equal(t, original.SingleUse, got.SingleUse)
-	assert.Nil(t, got.UsedAt)
-	assert.Empty(t, got.UsedBy)
-	assert.Equal(t, original.Revoked, got.Revoked)
 	assert.Nil(t, got.RevokedAt)
+	assert.Equal(t, original.Revoked, got.Revoked)
 }
 
-func TestStorageAdapter_ConsumeToken_Race(t *testing.T) {
+func TestStorageAdapter_RotateToken_Race(t *testing.T) {
 	tempDir := t.TempDir()
 
 	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
@@ -201,18 +187,19 @@ func TestStorageAdapter_ConsumeToken_Race(t *testing.T) {
 
 	adapter := NewStorageAdapter(store)
 
+	// Seed initial token
 	token := &Token{
-		Token:     "sqlite-race-token",
-		TenantID:  "tenant-race",
-		SingleUse: true,
-		CreatedAt: time.Now(),
+		Token:         "sqlite-rotate-seed",
+		TenantID:      "tenant-race",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "race-group",
+		CreatedAt:     time.Now(),
 	}
 	require.NoError(t, adapter.SaveToken(ctx, token))
 
-	const goroutines = 50
+	const goroutines = 20
 	var (
 		successCount atomic.Int32
-		alreadyUsed  atomic.Int32
 		wg           sync.WaitGroup
 		start        = make(chan struct{})
 	)
@@ -222,14 +209,9 @@ func TestStorageAdapter_ConsumeToken_Race(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			<-start
-			err := adapter.ConsumeToken(ctx, "sqlite-race-token", "steward-"+string(rune('A'+id)))
-			switch err {
-			case nil:
+			_, err := adapter.RotateToken(ctx, "tenant-race", "race-group")
+			if err == nil {
 				successCount.Add(1)
-			case business.ErrTokenAlreadyUsed:
-				alreadyUsed.Add(1)
-			default:
-				t.Errorf("goroutine %d: unexpected error: %v", id, err)
 			}
 		}(i)
 	}
@@ -237,6 +219,18 @@ func TestStorageAdapter_ConsumeToken_Race(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	assert.Equal(t, int32(1), successCount.Load(), "exactly one goroutine must succeed")
-	assert.Equal(t, int32(goroutines-1), alreadyUsed.Load(), "all others must get ErrTokenAlreadyUsed")
+	// All rotations must succeed (each one finds the previous rotation's token as active)
+	assert.Equal(t, int32(goroutines), successCount.Load(), "all concurrent rotations must succeed")
+
+	// Exactly one valid token must remain
+	tokens, err := adapter.ListTokens(ctx, "tenant-race")
+	require.NoError(t, err)
+
+	validCount := 0
+	for _, tok := range tokens {
+		if !tok.Revoked {
+			validCount++
+		}
+	}
+	assert.Equal(t, 1, validCount, "exactly one valid token must exist after all rotations")
 }

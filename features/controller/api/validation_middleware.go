@@ -90,8 +90,8 @@ func (s *Server) validateURLParameters(validator *security.EnhancedValidator, re
 			// Certificate serial numbers
 			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric", "max_length:40")
 		case "tenantId", "tenant_id":
-			// Tenant IDs should be UUIDs
-			validator.ValidateString(result, "path."+param, value, "required", "charset:uuid")
+			// Tenant IDs are human-readable identifiers (e.g., "acme-corp", "test-tenant")
+			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric_dash", "max_length:128")
 		case "stewardId", "steward_id":
 			// Steward IDs
 			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric_dash", "max_length:64")

@@ -5,119 +5,121 @@ package registration
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-func TestMemoryStore_ConsumeToken_SingleUse_Race(t *testing.T) {
+func TestMemoryStore_RotateToken_Basic(t *testing.T) {
 	store := newMemoryStore()
 	ctx := context.Background()
 
-	token := &Token{
-		Token:     "single-use-race-token",
-		TenantID:  "tenant-1",
-		SingleUse: true,
-		CreatedAt: time.Now(),
+	// Seed an initial token.
+	initial := &Token{
+		Token:         "initial-token",
+		TenantID:      "tenant-1",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "production",
+		CreatedAt:     time.Now(),
 	}
-	require.NoError(t, store.SaveToken(ctx, token))
+	require.NoError(t, store.SaveToken(ctx, initial))
 
-	const goroutines = 50
-	var (
-		successCount atomic.Int32
-		alreadyUsed  atomic.Int32
-		wg           sync.WaitGroup
-		start        = make(chan struct{})
-	)
+	newTok, err := store.RotateToken(ctx, "tenant-1", "production")
+	require.NoError(t, err)
+	assert.NotEmpty(t, newTok.Token)
+	assert.NotEqual(t, initial.Token, newTok.Token, "rotate must generate a different token string")
+	assert.Equal(t, "tenant-1", newTok.TenantID)
+	assert.Equal(t, "grpc://controller:7443", newTok.ControllerURL)
+	assert.Equal(t, "production", newTok.Group)
+
+	// Old token must now be revoked.
+	got, err := store.GetToken(ctx, initial.Token)
+	require.NoError(t, err)
+	assert.True(t, got.Revoked, "initial token must be revoked after rotation")
+}
+
+func TestMemoryStore_RotateToken_NoActiveTokens(t *testing.T) {
+	store := newMemoryStore()
+	ctx := context.Background()
+
+	_, err := store.RotateToken(ctx, "tenant-none", "group-none")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no active tokens found")
+}
+
+func TestRotateToken_InvalidatesOldTokenAtomically(t *testing.T) {
+	store := newMemoryStore()
+	ctx := context.Background()
+
+	// Seed an initial token.
+	initial := &Token{
+		Token:         "initial-concurrent-token",
+		TenantID:      "tenant-concurrent",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "concurrent-group",
+		CreatedAt:     time.Now(),
+	}
+	require.NoError(t, store.SaveToken(ctx, initial))
+
+	const goroutines = 20
+	results := make([]*Token, goroutines)
+	errs := make([]error, goroutines)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
 
 	wg.Add(goroutines)
 	for i := 0; i < goroutines; i++ {
 		go func(id int) {
 			defer wg.Done()
 			<-start
-			err := store.ConsumeToken(ctx, "single-use-race-token", "steward-"+string(rune('A'+id)))
-			switch err {
-			case nil:
-				successCount.Add(1)
-			case business.ErrTokenAlreadyUsed:
-				alreadyUsed.Add(1)
-			default:
-				t.Errorf("goroutine %d: unexpected error: %v", id, err)
-			}
+			results[id], errs[id] = store.RotateToken(ctx, "tenant-concurrent", "concurrent-group")
 		}(i)
 	}
 
 	close(start)
 	wg.Wait()
 
-	assert.Equal(t, int32(1), successCount.Load(), "exactly one goroutine must succeed")
-	assert.Equal(t, int32(goroutines-1), alreadyUsed.Load(), "all others must get ErrTokenAlreadyUsed")
-}
-
-func TestMemoryStore_ConsumeToken_MultiUse(t *testing.T) {
-	store := newMemoryStore()
-	ctx := context.Background()
-
-	token := &Token{
-		Token:     "multi-use-token",
-		TenantID:  "tenant-1",
-		SingleUse: false,
-		CreatedAt: time.Now(),
+	// All rotations must succeed.
+	for i, err := range errs {
+		require.NoError(t, err, "goroutine %d got unexpected error", i)
 	}
-	require.NoError(t, store.SaveToken(ctx, token))
 
-	// Multiple consumes of a multi-use token must all succeed.
-	require.NoError(t, store.ConsumeToken(ctx, "multi-use-token", "steward-1"))
-	require.NoError(t, store.ConsumeToken(ctx, "multi-use-token", "steward-2"))
-}
+	// After N concurrent rotations, exactly one token must be valid.
+	allTokens, err := store.ListTokens(ctx, "tenant-concurrent")
+	require.NoError(t, err)
 
-func TestMemoryStore_ConsumeToken_TokenNotFound(t *testing.T) {
-	store := newMemoryStore()
-	ctx := context.Background()
-
-	err := store.ConsumeToken(ctx, "nonexistent", "steward-1")
-	require.Error(t, err)
-	assert.NotEqual(t, business.ErrTokenAlreadyUsed, err)
-}
-
-func TestMemoryStore_ConsumeToken_RevokedToken(t *testing.T) {
-	store := newMemoryStore()
-	ctx := context.Background()
-
-	token := &Token{
-		Token:     "revoked-token",
-		TenantID:  "tenant-1",
-		SingleUse: true,
-		Revoked:   true,
-		CreatedAt: time.Now(),
+	validCount := 0
+	for _, tok := range allTokens {
+		if !tok.Revoked {
+			validCount++
+		}
 	}
-	require.NoError(t, store.SaveToken(ctx, token))
+	assert.Equal(t, 1, validCount, "exactly one valid token must exist after concurrent rotations")
 
-	err := store.ConsumeToken(ctx, "revoked-token", "steward-1")
-	require.Error(t, err)
-	assert.NotEqual(t, business.ErrTokenAlreadyUsed, err)
+	// The initial token must be revoked.
+	gotInitial, err := store.GetToken(ctx, initial.Token)
+	require.NoError(t, err)
+	assert.True(t, gotInitial.Revoked, "initial token must be revoked after rotation")
 }
 
-func TestMemoryStore_ConsumeToken_ExpiredToken(t *testing.T) {
+func TestMemoryStore_RotateToken_RevokedTokenNotCounted(t *testing.T) {
 	store := newMemoryStore()
 	ctx := context.Background()
 
-	past := time.Now().Add(-time.Hour)
-	token := &Token{
-		Token:     "expired-token",
-		TenantID:  "tenant-1",
-		SingleUse: false,
-		ExpiresAt: &past,
-		CreatedAt: time.Now().Add(-2 * time.Hour),
+	// Seed a revoked token — RotateToken must not consider it active.
+	revoked := &Token{
+		Token:         "already-revoked",
+		TenantID:      "tenant-2",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "group-a",
+		Revoked:       true,
+		CreatedAt:     time.Now(),
 	}
-	require.NoError(t, store.SaveToken(ctx, token))
+	require.NoError(t, store.SaveToken(ctx, revoked))
 
-	err := store.ConsumeToken(ctx, "expired-token", "steward-1")
-	require.Error(t, err)
-	assert.NotEqual(t, business.ErrTokenAlreadyUsed, err)
+	_, err := store.RotateToken(ctx, "tenant-2", "group-a")
+	require.Error(t, err, "no active tokens should cause an error")
+	assert.Contains(t, err.Error(), "no active tokens found")
 }

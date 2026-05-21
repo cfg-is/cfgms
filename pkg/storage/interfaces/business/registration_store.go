@@ -5,12 +5,8 @@ package business
 
 import (
 	"context"
-	"errors"
 	"time"
 )
-
-// ErrTokenAlreadyUsed is returned when a single-use token has already been consumed.
-var ErrTokenAlreadyUsed = errors.New("registration token already used")
 
 // RegistrationTokenStore defines storage interface for CFGMS registration token persistence
 // All registration token modules use this interface - storage provider is chosen by controller
@@ -22,9 +18,10 @@ type RegistrationTokenStore interface {
 	DeleteToken(ctx context.Context, tokenStr string) error
 	ListTokens(ctx context.Context, filter *RegistrationTokenFilter) ([]*RegistrationTokenData, error)
 
-	// ConsumeToken atomically validates and marks a token as used in a single operation.
-	// For single-use tokens, returns ErrTokenAlreadyUsed if already consumed.
-	ConsumeToken(ctx context.Context, tokenStr, stewardID string) error
+	// RotateToken atomically revokes all prior tokens for tenant+group and creates a new one.
+	// The controller_url is inherited from an existing active token. Returns the new token.
+	// Returns an error if no active tokens exist for the given tenant+group.
+	RotateToken(ctx context.Context, tenantID, group string) (*RegistrationTokenData, error)
 
 	// Initialize and cleanup
 	Initialize(ctx context.Context) error
@@ -51,15 +48,6 @@ type RegistrationTokenData struct {
 	// ExpiresAt is when the token expires (nil = never)
 	ExpiresAt *time.Time `json:"expires_at,omitempty" yaml:"expires_at,omitempty"`
 
-	// SingleUse indicates if token can only be used once
-	SingleUse bool `json:"single_use" yaml:"single_use"`
-
-	// UsedAt is when the token was first used (nil = unused)
-	UsedAt *time.Time `json:"used_at,omitempty" yaml:"used_at,omitempty"`
-
-	// UsedBy is the steward_id that used this token
-	UsedBy string `json:"used_by,omitempty" yaml:"used_by,omitempty"`
-
 	// Revoked indicates if token has been revoked
 	Revoked bool `json:"revoked" yaml:"revoked"`
 
@@ -69,29 +57,13 @@ type RegistrationTokenData struct {
 
 // IsValid returns whether the token is currently valid for use.
 func (t *RegistrationTokenData) IsValid() bool {
-	// Check if revoked
 	if t.Revoked {
 		return false
 	}
-
-	// Check if expired
 	if t.ExpiresAt != nil && time.Now().After(*t.ExpiresAt) {
 		return false
 	}
-
-	// Check if single-use and already used
-	if t.SingleUse && t.UsedAt != nil {
-		return false
-	}
-
 	return true
-}
-
-// MarkUsed marks the token as used by a specific steward.
-func (t *RegistrationTokenData) MarkUsed(stewardID string) {
-	now := time.Now()
-	t.UsedAt = &now
-	t.UsedBy = stewardID
 }
 
 // Revoke marks the token as revoked.
@@ -103,9 +75,7 @@ func (t *RegistrationTokenData) Revoke() {
 
 // RegistrationTokenFilter defines filtering criteria for token queries
 type RegistrationTokenFilter struct {
-	TenantID  string `json:"tenant_id,omitempty"`
-	Group     string `json:"group,omitempty"`
-	Revoked   *bool  `json:"revoked,omitempty"`
-	SingleUse *bool  `json:"single_use,omitempty"`
-	Used      *bool  `json:"used,omitempty"` // Filter by used/unused status
+	TenantID string `json:"tenant_id,omitempty"`
+	Group    string `json:"group,omitempty"`
+	Revoked  *bool  `json:"revoked,omitempty"`
 }

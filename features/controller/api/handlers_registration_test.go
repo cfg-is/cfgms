@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -40,19 +39,6 @@ func newTestRegistrationStore(t *testing.T) registration.Store {
 	t.Cleanup(func() { _ = store.Close() })
 	require.NoError(t, store.Initialize(context.Background()))
 	return registration.NewStorageAdapter(store)
-}
-
-// controlledConsumeStore wraps a registration.Store and injects a fixed error from ConsumeToken.
-type controlledConsumeStore struct {
-	registration.Store
-	consumeErr error
-}
-
-func (c *controlledConsumeStore) ConsumeToken(ctx context.Context, tokenStr, stewardID string) error {
-	if c.consumeErr != nil {
-		return c.consumeErr
-	}
-	return c.Store.ConsumeToken(ctx, tokenStr, stewardID)
 }
 
 // newHandleRegisterServer creates a minimal server for handleRegister unit tests.
@@ -147,39 +133,6 @@ func postRegister(server *Server, token string) *httptest.ResponseRecorder {
 	return rec
 }
 
-func TestHandleRegister_AlreadyUsedSingleUseToken_Returns409(t *testing.T) {
-	tokenStore := newTestRegistrationStore(t)
-	server, auditMgr := newHandleRegisterServer(t, tokenStore, nil)
-
-	usedAt := time.Now().Add(-time.Hour)
-	tok := &registration.Token{
-		Token:         "cfgms_reg_used_token",
-		TenantID:      "test-tenant",
-		ControllerURL: "grpc://controller:7443",
-		SingleUse:     true,
-		UsedAt:        &usedAt,
-		UsedBy:        "steward-previous",
-	}
-	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
-
-	rec := postRegister(server, "cfgms_reg_used_token")
-
-	assert.Equal(t, http.StatusConflict, rec.Code)
-	assert.Contains(t, rec.Body.String(), "already been used")
-
-	// Verify audit entry was recorded for the rejected registration
-	require.NoError(t, auditMgr.Flush(context.Background()))
-	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{
-		TenantID: "test-tenant",
-	})
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	assert.Equal(t, "registration_rejected", entries[0].Action)
-	assert.Equal(t, string(business.AuditResultFailure), string(entries[0].Result))
-	assert.Equal(t, string(business.AuditEventSecurityEvent), string(entries[0].EventType))
-	assert.Equal(t, "test-tenant", entries[0].TenantID)
-}
-
 func TestHandleRegister_RevokedToken_Returns401(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	server, auditMgr := newHandleRegisterServer(t, tokenStore, nil)
@@ -241,83 +194,22 @@ func TestHandleRegister_ExpiredToken_Returns401(t *testing.T) {
 		"token_prefix in audit detail must be redacted by the audit manager")
 }
 
-func TestHandleRegister_StoreError_Returns500(t *testing.T) {
-	storeErr := fmt.Errorf("failed to persist token state: %w", fmt.Errorf("connection refused"))
-	tokenStore := &controlledConsumeStore{
-		Store:      newTestRegistrationStore(t),
-		consumeErr: storeErr,
-	}
-	server, _ := newHandleRegisterServer(t, tokenStore, nil)
-
-	tok := &registration.Token{
-		Token:         "cfgms_reg_store_err_token",
-		TenantID:      "test-tenant",
-		ControllerURL: "grpc://controller:7443",
-		SingleUse:     true,
-	}
-	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
-
-	rec := postRegister(server, "cfgms_reg_store_err_token")
-
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-}
-
-func TestHandleRegister_ValidSingleUseToken_Returns200ThenSubsequent409(t *testing.T) {
-	tokenStore := newTestRegistrationStore(t)
-	certMgr := newTestCertManager(t)
-	server, auditMgr := newHandleRegisterServer(t, tokenStore, certMgr)
-
-	tok := &registration.Token{
-		Token:         "cfgms_reg_singleuse_valid",
-		TenantID:      "test-tenant",
-		ControllerURL: "grpc://controller:7443",
-		SingleUse:     true,
-	}
-	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
-
-	// First request should succeed
-	rec1 := postRegister(server, "cfgms_reg_singleuse_valid")
-	assert.Equal(t, http.StatusOK, rec1.Code)
-
-	var resp RegistrationResponse
-	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp))
-	assert.NotEmpty(t, resp.StewardID)
-	assert.Equal(t, "test-tenant", resp.TenantID)
-
-	// Verify audit entry for successful registration
-	require.NoError(t, auditMgr.Flush(context.Background()))
-	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{
-		TenantID: "test-tenant",
-	})
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	assert.Equal(t, "steward_registered", entries[0].Action)
-	assert.Equal(t, string(business.AuditResultSuccess), string(entries[0].Result))
-	assert.Equal(t, string(business.AuditEventAuthentication), string(entries[0].EventType))
-	assert.Equal(t, "test-tenant", entries[0].TenantID)
-
-	// Second request with same token must be rejected as already used
-	rec2 := postRegister(server, "cfgms_reg_singleuse_valid")
-	assert.Equal(t, http.StatusConflict, rec2.Code)
-}
-
-func TestHandleRegister_ValidMultiUseToken_AllowsTwoRegistrations(t *testing.T) {
+func TestHandleRegister_PerennialToken_AllowsMultipleRegistrations(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	certMgr := newTestCertManager(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
 
 	tok := &registration.Token{
-		Token:         "cfgms_reg_multiuse_valid",
+		Token:         "cfgms_reg_perennial_valid",
 		TenantID:      "test-tenant",
 		ControllerURL: "grpc://controller:7443",
-		SingleUse:     false,
 	}
 	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
 
-	rec1 := postRegister(server, "cfgms_reg_multiuse_valid")
+	rec1 := postRegister(server, "cfgms_reg_perennial_valid")
 	assert.Equal(t, http.StatusOK, rec1.Code)
 
-	rec2 := postRegister(server, "cfgms_reg_multiuse_valid")
+	rec2 := postRegister(server, "cfgms_reg_perennial_valid")
 	assert.Equal(t, http.StatusOK, rec2.Code)
 
 	// Both registrations should have distinct steward IDs
@@ -325,108 +217,6 @@ func TestHandleRegister_ValidMultiUseToken_AllowsTwoRegistrations(t *testing.T) 
 	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
 	assert.NotEqual(t, resp1.StewardID, resp2.StewardID)
-}
-
-func TestHandleRegister_ConsumeToken_NoSaveTokenCall(t *testing.T) {
-	// Verify that a successful registration does NOT call SaveToken (ConsumeToken handles it).
-	// We use the real MemoryStore and verify token state after registration.
-	tokenStore := newTestRegistrationStore(t)
-	certMgr := newTestCertManager(t)
-	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
-
-	tok := &registration.Token{
-		Token:         "cfgms_reg_nosave_check",
-		TenantID:      "test-tenant",
-		ControllerURL: "grpc://controller:7443",
-		SingleUse:     true,
-	}
-	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
-
-	rec := postRegister(server, "cfgms_reg_nosave_check")
-	require.Equal(t, http.StatusOK, rec.Code)
-
-	// Token should now be marked as used by ConsumeToken
-	updated, err := tokenStore.GetToken(context.Background(), "cfgms_reg_nosave_check")
-	require.NoError(t, err)
-	assert.NotNil(t, updated.UsedAt, "ConsumeToken must have marked the token as used")
-	assert.NotEmpty(t, updated.UsedBy, "ConsumeToken must have recorded the steward ID")
-}
-
-func TestHandleRegister_ConcurrentSingleUseToken_ExactlyOneSucceeds(t *testing.T) {
-	tokenStore := newTestRegistrationStore(t)
-	certMgr := newTestCertManager(t)
-	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
-
-	tok := &registration.Token{
-		Token:         "cfgms_reg_concurrent_token",
-		TenantID:      "test-tenant",
-		ControllerURL: "grpc://controller:7443",
-		SingleUse:     true,
-	}
-	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
-
-	// Use an httptest.Server so goroutines share a real HTTP stack
-	ts := httptest.NewServer(server.router)
-	t.Cleanup(ts.Close)
-
-	type result struct {
-		code int
-	}
-	results := make([]result, 2)
-	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			body, _ := json.Marshal(RegistrationRequest{Token: "cfgms_reg_concurrent_token"})
-			resp, err := ts.Client().Post(ts.URL+"/api/v1/register", "application/json", bytes.NewReader(body))
-			if err != nil {
-				return
-			}
-			defer func() { _ = resp.Body.Close() }()
-			results[idx] = result{code: resp.StatusCode}
-		}(i)
-	}
-	wg.Wait()
-
-	codes := []int{results[0].code, results[1].code}
-	assert.Contains(t, codes, http.StatusOK, "exactly one goroutine must succeed")
-	assert.Contains(t, codes, http.StatusConflict, "exactly one goroutine must get 409")
-
-	okCount := 0
-	conflictCount := 0
-	for _, r := range results {
-		switch r.code {
-		case http.StatusOK:
-			okCount++
-		case http.StatusConflict:
-			conflictCount++
-		}
-	}
-	assert.Equal(t, 1, okCount, "exactly one registration must succeed")
-	assert.Equal(t, 1, conflictCount, "exactly one registration must return 409")
-}
-
-// TestHandleRegister_ConsumeTokenNotAlreadyUsed_Returns401 verifies that ConsumeToken
-// returns ErrTokenAlreadyUsed (not a plain error) for the 409 path.
-func TestHandleRegister_ErrTokenAlreadyUsed_IsDistinctFrom500(t *testing.T) {
-	// This test uses the sentinel directly to confirm the error distinction matters.
-	tokenStore := &controlledConsumeStore{
-		Store:      newTestRegistrationStore(t),
-		consumeErr: business.ErrTokenAlreadyUsed,
-	}
-	server, _ := newHandleRegisterServer(t, tokenStore, nil)
-
-	tok := &registration.Token{
-		Token:         "cfgms_reg_sentinel_test",
-		TenantID:      "test-tenant",
-		ControllerURL: "grpc://controller:7443",
-		SingleUse:     true,
-	}
-	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
-
-	rec := postRegister(server, "cfgms_reg_sentinel_test")
-	assert.Equal(t, http.StatusConflict, rec.Code, "ErrTokenAlreadyUsed must map to 409 not 500")
 }
 
 // kvCapturingLogger captures both Warn message and key-value pairs for security assertions.
@@ -591,7 +381,6 @@ func TestHandleRegister_ValidToken_LogsRedactedPrefixNotFullToken(t *testing.T) 
 		Token:         fullToken,
 		TenantID:      "test-tenant",
 		ControllerURL: "grpc://controller:7443",
-		SingleUse:     true,
 	}
 	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
 
