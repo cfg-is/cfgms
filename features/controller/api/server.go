@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/push"
+	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/monitoring"
@@ -84,6 +85,8 @@ type Server struct {
 	configSourceSecretStore secretsif.SecretStore          // Issue #1396: secrets for config source validator
 	configSourceRateLimits  sync.Map                       // Issue #1396: per-tenant rate-limit counters
 	registrationQueue       sync.Map                       // Issue #1568: quarantined stewards awaiting approval
+	runManager              *controllerrun.Manager         // Issue #1673: run/job/execution model
+	runExecutionQueue       *script.ExecutionQueue         // Issue #1673: queue for ad-hoc run synthesis
 	stopCleanup             chan struct{}                  // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                  // closed when cleanup goroutine exits
 	closeOnce               sync.Once                      // idempotent Close
@@ -418,6 +421,15 @@ func (s *Server) setupRouter() {
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
 
+	// Ad-hoc run endpoints (Issue #1673). Always registered — returns 503 when
+	// run manager is not wired (transport-disabled deployments).
+	runs := api.PathPrefix("/runs").Subrouter()
+	runs.Handle("/script", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostRunScript))).Methods("POST")
+	runs.Handle("/command", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostRunCommand))).Methods("POST")
+	runs.Handle("/{run_id}", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetRun))).Methods("GET")
+	runs.Handle("/{run_id}/jobs", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetRunJobs))).Methods("GET")
+	runs.Handle("/{run_id}", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handleDeleteRun))).Methods("DELETE")
+
 	// Git-sync webhook is registered lazily by SetGitSyncWebhookHandler (Issue #666).
 	// No route is pre-registered here; the endpoint only exists when a git-sync
 	// handler is explicitly wired in after server creation.
@@ -694,6 +706,15 @@ func (s *Server) SetGitSyncWebhookHandler(h http.Handler) {
 		s.router.Handle("/api/v1/webhooks/git-push", h).Methods("POST")
 		s.logger.Info("git-sync webhook endpoint registered at /api/v1/webhooks/git-push")
 	}
+}
+
+// SetRunManager wires the run manager and execution queue for ad-hoc run endpoints
+// (Issue #1673). Call this after New() returns but before Start() is called.
+func (s *Server) SetRunManager(m *controllerrun.Manager, queue *script.ExecutionQueue) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runManager = m
+	s.runExecutionQueue = queue
 }
 
 // getHTTPListenAddr determines the HTTP listen address.

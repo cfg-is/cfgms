@@ -14,11 +14,14 @@ import (
 	"sync"
 	"time"
 
+	"database/sql"
+
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
+
 	"github.com/cfgis/cfgms/commercial/ha"
 	configgit "github.com/cfgis/cfgms/features/config/git"
 	gitStorage "github.com/cfgis/cfgms/features/config/git/storage"
@@ -34,6 +37,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/controller/push"
 	controllerRegistration "github.com/cfgis/cfgms/features/controller/registration"
+	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	"github.com/cfgis/cfgms/features/controller/service"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
@@ -649,6 +653,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		storageManager:          storageManager,
 		executionQueue:          executionQueue, // Issue #1672
 		jobDispatcher:           jobDispatcher,  // Issue #1672
+	}
+
+	// Issue #1673: Wire run/job/execution model into API server.
+	// The run store opens a dedicated connection to the same SQLite database.
+	if runManager := initializeRunManager(context.Background(), cfg, executionQueue, logger); runManager != nil {
+		httpServer.SetRunManager(runManager, executionQueue)
+		logger.Info("Run manager wired to HTTP API server")
 	}
 
 	// Story #416: Wire rollback manager into API server
@@ -1708,4 +1719,46 @@ func (s *Server) GetTransportListenAddr() string {
 		return s.quicListener.Addr().String()
 	}
 	return s.cfg.Transport.ListenAddr
+}
+
+// initializeRunManager opens a dedicated SQLite connection for the run store,
+// initializes the schema, and returns a run.Manager. Returns nil on failure so
+// the controller starts without run support rather than failing.
+func initializeRunManager(
+	ctx context.Context,
+	cfg *config.Config,
+	executionQueue *scriptmodule.ExecutionQueue,
+	logger logging.Logger,
+) *controllerrun.Manager {
+	if cfg.Storage == nil || cfg.Storage.SQLitePath == "" {
+		logger.Warn("Run manager: SQLite path not configured, run API disabled")
+		return nil
+	}
+
+	dsn := cfg.Storage.SQLitePath
+	if !strings.HasPrefix(dsn, "file:") {
+		dsn = "file:" + dsn
+	}
+
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		logger.Warn("Run manager: failed to open SQLite", "error", err)
+		return nil
+	}
+	// busy_timeout prevents SQLITE_BUSY errors when the main connection is writing.
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		logger.Warn("Run manager: failed to set busy_timeout", "error", err)
+		_ = db.Close()
+		return nil
+	}
+
+	store := controllerrun.NewRunStoreSQL(db)
+	if err := store.Init(ctx); err != nil {
+		logger.Warn("Run manager: failed to initialize schema", "error", err)
+		_ = db.Close()
+		return nil
+	}
+
+	logger.Info("Run manager initialized", "sqlite_path", cfg.Storage.SQLitePath)
+	return controllerrun.NewManager(store, executionQueue)
 }
