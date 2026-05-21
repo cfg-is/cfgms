@@ -3,10 +3,17 @@
 package jit
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // SimpleNotificationService provides a basic implementation of NotificationService
@@ -401,6 +408,195 @@ type NotificationStats struct {
 	TypeBreakdown    map[NotificationType]int    `json:"type_breakdown"`
 	ChannelBreakdown map[NotificationChannel]int `json:"channel_breakdown"`
 	GeneratedAt      time.Time                   `json:"generated_at"`
+}
+
+// EscalationWebhookPayload is the JSON body delivered when a JIT escalation notification
+// is sent via webhook. All required fields from the acceptance criteria are included.
+type EscalationWebhookPayload struct {
+	Event                string    `json:"event"`
+	EscalationID         string    `json:"escalation_id"`
+	RequestID            string    `json:"request_id"`
+	RequestingUser       string    `json:"requesting_user"`
+	RequestedPermissions []string  `json:"requested_permissions"`
+	Approvers            []string  `json:"approvers"`
+	EscalationLevel      int       `json:"escalation_level"`
+	Timestamp            time.Time `json:"timestamp"`
+}
+
+// WebhookNotificationConfig holds optional overrides for WebhookNotificationService.
+// Intended for tests that need a shorter RetryBase or a custom HTTP client.
+type WebhookNotificationConfig struct {
+	RetryBase  time.Duration
+	HTTPClient *http.Client
+}
+
+// WebhookNotificationService delivers JIT escalation notifications via HTTP POST webhook
+// and records them in memory after successful delivery. All non-escalation notification
+// methods are provided by the embedded SimpleNotificationService.
+type WebhookNotificationService struct {
+	*SimpleNotificationService
+	webhookURL string
+	retryBase  time.Duration
+	httpClient *http.Client
+}
+
+// compile-time check: WebhookNotificationService must satisfy NotificationService.
+var _ NotificationService = (*WebhookNotificationService)(nil)
+
+// NewWebhookNotificationService creates a production WebhookNotificationService using
+// standard retry defaults (1-second base, 10-second per-request timeout).
+func NewWebhookNotificationService(webhookURL string, registry ApproverRegistry) *WebhookNotificationService {
+	return NewWebhookNotificationServiceWithConfig(webhookURL, registry, WebhookNotificationConfig{})
+}
+
+// NewWebhookNotificationServiceWithConfig creates a WebhookNotificationService with
+// caller-supplied configuration. Intended for tests where shorter retry delays are needed.
+func NewWebhookNotificationServiceWithConfig(webhookURL string, registry ApproverRegistry, cfg WebhookNotificationConfig) *WebhookNotificationService {
+	retryBase := cfg.RetryBase
+	if retryBase <= 0 {
+		retryBase = time.Second
+	}
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	return &WebhookNotificationService{
+		SimpleNotificationService: NewSimpleNotificationServiceWithRegistry(registry),
+		webhookURL:                webhookURL,
+		retryBase:                 retryBase,
+		httpClient:                httpClient,
+	}
+}
+
+// SendEscalationNotification delivers an escalation notification via HTTP POST and records
+// it in the in-memory store on success. Delivery is retried up to 3 times with exponential
+// backoff on 5xx responses or network errors. Returns an error if all attempts fail;
+// no memory record is written on permanent delivery failure.
+func (w *WebhookNotificationService) SendEscalationNotification(ctx context.Context, request *JITAccessRequest, escalationLevel int) error {
+	approvers := []string{}
+	if w.registry != nil {
+		resolved, err := w.registry.GetApprovers(ctx, EscalationTypeDefault)
+		if err != nil {
+			return fmt.Errorf("approver registry lookup failed: %w", err)
+		}
+		if resolved != nil {
+			approvers = resolved
+		}
+	}
+
+	if len(approvers) == 0 {
+		slog.Warn("no escalation recipients configured; webhook will deliver with empty approver list",
+			"request_id", request.ID,
+			"tenant_id", request.TenantID,
+			"escalation_level", escalationLevel,
+		)
+	}
+
+	escalationID := fmt.Sprintf("esc-%s-l%d-%d", request.ID, escalationLevel, time.Now().UnixNano())
+	payload := EscalationWebhookPayload{
+		Event:                "jit.escalation",
+		EscalationID:         escalationID,
+		RequestID:            request.ID,
+		RequestingUser:       request.RequesterID,
+		RequestedPermissions: request.Permissions,
+		Approvers:            approvers,
+		EscalationLevel:      escalationLevel,
+		Timestamp:            time.Now(),
+	}
+
+	if err := w.sendWebhook(ctx, payload); err != nil {
+		return err
+	}
+
+	subject := fmt.Sprintf("[ESCALATION LEVEL %d] JIT Access Approval Required", escalationLevel)
+	message := fmt.Sprintf(
+		"JIT access request %s has been escalated to level %d due to lack of approval. Original request from %s for %v permissions.",
+		request.ID, escalationLevel, request.RequesterID, request.Permissions,
+	)
+	return w.sendNotification(ctx, NotificationTypeEscalation, approvers, subject, message, map[string]interface{}{
+		"request_id":         request.ID,
+		"tenant_id":          request.TenantID,
+		"escalation_level":   escalationLevel,
+		"original_requester": request.RequesterID,
+		"emergency_access":   request.EmergencyAccess,
+		"escalation_id":      escalationID,
+	})
+}
+
+// sendWebhook marshals payload to JSON and POSTs it to the configured URL, retrying up
+// to 3 times with exponential backoff on 5xx responses or network errors. Only http and
+// https schemes are accepted to prevent SSRF via exotic schemes. Only the host is logged
+// so that secrets embedded in URL paths are not written to log sinks.
+func (w *WebhookNotificationService) sendWebhook(ctx context.Context, payload interface{}) error {
+	u, err := url.Parse(w.webhookURL)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("invalid webhook URL: must use http or https scheme")
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal webhook payload: %w", err)
+	}
+
+	safeHost := logging.SanitizeLogValue(u.Host)
+
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(1<<uint(attempt-1)) * w.retryBase
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.webhookURL, bytes.NewReader(data))
+		if err != nil {
+			return fmt.Errorf("create webhook request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := w.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("webhook POST attempt %d: %w", attempt+1, err)
+			slog.Warn("webhook delivery attempt failed",
+				"attempt", attempt+1,
+				"host", safeHost,
+				"error", logging.SanitizeLogValue(lastErr.Error()),
+			)
+			continue
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		if err := resp.Body.Close(); err != nil {
+			slog.Warn("failed to close webhook response body", "error", err)
+		}
+
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("webhook server error on attempt %d: status %d", attempt+1, resp.StatusCode)
+			slog.Warn("webhook delivery attempt failed",
+				"attempt", attempt+1,
+				"host", safeHost,
+				"status", resp.StatusCode,
+			)
+			continue
+		}
+
+		// Non-2xx below 500 (e.g. 401/403/404) indicates a permanent misconfiguration —
+		// the server received the request but rejected it. Do not retry.
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("webhook rejected escalation notification: status %d", resp.StatusCode)
+		}
+
+		slog.Debug("webhook escalation notification sent", "host", safeHost)
+		return nil
+	}
+
+	slog.Error("webhook escalation delivery permanently failed",
+		"host", safeHost,
+		"error", logging.SanitizeLogValue(lastErr.Error()),
+	)
+	return lastErr
 }
 
 // GetNotificationStats generates notification statistics
