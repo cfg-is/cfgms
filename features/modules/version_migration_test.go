@@ -511,6 +511,47 @@ func TestDefaultVersionMigrator_ListActiveMigrations(t *testing.T) {
 			assert.False(t, activeIDs[id], "completed migration %s must not be in active list", id)
 		}
 	})
+
+	t.Run("terminal-status migration still in map is excluded", func(t *testing.T) {
+		// Reproduces the race in executeMigrationSteps: the terminal status is
+		// set before the cleanup defer removes the activeMigrations entry, so a
+		// caller that observed completion via WaitForMigration could otherwise
+		// still see the migration listed as active. ListActiveMigrations must
+		// classify by status, not by raw map membership.
+		terminalStates := []MigrationExecutionStatus{
+			MigrationStatusCompleted,
+			MigrationStatusFailed,
+			MigrationStatusCancelled,
+			MigrationStatusRolledBack,
+		}
+		for _, st := range terminalStates {
+			id := fmt.Sprintf("terminal-%s", st)
+
+			migrator.mu.Lock()
+			migrator.activeMigrations[id] = &MigrationExecution{
+				Path: &MigrationPath{
+					ID:          id,
+					ModuleName:  "terminal-module",
+					FromVersion: "1.0.0",
+					ToVersion:   "1.1.0",
+				},
+				Status:    st,
+				StartTime: time.Now(),
+			}
+			migrator.mu.Unlock()
+
+			active, err := migrator.ListActiveMigrations()
+			require.NoError(t, err)
+			for _, s := range active {
+				assert.NotEqual(t, id, s.ID,
+					"terminal-status migration %s must not be reported as active", id)
+			}
+
+			migrator.mu.Lock()
+			delete(migrator.activeMigrations, id)
+			migrator.mu.Unlock()
+		}
+	})
 }
 
 func TestDefaultVersionMigrator_RollbackMigration(t *testing.T) {
