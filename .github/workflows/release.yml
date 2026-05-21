@@ -282,22 +282,26 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      with:
+        # Release jobs only use the GH_TOKEN env for `gh release upload`;
+        # the git-config credential is not needed and must not persist into
+        # the workspace (zizmor artipacked / credential persistence).
+        persist-credentials: false
 
     - name: Set up Go
       uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
-
-    - name: Restore Go module cache
-      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-      with:
-        path: ~/go/pkg/mod
-        key: release-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        # Caching disabled: release artifacts must be built from a clean
+        # module set, never a cache a PR workflow could have poisoned
+        # (zizmor cache-poisoning).
+        cache: false
 
     - name: Build Windows MSI
       shell: pwsh
       env:
         VERSION: ${{ needs.create-release.outputs.version }}
+        ARCH: ${{ matrix.arch }}
       run: |
         # ControllerURL is intentionally omitted here: CI release MSIs are generic
         # artifacts (no controller URL baked in), consistent with the cross-platform
@@ -306,23 +310,20 @@ jobs:
         # Or via the controller's install-package generator (Story 2 of Epic #1661).
         .\build\windows\build-msi.ps1 `
           -Version "$env:VERSION" `
-          -Arch "${{ matrix.arch }}"
+          -Arch "$env:ARCH"
 
     - name: Upload MSI to release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VERSION: ${{ needs.create-release.outputs.version }}
+        ARCH: ${{ matrix.arch }}
       shell: bash
       run: |
-        VERSION="${{ needs.create-release.outputs.version }}"
+        # VERSION and ARCH are read from the env block above rather than
+        # interpolated inline with ${{ }} to avoid template injection into
+        # the shell (zizmor template-injection).
         gh release upload "$VERSION" \
-          "bin/cfgms-steward-windows-${{ matrix.arch }}.msi"
-
-    - name: Save Go module cache
-      if: success()
-      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-      with:
-        path: ~/go/pkg/mod
-        key: release-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          "bin/cfgms-steward-windows-${ARCH}.msi"
 
   # Back-merge release to develop
   back-merge-to-develop:
