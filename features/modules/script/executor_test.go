@@ -210,3 +210,41 @@ func TestExecutionContext_Integration_SystemDefault(t *testing.T) {
 	assert.Equal(t, ExecutionContextSystem, record.ExecutionContext)
 	assert.Empty(t, record.ActualUser)
 }
+
+// TestExecute_FastExitingScriptCapturesStdout is a regression test for a stdout-capture
+// race: when output was drained from cmd.StdoutPipe() concurrently with cmd.Wait(),
+// Wait could close the pipe before the reader drained the kernel buffer, silently
+// truncating output from scripts that exit almost immediately. A single `echo` exits
+// fast enough to lose its entire output. Running it repeatedly makes the regression
+// deterministic — any iteration with empty stdout proves the race has returned.
+func TestExecute_FastExitingScriptCapturesStdout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping execution test in short mode")
+	}
+
+	var script string
+	var shell ShellType
+	switch runtime.GOOS {
+	case "windows":
+		script = "echo race-marker"
+		shell = ShellCmd
+	default:
+		script = "echo race-marker"
+		shell = ShellBash
+	}
+
+	for i := 0; i < 50; i++ {
+		config := &ScriptConfig{
+			Content: script,
+			Shell:   shell,
+			Timeout: 10 * time.Second,
+		}
+		require.NoError(t, config.Validate())
+
+		result, err := NewExecutor(config).Execute(t.Context())
+		require.NoError(t, err, "iteration %d", i)
+		assert.Equal(t, 0, result.ExitCode, "iteration %d", i)
+		assert.Contains(t, result.Stdout, "race-marker",
+			"iteration %d: stdout of a fast-exiting script must not be truncated", i)
+	}
+}

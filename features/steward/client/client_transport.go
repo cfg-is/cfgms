@@ -642,6 +642,10 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		return nil
 	})
 
+	// Register execute_script handler — dispatches controller-sent scripts through
+	// the script module executor and publishes EventScriptCompleted (Issue #1669).
+	handler.RegisterExecuteScriptHandler()
+
 	return handler, nil
 }
 

@@ -18,6 +18,7 @@ enum CommandType {
   COMMAND_TYPE_SHUTDOWN = 5;
   COMMAND_TYPE_VALIDATE_CONFIG = 6;
   COMMAND_TYPE_RECONNECT = 7;
+  // COMMAND_TYPE_EXECUTE_SCRIPT = 8; -- stub for Issue #1669; proto regen deferred to later batch
 }
 
 // EventType enumerates the types of events a steward emits to a controller.

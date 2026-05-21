@@ -26,6 +26,10 @@ const (
 
 	// CommandReconnect instructs the steward to reconnect to the controller (HA failover)
 	CommandReconnect CommandType = "reconnect"
+
+	// CommandExecuteScript runs a script on the steward via the script module executor.
+	// Params: script_content (base64), shell, execution_id, timeout_seconds, execution_context.
+	CommandExecuteScript CommandType = "execute_script"
 )
 
 // Command represents a command sent from controller to steward.
@@ -82,6 +86,10 @@ const (
 
 	// EventDNAChanged indicates DNA attributes changed
 	EventDNAChanged EventType = "dna_changed"
+
+	// EventScriptCompleted indicates an execute_script command finished running.
+	// The exit code may be non-zero; this event is emitted regardless of exit code.
+	EventScriptCompleted EventType = "script_completed"
 )
 
 // Event represents an event published from steward to controller.
