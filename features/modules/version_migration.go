@@ -1193,6 +1193,16 @@ func (m *DefaultVersionMigrator) ListActiveMigrations() ([]*MigrationStatus, err
 		if err != nil {
 			continue // Skip migrations with errors (may have completed while we were iterating)
 		}
+		// A migration in a terminal state is no longer active, even if its
+		// entry has not yet been removed from the activeMigrations map.
+		// executeMigrationSteps sets the terminal status before its cleanup
+		// defer deletes the map entry, so a caller that observed completion
+		// via WaitForMigration can otherwise still see it listed here.
+		switch status.Status {
+		case MigrationStatusCompleted, MigrationStatusFailed,
+			MigrationStatusCancelled, MigrationStatusRolledBack:
+			continue
+		}
 		activeMigrations = append(activeMigrations, status)
 	}
 
@@ -1206,7 +1216,10 @@ func (m *DefaultVersionMigrator) ListActiveMigrations() ([]*MigrationStatus, err
 
 // RollbackMigration reverses a previously applied migration. If the migration has no Down() defined, returns an error.
 func (m *DefaultVersionMigrator) RollbackMigration(ctx context.Context, migrationID string) (*MigrationResult, error) {
-	// Find the migration to rollback
+	// Find the migration to rollback — hold the read lock to prevent a data
+	// race with executeMigrationSteps which appends to migrationHistory under
+	// the write lock in its cleanup defer.
+	m.mu.RLock()
 	var originalResult *MigrationResult
 	for _, result := range m.migrationHistory {
 		if result.ID == migrationID {
@@ -1214,6 +1227,7 @@ func (m *DefaultVersionMigrator) RollbackMigration(ctx context.Context, migratio
 			break
 		}
 	}
+	m.mu.RUnlock()
 
 	if originalResult == nil {
 		return nil, fmt.Errorf("migration %s not found in history", migrationID)

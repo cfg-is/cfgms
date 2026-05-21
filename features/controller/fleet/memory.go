@@ -4,6 +4,7 @@ package fleet
 
 import (
 	"context"
+	"path"
 	"strings"
 )
 
@@ -66,6 +67,12 @@ func matchesFilter(s StewardData, f Filter) bool {
 	if f.Status != "" && f.Status != "any" && s.Status != f.Status {
 		return false
 	}
+	if f.Name != "" {
+		matched, err := path.Match(f.Name, attrs["hostname"])
+		if err != nil || !matched {
+			return false
+		}
+	}
 	if f.Hostname != "" {
 		h := attrs["hostname"]
 		if strings.HasSuffix(f.Hostname, "*") {
@@ -89,15 +96,17 @@ func matchesFilter(s StewardData, f Filter) bool {
 	return true
 }
 
-// stewardHasTag reports whether the given tag appears in the steward's DNA["tags"] list.
-// Tags are stored as a comma-separated string, e.g. "production, web, db".
+// stewardHasTag reports whether the given tag pattern matches any tag in the steward's
+// DNA["tags"] list. Tags are stored as a comma-separated string, e.g. "production, web, db".
+// The pattern supports shell glob syntax via path.Match.
 func stewardHasTag(attrs map[string]string, tag string) bool {
 	raw, ok := attrs["tags"]
 	if !ok || raw == "" {
 		return false
 	}
 	for _, t := range strings.Split(raw, ",") {
-		if strings.TrimSpace(t) == tag {
+		matched, err := path.Match(tag, strings.TrimSpace(t))
+		if err == nil && matched {
 			return true
 		}
 	}
