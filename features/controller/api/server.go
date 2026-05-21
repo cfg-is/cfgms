@@ -673,6 +673,15 @@ func (s *Server) SetRegistry(r registry.Registry) {
 	s.registry = r
 }
 
+// Registry returns the wired active-steward connection registry, or nil if
+// none has been set. Used by controller wiring and tests to verify the API
+// server and the control-plane provider share a single registry instance.
+func (s *Server) Registry() registry.Registry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.registry
+}
+
 // SetGitSyncWebhookHandler registers the git-sync push-event webhook handler.
 // The handler is mounted at POST /api/v1/webhooks/git-push and uses its own
 // HMAC-SHA256 signature validation (no API-key auth). Call this after New()

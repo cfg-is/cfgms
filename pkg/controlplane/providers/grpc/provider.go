@@ -159,6 +159,17 @@ func New(mode Mode, opts ...option) *Provider {
 
 func (p *Provider) Name() string { return p.name }
 
+// Registry returns the steward connection registry used by this provider in
+// server mode. It is the registry passed via the "registry" Initialize config
+// key, or the one auto-created when none was supplied. Controller wiring uses
+// this to share a single registry instance with the HTTP API server so
+// connection_state stays accurate (Issue #1572).
+func (p *Provider) Registry() registry.Registry {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.registry
+}
+
 // Initialize configures the provider.
 //
 // Common config keys:

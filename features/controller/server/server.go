@@ -65,6 +65,7 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for OSS composite manager
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 	"gopkg.in/yaml.v3"
 )
 
@@ -87,6 +88,7 @@ type Server struct {
 	auditManager            *audit.Manager
 	haManager               *ha.Manager
 	controlPlane            controlplaneInterfaces.ControlPlaneProvider // Story #363 / #514
+	connRegistry            registry.Registry                           // Issue #1572: shared steward connection registry (CP provider + API server)
 	heartbeatService        *heartbeat.Service
 	commandPublisher        *commands.Publisher
 	registrationTokenStore  pkgRegistration.Store
@@ -370,6 +372,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize shared gRPC-over-QUIC transport (Story #515)
 	var controlPlane controlplaneInterfaces.ControlPlaneProvider
+	// connRegistry tracks active steward ControlChannel connections. It is
+	// created once here and shared between the CP provider (which registers
+	// connections) and the HTTP API server (which reads connection_state for
+	// GET /api/v1/stewards/{id}). Without this wiring the API server has no
+	// registry and always reports stewards as disconnected (Issue #1572).
+	var connRegistry registry.Registry
 	var heartbeatService *heartbeat.Service
 	var commandPublisher *commands.Publisher
 	// hoistedSigner and hoistedSignerCertSerial are set inside the transport block and
@@ -385,11 +393,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 
 		// Initialize CP provider (shared gRPC server created fresh in Start)
+		connRegistry = registry.NewRegistry()
 		controlPlane = grpcCP.New(grpcCP.ModeServer)
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
 			"mode":       "server",
 			"addr":       cfg.Transport.ListenAddr,
 			"tls_config": grpcTLSConfig,
+			"registry":   connRegistry,
 		}); err != nil {
 			return nil, fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
 		}
@@ -550,6 +560,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	logger.Info("HTTP API server initialized successfully")
 
+	// Wire the shared connection registry into the API server so
+	// GET /api/v1/stewards/{id} reports the live connection_state (Issue #1572).
+	if connRegistry != nil {
+		httpServer.SetRegistry(connRegistry)
+	}
+
 	srv := &Server{
 		cfg:                     cfg,
 		logger:                  logger,
@@ -563,6 +579,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		auditManager:            auditManager,
 		haManager:               haManager,
 		controlPlane:            controlPlane, // Story #363 / #514
+		connRegistry:            connRegistry, // Issue #1572: shared with CP provider re-init in Start()
 		heartbeatService:        heartbeatService,
 		commandPublisher:        commandPublisher,
 		registrationTokenStore:  regStore,
@@ -912,11 +929,15 @@ func (s *Server) Start() error {
 		s.quicListener = ql
 
 		// Re-initialize CP provider with the fresh gRPC server
+		// Re-initializing creates a fresh registry unless the shared one is
+		// passed back in — keep the same instance the API server holds so
+		// connection_state stays accurate across the Start() re-init (Issue #1572).
 		if err := s.controlPlane.Initialize(context.Background(), map[string]interface{}{
 			"mode":        "server",
 			"addr":        s.cfg.Transport.ListenAddr,
 			"tls_config":  grpcTLSConfig,
 			"grpc_server": s.grpcServer,
+			"registry":    s.connRegistry,
 		}); err != nil {
 			return fmt.Errorf("failed to re-initialize CP provider with shared server: %w", err)
 		}

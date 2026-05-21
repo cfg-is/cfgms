@@ -183,6 +183,20 @@ func TestValidateConfiguration(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// An uploaded config that omits the logging section is valid:
+			// applyDefaults supplies "info". The controller validates uploaded
+			// configs before applying defaults, so an empty level must not be
+			// rejected — fleet-config.yaml omits it.
+			name: "empty log level is valid (default applies)",
+			config: StewardConfig{
+				Steward: StewardSettings{
+					ID:   "test-steward",
+					Mode: ModeController,
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "resource missing name",
 			config: StewardConfig{
 				Steward: StewardSettings{

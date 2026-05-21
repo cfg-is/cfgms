@@ -97,7 +97,7 @@ func (s *SQLitePushStore) GetPendingPushes(ctx context.Context) ([]*business.Pus
 		SELECT id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at
 		FROM push_records
 		WHERE status IN ('pending', 'in_progress')
-		ORDER BY created_at ASC`,
+		ORDER BY created_at ASC, rowid ASC`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to get pending push records: %w", err)
@@ -117,13 +117,16 @@ func (s *SQLitePushStore) GetPush(ctx context.Context, id string) (*business.Pus
 
 // ListPushesByConfigID returns push records for the given config ID scoped to
 // tenantID, ordered by created_at descending so callers see the most recent
-// push first. Both configID and tenantID are required for tenant isolation.
+// push first. Records sharing an identical created_at (possible on
+// low-resolution clocks) are tie-broken by rowid descending so insertion order
+// is preserved deterministically. Both configID and tenantID are required for
+// tenant isolation.
 func (s *SQLitePushStore) ListPushesByConfigID(ctx context.Context, configID, tenantID string) ([]*business.PushRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at
 		FROM push_records
 		WHERE config_id = ? AND tenant_id = ?
-		ORDER BY created_at DESC`,
+		ORDER BY created_at DESC, rowid DESC`,
 		configID, tenantID,
 	)
 	if err != nil {
