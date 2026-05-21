@@ -20,12 +20,17 @@ package saas
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -335,9 +340,80 @@ func (ua *UniversalAuthenticator) authenticateClientCert(ctx context.Context, pr
 // AWS Signature V4 Authentication Implementation
 
 func (ua *UniversalAuthenticator) authenticateAWSSignature(ctx context.Context, provider string, config map[string]interface{}) error {
-	// Deferred: tracked in #1443 — implement AWS Signature V4 signing
-	return fmt.Errorf("AWS signature authentication is not supported by this build")
+	awsConfig, err := parseAWSSignatureConfig(config)
+	if err != nil {
+		return fmt.Errorf("invalid AWS signature config: %w", err)
+	}
+
+	data, err := json.Marshal(awsConfig)
+	if err != nil {
+		return fmt.Errorf("failed to marshal AWS signature config: %w", err)
+	}
+
+	return ua.credStore.StoreToken(provider+":secret", &auth.AccessToken{Token: string(data), TenantID: provider})
 }
+
+// VerifyAWSSignedRequest verifies an AWS Signature V4 signed HTTP request against
+// credentials previously stored via authenticateAWSSignature. Returns nil when the
+// signature is valid, an error wrapping codes.Unauthenticated on signature mismatch,
+// or a descriptive error on a malformed Authorization header.
+func (ua *UniversalAuthenticator) VerifyAWSSignedRequest(ctx context.Context, provider string, r *http.Request) error {
+	secretToken, err := ua.credStore.GetToken(provider + ":secret")
+	if err != nil {
+		return fmt.Errorf("failed to retrieve AWS credentials for provider %q: %w", provider, err)
+	}
+
+	var awsCreds AWSSignatureConfig
+	if err := json.Unmarshal([]byte(secretToken.Token), &awsCreds); err != nil {
+		return fmt.Errorf("stored AWS credentials for provider %q are malformed: %w", provider, err)
+	}
+
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return fmt.Errorf("missing Authorization header")
+	}
+
+	parsed, err := parseV4AuthorizationHeader(authHeader)
+	if err != nil {
+		return fmt.Errorf("malformed AWS Signature V4 Authorization header: %w", err)
+	}
+
+	if parsed.accessKeyID != awsCreds.AccessKeyID {
+		return fmt.Errorf("%w: credential access key does not match stored credentials", errUnauthenticated)
+	}
+
+	amzDate := r.Header.Get("X-Amz-Date")
+	if amzDate == "" {
+		return fmt.Errorf("missing X-Amz-Date header")
+	}
+
+	// Validate X-Amz-Date is in the required ISO 8601 basic format.
+	if _, err := time.Parse("20060102T150405Z", amzDate); err != nil {
+		return fmt.Errorf("malformed X-Amz-Date header %q: %w", amzDate, err)
+	}
+
+	payloadHash := r.Header.Get("X-Amz-Content-Sha256")
+	if payloadHash == "" {
+		// Empty body hash per SigV4 spec.
+		payloadHash = "e3b0c44298fc1c149afbf4c8996fb924" +
+			"27ae41e4649b934ca495991b7852b855"
+	}
+
+	canonicalReq := buildCanonicalRequest(r, parsed.signedHeaders, payloadHash)
+	stringToSign := buildStringToSign(amzDate, parsed.credentialScope, canonicalReq)
+	signingKey := deriveV4SigningKey(awsCreds.SecretAccessKey, parsed.date, parsed.region, parsed.service)
+	expectedSig := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
+
+	if !hmac.Equal([]byte(expectedSig), []byte(parsed.signature)) {
+		return fmt.Errorf("%w: signature verification failed", errUnauthenticated)
+	}
+
+	return nil
+}
+
+// errUnauthenticated is a sentinel that callers can match with errors.Is to distinguish
+// authentication failures from internal errors.
+var errUnauthenticated = fmt.Errorf("unauthenticated")
 
 // Custom Authentication Implementation
 
@@ -767,4 +843,191 @@ func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 
 	return rt.next.RoundTrip(req)
+}
+
+// parseAWSSignatureConfig extracts AWS Signature V4 credentials from a config map.
+func parseAWSSignatureConfig(config map[string]interface{}) (*AWSSignatureConfig, error) {
+	awsConfig := &AWSSignatureConfig{}
+	if v, ok := config["access_key_id"].(string); ok {
+		awsConfig.AccessKeyID = v
+	}
+	if v, ok := config["secret_access_key"].(string); ok {
+		awsConfig.SecretAccessKey = v
+	}
+	if v, ok := config["region"].(string); ok {
+		awsConfig.Region = v
+	}
+	if v, ok := config["service"].(string); ok {
+		awsConfig.Service = v
+	}
+	if awsConfig.AccessKeyID == "" {
+		return nil, fmt.Errorf("access_key_id is required")
+	}
+	if awsConfig.SecretAccessKey == "" {
+		return nil, fmt.Errorf("secret_access_key is required")
+	}
+	return awsConfig, nil
+}
+
+// v4ParsedAuth holds the components extracted from an AWS SigV4 Authorization header.
+type v4ParsedAuth struct {
+	accessKeyID     string
+	credentialScope string // date/region/service/aws4_request
+	date            string // YYYYMMDD
+	region          string
+	service         string
+	signedHeaders   string // semicolon-separated, already lower-cased
+	signature       string
+}
+
+// parseV4AuthorizationHeader parses:
+//
+//	AWS4-HMAC-SHA256 Credential=AKID/date/region/svc/aws4_request, SignedHeaders=..., Signature=...
+func parseV4AuthorizationHeader(header string) (*v4ParsedAuth, error) {
+	const prefix = "AWS4-HMAC-SHA256 "
+	if !strings.HasPrefix(header, prefix) {
+		return nil, fmt.Errorf("expected AWS4-HMAC-SHA256 prefix, got: %.40s", header)
+	}
+
+	rest := header[len(prefix):]
+	parts := strings.Split(rest, ", ")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("expected 3 comma-separated components, got %d", len(parts))
+	}
+
+	kv := func(s, key string) (string, error) {
+		if !strings.HasPrefix(s, key+"=") {
+			return "", fmt.Errorf("expected component %q, got: %.40s", key, s)
+		}
+		return strings.TrimPrefix(s, key+"="), nil
+	}
+
+	credential, err := kv(parts[0], "Credential")
+	if err != nil {
+		return nil, err
+	}
+	signedHeaders, err := kv(parts[1], "SignedHeaders")
+	if err != nil {
+		return nil, err
+	}
+	signature, err := kv(parts[2], "Signature")
+	if err != nil {
+		return nil, err
+	}
+
+	// Credential = AKID/YYYYMMDD/region/service/aws4_request
+	credParts := strings.SplitN(credential, "/", 5)
+	if len(credParts) != 5 {
+		return nil, fmt.Errorf("invalid Credential format: %q", credential)
+	}
+
+	return &v4ParsedAuth{
+		accessKeyID:     credParts[0],
+		credentialScope: strings.Join(credParts[1:], "/"),
+		date:            credParts[1],
+		region:          credParts[2],
+		service:         credParts[3],
+		signedHeaders:   signedHeaders,
+		signature:       signature,
+	}, nil
+}
+
+// buildCanonicalRequest constructs the SigV4 canonical request string.
+func buildCanonicalRequest(r *http.Request, signedHeadersStr, payloadHash string) string {
+	method := r.Method
+
+	// Canonical URI: percent-encode the path, normalise slashes
+	rawPath := r.URL.EscapedPath()
+	if rawPath == "" {
+		rawPath = "/"
+	}
+
+	// Canonical query string: sort params by name, then by value
+	canonicalQS := canonicalQueryString(r.URL)
+
+	// Canonical headers from signed-headers list
+	signedList := strings.Split(signedHeadersStr, ";")
+	sort.Strings(signedList)
+	var canonicalHeaders strings.Builder
+	for _, h := range signedList {
+		var val string
+		switch h {
+		case "host":
+			// r.Host takes priority (set explicitly); fall back to URL.Host.
+			val = r.Host
+			if val == "" {
+				val = r.URL.Host
+			}
+		case "content-length":
+			// Go stores content-length in r.ContentLength, not in r.Header.
+			if r.ContentLength >= 0 {
+				val = strconv.FormatInt(r.ContentLength, 10)
+			}
+		default:
+			vals := r.Header[http.CanonicalHeaderKey(h)]
+			val = strings.TrimSpace(strings.Join(vals, ","))
+		}
+		canonicalHeaders.WriteString(h)
+		canonicalHeaders.WriteByte(':')
+		canonicalHeaders.WriteString(val)
+		canonicalHeaders.WriteByte('\n')
+	}
+
+	return strings.Join([]string{
+		method,
+		rawPath,
+		canonicalQS,
+		canonicalHeaders.String(),
+		signedHeadersStr,
+		payloadHash,
+	}, "\n")
+}
+
+// canonicalQueryString returns the SigV4-canonical query string for a URL.
+func canonicalQueryString(u *url.URL) string {
+	query := u.Query()
+	if len(query) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(query))
+	for k := range query {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var parts []string
+	for _, k := range keys {
+		vals := query[k]
+		sort.Strings(vals)
+		for _, v := range vals {
+			parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(v))
+		}
+	}
+	return strings.Join(parts, "&")
+}
+
+// buildStringToSign constructs the SigV4 string-to-sign.
+func buildStringToSign(amzDate, credentialScope, canonicalRequest string) string {
+	hash := sha256.Sum256([]byte(canonicalRequest))
+	return strings.Join([]string{
+		"AWS4-HMAC-SHA256",
+		amzDate,
+		credentialScope,
+		hex.EncodeToString(hash[:]),
+	}, "\n")
+}
+
+// deriveV4SigningKey derives the SigV4 signing key from the secret access key and scope.
+func deriveV4SigningKey(secretKey, date, region, service string) []byte {
+	kSecret := []byte("AWS4" + secretKey)
+	kDate := hmacSHA256(kSecret, []byte(date))
+	kRegion := hmacSHA256(kDate, []byte(region))
+	kService := hmacSHA256(kRegion, []byte(service))
+	return hmacSHA256(kService, []byte("aws4_request"))
+}
+
+// hmacSHA256 computes HMAC-SHA256(key, data).
+func hmacSHA256(key, data []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(data)
+	return mac.Sum(nil)
 }

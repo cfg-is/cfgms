@@ -476,3 +476,11 @@ type JWTConfig struct {
 	Algorithm  string                 `json:"algorithm"`
 	Claims     map[string]interface{} `json:"claims"`
 }
+
+// AWSSignatureConfig contains AWS Signature V4 credentials
+type AWSSignatureConfig struct {
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+	Region          string `json:"region"`
+	Service         string `json:"service"`
+}
