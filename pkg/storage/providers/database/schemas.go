@@ -698,6 +698,10 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 		return err
 	}
 
+	if err := s.CreateIPTrustRangesTable(ctx, db); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -713,6 +717,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS admin_consent_requests;",
 		"DROP TABLE IF EXISTS client_tenants;",
 		"DROP TABLE IF EXISTS cfgms_registration_tokens;",
+		"DROP TABLE IF EXISTS cfgms_ip_trust_ranges;",
 		"DROP TABLE IF EXISTS rbac_role_assignments;", // Has foreign keys to subjects and roles
 		"DROP TABLE IF EXISTS rbac_subjects;",
 		"DROP TABLE IF EXISTS rbac_roles;", // Has self-reference foreign key

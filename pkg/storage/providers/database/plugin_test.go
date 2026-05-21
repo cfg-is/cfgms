@@ -273,6 +273,7 @@ func TestDatabaseSchemas_CreateTables(t *testing.T) {
 		"config_history",
 		"audit_entries",
 		"storage_health",
+		"cfgms_ip_trust_ranges",
 	}
 
 	for _, table := range tables {

@@ -122,6 +122,9 @@ func TestHybridStorageManager_Creation(t *testing.T) {
 	require.NotNil(t, ctStore)
 	assert.NotNil(t, manager.GetAuditStore())
 	assert.NotNil(t, manager.GetConfigStore())
+	// GetIPTrustStore must be wired in the constructor when the operational
+	// provider supports IP trust storage (Issue #1691, PR #1711 finding #1).
+	assert.NotNil(t, manager.GetIPTrustStore())
 
 	// Round-trip: store a client tenant and verify retrieval returns the same value.
 	wantTenant := &business.ClientTenant{ID: "hybrid-rt-1", TenantName: "Hybrid Round Trip"}
@@ -382,7 +385,7 @@ func (p *mockProvider) CreatePendingRegistrationStore(_ map[string]interface{}) 
 }
 
 func (p *mockProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
-	return nil, business.ErrNotSupported
+	return &mockIPTrustStore{}, nil
 }
 
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
@@ -698,3 +701,30 @@ func (s *mockRegistrationTokenStore) ConsumeToken(_ context.Context, _, _ string
 }
 func (s *mockRegistrationTokenStore) Initialize(_ context.Context) error { return nil }
 func (s *mockRegistrationTokenStore) Close() error                       { return nil }
+
+// mockIPTrustStore implements business.IPTrustStore for testing HybridStorageManager wiring.
+type mockIPTrustStore struct{}
+
+func (s *mockIPTrustStore) AddTrustedRange(_ context.Context, _, _ string, _ bool) error {
+	return nil
+}
+
+func (s *mockIPTrustStore) IsTrusted(_ context.Context, _, _ string) (bool, error) {
+	return false, nil
+}
+
+func (s *mockIPTrustStore) ListTrustedRanges(_ context.Context, _ string) ([]*business.IPTrustEntry, error) {
+	return nil, nil
+}
+
+func (s *mockIPTrustStore) RevokeTrustedRange(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (s *mockIPTrustStore) RecordHealthySteward(_ context.Context, _, _ string, _ time.Time) error {
+	return nil
+}
+
+func (s *mockIPTrustStore) GetLastActivity(_ context.Context, _, _ string) (*business.IPTrustActivity, error) {
+	return nil, nil
+}

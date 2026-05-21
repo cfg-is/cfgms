@@ -4,6 +4,7 @@
 package interfaces
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -73,6 +74,14 @@ func NewHybridStorageManager(config HybridStorageConfig) (*HybridStorageManager,
 	}
 	manager.auditStore = auditStore
 
+	// IP trust storage is database-tier only; operational providers that do not
+	// implement it (e.g. sqlite) leave the accessor nil rather than failing.
+	ipTrustStore, err := opProvider.CreateIPTrustStore(config.Operational.Config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create IP trust store: %w", err)
+	}
+	manager.ipTrustStore = ipTrustStore
+
 	// Create configuration store (GitOps workflow)
 	configStore, err := cfgProvider.CreateConfigStore(config.Configuration.Config)
 	if err != nil {
@@ -98,7 +107,8 @@ func (h *HybridStorageManager) GetConfigStore() cfgconfig.ConfigStore {
 	return h.configStore
 }
 
-// GetIPTrustStore returns the IP trust storage interface (operational backend).
+// GetIPTrustStore returns the IP trust storage interface (operational backend,
+// nil if the operational provider does not support IP trust storage).
 func (h *HybridStorageManager) GetIPTrustStore() business.IPTrustStore {
 	return h.ipTrustStore
 }
