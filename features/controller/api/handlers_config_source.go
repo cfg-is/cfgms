@@ -10,6 +10,7 @@ import (
 	"github.com/gorilla/mux"
 
 	cfgpkg "github.com/cfgis/cfgms/pkg/config"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
@@ -73,7 +74,7 @@ func (s *Server) handleConfigSourceTest(w http.ResponseWriter, r *http.Request) 
 	s.mu.RUnlock()
 
 	// Actor is extracted from the authenticated context only — never from request body.
-	actor, _ := r.Context().Value(userIDContextKey).(string)
+	actor, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
 	if actor == "" {
 		actor = "unknown"
 	}

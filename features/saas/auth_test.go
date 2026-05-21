@@ -55,7 +55,7 @@ func (s *inMemoryCredentialStore) GetToken(tenantID string) (*auth.AccessToken, 
 	return t, nil
 }
 
-func (s *inMemoryCredentialStore) DeleteToken(_ string) error                              { return nil }
+func (s *inMemoryCredentialStore) DeleteToken(_ string) error { return nil }
 func (s *inMemoryCredentialStore) StoreDelegatedToken(_, _ string, _ *auth.AccessToken) error {
 	return nil
 }
@@ -69,7 +69,7 @@ func (s *inMemoryCredentialStore) StoreUserContext(_, _ string, _ *auth.UserCont
 func (s *inMemoryCredentialStore) GetUserContext(_, _ string) (*auth.UserContext, error) {
 	return nil, fmt.Errorf("not implemented")
 }
-func (s *inMemoryCredentialStore) DeleteUserContext(_, _ string) error { return nil }
+func (s *inMemoryCredentialStore) DeleteUserContext(_, _ string) error              { return nil }
 func (s *inMemoryCredentialStore) StoreConfig(_ string, _ *auth.OAuth2Config) error { return nil }
 func (s *inMemoryCredentialStore) GetConfig(_ string) (*auth.OAuth2Config, error) {
 	return nil, fmt.Errorf("not implemented")

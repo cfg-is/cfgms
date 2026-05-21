@@ -752,3 +752,50 @@ func TestExtractAdminPrincipal_NilCertManager_AllowsUnrevoked(t *testing.T) {
 	require.NotNil(t, principal, "admin cert must be accepted when certManager is nil (no revocation checking)")
 	assert.True(t, principal.IsAdmin)
 }
+
+// TestAuthMiddleware_SetsUserIDKey_APIKey verifies that the API-key auth path writes
+// the authenticated user ID under ctxkeys.UserIDKey so downstream readers in
+// features/config/rollback and features/config/diff/approval can find it.
+func TestAuthMiddleware_SetsUserIDKey_APIKey(t *testing.T) {
+	server := setupTestServer(t)
+	apiKeyStr := NewTestKey(t, server, []string{"steward:read"})
+
+	var capturedUserID string
+	handler := server.authenticationMiddleware(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedUserID, _ = r.Context().Value(ctxkeys.UserIDKey).(string)
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.Header.Set("X-API-Key", apiKeyStr)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotEmpty(t, capturedUserID, "ctxkeys.UserIDKey must be set after API-key auth")
+}
+
+// TestAuthMiddleware_SetsUserIDKey_CertAuth verifies that the mTLS admin-cert auth
+// path writes the authenticated user ID under ctxkeys.UserIDKey.
+func TestAuthMiddleware_SetsUserIDKey_CertAuth(t *testing.T) {
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+
+	var capturedUserID string
+	handler := server.authenticationMiddleware(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedUserID, _ = r.Context().Value(ctxkeys.UserIDKey).(string)
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/stewards", adminCert)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotEmpty(t, capturedUserID, "ctxkeys.UserIDKey must be set after mTLS cert auth")
+	assert.Equal(t, "test-admin", capturedUserID, "UserIDKey must equal the cert CN (sanitized)")
+}

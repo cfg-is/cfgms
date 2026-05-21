@@ -67,7 +67,7 @@ func (s *Server) buildSecurityContext(r *http.Request) *security.SecurityContext
 	}
 
 	// Extract user and tenant info from context if available
-	if userID, ok := r.Context().Value(userIDContextKey).(string); ok {
+	if userID, ok := r.Context().Value(ctxkeys.UserIDKey).(string); ok {
 		ctx.UserID = userID
 	}
 	if tenantID, ok := r.Context().Value(ctxkeys.TenantID).(string); ok {

@@ -28,7 +28,6 @@ type contextKey string
 const (
 	// Context keys
 	apiKeyContextKey       contextKey = "api_key"
-	userIDContextKey       contextKey = "user_id"
 	authDecisionContextKey contextKey = "auth_decision"
 	principalContextKey    contextKey = "principal"
 )
@@ -208,7 +207,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			}
 			// Cert-auth success: set principal context and proceed.
 			ctx := context.WithValue(r.Context(), principalContextKey, adminPrincipal)
-			ctx = context.WithValue(ctx, userIDContextKey, logging.SanitizeLogValue(adminPrincipal.ID))
+			ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(adminPrincipal.ID))
 			ctx = context.WithValue(ctx, ctxkeys.TenantID, adminPrincipal.TenantID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
@@ -265,7 +264,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		// Add key info and principal to request context
 		ctx := context.WithValue(r.Context(), apiKeyContextKey, keyInfo)
 		ctx = context.WithValue(ctx, principalContextKey, principal)
-		ctx = context.WithValue(ctx, userIDContextKey, keyInfo.ID)
+		ctx = context.WithValue(ctx, ctxkeys.UserIDKey, keyInfo.ID)
 		ctx = context.WithValue(ctx, ctxkeys.TenantID, keyInfo.TenantID)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -384,7 +383,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				return
 			}
 
-			userID, _ := r.Context().Value(userIDContextKey).(string)
+			userID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
 			tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
 
 			// Build resource identifier from URL path variables
