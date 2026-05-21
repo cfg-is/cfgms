@@ -661,7 +661,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if runManager := initializeRunManager(context.Background(), cfg, executionQueue, logger); runManager != nil {
 		srv.runManager = runManager
 		httpServer.SetRunManager(runManager, executionQueue)
-		logger.Info("Run manager wired to HTTP API server")
+		// Wire the run manager as the dispatcher's completion sink so steward
+		// completion events advance run/job status to terminal (Issue #1673).
+		if jobDispatcher != nil {
+			jobDispatcher.SetRunCompletionSink(runManager)
+		}
+		logger.Info("Run manager wired to HTTP API server and job dispatcher")
 	}
 
 	// Story #416: Wire rollback manager into API server

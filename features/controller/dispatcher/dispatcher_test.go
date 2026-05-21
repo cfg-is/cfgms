@@ -4,6 +4,7 @@ package dispatcher
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,10 +15,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/run"
 	script "github.com/cfgis/cfgms/features/modules/script"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+
+	_ "modernc.org/sqlite"
 )
 
 // ----------------------------------------------------------------------------
@@ -562,6 +566,165 @@ func TestDispatcher_SendCommandErrorReleasesLock(t *testing.T) {
 		return cp.sentCount() >= 1
 	}, 2*time.Second, 10*time.Millisecond,
 		"dispatch should succeed after send error cleared and lock released")
+}
+
+// runTrackedExec builds a QueuedExecution carrying the workflow_run_id / job_id
+// metadata that the run synthesis layer threads through for dispatch tracking.
+func runTrackedExec(executionID, scriptRef, runID, jobID string) *script.QueuedExecution {
+	qe := queuedExec(executionID, scriptRef)
+	qe.Metadata = map[string]interface{}{
+		"workflow_run_id": runID,
+		"job_id":          jobID,
+	}
+	return qe
+}
+
+// TestDispatcher_CompletionAdvancesRunStatus verifies AC3: when every job of a
+// run reports completion, the dispatcher drives the run record to a terminal
+// status via the wired RunCompletionSink.
+func TestDispatcher_CompletionAdvancesRunStatus(t *testing.T) {
+	store := run.NewRunStoreSQL(mustOpenMemDB(t))
+	require.NoError(t, store.Init(context.Background()))
+	manager := run.NewManager(store, nil)
+
+	const runID = "run-disp-1"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID:     runID,
+		TenantID:  "tenant-abc",
+		CreatedAt: time.Now().UTC(),
+		Status:    run.RunStatusRunning,
+		JobCount:  2,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-1", RunID: runID, DeviceID: "device-1",
+		ExecutionID: "exec-001", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-2", RunID: runID, DeviceID: "device-2",
+		ExecutionID: "exec-002", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d := newTestDispatcher(t, q, cp)
+	d.SetRunCompletionSink(manager)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-001", "script-abc", runID, "job-1")))
+	require.NoError(t, q.QueueExecution("device-2", runTrackedExec("exec-002", "script-abc", runID, "job-2")))
+
+	d.OnHeartbeat("device-1")
+	d.OnHeartbeat("device-2")
+	require.Eventually(t, func() bool {
+		return cp.sentCount() >= 2
+	}, 2*time.Second, 10*time.Millisecond, "both executions should be dispatched")
+
+	// First job completes — run must remain running.
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-1", "exec-001", 0))
+	require.Eventually(t, func() bool {
+		r, err := manager.GetRun(context.Background(), runID)
+		return err == nil && r.CompletedJobs == 1
+	}, 2*time.Second, 10*time.Millisecond, "first job completion should be recorded")
+
+	r, err := manager.GetRun(context.Background(), runID)
+	require.NoError(t, err)
+	assert.Equal(t, run.RunStatusRunning, r.Status, "run must stay running while a job is in flight")
+
+	// Second (final) job completes — run must transition to completed.
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-2", "exec-002", 0))
+	require.Eventually(t, func() bool {
+		r, err := manager.GetRun(context.Background(), runID)
+		return err == nil && r.Status == run.RunStatusCompleted
+	}, 2*time.Second, 10*time.Millisecond, "run must reach completed once all jobs are terminal")
+
+	r, err = manager.GetRun(context.Background(), runID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, r.CompletedJobs)
+	assert.Equal(t, 0, r.FailedJobs)
+
+	jobs, err := manager.ListRunJobs(context.Background(), runID)
+	require.NoError(t, err)
+	require.Len(t, jobs, 2)
+	for _, j := range jobs {
+		assert.Equal(t, run.JobStatusCompleted, j.Status, "job %s must be completed", j.JobID)
+	}
+}
+
+// TestDispatcher_CompletionMarksRunFailed verifies that a non-zero exit code
+// from a steward drives the run record to the failed terminal status.
+func TestDispatcher_CompletionMarksRunFailed(t *testing.T) {
+	store := run.NewRunStoreSQL(mustOpenMemDB(t))
+	require.NoError(t, store.Init(context.Background()))
+	manager := run.NewManager(store, nil)
+
+	const runID = "run-disp-2"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID, TenantID: "tenant-abc", CreatedAt: time.Now().UTC(),
+		Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-fail", RunID: runID, DeviceID: "device-1",
+		ExecutionID: "exec-fail", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d := newTestDispatcher(t, q, cp)
+	d.SetRunCompletionSink(manager)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-fail", "script-abc", runID, "job-fail")))
+	d.OnHeartbeat("device-1")
+	require.Eventually(t, func() bool {
+		return cp.sentCount() >= 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Steward reports a non-zero exit code.
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-1", "exec-fail", 1))
+	require.Eventually(t, func() bool {
+		r, err := manager.GetRun(context.Background(), runID)
+		return err == nil && r.Status == run.RunStatusFailed
+	}, 2*time.Second, 10*time.Millisecond, "run must reach failed when a job fails")
+
+	r, err := manager.GetRun(context.Background(), runID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, r.FailedJobs)
+	assert.Equal(t, 0, r.CompletedJobs)
+}
+
+// TestDispatcher_CompletionWithoutSinkIsSafe verifies that completion handling
+// does not panic or error when no RunCompletionSink is wired.
+func TestDispatcher_CompletionWithoutSinkIsSafe(t *testing.T) {
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d := newTestDispatcher(t, q, cp) // no SetRunCompletionSink
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-001", "script-abc", "run-x", "job-x")))
+	d.OnHeartbeat("device-1")
+	require.Eventually(t, func() bool {
+		return cp.sentCount() >= 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-1", "exec-001", 0))
+	require.Eventually(t, func() bool {
+		return q.GetQueueDepth("device-1") == 0
+	}, 2*time.Second, 10*time.Millisecond, "completion must be acknowledged even without a run sink")
+}
+
+// mustOpenMemDB opens an in-memory SQLite database closed via t.Cleanup.
+func mustOpenMemDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err, "open in-memory sqlite")
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 // TestDispatcher_New_ValidationErrors verifies that New rejects nil config fields.

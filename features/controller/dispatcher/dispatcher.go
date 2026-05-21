@@ -49,6 +49,10 @@ type Dispatcher struct {
 	deviceLocks  sync.Map
 	pollInterval time.Duration
 	logger       logging.Logger
+	// runSink, when set, receives job-completion notifications so the run/job
+	// tracking model can advance run status. Set once via SetRunCompletionSink
+	// before Start; nil when no run manager is wired.
+	runSink RunCompletionSink
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -58,6 +62,14 @@ type Dispatcher struct {
 	// to prevent a race between external callbacks and wg.Wait in Stop.
 	mu      sync.Mutex
 	stopped bool
+}
+
+// RunCompletionSink is notified when a dispatched execution reaches a terminal
+// state so the run/job tracking model can advance run status (Issue #1673).
+// It is implemented by *run.Manager. The dispatcher depends on this narrow
+// interface rather than importing the run package directly.
+type RunCompletionSink interface {
+	RecordJobCompletion(ctx context.Context, runID, jobID, executionID string, failed bool) error
 }
 
 // Config holds Dispatcher configuration.
@@ -103,6 +115,13 @@ func New(cfg *Config) (*Dispatcher, error) {
 		ctx:          ctx,
 		cancel:       cancel,
 	}, nil
+}
+
+// SetRunCompletionSink wires the run/job tracking sink that receives a
+// notification when a dispatched execution completes. It must be called before
+// Start so the field is published before the event subscription begins.
+func (d *Dispatcher) SetRunCompletionSink(sink RunCompletionSink) {
+	d.runSink = sink
 }
 
 // Start begins the polling loop and subscribes to EventScriptCompleted events.
@@ -399,6 +418,18 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 		}
 	}
 
+	// Capture run-tracking metadata BEFORE AcknowledgeCompletion moves the entry
+	// out of the active queue. The run synthesis layer threads workflow_run_id
+	// and job_id through QueuedExecution.Metadata (Issue #1673).
+	var runID, jobID string
+	for _, qe := range d.queue.PeekForDevice(deviceID) {
+		if qe.ExecutionID == executionID && qe.Metadata != nil {
+			runID, _ = qe.Metadata["workflow_run_id"].(string)
+			jobID, _ = qe.Metadata["job_id"].(string)
+			break
+		}
+	}
+
 	if err := d.queue.AcknowledgeCompletion(executionID, deviceID, state, result); err != nil {
 		d.logger.Error("Failed to acknowledge completion",
 			"device_id", logging.SanitizeLogValue(deviceID),
@@ -410,6 +441,19 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 			"device_id", logging.SanitizeLogValue(deviceID),
 			"execution_id", executionID,
 			"state", state)
+
+		// Advance run/job tracking so the run can reach a terminal status once
+		// every job finishes (Issue #1673, AC3). Best-effort: a tracking failure
+		// must not stall the per-device dispatch loop.
+		if d.runSink != nil && runID != "" && jobID != "" {
+			if err := d.runSink.RecordJobCompletion(ctx, runID, jobID, executionID, state == script.QueueStateFailed); err != nil {
+				d.logger.Error("Failed to record job completion in run store",
+					"device_id", logging.SanitizeLogValue(deviceID),
+					"execution_id", logging.SanitizeLogValue(executionID),
+					"run_id", logging.SanitizeLogValue(runID),
+					"error", err)
+			}
+		}
 	}
 
 	// Release the per-device lock so the next queued execution can be dispatched.

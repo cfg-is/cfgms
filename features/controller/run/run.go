@@ -370,6 +370,69 @@ func (m *Manager) CancelRun(_ context.Context, runID string) error {
 	return m.store.UpdateRunStatus(runID, RunStatusCancelled)
 }
 
+// RecordJobCompletion records a terminal state for one job and advances the
+// run's status when every job has finished. It is invoked by the dispatcher
+// when a steward reports an execution complete (Issue #1673, AC3).
+//
+// The job is moved to completed or failed. Job states are then aggregated: once
+// every job in the run is terminal the run transitions to completed, or to
+// failed if any job failed. A run that is already terminal (e.g. cancelled) is
+// left untouched so a late completion callback cannot resurrect it.
+func (m *Manager) RecordJobCompletion(_ context.Context, runID, jobID, executionID string, failed bool) error {
+	jobStatus := JobStatusCompleted
+	if failed {
+		jobStatus = JobStatusFailed
+	}
+	if err := m.store.UpdateJobStatus(jobID, jobStatus, executionID); err != nil {
+		return fmt.Errorf("record job completion: update job %s: %w", jobID, err)
+	}
+
+	jobs, err := m.store.ListRunJobs(runID)
+	if err != nil {
+		return fmt.Errorf("record job completion: list jobs for run %s: %w", runID, err)
+	}
+
+	completed, failedCount := 0, 0
+	allTerminal := true
+	for _, j := range jobs {
+		switch j.Status {
+		case JobStatusCompleted:
+			completed++
+		case JobStatusFailed:
+			failedCount++
+		case JobStatusCancelled:
+			// Terminal, but counts toward neither completed nor failed.
+		default:
+			allTerminal = false
+		}
+	}
+
+	if err := m.store.UpdateRunCounts(runID, completed, failedCount); err != nil {
+		return fmt.Errorf("record job completion: update counts for run %s: %w", runID, err)
+	}
+
+	if !allTerminal {
+		return nil
+	}
+
+	run, err := m.store.GetRun(runID)
+	if err != nil {
+		return fmt.Errorf("record job completion: get run %s: %w", runID, err)
+	}
+	if run.Status.IsTerminal() {
+		return nil
+	}
+
+	finalStatus := RunStatusCompleted
+	if failedCount > 0 {
+		finalStatus = RunStatusFailed
+	}
+	if err := m.store.UpdateRunStatus(runID, finalStatus); err != nil {
+		return fmt.Errorf("record job completion: update run status for run %s: %w", runID, err)
+	}
+	return nil
+}
+
 // Close releases resources held by the Manager's store. If the store does not
 // own a closable resource, Close is a no-op.
 func (m *Manager) Close() error {

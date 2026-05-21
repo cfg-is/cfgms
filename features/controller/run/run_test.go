@@ -391,6 +391,117 @@ func TestManager_CancelRun_AlreadyCancelled(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrAlreadyTerminal))
 }
 
+// ---- RecordJobCompletion tests ----------------------------------------------
+
+// TestManager_RecordJobCompletion_AdvancesRunToCompleted verifies AC3: once the
+// last job in a run reaches a terminal state, the run transitions to completed.
+func TestManager_RecordJobCompletion_AdvancesRunToCompleted(t *testing.T) {
+	manager, store := newTestManager(t)
+
+	run := sampleRun("run-rjc-1", "tenant-abc")
+	run.Status = RunStatusRunning
+	run.JobCount = 2
+	require.NoError(t, store.CreateRun(run))
+	require.NoError(t, store.CreateJob(sampleJob("job-rjc-1", "run-rjc-1", "dev-a")))
+	require.NoError(t, store.CreateJob(sampleJob("job-rjc-2", "run-rjc-1", "dev-b")))
+
+	// First job completes — run must remain running (one job still pending).
+	require.NoError(t, manager.RecordJobCompletion(context.Background(), "run-rjc-1", "job-rjc-1", "exec-a", false))
+
+	got, err := store.GetRun("run-rjc-1")
+	require.NoError(t, err)
+	assert.Equal(t, RunStatusRunning, got.Status, "run must stay running while a job is pending")
+	assert.Equal(t, 1, got.CompletedJobs)
+	assert.Equal(t, 0, got.FailedJobs)
+
+	// Second (final) job completes — run must transition to completed.
+	require.NoError(t, manager.RecordJobCompletion(context.Background(), "run-rjc-1", "job-rjc-2", "exec-b", false))
+
+	got, err = store.GetRun("run-rjc-1")
+	require.NoError(t, err)
+	assert.Equal(t, RunStatusCompleted, got.Status, "run must be completed once all jobs are terminal")
+	assert.Equal(t, 2, got.CompletedJobs)
+	assert.Equal(t, 0, got.FailedJobs)
+
+	// Both jobs must carry their execution IDs and terminal status.
+	jobs, err := store.ListRunJobs("run-rjc-1")
+	require.NoError(t, err)
+	require.Len(t, jobs, 2)
+	for _, j := range jobs {
+		assert.Equal(t, JobStatusCompleted, j.Status)
+		assert.NotNil(t, j.CompletedAt)
+	}
+}
+
+// TestManager_RecordJobCompletion_FailedJobMarksRunFailed verifies that a run
+// with at least one failed job transitions to failed (not completed) once all
+// jobs are terminal.
+func TestManager_RecordJobCompletion_FailedJobMarksRunFailed(t *testing.T) {
+	manager, store := newTestManager(t)
+
+	run := sampleRun("run-rjc-2", "tenant-abc")
+	run.Status = RunStatusRunning
+	run.JobCount = 2
+	require.NoError(t, store.CreateRun(run))
+	require.NoError(t, store.CreateJob(sampleJob("job-f1", "run-rjc-2", "dev-a")))
+	require.NoError(t, store.CreateJob(sampleJob("job-f2", "run-rjc-2", "dev-b")))
+
+	require.NoError(t, manager.RecordJobCompletion(context.Background(), "run-rjc-2", "job-f1", "exec-a", false))
+	require.NoError(t, manager.RecordJobCompletion(context.Background(), "run-rjc-2", "job-f2", "exec-b", true))
+
+	got, err := store.GetRun("run-rjc-2")
+	require.NoError(t, err)
+	assert.Equal(t, RunStatusFailed, got.Status, "run must be failed when a job failed")
+	assert.Equal(t, 1, got.CompletedJobs)
+	assert.Equal(t, 1, got.FailedJobs)
+}
+
+// TestManager_RecordJobCompletion_LeavesTerminalRunUntouched verifies that a
+// late completion callback does not resurrect a run that is already terminal
+// (e.g. cancelled via DELETE).
+func TestManager_RecordJobCompletion_LeavesTerminalRunUntouched(t *testing.T) {
+	manager, store := newTestManager(t)
+
+	run := sampleRun("run-rjc-3", "tenant-abc")
+	run.Status = RunStatusCancelled
+	run.JobCount = 1
+	require.NoError(t, store.CreateRun(run))
+	require.NoError(t, store.CreateJob(sampleJob("job-late", "run-rjc-3", "dev-a")))
+
+	require.NoError(t, manager.RecordJobCompletion(context.Background(), "run-rjc-3", "job-late", "exec-late", false))
+
+	got, err := store.GetRun("run-rjc-3")
+	require.NoError(t, err)
+	assert.Equal(t, RunStatusCancelled, got.Status, "cancelled run must stay cancelled after a late completion")
+}
+
+// TestManager_RecordJobCompletion_CancelledJobIsTerminal verifies that a
+// cancelled job counts as terminal for run aggregation but toward neither the
+// completed nor failed counters.
+func TestManager_RecordJobCompletion_CancelledJobIsTerminal(t *testing.T) {
+	manager, store := newTestManager(t)
+
+	run := sampleRun("run-rjc-4", "tenant-abc")
+	run.Status = RunStatusRunning
+	run.JobCount = 2
+	require.NoError(t, store.CreateRun(run))
+
+	j1 := sampleJob("job-x1", "run-rjc-4", "dev-a")
+	j2 := sampleJob("job-x2", "run-rjc-4", "dev-b")
+	j2.Status = JobStatusCancelled // already cancelled
+	require.NoError(t, store.CreateJob(j1))
+	require.NoError(t, store.CreateJob(j2))
+
+	// Completing the only non-terminal job makes all jobs terminal.
+	require.NoError(t, manager.RecordJobCompletion(context.Background(), "run-rjc-4", "job-x1", "exec-a", false))
+
+	got, err := store.GetRun("run-rjc-4")
+	require.NoError(t, err)
+	assert.Equal(t, RunStatusCompleted, got.Status, "run completes once all jobs terminal")
+	assert.Equal(t, 1, got.CompletedJobs)
+	assert.Equal(t, 0, got.FailedJobs)
+}
+
 // ---- Close tests ------------------------------------------------------------
 
 // TestRunStoreSQL_Close_ReleasesDBHandle verifies that Close releases the
