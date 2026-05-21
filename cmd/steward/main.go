@@ -539,9 +539,11 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 	// steward is purely controller-managed), defaults apply in commands.Handler.
 	var commandReplayWindow time.Duration
 	var commandMaxParamsBytes int
+	var scriptSigning stewardconfig.ScriptSigningConfig
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
+		scriptSigning = cfg.Steward.ScriptSigning
 	}
 
 	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
@@ -558,6 +560,7 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		SecretStore:                 secretStore,
 		SignedCommandReplayWindow:   commandReplayWindow,
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
+		ScriptSigning:               scriptSigning,
 		Logger:                      logger,
 	})
 	if err != nil {

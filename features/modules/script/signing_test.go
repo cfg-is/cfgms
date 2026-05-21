@@ -604,8 +604,8 @@ func TestVerifyScriptSignature_PowerShell_TamperedContent_Fails(t *testing.T) {
 // Get-AuthenticodeSignature (which would report "NotSigned" — there is no embedded
 // signature block). This reproduces the Windows steward-integration regression.
 func TestVerifyScriptSignature_PowerShell_DetachedSignature_BypassesAuthenticode(t *testing.T) {
-	// Simulate a Windows build by registering a stub Authenticode verifier that records
-	// whether it was invoked. Restore the original after the test.
+	// Exercise the Windows code path by registering a stand-in Authenticode verifier
+	// that records whether it was invoked. Restore the original after the test.
 	orig := windowsAuthenticodeVerifier
 	t.Cleanup(func() { windowsAuthenticodeVerifier = orig })
 

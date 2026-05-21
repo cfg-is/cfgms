@@ -186,7 +186,7 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 	// This ensures the signing policy is live before any convergence run executes scripts.
 	if scriptMod, loadErr := moduleFactory.LoadModule("script"); loadErr == nil {
 		if sm, ok := scriptMod.(*script.Module); ok {
-			sm.SetSigningConfig(buildModuleSigningConfig(cfg.Steward.ScriptSigning))
+			sm.SetSigningConfig(config.BuildModuleSigningConfig(cfg.Steward.ScriptSigning))
 		}
 	} else if logger != nil {
 		logger.Warn("Failed to load script module for signing config wiring", "error", loadErr)
@@ -205,24 +205,6 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		driftDetector:    driftDetector,
 		shutdown:         make(chan struct{}),
 	}, nil
-}
-
-// buildModuleSigningConfig converts a steward ScriptSigningConfig to a script.ModuleSigningConfig
-// for injection into the script module.
-func buildModuleSigningConfig(cfg config.ScriptSigningConfig) script.ModuleSigningConfig {
-	entries := make([]script.TrustedKeyEntry, len(cfg.TrustedKeys))
-	for i, key := range cfg.TrustedKeys {
-		entries[i] = script.TrustedKeyEntry{
-			Name:         key.Name,
-			Thumbprint:   key.Thumbprint,
-			PublicKeyRef: key.PublicKeyRef,
-		}
-	}
-	return script.ModuleSigningConfig{
-		TrustMode:     script.TrustMode(cfg.TrustMode),
-		TrustedKeys:   entries,
-		AllowPublicCA: cfg.AllowPublicCA,
-	}
 }
 
 // Start initializes and starts the steward's convergence loop.

@@ -61,6 +61,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules/script"
 )
 
 // envVarPattern matches ${VAR} patterns without defaults
@@ -624,6 +626,28 @@ func MergeScriptSigningConfig(parent, child ScriptSigningConfig) (ScriptSigningC
 	}
 
 	return result, nil
+}
+
+// BuildModuleSigningConfig converts a steward ScriptSigningConfig into the
+// script.ModuleSigningConfig consumed by the script module and the steward
+// command handler's pre-dispatch signature verification (Issue #1671).
+//
+// It is used by both standalone-mode wiring (steward.go) and controller-connected
+// wiring (client.TransportClient) so the two paths cannot diverge.
+func BuildModuleSigningConfig(cfg ScriptSigningConfig) script.ModuleSigningConfig {
+	entries := make([]script.TrustedKeyEntry, len(cfg.TrustedKeys))
+	for i, key := range cfg.TrustedKeys {
+		entries[i] = script.TrustedKeyEntry{
+			Name:         key.Name,
+			Thumbprint:   key.Thumbprint,
+			PublicKeyRef: key.PublicKeyRef,
+		}
+	}
+	return script.ModuleSigningConfig{
+		TrustMode:     script.TrustMode(cfg.TrustMode),
+		TrustedKeys:   entries,
+		AllowPublicCA: cfg.AllowPublicCA,
+	}
 }
 
 // ValidateConfiguration checks if the configuration is valid
