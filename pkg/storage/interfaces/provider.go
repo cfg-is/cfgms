@@ -488,6 +488,11 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		return nil, fmt.Errorf("failed to create push store: %w", err)
 	}
 
+	ipTrustStore, err := provider.CreateIPTrustStore(config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create IP trust store: %w", err)
+	}
+
 	return &StorageManager{
 		providerName:           providerName,
 		provider:               provider,
@@ -502,6 +507,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		commandStore:           commandStore,
 		triggerStore:           triggerStore,
 		pushStore:              pushStore,
+		ipTrustStore:           ipTrustStore,
 	}, nil
 }
 
@@ -521,6 +527,7 @@ type StorageManager struct {
 	triggerStore             business.TriggerStore
 	pushStore                business.PushStore
 	pendingRegistrationStore business.PendingRegistrationStore
+	ipTrustStore             business.IPTrustStore
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -598,6 +605,19 @@ func (sm *StorageManager) GetPendingRegistrationStore() business.PendingRegistra
 // Used by CreateOSSStorageManager when the SQLite bundle path is taken.
 func (sm *StorageManager) SetPendingRegistrationStore(s business.PendingRegistrationStore) {
 	sm.pendingRegistrationStore = s
+}
+
+// GetIPTrustStore returns the IP-trust storage interface (Issue #1694).
+// Returns nil when the current storage provider does not support IP-trust storage
+// (e.g. the OSS composite flatfile+SQLite backend). Only the database provider
+// supplies a non-nil value.
+func (sm *StorageManager) GetIPTrustStore() business.IPTrustStore {
+	return sm.ipTrustStore
+}
+
+// SetIPTrustStore wires the IP-trust store after construction.
+func (sm *StorageManager) SetIPTrustStore(s business.IPTrustStore) {
+	sm.ipTrustStore = s
 }
 
 // GetCapabilities returns the provider's capabilities.

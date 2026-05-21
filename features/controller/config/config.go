@@ -123,6 +123,11 @@ type RegistrationConfig struct {
 	//     PendingRegistrationStore and holds the steward in quarantine until an
 	//     operator acts via `cfg registration approve/deny` (#1522-B).
 	ApprovalMode string `yaml:"approval_mode,omitempty"`
+
+	// IPTrustThreshold is the minimum continuous liveness duration before an IP
+	// is promoted to trusted status (Issue #1694). Default: 30 minutes.
+	// Sandbox-detonation attempts (3–15 min lifetime) cannot sustain this window.
+	IPTrustThreshold Duration `yaml:"ip_trust_threshold,omitempty"`
 }
 
 // CertificateConfig contains certificate management settings
@@ -810,4 +815,13 @@ func (cc *CertificateConfig) GetPublicAPISource() string {
 		return cc.PublicAPI.Source
 	}
 	return "internal"
+}
+
+// GetIPTrustThreshold returns the IP-trust establishment threshold, defaulting
+// to 30 minutes when not configured (Issue #1694).
+func (rc *RegistrationConfig) GetIPTrustThreshold() time.Duration {
+	if rc == nil || rc.IPTrustThreshold == 0 {
+		return 30 * time.Minute
+	}
+	return rc.IPTrustThreshold.AsDuration()
 }
