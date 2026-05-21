@@ -596,6 +596,101 @@ func TestVerifyScriptSignature_PowerShell_TamperedContent_Fails(t *testing.T) {
 	}
 }
 
+// TestVerifyScriptSignature_PowerShell_DetachedSignature_BypassesAuthenticode verifies
+// that when a detached signature is supplied for a PowerShell script, detached
+// cryptographic verification is used even on Windows builds where the Authenticode
+// verifier is registered. The command-signing wire protocol always transmits detached
+// signatures, so steward command verification must not be routed through
+// Get-AuthenticodeSignature (which would report "NotSigned" — there is no embedded
+// signature block). This reproduces the Windows steward-integration regression.
+func TestVerifyScriptSignature_PowerShell_DetachedSignature_BypassesAuthenticode(t *testing.T) {
+	// Simulate a Windows build by registering a stub Authenticode verifier that records
+	// whether it was invoked. Restore the original after the test.
+	orig := windowsAuthenticodeVerifier
+	t.Cleanup(func() { windowsAuthenticodeVerifier = orig })
+
+	authenticodeCalled := false
+	windowsAuthenticodeVerifier = func(_ []byte, _ *ScriptSignature, _ ModuleSigningConfig) error {
+		authenticodeCalled = true
+		return nil
+	}
+
+	key := generateRSAKey(t)
+	content := []byte("Write-Output 'hello'")
+	sig := &ScriptSignature{
+		Algorithm: "rsa-sha256",
+		Signature: signRSASHA256(t, key, content),
+		PublicKey: rsaPublicKeyPEM(key),
+	}
+	cfg := ModuleSigningConfig{TrustMode: TrustModeAnyValid}
+
+	if err := verifyScriptSignature(content, sig, ShellPowerShell, cfg); err != nil {
+		t.Errorf("PowerShell script with valid detached signature should pass: %v", err)
+	}
+	if authenticodeCalled {
+		t.Error("detached signature must be verified directly, not dispatched to Authenticode")
+	}
+
+	// A tampered body with the same detached signature must still fail cryptographically.
+	authenticodeCalled = false
+	if err := verifyScriptSignature([]byte("Remove-Item C:\\"), sig, ShellPowerShell, cfg); err == nil {
+		t.Error("tampered PowerShell script with detached signature must fail verification")
+	}
+	if authenticodeCalled {
+		t.Error("tampered detached signature must not be dispatched to Authenticode")
+	}
+}
+
+// TestVerifyScriptSignature_PowerShell_NoDetachedSignature_UsesAuthenticode verifies the
+// converse: when no detached signature material is present, a PowerShell script on a
+// Windows build is routed to the Authenticode verifier to inspect the embedded signature
+// block.
+func TestVerifyScriptSignature_PowerShell_NoDetachedSignature_UsesAuthenticode(t *testing.T) {
+	orig := windowsAuthenticodeVerifier
+	t.Cleanup(func() { windowsAuthenticodeVerifier = orig })
+
+	authenticodeCalled := false
+	windowsAuthenticodeVerifier = func(_ []byte, _ *ScriptSignature, _ ModuleSigningConfig) error {
+		authenticodeCalled = true
+		return nil
+	}
+
+	// Empty signature material → no detached signature → Authenticode path.
+	sig := &ScriptSignature{}
+	cfg := ModuleSigningConfig{TrustMode: TrustModeAnyValid}
+
+	if err := verifyScriptSignature([]byte("Write-Output 'hi'"), sig, ShellPowerShell, cfg); err != nil {
+		t.Errorf("unexpected error from stub Authenticode verifier: %v", err)
+	}
+	if !authenticodeCalled {
+		t.Error("PowerShell script without a detached signature must use the Authenticode path")
+	}
+}
+
+// TestHasDetachedSignature verifies the detached-signature detection used by the
+// verifyScriptSignature dispatch.
+func TestHasDetachedSignature(t *testing.T) {
+	tests := []struct {
+		name string
+		sig  *ScriptSignature
+		want bool
+	}{
+		{"nil signature", nil, false},
+		{"empty signature", &ScriptSignature{}, false},
+		{"algorithm only", &ScriptSignature{Algorithm: "rsa-sha256"}, false},
+		{"missing public key", &ScriptSignature{Algorithm: "rsa-sha256", Signature: "abc"}, false},
+		{"missing signature", &ScriptSignature{Algorithm: "rsa-sha256", PublicKey: "pem"}, false},
+		{"complete detached signature", &ScriptSignature{Algorithm: "rsa-sha256", Signature: "abc", PublicKey: "pem"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasDetachedSignature(tt.sig); got != tt.want {
+				t.Errorf("hasDetachedSignature() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // isPowerShellScript
 // ---------------------------------------------------------------------------

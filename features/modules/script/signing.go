@@ -73,16 +73,31 @@ func isPowerShellScript(shell ShellType) bool {
 	return shell == ShellPowerShell
 }
 
-// verifyScriptSignature selects the appropriate verification method based on platform and shell.
+// verifyScriptSignature selects the appropriate verification method based on platform,
+// shell, and whether the caller supplied a detached signature.
 //
-// On Windows, PowerShell (.ps1/.psm1/.psd1) scripts are verified via Authenticode
-// (Get-AuthenticodeSignature). All other scripts — including PowerShell on non-Windows
-// platforms — use detached RSA/ECDSA signature verification.
+// A detached signature — one carrying explicit Algorithm, Signature, and PublicKey
+// material — is verified cryptographically on every platform. The steward command-signing
+// wire protocol always transmits detached signatures (signature_value, signature_public_key),
+// so command verification is platform-independent and never depends on Windows tooling.
+//
+// The Windows Authenticode path (Get-AuthenticodeSignature) applies only when no detached
+// signature material is present — i.e. the signature is embedded in the PowerShell script
+// itself between the "# SIG #" markers. Dispatching a detached signature to Authenticode
+// would always report "NotSigned" because the embedded block is absent.
 func verifyScriptSignature(content []byte, sig *ScriptSignature, shell ShellType, cfg ModuleSigningConfig) error {
-	if isPowerShellScript(shell) && windowsAuthenticodeVerifier != nil {
+	if isPowerShellScript(shell) && windowsAuthenticodeVerifier != nil && !hasDetachedSignature(sig) {
 		return windowsAuthenticodeVerifier(content, sig, cfg)
 	}
 	return verifyDetachedSignature(content, sig, cfg)
+}
+
+// hasDetachedSignature reports whether sig carries explicit detached signature material
+// (algorithm, signature bytes, and public key). When all three are present the caller is
+// providing a detached signature to verify directly rather than relying on an embedded
+// Authenticode signature block.
+func hasDetachedSignature(sig *ScriptSignature) bool {
+	return sig != nil && sig.Algorithm != "" && sig.Signature != "" && sig.PublicKey != ""
 }
 
 // verifyDetachedSignature performs real cryptographic signature verification of script content.
