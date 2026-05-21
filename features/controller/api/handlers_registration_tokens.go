@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 )
 
@@ -96,7 +97,7 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 
 	s.logger.Info("Created registration token",
 		"token_prefix", token.Token[:min(len(token.Token), 6)],
-		"tenant_id", token.TenantID)
+		"tenant_id", logging.SanitizeLogValue(token.TenantID))
 
 	// Return token response
 	resp := tokenToResponse(token)
@@ -311,14 +312,16 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 			http.Error(w, "No active tokens found for the specified tenant/group", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("Failed to rotate registration token", "error", err, "tenant_id", tenantID)
+		s.logger.Error("Failed to rotate registration token",
+			"error", logging.SanitizeLogValue(err.Error()),
+			"tenant_id", logging.SanitizeLogValue(tenantID))
 		http.Error(w, "Failed to rotate token", http.StatusInternalServerError)
 		return
 	}
 
 	s.logger.Info("Rotated registration token",
 		"token_prefix", newToken.Token[:min(len(newToken.Token), 6)],
-		"tenant_id", tenantID)
+		"tenant_id", logging.SanitizeLogValue(tenantID))
 
 	resp := tokenToResponse(newToken)
 	w.Header().Set("Content-Type", "application/json")
