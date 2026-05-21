@@ -16,12 +16,14 @@ package commands
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/modules/script"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -70,6 +72,20 @@ type Handler struct {
 
 	// maxParamsBytes is the maximum allowed JSON-serialized size of Command.Params.
 	maxParamsBytes int
+
+	// Story #1671: script signature verification fields.
+
+	// signingConfig holds the steward-level script signing policy used for pre-dispatch
+	// verification of CommandExecuteScript commands.
+	signingConfig script.ModuleSigningConfig
+
+	// requireSignedAdhoc mirrors ScriptSigningConfig.RequireSignedAdhoc: when true,
+	// inline ad-hoc commands must carry a valid script signature before dispatch.
+	requireSignedAdhoc bool
+
+	// controllerCARoots is the certificate pool for verifying operator-signed inline
+	// command certificates. When nil, CA chain verification of operator certs is skipped.
+	controllerCARoots *x509.CertPool
 }
 
 // CommandFunc is a function that handles a specific command type.
@@ -110,6 +126,21 @@ type Config struct {
 	// MaxParamsBytes is the maximum JSON-serialized size of Command.Params.
 	// Defaults to 65536 (64 KiB) when zero.
 	MaxParamsBytes int
+
+	// Story #1671: script signature verification.
+
+	// SigningConfig is the script module signing policy for CommandExecuteScript
+	// pre-dispatch verification. Library scripts always require TrustedKeys verification;
+	// inline scripts require a valid signature when RequireSignedAdhoc is true.
+	SigningConfig script.ModuleSigningConfig
+
+	// RequireSignedAdhoc, when true, requires all inline ad-hoc CommandExecuteScript
+	// commands to carry a valid script signature before dispatch.
+	RequireSignedAdhoc bool
+
+	// ControllerCARoots is the certificate pool for verifying operator-signed inline
+	// command certs. When nil, CA chain verification of operator certs is skipped.
+	ControllerCARoots *x509.CertPool
 }
 
 const (
@@ -141,16 +172,19 @@ func New(cfg *Config) (*Handler, error) {
 	}
 
 	h := &Handler{
-		stewardID:      cfg.StewardID,
-		handlers:       make(map[cpTypes.CommandType]CommandFunc),
-		onStatus:       cfg.OnStatus,
-		logger:         cfg.Logger,
-		store:          cfg.Store,
-		executing:      make(map[string]*executionContext),
-		verifier:       cfg.Verifier,
-		replayWindow:   replayWindow,
-		replayCache:    newReplayCache(replayWindow),
-		maxParamsBytes: maxParamsBytes,
+		stewardID:          cfg.StewardID,
+		handlers:           make(map[cpTypes.CommandType]CommandFunc),
+		onStatus:           cfg.OnStatus,
+		logger:             cfg.Logger,
+		store:              cfg.Store,
+		executing:          make(map[string]*executionContext),
+		verifier:           cfg.Verifier,
+		replayWindow:       replayWindow,
+		replayCache:        newReplayCache(replayWindow),
+		maxParamsBytes:     maxParamsBytes,
+		signingConfig:      cfg.SigningConfig,
+		requireSignedAdhoc: cfg.RequireSignedAdhoc,
+		controllerCARoots:  cfg.ControllerCARoots,
 	}
 
 	// Startup sweep: flip stale "executing" records from a previous run to "failed".
@@ -260,6 +294,15 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		}
 		if len(paramBytes) > h.maxParamsBytes {
 			return ErrParamsTooLarge
+		}
+	}
+
+	// 6. Script signature pre-flight (Story #1671): verify before goroutine dispatch
+	// so ErrUnauthenticatedCommand is returned synchronously and the executor is never
+	// invoked on rejection.
+	if cmd.Type == cpTypes.CommandExecuteScript {
+		if err := h.preflightScriptSignature(cmd); err != nil {
+			return err
 		}
 	}
 

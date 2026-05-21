@@ -32,6 +32,7 @@ import (
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/dna"
@@ -181,6 +182,16 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		driftDetector = nil
 	}
 
+	// Wire script module signing config from steward config (Story #1671).
+	// This ensures the signing policy is live before any convergence run executes scripts.
+	if scriptMod, loadErr := moduleFactory.LoadModule("script"); loadErr == nil {
+		if sm, ok := scriptMod.(*script.Module); ok {
+			sm.SetSigningConfig(buildModuleSigningConfig(cfg.Steward.ScriptSigning))
+		}
+	} else if logger != nil {
+		logger.Warn("Failed to load script module for signing config wiring", "error", loadErr)
+	}
+
 	return &Steward{
 		standaloneConfig: cfg,
 		logger:           logger,
@@ -194,6 +205,24 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		driftDetector:    driftDetector,
 		shutdown:         make(chan struct{}),
 	}, nil
+}
+
+// buildModuleSigningConfig converts a steward ScriptSigningConfig to a script.ModuleSigningConfig
+// for injection into the script module.
+func buildModuleSigningConfig(cfg config.ScriptSigningConfig) script.ModuleSigningConfig {
+	entries := make([]script.TrustedKeyEntry, len(cfg.TrustedKeys))
+	for i, key := range cfg.TrustedKeys {
+		entries[i] = script.TrustedKeyEntry{
+			Name:         key.Name,
+			Thumbprint:   key.Thumbprint,
+			PublicKeyRef: key.PublicKeyRef,
+		}
+	}
+	return script.ModuleSigningConfig{
+		TrustMode:     script.TrustMode(cfg.TrustMode),
+		TrustedKeys:   entries,
+		AllowPublicCA: cfg.AllowPublicCA,
+	}
 }
 
 // Start initializes and starts the steward's convergence loop.

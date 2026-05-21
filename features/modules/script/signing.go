@@ -243,3 +243,10 @@ func isTrustedThumbprint(thumbprint string, trustedKeys []TrustedKeyEntry) bool 
 	}
 	return false
 }
+
+// VerifyScriptSignature is the exported entry point for script signature verification.
+// The handler calls this directly for pre-dispatch verification of CommandExecuteScript
+// commands, avoiding the ScriptConfig wrapper required by the module's internal method.
+func VerifyScriptSignature(content []byte, sig *ScriptSignature, shell ShellType, cfg ModuleSigningConfig) error {
+	return verifyScriptSignature(content, sig, shell, cfg)
+}

@@ -248,6 +248,12 @@ type ScriptSigningConfig struct {
 	// AllowPublicCA, when true alongside trusted_keys_and_public mode, also accepts
 	// signatures from public certificate authorities.
 	AllowPublicCA bool `yaml:"allow_public_ca,omitempty"`
+
+	// RequireSignedAdhoc, when true, requires a valid signature on all ad-hoc (inline)
+	// script commands dispatched to this steward. Library scripts (identified by a
+	// non-empty script_id param) always require their CI signature regardless of this
+	// setting. Incompatible with policy: none — use optional or required.
+	RequireSignedAdhoc bool `yaml:"require_signed_adhoc,omitempty"`
 }
 
 // ResourceConfig defines a single resource to be managed by the steward.
@@ -558,6 +564,12 @@ func validateScriptSigningConfig(cfg ScriptSigningConfig) error {
 		}
 	}
 
+	// require_signed_adhoc is incompatible with policy: none (the default when unset).
+	// Operators must explicitly choose optional or required when enabling this setting.
+	if cfg.RequireSignedAdhoc && (cfg.Policy == ScriptSigningPolicyNone || cfg.Policy == "") {
+		return fmt.Errorf("script_signing require_signed_adhoc requires policy optional or required, got %q", cfg.Policy)
+	}
+
 	return nil
 }
 
@@ -604,6 +616,11 @@ func MergeScriptSigningConfig(parent, child ScriptSigningConfig) (ScriptSigningC
 	// AllowPublicCA: child inherits parent value if not set (bool — treat parent true as inherited)
 	if !result.AllowPublicCA && parent.AllowPublicCA {
 		result.AllowPublicCA = parent.AllowPublicCA
+	}
+
+	// RequireSignedAdhoc: child inherits parent value when child has not enabled it.
+	if !result.RequireSignedAdhoc && parent.RequireSignedAdhoc {
+		result.RequireSignedAdhoc = parent.RequireSignedAdhoc
 	}
 
 	return result, nil

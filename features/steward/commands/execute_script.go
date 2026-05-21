@@ -5,7 +5,10 @@ package commands
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"time"
 
@@ -77,7 +80,7 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 		Shell:            script.ShellType(shellStr),
 		Timeout:          timeout,
 		ExecutionContext: execCtx,
-		SigningPolicy:    script.SigningPolicyNone, // signature verification is deferred (S3)
+		SigningPolicy:    script.SigningPolicyNone, // pre-flight verification is done in preflightScriptSignature
 	}
 
 	// Log only non-sensitive correlation data: SHA-256 prefix + byte length, never content.
@@ -158,4 +161,123 @@ func truncatePreview(s string, maxBytes int) string {
 // newEventID returns a monotonic event identifier.
 func newEventID() string {
 	return fmt.Sprintf("evt_%d", time.Now().UnixNano())
+}
+
+// preflightScriptSignature verifies the script signature of a CommandExecuteScript
+// command before goroutine dispatch. Returns ErrUnauthenticatedCommand on rejection.
+//
+// Library scripts (non-empty script_id): always verified against TrustedKeys; missing
+// or invalid signatures are always rejected regardless of require_signed_adhoc.
+//
+// Inline commands: verified only when require_signed_adhoc is true. When a signature
+// is present, cryptographic verification and (when controllerCARoots is set) operator
+// CA chain verification are performed.
+func (h *Handler) preflightScriptSignature(cmd *cpTypes.Command) error {
+	scriptID, _ := cmd.Params["script_id"].(string)
+	sigAlgorithm, _ := cmd.Params["signature_algorithm"].(string)
+	sigValue, _ := cmd.Params["signature_value"].(string)
+	sigPublicKey, _ := cmd.Params["signature_public_key"].(string)
+	shellStr, _ := cmd.Params["shell"].(string)
+	scriptContentB64, _ := cmd.Params["script_content"].(string)
+
+	isLibraryScript := scriptID != ""
+
+	// Decode base64 content. Fail closed when signature enforcement is active; fail open
+	// only for plain inline commands where require_signed_adhoc is false.
+	contentBytes, err := base64.StdEncoding.DecodeString(scriptContentB64)
+	if err != nil {
+		if isLibraryScript || h.requireSignedAdhoc {
+			return fmt.Errorf("%w: invalid script_content encoding", ErrUnauthenticatedCommand)
+		}
+		return nil
+	}
+
+	hasSig := sigAlgorithm != "" && sigValue != "" && sigPublicKey != ""
+
+	if isLibraryScript {
+		// Library scripts always require a valid CI signature via TrustedKeys mode.
+		// TrustModeAnyValid would accept any attacker key — explicitly use TrustedKeys.
+		if !hasSig {
+			return fmt.Errorf("%w: library script requires a script signature", ErrUnauthenticatedCommand)
+		}
+		// Thumbprint is computed from the actual public key material — never from params,
+		// which are attacker-controlled. Using sig.Thumbprint from params would let an
+		// attacker set thumbprint to a trusted value while signing with an untrusted key.
+		sig := &script.ScriptSignature{
+			Algorithm:  sigAlgorithm,
+			Signature:  sigValue,
+			PublicKey:  sigPublicKey,
+			Thumbprint: computeThumbprintFromPEM(sigPublicKey),
+		}
+		libraryCfg := script.ModuleSigningConfig{
+			TrustMode:   script.TrustModeTrustedKeys,
+			TrustedKeys: h.signingConfig.TrustedKeys,
+		}
+		if err := script.VerifyScriptSignature(contentBytes, sig, script.ShellType(shellStr), libraryCfg); err != nil {
+			return fmt.Errorf("%w: library script verification failed: %v", ErrUnauthenticatedCommand, err)
+		}
+		return nil
+	}
+
+	// Inline command: enforce signature only when require_signed_adhoc is set.
+	if !h.requireSignedAdhoc {
+		return nil
+	}
+	if !hasSig {
+		return ErrUnauthenticatedCommand
+	}
+	sig := &script.ScriptSignature{
+		Algorithm: sigAlgorithm,
+		Signature: sigValue,
+		PublicKey: sigPublicKey,
+	}
+	// Cryptographic verification with any_valid mode; CA chain check is separate below.
+	inlineCfg := script.ModuleSigningConfig{
+		TrustMode: script.TrustModeAnyValid,
+	}
+	if err := script.VerifyScriptSignature(contentBytes, sig, script.ShellType(shellStr), inlineCfg); err != nil {
+		return fmt.Errorf("%w: inline script verification failed: %v", ErrUnauthenticatedCommand, err)
+	}
+	// Operator cert chain verification: the signing cert must chain to the controller CA
+	// with client-auth EKU and must not be expired. This check is skipped when no CA
+	// roots are configured (e.g. standalone mode or tests without a controller CA).
+	if h.controllerCARoots != nil {
+		if err := verifyOperatorCert(sigPublicKey, h.controllerCARoots); err != nil {
+			return fmt.Errorf("%w: operator cert: %v", ErrUnauthenticatedCommand, err)
+		}
+	}
+	return nil
+}
+
+// computeThumbprintFromPEM returns hex(sha256(DER)) of the first PEM block in pemStr.
+// Works for both X.509 certificates and PKIX public keys — block.Bytes is the raw DER
+// in both cases. Returns empty string when pemStr contains no valid PEM block.
+func computeThumbprintFromPEM(pemStr string) string {
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		return ""
+	}
+	sum := sha256.Sum256(block.Bytes)
+	return hex.EncodeToString(sum[:])
+}
+
+// verifyOperatorCert parses publicKeyPEM as an X.509 certificate and verifies that it
+// chains to caRoots with client-auth EKU and has not expired.
+func verifyOperatorCert(publicKeyPEM string, caRoots *x509.CertPool) error {
+	block, _ := pem.Decode([]byte(publicKeyPEM))
+	if block == nil {
+		return fmt.Errorf("no PEM block found in signature_public_key")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse certificate: %w", err)
+	}
+	opts := x509.VerifyOptions{
+		Roots:     caRoots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	if _, err := cert.Verify(opts); err != nil {
+		return fmt.Errorf("certificate chain verification: %w", err)
+	}
+	return nil
 }
