@@ -20,6 +20,10 @@ import (
 //
 // The filter is tenant-scoped: filter.TenantID is always overwritten with tenantID
 // so that a principal cannot target devices outside its own tenant.
+//
+// runtimeParams are operator-supplied overrides. scriptMeta (optional) and
+// paramPlatformBindings (optional) drive per-device parameter resolution via
+// ResolveParams; when scriptMeta is nil the runtime params are used as-is.
 func SynthesizeScriptRun(
 	ctx context.Context,
 	manager *Manager,
@@ -29,7 +33,9 @@ func SynthesizeScriptRun(
 	filter fleet.Filter,
 	scriptRef, scriptVersion string,
 	shell scriptmodule.ShellType,
-	params map[string]string,
+	runtimeParams map[string]string,
+	scriptMeta *scriptmodule.ScriptMetadata,
+	paramPlatformBindings map[string]string,
 ) (string, error) {
 	filter.TenantID = tenantID
 
@@ -56,6 +62,8 @@ func SynthesizeScriptRun(
 		return "", fmt.Errorf("synthesize script run: create run: %w", err)
 	}
 
+	idempotent := scriptMeta != nil && scriptMeta.Idempotent
+
 	for _, device := range devices {
 		jobID := uuid.New().String()
 		executionID := uuid.New().String()
@@ -72,16 +80,26 @@ func SynthesizeScriptRun(
 			return "", fmt.Errorf("synthesize script run: create job for device %s: %w", device.ID, err)
 		}
 
+		resolved, err := ResolveParams(nil, scriptMeta, paramPlatformBindings, runtimeParams, device.DNAAttributes)
+		if err != nil {
+			return "", fmt.Errorf("synthesize script run: resolve params for device %s: %w", device.ID, err)
+		}
+
+		meta := map[string]interface{}{
+			"workflow_run_id": runID,
+			"job_id":          jobID,
+		}
+		if idempotent {
+			meta["idempotent"] = true
+		}
+
 		qe := &scriptmodule.QueuedExecution{
 			ExecutionID:   executionID,
 			ScriptRef:     scriptRef,
 			ScriptVersion: scriptVersion,
 			Shell:         shell,
-			Parameters:    params,
-			Metadata: map[string]interface{}{
-				"workflow_run_id": runID,
-				"job_id":          jobID,
-			},
+			Parameters:    resolved,
+			Metadata:      meta,
 		}
 		if err := executionQueue.QueueExecution(device.ID, qe); err != nil {
 			if errors.Is(err, scriptmodule.ErrDuplicateExecution) {
@@ -102,6 +120,10 @@ func SynthesizeScriptRun(
 // JobRecord per device for an inline (ad-hoc) script. Inline content is stored in
 // QueuedExecution.Metadata["inline_script_content"]; actual delivery to the steward
 // is handled by the dispatcher.
+//
+// Runtime params are resolved per-device via ResolveParams. Inline scripts have no
+// declared parameters, so DNA bindings do not apply and runtimeParams are passed
+// through unchanged.
 func SynthesizeCommandRun(
 	ctx context.Context,
 	manager *Manager,
@@ -154,10 +176,17 @@ func SynthesizeCommandRun(
 			return "", fmt.Errorf("synthesize command run: create job for device %s: %w", device.ID, err)
 		}
 
+		// Inline scripts have no declared parameters; nil metadata means ResolveParams
+		// passes runtime params through unchanged.
+		resolved, err := ResolveParams(nil, nil, nil, params, device.DNAAttributes)
+		if err != nil {
+			return "", fmt.Errorf("synthesize command run: resolve params for device %s: %w", device.ID, err)
+		}
+
 		qe := &scriptmodule.QueuedExecution{
 			ExecutionID: executionID,
 			Shell:       shell,
-			Parameters:  params,
+			Parameters:  resolved,
 			Metadata: map[string]interface{}{
 				"workflow_run_id":       runID,
 				"job_id":                jobID,

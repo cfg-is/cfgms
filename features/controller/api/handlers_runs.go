@@ -15,6 +15,7 @@ import (
 	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // postRunScriptRequest is the body of POST /api/v1/runs/script.
@@ -75,6 +76,32 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Look up script metadata for per-steward parameter resolution. Non-fatal if
+	// the repo is unavailable or the script is not found — params resolve from
+	// runtime overrides and defaults only.
+	var scriptMeta *scriptmodule.ScriptMetadata
+	if s.scriptRepo != nil {
+		if vs, err := s.scriptRepo.Get(req.ScriptID, req.ScriptVersion); err == nil && vs != nil {
+			scriptMeta = vs.Metadata
+		}
+	}
+
+	// Look up admin-configured DNA path overrides for parameter resolution.
+	var paramPlatformBindings map[string]string
+	if s.privilegeStore != nil {
+		key := &cfgconfig.ConfigKey{
+			TenantID:  tenantID,
+			Namespace: "script-privilege",
+			Name:      req.ScriptID,
+		}
+		if entry, err := s.privilegeStore.GetConfig(r.Context(), key); err == nil && entry != nil {
+			var privMeta ScriptPrivilegeMetadata
+			if json.Unmarshal(entry.Data, &privMeta) == nil {
+				paramPlatformBindings = privMeta.ParamPlatformBindings
+			}
+		}
+	}
+
 	runID, err := controllerrun.SynthesizeScriptRun(
 		r.Context(),
 		s.runManager,
@@ -87,6 +114,8 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		req.ScriptVersion,
 		scriptmodule.ShellType(req.Shell),
 		req.Params,
+		scriptMeta,
+		paramPlatformBindings,
 	)
 	if err != nil {
 		s.logger.Error("Failed to synthesize script run",

@@ -62,6 +62,7 @@ func TestSynthesizeScriptRun_TwoDevices_CreatesTwoJobs(t *testing.T) {
 		"scripts/deploy.sh", "v1.0.0",
 		scriptmodule.ShellBash,
 		map[string]string{"env": "prod"},
+		nil, nil,
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, runID)
@@ -122,7 +123,7 @@ func TestSynthesizeScriptRun_QueuedExecutionIDs_MatchJobRecords(t *testing.T) {
 		fleet.Filter{},
 		"scripts/check.sh", "",
 		scriptmodule.ShellBash,
-		nil,
+		nil, nil, nil,
 	)
 	require.NoError(t, err)
 
@@ -153,7 +154,7 @@ func TestSynthesizeScriptRun_NoDevices_CreatesEmptyRun(t *testing.T) {
 		fleet.Filter{},
 		"scripts/noop.sh", "",
 		scriptmodule.ShellBash,
-		nil,
+		nil, nil, nil,
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, runID)
@@ -188,7 +189,7 @@ func TestSynthesizeScriptRun_TenantIsolation(t *testing.T) {
 		fleet.Filter{}, // no explicit tenantID
 		"scripts/test.sh", "",
 		scriptmodule.ShellBash,
-		nil,
+		nil, nil, nil,
 	)
 	require.NoError(t, err)
 
@@ -245,6 +246,141 @@ func TestSynthesizeCommandRun_TwoDevices_CreatesTwoJobs(t *testing.T) {
 			"inline content must be in queue metadata for device %s", deviceID)
 		assert.Equal(t, runID, queued[0].Metadata["workflow_run_id"])
 	}
+}
+
+// TestSynthesizeScriptRun_ResolveParamsPerDevice verifies that when scriptMeta is
+// provided, each device's QueuedExecution.Parameters reflects that device's DNA
+// attributes, with runtime overrides still taking priority.
+func TestSynthesizeScriptRun_ResolveParamsPerDevice(t *testing.T) {
+	ctx := context.Background()
+	manager := newTestSynthesisManager(t)
+	queue := newTestExecutionQueue()
+
+	fq := &staticFleetQuery{
+		results: []fleet.StewardResult{
+			{
+				ID:            "device-linux",
+				TenantID:      "tenant-abc",
+				DNAAttributes: map[string]string{"device.os": "linux"},
+			},
+			{
+				ID:            "device-windows",
+				TenantID:      "tenant-abc",
+				DNAAttributes: map[string]string{"device.os": "windows"},
+			},
+		},
+	}
+
+	meta := &scriptmodule.ScriptMetadata{
+		ID:       "script-dna",
+		Name:     "DNA Param Script",
+		Version:  &scriptmodule.Version{Major: 1},
+		Shell:    scriptmodule.ShellBash,
+		Platform: []string{"linux", "windows"},
+		Parameters: []scriptmodule.ScriptParameter{
+			{Name: "os", Type: "string", DNAPath: "device.os"},
+			{Name: "env", Type: "string", Required: true},
+		},
+	}
+
+	_, err := SynthesizeScriptRun(
+		ctx, manager, queue, fq,
+		"tenant-abc", "user-1",
+		fleet.Filter{},
+		"scripts/dna.sh", "",
+		scriptmodule.ShellBash,
+		map[string]string{"env": "prod"},
+		meta, nil,
+	)
+	require.NoError(t, err)
+
+	// Each device must get its own resolved os value from DNA
+	linuxExecs := queue.PeekForDevice("device-linux")
+	require.Len(t, linuxExecs, 1)
+	assert.Equal(t, "linux", linuxExecs[0].Parameters["os"],
+		"device-linux must get os=linux from DNA")
+	assert.Equal(t, "prod", linuxExecs[0].Parameters["env"],
+		"runtime override must still apply")
+
+	windowsExecs := queue.PeekForDevice("device-windows")
+	require.Len(t, windowsExecs, 1)
+	assert.Equal(t, "windows", windowsExecs[0].Parameters["os"],
+		"device-windows must get os=windows from DNA")
+}
+
+// TestSynthesizeScriptRun_IdempotentMetadata verifies that idempotent scripts
+// carry idempotent=true in QueuedExecution.Metadata.
+func TestSynthesizeScriptRun_IdempotentMetadata(t *testing.T) {
+	ctx := context.Background()
+	manager := newTestSynthesisManager(t)
+	queue := newTestExecutionQueue()
+
+	fq := &staticFleetQuery{
+		results: []fleet.StewardResult{
+			{ID: "device-idem", TenantID: "tenant-abc"},
+		},
+	}
+
+	meta := &scriptmodule.ScriptMetadata{
+		ID:         "script-idem",
+		Name:       "Idempotent Script",
+		Version:    &scriptmodule.Version{Major: 1},
+		Shell:      scriptmodule.ShellBash,
+		Platform:   []string{"linux"},
+		Idempotent: true,
+	}
+
+	_, err := SynthesizeScriptRun(
+		ctx, manager, queue, fq,
+		"tenant-abc", "user-1",
+		fleet.Filter{},
+		"scripts/idem.sh", "",
+		scriptmodule.ShellBash,
+		nil, meta, nil,
+	)
+	require.NoError(t, err)
+
+	execs := queue.PeekForDevice("device-idem")
+	require.Len(t, execs, 1)
+	isIdempotent, _ := execs[0].Metadata["idempotent"].(bool)
+	assert.True(t, isIdempotent, "idempotent script must carry idempotent=true in metadata")
+}
+
+// TestSynthesizeScriptRun_MissingRequiredParam_Fails verifies that synthesis fails
+// fast when a required parameter has no value from any source.
+func TestSynthesizeScriptRun_MissingRequiredParam_Fails(t *testing.T) {
+	ctx := context.Background()
+	manager := newTestSynthesisManager(t)
+	queue := newTestExecutionQueue()
+
+	fq := &staticFleetQuery{
+		results: []fleet.StewardResult{
+			{ID: "device-req", TenantID: "tenant-abc"},
+		},
+	}
+
+	meta := &scriptmodule.ScriptMetadata{
+		ID:       "script-req",
+		Name:     "Required Param Script",
+		Version:  &scriptmodule.Version{Major: 1},
+		Shell:    scriptmodule.ShellBash,
+		Platform: []string{"linux"},
+		Parameters: []scriptmodule.ScriptParameter{
+			{Name: "must_have", Type: "string", Required: true},
+		},
+	}
+
+	_, err := SynthesizeScriptRun(
+		ctx, manager, queue, fq,
+		"tenant-abc", "user-1",
+		fleet.Filter{},
+		"scripts/req.sh", "",
+		scriptmodule.ShellBash,
+		nil, meta, nil,
+	)
+	require.Error(t, err, "synthesis must fail when required param has no value")
+	assert.Contains(t, err.Error(), "must_have",
+		"error must identify the missing required parameter")
 }
 
 func TestSynthesizeCommandRun_QueuedExecutionIDs_MatchJobRecords(t *testing.T) {

@@ -419,16 +419,26 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 	}
 
 	// Capture run-tracking metadata BEFORE AcknowledgeCompletion moves the entry
-	// out of the active queue. The run synthesis layer threads workflow_run_id
-	// and job_id through QueuedExecution.Metadata (Issue #1673).
+	// out of the active queue. The run synthesis layer threads workflow_run_id,
+	// job_id, and idempotent flag through QueuedExecution.Metadata (Issue #1673,
+	// Issue #1674).
 	var runID, jobID string
+	var isIdempotent bool
+	var retryCount int
+	var origQE *script.QueuedExecution
 	for _, qe := range d.queue.PeekForDevice(deviceID) {
 		if qe.ExecutionID == executionID && qe.Metadata != nil {
 			runID, _ = qe.Metadata["workflow_run_id"].(string)
 			jobID, _ = qe.Metadata["job_id"].(string)
+			isIdempotent, _ = qe.Metadata["idempotent"].(bool)
+			retryCount, _ = qe.Metadata["retry_count"].(int)
+			origQE = qe
 			break
 		}
 	}
+
+	// Determine whether to retry before acknowledging, so we hold the full QE.
+	shouldRetry := state == script.QueueStateFailed && isIdempotent && retryCount < 1
 
 	if err := d.queue.AcknowledgeCompletion(executionID, deviceID, state, result); err != nil {
 		d.logger.Error("Failed to acknowledge completion",
@@ -442,10 +452,41 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 			"execution_id", executionID,
 			"state", state)
 
-		// Advance run/job tracking so the run can reach a terminal status once
-		// every job finishes (Issue #1673, AC3). Best-effort: a tracking failure
-		// must not stall the per-device dispatch loop.
-		if d.runSink != nil && runID != "" && jobID != "" {
+		if shouldRetry && origQE != nil {
+			// Re-queue the idempotent execution with an incremented retry count.
+			// The run/job tracking record is NOT advanced yet — it will be updated
+			// when the retry completes (success or second failure).
+			retryMeta := make(map[string]interface{}, len(origQE.Metadata))
+			for k, v := range origQE.Metadata {
+				retryMeta[k] = v
+			}
+			retryMeta["retry_count"] = retryCount + 1
+
+			retryQE := &script.QueuedExecution{
+				ExecutionID:   uuid.New().String(),
+				ScriptID:      origQE.ScriptID,
+				ScriptVersion: origQE.ScriptVersion,
+				ScriptRef:     origQE.ScriptRef,
+				Shell:         origQE.Shell,
+				Parameters:    origQE.Parameters,
+				Timeout:       origQE.Timeout,
+				Metadata:      retryMeta,
+			}
+			if err := d.queue.QueueExecution(deviceID, retryQE); err != nil {
+				d.logger.Error("Failed to re-queue idempotent execution after failure",
+					"device_id", logging.SanitizeLogValue(deviceID),
+					"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID),
+					"error", err)
+			} else {
+				d.logger.Info("Re-queued idempotent execution after failure",
+					"device_id", logging.SanitizeLogValue(deviceID),
+					"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID))
+			}
+		}
+
+		// Advance run/job tracking only when not retrying. On retry, the job
+		// remains in-progress until the retry execution reaches a terminal state.
+		if !shouldRetry && d.runSink != nil && runID != "" && jobID != "" {
 			if err := d.runSink.RecordJobCompletion(ctx, runID, jobID, executionID, state == script.QueueStateFailed); err != nil {
 				d.logger.Error("Failed to record job completion in run store",
 					"device_id", logging.SanitizeLogValue(deviceID),
