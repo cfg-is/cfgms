@@ -21,11 +21,18 @@ const identityFileName = "steward-identity.json"
 // A tampered transport address fails the mTLS server-cert check against the
 // stored CA PEM; a tampered steward/tenant ID is overridden by the
 // authenticated-CN-wins contract on the controller side.
+//
+// ServerCertPEM and SigningCertPEM are the controller's signature-verification
+// certificates. They are persisted so the reconnect path can verify signed
+// sync_config commands without HTTP re-registration — without them the steward
+// reconnects but silently rejects every signed command and stops converging.
 type StewardIdentity struct {
 	StewardID        string `json:"steward_id"`
 	TenantID         string `json:"tenant_id"`
 	TransportAddress string `json:"transport_address"`
 	CACertPEM        string `json:"ca_cert_pem"`
+	ServerCertPEM    string `json:"server_cert_pem,omitempty"`
+	SigningCertPEM   string `json:"signing_cert_pem,omitempty"`
 }
 
 // saveIdentity writes id to dir/steward-identity.json with permissions 0600

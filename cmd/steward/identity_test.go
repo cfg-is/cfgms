@@ -19,7 +19,9 @@ func TestSaveAndLoadIdentity_RoundTrip(t *testing.T) {
 		StewardID:        "steward-abc123",
 		TenantID:         "tenant-xyz",
 		TransportAddress: "controller:4433",
-		CACertPEM:        "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
+		CACertPEM:        "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----",
+		ServerCertPEM:    "-----BEGIN CERTIFICATE-----\nfake-server\n-----END CERTIFICATE-----",
+		SigningCertPEM:   "-----BEGIN CERTIFICATE-----\nfake-signing\n-----END CERTIFICATE-----",
 	}
 
 	require.NoError(t, saveIdentity(dir, id))
@@ -31,6 +33,29 @@ func TestSaveAndLoadIdentity_RoundTrip(t *testing.T) {
 	assert.Equal(t, id.TenantID, got.TenantID)
 	assert.Equal(t, id.TransportAddress, got.TransportAddress)
 	assert.Equal(t, id.CACertPEM, got.CACertPEM)
+	assert.Equal(t, id.ServerCertPEM, got.ServerCertPEM)
+	assert.Equal(t, id.SigningCertPEM, got.SigningCertPEM)
+}
+
+// TestSaveAndLoadIdentity_PersistsServerCert proves the controller's server
+// certificate survives a save/load cycle. Without it the reconnect path cannot
+// verify signed sync_config commands and the steward silently stops applying
+// configuration after a restart.
+func TestSaveAndLoadIdentity_PersistsServerCert(t *testing.T) {
+	dir := t.TempDir()
+	id := StewardIdentity{
+		StewardID:        "steward-server-cert",
+		TransportAddress: "controller:4433",
+		ServerCertPEM:    "-----BEGIN CERTIFICATE-----\nserver-only\n-----END CERTIFICATE-----",
+	}
+
+	require.NoError(t, saveIdentity(dir, id))
+
+	got, err := loadIdentity(dir)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, id.ServerCertPEM, got.ServerCertPEM)
+	assert.Empty(t, got.SigningCertPEM, "signing cert is optional and was not set")
 }
 
 func TestLoadIdentity_MissingFile_ReturnsNilNoError(t *testing.T) {

@@ -570,6 +570,8 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		TenantID:         regResp.TenantID,
 		TransportAddress: regResp.TransportAddress,
 		CACertPEM:        regResp.CACert,
+		ServerCertPEM:    regResp.ServerCert,
+		SigningCertPEM:   regResp.SigningCert,
 	}
 	if saveErr := saveIdentity(certStoreDir, identity); saveErr != nil {
 		logger.Warn("Failed to persist steward identity; next restart will re-register", "error", saveErr)
@@ -649,6 +651,14 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		return nil, nil // first run; no stored identity
 	}
 
+	// The reconnect path must be able to verify signed sync_config commands.
+	// Without a controller server/signing cert the steward would reconnect but
+	// silently reject every signed command, so treat an identity record that
+	// lacks both as unusable and fall back to HTTP re-registration.
+	if id.ServerCertPEM == "" && id.SigningCertPEM == "" {
+		return nil, fmt.Errorf("stored identity missing controller server/signing certificate; cannot verify signed commands")
+	}
+
 	// Load the cert manager from the existing cert store.
 	certMgr, err := cert.NewManager(&cert.ManagerConfig{
 		StoragePath:    certStoreDir,
@@ -691,6 +701,8 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		ControllerURL:               id.TransportAddress,
 		RegistrationToken:           token,
 		CACertPEM:                   id.CACertPEM,
+		ServerCertPEM:               id.ServerCertPEM,
+		SigningCertPEM:              id.SigningCertPEM,
 		CertManager:                 certMgr,
 		SecretStore:                 secretStore,
 		SignedCommandReplayWindow:   commandReplayWindow,
