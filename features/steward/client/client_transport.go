@@ -518,7 +518,7 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		// Thread drift mode from the controller-delivered cfg into the executor.
 		// This is the only authorised source of DriftMode — local steward.cfg
 		// cannot set it (the local-file loading path clears the field).
-		executor.SetDriftMode(goConfig.Steward.DriftMode)
+		executor.SetDriftMode(applyDriftModeDefault(goConfig.Steward.DriftMode))
 
 		// Marshal to YAML for executor
 		configYAML, err := yaml.Marshal(goConfig)
@@ -872,6 +872,16 @@ func (c *TransportClient) ValidateConfiguration(
 	version string,
 ) ([]string, error) {
 	return nil, fmt.Errorf("configuration validation not yet supported via control plane provider")
+}
+
+// applyDriftModeDefault returns DriftModeApply when mode is empty.
+// The proto does not carry drift_mode, so FromProto always returns "".
+// Apply is the fleet default; this makes the intent explicit and testable.
+func applyDriftModeDefault(mode stewardconfig.DriftMode) stewardconfig.DriftMode {
+	if mode == "" {
+		return stewardconfig.DriftModeApply
+	}
+	return mode
 }
 
 // StartConvergenceLoop starts a background goroutine that re-converges against

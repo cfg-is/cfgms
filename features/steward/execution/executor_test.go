@@ -472,3 +472,54 @@ func TestExecutor_ApplyConfiguration_PermissionsRejectedOnWindows(t *testing.T) 
 	}
 	assert.True(t, found, fmt.Sprintf("expected error about unsupported permissions, got: %v", errList))
 }
+
+// TestApplyConfiguration_ApplyMode_CorrectsDriftAndReturnsOK verifies that an executor
+// running in DriftModeApply (as set by client_transport.applyDriftModeDefault when the
+// controller delivers a config) detects drift and calls Set() to correct it.
+// The defaulting itself is tested in features/steward/client/drift_mode_default_test.go.
+func TestApplyConfiguration_ApplyMode_CorrectsDriftAndReturnsOK(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions not applicable on Windows; no Windows equivalent for this test")
+	}
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "managed-file")
+
+	// Inject drift: file exists with wrong content, simulating a post-convergence drift event.
+	require.NoError(t, os.WriteFile(filePath, []byte("drift-injected-content\n"), 0644))
+
+	logger := logging.ForModule("executor_test")
+	// DriftModeApply is what client_transport.applyDriftModeDefault returns for all
+	// controller-delivered configs (proto does not carry drift_mode; default is apply).
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:    logger,
+		DriftMode: stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, stewardconfig.DriftModeApply, execution.ExecutorDriftMode(executor),
+		"executor must be in DriftModeApply (the fleet default set by client_transport)")
+
+	configJSON := `{
+  "steward": {"id": "test-steward", "mode": "controller"},
+  "resources": [
+    {
+      "name": "managed-file",
+      "module": "file",
+      "config": ` + testFileConfig(filePath, "fleet-managed-content\\n") + `
+    }
+  ]
+}`
+
+	ctx := context.Background()
+	report, applyErr := executor.ApplyConfiguration(ctx, []byte(configJSON), "v1")
+	require.NoError(t, applyErr)
+	require.NotNil(t, report)
+	assert.Equal(t, "OK", report.Status,
+		"apply mode must correct drift and return OK status")
+
+	// Verify drift was corrected — file must contain the desired content.
+	got, readErr := os.ReadFile(filePath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "fleet-managed-content\n", string(got),
+		"drifted managed resource must be re-applied to desired state in apply mode")
+}
