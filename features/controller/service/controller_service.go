@@ -102,36 +102,6 @@ func (s *ControllerService) LoadFromStorage(ctx context.Context) error {
 	return nil
 }
 
-// Authenticate handles authentication requests
-func (s *ControllerService) Authenticate(ctx context.Context, creds *common.Credentials) (*common.Token, error) {
-	s.logger.Info("Authentication request received",
-		"tenant_id", creds.TenantId,
-		"client_id", creds.ClientId,
-		"cert_subject", creds.Certificate)
-
-	// Validate tenant ID
-	tenantID := creds.TenantId
-	if tenantID == "" {
-		tenantID = "default" // Default to "default" tenant if not specified
-	}
-
-	// Deferred: tracked in #1440 — validate client mTLS certificate and tenant access rights
-	token, err := s.generateToken()
-	if err != nil {
-		s.logger.Error("Failed to generate authentication token", "error", err)
-		return nil, fmt.Errorf("authentication failed: %w", err)
-	}
-
-	s.logger.Info("Authentication successful",
-		"tenant_id", tenantID,
-		"client_id", creds.ClientId,
-		"token", token[:16]+"...")
-	return &common.Token{
-		AccessToken: token,
-		ExpiresAt:   time.Now().Add(24 * time.Hour).Unix(),
-	}, nil
-}
-
 // AcceptRegistration handles steward registration requests
 func (s *ControllerService) AcceptRegistration(ctx context.Context, req *controller.RegisterRequest) (*controller.RegisterResponse, error) {
 	// Extract tenant information from gRPC metadata
