@@ -236,7 +236,7 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 
 // buildInstallCommand builds the `cfgms-steward install` subcommand.
 func buildInstallCommand() *cobra.Command {
-	var regToken string
+	var regToken, caCertPath, fingerprint string
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -250,14 +250,20 @@ Platforms:
   macOS    /usr/local/bin/cfgms-steward               (launchd)
 
 Requires elevated privileges (Administrator on Windows, root on Linux/macOS).
-Install is idempotent: running it again updates the binary and restarts the service.`,
+Install is idempotent: running it again updates the binary and restarts the service.
+
+For controllers with a private CA, pass --ca-cert and --fingerprint to perform
+fingerprint-verified trust-on-first-use (TOFU) of the controller CA certificate.
+The fingerprint is printed by the controller during --init.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall(regToken)
+			return runInstall(regToken, caCertPath, fingerprint)
 		},
 	}
 
 	cmd.Flags().StringVar(&regToken, "regtoken", "", "Registration token (required)")
 	_ = cmd.MarkFlagRequired("regtoken")
+	cmd.Flags().StringVar(&caCertPath, "ca-cert", "", "Path to controller CA certificate PEM file (private-CA deployments)")
+	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "Expected SHA-256 fingerprint of the CA certificate (hex, from controller --init output)")
 
 	return cmd
 }
@@ -296,10 +302,19 @@ func buildStatusCommand() *cobra.Command {
 }
 
 // runInstall performs the install operation for the current platform.
-func runInstall(regToken string) error {
+func runInstall(regToken, caCertPath, fingerprint string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to determine executable path: %w", err)
+	}
+
+	var caCertPEM string
+	if caCertPath != "" {
+		data, readErr := os.ReadFile(caCertPath)
+		if readErr != nil {
+			return fmt.Errorf("failed to read CA cert file %s: %w", caCertPath, readErr)
+		}
+		caCertPEM = string(data)
 	}
 
 	mgr := service.New(exe)
@@ -310,7 +325,7 @@ func runInstall(regToken string) error {
 			"  Linux/macOS: re-run with sudo")
 	}
 
-	return mgr.Install(regToken)
+	return mgr.Install(regToken, caCertPEM, fingerprint)
 }
 
 // runUninstall performs the uninstall operation for the current platform.
@@ -414,7 +429,7 @@ func runInteractive() error {
 
 	switch choice {
 	case "1":
-		return runInstall(token)
+		return runInstall(token, "", "")
 	case "2":
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

@@ -74,9 +74,28 @@ func TestRunInstallRequiresElevation(t *testing.T) {
 	if isElevated() {
 		t.Skip("test requires non-elevated process — running as root")
 	}
-	err := runInstall("tok_test_abc123")
+	err := runInstall("tok_test_abc123", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "elevated privileges")
+}
+
+func TestRunInstallCACertFileNotFound(t *testing.T) {
+	// Verify runInstall returns an error that includes the filename when --ca-cert
+	// names a path that does not exist.
+	missing := filepath.Join(t.TempDir(), "nonexistent-ca.crt")
+	err := runInstall("tok_test_abc123", missing, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nonexistent-ca.crt")
+}
+
+func TestBuildInstallCommandFlags(t *testing.T) {
+	cmd := buildInstallCommand()
+	require.NotNil(t, cmd)
+
+	for _, name := range []string{"regtoken", "ca-cert", "fingerprint"} {
+		flag := cmd.Flags().Lookup(name)
+		assert.NotNil(t, flag, "expected flag %q to be registered on install subcommand", name)
+	}
 }
 
 func TestRunUninstallRequiresElevation(t *testing.T) {

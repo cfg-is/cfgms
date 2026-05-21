@@ -18,7 +18,7 @@ type stubManager struct{}
 
 func (m *stubManager) IsElevated() bool { return false }
 
-func (m *stubManager) Install(token string) error {
+func (m *stubManager) Install(token, caCertPEM, expectedFingerprint string) error {
 	return fmt.Errorf("service install is not supported on %s", runtime.GOOS)
 }
 

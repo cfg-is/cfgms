@@ -17,6 +17,43 @@ import (
 
 var _ Manager = New("")
 
+// TestLinuxInstallFingerprintMismatch verifies that a mismatched CA fingerprint causes
+// Install to return an error before writing the cert or registering the service.
+// Runs without root because fingerprint verification is checked before the elevation gate.
+func TestLinuxInstallFingerprintMismatch(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CFGMS_INSTALL_PREFIX", dir)
+
+	certPEM, _ := generateTestCACert(t)
+	m := New("/usr/bin/cfgms-steward")
+	err := m.Install("tok_test123", certPEM, "deadbeefdeadbeefdeadbeef")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fingerprint mismatch")
+
+	// Cert must NOT be written on fingerprint mismatch.
+	certPath := filepath.Join(dir, "etc", "cfgms", "controller-ca.crt")
+	_, statErr := os.Stat(certPath)
+	assert.True(t, os.IsNotExist(statErr), "cert file must not exist after fingerprint mismatch")
+}
+
+// TestLinuxInstallCACertWritten verifies that the CA cert is written to the prefixed
+// platform path with mode 0644 when a correct fingerprint is provided.
+func TestLinuxInstallCACertWritten(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, fingerprint := generateTestCACert(t)
+
+	// Fingerprint verification must pass for the cert we generated.
+	require.NoError(t, verifyCACertFingerprint(certPEM, fingerprint))
+
+	// Write cert using the same logic Install uses, with an explicit prefix path.
+	destPath := filepath.Join(dir, "etc", "cfgms", "controller-ca.crt")
+	require.NoError(t, writeCACert(certPEM, destPath))
+
+	info, err := os.Stat(destPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0644), info.Mode().Perm(), "CA cert must be written with mode 0644")
+}
+
 func TestLinuxManagerIsElevated(t *testing.T) {
 	m := New("/usr/bin/cfgms-steward")
 	// In most CI environments the test process is not root.
@@ -30,7 +67,7 @@ func TestLinuxManagerInstallRequiresElevation(t *testing.T) {
 		t.Skip("skipping elevation check — running as root")
 	}
 	m := New("/usr/bin/cfgms-steward")
-	err := m.Install("tok_test123")
+	err := m.Install("tok_test123", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "root")
 }

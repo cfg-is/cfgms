@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -16,7 +17,17 @@ const (
 	darwinInstallPath = "/usr/local/bin/cfgms-steward"
 	darwinPlistPath   = "/Library/LaunchDaemons/com.cfgms.steward.plist"
 	darwinServiceName = "com.cfgms.steward"
+	darwinCACertPath  = "/etc/cfgms/controller-ca.crt"
 )
+
+// platformCACertPath returns the path where the CA cert is written, respecting
+// CFGMS_INSTALL_PREFIX for test isolation.
+func platformCACertPath() string {
+	if prefix := os.Getenv("CFGMS_INSTALL_PREFIX"); prefix != "" {
+		return filepath.Join(prefix, darwinCACertPath)
+	}
+	return darwinCACertPath
+}
 
 func newManager(binaryPath string) Manager {
 	return &darwinManager{binaryPath: binaryPath}
@@ -33,9 +44,21 @@ func (m *darwinManager) IsElevated() bool {
 // Install copies the binary to /usr/local/bin, writes the launchd plist, and
 // loads it via launchctl. If already installed, the existing daemon is unloaded
 // first, the binary replaced, then reloaded.
-func (m *darwinManager) Install(token string) error {
+//
+// If caCertPEM is non-empty, the CA cert is written to the platform-standard
+// path before the daemon is loaded. When expectedFingerprint is also non-empty,
+// fingerprint verification runs first — a mismatch returns an error without any
+// disk writes or service changes.
+func (m *darwinManager) Install(token, caCertPEM, expectedFingerprint string) error {
 	if err := validateToken(token); err != nil {
 		return err
+	}
+	// Verify fingerprint before any privileged operations so the caller gets a
+	// clear error without needing to undo partial changes.
+	if caCertPEM != "" && expectedFingerprint != "" {
+		if err := verifyCACertFingerprint(caCertPEM, expectedFingerprint); err != nil {
+			return err
+		}
 	}
 	if !m.IsElevated() {
 		return fmt.Errorf("install requires root privileges: re-run with sudo")
@@ -50,6 +73,14 @@ func (m *darwinManager) Install(token string) error {
 	fmt.Printf("Installing to %s...\n", darwinInstallPath)
 	if err := copyBinary(m.binaryPath, darwinInstallPath); err != nil {
 		return fmt.Errorf("failed to copy binary: %w", err)
+	}
+
+	// Write CA cert before loading the daemon so the service finds it on first start.
+	if caCertPEM != "" {
+		fmt.Printf("Writing CA cert to %s...\n", platformCACertPath())
+		if err := writeCACert(caCertPEM, platformCACertPath()); err != nil {
+			return fmt.Errorf("failed to write CA cert: %w", err)
+		}
 	}
 
 	fmt.Println("Writing launchd plist...")
