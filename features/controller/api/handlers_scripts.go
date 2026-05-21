@@ -15,8 +15,8 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
-	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // ScriptPrivilegeMetadata holds controller-side privilege configuration for a library script.
@@ -62,31 +62,6 @@ func (s *Server) storePrivilegeMetadata(ctx context.Context, tenantID, scriptID 
 	}
 
 	return s.privilegeStore.StoreConfig(ctx, entry)
-}
-
-// loadPrivilegeMetadata reads privilege metadata from the config store.
-func (s *Server) loadPrivilegeMetadata(ctx context.Context, tenantID, scriptID string) (*ScriptPrivilegeMetadata, error) {
-	if s.privilegeStore == nil {
-		return nil, fmt.Errorf("privilege store not configured")
-	}
-
-	key := &cfgconfig.ConfigKey{
-		TenantID:  tenantID,
-		Namespace: "script-privilege",
-		Name:      scriptID,
-	}
-
-	entry, err := s.privilegeStore.GetConfig(ctx, key)
-	if err != nil {
-		return nil, fmt.Errorf("privilege metadata not found: %w", err)
-	}
-
-	var meta ScriptPrivilegeMetadata
-	if err := json.Unmarshal(entry.Data, &meta); err != nil {
-		return nil, fmt.Errorf("failed to parse privilege metadata: %w", err)
-	}
-
-	return &meta, nil
 }
 
 // handleListScripts handles GET /api/v1/scripts.

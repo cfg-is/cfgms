@@ -5,6 +5,7 @@ package script
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -23,6 +24,7 @@ type ExecutionQueue struct {
 	dispatchTimeout time.Duration    // Maximum time a dispatched execution may wait before re-queue
 	controllerURL   string           // Controller external URL for script callbacks
 	stopCh          chan struct{}
+	stopOnce        sync.Once
 }
 
 // QueuedExecution represents a script execution waiting for a device to come online.
@@ -453,9 +455,9 @@ func (q *ExecutionQueue) performMaintenance() {
 	_, _ = q.store.RequeueStale(q.dispatchTimeout) //nolint:errcheck // best-effort background maintenance; entries stay safe on error
 }
 
-// Stop halts the background maintenance goroutine.
+// Stop halts the background maintenance goroutine. Safe to call more than once.
 func (q *ExecutionQueue) Stop() {
-	close(q.stopCh)
+	q.stopOnce.Do(func() { close(q.stopCh) })
 }
 
 // entryToQueued converts a QueueEntry to a QueuedExecution for API compatibility.
