@@ -227,13 +227,25 @@ When connected to a controller, the steward also reports upstream:
 
 | Report | Timing | Content |
 |--------|--------|---------|
-| **Heartbeat** | Periodic (configurable interval) | Health status, uptime |
+| **Heartbeat** | Periodic (20 s base ± up to 10 s uniform jitter per tick; effective interval always in [20 s, 30 s)) | Health status, uptime |
 | **Convergence result** | After each convergence run | Per-resource compliance status, changes made, errors |
 | **DNA hash** | With each heartbeat | Hash of current DNA (control plane) |
 | **DNA delta** | As changes detected | Changed attributes only (control plane) |
 | **DNA full sync** | On hash mismatch or initial registration | Complete DNA snapshot (data plane) |
 | **Performance metrics** | Periodic (e.g., hourly), on-demand, or real-time stream | CPU, memory, disk, network, process metrics |
 | **Events** | As they occur | Drift detected, module errors, threshold breaches |
+
+### Heartbeat Timing
+
+Stewards send heartbeats at a base interval of **20 seconds**, with **uniform per-tick jitter in [0, 10 s)**. The effective per-tick interval is always in **[20 s, 30 s)**.
+
+**Why 20 s base with jitter (epic #1664):**
+
+- **NGFW UDP idle timeout survival**: Most Next-Generation Firewalls and NAT devices expire UDP pinholes after 30 s of silence. With a maximum effective interval of 30 s (exclusive), and QUIC keepalives at 20 s, at least one keepalive or heartbeat always fires before the 30 s timeout — keeping the QUIC connection alive through NGFW/NAT devices without requiring shorter (more expensive) keepalives.
+- **Herd prevention**: Jitter prevents 50 k stewards from synchronising their heartbeats, which would create CPU spikes on the controller. Uniform jitter distributes heartbeat load evenly across the 10 s window.
+- **Controller offline threshold**: The controller marks a steward offline after **60 s of silence** (3 missed heartbeats at 20 s base). The 3-miss threshold provides tolerance for transient network blips while detecting genuinely lost stewards within 60–90 s.
+
+The QUIC `KeepAlivePeriod` is set to **20 s** (aligned with the heartbeat base) so the QUIC layer and application layer cooperate — a QUIC PING fires at 20 s regardless of jitter, ensuring the UDP pinhole never reaches 30 s idle even when the heartbeat fires at its maximum interval.
 
 ### Offline Queueing
 

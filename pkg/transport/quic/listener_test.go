@@ -26,8 +26,8 @@ func TestDefaultQuicConfig_TunedValues(t *testing.T) {
 	if cfg.MaxIdleTimeout != 90*time.Second {
 		t.Errorf("MaxIdleTimeout: want 90s, got %s (see Story #504 keepalive rationale)", cfg.MaxIdleTimeout)
 	}
-	if cfg.KeepAlivePeriod != 25*time.Second {
-		t.Errorf("KeepAlivePeriod: want 25s, got %s (see Story #504 keepalive rationale)", cfg.KeepAlivePeriod)
+	if cfg.KeepAlivePeriod != 20*time.Second {
+		t.Errorf("KeepAlivePeriod: want 20s, got %s (see epic #1664 NGFW alignment rationale)", cfg.KeepAlivePeriod)
 	}
 	if cfg.HandshakeIdleTimeout != 30*time.Second {
 		t.Errorf("HandshakeIdleTimeout: want 30s, got %s (quic-go default 5s is too short for macOS CI under load)", cfg.HandshakeIdleTimeout)

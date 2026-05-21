@@ -15,6 +15,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -100,6 +101,9 @@ type TransportClient struct {
 	// Heartbeat
 	heartbeatInterval time.Duration
 	heartbeatStop     chan struct{}
+	// rng is the per-instance RNG for per-tick heartbeat jitter (epic #1664).
+	// Only accessed from the startHeartbeat goroutine; no mutex required.
+	rng *rand.Rand
 
 	// offlineQueue persists reports locally when the controller is unreachable.
 	// Issue #419: drained in order after a successful reconnect.
@@ -192,8 +196,11 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 
 	heartbeatInterval := cfg.HeartbeatInterval
 	if heartbeatInterval == 0 {
-		heartbeatInterval = 30 * time.Second
+		heartbeatInterval = 20 * time.Second // epic #1664: 20s base + [0,10s) jitter
 	}
+
+	// Per-instance RNG for per-tick heartbeat jitter (epic #1664).
+	rng := rand.New(rand.NewSource(time.Now().UnixNano())) //#nosec G404 -- non-crypto jitter
 
 	// Initialize offline queue for durable report persistence (Issue #419).
 	// Pass the SecretStore so the encryption key is persisted across restarts (Issue #920).
@@ -210,6 +217,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 
 	c := &TransportClient{
 		heartbeatInterval:     heartbeatInterval,
+		rng:                   rng,
 		heartbeatStop:         make(chan struct{}),
 		convergenceStop:       make(chan struct{}),
 		convergeInterval:      30 * time.Minute,
@@ -1236,17 +1244,33 @@ func (c *TransportClient) drainOfflineQueue(ctx context.Context) {
 }
 
 // startHeartbeat starts the periodic heartbeat goroutine.
-// After each successful heartbeat, any events queued during a transient
-// offline period are drained so the controller receives them promptly (Issue #419).
+// Each tick fires after base + uniform jitter in [0, 10 s) so the effective
+// interval is always in [20 s, 30 s). Jitter keeps 50k stewards from
+// synchronising their heartbeats and spiking controller CPU (epic #1664).
+// After each successful heartbeat, queued offline events are drained so the
+// controller receives them promptly (Issue #419).
 func (c *TransportClient) startHeartbeat() {
-	ticker := time.NewTicker(c.heartbeatInterval)
-	defer ticker.Stop()
+	const (
+		jitterMax = 10 * time.Second
+	)
+
+	rng := c.rng
+	if rng == nil {
+		rng = rand.New(rand.NewSource(time.Now().UnixNano())) //#nosec G404 -- non-crypto jitter
+	}
+
+	nextInterval := func() time.Duration {
+		return c.heartbeatInterval + time.Duration(rng.Int63n(int64(jitterMax)))
+	}
+
+	timer := time.NewTimer(nextInterval())
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-c.heartbeatStop:
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := c.SendHeartbeat(ctx, "healthy", nil); err != nil {
 				c.logger.Warn("Failed to send heartbeat", "error", err)
@@ -1256,6 +1280,7 @@ func (c *TransportClient) startHeartbeat() {
 				c.drainOfflineQueue(ctx)
 			}
 			cancel()
+			timer.Reset(nextInterval())
 		}
 	}
 }

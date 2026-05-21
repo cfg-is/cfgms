@@ -72,8 +72,12 @@ type Service struct {
 	stewards map[string]*StewardStatus
 
 	// Configuration
-	heartbeatTimeout time.Duration // Time before marking steward as unhealthy
-	checkInterval    time.Duration // How often to check for timeouts
+	// HeartbeatTimeout is the HA-failover detection threshold (Story #198, <15 s).
+	// StewardOfflineTimeout is the steward-liveness threshold (epic #1664, 60 s).
+	// Do not merge these fields.
+	heartbeatTimeout      time.Duration // HA-failover detection (Story #198, 15 s)
+	stewardOfflineTimeout time.Duration // Steward-liveness detection (epic #1664, 60 s)
+	checkInterval         time.Duration // How often to check for timeouts
 
 	// Callbacks
 	onStatusChange      StatusChangeCallback
@@ -91,9 +95,18 @@ type Config struct {
 	// ControlPlane is the control plane provider for heartbeat subscriptions (Story #363)
 	ControlPlane controlplaneInterfaces.ControlPlaneProvider
 
-	// HeartbeatTimeout is how long to wait before marking a steward unhealthy
-	// Default: 15 seconds (Story #198 requirement)
+	// HeartbeatTimeout is the HA-failover detection threshold (Story #198, <15 s).
+	// StewardOfflineTimeout is the steward-liveness threshold (epic #1664, 60 s).
+	// Do not merge these fields.
+
+	// HeartbeatTimeout is the HA-failover detection threshold.
+	// Default: 15 seconds (Story #198 requirement).
 	HeartbeatTimeout time.Duration
+
+	// StewardOfflineTimeout is the steward-liveness detection threshold used by
+	// checkStaleHeartbeats to mark a steward offline after extended silence.
+	// Default: 60 seconds (epic #1664 — 3 missed heartbeats at 20 s interval).
+	StewardOfflineTimeout time.Duration
 
 	// CheckInterval is how often to check for stale heartbeats
 	// Default: 5 seconds
@@ -129,6 +142,11 @@ func New(cfg *Config) (*Service, error) {
 		heartbeatTimeout = 15 * time.Second // Story #198 requirement: <15s failover detection
 	}
 
+	stewardOfflineTimeout := cfg.StewardOfflineTimeout
+	if stewardOfflineTimeout == 0 {
+		stewardOfflineTimeout = 60 * time.Second // epic #1664: 3 missed heartbeats at 20s interval
+	}
+
 	checkInterval := cfg.CheckInterval
 	if checkInterval == 0 {
 		checkInterval = 5 * time.Second
@@ -137,23 +155,25 @@ func New(cfg *Config) (*Service, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Service{
-		controlPlane:        cfg.ControlPlane,
-		stewards:            make(map[string]*StewardStatus),
-		heartbeatTimeout:    heartbeatTimeout,
-		checkInterval:       checkInterval,
-		onStatusChange:      cfg.OnStatusChange,
-		onDNAHashMismatch:   cfg.OnDNAHashMismatch,
-		onHeartbeatReceived: cfg.OnHeartbeatReceived,
-		ctx:                 ctx,
-		cancel:              cancel,
-		logger:              cfg.Logger,
+		controlPlane:          cfg.ControlPlane,
+		stewards:              make(map[string]*StewardStatus),
+		heartbeatTimeout:      heartbeatTimeout,
+		stewardOfflineTimeout: stewardOfflineTimeout,
+		checkInterval:         checkInterval,
+		onStatusChange:        cfg.OnStatusChange,
+		onDNAHashMismatch:     cfg.OnDNAHashMismatch,
+		onHeartbeatReceived:   cfg.OnHeartbeatReceived,
+		ctx:                   ctx,
+		cancel:                cancel,
+		logger:                cfg.Logger,
 	}, nil
 }
 
 // Start begins monitoring heartbeats.
 func (s *Service) Start(ctx context.Context) error {
 	s.logger.Info("Starting heartbeat monitoring service",
-		"timeout", s.heartbeatTimeout,
+		"ha_failover_timeout", s.heartbeatTimeout,
+		"steward_offline_timeout", s.stewardOfflineTimeout,
 		"check_interval", s.checkInterval)
 
 	// Subscribe to heartbeats via control plane provider (Story #363)
@@ -282,7 +302,7 @@ func (s *Service) checkStaleHeartbeats() {
 	for stewardID, status := range s.stewards {
 		if status.Healthy {
 			timeSinceLastBeat := now.Sub(status.LastHeartbeat)
-			if timeSinceLastBeat > s.heartbeatTimeout {
+			if timeSinceLastBeat > s.stewardOfflineTimeout {
 				// Mark as unhealthy
 				status.Healthy = false
 				status.MissedBeats++
