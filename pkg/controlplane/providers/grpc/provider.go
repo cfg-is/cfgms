@@ -102,6 +102,11 @@ type Provider struct {
 	backoffOverride    *backoff
 	quicConfigOverride *quicgo.Config
 
+	// approvalChecker gates reconnecting stewards on the ControlChannel path.
+	// Nil means "always admit" (default). Injected by WithApprovalChecker for
+	// the approval-gate epic (#1690–#1698).
+	approvalChecker StewardApprovalChecker
+
 	// Subscription handlers (client mode)
 	commandHandler interfaces.CommandHandler
 
@@ -1069,6 +1074,22 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	stewardID, err := extractStewardIDFromPeer(stream.Context())
 	if err != nil {
 		return status.Errorf(codes.Unauthenticated, "failed to extract steward identity: %v", err)
+	}
+
+	// Approval gate hook (Issue #1719): checked before admitting the stream.
+	// Fail-open on checker error to match the HTTP registration hook policy and
+	// avoid taking endpoints offline during transient controller-side failures.
+	// The #1690–#1698 epic wires in the real implementation via WithApprovalChecker.
+	if s.provider.approvalChecker != nil {
+		admitted, checkErr := s.provider.approvalChecker.IsApproved(stream.Context(), stewardID)
+		if checkErr != nil {
+			s.provider.logger.Error("steward approval check error, admitting (fail-open)",
+				"steward_id", logging.SanitizeLogValue(stewardID), "error", checkErr)
+		} else if !admitted {
+			s.provider.logger.Warn("steward ControlChannel rejected by approval checker",
+				"steward_id", logging.SanitizeLogValue(stewardID))
+			return status.Error(codes.PermissionDenied, "steward reconnect not approved")
+		}
 	}
 
 	// Create a stream sender adapter for the registry

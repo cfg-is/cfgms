@@ -151,8 +151,6 @@ func (s *FleetTestSuite) testControllerRestart(t *testing.T, configPath string) 
 func (s *FleetTestSuite) testStewardRestart(t *testing.T, configPath string) {
 	t.Helper()
 
-	t.Skip("steward cert reuse on restart not yet implemented — fleet-resilience epic #1714")
-
 	container := "fleet-steward-1"
 	oldID := s.stewardIDs[container]
 

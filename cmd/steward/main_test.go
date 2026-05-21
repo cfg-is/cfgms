@@ -179,6 +179,46 @@ func TestResolveRegistrationCACertPath(t *testing.T) {
 	})
 }
 
+func TestTryReconnectWithStoredIdentity_NoStoredIdentity_FallsThrough(t *testing.T) {
+	// No identity file on disk — first run. The function returns (nil, nil) so
+	// the caller falls through to HTTP registration without logging an error.
+	dir := t.TempDir()
+	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", logging.NewLogger("error"))
+	assert.Nil(t, tc)
+	assert.NoError(t, err)
+}
+
+func TestTryReconnectWithStoredIdentity_MissingServerCert_RejectsAndFallsBack(t *testing.T) {
+	// An identity record that lacks both ServerCertPEM and SigningCertPEM cannot
+	// verify signed sync_config commands. The reconnect must reject it with an
+	// explicit error so the caller falls back to HTTP re-registration rather than
+	// reconnecting into a state where every signed command is silently dropped.
+	dir := t.TempDir()
+	require.NoError(t, saveIdentity(dir, StewardIdentity{
+		StewardID:        "steward-no-cert",
+		TenantID:         "tenant-1",
+		TransportAddress: "controller:4433",
+		CACertPEM:        "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----",
+	}))
+
+	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", logging.NewLogger("error"))
+	assert.Nil(t, tc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing controller server/signing certificate")
+}
+
+func TestTryReconnectWithStoredIdentity_CorruptIdentity_FallsThrough(t *testing.T) {
+	// A corrupt identity file is not fatal — loadIdentity returns an error, which
+	// the reconnect treats as "no usable identity" and returns (nil, nil) so the
+	// caller falls through to HTTP registration.
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, identityFileName), []byte("{not json"), 0600))
+
+	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", logging.NewLogger("error"))
+	assert.Nil(t, tc)
+	assert.NoError(t, err)
+}
+
 func TestControllerURLOrUnknown(t *testing.T) {
 	// When ControllerURL is empty (default in test builds).
 	original := ControllerURL
