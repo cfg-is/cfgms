@@ -378,7 +378,7 @@ func (p *Provider) dialAndOpenStream() error {
 	dialer := quictransport.NewDialer(p.tlsConfig, p.quicConfig())
 
 	conn, err := grpc.NewClient(
-		addr,
+		quictransport.DialTarget(addr),
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(quictransport.TransportCredentials()),
 	)

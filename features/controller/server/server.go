@@ -7,8 +7,10 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -1367,6 +1369,56 @@ func initializeHAManager(logger logging.Logger, storageManager *interfaces.Stora
 	return haManager, nil
 }
 
+// grpcControlPlaneServerSANs returns the DNS names and IP addresses to embed in
+// the generated gRPC control-plane server certificate.
+//
+// It starts from the transport defaults (localhost / loopback) and merges in
+// any operator-configured server SANs (certificate.server.dns_names and
+// certificate.server.ip_addresses) plus CFGMS_EXTERNAL_HOSTNAME. Without this,
+// a steward dialing the controller by its external hostname fails mTLS
+// verification because the generated certificate omits that name. The
+// CFGMS_EXTERNAL_HOSTNAME value is classified as an IP SAN when it parses as an
+// IP literal and as a DNS SAN otherwise. Duplicates are removed and ordering is
+// deterministic.
+func grpcControlPlaneServerSANs(cfg *config.Config) (dnsNames, ipAddresses []string) {
+	dnsNames = []string{"localhost", "cfgms-grpc-server", "controller-standalone"}
+	ipAddresses = []string{"127.0.0.1", "0.0.0.0"}
+
+	if cfg != nil && cfg.Certificate != nil && cfg.Certificate.Server != nil {
+		dnsNames = append(dnsNames, cfg.Certificate.Server.DNSNames...)
+		ipAddresses = append(ipAddresses, cfg.Certificate.Server.IPAddresses...)
+	}
+
+	if hostname := strings.TrimSpace(os.Getenv("CFGMS_EXTERNAL_HOSTNAME")); hostname != "" {
+		if net.ParseIP(hostname) != nil {
+			ipAddresses = append(ipAddresses, hostname)
+		} else {
+			dnsNames = append(dnsNames, hostname)
+		}
+	}
+
+	return dedupeSANs(dnsNames), dedupeSANs(ipAddresses)
+}
+
+// dedupeSANs returns the input slice with empty strings dropped and duplicates
+// removed, preserving first-seen order.
+func dedupeSANs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
 // buildGRPCControlPlaneTLSConfig creates TLS configuration for the gRPC control plane provider.
 //
 // Uses the certificate manager to load or generate the server certificate and CA, then creates
@@ -1392,13 +1444,17 @@ func buildGRPCControlPlaneTLSConfig(cfg *config.Config, certManager *cert.Manage
 	}
 
 	if err != nil || len(serverCerts) == 0 {
-		// First boot: generate server certificate for gRPC control plane
+		// First boot: generate server certificate for gRPC control plane.
+		// SANs merge the transport defaults with any operator-configured server
+		// SANs and CFGMS_EXTERNAL_HOSTNAME so a steward connecting by the
+		// controller's external hostname can verify the certificate.
 		logger.Info("Generating gRPC control plane server certificate")
+		dnsNames, ipAddresses := grpcControlPlaneServerSANs(cfg)
 		certCfg := &cert.ServerCertConfig{
 			CommonName:   "cfgms-grpc-server",
 			Organization: "CFGMS",
-			DNSNames:     []string{"localhost", "cfgms-grpc-server", "controller-standalone"},
-			IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
+			DNSNames:     dnsNames,
+			IPAddresses:  ipAddresses,
 			ValidityDays: 365,
 		}
 		var generatedCert *cert.Certificate

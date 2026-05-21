@@ -226,7 +226,7 @@ func (p *Provider) startClient() error {
 	if p.ownGRPCConn {
 		dialer := quictransport.NewDialer(p.tlsConfig, nil)
 		conn, err := grpc.NewClient(
-			p.serverAddr,
+			quictransport.DialTarget(p.serverAddr),
 			grpc.WithContextDialer(dialer),
 			grpc.WithTransportCredentials(quictransport.TransportCredentials()),
 		)

@@ -155,9 +155,15 @@ func (s *Server) validateRequestHeaders(validator *security.EnhancedValidator, r
 	if r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" {
 		contentType := r.Header.Get("Content-Type")
 		if contentType != "" {
+			// YAML content types are accepted because the steward config
+			// upload endpoint (handleUpdateStewardConfig) ingests production
+			// .cfg files sent as application/yaml by `cfg config upload`.
 			if !strings.HasPrefix(contentType, "application/json") &&
 				!strings.HasPrefix(contentType, "application/x-www-form-urlencoded") &&
-				!strings.HasPrefix(contentType, "multipart/form-data") {
+				!strings.HasPrefix(contentType, "multipart/form-data") &&
+				!strings.HasPrefix(contentType, "application/yaml") &&
+				!strings.HasPrefix(contentType, "application/x-yaml") &&
+				!strings.HasPrefix(contentType, "text/yaml") {
 				result.AddError("header.Content-Type", contentType, "content_type", "unsupported content type")
 			}
 		}
