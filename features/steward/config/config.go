@@ -50,11 +50,14 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -245,10 +248,6 @@ type ScriptSigningConfig struct {
 	// AllowPublicCA, when true alongside trusted_keys_and_public mode, also accepts
 	// signatures from public certificate authorities.
 	AllowPublicCA bool `yaml:"allow_public_ca,omitempty"`
-
-	// ScriptRepoURL is the MSP-level Git repository URL for the tenant's script store.
-	// Tenant-scoped; child tenants may override this to point to their own repo.
-	ScriptRepoURL string `yaml:"script_repo_url,omitempty"`
 }
 
 // ResourceConfig defines a single resource to be managed by the steward.
@@ -386,8 +385,15 @@ func loadFromPath(configPath string) (StewardConfig, error) {
 	// This supports ${VAR} and ${VAR:-default} syntax for explicit env var references
 	expandedData := expandEnvWithDefaults(content)
 
-	if err := yaml.Unmarshal([]byte(expandedData), &config); err != nil {
-		return config, fmt.Errorf("failed to parse configuration: %w", err)
+	dec := yaml.NewDecoder(strings.NewReader(expandedData))
+	dec.KnownFields(true)
+	if err := dec.Decode(&config); err != nil {
+		// An empty (or whitespace-only) configuration file yields io.EOF from the
+		// streaming decoder. Treat it as an empty config: defaults are applied below
+		// and ID falls back to the hostname.
+		if !errors.Is(err, io.EOF) {
+			return config, fmt.Errorf("failed to parse configuration: %w", err)
+		}
 	}
 
 	// Security invariant: DriftMode must come from controller-delivered cfg only.
@@ -598,11 +604,6 @@ func MergeScriptSigningConfig(parent, child ScriptSigningConfig) (ScriptSigningC
 	// AllowPublicCA: child inherits parent value if not set (bool — treat parent true as inherited)
 	if !result.AllowPublicCA && parent.AllowPublicCA {
 		result.AllowPublicCA = parent.AllowPublicCA
-	}
-
-	// ScriptRepoURL: child overrides parent; inherit if child has none
-	if result.ScriptRepoURL == "" {
-		result.ScriptRepoURL = parent.ScriptRepoURL
 	}
 
 	return result, nil

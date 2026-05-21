@@ -681,14 +681,6 @@ func TestValidateScriptSigningConfig(t *testing.T) {
 			wantErr: true,
 			errMsg:  "thumbprint or public_key_ref",
 		},
-		{
-			name: "script_repo_url is optional and does not affect validation",
-			cfg: ScriptSigningConfig{
-				Policy:        ScriptSigningPolicyNone,
-				ScriptRepoURL: "https://git.example.com/msp/scripts.git",
-			},
-			wantErr: false,
-		},
 	}
 
 	for _, tt := range tests {
@@ -708,14 +700,13 @@ func TestValidateScriptSigningConfig(t *testing.T) {
 
 func TestMergeScriptSigningConfig(t *testing.T) {
 	tests := []struct {
-		name        string
-		parent      ScriptSigningConfig
-		child       ScriptSigningConfig
-		wantErr     bool
-		errMsg      string
-		wantPolicy  ScriptSigningPolicy
-		wantMode    ScriptTrustMode
-		wantRepoURL string
+		name       string
+		parent     ScriptSigningConfig
+		child      ScriptSigningConfig
+		wantErr    bool
+		errMsg     string
+		wantPolicy ScriptSigningPolicy
+		wantMode   ScriptTrustMode
 	}{
 		{
 			name:       "empty parent and child returns empty",
@@ -797,28 +788,6 @@ func TestMergeScriptSigningConfig(t *testing.T) {
 			errMsg:  "loosen",
 		},
 		{
-			name: "child overrides script_repo_url",
-			parent: ScriptSigningConfig{
-				Policy:        ScriptSigningPolicyNone,
-				ScriptRepoURL: "https://parent.example.com/scripts.git",
-			},
-			child: ScriptSigningConfig{
-				ScriptRepoURL: "https://child.example.com/scripts.git",
-			},
-			wantPolicy:  ScriptSigningPolicyNone,
-			wantRepoURL: "https://child.example.com/scripts.git",
-		},
-		{
-			name: "child inherits parent script_repo_url when not set",
-			parent: ScriptSigningConfig{
-				Policy:        ScriptSigningPolicyNone,
-				ScriptRepoURL: "https://parent.example.com/scripts.git",
-			},
-			child:       ScriptSigningConfig{},
-			wantPolicy:  ScriptSigningPolicyNone,
-			wantRepoURL: "https://parent.example.com/scripts.git",
-		},
-		{
 			name: "child overrides trusted keys",
 			parent: ScriptSigningConfig{
 				Policy:    ScriptSigningPolicyRequired,
@@ -852,9 +821,6 @@ func TestMergeScriptSigningConfig(t *testing.T) {
 			if tt.wantMode != "" {
 				assert.Equal(t, tt.wantMode, result.TrustMode)
 			}
-			if tt.wantRepoURL != "" {
-				assert.Equal(t, tt.wantRepoURL, result.ScriptRepoURL)
-			}
 		})
 	}
 }
@@ -871,7 +837,6 @@ func TestScriptSigningConfigInConfigFile(t *testing.T) {
     trusted_keys:
       - name: corp-cert
         thumbprint: abc123def456
-    script_repo_url: https://git.example.com/msp/scripts.git
 
 resources:
   - name: test-resource
@@ -888,7 +853,46 @@ resources:
 	assert.Len(t, cfg.Steward.ScriptSigning.TrustedKeys, 1)
 	assert.Equal(t, "corp-cert", cfg.Steward.ScriptSigning.TrustedKeys[0].Name)
 	assert.Equal(t, "abc123def456", cfg.Steward.ScriptSigning.TrustedKeys[0].Thumbprint)
-	assert.Equal(t, "https://git.example.com/msp/scripts.git", cfg.Steward.ScriptSigning.ScriptRepoURL)
+}
+
+// TestLoadConfiguration_ScriptRepoURLIsRejected verifies that a config file containing
+// the removed script_repo_url field is rejected with a clear error (clean break).
+func TestLoadConfiguration_ScriptRepoURLIsRejected(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  script_signing:
+    policy: none
+    script_repo_url: https://git.example.com/msp/scripts.git
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	_, err := LoadConfiguration(configFile)
+	require.Error(t, err, "config with removed script_repo_url field must fail to load")
+}
+
+// TestLoadConfiguration_EmptyFileAppliesDefaults verifies that a completely empty
+// configuration file loads without error and falls through to default application.
+// The streaming YAML decoder returns io.EOF on an empty document; loadFromPath must
+// treat that as an empty config rather than a parse failure.
+func TestLoadConfiguration_EmptyFileAppliesDefaults(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "empty.cfg")
+	require.NoError(t, os.WriteFile(configFile, []byte(""), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err, "empty config file must load without error")
+
+	assert.Equal(t, ModeStandalone, cfg.Steward.Mode, "empty config defaults to standalone mode")
+	assert.NotEmpty(t, cfg.Steward.ID, "empty config defaults ID to hostname")
 }
 
 func TestScriptSigningConfigValidationInLoadConfiguration(t *testing.T) {

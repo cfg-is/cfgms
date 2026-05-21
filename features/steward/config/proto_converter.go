@@ -58,7 +58,6 @@ func ToProto(config *StewardConfig) (*controller.StewardConfig, error) {
 		Policy:        string(ss.Policy),
 		TrustMode:     string(ss.TrustMode),
 		AllowPublicCa: ss.AllowPublicCA,
-		ScriptRepoUrl: ss.ScriptRepoURL,
 	}
 	for _, key := range ss.TrustedKeys {
 		protoSS.TrustedKeys = append(protoSS.TrustedKeys, &controller.TrustedKeyRef{
@@ -145,7 +144,6 @@ func FromProto(proto *controller.StewardConfig) (*StewardConfig, error) {
 			Policy:        ScriptSigningPolicy(ps.Policy),
 			TrustMode:     ScriptTrustMode(ps.TrustMode),
 			AllowPublicCA: ps.AllowPublicCa,
-			ScriptRepoURL: ps.ScriptRepoUrl,
 		}
 		for _, key := range ps.TrustedKeys {
 			sc.TrustedKeys = append(sc.TrustedKeys, TrustedKeyRef{

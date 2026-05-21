@@ -114,6 +114,8 @@ type ScriptMetadata struct {
 	Parameters  []ScriptParameter `json:"parameters,omitempty" yaml:"parameters,omitempty"` // Script parameters
 	CreatedAt   time.Time         `json:"created_at" yaml:"created_at"`                     // Creation timestamp
 	UpdatedAt   time.Time         `json:"updated_at" yaml:"updated_at"`                     // Last update timestamp
+	Idempotent  bool              `json:"idempotent,omitempty" yaml:"idempotent,omitempty"` // Whether the script is idempotent (safe to run multiple times)
+	Timeout     time.Duration     `json:"timeout,omitempty" yaml:"timeout,omitempty"`       // Maximum execution time; zero means use system default (15 min)
 }
 
 // ScriptParameter defines a parameter that can be passed to the script
@@ -129,9 +131,10 @@ type ScriptParameter struct {
 
 // VersionedScript represents a complete versioned script
 type VersionedScript struct {
-	Metadata *ScriptMetadata `json:"metadata" yaml:"metadata"` // Script metadata
-	Content  string          `json:"content" yaml:"content"`   // Script content
-	Hash     string          `json:"hash" yaml:"hash"`         // Content hash for integrity
+	Metadata  *ScriptMetadata  `json:"metadata" yaml:"metadata"`                   // Script metadata
+	Content   string           `json:"content" yaml:"content"`                     // Script content
+	Hash      string           `json:"hash" yaml:"hash"`                           // Content hash for integrity
+	Signature *ScriptSignature `json:"signature,omitempty" yaml:"signature,omitempty"` // Detached signature (optional)
 }
 
 // ScriptRepository defines the interface for script storage and versioning

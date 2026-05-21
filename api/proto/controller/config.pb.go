@@ -873,7 +873,7 @@ type ScriptSigningConfig struct {
 	TrustedKeys []*TrustedKeyRef `protobuf:"bytes,3,rep,name=trusted_keys,json=trustedKeys,proto3" json:"trusted_keys,omitempty"`
 	// allow_public_ca, when true alongside trusted_keys_and_public mode, also accepts public CAs.
 	AllowPublicCa bool `protobuf:"varint,4,opt,name=allow_public_ca,json=allowPublicCa,proto3" json:"allow_public_ca,omitempty"`
-	// script_repo_url is the MSP-level Git repository URL for the tenant's script store.
+	// Deprecated: reserved in proto (field 5). Keep for binary-descriptor compatibility until protoc regeneration.
 	ScriptRepoUrl string `protobuf:"bytes,5,opt,name=script_repo_url,json=scriptRepoUrl,proto3" json:"script_repo_url,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -937,6 +937,7 @@ func (x *ScriptSigningConfig) GetAllowPublicCa() bool {
 	return false
 }
 
+// Deprecated: GetScriptRepoUrl is reserved; use ScriptPrivilegeMetadata in the controller API instead.
 func (x *ScriptSigningConfig) GetScriptRepoUrl() string {
 	if x != nil {
 		return x.ScriptRepoUrl

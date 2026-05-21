@@ -65,6 +65,8 @@ var knownPermissions = map[string]bool{
 	"compliance:read-summary": true,
 	// Tenant management
 	"tenant:manage": true,
+	// Script library administration (Issue #1670)
+	"script:admin": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

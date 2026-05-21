@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/modules/script"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // newTestScriptTracker opens an in-memory SQLite database and returns a ready
@@ -353,4 +355,248 @@ func TestHandlePostScriptRetry_NotImplemented(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
 	require.NotNil(t, errResp.Error)
 	assert.Equal(t, "NOT_IMPLEMENTED", errResp.Error.Code)
+}
+
+// ---------------------------------------------------------------------------
+// Script library handler tests (Issue #1670)
+// ---------------------------------------------------------------------------
+
+// setupScriptLibraryServer creates a test server with a real script repository and privilege store.
+func setupScriptLibraryServer(t *testing.T) (*Server, *script.GitScriptRepository) {
+	t.Helper()
+	server := setupTestServer(t)
+
+	sm := pkgtesting.SetupTestStorage(t)
+	repo, err := script.NewGitScriptRepository(sm.GetConfigStore(), "test-tenant", false)
+	require.NoError(t, err)
+
+	server.SetScriptRepository(repo)
+	server.SetPrivilegeStore(sm.GetConfigStore())
+
+	return server, repo
+}
+
+// seedLibraryScript inserts a script into the repository.
+func seedLibraryScript(t *testing.T, repo *script.GitScriptRepository, id, name string) {
+	t.Helper()
+	vs := &script.VersionedScript{
+		Metadata: &script.ScriptMetadata{
+			ID:       id,
+			Name:     name,
+			Version:  &script.Version{Major: 1, Minor: 0, Patch: 0},
+			Shell:    script.ShellBash,
+			Platform: []string{"linux"},
+		},
+		Content: "#!/bin/bash\necho " + name + "\n",
+	}
+	require.NoError(t, repo.Create(vs))
+}
+
+// TestHandleListScripts_ReturnsSeededScripts verifies GET /api/v1/scripts returns scripts from the repo.
+func TestHandleListScripts_ReturnsSeededScripts(t *testing.T) {
+	server, repo := setupScriptLibraryServer(t)
+	apiKey := NewTestKey(t, server, []string{"script:admin"})
+
+	seedLibraryScript(t, repo, "backup-all", "Backup All")
+	seedLibraryScript(t, repo, "health-check", "Health Check")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/scripts", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	items, ok := resp.Data.([]interface{})
+	require.True(t, ok, "expected array in data")
+	assert.Len(t, items, 2)
+
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		m, ok := item.(map[string]interface{})
+		require.True(t, ok)
+		ids = append(ids, m["id"].(string))
+	}
+	assert.Contains(t, ids, "backup-all")
+	assert.Contains(t, ids, "health-check")
+}
+
+// TestHandleListScripts_ServiceUnavailable verifies 503 when no repo is wired.
+func TestHandleListScripts_ServiceUnavailable(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"script:admin"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/scripts", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// TestHandleGetScriptLibraryItem_Found verifies GET /api/v1/scripts/{id} returns a real script.
+func TestHandleGetScriptLibraryItem_Found(t *testing.T) {
+	server, repo := setupScriptLibraryServer(t)
+	apiKey := NewTestKey(t, server, []string{"script:admin"})
+
+	seedLibraryScript(t, repo, "deploy-agent", "Deploy Agent")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/scripts/deploy-agent", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	m, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok)
+	meta, ok := m["metadata"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "deploy-agent", meta["id"])
+}
+
+// TestHandleGetScriptLibraryItem_NotFound verifies 404 for an unknown script ID.
+func TestHandleGetScriptLibraryItem_NotFound(t *testing.T) {
+	server, _ := setupScriptLibraryServer(t)
+	apiKey := NewTestKey(t, server, []string{"script:admin"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/scripts/does-not-exist", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestHandlePutScriptPrivilege_ScopeNotHeldByCallerReturns403 is a REQUIRED acceptance test.
+// Even when the caller has PermissionScriptAdmin, granting a scope they don't hold must return 403.
+func TestHandlePutScriptPrivilege_ScopeNotHeldByCallerReturns403(t *testing.T) {
+	server, repo := setupScriptLibraryServer(t)
+	// Caller has script:admin but NOT config:push.
+	apiKey := NewTestKey(t, server, []string{"script:admin"})
+
+	seedLibraryScript(t, repo, "priv-test", "Priv Test")
+
+	body := `{"required_api_scope": ["config:push"]}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/priv-test/privilege", strings.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "must return 403 when granting scope caller does not hold")
+}
+
+// TestHandlePutScriptPrivilege_DNAPathWithoutReadDNAReturns403 is a REQUIRED acceptance test.
+// A ParamPlatformBindings entry pointing to a DNA key path without steward:read-dna returns 403.
+func TestHandlePutScriptPrivilege_DNAPathWithoutReadDNAReturns403(t *testing.T) {
+	server, repo := setupScriptLibraryServer(t)
+	// Caller has script:admin but NOT steward:read-dna.
+	apiKey := NewTestKey(t, server, []string{"script:admin"})
+
+	seedLibraryScript(t, repo, "dna-priv-test", "DNA Priv Test")
+
+	body := `{"param_platform_bindings": {"os_version": "OS.Version"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/dna-priv-test/privilege", strings.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "must return 403 when binding DNA paths without steward:read-dna")
+}
+
+// TestHandlePutScriptPrivilege_AllowedWhenCallerHoldsScopes verifies successful privilege update.
+func TestHandlePutScriptPrivilege_AllowedWhenCallerHoldsScopes(t *testing.T) {
+	server, repo := setupScriptLibraryServer(t)
+	// Caller has script:admin AND steward:read-scripts.
+	apiKey := NewTestKey(t, server, []string{"script:admin", "steward:read-scripts"})
+
+	seedLibraryScript(t, repo, "ok-priv", "OK Priv")
+
+	body := `{"required_api_scope": ["steward:read-scripts"]}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/ok-priv/privilege", strings.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	m, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "ok-priv", m["script_id"])
+}
+
+// TestHandlePutScriptPrivilege_DNAPathAllowedWithReadDNA verifies DNA binding when caller has steward:read-dna.
+func TestHandlePutScriptPrivilege_DNAPathAllowedWithReadDNA(t *testing.T) {
+	server, repo := setupScriptLibraryServer(t)
+	apiKey := NewTestKey(t, server, []string{"script:admin", "steward:read-dna"})
+
+	seedLibraryScript(t, repo, "dna-ok", "DNA OK")
+
+	body := `{"param_platform_bindings": {"os_version": "OS.Version"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/dna-ok/privilege", strings.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestHandlePutScriptPrivilege_TenantIsolation verifies that privilege metadata is tenant-scoped.
+func TestHandlePutScriptPrivilege_TenantIsolation(t *testing.T) {
+	server, repo := setupScriptLibraryServer(t)
+	// Create keys for different tenants.
+	keyTenantA := NewEphemeralTestKey(t, server, []string{"script:admin"}, "tenant-a", 5*time.Minute)
+	keyTenantB := NewEphemeralTestKey(t, server, []string{"script:admin"}, "tenant-b", 5*time.Minute)
+
+	seedLibraryScript(t, repo, "shared-id", "Shared Script")
+
+	// Tenant A sets privilege (no required scopes so no scope ceiling issue).
+	body := `{}`
+	reqA := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/shared-id/privilege", strings.NewReader(body))
+	reqA.Header.Set("X-API-Key", keyTenantA)
+	reqA.Header.Set("Content-Type", "application/json")
+	recA := httptest.NewRecorder()
+	server.router.ServeHTTP(recA, reqA)
+	require.Equal(t, http.StatusOK, recA.Code)
+
+	// Tenant B sets privilege with different data.
+	bodyB := `{"required_api_scope": []}`
+	reqB := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/shared-id/privilege", strings.NewReader(bodyB))
+	reqB.Header.Set("X-API-Key", keyTenantB)
+	reqB.Header.Set("Content-Type", "application/json")
+	recB := httptest.NewRecorder()
+	server.router.ServeHTTP(recB, reqB)
+	require.Equal(t, http.StatusOK, recB.Code)
+}
+
+// TestHandlePutScriptPrivilege_ServiceUnavailable verifies 503 when privilege store is not wired.
+func TestHandlePutScriptPrivilege_ServiceUnavailable(t *testing.T) {
+	server := setupTestServer(t)
+	// Wire repo but not privilege store.
+	sm := pkgtesting.SetupTestStorage(t)
+	repo, err := script.NewGitScriptRepository(sm.GetConfigStore(), "test-tenant", false)
+	require.NoError(t, err)
+	server.SetScriptRepository(repo)
+
+	apiKey := NewTestKey(t, server, []string{"script:admin"})
+
+	body := `{}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/any-id/privilege", strings.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }

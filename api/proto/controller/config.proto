@@ -121,8 +121,8 @@ message ScriptSigningConfig {
   // allow_public_ca, when true alongside trusted_keys_and_public mode, also accepts public CAs.
   bool allow_public_ca = 4;
 
-  // script_repo_url is the MSP-level Git repository URL for the tenant's script store.
-  string script_repo_url = 5;
+  reserved 5;
+  reserved "script_repo_url";
 }
 
 // TrustedKeyRef identifies a trusted signing key or certificate.

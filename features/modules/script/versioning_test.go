@@ -8,6 +8,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
+
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 func TestParseVersion(t *testing.T) {
@@ -244,4 +247,120 @@ func TestScriptMetadataClone(t *testing.T) {
 	// Ensure deep copy (modifying clone doesn't affect original)
 	clone.Tags[0] = "modified"
 	assert.NotEqual(t, original.Tags[0], clone.Tags[0])
+}
+
+// TestVersionedScriptYAMLRoundTrip_NewFields verifies that Signature, Idempotent, and Timeout
+// round-trip through YAML marshalling both when present and when absent.
+func TestVersionedScriptYAMLRoundTrip_NewFields(t *testing.T) {
+	t.Run("fields present", func(t *testing.T) {
+		original := &VersionedScript{
+			Metadata: &ScriptMetadata{
+				ID:         "test-script",
+				Name:       "Test Script",
+				Version:    &Version{Major: 1, Minor: 0, Patch: 0},
+				Shell:      ShellBash,
+				Platform:   []string{"linux"},
+				Idempotent: true,
+				Timeout:    30 * time.Minute,
+			},
+			Content: "#!/bin/bash\necho hello\n",
+			Hash:    "abc123",
+			Signature: &ScriptSignature{
+				Algorithm:  "rsa-sha256",
+				Signature:  "base64sig==",
+				PublicKey:  "base64pub==",
+				Thumbprint: "fingerprint",
+			},
+		}
+
+		data, err := yaml.Marshal(original)
+		require.NoError(t, err)
+
+		var restored VersionedScript
+		require.NoError(t, yaml.Unmarshal(data, &restored))
+
+		require.NotNil(t, restored.Metadata)
+		assert.True(t, restored.Metadata.Idempotent)
+		assert.Equal(t, 30*time.Minute, restored.Metadata.Timeout)
+		require.NotNil(t, restored.Signature)
+		assert.Equal(t, "rsa-sha256", restored.Signature.Algorithm)
+		assert.Equal(t, "base64sig==", restored.Signature.Signature)
+		assert.Equal(t, "fingerprint", restored.Signature.Thumbprint)
+	})
+
+	t.Run("fields absent", func(t *testing.T) {
+		original := &VersionedScript{
+			Metadata: &ScriptMetadata{
+				ID:       "min-script",
+				Name:     "Minimal Script",
+				Version:  &Version{Major: 1, Minor: 0, Patch: 0},
+				Shell:    ShellBash,
+				Platform: []string{"linux"},
+			},
+			Content: "#!/bin/bash\necho hi\n",
+			Hash:    "def456",
+		}
+
+		data, err := yaml.Marshal(original)
+		require.NoError(t, err)
+
+		var restored VersionedScript
+		require.NoError(t, yaml.Unmarshal(data, &restored))
+
+		require.NotNil(t, restored.Metadata)
+		assert.False(t, restored.Metadata.Idempotent)
+		assert.Equal(t, time.Duration(0), restored.Metadata.Timeout)
+		assert.Nil(t, restored.Signature)
+	})
+}
+
+// TestGitScriptRepository_TimeoutDefault verifies that Get returns Timeout = 15 * time.Minute
+// for a script stored with Timeout == 0.
+func TestGitScriptRepository_TimeoutDefault(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	repo, err := NewGitScriptRepository(sm.GetConfigStore(), "test-tenant", false)
+	require.NoError(t, err)
+
+	script := &VersionedScript{
+		Metadata: &ScriptMetadata{
+			ID:       "timeout-test",
+			Name:     "Timeout Test",
+			Version:  &Version{Major: 1, Minor: 0, Patch: 0},
+			Shell:    ShellBash,
+			Platform: []string{"linux"},
+			// Timeout intentionally zero — Get must apply the 15-min default.
+		},
+		Content: "#!/bin/bash\ndate\n",
+	}
+	require.NoError(t, repo.Create(script))
+
+	got, err := repo.Get("timeout-test", "")
+	require.NoError(t, err)
+	require.NotNil(t, got.Metadata)
+	assert.Equal(t, 15*time.Minute, got.Metadata.Timeout, "Get must return 15-min default for zero Timeout")
+}
+
+// TestGitScriptRepository_TimeoutPreserved verifies that a non-zero Timeout is not overwritten.
+func TestGitScriptRepository_TimeoutPreserved(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	repo, err := NewGitScriptRepository(sm.GetConfigStore(), "test-tenant-2", false)
+	require.NoError(t, err)
+
+	script := &VersionedScript{
+		Metadata: &ScriptMetadata{
+			ID:       "timeout-preserved",
+			Name:     "Timeout Preserved",
+			Version:  &Version{Major: 1, Minor: 0, Patch: 0},
+			Shell:    ShellBash,
+			Platform: []string{"linux"},
+			Timeout:  5 * time.Minute,
+		},
+		Content: "#!/bin/bash\ndate\n",
+	}
+	require.NoError(t, repo.Create(script))
+
+	got, err := repo.Get("timeout-preserved", "")
+	require.NoError(t, err)
+	require.NotNil(t, got.Metadata)
+	assert.Equal(t, 5*time.Minute, got.Metadata.Timeout, "explicitly set Timeout must not be overwritten")
 }

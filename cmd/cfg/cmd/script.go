@@ -3,6 +3,8 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
@@ -10,12 +12,17 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 )
@@ -59,10 +66,228 @@ Exit codes:
   1  signature invalid, not found, or signing failed`,
 }
 
+var (
+	scriptLibURL         string
+	scriptLibAPIKey      string
+	scriptLibTLSCACert   string
+	scriptLibTLSInsecure bool
+)
+
+// scriptPrivilegeScopes holds the --scope flag values for set-privilege.
+var scriptPrivilegeScopes []string
+
+// scriptPrivilegeBindings holds the --param-binding flag values for set-privilege.
+var scriptPrivilegeBindings []string
+
+// scriptListCmd outputs script IDs and names from the controller's script library.
+var scriptListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List scripts in the controller's library",
+	Long: `Display scripts from the git-backed script library on the controller.
+
+Examples:
+  cfg script list --url=https://controller.example.com --api-key=mykey`,
+	RunE: runScriptList,
+}
+
+// scriptShowCmd displays a single script by ID.
+var scriptShowCmd = &cobra.Command{
+	Use:   "show <id>",
+	Short: "Show a script from the library",
+	Long: `Display metadata and content for a specific script from the controller's library.
+
+Examples:
+  cfg script show backup-all --url=https://controller.example.com --api-key=mykey`,
+	Args: cobra.ExactArgs(1),
+	RunE: runScriptShow,
+}
+
+// scriptSetPrivilegeCmd sets controller-side privilege metadata for a script.
+var scriptSetPrivilegeCmd = &cobra.Command{
+	Use:   "set-privilege <id>",
+	Short: "Set privilege metadata for a script",
+	Long: `Configure controller-side privilege constraints for a library script.
+
+  --scope       Required API scope for consumers of this script (repeatable).
+  --param-binding  Parameter→DNA-key binding in the form key=dna.path (repeatable).
+
+Caller must hold every scope they grant and must have steward:read-dna to bind DNA paths.
+
+Examples:
+  cfg script set-privilege backup-all --scope steward:execute-scripts \
+    --url=https://controller.example.com --api-key=mykey`,
+	Args: cobra.ExactArgs(1),
+	RunE: runScriptSetPrivilege,
+}
+
 func init() {
+	// Library subcommand flags
+	for _, cmd := range []*cobra.Command{scriptListCmd, scriptShowCmd, scriptSetPrivilegeCmd} {
+		cmd.Flags().StringVar(&scriptLibURL, "url", "", "Controller API URL")
+		cmd.Flags().StringVar(&scriptLibAPIKey, "api-key", "", "API key for authentication")
+		cmd.Flags().StringVar(&scriptLibTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
+		cmd.Flags().BoolVar(&scriptLibTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	}
+	scriptSetPrivilegeCmd.Flags().StringArrayVar(&scriptPrivilegeScopes, "scope", nil, "Required API scope (repeatable)")
+	scriptSetPrivilegeCmd.Flags().StringArrayVar(&scriptPrivilegeBindings, "param-binding", nil, "Parameter→DNA binding key=path (repeatable)")
+
+	scriptCmd.AddCommand(scriptListCmd)
+	scriptCmd.AddCommand(scriptShowCmd)
+	scriptCmd.AddCommand(scriptSetPrivilegeCmd)
 	scriptCmd.AddCommand(scriptSignCmd)
 	scriptCmd.AddCommand(scriptVerifyCmd)
 	rootCmd.AddCommand(scriptCmd)
+}
+
+// getScriptLibClient creates an API client for the script library commands.
+func getScriptLibClient() (*APIClient, error) {
+	apiURL := strings.TrimSuffix(scriptLibURL, "/")
+	if apiURL == "" {
+		apiURL = os.Getenv("CFGMS_API_URL")
+	}
+
+	client, err := resolveBundleClient(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("bundle lookup failed: %w", err)
+	}
+	if client != nil {
+		return client, nil
+	}
+
+	apiKey := scriptLibAPIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("CFGMS_API_KEY")
+	}
+
+	tlsInsecure := scriptLibTLSInsecure
+	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
+		tlsInsecure = true
+	}
+
+	tlsCACertPath := scriptLibTLSCACert
+	if tlsCACertPath == "" {
+		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
+	}
+
+	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+}
+
+func runScriptList(cmd *cobra.Command, _ []string) error {
+	client, err := getScriptLibClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/scripts")
+	if err != nil {
+		return fmt.Errorf("failed to fetch scripts: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	var apiResp struct {
+		Data []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(apiResp.Data) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No scripts found.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "ID\tNAME")
+	_, _ = fmt.Fprintln(w, "--\t----")
+	for _, s := range apiResp.Data {
+		_, _ = fmt.Fprintf(w, "%s\t%s\n", s.ID, s.Name)
+	}
+	return w.Flush()
+}
+
+func runScriptShow(cmd *cobra.Command, args []string) error {
+	id := url.PathEscape(args[0])
+
+	client, err := getScriptLibClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/scripts/"+id)
+	if err != nil {
+		return fmt.Errorf("failed to fetch script: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Pretty-print the JSON response.
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, body, "", "  "); err != nil {
+		// Fall back to raw output if the response is not JSON.
+		fmt.Fprintln(cmd.OutOrStdout(), string(body))
+		return nil
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), pretty.String())
+	return nil
+}
+
+func runScriptSetPrivilege(_ *cobra.Command, args []string) error {
+	id := url.PathEscape(args[0])
+
+	// Parse --param-binding flags (format: key=dna.path)
+	paramBindings := make(map[string]string)
+	for _, b := range scriptPrivilegeBindings {
+		parts := strings.SplitN(b, "=", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("invalid --param-binding %q: expected key=dna.path", b)
+		}
+		paramBindings[parts[0]] = parts[1]
+	}
+
+	reqBody := map[string]interface{}{
+		"required_api_scope":      scriptPrivilegeScopes,
+		"param_platform_bindings": paramBindings,
+	}
+	reqJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to encode request: %w", err)
+	}
+
+	client, err := getScriptLibClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.doRequest(context.Background(), http.MethodPut, "/api/v1/scripts/"+id+"/privilege", bytes.NewReader(reqJSON))
+	if err != nil {
+		return fmt.Errorf("failed to set privilege: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	fmt.Printf("Privilege metadata updated for script %s\n", args[0])
+	return nil
 }
 
 // ---------------------------------------------------------------------------
