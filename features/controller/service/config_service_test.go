@@ -12,12 +12,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -65,17 +69,26 @@ func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
 	}
 }
 
-// createTestServiceV2 creates a ConfigurationServiceV2 backed by a real git StorageManager
+// createTestServiceV2 creates a ConfigurationServiceV2 backed by a real git StorageManager.
+// A "default" tenant is seeded so that single-tenant tests can call GetConfiguration
+// (which now routes through InheritanceResolver and requires the tenant to exist).
 func createTestServiceV2(t *testing.T) *ConfigurationServiceV2 {
 	t.Helper()
 	logger := logging.NewNoopLogger()
 	storageManager := pkgtesting.SetupTestStorage(t)
-	return NewConfigurationServiceV2(logger, storageManager, nil)
+	svc := NewConfigurationServiceV2(logger, storageManager, nil)
+	require.NoError(t, storageManager.GetTenantStore().CreateTenant(
+		context.Background(),
+		&business.TenantData{ID: "default", Name: "Default", Status: business.TenantStatusActive},
+	))
+	return svc
 }
 
 // createTestServiceV2WithFlatfileRoot creates a ConfigurationServiceV2 backed by real
 // git storage at rootDir. Use this when a test needs to manipulate the storage directory
 // (e.g. chmod to read-only) to simulate storage write errors.
+// A "default" tenant is seeded in the SQLite business store so that any GetConfiguration
+// calls work correctly with the InheritanceResolver.
 func createTestServiceV2WithFlatfileRoot(t *testing.T, rootDir string) *ConfigurationServiceV2 {
 	t.Helper()
 	seq := atomic.AddInt64(&configSvcTestSeq, 1)
@@ -83,7 +96,12 @@ func createTestServiceV2WithFlatfileRoot(t *testing.T, rootDir string) *Configur
 	storageManager, err := interfaces.CreateOSSStorageManager(rootDir, sqlitePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = storageManager.Close() })
-	return NewConfigurationServiceV2(logging.NewNoopLogger(), storageManager, nil)
+	svc := NewConfigurationServiceV2(logging.NewNoopLogger(), storageManager, nil)
+	require.NoError(t, storageManager.GetTenantStore().CreateTenant(
+		context.Background(),
+		&business.TenantData{ID: "default", Name: "Default", Status: business.TenantStatusActive},
+	))
+	return svc
 }
 
 func TestNewConfigurationServiceV2(t *testing.T) {
@@ -457,4 +475,139 @@ func TestConfigurationServiceV2Concurrency(t *testing.T) {
 	resp, err := svc.GetConfiguration(ctx, req)
 	assert.NoError(t, err)
 	assert.Equal(t, common.Status_OK, resp.Status.Code)
+}
+
+// marshalStewardConfigYAML encodes a StewardConfig to YAML bytes for direct config-store writes.
+func marshalStewardConfigYAML(t *testing.T, cfg stewardconfig.StewardConfig) []byte {
+	t.Helper()
+	data, err := yaml.Marshal(cfg)
+	require.NoError(t, err)
+	return data
+}
+
+// seedTwoLevelTenants creates a two-level tenant hierarchy: mspID (root) → childID.
+func seedTwoLevelTenants(t *testing.T, ctx context.Context, sm interface{ GetTenantStore() business.TenantStore }, mspID, childID string) {
+	t.Helper()
+	ts := sm.GetTenantStore()
+	require.NoError(t, ts.CreateTenant(ctx, &business.TenantData{
+		ID: mspID, Name: mspID, Status: business.TenantStatusActive,
+	}))
+	require.NoError(t, ts.CreateTenant(ctx, &business.TenantData{
+		ID: childID, Name: childID, ParentID: mspID, Status: business.TenantStatusActive,
+	}))
+}
+
+// TestGetConfiguration_CascadeMergedDelivery verifies that GetConfiguration (the steward
+// delivery path) performs a full tenant-cascade merge, not a most-specific-wins lookup.
+//
+// AC covered:
+//   - A steward in a child tenant receives a parent-tenant policy resource for which it has
+//     no device-level override.
+//   - A device-level resource with the same name overrides the parent resource.
+func TestGetConfiguration_CascadeMergedDelivery(t *testing.T) {
+	ctx := context.Background()
+	sm := pkgtesting.SetupTestStorage(t)
+	svc := NewConfigurationServiceV2(logging.NewNoopLogger(), sm, nil)
+
+	// Two-level hierarchy: msp (root) → client (child)
+	seedTwoLevelTenants(t, ctx, sm, "msp", "client")
+
+	cs := sm.GetConfigStore()
+
+	// MSP-level policy: two resources — one the device will inherit without override,
+	// one the device will override with its own version.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "msp", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfigYAML(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "msp-inherited", Module: "file", Config: map[string]interface{}{"path": "/etc/inherited.conf"}},
+				{Name: "shared-resource", Module: "file", Config: map[string]interface{}{"path": "/etc/parent.conf"}},
+			},
+		}),
+	}))
+
+	// Device-level config for steward-1 under client tenant.
+	// Includes "shared-resource" to test child-overrides-parent behaviour.
+	deviceCfg := createTestStewardConfig("steward-1")
+	deviceCfg.Resources = append(deviceCfg.Resources, stewardconfig.ResourceConfig{
+		Name: "shared-resource", Module: "file",
+		Config: map[string]interface{}{"path": "/etc/device.conf"},
+	})
+	// "file" is already in the Modules map from createTestStewardConfig; no missing-module error.
+	require.NoError(t, svc.SetConfiguration(ctx, "client", "steward-1", deviceCfg))
+
+	// Request config for steward-1 with the client tenant in context.
+	// controllerSvc is nil, so tenantID is read from ctxkeys.TenantID.
+	clientCtx := context.WithValue(ctx, ctxkeys.TenantID, "client")
+	resp, err := svc.GetConfiguration(clientCtx, &controller.ConfigRequest{StewardId: "steward-1"})
+	require.NoError(t, err)
+	require.Equal(t, common.Status_OK, resp.Status.Code)
+
+	retrieved, err := stewardconfig.FromProto(resp.Config.Config)
+	require.NoError(t, err)
+
+	byName := make(map[string]stewardconfig.ResourceConfig)
+	for _, r := range retrieved.Resources {
+		byName[r.Name] = r
+	}
+
+	t.Run("parent resource delivered when steward has no device-level override", func(t *testing.T) {
+		_, ok := byName["msp-inherited"]
+		assert.True(t, ok, "MSP-level resource 'msp-inherited' must be delivered to steward in child tenant")
+	})
+
+	t.Run("device-level resource overrides same-named parent resource", func(t *testing.T) {
+		r, ok := byName["shared-resource"]
+		require.True(t, ok, "'shared-resource' must appear in delivered config")
+		assert.Equal(t, "/etc/device.conf", r.Config["path"],
+			"device-level 'shared-resource' must override the MSP-level version")
+	})
+}
+
+// TestGetConfiguration_TenantIsolation verifies that the cascade merges only the steward's
+// own ancestor chain and never includes resources from sibling or unrelated tenants.
+//
+// AC covered: a test asserts tenant isolation.
+func TestGetConfiguration_TenantIsolation(t *testing.T) {
+	ctx := context.Background()
+	sm := pkgtesting.SetupTestStorage(t)
+	svc := NewConfigurationServiceV2(logging.NewNoopLogger(), sm, nil)
+
+	ts := sm.GetTenantStore()
+	// Two independent root tenants — no shared ancestry.
+	require.NoError(t, ts.CreateTenant(ctx, &business.TenantData{
+		ID: "msp-a", Name: "MSP A", Status: business.TenantStatusActive,
+	}))
+	require.NoError(t, ts.CreateTenant(ctx, &business.TenantData{
+		ID: "msp-b", Name: "MSP B", Status: business.TenantStatusActive,
+	}))
+
+	cs := sm.GetConfigStore()
+
+	// msp-a has an MSP-level policy that should be invisible to msp-b stewards.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "msp-a", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfigYAML(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "msp-a-policy", Module: "file", Config: map[string]interface{}{"path": "/etc/msp-a.conf"}},
+			},
+		}),
+	}))
+
+	// steward-b lives entirely within the msp-b tree; no relationship to msp-a.
+	stewardBCfg := createTestStewardConfig("steward-b")
+	require.NoError(t, svc.SetConfiguration(ctx, "msp-b", "steward-b", stewardBCfg))
+
+	mspBCtx := context.WithValue(ctx, ctxkeys.TenantID, "msp-b")
+	resp, err := svc.GetConfiguration(mspBCtx, &controller.ConfigRequest{StewardId: "steward-b"})
+	require.NoError(t, err)
+	require.Equal(t, common.Status_OK, resp.Status.Code)
+
+	retrieved, err := stewardconfig.FromProto(resp.Config.Config)
+	require.NoError(t, err)
+
+	for _, r := range retrieved.Resources {
+		assert.NotEqual(t, "msp-a-policy", r.Name,
+			"steward-b must not receive resources from msp-a's ancestor chain (tenant isolation violated)")
+	}
 }

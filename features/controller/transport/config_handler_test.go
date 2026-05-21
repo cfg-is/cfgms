@@ -26,6 +26,7 @@ import (
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -92,10 +93,17 @@ func peerContextWithCA(t *testing.T, ca *cfgcert.CA, cn string) context.Context 
 
 // createTestService returns a ConfigurationServiceV2 backed by real flatfile+SQLite
 // storage rooted in a temporary directory that is cleaned up after the test.
+// A "default" tenant is seeded so that GetConfiguration (which routes through
+// InheritanceResolver) can resolve tenant paths for single-tenant test setups.
 func createTestService(t *testing.T) *service.ConfigurationServiceV2 {
 	t.Helper()
 	storageManager := pkgtesting.SetupTestStorage(t)
-	return service.NewConfigurationServiceV2(logging.NewNoopLogger(), storageManager, nil)
+	svc := service.NewConfigurationServiceV2(logging.NewNoopLogger(), storageManager, nil)
+	require.NoError(t, storageManager.GetTenantStore().CreateTenant(
+		context.Background(),
+		&business.TenantData{ID: "default", Name: "Default", Status: business.TenantStatusActive},
+	))
+	return svc
 }
 
 // minimalStewardConfig returns a valid StewardConfig for stewardID.

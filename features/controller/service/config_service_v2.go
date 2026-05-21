@@ -119,8 +119,10 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 		tenantID = stewardInfo.TenantID
 	}
 
-	// Get configuration with inheritance from storage
-	stewardConfig, err := s.configManager.GetConfigurationWithInheritance(ctx, tenantID, req.StewardId)
+	// Resolve full tenant-cascade-merged effective config via InheritanceResolver.
+	// ResolveConfiguration walks the ancestor chain (MSP→Client→Group→Device),
+	// child resources overriding parent resources of the same name (Issue #1722).
+	effective, err := s.inheritanceResolver.ResolveConfiguration(ctx, tenantID, req.StewardId)
 	if err != nil {
 		s.logger.Debug("No configuration found for steward", "steward_id", logging.SanitizeLogValue(req.StewardId), "error", err)
 		return &controller.ConfigResponse{
@@ -130,9 +132,18 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 			},
 		}, nil
 	}
+	if len(effective.Sources) == 0 {
+		s.logger.Debug("No configuration found for steward at any hierarchy level", "steward_id", logging.SanitizeLogValue(req.StewardId))
+		return &controller.ConfigResponse{
+			Status: &common.Status{
+				Code:    common.Status_NOT_FOUND,
+				Message: "No configuration found for steward",
+			},
+		}, nil
+	}
 
 	// Filter configuration by requested modules if specified
-	filteredConfig := s.filterConfigByModules(stewardConfig, req.Modules)
+	filteredConfig := s.filterConfigByModules(effective.Config, req.Modules)
 
 	// Convert Go struct to protobuf
 	protoConfig, err := stewardconfig.ToProto(filteredConfig)
