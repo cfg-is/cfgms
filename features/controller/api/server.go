@@ -24,7 +24,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/push"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/modules/script"
-	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/authdefense"
@@ -38,6 +37,7 @@ import (
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
@@ -84,6 +84,7 @@ type Server struct {
 	configSourceSecretStore secretsif.SecretStore          // Issue #1396: secrets for config source validator
 	configSourceRateLimits  sync.Map                       // Issue #1396: per-tenant rate-limit counters
 	registrationQueue       sync.Map                       // Issue #1568: quarantined stewards awaiting approval
+	installerStore          *service.InstallerStore        // Issue #1683: steward binary upload storage
 	stopCleanup             chan struct{}                  // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                  // closed when cleanup goroutine exits
 	closeOnce               sync.Once                      // idempotent Close
@@ -143,6 +144,16 @@ func New(
 		return nil, fmt.Errorf("failed to initialize secret store: %w", err)
 	}
 
+	// Issue #1683: Initialize installer store for steward binary upload
+	var flatfileRoot string
+	if cfg.Storage != nil {
+		flatfileRoot = cfg.Storage.FlatfileRoot
+	}
+	installerStore, err := service.NewInstallerStore(flatfileRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize installer store: %w", err)
+	}
+
 	server := &Server{
 		cfg:                     cfg,
 		logger:                  logger,
@@ -164,6 +175,7 @@ func New(
 		auditManager:            auditManager,             // Issue #775: registration audit events
 		commandPublisher:        commandPublisher,         // Issue #1319: fan-out config push to active stewards
 		pushStore:               pushStore,                // Issue #1320: durable push-state persistence for HA failover
+		installerStore:          installerStore,           // Issue #1683: steward binary upload storage
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
 	}
@@ -332,6 +344,12 @@ func (s *Server) setupRouter() {
 	scripts.Handle("", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleListScripts))).Methods("GET")
 	scripts.Handle("/{id}", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleGetScriptLibraryItem))).Methods("GET")
 	scripts.Handle("/{id}/privilege", s.requirePermission("script", "admin")(http.HandlerFunc(s.handlePutScriptPrivilege))).Methods("PUT")
+
+	// Installer management endpoints (Issue #1683)
+	installer := api.PathPrefix("/installer").Subrouter()
+	installer.Handle("/binary", s.requirePermission("installer", "manage")(http.HandlerFunc(s.handleUploadStewardBinary))).Methods("PUT")
+	installer.Handle("/binary", s.requirePermission("installer", "manage")(http.HandlerFunc(s.handleGetStewardBinaryMeta))).Methods("GET")
+	installer.Handle("/binary", s.requirePermission("installer", "manage")(http.HandlerFunc(s.handleDeleteStewardBinary))).Methods("DELETE")
 
 	// Configuration list endpoint (Issue #1570)
 	api.Handle("/configs", s.requirePermission("config", "list")(http.HandlerFunc(s.handleListConfigs))).Methods("GET")

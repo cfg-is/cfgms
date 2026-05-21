@@ -236,6 +236,14 @@ type ConfigDeploymentsResponse struct {
 	PushHistory []PushSummary             `json:"push_history"`
 }
 
+// StewardBinaryMeta is the response body for installer binary endpoints (Issue #1683).
+type StewardBinaryMeta struct {
+	Filename   string    `json:"filename"`
+	SizeBytes  int64     `json:"size_bytes"`
+	SHA256     string    `json:"sha256"`
+	UploadedAt time.Time `json:"uploaded_at"`
+}
+
 // Helper functions to convert protobuf messages to API types
 
 // DNAFromProto converts a protobuf DNA message to DNAInfo
