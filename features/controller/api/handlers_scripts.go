@@ -3,6 +3,10 @@
 package api
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -10,8 +14,202 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// ScriptPrivilegeMetadata holds controller-side privilege configuration for a library script.
+// It is stored per-tenant and never included in VersionedScript (steward-visible).
+type ScriptPrivilegeMetadata struct {
+	ScriptID              string            `json:"script_id"`
+	RequiredAPIScope      []string          `json:"required_api_scope,omitempty"`
+	ParamPlatformBindings map[string]string `json:"param_platform_bindings,omitempty"`
+	SetByUserID           string            `json:"set_by_user_id"`
+	SetAt                 time.Time         `json:"set_at"`
+}
+
+// SetPrivilegeRequest is the body of PUT /api/v1/scripts/{id}/privilege.
+type SetPrivilegeRequest struct {
+	RequiredAPIScope      []string          `json:"required_api_scope,omitempty"`
+	ParamPlatformBindings map[string]string `json:"param_platform_bindings,omitempty"`
+}
+
+// storePrivilegeMetadata writes privilege metadata to the config store under the tenant namespace.
+func (s *Server) storePrivilegeMetadata(ctx context.Context, tenantID, scriptID string, meta *ScriptPrivilegeMetadata) error {
+	if s.privilegeStore == nil {
+		return fmt.Errorf("privilege store not configured")
+	}
+
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("failed to marshal privilege metadata: %w", err)
+	}
+
+	checksum := fmt.Sprintf("%x", sha256.Sum256(data))
+	entry := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
+			TenantID:  tenantID,
+			Namespace: "script-privilege",
+			Name:      scriptID,
+		},
+		Data:      data,
+		Format:    cfgconfig.ConfigFormatJSON,
+		Checksum:  checksum,
+		UpdatedAt: meta.SetAt,
+		UpdatedBy: meta.SetByUserID,
+		Source:    "script-admin",
+	}
+
+	return s.privilegeStore.StoreConfig(ctx, entry)
+}
+
+// loadPrivilegeMetadata reads privilege metadata from the config store.
+func (s *Server) loadPrivilegeMetadata(ctx context.Context, tenantID, scriptID string) (*ScriptPrivilegeMetadata, error) {
+	if s.privilegeStore == nil {
+		return nil, fmt.Errorf("privilege store not configured")
+	}
+
+	key := &cfgconfig.ConfigKey{
+		TenantID:  tenantID,
+		Namespace: "script-privilege",
+		Name:      scriptID,
+	}
+
+	entry, err := s.privilegeStore.GetConfig(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("privilege metadata not found: %w", err)
+	}
+
+	var meta ScriptPrivilegeMetadata
+	if err := json.Unmarshal(entry.Data, &meta); err != nil {
+		return nil, fmt.Errorf("failed to parse privilege metadata: %w", err)
+	}
+
+	return &meta, nil
+}
+
+// handleListScripts handles GET /api/v1/scripts.
+func (s *Server) handleListScripts(w http.ResponseWriter, r *http.Request) {
+	if s.scriptRepo == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Script library not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	scripts, err := s.scriptRepo.List(nil)
+	if err != nil {
+		s.logger.Error("Failed to list scripts", "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list scripts", "INTERNAL_ERROR")
+		return
+	}
+
+	s.writeSuccessResponse(w, scripts)
+}
+
+// handleGetScriptLibraryItem handles GET /api/v1/scripts/{id}.
+func (s *Server) handleGetScriptLibraryItem(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	if id == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Script ID is required", "MISSING_SCRIPT_ID")
+		return
+	}
+
+	if s.scriptRepo == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Script library not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	sanitizedID := logging.SanitizeLogValue(id)
+
+	vs, err := s.scriptRepo.Get(id, "")
+	if err != nil {
+		s.logger.Warn("Script not found", "id", sanitizedID, "error", err)
+		s.writeErrorResponse(w, http.StatusNotFound, "Script not found", "NOT_FOUND")
+		return
+	}
+
+	s.logger.Info("Retrieved script", "id", sanitizedID)
+	s.writeSuccessResponse(w, vs)
+}
+
+// handlePutScriptPrivilege handles PUT /api/v1/scripts/{id}/privilege.
+// The PermissionScriptAdmin gate is enforced by requirePermission middleware.
+// Additionally, the caller must hold every scope listed in RequiredAPIScope,
+// and must have steward:read-dna for any ParamPlatformBindings entry.
+func (s *Server) handlePutScriptPrivilege(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	if id == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Script ID is required", "MISSING_SCRIPT_ID")
+		return
+	}
+
+	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+
+	principal, ok := r.Context().Value(principalContextKey).(*Principal)
+	if !ok || principal == nil {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return
+	}
+
+	if s.privilegeStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Privilege store not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	var req SetPrivilegeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_REQUEST")
+		return
+	}
+
+	// Held-scope ceiling: caller must personally hold every scope they are granting.
+	for _, scope := range req.RequiredAPIScope {
+		if !s.hasPermission(principal, scope) {
+			s.logger.Warn("Scope ceiling violation: caller lacks scope being granted",
+				"caller", logging.SanitizeLogValue(principal.ID),
+				"scope", logging.SanitizeLogValue(scope),
+			)
+			s.writeErrorResponse(w, http.StatusForbidden,
+				fmt.Sprintf("cannot grant scope %q: caller does not hold it", scope),
+				"INSUFFICIENT_PERMISSIONS")
+			return
+		}
+	}
+
+	// DNA path check: any param-platform binding requires steward:read-dna.
+	if len(req.ParamPlatformBindings) > 0 && !s.hasPermission(principal, "steward:read-dna") {
+		s.logger.Warn("DNA path binding requires steward:read-dna",
+			"caller", logging.SanitizeLogValue(principal.ID),
+		)
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"cannot bind parameters to DNA key paths without steward:read-dna permission",
+			"INSUFFICIENT_PERMISSIONS")
+		return
+	}
+
+	sanitizedID := logging.SanitizeLogValue(id)
+
+	meta := &ScriptPrivilegeMetadata{
+		ScriptID:              id,
+		RequiredAPIScope:      req.RequiredAPIScope,
+		ParamPlatformBindings: req.ParamPlatformBindings,
+		SetByUserID:           principal.ID,
+		SetAt:                 time.Now().UTC(),
+	}
+
+	if err := s.storePrivilegeMetadata(r.Context(), tenantID, id, meta); err != nil {
+		s.logger.Error("Failed to store privilege metadata", "id", sanitizedID, "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store privilege metadata", "INTERNAL_ERROR")
+		return
+	}
+
+	s.logger.Info("Script privilege metadata updated", "id", sanitizedID, "tenant_id", logging.SanitizeLogValue(tenantID))
+	s.writeSuccessResponse(w, meta)
+}
 
 // ScriptExecutionInfo represents script execution information for API responses
 type ScriptExecutionInfo struct {

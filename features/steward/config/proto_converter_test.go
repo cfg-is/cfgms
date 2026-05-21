@@ -124,10 +124,8 @@ func TestToProtoFromProto_ScriptSigning(t *testing.T) {
 			ID:   "signing-steward",
 			Mode: ModeStandalone,
 			ScriptSigning: ScriptSigningConfig{
-				Policy:        ScriptSigningPolicyRequired,
-				TrustMode:     TrustModeTrustedKeys,
-				AllowPublicCA: false,
-				ScriptRepoURL: "https://git.example.com/scripts",
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeTrustedKeys,
 				TrustedKeys: []TrustedKeyRef{
 					{
 						Name:         "ops-key",
@@ -156,7 +154,6 @@ func TestToProtoFromProto_ScriptSigning(t *testing.T) {
 	ss := restored.Steward.ScriptSigning
 	assert.Equal(t, ScriptSigningPolicyRequired, ss.Policy)
 	assert.Equal(t, TrustModeTrustedKeys, ss.TrustMode)
-	assert.Equal(t, "https://git.example.com/scripts", ss.ScriptRepoURL)
 	require.Len(t, ss.TrustedKeys, 1)
 	assert.Equal(t, "ops-key", ss.TrustedKeys[0].Name)
 	assert.Equal(t, "AA:BB:CC:DD", ss.TrustedKeys[0].Thumbprint)
@@ -179,7 +176,6 @@ func TestToProtoFromProto_AllThreeNewFields(t *testing.T) {
 				Policy:        ScriptSigningPolicyOptional,
 				TrustMode:     TrustModeAnyValid,
 				AllowPublicCA: true,
-				ScriptRepoURL: "https://git.example.com/repo",
 			},
 			Logging:       LoggingConfig{Level: "debug", Format: "json"},
 			ErrorHandling: ErrorHandlingConfig{ModuleLoadFailure: ActionContinue, ResourceFailure: ActionWarn, ConfigurationError: ActionFail},
@@ -207,7 +203,6 @@ func TestToProtoFromProto_AllThreeNewFields(t *testing.T) {
 	assert.Equal(t, ScriptSigningPolicyOptional, restored.Steward.ScriptSigning.Policy)
 	assert.Equal(t, TrustModeAnyValid, restored.Steward.ScriptSigning.TrustMode)
 	assert.True(t, restored.Steward.ScriptSigning.AllowPublicCA)
-	assert.Equal(t, "https://git.example.com/repo", restored.Steward.ScriptSigning.ScriptRepoURL)
 }
 
 // TestToProto_NilConfig verifies that ToProto returns an error on nil input.

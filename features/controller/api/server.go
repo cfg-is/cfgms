@@ -24,6 +24,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/push"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/modules/script"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/authdefense"
@@ -73,6 +74,8 @@ type Server struct {
 	scriptTracker           script.ExecutionTracker        // Issue #708: durable execution audit records
 	scriptAuditLogger       *script.AuditLogger            // Issue #708: in-memory execution metrics
 	scriptMonitor           *script.ExecutionMonitor       // Issue #708: active execution tracking
+	scriptRepo              script.ScriptRepository        // Issue #1670: git-backed script library
+	privilegeStore          cfgconfig.ConfigStore          // Issue #1670: controller-side script privilege metadata
 	pushLeaderStatus        leaderStatus                   // Issue #1318: leader check for config push (nil = leader)
 	commandPublisher        *commands.Publisher            // Issue #1319: fan-out config push to active stewards
 	pushStore               business.PushStore             // Issue #1320: durable push-state persistence for HA failover
@@ -323,6 +326,12 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/scripts/executions/{execution_id}/retry", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostScriptRetry))).Methods("POST")
 	stewards.Handle("/{id}/scripts/metrics", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptMetrics))).Methods("GET")
 	stewards.Handle("/{id}/scripts/status", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptStatus))).Methods("GET")
+
+	// Script library endpoints (Issue #1670)
+	scripts := api.PathPrefix("/scripts").Subrouter()
+	scripts.Handle("", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleListScripts))).Methods("GET")
+	scripts.Handle("/{id}", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleGetScriptLibraryItem))).Methods("GET")
+	scripts.Handle("/{id}/privilege", s.requirePermission("script", "admin")(http.HandlerFunc(s.handlePutScriptPrivilege))).Methods("PUT")
 
 	// Configuration list endpoint (Issue #1570)
 	api.Handle("/configs", s.requirePermission("config", "list")(http.HandlerFunc(s.handleListConfigs))).Methods("GET")
@@ -635,6 +644,24 @@ func (s *Server) SetScriptModule(tracker script.ExecutionTracker, auditLogger *s
 	s.scriptTracker = tracker
 	s.scriptAuditLogger = auditLogger
 	s.scriptMonitor = monitor
+}
+
+// SetScriptRepository wires the git-backed script library so that
+// GET /api/v1/scripts returns real script metadata (Issue #1670).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetScriptRepository(r script.ScriptRepository) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scriptRepo = r
+}
+
+// SetPrivilegeStore wires the config store used to persist controller-side
+// script privilege metadata (Issue #1670).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetPrivilegeStore(cs cfgconfig.ConfigStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.privilegeStore = cs
 }
 
 // SetRegistry wires the active-steward connection registry so that

@@ -8,6 +8,10 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
@@ -658,4 +662,163 @@ func TestEscapePSPath_EmptyString(t *testing.T) {
 	if got != "" {
 		t.Errorf("escapePSPath(%q) = %q, want empty", "", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Script library command tests (Issue #1670)
+// ---------------------------------------------------------------------------
+
+// TestScriptList_OutputsScriptIDsInTabularForm is a REQUIRED acceptance test.
+// It verifies that `cfg script list` outputs script IDs from the git repository in tabular form.
+func TestScriptList_OutputsScriptIDsInTabularForm(t *testing.T) {
+	scripts := []map[string]interface{}{
+		{"id": "backup-all", "name": "Backup All"},
+		{"id": "health-check", "name": "Health Check"},
+	}
+
+	var requestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": scripts})
+	}))
+	defer server.Close()
+
+	origURL := scriptLibURL
+	origInsecure := scriptLibTLSInsecure
+	t.Cleanup(func() {
+		scriptLibURL = origURL
+		scriptLibTLSInsecure = origInsecure
+	})
+	scriptLibURL = server.URL
+	scriptLibTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runScriptList(scriptListCmd, []string{})
+		if err != nil {
+			t.Fatalf("runScriptList: %v", err)
+		}
+	})
+
+	if requestPath != "/api/v1/scripts" {
+		t.Errorf("expected request to /api/v1/scripts, got %s", requestPath)
+	}
+	if !containsStr(output, "backup-all") {
+		t.Errorf("expected output to contain 'backup-all', got:\n%s", output)
+	}
+	if !containsStr(output, "health-check") {
+		t.Errorf("expected output to contain 'health-check', got:\n%s", output)
+	}
+	// Verify tabular header is present.
+	if !containsStr(output, "ID") || !containsStr(output, "NAME") {
+		t.Errorf("expected tabular header in output, got:\n%s", output)
+	}
+}
+
+// TestScriptList_EmptyReturnsMessage verifies that an empty script list prints a user-friendly message.
+func TestScriptList_EmptyReturnsMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []interface{}{}})
+	}))
+	defer server.Close()
+
+	origURL := scriptLibURL
+	origInsecure := scriptLibTLSInsecure
+	t.Cleanup(func() {
+		scriptLibURL = origURL
+		scriptLibTLSInsecure = origInsecure
+	})
+	scriptLibURL = server.URL
+	scriptLibTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runScriptList(scriptListCmd, []string{})
+		if err != nil {
+			t.Fatalf("runScriptList: %v", err)
+		}
+	})
+
+	if !containsStr(output, "No scripts found") {
+		t.Errorf("expected 'No scripts found' message, got:\n%s", output)
+	}
+}
+
+// TestScriptList_ServerErrorReturnsError verifies that a non-OK response propagates as an error.
+func TestScriptList_ServerErrorReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+	}))
+	defer server.Close()
+
+	origURL := scriptLibURL
+	origInsecure := scriptLibTLSInsecure
+	t.Cleanup(func() {
+		scriptLibURL = origURL
+		scriptLibTLSInsecure = origInsecure
+	})
+	scriptLibURL = server.URL
+	scriptLibTLSInsecure = true
+
+	err := runScriptList(scriptListCmd, []string{})
+	if err == nil {
+		t.Error("expected error for non-OK response, got nil")
+	}
+}
+
+// TestScriptShow_PrintsScriptDetails verifies that runScriptShow prints the script JSON.
+func TestScriptShow_PrintsScriptDetails(t *testing.T) {
+	var capturedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"metadata": map[string]interface{}{"id": "backup-all", "name": "Backup All"},
+				"content":  "#!/bin/bash\necho backup\n",
+			},
+		})
+	}))
+	defer server.Close()
+
+	origURL := scriptLibURL
+	origInsecure := scriptLibTLSInsecure
+	t.Cleanup(func() {
+		scriptLibURL = origURL
+		scriptLibTLSInsecure = origInsecure
+	})
+	scriptLibURL = server.URL
+	scriptLibTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runScriptShow(scriptShowCmd, []string{"backup-all"})
+		if err != nil {
+			t.Fatalf("runScriptShow: %v", err)
+		}
+	})
+
+	if capturedPath != "/api/v1/scripts/backup-all" {
+		t.Errorf("expected path /api/v1/scripts/backup-all, got %s", capturedPath)
+	}
+	if !containsStr(output, "backup-all") {
+		t.Errorf("expected output to contain script ID, got:\n%s", output)
+	}
+}
+
+// TestScriptSetPrivilege_InvalidParamBinding verifies that malformed --param-binding returns an error.
+func TestScriptSetPrivilege_InvalidParamBinding(t *testing.T) {
+	origBindings := scriptPrivilegeBindings
+	t.Cleanup(func() { scriptPrivilegeBindings = origBindings })
+	scriptPrivilegeBindings = []string{"bad-format"}
+
+	err := runScriptSetPrivilege(scriptSetPrivilegeCmd, []string{"some-script"})
+	if err == nil {
+		t.Error("expected error for invalid --param-binding, got nil")
+	}
+}
+
+// containsStr is a helper that checks whether substr appears in s.
+func containsStr(s, substr string) bool {
+	return strings.Contains(s, substr)
 }

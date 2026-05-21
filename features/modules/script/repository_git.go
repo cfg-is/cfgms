@@ -11,7 +11,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
@@ -24,11 +23,9 @@ type GitScriptRepository struct {
 }
 
 // NewGitScriptRepository creates a new git-based script repository
-func NewGitScriptRepository(storage interfaces.StorageProvider, tenantID string, global bool) (*GitScriptRepository, error) {
-	// Create ConfigStore from provider
-	configStore, err := storage.CreateConfigStore(nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create config store: %w", err)
+func NewGitScriptRepository(configStore cfgconfig.ConfigStore, tenantID string, global bool) (*GitScriptRepository, error) {
+	if configStore == nil {
+		return nil, fmt.Errorf("configStore is required")
 	}
 
 	namespace := "scripts"
@@ -96,6 +93,11 @@ func (r *GitScriptRepository) Get(id string, version string) (*VersionedScript, 
 	expectedHash := r.calculateHash(script.Content)
 	if script.Hash != expectedHash {
 		return nil, fmt.Errorf("script integrity check failed: hash mismatch")
+	}
+
+	// Apply system default timeout for scripts stored with Timeout == 0.
+	if script.Metadata != nil && script.Metadata.Timeout == 0 {
+		script.Metadata.Timeout = 15 * time.Minute
 	}
 
 	return &script, nil
