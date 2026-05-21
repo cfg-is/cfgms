@@ -131,9 +131,9 @@ type ScriptParameter struct {
 
 // VersionedScript represents a complete versioned script
 type VersionedScript struct {
-	Metadata  *ScriptMetadata  `json:"metadata" yaml:"metadata"`                   // Script metadata
-	Content   string           `json:"content" yaml:"content"`                     // Script content
-	Hash      string           `json:"hash" yaml:"hash"`                           // Content hash for integrity
+	Metadata  *ScriptMetadata  `json:"metadata" yaml:"metadata"`                       // Script metadata
+	Content   string           `json:"content" yaml:"content"`                         // Script content
+	Hash      string           `json:"hash" yaml:"hash"`                               // Content hash for integrity
 	Signature *ScriptSignature `json:"signature,omitempty" yaml:"signature,omitempty"` // Detached signature (optional)
 }
 

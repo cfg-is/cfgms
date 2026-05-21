@@ -55,6 +55,12 @@ type StatusChangeCallback func(stewardID string, healthy bool, status StewardSta
 // CommandSyncDNA to request a full sync over the data plane.
 type DNAHashMismatchCallback func(stewardID string)
 
+// HeartbeatReceivedCallback is called on every heartbeat, unconditionally.
+// Unlike OnStatusChange which fires only on healthy→unhealthy transitions,
+// this fires on every received heartbeat so components like the job dispatcher
+// can use the heartbeat as a trigger to drain pending work.
+type HeartbeatReceivedCallback func(stewardID string)
+
 // Service monitors steward heartbeats via the ControlPlaneProvider.
 type Service struct {
 	mu sync.RWMutex
@@ -70,8 +76,9 @@ type Service struct {
 	checkInterval    time.Duration // How often to check for timeouts
 
 	// Callbacks
-	onStatusChange    StatusChangeCallback
-	onDNAHashMismatch DNAHashMismatchCallback
+	onStatusChange      StatusChangeCallback
+	onDNAHashMismatch   DNAHashMismatchCallback
+	onHeartbeatReceived HeartbeatReceivedCallback
 
 	// Control
 	ctx    context.Context
@@ -101,6 +108,12 @@ type Config struct {
 	// Optional — if nil hash-mismatch detection is disabled.
 	OnDNAHashMismatch DNAHashMismatchCallback
 
+	// OnHeartbeatReceived is called unconditionally on every heartbeat, after
+	// status fields are updated. Use this to trigger work that must happen on
+	// every heartbeat (e.g., job dispatch). Unlike OnStatusChange, this fires
+	// even when the steward remains healthy. Optional — nil disables.
+	OnHeartbeatReceived HeartbeatReceivedCallback
+
 	// Logger for service logging
 	Logger logging.Logger
 }
@@ -124,15 +137,16 @@ func New(cfg *Config) (*Service, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Service{
-		controlPlane:      cfg.ControlPlane,
-		stewards:          make(map[string]*StewardStatus),
-		heartbeatTimeout:  heartbeatTimeout,
-		checkInterval:     checkInterval,
-		onStatusChange:    cfg.OnStatusChange,
-		onDNAHashMismatch: cfg.OnDNAHashMismatch,
-		ctx:               ctx,
-		cancel:            cancel,
-		logger:            cfg.Logger,
+		controlPlane:        cfg.ControlPlane,
+		stewards:            make(map[string]*StewardStatus),
+		heartbeatTimeout:    heartbeatTimeout,
+		checkInterval:       checkInterval,
+		onStatusChange:      cfg.OnStatusChange,
+		onDNAHashMismatch:   cfg.OnDNAHashMismatch,
+		onHeartbeatReceived: cfg.OnHeartbeatReceived,
+		ctx:                 ctx,
+		cancel:              cancel,
+		logger:              cfg.Logger,
 	}, nil
 }
 
@@ -234,6 +248,11 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 	// Trigger callback if status changed
 	if !previouslyHealthy && s.onStatusChange != nil {
 		s.onStatusChange(hb.StewardID, true, *status)
+	}
+
+	// Fire unconditional per-heartbeat hook (e.g. for job dispatch).
+	if s.onHeartbeatReceived != nil {
+		s.onHeartbeatReceived(hb.StewardID)
 	}
 
 	return nil

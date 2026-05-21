@@ -25,6 +25,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/dispatcher"
 	dnaStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
@@ -33,6 +34,7 @@ import (
 	controllerRegistration "github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
+	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/rbac"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	reportscache "github.com/cfgis/cfgms/features/reports/cache"
@@ -101,6 +103,8 @@ type Server struct {
 	webhookHandler          *gitsync.WebhookHandler             // Issue #681: drain in-flight webhook syncs on shutdown
 	storageManager          *interfaces.StorageManager          // Main storage manager (must be closed on Stop to release SQLite handles)
 	manualReviewHook        *api.ManualReviewApprovalHook       // Issue #1599: manual-review approval hook (nil if not in use)
+	executionQueue          *scriptmodule.ExecutionQueue        // Issue #1672: persistent queue for script executions
+	jobDispatcher           *dispatcher.Dispatcher              // Issue #1672: job dispatcher for script executions
 }
 
 // New creates a new server instance
@@ -370,6 +374,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var controlPlane controlplaneInterfaces.ControlPlaneProvider
 	var heartbeatService *heartbeat.Service
 	var commandPublisher *commands.Publisher
+	var executionQueue *scriptmodule.ExecutionQueue
+	var jobDispatcher *dispatcher.Dispatcher
 	// hoistedSigner and hoistedSignerCertSerial are set inside the transport block and
 	// re-used by the data plane config handler so both consumers share the same key.
 	var hoistedSigner signature.Signer
@@ -393,29 +399,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 		logger.Info("gRPC control plane provider initialized", "provider", controlPlane.Name(), "addr", cfg.Transport.ListenAddr)
 
-		// Initialize heartbeat monitoring service
-		logger.Info("Initializing heartbeat monitoring service...")
-		heartbeatService, err = heartbeat.New(&heartbeat.Config{
-			ControlPlane:     controlPlane,
-			HeartbeatTimeout: 15 * time.Second,
-			CheckInterval:    5 * time.Second,
-			OnStatusChange: func(stewardID string, healthy bool, status heartbeat.StewardStatus) {
-				if healthy {
-					logger.Info("Steward heartbeat recovered", "steward_id", stewardID)
-				} else {
-					logger.Warn("Steward heartbeat failed", "steward_id", stewardID, "status", status.Status)
-				}
-			},
-			Logger: logger,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize heartbeat service: %w", err)
-		}
-		logger.Info("Heartbeat monitoring service initialized successfully")
-
-		// Story #919: Hoist signer construction so both the command publisher and the
-		// config handler share the same signer instance. This must happen before the
-		// publisher is created so the publisher can sign commands on transmission.
+		// Story #919: Hoist signer construction so the command publisher, config
+		// handler, and job dispatcher all share the same signer instance.
+		// Constructed here — before any publisher or dispatcher — so every
+		// controller-issued command carries a consistent signature.
 		//
 		// In separated mode: use CertificateTypeConfigSigning (dedicated signing cert)
 		// In unified mode: use CertificateTypeServer (backward compatible)
@@ -446,6 +433,56 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				}
 			}
 		}
+
+		// Initialize execution queue and job dispatcher (Issue #1672).
+		// The dispatcher drains the execution queue on every steward heartbeat and
+		// on a 30-second polling loop. The heartbeat service wires dispatcher.OnHeartbeat
+		// via OnHeartbeatReceived so that the queue is drained within one heartbeat
+		// cycle even before the next polling tick.
+		logger.Info("Initializing execution queue and job dispatcher...")
+		monitor := scriptmodule.NewExecutionMonitor()
+		keyManager := scriptmodule.NewEphemeralKeyManager()
+		executionQueue = scriptmodule.NewExecutionQueue(
+			monitor,
+			keyManager,
+			0,              // maxAge — defaults to 24 h
+			cfg.ListenAddr, // controllerURL for ephemeral-key callbacks
+			nil,            // store — defaults to InMemoryQueueStore
+			nil,            // scriptRepo — resolved at dispatch time when wired separately
+			0,              // dispatchTimeout — defaults to 1 h
+		)
+		var dispatcherErr error
+		jobDispatcher, dispatcherErr = dispatcher.New(&dispatcher.Config{
+			Queue:        executionQueue,
+			ControlPlane: controlPlane,
+			Signer:       hoistedSigner, // share the same signer as commandPublisher
+			Logger:       logger,
+		})
+		if dispatcherErr != nil {
+			return nil, fmt.Errorf("failed to initialize job dispatcher: %w", dispatcherErr)
+		}
+		logger.Info("Execution queue and job dispatcher initialized")
+
+		// Initialize heartbeat monitoring service
+		logger.Info("Initializing heartbeat monitoring service...")
+		heartbeatService, err = heartbeat.New(&heartbeat.Config{
+			ControlPlane:     controlPlane,
+			HeartbeatTimeout: 15 * time.Second,
+			CheckInterval:    5 * time.Second,
+			OnStatusChange: func(stewardID string, healthy bool, status heartbeat.StewardStatus) {
+				if healthy {
+					logger.Info("Steward heartbeat recovered", "steward_id", stewardID)
+				} else {
+					logger.Warn("Steward heartbeat failed", "steward_id", stewardID, "status", status.Status)
+				}
+			},
+			OnHeartbeatReceived: jobDispatcher.OnHeartbeat,
+			Logger:              logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize heartbeat service: %w", err)
+		}
+		logger.Info("Heartbeat monitoring service initialized successfully")
 
 		// Initialize command publisher (Story #198, Story #363, Story #514, Story #919)
 		logger.Info("Initializing command publisher...")
@@ -571,6 +608,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		healthCollector:         healthCollector,
 		alertManager:            healthAlertManager,
 		storageManager:          storageManager,
+		executionQueue:          executionQueue, // Issue #1672
+		jobDispatcher:           jobDispatcher,  // Issue #1672
 	}
 
 	// Story #416: Wire rollback manager into API server
@@ -985,6 +1024,14 @@ func (s *Server) Start() error {
 			}
 			s.logger.Info("Command publisher started")
 		}
+
+		// Start job dispatcher (Issue #1672)
+		if s.jobDispatcher != nil {
+			if err := s.jobDispatcher.Start(context.Background()); err != nil {
+				return fmt.Errorf("failed to start job dispatcher: %w", err)
+			}
+			s.logger.Info("Job dispatcher started")
+		}
 	}
 
 	// Start workflow trigger manager (Issue #414)
@@ -1148,6 +1195,14 @@ func (s *Server) Stop() error {
 		if err := s.heartbeatService.Stop(ctx); err != nil {
 			s.logger.Warn("Failed to stop heartbeat service", "error", err)
 		}
+	}
+
+	// Stop job dispatcher and execution queue (Issue #1672)
+	if s.jobDispatcher != nil {
+		s.jobDispatcher.Stop()
+	}
+	if s.executionQueue != nil {
+		s.executionQueue.Stop()
 	}
 
 	// Close DNA storage manager (releases SQLite DB file handles)

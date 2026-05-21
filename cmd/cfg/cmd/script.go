@@ -200,7 +200,7 @@ func runScriptList(cmd *cobra.Command, _ []string) error {
 	}
 
 	if len(apiResp.Data) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No scripts found.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No scripts found.")
 		return nil
 	}
 
@@ -241,10 +241,10 @@ func runScriptShow(cmd *cobra.Command, args []string) error {
 	var pretty bytes.Buffer
 	if err := json.Indent(&pretty, body, "", "  "); err != nil {
 		// Fall back to raw output if the response is not JSON.
-		fmt.Fprintln(cmd.OutOrStdout(), string(body))
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(body))
 		return nil
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), pretty.String())
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), pretty.String())
 	return nil
 }
 
