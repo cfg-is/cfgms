@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -180,6 +180,37 @@ build-steward-cross:
 	echo "Building steward for $(GOOS)/$(GOARCH)..."; \
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build ${BUILD_TAGS} ${STEWARD_BUILD_FLAGS} -o bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}$$EXT ./cmd/steward
 	@echo "✅ Built bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}"
+
+# Build Windows MSI installer for cfgms-steward using WiX 4.
+# Requires pwsh (PowerShell Core) and the .NET SDK; WiX 4 is installed automatically.
+# On Linux/macOS hosts: pwsh must be installed (brew install powershell / apt install powershell).
+# This target cross-compiles the binary and packages it into an MSI.
+# For production builds, provide a code-signing certificate:
+#   make build-msi-windows STEWARD_CONTROLLER_URL=https://ctrl.example.com \
+#        VERSION=v1.0.0 SIGNING_CERT_THUMBPRINT=<thumbprint>
+build-msi-windows:
+	@echo "🪟 Building Windows MSI installer"
+	@echo "==================================="
+	@if ! command -v pwsh >/dev/null 2>&1; then \
+		echo "❌ pwsh (PowerShell Core) not found."; \
+		echo "   Linux:  sudo apt install powershell  or  snap install powershell --classic"; \
+		echo "   macOS:  brew install powershell"; \
+		echo "   Docs:   https://learn.microsoft.com/powershell/scripting/install/installing-powershell"; \
+		exit 1; \
+	fi
+	@URL_ARG=""; \
+	if [ -n "$(STEWARD_CONTROLLER_URL)" ]; then \
+		URL_ARG="-ControllerURL '$(STEWARD_CONTROLLER_URL)'"; \
+	fi; \
+	SIGN_ARG=""; \
+	if [ -n "$(SIGNING_CERT_THUMBPRINT)" ]; then \
+		SIGN_ARG="-SigningCertThumbprint '$(SIGNING_CERT_THUMBPRINT)'"; \
+	fi; \
+	pwsh -NonInteractive -File build/windows/build-msi.ps1 \
+		$$URL_ARG \
+		-Version "$(or $(VERSION),0.0.0)" \
+		$$SIGN_ARG
+	@echo "✅ MSI built: bin/cfgms-steward-windows-amd64.msi"
 
 # Smart test - core modules + changed modules only
 test: fix-git-bare

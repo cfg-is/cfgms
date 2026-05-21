@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  cfgms-steward.wxs — WiX 4 installer for CFGMS Steward
+
+  Accepts these MSI properties for silent RMM deployment:
+    REGTOKEN        Registration token string (required)
+    CA_FINGERPRINT  SHA-256 hex fingerprint of the controller CA cert (required for private CA)
+    CA_CERT_PATH    Path to CA cert PEM file (optional; auto-detected from SourceDir when ca.crt is present)
+
+  Silent install from an extracted install package (includes ca.crt next to the MSI):
+    msiexec /qn /i cfgms-steward-windows-amd64.msi REGTOKEN="<token>" CA_FINGERPRINT="<hex>"
+
+  Silent install specifying the CA cert explicitly:
+    msiexec /qn /i cfgms-steward-windows-amd64.msi REGTOKEN="<token>" CA_FINGERPRINT="<hex>" CA_CERT_PATH="C:\path\to\ca.crt"
+
+  Installs the binary to C:\Program Files\CFGMS\ and runs:
+    cfgms-steward install --regtoken <REGTOKEN> --fingerprint <CA_FINGERPRINT> [--ca-cert <CA_CERT_PATH>]
+
+  The custom action is deferred and runs as SYSTEM (Impersonate="no") so it has the
+  Administrator rights required for Windows Service registration.
+
+  Build with build-msi.ps1:
+    .\build\windows\build-msi.ps1 -ControllerURL https://ctrl.example.com -Version v1.0.0
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="CFGMS Steward"
+           Manufacturer="CFGMS"
+           Version="$(var.ProductVersion)"
+           Language="1033"
+           UpgradeCode="{A5B3C0D1-E2F4-4A6B-8C9D-0E1F2A3B4C5D}"
+           Compressed="yes">
+
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of CFGMS Steward is already installed. Uninstall it before installing an older version." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!--
+      Public MSI properties for RMM silent deployment.
+      All uppercase names make them settable from the msiexec command line.
+      Secure="yes" ensures they are passed through to deferred custom actions.
+    -->
+    <Property Id="REGTOKEN" Secure="yes" />
+    <Property Id="CA_FINGERPRINT" Secure="yes" />
+
+    <!--
+      CA_CERT_PATH is auto-detected from the MSI source directory.
+      When the install package (tar.gz from Story 2) is extracted alongside the MSI,
+      ca.crt is present in the same directory and CA_CERT_PATH is set automatically.
+      A user-supplied CA_CERT_PATH on the msiexec command line takes precedence
+      over the auto-detected value (MSI public property semantics).
+    -->
+    <Property Id="CA_CERT_PATH" Secure="yes">
+      <DirectorySearch Id="SourceCACertDirSearch" Path="[SourceDir]" Depth="0">
+        <FileSearch Name="ca.crt" />
+      </DirectorySearch>
+    </Property>
+
+    <!--
+      Installation directory: C:\Program Files\CFGMS\
+      ProgramFiles64Folder maps to C:\Program Files\ on both AMD64 and ARM64 Windows.
+    -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="CFGMSDIR" Name="CFGMS">
+        <Component Id="StewardBinary" Guid="*">
+          <File Id="StewardExe"
+                Source="$(var.BinaryPath)"
+                Name="cfgms-steward.exe"
+                KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="ProductFeature" Title="CFGMS Steward" Level="1">
+      <ComponentRef Id="StewardBinary" />
+    </Feature>
+
+    <!--
+      Custom action — install without CA cert (when CA_CERT_PATH is not set).
+      Runs after the binary is installed so cfgms-steward.exe is available at
+      C:\Program Files\CFGMS\cfgms-steward.exe for Windows Service registration.
+    -->
+    <SetProperty Id="RunInstallNoCert"
+                 Before="RunInstallNoCert"
+                 Sequence="execute"
+                 Value="install --regtoken &quot;[REGTOKEN]&quot; --fingerprint &quot;[CA_FINGERPRINT]&quot;">NOT CA_CERT_PATH</SetProperty>
+
+    <CustomAction Id="RunInstallNoCert"
+                  FileRef="StewardExe"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <!--
+      Custom action — install with CA cert (when CA_CERT_PATH is set, either via
+      auto-detection or explicit command-line property).
+    -->
+    <SetProperty Id="RunInstallWithCert"
+                 Before="RunInstallWithCert"
+                 Sequence="execute"
+                 Value="install --regtoken &quot;[REGTOKEN]&quot; --fingerprint &quot;[CA_FINGERPRINT]&quot; --ca-cert &quot;[CA_CERT_PATH]&quot;">CA_CERT_PATH</SetProperty>
+
+    <CustomAction Id="RunInstallWithCert"
+                  FileRef="StewardExe"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <!--
+      Custom action — uninstall the Windows service before the binary is removed.
+      Runs before RemoveFiles so cfgms-steward.exe is still on disk when called.
+      Return="ignore" allows uninstall to proceed even if the service was already
+      removed or was never registered (idempotent cleanup).
+    -->
+    <SetProperty Id="RunUninstall"
+                 Before="RunUninstall"
+                 Sequence="execute"
+                 Value="uninstall">Installed AND REMOVE~="ALL"</SetProperty>
+
+    <CustomAction Id="RunUninstall"
+                  FileRef="StewardExe"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- Uninstall service before RemoveFiles (so the binary is still on disk) -->
+      <Custom Action="RunUninstall" Before="RemoveFiles">Installed AND REMOVE~="ALL"</Custom>
+      <!-- Install without CA cert when CA_CERT_PATH is not set -->
+      <Custom Action="RunInstallNoCert" After="InstallFiles">NOT Installed AND NOT CA_CERT_PATH</Custom>
+      <!-- Install with CA cert when CA_CERT_PATH is set (auto-detected or explicit) -->
+      <Custom Action="RunInstallWithCert" After="InstallFiles">NOT Installed AND CA_CERT_PATH</Custom>
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>
