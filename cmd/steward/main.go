@@ -449,13 +449,56 @@ func logLevelFromEnv() string {
 }
 
 // buildHTTPConfig constructs an HTTPConfig from environment variables and the provided arguments.
-// CFGMS_HTTP_CA_CERT_PATH, when set, is used to verify the controller's TLS certificate during registration.
 func buildHTTPConfig(controllerURL string, timeout time.Duration, logger logging.Logger) *registration.HTTPConfig {
 	return &registration.HTTPConfig{
 		ControllerURL: controllerURL,
 		Timeout:       timeout,
-		CACertPath:    os.Getenv("CFGMS_HTTP_CA_CERT_PATH"),
+		CACertPath:    resolveRegistrationCACertPath(logger),
 		Logger:        logger,
+	}
+}
+
+// resolveRegistrationCACertPath returns the first CA cert path that exists on disk,
+// checking in priority order: env var override, platform-standard installer path,
+// then empty string (system trust store). See doResolveRegistrationCACertPath for logic.
+func resolveRegistrationCACertPath(logger logging.Logger) string {
+	return doResolveRegistrationCACertPath(logger, defaultPlatformCACertPath())
+}
+
+// doResolveRegistrationCACertPath is the testable core of resolveRegistrationCACertPath.
+// platformPath is injected so tests can exercise all priority levels without root access.
+func doResolveRegistrationCACertPath(logger logging.Logger, platformPath string) string {
+	// Priority 1: explicit env var override.
+	if envPath := os.Getenv("CFGMS_HTTP_CA_CERT_PATH"); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			return envPath
+		}
+		logger.Warn("CFGMS_HTTP_CA_CERT_PATH set but file not found, falling through", "path", envPath)
+	}
+
+	// Priority 2: platform-standard path written by the installer.
+	if _, err := os.Stat(platformPath); err == nil {
+		logger.Info("Using platform-standard CA cert path", "path", platformPath)
+		return platformPath
+	}
+
+	// Priority 3: no cert found; caller uses system trust store.
+	logger.Info("No CA cert found; using system trust store")
+	return ""
+}
+
+// defaultPlatformCACertPath returns the OS-specific path where the installer writes
+// the controller CA cert, mirroring the path convention used by the install package.
+func defaultPlatformCACertPath() string {
+	switch runtime.GOOS {
+	case "windows":
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		return filepath.Join(programData, "cfgms", "controller-ca.crt")
+	default: // linux and darwin
+		return "/etc/cfgms/controller-ca.crt"
 	}
 }
 

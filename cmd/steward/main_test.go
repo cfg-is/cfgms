@@ -6,6 +6,8 @@ package main
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -100,14 +102,61 @@ func TestBuildHTTPConfig(t *testing.T) {
 		cfg := buildHTTPConfig("https://controller.example.com", 30*time.Second, logger)
 		require.NotNil(t, cfg)
 		assert.Equal(t, "https://controller.example.com", cfg.ControllerURL)
+		// CACertPath is "" when no env var is set and platform-standard cert does not exist.
+		// In test environments the platform cert is absent, so this holds.
 		assert.Equal(t, "", cfg.CACertPath)
 	})
 
-	t.Run("CFGMS_HTTP_CA_CERT_PATH is forwarded to HTTPConfig.CACertPath", func(t *testing.T) {
-		t.Setenv("CFGMS_HTTP_CA_CERT_PATH", "/etc/cfgms/ca.crt")
+	t.Run("CFGMS_HTTP_CA_CERT_PATH with existing file is forwarded to HTTPConfig.CACertPath", func(t *testing.T) {
+		dir := t.TempDir()
+		certFile := filepath.Join(dir, "ca.crt")
+		require.NoError(t, os.WriteFile(certFile, []byte("fake-cert"), 0600))
+		t.Setenv("CFGMS_HTTP_CA_CERT_PATH", certFile)
 		cfg := buildHTTPConfig("https://controller.example.com", 30*time.Second, logger)
 		require.NotNil(t, cfg)
-		assert.Equal(t, "/etc/cfgms/ca.crt", cfg.CACertPath)
+		assert.Equal(t, certFile, cfg.CACertPath)
+	})
+}
+
+func TestResolveRegistrationCACertPath(t *testing.T) {
+	logger := logging.NewLogger("debug")
+
+	t.Run("priority 1: env var set and file exists", func(t *testing.T) {
+		dir := t.TempDir()
+		certFile := filepath.Join(dir, "ca.crt")
+		require.NoError(t, os.WriteFile(certFile, []byte("fake-cert"), 0600))
+		t.Setenv("CFGMS_HTTP_CA_CERT_PATH", certFile)
+
+		result := doResolveRegistrationCACertPath(logger, filepath.Join(dir, "platform-ca.crt"))
+		assert.Equal(t, certFile, result)
+	})
+
+	t.Run("priority 1 fallthrough: env var set but file missing; platform path used", func(t *testing.T) {
+		dir := t.TempDir()
+		platformCert := filepath.Join(dir, "platform-ca.crt")
+		require.NoError(t, os.WriteFile(platformCert, []byte("fake-cert"), 0600))
+		t.Setenv("CFGMS_HTTP_CA_CERT_PATH", filepath.Join(dir, "nonexistent.crt"))
+
+		result := doResolveRegistrationCACertPath(logger, platformCert)
+		assert.Equal(t, platformCert, result)
+	})
+
+	t.Run("priority 2: platform-standard path exists when env var is empty", func(t *testing.T) {
+		dir := t.TempDir()
+		platformCert := filepath.Join(dir, "controller-ca.crt")
+		require.NoError(t, os.WriteFile(platformCert, []byte("fake-cert"), 0600))
+		t.Setenv("CFGMS_HTTP_CA_CERT_PATH", "")
+
+		result := doResolveRegistrationCACertPath(logger, platformCert)
+		assert.Equal(t, platformCert, result)
+	})
+
+	t.Run("priority 3: neither env var nor platform path exists returns empty string", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("CFGMS_HTTP_CA_CERT_PATH", "")
+
+		result := doResolveRegistrationCACertPath(logger, filepath.Join(dir, "nonexistent.crt"))
+		assert.Equal(t, "", result)
 	})
 }
 
