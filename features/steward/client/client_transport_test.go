@@ -234,3 +234,56 @@ func TestTransportClient_CertNotCached(t *testing.T) {
 		require.NotEmpty(t, got.Certificate, "call %d must return non-empty cert bytes", i+1)
 	}
 }
+
+// TestStartConvergenceLoop_IntervalChangeResetsTicker verifies that a
+// converge_interval delivered by a sync_config command takes effect promptly:
+// the convergence loop resets its ticker as soon as convergeInterval changes,
+// rather than waiting out the stale (30-minute startup default) tick period.
+//
+// Regression test for Issue #1721: the fleet drift-correction scenario uploads
+// a cfg with converge_interval=10s and expects a convergence run within ~90s.
+// With the ticker pinned to the 30-minute startup default that never happened,
+// so apply-mode drift was never re-corrected by the scheduled loop.
+func TestStartConvergenceLoop_IntervalChangeResetsTicker(t *testing.T) {
+	capLog := &kvCapturingLogger{}
+	c := &TransportClient{
+		logger:             capLog,
+		convergenceStop:    make(chan struct{}),
+		convergeIntervalCh: make(chan struct{}, 1),
+		convergeInterval:   1 * time.Hour, // startup default — far longer than the test window
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c.StartConvergenceLoop(ctx)
+
+	// Simulate a sync_config command lowering the interval, mirroring what
+	// client_transport.go does on cfg delivery: update the field, then signal.
+	c.mu.Lock()
+	c.convergeInterval = 150 * time.Millisecond
+	c.mu.Unlock()
+	select {
+	case c.convergeIntervalCh <- struct{}{}:
+	default:
+	}
+
+	// The loop must reset its ticker and fire a scheduled convergence well
+	// within the test window. With the bug (ticker pinned to 1h) it never does.
+	deadline := time.Now().Add(5 * time.Second)
+	fired := false
+	for time.Now().Before(deadline) && !fired {
+		for _, e := range capLog.allEntries() {
+			if e.msg == "Scheduled convergence triggered" {
+				fired = true
+				break
+			}
+		}
+		if !fired {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	assert.True(t, fired,
+		"convergence loop must reset its ticker on a converge_interval change and fire a scheduled convergence within 5s")
+}
