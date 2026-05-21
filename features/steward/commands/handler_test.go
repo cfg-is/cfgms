@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -724,6 +725,41 @@ func testSignedCommandWithParams(id string, cmdType cpTypes.CommandType, params 
 // execute_script handler tests
 // ---------------------------------------------------------------------------
 
+// platformShell returns the shell name the execute_script handler tests should use on
+// the current OS. bash is unavailable on Windows, so Windows runners use powershell;
+// both shells are recognised by script.ShellType and the script-module executor.
+func platformShell() string {
+	if runtime.GOOS == "windows" {
+		return "powershell"
+	}
+	return "bash"
+}
+
+// echoScriptBody returns a script body that writes s (followed by a newline) to stdout,
+// using the syntax of the current platform's shell (see platformShell).
+func echoScriptBody(s string) string {
+	if runtime.GOOS == "windows" {
+		return "Write-Output '" + s + "'"
+	}
+	return "echo '" + s + "'"
+}
+
+// exitScriptBody returns a script body that terminates with the given exit code.
+// The `exit N` syntax is identical in bash and PowerShell.
+func exitScriptBody(code int) string {
+	return fmt.Sprintf("exit %d", code)
+}
+
+// fixedSizeStdoutScriptBody returns a script body that writes exactly totalBytes bytes
+// to stdout with no trailing newline. totalBytes must be a multiple of 10.
+func fixedSizeStdoutScriptBody(totalBytes int) string {
+	chunks := totalBytes / 10
+	if runtime.GOOS == "windows" {
+		return fmt.Sprintf("for ($i=0; $i -lt %d; $i++) { [Console]::Out.Write('AAAAAAAAAA') }", chunks)
+	}
+	return fmt.Sprintf("i=0; while [ $i -lt %d ]; do printf 'AAAAAAAAAA'; i=$((i+1)); done", chunks)
+}
+
 // TestExecuteScriptHandler_Success verifies that a zero-exit script produces
 // EventScriptCompleted with exit_code 0 and the expected stdout_preview content.
 func TestExecuteScriptHandler_Success(t *testing.T) {
@@ -736,10 +772,10 @@ func TestExecuteScriptHandler_Success(t *testing.T) {
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
-	scriptContent := base64.StdEncoding.EncodeToString([]byte("echo hello"))
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(echoScriptBody("hello")))
 	sc := testSignedCommandWithParams("es-001", cpTypes.CommandExecuteScript, map[string]interface{}{
 		"script_content": scriptContent,
-		"shell":          "bash",
+		"shell":          platformShell(),
 		"execution_id":   "exec-001",
 	})
 
@@ -773,10 +809,10 @@ func TestExecuteScriptHandler_NonZeroExitCode(t *testing.T) {
 	h.RegisterExecuteScriptHandler()
 
 	// Script exits with code 42.
-	scriptContent := base64.StdEncoding.EncodeToString([]byte("exit 42"))
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(exitScriptBody(42)))
 	sc := testSignedCommandWithParams("es-002", cpTypes.CommandExecuteScript, map[string]interface{}{
 		"script_content": scriptContent,
-		"shell":          "bash",
+		"shell":          platformShell(),
 		"execution_id":   "exec-002",
 	})
 
@@ -809,12 +845,12 @@ func TestExecuteScriptHandler_StdoutTruncated(t *testing.T) {
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
-	// Generate >4096 bytes of output using a portable bash loop (500 iter × 10 bytes = 5000 bytes).
-	scriptBody := "i=0; while [ $i -lt 500 ]; do printf 'AAAAAAAAAA'; i=$((i+1)); done"
+	// Generate >4096 bytes of output (500 iterations × 10 bytes = 5000 bytes).
+	scriptBody := fixedSizeStdoutScriptBody(5000)
 	scriptContent := base64.StdEncoding.EncodeToString([]byte(scriptBody))
 	sc := testSignedCommandWithParams("es-003", cpTypes.CommandExecuteScript, map[string]interface{}{
 		"script_content": scriptContent,
-		"shell":          "bash",
+		"shell":          platformShell(),
 		"execution_id":   "exec-003",
 	})
 
@@ -855,12 +891,12 @@ func TestExecuteScriptHandler_NoContentLogged(t *testing.T) {
 
 	// Use a recognizable marker that would be visible in logs if content were leaked.
 	secretMarker := "CFGMS_SECRET_MARKER_XYZ_12345"
-	scriptBody := fmt.Sprintf("echo '%s'", secretMarker)
+	scriptBody := echoScriptBody(secretMarker)
 	scriptContent := base64.StdEncoding.EncodeToString([]byte(scriptBody))
 
 	sc := testSignedCommandWithParams("es-004", cpTypes.CommandExecuteScript, map[string]interface{}{
 		"script_content": scriptContent,
-		"shell":          "bash",
+		"shell":          platformShell(),
 		"execution_id":   "exec-004",
 	})
 
