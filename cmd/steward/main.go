@@ -520,7 +520,21 @@ func defaultPlatformCACertPath() string {
 // registerAndConnect registers the steward using HTTP REST API
 // and then establishes gRPC-over-QUIC connections for ongoing communication.
 // Both control plane and data plane use the transport_address from the registration response.
+//
+// On restart with a valid stored cert and identity, HTTP registration is skipped
+// and the steward reconnects directly using the persisted credentials (Issue #1719).
 func registerAndConnect(ctx context.Context, token string, logger logging.Logger) (*client.TransportClient, error) {
+	logger.Info("Starting steward connect sequence")
+
+	certStoreDir := defaultCertStoreDir()
+
+	// Attempt cert-reuse reconnect (skips HTTP registration on restart).
+	if tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, logger); tc != nil {
+		return tc, nil
+	} else if reconnErr != nil {
+		logger.Warn("Stored-identity reconnect failed; falling back to HTTP registration", "error", reconnErr)
+	}
+
 	logger.Info("Registering steward via HTTP API")
 
 	controllerURL := ControllerURL
@@ -548,6 +562,20 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		"tenant_id", regResp.TenantID,
 		"group", regResp.Group,
 		"transport_address", regResp.TransportAddress)
+
+	// Persist the identity record immediately after registration so that a
+	// subsequent restart can reconnect without HTTP re-registration (Issue #1719).
+	identity := StewardIdentity{
+		StewardID:        regResp.StewardID,
+		TenantID:         regResp.TenantID,
+		TransportAddress: regResp.TransportAddress,
+		CACertPEM:        regResp.CACert,
+	}
+	if saveErr := saveIdentity(certStoreDir, identity); saveErr != nil {
+		logger.Warn("Failed to persist steward identity; next restart will re-register", "error", saveErr)
+	} else {
+		logger.Info("Steward identity persisted for restart reuse", "steward_id", identity.StewardID)
+	}
 
 	// Optionally load the local steward config to apply custom replay window and
 	// params-size limits. If no config file is found (the common case when the
@@ -600,6 +628,111 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 	logger.Info("Configuration executor initialized", "tenant_id", regResp.TenantID)
 
 	return transportClient, nil
+}
+
+// tryReconnectWithStoredIdentity attempts to reconnect using the steward's
+// persisted identity record and the client cert already in the cert store,
+// skipping HTTP re-registration entirely.
+//
+// Returns (nil, nil) when no stored identity exists — caller falls through to
+// HTTP registration (first run or manually cleared identity).
+// Returns (nil, err) when a stored identity exists but reconnect fails — caller
+// should log the error and fall back to HTTP registration.
+func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token string, logger logging.Logger) (*client.TransportClient, error) {
+	id, err := loadIdentity(certStoreDir)
+	if err != nil {
+		// corrupt/unreadable identity: log and treat as absent so the caller falls through
+		logger.Warn("Could not load stored identity; falling back to HTTP registration", "error", err)
+		return nil, nil
+	}
+	if id == nil {
+		return nil, nil // first run; no stored identity
+	}
+
+	// Load the cert manager from the existing cert store.
+	certMgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath:    certStoreDir,
+		LoadExistingCA: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cert store not loadable: %w", err)
+	}
+
+	// Require at least one valid (non-expired) client cert in the store.
+	certs, err := certMgr.ListCertificates()
+	if err != nil {
+		return nil, fmt.Errorf("cert list unavailable: %w", err)
+	}
+	if !hasValidClientCert(certs) {
+		return nil, fmt.Errorf("no valid client certificate found in cert store")
+	}
+
+	logger.Info("Stored identity and cert found; reconnecting without HTTP registration",
+		"steward_id", logging.SanitizeLogValue(id.StewardID),
+		"tenant_id", logging.SanitizeLogValue(id.TenantID),
+		"transport_address", logging.SanitizeLogValue(id.TransportAddress))
+
+	// Best-effort secret store for offline queue encryption.
+	var secretStore secretsif.SecretStore
+	if sp, spErr := secretsif.GetSecretProvider("steward"); spErr == nil {
+		if store, storeErr := sp.CreateSecretStore(map[string]interface{}{}); storeErr == nil {
+			secretStore = store
+		}
+	}
+
+	var commandReplayWindow time.Duration
+	var commandMaxParamsBytes int
+	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
+		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
+		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
+	}
+
+	transportClient, err := client.NewTransportClient(&client.TransportConfig{
+		ControllerURL:               id.TransportAddress,
+		RegistrationToken:           token,
+		CACertPEM:                   id.CACertPEM,
+		CertManager:                 certMgr,
+		SecretStore:                 secretStore,
+		SignedCommandReplayWindow:   commandReplayWindow,
+		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
+		Logger:                      logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transport client: %w", err)
+	}
+
+	transportClient.SetStewardID(id.StewardID)
+	transportClient.SetTenantID(id.TenantID)
+
+	if err := transportClient.Connect(ctx); err != nil {
+		return nil, fmt.Errorf("failed to connect to controller with stored identity: %w", err)
+	}
+
+	logger.Info("Reconnected to controller via stored identity",
+		"steward_id", logging.SanitizeLogValue(id.StewardID),
+		"transport_address", logging.SanitizeLogValue(id.TransportAddress))
+
+	if err := transportClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
+		logger.Warn("Failed to send initial heartbeat after reconnect", "error", err)
+	}
+
+	if err := transportClient.InitializeConfigExecutor(id.TenantID); err != nil {
+		return nil, fmt.Errorf("failed to initialize config executor: %w", err)
+	}
+
+	logger.Info("Configuration executor initialized after reconnect", "tenant_id", logging.SanitizeLogValue(id.TenantID))
+
+	return transportClient, nil
+}
+
+// hasValidClientCert reports whether certs contains at least one non-expired client certificate.
+func hasValidClientCert(certs []*cert.CertificateInfo) bool {
+	for _, c := range certs {
+		if c.Type == cert.CertificateTypeClient && c.IsValid {
+			return true
+		}
+	}
+	return false
 }
 
 // buildCertManagerAndSecretStore initialises a cert.Manager (holding the
