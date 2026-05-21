@@ -450,10 +450,11 @@ func TestDefaultVersionMigrator_GetMigrationStatus(t *testing.T) {
 		assert.Equal(t, len(path.Steps), status.TotalSteps)
 		assert.Equal(t, MigrationStatusCompleted, status.Status)
 		assert.Equal(t, 1.0, status.Progress)
-		// ElapsedTime is a measured wall-clock duration. A no-op test migration
-		// can complete inside a single monotonic-clock tick (notably on Windows,
-		// where the tick is coarse), making an exactly-zero duration a valid
-		// measurement — assert it is recorded and non-negative, not strictly >0.
+		// ElapsedTime must be a valid, non-negative measurement. A completed migration
+		// can legitimately finish within a single clock tick on platforms with coarse
+		// monotonic-clock resolution (notably Windows), so the frozen Duration may be
+		// exactly 0; asserting strictly greater than 0 is flaky. A negative value would
+		// indicate a genuine bug (EndTime before StartTime).
 		assert.GreaterOrEqual(t, status.ElapsedTime, time.Duration(0))
 	})
 
