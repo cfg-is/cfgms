@@ -268,13 +268,70 @@ jobs:
         echo "- License compliance verification" >> $GITHUB_STEP_SUMMARY
         echo "- Enterprise procurement requirements" >> $GITHUB_STEP_SUMMARY
 
+  # Build Windows MSI installers (amd64 and arm64)
+  build-windows-msi:
+    name: Build Windows MSI (${{ matrix.arch }})
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    timeout-minutes: 30
+    needs: create-release
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      with:
+        # Release jobs only use the GH_TOKEN env for `gh release upload`;
+        # the git-config credential is not needed and must not persist into
+        # the workspace (zizmor artipacked / credential persistence).
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        # Caching disabled: release artifacts must be built from a clean
+        # module set, never a cache a PR workflow could have poisoned
+        # (zizmor cache-poisoning).
+        cache: false
+
+    - name: Build Windows MSI
+      shell: pwsh
+      env:
+        VERSION: ${{ needs.create-release.outputs.version }}
+        ARCH: ${{ matrix.arch }}
+      run: |
+        # ControllerURL is intentionally omitted here: CI release MSIs are generic
+        # artifacts (no controller URL baked in), consistent with the cross-platform
+        # release binaries. Operators build MSIs with their controller URL using:
+        #   build\windows\build-msi.ps1 -ControllerURL https://ctrl.example.com -Version vN.N.N
+        # Or via the controller's install-package generator (Story 2 of Epic #1661).
+        .\build\windows\build-msi.ps1 `
+          -Version "$env:VERSION" `
+          -Arch "$env:ARCH"
+
+    - name: Upload MSI to release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VERSION: ${{ needs.create-release.outputs.version }}
+        ARCH: ${{ matrix.arch }}
+      shell: bash
+      run: |
+        # VERSION and ARCH are read from the env block above rather than
+        # interpolated inline with ${{ }} to avoid template injection into
+        # the shell (zizmor template-injection).
+        gh release upload "$VERSION" \
+          "bin/cfgms-steward-windows-${ARCH}.msi"
+
   # Back-merge release to develop
   back-merge-to-develop:
     name: Back-merge to Develop
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    needs: [create-release, build-binaries]
+    needs: [create-release, build-binaries, build-windows-msi]
     if: success()
     steps:
     - name: Checkout repository
@@ -330,7 +387,7 @@ jobs:
     name: Release Summary
     runs-on: ubuntu-latest
     permissions: {}
-    needs: [create-release, build-binaries, generate-sbom, back-merge-to-develop]
+    needs: [create-release, build-binaries, build-windows-msi, generate-sbom, back-merge-to-develop]
     if: always()
     steps:
     - name: Generate Release Summary
@@ -341,15 +398,17 @@ jobs:
         echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
         echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
         echo "| Binaries | ${{ needs.build-binaries.result == 'success' && '✅ Built' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows MSI | ${{ needs.build-windows-msi.result == 'success' && '✅ Built' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
         echo "| SBOM | ${{ needs.generate-sbom.result == 'success' && '✅ Generated' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
         echo "| Back-merge | ${{ needs.back-merge-to-develop.result == 'success' && '✅ Completed' || '⚠️ Check manually' }} |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Platforms" >> $GITHUB_STEP_SUMMARY
         echo "- Linux (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
         echo "- macOS (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
-        echo "- Windows (AMD64)" >> $GITHUB_STEP_SUMMARY
+        echo "- Windows (AMD64, ARM64) — binaries + MSI installers" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Release Assets" >> $GITHUB_STEP_SUMMARY
         echo "- Cross-platform binaries (controller, steward, CLI)" >> $GITHUB_STEP_SUMMARY
+        echo "- Windows MSI installers (cfgms-steward-windows-amd64.msi, cfgms-steward-windows-arm64.msi)" >> $GITHUB_STEP_SUMMARY
         echo "- SHA256 checksums for verification" >> $GITHUB_STEP_SUMMARY
         echo "- SBOM files (SPDX-JSON format)" >> $GITHUB_STEP_SUMMARY

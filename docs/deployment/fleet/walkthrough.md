@@ -230,6 +230,35 @@ cfg token list --tenant-id=default
 
 ## Phase 4 — Build and Register Remote Stewards
 
+### Windows endpoints — MSI installer
+
+Windows endpoints can be enrolled silently using the `cfgms-steward-windows-amd64.msi`
+(or `arm64`) installer produced by CI. Download the MSI from the release artifacts and
+deploy it from your RMM (NinjaOne, Datto, ConnectWise, etc.):
+
+```powershell
+# Silent install — public CA (controller uses a publicly-trusted cert):
+msiexec /qn /i cfgms-steward-windows-amd64.msi `
+  REGTOKEN="<registration-token>" `
+  CA_FINGERPRINT="<sha256-hex>"
+
+# Silent install — private CA (place ca.crt alongside the MSI before running):
+# ca.crt is auto-detected from the same directory as the .msi file.
+msiexec /qn /i cfgms-steward-windows-amd64.msi `
+  REGTOKEN="<registration-token>" `
+  CA_FINGERPRINT="<sha256-hex>"
+```
+
+The installer places `cfgms-steward.exe` in `C:\Program Files\CFGMS\` and registers the
+`CFGMSSteward` Windows service configured for automatic start with restart-on-failure recovery.
+
+> **CA fingerprint**: the controller prints the CA fingerprint during `--init`. Retrieve it
+> at any time: `cfg controller info --url=https://<IP>:9080 | grep fingerprint`
+
+> **Full Windows MSI deployment guide**: a complete walkthrough — including how to build
+> a controller-URL-baked MSI for your fleet, download the install package from the controller,
+> and distribute via RMM — will be added in Story 8 of Epic #1661.
+
 ### 4a — Build a steward binary for your controller
 
 The steward binary has the controller URL **compiled in at build time**. A given binary
