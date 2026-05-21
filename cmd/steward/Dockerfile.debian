@@ -42,8 +42,16 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /src/steward .
 
+# Pre-create the steward's certificate store directory and hand it to the
+# cfgms user. defaultCertStoreDir() resolves to /var/lib/cfgms/steward/certs on
+# Linux; the steward runs as a non-root user and cannot create directories
+# under root-owned /var/lib at runtime. Without this, cert.NewManager fails to
+# initialize, the steward builds a nil TLS config, and control-plane
+# registration aborts with "client mode requires 'tls_config' in config".
+RUN mkdir -p /var/lib/cfgms/steward/certs
+
 # Change ownership
-RUN chown -R cfgms:cfgms /app
+RUN chown -R cfgms:cfgms /app /var/lib/cfgms
 
 # Switch to non-root user
 USER cfgms

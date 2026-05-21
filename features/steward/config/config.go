@@ -624,17 +624,21 @@ func ValidateConfiguration(config StewardConfig) error {
 		return fmt.Errorf("invalid operation mode: %s", config.Steward.Mode)
 	}
 
-	// Validate logging level
-	validLogLevels := []string{"debug", "info", "warn", "error"}
-	isValidLevel := false
-	for _, level := range validLogLevels {
-		if config.Steward.Logging.Level == level {
-			isValidLevel = true
-			break
+	// Validate logging level (only when explicitly set; empty means the
+	// default "info" will be applied by applyDefaults, so an unset level is
+	// valid — mirrors the converge_interval handling below).
+	if config.Steward.Logging.Level != "" {
+		validLogLevels := []string{"debug", "info", "warn", "error"}
+		isValidLevel := false
+		for _, level := range validLogLevels {
+			if config.Steward.Logging.Level == level {
+				isValidLevel = true
+				break
+			}
 		}
-	}
-	if !isValidLevel {
-		return fmt.Errorf("invalid log level: %s", config.Steward.Logging.Level)
+		if !isValidLevel {
+			return fmt.Errorf("invalid log level: %s", config.Steward.Logging.Level)
+		}
 	}
 
 	// Validate convergence interval (only when explicitly set; empty means default will apply)

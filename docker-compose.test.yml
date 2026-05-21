@@ -672,6 +672,12 @@ services:
       CFGMS_SEED_TEST_TOKENS: "1"
       CFGMS_ENABLE_TEST_ENDPOINTS: "true"
       CFGMS_TRANSPORT_USE_CERT_MANAGER: "true"
+      # Transport listen addr is 0.0.0.0:4433; the controller rewrites the
+      # 0.0.0.0 bind address in the registration response to this hostname so
+      # stewards on the cfgms-fleet network connect to "fleet-controller:4433"
+      # instead of "localhost:4433". Without this the steward connects to its
+      # own loopback, fails the gRPC-over-QUIC handshake, and exits 1.
+      CFGMS_EXTERNAL_HOSTNAME: "fleet-controller"
       CFGMS_LOG_LEVEL: "info"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
@@ -686,6 +692,26 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
+    networks:
+      - cfgms-fleet
+    profiles:
+      - fleet
+
+  # Publishes ONLY the controller's public CA certificate (ca.crt) into a
+  # steward-readable volume. Stewards must never mount the controller's cert
+  # directory — it also contains ca.key, the CA private key, which a steward
+  # must never see. This one-shot service is the harness stand-in for a real
+  # deployment, where the steward installer carries only the public ca.crt:
+  # it copies exactly that one file and exits. See Issue #1572.
+  fleet-ca-extract:
+    image: alpine:3.20
+    depends_on:
+      fleet-controller:
+        condition: service_healthy
+    volumes:
+      - fleet_controller_certs:/src:ro
+      - fleet_ca_dist:/dist
+    command: ["sh", "-c", "mkdir -p /dist/ca && cp /src/ca/ca.crt /dist/ca/ca.crt && chmod 0644 /dist/ca/ca.crt && echo 'fleet-ca-extract: published ca.crt'"]
     networks:
       - cfgms-fleet
     profiles:
@@ -707,12 +733,14 @@ services:
     command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
     volumes:
       - fleet_steward1_data:/app/data
-      - fleet_controller_certs:/app/controller-certs:ro
+      - fleet_ca_dist:/app/controller-certs:ro
     tmpfs:
       - /test-workspace:uid=1001,gid=1001,mode=0755,exec
     depends_on:
       fleet-controller:
         condition: service_healthy
+      fleet-ca-extract:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
       interval: 10s
@@ -739,12 +767,14 @@ services:
     command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
     volumes:
       - fleet_steward2_data:/app/data
-      - fleet_controller_certs:/app/controller-certs:ro
+      - fleet_ca_dist:/app/controller-certs:ro
     tmpfs:
       - /test-workspace:uid=1001,gid=1001,mode=0755,exec
     depends_on:
       fleet-controller:
         condition: service_healthy
+      fleet-ca-extract:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
       interval: 10s
@@ -852,6 +882,11 @@ volumes:
     driver: local
     # CA must persist across container restarts (no tmpfs)
     # Stewards hold client certs issued by this CA — cert validity requires persistence
+    # Mounted by the controller only — never by stewards (holds ca.key).
+  fleet_ca_dist:
+    driver: local
+    # Holds ONLY the controller's public ca.crt, published by fleet-ca-extract.
+    # This is what stewards mount — never fleet_controller_certs.
   fleet_steward1_data:
     driver: local
     driver_opts:

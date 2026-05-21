@@ -36,6 +36,44 @@ func TestControlPlaneProvider_Start_server_logsStarted(t *testing.T) {
 	assert.NotEmpty(t, mockLog.GetLogs("info"), "expected at least one info log when server starts")
 }
 
+// TestControlPlaneProvider_Registry_HonorsInjectedRegistry verifies that a
+// server-mode provider uses the registry passed via the "registry" Initialize
+// config key, and that a re-Initialize (as the controller performs in Start()
+// to swap in the shared gRPC server) keeps that same instance when the key is
+// supplied again. Regression guard for Issue #1572: the controller must be
+// able to share one registry between the CP provider and the HTTP API server.
+func TestControlPlaneProvider_Registry_HonorsInjectedRegistry(t *testing.T) {
+	reg := registry.NewRegistry()
+
+	p := New(ModeServer)
+	require.NoError(t, p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"grpc_server": grpc.NewServer(grpc.Creds(quictransport.TransportCredentials())),
+		"registry":    reg,
+	}))
+	assert.Same(t, reg, p.Registry(), "provider must use the injected registry")
+
+	// Re-Initialize with the same registry key — mirrors controller Start().
+	require.NoError(t, p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"grpc_server": grpc.NewServer(grpc.Creds(quictransport.TransportCredentials())),
+		"registry":    reg,
+	}))
+	assert.Same(t, reg, p.Registry(), "re-Initialize with the registry key must preserve the instance")
+}
+
+// TestControlPlaneProvider_Registry_AutoCreatesWhenAbsent verifies that a
+// server-mode provider auto-creates a registry when none is injected, so the
+// ControlChannel handler always has somewhere to register connections.
+func TestControlPlaneProvider_Registry_AutoCreatesWhenAbsent(t *testing.T) {
+	p := New(ModeServer)
+	require.NoError(t, p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"grpc_server": grpc.NewServer(grpc.Creds(quictransport.TransportCredentials())),
+	}))
+	assert.NotNil(t, p.Registry(), "provider must auto-create a registry when none is injected")
+}
+
 // TestControlPlaneProvider_reconnectLoop_logsWarning verifies that the reconnect loop
 // emits a warn log when a reconnection attempt fails after the server goes away.
 func TestControlPlaneProvider_reconnectLoop_logsWarning(t *testing.T) {

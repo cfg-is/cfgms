@@ -6,6 +6,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -196,6 +197,34 @@ func TestPushStore_ListPushesByConfigID(t *testing.T) {
 		require.Len(t, results, 2)
 		// Most recent (push-b was inserted last) comes first.
 		assert.Equal(t, "push-b", results[0].ID)
+		assert.Equal(t, "push-a", results[1].ID)
+	})
+
+	t.Run("breaks created_at ties by insertion order (most recent first)", func(t *testing.T) {
+		// Two pushes created at the identical timestamp — the situation that
+		// arises on low-resolution clocks (e.g. Windows CI) when records are
+		// inserted in quick succession. ORDER BY created_at alone is then
+		// nondeterministic; the rowid tiebreaker must keep the last-inserted
+		// record first.
+		store := newTestPushStore(t)
+		ctx := context.Background()
+
+		sameTime := time.Date(2026, 5, 21, 8, 0, 0, 0, time.UTC)
+
+		r1 := testPushRecord("push-a")
+		r1.ConfigID = "cfg-target"
+		r1.CreatedAt = sameTime
+		require.NoError(t, store.CreatePush(ctx, r1))
+
+		r2 := testPushRecord("push-b")
+		r2.ConfigID = "cfg-target"
+		r2.CreatedAt = sameTime
+		require.NoError(t, store.CreatePush(ctx, r2))
+
+		results, err := store.ListPushesByConfigID(ctx, "cfg-target", "tenant-1")
+		require.NoError(t, err)
+		require.Len(t, results, 2)
+		assert.Equal(t, "push-b", results[0].ID, "last-inserted record must come first on a created_at tie")
 		assert.Equal(t, "push-a", results[1].ID)
 	})
 

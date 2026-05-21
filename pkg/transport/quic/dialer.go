@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"strings"
 
 	quicgo "github.com/quic-go/quic-go"
 )
@@ -52,4 +53,23 @@ func NewDialer(tlsConfig *tls.Config, quicConfig *quicgo.Config) func(ctx contex
 	return func(ctx context.Context, addr string) (net.Conn, error) {
 		return Dial(ctx, addr, tlsConfig, quicConfig)
 	}
+}
+
+// DialTarget wraps a host:port address with gRPC's passthrough resolver scheme.
+//
+// grpc.NewClient defaults to the dns resolver, which resolves the host to an IP
+// address before invoking a custom contextDialer. quic-go's DialAddr then
+// verifies the server certificate against that IP literal rather than the
+// original hostname, so mTLS fails whenever the certificate carries DNS SANs
+// (the normal case for a controller addressed by hostname). Routing through the
+// passthrough resolver hands the address to the dialer verbatim, preserving the
+// hostname for QUIC's TLS verification.
+//
+// An address that already carries a resolver scheme (contains "://") is
+// returned unchanged.
+func DialTarget(addr string) string {
+	if strings.Contains(addr, "://") {
+		return addr
+	}
+	return "passthrough:///" + addr
 }

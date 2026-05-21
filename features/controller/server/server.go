@@ -7,8 +7,10 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,6 +65,7 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for OSS composite manager
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 	"gopkg.in/yaml.v3"
 )
 
@@ -85,6 +88,7 @@ type Server struct {
 	auditManager            *audit.Manager
 	haManager               *ha.Manager
 	controlPlane            controlplaneInterfaces.ControlPlaneProvider // Story #363 / #514
+	connRegistry            registry.Registry                           // Issue #1572: shared steward connection registry (CP provider + API server)
 	heartbeatService        *heartbeat.Service
 	commandPublisher        *commands.Publisher
 	registrationTokenStore  pkgRegistration.Store
@@ -177,8 +181,28 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Initialize tenant management with durable storage
 	tenantManager := tenant.NewManager(storageManager.GetTenantStore(), rbacManager)
 
-	// Create the controller service
-	controllerService := service.NewControllerService(logger)
+	// DNA storage — durable steward DNA + fleet registry. Shared by the
+	// controller service (warm-loading the steward registry after a restart)
+	// and the reports engine. (Issue #1572)
+	dnaStorageConfig := dnaStorage.DefaultConfig()
+	dnaStorageConfig.DataDir = filepath.Join(cfg.DataDir, "dna-reports")
+	dnaStorageManager, dnaErr := dnaStorage.NewManager(dnaStorageConfig, logger)
+	if dnaErr != nil {
+		logger.Warn("Failed to initialize DNA storage; steward registry will not survive a controller restart", "error", dnaErr)
+	}
+
+	// Create the controller service. With durable DNA storage its in-memory
+	// steward registry is warm-loaded from a previous run on startup, so a
+	// controller restart does not lose track of connected stewards. (Issue #1572)
+	var controllerService *service.ControllerService
+	if dnaStorageManager != nil {
+		controllerService = service.NewControllerServiceWithStorage(logger, dnaStorageManager)
+		if loadErr := controllerService.LoadFromStorage(context.Background()); loadErr != nil {
+			logger.Warn("Failed to warm-load steward registry from DNA storage", "error", loadErr)
+		}
+	} else {
+		controllerService = service.NewControllerService(logger)
+	}
 
 	// Create the configuration service (V2: durable storage via StorageManager)
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
@@ -368,6 +392,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize shared gRPC-over-QUIC transport (Story #515)
 	var controlPlane controlplaneInterfaces.ControlPlaneProvider
+	// connRegistry tracks active steward ControlChannel connections. It is
+	// created once here and shared between the CP provider (which registers
+	// connections) and the HTTP API server (which reads connection_state for
+	// GET /api/v1/stewards/{id}). Without this wiring the API server has no
+	// registry and always reports stewards as disconnected (Issue #1572).
+	var connRegistry registry.Registry
 	var heartbeatService *heartbeat.Service
 	var commandPublisher *commands.Publisher
 	// hoistedSigner and hoistedSignerCertSerial are set inside the transport block and
@@ -383,11 +413,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 
 		// Initialize CP provider (shared gRPC server created fresh in Start)
+		connRegistry = registry.NewRegistry()
 		controlPlane = grpcCP.New(grpcCP.ModeServer)
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
 			"mode":       "server",
 			"addr":       cfg.Transport.ListenAddr,
 			"tls_config": grpcTLSConfig,
+			"registry":   connRegistry,
 		}); err != nil {
 			return nil, fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
 		}
@@ -548,6 +580,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	logger.Info("HTTP API server initialized successfully")
 
+	// Wire the shared connection registry into the API server so
+	// GET /api/v1/stewards/{id} reports the live connection_state (Issue #1572).
+	if connRegistry != nil {
+		httpServer.SetRegistry(connRegistry)
+	}
+
 	srv := &Server{
 		cfg:                     cfg,
 		logger:                  logger,
@@ -561,6 +599,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		auditManager:            auditManager,
 		haManager:               haManager,
 		controlPlane:            controlPlane, // Story #363 / #514
+		connRegistry:            connRegistry, // Issue #1572: shared with CP provider re-init in Start()
 		heartbeatService:        heartbeatService,
 		commandPublisher:        commandPublisher,
 		registrationTokenStore:  regStore,
@@ -579,11 +618,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	configService.SetRollbackManager(rollbackManager)
 	logger.Info("Rollback manager wired to HTTP API server and gRPC config service")
 
-	// Story #416: Wire reports engine into API server
-	reportsHandler, reportsDNAManager := initializeReportsHandler(cfg, logger)
+	// Story #416: Wire reports engine into API server over the shared DNA
+	// storage manager. The controller server owns the manager's lifecycle
+	// (closed on Stop).
+	srv.dnaStorageManager = dnaStorageManager
+	reportsHandler := initializeReportsHandler(dnaStorageManager, logger)
 	if reportsHandler != nil {
 		httpServer.SetReportsHandler(reportsHandler)
-		srv.dnaStorageManager = reportsDNAManager
 		logger.Info("Reports engine wired to HTTP API server")
 	}
 
@@ -765,24 +806,19 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 	return manager
 }
 
-// initializeReportsHandler creates the reports API handler with its dependencies.
-// Returns both the handler and the DNA storage manager (which must be closed on shutdown).
-func initializeReportsHandler(cfg *config.Config, logger logging.Logger) (*reportapi.Handler, *dnaStorage.Manager) {
-	// Initialize DNA storage with SQLite backend in a dedicated directory
-	dnaStorageConfig := dnaStorage.DefaultConfig()
-	dnaStorageConfig.DataDir = filepath.Join(cfg.DataDir, "dna-reports")
-
-	dnaStorageManager, err := dnaStorage.NewManager(dnaStorageConfig, logger)
-	if err != nil {
-		logger.Warn("Failed to initialize DNA storage for reports engine", "error", err)
-		return nil, nil
+// initializeReportsHandler creates the reports API handler over the shared DNA
+// storage manager. Returns nil when DNA storage is unavailable (reports engine
+// disabled) — the manager's lifecycle is owned by the caller. (Issue #1572)
+func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, logger logging.Logger) *reportapi.Handler {
+	if dnaStorageManager == nil {
+		return nil
 	}
 
 	// Initialize drift detector with default configuration
 	driftDetector, err := dnadrift.NewDetector(nil, logger)
 	if err != nil {
 		logger.Warn("Failed to initialize drift detector for reports engine", "error", err)
-		return nil, nil
+		return nil
 	}
 
 	// Build the reports engine from its components
@@ -793,7 +829,7 @@ func initializeReportsHandler(cfg *config.Config, logger logging.Logger) (*repor
 	reportEngine := reportsengine.New(dataProvider, templateProcessor, exporter, reportsCache, logger)
 
 	logger.Info("Reports engine initialized")
-	return reportapi.New(reportEngine, exporter, logger), dnaStorageManager
+	return reportapi.New(reportEngine, exporter, logger)
 }
 
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.
@@ -910,11 +946,15 @@ func (s *Server) Start() error {
 		s.quicListener = ql
 
 		// Re-initialize CP provider with the fresh gRPC server
+		// Re-initializing creates a fresh registry unless the shared one is
+		// passed back in — keep the same instance the API server holds so
+		// connection_state stays accurate across the Start() re-init (Issue #1572).
 		if err := s.controlPlane.Initialize(context.Background(), map[string]interface{}{
 			"mode":        "server",
 			"addr":        s.cfg.Transport.ListenAddr,
 			"tls_config":  grpcTLSConfig,
 			"grpc_server": s.grpcServer,
+			"registry":    s.connRegistry,
 		}); err != nil {
 			return fmt.Errorf("failed to re-initialize CP provider with shared server: %w", err)
 		}
@@ -1367,6 +1407,56 @@ func initializeHAManager(logger logging.Logger, storageManager *interfaces.Stora
 	return haManager, nil
 }
 
+// grpcControlPlaneServerSANs returns the DNS names and IP addresses to embed in
+// the generated gRPC control-plane server certificate.
+//
+// It starts from the transport defaults (localhost / loopback) and merges in
+// any operator-configured server SANs (certificate.server.dns_names and
+// certificate.server.ip_addresses) plus CFGMS_EXTERNAL_HOSTNAME. Without this,
+// a steward dialing the controller by its external hostname fails mTLS
+// verification because the generated certificate omits that name. The
+// CFGMS_EXTERNAL_HOSTNAME value is classified as an IP SAN when it parses as an
+// IP literal and as a DNS SAN otherwise. Duplicates are removed and ordering is
+// deterministic.
+func grpcControlPlaneServerSANs(cfg *config.Config) (dnsNames, ipAddresses []string) {
+	dnsNames = []string{"localhost", "cfgms-grpc-server", "controller-standalone"}
+	ipAddresses = []string{"127.0.0.1", "0.0.0.0"}
+
+	if cfg != nil && cfg.Certificate != nil && cfg.Certificate.Server != nil {
+		dnsNames = append(dnsNames, cfg.Certificate.Server.DNSNames...)
+		ipAddresses = append(ipAddresses, cfg.Certificate.Server.IPAddresses...)
+	}
+
+	if hostname := strings.TrimSpace(os.Getenv("CFGMS_EXTERNAL_HOSTNAME")); hostname != "" {
+		if net.ParseIP(hostname) != nil {
+			ipAddresses = append(ipAddresses, hostname)
+		} else {
+			dnsNames = append(dnsNames, hostname)
+		}
+	}
+
+	return dedupeSANs(dnsNames), dedupeSANs(ipAddresses)
+}
+
+// dedupeSANs returns the input slice with empty strings dropped and duplicates
+// removed, preserving first-seen order.
+func dedupeSANs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
 // buildGRPCControlPlaneTLSConfig creates TLS configuration for the gRPC control plane provider.
 //
 // Uses the certificate manager to load or generate the server certificate and CA, then creates
@@ -1392,13 +1482,17 @@ func buildGRPCControlPlaneTLSConfig(cfg *config.Config, certManager *cert.Manage
 	}
 
 	if err != nil || len(serverCerts) == 0 {
-		// First boot: generate server certificate for gRPC control plane
+		// First boot: generate server certificate for gRPC control plane.
+		// SANs merge the transport defaults with any operator-configured server
+		// SANs and CFGMS_EXTERNAL_HOSTNAME so a steward connecting by the
+		// controller's external hostname can verify the certificate.
 		logger.Info("Generating gRPC control plane server certificate")
+		dnsNames, ipAddresses := grpcControlPlaneServerSANs(cfg)
 		certCfg := &cert.ServerCertConfig{
 			CommonName:   "cfgms-grpc-server",
 			Organization: "CFGMS",
-			DNSNames:     []string{"localhost", "cfgms-grpc-server", "controller-standalone"},
-			IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
+			DNSNames:     dnsNames,
+			IPAddresses:  ipAddresses,
 			ValidityDays: 365,
 		}
 		var generatedCert *cert.Certificate

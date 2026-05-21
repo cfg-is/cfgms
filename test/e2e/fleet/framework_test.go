@@ -382,4 +382,5 @@ func TestFleetWalkthrough(t *testing.T) {
 	t.Run("ControllerRestart", func(t *testing.T) { suite.testControllerRestart(t, cfg) })
 	t.Run("StewardRestart", func(t *testing.T) { suite.testStewardRestart(t, cfg) })
 	t.Run("DeferredConfig", func(t *testing.T) { suite.testDeferredConfig(t, cfg) })
+	t.Run("DriftAutoCorrection", func(t *testing.T) { suite.testDriftAutoCorrection(t, cfg) })
 }

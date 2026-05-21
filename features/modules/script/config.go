@@ -66,6 +66,63 @@ func (c *ScriptConfig) FromYAML(data []byte) error {
 	return yaml.Unmarshal(data, c)
 }
 
+// scriptConfigFromMap builds a ScriptConfig from a generic config map — the form
+// the convergence executor delivers (a map-backed modules.ConfigState rather
+// than a typed *ScriptConfig). Mirrors the file/directory modules' map-based
+// decode. Config values arrive as strings via the controller→steward proto, so
+// timeout is parsed from its duration string. (Issue #1572)
+func scriptConfigFromMap(m map[string]interface{}) (*ScriptConfig, error) {
+	c := &ScriptConfig{}
+	if v, ok := m["content"].(string); ok {
+		c.Content = v
+	}
+	if v, ok := m["shell"].(string); ok {
+		c.Shell = ShellType(v)
+	}
+	if v, ok := m["working_dir"].(string); ok {
+		c.WorkingDir = v
+	}
+	if v, ok := m["description"].(string); ok {
+		c.Description = v
+	}
+	if v, ok := m["signing_policy"].(string); ok {
+		c.SigningPolicy = SigningPolicy(v)
+	}
+	if v, ok := m["execution_context"].(string); ok {
+		c.ExecutionContext = ExecutionContext(v)
+	}
+	switch env := m["environment"].(type) {
+	case map[string]string:
+		c.Environment = env
+	case map[string]interface{}:
+		c.Environment = make(map[string]string, len(env))
+		for k, val := range env {
+			if s, ok := val.(string); ok {
+				c.Environment[k] = s
+			}
+		}
+	}
+	switch t := m["timeout"].(type) {
+	case string:
+		if t != "" {
+			d, err := time.ParseDuration(t)
+			if err != nil {
+				return nil, fmt.Errorf("invalid timeout %q: %w", t, err)
+			}
+			c.Timeout = d
+		}
+	case time.Duration:
+		c.Timeout = t
+	case int:
+		c.Timeout = time.Duration(t)
+	case int64:
+		c.Timeout = time.Duration(t)
+	case float64:
+		c.Timeout = time.Duration(t)
+	}
+	return c, nil
+}
+
 // Validate ensures the configuration is valid
 func (c *ScriptConfig) Validate() error {
 	if c.Content == "" {

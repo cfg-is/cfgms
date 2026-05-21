@@ -151,22 +151,29 @@ func TestFanout_ActiveStewards(t *testing.T) {
 	assert.ElementsMatch(t, []string{"steward-a", "steward-b"}, cp.ReceivedIDs())
 }
 
-// TestFanout_SkipsNonActive asserts that stewards with status "registered" and
-// "lost" are not sent a TriggerConfigSync command.
-func TestFanout_SkipsNonActive(t *testing.T) {
+// TestFanout_SkipsTerminalStatus asserts that stewards in a terminal status
+// (lost/deregistered/quarantined) are skipped, while a reachable "registered"
+// steward still receives a TriggerConfigSync. A ControllerService steward is
+// "registered" before its first heartbeat and "healthy" after — it never has
+// status "active", so those reachable states must not be skipped. (Issue #1572)
+func TestFanout_SkipsTerminalStatus(t *testing.T) {
 	cp := newRecordingControlPlane(nil)
 	pub := makePublisher(t, cp)
 
 	stewards := []*service.StewardInfo{
 		stewardWithStatus("steward-r", "registered"),
+		stewardWithStatus("steward-h", "healthy"),
 		stewardWithStatus("steward-l", "lost"),
+		stewardWithStatus("steward-d", "deregistered"),
+		stewardWithStatus("steward-q", "quarantined"),
 	}
 
 	result := push.Fanout(context.Background(), validFanoutCfg(), stewards, pub, logging.NewNoopLogger())
 
-	assert.Empty(t, result.Succeeded)
+	assert.ElementsMatch(t, []string{"steward-r", "steward-h"}, result.Succeeded)
 	assert.Empty(t, result.Failed)
-	assert.Empty(t, cp.ReceivedIDs(), "non-active stewards must not receive a SendCommand call")
+	assert.ElementsMatch(t, []string{"steward-r", "steward-h"}, cp.ReceivedIDs(),
+		"reachable stewards receive a SendCommand call; terminal-status stewards do not")
 }
 
 // TestFanout_PartialFailure asserts that a TriggerConfigSync failure for one

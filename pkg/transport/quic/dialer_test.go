@@ -78,6 +78,28 @@ func TestDialer_NewDialer_ContextDialer(t *testing.T) {
 	require.NoError(t, conn.Close())
 }
 
+// TestDialTarget verifies that bare host:port addresses are wrapped with the
+// passthrough resolver scheme while addresses already carrying a scheme are
+// returned unchanged.
+func TestDialTarget(t *testing.T) {
+	cases := []struct {
+		name string
+		addr string
+		want string
+	}{
+		{"hostname and port", "fleet-controller:4433", "passthrough:///fleet-controller:4433"},
+		{"localhost and port", "localhost:9080", "passthrough:///localhost:9080"},
+		{"ip and port", "127.0.0.1:4433", "passthrough:///127.0.0.1:4433"},
+		{"already passthrough", "passthrough:///already:1", "passthrough:///already:1"},
+		{"explicit dns scheme", "dns:///host:1", "dns:///host:1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, DialTarget(tc.addr))
+		})
+	}
+}
+
 // TestDialer_InvalidAddr verifies that Dial returns an error when it cannot
 // reach the target address within the given context deadline.
 func TestDialer_InvalidAddr(t *testing.T) {

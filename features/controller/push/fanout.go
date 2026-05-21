@@ -16,9 +16,18 @@ type FanoutResult struct {
 	Failed    map[string]error
 }
 
-// Fanout sends a CommandSyncConfig to every active steward via the command publisher.
-// Stewards with Status != "active" are skipped. A failure for one steward does not
-// block delivery to others.
+// terminalStewardStatuses are ControllerService steward statuses that mean the
+// steward is not reachable for a config push. registered/healthy/active are all
+// reachable; only these definitively-dead states are skipped. (Issue #1572)
+var terminalStewardStatuses = map[string]struct{}{
+	"lost":         {},
+	"deregistered": {},
+	"quarantined":  {},
+}
+
+// Fanout sends a CommandSyncConfig to every reachable steward via the command
+// publisher. Stewards in a terminal status (lost/deregistered/quarantined) are
+// skipped. A failure for one steward does not block delivery to others.
 func Fanout(
 	ctx context.Context,
 	cfg *StewardConfiguration,
@@ -32,7 +41,7 @@ func Fanout(
 	}
 
 	for _, steward := range stewards {
-		if steward.Status != "active" {
+		if _, terminal := terminalStewardStatuses[steward.Status]; terminal {
 			continue
 		}
 

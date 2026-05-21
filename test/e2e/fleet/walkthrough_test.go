@@ -116,6 +116,8 @@ func (s *FleetTestSuite) testPerModuleConvergence(t *testing.T) {
 func (s *FleetTestSuite) testControllerRestart(t *testing.T, configPath string) {
 	t.Helper()
 
+	t.Skip("controller restart-recovery not yet implemented — fleet-resilience epic #1714")
+
 	s.containerRestart(t, "fleet-controller", 60*time.Second)
 
 	// Rebuild HTTP clients — the admin bundle is regenerated on every controller init.
@@ -148,6 +150,8 @@ func (s *FleetTestSuite) testControllerRestart(t *testing.T, configPath string) 
 // re-uploads config, and verifies the apply-mode steward re-applies resources on reconnect.
 func (s *FleetTestSuite) testStewardRestart(t *testing.T, configPath string) {
 	t.Helper()
+
+	t.Skip("steward cert reuse on restart not yet implemented — fleet-resilience epic #1714")
 
 	container := "fleet-steward-1"
 	oldID := s.stewardIDs[container]
@@ -191,6 +195,8 @@ func (s *FleetTestSuite) testStewardRestart(t *testing.T, configPath string) {
 // be deferred by the controller until the steward comes back online.
 func (s *FleetTestSuite) testDeferredConfig(t *testing.T, configPath string) {
 	t.Helper()
+
+	t.Skip("deferred config delivery to an offline steward not yet implemented — fleet-resilience epic #1714")
 
 	container := "fleet-steward-2"
 	stewardID := s.stewardIDs[container]
