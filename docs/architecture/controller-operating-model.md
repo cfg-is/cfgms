@@ -208,10 +208,19 @@ For each steward, the controller tracks:
 
 The controller monitors steward heartbeats to detect connectivity loss:
 
-- Stewards send heartbeats at a configurable interval
-- If a heartbeat is missed beyond a timeout threshold, the steward is marked disconnected
+- Stewards send heartbeats at a **20 s base interval with ±10 s uniform per-tick jitter** (effective interval always in [20 s, 30 s) — see the [steward operating model heartbeat timing](steward-operating-model.md#heartbeat-timing) for rationale)
+- The controller marks a steward **offline after 60 s of silence** (`StewardOfflineTimeout`, epic #1664) — this is 3 missed heartbeats at the 20 s base, providing tolerance for transient network blips
 - Disconnected stewards continue operating independently — the controller simply loses visibility until the steward reconnects
 - On reconnect, the steward resyncs queued reports and the controller rebuilds its view
+
+**Two distinct timeout thresholds — do not confuse them:**
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `StewardOfflineTimeout` | 60 s | Marks a steward offline after extended silence (epic #1664). Used by `checkStaleHeartbeats`. |
+| `HeartbeatTimeout` | 15 s | HA-failover detection threshold (Story #198, <15 s). Scoped exclusively to controller-HA scenarios. |
+
+These fields must remain distinct. `HeartbeatTimeout` is intentionally short for fast HA-failover detection and must not be used for steward-liveness decisions.
 
 ### Commands
 

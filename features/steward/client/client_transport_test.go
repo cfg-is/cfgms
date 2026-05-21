@@ -164,6 +164,37 @@ func TestTransportClient_CertReloadOnHandshake(t *testing.T) {
 		"second handshake must return the newer cert after rotation (re-fetch, not cached)")
 }
 
+// TestTransportClient_HeartbeatJitter_Range verifies that:
+//  1. The default heartbeat interval is 20 s (epic #1664).
+//  2. 100 per-tick jitter-adjusted intervals all fall in [20 s, 30 s).
+//
+// Jitter is uniform in [0, 10 s), so the effective per-tick interval is always
+// between 20 s (no jitter) and just under 30 s (maximum jitter).
+func TestTransportClient_HeartbeatJitter_Range(t *testing.T) {
+	logger := logging.NewLogger("info")
+	c, err := NewTransportClient(&TransportConfig{
+		ControllerURL: "localhost:4433",
+		Logger:        logger,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 20*time.Second, c.heartbeatInterval,
+		"default heartbeat interval must be 20s (epic #1664)")
+
+	require.NotNil(t, c.rng, "NewTransportClient must initialise the per-instance RNG")
+
+	base := 20 * time.Second
+	jitterMax := 10 * time.Second
+	for i := 0; i < 100; i++ {
+		jitter := time.Duration(c.rng.Int63n(int64(jitterMax)))
+		interval := base + jitter
+		assert.GreaterOrEqual(t, interval, base,
+			"sample %d: jitter-adjusted interval must be >= 20s", i)
+		assert.Less(t, interval, base+jitterMax,
+			"sample %d: jitter-adjusted interval must be < 30s", i)
+	}
+}
+
 // TestTransportClient_CertNotCached verifies that every call to the
 // GetClientCertificate callback reads from the cert store rather than a cached
 // value — even when the certificate has not changed.

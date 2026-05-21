@@ -15,17 +15,18 @@ import (
 
 // defaultQuicConfig returns the default QUIC configuration for the transport adapter.
 //
-// Keepalive tuning rationale (Story #504):
+// Keepalive tuning rationale (epic #1664, Story #504):
 //
-//   - KeepAlivePeriod 25s: Under the 30s worst-case NAT/firewall UDP pinhole timeout.
-//     At 50k stewards this produces ~2,000 PING frames/sec (vs 5,000 at 10s).
-//     Application heartbeats (default 30s) provide additional traffic that keeps
-//     connections alive, so QUIC keepalives are a safety net, not the primary signal.
+//   - KeepAlivePeriod 20s: Aligned with the steward heartbeat base interval (20 s ± 10 s
+//     jitter, epic #1664). The worst-case effective heartbeat interval is 30 s — the QUIC
+//     PING at 20 s ensures at least one keepalive fires before the 30 s NGFW UDP idle
+//     timeout, keeping the UDP pinhole open even when the heartbeat fires near its maximum
+//     jitter. At 50k stewards this produces ~2,500 PING frames/sec.
 //
-//   - MaxIdleTimeout 90s: 3.6× the keepalive period. A connection is torn down only
-//     after ~3 missed keepalives AND no application traffic. This is generous enough
+//   - MaxIdleTimeout 90s: 4.5× the keepalive period. A connection is torn down only
+//     after ~4 missed keepalives AND no application traffic. This is generous enough
 //     to survive transient network blips while still detecting genuinely dead connections
-//     well before the controller's heartbeat timeout (default 15s detection + this).
+//     well before the controller's steward-offline threshold (60 s, epic #1664).
 //
 //   - HandshakeIdleTimeout 30s: quic-go defaults to 5s, which is too aggressive for
 //     macOS CI environments under load (many rapid UDP socket open/close cycles exhaust
@@ -57,7 +58,7 @@ import (
 func defaultQuicConfig() *quicgo.Config {
 	return &quicgo.Config{
 		MaxIdleTimeout:                 90 * time.Second,
-		KeepAlivePeriod:                25 * time.Second,
+		KeepAlivePeriod:                20 * time.Second,
 		HandshakeIdleTimeout:           30 * time.Second,
 		MaxIncomingStreams:             1,
 		MaxIncomingUniStreams:          -1,
@@ -106,7 +107,7 @@ var _ net.Listener = (*Listener)(nil)
 //
 // tlsConfig must have NextProtos set to a value agreed with the client.
 // If quicConfig is nil, sensible defaults (MaxIdleTimeout: 90s,
-// KeepAlivePeriod: 25s, HandshakeIdleTimeout: 30s, MaxIncomingStreams: 1,
+// KeepAlivePeriod: 20s, HandshakeIdleTimeout: 30s, MaxIncomingStreams: 1,
 // and other DoS-resilience fields) are used. See defaultQuicConfig for rationale.
 //
 // Listen enforces QUIC address validation (Retry) on every inbound connection
