@@ -283,6 +283,61 @@ func TestFileConfig_Validate_WindowsACL_MutualExclusion(t *testing.T) {
 	}
 }
 
+// TestFileModule_Get_EmitsModeAlias verifies that Get()/AsMap() emits the "mode"
+// octal-string alias alongside "permissions". Set() accepts a config declared
+// with either field; without "mode" in the read-back state the drift comparator
+// reports a phantom added field that no convergence pass can ever resolve.
+func TestFileModule_Get_EmitsModeAlias(t *testing.T) {
+	if !platformSupportsPermissions() {
+		t.Skip("Unix permission bits not applicable on this platform")
+	}
+	tempDir := t.TempDir()
+	testFile := filepath.Join(tempDir, "managed-file")
+	module := New()
+
+	// permissions: 420 == 0644 octal.
+	configState := createConfigFromYAML(
+		"content: \"managed\"\nstate: present\npermissions: 420\nallowed_base_path: " + tempDir)
+	if err := module.Set(context.Background(), testFile, configState); err != nil {
+		t.Fatalf("Set() failed: %v", err)
+	}
+
+	state, err := module.Get(context.Background(), testFile)
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	gotMap := state.AsMap()
+	if gotMap["mode"] != "0644" {
+		t.Errorf("AsMap()[mode] = %v (%T), want \"0644\"", gotMap["mode"], gotMap["mode"])
+	}
+	if gotMap["permissions"] != 420 {
+		t.Errorf("AsMap()[permissions] = %v, want 420", gotMap["permissions"])
+	}
+}
+
+// TestFileModule_Get_AbsentOmitsModeAlias verifies the "mode" alias is omitted
+// for absent state, matching the existing "permissions" omission.
+func TestFileModule_Get_AbsentOmitsModeAlias(t *testing.T) {
+	tempDir := t.TempDir()
+	module := New()
+	nonExistent := filepath.Join(tempDir, "missing")
+
+	// Configure the base path via an absent-state Set before Get.
+	absConfig := createConfigFromYAML("state: absent\nallowed_base_path: " + tempDir)
+	if err := module.Set(context.Background(), nonExistent, absConfig); err != nil {
+		t.Fatalf("Set() absent failed: %v", err)
+	}
+
+	state, err := module.Get(context.Background(), nonExistent)
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	gotMap := state.AsMap()
+	if _, ok := gotMap["mode"]; ok {
+		t.Errorf("AsMap() for absent state should omit \"mode\", got %v", gotMap["mode"])
+	}
+}
+
 func TestFileModule_PermissionsRejectedOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-only test")

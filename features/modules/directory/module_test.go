@@ -296,6 +296,66 @@ func TestDirectoryModule(t *testing.T) {
 	}
 }
 
+// TestDirectoryModule_Get_EmitsModeAlias verifies that Get()/AsMap() emits the
+// "mode" octal-string alias alongside "permissions". Set() accepts a config
+// declared with either field; without "mode" in the read-back state the drift
+// comparator reports a phantom added field that no convergence pass can resolve.
+func TestDirectoryModule_Get_EmitsModeAlias(t *testing.T) {
+	if !platformSupportsPermissions() {
+		t.Skip("Unix permission bits not applicable on this platform")
+	}
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "managed-dir")
+	module := New()
+
+	// testDirConfigYAML sets permissions: 0755.
+	configState := createConfigFromYAML(testDirConfigYAML(base, targetPath, "", "", ""))
+	if err := module.Set(context.Background(), targetPath, configState); err != nil {
+		t.Fatalf("Set() failed: %v", err)
+	}
+
+	state, err := module.Get(context.Background(), targetPath)
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	gotMap := state.AsMap()
+	if gotMap["mode"] != "0755" {
+		t.Errorf("AsMap()[mode] = %v (%T), want \"0755\"", gotMap["mode"], gotMap["mode"])
+	}
+	if gotMap["permissions"] != 0755 {
+		t.Errorf("AsMap()[permissions] = %v, want 493 (0755)", gotMap["permissions"])
+	}
+}
+
+// TestDirectoryModule_Get_AbsentOmitsModeAlias verifies the "mode" alias is
+// omitted for absent state, matching the existing "permissions" omission.
+func TestDirectoryModule_Get_AbsentOmitsModeAlias(t *testing.T) {
+	base := t.TempDir()
+	module := New()
+	missing := filepath.Join(base, "missing-dir")
+
+	// Get requires a configured base path; establish it without creating a directory.
+	configurable, ok := module.(modules.Configurable)
+	if !ok {
+		t.Fatal("directory module must implement modules.Configurable")
+	}
+	if err := configurable.Configure(createConfigFromYAML("allowed_base_path: " + base)); err != nil {
+		t.Fatalf("Configure() failed: %v", err)
+	}
+
+	state, err := module.Get(context.Background(), missing)
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	gotMap := state.AsMap()
+	if gotMap["state"] != "absent" {
+		t.Fatalf("Get() state = %v, want \"absent\"", gotMap["state"])
+	}
+	if _, ok := gotMap["mode"]; ok {
+		t.Errorf("AsMap() for absent state should omit \"mode\", got %v", gotMap["mode"])
+	}
+}
+
 func TestDirectoryModule_EdgeCases(t *testing.T) {
 	// Create a temporary directory for testing
 	tempDir, err := os.MkdirTemp("", "directory-module-test-*")
