@@ -718,6 +718,184 @@ func TestDispatcher_CompletionWithoutSinkIsSafe(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond, "completion must be acknowledged even without a run sink")
 }
 
+// idempotentTrackedExec builds a QueuedExecution that is flagged idempotent and
+// carries the run-tracking metadata fields.
+func idempotentTrackedExec(executionID, scriptRef, runID, jobID string) *script.QueuedExecution {
+	qe := runTrackedExec(executionID, scriptRef, runID, jobID)
+	qe.Metadata["idempotent"] = true
+	return qe
+}
+
+// TestDispatcher_IdempotentScript_RequeuesOnFirstFailure verifies that an idempotent
+// script is re-queued exactly once when it fails, and RecordJobCompletion is deferred
+// until the retry resolves.
+func TestDispatcher_IdempotentScript_RequeuesOnFirstFailure(t *testing.T) {
+	store := run.NewRunStoreSQL(mustOpenMemDB(t))
+	require.NoError(t, store.Init(context.Background()))
+	manager := run.NewManager(store, nil)
+
+	const runID = "run-idem-1"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID, TenantID: "tenant-abc",
+		CreatedAt: time.Now().UTC(), Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-idem-1", RunID: runID, DeviceID: "device-1",
+		ExecutionID: "exec-idem-1", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	cp := &testControlPlane{}
+	repo := newTestScriptRepo()
+	repo.addScript("script-idem", "#!/bin/bash\necho hi")
+	q := newTestQueue(t, repo)
+	d := newTestDispatcher(t, q, cp)
+	d.SetRunCompletionSink(manager)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	// Queue an idempotent execution.
+	require.NoError(t, q.QueueExecution("device-1", idempotentTrackedExec("exec-idem-1", "script-idem", runID, "job-idem-1")))
+
+	// Trigger dispatch and let it send.
+	d.OnHeartbeat("device-1")
+	require.Eventually(t, func() bool { return cp.sentCount() >= 1 }, 2*time.Second, 10*time.Millisecond)
+
+	// Inject a failure (exit code 1).
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-1", "exec-idem-1", 1))
+
+	// The dispatcher should re-queue a retry — queue depth goes back to 1.
+	require.Eventually(t, func() bool {
+		return q.GetQueueDepth("device-1") == 1
+	}, 2*time.Second, 10*time.Millisecond, "idempotent failure must re-queue a retry execution")
+
+	// The job must NOT be marked failed yet (retry is in-flight).
+	jobs, err := store.ListRunJobs(runID)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.NotEqual(t, run.JobStatusFailed, jobs[0].Status,
+		"job must not be marked failed while retry is pending")
+
+	// The re-queued execution must carry retry_count=1.
+	retryExecs := q.PeekForDevice("device-1")
+	require.Len(t, retryExecs, 1)
+	retryCount, _ := retryExecs[0].Metadata["retry_count"].(int)
+	assert.Equal(t, 1, retryCount, "re-queued execution must carry retry_count=1")
+	assert.Equal(t, runID, retryExecs[0].Metadata["workflow_run_id"],
+		"re-queued execution must carry the original run ID")
+	assert.Equal(t, "job-idem-1", retryExecs[0].Metadata["job_id"],
+		"re-queued execution must carry the original job ID")
+}
+
+// TestDispatcher_IdempotentScript_SecondFailureSetsJobFailed verifies that when
+// a retry execution also fails, the job transitions to failed and no further
+// re-queue occurs (retry_count >= 1).
+func TestDispatcher_IdempotentScript_SecondFailureSetsJobFailed(t *testing.T) {
+	store := run.NewRunStoreSQL(mustOpenMemDB(t))
+	require.NoError(t, store.Init(context.Background()))
+	manager := run.NewManager(store, nil)
+
+	const runID = "run-idem-2"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID, TenantID: "tenant-abc",
+		CreatedAt: time.Now().UTC(), Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-idem-2", RunID: runID, DeviceID: "device-2",
+		ExecutionID: "exec-idem-2", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	cp := &testControlPlane{}
+	repo := newTestScriptRepo()
+	repo.addScript("script-idem2", "#!/bin/bash\nexit 1")
+	q := newTestQueue(t, repo)
+	d := newTestDispatcher(t, q, cp)
+	d.SetRunCompletionSink(manager)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	// Queue an idempotent execution.
+	require.NoError(t, q.QueueExecution("device-2", idempotentTrackedExec("exec-idem-2", "script-idem2", runID, "job-idem-2")))
+
+	// First dispatch and failure → re-queue retry.
+	d.OnHeartbeat("device-2")
+	require.Eventually(t, func() bool { return cp.sentCount() >= 1 }, 2*time.Second, 10*time.Millisecond)
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-2", "exec-idem-2", 1))
+
+	// Wait for re-queue.
+	require.Eventually(t, func() bool {
+		return q.GetQueueDepth("device-2") == 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Capture the retry execution ID.
+	retryExecs := q.PeekForDevice("device-2")
+	require.Len(t, retryExecs, 1)
+	retryID := retryExecs[0].ExecutionID
+
+	// Dispatch and fail the retry.
+	d.OnHeartbeat("device-2")
+	require.Eventually(t, func() bool { return cp.sentCount() >= 2 }, 2*time.Second, 10*time.Millisecond)
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-2", retryID, 1))
+
+	// After second failure, the job must be marked failed.
+	require.Eventually(t, func() bool {
+		jobs, err := store.ListRunJobs(runID)
+		return err == nil && len(jobs) == 1 && jobs[0].Status == run.JobStatusFailed
+	}, 2*time.Second, 10*time.Millisecond, "job must be marked failed after second failure")
+
+	// Queue must be empty — no further retry.
+	assert.Eventually(t, func() bool {
+		return q.GetQueueDepth("device-2") == 0
+	}, 2*time.Second, 10*time.Millisecond, "queue must be empty after second failure (no further retry)")
+}
+
+// TestDispatcher_NonIdempotentScript_FailureImmediatelyMarksJobFailed verifies that
+// a non-idempotent script failure transitions the job to failed without any retry.
+func TestDispatcher_NonIdempotentScript_FailureImmediatelyMarksJobFailed(t *testing.T) {
+	store := run.NewRunStoreSQL(mustOpenMemDB(t))
+	require.NoError(t, store.Init(context.Background()))
+	manager := run.NewManager(store, nil)
+
+	const runID = "run-non-idem-1"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID, TenantID: "tenant-abc",
+		CreatedAt: time.Now().UTC(), Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-non-idem-1", RunID: runID, DeviceID: "device-3",
+		ExecutionID: "exec-non-idem-1", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	cp := &testControlPlane{}
+	repo := newTestScriptRepo()
+	repo.addScript("script-non-idem", "#!/bin/bash\nexit 1")
+	q := newTestQueue(t, repo)
+	d := newTestDispatcher(t, q, cp)
+	d.SetRunCompletionSink(manager)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	// Queue a non-idempotent execution (no idempotent flag).
+	require.NoError(t, q.QueueExecution("device-3", runTrackedExec("exec-non-idem-1", "script-non-idem", runID, "job-non-idem-1")))
+
+	d.OnHeartbeat("device-3")
+	require.Eventually(t, func() bool { return cp.sentCount() >= 1 }, 2*time.Second, 10*time.Millisecond)
+
+	// Inject failure.
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-3", "exec-non-idem-1", 1))
+
+	// Job must transition to failed immediately with no re-queue.
+	require.Eventually(t, func() bool {
+		jobs, err := store.ListRunJobs(runID)
+		return err == nil && len(jobs) == 1 && jobs[0].Status == run.JobStatusFailed
+	}, 2*time.Second, 10*time.Millisecond, "non-idempotent failure must mark job failed immediately")
+
+	// Confirm no re-queue occurred.
+	assert.Equal(t, 1, cp.sentCount(), "non-idempotent failure must not re-queue")
+}
+
 // mustOpenMemDB opens an in-memory SQLite database closed via t.Cleanup.
 func mustOpenMemDB(t *testing.T) *sql.DB {
 	t.Helper()
