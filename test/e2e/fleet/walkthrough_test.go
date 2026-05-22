@@ -116,8 +116,6 @@ func (s *FleetTestSuite) testPerModuleConvergence(t *testing.T) {
 func (s *FleetTestSuite) testControllerRestart(t *testing.T, configPath string) {
 	t.Helper()
 
-	t.Skip("controller restart-recovery not yet implemented — fleet-resilience epic #1714")
-
 	s.containerRestart(t, "fleet-controller", 60*time.Second)
 
 	// Rebuild HTTP clients — the admin bundle is regenerated on every controller init.
