@@ -291,6 +291,38 @@ func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, sig
 	return nil
 }
 
+// EnsureSigningCertificate generates a dedicated config-signing certificate if
+// none exists yet. Idempotent: safe to call on every controller startup.
+//
+// The config signer must remain STABLE across controller restarts. A steward
+// caches the controller's signing certificate at registration (and restores it
+// from disk on a cert-reuse reconnect) and rejects any command or config signed
+// by a different key. A dedicated, persisted config-signing certificate gives
+// the controller a durable signing identity — unlike the gRPC server
+// certificate, which may be regenerated per boot. When signingCfg is nil, a
+// default 1095-day RSA-4096 signing certificate is generated.
+func (m *Manager) EnsureSigningCertificate(signingCfg *SigningCertConfig) error {
+	signingCerts, err := m.store.GetCertificatesByType(CertificateTypeConfigSigning)
+	if err != nil {
+		return fmt.Errorf("failed to check for config signing certificates: %w", err)
+	}
+	if len(signingCerts) > 0 {
+		return nil
+	}
+
+	if signingCfg == nil {
+		signingCfg = &SigningCertConfig{
+			CommonName:   "cfgms-config-signer",
+			ValidityDays: 1095,
+			KeySize:      4096,
+		}
+	}
+	if _, err := m.GenerateSigningCertificate(signingCfg); err != nil {
+		return fmt.Errorf("failed to generate config signing certificate: %w", err)
+	}
+	return nil
+}
+
 // GetSigningCertificate returns the newest valid config signing certificate PEM (public only)
 func (m *Manager) GetSigningCertificate() ([]byte, error) {
 	signingCerts, err := m.store.GetCertificatesByType(CertificateTypeConfigSigning)

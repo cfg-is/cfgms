@@ -298,3 +298,66 @@ func findRepoRoot(t *testing.T) string {
 		dir = parent
 	}
 }
+
+// TestEnsureSigningCertificate_GeneratesWhenMissing verifies that
+// EnsureSigningCertificate creates a dedicated config-signing certificate on a
+// fresh store.
+func TestEnsureSigningCertificate_GeneratesWhenMissing(t *testing.T) {
+	manager := setupTestManager(t)
+
+	signingCerts, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	require.NoError(t, err)
+	assert.Empty(t, signingCerts)
+
+	require.NoError(t, manager.EnsureSigningCertificate(nil))
+
+	signingCerts, err = manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	require.NoError(t, err)
+	assert.Len(t, signingCerts, 1, "should generate exactly one config signing cert")
+	assert.Equal(t, "cfgms-config-signer", signingCerts[0].CommonName)
+}
+
+// TestEnsureSigningCertificate_StableAcrossCalls verifies the controller's
+// config-signing identity is stable: repeated EnsureSigningCertificate calls
+// (one per controller boot) never create a second cert and always resolve to
+// the byte-identical certificate. This is the property Issue #1718 depends on —
+// a steward caches the signing cert and rejects anything signed by a different
+// key, so the controller must present the same signing identity across restarts.
+func TestEnsureSigningCertificate_StableAcrossCalls(t *testing.T) {
+	manager := setupTestManager(t)
+
+	require.NoError(t, manager.EnsureSigningCertificate(nil))
+	first, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	firstSerial := first[0].SerialNumber
+
+	// Simulate subsequent controller boots.
+	for i := 0; i < 3; i++ {
+		require.NoError(t, manager.EnsureSigningCertificate(nil))
+	}
+
+	after, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	require.NoError(t, err)
+	require.Len(t, after, 1, "EnsureSigningCertificate must not accrete certificates")
+	assert.Equal(t, firstSerial, after[0].SerialNumber,
+		"signing cert serial must be stable across calls")
+}
+
+// TestEnsureSigningCertificate_NoOpAfterSeparatedCerts verifies that a signing
+// cert created by EnsureSeparatedCertificates is reused, not duplicated.
+func TestEnsureSigningCertificate_NoOpAfterSeparatedCerts(t *testing.T) {
+	manager := setupTestManager(t)
+
+	require.NoError(t, manager.EnsureSeparatedCertificates(nil, nil))
+	before, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	require.NoError(t, err)
+	require.Len(t, before, 1)
+
+	require.NoError(t, manager.EnsureSigningCertificate(nil))
+
+	after, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	require.NoError(t, err)
+	require.Len(t, after, 1, "must reuse the existing signing cert")
+	assert.Equal(t, before[0].SerialNumber, after[0].SerialNumber)
+}

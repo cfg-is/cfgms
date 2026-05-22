@@ -315,6 +315,7 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 			"mode":       "client",
 			"addr":       transportAddress,
 			"steward_id": stewardID,
+			"logger":     c.logger,
 		}
 		if tenantID != "" {
 			providerCfg["tenant_id"] = tenantID
