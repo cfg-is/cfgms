@@ -32,9 +32,17 @@ func TestResolveRelayUID_SystemContext(t *testing.T) {
 // The executor independently fails the run with the same underlying error.
 func TestResolveRelayUID_LoggedInUser_FallsBackOnError(t *testing.T) {
 	uid := resolveRelayUID(script.ExecutionContextLoggedInUser, logging.NewNoopLogger())
-	// Regardless of whether a user is logged in, the result must be a valid UID:
-	// either the resolved logged-in user's UID, or the process-UID fallback.
-	// It must never be a negative/zero sentinel from a partial resolution.
+	if runtime.GOOS == "windows" {
+		// On Windows, ResolveExecutionUID always returns -1 with no error:
+		// process identity is SID-based and the relay pipe is DACL-controlled,
+		// so -1 is the intentional "skip UID ownership" sentinel, not a failure.
+		assert.Equal(t, -1, uid, "resolveRelayUID must return the Windows -1 sentinel")
+		return
+	}
+	// On Unix, regardless of whether a user is logged in, the result must be a
+	// valid UID: either the resolved logged-in user's UID, or the process-UID
+	// fallback. It must never be a negative/zero sentinel from a partial
+	// resolution.
 	assert.GreaterOrEqual(t, uid, 0, "resolveRelayUID must always return a usable UID")
 }
 
