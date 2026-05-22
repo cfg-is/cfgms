@@ -559,12 +559,18 @@ func TestDispatcher_SendCommandErrorReleasesLock(t *testing.T) {
 	err = q.QueueExecution("device-1", queuedExec("exec-002", "script-def"))
 	require.NoError(t, err)
 
-	d.OnHeartbeat("device-1")
-
-	// exec-002 (or a re-queued exec-001) should now be dispatched successfully.
+	// Re-fire the heartbeat on every tick rather than once. A single
+	// OnHeartbeat can lose the per-device lock race: the startup dispatchAll
+	// sweep and the first OnHeartbeat both spawn a dispatchForDevice goroutine
+	// for device-1, and a leftover one can still be in flight here. When it
+	// holds the lock, this cycle's dispatchForDevice sees tryAcquireDevice
+	// fail and returns without sending. Production stewards heartbeat
+	// continuously, so the next heartbeat retries — model that here instead of
+	// depending on one heartbeat winning the race.
 	require.Eventually(t, func() bool {
+		d.OnHeartbeat("device-1")
 		return cp.sentCount() >= 1
-	}, 2*time.Second, 10*time.Millisecond,
+	}, 2*time.Second, 20*time.Millisecond,
 		"dispatch should succeed after send error cleared and lock released")
 }
 
