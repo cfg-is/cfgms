@@ -16,7 +16,7 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -27,19 +27,19 @@ import (
 
 var configSvcTestSeq int64
 
-func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
-	return &stewardconfig.StewardConfig{
-		Steward: stewardconfig.StewardSettings{
+func createTestStewardConfig(stewardID string) *stewardtypes.StewardConfig {
+	return &stewardtypes.StewardConfig{
+		Steward: stewardtypes.StewardSettings{
 			ID:   stewardID,
-			Mode: stewardconfig.ModeController,
-			Logging: stewardconfig.LoggingConfig{
+			Mode: stewardtypes.ModeController,
+			Logging: stewardtypes.LoggingConfig{
 				Level:  "info",
 				Format: "text",
 			},
-			ErrorHandling: stewardconfig.ErrorHandlingConfig{
-				ModuleLoadFailure:  stewardconfig.ActionContinue,
-				ResourceFailure:    stewardconfig.ActionWarn,
-				ConfigurationError: stewardconfig.ActionFail,
+			ErrorHandling: stewardtypes.ErrorHandlingConfig{
+				ModuleLoadFailure:  stewardtypes.ActionContinue,
+				ResourceFailure:    stewardtypes.ActionWarn,
+				ConfigurationError: stewardtypes.ActionFail,
 			},
 		},
 		// Modules map must include all modules referenced in Resources to prevent
@@ -48,7 +48,7 @@ func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
 			"directory": "directory",
 			"file":      "file",
 		},
-		Resources: []stewardconfig.ResourceConfig{
+		Resources: []stewardtypes.ResourceConfig{
 			{
 				Name:   "test-directory",
 				Module: "directory",
@@ -131,7 +131,7 @@ func TestSetConfiguration(t *testing.T) {
 	// Verify content round-trips through protobuf
 	require.NotNil(t, resp.Config)
 	require.NotNil(t, resp.Config.Config)
-	retrieved, err := stewardconfig.FromProto(resp.Config.Config)
+	retrieved, err := stewardtypes.FromProto(resp.Config.Config)
 	require.NoError(t, err)
 	assert.Equal(t, cfg.Steward.ID, retrieved.Steward.ID)
 	assert.Len(t, retrieved.Resources, 2)
@@ -175,7 +175,7 @@ func TestGetConfiguration(t *testing.T) {
 
 		require.NotNil(t, resp.Config)
 		require.NotNil(t, resp.Config.Config)
-		retrieved, err := stewardconfig.FromProto(resp.Config.Config)
+		retrieved, err := stewardtypes.FromProto(resp.Config.Config)
 		require.NoError(t, err)
 		assert.Equal(t, cfg.Steward.ID, retrieved.Steward.ID)
 		assert.Len(t, retrieved.Resources, 2)
@@ -195,7 +195,7 @@ func TestGetConfiguration(t *testing.T) {
 
 		require.NotNil(t, resp.Config)
 		require.NotNil(t, resp.Config.Config)
-		retrieved, err := stewardconfig.FromProto(resp.Config.Config)
+		retrieved, err := stewardtypes.FromProto(resp.Config.Config)
 		require.NoError(t, err)
 		assert.Len(t, retrieved.Resources, 1)
 		assert.Equal(t, "directory", retrieved.Resources[0].Module)
@@ -215,7 +215,7 @@ func TestGetConfiguration(t *testing.T) {
 
 		require.NotNil(t, resp.Config)
 		require.NotNil(t, resp.Config.Config)
-		retrieved, err := stewardconfig.FromProto(resp.Config.Config)
+		retrieved, err := stewardtypes.FromProto(resp.Config.Config)
 		require.NoError(t, err)
 		assert.Len(t, retrieved.Resources, 2)
 	})
@@ -234,7 +234,7 @@ func TestGetConfiguration(t *testing.T) {
 
 		require.NotNil(t, resp.Config)
 		require.NotNil(t, resp.Config.Config)
-		retrieved, err := stewardconfig.FromProto(resp.Config.Config)
+		retrieved, err := stewardtypes.FromProto(resp.Config.Config)
 		require.NoError(t, err)
 		assert.Len(t, retrieved.Resources, 0)
 	})
@@ -279,12 +279,12 @@ func TestValidateConfig(t *testing.T) {
 
 	t.Run("validation failure", func(t *testing.T) {
 		// Create invalid configuration (missing required fields)
-		invalidConfig := &stewardconfig.StewardConfig{
-			Steward: stewardconfig.StewardSettings{
+		invalidConfig := &stewardtypes.StewardConfig{
+			Steward: stewardtypes.StewardSettings{
 				// Missing ID field
-				Mode: stewardconfig.ModeController,
+				Mode: stewardtypes.ModeController,
 			},
-			Resources: []stewardconfig.ResourceConfig{
+			Resources: []stewardtypes.ResourceConfig{
 				{
 					Name:   "test-resource",
 					Module: "directory",
@@ -380,7 +380,7 @@ func TestSetConfiguration_DoesNotFireFanoutCallback_OnError(t *testing.T) {
 		svc.RegisterFanoutCallback(func(_ context.Context, _, _ string) { callCount++ })
 
 		// Empty StewardConfig fails validation (missing ID, invalid mode)
-		err := svc.SetConfiguration(ctx, "tenant-a", "steward-1", &stewardconfig.StewardConfig{})
+		err := svc.SetConfiguration(ctx, "tenant-a", "steward-1", &stewardtypes.StewardConfig{})
 		require.Error(t, err)
 		assert.Equal(t, 0, callCount, "callback must not fire on validation error")
 	})
@@ -478,7 +478,7 @@ func TestConfigurationServiceV2Concurrency(t *testing.T) {
 }
 
 // marshalStewardConfigYAML encodes a StewardConfig to YAML bytes for direct config-store writes.
-func marshalStewardConfigYAML(t *testing.T, cfg stewardconfig.StewardConfig) []byte {
+func marshalStewardConfigYAML(t *testing.T, cfg stewardtypes.StewardConfig) []byte {
 	t.Helper()
 	data, err := yaml.Marshal(cfg)
 	require.NoError(t, err)
@@ -518,8 +518,8 @@ func TestGetConfiguration_CascadeMergedDelivery(t *testing.T) {
 	// one the device will override with its own version.
 	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
 		Key: &cfgconfig.ConfigKey{TenantID: "msp", Namespace: "msp-policies", Name: "global"},
-		Data: marshalStewardConfigYAML(t, stewardconfig.StewardConfig{
-			Resources: []stewardconfig.ResourceConfig{
+		Data: marshalStewardConfigYAML(t, stewardtypes.StewardConfig{
+			Resources: []stewardtypes.ResourceConfig{
 				{Name: "msp-inherited", Module: "file", Config: map[string]interface{}{"path": "/etc/inherited.conf"}},
 				{Name: "shared-resource", Module: "file", Config: map[string]interface{}{"path": "/etc/parent.conf"}},
 			},
@@ -529,7 +529,7 @@ func TestGetConfiguration_CascadeMergedDelivery(t *testing.T) {
 	// Device-level config for steward-1 under client tenant.
 	// Includes "shared-resource" to test child-overrides-parent behaviour.
 	deviceCfg := createTestStewardConfig("steward-1")
-	deviceCfg.Resources = append(deviceCfg.Resources, stewardconfig.ResourceConfig{
+	deviceCfg.Resources = append(deviceCfg.Resources, stewardtypes.ResourceConfig{
 		Name: "shared-resource", Module: "file",
 		Config: map[string]interface{}{"path": "/etc/device.conf"},
 	})
@@ -543,10 +543,10 @@ func TestGetConfiguration_CascadeMergedDelivery(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, common.Status_OK, resp.Status.Code)
 
-	retrieved, err := stewardconfig.FromProto(resp.Config.Config)
+	retrieved, err := stewardtypes.FromProto(resp.Config.Config)
 	require.NoError(t, err)
 
-	byName := make(map[string]stewardconfig.ResourceConfig)
+	byName := make(map[string]stewardtypes.ResourceConfig)
 	for _, r := range retrieved.Resources {
 		byName[r.Name] = r
 	}
@@ -595,7 +595,7 @@ func TestGetConfiguration_TenantWithoutHierarchyRecord(t *testing.T) {
 
 		require.NotNil(t, resp.Config)
 		require.NotNil(t, resp.Config.Config)
-		retrieved, err := stewardconfig.FromProto(resp.Config.Config)
+		retrieved, err := stewardtypes.FromProto(resp.Config.Config)
 		require.NoError(t, err)
 		assert.Equal(t, "fleet-steward-1", retrieved.Steward.ID)
 		assert.Len(t, retrieved.Resources, 2)
@@ -632,8 +632,8 @@ func TestGetConfiguration_TenantIsolation(t *testing.T) {
 	// msp-a has an MSP-level policy that should be invisible to msp-b stewards.
 	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
 		Key: &cfgconfig.ConfigKey{TenantID: "msp-a", Namespace: "msp-policies", Name: "global"},
-		Data: marshalStewardConfigYAML(t, stewardconfig.StewardConfig{
-			Resources: []stewardconfig.ResourceConfig{
+		Data: marshalStewardConfigYAML(t, stewardtypes.StewardConfig{
+			Resources: []stewardtypes.ResourceConfig{
 				{Name: "msp-a-policy", Module: "file", Config: map[string]interface{}{"path": "/etc/msp-a.conf"}},
 			},
 		}),
@@ -648,7 +648,7 @@ func TestGetConfiguration_TenantIsolation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, common.Status_OK, resp.Status.Code)
 
-	retrieved, err := stewardconfig.FromProto(resp.Config.Config)
+	retrieved, err := stewardtypes.FromProto(resp.Config.Config)
 	require.NoError(t, err)
 
 	// steward-b must receive its own device config — without this the isolation

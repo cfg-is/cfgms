@@ -13,7 +13,7 @@ import (
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/config/rollback"
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/pkg/config"
 	controllerrouter "github.com/cfgis/cfgms/pkg/configrouting/providers/controller"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -157,7 +157,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 	filteredConfig := s.filterConfigByModules(effective.Config, req.Modules)
 
 	// Convert Go struct to protobuf
-	protoConfig, err := stewardconfig.ToProto(filteredConfig)
+	protoConfig, err := stewardtypes.ToProto(filteredConfig)
 	if err != nil {
 		s.logger.Error("Failed to convert configuration to protobuf", "steward_id", logging.SanitizeLogValue(req.StewardId), "error", err)
 		return &controller.ConfigResponse{
@@ -221,7 +221,7 @@ func (s *ConfigurationServiceV2) resolveDeviceLevelFallback(ctx context.Context,
 }
 
 // SetConfiguration stores a configuration for a specific steward using ConfigStore
-func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID, stewardID string, config *stewardconfig.StewardConfig) error {
+func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID, stewardID string, config *stewardtypes.StewardConfig) error {
 	// Validate configuration before storing
 	validationResult := s.validationManager.ValidateConfiguration(ctx, tenantID, stewardID, config)
 	if !validationResult.Valid {
@@ -370,7 +370,7 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 	s.logger.Debug("Configuration validation request received", "version", logging.SanitizeLogValue(req.Version))
 
 	// Parse configuration
-	var stewardConfig stewardconfig.StewardConfig
+	var stewardConfig stewardtypes.StewardConfig
 	if err := json.Unmarshal(req.Config, &stewardConfig); err != nil {
 		s.logger.Error("Failed to parse configuration for validation", "error", err)
 		return &controller.ConfigValidationResponse{
@@ -459,7 +459,7 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 // Helper methods
 
 // filterConfigByModules filters configuration to include only requested modules
-func (s *ConfigurationServiceV2) filterConfigByModules(config *stewardconfig.StewardConfig, modules []string) *stewardconfig.StewardConfig {
+func (s *ConfigurationServiceV2) filterConfigByModules(config *stewardtypes.StewardConfig, modules []string) *stewardtypes.StewardConfig {
 	if len(modules) == 0 {
 		return config
 	}

@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/pkg/logging"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -33,16 +33,16 @@ func TestConfigurationStorageMigration(t *testing.T) {
 	migration := NewConfigurationStorageMigration(configStore, logger)
 
 	// Test configuration
-	testConfig := &stewardconfig.StewardConfig{
-		Steward: stewardconfig.StewardSettings{
+	testConfig := &stewardtypes.StewardConfig{
+		Steward: stewardtypes.StewardSettings{
 			ID:   "test-steward",
-			Mode: stewardconfig.ModeStandalone,
-			Logging: stewardconfig.LoggingConfig{
+			Mode: stewardtypes.ModeStandalone,
+			Logging: stewardtypes.LoggingConfig{
 				Level:  "info",
 				Format: "text",
 			},
 		},
-		Resources: []stewardconfig.ResourceConfig{
+		Resources: []stewardtypes.ResourceConfig{
 			{
 				Name:   "test-resource",
 				Module: "directory",
@@ -160,10 +160,10 @@ func TestConfigurationStorageMigration(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Invalid configuration should fail (empty steward ID)
-		invalidConfig := &stewardconfig.StewardConfig{
-			Steward: stewardconfig.StewardSettings{
+		invalidConfig := &stewardtypes.StewardConfig{
+			Steward: stewardtypes.StewardSettings{
 				ID:   "", // Invalid empty ID
-				Mode: stewardconfig.ModeStandalone,
+				Mode: stewardtypes.ModeStandalone,
 			},
 		}
 
@@ -212,10 +212,10 @@ func TestEpic6ComplianceRequirements(t *testing.T) {
 	configStore := createTestConfigStore(t)
 	migration := NewConfigurationStorageMigration(configStore, logger)
 
-	testConfig := &stewardconfig.StewardConfig{
-		Steward: stewardconfig.StewardSettings{
+	testConfig := &stewardtypes.StewardConfig{
+		Steward: stewardtypes.StewardSettings{
 			ID:   "compliance-test",
-			Mode: stewardconfig.ModeStandalone,
+			Mode: stewardtypes.ModeStandalone,
 		},
 	}
 
@@ -276,10 +276,10 @@ func TestInMemoryToStorageMigration(t *testing.T) {
 			StewardID: "steward1",
 			TenantID:  "tenant1",
 			Version:   "v1",
-			Config: &stewardconfig.StewardConfig{
-				Steward: stewardconfig.StewardSettings{
+			Config: &stewardtypes.StewardConfig{
+				Steward: stewardtypes.StewardSettings{
 					ID:   "steward1",
-					Mode: stewardconfig.ModeStandalone,
+					Mode: stewardtypes.ModeStandalone,
 				},
 			},
 			LastUpdated: time.Now(),
@@ -289,10 +289,10 @@ func TestInMemoryToStorageMigration(t *testing.T) {
 			StewardID: "steward2",
 			TenantID:  "tenant2",
 			Version:   "v1",
-			Config: &stewardconfig.StewardConfig{
-				Steward: stewardconfig.StewardSettings{
+			Config: &stewardtypes.StewardConfig{
+				Steward: stewardtypes.StewardSettings{
 					ID:   "steward2",
-					Mode: stewardconfig.ModeController,
+					Mode: stewardtypes.ModeController,
 				},
 			},
 			LastUpdated: time.Now(),
@@ -309,11 +309,11 @@ func TestInMemoryToStorageMigration(t *testing.T) {
 		config1, err := migration.GetConfiguration(ctx, "tenant1", "steward1")
 		require.NoError(t, err)
 		assert.Equal(t, "steward1", config1.Steward.ID)
-		assert.Equal(t, stewardconfig.ModeStandalone, config1.Steward.Mode)
+		assert.Equal(t, stewardtypes.ModeStandalone, config1.Steward.Mode)
 
 		config2, err := migration.GetConfiguration(ctx, "tenant2", "steward2")
 		require.NoError(t, err)
 		assert.Equal(t, "steward2", config2.Steward.ID)
-		assert.Equal(t, stewardconfig.ModeController, config2.Steward.Mode)
+		assert.Equal(t, stewardtypes.ModeController, config2.Steward.Mode)
 	})
 }
