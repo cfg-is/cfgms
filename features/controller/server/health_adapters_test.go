@@ -190,9 +190,9 @@ func (s *testStewardStore) DeregisterSteward(_ context.Context, _ string) error 
 func (s *testStewardStore) GetStewardsSeen(_ context.Context, _ time.Time) ([]*business.StewardRecord, error) {
 	return nil, nil
 }
-func (s *testStewardStore) HealthCheck(_ context.Context) error  { return nil }
-func (s *testStewardStore) Initialize(_ context.Context) error   { return nil }
-func (s *testStewardStore) Close() error                         { return nil }
+func (s *testStewardStore) HealthCheck(_ context.Context) error { return nil }
+func (s *testStewardStore) Initialize(_ context.Context) error  { return nil }
+func (s *testStewardStore) Close() error                        { return nil }
 
 var _ business.StewardStore = (*testStewardStore)(nil)
 
