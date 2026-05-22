@@ -24,7 +24,7 @@ type RegistrationRequest struct {
 	Token string `json:"token"`
 }
 
-// RegistrationResponse represents the steward registration response
+// RegistrationResponse represents the steward registration response for an approved registration.
 type RegistrationResponse struct {
 	StewardID        string `json:"steward_id"`
 	TenantID         string `json:"tenant_id"`
@@ -32,7 +32,7 @@ type RegistrationResponse struct {
 	ControllerURL    string `json:"controller_url"`
 	TransportAddress string `json:"transport_address"`
 
-	// Certificate information (optional for alpha, required for production mTLS)
+	// Certificate information (required for production mTLS)
 	ClientCert string `json:"client_cert,omitempty"`
 	ClientKey  string `json:"client_key,omitempty"`
 	CACert     string `json:"ca_cert,omitempty"`
@@ -46,15 +46,22 @@ type RegistrationResponse struct {
 	// When present, stewards should use this for config signature verification instead of ServerCert
 	// In unified mode, this is empty and ServerCert is used for both
 	SigningCert string `json:"signing_cert,omitempty"`
+}
 
-	// Issue #422: Quarantined indicates the steward has been quarantined by the approval workflow.
-	// Quarantined stewards receive certificates but are restricted to baseline configuration
-	// (no secrets, no scripts) until an administrator promotes them.
-	Quarantined bool `json:"quarantined,omitempty"`
+// RegistrationPendingResponse is returned with HTTP 202 when a registration is quarantined
+// pending operator approval. It contains no certificate fields — cert issuance is gated on
+// the approval decision (Issue #1693).
+type RegistrationPendingResponse struct {
+	PendingID string `json:"pending_id"`
+	StewardID string `json:"steward_id"`
+	TenantID  string `json:"tenant_id"`
+	Group     string `json:"group"`
+	Status    string `json:"status"`
 }
 
 // PendingRegistration represents a quarantined steward awaiting admin approval.
 type PendingRegistration struct {
+	PendingID    string    `json:"pending_id"`
 	StewardID    string    `json:"steward_id"`
 	TenantID     string    `json:"tenant_id"`
 	SourceIP     string    `json:"source_ip"`
@@ -195,10 +202,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"steward_id", stewardID)
 
 	// Issue #422: Run registration approval hook.
-	// The token is consumed before the hook runs, preventing a second attempt while
-	// the hook is evaluating. Hook errors are non-fatal: we log and fall back to approve
-	// so transient failures do not block legitimate registrations.
-	quarantined := false
+	// Hook errors are non-fatal: we log and fall back to approve so transient failures
+	// do not block legitimate registrations.
 	{
 		input := RegistrationInput{
 			Token:    token,
@@ -222,13 +227,46 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Registration rejected", http.StatusForbidden)
 				return
 			case DecisionQuarantine:
-				quarantined = true
+				// Issue #1693: quarantine returns 202 with no cert — cert issuance is gated on approval.
+				pendingID := fmt.Sprintf("pending-%d", time.Now().UnixNano())
 				s.logger.Info("Registration quarantined by approval workflow",
-					"tenant_id", token.TenantID)
+					"tenant_id", token.TenantID,
+					"pending_id", pendingID)
+				// A registry write failure is non-fatal; the steward will re-appear on re-registration.
+				if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, s.getTransportAddress(), "quarantined"); err != nil {
+					s.logger.Error("Failed to register quarantined steward in controller service",
+						"steward_id", stewardID, "error", err)
+				} else {
+					s.registrationQueue.Store(stewardID, PendingRegistration{
+						PendingID:    pendingID,
+						StewardID:    stewardID,
+						TenantID:     token.TenantID,
+						SourceIP:     extractSourceIP(r),
+						RegisteredAt: time.Now().UTC(),
+					})
+				}
+				// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
+				s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
+					business.AuditEventAuthentication, "registration_quarantined",
+					business.AuditResultSuccess, business.AuditSeverityHigh,
+					map[string]interface{}{"quarantined": true})
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				if err := json.NewEncoder(w).Encode(RegistrationPendingResponse{
+					PendingID: pendingID,
+					StewardID: stewardID,
+					TenantID:  token.TenantID,
+					Group:     token.Group,
+					Status:    "pending",
+				}); err != nil {
+					s.logger.Error("Failed to encode pending registration response", "error", err)
+				}
+				return
 			}
 		}
 	}
 
+	// Approve path: generate mTLS certificates and return the full registration response.
 	s.logger.Info("Steward registered successfully",
 		"steward_id", stewardID,
 		"tenant_id", token.TenantID,
@@ -329,43 +367,18 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"steward_id", stewardID,
 		"validity_days", validityDays)
 
-	// Issue #422: Set quarantine flag on the response so the steward knows its status.
-	if quarantined {
-		resp.Quarantined = true
-	}
-
-	// Register steward in the single authoritative registry
-	initialStatus := "registered" // Initial status before first heartbeat
-	if quarantined {
-		initialStatus = "quarantined"
-	}
 	// A registry write failure is non-fatal: the steward already has valid certificates and
 	// will re-appear in the registry on its first heartbeat. Blocking the response here would
 	// leave the steward with credentials it cannot use and no way to recover without re-registering.
-	if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, resp.TransportAddress, initialStatus); err != nil {
+	if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, resp.TransportAddress, "registered"); err != nil {
 		s.logger.Error("Failed to register steward in controller service",
 			"steward_id", stewardID, "error", err)
-	} else if quarantined {
-		// Issue #1568: Track quarantined steward in the pending approval queue.
-		s.registrationQueue.Store(stewardID, PendingRegistration{
-			StewardID:    stewardID,
-			TenantID:     token.TenantID,
-			SourceIP:     extractSourceIP(r),
-			RegisteredAt: time.Now().UTC(),
-		})
 	}
 
-	// Emit success audit event before writing the response
-	successAction := "steward_registered"
-	var successExtras map[string]interface{}
-	if quarantined {
-		successAction = "registration_quarantined"
-		successExtras = map[string]interface{}{"quarantined": true}
-	}
 	// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 	s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
-		business.AuditEventAuthentication, successAction,
-		business.AuditResultSuccess, business.AuditSeverityHigh, successExtras)
+		business.AuditEventAuthentication, "steward_registered",
+		business.AuditResultSuccess, business.AuditSeverityHigh, nil)
 
 	// Return response
 	w.Header().Set("Content-Type", "application/json")

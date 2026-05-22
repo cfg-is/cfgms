@@ -23,7 +23,7 @@ type RegistrationRequest struct {
 	Token string `json:"token"`
 }
 
-// RegistrationResponse represents the response from the controller.
+// RegistrationResponse represents the response from the controller for an approved registration.
 type RegistrationResponse struct {
 	Success       bool   `json:"success"`
 	StewardID     string `json:"steward_id,omitempty"`
@@ -48,6 +48,17 @@ type RegistrationResponse struct {
 	// Story #377: Dedicated config signing certificate (separated architecture)
 	// When present, steward should prefer this for config signature verification
 	SigningCert string `json:"signing_cert,omitempty"`
+}
+
+// RegistrationPendingResponse is returned by the controller with HTTP 202 when a registration
+// is quarantined pending operator approval. It contains no certificate fields (Issue #1693).
+// Callers must check whether Register returned a pending response and enter a poll loop (story 7).
+type RegistrationPendingResponse struct {
+	PendingID string `json:"pending_id"`
+	StewardID string `json:"steward_id"`
+	TenantID  string `json:"tenant_id"`
+	Group     string `json:"group"`
+	Status    string `json:"status"`
 }
 
 // HTTPClient handles steward registration via REST API
@@ -110,35 +121,36 @@ func NewHTTPClient(cfg *HTTPConfig) (*HTTPClient, error) {
 	}, nil
 }
 
-// Register registers the steward with the controller using a registration token
-func (c *HTTPClient) Register(ctx context.Context, token string) (*RegistrationResponse, error) {
-	// Build registration URL
+// Register registers the steward with the controller using a registration token.
+//
+// Returns (*RegistrationResponse, nil, nil) on HTTP 200 (approved).
+// Returns (nil, *RegistrationPendingResponse, nil) on HTTP 202 (quarantined, pending approval).
+// Returns (nil, nil, error) on any other status or transport failure.
+// Callers must distinguish the pending case and enter a poll loop (story 7).
+func (c *HTTPClient) Register(ctx context.Context, token string) (*RegistrationResponse, *RegistrationPendingResponse, error) {
 	registrationURL := fmt.Sprintf("%s/api/v1/register", c.controllerURL)
 
-	// Create request body
 	reqBody := RegistrationRequest{
 		Token: token,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal registration request: %w", err)
+		return nil, nil, fmt.Errorf("failed to marshal registration request: %w", err)
 	}
 
-	// Create HTTP request
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, registrationURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+		return nil, nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	c.logger.Info("Sending registration request to controller", "url", registrationURL)
 
-	// Send request
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send registration request: %w", err)
+		return nil, nil, fmt.Errorf("failed to send registration request: %w", err)
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
@@ -146,27 +158,35 @@ func (c *HTTPClient) Register(ctx context.Context, token string) (*RegistrationR
 		}
 	}()
 
-	// Read response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Check status code
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(body))
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var regResp RegistrationResponse
+		if err := json.Unmarshal(body, &regResp); err != nil {
+			return nil, nil, fmt.Errorf("failed to parse registration response: %w", err)
+		}
+		c.logger.Info("Registration successful",
+			"steward_id", regResp.StewardID,
+			"tenant_id", regResp.TenantID,
+			"group", regResp.Group)
+		return &regResp, nil, nil
+
+	case http.StatusAccepted:
+		var pending RegistrationPendingResponse
+		if err := json.Unmarshal(body, &pending); err != nil {
+			return nil, nil, fmt.Errorf("failed to parse pending registration response: %w", err)
+		}
+		c.logger.Info("Registration pending operator approval",
+			"pending_id", pending.PendingID,
+			"steward_id", pending.StewardID,
+			"tenant_id", pending.TenantID)
+		return nil, &pending, nil
+
+	default:
+		return nil, nil, fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(body))
 	}
-
-	// Parse response
-	var regResp RegistrationResponse
-	if err := json.Unmarshal(body, &regResp); err != nil {
-		return nil, fmt.Errorf("failed to parse registration response: %w", err)
-	}
-
-	c.logger.Info("Registration successful",
-		"steward_id", regResp.StewardID,
-		"tenant_id", regResp.TenantID,
-		"group", regResp.Group)
-
-	return &regResp, nil
 }
