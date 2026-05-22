@@ -445,10 +445,10 @@ The workflow engine must support the following capabilities to fulfill its role 
 
 The controller is the certificate authority and identity provider for stewards. Two credential flavors support different deployment workflows:
 
-**Short-lived / single-use registration tokens**
-- Generated via REST API or `cfg token create --expires=<duration> --single-use`
-- Scoped to tenant/group, with expiry
-- Consumed on use (single-use enforces one-time pairing; expiry enforces time bounds)
+**Perennial registration tokens**
+- Generated via REST API or `cfg token create --expires=<duration>`
+- Scoped to tenant/group, with optional expiry
+- Survive multiple registrations (never consumed on use); rotate with `cfg token rotate` to atomically invalidate all prior tokens and issue a fresh one
 - Suitable for: manual onboarding, small fleets, time-bounded provisioning
 
 **Long-lived tenant/group registration codes**
@@ -461,7 +461,7 @@ The controller is the certificate authority and identity provider for stewards. 
 
 1. Admin creates a token or code on the controller (scoped to tenant/group, with optional expiry for tokens).
 2. Steward presents the token/code during registration via the compile-time controller URL.
-3. Controller validates the credential — single-use: consume; long-lived code: look up matching record.
+3. Controller validates the credential — perennial token: check expiry and revocation; long-lived code: look up matching record.
 4. Controller runs the registration approval workflow via `RegistrationApprovalHook`. The active workflow is selected by `registration.workflow` in `controller.cfg`:
    - **`auto-approve`** (default): approves every valid registration unconditionally. Implemented as a built-in workflow with `Variables: {policy: accept}` which short-circuits the engine. Equivalent to the legacy `DefaultApprovalHook`.
    - **`manual-review`** (production): quarantines the steward pending operator action. Sets `registration_decision: quarantine` so the steward is restricted to baseline config until promoted. Operators use `cfg registration pending` to list quarantined stewards, `cfg registration approve <id>` to promote, and `cfg registration deny <id> [--reason ...]` to reject.

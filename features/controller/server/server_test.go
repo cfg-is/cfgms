@@ -22,7 +22,7 @@ var hardcodedTestTokens = []string{
 	"integration_reusable",
 	"integration_expired",
 	"integration_revoked",
-	"integration_singleuse",
+	"dockertest_fleet",
 }
 
 // TestServer_ProductionStartup_NoHardcodedTokens verifies that a controller

@@ -5,8 +5,11 @@ package sqlite
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base32"
 	"fmt"
+	"strings"
 	"sync"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -14,8 +17,8 @@ import (
 
 // SQLiteRegistrationTokenStore implements business.RegistrationTokenStore using SQLite.
 type SQLiteRegistrationTokenStore struct {
-	db        *sql.DB
-	consumeMu sync.Mutex // serializes ConsumeToken to prevent SQLITE_BUSY under high concurrency
+	db       *sql.DB
+	rotateMu sync.Mutex // serializes concurrent RotateToken calls per-instance
 }
 
 // Initialize is a no-op; schema is applied in openAndInit.
@@ -30,8 +33,7 @@ func (s *SQLiteRegistrationTokenStore) Close() error {
 }
 
 // SaveToken persists a registration token. Uses UPSERT semantics so that
-// subsequent calls with the same token update mutable state — required for
-// single-use enforcement (Story #299 parity with the database provider).
+// subsequent calls with the same token update mutable state.
 func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *business.RegistrationTokenData) error {
 	if token == nil {
 		return fmt.Errorf("token cannot be nil")
@@ -46,16 +48,13 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *bus
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO registration_tokens
 			(token, tenant_id, controller_url, group_name, created_at,
-			 expires_at, single_use, used_at, used_by, revoked, revoked_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 expires_at, revoked, revoked_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(token) DO UPDATE SET
 			tenant_id = excluded.tenant_id,
 			controller_url = excluded.controller_url,
 			group_name = excluded.group_name,
 			expires_at = excluded.expires_at,
-			single_use = excluded.single_use,
-			used_at = excluded.used_at,
-			used_by = excluded.used_by,
 			revoked = excluded.revoked,
 			revoked_at = excluded.revoked_at`,
 		token.Token,
@@ -64,9 +63,6 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *bus
 		token.Group,
 		formatTime(token.CreatedAt),
 		nullTime(token.ExpiresAt),
-		boolToInt(token.SingleUse),
-		nullTime(token.UsedAt),
-		token.UsedBy,
 		boolToInt(token.Revoked),
 		nullTime(token.RevokedAt),
 	)
@@ -80,7 +76,7 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *bus
 func (s *SQLiteRegistrationTokenStore) GetToken(ctx context.Context, tokenStr string) (*business.RegistrationTokenData, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT token, tenant_id, controller_url, group_name, created_at,
-		       expires_at, single_use, used_at, used_by, revoked, revoked_at
+		       expires_at, revoked, revoked_at
 		FROM registration_tokens WHERE token = ?`, tokenStr)
 	return scanToken(row)
 }
@@ -94,16 +90,12 @@ func (s *SQLiteRegistrationTokenStore) UpdateToken(ctx context.Context, token *b
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE registration_tokens
 		SET tenant_id = ?, controller_url = ?, group_name = ?,
-		    expires_at = ?, single_use = ?, used_at = ?, used_by = ?,
-		    revoked = ?, revoked_at = ?
+		    expires_at = ?, revoked = ?, revoked_at = ?
 		WHERE token = ?`,
 		token.TenantID,
 		token.ControllerURL,
 		token.Group,
 		nullTime(token.ExpiresAt),
-		boolToInt(token.SingleUse),
-		nullTime(token.UsedAt),
-		token.UsedBy,
 		boolToInt(token.Revoked),
 		nullTime(token.RevokedAt),
 		token.Token,
@@ -134,7 +126,7 @@ func (s *SQLiteRegistrationTokenStore) DeleteToken(ctx context.Context, tokenStr
 // ListTokens returns registration tokens matching an optional filter.
 func (s *SQLiteRegistrationTokenStore) ListTokens(ctx context.Context, filter *business.RegistrationTokenFilter) ([]*business.RegistrationTokenData, error) {
 	query := `SELECT token, tenant_id, controller_url, group_name, created_at,
-	                 expires_at, single_use, used_at, used_by, revoked, revoked_at
+	                 expires_at, revoked, revoked_at
 	          FROM registration_tokens WHERE 1=1`
 	var args []interface{}
 
@@ -150,17 +142,6 @@ func (s *SQLiteRegistrationTokenStore) ListTokens(ctx context.Context, filter *b
 		if filter.Revoked != nil {
 			query += ` AND revoked = ?`
 			args = append(args, boolToInt(*filter.Revoked))
-		}
-		if filter.SingleUse != nil {
-			query += ` AND single_use = ?`
-			args = append(args, boolToInt(*filter.SingleUse))
-		}
-		if filter.Used != nil {
-			if *filter.Used {
-				query += ` AND used_at IS NOT NULL`
-			} else {
-				query += ` AND used_at IS NULL`
-			}
 		}
 	}
 
@@ -183,62 +164,81 @@ func (s *SQLiteRegistrationTokenStore) ListTokens(ctx context.Context, filter *b
 	return tokens, rows.Err()
 }
 
-// ConsumeToken atomically validates and marks a single-use token as used via a single UPDATE
-// with a WHERE guard. If rows-affected == 0 for a single-use token, a follow-up SELECT
-// distinguishes "not found" from "already used" to return the correct error.
-// The consumeMu mutex serializes callers within the same process because the pure-Go SQLite
-// driver does not reliably propagate busy_timeout across all pool connections.
-func (s *SQLiteRegistrationTokenStore) ConsumeToken(ctx context.Context, tokenStr, stewardID string) error {
-	s.consumeMu.Lock()
-	defer s.consumeMu.Unlock()
+// RotateToken atomically revokes all prior tokens for tenant+group and creates a new one in
+// a single SQLite transaction, ensuring no overlap window between old and new tokens.
+// rotateMu serializes concurrent callers to prevent SQLite snapshot-isolation conflicts.
+func (s *SQLiteRegistrationTokenStore) RotateToken(ctx context.Context, tenantID, group string) (*business.RegistrationTokenData, error) {
+	s.rotateMu.Lock()
+	defer s.rotateMu.Unlock()
 
-	now := formatTime(nowUTC())
+	newTokenStr, err := generateTokenString()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate token: %w", err)
+	}
 
-	// Attempt atomic mark-used for single-use tokens that are still unused.
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin rotation transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Find an existing active token to inherit controller_url.
+	var controllerURL string
+	err = tx.QueryRowContext(ctx, `
+		SELECT controller_url FROM registration_tokens
+		WHERE tenant_id = ? AND group_name = ? AND revoked = 0
+		ORDER BY created_at DESC LIMIT 1`,
+		tenantID, group,
+	).Scan(&controllerURL)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("no active tokens found for tenant %q group %q", tenantID, group)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to find existing token: %w", err)
+	}
+
+	now := nowUTC()
+	nowStr := formatTime(now)
+
+	// Insert the new token.
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO registration_tokens
+			(token, tenant_id, controller_url, group_name, created_at, revoked)
+		VALUES (?, ?, ?, ?, ?, 0)`,
+		newTokenStr, tenantID, controllerURL, group, nowStr,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to insert new token: %w", err)
+	}
+
+	// Revoke all prior tokens for this tenant+group atomically.
+	_, err = tx.ExecContext(ctx, `
 		UPDATE registration_tokens
-		SET used_at = ?, used_by = ?
-		WHERE token = ? AND single_use = 1 AND used_at IS NULL AND revoked = 0`,
-		now, stewardID, tokenStr,
+		SET revoked = 1, revoked_at = ?
+		WHERE tenant_id = ? AND group_name = ? AND revoked = 0 AND token != ?`,
+		nowStr, tenantID, group, newTokenStr,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to consume registration token: %w", err)
+		return nil, fmt.Errorf("failed to revoke old tokens: %w", err)
 	}
 
-	n, _ := res.RowsAffected()
-	if n > 0 {
-		return nil
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit rotation: %w", err)
 	}
+	committed = true
 
-	// Rows-affected == 0: either not found, already used, revoked, or multi-use. Inspect.
-	data, err := s.GetToken(ctx, tokenStr)
-	if err != nil {
-		// Token genuinely does not exist.
-		return fmt.Errorf("token not found")
-	}
-
-	if data.Revoked {
-		return fmt.Errorf("token is revoked")
-	}
-
-	if data.SingleUse && data.UsedAt != nil {
-		return business.ErrTokenAlreadyUsed
-	}
-
-	// Multi-use token or expired — validate then mark used unconditionally.
-	if !data.IsValid() {
-		return fmt.Errorf("token is not valid")
-	}
-
-	// Multi-use: mark used (tracks last consumer; non-blocking for concurrent callers).
-	_, err = s.db.ExecContext(ctx, `
-		UPDATE registration_tokens SET used_at = ?, used_by = ? WHERE token = ?`,
-		now, stewardID, tokenStr,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to mark multi-use token as used: %w", err)
-	}
-	return nil
+	return &business.RegistrationTokenData{
+		Token:         newTokenStr,
+		TenantID:      tenantID,
+		ControllerURL: controllerURL,
+		Group:         group,
+		CreatedAt:     now,
+	}, nil
 }
 
 // ---- helpers ----------------------------------------------------------------
@@ -246,13 +246,12 @@ func (s *SQLiteRegistrationTokenStore) ConsumeToken(ctx context.Context, tokenSt
 func scanToken(row *sql.Row) (*business.RegistrationTokenData, error) {
 	t := &business.RegistrationTokenData{}
 	var createdStr string
-	var expiresAt, usedAt, revokedAt sql.NullString
-	var singleUse, revoked int
+	var expiresAt, revokedAt sql.NullString
+	var revoked int
 
 	err := row.Scan(
 		&t.Token, &t.TenantID, &t.ControllerURL, &t.Group,
-		&createdStr, &expiresAt, &singleUse, &usedAt, &t.UsedBy,
-		&revoked, &revokedAt,
+		&createdStr, &expiresAt, &revoked, &revokedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("registration token not found")
@@ -260,38 +259,44 @@ func scanToken(row *sql.Row) (*business.RegistrationTokenData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan registration token: %w", err)
 	}
-	return populateToken(t, createdStr, singleUse, revoked, expiresAt, usedAt, revokedAt)
+	return populateToken(t, createdStr, revoked, expiresAt, revokedAt)
 }
 
 func scanTokenRow(rows *sql.Rows) (*business.RegistrationTokenData, error) {
 	t := &business.RegistrationTokenData{}
 	var createdStr string
-	var expiresAt, usedAt, revokedAt sql.NullString
-	var singleUse, revoked int
+	var expiresAt, revokedAt sql.NullString
+	var revoked int
 
 	if err := rows.Scan(
 		&t.Token, &t.TenantID, &t.ControllerURL, &t.Group,
-		&createdStr, &expiresAt, &singleUse, &usedAt, &t.UsedBy,
-		&revoked, &revokedAt,
+		&createdStr, &expiresAt, &revoked, &revokedAt,
 	); err != nil {
 		return nil, fmt.Errorf("failed to scan registration token row: %w", err)
 	}
-	return populateToken(t, createdStr, singleUse, revoked, expiresAt, usedAt, revokedAt)
+	return populateToken(t, createdStr, revoked, expiresAt, revokedAt)
 }
 
 func populateToken(
 	t *business.RegistrationTokenData,
 	createdStr string,
-	singleUse, revoked int,
-	expiresAt, usedAt, revokedAt sql.NullString,
+	revoked int,
+	expiresAt, revokedAt sql.NullString,
 ) (*business.RegistrationTokenData, error) {
 	t.CreatedAt = parseTime(createdStr)
-	t.SingleUse = singleUse != 0
 	t.Revoked = revoked != 0
 	t.ExpiresAt = parseNullTime(expiresAt)
-	t.UsedAt = parseNullTime(usedAt)
 	t.RevokedAt = parseNullTime(revokedAt)
 	return t, nil
+}
+
+// generateTokenString produces a random base32-encoded token string (16 bytes / 128-bit entropy).
+func generateTokenString() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to read random bytes: %w", err)
+	}
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b)), nil
 }
 
 // ensure SQLiteRegistrationTokenStore satisfies the interface at compile time

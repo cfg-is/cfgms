@@ -25,115 +25,113 @@ func newTestRegistrationStore(t *testing.T) *DatabaseRegistrationTokenStore {
 	return &DatabaseRegistrationTokenStore{db: db, config: nil, schemas: schemas}
 }
 
-func TestDatabaseRegistrationStore_ConsumeToken_SingleUse(t *testing.T) {
+func TestDatabaseRegistrationStore_RotateToken_Basic(t *testing.T) {
 	store := newTestRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &business.RegistrationTokenData{
-		Token:         "db-tok-consume-single",
-		TenantID:      "t",
-		ControllerURL: "https://c.example.com",
-		SingleUse:     true,
+	seed := &business.RegistrationTokenData{
+		Token:         "db-rotate-seed",
+		TenantID:      "tenant-rotate",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "prod",
 		CreatedAt:     time.Now().UTC(),
 	}
-	require.NoError(t, store.SaveToken(ctx, token))
+	require.NoError(t, store.SaveToken(ctx, seed))
 
-	// First consume must succeed.
-	require.NoError(t, store.ConsumeToken(ctx, "db-tok-consume-single", "steward-1"))
+	newTok, err := store.RotateToken(ctx, "tenant-rotate", "prod")
+	require.NoError(t, err)
+	assert.NotEmpty(t, newTok.Token)
+	assert.NotEqual(t, seed.Token, newTok.Token)
+	assert.Equal(t, "tenant-rotate", newTok.TenantID)
+	assert.Equal(t, "grpc://controller:7443", newTok.ControllerURL)
+	assert.Equal(t, "prod", newTok.Group)
 
-	// Second consume must return ErrTokenAlreadyUsed.
-	err := store.ConsumeToken(ctx, "db-tok-consume-single", "steward-2")
-	require.ErrorIs(t, err, business.ErrTokenAlreadyUsed)
+	// Old token must be revoked.
+	old, err := store.GetToken(ctx, seed.Token)
+	require.NoError(t, err)
+	assert.True(t, old.Revoked)
+
+	// New token must be valid.
+	got, err := store.GetToken(ctx, newTok.Token)
+	require.NoError(t, err)
+	assert.True(t, got.IsValid())
 }
 
-func TestDatabaseRegistrationStore_ConsumeToken_MultiUse(t *testing.T) {
+func TestDatabaseRegistrationStore_RotateToken_NoActiveTokens(t *testing.T) {
 	store := newTestRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &business.RegistrationTokenData{
-		Token:         "db-tok-consume-multi",
-		TenantID:      "t",
-		ControllerURL: "https://c.example.com",
-		SingleUse:     false,
-		CreatedAt:     time.Now().UTC(),
-	}
-	require.NoError(t, store.SaveToken(ctx, token))
-
-	// Multiple consumes of multi-use token must all succeed.
-	require.NoError(t, store.ConsumeToken(ctx, "db-tok-consume-multi", "steward-1"))
-	require.NoError(t, store.ConsumeToken(ctx, "db-tok-consume-multi", "steward-2"))
-}
-
-func TestDatabaseRegistrationStore_ConsumeToken_NotFound(t *testing.T) {
-	store := newTestRegistrationStore(t)
-	ctx := context.Background()
-
-	err := store.ConsumeToken(ctx, "db-nonexistent", "steward-1")
+	_, err := store.RotateToken(ctx, "tenant-none", "group-none")
 	require.Error(t, err)
-	require.NotErrorIs(t, err, business.ErrTokenAlreadyUsed)
+	assert.Contains(t, err.Error(), "no active tokens found")
 }
 
-func TestDatabaseRegistrationStore_ConsumeToken_Revoked(t *testing.T) {
+func TestDatabaseRegistrationStore_RotateToken_RevokedTokenNotCounted(t *testing.T) {
 	store := newTestRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &business.RegistrationTokenData{
-		Token:         "db-tok-revoked",
-		TenantID:      "t",
-		ControllerURL: "https://c.example.com",
-		SingleUse:     true,
+	revoked := &business.RegistrationTokenData{
+		Token:         "db-already-revoked",
+		TenantID:      "tenant-rev",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "group-a",
+		Revoked:       true,
 		CreatedAt:     time.Now().UTC(),
 	}
-	require.NoError(t, store.SaveToken(ctx, token))
-	token.Revoke()
-	require.NoError(t, store.UpdateToken(ctx, token))
+	require.NoError(t, store.SaveToken(ctx, revoked))
 
-	err := store.ConsumeToken(ctx, "db-tok-revoked", "steward-1")
+	_, err := store.RotateToken(ctx, "tenant-rev", "group-a")
 	require.Error(t, err)
-	require.NotErrorIs(t, err, business.ErrTokenAlreadyUsed)
+	assert.Contains(t, err.Error(), "no active tokens found")
 }
 
-func TestDatabaseRegistrationStore_ConsumeToken_Race(t *testing.T) {
+func TestDatabaseRegistrationStore_RotateToken_Race(t *testing.T) {
 	store := newTestRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &business.RegistrationTokenData{
-		Token:         "db-tok-race",
-		TenantID:      "t",
-		ControllerURL: "https://c.example.com",
-		SingleUse:     true,
+	seed := &business.RegistrationTokenData{
+		Token:         "db-race-seed",
+		TenantID:      "tenant-race",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "race-group",
 		CreatedAt:     time.Now().UTC(),
 	}
-	require.NoError(t, store.SaveToken(ctx, token))
+	require.NoError(t, store.SaveToken(ctx, seed))
 
-	const goroutines = 50
+	const goroutines = 20
 	var (
 		successCount atomic.Int32
-		alreadyUsed  atomic.Int32
 		wg           sync.WaitGroup
 		start        = make(chan struct{})
 	)
 
 	wg.Add(goroutines)
 	for i := 0; i < goroutines; i++ {
-		go func(id int) {
+		go func() {
 			defer wg.Done()
 			<-start
-			err := store.ConsumeToken(ctx, "db-tok-race", "steward-"+string(rune('A'+id)))
-			switch err {
-			case nil:
+			_, err := store.RotateToken(ctx, "tenant-race", "race-group")
+			if err == nil {
 				successCount.Add(1)
-			case business.ErrTokenAlreadyUsed:
-				alreadyUsed.Add(1)
-			default:
-				t.Errorf("goroutine %d: unexpected error: %v", id, err)
 			}
-		}(i)
+		}()
 	}
 
 	close(start)
 	wg.Wait()
 
-	assert.Equal(t, int32(1), successCount.Load(), "exactly one goroutine must succeed")
-	assert.Equal(t, int32(goroutines-1), alreadyUsed.Load(), "all others must get ErrTokenAlreadyUsed")
+	// All rotations must succeed (each finds the previous rotation's token as active).
+	assert.Equal(t, int32(goroutines), successCount.Load(), "all concurrent rotations must succeed")
+
+	// Exactly one valid token must remain.
+	tokens, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{TenantID: "tenant-race"})
+	require.NoError(t, err)
+
+	validCount := 0
+	for _, tok := range tokens {
+		if !tok.Revoked {
+			validCount++
+		}
+	}
+	assert.Equal(t, 1, validCount, "exactly one valid token must exist after all rotations")
 }

@@ -6,8 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
-
-	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"time"
 )
 
 // Store defines the interface for registration token storage.
@@ -27,9 +26,10 @@ type Store interface {
 	// DeleteToken deletes a token
 	DeleteToken(ctx context.Context, tokenStr string) error
 
-	// ConsumeToken atomically validates and marks a token as used in a single operation.
-	// For single-use tokens, returns business.ErrTokenAlreadyUsed if already consumed.
-	ConsumeToken(ctx context.Context, tokenStr, stewardID string) error
+	// RotateToken atomically revokes all prior tokens for tenant+group and returns a new token.
+	// controller_url is inherited from an existing active token.
+	// Returns an error if no active tokens exist for the given tenant+group.
+	RotateToken(ctx context.Context, tenantID, group string) (*Token, error)
 }
 
 // memoryStore is an in-memory implementation of Store (for use within this package only).
@@ -104,30 +104,53 @@ func (s *memoryStore) DeleteToken(ctx context.Context, tokenStr string) error {
 	return nil
 }
 
-// ConsumeToken atomically validates and marks a token as used under a single write lock,
-// preventing TOCTOU races when multiple callers attempt to consume the same single-use token.
-func (s *memoryStore) ConsumeToken(ctx context.Context, tokenStr, stewardID string) error {
+// RotateToken atomically revokes all prior tokens for tenant+group and creates a new token
+// under a single write lock, ensuring no overlap window between old and new tokens.
+func (s *memoryStore) RotateToken(ctx context.Context, tenantID, group string) (*Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	token, exists := s.tokens[tokenStr]
-	if !exists {
-		return fmt.Errorf("token not found")
-	}
-
-	if token.Revoked {
-		return fmt.Errorf("token is revoked")
-	}
-
-	if !token.IsValid() {
-		// Distinguish already-used single-use tokens from expired tokens.
-		if token.SingleUse && token.UsedAt != nil {
-			return business.ErrTokenAlreadyUsed
+	// Collect active tokens to identify controller_url and tokens to revoke.
+	var controllerURL string
+	var tokensToRevoke []string
+	found := false
+	for _, t := range s.tokens {
+		if t.TenantID == tenantID && t.Group == group && !t.Revoked {
+			tokensToRevoke = append(tokensToRevoke, t.Token)
+			if !found {
+				controllerURL = t.ControllerURL
+				found = true
+			}
 		}
-		return fmt.Errorf("token is not valid")
+	}
+	if !found {
+		return nil, fmt.Errorf("no active tokens found for tenant %q group %q", tenantID, group)
 	}
 
-	token.MarkUsed(stewardID)
-	s.tokens[tokenStr] = token
-	return nil
+	// Generate new token string.
+	tokenStr, err := GenerateToken()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate token: %w", err)
+	}
+
+	now := time.Now()
+
+	// Revoke all prior tokens atomically under the same lock.
+	for _, tok := range tokensToRevoke {
+		t := s.tokens[tok]
+		t.Revoked = true
+		t.RevokedAt = &now
+		s.tokens[tok] = t
+	}
+
+	newToken := &Token{
+		Token:         tokenStr,
+		TenantID:      tenantID,
+		ControllerURL: controllerURL,
+		Group:         group,
+		CreatedAt:     now,
+	}
+	s.tokens[tokenStr] = newToken
+
+	return newToken, nil
 }

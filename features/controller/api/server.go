@@ -383,6 +383,7 @@ func (s *Server) setupRouter() {
 	regTokens.Handle("/{token}", s.requirePermission("registration", "read-token")(http.HandlerFunc(s.handleGetRegistrationToken))).Methods("GET")
 	regTokens.Handle("/{token}", s.requirePermission("registration", "delete-token")(http.HandlerFunc(s.handleDeleteRegistrationToken))).Methods("DELETE")
 	regTokens.Handle("/{token}/revoke", s.requirePermission("registration", "revoke-token")(http.HandlerFunc(s.handleRevokeRegistrationToken))).Methods("POST")
+	regTokens.Handle("/{tenant_id}/rotate", s.requirePermission("registration", "rotate-token")(http.HandlerFunc(s.handleRotateRegistrationToken))).Methods("POST")
 
 	// Registration approval endpoints (Issue #1568)
 	api.Handle("/registration/pending", s.requirePermission("registration", "list-pending")(http.HandlerFunc(s.handleListPendingRegistrations))).Methods("GET")

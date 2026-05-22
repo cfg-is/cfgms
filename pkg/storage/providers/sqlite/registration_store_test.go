@@ -36,7 +36,6 @@ func TestRegistrationStore_SaveAndGet(t *testing.T) {
 		TenantID:      "tenant-1",
 		ControllerURL: "https://controller.example.com",
 		Group:         "servers",
-		SingleUse:     true,
 	}
 	require.NoError(t, store.SaveToken(ctx, token))
 
@@ -46,9 +45,7 @@ func TestRegistrationStore_SaveAndGet(t *testing.T) {
 	assert.Equal(t, token.TenantID, got.TenantID)
 	assert.Equal(t, token.ControllerURL, got.ControllerURL)
 	assert.Equal(t, token.Group, got.Group)
-	assert.True(t, got.SingleUse)
 	assert.False(t, got.Revoked)
-	assert.Nil(t, got.UsedAt)
 	assert.Nil(t, got.ExpiresAt)
 }
 
@@ -67,24 +64,18 @@ func TestRegistrationStore_Update(t *testing.T) {
 		Token:         "tok-upd",
 		TenantID:      "tenant-1",
 		ControllerURL: "https://c.example.com",
-		SingleUse:     true,
 	}
 	require.NoError(t, store.SaveToken(ctx, token))
 
-	// Mark as used
-	token.MarkUsed("steward-xyz")
+	token.Revoke()
 	require.NoError(t, store.UpdateToken(ctx, token))
 
 	got, err := store.GetToken(ctx, "tok-upd")
 	require.NoError(t, err)
-	assert.NotNil(t, got.UsedAt)
-	assert.Equal(t, "steward-xyz", got.UsedBy)
+	assert.True(t, got.Revoked)
+	assert.NotNil(t, got.RevokedAt)
 }
 
-// TestRegistrationStore_SaveToken_Upsert verifies that SaveToken acts as an
-// UPSERT — saving the same token twice updates mutable state (e.g., used_at).
-// This matches the database provider behavior (Story #299) and is the basis
-// for single-use token enforcement in the registration handler.
 func TestRegistrationStore_SaveToken_Upsert(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
@@ -93,20 +84,18 @@ func TestRegistrationStore_SaveToken_Upsert(t *testing.T) {
 		Token:         "tok-upsert",
 		TenantID:      "tenant-1",
 		ControllerURL: "https://c.example.com",
-		SingleUse:     true,
 	}
 	require.NoError(t, store.SaveToken(ctx, tok))
 
 	// Second SaveToken with the same primary key must not fail and must
-	// persist the updated state (used_at, used_by).
-	tok.MarkUsed("steward-xyz")
+	// persist the updated state (revoked).
+	tok.Revoke()
 	require.NoError(t, store.SaveToken(ctx, tok))
 
 	got, err := store.GetToken(ctx, "tok-upsert")
 	require.NoError(t, err)
-	assert.NotNil(t, got.UsedAt, "UsedAt must be persisted after second SaveToken")
-	assert.Equal(t, "steward-xyz", got.UsedBy)
-	assert.False(t, got.IsValid(), "single-use token must be invalid once used")
+	assert.True(t, got.Revoked, "revoked state must be persisted after second SaveToken")
+	assert.False(t, got.IsValid(), "revoked token must be invalid")
 }
 
 func TestRegistrationStore_Delete(t *testing.T) {
@@ -206,144 +195,110 @@ func TestRegistrationStore_List(t *testing.T) {
 	assert.Len(t, byGroup, 2)
 }
 
-func TestRegistrationStore_ListUsedFilter(t *testing.T) {
+func TestRegistrationStore_RotateToken_Basic(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	tok := &business.RegistrationTokenData{
-		Token:         "tok-used",
-		TenantID:      "t",
-		ControllerURL: "https://c.example.com",
-		SingleUse:     true,
+	seed := &business.RegistrationTokenData{
+		Token:         "rotate-seed",
+		TenantID:      "tenant-rotate",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "prod",
 	}
-	require.NoError(t, store.SaveToken(ctx, tok))
-	tok.MarkUsed("s-1")
-	require.NoError(t, store.UpdateToken(ctx, tok))
+	require.NoError(t, store.SaveToken(ctx, seed))
 
-	require.NoError(t, store.SaveToken(ctx, &business.RegistrationTokenData{
-		Token:         "tok-unused",
-		TenantID:      "t",
-		ControllerURL: "https://c.example.com",
-	}))
-
-	trueVal := true
-	falseVal := false
-
-	used, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{Used: &trueVal})
+	newTok, err := store.RotateToken(ctx, "tenant-rotate", "prod")
 	require.NoError(t, err)
-	assert.Len(t, used, 1)
-	assert.Equal(t, "tok-used", used[0].Token)
+	assert.NotEmpty(t, newTok.Token)
+	assert.NotEqual(t, seed.Token, newTok.Token)
+	assert.Equal(t, "tenant-rotate", newTok.TenantID)
+	assert.Equal(t, "grpc://controller:7443", newTok.ControllerURL)
+	assert.Equal(t, "prod", newTok.Group)
 
-	unused, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{Used: &falseVal})
+	// Old token must be revoked.
+	old, err := store.GetToken(ctx, seed.Token)
 	require.NoError(t, err)
-	assert.Len(t, unused, 1)
-	assert.Equal(t, "tok-unused", unused[0].Token)
+	assert.True(t, old.Revoked)
+
+	// New token must be valid.
+	got, err := store.GetToken(ctx, newTok.Token)
+	require.NoError(t, err)
+	assert.True(t, got.IsValid())
 }
 
-func TestRegistrationStore_ConsumeToken_SingleUse(t *testing.T) {
+func TestRegistrationStore_RotateToken_NoActiveTokens(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &business.RegistrationTokenData{
-		Token:         "tok-consume-single",
-		TenantID:      "t",
-		ControllerURL: "https://c.example.com",
-		SingleUse:     true,
-	}
-	require.NoError(t, store.SaveToken(ctx, token))
-
-	// First consume must succeed.
-	require.NoError(t, store.ConsumeToken(ctx, "tok-consume-single", "steward-1"))
-
-	// Second consume must return ErrTokenAlreadyUsed.
-	err := store.ConsumeToken(ctx, "tok-consume-single", "steward-2")
-	require.ErrorIs(t, err, business.ErrTokenAlreadyUsed)
-}
-
-func TestRegistrationStore_ConsumeToken_MultiUse(t *testing.T) {
-	store := newRegistrationStore(t)
-	ctx := context.Background()
-
-	token := &business.RegistrationTokenData{
-		Token:         "tok-consume-multi",
-		TenantID:      "t",
-		ControllerURL: "https://c.example.com",
-		SingleUse:     false,
-	}
-	require.NoError(t, store.SaveToken(ctx, token))
-
-	require.NoError(t, store.ConsumeToken(ctx, "tok-consume-multi", "steward-1"))
-	require.NoError(t, store.ConsumeToken(ctx, "tok-consume-multi", "steward-2"))
-}
-
-func TestRegistrationStore_ConsumeToken_NotFound(t *testing.T) {
-	store := newRegistrationStore(t)
-	ctx := context.Background()
-
-	err := store.ConsumeToken(ctx, "nonexistent-tok", "steward-1")
+	_, err := store.RotateToken(ctx, "tenant-none", "group-none")
 	require.Error(t, err)
-	require.NotErrorIs(t, err, business.ErrTokenAlreadyUsed)
+	assert.Contains(t, err.Error(), "no active tokens found")
 }
 
-func TestRegistrationStore_ConsumeToken_Revoked(t *testing.T) {
+func TestRegistrationStore_RotateToken_RevokedTokenNotCounted(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &business.RegistrationTokenData{
-		Token:         "tok-consume-revoked",
-		TenantID:      "t",
-		ControllerURL: "https://c.example.com",
-		SingleUse:     true,
+	revoked := &business.RegistrationTokenData{
+		Token:         "already-revoked",
+		TenantID:      "tenant-rev",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "group-a",
+		Revoked:       true,
 	}
-	require.NoError(t, store.SaveToken(ctx, token))
-	token.Revoke()
-	require.NoError(t, store.UpdateToken(ctx, token))
+	require.NoError(t, store.SaveToken(ctx, revoked))
 
-	err := store.ConsumeToken(ctx, "tok-consume-revoked", "steward-1")
+	_, err := store.RotateToken(ctx, "tenant-rev", "group-a")
 	require.Error(t, err)
-	require.NotErrorIs(t, err, business.ErrTokenAlreadyUsed)
+	assert.Contains(t, err.Error(), "no active tokens found")
 }
 
-func TestRegistrationStore_ConsumeToken_Race(t *testing.T) {
+func TestRegistrationStore_RotateToken_Race(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()
 
-	token := &business.RegistrationTokenData{
-		Token:         "tok-race",
-		TenantID:      "t",
-		ControllerURL: "https://c.example.com",
-		SingleUse:     true,
+	seed := &business.RegistrationTokenData{
+		Token:         "race-seed",
+		TenantID:      "tenant-race",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "race-group",
 	}
-	require.NoError(t, store.SaveToken(ctx, token))
+	require.NoError(t, store.SaveToken(ctx, seed))
 
-	const goroutines = 50
+	const goroutines = 20
 	var (
 		successCount atomic.Int32
-		alreadyUsed  atomic.Int32
 		wg           sync.WaitGroup
 		start        = make(chan struct{})
 	)
 
 	wg.Add(goroutines)
 	for i := 0; i < goroutines; i++ {
-		go func(id int) {
+		go func() {
 			defer wg.Done()
 			<-start
-			err := store.ConsumeToken(ctx, "tok-race", "steward-"+string(rune('A'+id)))
-			switch err {
-			case nil:
+			_, err := store.RotateToken(ctx, "tenant-race", "race-group")
+			if err == nil {
 				successCount.Add(1)
-			case business.ErrTokenAlreadyUsed:
-				alreadyUsed.Add(1)
-			default:
-				t.Errorf("goroutine %d: unexpected error: %v", id, err)
 			}
-		}(i)
+		}()
 	}
 
 	close(start)
 	wg.Wait()
 
-	assert.Equal(t, int32(1), successCount.Load(), "exactly one goroutine must succeed")
-	assert.Equal(t, int32(goroutines-1), alreadyUsed.Load(), "all others must get ErrTokenAlreadyUsed")
+	// All rotations must succeed (each one finds the previous rotation's token as active).
+	assert.Equal(t, int32(goroutines), successCount.Load(), "all concurrent rotations must succeed")
+
+	// Exactly one valid token must remain.
+	tokens, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{TenantID: "tenant-race"})
+	require.NoError(t, err)
+
+	validCount := 0
+	for _, tok := range tokens {
+		if !tok.Revoked {
+			validCount++
+		}
+	}
+	assert.Equal(t, 1, validCount, "exactly one valid token must exist after all rotations")
 }

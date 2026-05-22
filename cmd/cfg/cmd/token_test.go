@@ -59,7 +59,6 @@ func newTokenServer(t *testing.T) *httptest.Server {
 		Group:         "production",
 		CreatedAt:     "2026-05-01T00:00:00Z",
 		ExpiresAt:     &expiresAt,
-		SingleUse:     false,
 		Revoked:       false,
 	}
 
@@ -75,6 +74,9 @@ func newTokenServer(t *testing.T) *httptest.Server {
 				Total:  1,
 			}
 			_ = json.NewEncoder(w).Encode(resp)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/rotate"):
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(token)
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v1/registration/tokens/"):
 			_ = json.NewEncoder(w).Encode(token)
 		default:
@@ -95,7 +97,6 @@ func TestRunTokenCreate_JSONOutput(t *testing.T) {
 	origControllerURL := tokenControllerURL
 	origGroup := tokenGroup
 	origExpiresIn := tokenExpiresIn
-	origSingleUse := tokenSingleUse
 	origJSON := tokenJSONOutput
 	t.Cleanup(func() {
 		tokenAPIURL = origAPIURL
@@ -105,7 +106,6 @@ func TestRunTokenCreate_JSONOutput(t *testing.T) {
 		tokenControllerURL = origControllerURL
 		tokenGroup = origGroup
 		tokenExpiresIn = origExpiresIn
-		tokenSingleUse = origSingleUse
 		tokenJSONOutput = origJSON
 	})
 
@@ -115,7 +115,6 @@ func TestRunTokenCreate_JSONOutput(t *testing.T) {
 	tokenControllerURL = "controller.example.com:4433"
 	tokenGroup = ""
 	tokenExpiresIn = ""
-	tokenSingleUse = false
 	tokenJSONOutput = true
 
 	output := captureStdout(t, func() {
@@ -147,7 +146,6 @@ func TestRunTokenCreate_TextOutput(t *testing.T) {
 	origControllerURL := tokenControllerURL
 	origGroup := tokenGroup
 	origExpiresIn := tokenExpiresIn
-	origSingleUse := tokenSingleUse
 	origJSON := tokenJSONOutput
 	t.Cleanup(func() {
 		tokenAPIURL = origAPIURL
@@ -157,7 +155,6 @@ func TestRunTokenCreate_TextOutput(t *testing.T) {
 		tokenControllerURL = origControllerURL
 		tokenGroup = origGroup
 		tokenExpiresIn = origExpiresIn
-		tokenSingleUse = origSingleUse
 		tokenJSONOutput = origJSON
 	})
 
@@ -167,7 +164,6 @@ func TestRunTokenCreate_TextOutput(t *testing.T) {
 	tokenControllerURL = "controller.example.com:4433"
 	tokenGroup = ""
 	tokenExpiresIn = ""
-	tokenSingleUse = false
 	tokenJSONOutput = false
 
 	output := captureStdout(t, func() {
@@ -214,6 +210,116 @@ func TestRunTokenCreate_APIError(t *testing.T) {
 	err := runTokenCreate(tokenCreateCmd, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to create token")
+}
+
+func TestRunTokenRotate_JSONOutput(t *testing.T) {
+	server := newTokenServer(t)
+	defer server.Close()
+
+	origAPIURL := tokenAPIURL
+	origTLSInsecure := tokenTLSInsecure
+	origTenantID := tokenTenantID
+	origGroup := tokenGroup
+	origJSON := tokenJSONOutput
+	t.Cleanup(func() {
+		tokenAPIURL = origAPIURL
+		tokenTLSInsecure = origTLSInsecure
+		tokenTenantID = origTenantID
+		tokenGroup = origGroup
+		tokenJSONOutput = origJSON
+	})
+
+	tokenAPIURL = server.URL
+	tokenTLSInsecure = true
+	tokenTenantID = "test-tenant"
+	tokenGroup = "production"
+	tokenJSONOutput = true
+
+	output := captureStdout(t, func() {
+		err := runTokenRotate(tokenRotateCmd, nil)
+		require.NoError(t, err)
+	})
+
+	// Output must be valid JSON parseable as APITokenResponse
+	var parsed APITokenResponse
+	require.NoError(t, json.Unmarshal([]byte(output), &parsed), "output must be valid JSON")
+
+	assert.Equal(t, "abc123testtoken", parsed.Token)
+	assert.Equal(t, "test-tenant", parsed.TenantID)
+	assert.Equal(t, "controller.example.com:4433", parsed.ControllerURL)
+
+	// No human-readable text on stdout
+	assert.NotContains(t, output, "Token rotated successfully")
+	assert.NotContains(t, output, "New Registration Token:")
+}
+
+func TestRunTokenRotate_TextOutput(t *testing.T) {
+	server := newTokenServer(t)
+	defer server.Close()
+
+	origAPIURL := tokenAPIURL
+	origTLSInsecure := tokenTLSInsecure
+	origTenantID := tokenTenantID
+	origGroup := tokenGroup
+	origJSON := tokenJSONOutput
+	t.Cleanup(func() {
+		tokenAPIURL = origAPIURL
+		tokenTLSInsecure = origTLSInsecure
+		tokenTenantID = origTenantID
+		tokenGroup = origGroup
+		tokenJSONOutput = origJSON
+	})
+
+	tokenAPIURL = server.URL
+	tokenTLSInsecure = true
+	tokenTenantID = "test-tenant"
+	tokenGroup = ""
+	tokenJSONOutput = false
+
+	output := captureStdout(t, func() {
+		err := runTokenRotate(tokenRotateCmd, nil)
+		require.NoError(t, err)
+	})
+
+	// Human-readable output must be present
+	assert.Contains(t, output, "Token rotated successfully")
+	assert.Contains(t, output, "New Registration Token:")
+	assert.Contains(t, output, "abc123testtoken")
+
+	// Must not be bare JSON
+	assert.False(t, json.Valid([]byte(strings.TrimSpace(output))), "text output must not be valid JSON")
+}
+
+func TestRunTokenRotate_NoActiveTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"no active tokens found for the specified tenant/group"}`))
+	}))
+	defer server.Close()
+
+	origAPIURL := tokenAPIURL
+	origTLSInsecure := tokenTLSInsecure
+	origTenantID := tokenTenantID
+	origGroup := tokenGroup
+	origJSON := tokenJSONOutput
+	t.Cleanup(func() {
+		tokenAPIURL = origAPIURL
+		tokenTLSInsecure = origTLSInsecure
+		tokenTenantID = origTenantID
+		tokenGroup = origGroup
+		tokenJSONOutput = origJSON
+	})
+
+	tokenAPIURL = server.URL
+	tokenTLSInsecure = true
+	tokenTenantID = "test-tenant"
+	tokenGroup = ""
+	tokenJSONOutput = false
+
+	err := runTokenRotate(tokenRotateCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to rotate token")
 }
 
 func TestRunTokenList_JSONOutput(t *testing.T) {

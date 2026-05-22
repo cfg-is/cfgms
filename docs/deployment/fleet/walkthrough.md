@@ -175,24 +175,21 @@ steward knows where to connect after registration.
 > ongoing communication. This is distinct from the REST API (port `9080/TCP`) used
 > by the `cfg` operator CLI. Do not mix them up.
 
-Create one token per group (or per steward if you prefer single-use tokens):
+Create a token for the group. Tokens are perennial — they survive multiple registrations until explicitly rotated or revoked:
 
 ```bash
-# Token for steward-1 (single-use, 7-day window)
+# Token for the production group (7-day expiry window)
 cfg token create \
   --tenant-id=default \
   --controller-url=<CONTROLLER_IP>:4433 \
   --group=production \
-  --expires=7d \
-  --single-use
+  --expires=7d
+```
 
-# Token for steward-2 (single-use, 7-day window)
-cfg token create \
-  --tenant-id=default \
-  --controller-url=<CONTROLLER_IP>:4433 \
-  --group=production \
-  --expires=7d \
-  --single-use
+To invalidate the current token and issue a fresh one (e.g., after a deployment completes or a credential rotation policy requires it):
+
+```bash
+cfg token rotate --tenant-id=default --group=production
 ```
 
 Replace `<CONTROLLER_IP>` with the IP or hostname steward VMs use to reach the controller.
@@ -207,7 +204,6 @@ Token Details:
   Controller URL: 192.0.2.10:4433
   Group:          production
   Expires:        2026-05-26T00:00:00Z
-  Single Use:     true
 
 Deployment Examples:
 
@@ -218,7 +214,7 @@ Direct execution:
   cfgms-steward --regtoken=abcdefghijklmnopqrstuvwxyz123456
 ```
 
-Save both token strings — you'll use them in Phase 4.
+Save the token string — you'll use it in Phase 4.
 
 List all active tokens at any time:
 

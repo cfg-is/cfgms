@@ -584,7 +584,9 @@ func (s DatabaseSchemas) CreateRBACRoleAssignmentsTable(ctx context.Context, db 
 	return nil
 }
 
-// CreateRegistrationTokensTable creates the registration_tokens table for token persistence
+// CreateRegistrationTokensTable creates the registration_tokens table for token persistence.
+// Migration note: single_use, used_at, and used_by columns were removed in Issue #1690
+// (perennial token model with immediate-invalidation rotation).
 func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *sql.DB) error {
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_registration_tokens (
@@ -594,9 +596,6 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 			group_name VARCHAR(255) DEFAULT '',
 			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 			expires_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
-			single_use BOOLEAN NOT NULL DEFAULT FALSE,
-			used_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
-			used_by VARCHAR(255) DEFAULT '',
 			revoked BOOLEAN NOT NULL DEFAULT FALSE,
 			revoked_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
 		);
@@ -613,9 +612,7 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_created_at ON cfgms_registration_tokens(created_at);",
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_expires_at ON cfgms_registration_tokens(expires_at);",
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_revoked ON cfgms_registration_tokens(revoked);",
-		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_single_use ON cfgms_registration_tokens(single_use);",
-		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_used_at ON cfgms_registration_tokens(used_at);",
-		// Composite index for filtering unused, non-revoked tokens by tenant
+		// Composite index for filtering non-revoked tokens by tenant
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_tenant_active ON cfgms_registration_tokens(tenant_id) WHERE revoked = FALSE;",
 	}
 

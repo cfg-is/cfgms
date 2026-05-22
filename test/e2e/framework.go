@@ -480,8 +480,7 @@ func (f *E2ETestFramework) CreateRegistrationToken(tenantID string) (string, err
 		TenantID:      tenantID,
 		ControllerURL: "grpc://localhost:4433",
 		Group:         "e2e-test",
-		ExpiresIn:     "",    // Never expires for testing
-		SingleUse:     false, // Can be reused for testing
+		ExpiresIn:     "", // Never expires for testing
 	}
 
 	token, err := registration.CreateToken(tokenReq)

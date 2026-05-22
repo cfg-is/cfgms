@@ -137,7 +137,7 @@ func openDB(path string) (*sql.DB, error) {
 		"PRAGMA journal_mode = WAL",
 		"PRAGMA foreign_keys = ON",
 		// Retry for up to 5 s on SQLITE_BUSY instead of failing immediately.
-		// Required for correct concurrent-write semantics (e.g. ConsumeToken race).
+		// Required for correct concurrent-write semantics (e.g. RotateToken race).
 		"PRAGMA busy_timeout = 5000",
 	} {
 		if _, err := db.Exec(pragma); err != nil {

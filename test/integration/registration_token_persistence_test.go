@@ -65,7 +65,6 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 			ControllerURL: "tcp://localhost:1883",
 			Group:         "test-group",
 			CreatedAt:     now,
-			SingleUse:     false,
 			Revoked:       false,
 		},
 		{
@@ -75,7 +74,6 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 			Group:         "test-group",
 			CreatedAt:     now,
 			ExpiresAt:     &futureExpiry,
-			SingleUse:     true,
 			Revoked:       false,
 		},
 		{
@@ -84,7 +82,6 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 			ControllerURL: "tcp://localhost:1883",
 			Group:         "other-group",
 			CreatedAt:     now,
-			SingleUse:     false,
 			Revoked:       false,
 		},
 	}
@@ -95,13 +92,13 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 		t.Logf("Saved token: %s (tenant: %s)", token.Token, token.TenantID)
 	}
 
-	// Mark one token as used
+	// Revoke token 2 to test revocation persistence.
 	token2, err := adapter1.GetToken(ctx, "cfgms_reg_persist_test_2")
 	require.NoError(t, err)
-	token2.MarkUsed("steward-001")
+	token2.Revoke()
 	err = adapter1.UpdateToken(ctx, token2)
 	require.NoError(t, err)
-	t.Log("Marked token 2 as used by steward-001")
+	t.Log("Revoked token 2")
 
 	// Verify tokens exist in first store
 	allTokens, err := adapter1.ListTokens(ctx, "tenant-persistence-1")
@@ -135,13 +132,13 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 	assert.True(t, retrieved1.IsValid(), "Token 1 should be valid")
 	t.Log("Token 1 persisted correctly and is valid")
 
-	// Verify token 2 exists with used status preserved
+	// Verify token 2 exists with revoked status preserved.
 	retrieved2, err := adapter2.GetToken(ctx, "cfgms_reg_persist_test_2")
 	require.NoError(t, err, "Token 2 should persist after restart")
-	assert.NotNil(t, retrieved2.UsedAt, "Token 2 should retain used status")
-	assert.Equal(t, "steward-001", retrieved2.UsedBy, "Token 2 should retain used_by")
-	assert.False(t, retrieved2.IsValid(), "Token 2 should be invalid (single-use and used)")
-	t.Log("Token 2 persisted with used status preserved")
+	assert.True(t, retrieved2.Revoked, "Token 2 should retain revoked status")
+	assert.NotNil(t, retrieved2.RevokedAt, "Token 2 should retain revoked_at")
+	assert.False(t, retrieved2.IsValid(), "Token 2 should be invalid (revoked)")
+	t.Log("Token 2 persisted with revoked status preserved")
 
 	// Verify token 3 exists
 	retrieved3, err := adapter2.GetToken(ctx, "cfgms_reg_persist_test_3")
@@ -297,12 +294,11 @@ func TestRegistrationTokenPersistence_DeletePersists(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
-// TestConcurrentRegistration_SingleUseToken_ExactlyOneSucceeds validates that two
-// concurrent HTTP POST /api/v1/register requests with the same single-use token
-// produce exactly one 200 OK and one 409 Conflict against a real Server backed
-// by SQLite storage. This proves the TOCTOU race fixed in Issue #774 holds under
-// real concurrent HTTP load.
-func TestConcurrentRegistration_SingleUseToken_ExactlyOneSucceeds(t *testing.T) {
+// TestConcurrentRegistration_PerennialToken_AllRequestsSucceed validates that
+// multiple concurrent HTTP POST /api/v1/register requests with the same perennial
+// token all succeed (200 OK). Perennial tokens survive multiple registrations and
+// are never consumed on use (Issue #1690).
+func TestConcurrentRegistration_PerennialToken_AllRequestsSucceed(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "reg-concurrent-*")
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tempDir) }()
@@ -373,12 +369,11 @@ func TestConcurrentRegistration_SingleUseToken_ExactlyOneSucceeds(t *testing.T) 
 	)
 	require.NoError(t, err)
 
-	// Seed a single-use token
+	// Seed a perennial token (no expiry, not revoked).
 	tok := &registration.Token{
 		Token:         "cfgms_reg_concurrent_integ_test",
 		TenantID:      "integ-tenant",
 		ControllerURL: "grpc://controller:7443",
-		SingleUse:     true,
 	}
 	require.NoError(t, tokenStore.SaveToken(ctx, tok))
 
@@ -386,10 +381,11 @@ func TestConcurrentRegistration_SingleUseToken_ExactlyOneSucceeds(t *testing.T) 
 	ts := httptest.NewServer(server.GetRouter())
 	defer ts.Close()
 
+	const concurrency = 3
 	type result struct{ code int }
-	results := make([]result, 2)
+	results := make([]result, concurrency)
 	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
+	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
@@ -408,19 +404,8 @@ func TestConcurrentRegistration_SingleUseToken_ExactlyOneSucceeds(t *testing.T) 
 	}
 	wg.Wait()
 
-	codes := []int{results[0].code, results[1].code}
-	assert.Contains(t, codes, http.StatusOK, "exactly one goroutine must succeed with 200")
-	assert.Contains(t, codes, http.StatusConflict, "exactly one goroutine must get 409")
-
-	okCount, conflictCount := 0, 0
-	for _, r := range results {
-		switch r.code {
-		case http.StatusOK:
-			okCount++
-		case http.StatusConflict:
-			conflictCount++
-		}
+	// Perennial tokens are never consumed: all concurrent registrations must succeed.
+	for i, r := range results {
+		assert.Equal(t, http.StatusOK, r.code, "request %d must succeed with 200 (perennial token)", i)
 	}
-	assert.Equal(t, 1, okCount, "exactly one 200")
-	assert.Equal(t, 1, conflictCount, "exactly one 409")
 }

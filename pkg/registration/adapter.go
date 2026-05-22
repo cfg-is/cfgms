@@ -63,9 +63,13 @@ func (a *StorageAdapter) DeleteToken(ctx context.Context, tokenStr string) error
 	return a.store.DeleteToken(ctx, tokenStr)
 }
 
-// ConsumeToken atomically validates and marks a token as used, delegating to the storage provider.
-func (a *StorageAdapter) ConsumeToken(ctx context.Context, tokenStr, stewardID string) error {
-	return a.store.ConsumeToken(ctx, tokenStr, stewardID)
+// RotateToken atomically revokes all prior tokens for tenant+group and returns the new token.
+func (a *StorageAdapter) RotateToken(ctx context.Context, tenantID, group string) (*Token, error) {
+	data, err := a.store.RotateToken(ctx, tenantID, group)
+	if err != nil {
+		return nil, err
+	}
+	return dataToToken(data), nil
 }
 
 // tokenToData converts a Token to RegistrationTokenData
@@ -77,9 +81,6 @@ func tokenToData(token *Token) *business.RegistrationTokenData {
 		Group:         token.Group,
 		CreatedAt:     token.CreatedAt,
 		ExpiresAt:     token.ExpiresAt,
-		SingleUse:     token.SingleUse,
-		UsedAt:        token.UsedAt,
-		UsedBy:        token.UsedBy,
 		Revoked:       token.Revoked,
 		RevokedAt:     token.RevokedAt,
 	}
@@ -94,9 +95,6 @@ func dataToToken(data *business.RegistrationTokenData) *Token {
 		Group:         data.Group,
 		CreatedAt:     data.CreatedAt,
 		ExpiresAt:     data.ExpiresAt,
-		SingleUse:     data.SingleUse,
-		UsedAt:        data.UsedAt,
-		UsedBy:        data.UsedBy,
 		Revoked:       data.Revoked,
 		RevokedAt:     data.RevokedAt,
 	}

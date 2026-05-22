@@ -4,8 +4,11 @@ package database
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base32"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,13 +27,11 @@ type DatabaseRegistrationTokenStore struct {
 
 // NewDatabaseRegistrationTokenStore creates a new PostgreSQL-based registration token store
 func NewDatabaseRegistrationTokenStore(dsn string, config map[string]interface{}) (*DatabaseRegistrationTokenStore, error) {
-	// Open database connection with connection pooling
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database connection: %w", err)
 	}
 
-	// Configure connection pool
 	maxOpenConns := getIntFromConfig(config, "max_open_connections", 25)
 	maxIdleConns := getIntFromConfig(config, "max_idle_connections", 5)
 	connMaxLifetime := time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute
@@ -39,7 +40,6 @@ func NewDatabaseRegistrationTokenStore(dsn string, config map[string]interface{}
 	db.SetMaxIdleConns(maxIdleConns)
 	db.SetConnMaxLifetime(connMaxLifetime)
 
-	// Test connection
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
@@ -51,7 +51,6 @@ func NewDatabaseRegistrationTokenStore(dsn string, config map[string]interface{}
 		schemas: NewDatabaseSchemas(),
 	}
 
-	// Initialize database schema
 	if err := store.initializeSchema(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
@@ -64,24 +63,18 @@ func NewDatabaseRegistrationTokenStore(dsn string, config map[string]interface{}
 func (s *DatabaseRegistrationTokenStore) initializeSchema() error {
 	ctx := context.Background()
 
-	// Use PostgreSQL advisory lock to prevent concurrent schema initialization
-	// Lock ID: 13579248 (different from other schemas)
 	const schemaLockID = 13579248
 
-	// Acquire advisory lock - will wait if another instance is initializing
 	if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_lock($1)", schemaLockID); err != nil {
 		return fmt.Errorf("failed to acquire registration token schema initialization lock: %w", err)
 	}
 
-	// Ensure we release the lock when done
 	defer func() {
 		if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", schemaLockID); err != nil {
-			// Log but don't fail - lock will be released when connection closes
 			_ = err
 		}
 	}()
 
-	// Create registration token tables
 	if err := s.schemas.CreateRegistrationTokensTable(ctx, s.db); err != nil {
 		return fmt.Errorf("failed to create registration token tables: %w", err)
 	}
@@ -99,8 +92,7 @@ func (s *DatabaseRegistrationTokenStore) Close() error {
 	return s.db.Close()
 }
 
-// SaveToken implements RegistrationTokenStore.SaveToken
-// Uses UPSERT to handle both new tokens and updates to existing tokens
+// SaveToken implements RegistrationTokenStore.SaveToken using UPSERT semantics.
 func (s *DatabaseRegistrationTokenStore) SaveToken(ctx context.Context, token *business.RegistrationTokenData) error {
 	if token == nil {
 		return fmt.Errorf("token cannot be nil")
@@ -112,41 +104,29 @@ func (s *DatabaseRegistrationTokenStore) SaveToken(ctx context.Context, token *b
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	// Use UPSERT to handle both INSERT and UPDATE cases
-	// This ensures single-use token enforcement works correctly
-	query := `
-		INSERT INTO cfgms_registration_tokens (token, tenant_id, controller_url, group_name, created_at, expires_at, single_use, used_at, used_by, revoked, revoked_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO cfgms_registration_tokens
+			(token, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (token) DO UPDATE SET
 			tenant_id = EXCLUDED.tenant_id,
 			controller_url = EXCLUDED.controller_url,
 			group_name = EXCLUDED.group_name,
 			expires_at = EXCLUDED.expires_at,
-			single_use = EXCLUDED.single_use,
-			used_at = EXCLUDED.used_at,
-			used_by = EXCLUDED.used_by,
 			revoked = EXCLUDED.revoked,
-			revoked_at = EXCLUDED.revoked_at
-	`
-
-	_, err := s.db.ExecContext(ctx, query,
+			revoked_at = EXCLUDED.revoked_at`,
 		token.Token,
 		token.TenantID,
 		token.ControllerURL,
 		token.Group,
 		token.CreatedAt,
 		nullTimeOrNil(token.ExpiresAt),
-		token.SingleUse,
-		nullTimeOrNil(token.UsedAt),
-		token.UsedBy,
 		token.Revoked,
 		nullTimeOrNil(token.RevokedAt),
 	)
-
 	if err != nil {
 		return fmt.Errorf("failed to save token: %w", err)
 	}
-
 	return nil
 }
 
@@ -159,31 +139,23 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
-	query := `
-		SELECT token, tenant_id, controller_url, group_name, created_at, expires_at, single_use, used_at, used_by, revoked, revoked_at
-		FROM cfgms_registration_tokens
-		WHERE token = $1
-	`
-
 	var token business.RegistrationTokenData
-	var expiresAt, usedAt, revokedAt sql.NullTime
+	var expiresAt, revokedAt sql.NullTime
 	var group sql.NullString
-	var usedBy sql.NullString
 
-	err := s.db.QueryRowContext(ctx, query, tokenStr).Scan(
+	err := s.db.QueryRowContext(ctx, `
+		SELECT token, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
+		FROM cfgms_registration_tokens
+		WHERE token = $1`, tokenStr).Scan(
 		&token.Token,
 		&token.TenantID,
 		&token.ControllerURL,
 		&group,
 		&token.CreatedAt,
 		&expiresAt,
-		&token.SingleUse,
-		&usedAt,
-		&usedBy,
 		&token.Revoked,
 		&revokedAt,
 	)
-
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("token not found")
@@ -191,15 +163,9 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 		return nil, fmt.Errorf("failed to get token: %w", err)
 	}
 
-	// Convert nullable fields
 	token.Group = group.String
-	token.UsedBy = usedBy.String
-
 	if expiresAt.Valid {
 		token.ExpiresAt = &expiresAt.Time
-	}
-	if usedAt.Valid {
-		token.UsedAt = &usedAt.Time
 	}
 	if revokedAt.Valid {
 		token.RevokedAt = &revokedAt.Time
@@ -220,25 +186,19 @@ func (s *DatabaseRegistrationTokenStore) UpdateToken(ctx context.Context, token 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	query := `
+	result, err := s.db.ExecContext(ctx, `
 		UPDATE cfgms_registration_tokens
-		SET tenant_id = $2, controller_url = $3, group_name = $4, expires_at = $5, single_use = $6, used_at = $7, used_by = $8, revoked = $9, revoked_at = $10
-		WHERE token = $1
-	`
-
-	result, err := s.db.ExecContext(ctx, query,
+		SET tenant_id = $2, controller_url = $3, group_name = $4,
+		    expires_at = $5, revoked = $6, revoked_at = $7
+		WHERE token = $1`,
 		token.Token,
 		token.TenantID,
 		token.ControllerURL,
 		token.Group,
 		nullTimeOrNil(token.ExpiresAt),
-		token.SingleUse,
-		nullTimeOrNil(token.UsedAt),
-		token.UsedBy,
 		token.Revoked,
 		nullTimeOrNil(token.RevokedAt),
 	)
-
 	if err != nil {
 		return fmt.Errorf("failed to update token: %w", err)
 	}
@@ -247,11 +207,9 @@ func (s *DatabaseRegistrationTokenStore) UpdateToken(ctx context.Context, token 
 	if err != nil {
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
-
 	if rowsAffected == 0 {
 		return fmt.Errorf("token not found")
 	}
-
 	return nil
 }
 
@@ -264,9 +222,7 @@ func (s *DatabaseRegistrationTokenStore) DeleteToken(ctx context.Context, tokenS
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	query := `DELETE FROM cfgms_registration_tokens WHERE token = $1`
-
-	result, err := s.db.ExecContext(ctx, query, tokenStr)
+	result, err := s.db.ExecContext(ctx, `DELETE FROM cfgms_registration_tokens WHERE token = $1`, tokenStr)
 	if err != nil {
 		return fmt.Errorf("failed to delete token: %w", err)
 	}
@@ -275,11 +231,9 @@ func (s *DatabaseRegistrationTokenStore) DeleteToken(ctx context.Context, tokenS
 	if err != nil {
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
-
 	if rowsAffected == 0 {
 		return fmt.Errorf("token not found")
 	}
-
 	return nil
 }
 
@@ -289,14 +243,12 @@ func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter 
 	defer s.mutex.RUnlock()
 
 	query := `
-		SELECT token, tenant_id, controller_url, group_name, created_at, expires_at, single_use, used_at, used_by, revoked, revoked_at
+		SELECT token, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
 		FROM cfgms_registration_tokens
-		WHERE 1=1
-	`
+		WHERE 1=1`
 	args := []interface{}{}
 	argCount := 1
 
-	// Apply filters
 	if filter != nil {
 		if filter.TenantID != "" {
 			query += fmt.Sprintf(" AND tenant_id = $%d", argCount)
@@ -313,19 +265,8 @@ func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter 
 			args = append(args, *filter.Revoked)
 			argCount++
 		}
-		if filter.SingleUse != nil {
-			query += fmt.Sprintf(" AND single_use = $%d", argCount)
-			args = append(args, *filter.SingleUse)
-			// argCount not incremented as Used filter uses IS NULL/IS NOT NULL
-		}
-		if filter.Used != nil {
-			if *filter.Used {
-				query += " AND used_at IS NOT NULL"
-			} else {
-				query += " AND used_at IS NULL"
-			}
-		}
 	}
+	_ = argCount
 
 	query += " ORDER BY created_at DESC"
 
@@ -338,36 +279,25 @@ func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter 
 	var tokens []*business.RegistrationTokenData
 	for rows.Next() {
 		var token business.RegistrationTokenData
-		var expiresAt, usedAt, revokedAt sql.NullTime
+		var expiresAt, revokedAt sql.NullTime
 		var group sql.NullString
-		var usedBy sql.NullString
 
-		err := rows.Scan(
+		if err := rows.Scan(
 			&token.Token,
 			&token.TenantID,
 			&token.ControllerURL,
 			&group,
 			&token.CreatedAt,
 			&expiresAt,
-			&token.SingleUse,
-			&usedAt,
-			&usedBy,
 			&token.Revoked,
 			&revokedAt,
-		)
-		if err != nil {
+		); err != nil {
 			return nil, fmt.Errorf("failed to scan token row: %w", err)
 		}
 
-		// Convert nullable fields
 		token.Group = group.String
-		token.UsedBy = usedBy.String
-
 		if expiresAt.Valid {
 			token.ExpiresAt = &expiresAt.Time
-		}
-		if usedAt.Valid {
-			token.UsedAt = &usedAt.Time
 		}
 		if revokedAt.Valid {
 			token.RevokedAt = &revokedAt.Time
@@ -383,72 +313,79 @@ func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter 
 	return tokens, nil
 }
 
-// ConsumeToken atomically validates and marks a single-use token as used via a single UPDATE
-// with a WHERE guard. For single-use tokens that were already consumed, returns ErrTokenAlreadyUsed.
-func (s *DatabaseRegistrationTokenStore) ConsumeToken(ctx context.Context, tokenStr, stewardID string) error {
-	now := time.Now().UTC()
+// RotateToken atomically revokes all prior tokens for tenant+group and creates a new one in
+// a single PostgreSQL transaction, ensuring no overlap window between old and new tokens.
+func (s *DatabaseRegistrationTokenStore) RotateToken(ctx context.Context, tenantID, group string) (*business.RegistrationTokenData, error) {
+	newTokenStr, err := generateTokenString()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate token: %w", err)
+	}
 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	// Atomic mark-used for single-use tokens that are still unused and not revoked.
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE cfgms_registration_tokens
-		SET used_at = $1, used_by = $2
-		WHERE token = $3 AND single_use = true AND used_at IS NULL AND revoked = false`,
-		now, stewardID, tokenStr,
-	)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to consume registration token: %w", err)
+		return nil, fmt.Errorf("failed to begin rotation transaction: %w", err)
 	}
-
-	n, _ := res.RowsAffected()
-	if n > 0 {
-		return nil
-	}
-
-	// Rows-affected == 0: inspect to determine why.
-	var token business.RegistrationTokenData
-	var expiresAt, usedAt, revokedAt sql.NullTime
-	var group, usedBy sql.NullString
-	err = s.db.QueryRowContext(ctx, `
-		SELECT token, single_use, used_at, revoked, expires_at, group_name, used_by, revoked_at
-		FROM cfgms_registration_tokens WHERE token = $1`, tokenStr).Scan(
-		&token.Token, &token.SingleUse, &usedAt, &token.Revoked,
-		&expiresAt, &group, &usedBy, &revokedAt,
-	)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("token not found")
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
 		}
-		return fmt.Errorf("failed to inspect registration token: %w", err)
+	}()
+
+	// Find an existing active token to inherit controller_url.
+	var controllerURL string
+	err = tx.QueryRowContext(ctx, `
+		SELECT controller_url FROM cfgms_registration_tokens
+		WHERE tenant_id = $1 AND group_name = $2 AND revoked = false
+		ORDER BY created_at DESC LIMIT 1`,
+		tenantID, group,
+	).Scan(&controllerURL)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("no active tokens found for tenant %q group %q", tenantID, group)
 	}
-	if usedAt.Valid {
-		token.UsedAt = &usedAt.Time
-	}
-	if expiresAt.Valid {
-		token.ExpiresAt = &expiresAt.Time
+	if err != nil {
+		return nil, fmt.Errorf("failed to find existing token: %w", err)
 	}
 
-	if token.Revoked {
-		return fmt.Errorf("token is revoked")
-	}
-	if token.SingleUse && token.UsedAt != nil {
-		return business.ErrTokenAlreadyUsed
-	}
-	if !token.IsValid() {
-		return fmt.Errorf("token is not valid")
-	}
+	now := time.Now().UTC()
 
-	// Multi-use token: mark used.
-	_, err = s.db.ExecContext(ctx, `
-		UPDATE cfgms_registration_tokens SET used_at = $1, used_by = $2 WHERE token = $3`,
-		now, stewardID, tokenStr,
+	// Insert the new token.
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO cfgms_registration_tokens
+			(token, tenant_id, controller_url, group_name, created_at, revoked)
+		VALUES ($1, $2, $3, $4, $5, false)`,
+		newTokenStr, tenantID, controllerURL, group, now,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to mark multi-use token as used: %w", err)
+		return nil, fmt.Errorf("failed to insert new token: %w", err)
 	}
-	return nil
+
+	// Revoke all prior tokens for this tenant+group atomically.
+	_, err = tx.ExecContext(ctx, `
+		UPDATE cfgms_registration_tokens
+		SET revoked = true, revoked_at = $1
+		WHERE tenant_id = $2 AND group_name = $3 AND revoked = false AND token != $4`,
+		now, tenantID, group, newTokenStr,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to revoke old tokens: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit rotation: %w", err)
+	}
+	committed = true
+
+	return &business.RegistrationTokenData{
+		Token:         newTokenStr,
+		TenantID:      tenantID,
+		ControllerURL: controllerURL,
+		Group:         group,
+		CreatedAt:     now,
+	}, nil
 }
 
 // nullTimeOrNil converts a *time.Time pointer to sql.NullTime
@@ -457,4 +394,13 @@ func nullTimeOrNil(t *time.Time) sql.NullTime {
 		return sql.NullTime{Valid: false}
 	}
 	return sql.NullTime{Time: *t, Valid: true}
+}
+
+// generateTokenString produces a random base32-encoded token string (16 bytes / 128-bit entropy).
+func generateTokenString() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to read random bytes: %w", err)
+	}
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b)), nil
 }

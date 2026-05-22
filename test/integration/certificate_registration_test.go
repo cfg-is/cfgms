@@ -35,7 +35,7 @@ import (
 // This test suite validates:
 //  1. Registration token validation logic
 //  2. Certificate generation during registration
-//  3. Token lifecycle (expiration, revocation, single-use)
+//  3. Token lifecycle (expiration, revocation, rotation)
 //  4. Certificate chain validity
 //
 // Philosophy: "Test what you ship, ship what you test"
@@ -128,7 +128,6 @@ func (s *CertificateRegistrationTestSuite) TestTokenValidation() {
 		ControllerURL: "tcp://localhost:1883",
 		Group:         "test-group",
 		CreatedAt:     time.Now(),
-		SingleUse:     false,
 		Revoked:       false,
 	}
 	err := s.adapter.SaveToken(ctx, token)
@@ -156,7 +155,6 @@ func (s *CertificateRegistrationTestSuite) TestExpiredTokenInvalid() {
 		ControllerURL: "tcp://localhost:1883",
 		CreatedAt:     time.Now().Add(-2 * time.Hour),
 		ExpiresAt:     &pastExpiry,
-		SingleUse:     false,
 		Revoked:       false,
 	}
 	err := s.adapter.SaveToken(ctx, token)
@@ -180,7 +178,6 @@ func (s *CertificateRegistrationTestSuite) TestRevokedTokenInvalid() {
 		TenantID:      "test-tenant",
 		ControllerURL: "tcp://localhost:1883",
 		CreatedAt:     time.Now(),
-		SingleUse:     false,
 	}
 	token.Revoke()
 	err := s.adapter.SaveToken(ctx, token)
@@ -196,71 +193,60 @@ func (s *CertificateRegistrationTestSuite) TestRevokedTokenInvalid() {
 	s.T().Log("Revoked token correctly marked as invalid")
 }
 
-// TestSingleUseTokenBecomesInvalidAfterUse validates single-use token behavior
-func (s *CertificateRegistrationTestSuite) TestSingleUseTokenBecomesInvalidAfterUse() {
+// TestPerennialTokenRemainsValidAfterMultipleUses validates perennial token behavior.
+// Tokens are never consumed on use — they survive multiple registrations until
+// explicitly revoked or rotated (Issue #1690).
+func (s *CertificateRegistrationTestSuite) TestPerennialTokenRemainsValidAfterMultipleUses() {
 	ctx := context.Background()
 
-	// Create a single-use token
 	token := &registration.Token{
-		Token:         "cfgms_reg_single_use_test_001",
+		Token:         "cfgms_reg_perennial_test_001",
 		TenantID:      "test-tenant",
 		ControllerURL: "tcp://localhost:1883",
 		CreatedAt:     time.Now(),
-		SingleUse:     true,
 		Revoked:       false,
 	}
 	err := s.adapter.SaveToken(ctx, token)
 	require.NoError(s.T(), err)
 
-	// Token should be valid initially
-	retrieved, err := s.adapter.GetToken(ctx, token.Token)
-	require.NoError(s.T(), err)
-	assert.True(s.T(), retrieved.IsValid(), "Single-use token should be valid initially")
+	// Token should remain valid across multiple retrievals (simulating multiple registrations).
+	for i := 0; i < 3; i++ {
+		retrieved, err := s.adapter.GetToken(ctx, token.Token)
+		require.NoError(s.T(), err)
+		assert.True(s.T(), retrieved.IsValid(), "Perennial token must remain valid after registration #%d", i+1)
+	}
 
-	// Mark as used
-	retrieved.MarkUsed("steward-001")
-	err = s.adapter.UpdateToken(ctx, retrieved)
-	require.NoError(s.T(), err)
-
-	// Token should now be invalid
-	afterUse, err := s.adapter.GetToken(ctx, token.Token)
-	require.NoError(s.T(), err)
-	assert.False(s.T(), afterUse.IsValid(), "Single-use token should be invalid after use")
-	assert.Equal(s.T(), "steward-001", afterUse.UsedBy, "UsedBy should be set")
-	assert.NotNil(s.T(), afterUse.UsedAt, "UsedAt should be set")
-
-	s.T().Log("Single-use token enforcement working correctly")
+	s.T().Log("Perennial token survives multiple uses correctly")
 }
 
-// TestMultiUseTokenRemainsValidAfterUse validates multi-use tokens stay valid
-func (s *CertificateRegistrationTestSuite) TestMultiUseTokenRemainsValidAfterUse() {
+// TestTokenRotateInvalidatesPriorToken validates that RotateToken revokes the old
+// token and returns a new valid one (Issue #1690).
+func (s *CertificateRegistrationTestSuite) TestTokenRotateInvalidatesPriorToken() {
 	ctx := context.Background()
 
-	// Create a multi-use token
 	token := &registration.Token{
-		Token:         "cfgms_reg_multi_use_test_001",
-		TenantID:      "test-tenant",
+		Token:         "cfgms_reg_rotate_test_001",
+		TenantID:      "rotate-tenant",
 		ControllerURL: "tcp://localhost:1883",
+		Group:         "test-group",
 		CreatedAt:     time.Now(),
-		SingleUse:     false,
-		Revoked:       false,
 	}
 	err := s.adapter.SaveToken(ctx, token)
 	require.NoError(s.T(), err)
 
-	// Mark as used (would happen during registration)
-	retrieved, err := s.adapter.GetToken(ctx, token.Token)
+	newTok, err := s.tokenStore.RotateToken(ctx, "rotate-tenant", "test-group")
 	require.NoError(s.T(), err)
-	retrieved.MarkUsed("steward-001")
-	err = s.adapter.UpdateToken(ctx, retrieved)
-	require.NoError(s.T(), err)
+	require.NotNil(s.T(), newTok)
+	assert.NotEqual(s.T(), token.Token, newTok.Token, "New token must differ from old")
+	assert.True(s.T(), newTok.IsValid(), "Newly rotated token must be valid")
 
-	// Token should still be valid (multi-use)
-	afterUse, err := s.adapter.GetToken(ctx, token.Token)
+	// Old token must be revoked.
+	old, err := s.tokenStore.GetToken(ctx, token.Token)
 	require.NoError(s.T(), err)
-	assert.True(s.T(), afterUse.IsValid(), "Multi-use token should remain valid after use")
+	assert.True(s.T(), old.Revoked, "Old token must be revoked after rotation")
+	assert.False(s.T(), old.IsValid(), "Old token must be invalid after rotation")
 
-	s.T().Log("Multi-use token allows multiple uses")
+	s.T().Log("Token rotation correctly invalidates the prior token")
 }
 
 // TestCertificateProvisioning validates certificate generation for steward
@@ -460,7 +446,6 @@ func (s *CertificateRegistrationTestSuite) TestTokenWithFutureExpiry() {
 		ControllerURL: "tcp://localhost:1883",
 		CreatedAt:     time.Now(),
 		ExpiresAt:     &futureExpiry,
-		SingleUse:     false,
 		Revoked:       false,
 	}
 	err := s.adapter.SaveToken(ctx, token)
@@ -526,7 +511,6 @@ func (s *CertificateRegistrationTestSuite) TestRegistrationFlowIntegration() {
 		ControllerURL: "tcp://localhost:1883",
 		Group:         "production",
 		CreatedAt:     time.Now(),
-		SingleUse:     true,
 		Revoked:       false,
 	}
 	err := s.adapter.SaveToken(ctx, token)
@@ -549,18 +533,12 @@ func (s *CertificateRegistrationTestSuite) TestRegistrationFlowIntegration() {
 	require.NoError(s.T(), err)
 	require.True(s.T(), certResp.Success)
 
-	// Step 5: Mark token as used (for single-use tokens)
-	retrieved.MarkUsed(stewardID)
-	err = s.adapter.UpdateToken(ctx, retrieved)
+	// Step 5: Perennial tokens survive registration — token stays valid.
+	stillValid, err := s.adapter.GetToken(ctx, token.Token)
 	require.NoError(s.T(), err)
+	assert.True(s.T(), stillValid.IsValid(), "Perennial token must remain valid after registration")
 
-	// Step 6: Verify token is now invalid (single-use)
-	afterUse, err := s.adapter.GetToken(ctx, token.Token)
-	require.NoError(s.T(), err)
-	assert.False(s.T(), afterUse.IsValid(), "Single-use token should be invalid after use")
-	assert.Equal(s.T(), stewardID, afterUse.UsedBy)
-
-	// Step 7: Verify certificate is valid
+	// Step 6: Verify certificate is valid
 	err = cert.ValidateKeyPair(certResp.CertificatePEM, certResp.PrivateKeyPEM)
 	require.NoError(s.T(), err)
 

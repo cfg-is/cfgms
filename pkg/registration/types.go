@@ -9,6 +9,8 @@ package registration
 import "time"
 
 // Token represents a registration token for steward deployment.
+// Tokens are perennial: they survive multiple registrations and are never consumed on use.
+// Rotation atomically revokes the old token and issues a new one.
 type Token struct {
 	// Token is the unique token string (e.g., "abcdefghijklmnopqrstuvwxyz")
 	Token string `json:"token"`
@@ -28,15 +30,6 @@ type Token struct {
 	// ExpiresAt is when the token expires (nil = never)
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 
-	// SingleUse indicates if token can only be used once
-	SingleUse bool `json:"single_use"`
-
-	// UsedAt is when the token was first used (nil = unused)
-	UsedAt *time.Time `json:"used_at,omitempty"`
-
-	// UsedBy is the steward_id that used this token
-	UsedBy string `json:"used_by,omitempty"`
-
 	// Revoked indicates if token has been revoked
 	Revoked bool `json:"revoked"`
 
@@ -46,29 +39,13 @@ type Token struct {
 
 // IsValid returns whether the token is currently valid for use.
 func (t *Token) IsValid() bool {
-	// Check if revoked
 	if t.Revoked {
 		return false
 	}
-
-	// Check if expired
 	if t.ExpiresAt != nil && time.Now().After(*t.ExpiresAt) {
 		return false
 	}
-
-	// Check if single-use and already used
-	if t.SingleUse && t.UsedAt != nil {
-		return false
-	}
-
 	return true
-}
-
-// MarkUsed marks the token as used by a specific steward.
-func (t *Token) MarkUsed(stewardID string) {
-	now := time.Now()
-	t.UsedAt = &now
-	t.UsedBy = stewardID
 }
 
 // Revoke marks the token as revoked.
@@ -91,7 +68,4 @@ type TokenCreateRequest struct {
 
 	// ExpiresIn is the duration until token expires (e.g., "24h", "7d", "30d")
 	ExpiresIn string `json:"expires_in,omitempty"`
-
-	// SingleUse indicates if token can only be used once
-	SingleUse bool `json:"single_use"`
 }

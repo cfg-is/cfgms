@@ -174,7 +174,6 @@ func TestAPIClientCreateToken(t *testing.T) {
 				TenantID:      req.TenantID,
 				ControllerURL: req.ControllerURL,
 				CreatedAt:     "2025-01-01T00:00:00Z",
-				SingleUse:     false,
 				Revoked:       false,
 			}
 
@@ -422,6 +421,62 @@ func TestAPIClientRevokeToken(t *testing.T) {
 
 		assert.True(t, resp.Revoked)
 		assert.NotNil(t, resp.RevokedAt)
+	})
+}
+
+func TestAPIClientRotateToken(t *testing.T) {
+	t.Run("rotate returns new token", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "POST", r.Method)
+			assert.Equal(t, "/api/v1/registration/tokens/test-tenant/rotate", r.URL.Path)
+
+			var body APIRotateTokenRequest
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			assert.Equal(t, "production", body.Group)
+
+			resp := APITokenResponse{
+				Token:         "newtoken123",
+				TenantID:      "test-tenant",
+				ControllerURL: "controller:4433",
+				Group:         "production",
+				CreatedAt:     "2025-01-01T00:00:00Z",
+				Revoked:       false,
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(resp)
+		}))
+		defer server.Close()
+
+		cfg := &APIClientConfig{BaseURL: server.URL, APIKey: "test-key", TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		resp, err := client.RotateToken(context.Background(), "test-tenant", "production")
+		require.NoError(t, err)
+
+		assert.Equal(t, "newtoken123", resp.Token)
+		assert.Equal(t, "test-tenant", resp.TenantID)
+		assert.Equal(t, "production", resp.Group)
+	})
+
+	t.Run("no active tokens returns error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"no active tokens found for tenant"}`))
+		}))
+		defer server.Close()
+
+		cfg := &APIClientConfig{BaseURL: server.URL, TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		resp, err := client.RotateToken(context.Background(), "empty-tenant", "")
+		assert.Nil(t, resp)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no active tokens found")
 	})
 }
 

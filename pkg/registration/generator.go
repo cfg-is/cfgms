@@ -90,7 +90,6 @@ func CreateToken(req *TokenCreateRequest) (*Token, error) {
 		Group:         req.Group,
 		CreatedAt:     time.Now(),
 		ExpiresAt:     expiresAt,
-		SingleUse:     req.SingleUse,
 	}
 
 	return token, nil

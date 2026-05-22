@@ -18,7 +18,6 @@ var (
 	tokenControllerURL string
 	tokenGroup         string
 	tokenExpiresIn     string
-	tokenSingleUse     bool
 	tokenJSONOutput    bool
 
 	// API connection flags
@@ -35,8 +34,11 @@ var tokenCmd = &cobra.Command{
 	Long: `Manage registration tokens for steward deployment.
 
 Registration tokens are short API key-style strings that stewards use to
-auto-register with the controller. Tokens contain tenant information and
-can be time-limited, single-use, and revocable.
+auto-register with the controller. Tokens are perennial (survive multiple
+registrations), time-limited (optional), and revocable.
+
+Use 'cfg token rotate' to atomically replace the active token for a
+tenant/group with a fresh one, invalidating the old one immediately.
 
 This command communicates with the controller's REST API to manage tokens.
 The controller URL and API key can be provided via flags or environment variables:
@@ -49,8 +51,8 @@ Examples:
   # Create a token that expires in 7 days
   cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --expires=7d
 
-  # Create a single-use token for production group
-  cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --group=production --single-use
+  # Rotate the active token for a tenant/group
+  cfg token rotate --tenant-id=acme-corp --group=production
 
   # List all tokens for a tenant
   cfg token list --tenant-id=acme-corp
@@ -66,7 +68,8 @@ var tokenCreateCmd = &cobra.Command{
 	Long: `Create a new registration token for steward deployment.
 
 The token will be a bare base32-encoded string (e.g., abcdefghijklmnopqrstuvwxyz)
-that stewards can use to auto-register with the controller.
+that stewards can use to auto-register with the controller. Tokens are perennial:
+they survive multiple registrations until explicitly revoked or rotated.
 
 Expiration formats:
   - "24h" = 24 hours
@@ -78,12 +81,27 @@ Examples:
   # 7-day expiring token
   cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --expires=7d
 
-  # Single-use token
-  cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --single-use
-
   # Token for specific group
   cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --group=production`,
 	RunE: runTokenCreate,
+}
+
+// tokenRotateCmd represents the token rotate command
+var tokenRotateCmd = &cobra.Command{
+	Use:   "rotate",
+	Short: "Rotate the active token for a tenant/group",
+	Long: `Atomically replace the active registration token for a tenant/group.
+
+The old token is revoked and a new one is created in a single transaction,
+ensuring no window where a device could register with neither token.
+
+Examples:
+  # Rotate the token for all groups of a tenant
+  cfg token rotate --tenant-id=acme-corp
+
+  # Rotate the token for a specific group
+  cfg token rotate --tenant-id=acme-corp --group=production`,
+	RunE: runTokenRotate,
 }
 
 // tokenListCmd represents the token list command
@@ -158,11 +176,16 @@ func init() {
 	tokenCreateCmd.Flags().StringVar(&tokenControllerURL, "controller-url", "", "Controller transport URL for steward connections (required)")
 	tokenCreateCmd.Flags().StringVar(&tokenGroup, "group", "", "Optional group identifier")
 	tokenCreateCmd.Flags().StringVar(&tokenExpiresIn, "expires", "", "Expiration duration (e.g., 24h, 7d, 30d)")
-	tokenCreateCmd.Flags().BoolVar(&tokenSingleUse, "single-use", false, "Token can only be used once")
 	tokenCreateCmd.Flags().BoolVar(&tokenJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
 	_ = tokenCreateCmd.MarkFlagRequired("tenant-id")
 	_ = tokenCreateCmd.MarkFlagRequired("controller-url")
+
+	// Rotate command flags
+	tokenRotateCmd.Flags().StringVar(&tokenTenantID, "tenant-id", "", "Tenant ID (required)")
+	tokenRotateCmd.Flags().StringVar(&tokenGroup, "group", "", "Group to rotate (rotates all active tokens if omitted)")
+	tokenRotateCmd.Flags().BoolVar(&tokenJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
+	_ = tokenRotateCmd.MarkFlagRequired("tenant-id")
 
 	// List command flags
 	tokenListCmd.Flags().StringVar(&tokenTenantID, "tenant-id", "", "Filter by tenant ID (optional)")
@@ -173,6 +196,7 @@ func init() {
 
 	// Add subcommands
 	tokenCmd.AddCommand(tokenCreateCmd)
+	tokenCmd.AddCommand(tokenRotateCmd)
 	tokenCmd.AddCommand(tokenListCmd)
 	tokenCmd.AddCommand(tokenRevokeCmd)
 	tokenCmd.AddCommand(tokenDeleteCmd)
@@ -226,13 +250,11 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	// Create token via API
 	req := &APITokenCreateRequest{
 		TenantID:      tokenTenantID,
 		ControllerURL: tokenControllerURL,
 		Group:         tokenGroup,
 		ExpiresIn:     tokenExpiresIn,
-		SingleUse:     tokenSingleUse,
 	}
 
 	token, err := client.CreateToken(context.Background(), req)
@@ -244,7 +266,6 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(token)
 	}
 
-	// Output results
 	fmt.Printf("Registration Token: %s\n\n", token.Token)
 
 	fmt.Println("Token Details:")
@@ -258,7 +279,6 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("  Expires:        Never\n")
 	}
-	fmt.Printf("  Single Use:     %v\n", token.SingleUse)
 
 	fmt.Println()
 	fmt.Println("Deployment Examples:")
@@ -271,6 +291,38 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Println("Direct execution:")
 	fmt.Printf("  cfgms-steward --regtoken=%s\n", token.Token)
+
+	return nil
+}
+
+func runTokenRotate(cmd *cobra.Command, args []string) error {
+	client, err := getAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	token, err := client.RotateToken(context.Background(), tokenTenantID, tokenGroup)
+	if err != nil {
+		return fmt.Errorf("failed to rotate token: %w", err)
+	}
+
+	if tokenJSONOutput {
+		return json.NewEncoder(os.Stdout).Encode(token)
+	}
+
+	fmt.Printf("Token rotated successfully.\n\n")
+	fmt.Printf("New Registration Token: %s\n\n", token.Token)
+	fmt.Println("Token Details:")
+	fmt.Printf("  Tenant ID:      %s\n", token.TenantID)
+	fmt.Printf("  Controller URL: %s\n", token.ControllerURL)
+	if token.Group != "" {
+		fmt.Printf("  Group:          %s\n", token.Group)
+	}
+	if token.ExpiresAt != nil {
+		fmt.Printf("  Expires:        %s\n", *token.ExpiresAt)
+	} else {
+		fmt.Printf("  Expires:        Never\n")
+	}
 
 	return nil
 }
@@ -309,11 +361,6 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Expires:        %s\n", *token.ExpiresAt)
 		} else {
 			fmt.Printf("  Expires:        Never\n")
-		}
-		fmt.Printf("  Single Use:     %v\n", token.SingleUse)
-		if token.UsedAt != nil {
-			fmt.Printf("  Used At:        %s\n", *token.UsedAt)
-			fmt.Printf("  Used By:        %s\n", token.UsedBy)
 		}
 		if token.Revoked {
 			fmt.Printf("  Status:         REVOKED")
@@ -393,11 +440,6 @@ func runTokenGet(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Expires:        %s\n", *token.ExpiresAt)
 	} else {
 		fmt.Printf("  Expires:        Never\n")
-	}
-	fmt.Printf("  Single Use:     %v\n", token.SingleUse)
-	if token.UsedAt != nil {
-		fmt.Printf("  Used At:        %s\n", *token.UsedAt)
-		fmt.Printf("  Used By:        %s\n", token.UsedBy)
 	}
 	if token.Revoked {
 		fmt.Printf("  Status:         REVOKED")
