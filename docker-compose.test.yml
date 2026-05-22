@@ -731,7 +731,7 @@ services:
       args:
         STEWARD_CONTROLLER_URL: "https://fleet-controller:9080"
     environment:
-      CFGMS_REGISTRATION_TOKEN: "dockertest_fleet"
+      CFGMS_REGISTRATION_TOKEN: "dockertest_fleet_child_a"
       CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
@@ -765,7 +765,7 @@ services:
       args:
         STEWARD_CONTROLLER_URL: "https://fleet-controller:9080"
     environment:
-      CFGMS_REGISTRATION_TOKEN: "dockertest_fleet"
+      CFGMS_REGISTRATION_TOKEN: "dockertest_fleet_child_b"
       CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"

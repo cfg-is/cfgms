@@ -14,8 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"database/sql"
-
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -386,6 +384,24 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 					ExpiresAt:     nil,
 					Revoked:       false,
 				},
+				{
+					Token:         "dockertest_fleet_child_a", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "fleet-root/fleet-child-a",
+					ControllerURL: "fleet-controller:4433",
+					Group:         "test-group",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					Revoked:       false,
+				},
+				{
+					Token:         "dockertest_fleet_child_b", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "fleet-root/fleet-child-b",
+					ControllerURL: "fleet-controller:4433",
+					Group:         "test-group",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					Revoked:       false,
+				},
 			}
 
 			for _, testToken := range testTokens {
@@ -395,6 +411,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 					logger.Info("Seeded test registration token", "token", testToken.Token, "tenant", testToken.TenantID)
 				}
 			}
+
+			// Seed fleet cascade tenant hierarchy and MSP-level parent policy (Issue #1723).
+			// Creates fleet-root → fleet-child-a/fleet-child-b so the InheritanceResolver
+			// can walk the ancestor chain and cascade the parent policy to both child tenants.
+			seedFleetCascadeTestData(context.Background(), storageManager, logger)
 		}
 	}
 
@@ -1826,25 +1847,87 @@ func initializeRunManager(
 		dsn = "file:" + dsn
 	}
 
-	db, err := sql.Open("sqlite", dsn)
+	store, err := controllerrun.NewRunStoreSQLFromDSN(dsn)
 	if err != nil {
 		logger.Warn("Run manager: failed to open SQLite", "error", err)
 		return nil
 	}
-	// busy_timeout prevents SQLITE_BUSY errors when the main connection is writing.
-	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
-		logger.Warn("Run manager: failed to set busy_timeout", "error", err)
-		_ = db.Close()
-		return nil
-	}
-
-	store := controllerrun.NewRunStoreSQL(db)
 	if err := store.Init(ctx); err != nil {
 		logger.Warn("Run manager: failed to initialize schema", "error", err)
-		_ = db.Close()
+		_ = store.Close()
 		return nil
 	}
 
 	logger.Info("Run manager initialized", "sqlite_path", cfg.Storage.SQLitePath)
 	return controllerrun.NewManager(store, executionQueue)
+}
+
+// seedFleetCascadeTestData seeds the tenant hierarchy and MSP-level parent policy
+// required by the fleet E2E cascade test (Issue #1723). Called only when
+// CFGMS_SEED_TEST_TOKENS=1 is set. Creates a two-level tenant tree:
+//
+//	fleet-root (parent)
+//	  fleet-root/fleet-child-a (steward-1 tenant)
+//	  fleet-root/fleet-child-b (steward-2 tenant)
+//
+// Stores an MSP-level policy under fleet-root/msp-policies/global so the
+// InheritanceResolver delivers it to stewards in both child tenants via cascade.
+// Errors are logged as warnings (idempotent — tolerated on controller restart).
+func seedFleetCascadeTestData(ctx context.Context, sm *interfaces.StorageManager, logger logging.Logger) {
+	ts := sm.GetTenantStore()
+	cs := sm.GetConfigStore()
+
+	tenants := []business.TenantData{
+		{ID: "fleet-root", Name: "Fleet Root", Status: business.TenantStatusActive},
+		{ID: "fleet-root/fleet-child-a", Name: "Fleet Child A", ParentID: "fleet-root", Status: business.TenantStatusActive},
+		{ID: "fleet-root/fleet-child-b", Name: "Fleet Child B", ParentID: "fleet-root", Status: business.TenantStatusActive},
+	}
+	for i := range tenants {
+		if err := ts.CreateTenant(ctx, &tenants[i]); err != nil {
+			logger.Warn("fleet cascade seed: tenant (may already exist)", "id", tenants[i].ID, "error", err)
+		} else {
+			logger.Info("fleet cascade seed: tenant created", "id", tenants[i].ID)
+		}
+	}
+
+	// Parent policy: two file resources on /test-workspace tmpfs.
+	// cascade-policy: inherited by both children; child device config may override it.
+	// cascade-parent-only: present only at MSP level — proves cascade delivery when it
+	// appears on a steward whose device config does not include it.
+	parentPolicyYAML := `steward:
+  id: ""
+  mode: controller
+  converge_interval: "10s"
+  drift_mode: apply
+resources:
+  - name: cascade-policy
+    module: file
+    config:
+      path: /test-workspace/cascade-policy
+      state: present
+      content: "parent-policy-content\n"
+      mode: "0644"
+      allowed_base_path: /test-workspace
+  - name: cascade-parent-only
+    module: file
+    config:
+      path: /test-workspace/cascade-parent-only
+      state: present
+      content: "parent-only-content\n"
+      mode: "0644"
+      allowed_base_path: /test-workspace
+`
+	if err := cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
+			TenantID:  "fleet-root",
+			Namespace: "msp-policies",
+			Name:      "global",
+		},
+		Data:   []byte(parentPolicyYAML),
+		Format: cfgconfig.ConfigFormatYAML,
+	}); err != nil {
+		logger.Warn("fleet cascade seed: failed to store MSP-level parent policy", "error", err)
+	} else {
+		logger.Info("fleet cascade seed: MSP-level parent policy stored under fleet-root")
+	}
 }
