@@ -2250,7 +2250,7 @@ PYEOF
 }
 
 test_preflight_review_verdict_routing() {
-    log_test "Testing po-cycle-preflight.py: review-FAIL PRs route to re-review, never enqueue/clear-stale (Issue #1657)..."
+    log_test "Testing po-cycle-preflight.py: review-FAIL routing by commit-vs-review timestamp; never enqueue/clear-stale a FAIL (Issues #1657, #1731)..."
 
     local preflight_script
     preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-cycle-preflight.py"
@@ -2272,8 +2272,13 @@ spec = importlib.util.spec_from_file_location("preflight", script_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-fail_c = {"body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — FAIL\n"}
-pass_c = {"body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — PASS\n"}
+# createdAt drives the commit-vs-review timestamp comparison (issue #1731):
+# a fix counts as landed only when its commit is newer than the review comment.
+REVIEW_TS = "2026-05-21T12:00:00Z"
+fail_c = {"body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — FAIL\n",
+          "createdAt": REVIEW_TS}
+pass_c = {"body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — PASS\n",
+          "createdAt": REVIEW_TS}
 
 # Part A: latest_review_verdict extracts fail/pass/None
 if (mod.latest_review_verdict([fail_c]) == "fail"
@@ -2291,24 +2296,61 @@ else:
     print("FAIL_A2: latest_review_verdict did not take the latest")
     sys.exit(1)
 
+# Part A3: latest_review also returns the review comment's timestamp
+if mod.latest_review([fail_c]) == ("fail", REVIEW_TS):
+    print("PASS_A3: latest_review returns (verdict, created_at)")
+else:
+    print(f"FAIL_A3: latest_review returned {mod.latest_review([fail_c])!r}")
+    sys.exit(1)
+
+# Part A4: fix_landed_after_review compares commit vs review timestamps and
+# fails safe (False) when either timestamp is missing.
+if (mod.fix_landed_after_review({"latest_commit_date": "2026-05-21T13:00:00Z",
+                                 "latest_review_comment_date": REVIEW_TS}) is True
+        and mod.fix_landed_after_review({"latest_commit_date": "2026-05-21T11:00:00Z",
+                                         "latest_review_comment_date": REVIEW_TS}) is False
+        and mod.fix_landed_after_review({}) is False):
+    print("PASS_A4: fix_landed_after_review compares timestamps, fails safe")
+else:
+    print("FAIL_A4: fix_landed_after_review wrong")
+    sys.exit(1)
+
+# review FAIL + CI green, fix commit landed AFTER the review comment.
 pr_fail_green = {
     "pr": 2001, "story_number": 3001,
     "has_acceptance_review_comment": True,
     "latest_review_verdict": "fail",
+    "latest_review_comment_date": REVIEW_TS,
+    "latest_commit_date": "2026-05-21T13:00:00Z",
     "wip_session_failed": False,
     "merge_state_status": "MERGEABLE", "mergeable": "MERGEABLE",
     "auto_merge_enabled": False,
     "ci_summary": {"overall": "green", "pass": 4, "pending": 0, "fail": 0,
                    "skipped": 0, "pending_checks": [], "failed_checks": []},
 }
+# review FAIL + CI green, but NO fix commit since the review (commit predates it).
+pr_fail_nofix = dict(pr_fail_green, pr=2005,
+                     latest_commit_date="2026-05-21T11:00:00Z")
 
-# Part B: review FAIL + CI green -> re-review, NOT enqueue_merge
+# Part B1: review FAIL + CI green + fix commit landed after the review ->
+# spawn_acceptance_reviewer (re-review), NOT enqueue_merge.
 recs = mod.compute_review_recommendations([pr_fail_green], set(), set())
 action = recs[0].get("action") if recs else None
 if action == "spawn_acceptance_reviewer":
-    print("PASS_B: review FAIL + CI green -> spawn_acceptance_reviewer (re-review)")
+    print("PASS_B1: review FAIL + CI green + fix landed -> spawn_acceptance_reviewer")
 else:
-    print(f"FAIL_B: review FAIL + CI green got action={action!r}, expected spawn_acceptance_reviewer")
+    print(f"FAIL_B1: review FAIL + fix landed got action={action!r}, expected spawn_acceptance_reviewer")
+    sys.exit(1)
+
+# Part B2: review FAIL + CI green but NO fix commit since the review -> skip.
+# Green CI proves only that the OLD code compiles; re-reviewing unfixed code
+# would FAIL again. The fix cycle owns it — never enqueue a FAIL (issue #1731).
+recs = mod.compute_review_recommendations([pr_fail_nofix], set(), set())
+action = recs[0].get("action") if recs else None
+if action == "skip":
+    print("PASS_B2: review FAIL + CI green + no fix landed -> skip (fix cycle owns it)")
+else:
+    print(f"FAIL_B2: review FAIL + no fix got action={action!r}, expected skip")
     sys.exit(1)
 
 # Part C: review PASS + CI green + mergeable -> enqueue_merge (unchanged)
@@ -2321,19 +2363,32 @@ else:
     print(f"FAIL_C: review PASS + CI green got action={action!r}, expected enqueue_merge")
     sys.exit(1)
 
-# Part D: Fix story whose PR FAILED review + CI green must NOT clear_stale_status
+# Part D1: Fix story whose PR FAILED review, CI green, NO fix commit since the
+# review -> dispatch_fix. Must NEVER clear_stale_status — the FAIL is unresolved.
 fix_story = {"number": 3001, "title": "t", "item_id": "X"}
+recs = mod.compute_fix_recommendations([fix_story], [pr_fail_nofix], set(), set())
+action = recs[0].get("action") if recs else None
+if action == "dispatch_fix":
+    print("PASS_D1: review-FAIL Fix + CI green + no fix landed -> dispatch_fix")
+else:
+    print(f"FAIL_D1: review-FAIL Fix (no fix landed) got action={action!r}, expected dispatch_fix")
+    sys.exit(1)
+
+# Part D2: Fix story whose PR FAILED review, CI green, fix commit landed after
+# the review -> skip (the re-review owns it; do not clear_stale_status/enqueue).
 recs = mod.compute_fix_recommendations([fix_story], [pr_fail_green], set(), set())
 action = recs[0].get("action") if recs else None
-if action and action != "clear_stale_status":
-    print(f"PASS_D: review-FAIL Fix story + CI green -> action={action!r} (not clear_stale_status)")
+if action == "skip":
+    print("PASS_D2: review-FAIL Fix + CI green + fix landed -> skip (re-review owns it)")
 else:
-    print(f"FAIL_D: review-FAIL Fix story got action={action!r}, must not be clear_stale_status")
+    print(f"FAIL_D2: review-FAIL Fix (fix landed) got action={action!r}, expected skip")
     sys.exit(1)
 
 # Part E: CI-driven Fix (no review FAIL) + CI green still clears stale status
 pr_noreview_green = dict(pr_fail_green, pr=2003, story_number=3002,
-                         has_acceptance_review_comment=False, latest_review_verdict=None)
+                         has_acceptance_review_comment=False,
+                         latest_review_verdict=None,
+                         latest_review_comment_date=None)
 fix_story2 = {"number": 3002, "title": "t", "item_id": "Y"}
 recs = mod.compute_fix_recommendations([fix_story2], [pr_noreview_green], set(), set())
 action = recs[0].get("action") if recs else None
