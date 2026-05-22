@@ -8,7 +8,7 @@ By adding your name to this file as part of your contribution, you indicate your
 
 The CLA:
 - Assigns copyright in your contributions to Jordan Ritz (current copyright holder)
-- Allows your contributions to be licensed under both Apache License 2.0 and Elastic License 2.0
+- Allows your contributions to be licensed under any license selected by the Copyright Holder at its sole discretion, including AGPL-3.0 and private commercial licenses
 - Provides for future assignment to cfg.is entity when formed
 - Protects both you and the project
 
@@ -42,8 +42,8 @@ Format: `- [Company Name] (authorized by [Name] <email>) - YYYY-MM-DD`
 
 - **Total Individual Contributors**: 1
 - **Total Corporate Contributors**: 0
-- **CLA Version**: 1.0
-- **Last Updated**: 2026-01-10
+- **CLA Version**: 2.0
+- **Last Updated**: 2026-05-22
 
 ---
 
