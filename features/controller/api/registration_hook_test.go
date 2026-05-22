@@ -219,6 +219,38 @@ func TestIPTrustApprovalHook_StoreError_ReturnsQuarantine(t *testing.T) {
 	assert.Empty(t, reason)
 }
 
+// TestIPTrustApprovalHook_StoreError_SanitizesLogValue verifies the store-error
+// Warn log sanitizes the error string. The trust store echoes the request-derived
+// source IP back in its error; an attacker-injected CR/LF must not reach the log
+// verbatim (closes the CodeQL go/log-injection alert).
+func TestIPTrustApprovalHook_StoreError_SanitizesLogValue(t *testing.T) {
+	store := newTestIPTrustStore()
+	store.setError(fmt.Errorf("invalid IP address: 10.0.0.1\nforged-log-line key=value"))
+
+	logger := pkgtesting.NewMockLogger(true)
+	hook := NewIPTrustApprovalHook(store, logger)
+	decision, _, err := hook.Evaluate(context.Background(), sampleInput())
+
+	require.NoError(t, err)
+	assert.Equal(t, DecisionQuarantine, decision)
+
+	warnLogs := logger.GetLogs("warn")
+	require.Len(t, warnLogs, 1, "store error must emit exactly one Warn log")
+
+	var errVal string
+	var found bool
+	data := warnLogs[0].Data
+	for i := 0; i+1 < len(data); i += 2 {
+		if key, ok := data[i].(string); ok && key == "error" {
+			errVal, _ = data[i+1].(string)
+			found = true
+		}
+	}
+	require.True(t, found, "Warn log must carry an 'error' key")
+	assert.NotContains(t, errVal, "\n", "logged error must not contain a raw newline (log-injection)")
+	assert.NotContains(t, errVal, "\r", "logged error must not contain a raw carriage return")
+}
+
 func TestIPTrustApprovalHook_NilStore_ReturnsQuarantine(t *testing.T) {
 	hook := NewIPTrustApprovalHook(nil, logging.NewNoopLogger())
 	decision, _, err := hook.Evaluate(context.Background(), sampleInput())

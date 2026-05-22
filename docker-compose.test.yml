@@ -465,6 +465,9 @@ services:
       CFGMS_HA_ENABLED: "false"
       # Seed well-known test tokens for integration test suites (Issue #700)
       CFGMS_SEED_TEST_TOKENS: "1"
+      # Issue #1695: integration tests exercise the full register → mTLS flow.
+      # Opt into auto-approve so stewards are not quarantined by the ip-trust default.
+      CFGMS_REGISTRATION_WORKFLOW: "auto-approve"
       # Enable test endpoints for integration testing (auth bypass for /api/v1/test/*)
       CFGMS_ENABLE_TEST_ENDPOINTS: "true"
       CFGMS_CERT_PATH: "/app/certs"
@@ -670,6 +673,9 @@ services:
       - "8090:9080"       # HTTP API
     environment:
       CFGMS_SEED_TEST_TOKENS: "1"
+      # Issue #1695: fleet stewards must complete the full register → mTLS flow.
+      # Opt into auto-approve so they are not quarantined by the ip-trust default.
+      CFGMS_REGISTRATION_WORKFLOW: "auto-approve"
       CFGMS_ENABLE_TEST_ENDPOINTS: "true"
       CFGMS_TRANSPORT_USE_CERT_MANAGER: "true"
       # Transport listen addr is 0.0.0.0:4433; the controller rewrites the

@@ -283,6 +283,48 @@ func TestRegistrationConfigAutoApprove(t *testing.T) {
 	assert.Equal(t, "auto-approve", cfg.Registration.Workflow)
 }
 
+// TestLoadWithPath_RegistrationWorkflowEnvVar verifies CFGMS_REGISTRATION_WORKFLOW
+// creates the Registration section when absent and sets the workflow (Issue #1695).
+func TestLoadWithPath_RegistrationWorkflowEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_REGISTRATION_WORKFLOW", "auto-approve")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Registration,
+		"CFGMS_REGISTRATION_WORKFLOW must create the Registration section when absent")
+	assert.Equal(t, "auto-approve", cfg.Registration.Workflow)
+}
+
+// TestLoadWithPath_RegistrationWorkflowEnvVarOverridesFile verifies the env var
+// overrides a workflow value loaded from the config file (Issue #1695).
+func TestLoadWithPath_RegistrationWorkflowEnvVarOverridesFile(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	require.NoError(t, os.WriteFile(configPath,
+		[]byte("registration:\n  workflow: manual-review\n"), 0600))
+
+	t.Setenv("CFGMS_REGISTRATION_WORKFLOW", "auto-approve")
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Registration)
+	assert.Equal(t, "auto-approve", cfg.Registration.Workflow,
+		"CFGMS_REGISTRATION_WORKFLOW must override registration.workflow from the config file")
+}
+
+// TestLoadWithPath_RegistrationWorkflowUnsetLeavesDefault verifies an unset
+// env var does not create or mutate the Registration section (Issue #1695).
+func TestLoadWithPath_RegistrationWorkflowUnsetLeavesDefault(t *testing.T) {
+	// Explicitly clear the env var so the test is deterministic even if a CI
+	// runner sets CFGMS_REGISTRATION_WORKFLOW in its ambient environment.
+	t.Setenv("CFGMS_REGISTRATION_WORKFLOW", "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Nil(t, cfg.Registration,
+		"Registration must stay nil when CFGMS_REGISTRATION_WORKFLOW is unset and no config file is present")
+}
+
 // TestRegistrationConfig_GetIPTrustThreshold verifies the IP-trust threshold
 // getter covers all three cases: nil receiver, zero value, and configured value
 // (Issue #1694).

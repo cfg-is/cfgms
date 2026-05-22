@@ -99,10 +99,12 @@ func (h *IPTrustApprovalHook) Evaluate(ctx context.Context, input RegistrationIn
 	trusted, err := h.store.IsTrusted(ctx, input.Token.TenantID, input.SourceIP)
 	if err != nil {
 		if h.logger != nil {
+			// SourceIP flows from the HTTP request into IsTrusted and may be echoed
+			// back in the error; sanitize the error string to close go/log-injection.
 			h.logger.Warn("IPTrustApprovalHook: store error, quarantining (fail-closed)",
 				"tenant_id", input.Token.TenantID,
 				"source_ip", logging.SanitizeLogValue(input.SourceIP),
-				"error", err)
+				"error", logging.SanitizeLogValue(err.Error()))
 		}
 		return DecisionQuarantine, "", nil
 	}

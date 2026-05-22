@@ -755,6 +755,17 @@ func LoadWithPath(configPath string) (*Config, error) {
 		cfg.ListenAddr = httpListenAddr
 	}
 
+	// Registration configuration environment variables (Issue #1695).
+	// CFGMS_REGISTRATION_WORKFLOW selects the approval workflow ("ip-trust",
+	// "manual-review", "auto-approve"). Test/dev environments use this to opt
+	// into "auto-approve" without mounting a config file.
+	if regWorkflow := os.Getenv("CFGMS_REGISTRATION_WORKFLOW"); regWorkflow != "" {
+		if cfg.Registration == nil {
+			cfg.Registration = &RegistrationConfig{}
+		}
+		cfg.Registration.Workflow = regWorkflow
+	}
+
 	return cfg, nil
 }
 

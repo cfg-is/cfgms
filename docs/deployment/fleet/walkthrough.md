@@ -349,6 +349,33 @@ Connected to controller via gRPC transport
 Configuration executor initialized  tenant_id=default
 ```
 
+> **First steward quarantines under the `ip-trust` default.** With the default
+> `registration.workflow: ip-trust`, the controller approves a registration only
+> when the steward's source IP is already trusted for its tenant. The **first**
+> steward from a new tenant always quarantines: the controller responds `202
+> Accepted` with `status: pending` and issues **no certificate** until the IP is
+> established. The steward holds in a restricted state and retries. To inspect or
+> promote quarantined stewards, use `cfg registration pending` / `approve`. To
+> approve every registration immediately in a lab or pre-production fleet, set
+> `registration.workflow: auto-approve` in `controller.cfg` (a deprecated
+> dev/test-only mode).
+>
+> **Behind a load balancer:** the IP-trust decision uses the TCP peer address.
+> If the controller sits behind a reverse proxy or load balancer, the peer
+> address is the proxy, not the steward. Set `registration.trusted_proxies` to
+> the proxy's CIDR range so the controller honors the `X-Forwarded-For` header
+> and evaluates the real steward IP:
+>
+> ```yaml
+> registration:
+>   workflow: ip-trust
+>   trusted_proxies:
+>     - "10.0.0.0/8"
+> ```
+>
+> When `trusted_proxies` is empty (the default), `X-Forwarded-For` is never
+> trusted — this prevents an attacker from spoofing a trusted source IP.
+
 ---
 
 ## Phase 5 — Verify Fleet
