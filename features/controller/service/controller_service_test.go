@@ -28,6 +28,20 @@ func newTestFleetStorage(t *testing.T) *fleetStorage.Manager {
 	return mgr
 }
 
+// openFleetStorageAt opens a fleet storage Manager rooted at dataDir. Reusing
+// the same dataDir across two calls (with a Close in between) simulates a real
+// controller restart: the second Manager starts with an empty in-memory index
+// and must read persisted records back from the on-disk SQLite store.
+func openFleetStorageAt(t *testing.T, dataDir string) *fleetStorage.Manager {
+	t.Helper()
+	cfg := fleetStorage.DefaultConfig()
+	cfg.DataDir = dataDir
+	cfg.EnableDeduplication = false
+	mgr, err := fleetStorage.NewManager(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+	return mgr
+}
+
 // makeTestDNA builds a DNA proto for testing.
 func makeTestDNA(id string, attrs map[string]string) *commonpb.DNA {
 	return &commonpb.DNA{
@@ -241,6 +255,81 @@ func TestDNASurvivesControllerRestart(t *testing.T) {
 	require.NoError(t, svc2.LoadFromStorage(ctx))
 
 	// DNA should survive the simulated restart
+	assert.Equal(t, 1, svc2.GetStewardCount())
+
+	info, ok := svc2.GetStewardInfo("dev-persist")
+	require.True(t, ok)
+	assert.Equal(t, "tenant-persist", info.TenantID)
+	require.NotNil(t, info.DNA)
+	assert.Equal(t, "linux", info.DNA.Attributes["os"])
+	assert.Equal(t, "amd64", info.DNA.Attributes["architecture"])
+	assert.Equal(t, "persistent-host", info.DNA.Attributes["hostname"])
+}
+
+// TestRegisterSteward_PersistsAcrossManagerRestart proves a steward registered
+// via the HTTP path survives a controller restart. The second ControllerService
+// is backed by a fresh storage Manager opened on the same data directory — its
+// in-memory index is empty, so warm-load must read steward records from SQL.
+// This is the path a real restart depends on; tests that reuse one Manager keep
+// the index populated and cannot catch a regression here.
+func TestRegisterSteward_PersistsAcrossManagerRestart(t *testing.T) {
+	dataDir := t.TempDir()
+	ctx := context.Background()
+
+	// --- Session 1: register two stewards, then shut storage down. ---
+	mgr1 := openFleetStorageAt(t, dataDir)
+	svc1 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr1)
+	require.NoError(t, svc1.RegisterSteward("steward-1", "tenant-a", "addr-1", "registered"))
+	require.NoError(t, svc1.RegisterSteward("steward-2", "tenant-b", "addr-2", "quarantined"))
+	require.NoError(t, mgr1.Close())
+
+	// --- Session 2: fresh Manager on the same data dir (empty index). ---
+	mgr2 := openFleetStorageAt(t, dataDir)
+	defer func() { _ = mgr2.Close() }()
+	svc2 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr2)
+	require.NoError(t, svc2.LoadFromStorage(ctx))
+
+	assert.Equal(t, 2, svc2.GetStewardCount())
+
+	info1, ok := svc2.GetStewardInfo("steward-1")
+	require.True(t, ok)
+	assert.Equal(t, "tenant-a", info1.TenantID)
+	assert.Equal(t, "registered", info1.Status)
+
+	info2, ok := svc2.GetStewardInfo("steward-2")
+	require.True(t, ok)
+	assert.Equal(t, "tenant-b", info2.TenantID)
+	assert.Equal(t, "quarantined", info2.Status)
+}
+
+// TestDNASurvivesControllerRestart_FreshManager verifies that DNA synced during
+// one controller session is warm-loaded after a restart when the new controller
+// opens a fresh storage Manager (empty in-memory index) on the same data dir.
+func TestDNASurvivesControllerRestart_FreshManager(t *testing.T) {
+	dataDir := t.TempDir()
+	ctx := context.Background()
+
+	// --- Session 1: register, then sync full DNA. ---
+	mgr1 := openFleetStorageAt(t, dataDir)
+	svc1 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr1)
+	require.NoError(t, svc1.RegisterSteward("dev-persist", "tenant-persist", "addr-1", "registered"))
+
+	dna := makeTestDNA("dev-persist", map[string]string{
+		"os":           "linux",
+		"architecture": "amd64",
+		"hostname":     "persistent-host",
+	})
+	resp, err := svc1.SyncDNA(ctx, dna)
+	require.NoError(t, err)
+	require.Equal(t, commonpb.Status_OK, resp.Code)
+	require.NoError(t, mgr1.Close())
+
+	// --- Session 2: fresh Manager on the same data dir. ---
+	mgr2 := openFleetStorageAt(t, dataDir)
+	defer func() { _ = mgr2.Close() }()
+	svc2 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr2)
+	require.NoError(t, svc2.LoadFromStorage(ctx))
+
 	assert.Equal(t, 1, svc2.GetStewardCount())
 
 	info, ok := svc2.GetStewardInfo("dev-persist")

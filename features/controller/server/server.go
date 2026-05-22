@@ -193,8 +193,22 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// DNA storage — durable steward DNA + fleet registry. Shared by the
 	// controller service (warm-loading the steward registry after a restart)
 	// and the reports engine. (Issue #1572)
+	//
+	// The data root is cfg.DataDir when set; otherwise it is derived from the
+	// configured storage path so the DNA store is always co-located with the
+	// controller's other durable state and isolated per deployment. Falling
+	// back to a bare relative path would put the SQLite file in the process
+	// working directory, where concurrent controllers (and tests) collide.
+	dnaDataRoot := cfg.DataDir
+	if dnaDataRoot == "" {
+		if cfg.Storage.SQLitePath != "" {
+			dnaDataRoot = filepath.Dir(cfg.Storage.SQLitePath)
+		} else if cfg.Storage.FlatfileRoot != "" {
+			dnaDataRoot = filepath.Dir(cfg.Storage.FlatfileRoot)
+		}
+	}
 	dnaStorageConfig := dnaStorage.DefaultConfig()
-	dnaStorageConfig.DataDir = filepath.Join(cfg.DataDir, "dna-reports")
+	dnaStorageConfig.DataDir = filepath.Join(dnaDataRoot, "dna-reports")
 	dnaStorageManager, dnaErr := dnaStorage.NewManager(dnaStorageConfig, logger)
 	if dnaErr != nil {
 		logger.Warn("Failed to initialize DNA storage; steward registry will not survive a controller restart", "error", dnaErr)

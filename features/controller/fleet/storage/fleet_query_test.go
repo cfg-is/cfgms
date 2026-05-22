@@ -287,6 +287,10 @@ func TestQueryFleet_NonSQLiteBackendReturnsError(t *testing.T) {
 	_, err = mgr.ListAllDeviceIDs(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ListAllDeviceIDs requires SQLite backend")
+
+	_, err = mgr.GetLatestByDeviceID(context.Background(), "dev-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GetLatestByDeviceID requires SQLite backend")
 }
 
 // noopBackend is a minimal Backend implementation used to exercise error paths.

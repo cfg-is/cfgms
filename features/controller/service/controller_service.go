@@ -78,7 +78,10 @@ func (s *ControllerService) LoadFromStorage(ctx context.Context) error {
 	defer s.mu.Unlock()
 
 	for _, deviceID := range deviceIDs {
-		record, err := s.dnaStorage.GetLatest(ctx, deviceID)
+		// Read via the SQL-backed path: a freshly started controller has an
+		// empty in-memory index, so GetLatest (index-based) would miss every
+		// device persisted by the previous run.
+		record, err := s.dnaStorage.GetLatestByDeviceID(ctx, deviceID)
 		if err != nil {
 			s.logger.Warn("Failed to load DNA for device from storage",
 				"device_id", deviceID, "error", err)
@@ -335,16 +338,27 @@ func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool
 
 // RegisterSteward records or updates a steward that registered via the HTTP path.
 // It is idempotent: calling it twice with the same stewardID overwrites the entry.
+//
+// The steward is also persisted to durable DNA storage. Registration is the only
+// live-path entry point into the registry, so without this write the registry is
+// memory-only and a controller restart loses every steward (LoadFromStorage finds
+// device_count: 0). Persisting here lets the next startup warm-load the steward
+// before it reconnects, so GET /api/v1/stewards/{id} keeps returning it.
 func (s *ControllerService) RegisterSteward(stewardID, tenantID, transportAddr, status string) error {
+	dna := &common.DNA{Id: stewardID}
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.stewards[stewardID] = &StewardInfo{
 		ID:            stewardID,
 		TenantID:      tenantID,
+		DNA:           dna,
 		LastHeartbeat: time.Now(),
 		Status:        status,
 		Metrics:       make(map[string]string),
 	}
+	s.mu.Unlock()
+
+	s.storeDNA(context.Background(), stewardID, tenantID, dna, status)
 	return nil
 }
 
