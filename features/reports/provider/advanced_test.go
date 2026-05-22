@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/fleet/storage"
-	"github.com/cfgis/cfgms/features/steward/dna/drift"
+	"github.com/cfgis/cfgms/pkg/dna/drift"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )

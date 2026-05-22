@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/reports/interfaces"
-	"github.com/cfgis/cfgms/features/steward/dna/drift"
+	"github.com/cfgis/cfgms/pkg/dna/drift"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 

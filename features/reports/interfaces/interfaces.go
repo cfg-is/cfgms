@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet/storage"
-	"github.com/cfgis/cfgms/features/steward/dna/drift"
+	"github.com/cfgis/cfgms/pkg/dna/drift"
 )
 
 // ExportFormat defines supported export formats
