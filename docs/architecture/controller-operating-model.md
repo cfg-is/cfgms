@@ -222,6 +222,27 @@ The controller monitors steward heartbeats to detect connectivity loss:
 
 These fields must remain distinct. `HeartbeatTimeout` is intentionally short for fast HA-failover detection and must not be used for steward-liveness decisions.
 
+### IP-Trust Establishment
+
+The controller promotes a steward's source IP to **trusted status** only after it has been continuously healthy for at least the configured threshold (default: **30 minutes**). This is implemented by `IPTrustEvaluator` (`features/controller/registration/ip_trust_evaluator.go`, Issue #1694).
+
+**Mechanism:**
+
+1. Each heartbeat from a healthy steward triggers `RecordLiveness(tenantID, stewardID, ip, healthy=true)` via the `TrustEvaluator` wired into the heartbeat service.
+2. The evaluator maintains an in-memory per-(tenantID, ip) timer recording the first time a healthy liveness event was seen.
+3. When `now − firstSeen ≥ threshold`, the evaluator calls `store.AddTrustedRange(tenantID, ip+"/32", false)` and clears the timer.
+4. When the steward goes offline (`healthy=false`), the timer is reset. The IP must sustain liveness from scratch before trust is granted.
+
+**Sandbox-detonation resistance:** Analysis environments (VMs, containers) that auto-detonate after 3–15 minutes cannot sustain the 30-minute liveness window. Their IP is never promoted to trusted status.
+
+**Failure-safe restarts:** The in-memory timer is intentionally non-durable. After a controller restart the 30-minute clock resets, but existing trust entries in the `IPTrustStore` survive. This is fail-safe — the timer reset only delays trust establishment; it never revokes already-trusted IPs.
+
+**Configuration:** `registration.ip_trust_threshold` (YAML duration, default `30m`). The threshold is configurable per deployment; the default of 30 minutes is chosen to be well above sandbox lifetime (3–15 min) while remaining practical for legitimate registrations.
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `registration.ip_trust_threshold` | 30 min | Continuous liveness required before IP is trusted (Issue #1694) |
+
 ### Commands
 
 The controller can send commands to stewards over the gRPC control plane service:

@@ -7,6 +7,10 @@ import (
 	"time"
 
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	"github.com/cfgis/cfgms/features/controller/heartbeat"
+	controllerRegistration "github.com/cfgis/cfgms/features/controller/registration"
+	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // GRPCTransportStatsAdapter adapts the gRPC ControlPlaneProvider's GetStats() to
@@ -133,3 +137,48 @@ func (n *NoOpApplicationQueueStats) GetScriptStats() (queueDepth int64, maxWaitT
 func (n *NoOpApplicationQueueStats) GetConfigQueueDepth() int64 {
 	return 0
 }
+
+// stewardIPTrustAdapter bridges the heartbeat.TrustEvaluator interface to
+// IPTrustEvaluator by resolving tenantID and IP from the StewardStore on each
+// call (Issue #1694). The heartbeat service only knows the stewardID; this
+// adapter does the fleet-registry lookup so IPTrustEvaluator receives the
+// full (tenantID, ip) needed for the liveness gate.
+type stewardIPTrustAdapter struct {
+	evaluator    *controllerRegistration.IPTrustEvaluator
+	stewardStore business.StewardStore
+	logger       logging.Logger
+}
+
+// newStewardIPTrustAdapter creates an adapter wrapping the IP-trust evaluator
+// with a steward store for tenantID/IP resolution.
+func newStewardIPTrustAdapter(
+	evaluator *controllerRegistration.IPTrustEvaluator,
+	stewardStore business.StewardStore,
+	logger logging.Logger,
+) *stewardIPTrustAdapter {
+	return &stewardIPTrustAdapter{
+		evaluator:    evaluator,
+		stewardStore: stewardStore,
+		logger:       logger,
+	}
+}
+
+// RecordLiveness implements heartbeat.TrustEvaluator. It looks up the steward's
+// tenantID and IPAddress from the fleet registry and delegates to IPTrustEvaluator.
+func (a *stewardIPTrustAdapter) RecordLiveness(ctx context.Context, stewardID string, healthy bool) error {
+	if a.stewardStore == nil {
+		return nil
+	}
+	record, err := a.stewardStore.GetSteward(ctx, stewardID)
+	if err != nil {
+		// Steward not yet persisted — skip (best-effort, not an error).
+		return nil
+	}
+	if record.IPAddress == "" {
+		return nil
+	}
+	return a.evaluator.RecordLiveness(ctx, record.TenantID, stewardID, record.IPAddress, healthy)
+}
+
+// Compile-time: stewardIPTrustAdapter satisfies heartbeat.TrustEvaluator.
+var _ heartbeat.TrustEvaluator = (*stewardIPTrustAdapter)(nil)

@@ -282,3 +282,37 @@ func TestRegistrationConfigAutoApprove(t *testing.T) {
 	require.NotNil(t, cfg.Registration)
 	assert.Equal(t, "auto-approve", cfg.Registration.Workflow)
 }
+
+// TestRegistrationConfig_GetIPTrustThreshold verifies the IP-trust threshold
+// getter covers all three cases: nil receiver, zero value, and configured value
+// (Issue #1694).
+func TestRegistrationConfig_GetIPTrustThreshold(t *testing.T) {
+	// Nil receiver returns the 30-minute default.
+	var rc *RegistrationConfig
+	assert.Equal(t, 30*time.Minute, rc.GetIPTrustThreshold(),
+		"nil RegistrationConfig must default to 30 minutes")
+
+	// Zero value returns the 30-minute default.
+	zero := &RegistrationConfig{}
+	assert.Equal(t, 30*time.Minute, zero.GetIPTrustThreshold(),
+		"zero IPTrustThreshold must default to 30 minutes")
+
+	// Configured value is returned as-is.
+	configured := &RegistrationConfig{IPTrustThreshold: Duration(45 * time.Minute)}
+	assert.Equal(t, 45*time.Minute, configured.GetIPTrustThreshold(),
+		"configured threshold must be returned unchanged")
+}
+
+// TestRegistrationConfig_IPTrustThreshold_YAML verifies that the ip_trust_threshold
+// field is correctly parsed from YAML (Issue #1694).
+func TestRegistrationConfig_IPTrustThreshold_YAML(t *testing.T) {
+	yamlInput := "registration:\n  workflow: manual-review\n  ip_trust_threshold: 45m\n"
+
+	cfg := &Config{}
+	err := yaml.Unmarshal([]byte(yamlInput), cfg)
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Registration)
+	assert.Equal(t, 45*time.Minute, cfg.Registration.GetIPTrustThreshold(),
+		"ip_trust_threshold must be parsed from YAML duration string")
+}

@@ -500,6 +500,24 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 		logger.Info("Execution queue and job dispatcher initialized")
 
+		// Wire the IP-trust evaluator into the heartbeat service when the
+		// IP-trust store is available (Issue #1694). The database provider
+		// supplies an IPTrustStore; the OSS composite (flatfile+SQLite) returns
+		// nil, in which case the evaluator is skipped.
+		var heartbeatTrustEvaluator heartbeat.TrustEvaluator
+		if ipTrustStore := storageManager.GetIPTrustStore(); ipTrustStore != nil {
+			stewardStore := storageManager.GetStewardStore()
+			ipTrustThreshold := cfg.Registration.GetIPTrustThreshold()
+			evaluator := controllerRegistration.NewIPTrustEvaluator(controllerRegistration.IPTrustEvaluatorConfig{
+				Store:     ipTrustStore,
+				Threshold: ipTrustThreshold,
+				Logger:    logger,
+			})
+			heartbeatTrustEvaluator = newStewardIPTrustAdapter(evaluator, stewardStore, logger)
+			logger.Info("IP-trust evaluator wired into heartbeat service",
+				"threshold", ipTrustThreshold)
+		}
+
 		// Initialize heartbeat monitoring service
 		logger.Info("Initializing heartbeat monitoring service...")
 		heartbeatService, err = heartbeat.New(&heartbeat.Config{
@@ -514,6 +532,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				}
 			},
 			OnHeartbeatReceived: jobDispatcher.OnHeartbeat,
+			TrustEvaluator:      heartbeatTrustEvaluator,
 			Logger:              logger,
 		})
 		if err != nil {

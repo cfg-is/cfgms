@@ -6,6 +6,7 @@ package heartbeat
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,38 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// recordingTrustEvaluator is a real in-process TrustEvaluator used for testing.
+// It records every RecordLiveness call so tests can assert on call arguments.
+// It is NOT a mock — it is a functional test implementation that satisfies the
+// TrustEvaluator interface contract.
+type recordingTrustEvaluator struct {
+	mu    sync.Mutex
+	calls []trustCall
+}
+
+type trustCall struct {
+	stewardID string
+	healthy   bool
+}
+
+func (r *recordingTrustEvaluator) RecordLiveness(_ context.Context, stewardID string, healthy bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, trustCall{stewardID: stewardID, healthy: healthy})
+	return nil
+}
+
+func (r *recordingTrustEvaluator) allCalls() []trustCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]trustCall, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
+
+// Compile-time: recordingTrustEvaluator satisfies TrustEvaluator.
+var _ TrustEvaluator = (*recordingTrustEvaluator)(nil)
 
 // TestHeartbeatService_StewardOfflineThreshold_60s verifies that:
 //  1. StewardOfflineTimeout defaults to 60 s when not configured.
@@ -100,4 +133,97 @@ func TestHeartbeatService_HAFailoverThreshold_15s(t *testing.T) {
 		"overriding StewardOfflineTimeout must not change HeartbeatTimeout")
 	assert.Equal(t, 120*time.Second, customSvc.stewardOfflineTimeout,
 		"custom StewardOfflineTimeout must be respected")
+}
+
+// TestHeartbeatService_TrustEvaluator_CalledOnHeartbeat verifies that the
+// TrustEvaluator.RecordLiveness is called with healthy=true on each incoming
+// heartbeat and with healthy=false when a steward is marked stale.
+// It also verifies that a nil TrustEvaluator causes no panic (Issue #1694).
+func TestHeartbeatService_TrustEvaluator_CalledOnHeartbeat(t *testing.T) {
+	evaluator := &recordingTrustEvaluator{}
+	_, cp := newTestService(t, func(cfg *Config) {
+		cfg.TrustEvaluator = evaluator
+	})
+	ctx := context.Background()
+
+	const stewardID = "steward-trust-test"
+
+	// Send a heartbeat — evaluator must receive healthy=true for this steward.
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: stewardID,
+		Status:    controlplaneTypes.StatusHealthy,
+		Timestamp: time.Now(),
+	}))
+
+	calls := evaluator.allCalls()
+	require.NotEmpty(t, calls, "RecordLiveness must be called on heartbeat")
+	last := calls[len(calls)-1]
+	assert.Equal(t, stewardID, last.stewardID)
+	assert.True(t, last.healthy, "heartbeat event must report healthy=true")
+}
+
+// TestHeartbeatService_TrustEvaluator_CalledOnStale verifies that the
+// TrustEvaluator.RecordLiveness is called with healthy=false when a steward
+// is detected stale by checkStaleHeartbeats (Issue #1694).
+func TestHeartbeatService_TrustEvaluator_CalledOnStale(t *testing.T) {
+	evaluator := &recordingTrustEvaluator{}
+	svc, cp := newTestService(t, func(cfg *Config) {
+		cfg.TrustEvaluator = evaluator
+		cfg.StewardOfflineTimeout = 60 * time.Second
+	})
+	ctx := context.Background()
+
+	const stewardID = "steward-stale-test"
+
+	// Register the steward via an initial heartbeat.
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: stewardID,
+		Status:    controlplaneTypes.StatusHealthy,
+		Timestamp: time.Now(),
+	}))
+
+	// Force the last-heartbeat timestamp past the stale threshold.
+	svc.mu.Lock()
+	svc.stewards[stewardID].LastHeartbeat = time.Now().Add(-61 * time.Second)
+	svc.stewards[stewardID].Healthy = true
+	svc.mu.Unlock()
+
+	// checkStaleHeartbeats must fire the evaluator with healthy=false.
+	svc.checkStaleHeartbeats()
+
+	unhealthyCalls := 0
+	for _, c := range evaluator.allCalls() {
+		if c.stewardID == stewardID && !c.healthy {
+			unhealthyCalls++
+		}
+	}
+	assert.Equal(t, 1, unhealthyCalls,
+		"RecordLiveness must be called exactly once with healthy=false on stale detection")
+}
+
+// TestHeartbeatService_TrustEvaluator_NilIsNoop verifies that a nil
+// TrustEvaluator does not panic when heartbeats arrive or when stale
+// detection fires (Issue #1694).
+func TestHeartbeatService_TrustEvaluator_NilIsNoop(t *testing.T) {
+	// newTestService wires no TrustEvaluator by default (nil).
+	svc, cp := newTestService(t)
+	ctx := context.Background()
+
+	const stewardID = "steward-nil-eval-test"
+
+	// Send heartbeat — must not panic.
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: stewardID,
+		Status:    controlplaneTypes.StatusHealthy,
+		Timestamp: time.Now(),
+	}))
+
+	// Trigger stale detection — must not panic.
+	svc.mu.Lock()
+	svc.stewards[stewardID].LastHeartbeat = time.Now().Add(-61 * time.Second)
+	svc.stewards[stewardID].Healthy = true
+	svc.mu.Unlock()
+
+	assert.NotPanics(t, svc.checkStaleHeartbeats,
+		"nil TrustEvaluator must not cause a panic")
 }

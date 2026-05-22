@@ -61,6 +61,14 @@ type DNAHashMismatchCallback func(stewardID string)
 // can use the heartbeat as a trigger to drain pending work.
 type HeartbeatReceivedCallback func(stewardID string)
 
+// TrustEvaluator receives liveness signals from the heartbeat service and
+// decides whether an IP should be promoted to trusted status (Issue #1694).
+// The implementation (e.g. IPTrustEvaluator via the server.go adapter) is
+// responsible for resolving tenant and IP information from the steward store.
+type TrustEvaluator interface {
+	RecordLiveness(ctx context.Context, stewardID string, healthy bool) error
+}
+
 // Service monitors steward heartbeats via the ControlPlaneProvider.
 type Service struct {
 	mu sync.RWMutex
@@ -83,6 +91,9 @@ type Service struct {
 	onStatusChange      StatusChangeCallback
 	onDNAHashMismatch   DNAHashMismatchCallback
 	onHeartbeatReceived HeartbeatReceivedCallback
+
+	// Trust evaluator for IP-trust establishment (Issue #1694). Optional — nil disables.
+	trustEvaluator TrustEvaluator
 
 	// Control
 	ctx    context.Context
@@ -127,6 +138,11 @@ type Config struct {
 	// even when the steward remains healthy. Optional — nil disables.
 	OnHeartbeatReceived HeartbeatReceivedCallback
 
+	// TrustEvaluator receives healthy/unhealthy liveness signals so the
+	// IP-trust establishment gate (Issue #1694) can promote IPs to trusted
+	// status after sustained liveness. Optional — nil disables.
+	TrustEvaluator TrustEvaluator
+
 	// Logger for service logging
 	Logger logging.Logger
 }
@@ -163,6 +179,7 @@ func New(cfg *Config) (*Service, error) {
 		onStatusChange:        cfg.OnStatusChange,
 		onDNAHashMismatch:     cfg.OnDNAHashMismatch,
 		onHeartbeatReceived:   cfg.OnHeartbeatReceived,
+		trustEvaluator:        cfg.TrustEvaluator,
 		ctx:                   ctx,
 		cancel:                cancel,
 		logger:                cfg.Logger,
@@ -275,6 +292,14 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 		s.onHeartbeatReceived(hb.StewardID)
 	}
 
+	// Notify the trust evaluator of a healthy liveness event (Issue #1694).
+	if s.trustEvaluator != nil {
+		if err := s.trustEvaluator.RecordLiveness(ctx, hb.StewardID, true); err != nil {
+			s.logger.Warn("Trust evaluator error on healthy heartbeat",
+				"steward_id", hb.StewardID, "error", err)
+		}
+	}
+
 	return nil
 }
 
@@ -315,6 +340,14 @@ func (s *Service) checkStaleHeartbeats() {
 
 				if s.onStatusChange != nil {
 					s.onStatusChange(stewardID, false, *status)
+				}
+
+				// Notify the trust evaluator that this steward went offline (Issue #1694).
+				if s.trustEvaluator != nil {
+					if err := s.trustEvaluator.RecordLiveness(context.Background(), stewardID, false); err != nil {
+						s.logger.Warn("Trust evaluator error on stale detection",
+							"steward_id", stewardID, "error", err)
+					}
 				}
 			}
 		}
