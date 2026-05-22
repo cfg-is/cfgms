@@ -24,6 +24,10 @@ import (
 // runtimeParams are operator-supplied overrides. scriptMeta (optional) and
 // paramPlatformBindings (optional) drive per-device parameter resolution via
 // ResolveParams; when scriptMeta is nil the runtime params are used as-is.
+//
+// requiredAPIScope is the script's stored RequiredAPIScope from ScriptPrivilegeMetadata.
+// When non-empty it is threaded into QueuedExecution.Metadata so the dispatcher can
+// create a JIT relay grant at dispatch time (Issue #1675).
 func SynthesizeScriptRun(
 	ctx context.Context,
 	manager *Manager,
@@ -36,6 +40,7 @@ func SynthesizeScriptRun(
 	runtimeParams map[string]string,
 	scriptMeta *scriptmodule.ScriptMetadata,
 	paramPlatformBindings map[string]string,
+	requiredAPIScope []string,
 ) (string, error) {
 	filter.TenantID = tenantID
 
@@ -88,9 +93,13 @@ func SynthesizeScriptRun(
 		meta := map[string]interface{}{
 			"workflow_run_id": runID,
 			"job_id":          jobID,
+			"tenant_id":       tenantID,
 		}
 		if idempotent {
 			meta["idempotent"] = true
+		}
+		if len(requiredAPIScope) > 0 {
+			meta["required_api_scope"] = requiredAPIScope
 		}
 
 		qe := &scriptmodule.QueuedExecution{

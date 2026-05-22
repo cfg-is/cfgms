@@ -24,6 +24,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/modules/script"
+	scriptrelay "github.com/cfgis/cfgms/features/steward/script_relay"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -86,6 +87,10 @@ type Handler struct {
 	// controllerCARoots is the certificate pool for verifying operator-signed inline
 	// command certificates. When nil, CA chain verification of operator certs is skipped.
 	controllerCARoots *x509.CertPool
+
+	// Issue #1675: per-execution relay registry.
+	// relays maps executionID → *scriptrelay.Relay for CommandRelayResponse dispatch.
+	relays sync.Map
 }
 
 // CommandFunc is a function that handles a specific command type.
@@ -233,6 +238,32 @@ func (h *Handler) RegisterHandler(cmdType cpTypes.CommandType, handler CommandFu
 	defer h.mu.Unlock()
 	h.handlers[cmdType] = handler
 	h.logger.Info("Registered command handler", "type", cmdType)
+}
+
+// RegisterRelayResponseHandler registers a command handler for CommandRelayResponse
+// that dispatches incoming relay responses to the waiting per-execution Relay.
+// Call once after creating the Handler (Issue #1675).
+func (h *Handler) RegisterRelayResponseHandler() {
+	h.RegisterHandler(cpTypes.CommandRelayResponse, func(_ context.Context, cmd *cpTypes.Command) error {
+		execID, _ := cmd.Params["execution_id"].(string)
+		if execID == "" {
+			return nil
+		}
+		if v, ok := h.relays.Load(execID); ok {
+			v.(*scriptrelay.Relay).DeliverRelayResponse(cmd)
+		}
+		return nil
+	})
+}
+
+// registerRelay adds a relay to the handler's per-execution registry.
+func (h *Handler) registerRelay(executionID string, r *scriptrelay.Relay) {
+	h.relays.Store(executionID, r)
+}
+
+// unregisterRelay removes the relay for executionID from the handler's registry.
+func (h *Handler) unregisterRelay(executionID string) {
+	h.relays.Delete(executionID)
 }
 
 // HandleCommand processes an incoming signed command from the controller.

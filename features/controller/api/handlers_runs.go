@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -86,19 +87,17 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Look up admin-configured DNA path overrides for parameter resolution.
+	// Look up admin-configured privilege metadata: DNA path overrides for
+	// parameter resolution and the required API scope (Issue #1675). The scope
+	// is read from the store — never from the request body — so callers cannot
+	// widen it beyond what was set by script:admin.
 	var paramPlatformBindings map[string]string
+	var requiredAPIScope []string
 	if s.privilegeStore != nil {
-		key := &cfgconfig.ConfigKey{
-			TenantID:  tenantID,
-			Namespace: "script-privilege",
-			Name:      req.ScriptID,
-		}
-		if entry, err := s.privilegeStore.GetConfig(r.Context(), key); err == nil && entry != nil {
-			var privMeta ScriptPrivilegeMetadata
-			if json.Unmarshal(entry.Data, &privMeta) == nil {
-				paramPlatformBindings = privMeta.ParamPlatformBindings
-			}
+		meta, loadErr := s.loadPrivilegeMetadata(r.Context(), tenantID, req.ScriptID)
+		if loadErr == nil && meta != nil {
+			paramPlatformBindings = meta.ParamPlatformBindings
+			requiredAPIScope = meta.RequiredAPIScope
 		}
 	}
 
@@ -116,6 +115,7 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		req.Params,
 		scriptMeta,
 		paramPlatformBindings,
+		requiredAPIScope,
 	)
 	if err != nil {
 		s.logger.Error("Failed to synthesize script run",
@@ -361,4 +361,25 @@ func parseRunTarget(target string) (fleet.Filter, error) {
 		return fleet.Filter{}, nil
 	}
 	return fleet.ParseTargetSelector(target)
+}
+
+// loadPrivilegeMetadata retrieves ScriptPrivilegeMetadata for the given script from
+// the privilege store. Returns (nil, nil) when the entry does not exist.
+func (s *Server) loadPrivilegeMetadata(ctx context.Context, tenantID, scriptID string) (*ScriptPrivilegeMetadata, error) {
+	if s.privilegeStore == nil {
+		return nil, nil
+	}
+	entry, err := s.privilegeStore.GetConfig(ctx, &cfgconfig.ConfigKey{
+		TenantID:  tenantID,
+		Namespace: "script-privilege",
+		Name:      scriptID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var meta ScriptPrivilegeMetadata
+	if err := json.Unmarshal(entry.Data, &meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
 }

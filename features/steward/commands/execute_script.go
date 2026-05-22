@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules/script"
+	scriptrelay "github.com/cfgis/cfgms/features/steward/script_relay"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 )
 
@@ -62,6 +63,10 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 		return nil
 	}
 
+	// Extract required_api_scope — non-empty only for library scripts with
+	// RequiredAPIScope set (Issue #1675). Inline run-command scripts never have a scope.
+	requiredAPIScope := extractStringSlice(cmd.Params["required_api_scope"])
+
 	// Extract timeout; default to 15 minutes per spec.
 	timeoutSecs := float64(defaultScriptTimeoutSec)
 	if ts, ok := cmd.Params["timeout_seconds"].(float64); ok && ts > 0 {
@@ -83,6 +88,49 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 		SigningPolicy:    script.SigningPolicyNone, // pre-flight verification is done in preflightScriptSignature
 	}
 
+	// Issue #1675: start per-execution relay when the script needs API access.
+	var relay *scriptrelay.Relay
+	if len(requiredAPIScope) > 0 {
+		r, err := scriptrelay.NewRelay(executionID, h.stewardID, h.sendStatus, h.logger)
+		if err != nil {
+			h.logger.Error("execute_script: failed to start relay",
+				"command_id", cmd.ID,
+				"execution_id", executionID,
+				"error", err)
+			h.sendStatus(ctx, &cpTypes.Event{
+				ID:        newEventID(),
+				Type:      cpTypes.EventCommandFailed,
+				StewardID: h.stewardID,
+				CommandID: cmd.ID,
+				Timestamp: time.Now(),
+				Details: map[string]interface{}{
+					"execution_id": executionID,
+					"error":        "relay start failed: " + err.Error(),
+				},
+			})
+			return nil
+		}
+		if err := r.Start(ctx); err != nil {
+			h.logger.Error("execute_script: failed to start relay listener",
+				"execution_id", executionID,
+				"error", err)
+			r.Stop()
+			return nil
+		}
+		h.registerRelay(executionID, r)
+		cfg.Environment = mergeEnv(cfg.Environment, map[string]string{
+			"CFGMS_API_SOCKET": r.SocketPath(),
+		})
+		// Inject the shell helper function so the script can call cfgms_api / Invoke-CfgApi.
+		switch cfg.Shell {
+		case script.ShellBash, script.ShellSh, script.ShellZsh:
+			cfg.Content = scriptrelay.InjectBashPreamble(cfg.Content, r.SocketPath())
+		case script.ShellPowerShell:
+			cfg.Content = scriptrelay.InjectPowerShellPreamble(cfg.Content, r.SocketPath())
+		}
+		relay = r
+	}
+
 	// Log only non-sensitive correlation data: SHA-256 prefix + byte length, never content.
 	contentHash := sha256.Sum256(contentBytes)
 	h.logger.Info("execute_script: starting",
@@ -100,6 +148,12 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 
 	executor := script.NewExecutor(cfg)
 	result, execErr := executor.Execute(timeoutCtx)
+
+	// Stop relay after execution regardless of outcome so the socket is cleaned up.
+	if relay != nil {
+		relay.Stop()
+		h.unregisterRelay(executionID)
+	}
 
 	if execErr != nil {
 		h.logger.Error("execute_script: executor failed",
@@ -259,6 +313,40 @@ func computeThumbprintFromPEM(pemStr string) string {
 	}
 	sum := sha256.Sum256(block.Bytes)
 	return hex.EncodeToString(sum[:])
+}
+
+// extractStringSlice converts an interface{} value (as stored in cmd.Params after
+// JSON deserialisation) to []string. Accepts []interface{} (from JSON) or []string.
+func extractStringSlice(v interface{}) []string {
+	if v == nil {
+		return nil
+	}
+	if s, ok := v.([]interface{}); ok {
+		result := make([]string, 0, len(s))
+		for _, item := range s {
+			if str, ok := item.(string); ok && str != "" {
+				result = append(result, str)
+			}
+		}
+		return result
+	}
+	if s, ok := v.([]string); ok {
+		return s
+	}
+	return nil
+}
+
+// mergeEnv merges additional key-value pairs into base, returning a new map.
+// base may be nil.
+func mergeEnv(base, additional map[string]string) map[string]string {
+	out := make(map[string]string, len(base)+len(additional))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range additional {
+		out[k] = v
+	}
+	return out
 }
 
 // verifyOperatorCert parses publicKeyPEM as an X.509 certificate and verifies that it
