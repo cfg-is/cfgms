@@ -22,8 +22,19 @@ type Registry interface {
 
 	// Unregister removes a steward connection.
 	//
-	// No-op if stewardID is not registered.
+	// No-op if stewardID is not registered. Removes whatever connection is
+	// currently registered for stewardID — use UnregisterConn from a stream
+	// handler's cleanup path to avoid evicting a newer reconnected connection.
 	Unregister(stewardID string)
+
+	// UnregisterConn removes a steward connection only if it is still the
+	// connection currently registered for its stewardID.
+	//
+	// This is the reconnect-safe cleanup path: when a steward restarts, the
+	// stale stream handler's deferred cleanup must not evict the live
+	// connection that the reconnected steward just registered. No-op if conn
+	// is nil or has been superseded by a newer Register call.
+	UnregisterConn(conn *StewardConnection)
 
 	// Get returns a single steward's connection.
 	//
@@ -125,14 +136,47 @@ func (r *InMemoryRegistry) Unregister(stewardID string) {
 	hooks := r.onDisconnectHooks
 	r.mu.Unlock()
 
-	if exists {
-		for _, fn := range hooks {
-			fn := fn
-			go func() {
-				defer func() { recover() }() //nolint:errcheck // panic value intentionally discarded; no logger available in InMemoryRegistry yet
-				fn(stewardID)
-			}()
-		}
+	r.fireDisconnectHooks(exists, stewardID, hooks)
+}
+
+// UnregisterConn removes conn only if it is still the connection currently
+// registered for conn.StewardID.
+//
+// A steward restart races a stale stream handler against the reconnected
+// steward: the new connection registers first, then the old handler's
+// deferred cleanup runs. An ID-keyed Unregister would delete the live new
+// connection. UnregisterConn compares pointer identity so the stale cleanup
+// becomes a no-op once the connection has been superseded. On removal, fires
+// all registered OnDisconnect hooks in separate goroutines.
+func (r *InMemoryRegistry) UnregisterConn(conn *StewardConnection) {
+	if conn == nil {
+		return
+	}
+
+	r.mu.Lock()
+	current, exists := r.connections[conn.StewardID]
+	removed := exists && current == conn
+	if removed {
+		delete(r.connections, conn.StewardID)
+	}
+	hooks := r.onDisconnectHooks
+	r.mu.Unlock()
+
+	r.fireDisconnectHooks(removed, conn.StewardID, hooks)
+}
+
+// fireDisconnectHooks runs each OnDisconnect hook in its own goroutine when a
+// connection was actually removed.
+func (r *InMemoryRegistry) fireDisconnectHooks(removed bool, stewardID string, hooks []func(string)) {
+	if !removed {
+		return
+	}
+	for _, fn := range hooks {
+		fn := fn
+		go func() {
+			defer func() { recover() }() //nolint:errcheck // panic value intentionally discarded; no logger available in InMemoryRegistry yet
+			fn(stewardID)
+		}()
 	}
 }
 

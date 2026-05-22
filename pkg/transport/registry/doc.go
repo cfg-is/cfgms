@@ -57,7 +57,18 @@
 // The registry does NOT manage connection lifecycle. It does not perform
 // health checks, enforce timeouts, or automatically clean up stale connections.
 // The transport server handler is responsible for calling Register when a
-// steward connects and Unregister when the connection is lost.
+// steward connects and unregistering when the connection is lost.
+//
+// A stream handler's cleanup path must use UnregisterConn, not Unregister: a
+// steward restart races the stale handler's cleanup against the reconnected
+// steward's fresh Register. UnregisterConn compares connection identity so a
+// stale handler cannot evict the live reconnected connection:
+//
+//	conn := &registry.StewardConnection{StewardID: id, Sender: stream}
+//	if err := reg.Register(conn); err != nil {
+//	    return err
+//	}
+//	defer reg.UnregisterConn(conn)
 //
 // The registry does NOT support querying by tenant path. Fan-out target
 // resolution (determining which steward IDs belong to a tenant) is the
