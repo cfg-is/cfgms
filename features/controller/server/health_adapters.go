@@ -6,9 +6,9 @@ import (
 	"context"
 	"time"
 
-	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
 	controllerRegistration "github.com/cfgis/cfgms/features/controller/registration"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )

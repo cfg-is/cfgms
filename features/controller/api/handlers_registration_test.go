@@ -515,6 +515,111 @@ func TestHandleApproveRegistration(t *testing.T) {
 	})
 }
 
+// quarantineHookForTest is a test-only RegistrationApprovalHook that always quarantines.
+type quarantineHookForTest struct{}
+
+func (*quarantineHookForTest) Evaluate(_ context.Context, _ RegistrationInput) (ApprovalDecision, string, error) {
+	return DecisionQuarantine, "test quarantine", nil
+}
+
+// rejectHookForTest is a test-only RegistrationApprovalHook that always rejects.
+type rejectHookForTest struct{}
+
+func (*rejectHookForTest) Evaluate(_ context.Context, _ RegistrationInput) (ApprovalDecision, string, error) {
+	return DecisionReject, "test rejection", nil
+}
+
+func TestHandleRegister_QuarantineReturns202NoCert(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	// No cert manager: quarantine path must not reach cert generation.
+	server, auditMgr := newHandleRegisterServer(t, tokenStore, nil)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_quarantine_test",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, "cfgms_reg_quarantine_test")
+
+	assert.Equal(t, http.StatusAccepted, rec.Code, "quarantine decision must return HTTP 202")
+
+	var pending RegistrationPendingResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pending))
+	assert.NotEmpty(t, pending.PendingID, "pending_id must be non-empty")
+	assert.Equal(t, "test-tenant", pending.TenantID)
+	assert.Equal(t, "pending", pending.Status)
+
+	// Verify no cert fields in the raw JSON — the struct definition must not carry them.
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	assert.NotContains(t, raw, "client_cert", "quarantine response must not contain client_cert")
+	assert.NotContains(t, raw, "client_key", "quarantine response must not contain client_key")
+	assert.NotContains(t, raw, "ca_cert", "quarantine response must not contain ca_cert")
+
+	// Verify the quarantine audit event was emitted.
+	require.NoError(t, auditMgr.Flush(context.Background()))
+	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "registration_quarantined", entries[0].Action)
+	assert.Equal(t, string(business.AuditResultSuccess), string(entries[0].Result))
+	assert.Equal(t, string(business.AuditEventAuthentication), string(entries[0].EventType))
+}
+
+func TestHandleRegister_ApproveReturns200WithCert(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	// Default hook approves unconditionally.
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_approve_test",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, "cfgms_reg_approve_test")
+
+	assert.Equal(t, http.StatusOK, rec.Code, "approve decision must return HTTP 200")
+
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.ClientCert, "client_cert must be present and non-empty on approve")
+	assert.NotEmpty(t, resp.ClientKey, "client_key must be present and non-empty on approve")
+	assert.NotEmpty(t, resp.CACert, "ca_cert must be present and non-empty on approve")
+	assert.NotEmpty(t, resp.StewardID, "steward_id must be present on approve")
+	assert.Equal(t, "test-tenant", resp.TenantID)
+}
+
+func TestHandleRegister_RejectReturns403(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, auditMgr := newHandleRegisterServer(t, tokenStore, nil)
+	server.SetApprovalHook(&rejectHookForTest{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_reject_test",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, "cfgms_reg_reject_test")
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "reject decision must return HTTP 403")
+
+	require.NoError(t, auditMgr.Flush(context.Background()))
+	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "registration_rejected", entries[0].Action)
+	assert.Equal(t, string(business.AuditResultDenied), string(entries[0].Result))
+	assert.Equal(t, string(business.AuditEventSecurityEvent), string(entries[0].EventType))
+}
+
 func TestHandleDenyRegistration(t *testing.T) {
 	server, ts := newRegistrationApprovalServer(t)
 	defer ts.Close()

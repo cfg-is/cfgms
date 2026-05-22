@@ -345,8 +345,11 @@ The administrator chooses which flavor fits the deployment workflow. Both arrive
 1. Administrator creates a registration token or code on the controller.
 2. Steward is started with `--regtoken <token>`.
 3. Steward contacts its compile-time controller URL (HTTPS), submits the token.
-4. Controller validates the token (perennial token: check expiry and revocation; long-lived code: look up the matching tenant/group record), applies the registration approval workflow (`auto-approve` or `manual-review`), and on approval issues mTLS certificates scoped to the steward's tenant/group identity.
-5. Steward imports the issued cert into its local `cert.Manager` (stored under the platform cert dir) for use in TLS handshakes, records the node ID, and establishes a gRPC-over-QUIC transport connection.
+4. Controller validates the token (perennial token: check expiry and revocation; long-lived code: look up the matching tenant/group record) and applies the registration approval workflow:
+   - **Approved** (HTTP 200): controller issues mTLS certificates scoped to the steward's tenant/group identity and returns the full `RegistrationResponse` with `client_cert`, `client_key`, and `ca_cert`.
+   - **Quarantined** (HTTP 202): controller returns a `RegistrationPendingResponse` with a `pending_id` and `status: "pending"`. No certificates are issued. The steward must enter a poll loop (see story 7) waiting for operator approval via `cfg registration approve <id>`.
+   - **Rejected** (HTTP 403): registration is denied; steward exits.
+5. On approval (HTTP 200): steward imports the issued cert into its local `cert.Manager` (stored under the platform cert dir) for use in TLS handshakes, records the node ID, and establishes a gRPC-over-QUIC transport connection.
 6. Steward checks for a cfg from the controller.
 7. Normal operation begins.
 

@@ -552,9 +552,22 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 	regCtx, regCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer regCancel()
 
-	regResp, err := httpClient.Register(regCtx, token)
+	regResp, pendingResp, err := httpClient.Register(regCtx, token)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP registration failed: %w", err)
+	}
+
+	// Issue #1693: quarantine returns 202 with no certificates. The steward cannot
+	// proceed to transport setup without certs. The poll loop is deferred to story 7;
+	// surface the pending state as a retriable error so the caller knows to retry.
+	if pendingResp != nil {
+		logger.Info("Registration is pending operator approval — no certificates issued",
+			"pending_id", pendingResp.PendingID,
+			"steward_id", pendingResp.StewardID,
+			"tenant_id", pendingResp.TenantID,
+			"status", pendingResp.Status)
+		return nil, fmt.Errorf("registration pending operator approval (pending_id=%s): administrator must run 'cfg registration approve %s'",
+			pendingResp.PendingID, pendingResp.PendingID)
 	}
 
 	logger.Info("Registration successful via HTTP",
