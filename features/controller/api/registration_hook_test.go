@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +27,65 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// testIPTrustStore is a minimal in-memory IPTrustStore for hook unit tests.
+type testIPTrustStore struct {
+	mu      sync.RWMutex
+	trusted map[string]bool // key: tenantID+"\x00"+ip
+	err     error           // when non-nil, IsTrusted returns this error
+}
+
+func newTestIPTrustStore() *testIPTrustStore {
+	return &testIPTrustStore{trusted: make(map[string]bool)}
+}
+
+func (s *testIPTrustStore) key(tenantID, ip string) string { return tenantID + "\x00" + ip }
+
+func (s *testIPTrustStore) AddTrustedRange(_ context.Context, tenantID, cidr string, _ bool) error {
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return err
+	}
+	// For testing simplicity, record the network address as "trusted".
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.trusted[s.key(tenantID, ipNet.IP.String())] = true
+	return nil
+}
+
+func (s *testIPTrustStore) IsTrusted(_ context.Context, tenantID, ip string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.err != nil {
+		return false, s.err
+	}
+	return s.trusted[s.key(tenantID, ip)], nil
+}
+
+func (s *testIPTrustStore) ListTrustedRanges(_ context.Context, _ string) ([]*business.IPTrustEntry, error) {
+	return nil, nil
+}
+func (s *testIPTrustStore) RevokeTrustedRange(_ context.Context, _, _ string) error { return nil }
+func (s *testIPTrustStore) RecordHealthySteward(_ context.Context, _, _ string, _ time.Time) error {
+	return nil
+}
+func (s *testIPTrustStore) GetLastActivity(_ context.Context, _, _ string) (*business.IPTrustActivity, error) {
+	return nil, nil
+}
+
+// setTrusted marks an IP as trusted for a tenant.
+func (s *testIPTrustStore) setTrusted(tenantID, ip string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.trusted[s.key(tenantID, ip)] = true
+}
+
+// setError makes IsTrusted return the given error.
+func (s *testIPTrustStore) setError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
+}
 
 // newTestApprovalHook builds a WorkflowApprovalHook backed by real git storage and workflow engine.
 func newTestApprovalHook(t *testing.T) (*WorkflowApprovalHook, cfgconfig.ConfigStore) {
@@ -98,24 +159,97 @@ func (*errorHook) Evaluate(_ context.Context, _ RegistrationInput) (ApprovalDeci
 	return DecisionApprove, "", fmt.Errorf("hook failure injected by test")
 }
 
-// --- DefaultApprovalHook ---
+// --- AlwaysApproveHook (replaces removed DefaultApprovalHook) ---
 
-func TestDefaultApprovalHook_AlwaysApproves(t *testing.T) {
-	hook := &DefaultApprovalHook{}
+func TestAlwaysApproveHook_AlwaysApproves(t *testing.T) {
+	hook := &AlwaysApproveHook{}
 	decision, reason, err := hook.Evaluate(context.Background(), sampleInput())
 	require.NoError(t, err)
 	assert.Equal(t, DecisionApprove, decision)
 	assert.Empty(t, reason)
 }
 
-func TestDefaultApprovalHook_ApprovesWithExpiredToken(t *testing.T) {
-	hook := &DefaultApprovalHook{}
+func TestAlwaysApproveHook_ApprovesWithExpiredToken(t *testing.T) {
+	hook := &AlwaysApproveHook{}
 	exp := time.Now().Add(-1 * time.Hour) // expired
 	input := sampleInput()
 	input.Token.ExpiresAt = &exp
 	decision, _, err := hook.Evaluate(context.Background(), input)
 	require.NoError(t, err)
 	assert.Equal(t, DecisionApprove, decision)
+}
+
+// --- IPTrustApprovalHook ---
+
+func TestIPTrustApprovalHook_TrustedIP_ReturnsApprove(t *testing.T) {
+	store := newTestIPTrustStore()
+	store.setTrusted("test-tenant", "192.168.1.100")
+
+	hook := NewIPTrustApprovalHook(store, logging.NewNoopLogger())
+	decision, reason, err := hook.Evaluate(context.Background(), sampleInput())
+
+	require.NoError(t, err, "Evaluate must not return an error for trusted IP")
+	assert.Equal(t, DecisionApprove, decision, "trusted IP must get DecisionApprove")
+	assert.Empty(t, reason)
+}
+
+func TestIPTrustApprovalHook_UntrustedIP_ReturnsQuarantine(t *testing.T) {
+	store := newTestIPTrustStore()
+	// "192.168.1.100" is NOT added as trusted.
+
+	hook := NewIPTrustApprovalHook(store, logging.NewNoopLogger())
+	decision, reason, err := hook.Evaluate(context.Background(), sampleInput())
+
+	require.NoError(t, err, "Evaluate must not return an error for untrusted IP")
+	assert.Equal(t, DecisionQuarantine, decision, "untrusted IP must get DecisionQuarantine")
+	assert.Empty(t, reason)
+}
+
+func TestIPTrustApprovalHook_StoreError_ReturnsQuarantine(t *testing.T) {
+	store := newTestIPTrustStore()
+	store.setError(fmt.Errorf("store unavailable"))
+
+	hook := NewIPTrustApprovalHook(store, logging.NewNoopLogger())
+	decision, reason, err := hook.Evaluate(context.Background(), sampleInput())
+
+	// Fail-closed: store error must produce quarantine with nil error so the
+	// registration handler honours the quarantine decision instead of defaulting to approve.
+	require.NoError(t, err, "Evaluate must return nil error on store failure (fail-closed)")
+	assert.Equal(t, DecisionQuarantine, decision, "store error must fail closed (quarantine)")
+	assert.Empty(t, reason)
+}
+
+func TestIPTrustApprovalHook_NilStore_ReturnsQuarantine(t *testing.T) {
+	hook := NewIPTrustApprovalHook(nil, logging.NewNoopLogger())
+	decision, _, err := hook.Evaluate(context.Background(), sampleInput())
+
+	require.NoError(t, err)
+	assert.Equal(t, DecisionQuarantine, decision, "nil store must fail closed (quarantine)")
+}
+
+func TestIPTrustApprovalHook_DifferentTenants_Isolated(t *testing.T) {
+	store := newTestIPTrustStore()
+	// Only trust the IP under "tenant-a", not "tenant-b".
+	store.setTrusted("tenant-a", "10.0.0.1")
+
+	hook := NewIPTrustApprovalHook(store, logging.NewNoopLogger())
+
+	inputA := RegistrationInput{
+		Token:    &registration.Token{Token: "tok", TenantID: "tenant-a"},
+		SourceIP: "10.0.0.1",
+	}
+	inputB := RegistrationInput{
+		Token:    &registration.Token{Token: "tok", TenantID: "tenant-b"},
+		SourceIP: "10.0.0.1",
+	}
+
+	decA, _, err := hook.Evaluate(context.Background(), inputA)
+	require.NoError(t, err)
+	assert.Equal(t, DecisionApprove, decA, "tenant-a trusts this IP")
+
+	decB, _, err := hook.Evaluate(context.Background(), inputB)
+	require.NoError(t, err)
+	assert.Equal(t, DecisionQuarantine, decB, "tenant-b does not trust this IP")
 }
 
 // --- WorkflowApprovalHook: no workflow configured ---
@@ -293,7 +427,7 @@ func TestWorkflowHandler_NewRegistrationApprovalHook_NilEngine_ReturnsDefault(t 
 	hook := h.NewRegistrationApprovalHook(logger)
 	require.NotNil(t, hook)
 
-	// Should be the DefaultApprovalHook (nil engine → always approve)
+	// nil engine → AlwaysApproveHook (always approve)
 	decision, _, err := hook.Evaluate(context.Background(), sampleInput())
 	require.NoError(t, err)
 	assert.Equal(t, DecisionApprove, decision)

@@ -110,11 +110,21 @@ type Config struct {
 type RegistrationConfig struct {
 	// Workflow selects the built-in registration approval workflow.
 	// Valid values:
-	//   "auto-approve" (default) — all registrations approved immediately; safe for development.
-	//   "manual-review"          — stewards quarantined pending operator approval via `cfg registration approve`.
-	// If empty and no "steward-registration-approval" workflow exists in the config store,
-	// the controller defaults to "auto-approve" behaviour.
+	//   "ip-trust" (default) — auto-approve if the source IP is trusted for the tenant;
+	//     quarantine otherwise. The first steward from a new tenant always quarantines
+	//     until its IP is established via the 30-minute liveness window (Issue #1694).
+	//   "manual-review"      — stewards quarantined pending operator approval via
+	//     `cfg registration approve`.
+	//   "auto-approve"       — DEPRECATED. Approves all registrations immediately.
+	//     Use only in dev/test environments. A startup warning is logged.
+	// If empty, defaults to "ip-trust".
 	Workflow string `yaml:"workflow"`
+
+	// TrustedProxies is a list of CIDR ranges identifying reverse proxies that are
+	// trusted to set the X-Forwarded-For header. When empty (the default),
+	// X-Forwarded-For is never trusted and the TCP peer address is always used
+	// for the IP-trust decision. Parse once at startup, not per-request (Issue #1695).
+	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
 
 	// ApprovalMode selects the registration approval hook implementation.
 	// Valid values:

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -87,6 +88,7 @@ type Server struct {
 	registrationQueue       sync.Map                       // Issue #1568: quarantined stewards awaiting approval
 	runManager              *controllerrun.Manager         // Issue #1673: run/job/execution model
 	runExecutionQueue       *script.ExecutionQueue         // Issue #1673: queue for ad-hoc run synthesis
+	trustedProxies          []net.IPNet                    // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
 	stopCleanup             chan struct{}                  // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                  // closed when cleanup goroutine exits
 	closeOnce               sync.Once                      // idempotent Close
@@ -146,6 +148,21 @@ func New(
 		return nil, fmt.Errorf("failed to initialize secret store: %w", err)
 	}
 
+	// Issue #1695: Parse TrustedProxies CIDRs once at startup so per-request
+	// extractSourceIP calls never parse strings.
+	var trustedProxies []net.IPNet
+	if cfg.Registration != nil {
+		for _, cidr := range cfg.Registration.TrustedProxies {
+			_, ipNet, parseErr := net.ParseCIDR(cidr)
+			if parseErr != nil {
+				logger.Warn("Invalid trusted_proxy CIDR, skipping",
+					"cidr", logging.SanitizeLogValue(cidr), "error", parseErr)
+				continue
+			}
+			trustedProxies = append(trustedProxies, *ipNet)
+		}
+	}
+
 	server := &Server{
 		cfg:                     cfg,
 		logger:                  logger,
@@ -163,7 +180,8 @@ func New(
 		signerCertSerial:        signerCertSerial,         // Story #378: For registration handler
 		apiKeys:                 make(map[string]*APIKey), // In-memory cache
 		secretStore:             secretStore,              // M-AUTH-1: Central secrets provider
-		approvalHook:            &DefaultApprovalHook{},   // Issue #422: accept-all default
+		approvalHook:            &IPTrustApprovalHook{},   // Issue #1695: nil store → fail-closed (quarantine all)
+		trustedProxies:          trustedProxies,           // Issue #1695: parsed from TrustedProxies config
 		auditManager:            auditManager,             // Issue #775: registration audit events
 		commandPublisher:        commandPublisher,         // Issue #1319: fan-out config push to active stewards
 		pushStore:               pushStore,                // Issue #1320: durable push-state persistence for HA failover

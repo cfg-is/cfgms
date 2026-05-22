@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -207,7 +208,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	{
 		input := RegistrationInput{
 			Token:    token,
-			SourceIP: extractSourceIP(r),
+			SourceIP: extractSourceIP(r, s.trustedProxies),
 		}
 		decision, reason, hookErr := s.approvalHook.Evaluate(r.Context(), input)
 		if hookErr != nil {
@@ -241,7 +242,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 						PendingID:    pendingID,
 						StewardID:    stewardID,
 						TenantID:     token.TenantID,
-						SourceIP:     extractSourceIP(r),
+						SourceIP:     extractSourceIP(r, s.trustedProxies),
 						RegisteredAt: time.Now().UTC(),
 					})
 				}
@@ -422,21 +423,39 @@ func replaceBindAddress(addr string) string {
 }
 
 // extractSourceIP returns the source IP from the HTTP request.
-// It prefers X-Forwarded-For (first entry) when present, falling back to RemoteAddr.
-func extractSourceIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first address (client IP before any proxies)
-		if idx := strings.Index(xff, ","); idx != -1 {
-			return strings.TrimSpace(xff[:idx])
+// It honors X-Forwarded-For only when the TCP peer (r.RemoteAddr) is within
+// trustedProxies. When trustedProxies is empty or the peer is not in the list,
+// the TCP peer address is always used — XFF is untrusted and ignored.
+// This prevents spoofing: an attacker cannot bypass IP-trust checks by injecting
+// a forged X-Forwarded-For header from an untrusted network position.
+func extractSourceIP(r *http.Request, trustedProxies []net.IPNet) string {
+	// Parse the TCP peer host (strip port). net.SplitHostPort handles IPv6
+	// bracket notation ([::1]:port) correctly; fall back to the raw value
+	// if SplitHostPort fails (e.g. no port present, unlikely for net/http).
+	peerHost := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		peerHost = host
+	}
+
+	// Honor XFF only when the peer is a trusted proxy.
+	if len(trustedProxies) > 0 {
+		peerIP := net.ParseIP(peerHost)
+		if peerIP != nil {
+			for i := range trustedProxies {
+				if trustedProxies[i].Contains(peerIP) {
+					if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+						if idx := strings.Index(xff, ","); idx != -1 {
+							return strings.TrimSpace(xff[:idx])
+						}
+						return strings.TrimSpace(xff)
+					}
+					break
+				}
+			}
 		}
-		return strings.TrimSpace(xff)
 	}
-	// RemoteAddr is "host:port"; strip the port
-	addr := r.RemoteAddr
-	if idx := strings.LastIndex(addr, ":"); idx != -1 {
-		return addr[:idx]
-	}
-	return addr
+
+	return peerHost
 }
 
 // emitRegistrationAudit records a registration audit event. It is a no-op when auditManager is nil.
