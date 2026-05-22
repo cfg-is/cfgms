@@ -54,6 +54,10 @@ type Dispatcher struct {
 	// before Start; nil when no run manager is wired.
 	runSink RunCompletionSink
 
+	// grantManager, when set, creates and consumes per-execution relay grants
+	// (Issue #1675). Set once via SetGrantManager before Start; nil = no grants.
+	grantManager GrantManager
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -70,6 +74,15 @@ type Dispatcher struct {
 // interface rather than importing the run package directly.
 type RunCompletionSink interface {
 	RecordJobCompletion(ctx context.Context, runID, jobID, executionID string, failed bool) error
+}
+
+// GrantManager creates and consumes per-execution relay grants (Issue #1675).
+// It is implemented by *run.Manager.
+type GrantManager interface {
+	// CreateGrant records a JIT relay grant at dispatch time.
+	CreateGrant(deviceID, tenantID, executionID string, scope []string, ttl time.Duration) error
+	// ConsumeGrant marks the grant consumed when the execution completes.
+	ConsumeGrant(executionID string) error
 }
 
 // Config holds Dispatcher configuration.
@@ -122,6 +135,12 @@ func New(cfg *Config) (*Dispatcher, error) {
 // Start so the field is published before the event subscription begins.
 func (d *Dispatcher) SetRunCompletionSink(sink RunCompletionSink) {
 	d.runSink = sink
+}
+
+// SetGrantManager wires the grant manager for zero-trust script API access
+// (Issue #1675). Must be called before Start.
+func (d *Dispatcher) SetGrantManager(gm GrantManager) {
+	d.grantManager = gm
 }
 
 // Start begins the polling loop and subscribes to EventScriptCompleted events.
@@ -332,6 +351,24 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		params["environment"] = prepared.Environment
 	}
 
+	// Issue #1675: create JIT relay grant when the script requires API access.
+	// The scope comes from QueuedExecution.Metadata["required_api_scope"] which is set
+	// by SynthesizeScriptRun from the stored ScriptPrivilegeMetadata — never from runtime input.
+	if scope := extractMetaStringSlice(exec.Metadata, "required_api_scope"); len(scope) > 0 {
+		params["required_api_scope"] = scope
+
+		if d.grantManager != nil {
+			tenantID, _ := exec.Metadata["tenant_id"].(string)
+			ttl := exec.Timeout
+			if ttl <= 0 {
+				ttl = 15 * time.Minute // matches defaultScriptTimeoutSec in steward handler
+			}
+			if err := d.grantManager.CreateGrant(deviceID, tenantID, exec.ExecutionID, scope, ttl); err != nil {
+				return fmt.Errorf("create execution grant: %w", err)
+			}
+		}
+	}
+
 	cmd := &controlplaneTypes.Command{
 		ID:        uuid.New().String(),
 		Type:      controlplaneTypes.CommandExecuteScript,
@@ -495,6 +532,15 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 					"error", err)
 			}
 		}
+
+		// Issue #1675: consume the relay grant on execution completion so further
+		// relay requests return 403. Best-effort — a failure must not stall dispatch.
+		if d.grantManager != nil {
+			if err := d.grantManager.ConsumeGrant(executionID); err != nil {
+				d.logger.Debug("ConsumeGrant: no grant for execution (inline or no API scope)",
+					"execution_id", logging.SanitizeLogValue(executionID))
+			}
+		}
 	}
 
 	// Release the per-device lock so the next queued execution can be dispatched.
@@ -509,5 +555,30 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 		}()
 	}
 
+	return nil
+}
+
+// extractMetaStringSlice extracts a []string value from a metadata map.
+// Handles []interface{} (JSON-decoded) and []string (direct).
+func extractMetaStringSlice(meta map[string]interface{}, key string) []string {
+	if meta == nil {
+		return nil
+	}
+	v := meta[key]
+	if v == nil {
+		return nil
+	}
+	if s, ok := v.([]interface{}); ok {
+		result := make([]string, 0, len(s))
+		for _, item := range s {
+			if str, ok := item.(string); ok && str != "" {
+				result = append(result, str)
+			}
+		}
+		return result
+	}
+	if s, ok := v.([]string); ok {
+		return s
+	}
 	return nil
 }

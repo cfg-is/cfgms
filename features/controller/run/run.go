@@ -21,6 +21,12 @@ var ErrNotFound = errors.New("run not found")
 // ErrAlreadyTerminal is returned when an operation targets a run that has already reached a terminal state.
 var ErrAlreadyTerminal = errors.New("run is already in a terminal state")
 
+// ErrGrantNotFound is returned when no active grant exists for (deviceID, executionID).
+var ErrGrantNotFound = errors.New("execution grant not found or expired")
+
+// ErrGrantConsumed is returned when the grant has already been consumed.
+var ErrGrantConsumed = errors.New("execution grant already consumed")
+
 // RunStatus represents the lifecycle state of a run.
 type RunStatus string
 
@@ -81,6 +87,18 @@ type JobRecord struct {
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
+// ExecutionGrant records a per-execution API access grant created at dispatch time.
+// Grants are consumed when the execution completes and expire after their TTL.
+type ExecutionGrant struct {
+	DeviceID    string
+	TenantID    string
+	ExecutionID string
+	Scope       []string
+	CreatedAt   time.Time
+	ExpiresAt   time.Time
+	Consumed    bool
+}
+
 // RunStore is the durable storage interface for run and job records.
 type RunStore interface {
 	CreateRun(*RunRecord) error
@@ -90,6 +108,22 @@ type RunStore interface {
 	UpdateJobStatus(jobID string, status JobStatus, executionID string) error
 	UpdateRunStatus(runID string, status RunStatus) error
 	UpdateRunCounts(runID string, completedJobs, failedJobs int) error
+
+	// Grant management for zero-trust script API access (Issue #1675).
+
+	// CreateExecutionGrant records a JIT grant keyed on (deviceID, executionID).
+	// tenantID is stored with the grant so the relay handler can construct a scoped Principal.
+	// The grant expires after ttl elapses and is also invalidated by ConsumeGrant.
+	CreateExecutionGrant(deviceID, tenantID, executionID string, scope []string, ttl time.Duration) error
+
+	// LookupGrant returns the grant for (deviceID, executionID).
+	// Returns ErrGrantNotFound when no grant exists or it is expired.
+	// Returns ErrGrantConsumed when the grant has been consumed.
+	LookupGrant(deviceID, executionID string) (*ExecutionGrant, error)
+
+	// ConsumeGrant marks the grant for executionID as consumed so further relay
+	// requests return ErrGrantConsumed. Called when AcknowledgeCompletion fires.
+	ConsumeGrant(executionID string) error
 }
 
 // RunStoreSQL is the SQLite-backed implementation of RunStore.
@@ -104,8 +138,8 @@ func NewRunStoreSQL(db *sql.DB) *RunStoreSQL {
 	return &RunStoreSQL{db: db}
 }
 
-// Init creates the script_runs and script_run_jobs tables and their indexes if
-// they do not already exist. Safe to call multiple times (idempotent).
+// Init creates the script_runs, script_run_jobs, and execution_grants tables and
+// their indexes if they do not already exist. Safe to call multiple times (idempotent).
 func (s *RunStoreSQL) Init(_ context.Context) error {
 	const createRuns = `
 CREATE TABLE IF NOT EXISTS script_runs (
@@ -135,7 +169,20 @@ CREATE TABLE IF NOT EXISTS script_run_jobs (
 	const createJobsIndex = `
 CREATE INDEX IF NOT EXISTS idx_srj_run_id ON script_run_jobs(run_id);`
 
-	for _, stmt := range []string{createRuns, createJobs, createJobsIndex} {
+	const createGrants = `
+CREATE TABLE IF NOT EXISTS execution_grants (
+    execution_id TEXT NOT NULL PRIMARY KEY,
+    device_id    TEXT NOT NULL,
+    tenant_id    TEXT NOT NULL,
+    scope_json   TEXT NOT NULL,
+    created_at   DATETIME NOT NULL,
+    expires_at   DATETIME NOT NULL,
+    consumed     INTEGER NOT NULL DEFAULT 0
+);`
+	const createGrantsIndex = `
+CREATE INDEX IF NOT EXISTS idx_eg_device ON execution_grants(device_id, execution_id);`
+
+	for _, stmt := range []string{createRuns, createJobs, createJobsIndex, createGrants, createGrantsIndex} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("run store init: %w", err)
 		}
@@ -293,6 +340,60 @@ func (s *RunStoreSQL) UpdateRunCounts(runID string, completedJobs, failedJobs in
 	return err
 }
 
+// CreateExecutionGrant stores a JIT relay grant keyed on (deviceID, executionID).
+func (s *RunStoreSQL) CreateExecutionGrant(deviceID, tenantID, executionID string, scope []string, ttl time.Duration) error {
+	scopeJSON, err := json.Marshal(scope)
+	if err != nil {
+		return fmt.Errorf("run store create grant: marshal scope: %w", err)
+	}
+	now := time.Now().UTC()
+	const q = `
+INSERT INTO execution_grants (execution_id, device_id, tenant_id, scope_json, created_at, expires_at, consumed)
+VALUES (?, ?, ?, ?, ?, ?, 0)`
+	_, err = s.db.Exec(q, executionID, deviceID, tenantID, string(scopeJSON), now, now.Add(ttl))
+	return err
+}
+
+// LookupGrant returns the grant for (deviceID, executionID).
+// Returns ErrGrantNotFound when no matching unexpired grant exists.
+// Returns ErrGrantConsumed when the grant has been consumed.
+func (s *RunStoreSQL) LookupGrant(deviceID, executionID string) (*ExecutionGrant, error) {
+	const q = `
+SELECT device_id, tenant_id, execution_id, scope_json, created_at, expires_at, consumed
+FROM execution_grants
+WHERE execution_id = ? AND device_id = ?`
+
+	row := s.db.QueryRow(q, executionID, deviceID)
+	g := &ExecutionGrant{}
+	var scopeJSON string
+	var consumed int
+	err := row.Scan(&g.DeviceID, &g.TenantID, &g.ExecutionID, &scopeJSON, &g.CreatedAt, &g.ExpiresAt, &consumed)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrGrantNotFound
+		}
+		return nil, fmt.Errorf("run store lookup grant: %w", err)
+	}
+	if consumed != 0 {
+		return nil, ErrGrantConsumed
+	}
+	if time.Now().After(g.ExpiresAt) {
+		return nil, ErrGrantNotFound
+	}
+	if err := json.Unmarshal([]byte(scopeJSON), &g.Scope); err != nil {
+		return nil, fmt.Errorf("run store lookup grant: unmarshal scope: %w", err)
+	}
+	g.Consumed = consumed != 0
+	return g, nil
+}
+
+// ConsumeGrant marks the grant for executionID as consumed.
+func (s *RunStoreSQL) ConsumeGrant(executionID string) error {
+	const q = `UPDATE execution_grants SET consumed = 1 WHERE execution_id = ?`
+	_, err := s.db.Exec(q, executionID)
+	return err
+}
+
 // Close releases the underlying database connection. After Close, the store
 // must not be used. Safe to call on a store backed by a shared *sql.DB only
 // when that connection is dedicated to the run store.
@@ -431,6 +532,22 @@ func (m *Manager) RecordJobCompletion(_ context.Context, runID, jobID, execution
 		return fmt.Errorf("record job completion: update run status for run %s: %w", runID, err)
 	}
 	return nil
+}
+
+// CreateGrant creates a JIT relay grant. Called by the dispatcher at dispatch time.
+func (m *Manager) CreateGrant(deviceID, tenantID, executionID string, scope []string, ttl time.Duration) error {
+	return m.store.CreateExecutionGrant(deviceID, tenantID, executionID, scope, ttl)
+}
+
+// LookupGrant validates and returns the grant for (deviceID, executionID).
+// Used by the relay handler to construct the scoped Principal.
+func (m *Manager) LookupGrant(deviceID, executionID string) (*ExecutionGrant, error) {
+	return m.store.LookupGrant(deviceID, executionID)
+}
+
+// ConsumeGrant marks the grant consumed. Called by the dispatcher on AcknowledgeCompletion.
+func (m *Manager) ConsumeGrant(executionID string) error {
+	return m.store.ConsumeGrant(executionID)
 }
 
 // Close releases resources held by the Manager's store. If the store does not

@@ -30,6 +30,10 @@ const (
 	// CommandExecuteScript runs a script on the steward via the script module executor.
 	// Params: script_content (base64), shell, execution_id, timeout_seconds, execution_context.
 	CommandExecuteScript CommandType = "execute_script"
+
+	// CommandRelayResponse carries the controller's HTTP response back to the steward
+	// relay goroutine. Params: execution_id, sequence, status (int), headers (map), body (base64).
+	CommandRelayResponse CommandType = "relay_response"
 )
 
 // Command represents a command sent from controller to steward.
@@ -90,6 +94,11 @@ const (
 	// EventScriptCompleted indicates an execute_script command finished running.
 	// The exit code may be non-zero; this event is emitted regardless of exit code.
 	EventScriptCompleted EventType = "script_completed"
+
+	// EventRelayRequest is published by the steward to relay a script's REST API
+	// call to the controller. Details carry method, path, headers, body, execution_id,
+	// and a per-execution sequence number for correlation.
+	EventRelayRequest EventType = "relay_request"
 )
 
 // Event represents an event published from steward to controller.

@@ -176,8 +176,21 @@ func hasHeaderCredentials(r *http.Request) bool {
 // States: (a) admin-marked cert only → admin principal; (b) admin-marked cert + header → 400;
 // (c) cert without admin marker → fall through to API-key auth; (d) no cert → API-key auth.
 // M-AUTH-1: Load API keys from secret store on-demand if not in cache.
+// Issue #1675: relay-injected principals bypass normal auth when relayPrincipalKey is set.
 func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Issue #1675: relay principal — pre-validated by RelayHandler after grant check.
+		// The relayPrincipalKey is set only in the relay handler after LookupGrant succeeds,
+		// so this path can only be reached via an internal in-process call, never from the
+		// network. The principalContextKey is also set by the relay handler before calling
+		// ServeHTTP, so the context already carries both keys.
+		if injected, ok := r.Context().Value(relayPrincipalKey).(*Principal); ok && injected != nil {
+			// principalContextKey is already set by the relay handler; just proceed.
+			_ = injected // already in context
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Test endpoints require explicit opt-in via CFGMS_ENABLE_TEST_ENDPOINTS=true.
 		// Without this env var, test endpoints require authentication like everything else.
 		if os.Getenv("CFGMS_ENABLE_TEST_ENDPOINTS") == "true" {
@@ -369,8 +382,20 @@ type AuthorizationDecision struct {
 func (s *Server) requirePermission(resourceType, action string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip permission check if RBAC service is not available
+			// Skip permission check if RBAC service is not available.
+			// Relay principals are always enforced inline — scope isolation is their
+			// entire security guarantee and must hold even without the RBAC audit path.
 			if s.rbacService == nil {
+				if _, isRelay := r.Context().Value(relayPrincipalKey).(*Principal); isRelay {
+					p, _ := r.Context().Value(principalContextKey).(*Principal)
+					permID := s.buildPermissionID(resourceType, action)
+					if !s.hasPermission(p, permID) {
+						s.writeErrorResponse(w, http.StatusForbidden, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS")
+						return
+					}
+					next.ServeHTTP(w, r)
+					return
+				}
 				s.logger.Warn("RBAC service not available, skipping permission check")
 				next.ServeHTTP(w, r)
 				return

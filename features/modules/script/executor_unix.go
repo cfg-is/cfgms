@@ -8,8 +8,11 @@ package script
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"os/user"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -96,6 +99,34 @@ func detectLinuxUserViaWho() (string, error) {
 // unixDetectLoggedInUser is a test hook; override in tests to inject user detection
 // errors without calling the real OS utilities (loginctl/who/stat).
 var unixDetectLoggedInUser = detectLoggedInUser
+
+// ResolveExecutionUID returns the numeric UID the script will run as under the
+// given execution context. ExecutionContextSystem resolves to the steward
+// process UID (the script runs in-process under the steward's identity).
+// ExecutionContextLoggedInUser detects the logged-in console user and resolves
+// its UID; ErrNoUserLoggedIn is propagated when no interactive user is present.
+//
+// Callers use this to chown the per-execution relay socket so a script running
+// under a different UID (logged_in_user context, launched via `sudo -u`) can
+// still connect to it.
+func ResolveExecutionUID(execCtx ExecutionContext) (int, error) {
+	if execCtx != ExecutionContextLoggedInUser {
+		return os.Getuid(), nil
+	}
+	username, err := unixDetectLoggedInUser()
+	if err != nil {
+		return 0, err
+	}
+	u, err := user.Lookup(username)
+	if err != nil {
+		return 0, fmt.Errorf("lookup logged-in user %q: %w", username, err)
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return 0, fmt.Errorf("parse uid %q for user %q: %w", u.Uid, username, err)
+	}
+	return uid, nil
+}
 
 // applyExecutionContext returns a (potentially modified) command configured to run
 // under the execution context specified in config, the actual OS user the script will

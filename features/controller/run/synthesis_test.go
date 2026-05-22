@@ -62,7 +62,7 @@ func TestSynthesizeScriptRun_TwoDevices_CreatesTwoJobs(t *testing.T) {
 		"scripts/deploy.sh", "v1.0.0",
 		scriptmodule.ShellBash,
 		map[string]string{"env": "prod"},
-		nil, nil,
+		nil, nil, nil,
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, runID)
@@ -123,7 +123,7 @@ func TestSynthesizeScriptRun_QueuedExecutionIDs_MatchJobRecords(t *testing.T) {
 		fleet.Filter{},
 		"scripts/check.sh", "",
 		scriptmodule.ShellBash,
-		nil, nil, nil,
+		nil, nil, nil, nil,
 	)
 	require.NoError(t, err)
 
@@ -154,7 +154,7 @@ func TestSynthesizeScriptRun_NoDevices_CreatesEmptyRun(t *testing.T) {
 		fleet.Filter{},
 		"scripts/noop.sh", "",
 		scriptmodule.ShellBash,
-		nil, nil, nil,
+		nil, nil, nil, nil,
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, runID)
@@ -189,7 +189,7 @@ func TestSynthesizeScriptRun_TenantIsolation(t *testing.T) {
 		fleet.Filter{}, // no explicit tenantID
 		"scripts/test.sh", "",
 		scriptmodule.ShellBash,
-		nil, nil, nil,
+		nil, nil, nil, nil,
 	)
 	require.NoError(t, err)
 
@@ -290,7 +290,7 @@ func TestSynthesizeScriptRun_ResolveParamsPerDevice(t *testing.T) {
 		"scripts/dna.sh", "",
 		scriptmodule.ShellBash,
 		map[string]string{"env": "prod"},
-		meta, nil,
+		meta, nil, nil,
 	)
 	require.NoError(t, err)
 
@@ -336,7 +336,7 @@ func TestSynthesizeScriptRun_IdempotentMetadata(t *testing.T) {
 		fleet.Filter{},
 		"scripts/idem.sh", "",
 		scriptmodule.ShellBash,
-		nil, meta, nil,
+		nil, meta, nil, nil,
 	)
 	require.NoError(t, err)
 
@@ -376,7 +376,7 @@ func TestSynthesizeScriptRun_MissingRequiredParam_Fails(t *testing.T) {
 		fleet.Filter{},
 		"scripts/req.sh", "",
 		scriptmodule.ShellBash,
-		nil, meta, nil,
+		nil, meta, nil, nil,
 	)
 	require.Error(t, err, "synthesis must fail when required param has no value")
 	assert.Contains(t, err.Error(), "must_have",

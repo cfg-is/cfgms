@@ -76,7 +76,7 @@ func querySessionUsername(sessionID uint32) (string, error) {
 		0,
 		uintptr(sessionID),
 		uintptr(wtsUserName),
-		uintptr(unsafe.Pointer(&pBuffer)),  //nolint:gosec // unsafe required for WTS API
+		uintptr(unsafe.Pointer(&pBuffer)),       //nolint:gosec // unsafe required for WTS API
 		uintptr(unsafe.Pointer(&bytesReturned)), //nolint:gosec // unsafe required for WTS API
 	)
 	if r1 == 0 {
@@ -156,4 +156,12 @@ func applyExecutionContext(ctx context.Context, config *ScriptConfig, cmd *exec.
 	cmd.SysProcAttr.Token = syscall.Token(hToken) //nolint:gosec // intentional token assignment
 
 	return cmd, username, cleanup, nil
+}
+
+// ResolveExecutionUID is not applicable on Windows: process identity is
+// SID-based, not POSIX UID-based, and the relay named pipe is access-controlled
+// via an explicit DACL rather than file ownership. It always returns -1, which
+// signals the relay layer to skip UID-based ownership changes.
+func ResolveExecutionUID(_ ExecutionContext) (int, error) {
+	return -1, nil
 }
