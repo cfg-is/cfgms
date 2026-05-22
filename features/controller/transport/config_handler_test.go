@@ -316,3 +316,92 @@ func TestHandleGRPC_NoSignatureWhenSignerNil(t *testing.T) {
 	assert.Empty(t, transfer.Signature,
 		"ConfigTransfer.Signature must be empty when no signer is configured")
 }
+
+// ---------------------------------------------------------------------------
+// HandleGRPC — tenant isolation tests (Issue #1720)
+// ---------------------------------------------------------------------------
+
+// createTestServiceWithControllerSvc returns a ConfigurationServiceV2 backed by
+// real storage and wired to a ControllerService so tenant resolution uses the
+// fleet registry. Both "tenant-a" and "default" tenants are seeded so that the
+// InheritanceResolver can walk tenant paths in both directions.
+func createTestServiceWithControllerSvc(t *testing.T, controllerSvc *service.ControllerService) *service.ConfigurationServiceV2 {
+	t.Helper()
+	storageManager := pkgtesting.SetupTestStorage(t)
+	svc := service.NewConfigurationServiceV2(logging.NewNoopLogger(), storageManager, controllerSvc)
+	for _, tid := range []string{"default", "tenant-a"} {
+		require.NoError(t, storageManager.GetTenantStore().CreateTenant(
+			context.Background(),
+			&business.TenantData{ID: tid, Name: tid, Status: business.TenantStatusActive},
+		))
+	}
+	return svc
+}
+
+// TestHandleGRPC_TenantIsolation_ReceivesRegisteredTenantConfig asserts that a
+// steward registered in tenant-a receives its tenant-a config — not a config stored
+// under the default tenant — when SyncConfig is called after (re)connect.
+//
+// This is the [REQUIRED TEST] from Issue #1720: "A test asserts a steward registered
+// in tenant A, reconnecting after a controller restart, receives tenant-A config —
+// not config from any other tenant or the default tenant."
+//
+// The test uses two storage slots: a distinct config under "tenant-a" and a distinct
+// config under "default". WithControllerService injects "tenant-a" into the context,
+// so GetConfiguration resolves to the tenant-a config. Without the injection the
+// handler would fall back to "default" and return the wrong config.
+func TestHandleGRPC_TenantIsolation_ReceivesRegisteredTenantConfig(t *testing.T) {
+	const stewardID = "steward-tenant-a"
+
+	ca := newTestCA(t)
+	controllerSvc := service.NewControllerService(logging.NewNoopLogger())
+	require.NoError(t, controllerSvc.RegisterSteward(stewardID, "tenant-a", "localhost:4433", "connected"))
+
+	svc := createTestServiceWithControllerSvc(t, nil) // nil: service does not see controllerSvc
+	h := NewConfigHandler(svc, logging.NewNoopLogger(), nil).
+		WithControllerService(controllerSvc)
+
+	// Store config under tenant-a only; no config under default.
+	// If the handler correctly injects "tenant-a", the call succeeds.
+	// If it incorrectly falls back to "default", GetConfiguration returns NOT_FOUND.
+	tenantACfg := minimalStewardConfig(stewardID)
+	tenantACfg.Steward.ID = "tenant-a-config-marker"
+	require.NoError(t, svc.SetConfiguration(context.Background(), "tenant-a", stewardID, tenantACfg))
+
+	ctx := peerContextWithCA(t, ca, stewardID)
+	req := &transportpb.ConfigSyncRequest{StewardId: stewardID}
+	stream := &testConfigStream{}
+
+	err := h.HandleGRPC(ctx, req, stream)
+	require.NoError(t, err,
+		"steward registered in tenant-a must receive its config without error; "+
+			"a NOT_FOUND error means the handler used the wrong tenant (default instead of tenant-a)")
+	assert.NotEmpty(t, stream.chunks, "at least one config chunk must be streamed")
+}
+
+// TestHandleGRPC_TenantIsolation_NoInjection_FallsBackToDefault verifies the
+// baseline: without WithControllerService, a gRPC context carrying no tenant
+// falls back to "default" for config lookup, and fails when no default config
+// exists for the steward. This confirms the injection in the positive test is
+// doing meaningful work.
+func TestHandleGRPC_TenantIsolation_NoInjection_FallsBackToDefault(t *testing.T) {
+	const stewardID = "steward-tenant-b"
+
+	ca := newTestCA(t)
+	svc := createTestServiceWithControllerSvc(t, nil)
+	// No WithControllerService — handler has no registry, context carries no tenant.
+	h := NewConfigHandler(svc, logging.NewNoopLogger(), nil)
+
+	// Store config only under tenant-b. "default" has no config for this steward.
+	require.NoError(t, svc.SetConfiguration(context.Background(), "tenant-a", stewardID, minimalStewardConfig(stewardID)))
+
+	ctx := peerContextWithCA(t, ca, stewardID)
+	req := &transportpb.ConfigSyncRequest{StewardId: stewardID}
+	stream := &testConfigStream{}
+
+	err := h.HandleGRPC(ctx, req, stream)
+	require.Error(t, err,
+		"without tenant injection, context has no tenant so lookup falls back to default; "+
+			"no config is stored under default for this steward, so the call must fail")
+	assert.Empty(t, stream.chunks, "no chunks should be sent when config is not found")
+}

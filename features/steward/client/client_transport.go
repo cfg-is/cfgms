@@ -400,10 +400,35 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	c.connected = true
 	c.mu.Unlock()
 
+	// Auto-initialize the config executor when the tenant ID is already known
+	// and no executor has been set. This lets the on-connect sync below run
+	// without the caller needing to call InitializeConfigExecutor first. (Issue #1720)
+	c.mu.RLock()
+	hasExecutor := c.configExecutor != nil
+	knownTenant := c.tenantID
+	c.mu.RUnlock()
+	if !hasExecutor && knownTenant != "" {
+		if initErr := c.InitializeConfigExecutor(knownTenant); initErr != nil {
+			c.logger.Warn("Could not auto-initialize config executor during connect", "error", initErr)
+		}
+	}
+
 	// Drain any events queued during the offline period (Issue #419).
 	// Done synchronously before starting the heartbeat so the controller
 	// receives a complete history before the next heartbeat arrives.
 	c.drainOfflineQueue(ctx)
+
+	// Pull any config stored while this steward was offline (Issue #1720).
+	// Runs in a background goroutine so Connect() returns promptly. A non-nil
+	// error (e.g. no config stored yet) is logged at Info level and ignored —
+	// the absence of config is a valid first-connect state.
+	go func() {
+		syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := c.syncConfigNow(syncCtx, "on-connect", nil); err != nil {
+			c.logger.Info("On-connect config sync skipped", "error", err)
+		}
+	}()
 
 	// Start heartbeat
 	go c.startHeartbeat()
@@ -474,11 +499,12 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		return nil, fmt.Errorf("failed to create command handler: %w", err)
 	}
 
-	// Register sync_config handler — retrieves config via gRPC data plane ReceiveConfig()
+	// Register sync_config handler — delegates to syncConfigNow for both
+	// command-triggered syncs and the on-connect pull (Issue #1720).
 	handler.RegisterHandler(cpTypes.CommandSyncConfig, func(ctx context.Context, cmd *cpTypes.Command) error {
 		c.logger.Info("Received sync_config command", "command_id", cmd.ID, "params_keys", paramKeys(cmd.Params))
 
-		// Get modules filter from command params (optional, passed as context but not used in gRPC request)
+		// Extract optional module filter from command params.
 		var modules []string
 		if modulesParam, ok := cmd.Params["modules"].([]interface{}); ok {
 			for _, m := range modulesParam {
@@ -488,160 +514,7 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			}
 		}
 
-		// Retrieve configuration via gRPC data plane
-		configData, version, err := c.GetConfiguration(ctx, modules)
-		if err != nil {
-			c.logger.Error("Failed to retrieve configuration", "error", err)
-			return fmt.Errorf("config retrieval failed: %w", err)
-		}
-
-		c.logger.Info("Configuration retrieved",
-			"command_id", cmd.ID,
-			"version", version,
-			"config_size", len(configData))
-
-		// Compute SHA-256 of the raw wire bytes for DNA delivery verification (Issue #1316).
-		configHash := fmt.Sprintf("%x", sha256.Sum256(configData))
-
-		// Unmarshal protobuf SignedConfig
-		var signedProtoConfig controller.SignedConfig
-		if err := proto.Unmarshal(configData, &signedProtoConfig); err != nil {
-			c.logger.Error("Failed to unmarshal protobuf configuration",
-				"command_id", cmd.ID,
-				"version", version,
-				"error", err)
-			return fmt.Errorf("failed to unmarshal protobuf config: %w", err)
-		}
-
-		// Verify configuration signature — verifier obtained on demand (Issue #920).
-		verifier := c.buildVerifierOnDemand()
-
-		var unsignedProtoConfig *controller.StewardConfig
-		if verifier != nil {
-			if signedProtoConfig.Signature == nil {
-				c.logger.Error("Configuration is not signed",
-					"command_id", cmd.ID,
-					"version", version)
-				return fmt.Errorf("configuration signature verification failed: missing signature")
-			}
-
-			verified, err := signature.VerifyProtoConfig(verifier, &signedProtoConfig)
-			if err != nil {
-				c.logger.Error("Configuration signature verification failed",
-					"command_id", cmd.ID,
-					"version", version,
-					"error", err)
-				return fmt.Errorf("configuration signature verification failed: %w", err)
-			}
-
-			c.logger.Info("Configuration signature verified",
-				"command_id", cmd.ID,
-				"version", version)
-
-			unsignedProtoConfig = verified
-		} else {
-			c.logger.Warn("Configuration verifier not available, skipping signature verification",
-				"command_id", cmd.ID)
-			unsignedProtoConfig = signedProtoConfig.Config
-		}
-
-		// Convert protobuf to Go struct
-		goConfig, err := stewardconfig.FromProto(unsignedProtoConfig)
-		if err != nil {
-			c.logger.Error("Failed to convert protobuf to Go struct",
-				"command_id", cmd.ID,
-				"version", version,
-				"error", err)
-			return fmt.Errorf("failed to convert protobuf config: %w", err)
-		}
-
-		// Apply configuration using executor
-		c.mu.RLock()
-		executor := c.configExecutor
-		sid := c.stewardID
-		c.mu.RUnlock()
-
-		if executor == nil {
-			c.logger.Error("Configuration executor not initialized")
-			return fmt.Errorf("configuration executor not available")
-		}
-
-		// Update convergence interval from the received cfg so the scheduled
-		// loop respects the controller-delivered converge_interval value.
-		newInterval := stewardconfig.GetConvergeInterval(*goConfig)
-		c.mu.Lock()
-		intervalChanged := c.convergeInterval != newInterval
-		c.convergeInterval = newInterval
-		c.mu.Unlock()
-		if intervalChanged {
-			// Wake the convergence loop so it resets its ticker to the new
-			// interval now, rather than after the next (stale) tick fires.
-			select {
-			case c.convergeIntervalCh <- struct{}{}:
-			default:
-			}
-		}
-
-		// Thread drift mode from the controller-delivered cfg into the executor.
-		// This is the only authorised source of DriftMode — local steward.cfg
-		// cannot set it (the local-file loading path clears the field).
-		executor.SetDriftMode(applyDriftModeDefault(goConfig.Steward.DriftMode))
-
-		// Marshal to YAML for executor
-		configYAML, err := yaml.Marshal(goConfig)
-		if err != nil {
-			c.logger.Error("Failed to marshal config to YAML",
-				"command_id", cmd.ID,
-				"version", version,
-				"error", err)
-			return fmt.Errorf("failed to marshal config: %w", err)
-		}
-
-		// Store validated config for scheduled re-convergence runs.
-		// This is set before Apply so that even if Apply fails, the next
-		// scheduled convergence attempt uses the latest verified cfg.
-		c.lastConfigMu.Lock()
-		c.lastConfigYAML = configYAML
-		c.lastConfigVersion = version
-		c.lastConfigMu.Unlock()
-
-		report, err := executor.ApplyConfiguration(ctx, configYAML, version)
-		if err != nil {
-			c.logger.Error("Configuration application failed", "error", err)
-			if report != nil {
-				report.StewardID = sid
-				if pubErr := c.publishConfigStatus(report); pubErr != nil {
-					c.logger.Error("Failed to publish config status after error", "error", pubErr)
-				}
-			}
-			return fmt.Errorf("config application failed: %w", err)
-		}
-
-		// Publish configuration status report
-		report.StewardID = sid
-		if err := c.publishConfigStatus(report); err != nil {
-			c.logger.Error("Failed to publish config status", "error", err)
-		}
-
-		c.logger.Info("Configuration sync completed",
-			"command_id", cmd.ID,
-			"version", version,
-			"status", report.Status)
-
-		// Publish DNA update carrying the config hash so the controller can verify
-		// delivery via heartbeats (Issue #1316).
-		c.dnaMu.RLock()
-		currentDNA := copyStringMap(c.lastPublishedDNA)
-		c.dnaMu.RUnlock()
-		if currentDNA == nil {
-			currentDNA = make(map[string]string)
-		}
-		currentDNA["config_hash"] = configHash
-		if pubErr := c.PublishDNAUpdate(ctx, currentDNA, configHash, ""); pubErr != nil {
-			c.logger.Info("DNA update after config apply skipped", "error", pubErr)
-		}
-
-		return nil
+		return c.syncConfigNow(ctx, cmd.ID, modules)
 	})
 
 	// Register sync_dna handler — sends full DNA over the data plane.
@@ -722,6 +595,168 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	handler.RegisterExecuteScriptHandler()
 
 	return handler, nil
+}
+
+// syncConfigNow pulls the latest config from the controller via the data plane and
+// applies it. It is the shared implementation for the CommandSyncConfig handler and
+// the on-(re)connect pull triggered in Connect() (Issue #1720).
+//
+// commandID is used only for log correlation; pass "" when triggered outside of a
+// command context. modules filters which modules to sync; nil means all.
+func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, modules []string) error {
+	// Retrieve configuration via gRPC data plane.
+	configData, version, err := c.GetConfiguration(ctx, modules)
+	if err != nil {
+		c.logger.Error("Failed to retrieve configuration", "command_id", commandID, "error", err)
+		return fmt.Errorf("config retrieval failed: %w", err)
+	}
+
+	c.logger.Info("Configuration retrieved",
+		"command_id", commandID,
+		"version", version,
+		"config_size", len(configData))
+
+	// Compute SHA-256 of the raw wire bytes for DNA delivery verification (Issue #1316).
+	configHash := fmt.Sprintf("%x", sha256.Sum256(configData))
+
+	// Unmarshal protobuf SignedConfig.
+	var signedProtoConfig controller.SignedConfig
+	if err := proto.Unmarshal(configData, &signedProtoConfig); err != nil {
+		c.logger.Error("Failed to unmarshal protobuf configuration",
+			"command_id", commandID,
+			"version", version,
+			"error", err)
+		return fmt.Errorf("failed to unmarshal protobuf config: %w", err)
+	}
+
+	// Verify configuration signature — verifier obtained on demand (Issue #920).
+	verifier := c.buildVerifierOnDemand()
+
+	var unsignedProtoConfig *controller.StewardConfig
+	if verifier != nil {
+		if signedProtoConfig.Signature == nil {
+			c.logger.Error("Configuration is not signed",
+				"command_id", commandID,
+				"version", version)
+			return fmt.Errorf("configuration signature verification failed: missing signature")
+		}
+
+		verified, err := signature.VerifyProtoConfig(verifier, &signedProtoConfig)
+		if err != nil {
+			c.logger.Error("Configuration signature verification failed",
+				"command_id", commandID,
+				"version", version,
+				"error", err)
+			return fmt.Errorf("configuration signature verification failed: %w", err)
+		}
+
+		c.logger.Info("Configuration signature verified",
+			"command_id", commandID,
+			"version", version)
+
+		unsignedProtoConfig = verified
+	} else {
+		c.logger.Warn("Configuration verifier not available, skipping signature verification",
+			"command_id", commandID)
+		unsignedProtoConfig = signedProtoConfig.Config
+	}
+
+	// Convert protobuf to Go struct.
+	goConfig, err := stewardconfig.FromProto(unsignedProtoConfig)
+	if err != nil {
+		c.logger.Error("Failed to convert protobuf to Go struct",
+			"command_id", commandID,
+			"version", version,
+			"error", err)
+		return fmt.Errorf("failed to convert protobuf config: %w", err)
+	}
+
+	// Apply configuration using executor.
+	c.mu.RLock()
+	executor := c.configExecutor
+	sid := c.stewardID
+	c.mu.RUnlock()
+
+	if executor == nil {
+		c.logger.Error("Configuration executor not initialized", "command_id", commandID)
+		return fmt.Errorf("configuration executor not available")
+	}
+
+	// Update convergence interval from the received cfg so the scheduled loop
+	// respects the controller-delivered converge_interval value.
+	newInterval := stewardconfig.GetConvergeInterval(*goConfig)
+	c.mu.Lock()
+	intervalChanged := c.convergeInterval != newInterval
+	c.convergeInterval = newInterval
+	c.mu.Unlock()
+	if intervalChanged {
+		// Wake the convergence loop so it resets its ticker to the new interval now,
+		// rather than after the next (stale) tick fires.
+		select {
+		case c.convergeIntervalCh <- struct{}{}:
+		default:
+		}
+	}
+
+	// Thread drift mode from the controller-delivered cfg into the executor.
+	// This is the only authorised source of DriftMode — local steward.cfg
+	// cannot set it (the local-file loading path clears the field).
+	executor.SetDriftMode(applyDriftModeDefault(goConfig.Steward.DriftMode))
+
+	// Marshal to YAML for executor.
+	configYAML, err := yaml.Marshal(goConfig)
+	if err != nil {
+		c.logger.Error("Failed to marshal config to YAML",
+			"command_id", commandID,
+			"version", version,
+			"error", err)
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	// Store validated config for scheduled re-convergence runs.
+	// Set before Apply so a failed apply still updates the retry baseline.
+	c.lastConfigMu.Lock()
+	c.lastConfigYAML = configYAML
+	c.lastConfigVersion = version
+	c.lastConfigMu.Unlock()
+
+	report, err := executor.ApplyConfiguration(ctx, configYAML, version)
+	if err != nil {
+		c.logger.Error("Configuration application failed", "command_id", commandID, "error", err)
+		if report != nil {
+			report.StewardID = sid
+			if pubErr := c.publishConfigStatus(report); pubErr != nil {
+				c.logger.Error("Failed to publish config status after error", "error", pubErr)
+			}
+		}
+		return fmt.Errorf("config application failed: %w", err)
+	}
+
+	// Publish configuration status report.
+	report.StewardID = sid
+	if err := c.publishConfigStatus(report); err != nil {
+		c.logger.Error("Failed to publish config status", "error", err)
+	}
+
+	c.logger.Info("Configuration sync completed",
+		"command_id", commandID,
+		"version", version,
+		"status", report.Status)
+
+	// Publish DNA update carrying the config hash so the controller can verify
+	// delivery via heartbeats (Issue #1316).
+	c.dnaMu.RLock()
+	currentDNA := copyStringMap(c.lastPublishedDNA)
+	c.dnaMu.RUnlock()
+	if currentDNA == nil {
+		currentDNA = make(map[string]string)
+	}
+	currentDNA["config_hash"] = configHash
+	if pubErr := c.PublishDNAUpdate(ctx, currentDNA, configHash, ""); pubErr != nil {
+		c.logger.Info("DNA update after config apply skipped", "error", pubErr)
+	}
+
+	return nil
 }
 
 // GetConfiguration retrieves configuration from the controller via gRPC data plane.
