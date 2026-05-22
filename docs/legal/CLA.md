@@ -1,8 +1,19 @@
 # CFGMS Contributor License Agreement
 
-**Version 1.0 - Effective January 2026**
+**Version 2.0 - Effective 2026-05-22**
 
 Thank you for your interest in contributing to CFGMS (the "Project"). This Contributor License Agreement ("Agreement") documents the intellectual property rights granted by contributors to Jordan Ritz ("Copyright Holder").
+
+<!-- §1 retains full copyright assignment rather than a license grant because AGPL-3.0
+     enforcement against third parties requires the Copyright Holder to hold standing
+     as the copyright owner. A bare license grant is insufficient to bring infringement
+     actions or compel source disclosure under the AGPL copyleft provisions. -->
+
+## Amendment Notice (per §12)
+
+This Agreement is amended effective 2026-05-22 to reflect the Project's adoption of AGPL-3.0 as its single in-repository license. §3 and §4 have been replaced with broadened license-discretion language; §5 has been expanded to include AI-assisted contribution disclosure requirements. All other terms remain in effect.
+
+---
 
 ## Purpose
 
@@ -15,8 +26,6 @@ This Agreement clarifies the intellectual property license granted with Contribu
 **"Contribution"** means any original work of authorship, including any modifications or additions to an existing work, that is intentionally submitted by You to the Copyright Holder for inclusion in, or documentation of, the Project. This includes source code, documentation, configuration files, build scripts, and any other materials.
 
 **"Submit"** means any form of electronic, verbal, or written communication sent to the Copyright Holder or its representatives, including but not limited to communication on electronic mailing lists, source code control systems, and issue tracking systems.
-
-**"Dual-License Model"** means the Project's licensing structure where certain components are licensed under the Apache License 2.0 (open source) and other components are licensed under the Elastic License 2.0 (commercial/source-available).
 
 ## Terms and Conditions
 
@@ -33,7 +42,7 @@ This assignment includes, without limitation:
 
 ### 2. Future Entity Assignment
 
-You acknowledge and agree that Jordan Ritz may assign all rights granted under this Agreement to cfg.is (or any successor legal entity formed to manage the Project), and such assignment includes all rights necessary for dual-license distribution.
+You acknowledge and agree that Jordan Ritz may assign all rights granted under this Agreement to cfg.is (or any successor legal entity formed to manage the Project), and such assignment includes all rights necessary for the Copyright Holder to license the Project.
 
 When such assignment occurs:
 - The new entity (cfg.is) will become the Copyright Holder
@@ -41,19 +50,13 @@ When such assignment occurs:
 - You will be notified via the Project's communication channels
 - No additional signature or consent from You will be required
 
-### 3. Dual-License Awareness and Grant
+### 3. License Discretion
 
-You understand and agree that Your Contribution may be distributed under **both** of the following licenses, at the Copyright Holder's discretion:
-
-**a) Apache License 2.0** - For open source components of the Project
-
-**b) Elastic License 2.0** - For commercial/source-available components of the Project
-
-You grant the Copyright Holder the perpetual, irrevocable right to determine which license applies to any portion of Your Contribution, and to change that determination in the future.
+You understand and agree that Your Contribution may be distributed under any license selected by the Copyright Holder at its sole discretion, including without limitation the Apache License 2.0, the GNU Affero General Public License v3.0, or a private commercial license. You grant the Copyright Holder the perpetual, irrevocable right to determine which license applies to any portion of Your Contribution.
 
 ### 4. Patent Grant
 
-If Your Contribution includes any patents (now or in the future), You hereby grant to the Copyright Holder and to recipients of software distributed by the Copyright Holder a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer Your Contribution under both licenses described in Section 3.
+If Your Contribution includes any patents (now or in the future), You hereby grant to the Copyright Holder and to recipients of software distributed by the Copyright Holder a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer Your Contribution under any license applied to the Project.
 
 ### 5. Your Representations and Warranties
 
@@ -71,6 +74,11 @@ You represent and warrant that:
 **d) No Conflicting Obligations**: You are not subject to any agreement or obligation that would prevent You from entering into this Agreement or making Your Contributions.
 
 **e) Compliance with Laws**: Your Contribution complies with all applicable laws and regulations, including export control laws.
+
+**f) AI-Assisted Contributions**: If Your Contribution was wholly or substantially generated by AI tooling (including but not limited to large language models, code generation systems, or similar automated tools), You represent that:
+   - You have disclosed this fact to the Copyright Holder by including a note in the pull request or commit message (e.g., "Generated with assistance from [tool name]")
+   - You have reviewed the AI-generated content in full and take personal responsibility for its accuracy, originality, and compliance with this Agreement
+   - To the best of Your knowledge, the Contribution does not reproduce third-party training data or other copyrighted material in a manner that would conflict with the copyright assignment made in Section 1
 
 ### 6. Notification of Issues
 
@@ -150,7 +158,7 @@ If You have questions about this Agreement, please:
 
 ## Acknowledgment for Use of Standard Language
 
-This CLA is based on standard contributor license agreements used in open source projects, including the Apache Software Foundation CLA and Project Harmony templates, adapted for CFGMS's dual-license model.
+This CLA is based on standard contributor license agreements used in open source projects, including the Apache Software Foundation CLA and Project Harmony templates, adapted for CFGMS's license management model.
 
 ---
 
@@ -162,5 +170,5 @@ https://github.com/cfg-is/cfgms
 
 ---
 
-**Last Updated:** January 10, 2026
-**Version:** 1.0
+**Last Updated:** 2026-05-22
+**Version:** 2.0

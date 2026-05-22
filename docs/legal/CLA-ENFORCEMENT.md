@@ -132,13 +132,13 @@ For future contributions with code or substantial documentation changes, you'll 
 
 If a contributor doesn't want to sign the CLA:
 
-1. Politely explain why we need it (dual-license model, copyright clarity)
+1. Politely explain why we need it (copyright assignment enables AGPL-3.0 enforcement and license discretion)
 2. Point them to the FAQ: [docs/legal/README.md#faq](../docs/legal/README.md#faq)
 3. If they still refuse, close the PR with thanks
 
 **Example response:**
 ```markdown
-We understand CLAs aren't for everyone. CFGMS requires a CLA to support our dual-license model (Apache 2.0 + Elastic License 2.0).
+We understand CLAs aren't for everyone. CFGMS requires a CLA to support copyright assignment, which enables enforcement of AGPL-3.0 obligations and outbound license discretion.
 
 If you'd prefer not to sign the CLA, we won't be able to merge this PR. However, we appreciate you reporting the issue/suggesting the improvement!
 
@@ -253,5 +253,5 @@ For complex cases or legal questions, consult with project leadership.
 
 ---
 
-**Last Updated:** 2026-01-10
-**Version:** 1.0
+**Last Updated:** 2026-05-22
+**Version:** 2.0
