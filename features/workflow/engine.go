@@ -13,7 +13,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
-	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -32,7 +31,7 @@ type TransformStepExecutor interface {
 
 // Engine implements the WorkflowEngine interface
 type Engine struct {
-	moduleFactory     *factory.ModuleFactory
+	moduleFactory     ModuleLoader
 	logger            *logging.ModuleLogger
 	executions        map[string]*WorkflowExecution
 	workflows         map[string]Workflow
@@ -48,7 +47,7 @@ type Engine struct {
 // NewEngine creates a new workflow engine instance.
 // transformExecutor handles StepTypeTransform steps; pass nil if transform steps
 // are not used (executeStep will return an error for any transform step encountered).
-func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger, transformExecutor TransformStepExecutor) *Engine {
+func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, transformExecutor TransformStepExecutor) *Engine {
 	// Create module logger for structured workflow logging
 	workflowLogger := logging.ForModule("workflow").WithField("component", "engine")
 
