@@ -209,6 +209,18 @@ func (m *Manager) ListAllDeviceIDs(ctx context.Context) ([]string, error) {
 	return sqliteBackend.listAllDeviceIDs(ctx)
 }
 
+// GetLatestByDeviceID returns the most recent DNA record for a device, read
+// directly from the SQL store. Unlike GetLatest, it does not consult the
+// in-memory index, which starts empty after a controller restart — so this is
+// the path LoadFromStorage must use to warm the steward registry on startup.
+func (m *Manager) GetLatestByDeviceID(ctx context.Context, deviceID string) (*DNARecord, error) {
+	sqliteBackend, ok := m.storage.(*SQLiteBackend)
+	if !ok {
+		return nil, fmt.Errorf("GetLatestByDeviceID requires SQLite backend")
+	}
+	return sqliteBackend.GetLatestByDeviceID(ctx, deviceID)
+}
+
 // listAllDeviceIDs queries the distinct device IDs stored in dna_history.
 func (b *SQLiteBackend) listAllDeviceIDs(ctx context.Context) ([]string, error) {
 	b.mutex.RLock()

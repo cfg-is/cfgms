@@ -193,8 +193,22 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// DNA storage — durable steward DNA + fleet registry. Shared by the
 	// controller service (warm-loading the steward registry after a restart)
 	// and the reports engine. (Issue #1572)
+	//
+	// The data root is cfg.DataDir when set; otherwise it is derived from the
+	// configured storage path so the DNA store is always co-located with the
+	// controller's other durable state and isolated per deployment. Falling
+	// back to a bare relative path would put the SQLite file in the process
+	// working directory, where concurrent controllers (and tests) collide.
+	dnaDataRoot := cfg.DataDir
+	if dnaDataRoot == "" {
+		if cfg.Storage.SQLitePath != "" {
+			dnaDataRoot = filepath.Dir(cfg.Storage.SQLitePath)
+		} else if cfg.Storage.FlatfileRoot != "" {
+			dnaDataRoot = filepath.Dir(cfg.Storage.FlatfileRoot)
+		}
+	}
 	dnaStorageConfig := dnaStorage.DefaultConfig()
-	dnaStorageConfig.DataDir = filepath.Join(cfg.DataDir, "dna-reports")
+	dnaStorageConfig.DataDir = filepath.Join(dnaDataRoot, "dna-reports")
 	dnaStorageManager, dnaErr := dnaStorage.NewManager(dnaStorageConfig, logger)
 	if dnaErr != nil {
 		logger.Warn("Failed to initialize DNA storage; steward registry will not survive a controller restart", "error", dnaErr)
@@ -416,6 +430,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			"addr":       cfg.Transport.ListenAddr,
 			"tls_config": grpcTLSConfig,
 			"registry":   connRegistry,
+			"logger":     logger,
 		}); err != nil {
 			return nil, fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
 		}
@@ -426,14 +441,21 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Constructed here — before any publisher or dispatcher — so every
 		// controller-issued command carries a consistent signature.
 		//
-		// In separated mode: use CertificateTypeConfigSigning (dedicated signing cert)
-		// In unified mode: use CertificateTypeServer (backward compatible)
+		// The signer MUST use a dedicated, persisted config-signing certificate
+		// (CertificateTypeConfigSigning) in every architecture mode. A steward
+		// caches the controller's signing certificate at registration (and
+		// restores it from disk on a cert-reuse reconnect) and rejects any
+		// command or config signed by a different key. The gRPC server
+		// certificate must never be used as the signer: GetCertificatesByType
+		// returns every Server-typed cert newest-first, and the controller owns
+		// more than one (gRPC transport + HTTP API), so that selection is not
+		// stable across restarts. EnsureSigningCertificate is idempotent — it
+		// generates the signing cert once and reuses it on every later boot.
 		if certManager != nil {
-			signerCertType := cert.CertificateTypeServer
-			if cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture() {
-				signerCertType = cert.CertificateTypeConfigSigning
+			if ensureErr := certManager.EnsureSigningCertificate(nil); ensureErr != nil {
+				logger.Warn("Failed to ensure config signing certificate", "error", ensureErr)
 			}
-			signerCerts, scErr := certManager.GetCertificatesByType(signerCertType)
+			signerCerts, scErr := certManager.GetCertificatesByType(cert.CertificateTypeConfigSigning)
 			if scErr == nil && len(signerCerts) > 0 {
 				hoistedSignerCertSerial = signerCerts[0].SerialNumber
 				certPEM, keyPEM, exportErr := certManager.ExportCertificate(hoistedSignerCertSerial, true)
@@ -450,7 +472,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 							"algorithm", hoistedSigner.Algorithm(),
 							"fingerprint", hoistedSigner.KeyFingerprint(),
 							"cert_serial", hoistedSignerCertSerial,
-							"cert_type", signerCertType.String())
+							"cert_type", cert.CertificateTypeConfigSigning.String())
 					}
 				}
 			}

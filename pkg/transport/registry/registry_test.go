@@ -128,6 +128,117 @@ func TestRegistry_UnregisterMissing(t *testing.T) {
 	reg.Unregister("does-not-exist")
 }
 
+// TestRegistry_UnregisterConn verifies that UnregisterConn removes the
+// connection when it is still the one currently registered.
+func TestRegistry_UnregisterConn(t *testing.T) {
+	reg := NewRegistry()
+	conn := newConn("steward-001")
+
+	if err := reg.Register(conn); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	reg.UnregisterConn(conn)
+
+	if _, ok := reg.Get("steward-001"); ok {
+		t.Error("Get() returned true after UnregisterConn, want false")
+	}
+}
+
+// TestRegistry_UnregisterConn_StaleDoesNotEvictReconnect reproduces the steward
+// restart race: the reconnected steward's fresh connection registers first,
+// then the stale stream handler's deferred cleanup runs. UnregisterConn with
+// the stale connection must be a no-op so the live connection survives.
+func TestRegistry_UnregisterConn_StaleDoesNotEvictReconnect(t *testing.T) {
+	reg := NewRegistry()
+	stale := newConn("steward-001")
+	fresh := newConn("steward-001")
+
+	if err := reg.Register(stale); err != nil {
+		t.Fatalf("Register(stale) error = %v", err)
+	}
+	// Steward restarts: its new ControlChannel registers a fresh connection.
+	if err := reg.Register(fresh); err != nil {
+		t.Fatalf("Register(fresh) error = %v", err)
+	}
+
+	// The stale handler's stream finally errors and its deferred cleanup runs.
+	reg.UnregisterConn(stale)
+
+	got, ok := reg.Get("steward-001")
+	if !ok {
+		t.Fatal("Get() returned false after stale UnregisterConn — live connection was evicted")
+	}
+	if got != fresh {
+		t.Error("Get() did not return the reconnected connection after stale UnregisterConn")
+	}
+
+	// The genuine cleanup for the live connection still removes it.
+	reg.UnregisterConn(fresh)
+	if _, ok := reg.Get("steward-001"); ok {
+		t.Error("Get() returned true after UnregisterConn(fresh), want false")
+	}
+}
+
+// TestRegistry_UnregisterConn_Nil verifies that UnregisterConn(nil) is a no-op
+// and does not panic.
+func TestRegistry_UnregisterConn_Nil(t *testing.T) {
+	reg := NewRegistry()
+	reg.UnregisterConn(nil) // must not panic
+}
+
+// TestRegistry_UnregisterConn_NeverRegistered verifies that UnregisterConn for
+// a connection that was never registered is a no-op.
+func TestRegistry_UnregisterConn_NeverRegistered(t *testing.T) {
+	reg := NewRegistry()
+	live := newConn("steward-001")
+	if err := reg.Register(live); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	reg.UnregisterConn(newConn("steward-001")) // different pointer, never registered
+
+	if _, ok := reg.Get("steward-001"); !ok {
+		t.Error("UnregisterConn with an unregistered connection evicted the live entry")
+	}
+}
+
+// TestRegistry_UnregisterConn_StaleDoesNotFireDisconnect verifies that a stale
+// UnregisterConn fires no OnDisconnect hook, while the matching one does.
+func TestRegistry_UnregisterConn_StaleDoesNotFireDisconnect(t *testing.T) {
+	reg := NewRegistry()
+	ch := make(chan string, 2)
+	reg.OnDisconnect(func(stewardID string) { ch <- stewardID })
+
+	stale := newConn("steward-001")
+	fresh := newConn("steward-001")
+	if err := reg.Register(stale); err != nil {
+		t.Fatalf("Register(stale) error = %v", err)
+	}
+	if err := reg.Register(fresh); err != nil {
+		t.Fatalf("Register(fresh) error = %v", err)
+	}
+
+	reg.UnregisterConn(stale) // superseded — must not fire OnDisconnect
+
+	select {
+	case got := <-ch:
+		t.Fatalf("stale UnregisterConn fired OnDisconnect for %q, want no callback", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	reg.UnregisterConn(fresh) // genuine disconnect — must fire OnDisconnect
+
+	select {
+	case got := <-ch:
+		if got != "steward-001" {
+			t.Errorf("OnDisconnect got %q, want %q", got, "steward-001")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("OnDisconnect not fired for the genuine UnregisterConn")
+	}
+}
+
 // =============================================================================
 // Bulk operation tests
 // =============================================================================

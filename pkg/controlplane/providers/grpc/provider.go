@@ -1105,7 +1105,11 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	if err := s.provider.registry.Register(conn); err != nil {
 		return status.Errorf(codes.Internal, "failed to register steward: %v", err)
 	}
-	defer s.provider.registry.Unregister(stewardID)
+	// Reconnect-safe cleanup: if the steward restarts, its new ControlChannel
+	// registers a fresh connection before this stale handler's stream.Recv
+	// finally errors. Unregistering by ID would evict the live new connection;
+	// UnregisterConn only removes this exact connection if it is still current.
+	defer s.provider.registry.UnregisterConn(conn)
 
 	s.provider.logger.Info("steward connected to ControlChannel", "steward_id", logging.SanitizeLogValue(stewardID), "remote_addr", logging.SanitizeLogValue(p.Addr.String()))
 
