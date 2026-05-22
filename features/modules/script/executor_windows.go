@@ -76,7 +76,7 @@ func querySessionUsername(sessionID uint32) (string, error) {
 		0,
 		uintptr(sessionID),
 		uintptr(wtsUserName),
-		uintptr(unsafe.Pointer(&pBuffer)),  //nolint:gosec // unsafe required for WTS API
+		uintptr(unsafe.Pointer(&pBuffer)),       //nolint:gosec // unsafe required for WTS API
 		uintptr(unsafe.Pointer(&bytesReturned)), //nolint:gosec // unsafe required for WTS API
 	)
 	if r1 == 0 {

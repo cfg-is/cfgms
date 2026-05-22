@@ -43,6 +43,7 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 	shellStr, _ := cmd.Params["shell"].(string)
 	executionID, _ := cmd.Params["execution_id"].(string)
 	executionContextStr, _ := cmd.Params["execution_context"].(string)
+	scriptID, _ := cmd.Params["script_id"].(string)
 
 	// Decode base64 script content — content is NEVER stored in a variable that gets logged.
 	contentBytes, err := base64.StdEncoding.DecodeString(scriptContentB64)
@@ -91,8 +92,20 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 	}
 
 	// Issue #1675: start per-execution relay when the script needs API access.
+	// Guard: only LIBRARY scripts (non-empty script_id) ever get a relay socket.
+	// Inline run-command dispatches NEVER create a socket regardless of
+	// required_api_scope — the steward enforces this invariant here at the
+	// handler layer rather than trusting the dispatcher to omit the param.
+	isLibraryScript := scriptID != ""
+	if !isLibraryScript && len(requiredAPIScope) > 0 {
+		// Anomaly: an inline command carrying required_api_scope indicates a
+		// dispatcher bug or tampering. Drop the scope and proceed without a relay.
+		h.logger.Warn("execute_script: ignoring required_api_scope on inline command — relay sockets are library-script only",
+			"command_id", cmd.ID,
+			"execution_id", executionID)
+	}
 	var relay *scriptrelay.Relay
-	if len(requiredAPIScope) > 0 {
+	if isLibraryScript && len(requiredAPIScope) > 0 {
 		// Resolve the UID the script will run as so the relay socket can be
 		// chowned to it — a logged_in_user script (launched via `sudo -u`)
 		// otherwise cannot connect to the 0700/0600 socket owned by the
