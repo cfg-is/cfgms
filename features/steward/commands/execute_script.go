@@ -10,11 +10,13 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules/script"
 	scriptrelay "github.com/cfgis/cfgms/features/steward/script_relay"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 const (
@@ -91,7 +93,12 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 	// Issue #1675: start per-execution relay when the script needs API access.
 	var relay *scriptrelay.Relay
 	if len(requiredAPIScope) > 0 {
-		r, err := scriptrelay.NewRelay(executionID, h.stewardID, h.sendStatus, h.logger)
+		// Resolve the UID the script will run as so the relay socket can be
+		// chowned to it — a logged_in_user script (launched via `sudo -u`)
+		// otherwise cannot connect to the 0700/0600 socket owned by the
+		// steward process.
+		relayUID := resolveRelayUID(execCtx, h.logger)
+		r, err := scriptrelay.NewRelay(executionID, h.stewardID, relayUID, h.sendStatus, h.logger)
 		if err != nil {
 			h.logger.Error("execute_script: failed to start relay",
 				"command_id", cmd.ID,
@@ -202,6 +209,23 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 		},
 	})
 	return nil
+}
+
+// resolveRelayUID returns the UID the per-execution relay socket should be
+// owned by so the script process can connect to it. It mirrors the executor's
+// execution-context UID resolution. On resolution failure (e.g. no user is
+// logged in for a logged_in_user script) it falls back to the steward process
+// UID; the executor independently fails the run with the same underlying error,
+// so the fallback never produces an inconsistent outcome.
+func resolveRelayUID(execCtx script.ExecutionContext, logger logging.Logger) int {
+	uid, err := script.ResolveExecutionUID(execCtx)
+	if err != nil {
+		logger.Debug("execute_script: relay UID resolution fell back to process UID",
+			"execution_context", string(execCtx),
+			"error", err)
+		return os.Getuid()
+	}
+	return uid
 }
 
 // truncatePreview returns at most maxBytes bytes of s; excess is silently dropped.

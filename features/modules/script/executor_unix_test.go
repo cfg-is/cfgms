@@ -7,8 +7,11 @@ package script
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"os/user"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -158,4 +161,55 @@ func TestApplyExecutionContext_LoggedInUser_WithUser(t *testing.T) {
 	assert.Equal(t, "-u", cmd.Args[1])
 	assert.Equal(t, user, cmd.Args[2])
 	assert.Equal(t, "--", cmd.Args[3])
+}
+
+// TestResolveExecutionUID_System verifies that system context resolves to the
+// current process UID (the relay socket chown is then a no-op).
+func TestResolveExecutionUID_System(t *testing.T) {
+	uid, err := ResolveExecutionUID(ExecutionContextSystem)
+	require.NoError(t, err)
+	assert.Equal(t, os.Getuid(), uid, "system context must resolve to the process UID")
+}
+
+// TestResolveExecutionUID_LoggedInUser_NoUser verifies that ErrNoUserLoggedIn is
+// propagated when no interactive user is present.
+func TestResolveExecutionUID_LoggedInUser_NoUser(t *testing.T) {
+	old := unixDetectLoggedInUser
+	unixDetectLoggedInUser = func() (string, error) { return "", ErrNoUserLoggedIn }
+	defer func() { unixDetectLoggedInUser = old }()
+
+	_, err := ResolveExecutionUID(ExecutionContextLoggedInUser)
+	assert.ErrorIs(t, err, ErrNoUserLoggedIn)
+}
+
+// TestResolveExecutionUID_LoggedInUser_Resolves verifies that a detected
+// username is resolved to its numeric UID.
+func TestResolveExecutionUID_LoggedInUser_Resolves(t *testing.T) {
+	current, err := user.Current()
+	require.NoError(t, err)
+	wantUID, err := strconv.Atoi(current.Uid)
+	require.NoError(t, err)
+
+	old := unixDetectLoggedInUser
+	unixDetectLoggedInUser = func() (string, error) { return current.Username, nil }
+	defer func() { unixDetectLoggedInUser = old }()
+
+	uid, err := ResolveExecutionUID(ExecutionContextLoggedInUser)
+	require.NoError(t, err)
+	assert.Equal(t, wantUID, uid, "logged_in_user context must resolve the detected user's UID")
+}
+
+// TestResolveExecutionUID_LoggedInUser_UnknownUser verifies that a detection
+// result that does not correspond to a real account surfaces an error rather
+// than a bogus UID.
+func TestResolveExecutionUID_LoggedInUser_UnknownUser(t *testing.T) {
+	old := unixDetectLoggedInUser
+	unixDetectLoggedInUser = func() (string, error) {
+		return "cfgms-nonexistent-user-9f3a", nil
+	}
+	defer func() { unixDetectLoggedInUser = old }()
+
+	_, err := ResolveExecutionUID(ExecutionContextLoggedInUser)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lookup logged-in user")
 }

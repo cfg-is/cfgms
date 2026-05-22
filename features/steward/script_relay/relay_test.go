@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,8 +27,16 @@ import (
 )
 
 // newTestRelay creates a Relay for testing. It captures published events and
-// returns a thread-safe accessor function for reading them.
+// returns a thread-safe accessor function for reading them. The relay is
+// created with the current process UID so the socket chown is a no-op.
 func newTestRelay(t *testing.T, executionID string) (*Relay, func() []cpTypes.Event) {
+	t.Helper()
+	return newTestRelayWithUID(t, executionID, os.Getuid())
+}
+
+// newTestRelayWithUID is newTestRelay with an explicit execution UID, used to
+// exercise the socket-ownership chown path.
+func newTestRelayWithUID(t *testing.T, executionID string, uid int) (*Relay, func() []cpTypes.Event) {
 	t.Helper()
 	var mu sync.Mutex
 	var events []cpTypes.Event
@@ -38,7 +47,7 @@ func newTestRelay(t *testing.T, executionID string) (*Relay, func() []cpTypes.Ev
 		mu.Unlock()
 	}
 
-	r, err := NewRelay(executionID, "steward-1", publish, logging.NewNoopLogger())
+	r, err := NewRelay(executionID, "steward-1", uid, publish, logging.NewNoopLogger())
 	require.NoError(t, err)
 	getEvents := func() []cpTypes.Event {
 		mu.Lock()
@@ -50,8 +59,19 @@ func newTestRelay(t *testing.T, executionID string) (*Relay, func() []cpTypes.Ev
 	return r, getEvents
 }
 
+// statUID returns the owning UID of path via the underlying syscall.Stat_t.
+func statUID(t *testing.T, path string) uint32 {
+	t.Helper()
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	st, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok, "expected *syscall.Stat_t for %s", path)
+	return st.Uid
+}
+
 // TestRelay_SocketCreation verifies that Start creates a 0700 directory and
-// 0600 socket, and that Stop removes them (AC1 — socket lifecycle).
+// 0600 socket owned by the execution UID, and that Stop removes them
+// (AC1 — socket lifecycle and ownership).
 func TestRelay_SocketCreation(t *testing.T) {
 	execID := "test-exec-socket"
 	r, _ := newTestRelay(t, execID)
@@ -71,10 +91,67 @@ func TestRelay_SocketCreation(t *testing.T) {
 	require.NoError(t, err, "socket file must exist")
 	assert.Equal(t, os.FileMode(0600), sockInfo.Mode().Perm(), "socket file must be 0600")
 
+	// Directory and socket must be owned by the execution UID. newTestRelay
+	// uses the current process UID, so ownership equals os.Getuid().
+	wantUID := uint32(os.Getuid())
+	assert.Equal(t, wantUID, statUID(t, sockDir), "socket directory must be owned by the execution UID")
+	assert.Equal(t, wantUID, statUID(t, sockPath), "socket file must be owned by the execution UID")
+
 	// Stop must remove both the socket and the directory.
 	r.Stop()
 	_, err = os.Stat(sockDir)
 	assert.True(t, os.IsNotExist(err), "socket directory must be removed after Stop")
+}
+
+// TestRelay_SocketCreation_ChownsToExecutionUID verifies that the per-execution
+// socket directory and socket file are chowned to the script's execution UID
+// when it differs from the steward process UID (logged_in_user context). The
+// chown requires CAP_CHOWN, so the test only runs as root.
+func TestRelay_SocketCreation_ChownsToExecutionUID(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("chown to a different UID requires root (CAP_CHOWN)")
+	}
+
+	// UID 1 (daemon/bin) exists on every POSIX system and is never root.
+	const execUID = 1
+	r, _ := newTestRelayWithUID(t, "test-exec-chown", execUID)
+	defer r.Stop()
+
+	sockPath := r.SocketPath()
+	sockDir := filepath.Dir(sockPath)
+
+	assert.Equal(t, uint32(execUID), statUID(t, sockDir),
+		"socket directory must be chowned to the execution UID")
+	assert.Equal(t, uint32(execUID), statUID(t, sockPath),
+		"socket file must be chowned to the execution UID")
+
+	// Mode must remain restrictive after the chown.
+	dirInfo, err := os.Stat(sockDir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0700), dirInfo.Mode().Perm())
+	sockInfo, err := os.Stat(sockPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), sockInfo.Mode().Perm())
+}
+
+// TestNewRelay_InvalidUIDChownFails verifies NewRelay returns an error (rather
+// than silently producing an unconnectable socket) when the requested
+// execution UID cannot be applied. Running as non-root, chowning to root (UID 0)
+// is denied by the kernel.
+func TestNewRelay_InvalidUIDChownFails(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: chown to any UID succeeds, cannot exercise the failure path")
+	}
+
+	publish := func(_ context.Context, _ *cpTypes.Event) {}
+	_, err := NewRelay("test-exec-badchown", "steward-1", 0, publish, logging.NewNoopLogger())
+	require.Error(t, err, "NewRelay must fail when the socket cannot be chowned to the execution UID")
+	assert.Contains(t, err.Error(), "chown")
+
+	// The failed socket directory must not be left behind.
+	sockDir := filepath.Join(os.TempDir(), "cfgms-test-exec-badchown")
+	_, statErr := os.Stat(sockDir)
+	assert.True(t, os.IsNotExist(statErr), "socket directory must be cleaned up after a failed chown")
 }
 
 // TestRelay_RequestResponseCycle tests the full steward-side relay lifecycle:
@@ -90,7 +167,7 @@ func TestRelay_RequestResponseCycle(t *testing.T) {
 	require.NoError(t, r.Start(ctx))
 	defer r.Stop()
 
-	// Simulate the script connecting and sending an HTTP request.
+	// Act as the script would: connect and send an HTTP request.
 	var wg sync.WaitGroup
 	wg.Add(1)
 	var gotResponseBody string

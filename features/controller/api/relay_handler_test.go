@@ -384,7 +384,7 @@ func TestRelayHandler_AuthMiddlewareBypass(t *testing.T) {
 	inner := newRelayTestHandler()
 	// Wrap inner with a middleware that checks for the relay principal bypass.
 	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Simulate authenticationMiddleware: check relay bypass first.
+		// Mirror authenticationMiddleware: check relay bypass first.
 		if injected, ok := r.Context().Value(relayPrincipalKey).(*Principal); ok && injected != nil {
 			inner.ServeHTTP(w, r)
 			return

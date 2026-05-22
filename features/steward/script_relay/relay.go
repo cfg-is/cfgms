@@ -34,6 +34,13 @@ type Relay struct {
 	executionID string
 	stewardID   string
 
+	// uid is the numeric UID the script executes as. The per-execution socket
+	// directory and socket file are chowned to this UID so a script running
+	// under a different user (logged_in_user context) can connect. A value < 0
+	// or equal to the steward process UID makes the chown a no-op. Unused on
+	// Windows, where the named pipe is access-controlled via an explicit DACL.
+	uid int
+
 	// socketPath is the path advertised to the script via CFGMS_API_SOCKET.
 	socketPath string
 
@@ -56,13 +63,19 @@ type Relay struct {
 // NewRelay creates a Relay for the given execution. Call Start to begin
 // accepting connections. The caller is responsible for calling Stop after
 // script execution completes to clean up the socket directory.
-func NewRelay(executionID, stewardID string, publish StatusCallback, logger logging.Logger) (*Relay, error) {
+//
+// uid is the numeric UID the script executes as; the per-execution socket
+// directory and socket file are chowned to it so a script running under a
+// different user can connect. Pass the steward process UID (or -1) to make the
+// chown a no-op for system-context scripts.
+func NewRelay(executionID, stewardID string, uid int, publish StatusCallback, logger logging.Logger) (*Relay, error) {
 	if executionID == "" {
 		return nil, fmt.Errorf("relay: executionID must not be empty")
 	}
 	r := &Relay{
 		executionID: executionID,
 		stewardID:   stewardID,
+		uid:         uid,
 		publish:     publish,
 		responseCh:  make(chan *cpTypes.Command, 1),
 		stopCh:      make(chan struct{}),

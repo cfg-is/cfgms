@@ -36,6 +36,27 @@ func initSocket(r *Relay) error {
 		return fmt.Errorf("chmod socket: %w", err)
 	}
 
+	// Chown the directory and socket to the script's execution UID. With mode
+	// 0700/0600, connecting requires write access to the socket inode, so a
+	// script running under a different user (logged_in_user context, launched
+	// via `sudo -u`) can only connect when it owns these files. When the
+	// execution UID equals the steward process UID (system context) or is
+	// unset (< 0), the chown is skipped as a no-op.
+	if r.uid >= 0 && r.uid != os.Getuid() {
+		if err := os.Chown(sockDir, r.uid, -1); err != nil {
+			_ = ln.Close()
+			_ = os.RemoveAll(sockDir)
+			return fmt.Errorf("chown socket dir to uid %d: %w", r.uid, err)
+		}
+		// Lchown the socket itself: it is never a symlink, but Lchown avoids
+		// following one if the path were ever swapped, matching the dir chown.
+		if err := os.Lchown(sockPath, r.uid, -1); err != nil {
+			_ = ln.Close()
+			_ = os.RemoveAll(sockDir)
+			return fmt.Errorf("chown socket to uid %d: %w", r.uid, err)
+		}
+	}
+
 	r.socketPath = sockPath
 	r.ln = ln
 	return nil

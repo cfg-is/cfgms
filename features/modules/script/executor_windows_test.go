@@ -171,3 +171,14 @@ func TestApplyExecutionContext_Windows_LoggedInUser_WithUser(t *testing.T) {
 	require.NotNil(t, cmd.SysProcAttr, "SysProcAttr must be non-nil after token attachment")
 	assert.NotZero(t, cmd.SysProcAttr.Token, "Token must be set to the active console session token")
 }
+
+// TestResolveExecutionUID_Windows verifies that ResolveExecutionUID returns -1
+// on Windows for every execution context: process identity is SID-based and the
+// relay named pipe uses an explicit DACL, so no POSIX-UID chown applies.
+func TestResolveExecutionUID_Windows(t *testing.T) {
+	for _, ec := range []ExecutionContext{ExecutionContextSystem, ExecutionContextLoggedInUser} {
+		uid, err := ResolveExecutionUID(ec)
+		require.NoError(t, err)
+		assert.Equal(t, -1, uid, "Windows ResolveExecutionUID must return -1 (no UID chown)")
+	}
+}

@@ -157,3 +157,11 @@ func applyExecutionContext(ctx context.Context, config *ScriptConfig, cmd *exec.
 
 	return cmd, username, cleanup, nil
 }
+
+// ResolveExecutionUID is not applicable on Windows: process identity is
+// SID-based, not POSIX UID-based, and the relay named pipe is access-controlled
+// via an explicit DACL rather than file ownership. It always returns -1, which
+// signals the relay layer to skip UID-based ownership changes.
+func ResolveExecutionUID(_ ExecutionContext) (int, error) {
+	return -1, nil
+}
