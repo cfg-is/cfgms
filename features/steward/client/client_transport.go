@@ -100,6 +100,12 @@ type TransportClient struct {
 	// Convergence loop control
 	convergenceStop  chan struct{}
 	convergeInterval time.Duration // cfg-driven; updated on each sync_config
+	// convergeIntervalCh wakes the convergence loop when convergeInterval
+	// changes so it resets its ticker immediately. Without it the running
+	// ticker keeps its stale period (the 30-minute startup default) until the
+	// next tick fires — a cfg lowering converge_interval would not take effect
+	// for up to 30 minutes. Buffered (1) so senders never block.
+	convergeIntervalCh chan struct{}
 
 	// Connection state — single flag for unified gRPC transport
 	connected bool
@@ -235,6 +241,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		heartbeatStop:         make(chan struct{}),
 		convergenceStop:       make(chan struct{}),
 		convergeInterval:      30 * time.Minute,
+		convergeIntervalCh:    make(chan struct{}, 1),
 		transportAddress:      cfg.ControllerURL,
 		certPath:              cfg.TLSCertPath,
 		caCertPEM:             cfg.CACertPEM,
@@ -562,13 +569,22 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		// loop respects the controller-delivered converge_interval value.
 		newInterval := stewardconfig.GetConvergeInterval(*goConfig)
 		c.mu.Lock()
+		intervalChanged := c.convergeInterval != newInterval
 		c.convergeInterval = newInterval
 		c.mu.Unlock()
+		if intervalChanged {
+			// Wake the convergence loop so it resets its ticker to the new
+			// interval now, rather than after the next (stale) tick fires.
+			select {
+			case c.convergeIntervalCh <- struct{}{}:
+			default:
+			}
+		}
 
 		// Thread drift mode from the controller-delivered cfg into the executor.
 		// This is the only authorised source of DriftMode — local steward.cfg
 		// cannot set it (the local-file loading path clears the field).
-		executor.SetDriftMode(goConfig.Steward.DriftMode)
+		executor.SetDriftMode(applyDriftModeDefault(goConfig.Steward.DriftMode))
 
 		// Marshal to YAML for executor
 		configYAML, err := yaml.Marshal(goConfig)
@@ -924,6 +940,16 @@ func (c *TransportClient) ValidateConfiguration(
 	return nil, fmt.Errorf("configuration validation not yet supported via control plane provider")
 }
 
+// applyDriftModeDefault returns DriftModeApply when mode is empty.
+// The proto does not carry drift_mode, so FromProto always returns "".
+// Apply is the fleet default; this makes the intent explicit and testable.
+func applyDriftModeDefault(mode stewardconfig.DriftMode) stewardconfig.DriftMode {
+	if mode == "" {
+		return stewardconfig.DriftModeApply
+	}
+	return mode
+}
+
 // StartConvergenceLoop starts a background goroutine that re-converges against
 // the last-received cfg on a schedule driven by the cfg's converge_interval field.
 //
@@ -952,9 +978,21 @@ func (c *TransportClient) StartConvergenceLoop(ctx context.Context) {
 				return
 			case <-c.convergenceStop:
 				return
+			case <-c.convergeIntervalCh:
+				// A sync_config delivery changed converge_interval. Reset the
+				// ticker now so the new interval takes effect on the next tick
+				// instead of waiting out the stale (possibly 30-minute) period.
+				c.mu.RLock()
+				current := c.convergeInterval
+				c.mu.RUnlock()
+				if current != interval {
+					interval = current
+					ticker.Reset(interval)
+					c.logger.Info("Convergence interval updated", "interval", interval)
+				}
 			case <-ticker.C:
-				// Re-read the interval on every tick so that a cfg delivery
-				// with a different converge_interval takes effect promptly.
+				// Re-read the interval on every tick as a fallback in case an
+				// interval-change signal was missed.
 				c.mu.RLock()
 				current := c.convergeInterval
 				c.mu.RUnlock()

@@ -25,8 +25,6 @@ import (
 func (s *FleetTestSuite) testDriftAutoCorrection(t *testing.T, configPath string) {
 	t.Helper()
 
-	t.Skip("drift auto-correction not yet implemented — fleet-resilience epic #1714")
-
 	container := "fleet-steward-1"
 	stewardID := s.stewardIDs[container]
 

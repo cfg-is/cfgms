@@ -472,3 +472,108 @@ func TestExecutor_ApplyConfiguration_PermissionsRejectedOnWindows(t *testing.T) 
 	}
 	assert.True(t, found, fmt.Sprintf("expected error about unsupported permissions, got: %v", errList))
 }
+
+// TestApplyConfiguration_ApplyMode_CorrectsDriftAndReturnsOK verifies that an executor
+// running in DriftModeApply (as set by client_transport.applyDriftModeDefault when the
+// controller delivers a config) detects drift and calls Set() to correct it.
+// The defaulting itself is tested in features/steward/client/drift_mode_default_test.go.
+func TestApplyConfiguration_ApplyMode_CorrectsDriftAndReturnsOK(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions not applicable on Windows; no Windows equivalent for this test")
+	}
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "managed-file")
+
+	// Inject drift: file exists with wrong content, simulating a post-convergence drift event.
+	require.NoError(t, os.WriteFile(filePath, []byte("drift-injected-content\n"), 0644))
+
+	logger := logging.ForModule("executor_test")
+	// DriftModeApply is what client_transport.applyDriftModeDefault returns for all
+	// controller-delivered configs (proto does not carry drift_mode; default is apply).
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:    logger,
+		DriftMode: stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, stewardconfig.DriftModeApply, execution.ExecutorDriftMode(executor),
+		"executor must be in DriftModeApply (the fleet default set by client_transport)")
+
+	configJSON := `{
+  "steward": {"id": "test-steward", "mode": "controller"},
+  "resources": [
+    {
+      "name": "managed-file",
+      "module": "file",
+      "config": ` + testFileConfig(filePath, "fleet-managed-content\\n") + `
+    }
+  ]
+}`
+
+	ctx := context.Background()
+	report, applyErr := executor.ApplyConfiguration(ctx, []byte(configJSON), "v1")
+	require.NoError(t, applyErr)
+	require.NotNil(t, report)
+	assert.Equal(t, "OK", report.Status,
+		"apply mode must correct drift and return OK status")
+
+	// Verify drift was corrected — file must contain the desired content.
+	got, readErr := os.ReadFile(filePath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "fleet-managed-content\n", string(got),
+		"drifted managed resource must be re-applied to desired state in apply mode")
+}
+
+// TestApplyConfiguration_ApplyMode_ModeAliasConfigVerifiesClean reproduces the
+// fleet drift scenario: a file resource declared with the "mode" octal-string
+// alias (as test/e2e/fleet/configs/fleet-config.yaml does) must verify clean
+// after re-apply and report OK. The file module's Set() accepts "mode" but its
+// Get() formerly emitted only "permissions"; the drift comparator then saw
+// "mode" as a phantom added field that no convergence pass could resolve, so the
+// executor reported the resource as failed even though the file was correct.
+func TestApplyConfiguration_ApplyMode_ModeAliasConfigVerifiesClean(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions not applicable on Windows; no Windows equivalent for this test")
+	}
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "managed-file")
+
+	// Inject drift: file present with wrong content.
+	require.NoError(t, os.WriteFile(filePath, []byte("drift-injected-content\n"), 0644))
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:    logging.ForModule("executor_test"),
+		DriftMode: stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	// Config declares permissions via the "mode" octal-string alias, exactly as
+	// the fleet E2E config does — not the "permissions" int field.
+	configJSON := `{
+  "steward": {"id": "test-steward", "mode": "controller"},
+  "resources": [
+    {
+      "name": "managed-file",
+      "module": "file",
+      "config": {
+        "path": "` + filepath.ToSlash(filePath) + `",
+        "state": "present",
+        "content": "fleet-managed-content\n",
+        "mode": "0644",
+        "allowed_base_path": "` + filepath.ToSlash(tempDir) + `"
+      }
+    }
+  ]
+}`
+
+	report, applyErr := executor.ApplyConfiguration(context.Background(), []byte(configJSON), "v1")
+	require.NoError(t, applyErr)
+	require.NotNil(t, report)
+	assert.Equal(t, "OK", report.Status,
+		"a mode-alias config must verify clean and return OK after re-apply")
+
+	got, readErr := os.ReadFile(filePath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "fleet-managed-content\n", string(got),
+		"drifted resource declared with the mode alias must be re-applied to desired state")
+}

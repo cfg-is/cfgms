@@ -80,6 +80,12 @@ func (c *directoryConfig) AsMap() map[string]interface{} {
 	// Only include permissions for present state
 	if c.State != "absent" {
 		result["permissions"] = c.Permissions
+		// mode mirrors permissions as an octal string. Set() accepts either
+		// "permissions" (int) or the "mode" (octal-string) alias, so Get() must
+		// emit both — otherwise a config declared with "mode" compares against a
+		// state map that lacks it and the comparator reports a phantom added
+		// field that no Set() can ever resolve.
+		result["mode"] = fmt.Sprintf("%#o", c.Permissions)
 	}
 
 	if c.Owner != "" {
