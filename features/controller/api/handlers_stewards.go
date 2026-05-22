@@ -16,8 +16,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -281,7 +281,7 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Convert protobuf to Go struct
-	goConfig, err := stewardconfig.FromProto(protoConfig)
+	goConfig, err := stewardtypes.FromProto(protoConfig)
 	if err != nil {
 		s.logger.Error("Failed to convert protobuf to Go struct", "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to convert configuration", "CONVERSION_ERROR")
@@ -330,7 +330,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 
 	// Parse request body into StewardConfig
 	// Support both JSON (legacy) and YAML (production .cfg format)
-	var config stewardconfig.StewardConfig
+	var config stewardtypes.StewardConfig
 	contentType := r.Header.Get("Content-Type")
 
 	// Read body

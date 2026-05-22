@@ -15,11 +15,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	cpInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
@@ -1386,20 +1386,20 @@ func setupServerWithPublisher(t *testing.T, cp *testControlPlane) (*Server, *ser
 // on the config service when commandPublisher is non-nil, and that the callback correctly
 // dispatches push.Fanout() to active stewards of the affected tenant only.
 func TestNew_FanoutCallbackWired(t *testing.T) {
-	minimalStewardCfg := func(id string) *stewardconfig.StewardConfig {
-		return &stewardconfig.StewardConfig{
-			Steward: stewardconfig.StewardSettings{
+	minimalStewardCfg := func(id string) *stewardtypes.StewardConfig {
+		return &stewardtypes.StewardConfig{
+			Steward: stewardtypes.StewardSettings{
 				ID:      id,
-				Mode:    stewardconfig.ModeController,
-				Logging: stewardconfig.LoggingConfig{Level: "info", Format: "text"},
-				ErrorHandling: stewardconfig.ErrorHandlingConfig{
-					ModuleLoadFailure:  stewardconfig.ActionContinue,
-					ResourceFailure:    stewardconfig.ActionWarn,
-					ConfigurationError: stewardconfig.ActionFail,
+				Mode:    stewardtypes.ModeController,
+				Logging: stewardtypes.LoggingConfig{Level: "info", Format: "text"},
+				ErrorHandling: stewardtypes.ErrorHandlingConfig{
+					ModuleLoadFailure:  stewardtypes.ActionContinue,
+					ResourceFailure:    stewardtypes.ActionWarn,
+					ConfigurationError: stewardtypes.ActionFail,
 				},
 			},
 			Modules: map[string]string{"file": "file"},
-			Resources: []stewardconfig.ResourceConfig{
+			Resources: []stewardtypes.ResourceConfig{
 				{Name: "f", Module: "file", Config: map[string]interface{}{"path": "/tmp/f", "content": "x"}},
 			},
 		}
