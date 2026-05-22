@@ -16,6 +16,9 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
+// Compile-time assertion: IPTrustApprovalHook satisfies RegistrationApprovalHook.
+var _ RegistrationApprovalHook = (*IPTrustApprovalHook)(nil)
+
 // ApprovalDecision represents the outcome of a registration approval evaluation.
 type ApprovalDecision string
 
@@ -61,13 +64,54 @@ type RegistrationApprovalHook interface {
 	Evaluate(ctx context.Context, input RegistrationInput) (decision ApprovalDecision, reason string, err error)
 }
 
-// DefaultApprovalHook approves every valid registration unconditionally.
-// It is the out-of-box hook used when no workflow engine is available.
-type DefaultApprovalHook struct{}
+// AlwaysApproveHook approves every valid registration unconditionally.
+// Used only for the deprecated "auto-approve" workflow alias and as a fallback
+// when no workflow engine is available. Dev/test environments only (Issue #1695).
+type AlwaysApproveHook struct{}
 
 // Evaluate always returns DecisionApprove.
-func (*DefaultApprovalHook) Evaluate(_ context.Context, _ RegistrationInput) (ApprovalDecision, string, error) {
+func (*AlwaysApproveHook) Evaluate(_ context.Context, _ RegistrationInput) (ApprovalDecision, string, error) {
 	return DecisionApprove, "", nil
+}
+
+// IPTrustApprovalHook evaluates registration decisions based on IP trust (Issue #1695).
+// It calls store.IsTrusted for the registering steward's source IP and returns
+// DecisionApprove for trusted IPs, DecisionQuarantine otherwise. On store error
+// or when the store is nil, it returns DecisionQuarantine (fail-closed): an
+// unavailable trust store must not grant unrestricted fleet access.
+type IPTrustApprovalHook struct {
+	store  business.IPTrustStore
+	logger logging.Logger
+}
+
+// NewIPTrustApprovalHook creates an IPTrustApprovalHook. When store is nil,
+// Evaluate always returns DecisionQuarantine.
+func NewIPTrustApprovalHook(store business.IPTrustStore, logger logging.Logger) *IPTrustApprovalHook {
+	return &IPTrustApprovalHook{store: store, logger: logger}
+}
+
+// Evaluate checks whether the source IP is trusted for the tenant.
+// Fails closed: returns DecisionQuarantine on store error or nil store.
+func (h *IPTrustApprovalHook) Evaluate(ctx context.Context, input RegistrationInput) (ApprovalDecision, string, error) {
+	if h.store == nil {
+		return DecisionQuarantine, "", nil
+	}
+	trusted, err := h.store.IsTrusted(ctx, input.Token.TenantID, input.SourceIP)
+	if err != nil {
+		if h.logger != nil {
+			// SourceIP flows from the HTTP request into IsTrusted and may be echoed
+			// back in the error; sanitize the error string to close go/log-injection.
+			h.logger.Warn("IPTrustApprovalHook: store error, quarantining (fail-closed)",
+				"tenant_id", input.Token.TenantID,
+				"source_ip", logging.SanitizeLogValue(input.SourceIP),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		return DecisionQuarantine, "", nil
+	}
+	if trusted {
+		return DecisionApprove, "", nil
+	}
+	return DecisionQuarantine, "", nil
 }
 
 // WorkflowApprovalHook delegates registration approval to the workflow engine.

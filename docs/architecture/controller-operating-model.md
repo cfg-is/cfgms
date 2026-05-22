@@ -463,8 +463,9 @@ The controller is the certificate authority and identity provider for stewards. 
 2. Steward presents the token/code during registration via the compile-time controller URL.
 3. Controller validates the credential — perennial token: check expiry and revocation; long-lived code: look up matching record.
 4. Controller runs the registration approval workflow via `RegistrationApprovalHook`. The active workflow is selected by `registration.workflow` in `controller.cfg`:
-   - **`auto-approve`** (default): approves every valid registration unconditionally. Implemented as a built-in workflow with `Variables: {policy: accept}` which short-circuits the engine. Equivalent to the legacy `DefaultApprovalHook`.
+   - **`ip-trust`** (default): approves the registration when the steward's source IP is trusted for its tenant; quarantines otherwise. The first steward from any new tenant always quarantines because no IP is trusted yet. The hook is code-wired (`IPTrustApprovalHook`), not seeded as a workflow. It fails closed — a nil or erroring trust store quarantines rather than admits.
    - **`manual-review`** (production): quarantines the steward pending operator action. Sets `registration_decision: quarantine` so the steward is restricted to baseline config until promoted. Operators use `cfg registration pending` to list quarantined stewards, `cfg registration approve <id>` to promote, and `cfg registration deny <id> [--reason ...]` to reject.
+   - **`auto-approve`** (deprecated): approves every valid registration unconditionally. Dev/test environments only — a startup warning is logged. Replaces the legacy `DefaultApprovalHook`.
    - Custom workflows can implement arbitrary policy (e.g., approve `tenant=lab` registrations, reject everything else)
 5. On approval (`approve`): controller generates the steward ID and issues an mTLS client certificate scoped to the steward's tenant/group identity.
    On quarantine (`quarantine`): controller issues certificates but restricts the steward to baseline configuration only (no secrets, no scripts) until an administrator promotes it.
@@ -476,15 +477,22 @@ The controller is the certificate authority and identity provider for stewards. 
 
 ```yaml
 registration:
-  workflow: auto-approve   # or: manual-review (default: auto-approve)
+  workflow: ip-trust       # or: manual-review, auto-approve (default: ip-trust)
+  # trusted_proxies lists CIDR ranges of reverse proxies trusted to set
+  # X-Forwarded-For. Empty (default) means X-Forwarded-For is never trusted.
+  trusted_proxies:
+    - "10.0.0.0/8"
 ```
 
 | Value | Behavior |
 |---|---|
-| `auto-approve` (default) | Approves all valid registrations immediately. Seeds a built-in workflow with `Variables: {policy: accept}` that short-circuits the approval engine. |
+| `ip-trust` (default) | Approves the registration when the source IP is trusted for the tenant; quarantines otherwise. Code-wired (`IPTrustApprovalHook`) — no workflow is seeded. Fails closed on a missing or erroring trust store. |
 | `manual-review` | Quarantines every new steward pending operator action. Seeds a built-in workflow with `Variables: {registration_decision: quarantine}`. Use `cfg registration pending` / `approve` / `deny` to manage the queue. |
+| `auto-approve` (deprecated) | Approves all valid registrations immediately. Dev/test environments only — a startup deprecation warning is logged. |
 
-If `registration.workflow` is omitted and no `steward-registration-approval` workflow exists in the config store, the controller defaults to `auto-approve`. If a custom workflow already exists in the store, seeding is skipped to preserve operator-authored policy.
+If `registration.workflow` is omitted, the controller defaults to `ip-trust`. The `CFGMS_REGISTRATION_WORKFLOW` environment variable overrides the config-file value (used by test environments to opt into `auto-approve`).
+
+**X-Forwarded-For spoofing protection:** The controller derives the steward's source IP for the IP-trust decision from the TCP peer address (`r.RemoteAddr`). It honors an `X-Forwarded-For` header **only** when the TCP peer falls within a `trusted_proxies` CIDR range. With `trusted_proxies` empty (the default), `X-Forwarded-For` is always ignored, so an attacker on an untrusted network position cannot bypass IP-trust by injecting a forged header. When the controller runs behind a load balancer, set `trusted_proxies` to the load balancer's address range so the real client IP is used.
 
 **Managing pending registrations with `cfg registration`:**
 

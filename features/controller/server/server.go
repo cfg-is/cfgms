@@ -717,32 +717,69 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		httpServer.SetWorkflowHandler(workflowHandler)
 		srv.triggerManager = triggerMgr
 		logger.Info("Workflow engine wired to HTTP API server")
+	}
 
-		// Issue #1527: Seed the built-in registration approval workflow before wiring the hook.
-		seedBuiltinRegistrationWorkflow(cfg, storageManager.GetConfigStore(), logger)
+	// Issue #1695: Wire the registration approval hook based on registration.workflow.
+	// ip-trust is the new default and does not require the workflow engine.
+	{
+		workflowName := ""
+		if cfg.Registration != nil {
+			workflowName = cfg.Registration.Workflow
+		}
+		// Legacy: if Workflow is empty but ApprovalMode is set, honour it.
+		if workflowName == "" && cfg.Registration != nil && cfg.Registration.ApprovalMode == "manual-review" {
+			workflowName = "manual-review"
+		}
+		// Default to ip-trust (Issue #1695).
+		if workflowName == "" {
+			workflowName = "ip-trust"
+		}
 
-		// Issue #1599: When approval_mode = "manual-review", use ManualReviewApprovalHook
-		// which persists requests to PendingRegistrationStore for CLI approve/deny (#1522-B).
-		// Otherwise fall back to the workflow-engine hook (Issue #422).
-		if cfg.Registration != nil && cfg.Registration.ApprovalMode == "manual-review" {
+		switch workflowName {
+		case "ip-trust":
+			// ip-trust hook is code-wired; seedBuiltinRegistrationWorkflow is a no-op for this path.
+			ipTrustStore := storageManager.GetIPTrustStore()
+			httpServer.SetApprovalHook(api.NewIPTrustApprovalHook(ipTrustStore, logger))
+			if ipTrustStore != nil {
+				logger.Info("IP-trust registration approval hook wired (Issue #1695)")
+			} else {
+				logger.Warn("IP-trust store not available (OSS composite storage); registrations will quarantine until an IP-trust store is wired")
+			}
+
+		case "manual-review":
+			// Issue #1527: Seed the manual-review workflow before wiring the hook.
+			if workflowHandler != nil {
+				seedBuiltinRegistrationWorkflow(cfg, storageManager.GetConfigStore(), logger)
+			}
+			// Issue #1599: Use ManualReviewApprovalHook which persists requests to
+			// PendingRegistrationStore for CLI approve/deny (#1522-B).
 			pendingStore := storageManager.GetPendingRegistrationStore()
 			if pendingStore != nil {
 				hook := api.NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logger)
 				httpServer.SetApprovalHook(hook)
 				srv.manualReviewHook = hook
 				logger.Info("Manual-review registration approval hook wired (Issue #1599)")
-			} else {
-				logger.Warn("approval_mode=manual-review requested but PendingRegistrationStore unavailable, falling back to workflow hook")
+			} else if workflowHandler != nil {
+				logger.Warn("manual-review requested but PendingRegistrationStore unavailable, falling back to workflow hook")
 				approvalHook := workflowHandler.NewRegistrationApprovalHook(logger)
 				httpServer.SetApprovalHook(approvalHook)
-				logger.Info("Registration approval hook wired (Issue #422)")
+				logger.Info("Registration approval hook wired (Issue #422, manual-review fallback)")
 			}
-		} else {
-			// Issue #422: Wire registration approval hook backed by the workflow engine.
-			// Operators configure the "steward-registration-approval" workflow to customise policy.
-			approvalHook := workflowHandler.NewRegistrationApprovalHook(logger)
-			httpServer.SetApprovalHook(approvalHook)
-			logger.Info("Registration approval hook wired (Issue #422)")
+
+		case "auto-approve":
+			// Deprecated: log a warning but continue to support dev environments.
+			logger.Warn("registration.workflow 'auto-approve' is deprecated; use 'ip-trust' (Issue #1695)")
+			if workflowHandler != nil {
+				seedBuiltinRegistrationWorkflow(cfg, storageManager.GetConfigStore(), logger)
+			}
+			httpServer.SetApprovalHook(&api.AlwaysApproveHook{})
+			logger.Info("auto-approve registration approval hook wired (deprecated)")
+
+		default:
+			logger.Warn("Unknown registration.workflow value, defaulting to ip-trust (Issue #1695)",
+				"workflow", logging.SanitizeLogValue(workflowName))
+			ipTrustStore := storageManager.GetIPTrustStore()
+			httpServer.SetApprovalHook(api.NewIPTrustApprovalHook(ipTrustStore, logger))
 		}
 	}
 
@@ -800,9 +837,17 @@ const builtinWorkflowTenantID = "root"
 // workflow into the config store under the root tenant scope based on
 // cfg.Registration.Workflow (Issue #1527).
 //
+// No-op when Workflow == "ip-trust": the IP-trust hook is wired in code, not via a
+// workflow entry (Issue #1695).
+//
 // If the workflow field is empty and a custom "steward-registration-approval" workflow
 // already exists in the root scope, seeding is skipped to preserve operator-authored workflows.
 func seedBuiltinRegistrationWorkflow(cfg *config.Config, configStore cfgconfig.ConfigStore, logger logging.Logger) {
+	// ip-trust hook is code-wired; no workflow seeding is needed.
+	if cfg.Registration != nil && cfg.Registration.Workflow == "ip-trust" {
+		return
+	}
+
 	ctx := context.Background()
 
 	// Root-tenant workflow store.

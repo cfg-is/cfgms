@@ -167,18 +167,20 @@ func (s *ControllerTestSuite) TestStewardRegistration() {
 	err = json.NewDecoder(resp.Body).Decode(&regResp)
 	require.NoError(s.T(), err, "Registration response should be valid JSON")
 
-	// Verify registration succeeded - response must contain a steward_id
+	// With ip-trust as the default workflow (Issue #1695), the first steward from a new
+	// tenant always quarantines because no source IP is yet trusted for that tenant.
+	// The controller returns 202 Accepted with status="pending".
+	s.Equal(http.StatusAccepted, resp.StatusCode, "First registration for new tenant should return 202 (quarantine)")
 	s.Contains(regResp, "steward_id", "Registration response should contain steward_id")
 	s.NotEmpty(regResp["steward_id"], "Steward ID should not be empty")
-
-	// Verify tenant info is correct
 	s.Equal("test-tenant", regResp["tenant_id"], "Response should contain correct tenant_id")
+	s.Equal("pending", regResp["status"], "First registration should be quarantined (status=pending)")
+	s.Contains(regResp, "pending_id", "Quarantined registration should include a pending_id")
 
-	// Verify certificates were provided (proves cert manager is working)
-	s.Contains(regResp, "ca_cert", "Registration response should contain CA certificate")
-	s.Contains(regResp, "client_cert", "Registration response should contain client certificate")
+	// No client cert is issued for quarantined stewards (Issue #1693).
+	s.NotContains(regResp, "client_cert", "Quarantined registration must not include a client certificate")
 
-	s.T().Logf("Registration successful: steward_id=%v, tenant_id=%v", regResp["steward_id"], regResp["tenant_id"])
+	s.T().Logf("Registration quarantined as expected: steward_id=%v, pending_id=%v", regResp["steward_id"], regResp["pending_id"])
 }
 
 func TestControllerIntegration(t *testing.T) {

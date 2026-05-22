@@ -66,11 +66,11 @@ func (h *WorkflowHandler) RegisterWorkflowRoutes(router *mux.Router) {
 }
 
 // NewRegistrationApprovalHook creates a RegistrationApprovalHook backed by this handler's
-// workflow engine and config store.  If the engine or config store are unavailable it
-// returns a DefaultApprovalHook so the controller always has a valid hook.
+// workflow engine and config store. If the engine or config store are unavailable it
+// returns an AlwaysApproveHook so the controller always has a valid (if permissive) hook.
 func (h *WorkflowHandler) NewRegistrationApprovalHook(logger logging.Logger) RegistrationApprovalHook {
 	if h.engine == nil || h.configStore == nil {
-		return &DefaultApprovalHook{}
+		return &AlwaysApproveHook{}
 	}
 	return NewWorkflowApprovalHook(h.engine, h.configStore, logger)
 }

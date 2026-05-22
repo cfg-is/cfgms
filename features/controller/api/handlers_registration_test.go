@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -198,6 +199,9 @@ func TestHandleRegister_PerennialToken_AllowsMultipleRegistrations(t *testing.T)
 	tokenStore := newTestRegistrationStore(t)
 	certMgr := newTestCertManager(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	// Explicitly use always-approve hook: this test verifies perennial token behaviour
+	// on the approve path, not registration approval policy.
+	server.SetApprovalHook(&AlwaysApproveHook{})
 
 	tok := &registration.Token{
 		Token:         "cfgms_reg_perennial_valid",
@@ -375,6 +379,8 @@ func TestHandleRegister_ValidToken_LogsRedactedPrefixNotFullToken(t *testing.T) 
 	certMgr := newTestCertManager(t)
 	capLogger := &kvCapturingLogger{}
 	server, _ := newHandleRegisterServer(t, tokenStore, certMgr, capLogger)
+	// Explicitly use always-approve hook: this test exercises the success (approve) log path.
+	server.SetApprovalHook(&AlwaysApproveHook{})
 
 	fullToken := "cfgms_reg_valid_loggingtest_12345"
 	tok := &registration.Token{
@@ -573,7 +579,8 @@ func TestHandleRegister_ApproveReturns200WithCert(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	certMgr := newTestCertManager(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
-	// Default hook approves unconditionally.
+	// Explicitly use always-approve hook: this test exercises the 200+cert approve path.
+	server.SetApprovalHook(&AlwaysApproveHook{})
 
 	tok := &registration.Token{
 		Token:         "cfgms_reg_approve_test",
@@ -684,4 +691,59 @@ func TestHandleDenyRegistration(t *testing.T) {
 
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
+}
+
+// TestExtractSourceIP_XFFIgnoredWhenPeerNotProxy verifies that a spoofed
+// X-Forwarded-For header is ignored when the TCP peer is not in the
+// TrustedProxies list. The TCP peer address must be used instead (Issue #1695).
+func TestExtractSourceIP_XFFIgnoredWhenPeerNotProxy(t *testing.T) {
+	const peerAddr = "203.0.113.5"  // "legitimate" attacker IP
+	const spoofedXFF = "10.0.0.100" // attacker claims to be this trusted-looking IP
+	const trustedProxy = "192.168.1.0/24"
+
+	_, trustedNet, err := net.ParseCIDR(trustedProxy)
+	require.NoError(t, err)
+	proxies := []net.IPNet{*trustedNet}
+
+	// Request with spoofed XFF from an untrusted peer.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", nil)
+	req.RemoteAddr = peerAddr + ":54321"
+	req.Header.Set("X-Forwarded-For", spoofedXFF)
+
+	// With empty trusted proxies: XFF must be ignored.
+	got := extractSourceIP(req, nil)
+	assert.Equal(t, peerAddr, got,
+		"empty trustedProxies: must use TCP peer, not XFF")
+
+	// With trustedProxies configured but peerAddr NOT in the list:
+	// XFF must still be ignored.
+	got = extractSourceIP(req, proxies)
+	assert.Equal(t, peerAddr, got,
+		"peer not in trustedProxies: must use TCP peer, not the spoofed XFF")
+
+	// When the peer IS in trustedProxies, XFF should be honored.
+	reqFromProxy := httptest.NewRequest(http.MethodPost, "/api/v1/register", nil)
+	reqFromProxy.RemoteAddr = "192.168.1.10:54321" // inside 192.168.1.0/24
+	reqFromProxy.Header.Set("X-Forwarded-For", spoofedXFF)
+
+	got = extractSourceIP(reqFromProxy, proxies)
+	assert.Equal(t, spoofedXFF, got,
+		"peer in trustedProxies: XFF must be honored")
+
+	// When the peer IS in trustedProxies but XFF is absent, use peer address.
+	reqFromProxyNoXFF := httptest.NewRequest(http.MethodPost, "/api/v1/register", nil)
+	reqFromProxyNoXFF.RemoteAddr = "192.168.1.10:54321"
+
+	got = extractSourceIP(reqFromProxyNoXFF, proxies)
+	assert.Equal(t, "192.168.1.10", got,
+		"peer in trustedProxies but no XFF: must use TCP peer address")
+
+	// IPv6 peer address: net.SplitHostPort must correctly strip brackets and port.
+	reqIPv6 := httptest.NewRequest(http.MethodPost, "/api/v1/register", nil)
+	reqIPv6.RemoteAddr = "[::1]:54321"
+	reqIPv6.Header.Set("X-Forwarded-For", spoofedXFF)
+
+	got = extractSourceIP(reqIPv6, nil)
+	assert.Equal(t, "::1", got,
+		"IPv6 peer: must return bare IPv6 address without brackets or port")
 }

@@ -209,8 +209,38 @@ func TestInitializeHAManager_UsesDefaultConfig(t *testing.T) {
 	assert.NotEmpty(t, node.ID, "auto-generated node ID must not be empty")
 }
 
-// TestBuiltinWorkflowSeedingAutoApprove verifies that a controller started with no
-// registration config seeds the auto-approve built-in workflow (Issue #1527).
+// TestBuiltinWorkflowSeedingIPTrust verifies that a controller started with no
+// registration config (defaulting to ip-trust) does NOT seed a built-in workflow,
+// because ip-trust approval is handled by the IPTrustApprovalHook directly in code
+// rather than through the workflow engine (Issue #1695).
+func TestBuiltinWorkflowSeedingIPTrust(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: false,
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: tempDir + "/flatfile",
+			SQLitePath:   tempDir + "/cfgms.db",
+		},
+		// No Registration block: defaults to ip-trust mode, which does not seed a workflow.
+	}
+
+	srv, err := New(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+	require.NotNil(t, srv)
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	ctx := context.Background()
+	store := workflow.NewWorkflowStore(srv.GetConfigStore(), builtinWorkflowTenantID)
+	_, err = store.GetLatestWorkflow(ctx, "steward-registration-approval")
+	require.Error(t, err, "ip-trust mode must NOT seed a built-in workflow — approval is handled by IPTrustApprovalHook in code")
+}
+
+// TestBuiltinWorkflowSeedingAutoApprove verifies that a controller explicitly configured
+// with registration.workflow=auto-approve seeds the auto-approve built-in workflow (Issue #1527).
 func TestBuiltinWorkflowSeedingAutoApprove(t *testing.T) {
 	tempDir := t.TempDir()
 	cfg := &config.Config{
@@ -223,7 +253,9 @@ func TestBuiltinWorkflowSeedingAutoApprove(t *testing.T) {
 			FlatfileRoot: tempDir + "/flatfile",
 			SQLitePath:   tempDir + "/cfgms.db",
 		},
-		// No Registration block: defaults to auto-approve seeding.
+		Registration: &config.RegistrationConfig{
+			Workflow: "auto-approve",
+		},
 	}
 
 	srv, err := New(cfg, logging.NewNoopLogger())

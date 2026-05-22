@@ -355,6 +355,13 @@ func (f *E2ETestFramework) initializeController() error {
 			KeepalivePeriod: controllerConfig.Duration(30 * time.Second),
 			IdleTimeout:     controllerConfig.Duration(5 * time.Minute),
 		},
+		// Issue #1695: the e2e harness exercises the full registration → mTLS →
+		// transport flow, so the test controller opts into auto-approve. The
+		// ip-trust default would quarantine every steward (no trusted source IP),
+		// leaving stewards without certificates and unable to connect.
+		Registration: &controllerConfig.RegistrationConfig{
+			Workflow: "auto-approve",
+		},
 	}
 
 	// Create storage directories
