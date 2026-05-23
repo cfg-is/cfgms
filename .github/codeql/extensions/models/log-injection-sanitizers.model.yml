@@ -1,38 +1,33 @@
-# CFGMS log-injection sanitizer modeled as a summary.
+# CFGMS log-injection sanitizer modeled as a data-flow barrier.
 #
 # logging.SanitizeLogValue replaces every Unicode control character (C0, C1,
-# DEL) with an underscore and truncates the value to 1024 chars. The output is
-# safe to embed in a log line — CR/LF cannot be smuggled to forge a new
-# entry. Without an explicit model, CodeQL's default log-injection query
-# (CWE-117 "Log entries created from user input") sees taint flow from
-# request fields straight through to logger calls and fires false positives at
-# every call site that uses this wrapper.
+# DEL) with an underscore and truncates the value to 1024 chars. The output
+# is safe to embed in a log line — CR/LF cannot be smuggled to forge a new
+# entry. Without an explicit barrier, CodeQL's default log-injection query
+# (CWE-117) sees taint flow from request fields straight through to logger
+# calls and fires false positives at every wrapped call site.
 #
-# The same model also resolves the CWE-312 "Clear-text logging of sensitive
-# information" rule when sensitive values (request paths, header values,
-# decoded body fields) pass through the sanitizer — `kind: value` blocks taint
-# propagation universally, not just for one rule.
+# Mechanism: `barrierModel` (extensible predicate added in CodeQL 2.25.2,
+# 2026-04). It declaratively marks a function's return value as a taint
+# barrier for the named sink-kind, which is what summaryModel(kind=value)
+# was approximating less reliably (the older form only blocked some flow
+# paths — e.g., flows from mux.Vars worked, flows from json.Decode field
+# selections did not).
 #
-# Format (per CodeQL `summaryModel` extensible predicate):
-#   [package, type, subtypes, name, signature, ext, input, output, kind, provenance]
+# Format (barrierModel):
+#   [package, type, subtypes, name, signature, ext, output, kind, provenance]
 #
-# SanitizeLogValue signature: func SanitizeLogValue(s string) string
-#   - Argument[0]    = the value to sanitize
-#   - ReturnValue[0] = the sanitized value
-#
-# See path-injection-sanitizers.model.yml in this directory for the same
-# pattern applied to safeJoin.
+# - kind="log-injection"      → CWE-117 "Log entries created from user input"
+# - kind="clear-text-logging" → CWE-312 "Clear-text logging of sensitive
+#                                information" (covered as a precaution; our
+#                                handlers also drop sensitive paths from logs)
 
 extensions:
   - addsTo:
       pack: codeql/go-all
-      extensible: summaryModel
+      extensible: barrierModel
     data:
-      # Provide both ReturnValue and ReturnValue[0] forms — CodeQL Go 2.25.5
-      # has inconsistent matching for single-return functions; supplying both
-      # forms covers either matcher. The taint engine treats this as
-      # value-flow (kind=value), so the output is no longer tainted.
-      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "Argument[0]", "ReturnValue", "value", "manual"]
-      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
-      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "Argument[0]", "ReturnValue", "value", "manual"]
-      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "ReturnValue", "log-injection", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "ReturnValue", "clear-text-logging", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "ReturnValue", "log-injection", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "ReturnValue", "clear-text-logging", "manual"]

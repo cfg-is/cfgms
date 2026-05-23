@@ -1,5 +1,5 @@
 name: cfg-is/cfgms-go-extensions
-version: 0.0.2
+version: 0.0.3
 library: true
 
 # Apply our model extensions on top of the standard Go query pack so that
