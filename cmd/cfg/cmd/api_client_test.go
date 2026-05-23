@@ -695,3 +695,191 @@ func TestAPIClientGet(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+func TestAPIClientApproveAllRegistrations(t *testing.T) {
+	t.Run("returns count of approved registrations", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "POST", r.Method)
+			assert.Equal(t, "/api/v1/registration/approve-all", r.URL.Path)
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"approved":3}`))
+		}))
+		defer server.Close()
+
+		cfg := &APIClientConfig{BaseURL: server.URL, TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		count, err := client.ApproveAllRegistrations(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, 3, count)
+	})
+
+	t.Run("returns 0 on second call (idempotent)", func(t *testing.T) {
+		callCount := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+			w.Header().Set("Content-Type", "application/json")
+			if callCount == 1 {
+				_, _ = w.Write([]byte(`{"approved":2}`))
+			} else {
+				_, _ = w.Write([]byte(`{"approved":0}`))
+			}
+		}))
+		defer server.Close()
+
+		cfg := &APIClientConfig{BaseURL: server.URL, TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		count1, err := client.ApproveAllRegistrations(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, 2, count1)
+
+		count2, err := client.ApproveAllRegistrations(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, 0, count2)
+	})
+
+	t.Run("API error is returned", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"store unavailable"}`))
+		}))
+		defer server.Close()
+
+		cfg := &APIClientConfig{BaseURL: server.URL, TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		_, err = client.ApproveAllRegistrations(context.Background())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "store unavailable")
+	})
+}
+
+func TestAPIClientApproveByCIDR(t *testing.T) {
+	t.Run("sends CIDR in request body and returns count", func(t *testing.T) {
+		var capturedBody string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "POST", r.Method)
+			assert.Equal(t, "/api/v1/registration/approve-by-cidr", r.URL.Path)
+
+			buf := make([]byte, 256)
+			n, _ := r.Body.Read(buf)
+			capturedBody = string(buf[:n])
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"approved":2}`))
+		}))
+		defer server.Close()
+
+		cfg := &APIClientConfig{BaseURL: server.URL, TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		count, err := client.ApproveByCIDR(context.Background(), "192.168.1.0/24")
+		require.NoError(t, err)
+		assert.Equal(t, 2, count)
+		assert.Contains(t, capturedBody, "192.168.1.0/24")
+	})
+
+	t.Run("API error is returned", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid CIDR"}`))
+		}))
+		defer server.Close()
+
+		cfg := &APIClientConfig{BaseURL: server.URL, TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		_, err = client.ApproveByCIDR(context.Background(), "not-a-cidr")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid CIDR")
+	})
+}
+
+func TestAPIClientAddIPTrust(t *testing.T) {
+	t.Run("sends tenant_id, cidr and pre_seeded=true", func(t *testing.T) {
+		var capturedBody string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "POST", r.Method)
+			assert.Equal(t, "/api/v1/registration/ip-trust", r.URL.Path)
+
+			buf := make([]byte, 256)
+			n, _ := r.Body.Read(buf)
+			capturedBody = string(buf[:n])
+
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
+
+		cfg := &APIClientConfig{BaseURL: server.URL, TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		err = client.AddIPTrust(context.Background(), "acme", "10.0.0.0/8")
+		require.NoError(t, err)
+		assert.Contains(t, capturedBody, "acme")
+		assert.Contains(t, capturedBody, "10.0.0.0/8")
+		assert.Contains(t, capturedBody, `"pre_seeded":true`)
+	})
+
+	t.Run("API error is returned", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"ip-trust store unavailable"}`))
+		}))
+		defer server.Close()
+
+		cfg := &APIClientConfig{BaseURL: server.URL, TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		err = client.AddIPTrust(context.Background(), "acme", "10.0.0.0/8")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ip-trust store unavailable")
+	})
+}
+
+func TestAPIClientRevokeIPTrust(t *testing.T) {
+	t.Run("sends DELETE to correct path with encoded CIDR", func(t *testing.T) {
+		var capturedMethod, capturedRawPath string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedMethod = r.Method
+			capturedRawPath = r.URL.RawPath
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
+
+		cfg := &APIClientConfig{BaseURL: server.URL, TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		err = client.RevokeIPTrust(context.Background(), "acme", "10.0.0.0/8")
+		require.NoError(t, err)
+		assert.Equal(t, "DELETE", capturedMethod)
+		// The CIDR slash should be percent-encoded to preserve it as a single path segment.
+		assert.Contains(t, capturedRawPath, "10.0.0.0%2F8")
+		assert.Contains(t, capturedRawPath, "acme")
+	})
+
+	t.Run("not found returns error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"ip trust entry not found"}`))
+		}))
+		defer server.Close()
+
+		cfg := &APIClientConfig{BaseURL: server.URL, TLSInsecure: true}
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+
+		err = client.RevokeIPTrust(context.Background(), "acme", "10.0.0.0/8")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ip trust entry not found")
+	})
+}

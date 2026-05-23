@@ -39,6 +39,14 @@ func newRegistrationServer(t *testing.T) *httptest.Server {
 			w.WriteHeader(http.StatusOK)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deny"):
 			w.WriteHeader(http.StatusOK)
+		case r.Method == "POST" && r.URL.Path == "/api/v1/registration/approve-all":
+			_, _ = w.Write([]byte(`{"approved":1}`))
+		case r.Method == "POST" && r.URL.Path == "/api/v1/registration/approve-by-cidr":
+			_, _ = w.Write([]byte(`{"approved":1}`))
+		case r.Method == "POST" && r.URL.Path == "/api/v1/registration/ip-trust":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/api/v1/registration/ip-trust/"):
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -72,6 +80,7 @@ func TestRegistrationPendingCommand(t *testing.T) {
 		assert.Contains(t, output, "steward-1234567890", "STEWARD ID column must appear")
 		assert.Contains(t, output, "test-tenant")
 		assert.Contains(t, output, "10.0.0.1")
+		assert.Contains(t, output, "RDNS", "RDNS column header must appear")
 		assert.Contains(t, output, "Pending registrations")
 	})
 
@@ -336,5 +345,205 @@ func TestRegistrationDenyCommand(t *testing.T) {
 		err := runRegistrationDeny(registrationDenyCmd, []string{"steward-xyz"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to deny registration")
+	})
+}
+
+func TestRegistrationApproveAllCommand(t *testing.T) {
+	t.Run("approve-all prints count", func(t *testing.T) {
+		server := newRegistrationServer(t)
+		defer server.Close()
+
+		origAPIURL := registrationAPIURL
+		origTLSInsecure := registrationTLSInsecure
+		t.Cleanup(func() {
+			registrationAPIURL = origAPIURL
+			registrationTLSInsecure = origTLSInsecure
+		})
+
+		registrationAPIURL = server.URL
+		registrationTLSInsecure = true
+
+		output := captureStdout(t, func() {
+			err := runRegistrationApproveAll(registrationApproveAllCmd, nil)
+			require.NoError(t, err)
+		})
+
+		assert.Contains(t, output, "Approved 1 registrations")
+	})
+
+	t.Run("API error is returned", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"store unavailable"}`))
+		}))
+		defer server.Close()
+
+		origAPIURL := registrationAPIURL
+		origTLSInsecure := registrationTLSInsecure
+		t.Cleanup(func() {
+			registrationAPIURL = origAPIURL
+			registrationTLSInsecure = origTLSInsecure
+		})
+
+		registrationAPIURL = server.URL
+		registrationTLSInsecure = true
+
+		err := runRegistrationApproveAll(registrationApproveAllCmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to approve all registrations")
+	})
+}
+
+func TestRegistrationApproveByCIDRCommand(t *testing.T) {
+	t.Run("approve-by-cidr prints count", func(t *testing.T) {
+		server := newRegistrationServer(t)
+		defer server.Close()
+
+		origAPIURL := registrationAPIURL
+		origTLSInsecure := registrationTLSInsecure
+		t.Cleanup(func() {
+			registrationAPIURL = origAPIURL
+			registrationTLSInsecure = origTLSInsecure
+		})
+
+		registrationAPIURL = server.URL
+		registrationTLSInsecure = true
+
+		output := captureStdout(t, func() {
+			err := runRegistrationApproveByCIDR(registrationApproveByCIDRCmd, []string{"10.0.0.0/8"})
+			require.NoError(t, err)
+		})
+
+		assert.Contains(t, output, "Approved 1 registrations")
+	})
+
+	t.Run("API error is returned", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid CIDR"}`))
+		}))
+		defer server.Close()
+
+		origAPIURL := registrationAPIURL
+		origTLSInsecure := registrationTLSInsecure
+		t.Cleanup(func() {
+			registrationAPIURL = origAPIURL
+			registrationTLSInsecure = origTLSInsecure
+		})
+
+		registrationAPIURL = server.URL
+		registrationTLSInsecure = true
+
+		err := runRegistrationApproveByCIDR(registrationApproveByCIDRCmd, []string{"not-a-cidr"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to approve registrations by CIDR")
+	})
+}
+
+func TestRegistrationIPTrustAddCommand(t *testing.T) {
+	t.Run("ip-trust add prints confirmation", func(t *testing.T) {
+		server := newRegistrationServer(t)
+		defer server.Close()
+
+		origAPIURL := registrationAPIURL
+		origTLSInsecure := registrationTLSInsecure
+		origTenantID := registrationIPTrustTenantID
+		t.Cleanup(func() {
+			registrationAPIURL = origAPIURL
+			registrationTLSInsecure = origTLSInsecure
+			registrationIPTrustTenantID = origTenantID
+		})
+
+		registrationAPIURL = server.URL
+		registrationTLSInsecure = true
+		registrationIPTrustTenantID = "acme"
+
+		output := captureStdout(t, func() {
+			err := runRegistrationIPTrustAdd(registrationIPTrustAddCmd, []string{"10.0.0.0/8"})
+			require.NoError(t, err)
+		})
+
+		assert.Contains(t, output, "IP trust range added")
+		assert.Contains(t, output, "10.0.0.0/8")
+		assert.Contains(t, output, "acme")
+	})
+
+	t.Run("API error is returned", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"ip-trust store unavailable"}`))
+		}))
+		defer server.Close()
+
+		origAPIURL := registrationAPIURL
+		origTLSInsecure := registrationTLSInsecure
+		origTenantID := registrationIPTrustTenantID
+		t.Cleanup(func() {
+			registrationAPIURL = origAPIURL
+			registrationTLSInsecure = origTLSInsecure
+			registrationIPTrustTenantID = origTenantID
+		})
+
+		registrationAPIURL = server.URL
+		registrationTLSInsecure = true
+		registrationIPTrustTenantID = "acme"
+
+		err := runRegistrationIPTrustAdd(registrationIPTrustAddCmd, []string{"10.0.0.0/8"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to add IP trust range")
+	})
+}
+
+func TestRegistrationIPTrustRevokeCommand(t *testing.T) {
+	t.Run("ip-trust revoke prints confirmation", func(t *testing.T) {
+		server := newRegistrationServer(t)
+		defer server.Close()
+
+		origAPIURL := registrationAPIURL
+		origTLSInsecure := registrationTLSInsecure
+		origTenantID := registrationIPTrustTenantID
+		t.Cleanup(func() {
+			registrationAPIURL = origAPIURL
+			registrationTLSInsecure = origTLSInsecure
+			registrationIPTrustTenantID = origTenantID
+		})
+
+		registrationAPIURL = server.URL
+		registrationTLSInsecure = true
+		registrationIPTrustTenantID = "acme"
+
+		output := captureStdout(t, func() {
+			err := runRegistrationIPTrustRevoke(registrationIPTrustRevokeCmd, []string{"10.0.0.0/8"})
+			require.NoError(t, err)
+		})
+
+		assert.Contains(t, output, "IP trust range revoked")
+		assert.Contains(t, output, "10.0.0.0/8")
+		assert.Contains(t, output, "acme")
+	})
+
+	t.Run("not found returns error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"ip trust entry not found"}`))
+		}))
+		defer server.Close()
+
+		origAPIURL := registrationAPIURL
+		origTLSInsecure := registrationTLSInsecure
+		origTenantID := registrationIPTrustTenantID
+		t.Cleanup(func() {
+			registrationAPIURL = origAPIURL
+			registrationTLSInsecure = origTLSInsecure
+			registrationIPTrustTenantID = origTenantID
+		})
+
+		registrationAPIURL = server.URL
+		registrationTLSInsecure = true
+		registrationIPTrustTenantID = "acme"
+
+		err := runRegistrationIPTrustRevoke(registrationIPTrustRevokeCmd, []string{"10.0.0.0/8"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to revoke IP trust range")
 	})
 }
