@@ -17,9 +17,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/features/steward/discovery"
-	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
@@ -94,13 +91,8 @@ func newTestApprovalHook(t *testing.T) (*WorkflowApprovalHook, cfgconfig.ConfigS
 	storageManager := pkgtesting.SetupTestStorage(t)
 	configStore := storageManager.GetConfigStore()
 
-	registry := make(discovery.ModuleRegistry)
-	errorConfig := stewardconfig.ErrorHandlingConfig{
-		ModuleLoadFailure: stewardconfig.ActionContinue,
-	}
-	moduleFactory := factory.New(registry, errorConfig, logging.NewNoopLogger())
 	logger := logging.NewNoopLogger()
-	engine := workflow.NewEngine(moduleFactory, logger, nil)
+	engine := workflow.NewEngine(workflow.NewNullModuleFactory(), logger, nil)
 
 	hook := NewWorkflowApprovalHook(engine, configStore, logger)
 	return hook, configStore
