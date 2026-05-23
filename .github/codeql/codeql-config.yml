@@ -10,4 +10,4 @@ queries:
 # file's directory — see https://docs.github.com/en/code-security/code-scanning/managing-your-code-scanning-configuration/configuring-advanced-setup-for-code-scanning#specifying-additional-queries.
 packs:
   go:
-    - .github/codeql/extensions
+    - ./.github/codeql/extensions
