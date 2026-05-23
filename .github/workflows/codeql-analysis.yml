@@ -91,11 +91,15 @@ jobs:
       uses: github/codeql-action/init@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4
       with:
         languages: ${{ matrix.language }}
-        # Pull queries (security-extended) AND data-extension packs from a
-        # repo-local config. The config registers ./.github/codeql/extensions/
-        # which models pkg/storage/providers/flatfile.safeJoin as a path-
-        # injection sanitizer so default-suite false positives auto-close.
+        # Pull queries (security-extended) from the repo-local config.
         config-file: ./.github/codeql/codeql-config.yml
+        # Load the local data-extension pack here — the workflow-level
+        # `packs:` input resolves `./` paths against the workspace, whereas
+        # the config-file `packs:` field rejects them as invalid pack specs.
+        # The pack registers:
+        #  - safeJoin (path-injection sanitizer)
+        #  - logging.SanitizeLogValue, RedactedID (log-injection sanitizers)
+        packs: ./.github/codeql/extensions
         # Persist per-language dependency caches across runs (Issue #1581).
         # Official CodeQL-action support — complements the Go module cache
         # above and the DB cache below to minimize cold-start work.
