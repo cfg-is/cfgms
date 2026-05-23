@@ -160,7 +160,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Created new API key",
 		"id", keyID,
 		"name", logging.SanitizeLogValue(createReq.Name),
-		"tenant_id", tenantID)
+		"tenant_id", logging.SanitizeLogValue(tenantID))
 
 	s.writeResponse(w, http.StatusCreated, result)
 }

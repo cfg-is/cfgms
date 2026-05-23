@@ -176,7 +176,7 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	resp, err := s.rbacService.CreateRole(ctx, req)
 	if err != nil {
-		s.logger.Error("Failed to create role", "name", logging.SanitizeLogValue(roleInfo.Name), "error", err)
+		s.logger.Error("Failed to create role", "name", logging.SanitizeLogValue(roleInfo.Name), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create role", "INTERNAL_ERROR")
 		return
 	}
