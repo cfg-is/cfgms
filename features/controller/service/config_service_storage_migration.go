@@ -11,7 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/pkg/logging"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
@@ -21,7 +21,7 @@ type StoredConfiguration struct {
 	StewardID   string
 	TenantID    string // Multi-tenant support
 	Version     string
-	Config      *stewardconfig.StewardConfig
+	Config      *stewardtypes.StewardConfig
 	LastUpdated time.Time
 	CreatedAt   time.Time
 }
@@ -42,7 +42,7 @@ func NewConfigurationStorageMigration(configStore cfgconfig.ConfigStore, logger 
 }
 
 // StoreConfiguration stores a steward configuration using ConfigStore interface
-func (csm *ConfigurationStorageMigration) StoreConfiguration(ctx context.Context, tenantID, stewardID string, config *stewardconfig.StewardConfig) error {
+func (csm *ConfigurationStorageMigration) StoreConfiguration(ctx context.Context, tenantID, stewardID string, config *stewardtypes.StewardConfig) error {
 	// Marshal configuration to YAML for human-readable storage
 	configData, err := yaml.Marshal(config)
 	if err != nil {
@@ -84,7 +84,7 @@ func (csm *ConfigurationStorageMigration) StoreConfiguration(ctx context.Context
 }
 
 // GetConfiguration retrieves a steward configuration from ConfigStore
-func (csm *ConfigurationStorageMigration) GetConfiguration(ctx context.Context, tenantID, stewardID string) (*stewardconfig.StewardConfig, error) {
+func (csm *ConfigurationStorageMigration) GetConfiguration(ctx context.Context, tenantID, stewardID string) (*stewardtypes.StewardConfig, error) {
 	// Create config key
 	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
@@ -109,7 +109,7 @@ func (csm *ConfigurationStorageMigration) GetConfiguration(ctx context.Context, 
 	}
 
 	// Parse YAML configuration
-	var config stewardconfig.StewardConfig
+	var config stewardtypes.StewardConfig
 	if err := yaml.Unmarshal(configEntry.Data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse configuration YAML: %w", err)
 	}
@@ -118,7 +118,7 @@ func (csm *ConfigurationStorageMigration) GetConfiguration(ctx context.Context, 
 }
 
 // GetConfigurationWithInheritance retrieves configuration with tenant hierarchy inheritance
-func (csm *ConfigurationStorageMigration) GetConfigurationWithInheritance(ctx context.Context, tenantID, stewardID string) (*stewardconfig.StewardConfig, error) {
+func (csm *ConfigurationStorageMigration) GetConfigurationWithInheritance(ctx context.Context, tenantID, stewardID string) (*stewardtypes.StewardConfig, error) {
 	// Use storage provider's built-in inheritance resolution
 	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
@@ -132,7 +132,7 @@ func (csm *ConfigurationStorageMigration) GetConfigurationWithInheritance(ctx co
 	}
 
 	// Parse the resolved configuration
-	var config stewardconfig.StewardConfig
+	var config stewardtypes.StewardConfig
 	if err := yaml.Unmarshal(configEntry.Data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse inherited configuration: %w", err)
 	}
@@ -156,7 +156,7 @@ func (csm *ConfigurationStorageMigration) GetStoredConfiguration(ctx context.Con
 	}
 
 	// Parse YAML configuration
-	var config stewardconfig.StewardConfig
+	var config stewardtypes.StewardConfig
 	if err := yaml.Unmarshal(configEntry.Data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse configuration YAML: %w", err)
 	}
@@ -191,7 +191,7 @@ func (csm *ConfigurationStorageMigration) ListConfigurations(ctx context.Context
 	var storedConfigs []*StoredConfiguration
 	for _, entry := range configEntries {
 		// Parse YAML configuration
-		var config stewardconfig.StewardConfig
+		var config stewardtypes.StewardConfig
 		if err := yaml.Unmarshal(entry.Data, &config); err != nil {
 			csm.logger.Warn("Failed to parse configuration during listing",
 				"steward_id", entry.Key.Name,
@@ -261,7 +261,7 @@ func (csm *ConfigurationStorageMigration) GetConfigurationHistory(ctx context.Co
 }
 
 // GetConfigurationVersion retrieves a specific version of a configuration
-func (csm *ConfigurationStorageMigration) GetConfigurationVersion(ctx context.Context, tenantID, stewardID string, version int64) (*stewardconfig.StewardConfig, error) {
+func (csm *ConfigurationStorageMigration) GetConfigurationVersion(ctx context.Context, tenantID, stewardID string, version int64) (*stewardtypes.StewardConfig, error) {
 	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "stewards",
@@ -274,7 +274,7 @@ func (csm *ConfigurationStorageMigration) GetConfigurationVersion(ctx context.Co
 	}
 
 	// Parse YAML configuration
-	var config stewardconfig.StewardConfig
+	var config stewardtypes.StewardConfig
 	if err := yaml.Unmarshal(configEntry.Data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse configuration version %d: %w", version, err)
 	}
@@ -283,9 +283,9 @@ func (csm *ConfigurationStorageMigration) GetConfigurationVersion(ctx context.Co
 }
 
 // ValidateConfiguration validates a configuration before storage
-func (csm *ConfigurationStorageMigration) ValidateConfiguration(ctx context.Context, config *stewardconfig.StewardConfig) error {
+func (csm *ConfigurationStorageMigration) ValidateConfiguration(ctx context.Context, config *stewardtypes.StewardConfig) error {
 	// Use existing steward config validation
-	if err := stewardconfig.ValidateConfiguration(*config); err != nil {
+	if err := stewardtypes.ValidateConfiguration(*config); err != nil {
 		return fmt.Errorf("configuration validation failed: %w", err)
 	}
 
