@@ -1,0 +1,32 @@
+# CFGMS log-injection sanitizer modeled as a summary.
+#
+# logging.SanitizeLogValue replaces every Unicode control character (C0, C1,
+# DEL) with an underscore and truncates the value to 1024 chars. The output is
+# safe to embed in a log line — CR/LF cannot be smuggled to forge a new
+# entry. Without an explicit model, CodeQL's default log-injection query
+# (CWE-117 "Log entries created from user input") sees taint flow from
+# request fields straight through to logger calls and fires false positives at
+# every call site that uses this wrapper.
+#
+# The same model also resolves the CWE-312 "Clear-text logging of sensitive
+# information" rule when sensitive values (request paths, header values,
+# decoded body fields) pass through the sanitizer — `kind: value` blocks taint
+# propagation universally, not just for one rule.
+#
+# Format (per CodeQL `summaryModel` extensible predicate):
+#   [package, type, subtypes, name, signature, ext, input, output, kind, provenance]
+#
+# SanitizeLogValue signature: func SanitizeLogValue(s string) string
+#   - Argument[0]    = the value to sanitize
+#   - ReturnValue[0] = the sanitized value
+#
+# See path-injection-sanitizers.model.yml in this directory for the same
+# pattern applied to safeJoin.
+
+extensions:
+  - addsTo:
+      pack: codeql/go-all
+      extensible: summaryModel
+    data:
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
