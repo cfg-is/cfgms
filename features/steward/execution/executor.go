@@ -389,9 +389,16 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		return report, fmt.Errorf("failed to parse configuration: %w", err)
 	}
 
-	e.logger.Info("Parsed configuration",
-		"steward_id", cfg.Steward.ID,
-		"resource_count", len(cfg.Resources))
+	// cfg.Steward.ID is the locally-declared steward identifier from the
+	// SYNCED config payload — which the controller does not populate (the
+	// runtime steward_id comes from registration, not configuration). Logging
+	// the empty value pollutes any `tail -1 | grep steward_id` consumer
+	// (notably the fleet-e2e framework_test.go:178 wait). Omit when empty.
+	logArgs := []interface{}{"resource_count", len(cfg.Resources)}
+	if cfg.Steward.ID != "" {
+		logArgs = append(logArgs, "steward_id", cfg.Steward.ID)
+	}
+	e.logger.Info("Parsed configuration", logArgs...)
 
 	// Add tenant context
 	if e.tenantID != "" {
