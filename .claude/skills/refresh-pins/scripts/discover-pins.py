@@ -13,6 +13,10 @@ Discovery sources:
 - .devcontainer/Dockerfile — same
 - .github/workflows/dependency-pin-check.yml — the existing tool pin list
   (check_version <name> <repo> <version> calls)
+- .github/workflows/*.yml — GitHub Action SHA pins (uses: <owner>/<name>@<sha>)
+  — one inventory entry per unique (action, sha) tuple so SHA drift across
+  workflows is naturally visible (multiple entries with the same action name
+  but different SHAs).
 
 Run from repo root or any subdir — uses `git rev-parse --show-toplevel`
 to anchor.
@@ -186,10 +190,86 @@ def discover_tool_pins(root: Path) -> list[dict]:
     return pins
 
 
+_GITHUB_ACTION_USES_RE = re.compile(
+    # Match:  uses: <owner>/<name>[/<subpath>]@<40-hex-sha>  [# v<tag-hint>]
+    # Owner and name use the GitHub allowed-character set; subpath is optional
+    # (some actions live in subdirs of a monorepo, e.g. actions/cache/save).
+    r"""
+    ^\s*-?\s*uses:\s*
+    (?P<action>[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+)
+    @
+    (?P<sha>[a-fA-F0-9]{40})
+    (?:\s*\#\s*(?P<hint>\S+))?
+    """,
+    re.VERBOSE,
+)
+
+
+def discover_github_actions(root: Path) -> list[dict]:
+    """Discover GitHub Action SHA pins across every workflow file.
+
+    One inventory entry per unique (action, sha) tuple — so when the same
+    action appears at different SHAs across workflows (drift, or intentional
+    pin-back), each version becomes its own entry. The optional `# vN` hint
+    after the SHA is captured into the match string for human readability;
+    it is not parsed as the canonical version (the SHA is the source of
+    truth, since release notes and tags can be retconned).
+
+    The `name` slug embeds the short SHA so multiple entries for the same
+    action remain unique inventory keys (a downstream consumer can group
+    by stripping `@<sha>`).
+    """
+    workflows = sorted((root / ".github/workflows").glob("*.yml"))
+
+    # (action, sha) → {"hint": "v4" or None, "locations": [...]}
+    by_pin: dict[tuple[str, str], dict] = {}
+
+    for wf in workflows:
+        if not wf.is_file():
+            continue
+        try:
+            lines = wf.read_text().splitlines()
+        except UnicodeDecodeError:
+            continue
+        for i, line in enumerate(lines, 1):
+            m = _GITHUB_ACTION_USES_RE.match(line)
+            if not m:
+                continue
+            action = m.group("action")
+            sha = m.group("sha")
+            hint = m.group("hint")
+            key = (action, sha)
+            entry = by_pin.setdefault(key, {"hint": hint, "locations": []})
+            # Keep the first non-None hint we see (they should all agree).
+            if entry["hint"] is None and hint is not None:
+                entry["hint"] = hint
+            entry["locations"].append({
+                "file": str(wf.relative_to(root)),
+                "line": i,
+                "match": line.strip(),
+            })
+
+    pins = []
+    for (action, sha), entry in sorted(by_pin.items()):
+        # `current` is the full SHA — the canonical identity of the pinned
+        # version. Tag hints (e.g. `# v4`) are advisory only.
+        pins.append({
+            "name": f"gha:{action}@{sha[:8]}",
+            "kind": "tool",
+            "current": sha,
+            "release_source": f"gh:{action.split('/', 1)[0]}/{action.split('/', 1)[1].split('/', 1)[0]}",
+            "ecosystem": None,
+            "package": None,
+            "locations": entry["locations"],
+        })
+    return pins
+
+
 def main() -> int:
     root = repo_root()
     inventory = [discover_go_toolchain(root)]
     inventory.extend(discover_tool_pins(root))
+    inventory.extend(discover_github_actions(root))
     json.dump(inventory, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
