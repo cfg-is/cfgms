@@ -358,3 +358,52 @@ func TestRegistrationConfig_IPTrustThreshold_YAML(t *testing.T) {
 	assert.Equal(t, 45*time.Minute, cfg.Registration.GetIPTrustThreshold(),
 		"ip_trust_threshold must be parsed from YAML duration string")
 }
+
+// TestRegistrationConfig_GetIPTrustDarkWindow verifies the dark-window getter
+// covers nil receiver, zero value, and configured value (Issue #1697).
+func TestRegistrationConfig_GetIPTrustDarkWindow(t *testing.T) {
+	var rc *RegistrationConfig
+	assert.Equal(t, 30*24*time.Hour, rc.GetIPTrustDarkWindow(),
+		"nil RegistrationConfig must default to 30 days")
+
+	zero := &RegistrationConfig{}
+	assert.Equal(t, 30*24*time.Hour, zero.GetIPTrustDarkWindow(),
+		"zero IPTrustDarkWindow must default to 30 days")
+
+	configured := &RegistrationConfig{IPTrustDarkWindow: Duration(7 * 24 * time.Hour)}
+	assert.Equal(t, 7*24*time.Hour, configured.GetIPTrustDarkWindow(),
+		"configured dark window must be returned unchanged")
+}
+
+// TestRegistrationConfig_GetPendingReviewTimeout verifies the pending timeout
+// getter covers nil receiver, zero value, and configured value (Issue #1697).
+func TestRegistrationConfig_GetPendingReviewTimeout(t *testing.T) {
+	var rc *RegistrationConfig
+	assert.Equal(t, 5*24*time.Hour, rc.GetPendingReviewTimeout(),
+		"nil RegistrationConfig must default to 5 days")
+
+	zero := &RegistrationConfig{}
+	assert.Equal(t, 5*24*time.Hour, zero.GetPendingReviewTimeout(),
+		"zero PendingReviewTimeout must default to 5 days")
+
+	configured := &RegistrationConfig{PendingReviewTimeout: Duration(3 * 24 * time.Hour)}
+	assert.Equal(t, 3*24*time.Hour, configured.GetPendingReviewTimeout(),
+		"configured timeout must be returned unchanged")
+}
+
+// TestRegistrationConfig_DarkWindowAndTimeout_YAML verifies that
+// ip_trust_dark_window and pending_review_timeout parse from YAML (Issue #1697).
+// Uses non-default values (14 days / 3 days) so the assertion only passes when
+// YAML unmarshaling actually populated the fields.
+func TestRegistrationConfig_DarkWindowAndTimeout_YAML(t *testing.T) {
+	yamlInput := "registration:\n  ip_trust_dark_window: 336h\n  pending_review_timeout: 72h\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+	require.NotNil(t, cfg.Registration)
+
+	assert.Equal(t, 14*24*time.Hour, cfg.Registration.GetIPTrustDarkWindow(),
+		"336h must parse to 14 days")
+	assert.Equal(t, 3*24*time.Hour, cfg.Registration.GetPendingReviewTimeout(),
+		"72h must parse to 3 days")
+}

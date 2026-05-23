@@ -242,6 +242,24 @@ The controller promotes a steward's source IP to **trusted status** only after i
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
 | `registration.ip_trust_threshold` | 30 min | Continuous liveness required before IP is trusted (Issue #1694) |
+| `registration.ip_trust_dark_window` | 30 days | Inactivity period before a trusted IP range is auto-revoked (Issue #1697) |
+| `registration.pending_review_timeout` | 5 days | Maximum time a pending registration may await operator action (Issue #1697) |
+
+### IP-Trust Dark-Window Expiry (Issue #1697)
+
+A trusted IP range is automatically revoked after 30 consecutive days with no registrations and no healthy stewards from that range (the **dark window**). The sweep is performed hourly by `IPTrustExpiryJob` (`features/controller/registration/ip_trust_expiry.go`).
+
+**Exemption:** Pre-seeded entries (`PreSeeded: true`) are never auto-revoked. Operator-owned ranges added via `cfg registration ip-trust add --pre-seeded` can only be revoked explicitly with `cfg registration ip-trust revoke`.
+
+**Activity tracking:** `RecordHealthySteward` (called on every healthy steward heartbeat) updates the `last_activity` timestamp on the matching CIDR entry. A registration attempt from an already-known IP also counts as activity. An entry whose `last_activity` is older than the dark window is revoked on the next sweep.
+
+**Idempotency:** Revoking an already-revoked entry is a no-op.
+
+### Pending-Registration Expiry (Issue #1697)
+
+Pending registration entries that have not been acted on within 5 days are automatically marked `expired` by `PendingExpiryJob` (`features/controller/registration/pending_expiry.go`). The sweep runs hourly and delegates to `PendingRegistrationStore.ExpireStale`.
+
+Expired entries are visible via `cfg registration pending` (status `expired`). They cannot be approved or denied after expiry; the steward must re-register to obtain a fresh pending entry.
 
 ### Commands
 
