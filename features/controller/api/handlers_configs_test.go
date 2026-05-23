@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/service"
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 	storageifaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -64,22 +64,22 @@ func useFailingConfigService(t *testing.T, server *Server) {
 // storeTestConfig stores a minimal valid StewardConfig for the given tenant and steward.
 func storeTestConfig(t *testing.T, server *Server, tenantID, stewardID string) {
 	t.Helper()
-	cfg := &stewardconfig.StewardConfig{
-		Steward: stewardconfig.StewardSettings{
+	cfg := &stewardtypes.StewardConfig{
+		Steward: stewardtypes.StewardSettings{
 			ID:   stewardID,
-			Mode: stewardconfig.ModeController,
-			Logging: stewardconfig.LoggingConfig{
+			Mode: stewardtypes.ModeController,
+			Logging: stewardtypes.LoggingConfig{
 				Level:  "info",
 				Format: "text",
 			},
-			ErrorHandling: stewardconfig.ErrorHandlingConfig{
-				ModuleLoadFailure:  stewardconfig.ActionContinue,
-				ResourceFailure:    stewardconfig.ActionWarn,
-				ConfigurationError: stewardconfig.ActionFail,
+			ErrorHandling: stewardtypes.ErrorHandlingConfig{
+				ModuleLoadFailure:  stewardtypes.ActionContinue,
+				ResourceFailure:    stewardtypes.ActionWarn,
+				ConfigurationError: stewardtypes.ActionFail,
 			},
 		},
 		Modules:   map[string]string{"file": "file"},
-		Resources: []stewardconfig.ResourceConfig{},
+		Resources: []stewardtypes.ResourceConfig{},
 	}
 	err := server.configService.SetConfiguration(context.Background(), tenantID, stewardID, cfg)
 	require.NoError(t, err)

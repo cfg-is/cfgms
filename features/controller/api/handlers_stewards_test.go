@@ -590,3 +590,64 @@ func TestHandleDeleteStewardConfig(t *testing.T) {
 		assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
 	})
 }
+
+// TestHandleGetStewardConfig_HappyPath exercises the stewardtypes.FromProto conversion
+// path inside handleGetStewardConfig: register a steward, store a config, then GET it.
+func TestHandleGetStewardConfig_HappyPath(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-config"})
+
+	// Register a steward so GetConfiguration can look up its tenant.
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "cfg-test-host", "os": "linux",
+	})
+
+	// Store a config — uses the same "test-tenant" that registerTestSteward injects
+	// via context. The inheritance resolver will fall back to device-level config since
+	// "test-tenant" has no full TenantData record in this in-memory test setup.
+	storeTestConfig(t, server, "test-tenant", stewardID)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/config", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp APIResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	data, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok, "response data must be a map, got %T", resp.Data)
+	assert.Equal(t, stewardID, data["steward_id"])
+	assert.Contains(t, data, "config")
+}
+
+// TestHandleGetStewardConfig_StewardNotRegistered verifies that requesting config for
+// an unknown steward returns 400 CONFIG_ERROR (configService returns NOT_FOUND).
+func TestHandleGetStewardConfig_StewardNotRegistered(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-config"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/nonexistent-steward/config", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CONFIG_ERROR", errResp.Error.Code)
+}
+
+// TestHandleGetStewardConfig_InsufficientPermission verifies 403 when the API key
+// lacks steward:read-config permission.
+func TestHandleGetStewardConfig_InsufficientPermission(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/any-steward/config", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}

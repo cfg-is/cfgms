@@ -21,8 +21,8 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/config/signature"
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/service"
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -107,25 +107,25 @@ func createTestService(t *testing.T) *service.ConfigurationServiceV2 {
 }
 
 // minimalStewardConfig returns a valid StewardConfig for stewardID.
-func minimalStewardConfig(stewardID string) *stewardconfig.StewardConfig {
-	return &stewardconfig.StewardConfig{
-		Steward: stewardconfig.StewardSettings{
+func minimalStewardConfig(stewardID string) *stewardtypes.StewardConfig {
+	return &stewardtypes.StewardConfig{
+		Steward: stewardtypes.StewardSettings{
 			ID:   stewardID,
-			Mode: stewardconfig.ModeController,
-			Logging: stewardconfig.LoggingConfig{
+			Mode: stewardtypes.ModeController,
+			Logging: stewardtypes.LoggingConfig{
 				Level:  "info",
 				Format: "text",
 			},
-			ErrorHandling: stewardconfig.ErrorHandlingConfig{
-				ModuleLoadFailure:  stewardconfig.ActionContinue,
-				ResourceFailure:    stewardconfig.ActionWarn,
-				ConfigurationError: stewardconfig.ActionFail,
+			ErrorHandling: stewardtypes.ErrorHandlingConfig{
+				ModuleLoadFailure:  stewardtypes.ActionContinue,
+				ResourceFailure:    stewardtypes.ActionWarn,
+				ConfigurationError: stewardtypes.ActionFail,
 			},
 		},
 		Modules: map[string]string{
 			"directory": "directory",
 		},
-		Resources: []stewardconfig.ResourceConfig{
+		Resources: []stewardtypes.ResourceConfig{
 			{
 				Name:   "test-dir",
 				Module: "directory",
