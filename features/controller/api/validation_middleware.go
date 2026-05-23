@@ -95,6 +95,9 @@ func (s *Server) validateURLParameters(validator *security.EnhancedValidator, re
 		case "stewardId", "steward_id":
 			// Steward IDs
 			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric_dash", "max_length:64")
+		case "cidr":
+			// CIDR ranges: IPv4 (10.0.0.0/8) and IPv6 (2001:db8::/32)
+			validator.ValidateString(result, "path."+param, value, "required", "charset:cidr", "max_length:64")
 		default:
 			// Generic validation for other path parameters
 			validator.ValidateString(result, "path."+param, value, "charset:safe_text", "max_length:128", "no_control_chars")

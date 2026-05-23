@@ -529,10 +529,10 @@ If `registration.workflow` is omitted, the controller defaults to `ip-trust`. Th
 
 **Managing pending registrations with `cfg registration`:**
 
-When using `manual-review`, quarantined stewards accumulate in the controller's in-memory pending queue until approved or denied. Use the `cfg registration` CLI commands to manage them:
+When using `manual-review`, quarantined stewards accumulate in the controller's durable pending queue until approved or denied. Use the `cfg registration` CLI commands to manage them:
 
 ```bash
-# List all quarantined stewards awaiting approval
+# List all quarantined stewards awaiting approval (shows SOURCE_IP and RDNS columns)
 cfg registration pending
 
 # Approve a steward (promotes from quarantined → registered)
@@ -540,17 +540,37 @@ cfg registration approve <steward-id>
 
 # Deny a steward (removes from queue; steward must re-register to retry)
 cfg registration deny <steward-id> --reason "Unauthorized deployment"
+
+# Approve all pending registrations in one call
+cfg registration approve-all
+
+# Approve only pending entries whose source IP is in a given CIDR range
+cfg registration approve-by-cidr 10.0.0.0/8
+
+# Add a pre-seeded trusted CIDR range for a tenant (ip-trust workflow)
+cfg registration ip-trust add 10.0.0.0/8 --tenant-id acme-corp
+
+# Revoke a trusted CIDR range for a tenant
+cfg registration ip-trust revoke 10.0.0.0/8 --tenant-id acme-corp
 ```
 
 | Command | HTTP call | Effect |
 |---|---|---|
-| `cfg registration pending` | `GET /api/v1/registration/pending` | Lists all quarantined stewards |
+| `cfg registration pending` | `GET /api/v1/registration/pending` | Lists all quarantined stewards with SOURCE_IP and RDNS |
 | `cfg registration approve <id>` | `POST /api/v1/registration/{id}/approve` | Promotes steward status to `registered` |
 | `cfg registration deny <id>` | `POST /api/v1/registration/{id}/deny` | Removes steward from pending queue |
+| `cfg registration approve-all` | `POST /api/v1/registration/approve-all` | Approves all pending registrations; prints count approved |
+| `cfg registration approve-by-cidr <cidr>` | `POST /api/v1/registration/approve-by-cidr` | Approves pending entries whose source IP falls in the CIDR |
+| `cfg registration ip-trust add <cidr>` | `POST /api/v1/registration/ip-trust` | Adds a pre-seeded trusted CIDR for `--tenant-id` |
+| `cfg registration ip-trust revoke <cidr>` | `DELETE /api/v1/registration/ip-trust/{tenant_id}/{cidr}` | Revokes a trusted CIDR for `--tenant-id` |
 
-Required API key permissions: `registration:list-pending`, `registration:approve`, `registration:deny`.
+Required API key permissions: `registration:list-pending`, `registration:approve`, `registration:deny` for individual and bulk approval operations; `registration:manage-ip-trust` for ip-trust subcommands.
 
-The pending queue is in-memory only — it does not survive controller restarts. Quarantined stewards must re-register after a controller restart to reappear in the queue.
+The `pending` output includes a `SOURCE_IP` column showing the steward's source IP at registration time, and an `RDNS` column populated by a best-effort reverse DNS lookup at display time (shows `-` on failure or timeout).
+
+The `approve-by-cidr` command performs IP containment filtering on the controller using `net.ParseCIDR` + `ipNet.Contains` — the CIDR is not delegated to the database. All approved entries are updated atomically per-entry; partial approval (some entries approved, others skipped) is the expected outcome.
+
+The pending queue is backed by the durable `PendingRegistrationStore` (SQLite in OSS, PostgreSQL in commercial) and survives controller restarts.
 
 ### RBAC
 

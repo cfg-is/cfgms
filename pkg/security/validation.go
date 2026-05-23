@@ -86,6 +86,8 @@ func NewValidator() *Validator {
 	v.allowedCharsets["hostname"] = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)
 	v.allowedCharsets["safe_text"] = regexp.MustCompile(`^[a-zA-Z0-9\s\.\-_,;:!?\(\)\[\]]+$`)
 	v.allowedCharsets["base64"] = regexp.MustCompile(`^[A-Za-z0-9+/]*={0,2}$`)
+	// cidr: IPv4 (10.0.0.0/8) and IPv6 (2001:db8::/32) CIDR notation
+	v.allowedCharsets["cidr"] = regexp.MustCompile(`^[0-9a-fA-F.:\/]+$`)
 
 	v.dnsLookupTimeout = 5 * time.Second
 

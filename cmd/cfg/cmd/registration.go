@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -16,12 +17,14 @@ import (
 )
 
 var (
-	registrationAPIURL      string
-	registrationAPIKey      string
-	registrationTLSCACert   string
-	registrationTLSInsecure bool
-	registrationJSONOutput  bool
-	registrationDenyReason  string
+	registrationAPIURL           string
+	registrationAPIKey           string
+	registrationTLSCACert        string
+	registrationTLSInsecure      bool
+	registrationJSONOutput       bool
+	registrationDenyReason       string
+	registrationIPTrustTenantID  string
+	registrationIPTrustPreSeeded bool
 )
 
 // registrationCmd is the parent command for registration management.
@@ -98,6 +101,68 @@ Examples:
 	RunE: runRegistrationDeny,
 }
 
+// registrationApproveAllCmd approves all pending steward registrations in one operation.
+var registrationApproveAllCmd = &cobra.Command{
+	Use:   "approve-all",
+	Short: "Approve all pending steward registrations",
+	Long: `Approve all quarantined steward registrations in one operation.
+
+Returns the count of newly approved registrations. Already-approved stewards
+are not counted (idempotent).
+
+Examples:
+  cfg registration approve-all`,
+	RunE: runRegistrationApproveAll,
+}
+
+// registrationApproveByCIDRCmd approves pending registrations by source IP CIDR.
+var registrationApproveByCIDRCmd = &cobra.Command{
+	Use:   "approve-by-cidr <cidr>",
+	Short: "Approve pending steward registrations whose source IP falls in the CIDR",
+	Long: `Approve pending registrations for stewards whose source IP falls within the
+given CIDR. Registrations outside the CIDR remain pending.
+
+Returns the count of newly approved registrations.
+
+Examples:
+  cfg registration approve-by-cidr 192.168.1.0/24`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRegistrationApproveByCIDR,
+}
+
+// registrationIPTrustCmd is the parent for ip-trust subcommands.
+var registrationIPTrustCmd = &cobra.Command{
+	Use:   "ip-trust",
+	Short: "Manage IP trust ranges for automatic registration approval",
+	Long:  `Add or revoke trusted IP CIDR ranges for tenant-scoped automatic registration approval.`,
+}
+
+// registrationIPTrustAddCmd adds a trusted CIDR for a tenant.
+var registrationIPTrustAddCmd = &cobra.Command{
+	Use:   "add <cidr>",
+	Short: "Add a trusted IP CIDR for a tenant",
+	Long: `Add a trusted CIDR range for the given tenant. Stewards registering from IPs
+in this range are automatically approved.
+
+Examples:
+  cfg registration ip-trust add 10.0.0.0/8 --tenant-id acme`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRegistrationIPTrustAdd,
+}
+
+// registrationIPTrustRevokeCmd revokes a trusted CIDR for a tenant.
+var registrationIPTrustRevokeCmd = &cobra.Command{
+	Use:   "revoke <cidr>",
+	Short: "Revoke a trusted IP CIDR for a tenant",
+	Long: `Revoke a trusted CIDR range for the given tenant. Subsequent registrations
+from IPs in this range will be quarantined for manual review.
+
+Examples:
+  cfg registration ip-trust revoke 10.0.0.0/8 --tenant-id acme`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRegistrationIPTrustRevoke,
+}
+
 func init() {
 	registrationCmd.PersistentFlags().StringVar(&registrationAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	registrationCmd.PersistentFlags().StringVar(&registrationAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
@@ -108,9 +173,22 @@ func init() {
 
 	registrationDenyCmd.Flags().StringVar(&registrationDenyReason, "reason", "", "Reason for denying the registration (optional)")
 
+	registrationIPTrustAddCmd.Flags().BoolVar(&registrationIPTrustPreSeeded, "pre-seeded", true, "Mark this CIDR as pre-seeded (operator intent: auto-approve)")
+	registrationIPTrustAddCmd.Flags().StringVar(&registrationIPTrustTenantID, "tenant-id", "", "Tenant ID to configure (required)")
+	_ = registrationIPTrustAddCmd.MarkFlagRequired("tenant-id")
+
+	registrationIPTrustRevokeCmd.Flags().StringVar(&registrationIPTrustTenantID, "tenant-id", "", "Tenant ID to configure (required)")
+	_ = registrationIPTrustRevokeCmd.MarkFlagRequired("tenant-id")
+
+	registrationIPTrustCmd.AddCommand(registrationIPTrustAddCmd)
+	registrationIPTrustCmd.AddCommand(registrationIPTrustRevokeCmd)
+
 	registrationCmd.AddCommand(registrationPendingCmd)
 	registrationCmd.AddCommand(registrationApproveCmd)
 	registrationCmd.AddCommand(registrationDenyCmd)
+	registrationCmd.AddCommand(registrationApproveAllCmd)
+	registrationCmd.AddCommand(registrationApproveByCIDRCmd)
+	registrationCmd.AddCommand(registrationIPTrustCmd)
 }
 
 // getRegistrationClient creates an API client using bundle auth (mTLS) when available,
@@ -151,6 +229,20 @@ func getRegistrationClient() (*APIClient, error) {
 	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
 }
 
+// lookupRDNS performs a best-effort reverse DNS lookup for the given IP.
+// Returns "-" on failure or timeout (2-second budget).
+func lookupRDNS(sourceIP string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var r net.Resolver
+	names, err := r.LookupAddr(ctx, sourceIP)
+	if err != nil || len(names) == 0 {
+		return "-"
+	}
+	return strings.TrimSuffix(names[0], ".")
+}
+
 func runRegistrationPending(cmd *cobra.Command, args []string) error {
 	client, err := getRegistrationClient()
 	if err != nil {
@@ -160,6 +252,11 @@ func runRegistrationPending(cmd *cobra.Command, args []string) error {
 	pending, err := client.ListPendingRegistrations(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to list pending registrations: %w", err)
+	}
+
+	// Populate RDNS at display time — best-effort, does not affect the server record.
+	for i := range pending {
+		pending[i].RDNS = lookupRDNS(pending[i].SourceIP)
 	}
 
 	if registrationJSONOutput {
@@ -173,10 +270,11 @@ func runRegistrationPending(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Pending registrations (%d):\n\n", len(pending))
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintf(w, "PENDING ID\tSTEWARD ID\tTENANT ID\tSOURCE IP\tREGISTERED AT\n")
+	_, _ = fmt.Fprintf(w, "PENDING ID\tSTEWARD ID\tTENANT ID\tSOURCE IP\tRDNS\tREGISTERED AT\n")
 	for _, pr := range pending {
 		registeredAt := pr.RegisteredAt.UTC().Format(time.RFC3339)
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", pr.PendingID, pr.StewardID, pr.TenantID, pr.SourceIP, registeredAt)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			pr.PendingID, pr.StewardID, pr.TenantID, pr.SourceIP, pr.RDNS, registeredAt)
 	}
 	_ = w.Flush()
 
@@ -210,5 +308,66 @@ func runRegistrationDeny(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Registration denied: %s\n", pendingID)
+	return nil
+}
+
+func runRegistrationApproveAll(cmd *cobra.Command, args []string) error {
+	client, err := getRegistrationClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	count, err := client.ApproveAllRegistrations(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to approve all registrations: %w", err)
+	}
+
+	fmt.Printf("Approved %d registrations\n", count)
+	return nil
+}
+
+func runRegistrationApproveByCIDR(cmd *cobra.Command, args []string) error {
+	cidr := args[0]
+	client, err := getRegistrationClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	count, err := client.ApproveByCIDR(context.Background(), cidr)
+	if err != nil {
+		return fmt.Errorf("failed to approve registrations by CIDR %s: %w", cidr, err)
+	}
+
+	fmt.Printf("Approved %d registrations\n", count)
+	return nil
+}
+
+func runRegistrationIPTrustAdd(cmd *cobra.Command, args []string) error {
+	cidr := args[0]
+	client, err := getRegistrationClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	if err := client.AddIPTrust(context.Background(), registrationIPTrustTenantID, cidr); err != nil {
+		return fmt.Errorf("failed to add IP trust range %s for tenant %s: %w", cidr, registrationIPTrustTenantID, err)
+	}
+
+	fmt.Printf("IP trust range added: %s (tenant: %s)\n", cidr, registrationIPTrustTenantID)
+	return nil
+}
+
+func runRegistrationIPTrustRevoke(cmd *cobra.Command, args []string) error {
+	cidr := args[0]
+	client, err := getRegistrationClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	if err := client.RevokeIPTrust(context.Background(), registrationIPTrustTenantID, cidr); err != nil {
+		return fmt.Errorf("failed to revoke IP trust range %s for tenant %s: %w", cidr, registrationIPTrustTenantID, err)
+	}
+
+	fmt.Printf("IP trust range revoked: %s (tenant: %s)\n", cidr, registrationIPTrustTenantID)
 	return nil
 }

@@ -348,6 +348,104 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 	return resp, nil
 }
 
+// approveAllResponse is the JSON body returned by approve-all and approve-by-cidr.
+type approveAllResponse struct {
+	Approved int `json:"approved"`
+}
+
+// approveByCIDRRequest is the request body for POST /api/v1/registration/approve-by-cidr.
+type approveByCIDRRequest struct {
+	CIDR string `json:"cidr"`
+}
+
+// handleApproveAllRegistrations handles POST /api/v1/registration/approve-all.
+// Approves every entry currently in "pending" status and returns the count.
+// Idempotent: entries already approved/claimed/denied are skipped without error.
+func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Request) {
+	if s.pendingStore == nil {
+		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	entries, err := s.pendingStore.ListPending(r.Context(), "")
+	if err != nil {
+		s.logger.Error("Failed to list pending registrations for approve-all", "error", err)
+		http.Error(w, "Failed to list pending registrations", http.StatusInternalServerError)
+		return
+	}
+
+	approved := 0
+	for _, e := range entries {
+		if e.Status != business.PendingRegistrationStatusPending {
+			continue
+		}
+		if err := s.pendingStore.UpdateStatus(r.Context(), e.PendingID, business.PendingRegistrationStatusApproved); err != nil {
+			s.logger.Error("Failed to approve pending registration in bulk",
+				"pending_id", logging.SanitizeLogValue(e.PendingID), "error", err)
+			continue
+		}
+		approved++
+	}
+
+	s.logger.Info("Bulk approve-all completed", "approved", approved)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(approveAllResponse{Approved: approved}); err != nil {
+		s.logger.Error("Failed to encode approve-all response", "error", err)
+	}
+}
+
+// handleApproveByCIDR handles POST /api/v1/registration/approve-by-cidr.
+// Filters pending entries by source IP containment in the given CIDR (evaluated in Go,
+// not delegated to storage) and approves matching entries. Returns the count approved.
+func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
+	if s.pendingStore == nil {
+		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req approveByCIDRRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CIDR == "" {
+		http.Error(w, "cidr is required", http.StatusBadRequest)
+		return
+	}
+
+	_, ipNet, err := net.ParseCIDR(req.CIDR)
+	if err != nil {
+		http.Error(w, "invalid CIDR", http.StatusBadRequest)
+		return
+	}
+
+	entries, err := s.pendingStore.ListPending(r.Context(), "")
+	if err != nil {
+		s.logger.Error("Failed to list pending registrations for approve-by-cidr", "error", err)
+		http.Error(w, "Failed to list pending registrations", http.StatusInternalServerError)
+		return
+	}
+
+	approved := 0
+	for _, e := range entries {
+		if e.Status != business.PendingRegistrationStatusPending {
+			continue
+		}
+		ip := net.ParseIP(e.SourceIP)
+		if ip == nil || !ipNet.Contains(ip) {
+			continue
+		}
+		if err := s.pendingStore.UpdateStatus(r.Context(), e.PendingID, business.PendingRegistrationStatusApproved); err != nil {
+			s.logger.Error("Failed to approve pending registration in CIDR bulk",
+				"pending_id", logging.SanitizeLogValue(e.PendingID), "error", err)
+			continue
+		}
+		approved++
+	}
+
+	s.logger.Info("CIDR bulk approve completed",
+		"cidr", logging.SanitizeLogValue(req.CIDR), "approved", approved)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(approveAllResponse{Approved: approved}); err != nil {
+		s.logger.Error("Failed to encode approve-by-cidr response", "error", err)
+	}
+}
+
 // handleRegister handles steward registration via REST API
 // POST /api/v1/register
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -926,4 +927,198 @@ func TestHandleRegistrationStatus_NoAuth(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
+
+// newBulkApprovalServer creates a test server with approve + approve-all + approve-by-cidr permissions.
+func newBulkApprovalServer(t *testing.T) (*Server, *httptest.Server, business.PendingRegistrationStore) {
+	t.Helper()
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore, "test storage must provide a PendingRegistrationStore")
+	server.SetPendingStore(pendingStore)
+
+	server.apiKeys["bulk-key"] = &APIKey{
+		ID:          "bulk-key-id",
+		Key:         "bulk-key",
+		Permissions: []string{"registration:list-pending", "registration:approve", "registration:deny"},
+		TenantID:    "default",
+	}
+
+	ts := httptest.NewServer(server.router)
+	return server, ts, pendingStore
+}
+
+// addPendingEntry is a helper that inserts a pending entry into the store.
+func addPendingEntry(t *testing.T, store business.PendingRegistrationStore, pendingID, stewardID, tenantID, sourceIP string) {
+	t.Helper()
+	now := time.Now().UTC()
+	require.NoError(t, store.AddPending(context.Background(), &business.PendingRegistrationEntry{
+		PendingID:    pendingID,
+		StewardID:    stewardID,
+		TenantID:     tenantID,
+		TokenStr:     "tok-" + pendingID,
+		SourceIP:     sourceIP,
+		RegisteredAt: now,
+		ExpiresAt:    now.Add(5 * 24 * time.Hour),
+		Status:       business.PendingRegistrationStatusPending,
+	}))
+}
+
+// TestApproveByCIDR_FiltersCorrectly verifies that only entries whose source IP is in the
+// CIDR are approved; entries outside it remain pending (required test from AC).
+func TestApproveByCIDR_FiltersCorrectly(t *testing.T) {
+	_, ts, pendingStore := newBulkApprovalServer(t)
+	defer ts.Close()
+
+	// Two entries inside the CIDR 192.168.1.0/24, one outside.
+	addPendingEntry(t, pendingStore, "pending-cidr-in-1", "steward-in-1", "tenant-a", "192.168.1.10")
+	addPendingEntry(t, pendingStore, "pending-cidr-in-2", "steward-in-2", "tenant-a", "192.168.1.200")
+	addPendingEntry(t, pendingStore, "pending-cidr-out-1", "steward-out-1", "tenant-a", "10.0.0.5")
+
+	body := `{"cidr":"192.168.1.0/24"}`
+	req, err := http.NewRequestWithContext(context.Background(), "POST",
+		ts.URL+"/api/v1/registration/approve-by-cidr",
+		strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer bulk-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result struct {
+		Approved int `json:"approved"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.Equal(t, 2, result.Approved, "only two entries inside the CIDR should be approved")
+
+	// Verify store state: inside entries approved, outside entry still pending.
+	in1, err := pendingStore.GetPendingByID(context.Background(), "pending-cidr-in-1")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusApproved, in1.Status)
+
+	in2, err := pendingStore.GetPendingByID(context.Background(), "pending-cidr-in-2")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusApproved, in2.Status)
+
+	out1, err := pendingStore.GetPendingByID(context.Background(), "pending-cidr-out-1")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusPending, out1.Status,
+		"entry outside CIDR must remain pending")
+}
+
+// TestApproveAll_Idempotent verifies that calling approve-all twice does not error and
+// the second call returns 0 approved (required test from AC).
+func TestApproveAll_Idempotent(t *testing.T) {
+	_, ts, pendingStore := newBulkApprovalServer(t)
+	defer ts.Close()
+
+	addPendingEntry(t, pendingStore, "pending-idem-1", "steward-idem-1", "tenant-a", "10.0.0.1")
+	addPendingEntry(t, pendingStore, "pending-idem-2", "steward-idem-2", "tenant-a", "10.0.0.2")
+
+	doApproveAll := func(t *testing.T) int {
+		t.Helper()
+		req, err := http.NewRequestWithContext(context.Background(), "POST",
+			ts.URL+"/api/v1/registration/approve-all", nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer bulk-key")
+
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var result struct {
+			Approved int `json:"approved"`
+		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+		return result.Approved
+	}
+
+	// First call: both pending entries should be approved.
+	count1 := doApproveAll(t)
+	assert.Equal(t, 2, count1, "first approve-all should approve all pending entries")
+
+	// Second call: no pending entries remain, count must be 0.
+	count2 := doApproveAll(t)
+	assert.Equal(t, 0, count2, "second approve-all must return 0 (idempotent)")
+}
+
+// TestHandleApproveByCIDR_InvalidCIDR verifies that a malformed CIDR returns 400.
+func TestHandleApproveByCIDR_InvalidCIDR(t *testing.T) {
+	_, ts, _ := newBulkApprovalServer(t)
+	defer ts.Close()
+
+	req, err := http.NewRequestWithContext(context.Background(), "POST",
+		ts.URL+"/api/v1/registration/approve-by-cidr",
+		strings.NewReader(`{"cidr":"not-a-cidr"}`))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer bulk-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestHandleApproveByCIDR_NoPendingStore verifies 503 when pendingStore is nil.
+func TestHandleApproveByCIDR_NoPendingStore(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	// Do NOT set pendingStore.
+	server.apiKeys["bulk-key"] = &APIKey{
+		ID:          "bulk-key-id",
+		Key:         "bulk-key",
+		Permissions: []string{"registration:approve"},
+		TenantID:    "default",
+	}
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	req, err := http.NewRequestWithContext(context.Background(), "POST",
+		ts.URL+"/api/v1/registration/approve-by-cidr",
+		strings.NewReader(`{"cidr":"10.0.0.0/8"}`))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer bulk-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+// TestHandleApproveAll_NoPendingStore verifies 503 when pendingStore is nil.
+func TestHandleApproveAll_NoPendingStore(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	// Do NOT set pendingStore.
+	server.apiKeys["bulk-key"] = &APIKey{
+		ID:          "bulk-key-id",
+		Key:         "bulk-key",
+		Permissions: []string{"registration:approve"},
+		TenantID:    "default",
+	}
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	req, err := http.NewRequestWithContext(context.Background(), "POST",
+		ts.URL+"/api/v1/registration/approve-all", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer bulk-key")
+
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }

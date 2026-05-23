@@ -86,6 +86,7 @@ type Server struct {
 	configSourceSecretStore secretsif.SecretStore             // Issue #1396: secrets for config source validator
 	configSourceRateLimits  sync.Map                          // Issue #1396: per-tenant rate-limit counters
 	pendingStore            business.PendingRegistrationStore // Issue #1696: durable pending-registration queue
+	ipTrustStore            business.IPTrustStore             // Issue #1698: operator IP-trust management
 	runManager              *controllerrun.Manager            // Issue #1673: run/job/execution model
 	runExecutionQueue       *script.ExecutionQueue            // Issue #1673: queue for ad-hoc run synthesis
 	trustedProxies          []net.IPNet                       // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
@@ -410,6 +411,13 @@ func (s *Server) setupRouter() {
 	api.Handle("/registration/pending", s.requirePermission("registration", "list-pending")(http.HandlerFunc(s.handleListPendingRegistrations))).Methods("GET")
 	api.Handle("/registration/{id}/approve", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveRegistration))).Methods("POST")
 	api.Handle("/registration/{id}/deny", s.requirePermission("registration", "deny")(http.HandlerFunc(s.handleDenyRegistration))).Methods("POST")
+
+	// Bulk registration approval and IP-trust management (Issue #1698)
+	api.Handle("/registration/approve-all", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveAllRegistrations))).Methods("POST")
+	api.Handle("/registration/approve-by-cidr", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveByCIDR))).Methods("POST")
+	api.Handle("/registration/ip-trust", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleAddIPTrust))).Methods("POST")
+	// {cidr:.+} allows the CIDR slash to appear literally in the URL path after decoding.
+	api.Handle("/registration/ip-trust/{tenant_id}/{cidr:.+}", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleRevokeIPTrust))).Methods("DELETE")
 
 	// Monitoring endpoints
 	monitoring := api.PathPrefix("/monitoring").Subrouter()
@@ -745,6 +753,14 @@ func (s *Server) SetPendingStore(store business.PendingRegistrationStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pendingStore = store
+}
+
+// SetIPTrustStore wires the IP-trust store for operator ip-trust management (Issue #1698).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetIPTrustStore(store business.IPTrustStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ipTrustStore = store
 }
 
 // getHTTPListenAddr determines the HTTP listen address.

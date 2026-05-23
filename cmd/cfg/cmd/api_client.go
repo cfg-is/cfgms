@@ -254,6 +254,7 @@ type APIPendingRegistration struct {
 	StewardID    string    `json:"steward_id"`
 	TenantID     string    `json:"tenant_id"`
 	SourceIP     string    `json:"source_ip"`
+	RDNS         string    `json:"rdns,omitempty"` // populated by CLI at display time via net.LookupAddr
 	RegisteredAt time.Time `json:"registered_at"`
 }
 
@@ -311,6 +312,95 @@ func (c *APIClient) DenyRegistration(ctx context.Context, pendingID, reason stri
 		return c.parseError(resp)
 	}
 
+	return nil
+}
+
+// ApproveAllRegistrations approves all pending registrations and returns the count of newly approved.
+func (c *APIClient) ApproveAllRegistrations(ctx context.Context) (int, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/registration/approve-all", nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, c.parseError(resp)
+	}
+
+	var result struct {
+		Approved int `json:"approved"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return result.Approved, nil
+}
+
+// ApproveByCIDR approves pending registrations whose source IP falls within the given CIDR.
+func (c *APIClient) ApproveByCIDR(ctx context.Context, cidr string) (int, error) {
+	body, err := json.Marshal(struct {
+		CIDR string `json:"cidr"`
+	}{CIDR: cidr})
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/registration/approve-by-cidr", bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, c.parseError(resp)
+	}
+
+	var result struct {
+		Approved int `json:"approved"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return result.Approved, nil
+}
+
+// AddIPTrust adds a trusted CIDR range for a tenant (pre-seeded by default).
+func (c *APIClient) AddIPTrust(ctx context.Context, tenantID, cidr string) error {
+	body, err := json.Marshal(struct {
+		TenantID  string `json:"tenant_id"`
+		CIDR      string `json:"cidr"`
+		PreSeeded bool   `json:"pre_seeded"`
+	}{TenantID: tenantID, CIDR: cidr, PreSeeded: true})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/registration/ip-trust", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return c.parseError(resp)
+	}
+	return nil
+}
+
+// RevokeIPTrust revokes a trusted CIDR range for a tenant.
+func (c *APIClient) RevokeIPTrust(ctx context.Context, tenantID, cidr string) error {
+	// PathEscape encodes '/' as '%2F' so the CIDR survives as a single path segment;
+	// the server uses {cidr:.+} to match the decoded form.
+	path := "/api/v1/registration/ip-trust/" + url.PathEscape(tenantID) + "/" + url.PathEscape(cidr)
+	resp, err := c.doRequest(ctx, "DELETE", path, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return c.parseError(resp)
+	}
 	return nil
 }
 
