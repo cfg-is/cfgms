@@ -46,10 +46,6 @@ import (
 	reportsexporters "github.com/cfgis/cfgms/features/reports/exporters"
 	reportsprovider "github.com/cfgis/cfgms/features/reports/provider"
 	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/features/steward/discovery"
-	dnadrift "github.com/cfgis/cfgms/features/steward/dna/drift"
-	stewardfactory "github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/features/workflow"
 	workflowtrigger "github.com/cfgis/cfgms/features/workflow/trigger"
@@ -60,6 +56,7 @@ import (
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	dataplaneGRPC "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider; exported for ServerOptions
+	dnadrift "github.com/cfgis/cfgms/pkg/dna/drift"
 	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
@@ -994,11 +991,7 @@ func initializeWorkflowHandler(storageManager *interfaces.StorageManager, logger
 	// Create a minimal module factory for the workflow engine.
 	// The controller does not load steward modules directly; the factory is
 	// required by the engine constructor but not exercised during REST API use.
-	moduleFactory := stewardfactory.New(
-		discovery.ModuleRegistry{},
-		stewardconfig.ErrorHandlingConfig{},
-		logger,
-	)
+	moduleFactory := workflow.NewNullModuleFactory()
 
 	workflowEngine := workflow.NewEngine(moduleFactory, logger, nil)
 

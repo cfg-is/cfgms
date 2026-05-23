@@ -16,9 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/features/steward/discovery"
-	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -34,13 +31,8 @@ func newTestWorkflowHandler(t *testing.T) (*WorkflowHandler, cfgconfig.ConfigSto
 	storageManager := pkgtesting.SetupTestStorage(t)
 	configStore := storageManager.GetConfigStore()
 
-	registry := make(discovery.ModuleRegistry)
-	errorConfig := stewardconfig.ErrorHandlingConfig{
-		ModuleLoadFailure: stewardconfig.ActionContinue,
-	}
-	moduleFactory := factory.New(registry, errorConfig, logging.NewNoopLogger())
 	logger := logging.NewNoopLogger()
-	engine := workflow.NewEngine(moduleFactory, logger, nil)
+	engine := workflow.NewEngine(workflow.NewNullModuleFactory(), logger, nil)
 
 	handler := NewWorkflowHandler(engine, configStore, nil, logger)
 	return handler, configStore
@@ -555,9 +547,7 @@ func TestWorkflowHandler_SpecialCharsInName_HandledSafely(t *testing.T) {
 	_, configStore := newTestWorkflowHandler(t)
 	capLogger := &capturingLogger{}
 
-	registry := make(discovery.ModuleRegistry)
-	errCfg := stewardconfig.ErrorHandlingConfig{ModuleLoadFailure: stewardconfig.ActionContinue}
-	engine := workflow.NewEngine(factory.New(registry, errCfg, logging.NewNoopLogger()), capLogger, nil)
+	engine := workflow.NewEngine(workflow.NewNullModuleFactory(), capLogger, nil)
 	h := NewWorkflowHandler(engine, configStore, nil, capLogger)
 	router := newWorkflowRouter(h)
 
