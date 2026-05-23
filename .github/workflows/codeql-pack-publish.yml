@@ -19,7 +19,12 @@ name: Publish CodeQL Extension Pack
 
 on:
   push:
-    branches: [ main, develop ]
+    # `feature/story-1771-loginjection-lint` is temporarily included so the
+    # very first publish can happen before this workflow lands on develop —
+    # workflow_dispatch only works for workflows already on the default
+    # branch. Remove after this PR merges (the trigger graduates to a
+    # standard develop/main-only flow at that point).
+    branches: [ main, develop, 'feature/story-1771-loginjection-lint' ]
     paths:
       - '.github/codeql/extensions/**'
       - '.github/workflows/codeql-pack-publish.yml'

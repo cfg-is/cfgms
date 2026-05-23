@@ -129,3 +129,4 @@ __pycache__/
 /tenant2/
 /test-tenant/
 /version-tenant/
+.codeql/
