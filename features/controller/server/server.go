@@ -103,15 +103,17 @@ type Server struct {
 	signerCertSerial        string                  // Serial number of server cert used for config signing (Story #378)
 	healthCollector         *health.Collector
 	alertManager            *health.DefaultAlertManager
-	dnaStorageManager       *dnaStorage.Manager                 // Reports engine DNA storage (must be closed on Stop)
-	triggerManager          *workflowtrigger.TriggerManagerImpl // Issue #414: Workflow trigger manager
-	gitSyncer               *gitsync.Syncer                     // Issue #666: git-sync write-through component
-	webhookHandler          *gitsync.WebhookHandler             // Issue #681: drain in-flight webhook syncs on shutdown
-	storageManager          *interfaces.StorageManager          // Main storage manager (must be closed on Stop to release SQLite handles)
-	manualReviewHook        *api.ManualReviewApprovalHook       // Issue #1599: manual-review approval hook (nil if not in use)
-	executionQueue          *scriptmodule.ExecutionQueue        // Issue #1672: persistent queue for script executions
-	jobDispatcher           *dispatcher.Dispatcher              // Issue #1672: job dispatcher for script executions
-	runManager              *controllerrun.Manager              // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
+	dnaStorageManager       *dnaStorage.Manager                      // Reports engine DNA storage (must be closed on Stop)
+	triggerManager          *workflowtrigger.TriggerManagerImpl      // Issue #414: Workflow trigger manager
+	gitSyncer               *gitsync.Syncer                          // Issue #666: git-sync write-through component
+	webhookHandler          *gitsync.WebhookHandler                  // Issue #681: drain in-flight webhook syncs on shutdown
+	storageManager          *interfaces.StorageManager               // Main storage manager (must be closed on Stop to release SQLite handles)
+	manualReviewHook        *api.ManualReviewApprovalHook            // Issue #1599: manual-review approval hook (nil if not in use)
+	executionQueue          *scriptmodule.ExecutionQueue             // Issue #1672: persistent queue for script executions
+	jobDispatcher           *dispatcher.Dispatcher                   // Issue #1672: job dispatcher for script executions
+	runManager              *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
+	ipTrustExpiryJob        *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
+	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
 }
 
 // New creates a new server instance
@@ -682,6 +684,34 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Durable pending registration store wired to HTTP API server (Issue #1696)")
 	}
 
+	// Issue #1697: Create background expiry jobs.
+	// IPTrustExpiryJob is only wired when the IPTrustStore is available (database provider).
+	// PendingExpiryJob is only wired when the PendingRegistrationStore is available.
+	var ipTrustExpiryJob *controllerRegistration.IPTrustExpiryJob
+	if ipTrustStore := storageManager.GetIPTrustStore(); ipTrustStore != nil {
+		darkWindow := cfg.Registration.GetIPTrustDarkWindow()
+		ipTrustExpiryJob = controllerRegistration.NewIPTrustExpiryJob(controllerRegistration.IPTrustExpiryConfig{
+			Store:         ipTrustStore,
+			TenantStore:   storageManager.GetTenantStore(),
+			DarkWindow:    darkWindow,
+			CheckInterval: time.Hour,
+			Logger:        logger,
+		})
+		logger.Info("IP-trust expiry job created (Issue #1697)", "dark_window", darkWindow)
+	}
+
+	var pendingExpiryJob *controllerRegistration.PendingExpiryJob
+	if pendingStore := storageManager.GetPendingRegistrationStore(); pendingStore != nil {
+		pendingTimeout := cfg.Registration.GetPendingReviewTimeout()
+		pendingExpiryJob = controllerRegistration.NewPendingExpiryJob(controllerRegistration.PendingExpiryConfig{
+			Store:         pendingStore,
+			Timeout:       pendingTimeout,
+			CheckInterval: time.Hour,
+			Logger:        logger,
+		})
+		logger.Info("Pending-registration expiry job created (Issue #1697)", "timeout", pendingTimeout)
+	}
+
 	srv := &Server{
 		cfg:                     cfg,
 		logger:                  logger,
@@ -706,8 +736,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		healthCollector:         healthCollector,
 		alertManager:            healthAlertManager,
 		storageManager:          storageManager,
-		executionQueue:          executionQueue, // Issue #1672
-		jobDispatcher:           jobDispatcher,  // Issue #1672
+		executionQueue:          executionQueue,   // Issue #1672
+		jobDispatcher:           jobDispatcher,    // Issue #1672
+		ipTrustExpiryJob:        ipTrustExpiryJob, // Issue #1697
+		pendingExpiryJob:        pendingExpiryJob, // Issue #1697
 	}
 
 	// Issue #1673: Wire run/job/execution model into API server.
@@ -1191,6 +1223,22 @@ func (s *Server) Start() error {
 		}
 	}
 
+	// Start background expiry jobs (Issue #1697).
+	if s.ipTrustExpiryJob != nil {
+		if err := s.ipTrustExpiryJob.Start(context.Background()); err != nil {
+			s.logger.Warn("Failed to start IP-trust expiry job", "error", err)
+		} else {
+			s.logger.Info("IP-trust expiry job started (Issue #1697)")
+		}
+	}
+	if s.pendingExpiryJob != nil {
+		if err := s.pendingExpiryJob.Start(context.Background()); err != nil {
+			s.logger.Warn("Failed to start pending-registration expiry job", "error", err)
+		} else {
+			s.logger.Info("Pending-registration expiry job started (Issue #1697)")
+		}
+	}
+
 	// Start workflow trigger manager (Issue #414)
 	if s.triggerManager != nil {
 		if err := s.triggerManager.Start(context.Background()); err != nil {
@@ -1360,6 +1408,14 @@ func (s *Server) Stop() error {
 	}
 	if s.executionQueue != nil {
 		s.executionQueue.Stop()
+	}
+
+	// Stop background expiry jobs (Issue #1697)
+	if s.ipTrustExpiryJob != nil {
+		s.ipTrustExpiryJob.Stop()
+	}
+	if s.pendingExpiryJob != nil {
+		s.pendingExpiryJob.Stop()
 	}
 
 	// Close DNA storage manager (releases SQLite DB file handles)

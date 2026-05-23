@@ -138,6 +138,17 @@ type RegistrationConfig struct {
 	// is promoted to trusted status (Issue #1694). Default: 30 minutes.
 	// Sandbox-detonation attempts (3–15 min lifetime) cannot sustain this window.
 	IPTrustThreshold Duration `yaml:"ip_trust_threshold,omitempty"`
+
+	// IPTrustDarkWindow is the consecutive inactivity period after which a
+	// non-pre-seeded trusted IP range is auto-revoked (Issue #1697).
+	// Default: 30 days. Pre-seeded entries are exempt and can only be revoked
+	// explicitly via `cfg registration ip-trust revoke`.
+	IPTrustDarkWindow Duration `yaml:"ip_trust_dark_window,omitempty"`
+
+	// PendingReviewTimeout is the maximum time a pending registration may wait
+	// for operator action before it is automatically expired (Issue #1697).
+	// Default: 5 days.
+	PendingReviewTimeout Duration `yaml:"pending_review_timeout,omitempty"`
 }
 
 // CertificateConfig contains certificate management settings
@@ -845,4 +856,22 @@ func (rc *RegistrationConfig) GetIPTrustThreshold() time.Duration {
 		return 30 * time.Minute
 	}
 	return rc.IPTrustThreshold.AsDuration()
+}
+
+// GetIPTrustDarkWindow returns the inactivity period after which a non-pre-seeded
+// trusted IP range is auto-revoked, defaulting to 30 days (Issue #1697).
+func (rc *RegistrationConfig) GetIPTrustDarkWindow() time.Duration {
+	if rc == nil || rc.IPTrustDarkWindow == 0 {
+		return 30 * 24 * time.Hour
+	}
+	return rc.IPTrustDarkWindow.AsDuration()
+}
+
+// GetPendingReviewTimeout returns the maximum time a pending registration may
+// wait for operator action before it is auto-expired, defaulting to 5 days (Issue #1697).
+func (rc *RegistrationConfig) GetPendingReviewTimeout() time.Duration {
+	if rc == nil || rc.PendingReviewTimeout == 0 {
+		return 5 * 24 * time.Hour
+	}
+	return rc.PendingReviewTimeout.AsDuration()
 }
