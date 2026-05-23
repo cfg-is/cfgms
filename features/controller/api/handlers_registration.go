@@ -39,13 +39,9 @@ type RegistrationResponse struct {
 	CACert     string `json:"ca_cert,omitempty"`
 
 	// Controller's server certificate (public key) for configuration signature verification
-	// Stewards use this to verify configs signed by this controller
-	// In HA clusters, stewards collect and trust certs from all controllers they connect to
 	ServerCert string `json:"server_cert,omitempty"`
 
 	// Story #377: Dedicated config signing certificate (separated architecture)
-	// When present, stewards should use this for config signature verification instead of ServerCert
-	// In unified mode, this is empty and ServerCert is used for both
 	SigningCert string `json:"signing_cert,omitempty"`
 }
 
@@ -60,13 +56,32 @@ type RegistrationPendingResponse struct {
 	Status    string `json:"status"`
 }
 
-// PendingRegistration represents a quarantined steward awaiting admin approval.
+// PendingRegistration represents a quarantined steward awaiting admin approval in list responses.
 type PendingRegistration struct {
 	PendingID    string    `json:"pending_id"`
 	StewardID    string    `json:"steward_id"`
 	TenantID     string    `json:"tenant_id"`
 	SourceIP     string    `json:"source_ip"`
 	RegisteredAt time.Time `json:"registered_at"`
+}
+
+// RegistrationStatusResponse is returned by GET /api/v1/registration/status/{pending_id}.
+// For terminal-approved (claimed) entries it includes the full cert bundle; other states
+// include only Status.
+type RegistrationStatusResponse struct {
+	Status string `json:"status"`
+
+	// Populated only when status transitions from "approved" to "claimed":
+	StewardID        string `json:"steward_id,omitempty"`
+	TenantID         string `json:"tenant_id,omitempty"`
+	Group            string `json:"group,omitempty"`
+	ControllerURL    string `json:"controller_url,omitempty"`
+	TransportAddress string `json:"transport_address,omitempty"`
+	ClientCert       string `json:"client_cert,omitempty"`
+	ClientKey        string `json:"client_key,omitempty"`
+	CACert           string `json:"ca_cert,omitempty"`
+	ServerCert       string `json:"server_cert,omitempty"`
+	SigningCert      string `json:"signing_cert,omitempty"`
 }
 
 // denyRegistrationRequest is the optional request body for the deny endpoint.
@@ -77,15 +92,26 @@ type denyRegistrationRequest struct {
 // handleListPendingRegistrations handles GET /api/v1/registration/pending.
 // Returns all quarantined stewards awaiting operator approval.
 func (s *Server) handleListPendingRegistrations(w http.ResponseWriter, r *http.Request) {
-	var pending []PendingRegistration
-	s.registrationQueue.Range(func(_, value interface{}) bool {
-		if pr, ok := value.(PendingRegistration); ok {
-			pending = append(pending, pr)
-		}
-		return true
-	})
-	if pending == nil {
-		pending = []PendingRegistration{}
+	if s.pendingStore == nil {
+		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	entries, err := s.pendingStore.ListPending(r.Context(), "")
+	if err != nil {
+		s.logger.Error("Failed to list pending registrations", "error", err)
+		http.Error(w, "Failed to list pending registrations", http.StatusInternalServerError)
+		return
+	}
+
+	pending := make([]PendingRegistration, 0, len(entries))
+	for _, e := range entries {
+		pending = append(pending, PendingRegistration{
+			PendingID:    e.PendingID,
+			StewardID:    e.StewardID,
+			TenantID:     e.TenantID,
+			SourceIP:     e.SourceIP,
+			RegisteredAt: e.RegisteredAt,
+		})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(pending); err != nil {
@@ -94,38 +120,232 @@ func (s *Server) handleListPendingRegistrations(w http.ResponseWriter, r *http.R
 }
 
 // handleApproveRegistration handles POST /api/v1/registration/{id}/approve.
-// Promotes a quarantined steward to registered status.
+// Marks the pending entry as approved; no cert is generated here (generate-on-claim).
 func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Request) {
-	stewardID := mux.Vars(r)["id"]
-	if _, ok := s.registrationQueue.Load(stewardID); !ok {
-		http.Error(w, "steward not found in pending queue", http.StatusNotFound)
+	pendingID := mux.Vars(r)["id"]
+	if s.pendingStore == nil {
+		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if err := s.controllerService.UpdateStewardStatus(stewardID, "registered"); err != nil {
-		s.logger.Error("Failed to update steward status", "steward_id", stewardID, "error", err)
-		http.Error(w, "Failed to update steward status", http.StatusInternalServerError)
+	if _, err := s.pendingStore.GetPendingByID(r.Context(), pendingID); err != nil {
+		if err == business.ErrPendingRegistrationNotFound {
+			http.Error(w, "pending registration not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
 		return
 	}
-	s.registrationQueue.Delete(stewardID)
-	s.logger.Info("Steward registration approved", "steward_id", stewardID)
+	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusApproved); err != nil {
+		s.logger.Error("Failed to approve pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "Failed to approve registration", http.StatusInternalServerError)
+		return
+	}
+	s.logger.Info("Steward registration approved (awaiting claim)", "pending_id", logging.SanitizeLogValue(pendingID))
 	w.WriteHeader(http.StatusOK)
 }
 
 // handleDenyRegistration handles POST /api/v1/registration/{id}/deny.
-// Removes a quarantined steward from the pending queue without promoting it.
+// Marks the pending entry as denied; no certs are issued.
 func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) {
-	stewardID := mux.Vars(r)["id"]
-	if _, ok := s.registrationQueue.Load(stewardID); !ok {
-		http.Error(w, "steward not found in pending queue", http.StatusNotFound)
+	pendingID := mux.Vars(r)["id"]
+	if s.pendingStore == nil {
+		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if _, err := s.pendingStore.GetPendingByID(r.Context(), pendingID); err != nil {
+		if err == business.ErrPendingRegistrationNotFound {
+			http.Error(w, "pending registration not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
 		return
 	}
 	var req denyRegistrationRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	s.registrationQueue.Delete(stewardID)
+	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusDenied); err != nil {
+		s.logger.Error("Failed to deny pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "Failed to deny registration", http.StatusInternalServerError)
+		return
+	}
 	s.logger.Info("Steward registration denied",
-		"steward_id", stewardID,
+		"pending_id", logging.SanitizeLogValue(pendingID),
 		"reason", logging.SanitizeLogValue(req.Reason))
 	w.WriteHeader(http.StatusOK)
+}
+
+// handleRegistrationStatus handles GET /api/v1/registration/status/{pending_id}.
+// Auth: Bearer <regToken> header; token must belong to the same tenant as the pending entry.
+// State machine: pending→200 status, approved→claim+cert+200, claimed→410, denied/expired→200 status.
+func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request) {
+	pendingID := mux.Vars(r)["pending_id"]
+
+	if s.pendingStore == nil || s.registrationTokenStore == nil {
+		http.Error(w, "registration service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Extract Bearer token from Authorization header.
+	authHeader := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		http.Error(w, "Authorization: Bearer <token> required", http.StatusUnauthorized)
+		return
+	}
+	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+
+	// Validate the registration token.
+	token, err := s.registrationTokenStore.GetToken(r.Context(), tokenStr)
+	if err != nil {
+		http.Error(w, "Invalid or expired registration token", http.StatusUnauthorized)
+		return
+	}
+	if !token.IsValid() {
+		http.Error(w, "Registration token is revoked or expired", http.StatusUnauthorized)
+		return
+	}
+
+	// Retrieve the pending entry.
+	entry, err := s.pendingStore.GetPendingByID(r.Context(), pendingID)
+	if err != nil {
+		if err == business.ErrPendingRegistrationNotFound {
+			http.Error(w, "pending registration not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("Failed to retrieve pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		http.Error(w, "Failed to retrieve pending registration", http.StatusInternalServerError)
+		return
+	}
+
+	// Tenant isolation: a token from a different tenant cannot observe this entry.
+	if entry.TenantID != token.TenantID {
+		http.Error(w, "forbidden: token tenant does not match pending entry tenant", http.StatusForbidden)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	switch entry.Status {
+	case business.PendingRegistrationStatusPending:
+		_ = json.NewEncoder(w).Encode(RegistrationStatusResponse{Status: "pending"})
+
+	case business.PendingRegistrationStatusApproved:
+		// Generate-on-claim: persist "claimed" + claimed_at BEFORE generating the cert so
+		// a restart between this step and the response cannot yield a second cert.
+		// The UPDATE has AND status = 'approved', so a concurrent poll racing this one
+		// will get RowsAffected = 0 (returned as ErrPendingRegistrationNotFound), which
+		// we surface as 410 Gone rather than 500, preventing double cert issuance.
+		if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusClaimed); err != nil {
+			if err == business.ErrPendingRegistrationNotFound {
+				// Already claimed by a concurrent poll.
+				w.WriteHeader(http.StatusGone)
+				return
+			}
+			s.logger.Error("Failed to mark pending entry as claimed", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
+			http.Error(w, "Failed to claim registration", http.StatusInternalServerError)
+			return
+		}
+		resp, err := s.buildClaimResponse(r.Context(), entry)
+		if err != nil {
+			s.logger.Error("Failed to generate cert for claimed registration",
+				"pending_id", logging.SanitizeLogValue(pendingID), "steward_id", logging.SanitizeLogValue(entry.StewardID), "error", err)
+			// Entry is already "claimed" — steward must re-register if cert was not received.
+			http.Error(w, "Failed to generate client certificate", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			s.logger.Error("Failed to encode registration status response", "error", err)
+		}
+
+	case business.PendingRegistrationStatusClaimed:
+		w.WriteHeader(http.StatusGone)
+
+	case business.PendingRegistrationStatusDenied:
+		_ = json.NewEncoder(w).Encode(RegistrationStatusResponse{Status: "denied"})
+
+	case business.PendingRegistrationStatusExpired:
+		_ = json.NewEncoder(w).Encode(RegistrationStatusResponse{Status: "expired"})
+
+	default:
+		_ = json.NewEncoder(w).Encode(RegistrationStatusResponse{Status: entry.Status})
+	}
+}
+
+// buildClaimResponse generates the cert and builds the RegistrationStatusResponse.
+// Mirrors the approved path in handleRegister (lines ~286–365).
+func (s *Server) buildClaimResponse(ctx context.Context, entry *business.PendingRegistrationEntry) (*RegistrationStatusResponse, error) {
+	if s.certManager == nil {
+		return nil, fmt.Errorf("certificate manager not initialized")
+	}
+
+	// Re-fetch the token to obtain Group and ControllerURL.
+	tok, err := s.registrationTokenStore.GetToken(ctx, entry.TokenStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve token for claim: %w", err)
+	}
+
+	validityDays := 365
+	if s.cfg.Certificate != nil && s.cfg.Certificate.ClientCertValidityDays > 0 {
+		validityDays = s.cfg.Certificate.ClientCertValidityDays
+	}
+
+	clientCert, err := s.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   entry.StewardID,
+		Organization: "CFGMS Stewards",
+		ClientID:     entry.StewardID,
+		ValidityDays: validityDays,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate client certificate: %w", err)
+	}
+
+	caCert, err := s.certManager.GetCACertificate()
+	if err != nil || len(caCert) == 0 {
+		return nil, fmt.Errorf("CA certificate unavailable: %w", err)
+	}
+
+	var serverCert []byte
+	if s.signerCertSerial != "" {
+		certPEM, _, err := s.certManager.ExportCertificate(s.signerCertSerial, false)
+		if err == nil && len(certPEM) > 0 {
+			serverCert = certPEM
+		}
+	}
+
+	resp := &RegistrationStatusResponse{
+		Status:           business.PendingRegistrationStatusClaimed,
+		StewardID:        entry.StewardID,
+		TenantID:         entry.TenantID,
+		Group:            tok.Group,
+		ControllerURL:    tok.ControllerURL,
+		TransportAddress: s.getTransportAddress(),
+		ClientCert:       string(clientCert.CertificatePEM),
+		ClientKey:        string(clientCert.PrivateKeyPEM),
+		CACert:           string(caCert),
+		ServerCert:       string(serverCert),
+	}
+
+	if s.cfg.Certificate != nil && s.cfg.Certificate.IsSeparatedArchitecture() {
+		signingCertPEM, err := s.certManager.GetSigningCertificate()
+		if err == nil && len(signingCertPEM) > 0 {
+			resp.SigningCert = string(signingCertPEM)
+			resp.ServerCert = string(signingCertPEM)
+		}
+	}
+
+	// Promote steward to registered in the fleet registry.
+	if err := s.controllerService.UpdateStewardStatus(entry.StewardID, "registered"); err != nil {
+		s.logger.Warn("Failed to update steward status to registered after claim",
+			"steward_id", entry.StewardID, "error", err)
+	}
+
+	s.logger.Info("Generated client certificate for claimed registration",
+		"pending_id", entry.PendingID,
+		"steward_id", entry.StewardID,
+		"validity_days", validityDays)
+
+	return resp, nil
 }
 
 // handleRegister handles steward registration via REST API
@@ -229,23 +449,37 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 				return
 			case DecisionQuarantine:
 				// Issue #1693: quarantine returns 202 with no cert — cert issuance is gated on approval.
+				// Issue #1696: store the pending entry durably instead of in-memory sync.Map.
 				pendingID := fmt.Sprintf("pending-%d", time.Now().UnixNano())
 				s.logger.Info("Registration quarantined by approval workflow",
 					"tenant_id", token.TenantID,
 					"pending_id", pendingID)
-				// A registry write failure is non-fatal; the steward will re-appear on re-registration.
+
 				if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, s.getTransportAddress(), "quarantined"); err != nil {
 					s.logger.Error("Failed to register quarantined steward in controller service",
 						"steward_id", stewardID, "error", err)
-				} else {
-					s.registrationQueue.Store(stewardID, PendingRegistration{
+				}
+
+				if s.pendingStore != nil {
+					pendingEntry := &business.PendingRegistrationEntry{
 						PendingID:    pendingID,
 						StewardID:    stewardID,
 						TenantID:     token.TenantID,
+						TokenStr:     req.Token,
 						SourceIP:     extractSourceIP(r, s.trustedProxies),
 						RegisteredAt: time.Now().UTC(),
-					})
+						ExpiresAt:    time.Now().UTC().Add(5 * 24 * time.Hour),
+						Status:       business.PendingRegistrationStatusPending,
+					}
+					if err := s.pendingStore.AddPending(r.Context(), pendingEntry); err != nil {
+						s.logger.Error("Failed to persist pending registration",
+							"pending_id", pendingID, "steward_id", stewardID, "error", err)
+					}
+				} else {
+					s.logger.Warn("Pending store not available; registration queue is not durable",
+						"pending_id", pendingID)
 				}
+
 				// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 				s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
 					business.AuditEventAuthentication, "registration_quarantined",
@@ -317,13 +551,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get server certificate (public key) for configuration signature verification
-	// Stewards need this to verify configs signed by this controller
-	// CRITICAL (Story #378): Must use THE EXACT SAME certificate that the signer uses
-	// We use the signerCertSerial that was stored during signer creation to ensure they match
 	var serverCert []byte
 	if s.certManager != nil && s.signerCertSerial != "" {
-		// Use THE SAME cert serial that the signer uses (from server startup)
-		// This guarantees signature verification will work
 		certPEM, _, err := s.certManager.ExportCertificate(s.signerCertSerial, false)
 		if err == nil && len(certPEM) > 0 {
 			serverCert = certPEM
@@ -349,12 +578,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	resp.ServerCert = string(serverCert) // For config signature verification (backward compat)
 
 	// Story #377: In separated mode, also provide the dedicated signing certificate
-	// Stewards should prefer SigningCert for config verification when present
 	if s.cfg.Certificate != nil && s.cfg.Certificate.IsSeparatedArchitecture() && s.certManager != nil {
 		signingCertPEM, err := s.certManager.GetSigningCertificate()
 		if err == nil && len(signingCertPEM) > 0 {
 			resp.SigningCert = string(signingCertPEM)
-			// Also set ServerCert to signing cert for backward compatibility with older stewards
 			resp.ServerCert = string(signingCertPEM)
 			s.logger.Info("Providing dedicated signing certificate to steward",
 				"steward_id", stewardID)
@@ -368,9 +595,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"steward_id", stewardID,
 		"validity_days", validityDays)
 
-	// A registry write failure is non-fatal: the steward already has valid certificates and
-	// will re-appear in the registry on its first heartbeat. Blocking the response here would
-	// leave the steward with credentials it cannot use and no way to recover without re-registering.
 	if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, resp.TransportAddress, "registered"); err != nil {
 		s.logger.Error("Failed to register steward in controller service",
 			"steward_id", stewardID, "error", err)
@@ -390,34 +614,23 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // getTransportAddress returns the unified transport address for steward connections.
-// This is a host:port string (e.g., "controller:4433"); the transport provider handles protocol details.
 func (s *Server) getTransportAddress() string {
 	addr := "localhost:4433" // Default transport address
 	if s.cfg.Transport != nil && s.cfg.Transport.ListenAddr != "" {
 		addr = s.cfg.Transport.ListenAddr
 	}
-
-	// Replace 0.0.0.0 with external hostname if configured (Docker/test mode)
 	return replaceBindAddress(addr)
 }
 
 // replaceBindAddress replaces 0.0.0.0 bind addresses with external hostname
-// This is needed for Docker/test environments where the controller binds to 0.0.0.0
-// but stewards need a real hostname to connect to
 func replaceBindAddress(addr string) string {
-	// Check if address starts with 0.0.0.0
 	if !strings.HasPrefix(addr, "0.0.0.0:") {
 		return addr
 	}
-
-	// Get external hostname from environment (Docker/test mode)
 	externalHostname := os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
 	if externalHostname == "" {
-		// Default to localhost if not specified
 		externalHostname = "localhost"
 	}
-
-	// Replace 0.0.0.0 with external hostname
 	port := strings.TrimPrefix(addr, "0.0.0.0:")
 	return externalHostname + ":" + port
 }
@@ -426,18 +639,12 @@ func replaceBindAddress(addr string) string {
 // It honors X-Forwarded-For only when the TCP peer (r.RemoteAddr) is within
 // trustedProxies. When trustedProxies is empty or the peer is not in the list,
 // the TCP peer address is always used — XFF is untrusted and ignored.
-// This prevents spoofing: an attacker cannot bypass IP-trust checks by injecting
-// a forged X-Forwarded-For header from an untrusted network position.
 func extractSourceIP(r *http.Request, trustedProxies []net.IPNet) string {
-	// Parse the TCP peer host (strip port). net.SplitHostPort handles IPv6
-	// bracket notation ([::1]:port) correctly; fall back to the raw value
-	// if SplitHostPort fails (e.g. no port present, unlikely for net/http).
 	peerHost := r.RemoteAddr
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		peerHost = host
 	}
 
-	// Honor XFF only when the peer is a trusted proxy.
 	if len(trustedProxies) > 0 {
 		peerIP := net.ParseIP(peerHost)
 		if peerIP != nil {
@@ -459,7 +666,6 @@ func extractSourceIP(r *http.Request, trustedProxies []net.IPNet) string {
 }
 
 // emitRegistrationAudit records a registration audit event. It is a no-op when auditManager is nil.
-// Errors are logged at Warn and do not affect the caller's control flow.
 func (s *Server) emitRegistrationAudit(
 	ctx context.Context,
 	tokenStr, tenantID, stewardID string,

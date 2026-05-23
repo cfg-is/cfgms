@@ -125,6 +125,9 @@ func TestHybridStorageManager_Creation(t *testing.T) {
 	// GetIPTrustStore must be wired in the constructor when the operational
 	// provider supports IP trust storage (Issue #1691, PR #1711 finding #1).
 	assert.NotNil(t, manager.GetIPTrustStore())
+	// GetPendingRegistrationStore must be wired in the constructor when the operational
+	// provider supports pending registration storage (Issue #1696).
+	assert.NotNil(t, manager.GetPendingRegistrationStore())
 
 	// Round-trip: store a client tenant and verify retrieval returns the same value.
 	wantTenant := &business.ClientTenant{ID: "hybrid-rt-1", TenantName: "Hybrid Round Trip"}
@@ -381,7 +384,7 @@ func (p *mockProvider) CreatePushStore(_ map[string]interface{}) (business.PushS
 }
 
 func (p *mockProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
-	return nil, business.ErrNotSupported
+	return &mockPendingRegistrationStore{}, nil
 }
 
 func (p *mockProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
@@ -727,4 +730,32 @@ func (s *mockIPTrustStore) RecordHealthySteward(_ context.Context, _, _ string, 
 
 func (s *mockIPTrustStore) GetLastActivity(_ context.Context, _, _ string) (*business.IPTrustActivity, error) {
 	return nil, nil
+}
+
+// mockPendingRegistrationStore implements business.PendingRegistrationStore for testing
+// HybridStorageManager wiring (Issue #1696).
+type mockPendingRegistrationStore struct{}
+
+func (s *mockPendingRegistrationStore) AddPending(_ context.Context, _ *business.PendingRegistrationEntry) error {
+	return nil
+}
+
+func (s *mockPendingRegistrationStore) GetPendingByID(_ context.Context, _ string) (*business.PendingRegistrationEntry, error) {
+	return nil, business.ErrPendingRegistrationNotFound
+}
+
+func (s *mockPendingRegistrationStore) GetPendingByToken(_ context.Context, _ string) (*business.PendingRegistrationEntry, error) {
+	return nil, business.ErrPendingRegistrationNotFound
+}
+
+func (s *mockPendingRegistrationStore) UpdateStatus(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (s *mockPendingRegistrationStore) ListPending(_ context.Context, _ string) ([]*business.PendingRegistrationEntry, error) {
+	return nil, nil
+}
+
+func (s *mockPendingRegistrationStore) ExpireStale(_ context.Context, _ time.Time) (int, error) {
+	return 0, nil
 }

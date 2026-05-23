@@ -347,9 +347,15 @@ The administrator chooses which flavor fits the deployment workflow. Both arrive
 3. Steward contacts its compile-time controller URL (HTTPS), submits the token.
 4. Controller validates the token (perennial token: check expiry and revocation; long-lived code: look up the matching tenant/group record) and applies the registration approval workflow:
    - **Approved** (HTTP 200): controller issues mTLS certificates scoped to the steward's tenant/group identity and returns the full `RegistrationResponse` with `client_cert`, `client_key`, and `ca_cert`.
-   - **Quarantined** (HTTP 202): controller returns a `RegistrationPendingResponse` with a `pending_id` and `status: "pending"`. No certificates are issued. The steward must enter a poll loop (see story 7) waiting for operator approval via `cfg registration approve <id>`.
+   - **Quarantined** (HTTP 202): controller returns a `RegistrationPendingResponse` with a `pending_id` and `status: "pending"`. No certificates are issued. The steward enters a **Phase 2 poll loop** (see below).
    - **Rejected** (HTTP 403): registration is denied; steward exits.
-5. On approval (HTTP 200): steward imports the issued cert into its local `cert.Manager` (stored under the platform cert dir) for use in TLS handshakes, records the node ID, and establishes a gRPC-over-QUIC transport connection.
+5. **Phase 2 — Poll loop (quarantine path):** The steward polls `GET /api/v1/registration/status/{pending_id}` using `Authorization: Bearer <regToken>`. Poll interval = `baseInterval + rand(jitter)` (default 90 s base, 30 s jitter). Possible outcomes:
+   - `{"status":"pending"}` (HTTP 200): operator has not yet acted — continue polling.
+   - `{"status":"claimed", "client_cert":..., ...}` (HTTP 200): operator approved; cert bundle returned exactly once. Steward imports certs and proceeds to step 6.
+   - HTTP 410 Gone: steward already collected the cert (duplicate poll) — stop polling.
+   - `{"status":"denied"}` or `{"status":"expired"}` (HTTP 200): registration was rejected — steward exits or re-registers.
+   The cert is generated on first approved poll (generate-on-claim); the controller never stores private keys in the database.
+6. On approval: steward imports the issued cert into its local `cert.Manager` (stored under the platform cert dir) for use in TLS handshakes, records the node ID, and establishes a gRPC-over-QUIC transport connection.
 6. Steward checks for a cfg from the controller.
 7. Normal operation begins.
 

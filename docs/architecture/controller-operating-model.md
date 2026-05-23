@@ -467,11 +467,26 @@ The controller is the certificate authority and identity provider for stewards. 
    - **`manual-review`** (production): quarantines the steward pending operator action. Sets `registration_decision: quarantine` so the steward is restricted to baseline config until promoted. Operators use `cfg registration pending` to list quarantined stewards, `cfg registration approve <id>` to promote, and `cfg registration deny <id> [--reason ...]` to reject.
    - **`auto-approve`** (deprecated): approves every valid registration unconditionally. Dev/test environments only — a startup warning is logged. Replaces the legacy `DefaultApprovalHook`.
    - Custom workflows can implement arbitrary policy (e.g., approve `tenant=lab` registrations, reject everything else)
-5. On approval (`approve`): controller generates the steward ID and issues an mTLS client certificate scoped to the steward's tenant/group identity.
-   On quarantine (`quarantine`): controller issues certificates but restricts the steward to baseline configuration only (no secrets, no scripts) until an administrator promotes it.
-   On rejection (`reject`): registration is denied.
-6. Controller distributes the CA cert, signing cert, and connection details.
-7. Steward is now a trusted member of the fleet and stores its cert for subsequent startups.
+5. On approval (`approve`): controller generates the steward ID and issues an mTLS client certificate scoped to the steward's tenant/group identity (HTTP 200 with full cert bundle).
+   On quarantine (`quarantine`): controller returns HTTP 202 with a `pending_id` and no certificates. The pending entry is written to the durable `PendingRegistrationStore` (SQLite in OSS, PostgreSQL in commercial). The steward polls `GET /api/v1/registration/status/{pending_id}` with its registration token as a Bearer credential until the operator acts. Operators use `cfg registration approve <pending-id>` or `cfg registration deny <pending-id>`.
+   On rejection (`reject`): HTTP 403 is returned; registration is denied.
+6. **Generate-on-claim (quarantine path):** When the operator approves an entry and the steward polls again, the controller generates the mTLS certificate in memory for that single response, marks the entry as `claimed`, and returns the full cert bundle in HTTP 200. A subsequent poll on an already-claimed entry returns HTTP 410 Gone — the cert is never re-issued. Private keys are never stored in the database.
+7. Controller distributes the CA cert, signing cert, and connection details.
+8. Steward is now a trusted member of the fleet and stores its cert for subsequent startups.
+
+**Registration status endpoint (Issue #1696):**
+
+`GET /api/v1/registration/status/{pending_id}` — authenticated with `Authorization: Bearer <regToken>`.
+
+| Response | Meaning |
+|----------|---------|
+| HTTP 200 `{"status":"pending"}` | Operator has not yet acted |
+| HTTP 200 `{"status":"claimed", "client_cert":..., ...}` | Approved and cert issued — steward should connect now |
+| HTTP 410 Gone | Already claimed (duplicate poll) — stop polling |
+| HTTP 200 `{"status":"denied"}` | Operator denied — steward should exit or re-register |
+| HTTP 200 `{"status":"expired"}` | Entry expired before operator acted — steward should re-register |
+| HTTP 403 | Token tenant ≠ entry tenant (tenant isolation) |
+| HTTP 401 | Invalid or missing Bearer token |
 
 **Configuring the registration workflow (`controller.cfg`):**
 

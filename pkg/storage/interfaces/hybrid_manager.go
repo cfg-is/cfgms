@@ -31,10 +31,11 @@ type HybridStorageManager struct {
 	operationalProvider   StorageProvider
 	configurationProvider StorageProvider
 
-	clientTenantStore business.ClientTenantStore
-	auditStore        business.AuditStore
-	configStore       cfgconfig.ConfigStore
-	ipTrustStore      business.IPTrustStore
+	clientTenantStore        business.ClientTenantStore
+	auditStore               business.AuditStore
+	configStore              cfgconfig.ConfigStore
+	ipTrustStore             business.IPTrustStore
+	pendingRegistrationStore business.PendingRegistrationStore
 
 	config HybridStorageConfig
 }
@@ -82,6 +83,14 @@ func NewHybridStorageManager(config HybridStorageConfig) (*HybridStorageManager,
 	}
 	manager.ipTrustStore = ipTrustStore
 
+	// Pending registration storage is operational-tier; providers that do not
+	// implement it leave the accessor nil rather than failing.
+	pendingRegistrationStore, err := opProvider.CreatePendingRegistrationStore(config.Operational.Config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create pending registration store: %w", err)
+	}
+	manager.pendingRegistrationStore = pendingRegistrationStore
+
 	// Create configuration store (GitOps workflow)
 	configStore, err := cfgProvider.CreateConfigStore(config.Configuration.Config)
 	if err != nil {
@@ -111,6 +120,13 @@ func (h *HybridStorageManager) GetConfigStore() cfgconfig.ConfigStore {
 // nil if the operational provider does not support IP trust storage).
 func (h *HybridStorageManager) GetIPTrustStore() business.IPTrustStore {
 	return h.ipTrustStore
+}
+
+// GetPendingRegistrationStore returns the pending registration storage interface
+// (operational backend, nil if the operational provider does not support pending
+// registration storage).
+func (h *HybridStorageManager) GetPendingRegistrationStore() business.PendingRegistrationStore {
+	return h.pendingRegistrationStore
 }
 
 // GetOperationalProvider returns the operational storage provider.

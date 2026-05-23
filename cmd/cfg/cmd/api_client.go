@@ -250,6 +250,7 @@ func (c *APIClient) RotateToken(ctx context.Context, tenantID, group string) (*A
 
 // APIPendingRegistration represents a quarantined steward awaiting approval in API responses.
 type APIPendingRegistration struct {
+	PendingID    string    `json:"pending_id"`
 	StewardID    string    `json:"steward_id"`
 	TenantID     string    `json:"tenant_id"`
 	SourceIP     string    `json:"source_ip"`
@@ -276,9 +277,9 @@ func (c *APIClient) ListPendingRegistrations(ctx context.Context) ([]APIPendingR
 	return pending, nil
 }
 
-// ApproveRegistration approves a quarantined steward, promoting it to registered status.
-func (c *APIClient) ApproveRegistration(ctx context.Context, stewardID string) error {
-	resp, err := c.doRequest(ctx, "POST", "/api/v1/registration/"+stewardID+"/approve", nil)
+// ApproveRegistration approves a quarantined steward registration by pending_id.
+func (c *APIClient) ApproveRegistration(ctx context.Context, pendingID string) error {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/registration/"+pendingID+"/approve", nil)
 	if err != nil {
 		return err
 	}
@@ -291,8 +292,8 @@ func (c *APIClient) ApproveRegistration(ctx context.Context, stewardID string) e
 	return nil
 }
 
-// DenyRegistration denies a quarantined steward registration with an optional reason.
-func (c *APIClient) DenyRegistration(ctx context.Context, stewardID, reason string) error {
+// DenyRegistration denies a quarantined steward registration by pending_id with an optional reason.
+func (c *APIClient) DenyRegistration(ctx context.Context, pendingID, reason string) error {
 	body, err := json.Marshal(struct {
 		Reason string `json:"reason,omitempty"`
 	}{Reason: reason})
@@ -300,7 +301,7 @@ func (c *APIClient) DenyRegistration(ctx context.Context, stewardID, reason stri
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	resp, err := c.doRequest(ctx, "POST", "/api/v1/registration/"+stewardID+"/deny", bytes.NewReader(body))
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/registration/"+pendingID+"/deny", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

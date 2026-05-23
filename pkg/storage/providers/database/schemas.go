@@ -660,6 +660,40 @@ func (s DatabaseSchemas) CreateIPTrustRangesTable(ctx context.Context, db *sql.D
 	return nil
 }
 
+// CreatePendingRegistrationsTable creates the cfgms_pending_registrations table (Issue #1696).
+// No cert bundle columns are included — generate-on-claim issues certs in memory only.
+func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS cfgms_pending_registrations (
+			pending_id    TEXT PRIMARY KEY,
+			steward_id    TEXT NOT NULL DEFAULT '',
+			tenant_id     TEXT NOT NULL,
+			token_str     TEXT NOT NULL,
+			source_ip     TEXT NOT NULL DEFAULT '',
+			registered_at TIMESTAMP WITH TIME ZONE NOT NULL,
+			expires_at    TIMESTAMP WITH TIME ZONE NOT NULL,
+			claimed_at    TIMESTAMP WITH TIME ZONE,
+			status        TEXT NOT NULL DEFAULT 'pending'
+		);
+	`
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_pending_registrations table: %w", err)
+	}
+
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_tenant_id  ON cfgms_pending_registrations(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_status     ON cfgms_pending_registrations(status);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_expires_at ON cfgms_pending_registrations(expires_at);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_token_str  ON cfgms_pending_registrations(token_str);",
+	}
+	for _, idx := range indexes {
+		if _, err := db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("failed to create cfgms_pending_registrations index: %w", err)
+		}
+	}
+	return nil
+}
+
 // CreateAllTables creates all necessary database tables and indexes
 func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error {
 	// Create tables in dependency order

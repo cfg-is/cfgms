@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
 // Package business defines the PendingRegistrationStore interface for the
-// manual-review registration approval mode (Issue #1599).
+// generate-on-claim registration approval flow (Issue #1696).
 package business
 
 import (
@@ -13,91 +13,76 @@ import (
 // ErrPendingRegistrationNotFound is returned when a pending registration record does not exist.
 var ErrPendingRegistrationNotFound = errors.New("pending registration not found")
 
-// PendingRegistrationStatus represents the lifecycle state of a pending registration request.
-type PendingRegistrationStatus string
-
+// Pending registration status values.
 const (
-	// PendingRegistrationStatusPending indicates the request is awaiting operator action.
-	PendingRegistrationStatusPending PendingRegistrationStatus = "pending"
-
-	// PendingRegistrationStatusApproved indicates an operator approved the request.
-	PendingRegistrationStatusApproved PendingRegistrationStatus = "approved"
-
-	// PendingRegistrationStatusDenied indicates an operator denied the request.
-	PendingRegistrationStatusDenied PendingRegistrationStatus = "denied"
-
-	// PendingRegistrationStatusTimedOut indicates the request expired before an operator acted.
-	PendingRegistrationStatusTimedOut PendingRegistrationStatus = "timed-out"
+	PendingRegistrationStatusPending  = "pending"
+	PendingRegistrationStatusApproved = "approved"
+	PendingRegistrationStatusClaimed  = "claimed"
+	PendingRegistrationStatusDenied   = "denied"
+	PendingRegistrationStatusExpired  = "expired"
 )
 
-// PendingRegistrationData holds the durable state for a single registration request
-// queued for manual review.
+// PendingRegistrationEntry holds the durable state for a single registration request
+// awaiting manual review and generate-on-claim cert issuance.
 //
-// The full registration token is never stored. TokenPrefix holds only a redacted
-// identifier so operators can correlate the request without exposing the secret.
-type PendingRegistrationData struct {
-	// ID is the unique pending-registration identifier.
-	ID string
+// No private key or certificate bundle is ever stored — cert generation happens
+// in memory when the steward first polls an approved entry.
+type PendingRegistrationEntry struct {
+	// PendingID is the unique pending-registration identifier (e.g. "pending-<nanoseconds>").
+	PendingID string
 
-	// StewardID is the steward identifier assigned after approval. Empty while pending.
+	// StewardID is the steward identifier assigned at registration time.
 	StewardID string
 
 	// TenantID is the tenant the registering steward belongs to.
 	TenantID string
 
+	// TokenStr is the full registration token presented at registration time.
+	// Stored so GetPendingByToken can locate the entry without the pending_id.
+	TokenStr string
+
 	// SourceIP is the remote address of the registering steward.
 	SourceIP string
 
-	// TokenPrefix is the redacted registration-token identifier (never the full token).
-	TokenPrefix string
+	// RegisteredAt is the time the steward first registered (and was quarantined).
+	RegisteredAt time.Time
 
-	// Status is the current lifecycle state of the request.
-	Status PendingRegistrationStatus
-
-	// DenyReason is a human-readable reason set when the request is denied or timed out.
-	DenyReason string
-
-	// CreatedAt is the time the request was queued.
-	CreatedAt time.Time
-
-	// ExpiresAt is the deadline after which the request is auto-rejected.
+	// ExpiresAt is the deadline after which the entry is eligible for expiry sweep.
 	ExpiresAt time.Time
+
+	// ClaimedAt is set when the steward first polls an approved entry and receives its cert.
+	// It is persisted before cert generation so a restart cannot yield a second cert.
+	ClaimedAt *time.Time
+
+	// Status is the current lifecycle state: pending | approved | claimed | denied | expired.
+	Status string
 }
 
-// PendingRegistrationFilter narrows the results of ListPending. A nil filter, or a
-// filter with all fields nil, returns every pending-registration record.
-type PendingRegistrationFilter struct {
-	// Status, when set, restricts results to records with the given status.
-	Status *PendingRegistrationStatus
-
-	// ExpiresBeforeOrAt, when set, restricts results to records whose ExpiresAt
-	// is at or before the given time. Used by the expiry sweep to find timed-out records.
-	ExpiresBeforeOrAt *time.Time
-
-	// TenantID, when set, restricts results to records for the given tenant.
-	TenantID *string
-}
-
-// PendingRegistrationStore defines the storage interface for durable persistence
-// of registration requests awaiting manual review.
+// PendingRegistrationStore defines the storage interface for durable persistence of
+// registration requests in the generate-on-claim approval flow.
 type PendingRegistrationStore interface {
-	// CreatePending inserts a new pending-registration record.
-	// Returns an error if a record with the same ID already exists.
-	CreatePending(ctx context.Context, record *PendingRegistrationData) error
+	// AddPending inserts a new pending-registration entry.
+	// Returns an error if an entry with the same PendingID already exists.
+	AddPending(ctx context.Context, entry *PendingRegistrationEntry) error
 
-	// GetPending retrieves the pending-registration record for the given ID.
+	// GetPendingByID retrieves the entry for the given pending_id.
 	// Returns ErrPendingRegistrationNotFound if no record exists.
-	GetPending(ctx context.Context, id string) (*PendingRegistrationData, error)
+	GetPendingByID(ctx context.Context, pendingID string) (*PendingRegistrationEntry, error)
 
-	// ListPending returns all records matching the filter, ordered by CreatedAt ascending.
-	// A nil filter returns every record.
-	ListPending(ctx context.Context, filter *PendingRegistrationFilter) ([]*PendingRegistrationData, error)
+	// GetPendingByToken retrieves the entry whose TokenStr matches the given token.
+	// Returns ErrPendingRegistrationNotFound if no matching record exists.
+	GetPendingByToken(ctx context.Context, tokenStr string) (*PendingRegistrationEntry, error)
 
-	// UpdatePendingStatus updates the status and deny reason of the given record.
+	// UpdateStatus updates the status of the entry identified by pendingID.
+	// When status is "claimed", the implementation also persists claimed_at = now().
 	// Returns ErrPendingRegistrationNotFound if no record exists for the ID.
-	UpdatePendingStatus(ctx context.Context, id string, status PendingRegistrationStatus, reason string) error
+	UpdateStatus(ctx context.Context, pendingID, status string) error
 
-	// DeletePending removes the pending-registration record for the given ID.
-	// Returns ErrPendingRegistrationNotFound if no record exists.
-	DeletePending(ctx context.Context, id string) error
+	// ListPending returns all entries for the given tenantID, ordered by registered_at ascending.
+	// An empty tenantID returns entries for all tenants (operator list view).
+	ListPending(ctx context.Context, tenantID string) ([]*PendingRegistrationEntry, error)
+
+	// ExpireStale marks entries whose expires_at is at or before cutoff and whose status
+	// is "pending" as "expired". Returns the number of entries updated.
+	ExpireStale(ctx context.Context, cutoff time.Time) (int, error)
 }

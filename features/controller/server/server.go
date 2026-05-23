@@ -676,6 +676,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		httpServer.SetRegistry(connRegistry)
 	}
 
+	// Issue #1696: Wire durable pending registration store for status poll endpoint.
+	if pendingStore := storageManager.GetPendingRegistrationStore(); pendingStore != nil {
+		httpServer.SetPendingStore(pendingStore)
+		logger.Info("Durable pending registration store wired to HTTP API server (Issue #1696)")
+	}
+
 	srv := &Server{
 		cfg:                     cfg,
 		logger:                  logger,

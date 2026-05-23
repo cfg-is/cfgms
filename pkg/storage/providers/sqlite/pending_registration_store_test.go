@@ -13,7 +13,7 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// newTestPendingRegistrationStore creates an in-memory SQLite PendingRegistrationStore for tests.
+// newTestPendingRegistrationStore opens an in-memory SQLite store for testing.
 func newTestPendingRegistrationStore(t *testing.T) *SQLitePendingRegistrationStore {
 	t.Helper()
 	db, err := openAndInit(":memory:")
@@ -22,161 +22,233 @@ func newTestPendingRegistrationStore(t *testing.T) *SQLitePendingRegistrationSto
 	return &SQLitePendingRegistrationStore{db: db}
 }
 
-// testPendingRecord returns a PendingRegistrationData with sensible defaults.
-func testPendingRecord(id string) *business.PendingRegistrationData {
-	now := time.Now().UTC()
-	return &business.PendingRegistrationData{
-		ID:          id,
-		StewardID:   "",
-		TenantID:    "tenant-1",
-		SourceIP:    "10.0.0.5",
-		TokenPrefix: "tok-abcd",
-		Status:      business.PendingRegistrationStatusPending,
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(24 * time.Hour),
+// testPendingEntry returns a PendingRegistrationEntry with sensible defaults.
+func testPendingEntry(pendingID, tenantID string) *business.PendingRegistrationEntry {
+	now := time.Now().UTC().Truncate(time.Second)
+	return &business.PendingRegistrationEntry{
+		PendingID:    pendingID,
+		StewardID:    "steward-" + pendingID,
+		TenantID:     tenantID,
+		TokenStr:     "cfgms_reg_tok_" + pendingID,
+		SourceIP:     "10.0.0.5",
+		RegisteredAt: now,
+		ExpiresAt:    now.Add(5 * 24 * time.Hour),
+		Status:       business.PendingRegistrationStatusPending,
 	}
 }
 
-func TestPendingRegistrationStore_CreateAndGet(t *testing.T) {
+func TestPendingRegistrationStore_AddAndGetByID(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
 	ctx := context.Background()
 
-	record := testPendingRecord("pr-1")
-	require.NoError(t, store.CreatePending(ctx, record))
+	entry := testPendingEntry("pr-1", "tenant-1")
+	require.NoError(t, store.AddPending(ctx, entry))
 
-	got, err := store.GetPending(ctx, "pr-1")
+	got, err := store.GetPendingByID(ctx, "pr-1")
 	require.NoError(t, err)
-	assert.Equal(t, "pr-1", got.ID)
+	assert.Equal(t, "pr-1", got.PendingID)
 	assert.Equal(t, "tenant-1", got.TenantID)
-	assert.Equal(t, "10.0.0.5", got.SourceIP)
-	assert.Equal(t, "tok-abcd", got.TokenPrefix)
+	assert.Equal(t, "cfgms_reg_tok_pr-1", got.TokenStr)
 	assert.Equal(t, business.PendingRegistrationStatusPending, got.Status)
-	assert.WithinDuration(t, record.ExpiresAt, got.ExpiresAt, time.Second)
+	assert.WithinDuration(t, entry.ExpiresAt, got.ExpiresAt, time.Second)
+	assert.Nil(t, got.ClaimedAt)
 }
 
-func TestPendingRegistrationStore_CreateNil(t *testing.T) {
-	store := newTestPendingRegistrationStore(t)
-	err := store.CreatePending(context.Background(), nil)
-	require.Error(t, err)
-}
-
-func TestPendingRegistrationStore_CreateEmptyID(t *testing.T) {
-	store := newTestPendingRegistrationStore(t)
-	record := testPendingRecord("")
-	err := store.CreatePending(context.Background(), record)
-	require.Error(t, err)
-}
-
-func TestPendingRegistrationStore_CreateDuplicate(t *testing.T) {
+func TestPendingRegistrationStore_GetByToken(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
 	ctx := context.Background()
 
-	require.NoError(t, store.CreatePending(ctx, testPendingRecord("pr-dup")))
-	err := store.CreatePending(ctx, testPendingRecord("pr-dup"))
-	require.Error(t, err, "creating a record with a duplicate ID must fail")
+	entry := testPendingEntry("pr-tok", "tenant-1")
+	require.NoError(t, store.AddPending(ctx, entry))
+
+	got, err := store.GetPendingByToken(ctx, "cfgms_reg_tok_pr-tok")
+	require.NoError(t, err)
+	assert.Equal(t, "pr-tok", got.PendingID)
 }
 
-func TestPendingRegistrationStore_GetNotFound(t *testing.T) {
+func TestPendingRegistrationStore_GetByToken_NotFound(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
-	_, err := store.GetPending(context.Background(), "nonexistent")
+	_, err := store.GetPendingByToken(context.Background(), "nonexistent-token")
 	assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound)
 }
 
-func TestPendingRegistrationStore_ListNoFilter(t *testing.T) {
+func TestPendingRegistrationStore_AddNil(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
-	ctx := context.Background()
-
-	require.NoError(t, store.CreatePending(ctx, testPendingRecord("pr-a")))
-	require.NoError(t, store.CreatePending(ctx, testPendingRecord("pr-b")))
-
-	records, err := store.ListPending(ctx, nil)
-	require.NoError(t, err)
-	assert.Len(t, records, 2)
+	err := store.AddPending(context.Background(), nil)
+	require.Error(t, err)
 }
 
-func TestPendingRegistrationStore_ListFilterByStatus(t *testing.T) {
+func TestPendingRegistrationStore_AddEmptyPendingID(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
-	ctx := context.Background()
-
-	require.NoError(t, store.CreatePending(ctx, testPendingRecord("pr-pending")))
-	denied := testPendingRecord("pr-denied")
-	denied.Status = business.PendingRegistrationStatusDenied
-	require.NoError(t, store.CreatePending(ctx, denied))
-
-	pending := business.PendingRegistrationStatusPending
-	records, err := store.ListPending(ctx, &business.PendingRegistrationFilter{Status: &pending})
-	require.NoError(t, err)
-	require.Len(t, records, 1)
-	assert.Equal(t, "pr-pending", records[0].ID)
+	entry := testPendingEntry("", "tenant-1")
+	err := store.AddPending(context.Background(), entry)
+	require.Error(t, err)
 }
 
-func TestPendingRegistrationStore_ListFilterByTenant(t *testing.T) {
+func TestPendingRegistrationStore_AddDuplicate(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
 	ctx := context.Background()
 
-	require.NoError(t, store.CreatePending(ctx, testPendingRecord("pr-t1")))
-	other := testPendingRecord("pr-t2")
-	other.TenantID = "tenant-2"
-	require.NoError(t, store.CreatePending(ctx, other))
-
-	tenant := "tenant-2"
-	records, err := store.ListPending(ctx, &business.PendingRegistrationFilter{TenantID: &tenant})
-	require.NoError(t, err)
-	require.Len(t, records, 1)
-	assert.Equal(t, "pr-t2", records[0].ID)
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-dup", "tenant-1")))
+	err := store.AddPending(ctx, testPendingEntry("pr-dup", "tenant-1"))
+	require.Error(t, err, "creating a record with a duplicate pending_id must fail")
 }
 
-func TestPendingRegistrationStore_ListFilterExpired(t *testing.T) {
+func TestPendingRegistrationStore_GetByID_NotFound(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
-	ctx := context.Background()
-
-	expired := testPendingRecord("pr-expired")
-	expired.ExpiresAt = time.Now().UTC().Add(-1 * time.Hour)
-	require.NoError(t, store.CreatePending(ctx, expired))
-
-	active := testPendingRecord("pr-active")
-	active.ExpiresAt = time.Now().UTC().Add(24 * time.Hour)
-	require.NoError(t, store.CreatePending(ctx, active))
-
-	now := time.Now().UTC()
-	records, err := store.ListPending(ctx, &business.PendingRegistrationFilter{ExpiresBeforeOrAt: &now})
-	require.NoError(t, err)
-	require.Len(t, records, 1)
-	assert.Equal(t, "pr-expired", records[0].ID)
+	_, err := store.GetPendingByID(context.Background(), "nonexistent")
+	assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound)
 }
 
-func TestPendingRegistrationStore_UpdateStatus(t *testing.T) {
+func TestPendingRegistrationStore_UpdateStatus_Approved(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
 	ctx := context.Background()
 
-	require.NoError(t, store.CreatePending(ctx, testPendingRecord("pr-upd")))
-	require.NoError(t, store.UpdatePendingStatus(ctx, "pr-upd", business.PendingRegistrationStatusDenied, "policy violation"))
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-appr", "tenant-1")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-appr", business.PendingRegistrationStatusApproved))
 
-	got, err := store.GetPending(ctx, "pr-upd")
+	got, err := store.GetPendingByID(ctx, "pr-appr")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusApproved, got.Status)
+	assert.Nil(t, got.ClaimedAt, "claimed_at must remain nil for approved status")
+}
+
+func TestPendingRegistrationStore_UpdateStatus_Claimed_SetsClaimed(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-claim", "tenant-1")))
+	// Must be approved first — UpdateStatus("claimed") has AND status='approved' guard.
+	require.NoError(t, store.UpdateStatus(ctx, "pr-claim", business.PendingRegistrationStatusApproved))
+
+	before := time.Now().UTC()
+	require.NoError(t, store.UpdateStatus(ctx, "pr-claim", business.PendingRegistrationStatusClaimed))
+
+	got, err := store.GetPendingByID(ctx, "pr-claim")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status)
+	require.NotNil(t, got.ClaimedAt, "claimed_at must be set when status is claimed")
+	assert.WithinDuration(t, before, *got.ClaimedAt, 2*time.Second)
+}
+
+func TestPendingRegistrationStore_UpdateStatus_Denied(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-deny", "tenant-1")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-deny", business.PendingRegistrationStatusDenied))
+
+	got, err := store.GetPendingByID(ctx, "pr-deny")
 	require.NoError(t, err)
 	assert.Equal(t, business.PendingRegistrationStatusDenied, got.Status)
-	assert.Equal(t, "policy violation", got.DenyReason)
 }
 
-func TestPendingRegistrationStore_UpdateStatusNotFound(t *testing.T) {
+func TestPendingRegistrationStore_UpdateStatus_NotFound(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
-	err := store.UpdatePendingStatus(context.Background(), "missing", business.PendingRegistrationStatusApproved, "")
+	err := store.UpdateStatus(context.Background(), "missing", business.PendingRegistrationStatusApproved)
 	assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound)
 }
 
-func TestPendingRegistrationStore_Delete(t *testing.T) {
+func TestPendingRegistrationStore_ListPending_AllTenants(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
 	ctx := context.Background()
 
-	require.NoError(t, store.CreatePending(ctx, testPendingRecord("pr-del")))
-	require.NoError(t, store.DeletePending(ctx, "pr-del"))
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-a", "tenant-1")))
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-b", "tenant-2")))
 
-	_, err := store.GetPending(ctx, "pr-del")
-	assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound)
+	entries, err := store.ListPending(ctx, "")
+	require.NoError(t, err)
+	assert.Len(t, entries, 2)
 }
 
-func TestPendingRegistrationStore_DeleteNotFound(t *testing.T) {
+func TestPendingRegistrationStore_ListPending_FilterByTenant(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
-	err := store.DeletePending(context.Background(), "missing")
-	assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-t1", "tenant-1")))
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-t2", "tenant-2")))
+
+	entries, err := store.ListPending(ctx, "tenant-2")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "pr-t2", entries[0].PendingID)
+}
+
+func TestPendingRegistrationStore_ExpireStale(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	past := time.Now().UTC().Add(-2 * time.Hour)
+	future := time.Now().UTC().Add(24 * time.Hour)
+
+	stale := testPendingEntry("pr-stale", "tenant-1")
+	stale.ExpiresAt = past
+	require.NoError(t, store.AddPending(ctx, stale))
+
+	active := testPendingEntry("pr-active", "tenant-1")
+	active.ExpiresAt = future
+	require.NoError(t, store.AddPending(ctx, active))
+
+	count, err := store.ExpireStale(ctx, time.Now().UTC())
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+
+	got, err := store.GetPendingByID(ctx, "pr-stale")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusExpired, got.Status)
+
+	activeGot, err := store.GetPendingByID(ctx, "pr-active")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusPending, activeGot.Status)
+}
+
+func TestPendingRegistrationStore_ExpireStale_SkipsNonPending(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	past := time.Now().UTC().Add(-1 * time.Hour)
+
+	approved := testPendingEntry("pr-appr", "tenant-1")
+	approved.ExpiresAt = past
+	require.NoError(t, store.AddPending(ctx, approved))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-appr", business.PendingRegistrationStatusApproved))
+
+	count, err := store.ExpireStale(ctx, time.Now().UTC())
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "approved entries must not be expired")
+
+	got, err := store.GetPendingByID(ctx, "pr-appr")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusApproved, got.Status)
+}
+
+// TestPendingRegistrationStore_PersistAcrossInit verifies durability: an entry
+// added to one store instance is retrievable after the store is closed and
+// re-opened using the same on-disk file (Issue #1696 AC).
+func TestPendingRegistrationStore_PersistAcrossInit(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := dir + "/test.db"
+
+	// Open first store instance, add an entry, then close.
+	db1, err := openAndInit(dbPath)
+	require.NoError(t, err)
+	store1 := &SQLitePendingRegistrationStore{db: db1}
+
+	ctx := context.Background()
+	entry := testPendingEntry("pr-persist", "tenant-durable")
+	require.NoError(t, store1.AddPending(ctx, entry))
+	require.NoError(t, store1.UpdateStatus(ctx, "pr-persist", business.PendingRegistrationStatusApproved))
+	require.NoError(t, store1.Close())
+
+	// Open a fresh store instance pointing to the same file.
+	db2, err := openAndInit(dbPath)
+	require.NoError(t, err)
+	store2 := &SQLitePendingRegistrationStore{db: db2}
+	t.Cleanup(func() { _ = store2.Close() })
+
+	got, err := store2.GetPendingByID(ctx, "pr-persist")
+	require.NoError(t, err)
+	assert.Equal(t, "pr-persist", got.PendingID)
+	assert.Equal(t, "tenant-durable", got.TenantID)
+	assert.Equal(t, business.PendingRegistrationStatusApproved, got.Status)
 }
