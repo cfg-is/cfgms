@@ -93,30 +93,25 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
-    # Stage the local data-extension pack into the CodeQL CLI's install
-    # cache so it resolves by name (cfgis/cfgms-go-extensions). The
-    # codeql-action's `packs:` input — config-file or workflow-level — only
-    # accepts pack NAMES; paths are rejected as "invalid pack specification".
-    # The cache layout `~/.codeql/packages/<scope>/<name>/<version>/` is
-    # what the CLI scans during init/analyze.
-    - name: Stage local CodeQL extension pack
-      shell: bash
-      run: |
-        set -euo pipefail
-        version=$(awk -F': *' '/^version:/ {gsub(/["'"'"' ]/, "", $2); print $2}' .github/codeql/extensions/qlpack.yml)
-        dest="$HOME/.codeql/packages/cfgis/cfgms-go-extensions/${version}"
-        mkdir -p "$dest"
-        cp -r .github/codeql/extensions/. "$dest/"
-        echo "Staged pack at $dest (version $version):"
-        ls -la "$dest"
-
-    # Initialize CodeQL tools for scanning
+    # Initialize CodeQL tools for scanning.
+    #
+    # Pack resolution for the local extension pack (cfgis/cfgms-go-extensions):
+    # we pass `--additional-packs` through to the CLI via the codeql-action's
+    # documented CODEQL_ACTION_EXTRA_OPTIONS env-var hook. The action's
+    # `packs:` input (config-file and workflow-level) accepts only registry
+    # pack names — a local-path entry there logs "Invalid pack specification"
+    # and the CLI then 404s on ghcr.io. Pre-staging the pack into
+    # ~/.codeql/packages/ doesn't help either: the CLI still queries the
+    # registry first for resolution unless told otherwise. --additional-packs
+    # adds the workspace dir to the resolver search path, which IS honored.
     - name: Initialize CodeQL
       uses: github/codeql-action/init@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4
+      env:
+        CODEQL_ACTION_EXTRA_OPTIONS: '{"database":{"init":["--additional-packs","${{ github.workspace }}/.github/codeql"]}}'
       with:
         languages: ${{ matrix.language }}
         # Pull queries (security-extended) AND data-extension pack (by name,
-        # staged above) from the repo-local config.
+        # resolved via --additional-packs above) from the repo-local config.
         config-file: ./.github/codeql/codeql-config.yml
         # Persist per-language dependency caches across runs (Issue #1581).
         # Official CodeQL-action support — complements the Go module cache
