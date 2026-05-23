@@ -18,13 +18,17 @@
 name: Publish CodeQL Extension Pack
 
 on:
+  # Restricted to protected integration branches only. Allowing feature
+  # branches to publish would be a supply-chain footgun: anyone with push
+  # to any branch could ship a pack that the production CodeQL analysis
+  # then trusts (cfg-is/cfgms-go-extensions is referenced by name from
+  # codeql-config.yml on every PR). main/develop are PR-gated; the model
+  # changes go through code review before they can be published.
+  #
+  # First publish was bootstrapped via a temporary feature-branch entry
+  # on commits ad2dc91/bf5bc24/43acc90/ebf6bdf — removed before merge.
   push:
-    # `feature/story-1771-loginjection-lint` is temporarily included so the
-    # very first publish can happen before this workflow lands on develop —
-    # workflow_dispatch only works for workflows already on the default
-    # branch. Remove after this PR merges (the trigger graduates to a
-    # standard develop/main-only flow at that point).
-    branches: [ main, develop, 'feature/story-1771-loginjection-lint' ]
+    branches: [ main, develop ]
     paths:
       - '.github/codeql/extensions/**'
       - '.github/workflows/codeql-pack-publish.yml'
