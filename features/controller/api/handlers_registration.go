@@ -137,7 +137,7 @@ func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusApproved); err != nil {
-		s.logger.Error("Failed to approve pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.logger.Error("Failed to approve pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to approve registration", http.StatusInternalServerError)
 		return
 	}
@@ -165,7 +165,7 @@ func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) 
 	var req denyRegistrationRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusDenied); err != nil {
-		s.logger.Error("Failed to deny pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.logger.Error("Failed to deny pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to deny registration", http.StatusInternalServerError)
 		return
 	}
@@ -241,7 +241,7 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 				w.WriteHeader(http.StatusGone)
 				return
 			}
-			s.logger.Error("Failed to mark pending entry as claimed", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+			s.logger.Error("Failed to mark pending entry as claimed", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 			http.Error(w, "Failed to claim registration", http.StatusInternalServerError)
 			return
 		}
