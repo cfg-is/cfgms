@@ -28,5 +28,11 @@ extensions:
       pack: codeql/go-all
       extensible: summaryModel
     data:
+      # Provide both ReturnValue and ReturnValue[0] forms — CodeQL Go 2.25.5
+      # has inconsistent matching for single-return functions; supplying both
+      # forms covers either matcher. The taint engine treats this as
+      # value-flow (kind=value), so the output is no longer tainted.
       - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "Argument[0]", "ReturnValue", "value", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
       - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "Argument[0]", "ReturnValue", "value", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
