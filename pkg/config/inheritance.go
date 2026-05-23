@@ -287,6 +287,21 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 		effective.Sources["steward.module_paths"] = source
 	}
 
+	// ConvergeInterval and DriftMode are scalar steward settings that follow
+	// the same later-overrides-earlier rule as ID/Mode/ModulePaths. Without
+	// this, a cascade-enabled tenant loses the configured interval and the
+	// steward falls back to its 30-minute default — breaking drift-correction
+	// SLAs inside any tenant hierarchy.
+	if config.Steward.ConvergeInterval != "" {
+		effective.Config.Steward.ConvergeInterval = config.Steward.ConvergeInterval
+		effective.Sources["steward.converge_interval"] = source
+	}
+
+	if config.Steward.DriftMode != "" {
+		effective.Config.Steward.DriftMode = config.Steward.DriftMode
+		effective.Sources["steward.drift_mode"] = source
+	}
+
 	// Apply logging settings
 	if config.Steward.Logging.Level != "" {
 		effective.Config.Steward.Logging.Level = config.Steward.Logging.Level

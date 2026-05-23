@@ -93,6 +93,54 @@ func TestRunStoreSQL_Init_Idempotent(t *testing.T) {
 	assert.True(t, indexFound, "idx_srj_run_id index must exist")
 }
 
+func TestNewRunStoreSQLFromDSN_HappyPath(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "runs.db")
+
+	store, err := NewRunStoreSQLFromDSN(dsn)
+	require.NoError(t, err, "valid DSN must open a usable store")
+	require.NotNil(t, store)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// The store must be usable: Init creates the schema, and the busy_timeout
+	// PRAGMA set by NewRunStoreSQLFromDSN must persist (verify it is non-zero).
+	require.NoError(t, store.Init(context.Background()), "Init must succeed on store from DSN")
+
+	var busyTimeout int
+	require.NoError(t, store.db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout))
+	assert.Equal(t, 5000, busyTimeout, "busy_timeout must be set to 5000 ms by the constructor")
+
+	// And the store must accept writes via the normal API.
+	require.NoError(t, store.CreateRun(sampleRun("run-dsn-1", "tenant-dsn")))
+	got, err := store.GetRun("run-dsn-1")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-dsn", got.TenantID)
+}
+
+func TestNewRunStoreSQLFromDSN_PragmaFailsOnUnreachablePath(t *testing.T) {
+	// A DSN pointing into a non-existent directory cannot be opened on disk.
+	// sql.Open succeeds (the modernc.org/sqlite driver defers connection),
+	// so the PRAGMA Exec is what surfaces the failure — exercising the
+	// second error branch of NewRunStoreSQLFromDSN.
+	dsn := filepath.Join(t.TempDir(), "no-such-subdir", "runs.db")
+
+	store, err := NewRunStoreSQLFromDSN(dsn)
+	require.Error(t, err, "DSN under a missing directory must surface as an error")
+	assert.Nil(t, store, "no store should be returned on PRAGMA failure")
+	assert.Contains(t, err.Error(), "run store:", "error must be wrapped by NewRunStoreSQLFromDSN")
+}
+
+func TestNewRunStoreSQLFromDSN_EmptyDSN(t *testing.T) {
+	// An empty DSN opens an anonymous in-memory database — the same behavior
+	// as ":memory:". The constructor must still set busy_timeout and return a
+	// usable store; this guards against accidental nil/zero-value regressions.
+	store, err := NewRunStoreSQLFromDSN("")
+	require.NoError(t, err)
+	require.NotNil(t, store)
+	t.Cleanup(func() { _ = store.Close() })
+
+	require.NoError(t, store.Init(context.Background()))
+}
+
 func TestRunStoreSQL_CreateRun_GetRun(t *testing.T) {
 	store := newTestRunStore(t)
 

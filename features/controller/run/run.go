@@ -138,6 +138,23 @@ func NewRunStoreSQL(db *sql.DB) *RunStoreSQL {
 	return &RunStoreSQL{db: db}
 }
 
+// NewRunStoreSQLFromDSN opens a SQLite database at dsn and returns a RunStoreSQL
+// backed by it. The caller must call Init before any other method, and Close when
+// done to release the underlying connection. Use this constructor instead of
+// calling sql.Open directly in callers outside pkg/storage.
+func NewRunStoreSQLFromDSN(dsn string) (*RunStoreSQL, error) {
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("run store: open sqlite %s: %w", dsn, err)
+	}
+	// busy_timeout prevents SQLITE_BUSY errors when the main connection is writing.
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("run store: set busy_timeout: %w", err)
+	}
+	return &RunStoreSQL{db: db}, nil
+}
+
 // Init creates the script_runs, script_run_jobs, and execution_grants tables and
 // their indexes if they do not already exist. Safe to call multiple times (idempotent).
 func (s *RunStoreSQL) Init(_ context.Context) error {

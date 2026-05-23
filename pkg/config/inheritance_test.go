@@ -154,3 +154,96 @@ func TestResolveConfiguration_LaterLevelOverridesEarlier(t *testing.T) {
 
 	assert.Equal(t, "msp-id", effective.Config.Steward.ID, "later level must override earlier level")
 }
+
+// TestResolveConfiguration_PropagatesConvergeIntervalFromParent verifies that a
+// converge_interval set at an ancestor level reaches the steward via cascade.
+// Without propagation, cascade-enabled tenants fell back to the 30-minute
+// steward default — breaking drift-correction SLAs inside tenant hierarchies.
+func TestResolveConfiguration_PropagatesConvergeIntervalFromParent(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NotNil(t, cs)
+
+	// Parent policy sets converge_interval; child has no config at all.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{ConvergeInterval: "10s"},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, "10s", effective.Config.Steward.ConvergeInterval,
+		"converge_interval set at parent tenant must cascade to descendant stewards")
+	assert.NotNil(t, effective.Sources["steward.converge_interval"],
+		"inheritance source for converge_interval must be recorded")
+}
+
+// TestResolveConfiguration_ChildOverridesConvergeInterval verifies that a child-level
+// converge_interval takes precedence over a parent-level value.
+func TestResolveConfiguration_ChildOverridesConvergeInterval(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NotNil(t, cs)
+
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{ConvergeInterval: "30m"},
+		}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{ConvergeInterval: "5s"},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, "5s", effective.Config.Steward.ConvergeInterval,
+		"child-level converge_interval must override parent value")
+}
+
+// TestResolveConfiguration_PropagatesDriftModeFromParent verifies that drift_mode
+// cascades from an ancestor tenant. drift_mode is security-sensitive (steward
+// trusts controller-delivered value only) so silently dropping it on cascade
+// would leave stewards on the apply-mode default regardless of policy.
+func TestResolveConfiguration_PropagatesDriftModeFromParent(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NotNil(t, cs)
+
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{DriftMode: stewardconfig.DriftModeMonitor},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, stewardconfig.DriftModeMonitor, effective.Config.Steward.DriftMode,
+		"drift_mode set at parent tenant must cascade to descendant stewards")
+	assert.NotNil(t, effective.Sources["steward.drift_mode"],
+		"inheritance source for drift_mode must be recorded")
+}
