@@ -1,0 +1,14 @@
+# CodeQL Workspace — local pack discovery.
+#
+# The CodeQL CLI auto-discovers this file at the repo root and treats every
+# qlpack.yml matched by `provide:` as a local pack. Names in this file's
+# packs override registry lookups — without it, `packs: cfgis/cfgms-go-extensions`
+# in .github/codeql/codeql-config.yml resolves to ghcr.io (404) instead of
+# the in-tree extension pack.
+#
+# The codeql-action's own `packs:` input cannot point at local paths
+# directly; this file is the supported escape hatch for in-repo data-extension
+# packs (see github/codeql/codeql-workspace.yml for the canonical pattern).
+
+provide:
+  - .github/codeql/extensions/qlpack.yml

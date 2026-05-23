@@ -95,23 +95,19 @@ jobs:
 
     # Initialize CodeQL tools for scanning.
     #
-    # Pack resolution for the local extension pack (cfgis/cfgms-go-extensions):
-    # we pass `--additional-packs` through to the CLI via the codeql-action's
-    # documented CODEQL_ACTION_EXTRA_OPTIONS env-var hook. The action's
-    # `packs:` input (config-file and workflow-level) accepts only registry
-    # pack names — a local-path entry there logs "Invalid pack specification"
-    # and the CLI then 404s on ghcr.io. Pre-staging the pack into
-    # ~/.codeql/packages/ doesn't help either: the CLI still queries the
-    # registry first for resolution unless told otherwise. --additional-packs
-    # adds the workspace dir to the resolver search path, which IS honored.
+    # Local extension pack (cfgis/cfgms-go-extensions) is resolved via the
+    # repo-root codeql-workspace.yml's `provide:` section, which the CodeQL
+    # CLI auto-discovers. The pack is then referenced by name in
+    # codeql-config.yml's `packs:` field. This is the supported mechanism for
+    # local data-extension packs — the `packs:` input itself only accepts
+    # registry names, and --additional-packs isn't exposed on `database init`.
     - name: Initialize CodeQL
       uses: github/codeql-action/init@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4
-      env:
-        CODEQL_ACTION_EXTRA_OPTIONS: '{"database":{"init":["--additional-packs","${{ github.workspace }}/.github/codeql"]}}'
       with:
         languages: ${{ matrix.language }}
         # Pull queries (security-extended) AND data-extension pack (by name,
-        # resolved via --additional-packs above) from the repo-local config.
+        # resolved via codeql-workspace.yml at the repo root) from the
+        # repo-local config.
         config-file: ./.github/codeql/codeql-config.yml
         # Persist per-language dependency caches across runs (Issue #1581).
         # Official CodeQL-action support — complements the Go module cache
