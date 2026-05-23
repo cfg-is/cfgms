@@ -21,6 +21,7 @@ import (
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
@@ -36,6 +37,11 @@ type ConfigHandler struct {
 	configService *service.ConfigurationServiceV2
 	logger        logging.Logger
 	signer        signature.Signer
+	// controllerSvc, when set, enables tenant-context injection before GetConfiguration.
+	// The steward's TenantID from the fleet registry is written into the request context
+	// so that extractTenantID(ctx) returns the correct tenant on the mTLS-authenticated
+	// data-plane sync path, which carries no tenant value in the gRPC context. (Issue #1720)
+	controllerSvc *service.ControllerService
 }
 
 // NewConfigHandler creates a new config sync handler.
@@ -45,6 +51,15 @@ func NewConfigHandler(configService *service.ConfigurationServiceV2, logger logg
 		logger:        logger,
 		signer:        signer,
 	}
+}
+
+// WithControllerService wires the fleet registry into the handler so the steward's
+// authenticated tenant ID is injected into the request context before GetConfiguration
+// is called. Without this, extractTenantID(ctx) returns "default" on the data-plane
+// sync path and the config lookup scopes to the wrong tenant. (Issue #1720)
+func (h *ConfigHandler) WithControllerService(cs *service.ControllerService) *ConfigHandler {
+	h.controllerSvc = cs
+	return h
 }
 
 // HandleGRPC processes a SyncConfig RPC on the shared gRPC-over-QUIC server.
@@ -73,6 +88,16 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 	}
 	if stewardID != peerID {
 		return status.Error(codes.PermissionDenied, "steward ID mismatch")
+	}
+
+	// Inject the steward's authenticated tenant ID from the fleet registry into the
+	// request context before calling GetConfiguration. The mTLS data-plane sync path
+	// carries no tenant context value, so without this injection extractTenantID(ctx)
+	// returns "default" and the config lookup scopes to the wrong tenant. (Issue #1720)
+	if h.controllerSvc != nil {
+		if info, ok := h.controllerSvc.GetStewardInfo(stewardID); ok && info.TenantID != "" {
+			ctx = context.WithValue(ctx, ctxkeys.TenantID, info.TenantID)
+		}
 	}
 
 	// Get configuration from service

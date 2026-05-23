@@ -609,7 +609,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if dataPlane != nil {
 		// Use the signer hoisted above (nil when certManager absent or export failed).
 		signerCertSerial = hoistedSignerCertSerial
-		configHandler = controllerTransport.NewConfigHandler(configService, logger, hoistedSigner)
+		configHandler = controllerTransport.NewConfigHandler(configService, logger, hoistedSigner).
+			WithControllerService(controllerService)
 		logger.Debug("Config handler initialized for data plane", "signing_enabled", hoistedSigner != nil)
 	}
 

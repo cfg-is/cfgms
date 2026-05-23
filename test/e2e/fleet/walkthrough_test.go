@@ -192,8 +192,6 @@ func (s *FleetTestSuite) testStewardRestart(t *testing.T, configPath string) {
 func (s *FleetTestSuite) testDeferredConfig(t *testing.T, configPath string) {
 	t.Helper()
 
-	t.Skip("deferred config delivery to an offline steward not yet implemented — fleet-resilience epic #1714")
-
 	container := "fleet-steward-2"
 	stewardID := s.stewardIDs[container]
 
