@@ -1261,11 +1261,14 @@ test_no_pipeline_label_refs() {
     fi
 
     # Real check: assert zero matches in the actual codebase directories.
+    # Exclude .claude/worktrees/ — that's the agent-dispatch root containing
+    # nested repo copies, not source for this checkout.
     local matches
     matches=$(grep -rn \
         "pipeline:story\|pipeline:draft\|pipeline:review\|pipeline:ready\|agent:ready\|agent:success\|agent:in-progress\|agent:failed" \
         "${root}/.claude/" "${root}/scripts/" \
         --exclude="test-scripts.sh" \
+        --exclude-dir="worktrees" \
         2>/dev/null) || true
 
     if [[ -z "$matches" ]]; then

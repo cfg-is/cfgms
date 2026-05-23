@@ -13,6 +13,7 @@ import (
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // handleListPermissions handles GET /api/v1/rbac/permissions
@@ -175,7 +176,7 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	resp, err := s.rbacService.CreateRole(ctx, req)
 	if err != nil {
-		s.logger.Error("Failed to create role", "name", roleInfo.Name, "error", err)
+		s.logger.Error("Failed to create role", "name", logging.SanitizeLogValue(roleInfo.Name), "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create role", "INTERNAL_ERROR")
 		return
 	}

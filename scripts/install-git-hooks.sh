@@ -199,6 +199,26 @@ if [ $blocked -ne 0 ]; then
     exit 1
 fi
 
+# Log-injection gate — catches CodeQL "Log entries created from user input"
+# at commit time. Only runs on staged .go files under features/**/api/ to
+# keep the pre-commit hook fast.
+staged_log_files=()
+while IFS= read -r f; do
+    case "$f" in
+        features/*/api/*.go) [[ "$f" == *_test.go ]] || staged_log_files+=("$f") ;;
+    esac
+done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+if [ ${#staged_log_files[@]} -gt 0 ]; then
+    if ! go run ./scripts/lint-log-injection "${staged_log_files[@]}"; then
+        echo ""
+        echo "Wrap each flagged value with logging.SanitizeLogValue(...) before committing,"
+        echo "or bypass with --no-verify if you've audited the call site as safe."
+        echo ""
+        exit 1
+    fi
+fi
+
 exit 0
 HOOK_EOF
 

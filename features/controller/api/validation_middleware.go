@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/security"
 )
 
@@ -49,7 +50,7 @@ func (s *Server) validationMiddleware(next http.Handler) http.Handler {
 		// If validation failed, return error response
 		if !result.Valid {
 			// Log validation errors for debugging
-			s.logger.Debug("Request validation failed", "errors", result.Errors, "path", r.URL.Path)
+			s.logger.Debug("Request validation failed", "errors", result.Errors, "path", logging.SanitizeLogValue(r.URL.Path))
 			s.writeValidationErrorResponse(w, result)
 			return
 		}

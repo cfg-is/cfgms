@@ -253,8 +253,16 @@ func TestSetAdminMarker_Architecture(t *testing.T) {
 
 	var violations []string
 	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			// Skip agent dispatch worktrees — they contain nested repo copies
+			// from /dispatch agents and are not part of this checkout's source.
+			if d.Name() == "worktrees" {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
