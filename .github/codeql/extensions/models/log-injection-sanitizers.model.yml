@@ -28,5 +28,5 @@ extensions:
       pack: codeql/go-all
       extensible: summaryModel
     data:
-      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
-      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "Argument[0]", "ReturnValue", "value", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "Argument[0]", "ReturnValue", "value", "manual"]
