@@ -1,16 +1,14 @@
 name: "CFGMS CodeQL config"
 
-# Use security-extended query suite + CFGMS-local data-extension pack
-# (sanitizer models for safeJoin, SanitizeLogValue, RedactedID).
-#
-# The pack is referenced by NAME here — the codeql-action's `packs:` input
-# (both config-file and workflow-level) rejects local paths as "invalid pack
-# specifications" on CodeQL CLI 2.25.x. The workflow stages the pack source
-# into ~/.codeql/packages/cfgis/cfgms-go-extensions/<version>/ before `init`
-# so the CLI resolves it by name from its install cache.
+# Use security-extended query suite + CFGMS data-extension pack from ghcr.io.
+# The pack (cfg-is/cfgms-go-extensions) registers sanitizer models for
+# safeJoin, SanitizeLogValue, and RedactedID. It is published to the CodeQL
+# pack registry by the "Publish CodeQL extension pack" step in
+# .github/workflows/codeql-analysis.yml — local-path references in `packs:`
+# are not supported by the codeql-action.
 queries:
   - uses: security-extended
 
 packs:
   go:
-    - cfgis/cfgms-go-extensions
+    - cfg-is/cfgms-go-extensions

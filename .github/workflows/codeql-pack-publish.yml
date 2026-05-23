@@ -1,0 +1,73 @@
+# Publish the CFGMS CodeQL data-extension pack to ghcr.io.
+#
+# Why this exists: the codeql-action's `packs:` input rejects local-path
+# references with "invalid pack specification", and the CLI's
+# `database init` resolves names exclusively from the registry. To use our
+# in-repo sanitizer model (logging.SanitizeLogValue, RedactedID, safeJoin),
+# the pack must be published. Once published, .github/workflows/codeql-
+# analysis.yml resolves `cfg-is/cfgms-go-extensions` against ghcr.io
+# normally.
+#
+# Triggers:
+# - push to main/develop touching .github/codeql/extensions/** — keeps the
+#   registry in sync with whatever's on the integration branches
+# - workflow_dispatch — manual trigger, needed when iterating on the model
+#   from a feature branch before the changes have merged (re-publish the
+#   same version is a no-op; bump qlpack.yml's `version:` for real changes)
+
+name: Publish CodeQL Extension Pack
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - '.github/codeql/extensions/**'
+      - '.github/workflows/codeql-pack-publish.yml'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  publish:
+    name: Publish to ghcr.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Download CodeQL CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Pin to the same CodeQL CLI version codeql-analysis.yml's action
+          # bundle ships with so `pack publish` and `database init` agree on
+          # pack format. Update both when bumping CodeQL.
+          version="v2.25.5"
+          url="https://github.com/github/codeql-cli-binaries/releases/download/${version}/codeql-linux64.zip"
+          mkdir -p /tmp/codeql-dl
+          curl -fsSL "$url" -o /tmp/codeql-dl/codeql.zip
+          unzip -q /tmp/codeql-dl/codeql.zip -d /tmp/codeql-dl
+          echo "/tmp/codeql-dl/codeql" >> "$GITHUB_PATH"
+          /tmp/codeql-dl/codeql/codeql --version
+
+      - name: Publish pack to ghcr.io
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          # pack publish exits non-zero if the same <name>@<version> already
+          # exists; that's expected idempotent behavior. Bumping the version
+          # in qlpack.yml is the trigger for a new publish.
+          printf '{"ghcr.io":"%s"}' "$GITHUB_TOKEN" \
+            | codeql pack publish --registries-auth-stdin .github/codeql/extensions
+          status=$?
+          if [ $status -ne 0 ]; then
+            echo "::notice::pack publish exited $status — likely version already exists in registry (idempotent re-publish)"
+          fi
+          exit 0
