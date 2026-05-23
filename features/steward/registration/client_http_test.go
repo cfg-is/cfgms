@@ -207,10 +207,10 @@ func TestNewHTTPClientAlwaysVerifiesTLS(t *testing.T) {
 	})
 }
 
-// TestComputePollInterval_JitterRange samples 100 intervals with base=90s and jitter=30s and
+// TestPollStatus_JitterRange samples 100 intervals with base=90s and jitter=30s and
 // asserts every result is in [90s, 120s). This proves the jitter never causes an underrun
 // (below base) and never exceeds base+jitter.
-func TestComputePollInterval_JitterRange(t *testing.T) {
+func TestPollStatus_JitterRange(t *testing.T) {
 	const base = 90 * time.Second
 	const jitter = 30 * time.Second
 	for i := 0; i < 100; i++ {

@@ -81,7 +81,7 @@ type RegistrationStatusResponse struct {
 	ClientKey        string `json:"client_key,omitempty"`
 	CACert           string `json:"ca_cert,omitempty"`
 	ServerCert       string `json:"server_cert,omitempty"`
-	SigningCert       string `json:"signing_cert,omitempty"`
+	SigningCert      string `json:"signing_cert,omitempty"`
 }
 
 // denyRegistrationRequest is the optional request body for the deny endpoint.
@@ -132,16 +132,16 @@ func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "pending registration not found", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("Failed to look up pending registration", "pending_id", pendingID, "error", err)
+		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
 		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
 		return
 	}
 	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusApproved); err != nil {
-		s.logger.Error("Failed to approve pending registration", "pending_id", pendingID, "error", err)
+		s.logger.Error("Failed to approve pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
 		http.Error(w, "Failed to approve registration", http.StatusInternalServerError)
 		return
 	}
-	s.logger.Info("Steward registration approved (awaiting claim)", "pending_id", pendingID)
+	s.logger.Info("Steward registration approved (awaiting claim)", "pending_id", logging.SanitizeLogValue(pendingID))
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -158,19 +158,19 @@ func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "pending registration not found", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("Failed to look up pending registration", "pending_id", pendingID, "error", err)
+		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
 		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
 		return
 	}
 	var req denyRegistrationRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusDenied); err != nil {
-		s.logger.Error("Failed to deny pending registration", "pending_id", pendingID, "error", err)
+		s.logger.Error("Failed to deny pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
 		http.Error(w, "Failed to deny registration", http.StatusInternalServerError)
 		return
 	}
 	s.logger.Info("Steward registration denied",
-		"pending_id", pendingID,
+		"pending_id", logging.SanitizeLogValue(pendingID),
 		"reason", logging.SanitizeLogValue(req.Reason))
 	w.WriteHeader(http.StatusOK)
 }
@@ -212,7 +212,7 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 			http.Error(w, "pending registration not found", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("Failed to retrieve pending registration", "pending_id", pendingID, "error", err)
+		s.logger.Error("Failed to retrieve pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
 		http.Error(w, "Failed to retrieve pending registration", http.StatusInternalServerError)
 		return
 	}
@@ -241,14 +241,14 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 				w.WriteHeader(http.StatusGone)
 				return
 			}
-			s.logger.Error("Failed to mark pending entry as claimed", "pending_id", pendingID, "error", err)
+			s.logger.Error("Failed to mark pending entry as claimed", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
 			http.Error(w, "Failed to claim registration", http.StatusInternalServerError)
 			return
 		}
 		resp, err := s.buildClaimResponse(r.Context(), entry)
 		if err != nil {
 			s.logger.Error("Failed to generate cert for claimed registration",
-				"pending_id", pendingID, "steward_id", entry.StewardID, "error", err)
+				"pending_id", logging.SanitizeLogValue(pendingID), "steward_id", logging.SanitizeLogValue(entry.StewardID), "error", err)
 			// Entry is already "claimed" — steward must re-register if cert was not received.
 			http.Error(w, "Failed to generate client certificate", http.StatusInternalServerError)
 			return

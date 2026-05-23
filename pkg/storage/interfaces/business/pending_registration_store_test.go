@@ -110,8 +110,8 @@ func (s *inMemPendingStore) ExpireStale(_ context.Context, cutoff time.Time) (in
 
 // test-only sentinel errors
 var (
-	ErrTestNilEntry   = errStr("nil entry")
-	ErrTestDuplicate  = errStr("duplicate pending_id")
+	ErrTestNilEntry  = errStr("nil entry")
+	ErrTestDuplicate = errStr("duplicate pending_id")
 )
 
 type errStr string

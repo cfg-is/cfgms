@@ -60,38 +60,38 @@ type Server struct {
 	systemMonitor           *monitoring.SystemMonitor
 	healthCollector         *health.Collector
 	haManager               *ha.Manager
-	apiKeys                 map[string]*APIKey             // In-memory cache for fast lookup
-	secretStore             secretsif.SecretStore          // M-AUTH-1: Central secrets provider for API keys
-	registrationTokenStore  registration.Store             // Registration token store for steward registration
-	corsConfig              *CORSConfig                    // CORS configuration
-	signerCertSerial        string                         // Story #378: Serial of cert used for config signing
-	authDefense             *authdefense.AuthDefenseSystem // Story #380: Three-tier auth defense
-	rollbackManager         rollback.RollbackManager       // Story #416: Rollback system
-	reportsHandler          *reportapi.Handler             // Story #416: Reports engine
-	workflowHandler         *WorkflowHandler               // Story #414: Workflow engine REST API
-	approvalHook            RegistrationApprovalHook       // Issue #422: Registration approval hook
-	fleetQuery              fleet.FleetQuery               // Issue #603: Single query path for device filtering
-	gitSyncWebhookHandler   http.Handler                   // Issue #666: git-sync webhook endpoint (optional)
-	auditManager            *audit.Manager                 // Issue #775: registration audit events
-	scriptTracker           script.ExecutionTracker        // Issue #708: durable execution audit records
-	scriptAuditLogger       *script.AuditLogger            // Issue #708: in-memory execution metrics
-	scriptMonitor           *script.ExecutionMonitor       // Issue #708: active execution tracking
-	scriptRepo              script.ScriptRepository        // Issue #1670: git-backed script library
-	privilegeStore          cfgconfig.ConfigStore          // Issue #1670: controller-side script privilege metadata
-	pushLeaderStatus        leaderStatus                   // Issue #1318: leader check for config push (nil = leader)
-	commandPublisher        *commands.Publisher            // Issue #1319: fan-out config push to active stewards
-	pushStore               business.PushStore             // Issue #1320: durable push-state persistence for HA failover
-	registry                registry.Registry              // Issue #1323: active steward connection registry
-	mountPointValidator     MountPointValidator            // Issue #1396: config source connection test
-	configSourceSecretStore secretsif.SecretStore          // Issue #1396: secrets for config source validator
-	configSourceRateLimits  sync.Map                       // Issue #1396: per-tenant rate-limit counters
+	apiKeys                 map[string]*APIKey                // In-memory cache for fast lookup
+	secretStore             secretsif.SecretStore             // M-AUTH-1: Central secrets provider for API keys
+	registrationTokenStore  registration.Store                // Registration token store for steward registration
+	corsConfig              *CORSConfig                       // CORS configuration
+	signerCertSerial        string                            // Story #378: Serial of cert used for config signing
+	authDefense             *authdefense.AuthDefenseSystem    // Story #380: Three-tier auth defense
+	rollbackManager         rollback.RollbackManager          // Story #416: Rollback system
+	reportsHandler          *reportapi.Handler                // Story #416: Reports engine
+	workflowHandler         *WorkflowHandler                  // Story #414: Workflow engine REST API
+	approvalHook            RegistrationApprovalHook          // Issue #422: Registration approval hook
+	fleetQuery              fleet.FleetQuery                  // Issue #603: Single query path for device filtering
+	gitSyncWebhookHandler   http.Handler                      // Issue #666: git-sync webhook endpoint (optional)
+	auditManager            *audit.Manager                    // Issue #775: registration audit events
+	scriptTracker           script.ExecutionTracker           // Issue #708: durable execution audit records
+	scriptAuditLogger       *script.AuditLogger               // Issue #708: in-memory execution metrics
+	scriptMonitor           *script.ExecutionMonitor          // Issue #708: active execution tracking
+	scriptRepo              script.ScriptRepository           // Issue #1670: git-backed script library
+	privilegeStore          cfgconfig.ConfigStore             // Issue #1670: controller-side script privilege metadata
+	pushLeaderStatus        leaderStatus                      // Issue #1318: leader check for config push (nil = leader)
+	commandPublisher        *commands.Publisher               // Issue #1319: fan-out config push to active stewards
+	pushStore               business.PushStore                // Issue #1320: durable push-state persistence for HA failover
+	registry                registry.Registry                 // Issue #1323: active steward connection registry
+	mountPointValidator     MountPointValidator               // Issue #1396: config source connection test
+	configSourceSecretStore secretsif.SecretStore             // Issue #1396: secrets for config source validator
+	configSourceRateLimits  sync.Map                          // Issue #1396: per-tenant rate-limit counters
 	pendingStore            business.PendingRegistrationStore // Issue #1696: durable pending-registration queue
-	runManager              *controllerrun.Manager         // Issue #1673: run/job/execution model
-	runExecutionQueue       *script.ExecutionQueue         // Issue #1673: queue for ad-hoc run synthesis
-	trustedProxies          []net.IPNet                    // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
-	stopCleanup             chan struct{}                  // signals startAPIKeyCleanup to exit
-	cleanupDone             chan struct{}                  // closed when cleanup goroutine exits
-	closeOnce               sync.Once                      // idempotent Close
+	runManager              *controllerrun.Manager            // Issue #1673: run/job/execution model
+	runExecutionQueue       *script.ExecutionQueue            // Issue #1673: queue for ad-hoc run synthesis
+	trustedProxies          []net.IPNet                       // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
+	stopCleanup             chan struct{}                     // signals startAPIKeyCleanup to exit
+	cleanupDone             chan struct{}                     // closed when cleanup goroutine exits
+	closeOnce               sync.Once                         // idempotent Close
 }
 
 // APIKey represents an API key for external authentication
