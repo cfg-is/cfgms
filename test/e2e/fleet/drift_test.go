@@ -89,9 +89,21 @@ func (s *FleetTestSuite) testDriftAutoCorrection(t *testing.T, configPath string
 	// The steward exposes no HTTP status endpoint, so its structured log file
 	// is the authoritative upstream report — the same convergence outcome is
 	// published to the controller as an EventConfigApplied event.
-	logContent, err := s.readStewardLog(t, container)
-	if err != nil {
-		t.Fatalf("read steward log for drift report: %v", err)
+	//
+	// Poll for up to 15 s while the buffered file logger flushes the
+	// drift-correction entries. The steward's file logger flushes every 5 s,
+	// so a convergence run that completes just after a flush will not be
+	// observable on disk until the next flush tick.
+	var logContent string
+	flushDeadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(flushDeadline) {
+		var readErr error
+		logContent, readErr = s.readStewardLog(t, container)
+		if readErr == nil &&
+			countLogLinesWith(logContent, "drift detected", "managed-file") > driftBaseline {
+			break
+		}
+		time.Sleep(1 * time.Second)
 	}
 	assertDriftReport(t, logContent, driftBaseline)
 }
