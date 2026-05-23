@@ -22,6 +22,7 @@ func newRegistrationServer(t *testing.T) *httptest.Server {
 	registeredAt := time.Now().UTC()
 	pending := []APIPendingRegistration{
 		{
+			PendingID:    "pending-1234567890",
 			StewardID:    "steward-1234567890",
 			TenantID:     "test-tenant",
 			SourceIP:     "10.0.0.1",
@@ -67,7 +68,8 @@ func TestRegistrationPendingCommand(t *testing.T) {
 			require.NoError(t, err)
 		})
 
-		assert.Contains(t, output, "steward-1234567890")
+		assert.Contains(t, output, "pending-1234567890", "PENDING ID column must appear")
+		assert.Contains(t, output, "steward-1234567890", "STEWARD ID column must appear")
 		assert.Contains(t, output, "test-tenant")
 		assert.Contains(t, output, "10.0.0.1")
 		assert.Contains(t, output, "Pending registrations")
@@ -98,6 +100,7 @@ func TestRegistrationPendingCommand(t *testing.T) {
 		var parsed []APIPendingRegistration
 		require.NoError(t, json.Unmarshal([]byte(output), &parsed), "output must be valid JSON")
 		require.Len(t, parsed, 1)
+		assert.Equal(t, "pending-1234567890", parsed[0].PendingID)
 		assert.Equal(t, "steward-1234567890", parsed[0].StewardID)
 		assert.Equal(t, "test-tenant", parsed[0].TenantID)
 	})
@@ -169,12 +172,12 @@ func TestRegistrationApproveCommand(t *testing.T) {
 		registrationTLSInsecure = true
 
 		output := captureStdout(t, func() {
-			err := runRegistrationApprove(registrationApproveCmd, []string{"steward-1234567890"})
+			err := runRegistrationApprove(registrationApproveCmd, []string{"pending-1234567890"})
 			require.NoError(t, err)
 		})
 
 		assert.Contains(t, output, "Registration approved")
-		assert.Contains(t, output, "steward-1234567890")
+		assert.Contains(t, output, "pending-1234567890")
 	})
 
 	t.Run("not found returns error", func(t *testing.T) {
@@ -242,12 +245,12 @@ func TestRegistrationDenyCommand(t *testing.T) {
 		registrationDenyReason = ""
 
 		output := captureStdout(t, func() {
-			err := runRegistrationDeny(registrationDenyCmd, []string{"steward-1234567890"})
+			err := runRegistrationDeny(registrationDenyCmd, []string{"pending-1234567890"})
 			require.NoError(t, err)
 		})
 
 		assert.Contains(t, output, "Registration denied")
-		assert.Contains(t, output, "steward-1234567890")
+		assert.Contains(t, output, "pending-1234567890")
 	})
 
 	t.Run("deny with reason", func(t *testing.T) {
@@ -279,7 +282,7 @@ func TestRegistrationDenyCommand(t *testing.T) {
 		registrationDenyReason = "Unauthorized deployment"
 
 		output := captureStdout(t, func() {
-			err := runRegistrationDeny(registrationDenyCmd, []string{"steward-1234567890"})
+			err := runRegistrationDeny(registrationDenyCmd, []string{"pending-1234567890"})
 			require.NoError(t, err)
 		})
 

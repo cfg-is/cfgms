@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -204,4 +205,119 @@ func TestNewHTTPClientAlwaysVerifiesTLS(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "logger is required")
 	})
+}
+
+// TestComputePollInterval_JitterRange samples 100 intervals with base=90s and jitter=30s and
+// asserts every result is in [90s, 120s). This proves the jitter never causes an underrun
+// (below base) and never exceeds base+jitter.
+func TestComputePollInterval_JitterRange(t *testing.T) {
+	const base = 90 * time.Second
+	const jitter = 30 * time.Second
+	for i := 0; i < 100; i++ {
+		got := computePollInterval(base, jitter)
+		assert.GreaterOrEqual(t, got, base, "interval must be >= base (iteration %d)", i)
+		assert.Less(t, got, base+jitter, "interval must be < base+jitter (iteration %d)", i)
+	}
+}
+
+// TestComputePollInterval_ZeroJitter verifies that zero jitter returns exactly base.
+func TestComputePollInterval_ZeroJitter(t *testing.T) {
+	assert.Equal(t, 90*time.Second, computePollInterval(90*time.Second, 0))
+}
+
+// TestPollStatus_Pending verifies that a 200 with status="pending" is returned correctly.
+func TestPollStatus_Pending(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/v1/registration/status/pending-123", r.URL.Path)
+		assert.Equal(t, "Bearer reg-token-abc", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"pending"}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	resp, err := client.PollStatus(context.Background(), "pending-123", "reg-token-abc", 0, 0)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "pending", resp.Status)
+}
+
+// TestPollStatus_Claimed_Returns410AsClaimedStatus verifies that HTTP 410 Gone is surfaced
+// as RegistrationStatusResponse{Status:"claimed"} without an error, so the steward loop can
+// stop without treating a second poll as an error condition.
+func TestPollStatus_Claimed_Returns410AsClaimedStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusGone)
+	}))
+	defer srv.Close()
+
+	client, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	resp, err := client.PollStatus(context.Background(), "pending-xyz", "tok", 0, 0)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "claimed", resp.Status)
+}
+
+// TestPollStatus_Denied_IsTerminal verifies that a "denied" status is returned without error
+// so the steward can cleanly exit the poll loop.
+func TestPollStatus_Denied_IsTerminal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"denied"}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	resp, err := client.PollStatus(context.Background(), "pending-denied", "tok", 0, 0)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "denied", resp.Status)
+}
+
+// TestPollStatus_ApprovedWithCerts verifies that a claimed response with cert fields is decoded.
+func TestPollStatus_ApprovedWithCerts(t *testing.T) {
+	body := `{"status":"claimed","steward_id":"s1","tenant_id":"t1","client_cert":"CERT","client_key":"KEY","ca_cert":"CA"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	client, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	resp, err := client.PollStatus(context.Background(), "pending-approved", "tok", 0, 0)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "claimed", resp.Status)
+	assert.Equal(t, "CERT", resp.ClientCert)
+	assert.Equal(t, "KEY", resp.ClientKey)
+	assert.Equal(t, "CA", resp.CACert)
+	assert.Equal(t, "s1", resp.StewardID)
+}
+
+// TestPollStatus_ErrorStatus_ReturnsError verifies that non-200/non-410 statuses return an error.
+func TestPollStatus_ErrorStatus_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	client, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	resp, err := client.PollStatus(context.Background(), "pending-unauth", "bad-tok", 0, 0)
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Contains(t, err.Error(), "status poll failed with HTTP 401")
 }

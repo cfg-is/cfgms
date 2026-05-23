@@ -404,12 +404,18 @@ func TestHandleRegister_ValidToken_LogsRedactedPrefixNotFullToken(t *testing.T) 
 }
 
 // newRegistrationApprovalServer creates a minimal server with a test API key that has
-// all three registration approval permissions, wired to a real httptest.Server.
-// Returns the server and the httptest.Server (caller must close the httptest.Server).
-func newRegistrationApprovalServer(t *testing.T) (*Server, *httptest.Server) {
+// all three registration approval permissions, wired to a real httptest.Server and a durable
+// pending registration store (Issue #1696).
+// Returns the server, the httptest.Server (caller must close it), and the pending store.
+func newRegistrationApprovalServer(t *testing.T) (*Server, *httptest.Server, business.PendingRegistrationStore) {
 	t.Helper()
 	tokenStore := newTestRegistrationStore(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	// Wire a real SQLite-backed pending store (Issue #1696).
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore, "test storage must provide a PendingRegistrationStore")
+	server.SetPendingStore(pendingStore)
 
 	// Add a test API key with all registration approval permissions.
 	server.apiKeys["reg-approval-key"] = &APIKey{
@@ -420,11 +426,11 @@ func newRegistrationApprovalServer(t *testing.T) (*Server, *httptest.Server) {
 	}
 
 	ts := httptest.NewServer(server.router)
-	return server, ts
+	return server, ts, pendingStore
 }
 
 func TestHandleListPendingRegistrations(t *testing.T) {
-	server, ts := newRegistrationApprovalServer(t)
+	_, ts, pendingStore := newRegistrationApprovalServer(t)
 	defer ts.Close()
 
 	makeRequest := func(t *testing.T) *http.Response {
@@ -437,7 +443,7 @@ func TestHandleListPendingRegistrations(t *testing.T) {
 		return resp
 	}
 
-	t.Run("empty queue returns empty array", func(t *testing.T) {
+	t.Run("empty store returns empty array", func(t *testing.T) {
 		resp := makeRequest(t)
 		defer func() { _ = resp.Body.Close() }()
 
@@ -448,15 +454,19 @@ func TestHandleListPendingRegistrations(t *testing.T) {
 		assert.Empty(t, pending)
 	})
 
-	t.Run("returns queued registrations", func(t *testing.T) {
+	t.Run("returns pending entries from durable store", func(t *testing.T) {
 		now := time.Now().UTC()
-		server.registrationQueue.Store("steward-test-list-1", PendingRegistration{
-			StewardID:    "steward-test-list-1",
+		entry := &business.PendingRegistrationEntry{
+			PendingID:    "pending-list-test-1",
+			StewardID:    "steward-list-test-1",
 			TenantID:     "tenant-a",
+			TokenStr:     "tok-list-1",
 			SourceIP:     "192.168.1.1",
 			RegisteredAt: now,
-		})
-		t.Cleanup(func() { server.registrationQueue.Delete("steward-test-list-1") })
+			ExpiresAt:    now.Add(5 * 24 * time.Hour),
+			Status:       business.PendingRegistrationStatusPending,
+		}
+		require.NoError(t, pendingStore.AddPending(context.Background(), entry))
 
 		resp := makeRequest(t)
 		defer func() { _ = resp.Body.Close() }()
@@ -466,20 +476,21 @@ func TestHandleListPendingRegistrations(t *testing.T) {
 		var pending []PendingRegistration
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&pending))
 		require.Len(t, pending, 1)
-		assert.Equal(t, "steward-test-list-1", pending[0].StewardID)
+		assert.Equal(t, "pending-list-test-1", pending[0].PendingID)
+		assert.Equal(t, "steward-list-test-1", pending[0].StewardID)
 		assert.Equal(t, "tenant-a", pending[0].TenantID)
 		assert.Equal(t, "192.168.1.1", pending[0].SourceIP)
 	})
 }
 
 func TestHandleApproveRegistration(t *testing.T) {
-	server, ts := newRegistrationApprovalServer(t)
+	_, ts, pendingStore := newRegistrationApprovalServer(t)
 	defer ts.Close()
 
-	makeApprove := func(t *testing.T, stewardID string) *http.Response {
+	makeApprove := func(t *testing.T, pendingID string) *http.Response {
 		t.Helper()
 		req, err := http.NewRequestWithContext(context.Background(), "POST",
-			ts.URL+"/api/v1/registration/"+stewardID+"/approve", nil)
+			ts.URL+"/api/v1/registration/"+pendingID+"/approve", nil)
 		require.NoError(t, err)
 		req.Header.Set("Authorization", "Bearer reg-approval-key")
 		resp, err := ts.Client().Do(req)
@@ -487,33 +498,33 @@ func TestHandleApproveRegistration(t *testing.T) {
 		return resp
 	}
 
-	t.Run("happy path - promotes quarantined steward to registered", func(t *testing.T) {
-		// Register steward in controller service so UpdateStewardStatus can find it.
-		require.NoError(t, server.controllerService.RegisterSteward("steward-approve-1", "tenant-a", "", "quarantined"))
-		server.registrationQueue.Store("steward-approve-1", PendingRegistration{
+	t.Run("happy path - marks pending entry as approved", func(t *testing.T) {
+		now := time.Now().UTC()
+		entry := &business.PendingRegistrationEntry{
+			PendingID:    "pending-approve-1",
 			StewardID:    "steward-approve-1",
 			TenantID:     "tenant-a",
+			TokenStr:     "tok-approve-1",
 			SourceIP:     "10.0.0.1",
-			RegisteredAt: time.Now().UTC(),
-		})
+			RegisteredAt: now,
+			ExpiresAt:    now.Add(5 * 24 * time.Hour),
+			Status:       business.PendingRegistrationStatusPending,
+		}
+		require.NoError(t, pendingStore.AddPending(context.Background(), entry))
 
-		resp := makeApprove(t, "steward-approve-1")
+		resp := makeApprove(t, "pending-approve-1")
 		defer func() { _ = resp.Body.Close() }()
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-		// Steward must be removed from the pending queue.
-		_, inQueue := server.registrationQueue.Load("steward-approve-1")
-		assert.False(t, inQueue, "approved steward must be removed from pending queue")
-
-		// Steward status must be updated to "registered".
-		info, exists := server.controllerService.GetStewardInfo("steward-approve-1")
-		require.True(t, exists)
-		assert.Equal(t, "registered", info.Status)
+		// Entry status must be updated to "approved" in the durable store.
+		got, err := pendingStore.GetPendingByID(context.Background(), "pending-approve-1")
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusApproved, got.Status)
 	})
 
 	t.Run("not found returns 404", func(t *testing.T) {
-		resp := makeApprove(t, "nonexistent-steward")
+		resp := makeApprove(t, "nonexistent-pending-id")
 		defer func() { _ = resp.Body.Close() }()
 
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
@@ -628,10 +639,10 @@ func TestHandleRegister_RejectReturns403(t *testing.T) {
 }
 
 func TestHandleDenyRegistration(t *testing.T) {
-	server, ts := newRegistrationApprovalServer(t)
+	_, ts, pendingStore := newRegistrationApprovalServer(t)
 	defer ts.Close()
 
-	makeDeny := func(t *testing.T, stewardID, body string) *http.Response {
+	makeDeny := func(t *testing.T, pendingID, body string) *http.Response {
 		t.Helper()
 		var reqBody *bytes.Reader
 		if body != "" {
@@ -640,7 +651,7 @@ func TestHandleDenyRegistration(t *testing.T) {
 			reqBody = bytes.NewReader(nil)
 		}
 		req, err := http.NewRequestWithContext(context.Background(), "POST",
-			ts.URL+"/api/v1/registration/"+stewardID+"/deny", reqBody)
+			ts.URL+"/api/v1/registration/"+pendingID+"/deny", reqBody)
 		require.NoError(t, err)
 		req.Header.Set("Authorization", "Bearer reg-approval-key")
 		if body != "" {
@@ -651,42 +662,49 @@ func TestHandleDenyRegistration(t *testing.T) {
 		return resp
 	}
 
-	t.Run("happy path - removes steward from pending queue", func(t *testing.T) {
-		server.registrationQueue.Store("steward-deny-1", PendingRegistration{
-			StewardID:    "steward-deny-1",
-			TenantID:     "tenant-b",
-			SourceIP:     "10.0.0.2",
-			RegisteredAt: time.Now().UTC(),
-		})
+	addEntry := func(t *testing.T, pendingID, stewardID, tenantID, sourceIP string) {
+		t.Helper()
+		now := time.Now().UTC()
+		require.NoError(t, pendingStore.AddPending(context.Background(), &business.PendingRegistrationEntry{
+			PendingID:    pendingID,
+			StewardID:    stewardID,
+			TenantID:     tenantID,
+			TokenStr:     "tok-" + pendingID,
+			SourceIP:     sourceIP,
+			RegisteredAt: now,
+			ExpiresAt:    now.Add(5 * 24 * time.Hour),
+			Status:       business.PendingRegistrationStatusPending,
+		}))
+	}
 
-		resp := makeDeny(t, "steward-deny-1", "")
+	t.Run("happy path - marks entry as denied in durable store", func(t *testing.T) {
+		addEntry(t, "pending-deny-1", "steward-deny-1", "tenant-b", "10.0.0.2")
+
+		resp := makeDeny(t, "pending-deny-1", "")
 		defer func() { _ = resp.Body.Close() }()
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-		_, inQueue := server.registrationQueue.Load("steward-deny-1")
-		assert.False(t, inQueue, "denied steward must be removed from pending queue")
+		got, err := pendingStore.GetPendingByID(context.Background(), "pending-deny-1")
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusDenied, got.Status)
 	})
 
-	t.Run("deny with reason - removes from queue", func(t *testing.T) {
-		server.registrationQueue.Store("steward-deny-2", PendingRegistration{
-			StewardID:    "steward-deny-2",
-			TenantID:     "tenant-b",
-			SourceIP:     "10.0.0.3",
-			RegisteredAt: time.Now().UTC(),
-		})
+	t.Run("deny with reason - marks entry as denied", func(t *testing.T) {
+		addEntry(t, "pending-deny-2", "steward-deny-2", "tenant-b", "10.0.0.3")
 
-		resp := makeDeny(t, "steward-deny-2", `{"reason":"Unauthorized deployment"}`)
+		resp := makeDeny(t, "pending-deny-2", `{"reason":"Unauthorized deployment"}`)
 		defer func() { _ = resp.Body.Close() }()
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-		_, inQueue := server.registrationQueue.Load("steward-deny-2")
-		assert.False(t, inQueue, "denied steward must be removed from pending queue")
+		got, err := pendingStore.GetPendingByID(context.Background(), "pending-deny-2")
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusDenied, got.Status)
 	})
 
 	t.Run("not found returns 404", func(t *testing.T) {
-		resp := makeDeny(t, "nonexistent-steward", "")
+		resp := makeDeny(t, "nonexistent-pending-id", "")
 		defer func() { _ = resp.Body.Close() }()
 
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
@@ -746,4 +764,166 @@ func TestExtractSourceIP_XFFIgnoredWhenPeerNotProxy(t *testing.T) {
 	got = extractSourceIP(reqIPv6, nil)
 	assert.Equal(t, "::1", got,
 		"IPv6 peer: must return bare IPv6 address without brackets or port")
+}
+
+// TestHandleRegistrationStatus_Lifecycle verifies the full poll lifecycle for Issue #1696:
+// pending → approve → poll returns cert bundle and marks claimed → second poll returns 410.
+func TestHandleRegistrationStatus_Lifecycle(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+
+	// Wire a real pending store.
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	// Seed a valid registration token.
+	const regToken = "cfgms_reg_lifecycle_tok"
+	const tenantID = "test-tenant"
+	tok := &registration.Token{
+		Token:         regToken,
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+		Group:         "prod",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	// Create a pending entry in the store.
+	now := time.Now().UTC()
+	entry := &business.PendingRegistrationEntry{
+		PendingID:    "pending-lifecycle-1",
+		StewardID:    "steward-lifecycle-1",
+		TenantID:     tenantID,
+		TokenStr:     regToken,
+		SourceIP:     "10.0.0.1",
+		RegisteredAt: now,
+		ExpiresAt:    now.Add(5 * 24 * time.Hour),
+		Status:       business.PendingRegistrationStatusPending,
+	}
+	require.NoError(t, pendingStore.AddPending(context.Background(), entry))
+
+	pollStatus := func(t *testing.T, pendingID, bearerToken string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(context.Background(), "GET",
+			ts.URL+"/api/v1/registration/status/"+pendingID, nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+
+	t.Run("pending status returns 200 with status=pending", func(t *testing.T) {
+		resp := pollStatus(t, "pending-lifecycle-1", regToken)
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		var body RegistrationStatusResponse
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+		assert.Equal(t, "pending", body.Status)
+		assert.Empty(t, body.ClientCert, "no cert in pending response")
+	})
+
+	t.Run("after approve, poll returns cert bundle and status=claimed", func(t *testing.T) {
+		// Operator approves.
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+			"pending-lifecycle-1", business.PendingRegistrationStatusApproved))
+
+		resp := pollStatus(t, "pending-lifecycle-1", regToken)
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		var body RegistrationStatusResponse
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+		assert.Equal(t, "claimed", body.Status)
+		assert.NotEmpty(t, body.ClientCert, "client_cert must be present after approval")
+		assert.NotEmpty(t, body.ClientKey, "client_key must be present after approval")
+		assert.NotEmpty(t, body.CACert, "ca_cert must be present after approval")
+
+		// Entry must be persisted as claimed.
+		got, err := pendingStore.GetPendingByID(context.Background(), "pending-lifecycle-1")
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status)
+	})
+
+	t.Run("second poll after claim returns 410 Gone", func(t *testing.T) {
+		resp := pollStatus(t, "pending-lifecycle-1", regToken)
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusGone, resp.StatusCode,
+			"second poll after claim must return 410 Gone — cert must not be re-issued")
+	})
+}
+
+// TestHandleRegistrationStatus_TenantIsolation verifies that a token from a different tenant
+// cannot observe or interact with another tenant's pending entry.
+func TestHandleRegistrationStatus_TenantIsolation(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	// Token for tenant-a.
+	tokA := &registration.Token{Token: "tok-tenant-a", TenantID: "tenant-a", ControllerURL: "grpc://c:7443"}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tokA))
+
+	// Token for tenant-b.
+	tokB := &registration.Token{Token: "tok-tenant-b", TenantID: "tenant-b", ControllerURL: "grpc://c:7443"}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tokB))
+
+	now := time.Now().UTC()
+	require.NoError(t, pendingStore.AddPending(context.Background(), &business.PendingRegistrationEntry{
+		PendingID:    "pending-tenant-a-1",
+		StewardID:    "steward-a-1",
+		TenantID:     "tenant-a",
+		TokenStr:     "tok-tenant-a",
+		SourceIP:     "10.0.0.1",
+		RegisteredAt: now,
+		ExpiresAt:    now.Add(5 * 24 * time.Hour),
+		Status:       business.PendingRegistrationStatusPending,
+	}))
+
+	// tenant-b token must not be able to observe tenant-a's pending entry.
+	req, err := http.NewRequestWithContext(context.Background(), "GET",
+		ts.URL+"/api/v1/registration/status/pending-tenant-a-1", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer tok-tenant-b")
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode,
+		"cross-tenant token must receive 403 Forbidden")
+}
+
+// TestHandleRegistrationStatus_NoAuth verifies that the status endpoint requires Bearer auth.
+func TestHandleRegistrationStatus_NoAuth(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	req, err := http.NewRequestWithContext(context.Background(), "GET",
+		ts.URL+"/api/v1/registration/status/pending-noauth-1", nil)
+	require.NoError(t, err)
+	// No Authorization header.
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }

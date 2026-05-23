@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -48,6 +49,23 @@ type RegistrationResponse struct {
 	// Story #377: Dedicated config signing certificate (separated architecture)
 	// When present, steward should prefer this for config signature verification
 	SigningCert string `json:"signing_cert,omitempty"`
+}
+
+// RegistrationStatusResponse is the response from GET /api/v1/registration/status/{pending_id}.
+// When status is "claimed", all cert fields are populated; other statuses include only Status.
+type RegistrationStatusResponse struct {
+	Status string `json:"status"`
+
+	StewardID        string `json:"steward_id,omitempty"`
+	TenantID         string `json:"tenant_id,omitempty"`
+	Group            string `json:"group,omitempty"`
+	ControllerURL    string `json:"controller_url,omitempty"`
+	TransportAddress string `json:"transport_address,omitempty"`
+	ClientCert       string `json:"client_cert,omitempty"`
+	ClientKey        string `json:"client_key,omitempty"`
+	CACert           string `json:"ca_cert,omitempty"`
+	ServerCert       string `json:"server_cert,omitempty"`
+	SigningCert      string `json:"signing_cert,omitempty"`
 }
 
 // RegistrationPendingResponse is returned by the controller with HTTP 202 when a registration
@@ -189,4 +207,62 @@ func (c *HTTPClient) Register(ctx context.Context, token string) (*RegistrationR
 	default:
 		return nil, nil, fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(body))
 	}
+}
+
+// PollStatus polls GET /api/v1/registration/status/{pendingID} once, authenticating with regToken.
+// Before the HTTP call it sleeps for computePollInterval(baseInterval, jitter); pass both as 0 to
+// skip the sleep (useful in tests). On HTTP 410 Gone the entry was already claimed; returns
+// &RegistrationStatusResponse{Status:"claimed"} so callers can stop polling.
+func (c *HTTPClient) PollStatus(ctx context.Context, pendingID, regToken string, baseInterval, jitter time.Duration) (*RegistrationStatusResponse, error) {
+	if interval := computePollInterval(baseInterval, jitter); interval > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+
+	pollURL := fmt.Sprintf("%s/api/v1/registration/status/%s", c.controllerURL, pendingID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create status request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+regToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to poll registration status: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Warn("Failed to close status response body", "error", closeErr)
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read status response body: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusGone {
+		return &RegistrationStatusResponse{Status: "claimed"}, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status poll failed with HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var statusResp RegistrationStatusResponse
+	if err := json.Unmarshal(body, &statusResp); err != nil {
+		return nil, fmt.Errorf("failed to parse status response: %w", err)
+	}
+	return &statusResp, nil
+}
+
+// computePollInterval returns base + a random duration in [0, jitter).
+// Returns base unchanged when jitter is 0 (test/immediate-poll mode).
+func computePollInterval(base, jitter time.Duration) time.Duration {
+	if jitter <= 0 {
+		return base
+	}
+	return base + time.Duration(rand.N(uint64(jitter)))
 }

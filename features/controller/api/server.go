@@ -85,7 +85,7 @@ type Server struct {
 	mountPointValidator     MountPointValidator            // Issue #1396: config source connection test
 	configSourceSecretStore secretsif.SecretStore          // Issue #1396: secrets for config source validator
 	configSourceRateLimits  sync.Map                       // Issue #1396: per-tenant rate-limit counters
-	registrationQueue       sync.Map                       // Issue #1568: quarantined stewards awaiting approval
+	pendingStore            business.PendingRegistrationStore // Issue #1696: durable pending-registration queue
 	runManager              *controllerrun.Manager         // Issue #1673: run/job/execution model
 	runExecutionQueue       *script.ExecutionQueue         // Issue #1673: queue for ad-hoc run synthesis
 	trustedProxies          []net.IPNet                    // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
@@ -320,6 +320,9 @@ func (s *Server) setupRouter() {
 
 	// Steward registration (no auth required - uses registration token)
 	s.router.HandleFunc("/api/v1/register", s.handleRegister).Methods("POST", "OPTIONS")
+
+	// Registration status poll (no API-key auth — authenticated by regtoken Bearer header)
+	s.router.HandleFunc("/api/v1/registration/status/{pending_id}", s.handleRegistrationStatus).Methods("GET")
 
 	// Test-mode config upload (no auth required - for integration tests only)
 	// Use separate path to avoid conflict with authenticated subrouter
@@ -734,6 +737,14 @@ func (s *Server) SetRunManager(m *controllerrun.Manager, queue *script.Execution
 	defer s.mu.Unlock()
 	s.runManager = m
 	s.runExecutionQueue = queue
+}
+
+// SetPendingStore wires the durable pending-registration store (Issue #1696).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetPendingStore(store business.PendingRegistrationStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingStore = store
 }
 
 // getHTTPListenAddr determines the HTTP listen address.

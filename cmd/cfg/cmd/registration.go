@@ -69,32 +69,31 @@ Examples:
 
 // registrationApproveCmd approves a quarantined steward registration.
 var registrationApproveCmd = &cobra.Command{
-	Use:   "approve <steward-id>",
+	Use:   "approve <pending-id>",
 	Short: "Approve a pending steward registration",
-	Long: `Approve a quarantined steward, promoting it to registered status.
+	Long: `Approve a quarantined steward registration by its pending_id.
 
-After approval, the steward gains full access to its configured policies,
-secrets, and scripts.
+After approval, the steward's next poll returns the mTLS certificate bundle and
+it gains full access to its configured policies, secrets, and scripts.
 
 Examples:
-  cfg registration approve steward-1234567890`,
+  cfg registration approve pending-1234567890`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRegistrationApprove,
 }
 
 // registrationDenyCmd denies a quarantined steward registration.
 var registrationDenyCmd = &cobra.Command{
-	Use:   "deny <steward-id>",
+	Use:   "deny <pending-id>",
 	Short: "Deny a pending steward registration",
-	Long: `Deny a quarantined steward registration, removing it from the pending queue.
+	Long: `Deny a quarantined steward registration by its pending_id.
 
-The steward's registration record is kept (it remains quarantined in the fleet
-registry) but it is removed from the approval queue. The steward must re-register
-to appear in the pending queue again.
+The entry is marked denied; the steward's next poll returns status="denied".
+The steward must re-register to obtain a new pending_id.
 
 Examples:
-  cfg registration deny steward-1234567890
-  cfg registration deny steward-1234567890 --reason "Unauthorized deployment"`,
+  cfg registration deny pending-1234567890
+  cfg registration deny pending-1234567890 --reason "Unauthorized deployment"`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRegistrationDeny,
 }
@@ -174,10 +173,10 @@ func runRegistrationPending(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Pending registrations (%d):\n\n", len(pending))
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintf(w, "STEWARD ID\tTENANT ID\tSOURCE IP\tREGISTERED AT\n")
+	_, _ = fmt.Fprintf(w, "PENDING ID\tSTEWARD ID\tTENANT ID\tSOURCE IP\tREGISTERED AT\n")
 	for _, pr := range pending {
 		registeredAt := pr.RegisteredAt.UTC().Format(time.RFC3339)
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", pr.StewardID, pr.TenantID, pr.SourceIP, registeredAt)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", pr.PendingID, pr.StewardID, pr.TenantID, pr.SourceIP, registeredAt)
 	}
 	_ = w.Flush()
 
@@ -185,31 +184,31 @@ func runRegistrationPending(cmd *cobra.Command, args []string) error {
 }
 
 func runRegistrationApprove(cmd *cobra.Command, args []string) error {
-	stewardID := args[0]
+	pendingID := args[0]
 	client, err := getRegistrationClient()
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	if err := client.ApproveRegistration(context.Background(), stewardID); err != nil {
-		return fmt.Errorf("failed to approve registration for %s: %w", stewardID, err)
+	if err := client.ApproveRegistration(context.Background(), pendingID); err != nil {
+		return fmt.Errorf("failed to approve registration %s: %w", pendingID, err)
 	}
 
-	fmt.Printf("Registration approved: %s\n", stewardID)
+	fmt.Printf("Registration approved: %s\n", pendingID)
 	return nil
 }
 
 func runRegistrationDeny(cmd *cobra.Command, args []string) error {
-	stewardID := args[0]
+	pendingID := args[0]
 	client, err := getRegistrationClient()
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	if err := client.DenyRegistration(context.Background(), stewardID, registrationDenyReason); err != nil {
-		return fmt.Errorf("failed to deny registration for %s: %w", stewardID, err)
+	if err := client.DenyRegistration(context.Background(), pendingID, registrationDenyReason); err != nil {
+		return fmt.Errorf("failed to deny registration %s: %w", pendingID, err)
 	}
 
-	fmt.Printf("Registration denied: %s\n", stewardID)
+	fmt.Printf("Registration denied: %s\n", pendingID)
 	return nil
 }
