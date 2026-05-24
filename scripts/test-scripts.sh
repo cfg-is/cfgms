@@ -94,12 +94,20 @@ test_log_injection_linter() {
     local script_abs
     script_abs="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lint-log-injection.sh"
 
-    if (cd "$tmp_cwd" && "$script_abs" >/dev/null 2>&1); then
+    # Capture stderr so a CI failure shows the underlying go/lint diagnostic
+    # (the test previously discarded it, leaving "broken cd?" as the only clue).
+    local out_file rc
+    out_file=$(mktemp)
+    (cd "$tmp_cwd" && "$script_abs") >"$out_file" 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
         log_pass "lint-log-injection.sh: Exits 0 on clean tree from foreign CWD"
     else
-        log_fail "lint-log-injection.sh: Failed from CWD outside repo (broken cd to repo root?)"
+        log_fail "lint-log-injection.sh: Failed from CWD outside repo (rc=$rc) — output below"
+        sed 's/^/    /' "$out_file" >&2
     fi
 
+    rm -f "$out_file"
     rm -rf "$tmp_cwd"
 }
 
