@@ -67,6 +67,42 @@ test_license_checker() {
     fi
 }
 
+# Test: log-injection linter wrapper (Issue #1771 AC #1)
+# The wrapper is a thin shim over `go run ./scripts/lint-log-injection`. Both
+# the Makefile target and the pre-commit hook invoke the Go binary directly,
+# so without this smoke test the wrapper's runtime path (cd to repo root,
+# exec the linter) has no functional coverage — a silent breakage (e.g. wrong
+# relative path after a repo restructure) would slip past `bash -n`.
+test_log_injection_linter() {
+    log_test "Testing log-injection linter wrapper..."
+
+    if [ ! -f scripts/lint-log-injection.sh ]; then
+        log_fail "lint-log-injection.sh: Not found (Issue #1771 AC #1 requires it)"
+        return
+    fi
+
+    if [ ! -x scripts/lint-log-injection.sh ]; then
+        log_fail "lint-log-injection.sh: Not executable"
+        return
+    fi
+
+    # Wrapper must succeed from a CWD outside the repo — its job is to cd to
+    # the repo root before invoking `go run`. Running it from /tmp catches the
+    # class of regression where the script trusts caller CWD.
+    local tmp_cwd
+    tmp_cwd=$(mktemp -d)
+    local script_abs
+    script_abs="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lint-log-injection.sh"
+
+    if (cd "$tmp_cwd" && "$script_abs" >/dev/null 2>&1); then
+        log_pass "lint-log-injection.sh: Exits 0 on clean tree from foreign CWD"
+    else
+        log_fail "lint-log-injection.sh: Failed from CWD outside repo (broken cd to repo root?)"
+    fi
+
+    rm -rf "$tmp_cwd"
+}
+
 # Test 4: Invalid certificate generation (dry run)
 test_invalid_cert_generation() {
     log_test "Testing invalid certificate generation script..."
@@ -2426,6 +2462,8 @@ echo ""
 test_syntax
 echo ""
 test_license_checker
+echo ""
+test_log_injection_linter
 echo ""
 test_invalid_cert_generation
 echo ""

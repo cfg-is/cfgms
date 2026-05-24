@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jordan Ritz
+
 // Package main implements a lightweight log-injection linter for CFGMS.
 //
 // It catches the recurring CodeQL class "Log entries created from user input"
@@ -28,14 +31,14 @@ import (
 // The key is the full selector (pkg.Method) — values that compare against it
 // are matched after we collapse the AST selector into a dotted string.
 var taintSourceCalls = map[string]struct{}{
-	"mux.Vars":           {},
-	"r.URL.Query":        {},
-	"r.Header.Get":       {},
-	"r.FormValue":        {},
-	"r.Form.Get":         {},
-	"r.PostFormValue":    {},
-	"r.PostForm.Get":     {},
-	"json.NewDecoder":    {}, // tainted iff Decode target is then logged; handled separately
+	"mux.Vars":              {},
+	"r.URL.Query":           {},
+	"r.Header.Get":          {},
+	"r.FormValue":           {},
+	"r.Form.Get":            {},
+	"r.PostFormValue":       {},
+	"r.PostForm.Get":        {},
+	"json.NewDecoder":       {}, // tainted iff Decode target is then logged; handled separately
 	"querystring.Unmarshal": {},
 }
 

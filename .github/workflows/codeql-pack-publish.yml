@@ -48,6 +48,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # Don't write GITHUB_TOKEN into .git/config — zizmor flags this as
+          # "credential persistence through GitHub Actions artifacts" because
+          # any subsequent step (or compromised tool) could exfiltrate the
+          # token from the local checkout. This workflow only reads the repo;
+          # pack publishing uses --registries-auth-stdin with its own scoped
+          # GITHUB_TOKEN env, so the checkout credential is unused.
+          persist-credentials: false
 
       - name: Download CodeQL CLI
         shell: bash
