@@ -98,7 +98,7 @@ This document describes the GitHub Actions workflows configured for the CFGMS pr
 - MIT, Apache-2.0, BSD (2-Clause, 3-Clause), ISC, MPL-2.0
 
 **Forbidden Licenses:**
-- GPL/LGPL/AGPL (copyleft incompatible with Apache-2.0)
+- GPL/LGPL/AGPL (stricter copyleft — review required)
 - CC-BY-NC (non-commercial restriction)
 - Commercial/Proprietary
 - SSPL (Server Side Public License)

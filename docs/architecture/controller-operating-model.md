@@ -27,7 +27,7 @@ The `initialization.Run()` function performs the following steps in order:
 
 1. **Pre-flight validation** — verifies that config is present, certificate management is enabled (`certificate.enable_cert_management: true`), and `certificate.ca_path` is set
 2. **Idempotent guard** — reads the CA directory for an existing `.cfgms-initialized` marker. If the marker exists, init refuses to run and reports when and with what CA the controller was previously initialized. To re-initialize, the operator must remove the CA directory and run `--init` again
-3. **Storage backend creation** — initializes the storage backend. OSS deployments use the composite flatfile + SQLite backend via `interfaces.CreateOSSStorageManager()`; commercial single-provider deployments use a database backend via `interfaces.CreateAllStoresFromConfig()`
+3. **Storage backend creation** — initializes the storage backend. Default configuration deployments use the composite flatfile + SQLite backend via `interfaces.CreateOSSStorageManager()`; production-scale deployments may configure a database backend via `interfaces.CreateAllStoresFromConfig()`
 4. **CA directory and CA generation** — creates the CA directory (`os.MkdirAll` with `0700`), then creates a new Certificate Authority via `pkg/cert.Manager` with `LoadExistingCA: false`
 5. **Internal mTLS certificate** — if separated certificate architecture is configured, generates the `cfgms-internal` certificate used for gRPC-over-QUIC inter-component communication
 6. **Config signing certificate** — if separated architecture, generates the `cfgms-config-signer` certificate used to sign cfgs distributed to stewards (4096-bit RSA key)
@@ -99,7 +99,7 @@ For production fleets, a steward runs alongside the controller on each node. The
 | CA and certificates | Controller | Generated during `--init`, managed in-memory |
 | RBAC and tenant data | Controller | Stored in durable storage backend |
 | Fleet registry | Controller | Steward registrations and heartbeats persisted in `StewardStore` — survives controller restarts (Issue #663) |
-| Storage backend | Controller | Flatfile + SQLite (OSS) or PostgreSQL (commercial) operations |
+| Storage backend | Controller | Flatfile + SQLite (default) or PostgreSQL (production scale) operations |
 | Fleet orchestration | Controller | Config distribution, steward registration, workflows |
 
 See [Single Controller Deployment](../../deployment/single-controller/walkthrough.md) for the deployment guide and [ADR-002](decisions/002-steward-bootstrap-for-controllers.md) for the architectural decision.
@@ -150,7 +150,7 @@ The controller is the authoring and distribution point for steward cfgs. It does
 Author → Validate → Store → Distribute → Monitor Compliance
 ```
 
-1. **Author** — Cfgs are created or updated via the `cfg` CLI (`cfg config upload`), the commercial web UI, a GitOps webhook, or workflow output. All sources write through the same ConfigStore — there is no separate "fast path".
+1. **Author** — Cfgs are created or updated via the `cfg` CLI (`cfg config upload`), the administration web UI, a GitOps webhook, or workflow output. All sources write through the same ConfigStore — there is no separate "fast path".
 2. **Validate** — Controller validates cfg syntax, module references, and tenant scoping before accepting. Validation is part of the write path; an invalid cfg never lands in storage.
 3. **Store** — Cfg is persisted in durable, version-controlled ConfigStore. Every change is a new version with full audit trail.
 4. **Distribute** — A successful `ConfigStore` write inside `SetConfiguration()` triggers automatic distribution via a service-level callback (Issue #1521, Option A). The callback is registered at server startup (`server.go`) and invokes `push.Fanout()` scoped to the tenant from the write context. Distribution is fire-and-forget: `SetConfiguration()` returns without blocking on fanout completion. Cfgs are signed with the controller's signing certificate so stewards can verify authenticity. Note: debounce (burst-save absorption) and per-steward targeting evaluation are tracked as follow-on stories.
@@ -486,7 +486,7 @@ The controller is the certificate authority and identity provider for stewards. 
    - **`auto-approve`** (deprecated): approves every valid registration unconditionally. Dev/test environments only — a startup warning is logged. Replaces the legacy `DefaultApprovalHook`.
    - Custom workflows can implement arbitrary policy (e.g., approve `tenant=lab` registrations, reject everything else)
 5. On approval (`approve`): controller generates the steward ID and issues an mTLS client certificate scoped to the steward's tenant/group identity (HTTP 200 with full cert bundle).
-   On quarantine (`quarantine`): controller returns HTTP 202 with a `pending_id` and no certificates. The pending entry is written to the durable `PendingRegistrationStore` (SQLite in OSS, PostgreSQL in commercial). The steward polls `GET /api/v1/registration/status/{pending_id}` with its registration token as a Bearer credential until the operator acts. Operators use `cfg registration approve <pending-id>` or `cfg registration deny <pending-id>`.
+   On quarantine (`quarantine`): controller returns HTTP 202 with a `pending_id` and no certificates. The pending entry is written to the durable `PendingRegistrationStore` (SQLite by default, PostgreSQL at production scale). The steward polls `GET /api/v1/registration/status/{pending_id}` with its registration token as a Bearer credential until the operator acts. Operators use `cfg registration approve <pending-id>` or `cfg registration deny <pending-id>`.
    On rejection (`reject`): HTTP 403 is returned; registration is denied.
 6. **Generate-on-claim (quarantine path):** When the operator approves an entry and the steward polls again, the controller generates the mTLS certificate in memory for that single response, marks the entry as `claimed`, and returns the full cert bundle in HTTP 200. A subsequent poll on an already-claimed entry returns HTTP 410 Gone — the cert is never re-issued. Private keys are never stored in the database.
 7. Controller distributes the CA cert, signing cert, and connection details.
@@ -570,7 +570,7 @@ The `pending` output includes a `SOURCE_IP` column showing the steward's source 
 
 The `approve-by-cidr` command performs IP containment filtering on the controller using `net.ParseCIDR` + `ipNet.Contains` — the CIDR is not delegated to the database. All approved entries are updated atomically per-entry; partial approval (some entries approved, others skipped) is the expected outcome.
 
-The pending queue is backed by the durable `PendingRegistrationStore` (SQLite in OSS, PostgreSQL in commercial) and survives controller restarts.
+The pending queue is backed by the durable `PendingRegistrationStore` (SQLite by default, PostgreSQL at production scale) and survives controller restarts.
 
 ### RBAC
 
@@ -626,7 +626,7 @@ Tenants are identified by **path** (e.g., `root/msp-a/client-1/servers`). Path-b
 - **Wildcard targeting** — `root/msp-a/*/production` matches all production groups across clients
 - **Efficient resolution** — cfg inheritance walks the path from root to leaf
 
-#### Example: Single MSP (Apache / OSS)
+#### Example: Single MSP
 
 ```
 acme-msp (root)
@@ -645,9 +645,9 @@ acme-msp (root)
      └── device-6 (steward)
 ```
 
-One root tenant, unlimited depth. This is the Apache-licensed deployment model.
+One root tenant, unlimited depth.
 
-#### Example: SaaS Platform (Elastic / Commercial)
+#### Example: SaaS Platform
 
 ```
 cfg-is (platform root)
@@ -665,7 +665,7 @@ cfg-is (platform root)
      └── ...
 ```
 
-Multiple independent root tenants under a platform tenant. MSPs cannot see each other's trees. This is the Elastic-licensed deployment model — it enables cfg.is to host hundreds of MSPs on shared infrastructure with per-MSP isolation, resource scheduling, and billing.
+Multiple independent root tenants under a platform tenant. MSPs cannot see each other's trees. This topology enables cfg.is to host hundreds of MSPs on shared infrastructure with per-MSP isolation, resource scheduling, and billing.
 
 ### Cfg Inheritance
 
@@ -685,7 +685,7 @@ Every value in the effective cfg carries its **source path** and **version** for
 - **Certificate isolation** — each steward gets its own client certificate
 - **RBAC isolation** — permissions are scoped to tenant path; a client admin cannot manage another client's devices
 - **Cfg inheritance** — flows down the hierarchy only; children inherit from parents, never sideways
-- **Multi-root isolation** (commercial) — independent root tenants are fully isolated; no inheritance, no visibility, no shared state between roots
+- **Multi-root isolation** — independent root tenants are fully isolated; no inheritance, no visibility, no shared state between roots
 
 ## Monitoring and Reporting
 
@@ -718,11 +718,11 @@ The controller evaluates fleet-level conditions and raises alerts:
 
 ## High Availability
 
-### OSS (Single Server)
+### Single Server
 
 The controller runs as a single instance. If it goes down, stewards continue operating independently on their last-known cfgs. When the controller comes back, stewards reconnect and resync.
 
-### Commercial (Cluster)
+### Clustered
 
 Multiple controller instances form a **Raft consensus cluster**. Raft is the sole authority for cluster membership and leader election — there is no static or geographic node discovery layer, and no ad-hoc election logic outside Raft:
 

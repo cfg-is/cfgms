@@ -185,13 +185,11 @@ rm -rf /tmp/cfgms-release-* /tmp/controller-release-test.yaml
 
 ## Tier 3: High Availability Validation
 
-### 5. HA Cluster Tests (Commercial Only) ✅
-
-**For commercial builds only:**
+### 5. HA Cluster Tests ✅
 
 ```bash
 cd test/integration/ha
-go test -v -tags commercial -timeout 30m
+go test -v -timeout 30m
 ```
 
 **Tests Validated:**

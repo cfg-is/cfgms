@@ -10,7 +10,7 @@ CFGMS implements a hierarchical configuration inheritance system that allows MSP
 - [Hierarchy Levels](#hierarchy-levels)
 - [Inheritance Rules](#inheritance-rules)
 - [Configuration Format](#configuration-format)
-- [Licensing Boundary: Apache vs Elastic](#licensing-boundary-apache-vs-elastic)
+- [Deployment Topology](#deployment-topology)
 - [Practical Examples](#practical-examples)
 - [Best Practices](#best-practices)
 - [API Usage](#api-usage)
@@ -195,42 +195,9 @@ resources:
         password=${DB_PASSWORD}   # required — startup fails if not set
 ```
 
-## Licensing Boundary: Apache vs Elastic
+## Deployment Topology
 
-The tenant depth capability is the same in both tiers, but the **number of root tenants** determines which license applies:
-
-### Apache License (OSS)
-
-A **single root tenant tree** — one MSP, unlimited depth beneath it.
-
-```
-acme-msp (single root)
- ├── client-a
- │   ├── production
- │   │   ├── device-1 (steward)
- │   │   └── device-2 (steward)
- │   └── development
- │       └── device-3 (steward)
- └── client-b
-     └── device-4 (steward)
-```
-
-### Elastic License (Commercial)
-
-**Multiple independent root tenants** under a platform root — the cfg.is SaaS deployment model.
-
-```
-cfg-is (platform root)
- ├── msp-alpha (root — isolated)
- │   ├── client-1
- │   └── client-2
- ├── msp-beta (root — isolated)
- │   └── client-1
- └── msp-gamma (root)
-     └── ...
-```
-
-MSPs cannot see each other's trees. Cfg inheritance never crosses root boundaries. Use the single-root model unless you are building a multi-MSP platform.
+Each controller deployment has a single root tenant. Multi-root (multiple independent MSP trees on shared infrastructure) is a future deployment topology not yet implemented.
 
 ## Practical Examples
 
