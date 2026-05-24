@@ -132,20 +132,76 @@ func analyzeFile(path string) ([]finding, error) {
 		return nil, err
 	}
 
+	structFields := collectStructFields(src)
+
 	var findings []finding
 	for _, decl := range src.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
 			continue
 		}
-		findings = append(findings, analyzeFunc(fset, fn)...)
+		findings = append(findings, analyzeFunc(fset, fn, structFields)...)
 	}
 	return findings, nil
 }
 
+// collectStructFields walks the file's top-level type declarations and returns
+// a registry of struct name → field name → field type identifier (e.g. "bool",
+// "string", "int64"). Anonymous and embedded fields are ignored. Cross-package
+// types resolve to "" — the caller must treat unknown types as potentially
+// string-like (current default behavior) to avoid silently dropping findings.
+func collectStructFields(src *ast.File) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for _, decl := range src.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok || st.Fields == nil {
+				continue
+			}
+			fields := map[string]string{}
+			for _, f := range st.Fields.List {
+				typ := exprString(f.Type)
+				for _, name := range f.Names {
+					fields[name.Name] = typ
+				}
+			}
+			out[ts.Name.Name] = fields
+		}
+	}
+	return out
+}
+
+// isScalarType returns true for Go types that cannot carry log-injection
+// payloads. Strings and byte slices are deliberately excluded — those are the
+// types the linter exists to catch. Unknown types (cross-package, generics)
+// return false so the linter stays conservative on its first encounter.
+func isScalarType(typ string) bool {
+	switch typ {
+	case "bool",
+		"int", "int8", "int16", "int32", "int64",
+		"uint", "uint8", "uint16", "uint32", "uint64",
+		"uintptr",
+		"float32", "float64",
+		"complex64", "complex128",
+		"rune",
+		"time.Time", "time.Duration":
+		return true
+	}
+	return false
+}
+
 // analyzeFunc applies the two-pass taint analysis within a single function body.
-func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl) []finding {
+func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl, structFields map[string]map[string]string) []finding {
 	tainted := collectTaintedVars(fn.Body)
+	varTypes := collectVarTypes(fn.Body)
 
 	var findings []finding
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -172,6 +228,14 @@ func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl) []finding {
 			if !isTaintedExpr(arg, tainted) {
 				continue
 			}
+			// Type-aware suppression: a tainted struct's bool/int/etc. field
+			// cannot carry an injection payload. CodeQL's "Log entries from
+			// user input" rule doesn't flag these either, so neither do we.
+			if sel, ok := arg.(*ast.SelectorExpr); ok {
+				if isProvablyScalar(sel, varTypes, structFields) {
+					continue
+				}
+			}
 			pos := fset.Position(arg.Pos())
 			findings = append(findings, finding{
 				file: pos.Filename,
@@ -182,6 +246,74 @@ func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl) []finding {
 		return true
 	})
 	return findings
+}
+
+// collectVarTypes returns a function-scoped map from variable name to its
+// declared struct type name. Only patterns that pin a type unambiguously are
+// recorded: `var x T` and `var x T{...}`. Composite literals (`x := T{}`),
+// type-asserted assignments, and short-decls from typed function returns all
+// resolve via the same `exprString` over the type expression. Cross-package
+// types remain dotted (`pkg.T`) — collectStructFields keys on simple names, so
+// they won't match and the linter stays conservative on imports.
+func collectVarTypes(root ast.Node) map[string]string {
+	out := map[string]string{}
+	ast.Inspect(root, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.DeclStmt:
+			gen, ok := v.Decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.VAR {
+				return true
+			}
+			for _, spec := range gen.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || vs.Type == nil {
+					continue
+				}
+				typ := exprString(vs.Type)
+				for _, name := range vs.Names {
+					out[name.Name] = typ
+				}
+			}
+		case *ast.AssignStmt:
+			if v.Tok != token.DEFINE || len(v.Lhs) != 1 || len(v.Rhs) != 1 {
+				return true
+			}
+			id, ok := v.Lhs[0].(*ast.Ident)
+			if !ok {
+				return true
+			}
+			// `x := T{...}` — composite literal pins the type.
+			if cl, ok := v.Rhs[0].(*ast.CompositeLit); ok && cl.Type != nil {
+				out[id.Name] = exprString(cl.Type)
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// isProvablyScalar returns true when the SelectorExpr's field type can be
+// determined from same-file declarations AND that type is a non-string scalar
+// (bool, int*, float*, time.Time, etc.). Returns false on any uncertainty so
+// the caller falls through to the normal flag path.
+func isProvablyScalar(sel *ast.SelectorExpr, varTypes map[string]string, structFields map[string]map[string]string) bool {
+	id, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	typeName, ok := varTypes[id.Name]
+	if !ok {
+		return false
+	}
+	fields, ok := structFields[typeName]
+	if !ok {
+		return false
+	}
+	fieldType, ok := fields[sel.Sel.Name]
+	if !ok {
+		return false
+	}
+	return isScalarType(fieldType)
 }
 
 // collectTaintedVars returns a set of identifier names that are assigned from
