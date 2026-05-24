@@ -21,18 +21,25 @@ on:
   # CodeQL is configured for `language: go` only, so PRs that don't touch any
   # Go files have nothing to analyze. The strict allowlist supersedes the
   # previous `paths-ignore` block — same behavior, fewer surprises for readers.
+  # CodeQL config + extension pack + workflow file are also included so config
+  # tweaks (sanitizer models, query suite changes) trigger a re-scan; without
+  # this, a config-only commit silently ran against the previous SARIF.
   push:
     branches: [ main, develop ]
     paths:
       - '**.go'
       - 'go.mod'
       - 'go.sum'
+      - '.github/codeql/**'
+      - '.github/workflows/codeql-analysis.yml'
   pull_request:
     branches: [ main, develop ]
     paths:
       - '**.go'
       - 'go.mod'
       - 'go.sum'
+      - '.github/codeql/**'
+      - '.github/workflows/codeql-analysis.yml'
   schedule:
     # Run weekly security scan on Wednesdays at 3 AM UTC
     - cron: '0 3 * * 3'
@@ -53,6 +60,8 @@ jobs:
       actions: read
       contents: read
       security-events: write
+      # Required so init can pull cfg-is/cfgms-go-extensions from ghcr.io.
+      packages: read
 
     strategy:
       fail-fast: false
@@ -86,15 +95,18 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
-    # Initialize CodeQL tools for scanning
+    # Initialize CodeQL tools for scanning.
+    #
+    # cfg-is/cfgms-go-extensions is resolved by name from ghcr.io. The pack
+    # is published by .github/workflows/codeql-pack-publish.yml (triggers
+    # on push to main/develop when .github/codeql/extensions/** changes,
+    # plus workflow_dispatch). For the first publish from a feature branch,
+    # run that workflow manually with `--ref <branch>` before re-running
+    # this one.
     - name: Initialize CodeQL
       uses: github/codeql-action/init@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4
       with:
         languages: ${{ matrix.language }}
-        # Pull queries (security-extended) AND data-extension packs from a
-        # repo-local config. The config registers ./.github/codeql/extensions/
-        # which models pkg/storage/providers/flatfile.safeJoin as a path-
-        # injection sanitizer so default-suite false positives auto-close.
         config-file: ./.github/codeql/codeql-config.yml
         # Persist per-language dependency caches across runs (Issue #1581).
         # Official CodeQL-action support — complements the Go module cache

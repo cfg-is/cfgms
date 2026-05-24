@@ -1,0 +1,33 @@
+# CFGMS log-injection sanitizer modeled as a data-flow barrier.
+#
+# logging.SanitizeLogValue replaces every Unicode control character (C0, C1,
+# DEL) with an underscore and truncates the value to 1024 chars. The output
+# is safe to embed in a log line — CR/LF cannot be smuggled to forge a new
+# entry. Without an explicit barrier, CodeQL's default log-injection query
+# (CWE-117) sees taint flow from request fields straight through to logger
+# calls and fires false positives at every wrapped call site.
+#
+# Mechanism: `barrierModel` (extensible predicate added in CodeQL 2.25.2,
+# 2026-04). It declaratively marks a function's return value as a taint
+# barrier for the named sink-kind, which is what summaryModel(kind=value)
+# was approximating less reliably (the older form only blocked some flow
+# paths — e.g., flows from mux.Vars worked, flows from json.Decode field
+# selections did not).
+#
+# Format (barrierModel):
+#   [package, type, subtypes, name, signature, ext, output, kind, provenance]
+#
+# - kind="log-injection"      → CWE-117 "Log entries created from user input"
+# - kind="clear-text-logging" → CWE-312 "Clear-text logging of sensitive
+#                                information" (covered as a precaution; our
+#                                handlers also drop sensitive paths from logs)
+
+extensions:
+  - addsTo:
+      pack: codeql/go-all
+      extensible: barrierModel
+    data:
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "ReturnValue", "log-injection", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "ReturnValue", "clear-text-logging", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "ReturnValue", "log-injection", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "ReturnValue", "clear-text-logging", "manual"]

@@ -1,13 +1,14 @@
 name: "CFGMS CodeQL config"
 
-# Use security-extended query suite plus the local extension pack.
+# Use security-extended query suite + CFGMS data-extension pack from ghcr.io.
+# The pack (cfg-is/cfgms-go-extensions) registers sanitizer models for
+# safeJoin, SanitizeLogValue, and RedactedID. It is published to the CodeQL
+# pack registry by the "Publish CodeQL extension pack" step in
+# .github/workflows/codeql-analysis.yml — local-path references in `packs:`
+# are not supported by the codeql-action.
 queries:
   - uses: security-extended
 
-# Reference the local data-extension pack so CodeQL recognizes
-# CFGMS-specific sanitizers (notably safeJoin in pkg/storage/providers/flatfile).
-# Path is resolved from the source root (repo top), not from this config
-# file's directory — see https://docs.github.com/en/code-security/code-scanning/managing-your-code-scanning-configuration/configuring-advanced-setup-for-code-scanning#specifying-additional-queries.
 packs:
   go:
-    - .github/codeql/extensions
+    - cfg-is/cfgms-go-extensions

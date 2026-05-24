@@ -147,7 +147,7 @@ cat > "$HOOKS_DIR/pre-commit" << 'HOOK_EOF'
 ALLOWED_DIRS="^(api|cmd|commercial|docs|examples|features|internal|pkg|scripts|templates|test|\.claude|\.devcontainer|\.github)/"
 
 # Allowed root-level files (config, docs, build files)
-ALLOWED_FILES="^(\.|CLAUDE|README|CHANGELOG|CONTRIBUTING|CONTRIBUTORS|CODE_OF_CONDUCT|CODEOWNERS|DEVELOPMENT|ARCHITECTURE|LICENSING|QUICK_START|SECURITY|LICENSE|Makefile|Dockerfile|docker-compose|go\.(mod|sum)|buf\.(gen\.)?yaml|staticcheck\.conf|windows-setup\.ps1|\.agent-dispatch\.yaml)"
+ALLOWED_FILES="^(\.|CLAUDE|README|CHANGELOG|CONTRIBUTING|CONTRIBUTORS|CODE_OF_CONDUCT|CODEOWNERS|DEVELOPMENT|ARCHITECTURE|LICENSING|QUICK_START|SECURITY|LICENSE|Makefile|Dockerfile|docker-compose|go\.(mod|sum)|buf\.(gen\.)?yaml|staticcheck\.conf|windows-setup\.ps1|\.agent-dispatch\.yaml|codeql-workspace\.yml)"
 
 blocked=0
 blocked_files=""
@@ -197,6 +197,26 @@ if [ $blocked -ne 0 ]; then
     echo "If legitimate, bypass with: git commit --no-verify"
     echo ""
     exit 1
+fi
+
+# Log-injection gate — catches CodeQL "Log entries created from user input"
+# at commit time. Only runs on staged .go files under features/**/api/ to
+# keep the pre-commit hook fast.
+staged_log_files=()
+while IFS= read -r f; do
+    case "$f" in
+        features/*/api/*.go) [[ "$f" == *_test.go ]] || staged_log_files+=("$f") ;;
+    esac
+done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+if [ ${#staged_log_files[@]} -gt 0 ]; then
+    if ! go run ./scripts/lint-log-injection "${staged_log_files[@]}"; then
+        echo ""
+        echo "Wrap each flagged value with logging.SanitizeLogValue(...) before committing,"
+        echo "or bypass with --no-verify if you've audited the call site as safe."
+        echo ""
+        exit 1
+    fi
 fi
 
 exit 0

@@ -67,6 +67,53 @@ test_license_checker() {
     fi
 }
 
+# Test: log-injection linter wrapper (Issue #1771 AC #1)
+# The wrapper is a thin shim over `go run ./scripts/lint-log-injection`. Both
+# the Makefile target and the pre-commit hook invoke the Go binary directly,
+# so without this smoke test the wrapper's runtime path (cd to repo root,
+# exec the linter) has no functional coverage — a silent breakage (e.g. wrong
+# relative path after a repo restructure) would slip past `bash -n`.
+test_log_injection_linter() {
+    log_test "Testing log-injection linter wrapper..."
+
+    if [ ! -f scripts/lint-log-injection.sh ]; then
+        log_fail "lint-log-injection.sh: Not found (Issue #1771 AC #1 requires it)"
+        return
+    fi
+
+    if [ ! -x scripts/lint-log-injection.sh ]; then
+        log_fail "lint-log-injection.sh: Not executable"
+        return
+    fi
+
+    # Wrapper must succeed from a CWD outside the repo — its job is to cd to
+    # the repo root before invoking `go run`. Running it from /tmp catches the
+    # class of regression where the script trusts caller CWD.
+    local tmp_cwd
+    tmp_cwd=$(mktemp -d)
+    local script_abs
+    script_abs="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lint-log-injection.sh"
+
+    # Capture stderr so a CI failure shows the underlying go/lint diagnostic
+    # (the test previously discarded it, leaving "broken cd?" as the only clue).
+    # The `|| rc=$?` form is load-bearing: this file runs under `set -e`, so a
+    # bare `(...); rc=$?` would abort the whole suite the instant the wrapper
+    # returns non-zero — silently skipping the log_fail diagnostic and leaving
+    # CI showing "❌ Script tests failed" with no clue why.
+    local out_file rc=0
+    out_file=$(mktemp)
+    (cd "$tmp_cwd" && "$script_abs") >"$out_file" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log_pass "lint-log-injection.sh: Exits 0 on clean tree from foreign CWD"
+    else
+        log_fail "lint-log-injection.sh: Failed from CWD outside repo (rc=$rc) — output below"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+
+    rm -f "$out_file"
+    rm -rf "$tmp_cwd"
+}
+
 # Test 4: Invalid certificate generation (dry run)
 test_invalid_cert_generation() {
     log_test "Testing invalid certificate generation script..."
@@ -1261,11 +1308,14 @@ test_no_pipeline_label_refs() {
     fi
 
     # Real check: assert zero matches in the actual codebase directories.
+    # Exclude .claude/worktrees/ — that's the agent-dispatch root containing
+    # nested repo copies, not source for this checkout.
     local matches
     matches=$(grep -rn \
         "pipeline:story\|pipeline:draft\|pipeline:review\|pipeline:ready\|agent:ready\|agent:success\|agent:in-progress\|agent:failed" \
         "${root}/.claude/" "${root}/scripts/" \
         --exclude="test-scripts.sh" \
+        --exclude-dir="worktrees" \
         2>/dev/null) || true
 
     if [[ -z "$matches" ]]; then
@@ -2423,6 +2473,8 @@ echo ""
 test_syntax
 echo ""
 test_license_checker
+echo ""
+test_log_injection_linter
 echo ""
 test_invalid_cert_generation
 echo ""

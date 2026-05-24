@@ -48,8 +48,14 @@ func (s *Server) validationMiddleware(next http.Handler) http.Handler {
 
 		// If validation failed, return error response
 		if !result.Valid {
-			// Log validation errors for debugging
-			s.logger.Debug("Request validation failed", "errors", result.Errors, "path", r.URL.Path)
+			// Log validation failure for debugging. We intentionally avoid
+			// logging the raw r.URL.Path or result.Errors slice — both can
+			// contain user-controlled values and trip CWE-117 / CWE-312
+			// rules. The error count + method give enough signal for triage;
+			// full details ship in the JSON response body.
+			s.logger.Debug("Request validation failed",
+				"error_count", len(result.Errors),
+				"method", r.Method)
 			s.writeValidationErrorResponse(w, result)
 			return
 		}

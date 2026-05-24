@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
@@ -158,8 +159,8 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("Created new API key",
 		"id", keyID,
-		"name", createReq.Name,
-		"tenant_id", tenantID)
+		"name", logging.SanitizeLogValue(createReq.Name),
+		"tenant_id", logging.SanitizeLogValue(tenantID))
 
 	s.writeResponse(w, http.StatusCreated, result)
 }
