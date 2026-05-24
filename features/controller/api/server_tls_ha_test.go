@@ -1,6 +1,3 @@
-//go:build commercial
-// +build commercial
-
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright 2026 Jordan Ritz
 package api
@@ -25,8 +22,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/commercial/ha"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/testing/storage"
 )
@@ -95,7 +92,7 @@ func TestSetupManagedTLS_ClusterMode_NoCert_HandshakeSucceeds(t *testing.T) {
 	// Start a real TLS listener using the returned config.
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
 	require.NoError(t, err)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	var (
 		mu         sync.Mutex
@@ -132,7 +129,7 @@ func TestSetupManagedTLS_ClusterMode_NoCert_HandshakeSucceeds(t *testing.T) {
 
 	resp, err := client.Get(fmt.Sprintf("https://%s/", ln.Addr().String()))
 	require.NoError(t, err, "HTTPS request without a client cert must succeed under VerifyClientCertIfGiven")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	mu.Lock()
@@ -186,7 +183,7 @@ func TestSetupManagedTLS_ClusterMode_AdminCertAndHAPeerCertBothVerify(t *testing
 	// Start a real TLS listener.
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
 	require.NoError(t, err)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -294,6 +291,6 @@ func doTLSHandshake(t *testing.T, addr string, clientCert tls.Certificate, serve
 	}
 	resp, err := client.Get(addr)
 	require.NoError(t, err, msg)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusOK, resp.StatusCode, msg)
 }

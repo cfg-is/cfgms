@@ -1,6 +1,3 @@
-//go:build commercial
-// +build commercial
-
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright 2026 Jordan Ritz
 
@@ -14,8 +11,8 @@ import (
 	"time"
 )
 
-// NOTE: All type definitions (Config, NodeConfig, ClusterConfig, etc.) are now in types.go
-// This file contains only the commercial-specific implementation methods.
+// NOTE: All type definitions (Config, NodeConfig, ClusterConfig, etc.) are in types.go
+// This file contains the configuration implementation methods.
 
 // DefaultConfig returns a Config with reasonable defaults
 // This function must match the type definitions in types.go
@@ -100,7 +97,7 @@ func (c *Config) LoadFromEnvironment() error {
 		c.Node.ExternalAddress = externalAddr
 	}
 
-	// NOTE: InternalAddress field removed from types.go (OSS simplification)
+	// NOTE: InternalAddress field was removed from types.go
 
 	// Load geographic configuration
 	if region := os.Getenv("CFGMS_NODE_REGION"); region != "" {

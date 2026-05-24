@@ -20,7 +20,6 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 
-	"github.com/cfgis/cfgms/commercial/ha"
 	configgit "github.com/cfgis/cfgms/features/config/git"
 	gitStorage "github.com/cfgis/cfgms/features/config/git/storage"
 	"github.com/cfgis/cfgms/features/config/rollback"
@@ -61,6 +60,7 @@ import (
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	dataplaneGRPC "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider; exported for ServerOptions
 	"github.com/cfgis/cfgms/pkg/gitsync"
+	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"

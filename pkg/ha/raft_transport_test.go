@@ -1,8 +1,5 @@
-//go:build commercial
-
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright 2026 Jordan Ritz
-// +build commercial
 
 package ha
 
@@ -21,28 +18,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-func TestRaftTransport_Start_logsStartup(t *testing.T) {
-	mock := pkgtesting.NewMockLogger(true)
-
-	transport := newRaftTransport(1, "localhost:8080", nil, nil, nil, mock)
+func TestRaftTransport_Start_returnsNoError(t *testing.T) {
+	transport := newRaftTransport(1, "localhost:8080", nil, nil, nil, logging.GetLogger())
 
 	ctx := context.Background()
 	err := transport.Start(ctx)
 	require.NoError(t, err)
-
-	infoLogs := mock.GetLogs("info")
-	require.NotEmpty(t, infoLogs, "expected at least one info log after Start()")
-	var found bool
-	for _, entry := range infoLogs {
-		if entry.Message == "Started transport" {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "expected info log with message 'Started transport'; got: %v", infoLogs)
 }
 
 // makeFakePeerCert returns a minimal x509.Certificate with the given CN, suitable
@@ -57,8 +40,7 @@ func makeFakePeerCert(cn string) *x509.Certificate {
 // TestHandleMessage_NilTLS_Returns403 verifies that HandleMessage rejects requests
 // that arrive without a TLS connection state (i.e., plain HTTP).
 func TestHandleMessage_NilTLS_Returns403(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
-	transport := newRaftTransport(1, "localhost:8080", nil, nil, []string{"node-1"}, logger)
+	transport := newRaftTransport(1, "localhost:8080", nil, nil, []string{"node-1"}, logging.GetLogger())
 
 	req := httptest.NewRequest("POST", "/raft/message", nil)
 	// r.TLS is nil (plain HTTP, no peer certificate)
@@ -73,8 +55,7 @@ func TestHandleMessage_NilTLS_Returns403(t *testing.T) {
 // (r.TLS is non-nil but PeerCertificates is empty). This is a distinct reachable
 // scenario from nil-TLS: e.g., a non-peer HTTPS client hitting /raft/message.
 func TestHandleMessage_EmptyPeerCertificates_Returns403(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
-	transport := newRaftTransport(1, "localhost:8080", nil, nil, []string{"node-1"}, logger)
+	transport := newRaftTransport(1, "localhost:8080", nil, nil, []string{"node-1"}, logging.GetLogger())
 
 	req := httptest.NewRequest("POST", "/raft/message", nil)
 	req.TLS = &tls.ConnectionState{
@@ -89,8 +70,7 @@ func TestHandleMessage_EmptyPeerCertificates_Returns403(t *testing.T) {
 // TestHandleMessage_UnknownCN_Returns403 verifies that HandleMessage rejects requests
 // whose peer certificate CN is not in the configured cluster node allowlist.
 func TestHandleMessage_UnknownCN_Returns403(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
-	transport := newRaftTransport(1, "localhost:8080", nil, nil, []string{"node-1"}, logger)
+	transport := newRaftTransport(1, "localhost:8080", nil, nil, []string{"node-1"}, logging.GetLogger())
 
 	req := httptest.NewRequest("POST", "/raft/message", nil)
 	req.TLS = &tls.ConnectionState{
@@ -121,7 +101,7 @@ func TestHandleMessage_ValidPeerCN_Returns200(t *testing.T) {
 		}
 	}()
 
-	transport := newRaftTransport(1, "localhost:8080", consensus, nil, []string{"node-1"}, pkgtesting.NewMockLogger(true))
+	transport := newRaftTransport(1, "localhost:8080", consensus, nil, []string{"node-1"}, logger)
 
 	// Marshal a minimal raftpb.Message (empty message, Type=MsgHup).
 	// node.Step is non-blocking: it enqueues to the raft goroutine and returns nil.

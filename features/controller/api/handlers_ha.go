@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/cfgis/cfgms/commercial/ha"
+	"github.com/cfgis/cfgms/pkg/ha"
 )
 
 // HAStatusResponse represents the response for HA status endpoint

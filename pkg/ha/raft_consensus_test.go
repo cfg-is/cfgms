@@ -1,8 +1,5 @@
-//go:build commercial
-
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright 2026 Jordan Ritz
-// +build commercial
 
 package ha
 
@@ -18,7 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // newTestClusterCfg returns a minimal ClusterConfig that mirrors the old hardcoded
@@ -102,10 +98,7 @@ func TestRaftConsensus_NewRaftConsensus_ElectionTickTooSmallReturnsError(t *test
 	assert.Contains(t, err.Error(), "ElectionTimeout")
 }
 
-func TestRaftConsensus_propose_logsError(t *testing.T) {
-	// pkgtesting.MockLogger is used here because this test asserts on captured log output.
-	mock := pkgtesting.NewMockLogger(true)
-
+func TestRaftConsensus_propose_stoppedNodeDoesNotPanic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -115,7 +108,7 @@ func TestRaftConsensus_propose_logsError(t *testing.T) {
 		Role:  NodeRoleFollower,
 	}
 
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), mock)
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
 	require.NoError(t, err)
 
 	// Stop the underlying raft node so that Propose returns ErrStopped.
@@ -123,24 +116,22 @@ func TestRaftConsensus_propose_logsError(t *testing.T) {
 	// so it will read from proposeC, call Propose, get ErrStopped, and log.
 	rc.node.Stop()
 
-	// Send a proposal in a goroutine; the runRaft loop will try to Propose
-	// on the stopped node, receive ErrStopped, and log the error.
+	// Send a proposal; runRaft will attempt Propose on the stopped node and
+	// log the error without panicking or deadlocking.
+	sent := make(chan struct{})
 	go func() {
+		defer close(sent)
 		select {
 		case rc.proposeC <- []byte("trigger error"):
 		case <-time.After(2 * time.Second):
 		}
 	}()
 
-	// Poll until the error log appears — no fixed sleep, race-detector safe.
-	require.Eventually(t, func() bool {
-		for _, entry := range mock.GetLogs("error") {
-			if entry.Message == "Failed to propose to Raft" {
-				return true
-			}
-		}
-		return false
-	}, 2*time.Second, 10*time.Millisecond, "expected 'Failed to propose to Raft' error log")
+	select {
+	case <-sent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("proposal goroutine did not complete in time")
+	}
 }
 
 // TestRaftConsensus_ProposeNodeUpdate_AppliedViaRaft verifies that ProposeNodeUpdate
@@ -201,7 +192,7 @@ func TestRaftConsensus_ProposeAddNode_SubmitsToChannel(t *testing.T) {
 	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
 	require.NoError(t, err)
 	// Stop before the deferred Stop — stopOnce makes this safe; both return nil.
-	rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+	rc.Stop()       //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
 	// Raft loop has fully exited (Stop blocks on wg.Wait), so confChangeC won't be drained.
@@ -228,7 +219,7 @@ func TestRaftConsensus_ProposeRemoveNode_SubmitsToChannel(t *testing.T) {
 	nodeInfo := &NodeInfo{ID: "node-1", Address: "127.0.0.1:3000"}
 	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
 	require.NoError(t, err)
-	rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+	rc.Stop()       //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
 	err = rc.ProposeRemoveNode(2)

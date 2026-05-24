@@ -24,10 +24,6 @@ GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 STEWARD_CONTROLLER_URL ?= https://localhost:9080
 STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL)"
 
-# Build tags (optional - use TAGS=commercial for commercial builds)
-# Example: make build-controller TAGS=commercial
-BUILD_TAGS=$(if $(TAGS),-tags $(TAGS),)
-
 # Binary names
 STEWARD_BINARY=cfgms-steward
 CONTROLLER_BINARY=controller
@@ -95,16 +91,16 @@ build: fix-git-bare build-steward build-controller build-cli build-cert-manager
 # Build individual binaries
 .PHONY: build-steward build-controller build-cli build-cert-manager
 build-steward:
-	go build ${BUILD_TAGS} ${STEWARD_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
+	go build ${STEWARD_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
 
 build-controller:
-	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
+	go build ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
 
 build-cli:
-	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfg
+	go build ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfg
 
 build-cert-manager:
-	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
+	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
 
 # Cross-platform build targets
 # Supported platforms: Linux, Windows, macOS (AMD64 and ARM64)
@@ -122,10 +118,10 @@ build-cross-platform:
 		export OUTDIR=bin/$$GOOS-$$GOARCH; \
 		echo "  Building for $$GOOS/$$GOARCH..."; \
 		mkdir -p $$OUTDIR; \
-		go build ${BUILD_TAGS} ${STEWARD_BUILD_FLAGS} -o $$OUTDIR/${STEWARD_BINARY}$$EXT ./cmd/steward && \
-		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CONTROLLER_BINARY}$$EXT ./cmd/controller && \
-		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CLI_BINARY}$$EXT ./cmd/cfg && \
-		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CERT_MANAGER_BINARY}$$EXT ./cmd/cert-manager || exit 1; \
+		go build ${STEWARD_BUILD_FLAGS} -o $$OUTDIR/${STEWARD_BINARY}$$EXT ./cmd/steward && \
+		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${CONTROLLER_BINARY}$$EXT ./cmd/controller && \
+		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${CLI_BINARY}$$EXT ./cmd/cfg && \
+		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${CERT_MANAGER_BINARY}$$EXT ./cmd/cert-manager || exit 1; \
 		echo "  ✅ $$GOOS/$$GOARCH complete"; \
 	done
 	@echo ""
@@ -143,10 +139,10 @@ build-cross-validate:
 		export GOARCH=$${platform#*/}; \
 		printf "  %-15s" "$$GOOS/$$GOARCH:"; \
 		ERROR_LOG=$$(mktemp); \
-		if go build ${BUILD_TAGS} ${STEWARD_BUILD_FLAGS} -o /dev/null ./cmd/steward 2>$$ERROR_LOG && \
-		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/controller 2>>$$ERROR_LOG && \
-		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfg 2>>$$ERROR_LOG && \
-		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cert-manager 2>>$$ERROR_LOG; then \
+		if go build ${STEWARD_BUILD_FLAGS} -o /dev/null ./cmd/steward 2>$$ERROR_LOG && \
+		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/controller 2>>$$ERROR_LOG && \
+		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfg 2>>$$ERROR_LOG && \
+		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cert-manager 2>>$$ERROR_LOG; then \
 			echo "✅ PASS"; \
 			rm -f $$ERROR_LOG; \
 		else \
@@ -178,7 +174,7 @@ build-steward-cross:
 	fi
 	@EXT=$$( [ "$(GOOS)" = "windows" ] && echo ".exe" || echo "" ); \
 	echo "Building steward for $(GOOS)/$(GOARCH)..."; \
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build ${BUILD_TAGS} ${STEWARD_BUILD_FLAGS} -o bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}$$EXT ./cmd/steward
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build ${STEWARD_BUILD_FLAGS} -o bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}$$EXT ./cmd/steward
 	@echo "✅ Built bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}"
 
 # Build Windows MSI installer for cfgms-steward using WiX 4.
@@ -262,19 +258,10 @@ test: fix-git-bare
 	fi
 	@echo "✅ OSS build tests complete"
 	@echo ""
-	@echo "🏢 Testing Commercial Build..."
-	@echo "  Compiling commercial controller..."
-	@go build -tags commercial -o /tmp/controller-commercial ./cmd/controller > /dev/null 2>&1 || { echo "❌ Commercial controller build failed"; exit 1; }
-	@echo "  ✅ Commercial controller compiles"
-	@echo "  Testing commercial HA features..."
-	@go test -tags commercial -race -short -timeout=1m ./commercial/ha/... || { echo "❌ Commercial HA tests failed"; exit 1; }
-	@echo "  ✅ Commercial HA tests pass"
-	@rm -f /tmp/controller-commercial
-	@echo ""
 	@echo "🔧 Testing Shell Scripts..."
 	@./scripts/test-scripts.sh || { echo "❌ Script tests failed"; exit 1; }
 	@echo ""
-	@echo "✅ ALL VALIDATION COMPLETE (OSS + Commercial + Scripts)"
+	@echo "✅ ALL VALIDATION COMPLETE (HA + Scripts)"
 
 # OPTIMIZED TEST TARGETS (Cache-Aware Strategy)
 
@@ -645,19 +632,10 @@ test-infrastructure-required:
 	fi
 	@echo "✅ OSS build tests complete"
 	@echo ""
-	@echo "🏢 Testing Commercial Build..."
-	@echo "  Compiling commercial controller..."
-	@go build -tags commercial -o /tmp/controller-commercial ./cmd/controller > /dev/null 2>&1 || { echo "❌ Commercial controller build failed"; exit 1; }
-	@echo "  ✅ Commercial controller compiles"
-	@echo "  Testing commercial HA features..."
-	@./scripts/test-with-infrastructure.sh go test -tags commercial -race -short -timeout=1m ./commercial/ha/... || { echo "❌ Commercial HA tests failed"; exit 1; }
-	@echo "  ✅ Commercial HA tests pass"
-	@rm -f /tmp/controller-commercial
-	@echo ""
 	@echo "✅ CI VALIDATION FINISHED"
 	@echo "=========================="
 	@echo "- ✅ OSS build tests passed"
-	@echo "- ✅ Commercial build tests passed"
+	@echo "- ✅ HA build tests passed"
 	@echo "- ✅ Factory integration tests passed"
 	@echo "- ✅ Linting passed"
 	@echo "- ✅ Security scanning passed"

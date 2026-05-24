@@ -1,8 +1,5 @@
-//go:build commercial
-
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright 2026 Jordan Ritz
-// +build commercial
 
 package ha
 
