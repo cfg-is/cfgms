@@ -6,7 +6,7 @@
 
 **Deciders**: Development Team
 
-**Related**: ADR-001 (Central Provider Compliance Enforcement), `docs/product/feature-boundaries.md`, `docs/architecture/storage-architecture.md`
+**Related**: ADR-001 (Central Provider Compliance Enforcement), `docs/architecture/storage-architecture.md`
 
 ## Context
 
@@ -39,7 +39,7 @@ A single global backend cannot serve all five well.
 
 ### Licensing Boundary
 
-`docs/product/feature-boundaries.md:27` lists the OSS track as "Git, SQLite, PostgreSQL" and the commercial track as the same plus HA-optimized PostgreSQL. SQLite is advertised but not implemented. Git is listed as a storage backend but is a poor fit for anything other than small, human-edited config files.
+Prior documentation listed the OSS track as "Git, SQLite, PostgreSQL" and the commercial track as the same plus HA-optimized PostgreSQL. SQLite is advertised but not implemented. Git is listed as a storage backend but is a poor fit for anything other than small, human-edited config files.
 
 ### Concrete Deficiencies
 
@@ -69,7 +69,7 @@ Storage is partitioned by data type, not by a single global backend. Each type h
 | Timeseries | Local log files | ClickHouse / Timescale / Influx |
 | Blobs | Local filesystem | S3-compatible object storage |
 
-**The OSS column shows the zero-config default, not a limit.** Any backend listed in the Commercial column is available to OSS deployments. The licensing boundary is tenant-tree shape (single-root vs multi-root), not backend choice — see `docs/product/feature-boundaries.md`. An OSS single-root deployment is free to run PostgreSQL for business data, a key vault for secrets, and S3 for blobs if the operator wants that.
+**The OSS column shows the zero-config default, not a limit.** Any backend listed in the Commercial column is available to OSS deployments. The licensing boundary is single-root tenant tree shape, not backend choice — see [LICENSING.md](../../../LICENSING.md). An OSS single-root deployment is free to run PostgreSQL for business data, a key vault for secrets, and S3 for blobs if the operator wants that.
 
 ### 2. Interface Mapping
 
@@ -174,7 +174,7 @@ Tracked under the epic referenced in [Code Changes Required](#code-changes-requi
 
 **Rejected because**:
 - Raises the OSS barrier to entry significantly — a single-binary MSP demo now requires a database
-- Contradicts `feature-boundaries.md` which advertises flat-file-class options for OSS
+- Contradicts the project's documented flat-file-class options for OSS deployments
 - Over-serves the small-deployment end of the market
 
 ### Alternative 3: Per-Store Provider Selection Without the Taxonomy
@@ -225,7 +225,7 @@ Each sub-story has its own testable acceptance criteria. This ADR is the shared 
 
 Any sub-story under this epic that changes the shape of the product — adds or removes a backend, changes the OSS/commercial boundary, renames a public interface, changes config schema, or moves an interface between packages — **must update the following in the same PR**:
 
-- `docs/product/feature-boundaries.md` — if backend lists or licensing boundary wording changes
+- `LICENSING.md` — if the licensing boundary description changes
 - `docs/architecture/storage-architecture.md` — operator walk-through of the taxonomy
 - `pkg/storage/interfaces/README.md` — if interface inventory changes
 - Any deployment, testing, or troubleshooting doc that names the changed interface or backend
@@ -243,8 +243,7 @@ Rule of thumb: **if a steward does not use the interface, it does not belong und
 ## References
 
 - `docs/architecture/decisions/001-central-provider-compliance-enforcement.md` — format template and the "pluggable by default" principle this ADR builds on
-- `docs/product/feature-boundaries.md` — OSS/commercial line and storage backend advertisement
-- `docs/architecture/ha-commercial-split.md` — build-tag pattern for OSS vs commercial code paths
+- `LICENSING.md` — licensing details and commercial FAQ
 - `docs/architecture/storage-architecture.md` — operator-facing walk-through of this decision (renamed from `hybrid-storage-solution.md`)
 - `pkg/storage/providers/git/plugin.go:152-166` — evidence for git-provider deprecation (`RuntimeStore` memory-cache admission)
 - `features/steward/health.go` — in-memory fleet state (motivates `StewardStore`)

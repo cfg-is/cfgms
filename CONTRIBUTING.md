@@ -63,10 +63,10 @@ CFGMS follows the GitFlow branching model for development:
 
 ### Why We Require a CLA
 
-CFGMS uses a dual-license model (Apache 2.0 + Elastic License 2.0) for open source and commercial features. The CLA:
+CFGMS is licensed under AGPL-3.0. The CLA (v2.0):
 
 - **Assigns copyright** to Jordan Ritz (current copyright holder)
-- **Enables dual-licensing** of your contributions under both Apache 2.0 and Elastic License 2.0
+- **Grants license discretion** — the Copyright Holder may distribute contributions under AGPL-3.0 or a commercial license
 - **Protects you** by ensuring you have the rights to contribute
 - **Protects the project** from legal issues related to intellectual property
 - **Plans for the future** by allowing transfer to cfg.is entity when formed
@@ -99,7 +99,7 @@ By signing the CLA, you certify that:
 - ✅ You have the right to make this contribution
 - ✅ Your contribution doesn't violate any third-party rights
 - ✅ You agree to copyright assignment to Jordan Ritz
-- ✅ Your contributions can be licensed under both Apache 2.0 and Elastic License 2.0
+- ✅ Your contributions may be licensed under AGPL-3.0 or a commercial license at the Copyright Holder's discretion
 
 ### Questions About the CLA?
 

@@ -128,7 +128,7 @@ Structured conversation to capture founder intent and create a GitHub epic issue
 Run in parallel:
 - Check existing epic issues (`epic` label) for overlap
 - Read `docs/product/roadmap.md` for milestone overlap
-- Read `docs/product/feature-boundaries.md` for licensing boundary
+- Read `LICENSING.md` for licensing boundary
 
 Surface findings: "There's an existing epic #586 that may overlap — want to proceed or extend that one?"
 

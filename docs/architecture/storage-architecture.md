@@ -22,7 +22,7 @@ Git is not a storage backend. For OSS, file-based storage is served by a flat-fi
 | Timeseries | Local log files | ClickHouse / Timescale / Influx |
 | Blobs | Local filesystem | S3-compatible object storage |
 
-**OSS column shows defaults, not limits.** Any backend listed in the Commercial column is available to OSS deployments — the licensing boundary is tenant-tree shape (single-root vs multi-root), not backend choice. An OSS single-root MSP is welcome to run PostgreSQL, Vault, and S3 if that's what fits the environment. See [`docs/product/feature-boundaries.md`](../product/feature-boundaries.md).
+**OSS column shows defaults, not limits.** Any backend listed in the Commercial column is available to OSS deployments — the licensing boundary is single-root tenant tree shape, not backend choice. An OSS single-root MSP is welcome to run PostgreSQL, Vault, and S3 if that's what fits the environment. See [LICENSING.md](../../LICENSING.md).
 
 ### What belongs where
 
@@ -388,6 +388,6 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 ## References
 
 - [ADR-003: Storage Data Taxonomy](decisions/003-storage-data-taxonomy.md) — authoritative design document
-- [`docs/product/feature-boundaries.md`](../product/feature-boundaries.md) — OSS/commercial licensing boundary
+- [LICENSING.md](../../LICENSING.md) — licensing details and commercial FAQ
 - [`pkg/storage/interfaces/README.md`](../../pkg/storage/interfaces/README.md) — current interface layout and reorganization plan
 - [ADR-001: Central Provider Compliance Enforcement](decisions/001-central-provider-compliance-enforcement.md) — pluggable-by-default principle

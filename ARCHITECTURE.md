@@ -322,10 +322,7 @@ acme-msp (root)
 
 ### Licensing Boundary
 
-- **Apache (OSS)**: Single root tenant tree, unlimited depth
-- **Elastic (Commercial)**: Multiple independent root trees on shared infrastructure (SaaS/platform mode)
-
-See [Feature Boundaries](docs/product/feature-boundaries.md) for the complete breakdown.
+CFGMS is licensed under AGPL-3.0. Each controller deployment has a single root tenant. See [LICENSING.md](LICENSING.md) for commercial licensing details.
 
 ### Scale
 

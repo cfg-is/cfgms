@@ -62,7 +62,7 @@ Reviewed 68 documentation files across 13 categories. **All critical and major i
 All 14 files were reviewed and updated appropriately:
 
 1. ✅ `docs/product/roadmap.md` - Historical references only, kept for context
-2. ✅ `docs/architecture/ha-commercial-split.md` - Historical reference, kept for context
+2. ✅ `docs/architecture/` - HA commercial split doc: historical reference (file removed as part of AGPL-3.0 migration)
 3. ✅ `docs/product/v0.7.0-epic.md` - Historical task list, kept as-is
 4. ✅ `docs/operations/production-runbooks.md` - **UPDATED**: 4 references to gRPC-over-QUIC
 5. ✅ `docs/architecture.md` - **UPDATED**: 4 references to gRPC-over-QUIC (see Critical #2)
@@ -185,7 +185,6 @@ The following files appear accurate and ready for OSS launch:
 
 ### Product Documentation (3 files)
 
-- `docs/product/feature-boundaries.md` ✅
 - `docs/product/vision.md` ✅
 - `docs/product/README.md` ✅
 
@@ -269,7 +268,7 @@ The following files appear accurate and ready for OSS launch:
 
 ## Product Information
 - [Product Vision](product/vision.md)
-- [Feature Boundaries](product/feature-boundaries.md) (OSS vs Commercial)
+- [LICENSING.md](../LICENSING.md)
 - [Roadmap](product/roadmap.md)
 
 ## Integration Guides

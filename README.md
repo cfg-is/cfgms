@@ -43,7 +43,7 @@ CFGMS uses a **dual licensing model**:
 - **Open Source (Apache 2.0)**: Free forever, use commercially, modify and distribute freely
 - **Commercial (Elastic 2.0)**: Free to use in your infrastructure, cannot offer as a hosted service
 
-For complete licensing details, feature boundaries, and FAQ, see [LICENSING.md](LICENSING.md).
+For complete licensing details and FAQ, see [LICENSING.md](LICENSING.md).
 
 ## Enterprise Features
 
