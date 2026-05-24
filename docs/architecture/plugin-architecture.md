@@ -35,12 +35,12 @@ pkg/
 │   │   ├── secrets/          # SecretStore — credentials, API keys
 │   │   └── timeseries/       # MetricsStore, LogStore — append-only metrics
 │   └── providers/            # Storage implementations (one per type)
-│       ├── sqlite/           # Business data OSS default
-│       ├── flatfile/         # Config + audit OSS default
-│       ├── database/         # PostgreSQL (commercial/SaaS)
+│       ├── sqlite/           # Business data default
+│       ├── flatfile/         # Config + audit default
+│       ├── database/         # PostgreSQL (production scale / SaaS)
 │       └── blobstore/
-│           ├── filesystem/   # Blob storage OSS default
-│           └── s3/           # Blob storage commercial/SaaS
+│           ├── filesystem/   # Blob storage default
+│           └── s3/           # Blob storage production scale / SaaS
 features/
 ├── controller/               # Controller wires storage providers
 ├── modules/m365/auth/        # Uses pkg/storage/interfaces only
@@ -115,7 +115,7 @@ func (p *DatabaseProvider) CreateAuditStore(config map[string]interface{}) (inte
 }
 
 func (p *DatabaseProvider) Description() string {
-    return "PostgreSQL-backed storage for production and commercial deployments"
+    return "PostgreSQL-backed storage for production-scale deployments"
 }
 
 // Salt-style auto-registration
@@ -151,7 +151,7 @@ func NewAdminConsentFlow(clientStore interfaces.ClientTenantStore) *AdminConsent
 Storage is configured per data type (five-type composition). See [Storage Architecture](storage-architecture.md) for the full reference.
 
 ```yaml
-# cfgms.yaml - Controller configuration (OSS example)
+# cfgms.yaml - Controller configuration (default example)
 controller:
   storage:
     business:
@@ -190,15 +190,15 @@ cfg plugins list storage
 
 ```
 Available Storage Plugins (business data):
-  ✅ sqlite      - SQLite storage (OSS default)
+  ✅ sqlite      - SQLite storage (default)
   ✅ database    - PostgreSQL storage (requires: postgresql client)
 
 Available Storage Plugins (config storage):
-  ✅ flatfile    - Flat-file storage (OSS default)
-  ✅ database    - PostgreSQL storage (commercial/SaaS)
+  ✅ flatfile    - Flat-file storage (default)
+  ✅ database    - PostgreSQL storage (production scale / SaaS)
 
 Available Storage Plugins (blob storage):
-  ✅ filesystem  - Local filesystem (OSS default)
+  ✅ filesystem  - Local filesystem (default)
   ✅ s3          - S3-compatible object storage
 ```
 
@@ -320,11 +320,11 @@ func CreateStorageFromConfig(backendType string, config map[string]interface{}) 
 
 Per [ADR-003](decisions/003-storage-data-taxonomy.md), storage is split into five independent data types. Each type is configured with its own provider — there is no single global storage backend.
 
-- **Business data** (tenants, RBAC, sessions, commands, audit): `sqlite` (OSS), `database`/PostgreSQL (commercial)
-- **Config storage** (templates, policies, firewall rules): `flatfile` (OSS), `database`/PostgreSQL (commercial)
-- **Secrets** (credentials, certificates): `sops` (OSS), key vault (commercial)
-- **Timeseries** (metrics, logs): local files (OSS), ClickHouse/Timescale (commercial)
-- **Blobs** (installers, script bodies): `filesystem` (OSS), `s3` (commercial)
+- **Business data** (tenants, RBAC, sessions, commands, audit): `sqlite` (default), `database`/PostgreSQL (production scale)
+- **Config storage** (templates, policies, firewall rules): `flatfile` (default), `database`/PostgreSQL (production scale)
+- **Secrets** (credentials, certificates): `sops` (default), key vault (production scale / SaaS)
+- **Timeseries** (metrics, logs): local files (default), ClickHouse/Timescale (production scale)
+- **Blobs** (installers, script bodies): `filesystem` (default), `s3` (production scale / SaaS)
 
 ### Configuration Flow
 
@@ -359,10 +359,10 @@ Current implementations following this pattern:
 - **Business data**: `pkg/storage/providers/sqlite` (TenantStore, ClientTenantStore, AuditStore, RBACStore, SessionStore, CommandStore, StewardStore, RegistrationTokenStore, TriggerStore, PushStore)
 - **Config storage**: `pkg/storage/providers/flatfile` (ConfigStore, AuditStore, StewardStore)
 - **Blob storage**: `pkg/storage/providers/blobstore/filesystem` and `blobstore/s3`
-- **PostgreSQL**: `pkg/storage/providers/database` (business + config stores for commercial)
+- **PostgreSQL**: `pkg/storage/providers/database` (business + config stores, production scale / SaaS)
 - **Git sync**: `pkg/gitsync` — optional read-only import from external git repos into ConfigStore
 - **Control/data plane**: `pkg/controlplane/providers/grpc`, `pkg/dataplane/providers/grpc`
-- **Secrets**: `pkg/secrets` (SOPS-based for OSS)
+- **Secrets**: `pkg/secrets` (SOPS-based, default)
 - **Logging**: `pkg/logging` (file, timescale)
 
 Future:

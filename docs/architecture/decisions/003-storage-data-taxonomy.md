@@ -37,16 +37,16 @@ CLAUDE.md states the target of **50k+ Stewards** per controller deployment. At t
 
 A single global backend cannot serve all five well.
 
-### Licensing Boundary
+### Storage Backend Context
 
-Prior documentation listed the OSS track as "Git, SQLite, PostgreSQL" and the commercial track as the same plus HA-optimized PostgreSQL. SQLite is advertised but not implemented. Git is listed as a storage backend but is a poor fit for anything other than small, human-edited config files.
+Prior documentation listed the default track as "Git, SQLite, PostgreSQL" and the production-scale track as the same plus HA-optimized PostgreSQL. SQLite is advertised but not implemented. Git is listed as a storage backend but is a poor fit for anything other than small, human-edited config files.
 
 ### Concrete Deficiencies
 
 Verified during exploration; each becomes a sub-issue under the epic tracked by this ADR:
 
 1. **No SQLite provider.** `pkg/storage/providers/` contains only `database/` (PostgreSQL) and `git/`.
-2. **No flat-file provider.** Needed to replace the git provider as the OSS file-based option.
+2. **No flat-file provider.** Needed to replace the git provider as the default file-based option.
 3. **Git provider's `RuntimeStore` is memory-backed.** `pkg/storage/providers/git/plugin.go:152-166` returns `cache.NewRuntimeCache(...)` with a comment admitting "runtime sessions are ephemeral." Persistent-session semantics silently lost on git deployments.
 4. **No `StewardStore`.** Steward fleet state (last-seen, heartbeat, status) is in-memory only in `features/steward/health.go`. Controller restart loses the fleet view.
 5. **No persistent command dispatch.** `features/steward/commands/handler.go` tracks executing commands in-memory. No crash-survivable audit trail.
@@ -60,8 +60,8 @@ Verified during exploration; each becomes a sub-issue under the epic tracked by 
 
 Storage is partitioned by data type, not by a single global backend. Each type has its own interfaces and its own backend selection. Deployments compose one provider per type.
 
-| Type | OSS default | Commercial/SaaS default |
-|------|-------------|-------------------------|
+| Type | Default configuration | Production scale |
+|------|----------------------|-----------------|
 | Business data | SQLite | PostgreSQL |
 | Config storage | Flat file | PostgreSQL |
 | Config *git sync* (optional, per-scope) | Flat file ⇄ external git origin | PostgreSQL ⇄ external git origin |
@@ -69,7 +69,7 @@ Storage is partitioned by data type, not by a single global backend. Each type h
 | Timeseries | Local log files | ClickHouse / Timescale / Influx |
 | Blobs | Local filesystem | S3-compatible object storage |
 
-**The OSS column shows the zero-config default, not a limit.** Any backend listed in the Commercial column is available to OSS deployments. The licensing boundary is single-root tenant tree shape, not backend choice — see [LICENSING.md](../../../LICENSING.md). An OSS single-root deployment is free to run PostgreSQL for business data, a key vault for secrets, and S3 for blobs if the operator wants that.
+**The default column shows the zero-config default, not a limit.** Any production-scale backend is available to all deployments. Deployment topology (single root vs. multi-root) is a separate concern from backend choice — see [LICENSING.md](../../../LICENSING.md). A single-root deployment is free to run PostgreSQL for business data, a key vault for secrets, and S3 for blobs if the operator wants that.
 
 ### 2. Interface Mapping
 
@@ -98,27 +98,27 @@ General rule for the epic: **anything named `*Store` is durable; anything epheme
 
 The existing `pkg/storage/providers/git/` is **deprecated and removed**. Git re-enters the architecture as an optional *sync source* for admin-designated config scopes.
 
-**Replacement for OSS file-based storage**: a new **flat-file** provider. The admin is responsible for backups of the flat-file tree (filesystem snapshots, rsync, restic, etc.). CFGMS does not manage versioning or history at the storage layer.
+**Replacement for the file-based default storage**: a new **flat-file** provider. The admin is responsible for backups of the flat-file tree (filesystem snapshots, rsync, restic, etc.). CFGMS does not manage versioning or history at the storage layer.
 
-**Git-sync model** (single component, shared across OSS and commercial):
+**Git-sync model** (single component, shared across all deployment scales):
 
 - Admin binds a config scope (tenant path + namespace, e.g., `root/msp-a/client-1/firewall`) to an external git origin: URL, branch, credentials reference.
 - Git-sync pulls from the origin on webhook (push event) with a polling fallback.
-- Imported configs write through to the chosen config backend — flat-file (OSS) or PostgreSQL (commercial).
+- Imported configs write through to the chosen config backend — flat-file (default) or PostgreSQL (production scale).
 - Scopes without a git binding live natively in the backend.
 - Read path is always the backend; git is the editing surface for bound scopes, not a query target.
 - **v1 is one-way, read-only** (git → backend). The controller never writes back to the git origin. For bound scopes, all edits happen at the git origin (PRs, commits, merges via the tenant's normal GitOps workflow) and flow down via sync. Bidirectional sync (backend → git commits for UI-initiated edits) is explicitly out of scope for v1 and will be a future ADR if demand emerges.
 
-This gives tenants their existing GitHub/GitLab PR workflow without CFGMS hosting git. One code path serves both OSS and commercial deployments.
+This gives tenants their existing GitHub/GitLab PR workflow without CFGMS hosting git. One code path serves all deployment scales.
 
 ### 4. Implementation Sequence
 
 Tracked under the epic referenced in [Code Changes Required](#code-changes-required). Ordered to unblock SaaS first:
 
-1. Flat-file provider (replaces git provider for OSS)
+1. Flat-file provider (replaces git provider for default file-based storage)
 2. `StewardStore` + persistent fleet registry
 3. ~~Deprecate and remove `pkg/storage/providers/git/`~~ **Done** (Issue #664)
-4. SQLite provider for OSS business data
+4. SQLite provider for default business data storage
 5. Persist command dispatch (audit-integrated)
 6. Git-sync component
 7. `BlobStore` interface + filesystem/S3 providers
@@ -134,11 +134,11 @@ Tracked under the epic referenced in [Code Changes Required](#code-changes-requi
 
 ### Positive
 
-1. **OSS↔commercial symmetry**: one git-sync path, two backend targets. No forked codebase.
+1. **Backend symmetry**: one git-sync path serves both default and production-scale backends. No forked codebase.
 2. **Admin-owned backups**: removing the git provider eliminates a surprising abstraction (git commits per write) and hands backup responsibility to the operator, who can use standard filesystem tools.
 3. **Tenant workflow preserved**: MSPs continue editing config on their own GitHub/GitLab; git-sync imports the result.
 4. **Clean swap boundaries**: a new timeseries backend doesn't force rewriting config or business stores.
-5. **SaaS-ready**: SQLite/flat-file for OSS, PostgreSQL/S3/vault for SaaS — each type picks its own scaling story.
+5. **SaaS-ready**: SQLite/flat-file for default deployments, PostgreSQL/S3/vault for production scale — each type picks its own scaling story.
 6. **Eliminates the `RuntimeStore` memory-cache lie**: the broken git implementation goes away. Durable pieces move to `SessionStore`; ephemeral pieces move to `pkg/cache`. No more interface pretending to be storage while returning a cache.
 7. **Purges controller concerns from steward paths**: drift event storage, M365 admin-consent `ClientTenantStore`, and similar controller-side interfaces currently living under `features/steward/*` and `features/modules/m365/auth/*` relocate to the canonical `pkg/storage/interfaces/` tree. One authoritative location per interface.
 
@@ -164,17 +164,17 @@ Tracked under the epic referenced in [Code Changes Required](#code-changes-requi
 
 **Rejected because**:
 - Two code paths doing substantially similar work (commit on write vs. pull from origin)
-- OSS and SaaS diverge architecturally — a bug found in one path doesn't necessarily fix the other
+- Default and SaaS deployments diverge architecturally — a bug found in one path doesn't necessarily fix the other
 - Git provider's `RuntimeStore` memory-cache issue remains
 - Admin still shoulders git-provider failure modes (merge conflicts on high-write paths) with no benefit
 
-### Alternative 2: Require Postgres for All OSS Deployments
+### Alternative 2: Require Postgres for All Deployments
 
 **Approach**: Drop file-based storage entirely; Postgres is the only supported backend.
 
 **Rejected because**:
-- Raises the OSS barrier to entry significantly — a single-binary MSP demo now requires a database
-- Contradicts the project's documented flat-file-class options for OSS deployments
+- Raises the barrier to entry significantly — a single-binary MSP demo now requires a database
+- Contradicts the project's documented flat-file-class default options
 - Over-serves the small-deployment end of the market
 
 ### Alternative 3: Per-Store Provider Selection Without the Taxonomy
@@ -188,7 +188,7 @@ Tracked under the epic referenced in [Code Changes Required](#code-changes-requi
 
 ### Chosen Approach: Five-Type Taxonomy + Flat-File + Git-Sync
 
-Cleanest shape for the backend-technology clusters we actually need, preserves the tenant GitOps workflow, and lets a single git-sync code path serve both OSS and SaaS.
+Cleanest shape for the backend-technology clusters we actually need, preserves the tenant GitOps workflow, and lets a single git-sync code path serve all deployment scales.
 
 ## Code Changes Required
 
@@ -196,13 +196,13 @@ This ADR ratifies the direction. Implementation is tracked by the epic **Storage
 
 | # | Title | Priority | Depends on | Status |
 |---|-------|----------|------------|--------|
-| A | Flat-file storage provider (OSS file-based backend) | P0 | — | **Merged** (Issue #661) |
-| C | SQLite storage provider for OSS business data | P0 | — | **Merged** (Issues #662, #663, #665) |
+| A | Flat-file storage provider (default file-based backend) | P0 | — | **Merged** (Issue #661) |
+| C | SQLite storage provider for default business data | P0 | — | **Merged** (Issues #662, #663, #665) |
 | D | `StewardStore` interface + persistent fleet registry | P0 | A, C | **Merged** (Issue #663) |
 | E | Persist command dispatch state (audit-integrated) | P1 | C | **Merged** (Issue #665) |
-| J | Composite storage manager + OSS factory (`NewStorageManagerFromStores`, `CreateOSSStorageManager`) | P0 | A, C, D, E | **Merged** (Issue #692) |
+| J | Composite storage manager + default factory (`NewStorageManagerFromStores`, `CreateOSSStorageManager`) | P0 | A, C, D, E | **Merged** (Issue #692) |
 | B | Deprecate and remove `pkg/storage/providers/git/` | P1 | A, J | In progress (Issue #664) |
-| F | Git-sync component (shared OSS/commercial) | P1 | A | Not started |
+| F | Git-sync component (shared across all scales) | P1 | A | Not started |
 | G | `BlobStore` interface + filesystem and S3-compatible providers | P2 | — | **Merged** (Issue #667) |
 | H | `SecretStore` interface unifying SOPS and key vaults | P2 | — | Not started |
 | I | Reorganize `pkg/storage/interfaces/` into type-based taxonomy | P2 | A, B, C, D, E, F, G, H | Not started |
@@ -215,7 +215,7 @@ A, C  →  D, E, F  →  B  →  G, H  →  I
 
 - A (flat-file) and C (SQLite) have no dependencies and can proceed in parallel.
 - D (StewardStore) needs at least one backend (A or C) to persist into; the story must be built against both.
-- B (remove git provider) can only land after A exists as its OSS replacement.
+- B (remove git provider) can only land after A exists as its replacement.
 - F (git-sync) requires A (flat-file write-through target).
 - I (interfaces reorganization) lands last so it doesn't cause churn during the earlier stories.
 
@@ -223,7 +223,7 @@ Each sub-story has its own testable acceptance criteria. This ADR is the shared 
 
 ## Documentation Currency
 
-Any sub-story under this epic that changes the shape of the product — adds or removes a backend, changes the OSS/commercial boundary, renames a public interface, changes config schema, or moves an interface between packages — **must update the following in the same PR**:
+Any sub-story under this epic that changes the shape of the product — adds or removes a backend, changes the deployment topology or backend defaults, renames a public interface, changes config schema, or moves an interface between packages — **must update the following in the same PR**:
 
 - `LICENSING.md` — if the licensing boundary description changes
 - `docs/architecture/storage-architecture.md` — operator walk-through of the taxonomy
@@ -243,7 +243,7 @@ Rule of thumb: **if a steward does not use the interface, it does not belong und
 ## References
 
 - `docs/architecture/decisions/001-central-provider-compliance-enforcement.md` — format template and the "pluggable by default" principle this ADR builds on
-- `LICENSING.md` — licensing details and commercial FAQ
+- `LICENSING.md` — licensing details and deployment topology FAQ
 - `docs/architecture/storage-architecture.md` — operator-facing walk-through of this decision (renamed from `hybrid-storage-solution.md`)
 - `pkg/storage/providers/git/plugin.go:152-166` — evidence for git-provider deprecation (`RuntimeStore` memory-cache admission)
 - `features/steward/health.go` — in-memory fleet state (motivates `StewardStore`)

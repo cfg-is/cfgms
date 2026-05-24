@@ -277,7 +277,7 @@ Operators interact with CFGMS through layered UX surfaces.
 
 **`cfg` CLI — first-class community UI.** The canonical interaction surface for the open-source distribution. Every documented operator action works through the CLI. The CLI wraps REST endpoints so operators don't need to script against REST for documented workflows.
 
-**Web UI — commercial layer (planned before v1).** A separate UX layer in the commercial distribution. Targets operators who prefer graphical workflows or shared-team views. Some power-user flows may remain CLI-only.
+**Web UI (planned before v1).** A separate UX layer for operators who prefer graphical workflows or shared-team views. Some power-user flows may remain CLI-only.
 
 **REST API — underlying contract.** The wire format the CLI and web UI both use. Stable, versioned, and documented at `docs/api/rest-api.md`. Available to operators and integrators for scripting and third-party tools.
 
