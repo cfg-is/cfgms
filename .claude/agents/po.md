@@ -600,6 +600,16 @@ rm /tmp/convergence-failure-<EPIC_NUM>.md
 ```
 `po-act.sh block <ISSUE> -` reads the reason from stdin so multi-line summaries don't need command-line argument escaping. The block subcommand idempotently adds the epic to the project queue (if not present) and sets status to Blocked.
 
+**Step 7.5 — Pipeline sweep (closeout + reconciliation):**
+
+Run the `pipeline-sweep` skill. It closes every open epic whose sub-tasks are all done AND whose AC verification passes on `origin/develop`, drafts a remediation story under any epic whose sub-tasks are done but AC verification fails, and moves any CLOSED-on-GitHub project item whose status is stale (anything other than `Done`) to `Done`. Runs in both `cycle` and `cron` modes; cheap and idempotent.
+
+```
+Skill: pipeline-sweep
+```
+
+Include the sweep's headline + verdict tables in the cycle summary you return to the founder. If the sweep surfaces a "Needs founder review" Blocked anomaly (project item Blocked but GH issue closed — e.g. a founder action was completed but the project status was not advanced), flag it in the §6 (Cron PO) section of the cycle report.
+
 **Step 8 — Forward edge:**
 If active milestone >80% complete and next milestone has no epics, create a `high-priority` tracking issue requesting intent capture and add it to the project queue as Blocked.
 
