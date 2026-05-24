@@ -1,0 +1,194 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jordan Ritz
+package ha
+
+import (
+	"context"
+	"net/http"
+	"time"
+)
+
+// DeploymentMode represents the controller deployment configuration
+type DeploymentMode int
+
+const (
+	// SingleServerMode - Traditional single instance deployment
+	SingleServerMode DeploymentMode = iota
+
+	// BlueGreenMode - Dual instance deployment for zero-downtime updates
+	BlueGreenMode
+
+	// ClusterMode - Multi-instance cluster with leader election
+	ClusterMode
+)
+
+func (d DeploymentMode) String() string {
+	switch d {
+	case SingleServerMode:
+		return "single"
+	case BlueGreenMode:
+		return "blue-green"
+	case ClusterMode:
+		return "cluster"
+	default:
+		return "unknown"
+	}
+}
+
+// NodeState represents the state of a controller node
+type NodeState int
+
+const (
+	NodeStateUnknown NodeState = iota
+	NodeStateHealthy
+	NodeStateDegraded
+	NodeStateFailed
+	NodeStateOffline
+)
+
+func (n NodeState) String() string {
+	switch n {
+	case NodeStateHealthy:
+		return "healthy"
+	case NodeStateDegraded:
+		return "degraded"
+	case NodeStateFailed:
+		return "failed"
+	case NodeStateOffline:
+		return "offline"
+	default:
+		return "unknown"
+	}
+}
+
+// NodeRole represents the role of a controller node in cluster mode
+type NodeRole int
+
+const (
+	NodeRoleFollower NodeRole = iota
+	NodeRoleCandidate
+	NodeRoleLeader
+)
+
+func (r NodeRole) String() string {
+	switch r {
+	case NodeRoleFollower:
+		return "follower"
+	case NodeRoleCandidate:
+		return "candidate"
+	case NodeRoleLeader:
+		return "leader"
+	default:
+		return "unknown"
+	}
+}
+
+// NodeInfo represents information about a controller node
+type NodeInfo struct {
+	ID               string                   `json:"id"`
+	Address          string                   `json:"address"`
+	State            NodeState                `json:"state"`
+	Role             NodeRole                 `json:"role"`
+	LastSeen         time.Time                `json:"last_seen"`
+	Version          string                   `json:"version"`
+	StartedAt        time.Time                `json:"started_at"`
+	Capabilities     []string                 `json:"capabilities"`
+	Region           string                   `json:"region,omitempty"`
+	AvailabilityZone string                   `json:"availability_zone,omitempty"`
+	Coordinates      *GeographicCoordinates   `json:"coordinates,omitempty"`
+	Latency          map[string]time.Duration `json:"latency,omitempty"` // Latency to other nodes
+}
+
+// ClusterManager handles high availability operations
+type ClusterManager interface {
+	// Start begins the cluster operations
+	Start(ctx context.Context) error
+
+	// Stop gracefully stops cluster operations
+	Stop(ctx context.Context) error
+
+	// GetDeploymentMode returns the current deployment mode
+	GetDeploymentMode() DeploymentMode
+
+	// GetLocalNode returns information about the local node
+	GetLocalNode() *NodeInfo
+
+	// GetClusterNodes returns information about all nodes in the cluster
+	GetClusterNodes() ([]*NodeInfo, error)
+
+	// IsLeader returns true if this node is the cluster leader
+	IsLeader() bool
+
+	// GetLeader returns the current cluster leader node
+	GetLeader() (*NodeInfo, error)
+
+	// RegisterHealthCheck registers a health check function
+	RegisterHealthCheck(name string, check HealthCheckFunc)
+
+	// GetHealth returns the current health status
+	GetHealth() *HealthStatus
+
+	// GetRaftTransport returns the Raft HTTP transport (commercial only, returns nil in OSS)
+	GetRaftTransport() RaftTransport
+
+	// GetCACertPEM returns the CA certificate PEM bytes used to verify HA peer TLS.
+	// Returns nil when CACertPath is unconfigured or the file cannot be read.
+	// Safe to call concurrently.
+	GetCACertPEM() []byte
+}
+
+// HealthCheckFunc is a function that checks the health of a component
+type HealthCheckFunc func(ctx context.Context) error
+
+// HealthStatus represents the overall health of the node
+type HealthStatus struct {
+	Overall   NodeState            `json:"overall"`
+	Checks    map[string]NodeState `json:"checks"`
+	Timestamp time.Time            `json:"timestamp"`
+	Details   map[string]string    `json:"details,omitempty"`
+}
+
+// FailoverHandler handles failover events
+type FailoverHandler interface {
+	OnFailoverStarted(event *FailoverEvent) error
+	OnFailoverCompleted(event *FailoverEvent) error
+	OnFailoverFailed(event *FailoverEvent, err error) error
+}
+
+// FailoverEvent represents a failover event
+type FailoverEvent struct {
+	ID               string                 `json:"id"`
+	Timestamp        time.Time              `json:"timestamp"`
+	Reason           string                 `json:"reason"`
+	PreviousLeader   string                 `json:"previous_leader,omitempty"`
+	NewLeader        string                 `json:"new_leader,omitempty"`
+	Duration         time.Duration          `json:"duration"`
+	SessionsMigrated int                    `json:"sessions_migrated"`
+	Status           string                 `json:"status"`
+	Details          map[string]interface{} `json:"details,omitempty"`
+}
+
+// SplitBrainHandler handles split-brain detection events
+type SplitBrainHandler interface {
+	OnSplitBrainDetected(status *SplitBrainStatus) error
+	OnSplitBrainResolved(status *SplitBrainStatus) error
+}
+
+// SplitBrainStatus represents the status of split-brain detection
+type SplitBrainStatus struct {
+	Detected     bool                   `json:"detected"`
+	Timestamp    time.Time              `json:"timestamp"`
+	PartitionIDs []string               `json:"partition_ids,omitempty"`
+	Resolution   string                 `json:"resolution,omitempty"`
+	Details      map[string]interface{} `json:"details,omitempty"`
+}
+
+// RaftTransport handles HTTP transport for Raft messages
+// This is only used in commercial builds with clustering
+type RaftTransport interface {
+	// HandleMessage handles incoming Raft messages
+	HandleMessage(w http.ResponseWriter, r *http.Request)
+
+	// HandleStatus returns Raft cluster status
+	HandleStatus(w http.ResponseWriter, r *http.Request)
+}

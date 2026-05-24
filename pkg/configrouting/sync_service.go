@@ -25,8 +25,8 @@ const minPollInterval = time.Minute
 
 // ErrCrossRootBoundary is returned by Register when the tenant's hierarchy root does
 // not match the rootTenantID established at construction time.
-// Multi-root operation (separate MSP trees) requires the Elastic commercial licence.
-var ErrCrossRootBoundary = errors.New("tenant belongs to a different root: cross-root sync requires Elastic license")
+// Multi-root operation requires separate SyncService instances per root.
+var ErrCrossRootBoundary = errors.New("tenant belongs to a different root: cross-root sync is not supported in single-root deployments")
 
 // tenantRemoteSyncer is the optional extension interface that a ConfigSourceRouter
 // may implement to support background remote pull. controllerRouter satisfies this.
@@ -41,7 +41,7 @@ type tenantRemoteSyncer interface {
 //   - records a "config_source_sync_failed" audit event with failure_category on error
 //   - calls cascadeFn only after a successful pull that introduced new commits
 //
-// Apache OSS boundary: all tenants must descend from the rootTenantID provided at
+// Single-root boundary: all tenants must descend from the rootTenantID provided at
 // construction. Register returns ErrCrossRootBoundary for tenants from a different tree.
 type SyncService struct {
 	router       configroutingiface.ConfigSourceRouter

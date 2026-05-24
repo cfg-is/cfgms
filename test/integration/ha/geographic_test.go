@@ -1,8 +1,5 @@
-//go:build commercial
-
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// +build commercial
 
 package ha
 
@@ -18,7 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/commercial/ha"
+	"github.com/cfgis/cfgms/pkg/ha"
 )
 
 // GeographicTestConfig represents geographic configuration for testing
