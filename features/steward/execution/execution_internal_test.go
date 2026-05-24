@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package-private genericConfigState YAML round-trip tests (TestGenericConfigState_*)
 // intentionally retained in package execution per epic #730 Story 7.

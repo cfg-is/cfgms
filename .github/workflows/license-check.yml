@@ -65,11 +65,12 @@ jobs:
         echo ""
 
         # Define forbidden license types
-        # These licenses are incompatible with Apache 2.0 or pose legal risks
+        # CFGMS itself is licensed under AGPL-3.0 (see LICENSE), so copyleft
+        # licenses (GPL/LGPL/AGPL) on third-party *dependencies* are
+        # compatible and intentionally NOT listed here. The forbidden set
+        # below covers licenses that are non-commercial, source-unavailable,
+        # or otherwise incompatible with AGPL-3.0 redistribution.
         FORBIDDEN_LICENSES=(
-          "GPL"
-          "LGPL"
-          "AGPL"
           "CC-BY-NC"
           "Commercial"
           "Proprietary"
@@ -144,15 +145,18 @@ jobs:
         echo '```' >> license-reports/summary.md
 
         echo "" >> license-reports/summary.md
+        echo "## CFGMS Project License" >> license-reports/summary.md
+        echo "CFGMS itself is licensed under **AGPL-3.0** (see [LICENSE](../LICENSE))." >> license-reports/summary.md
+        echo "" >> license-reports/summary.md
         echo "## Allowed License Types" >> license-reports/summary.md
         echo "- ✅ MIT" >> license-reports/summary.md
         echo "- ✅ Apache-2.0" >> license-reports/summary.md
         echo "- ✅ BSD (2-Clause, 3-Clause)" >> license-reports/summary.md
         echo "- ✅ ISC" >> license-reports/summary.md
         echo "- ✅ MPL-2.0" >> license-reports/summary.md
+        echo "- ✅ GPL/LGPL/AGPL (copyleft compatible with project AGPL-3.0)" >> license-reports/summary.md
         echo "" >> license-reports/summary.md
         echo "## Forbidden License Types" >> license-reports/summary.md
-        echo "- ❌ GPL/LGPL/AGPL (copyleft incompatible with Apache-2.0)" >> license-reports/summary.md
         echo "- ❌ CC-BY-NC (non-commercial restriction)" >> license-reports/summary.md
         echo "- ❌ Commercial/Proprietary" >> license-reports/summary.md
         echo "- ❌ SSPL (Server Side Public License)" >> license-reports/summary.md

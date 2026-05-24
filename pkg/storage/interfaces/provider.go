@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package interfaces defines the global storage provider system for CFGMS.
 // Store contracts are organised under sub-packages (business, config, blob,

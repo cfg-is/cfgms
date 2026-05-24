@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2025 CFGMS Contributors
 // Package storage implements local Git repository operations
 // #nosec G304 - Git storage operations require file access for configuration repository management

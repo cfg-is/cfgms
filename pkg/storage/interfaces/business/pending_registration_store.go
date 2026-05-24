@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package business defines the PendingRegistrationStore interface for the
 // generate-on-claim registration approval flow (Issue #1696).

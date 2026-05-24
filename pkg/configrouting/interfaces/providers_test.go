@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package interfaces_test — provider factory for contract tests.
 // Kept in a file named providers_test.go so that the check-providers.sh

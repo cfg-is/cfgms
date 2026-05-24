@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package ctxkeys is the shared context-key registry usable from platform and feature packages —
 // defined here to avoid cross-feature imports.

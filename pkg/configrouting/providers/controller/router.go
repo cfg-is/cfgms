@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package controller provides the ConfigSourceRouter implementation that routes tenant
 // config reads to the appropriate backing store — controller store or git store.

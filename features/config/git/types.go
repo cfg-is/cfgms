@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2025 CFGMS Contributors
 // Package git provides Git-based configuration storage and version control
 // for the CFGMS system. It implements a hybrid repository model with separate

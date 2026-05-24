@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package interfaces defines the SecretStore interface for CFGMS secrets management
 // M-AUTH-1: Core secret storage operations with encryption, versioning, and audit support

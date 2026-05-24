@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package heartbeat tests the steward-offline and HA-failover thresholds.
 // Epic #1664: StewardOfflineTimeout (60 s) is distinct from HeartbeatTimeout (15 s HA-failover).
