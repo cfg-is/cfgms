@@ -96,10 +96,13 @@ test_log_injection_linter() {
 
     # Capture stderr so a CI failure shows the underlying go/lint diagnostic
     # (the test previously discarded it, leaving "broken cd?" as the only clue).
-    local out_file rc
+    # The `|| rc=$?` form is load-bearing: this file runs under `set -e`, so a
+    # bare `(...); rc=$?` would abort the whole suite the instant the wrapper
+    # returns non-zero — silently skipping the log_fail diagnostic and leaving
+    # CI showing "❌ Script tests failed" with no clue why.
+    local out_file rc=0
     out_file=$(mktemp)
-    (cd "$tmp_cwd" && "$script_abs") >"$out_file" 2>&1
-    rc=$?
+    (cd "$tmp_cwd" && "$script_abs") >"$out_file" 2>&1 || rc=$?
     if [ "$rc" -eq 0 ]; then
         log_pass "lint-log-injection.sh: Exits 0 on clean tree from foreign CWD"
     else
