@@ -168,7 +168,7 @@ When decomposing an epic, for each story:
 
 1. **Identify the product-shape delta.** If the story changes behavior a user or operator observes, it changes product shape.
 2. **List affected docs in `## Docs In Scope`.** Candidates to check:
-   - `docs/product/feature-boundaries.md` — OSS/commercial line, backend lists
+   - `LICENSING.md` — licensing boundary, commercial FAQ
    - `docs/architecture/*.md` — architecture docs under the relevant area
    - `docs/architecture/decisions/*.md` — any ADR referenced by the change
    - `pkg/*/README.md` — package-level docs for affected packages

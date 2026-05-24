@@ -70,7 +70,7 @@ Policy-driven automation with advanced script execution (Issue #210 - Git-versio
 
 #### v0.7.0 (Pre-OSS / Alpha) - Open Source Preparation - ✅ COMPLETED
 
-Codebase prepared for open source launch with proper licensing, clean architecture, and production-ready security. See [v0.7.0-epic.md](./v0.7.0-epic.md) and [feature-boundaries.md](./feature-boundaries.md).
+Codebase prepared for open source launch with proper licensing, clean architecture, and production-ready security. See [v0.7.0-epic.md](./v0.7.0-epic.md).
 
 #### v0.7.1: Code Cleanup - ✅ COMPLETED
 
@@ -461,4 +461,4 @@ Multi-layered validation approach:
 
 - [Versioning Policy](../development/versioning-policy.md) - Semantic versioning details
 - [CHANGELOG.md](../../CHANGELOG.md) - Complete version history
-- [Feature Boundaries](./feature-boundaries.md) - OSS vs Commercial features
+- [LICENSING.md](../../LICENSING.md) - Licensing details and FAQ

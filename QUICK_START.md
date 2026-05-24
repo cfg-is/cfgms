@@ -321,7 +321,7 @@ After completing the fleet walkthrough:
 - Learn about [multi-tenancy](docs/guides/configuration-inheritance.md)
 - Set up [production certificates](docs/development/security-setup.md)
 - Explore [DNA and drift detection](docs/architecture/rollback-design.md)
-- Scale to [50,000+ stewards](docs/architecture/ha-commercial-split.md)
+- Scale to 50,000+ stewards
 
 ---
 

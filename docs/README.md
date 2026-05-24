@@ -37,10 +37,6 @@ If you're new to the project, start with these essential documents:
 - [Architecture Decision Records](architecture/decisions/README.md) - Index of all ADRs
 - [ADR-001: Central Provider Compliance Enforcement](architecture/decisions/001-central-provider-compliance-enforcement.md)
 
-### High Availability & Commercial Split
-
-- [HA Commercial Split](architecture/ha-commercial-split.md) - Open source vs commercial boundaries
-
 ### Historical Design Documents
 
 - [gRPC Usage Analysis](archive/grpc-usage-analysis.md) - Historical: Analysis that led to the gRPC-over-QUIC unified transport
@@ -108,7 +104,6 @@ If you're new to the project, start with these essential documents:
 
 - [Product Vision](product/vision.md) - Long-term product vision and strategy
 - [Product Roadmap](product/roadmap.md) - Development roadmap and release planning
-- [Feature Boundaries](product/feature-boundaries.md) - Open source vs commercial features
 - [v0.7.0 Epic](product/v0.7.0-epic.md) - OSS launch preparation and business model
 
 ## Integration Guides

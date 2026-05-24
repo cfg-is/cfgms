@@ -129,7 +129,7 @@ Stories that change product shape must update docs and tests in the same PR. Det
 If yes, verify the story contains **all three**:
 
 1. **`## Docs In Scope` section** listing each affected doc file with what to update. Candidates to audit against:
-   - `docs/product/feature-boundaries.md` (OSS/commercial backend lists)
+   - `LICENSING.md` (licensing boundary, commercial FAQ)
    - Relevant `docs/architecture/*.md` and any ADR referenced by the change
    - `pkg/*/README.md` for affected packages
    - `docs/deployment/*`, `docs/testing/*`, `docs/troubleshooting/*` for user-facing guides
@@ -143,7 +143,7 @@ If the story does not change product shape (e.g., internal refactor with no obse
 - Story changes a public interface but has no test updates — BLOCK, request test coverage
 - Story claims "docs will come in a follow-up" — BLOCK. Documentation currency is not deferrable.
 
-When you find the docs list is obviously incomplete (e.g., story changes a storage backend but doesn't list `feature-boundaries.md`), add the missing entries yourself as part of your `## Implementation Notes` write-up rather than blocking — but only when the gap is obvious. Anything judgment-heavy goes back to the BA.
+When you find the docs list is obviously incomplete (e.g., story changes a storage backend but doesn't list `LICENSING.md` or the relevant architecture doc), add the missing entries yourself as part of your `## Implementation Notes` write-up rather than blocking — but only when the gap is obvious. Anything judgment-heavy goes back to the BA.
 
 ## Passing a Story
 

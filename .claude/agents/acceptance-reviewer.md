@@ -150,7 +150,7 @@ If the story body has a `## Docs In Scope` section listing files, **every file l
 
 If the story changes product shape (adds/removes a backend, changes a public interface, changes CLI/API surface, changes the OSS/commercial boundary) but the PR has **no doc changes at all**, that is also a finding — even if the story body didn't list them. Check for obvious missed updates:
 
-- Backend or provider added/removed → `docs/product/feature-boundaries.md` expected
+- Backend or provider added/removed → `LICENSING.md` or `docs/architecture/storage-architecture.md` expected
 - Public interface changed → the relevant `pkg/*/README.md` expected
 - Architecture changed → relevant `docs/architecture/*.md` expected
 
