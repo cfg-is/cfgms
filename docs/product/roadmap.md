@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-03-28
+**Last Updated**: 2026-05-25
 
 ## Versioning Strategy
 
@@ -125,9 +125,9 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [x] Configure MQTT broker ACLs for topic-level access control by steward ID (issue #313) ✅ COMPLETED
 - [x] Align test-complete with CI required checks for 100% local validation parity (issue #315) ✅ COMPLETED
 
-### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
+### v0.9.x Series — Production Stability & Foundation
 
-Path to functioning beta: deploy controller on test cluster, manage Windows and Linux VMs with existing modules.
+v0.9.0–v0.9.5 work has shipped to `develop` but no v0.9.x tags have been cut.
 
 #### v0.9.0 — Test & Architecture Foundation ✅ COMPLETED
 
@@ -260,7 +260,52 @@ Controller nodes managed by stewards — clean separation of node management fro
 - [x] Steward: implement service module for idempotent OS service management (Issue #577 - 8 points) - systemd/Windows Service/launchd Get→Compare→Set→Verify, replaces script workaround
 - [x] Controller: add install/uninstall/status subcommands (Issue #578 - 5 points) - Mirror steward self-install pattern for OS service registration
 
-#### v0.10.0 - Web Interface Foundation & Deferred Features
+#### Post-v0.9.5 epics on develop (untagged)
+
+- [x] Epic #786 — CI: pre-merge validation runs against branch state
+- [x] Epic #1414 — mTLS admin authentication for controller REST API
+- [x] Epic #1500 — Operating-model docs audit/walkthrough/consolidation
+- [x] Epic #1501 — Operating-model CLI surface + docker fleet validation
+- [x] Epic #1523 — Steward job execution (scripts, inline commands, dispatch)
+- [x] Epic #1550 — Post-audit follow-ups
+- [x] Epic #1664 — Steward registration trust model (perennial tokens, IP-trust)
+- [x] Epic #1714 — Fleet resilience (restart-recovery, cert-reuse, drift)
+- [ ] Epic #1661 — Steward provisioning installer + trust bootstrap (in flight)
+- [ ] Epic #1754 — Decouple controller from steward-internal packages (in flight)
+
+#### v0.9.6 — Consolidation + AGPL Governance Release
+
+- [ ] Epic #1716 — Migrate licensing model to AGPL-3.0 single license (in flight)
+
+#### v0.9.7 — Tier 1 Hyper-V controller bringup
+
+- [ ] Epic #1787 — persistent controller on Hyper-V cluster VM, manual install, durable git+SOPS storage, mTLS
+
+#### v0.9.8 — `cfg` CLI on agent containers + Tier 1 connectivity
+
+- [ ] Epic #1788 — `cfg` CLI baked into agent image, per-agent mTLS bundle, routable reach to Tier 1
+
+#### v0.9.9 — Hyper-V management module
+
+- [ ] Epic #1789 — `features/modules/hyperv/`: VM lifecycle, snapshot/restore, vSwitch (PowerShell-over-WinRM)
+
+#### v0.9.10 — Stewards on Hyper-V hosts
+
+- [ ] Epic #1790 — registered, healthy stewards on every Hyper-V cluster node; service account, WinRM, module loading
+
+#### v0.9.11 — Phase 2 dev-agent conventions
+
+- [ ] Epic #1791 — tenant-scoping, breakage-tolerance ceremony, agent guardrails for Tier 1
+
+#### v0.9.12 — Ephemeral per-agent dev infrastructure (DRAFT)
+
+- [ ] Epic #1792 — each dispatched agent runs against its own ephemeral controller + steward VMs built from its branch
+
+#### v0.9.13 — Beta deployment validation on real VMs
+
+Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock. New issue to be filed when ready.
+
+#### v0.10.0 - Web Interface Foundation
 
 **Deferred from v0.9.x** (functional but not on beta critical path):
 - [ ] Workflow management REST API (engine works internally, API needed for Web UI)
@@ -454,8 +499,8 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Document Version**: 3.0
-- **Last Updated**: 2026-03-28
+- **Document Version**: 4.0
+- **Last Updated**: 2026-05-25
 
 ### Related Documentation
 
