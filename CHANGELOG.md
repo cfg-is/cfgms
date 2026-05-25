@@ -13,6 +13,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cfg storage migrate --from git --to flatfile` before upgrading. The controller now rejects
   `storage.provider: git` at startup with actionable instructions.
 
+## [0.8.0-governance] - 2026-05-24
+
+Governance release — license migration only. No feature, API, or wire-format changes.
+
+### Changed
+
+- **BREAKING (licensing)**: CFGMS is now licensed under **AGPL-3.0-only**. The previous Apache-2.0 + Elastic License v2 dual-license model has been retired (Epic #1716). Every file in the repository — controller, steward, protocol, integrations, CLI, workflow engine, and HA clustering — is now AGPL-3.0. A separate commercial-embedding license is available via cfg.is for third parties wishing to embed CFGMS in proprietary products without AGPL obligations; see [LICENSE.CommercialLicenses.md](LICENSE.CommercialLicenses.md).
+- **CLA upgraded to v2.0** (Issue #1744, PR #1753). §3 / §4 broadened to "any license selected by the Copyright Holder at its sole discretion" so future license changes do not require re-papering. §5(f) adds AI-assisted contribution disclosure. §1 copyright assignment retained.
+- **High Availability (HA) is now in every build.** The `commercial/` build-tag split has been removed (Issue #1745, PR #1780). `pkg/ha` is the unified package — controllers built from the public source tree include Raft consensus, failover, and split-brain protection by default.
+
+### Added
+
+- `LICENSE` — full GNU AGPL-3.0 text (Issue #1747).
+- `LICENSE.CommercialLicenses.md` — describes the outbound commercial-embedding license offering (Issue #1747).
+
+### Removed
+
+- `LICENSE-APACHE-2.0` and `LICENSE-ELASTIC-2.0` (Issue #1747).
+- `commercial/` directory and the `commercial` build tag (Issue #1745).
+- `docs/architecture/ha-commercial-split.md` and `docs/product/feature-boundaries.md` (Issues #1748, #1750).
+- `"AGPL"` from `.github/workflows/license-check.yml` forbidden-dependency-licenses list (Issue #1747) — AGPL dependencies are now compatible with the project's own AGPL-3.0 license.
+
+### Migration notes
+
+- **Embedding CFGMS in a proprietary product**: contact licensing@cfg.is. The public repository remains AGPL-3.0 for all users.
+- **Self-hosting CFGMS for your own organization** (including as an MSP serving clients via the public network): AGPL-3.0 permits this. If you modify CFGMS and expose those modifications via the network, AGPL-3.0 §13 requires you to make corresponding source available to your users.
+- **Existing forks** as of the migration date are grandfathered under their original Apache-2.0 license. Future merges from upstream after the relicense carry AGPL-3.0 terms.
+
 ### Added
 - Semantic versioning policy documentation
 - CHANGELOG.md for tracking version history
