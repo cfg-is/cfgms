@@ -152,7 +152,7 @@ Consult these before implementing steward or controller behavior changes:
 3. Extend existing providers rather than creating overlapping code
 4. `make check-architecture` enforces this automatically
 
-**Why pluggable by default:** Multi-tenant SaaS with different backend needs, commercial/OSS feature gating, 50k+ steward scale, cloud vs on-prem flexibility, testing without mocks (use test implementations). Cheap to do now, expensive to retrofit.
+**Why pluggable by default:** Multi-tenant SaaS with different backend needs, deployment-scale flexibility, 50k+ steward scale, cloud vs on-prem flexibility, testing without mocks (use test implementations). Cheap to do now, expensive to retrofit.
 
 **Pluggable Providers:**
 
@@ -165,7 +165,7 @@ Consult these before implementing steward or controller behavior changes:
 | `pkg/controlplane` | Control plane communication (gRPC) |
 | `pkg/dataplane` | Data plane communication (gRPC) |
 
-**Direct Providers:** `pkg/cert`, `pkg/telemetry`, `pkg/cache`, `pkg/session`, `pkg/registration`, `pkg/monitoring`, `pkg/maintenance`, `pkg/security`
+**Direct Providers:** `pkg/cert`, `pkg/telemetry`, `pkg/cache`, `pkg/session`, `pkg/registration`, `pkg/monitoring`, `pkg/maintenance`, `pkg/security`, `pkg/ha`
 
 **Utilities (not providers):** `pkg/config`, `pkg/testing`, `pkg/testutil`, `pkg/version`, `pkg/audit`
 
@@ -240,10 +240,7 @@ Recursive parent-child tenant model with arbitrary depth. Path-based identificat
 
 ### Licensing Boundary
 
-- **Apache (OSS):** Single root tenant tree — one MSP, unlimited depth
-- **Elastic (Commercial):** Multi-root / platform mode — multiple independent MSP trees
-
-Ask: "Does this work within a single tenant tree, or require awareness of multiple roots?" Single-tree = Apache. Multi-root = Elastic.
+All CFGMS code is AGPL-3.0. A commercial embedding license is available via private agreement for third parties shipping CFGMS in proprietary products. The single-root vs multi-root deployment distinction is an architectural boundary, not a license boundary — all deployment shapes run AGPL-3.0 code.
 
 ## Quick Reference
 

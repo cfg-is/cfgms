@@ -15,7 +15,7 @@ CFGMS is a modern configuration management system designed with resilience, secu
 [![CodeQL](https://github.com/cfg-is/cfgms/workflows/CodeQL%20Security%20Analysis/badge.svg)](https://github.com/cfg-is/cfgms/security/code-scanning)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/cfg-is/cfgms/badge)](https://securityscorecards.dev/viewer/?uri=github.com/cfg-is/cfgms)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cfg-is/cfgms)](https://goreportcard.com/report/github.com/cfg-is/cfgms)
-[![License](https://img.shields.io/badge/License-Apache%202.0%20%2B%20Elastic%20v2-blue.svg)](LICENSING.md)
+[![License](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
 ## Project Status
 
@@ -34,20 +34,17 @@ This project board provides real-time visibility into:
 
 ## License
 
-CFGMS uses a **dual licensing model**:
+CFGMS is licensed under the **[GNU Affero General Public License v3.0](LICENSE)** (AGPL-3.0).
 
-- **[Apache License 2.0](LICENSE-APACHE-2.0)** - The vast majority of CFGMS (all modules, integrations, CLI/API, workflow engine, DNA system, RBAC, monitoring)
-- **[Elastic License 2.0](LICENSE-ELASTIC-2.0)** - Small subset of enterprise features (HA clustering, future Web UI)
-
-**Quick Summary:**
-- **Open Source (Apache 2.0)**: Free forever, use commercially, modify and distribute freely
-- **Commercial (Elastic 2.0)**: Free to use in your infrastructure, cannot offer as a hosted service
+- **Self-hosted use** (on-premises or private cloud) is fully permitted — no commercial license required.
+- **MSPs** managing client endpoints under a single CFGMS deployment require no commercial license.
+- **Commercial embedding** (compiling CFGMS source into a proprietary product) requires a private commercial license. Contact [licensing@cfg.is](mailto:licensing@cfg.is).
 
 For complete licensing details and FAQ, see [LICENSING.md](LICENSING.md).
 
 ## Enterprise Features
 
-Enterprise features (HA clustering, Web UI, multi-MSP) are available by building with `-tags commercial`. These features are **free for internal use** under Elastic License 2.0.
+HA clustering is included in all builds. Web UI is planned for a future release.
 
 For hosted deployment or support contracts, contact [licensing@cfg.is](mailto:licensing@cfg.is). See [LICENSING.md](LICENSING.md) for complete details.
 

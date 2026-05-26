@@ -12,10 +12,10 @@ Closes #
 **⚠️ REQUIRED: All contributors must sign the CLA before code can be merged.**
 
 - [ ] **I have signed the CLA** by adding my name to [CONTRIBUTORS.md](../CONTRIBUTORS.md)
-- [ ] **I have read the CLA**: [docs/legal/CLA.md](../docs/legal/CLA.md)
+- [ ] **I have read the CLA v2.0**: [docs/legal/CLA.md](../docs/legal/CLA.md)
 
 **For first-time contributors:**
-1. Read the [Contributor License Agreement](../docs/legal/CLA.md)
+1. Read the [Contributor License Agreement v2.0](../docs/legal/CLA.md)
 2. Add your name to [CONTRIBUTORS.md](../CONTRIBUTORS.md) in this PR
 3. Check the box above
 
