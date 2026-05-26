@@ -152,12 +152,6 @@ Enabled in Story #801. The merge queue replaces the previous `strict_required_st
 
 ## Workflow Integration
 
-### GitHub Actions Permissions
-
-Required workflow permissions for release automation:
-- `contents: write` - Create releases and tags
-- `pull-requests: write` - Create and manage PRs
-
 ### Status Check Sources
 
 | Check Name | Workflow File | Job Name |
@@ -181,5 +175,4 @@ Required workflow permissions for release automation:
 ## Related Documentation
 
 - [Git Workflow](./git-workflow.md) - Development workflow and branching strategy
-- [Release Automation](../../.github/workflows/release-automation.yml) - Automated release workflow
 - [Production Gates](../../.github/workflows/production-gates.yml) - Security and quality gates

@@ -105,46 +105,11 @@ This document describes the GitHub Actions workflows configured for the CFGMS pr
 
 **Timeout:** 10 minutes
 
-### 5. Release Workflow (`.github/workflows/release.yml`)
+### 5. Release Workflow — removed 2026-05-25
 
-**Status:** Ready - Activates on repository public status
+CFGMS does not currently ship signed release binaries from CI. The previous `release.yml` and `release-automation.yml` workflows were removed pre-1.0 because they produced unsigned binaries without the supporting code-signing certificates, key management, or attestation infrastructure to make them trustworthy. Distribution today is via `git clone && make build` against a tagged commit.
 
-**Purpose:** Automated release with SBOM generation
-
-**Triggers:**
-- Version tags (e.g., `v0.8.0`, `v1.0.0`)
-- Manual dispatch with version input
-
-**Features:**
-- Creates GitHub releases with changelog
-- Builds cross-platform binaries (Linux, macOS, Windows)
-- Generates SHA256 checksums
-- **SBOM Generation (SPDX-JSON format)** - New for Story #280
-- Uploads all artifacts to release
-
-**Platforms:**
-- Linux: AMD64, ARM64
-- macOS: AMD64, ARM64 (Apple Silicon)
-- Windows: AMD64
-
-**Components Built:**
-- Controller
-- Steward
-- CLI (`cfg`)
-
-**SBOM Details:**
-- Format: SPDX 2.3 (JSON)
-- Tool: Syft (Anchore)
-- Compliance: NTIA Minimum Elements
-- Generated for: Controller, Steward, CLI
-- Use cases: Supply chain security, vulnerability tracking, license compliance, enterprise procurement
-
-**Timeout:** 30 minutes for builds, 15 minutes for SBOM
-
-**Permissions Required:**
-- `contents: write`
-- `packages: write`
-- `id-token: write`
+A proper release-engineering pipeline (cross-platform signed builds, SBOM attestation, MSI/pkg installers) will be designed once the Hyper-V dev infrastructure (Phase 2, Epic #390) provides controlled build hosts.
 
 ## Activation Timeline
 
@@ -158,7 +123,6 @@ These workflows will **activate immediately** when repository becomes public:
 - ✅ CodeQL security scanning
 - ✅ Docker container scanning
 - ✅ License compliance checking
-- ✅ Release automation with SBOM
 
 ## Testing Plan
 

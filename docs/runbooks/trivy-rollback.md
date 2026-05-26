@@ -51,11 +51,10 @@ rm "/tmp/${ARCHIVE}" /tmp/trivy
 1. `.devcontainer/Dockerfile` — `TRIVY_VERSION` and `TRIVY_SHA256` in the Trivy install RUN block.
 2. `.github/workflows/security-scan.yml` — both invocations of `install-trivy.sh`.
 3. `.github/workflows/production-gates.yml` — the install invocation.
-4. `.github/workflows/release-automation.yml` — the install invocation.
-5. `.github/workflows/docker-security.yml` — `TRIVY_VERSION` env var (line 35). The SHA-pinned `aquasecurity/trivy-action` and `aquasecurity/setup-trivy` references at lines 53/81/104/140/168/191 must NOT change — those SHAs are the advisory-confirmed safe versions.
-6. `.github/workflows/dependency-pin-check.yml` — `check_version "trivy"` argument and the denylist regex (the v0.69.4–v0.69.6 entries stay; do NOT add v0.70.0 to the denylist on rollback unless the advisory confirms compromise).
-7. `Makefile` — error-handler echo strings in the `security-trivy` target.
-8. This runbook — update the rollback SHA if you're rolling back to a different version.
+4. `.github/workflows/docker-security.yml` — `TRIVY_VERSION` env var (line 35). The SHA-pinned `aquasecurity/trivy-action` and `aquasecurity/setup-trivy` references at lines 53/81/104/140/168/191 must NOT change — those SHAs are the advisory-confirmed safe versions.
+5. `.github/workflows/dependency-pin-check.yml` — `check_version "trivy"` argument and the denylist regex (the v0.69.4–v0.69.6 entries stay; do NOT add v0.70.0 to the denylist on rollback unless the advisory confirms compromise).
+6. `Makefile` — error-handler echo strings in the `security-trivy` target.
+7. This runbook — update the rollback SHA if you're rolling back to a different version.
 
 ## Out of scope
 
