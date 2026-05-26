@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cfg storage migrate --from git --to flatfile` before upgrading. The controller now rejects
   `storage.provider: git` at startup with actionable instructions.
 
-## [0.8.0-governance] - 2026-05-24
+## [0.9.6] - 2026-05-24
 
-Governance release — license migration only. No feature, API, or wire-format changes.
+Consolidation + AGPL governance release. Bundles the v0.9.0–v0.9.5 work that has shipped to `develop` since v0.8.1 (2026-01-25) but was never tagged, plus the AGPL-3.0 relicense (Epic #1716). See [`docs/product/roadmap.md`](docs/product/roadmap.md) for the full list of bundled v0.9.x epics.
 
 ### Changed
 

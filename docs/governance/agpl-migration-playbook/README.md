@@ -1,17 +1,17 @@
-# AGPL-3.0 Migration Playbook (Story #1751)
+# v0.9.6 Consolidation + AGPL Governance Release Playbook (Story #1751)
 
-This directory is the **execution playbook** for the founder-action items in [Issue #1751](https://github.com/cfg-is/cfgms/issues/1751) — the closeout story for Epic #1716 (license migration to AGPL-3.0).
+This directory is the **execution playbook** for the founder-action items in [Issue #1751](https://github.com/cfg-is/cfgms/issues/1751) — the closeout story for the v0.9.6 release (Epic #1716 AGPL migration + the v0.9.0–v0.9.5 work consolidation, per [`docs/product/roadmap.md`](../../product/roadmap.md)).
 
 ## What's here
 
 | File | Purpose | AC item |
 |---|---|---|
 | `01-changelog-entry.md` | Reference copy of the CHANGELOG entry that was added to `/CHANGELOG.md` in this same PR. | #1 (delivered in this PR) |
-| `02-release-notes.md` | Drop-in body for the `v0.8.0-governance` GitHub release, with the `gh release create` command. | #2 |
+| `02-release-notes.md` | Drop-in body for the `v0.9.6` GitHub release, with the `gh release create` command. | #2 |
 | `03-repo-metadata.md` | Description + topics diff and `gh repo edit` commands. | #3 |
-| `05-followup-issues.md` | Two follow-up issue bodies (cfg.is website + commercial-license intake) with `gh issue create` commands. | #5 |
+| `05-followup-issues.md` | Two follow-up issue bodies (cfg.is website + commercial-license intake) with `gh issue create` commands. | #4 |
 
-**AC item #4 (fork-owner notification) is intentionally omitted.** Investigation surfaced one known fork (SAY-5/cfgms) but it has zero commits since the fork point, no upstream merges, and the fork owner's single interaction with cfg-is/cfgms (PR #850 against issue #849 on 2026-04-24) was a one-time contribution attempt — not active fork maintenance. No notification is warranted; #1751's AC #4 should be amended to reflect "no active fork-maintainers, no notification required" at execution time. The Apache-2.0 grandfathering protection for that fork stands without any action on our part.
+(File 04 for fork-owner notification was dropped on 2026-05-25 — investigation showed the only known fork (SAY-5/cfgms) has zero post-fork upstream engagement and the owner's single interaction was a one-time PR; no notification warranted. AC #4 was removed from #1751 on the same day.)
 
 ## How to use
 

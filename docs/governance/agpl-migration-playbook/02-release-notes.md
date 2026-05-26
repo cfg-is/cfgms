@@ -1,10 +1,10 @@
-## Track 2 Artifact 2: v0.8.0-governance release notes
+## Track 2 Artifact 2: v0.9.6 release notes
 
-**For `gh release create v0.8.0-governance --notes-file <this file>`** (paste the body below; the `gh release create` invocation is shown at the bottom):
+**For `gh release create v0.9.6 --notes-file <this file>`** (paste the body below; the `gh release create` invocation is shown at the bottom):
 
 ---
 
-# v0.8.0-governance — License change to AGPL-3.0
+# v0.9.6 — License change to AGPL-3.0
 
 This is a **governance release**, not a feature release. It tags the moment cfgms transitioned from the Apache-2.0 + Elastic License v2 dual-license model to a single **AGPL-3.0** license covering the entire repository.
 
@@ -62,9 +62,9 @@ See Epic [#1716](https://github.com/cfg-is/cfgms/issues/1716) for the full reaso
 
 ```bash
 # Replace HEAD if you want to tag a specific commit
-gh release create v0.8.0-governance \
+gh release create v0.9.6 \
   --target develop \
-  --title "v0.8.0-governance — License change to AGPL-3.0" \
+  --title "v0.9.6 — License change to AGPL-3.0" \
   --notes-file docs/governance/agpl-migration-playbook/02-release-notes.md
 ```
 

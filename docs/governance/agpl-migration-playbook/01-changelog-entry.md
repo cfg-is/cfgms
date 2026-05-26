@@ -1,9 +1,11 @@
 ## Track 2 Artifact 1: CHANGELOG.md entry
 
-**Insert at the top of the `## [Unreleased]` section in CHANGELOG.md** (or as a new section if you want to tag immediately as `[0.8.0-governance]`):
+**Already added to [`/CHANGELOG.md`](../../../CHANGELOG.md) in this PR's first commit.** This file is a reference copy of what was added, for quick reference at execution time. The text below should match the current CHANGELOG.md `[0.9.6]` section — if they diverge, the live CHANGELOG.md is the source of truth.
 
 ```markdown
-## [0.8.0-governance] - 2026-05-24
+## [0.9.6] - 2026-05-24
+
+Consolidation + AGPL governance release. Bundles the v0.9.0–v0.9.5 work that has shipped to `develop` since v0.8.1 (2026-01-25) but was never tagged, plus the AGPL-3.0 relicense (Epic #1716). See [`docs/product/roadmap.md`](docs/product/roadmap.md) for the full list of bundled v0.9.x epics.
 
 ### Changed
 
