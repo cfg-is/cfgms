@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 CFGMS Contributors
 // Package git provides a read-only ConfigStore backed by an external HTTPS git repository.
 // Credentials are fetched from pkg/secrets at transport time and never stored in struct fields.

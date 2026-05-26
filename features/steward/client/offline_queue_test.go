@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package client provides tests for offline report queueing.
 // Issue #419: steward queues reports locally when controller is unreachable.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package saas transport provides the HTTP client factory for Microsoft Graph API calls.
 // Graph API uses Microsoft's public CA infrastructure, so http.DefaultTransport

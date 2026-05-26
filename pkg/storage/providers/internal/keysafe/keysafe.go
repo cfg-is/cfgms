@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package keysafe provides path-safety validators for storage key fields.
 // It uses only the standard library to avoid import cycles with other CFGMS packages.

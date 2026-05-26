@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package interfaces defines the global secrets provider system for CFGMS
 // M-AUTH-1: Central secrets management with pluggable backends (SOPS, Vault, Azure KeyVault, AWS Secrets Manager)

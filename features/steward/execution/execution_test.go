@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Executor-wiring and ExecuteConfiguration tests. TestGenericConfigState_* are
 // intentionally kept in execution_internal_test.go (package execution) — see that

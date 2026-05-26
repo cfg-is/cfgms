@@ -1,7 +1,7 @@
 //go:build !windows
 // +build !windows
 
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package file - Platform-specific disk usage calculation for Unix-like systems
 

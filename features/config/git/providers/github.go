@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2025 CFGMS Contributors
 // Package providers implements Git provider abstractions for different services
 package providers

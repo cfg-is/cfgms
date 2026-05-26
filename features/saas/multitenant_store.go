@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package saas multitenant_store defines the ConsentStore interface for persisting
 // and retrieving admin-consent state, and provides InMemoryConsentStore as the
