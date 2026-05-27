@@ -19,8 +19,6 @@ This document defines standards and best practices for GitHub Actions workflows 
 
 3. **Production Workflows** (run on main/releases)
    - `production-gates.yml` - Comprehensive production readiness validation
-   - `release.yml` - Release automation
-   - `release-automation.yml` - Automated release process
 
 ## Branch Protection & Required Checks
 
