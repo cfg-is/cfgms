@@ -310,3 +310,15 @@ jobs:
           echo "✅ Documentation-only PR detected"
           echo "   Skipping fleet E2E tests (no code changes)"
           echo "   No fleet test validation required for docs-only changes"
+
+  trivy:
+    name: Trivy
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    steps:
+      - name: Docs-only Trivy validation
+        run: |
+          echo "✅ Documentation-only PR detected"
+          echo "   Skipping Trivy filesystem and image scans (no code or Dockerfile changes)"
+          echo "   No vulnerability scanning required for docs-only changes"
