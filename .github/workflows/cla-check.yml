@@ -15,6 +15,12 @@
 name: CLA Check
 
 on:
+  # zizmor: ignore[dangerous-triggers]
+  # `pull_request_target` is intentional: this workflow needs the elevated
+  # `pull-requests: write` token to post the CLA-bot comment on fork PRs.
+  # The workflow NEVER checks out the PR HEAD or executes PR-supplied code;
+  # it only checks out `develop` (a base-controlled ref) and calls `gh api`
+  # with `github.event`-supplied fields, which are GitHub-controlled.
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -33,6 +39,7 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: develop
+          persist-credentials: false
 
       - name: Verify CLA signature
         env:
