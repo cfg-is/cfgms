@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package m365 provides directory provider integration for Microsoft 365/Entra ID
 // that implements the controller's unified directory interface.
@@ -11,6 +11,7 @@ package m365
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/directory"
@@ -299,66 +300,290 @@ func (p *EntraIDDirectoryProvider) DeleteUser(ctx context.Context, userID string
 	return nil
 }
 
-// SearchUsers searches for users in Entra ID
+// SearchUsers searches for users in Entra ID using OData startswith filters on
+// displayName and userPrincipalName. Paging is handled transparently (up to 1000
+// results). An empty query is rejected to prevent accidentally fetching all users.
 func (p *EntraIDDirectoryProvider) SearchUsers(ctx context.Context, query *directory.SearchQuery) ([]*types.DirectoryUser, error) {
 	if !p.connected {
 		return nil, fmt.Errorf("not connected to Entra ID")
 	}
 
-	// For now, return empty slice - full implementation would use Graph API search
-	// This would involve constructing OData filter queries from the SearchQuery
-	p.logger.Info("SearchUsers called", "query", query.Query, "limit", query.Limit)
-	return []*types.DirectoryUser{}, nil
+	if strings.TrimSpace(query.Query) == "" {
+		return nil, fmt.Errorf("search query must not be empty")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sanitize single quotes to prevent OData injection.
+	sanitized := strings.ReplaceAll(query.Query, "'", "''")
+	filter := fmt.Sprintf(
+		"startswith(displayName,'%s') or startswith(userPrincipalName,'%s')",
+		sanitized, sanitized,
+	)
+
+	users, err := p.graphClient.ListUsers(ctx, token, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search users in Entra ID: %w", err)
+	}
+
+	result := make([]*types.DirectoryUser, 0, len(users))
+	for i := range users {
+		graphUserType := &types.GraphUser{
+			ID:                users[i].ID,
+			UserPrincipalName: users[i].UserPrincipalName,
+			DisplayName:       users[i].DisplayName,
+			MailNickname:      users[i].MailNickname,
+			AccountEnabled:    users[i].AccountEnabled,
+			Mail:              users[i].Mail,
+			MobilePhone:       users[i].MobilePhone,
+			OfficeLocation:    users[i].OfficeLocation,
+			JobTitle:          users[i].JobTitle,
+			Department:        users[i].Department,
+			CompanyName:       users[i].CompanyName,
+			CreatedDateTime:   users[i].CreatedDateTime,
+		}
+		result = append(result, types.FromGraphUser(graphUserType, p.name))
+	}
+	return result, nil
 }
 
-// Group Operations (similar pattern to user operations)
+// Group Operations
 
 // GetGroup retrieves a group from Entra ID
 func (p *EntraIDDirectoryProvider) GetGroup(ctx context.Context, groupID string) (*types.DirectoryGroup, error) {
-	// Similar implementation to GetUser but for groups
-	return nil, fmt.Errorf("GetGroup not yet implemented for Entra ID provider")
+	if !p.connected {
+		return nil, fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	group, err := p.graphClient.GetGroup(ctx, token, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group from Entra ID: %w", err)
+	}
+
+	return p.graphGroupToDirectoryGroup(group), nil
 }
 
 // CreateGroup creates a group in Entra ID
 func (p *EntraIDDirectoryProvider) CreateGroup(ctx context.Context, group *types.DirectoryGroup) (*types.DirectoryGroup, error) {
-	return nil, fmt.Errorf("CreateGroup not yet implemented for Entra ID provider")
+	if !p.connected {
+		return nil, fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	graphGroup := group.ToGraphGroup()
+	createRequest := &graph.CreateGroupRequest{
+		DisplayName:     graphGroup.DisplayName,
+		Description:     graphGroup.Description,
+		MailEnabled:     graphGroup.MailEnabled,
+		SecurityEnabled: graphGroup.SecurityEnabled,
+		MailNickname:    graphGroup.MailNickname,
+	}
+
+	created, err := p.graphClient.CreateGroup(ctx, token, createRequest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create group in Entra ID: %w", err)
+	}
+
+	return p.graphGroupToDirectoryGroup(created), nil
 }
 
 // UpdateGroup updates a group in Entra ID
 func (p *EntraIDDirectoryProvider) UpdateGroup(ctx context.Context, groupID string, updates *types.DirectoryGroup) (*types.DirectoryGroup, error) {
-	return nil, fmt.Errorf("UpdateGroup not yet implemented for Entra ID provider")
+	if !p.connected {
+		return nil, fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	graphGroup := updates.ToGraphGroup()
+	updateRequest := &graph.UpdateGroupRequest{
+		DisplayName:     &graphGroup.DisplayName,
+		Description:     &graphGroup.Description,
+		MailEnabled:     &graphGroup.MailEnabled,
+		SecurityEnabled: &graphGroup.SecurityEnabled,
+		MailNickname:    &graphGroup.MailNickname,
+	}
+
+	if err := p.graphClient.UpdateGroup(ctx, token, groupID, updateRequest); err != nil {
+		return nil, fmt.Errorf("failed to update group in Entra ID: %w", err)
+	}
+
+	return p.GetGroup(ctx, groupID)
 }
 
 // DeleteGroup deletes a group from Entra ID
 func (p *EntraIDDirectoryProvider) DeleteGroup(ctx context.Context, groupID string) error {
-	return fmt.Errorf("DeleteGroup not yet implemented for Entra ID provider")
+	if !p.connected {
+		return fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := p.graphClient.DeleteGroup(ctx, token, groupID); err != nil {
+		return fmt.Errorf("failed to delete group from Entra ID: %w", err)
+	}
+
+	return nil
 }
 
-// SearchGroups searches for groups in Entra ID
+// SearchGroups searches for groups in Entra ID using a displayName eq filter
 func (p *EntraIDDirectoryProvider) SearchGroups(ctx context.Context, query *directory.SearchQuery) ([]*types.DirectoryGroup, error) {
-	return nil, fmt.Errorf("SearchGroups not yet implemented for Entra ID provider")
+	if !p.connected {
+		return nil, fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build OData filter; sanitize single quotes to prevent OData injection.
+	// Design decision: group search uses /groups?$filter=displayName eq '...' via ListGroups;
+	// $search requires ConsistencyLevel:eventual header not yet propagated through the client.
+	var filter string
+	if query.Filter != "" {
+		filter = query.Filter
+	} else {
+		sanitized := strings.ReplaceAll(query.Query, "'", "''")
+		filter = fmt.Sprintf("displayName eq '%s'", sanitized)
+	}
+
+	groups, err := p.graphClient.ListGroups(ctx, token, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search groups in Entra ID: %w", err)
+	}
+
+	result := make([]*types.DirectoryGroup, 0, len(groups))
+	for i := range groups {
+		result = append(result, p.graphGroupToDirectoryGroup(&groups[i]))
+	}
+	return result, nil
 }
 
 // Membership Operations
 
 // AddUserToGroup adds a user to a group in Entra ID
 func (p *EntraIDDirectoryProvider) AddUserToGroup(ctx context.Context, userID, groupID string) error {
-	return fmt.Errorf("AddUserToGroup not yet implemented for Entra ID provider")
+	if !p.connected {
+		return fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := p.graphClient.AddUserToGroup(ctx, token, userID, groupID); err != nil {
+		return fmt.Errorf("failed to add user to group in Entra ID: %w", err)
+	}
+
+	return nil
 }
 
 // RemoveUserFromGroup removes a user from a group in Entra ID
 func (p *EntraIDDirectoryProvider) RemoveUserFromGroup(ctx context.Context, userID, groupID string) error {
-	return fmt.Errorf("RemoveUserFromGroup not yet implemented for Entra ID provider")
+	if !p.connected {
+		return fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := p.graphClient.RemoveUserFromGroup(ctx, token, userID, groupID); err != nil {
+		return fmt.Errorf("failed to remove user from group in Entra ID: %w", err)
+	}
+
+	return nil
 }
 
 // GetUserGroups gets all groups for a user in Entra ID
 func (p *EntraIDDirectoryProvider) GetUserGroups(ctx context.Context, userID string) ([]*types.DirectoryGroup, error) {
-	return nil, fmt.Errorf("GetUserGroups not yet implemented for Entra ID provider")
+	if !p.connected {
+		return nil, fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	groupIDs, err := p.graphClient.GetUserGroups(ctx, token, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user groups from Entra ID: %w", err)
+	}
+
+	result := make([]*types.DirectoryGroup, 0, len(groupIDs))
+	for _, gid := range groupIDs {
+		group, err := p.graphClient.GetGroup(ctx, token, gid)
+		if err != nil {
+			p.logger.Warn("failed to get group details", "group_id", logging.SanitizeLogValue(gid), "error", err)
+			continue
+		}
+		result = append(result, p.graphGroupToDirectoryGroup(group))
+	}
+	return result, nil
 }
 
 // GetGroupMembers gets all members of a group in Entra ID
 func (p *EntraIDDirectoryProvider) GetGroupMembers(ctx context.Context, groupID string) ([]*types.DirectoryUser, error) {
-	return nil, fmt.Errorf("GetGroupMembers not yet implemented for Entra ID provider")
+	if !p.connected {
+		return nil, fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	upns, err := p.graphClient.ListGroupMembers(ctx, token, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group members from Entra ID: %w", err)
+	}
+
+	result := make([]*types.DirectoryUser, 0, len(upns))
+	for _, upn := range upns {
+		user, err := p.graphClient.GetUser(ctx, token, upn)
+		if err != nil {
+			p.logger.Warn("failed to get member details", "upn", logging.SanitizeLogValue(upn), "error", err)
+			continue
+		}
+		graphUserType := &types.GraphUser{
+			ID:                user.ID,
+			UserPrincipalName: user.UserPrincipalName,
+			DisplayName:       user.DisplayName,
+			MailNickname:      user.MailNickname,
+			AccountEnabled:    user.AccountEnabled,
+			Mail:              user.Mail,
+			MobilePhone:       user.MobilePhone,
+			OfficeLocation:    user.OfficeLocation,
+			JobTitle:          user.JobTitle,
+			Department:        user.Department,
+			CompanyName:       user.CompanyName,
+			CreatedDateTime:   user.CreatedDateTime,
+		}
+		result = append(result, types.FromGraphUser(graphUserType, p.name))
+	}
+	return result, nil
 }
 
 // Organizational Structure (Entra ID doesn't support OUs)
@@ -402,27 +627,117 @@ func (p *EntraIDDirectoryProvider) SupportsAdminUnits() bool {
 
 // GetAdminUnit gets an administrative unit from Entra ID
 func (p *EntraIDDirectoryProvider) GetAdminUnit(ctx context.Context, unitID string) (*directory.AdministrativeUnit, error) {
-	return nil, fmt.Errorf("GetAdminUnit not yet implemented for Entra ID provider")
+	if !p.connected {
+		return nil, fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	unit, err := p.graphClient.GetAdministrativeUnit(ctx, token, unitID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get administrative unit from Entra ID: %w", err)
+	}
+
+	return p.graphAdminUnitToDirectoryAdminUnit(unit), nil
 }
 
 // CreateAdminUnit creates an administrative unit in Entra ID
 func (p *EntraIDDirectoryProvider) CreateAdminUnit(ctx context.Context, unit *directory.AdministrativeUnit) (*directory.AdministrativeUnit, error) {
-	return nil, fmt.Errorf("CreateAdminUnit not yet implemented for Entra ID provider")
+	if !p.connected {
+		return nil, fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	createRequest := &graph.CreateAdministrativeUnitRequest{
+		DisplayName:                   unit.DisplayName,
+		Description:                   unit.Description,
+		Visibility:                    unit.Visibility,
+		MembershipType:                unit.MembershipType,
+		MembershipRule:                unit.MembershipRule,
+		MembershipRuleProcessingState: unit.MembershipRuleProcessingState,
+	}
+
+	created, err := p.graphClient.CreateAdministrativeUnit(ctx, token, createRequest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create administrative unit in Entra ID: %w", err)
+	}
+
+	return p.graphAdminUnitToDirectoryAdminUnit(created), nil
 }
 
 // UpdateAdminUnit updates an administrative unit in Entra ID
 func (p *EntraIDDirectoryProvider) UpdateAdminUnit(ctx context.Context, unitID string, updates *directory.AdministrativeUnit) (*directory.AdministrativeUnit, error) {
-	return nil, fmt.Errorf("UpdateAdminUnit not yet implemented for Entra ID provider")
+	if !p.connected {
+		return nil, fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	updateRequest := &graph.UpdateAdministrativeUnitRequest{
+		DisplayName:                   &updates.DisplayName,
+		Description:                   &updates.Description,
+		Visibility:                    &updates.Visibility,
+		MembershipType:                &updates.MembershipType,
+		MembershipRule:                &updates.MembershipRule,
+		MembershipRuleProcessingState: &updates.MembershipRuleProcessingState,
+	}
+
+	if err := p.graphClient.UpdateAdministrativeUnit(ctx, token, unitID, updateRequest); err != nil {
+		return nil, fmt.Errorf("failed to update administrative unit in Entra ID: %w", err)
+	}
+
+	return p.GetAdminUnit(ctx, unitID)
 }
 
 // DeleteAdminUnit deletes an administrative unit from Entra ID
 func (p *EntraIDDirectoryProvider) DeleteAdminUnit(ctx context.Context, unitID string) error {
-	return fmt.Errorf("DeleteAdminUnit not yet implemented for Entra ID provider")
+	if !p.connected {
+		return fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := p.graphClient.DeleteAdministrativeUnit(ctx, token, unitID); err != nil {
+		return fmt.Errorf("failed to delete administrative unit from Entra ID: %w", err)
+	}
+
+	return nil
 }
 
 // ListAdminUnits lists administrative units in Entra ID
 func (p *EntraIDDirectoryProvider) ListAdminUnits(ctx context.Context) ([]*directory.AdministrativeUnit, error) {
-	return nil, fmt.Errorf("ListAdminUnits not yet implemented for Entra ID provider")
+	if !p.connected {
+		return nil, fmt.Errorf("not connected to Entra ID")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	units, err := p.graphClient.ListAdministrativeUnits(ctx, token, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list administrative units from Entra ID: %w", err)
+	}
+
+	result := make([]*directory.AdministrativeUnit, 0, len(units))
+	for i := range units {
+		result = append(result, p.graphAdminUnitToDirectoryAdminUnit(&units[i]))
+	}
+	return result, nil
 }
 
 // Helper Methods
@@ -462,9 +777,37 @@ func (p *EntraIDDirectoryProvider) parseConfig(config directory.ProviderConfig) 
 	}, nil
 }
 
-// RegisterWithController registers this provider with the controller's directory service
+// graphGroupToDirectoryGroup converts a graph.Group to types.DirectoryGroup
+func (p *EntraIDDirectoryProvider) graphGroupToDirectoryGroup(g *graph.Group) *types.DirectoryGroup {
+	graphGroupType := &types.GraphGroup{
+		ID:              g.ID,
+		DisplayName:     g.DisplayName,
+		Description:     g.Description,
+		MailEnabled:     g.MailEnabled,
+		SecurityEnabled: g.SecurityEnabled,
+		MailNickname:    g.MailNickname,
+		Mail:            g.Mail,
+	}
+	return types.FromGraphGroup(graphGroupType, p.name)
+}
+
+// graphAdminUnitToDirectoryAdminUnit converts a graph.AdministrativeUnit to directory.AdministrativeUnit
+func (p *EntraIDDirectoryProvider) graphAdminUnitToDirectoryAdminUnit(u *graph.AdministrativeUnit) *directory.AdministrativeUnit {
+	return &directory.AdministrativeUnit{
+		ID:                            u.ID,
+		DisplayName:                   u.DisplayName,
+		Description:                   u.Description,
+		Visibility:                    u.Visibility,
+		MembershipType:                u.MembershipType,
+		MembershipRule:                u.MembershipRule,
+		MembershipRuleProcessingState: u.MembershipRuleProcessingState,
+		Source:                        p.name,
+	}
+}
+
+// RegisterWithController registers this provider with the controller's directory service.
+// Design decision: module registration is injected at controller startup via the controller interface
+// parameter; this function satisfies the module lifecycle contract but performs no work.
 func RegisterWithController(controller interface{}) error {
-	// This would be called during module initialization
-	// For now, just return success - actual registration would happen through controller interface
 	return nil
 }

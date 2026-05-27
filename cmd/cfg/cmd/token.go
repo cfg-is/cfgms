@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package cmd implements the CLI commands for cfg
 package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -17,7 +18,7 @@ var (
 	tokenControllerURL string
 	tokenGroup         string
 	tokenExpiresIn     string
-	tokenSingleUse     bool
+	tokenJSONOutput    bool
 
 	// API connection flags
 	tokenAPIURL      string
@@ -33,8 +34,11 @@ var tokenCmd = &cobra.Command{
 	Long: `Manage registration tokens for steward deployment.
 
 Registration tokens are short API key-style strings that stewards use to
-auto-register with the controller. Tokens contain tenant information and
-can be time-limited, single-use, and revocable.
+auto-register with the controller. Tokens are perennial (survive multiple
+registrations), time-limited (optional), and revocable.
+
+Use 'cfg token rotate' to atomically replace the active token for a
+tenant/group with a fresh one, invalidating the old one immediately.
 
 This command communicates with the controller's REST API to manage tokens.
 The controller URL and API key can be provided via flags or environment variables:
@@ -45,16 +49,16 @@ The controller URL and API key can be provided via flags or environment variable
 
 Examples:
   # Create a token that expires in 7 days
-  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --expires=7d
+  cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --expires=7d
 
-  # Create a single-use token for production group
-  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production --single-use
+  # Rotate the active token for a tenant/group
+  cfg token rotate --tenant-id=acme-corp --group=production
 
   # List all tokens for a tenant
   cfg token list --tenant-id=acme-corp
 
   # Revoke a token
-  cfg token revoke cfgms_reg_abc123def456`,
+  cfg token revoke abcdefghijklmnopqrstuvwxyz`,
 }
 
 // tokenCreateCmd represents the token create command
@@ -63,8 +67,9 @@ var tokenCreateCmd = &cobra.Command{
 	Short: "Create a new registration token",
 	Long: `Create a new registration token for steward deployment.
 
-The token will be a short API key-style string (e.g., cfgms_reg_abc123def456)
-that stewards can use to auto-register with the controller.
+The token will be a bare base32-encoded string (e.g., abcdefghijklmnopqrstuvwxyz)
+that stewards can use to auto-register with the controller. Tokens are perennial:
+they survive multiple registrations until explicitly revoked or rotated.
 
 Expiration formats:
   - "24h" = 24 hours
@@ -74,14 +79,29 @@ Expiration formats:
 
 Examples:
   # 7-day expiring token
-  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --expires=7d
-
-  # Single-use token
-  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --single-use
+  cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --expires=7d
 
   # Token for specific group
-  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production`,
+  cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --group=production`,
 	RunE: runTokenCreate,
+}
+
+// tokenRotateCmd represents the token rotate command
+var tokenRotateCmd = &cobra.Command{
+	Use:   "rotate",
+	Short: "Rotate the active token for a tenant/group",
+	Long: `Atomically replace the active registration token for a tenant/group.
+
+The old token is revoked and a new one is created in a single transaction,
+ensuring no window where a device could register with neither token.
+
+Examples:
+  # Rotate the token for all groups of a tenant
+  cfg token rotate --tenant-id=acme-corp
+
+  # Rotate the token for a specific group
+  cfg token rotate --tenant-id=acme-corp --group=production`,
+	RunE: runTokenRotate,
 }
 
 // tokenListCmd represents the token list command
@@ -111,7 +131,7 @@ The token will be marked as revoked but not deleted from storage.
 This allows for audit trail of token usage.
 
 Examples:
-  cfg token revoke cfgms_reg_abc123def456`,
+  cfg token revoke abcdefghijklmnopqrstuvwxyz`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTokenRevoke,
 }
@@ -126,9 +146,22 @@ This permanently removes the token. Use 'revoke' instead if you want
 to maintain an audit trail.
 
 Examples:
-  cfg token delete cfgms_reg_abc123def456`,
+  cfg token delete abcdefghijklmnopqrstuvwxyz`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTokenDelete,
+}
+
+// tokenGetCmd represents the token get command
+var tokenGetCmd = &cobra.Command{
+	Use:   "get <token>",
+	Short: "Get a registration token by value",
+	Long: `Retrieve a single registration token by its string value.
+
+Examples:
+  cfg token get abcdefghijklmnopqrstuvwxyz
+  cfg token get abcdefghijklmnopqrstuvwxyz --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runTokenGet,
 }
 
 func init() {
@@ -140,42 +173,64 @@ func init() {
 
 	// Create command flags
 	tokenCreateCmd.Flags().StringVar(&tokenTenantID, "tenant-id", "", "Tenant ID (required)")
-	tokenCreateCmd.Flags().StringVar(&tokenControllerURL, "controller-url", "", "Controller MQTT URL for steward connections (required)")
+	tokenCreateCmd.Flags().StringVar(&tokenControllerURL, "controller-url", "", "Controller transport URL for steward connections (required)")
 	tokenCreateCmd.Flags().StringVar(&tokenGroup, "group", "", "Optional group identifier")
 	tokenCreateCmd.Flags().StringVar(&tokenExpiresIn, "expires", "", "Expiration duration (e.g., 24h, 7d, 30d)")
-	tokenCreateCmd.Flags().BoolVar(&tokenSingleUse, "single-use", false, "Token can only be used once")
+	tokenCreateCmd.Flags().BoolVar(&tokenJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
 	_ = tokenCreateCmd.MarkFlagRequired("tenant-id")
 	_ = tokenCreateCmd.MarkFlagRequired("controller-url")
 
+	// Rotate command flags
+	tokenRotateCmd.Flags().StringVar(&tokenTenantID, "tenant-id", "", "Tenant ID (required)")
+	tokenRotateCmd.Flags().StringVar(&tokenGroup, "group", "", "Group to rotate (rotates all active tokens if omitted)")
+	tokenRotateCmd.Flags().BoolVar(&tokenJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
+	_ = tokenRotateCmd.MarkFlagRequired("tenant-id")
+
 	// List command flags
 	tokenListCmd.Flags().StringVar(&tokenTenantID, "tenant-id", "", "Filter by tenant ID (optional)")
+	tokenListCmd.Flags().BoolVar(&tokenJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
+
+	// Get command flags
+	tokenGetCmd.Flags().BoolVar(&tokenJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
 	// Add subcommands
 	tokenCmd.AddCommand(tokenCreateCmd)
+	tokenCmd.AddCommand(tokenRotateCmd)
 	tokenCmd.AddCommand(tokenListCmd)
 	tokenCmd.AddCommand(tokenRevokeCmd)
 	tokenCmd.AddCommand(tokenDeleteCmd)
+	tokenCmd.AddCommand(tokenGetCmd)
 }
 
-// getAPIClient creates an API client using flags or environment variables
+// getAPIClient creates an API client using bundle auth (mTLS) when available,
+// falling back to API key auth when no bundle is found or discovery is opted out.
 func getAPIClient() (*APIClient, error) {
-	// Resolve API URL
+	// Resolve API URL (without default — bundle ControllerURL fills the gap)
 	apiURL := tokenAPIURL
 	if apiURL == "" {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
+
+	// Try admin bundle first (mTLS auto-discovery)
+	client, err := resolveBundleClient(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("bundle lookup failed: %w", err)
+	}
+	if client != nil {
+		return client, nil
+	}
+
+	// Fallback: API key path (unchanged from pre-bundle behavior)
 	if apiURL == "" {
 		apiURL = "http://localhost:9080"
 	}
 
-	// Resolve API key
 	apiKey := tokenAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
 	}
 
-	// Resolve TLS settings
 	tlsInsecure := tokenTLSInsecure
 	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
 		tlsInsecure = true
@@ -186,25 +241,7 @@ func getAPIClient() (*APIClient, error) {
 		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
 	}
 
-	// Load CA certificate if provided
-	var caCertPEM []byte
-	if tlsCACertPath != "" {
-		var err error
-		// #nosec G304 - CA certificate path is intentionally provided by user via CLI flag or env var
-		caCertPEM, err = os.ReadFile(tlsCACertPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read CA certificate: %w", err)
-		}
-	}
-
-	cfg := &APIClientConfig{
-		BaseURL:     apiURL,
-		APIKey:      apiKey,
-		CACertPEM:   caCertPEM,
-		TLSInsecure: tlsInsecure,
-	}
-
-	return NewAPIClient(cfg)
+	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
 }
 
 func runTokenCreate(cmd *cobra.Command, args []string) error {
@@ -213,13 +250,11 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	// Create token via API
 	req := &APITokenCreateRequest{
 		TenantID:      tokenTenantID,
 		ControllerURL: tokenControllerURL,
 		Group:         tokenGroup,
 		ExpiresIn:     tokenExpiresIn,
-		SingleUse:     tokenSingleUse,
 	}
 
 	token, err := client.CreateToken(context.Background(), req)
@@ -227,7 +262,10 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create token: %w", err)
 	}
 
-	// Output results
+	if tokenJSONOutput {
+		return json.NewEncoder(os.Stdout).Encode(token)
+	}
+
 	fmt.Printf("Registration Token: %s\n\n", token.Token)
 
 	fmt.Println("Token Details:")
@@ -241,7 +279,6 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("  Expires:        Never\n")
 	}
-	fmt.Printf("  Single Use:     %v\n", token.SingleUse)
 
 	fmt.Println()
 	fmt.Println("Deployment Examples:")
@@ -258,6 +295,38 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runTokenRotate(cmd *cobra.Command, args []string) error {
+	client, err := getAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	token, err := client.RotateToken(context.Background(), tokenTenantID, tokenGroup)
+	if err != nil {
+		return fmt.Errorf("failed to rotate token: %w", err)
+	}
+
+	if tokenJSONOutput {
+		return json.NewEncoder(os.Stdout).Encode(token)
+	}
+
+	fmt.Printf("Token rotated successfully.\n\n")
+	fmt.Printf("New Registration Token: %s\n\n", token.Token)
+	fmt.Println("Token Details:")
+	fmt.Printf("  Tenant ID:      %s\n", token.TenantID)
+	fmt.Printf("  Controller URL: %s\n", token.ControllerURL)
+	if token.Group != "" {
+		fmt.Printf("  Group:          %s\n", token.Group)
+	}
+	if token.ExpiresAt != nil {
+		fmt.Printf("  Expires:        %s\n", *token.ExpiresAt)
+	} else {
+		fmt.Printf("  Expires:        Never\n")
+	}
+
+	return nil
+}
+
 func runTokenList(cmd *cobra.Command, args []string) error {
 	client, err := getAPIClient()
 	if err != nil {
@@ -267,6 +336,10 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 	resp, err := client.ListTokens(context.Background(), tokenTenantID)
 	if err != nil {
 		return fmt.Errorf("failed to list tokens: %w", err)
+	}
+
+	if tokenJSONOutput {
+		return json.NewEncoder(os.Stdout).Encode(resp)
 	}
 
 	if resp.Total == 0 {
@@ -288,11 +361,6 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Expires:        %s\n", *token.ExpiresAt)
 		} else {
 			fmt.Printf("  Expires:        Never\n")
-		}
-		fmt.Printf("  Single Use:     %v\n", token.SingleUse)
-		if token.UsedAt != nil {
-			fmt.Printf("  Used At:        %s\n", *token.UsedAt)
-			fmt.Printf("  Used By:        %s\n", token.UsedBy)
 		}
 		if token.Revoked {
 			fmt.Printf("  Status:         REVOKED")
@@ -341,6 +409,48 @@ func runTokenDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Token deleted successfully: %s\n", tokenStr)
+
+	return nil
+}
+
+func runTokenGet(cmd *cobra.Command, args []string) error {
+	tokenStr := args[0]
+	client, err := getAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	token, err := client.GetToken(context.Background(), tokenStr)
+	if err != nil {
+		return fmt.Errorf("failed to get token %s: %w", tokenStr, err)
+	}
+
+	if tokenJSONOutput {
+		return json.NewEncoder(os.Stdout).Encode(token)
+	}
+
+	fmt.Printf("Token: %s\n", token.Token)
+	fmt.Printf("  Tenant ID:      %s\n", token.TenantID)
+	fmt.Printf("  Controller URL: %s\n", token.ControllerURL)
+	if token.Group != "" {
+		fmt.Printf("  Group:          %s\n", token.Group)
+	}
+	fmt.Printf("  Created:        %s\n", token.CreatedAt)
+	if token.ExpiresAt != nil {
+		fmt.Printf("  Expires:        %s\n", *token.ExpiresAt)
+	} else {
+		fmt.Printf("  Expires:        Never\n")
+	}
+	if token.Revoked {
+		fmt.Printf("  Status:         REVOKED")
+		if token.RevokedAt != nil {
+			fmt.Printf(" (at %s)", *token.RevokedAt)
+		}
+		fmt.Println()
+	} else {
+		fmt.Printf("  Status:         Active\n")
+	}
+	fmt.Println()
 
 	return nil
 }

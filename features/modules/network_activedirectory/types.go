@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package network_activedirectory
 
@@ -26,9 +26,9 @@ type ADModuleConfig struct {
 	CrossDomainAuth bool     `yaml:"cross_domain_auth"`           // Enable cross-domain authentication
 
 	// Authentication
-	AuthMethod string `yaml:"auth_method"`        // "kerberos", "ntlm", "simple"
-	Username   string `yaml:"username,omitempty"` // Service account username
-	Password   string `yaml:"password,omitempty"` // Service account password
+	AuthMethod        string `yaml:"auth_method"`                   // "kerberos", "ntlm", "simple"
+	Username          string `yaml:"username,omitempty"`            // Service account username
+	PasswordSecretKey string `yaml:"password_secret_key,omitempty"` // pkg/secrets key for the service account password
 
 	// Search configuration
 	SearchBase string `yaml:"search_base,omitempty"` // Base DN for searches
@@ -65,6 +65,9 @@ func (c *ADModuleConfig) AsMap() map[string]interface{} {
 	if c.Username != "" {
 		result["username"] = c.Username
 	}
+	if c.PasswordSecretKey != "" {
+		result["password_secret_key"] = c.PasswordSecretKey
+	}
 	if c.SearchBase != "" {
 		result["search_base"] = c.SearchBase
 	}
@@ -95,10 +98,7 @@ func (c *ADModuleConfig) AsMap() map[string]interface{} {
 
 // ToYAML serializes the configuration to YAML
 func (c *ADModuleConfig) ToYAML() ([]byte, error) {
-	// Create a copy without sensitive fields for serialization
-	safe := *c
-	safe.Password = "[REDACTED]"
-	return yaml.Marshal(safe)
+	return yaml.Marshal(c)
 }
 
 // FromYAML deserializes YAML data into the configuration
@@ -190,9 +190,11 @@ type ADQueryResult struct {
 	User           *interfaces.DirectoryUser       `json:"user,omitempty"`
 	Group          *interfaces.DirectoryGroup      `json:"group,omitempty"`
 	OU             *interfaces.OrganizationalUnit  `json:"ou,omitempty"`
+	Computer       *interfaces.DirectoryComputer   `json:"computer,omitempty"`
 	Users          []interfaces.DirectoryUser      `json:"users,omitempty"`
 	Groups         []interfaces.DirectoryGroup     `json:"groups,omitempty"`
 	OUs            []interfaces.OrganizationalUnit `json:"ous,omitempty"`
+	Computers      []interfaces.DirectoryComputer  `json:"computers,omitempty"`
 	GenericObject  *interfaces.DirectoryUser       `json:"generic_object,omitempty"`
 	GenericObjects []map[string]interface{}        `json:"generic_objects,omitempty"`
 
@@ -246,6 +248,12 @@ func (r *ADQueryResult) AsMap() map[string]interface{} {
 	}
 	if len(r.OUs) > 0 {
 		result["ous"] = r.OUs
+	}
+	if r.Computer != nil {
+		result["computer"] = r.Computer
+	}
+	if len(r.Computers) > 0 {
+		result["computers"] = r.Computers
 	}
 	if r.GenericObject != nil {
 		result["generic_object"] = r.GenericObject

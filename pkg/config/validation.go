@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package config provides configuration validation before storage persistence
 package config
@@ -11,18 +11,21 @@ import (
 	"gopkg.in/yaml.v3"
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // ValidationManager handles configuration validation before storage
 type ValidationManager struct {
-	configStore interfaces.ConfigStore
+	configStore cfgconfig.ConfigStore
+	tenantStore business.TenantStore
 }
 
 // NewValidationManager creates a new validation manager
-func NewValidationManager(configStore interfaces.ConfigStore) *ValidationManager {
+func NewValidationManager(configStore cfgconfig.ConfigStore, tenantStore business.TenantStore) *ValidationManager {
 	return &ValidationManager{
 		configStore: configStore,
+		tenantStore: tenantStore,
 	}
 }
 
@@ -83,21 +86,23 @@ func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID
 			Field:   "steward_config",
 			Message: fmt.Sprintf("Basic validation failed: %v", err),
 			Code:    "BASIC_VALIDATION_FAILED",
-			Level:   "error",
+			Level:   "critical",
 		})
 	}
 
 	// Validate tenant context
-	result.TenantChecks = vm.validateTenantContext(ctx, tenantID, stewardID, config)
-	if !result.TenantChecks.TenantExists {
+	tenantChecks, tenantErr := vm.validateTenantContext(ctx, tenantID, stewardID, config)
+	if tenantErr != nil {
 		result.Valid = false
 		result.Errors = append(result.Errors, ValidationError{
-			Field:      "tenant_id",
-			Message:    fmt.Sprintf("Tenant '%s' does not exist", tenantID),
-			Code:       "TENANT_NOT_FOUND",
-			Level:      "error",
-			Suggestion: "Ensure the tenant exists before storing configuration",
+			Field:   "tenant_id",
+			Message: fmt.Sprintf("Tenant lookup failed: %v", tenantErr),
+			Code:    "TENANT_LOOKUP_ERROR",
+			Level:   "error",
 		})
+		result.TenantChecks = &TenantValidationResult{TenantID: tenantID}
+	} else {
+		result.TenantChecks = tenantChecks
 	}
 
 	// Validate module dependencies
@@ -139,28 +144,34 @@ func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID
 	// Validate resource configurations
 	vm.validateResources(result, config)
 
-	// Validate steward settings
-	vm.validateStewardSettings(result, config)
-
 	return result
 }
 
-// validateTenantContext validates tenant-related aspects of the configuration
-func (vm *ValidationManager) validateTenantContext(ctx context.Context, tenantID, stewardID string, config *stewardconfig.StewardConfig) *TenantValidationResult {
+// validateTenantContext validates tenant-related aspects of the configuration.
+// Returns (result, nil) when the tenant exists or is simply absent from the store.
+// Returns (nil, err) only on a real store error (not a not-found condition).
+func (vm *ValidationManager) validateTenantContext(ctx context.Context, tenantID, stewardID string, config *stewardconfig.StewardConfig) (*TenantValidationResult, error) {
 	result := &TenantValidationResult{
-		TenantExists:      true, // Simplified - would check tenant store in full implementation
+		TenantExists:      false,
 		TenantID:          tenantID,
 		InheritanceValid:  true,
 		ConflictsDetected: 0,
 	}
 
-	// In a full implementation, this would:
-	// 1. Check if tenant exists in ClientTenantStore
-	// 2. Validate inheritance chain
-	// 3. Check for configuration conflicts in the hierarchy
-	// 4. Validate permissions to modify configuration
+	if tenantID == "" {
+		return result, nil
+	}
 
-	return result
+	_, err := vm.tenantStore.GetTenant(ctx, tenantID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return result, nil
+		}
+		return nil, fmt.Errorf("tenant store lookup failed: %w", err)
+	}
+
+	result.TenantExists = true
+	return result, nil
 }
 
 // validateDependencies validates module dependencies and availability
@@ -280,80 +291,6 @@ func (vm *ValidationManager) validateResources(result *ValidationResult, config 
 	}
 }
 
-// validateStewardSettings validates steward-specific settings
-func (vm *ValidationManager) validateStewardSettings(result *ValidationResult, config *stewardconfig.StewardConfig) {
-	// Validate steward ID
-	if config.Steward.ID == "" {
-		result.Warnings = append(result.Warnings, ValidationError{
-			Field:      "steward.id",
-			Message:    "Steward ID is empty - will use hostname as default",
-			Code:       "EMPTY_STEWARD_ID",
-			Level:      "warning",
-			Suggestion: "Consider setting an explicit steward ID for better identification",
-		})
-	}
-
-	// Validate operation mode
-	validModes := []stewardconfig.OperationMode{stewardconfig.ModeStandalone, stewardconfig.ModeController}
-	modeValid := false
-	for _, validMode := range validModes {
-		if config.Steward.Mode == validMode {
-			modeValid = true
-			break
-		}
-	}
-
-	if !modeValid && config.Steward.Mode != "" {
-		result.Valid = false
-		result.Errors = append(result.Errors, ValidationError{
-			Field:      "steward.mode",
-			Message:    fmt.Sprintf("Invalid operation mode: %s", config.Steward.Mode),
-			Code:       "INVALID_OPERATION_MODE",
-			Level:      "error",
-			Suggestion: "Use 'standalone' or 'controller' as operation mode",
-		})
-	}
-
-	// Validate logging configuration
-	validLogLevels := []string{"debug", "info", "warn", "error"}
-	if config.Steward.Logging.Level != "" {
-		levelValid := false
-		for _, validLevel := range validLogLevels {
-			if config.Steward.Logging.Level == validLevel {
-				levelValid = true
-				break
-			}
-		}
-
-		if !levelValid {
-			result.Valid = false
-			result.Errors = append(result.Errors, ValidationError{
-				Field:      "steward.logging.level",
-				Message:    fmt.Sprintf("Invalid log level: %s", config.Steward.Logging.Level),
-				Code:       "INVALID_LOG_LEVEL",
-				Level:      "error",
-				Suggestion: "Use debug, info, warn, or error as log level",
-			})
-		}
-	}
-
-	// Validate error handling settings
-	validActions := []stewardconfig.ErrorAction{stewardconfig.ActionContinue, stewardconfig.ActionFail, stewardconfig.ActionWarn}
-
-	if config.Steward.ErrorHandling.ModuleLoadFailure != "" {
-		if !isValidErrorAction(config.Steward.ErrorHandling.ModuleLoadFailure, validActions) {
-			result.Valid = false
-			result.Errors = append(result.Errors, ValidationError{
-				Field:      "steward.error_handling.module_load_failure",
-				Message:    fmt.Sprintf("Invalid error action: %s", config.Steward.ErrorHandling.ModuleLoadFailure),
-				Code:       "INVALID_ERROR_ACTION",
-				Level:      "error",
-				Suggestion: "Use continue, fail, or warn as error action",
-			})
-		}
-	}
-}
-
 // isValidResourceName checks if a resource name follows the required format
 func isValidResourceName(name string) bool {
 	if name == "" {
@@ -372,18 +309,8 @@ func isValidResourceName(name string) bool {
 	return true
 }
 
-// isValidErrorAction checks if an error action is valid
-func isValidErrorAction(action stewardconfig.ErrorAction, validActions []stewardconfig.ErrorAction) bool {
-	for _, validAction := range validActions {
-		if action == validAction {
-			return true
-		}
-	}
-	return false
-}
-
 // ValidateConfigurationEntry validates a configuration entry for storage
-func (vm *ValidationManager) ValidateConfigurationEntry(ctx context.Context, entry *interfaces.ConfigEntry) error {
+func (vm *ValidationManager) ValidateConfigurationEntry(ctx context.Context, entry *cfgconfig.ConfigEntry) error {
 	// Validate required fields
 	if entry.Key == nil {
 		return fmt.Errorf("configuration key is required")
@@ -406,12 +333,12 @@ func (vm *ValidationManager) ValidateConfigurationEntry(ctx context.Context, ent
 	}
 
 	// Validate format
-	if entry.Format != interfaces.ConfigFormatYAML && entry.Format != interfaces.ConfigFormatJSON {
+	if entry.Format != cfgconfig.ConfigFormatYAML && entry.Format != cfgconfig.ConfigFormatJSON {
 		return fmt.Errorf("invalid format: %s", entry.Format)
 	}
 
 	// Validate data format consistency
-	if entry.Format == interfaces.ConfigFormatYAML {
+	if entry.Format == cfgconfig.ConfigFormatYAML {
 		var temp interface{}
 		if err := yaml.Unmarshal(entry.Data, &temp); err != nil {
 			return fmt.Errorf("invalid YAML data: %w", err)

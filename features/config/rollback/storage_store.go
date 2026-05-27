@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rollback
 
@@ -11,19 +11,19 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // StorageRollbackStore provides a storage-backed implementation of RollbackStore
 // using pkg/storage for durable persistence across controller restarts
 type StorageRollbackStore struct {
-	configStore interfaces.ConfigStore
+	configStore cfgconfig.ConfigStore
 	mu          sync.RWMutex // Protects audit entry appends for concurrency safety
 }
 
 // NewStorageRollbackStore creates a new storage-backed rollback store
 // configStore must be initialized and operational
-func NewStorageRollbackStore(configStore interfaces.ConfigStore) RollbackStore {
+func NewStorageRollbackStore(configStore cfgconfig.ConfigStore) RollbackStore {
 	if configStore == nil {
 		panic("configStore cannot be nil")
 	}
@@ -46,14 +46,14 @@ func (s *StorageRollbackStore) SaveOperation(ctx context.Context, operation *Rol
 	}
 
 	// Create config entry for operation
-	entry := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	entry := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  "system", // System-level rollback operations
-			Namespace: "rollback/operations",
+			Namespace: "rollback-operations",
 			Name:      operation.ID,
 		},
 		Data:   yamlData,
-		Format: interfaces.ConfigFormatYAML,
+		Format: cfgconfig.ConfigFormatYAML,
 		Metadata: map[string]interface{}{
 			"target_type":  string(operation.Request.TargetType),
 			"target_id":    operation.Request.TargetID,
@@ -78,16 +78,16 @@ func (s *StorageRollbackStore) SaveOperation(ctx context.Context, operation *Rol
 
 // GetOperation retrieves an operation by ID from storage
 func (s *StorageRollbackStore) GetOperation(ctx context.Context, id string) (*RollbackOperation, error) {
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  "system",
-		Namespace: "rollback/operations",
+		Namespace: "rollback-operations",
 		Name:      id,
 	}
 
 	entry, err := s.configStore.GetConfig(ctx, key)
 	if err != nil {
 		// Check if it's a "not found" error
-		if err == interfaces.ErrConfigNotFound {
+		if err == cfgconfig.ErrConfigNotFound {
 			return nil, nil // Return nil operation for not found
 		}
 		return nil, fmt.Errorf("failed to get operation: %w", err)
@@ -109,9 +109,9 @@ func (s *StorageRollbackStore) GetOperation(ctx context.Context, id string) (*Ro
 // ListOperations lists operations matching the filters
 func (s *StorageRollbackStore) ListOperations(ctx context.Context, filters RollbackFilters) ([]RollbackOperation, error) {
 	// Build config filter from rollback filters
-	configFilter := &interfaces.ConfigFilter{
+	configFilter := &cfgconfig.ConfigFilter{
 		TenantID:  "system",
-		Namespace: "rollback/operations",
+		Namespace: "rollback-operations",
 		SortBy:    "created_at",
 		Order:     "desc",
 	}
@@ -210,14 +210,14 @@ func (s *StorageRollbackStore) UpdateOperation(ctx context.Context, operation *R
 	}
 
 	// Create updated config entry
-	entry := &interfaces.ConfigEntry{
-		Key: &interfaces.ConfigKey{
+	entry := &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
 			TenantID:  "system",
-			Namespace: "rollback/operations",
+			Namespace: "rollback-operations",
 			Name:      operation.ID,
 		},
 		Data:   yamlData,
-		Format: interfaces.ConfigFormatYAML,
+		Format: cfgconfig.ConfigFormatYAML,
 		Metadata: map[string]interface{}{
 			"target_type":  string(operation.Request.TargetType),
 			"target_id":    operation.Request.TargetID,

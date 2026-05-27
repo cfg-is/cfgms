@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package cert manager provides a high-level interface for certificate management.
 //
@@ -43,8 +43,13 @@
 package cert
 
 import (
+	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"time"
 )
 
 // ManagerConfig contains configuration for the certificate manager
@@ -65,11 +70,12 @@ type ManagerConfig struct {
 
 // Manager provides high-level certificate management functionality
 type Manager struct {
-	ca        CAManager
-	store     CertificateStore
-	validator CertificateValidator
-	renewer   CertificateRenewer
-	config    *ManagerConfig
+	ca         *CA
+	store      *FileStore
+	validator  *Validator
+	renewer    *Renewer
+	config     *ManagerConfig
+	revocation *revocationStore
 }
 
 // NewManager creates a new certificate manager
@@ -128,12 +134,19 @@ func NewManager(config *ManagerConfig) (*Manager, error) {
 	// Initialize renewer
 	renewer := NewRenewer(ca, store, validator)
 
+	// Initialize revocation store (reads existing list if present, empty list if not)
+	revStore, err := newRevocationStore(config.StoragePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize revocation store: %w", err)
+	}
+
 	manager := &Manager{
-		ca:        ca,
-		store:     store,
-		validator: validator,
-		renewer:   renewer,
-		config:    config,
+		ca:         ca,
+		store:      store,
+		validator:  validator,
+		renewer:    renewer,
+		config:     config,
+		revocation: revStore,
 	}
 
 	// Store the CA certificate in the certificate store for easy retrieval
@@ -173,35 +186,6 @@ func (m *Manager) GetCACertificate() ([]byte, error) {
 // GetCAInfo returns information about the CA
 func (m *Manager) GetCAInfo() (*CertificateInfo, error) {
 	return m.ca.GetCAInfo()
-}
-
-// GetServerCertificate returns the server certificate in PEM format
-// This retrieves the first server certificate from the store
-// Used for configuration signature verification in HA clusters
-func (m *Manager) GetServerCertificate() ([]byte, error) {
-	// Get all server certificates from the store
-	serverCertInfos, err := m.store.GetCertificatesByType(CertificateTypeServer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve server certificates: %w", err)
-	}
-
-	if len(serverCertInfos) == 0 {
-		return nil, fmt.Errorf("no server certificate found")
-	}
-
-	// Get the full certificate data using the serial number
-	// In practice, there should only be one server certificate per controller
-	certInfo := serverCertInfos[0]
-	cert, err := m.store.GetCertificate(certInfo.SerialNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve server certificate data: %w", err)
-	}
-
-	if len(cert.CertificatePEM) == 0 {
-		return nil, fmt.Errorf("server certificate PEM data is empty")
-	}
-
-	return cert.CertificatePEM, nil
 }
 
 // GenerateServerCertificate creates a new server certificate
@@ -307,6 +291,38 @@ func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, sig
 	return nil
 }
 
+// EnsureSigningCertificate generates a dedicated config-signing certificate if
+// none exists yet. Idempotent: safe to call on every controller startup.
+//
+// The config signer must remain STABLE across controller restarts. A steward
+// caches the controller's signing certificate at registration (and restores it
+// from disk on a cert-reuse reconnect) and rejects any command or config signed
+// by a different key. A dedicated, persisted config-signing certificate gives
+// the controller a durable signing identity — unlike the gRPC server
+// certificate, which may be regenerated per boot. When signingCfg is nil, a
+// default 1095-day RSA-4096 signing certificate is generated.
+func (m *Manager) EnsureSigningCertificate(signingCfg *SigningCertConfig) error {
+	signingCerts, err := m.store.GetCertificatesByType(CertificateTypeConfigSigning)
+	if err != nil {
+		return fmt.Errorf("failed to check for config signing certificates: %w", err)
+	}
+	if len(signingCerts) > 0 {
+		return nil
+	}
+
+	if signingCfg == nil {
+		signingCfg = &SigningCertConfig{
+			CommonName:   "cfgms-config-signer",
+			ValidityDays: 1095,
+			KeySize:      4096,
+		}
+	}
+	if _, err := m.GenerateSigningCertificate(signingCfg); err != nil {
+		return fmt.Errorf("failed to generate config signing certificate: %w", err)
+	}
+	return nil
+}
+
 // GetSigningCertificate returns the newest valid config signing certificate PEM (public only)
 func (m *Manager) GetSigningCertificate() ([]byte, error) {
 	signingCerts, err := m.store.GetCertificatesByType(CertificateTypeConfigSigning)
@@ -354,7 +370,7 @@ func (m *Manager) GetCertificateByCommonName(commonName string) ([]*CertificateI
 
 // ValidateCertificate validates a certificate
 func (m *Manager) ValidateCertificate(certPEM []byte) (*ValidationResult, error) {
-	return m.ca.ValidateCertificate(certPEM)
+	return m.validator.ValidateCertificateFile(certPEM)
 }
 
 // GetExpiringCertificates returns certificates expiring within the specified days
@@ -433,7 +449,7 @@ func (m *Manager) ImportCertificate(certPEM, keyPEM []byte, certType Certificate
 		IsValid:        !IsCertificateExpired(x509Cert),
 		CertificatePEM: certPEM,
 		PrivateKeyPEM:  keyPEM,
-		Fingerprint:    GetCertificateFingerprint(x509Cert),
+		Fingerprint:    func() string { h := sha256.Sum256(x509Cert.Raw); return hex.EncodeToString(h[:]) }(),
 		Issuer:         x509Cert.Issuer.CommonName,
 	}
 
@@ -459,26 +475,6 @@ func (m *Manager) ExportCertificate(serialNumber string, includePrivateKey bool)
 	}
 
 	return certPEM, keyPEM, nil
-}
-
-// GetCertificateStatus provides detailed status information for a certificate
-func (m *Manager) GetCertificateStatus(serialNumber string) (*CertificateStatus, error) {
-	cert, err := m.store.GetCertificate(serialNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get certificate: %w", err)
-	}
-
-	// Validate the certificate
-	validationResult, err := m.validator.ValidateCertificateFile(cert.CertificatePEM)
-	if err != nil {
-		return nil, fmt.Errorf("failed to validate certificate: %w", err)
-	}
-
-	return &CertificateStatus{
-		Certificate:  cert,
-		Validation:   validationResult,
-		NeedsRenewal: validationResult.DaysUntilExpiration <= m.config.RenewalThresholdDays,
-	}, nil
 }
 
 // GetManagerStats returns statistics about the certificate manager
@@ -518,13 +514,6 @@ func (m *Manager) GetManagerStats() (*ManagerStats, error) {
 	return stats, nil
 }
 
-// CertificateStatus provides detailed status information for a certificate
-type CertificateStatus struct {
-	Certificate  *Certificate
-	Validation   *ValidationResult
-	NeedsRenewal bool
-}
-
 // ManagerStats provides statistics about the certificate manager
 type ManagerStats struct {
 	TotalCertificates    int
@@ -534,14 +523,60 @@ type ManagerStats struct {
 	CAInfo               *CertificateInfo
 }
 
+// GetClientCertificate returns the latest steward client certificate for TLS handshakes.
+// Each call reads the current certificate from the store so cert rotations are picked
+// up automatically — no explicit notification needed.
+func (m *Manager) GetClientCertificate(_ context.Context) (*tls.Certificate, error) {
+	clientCerts, err := m.store.GetCertificatesByType(CertificateTypeClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve client certificates: %w", err)
+	}
+	if len(clientCerts) == 0 {
+		return nil, fmt.Errorf("no client certificate found in store")
+	}
+
+	// GetCertificatesByType returns newest-first.
+	certInfo := clientCerts[0]
+	c, err := m.store.GetCertificate(certInfo.SerialNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve client certificate data: %w", err)
+	}
+	if len(c.CertificatePEM) == 0 || len(c.PrivateKeyPEM) == 0 {
+		return nil, fmt.Errorf("client certificate or private key is missing from store")
+	}
+
+	tlsCert, err := tls.X509KeyPair(c.CertificatePEM, c.PrivateKeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load client certificate key pair: %w", err)
+	}
+	return &tlsCert, nil
+}
+
 // GetStoragePath returns the certificate storage path
 func (m *Manager) GetStoragePath() string {
 	return m.store.GetStoragePath()
 }
 
-// InitializeCA initializes the CA if not already initialized
-func (m *Manager) InitializeCA() error {
-	// CA should already be initialized in NewManager
-	// This method is for compatibility with test code
-	return nil
+// Revoke adds serial to the revoked-serials list and persists it atomically.
+// Returns an error if the serial is not found in the certificate store — revoking
+// an unknown serial is an operator error that must surface explicitly.
+func (m *Manager) Revoke(serial string) error {
+	if _, err := m.store.GetCertificate(serial); err != nil {
+		return fmt.Errorf("cannot revoke unknown serial %q: %w", serial, err)
+	}
+	return m.revocation.addAndPersist(RevocationEntry{
+		Serial:    serial,
+		RevokedAt: time.Now().UTC(),
+	})
+}
+
+// IsRevoked reports whether the given certificate serial number appears in the
+// revoked-serials list. Called on every mTLS admin cert authentication request.
+func (m *Manager) IsRevoked(serial string) bool {
+	return m.revocation.isRevoked(serial)
+}
+
+// ListRevoked returns all revocation entries for auditing and --list output.
+func (m *Manager) ListRevoked() ([]RevocationEntry, error) {
+	return m.revocation.allEntries(), nil
 }

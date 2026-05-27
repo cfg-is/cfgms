@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package graph
 
@@ -38,6 +38,8 @@ type Client interface {
 
 	// Intune operations
 	GetDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string) (*DeviceConfiguration, error)
+	ListDeviceConfigurationAssignments(ctx context.Context, token *auth.AccessToken, configurationID string) ([]DeviceConfigurationAssignment, error)
+	AssignDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, assignments []DeviceConfigurationAssignment) error
 	CreateDeviceConfiguration(ctx context.Context, token *auth.AccessToken, request *CreateDeviceConfigurationRequest) (*DeviceConfiguration, error)
 	UpdateDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, request *UpdateDeviceConfigurationRequest) error
 	DeleteDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string) error
@@ -62,6 +64,28 @@ type Client interface {
 	CreateGroup(ctx context.Context, token *auth.AccessToken, request *CreateGroupRequest) (*Group, error)
 	UpdateGroup(ctx context.Context, token *auth.AccessToken, groupID string, request *UpdateGroupRequest) error
 	DeleteGroup(ctx context.Context, token *auth.AccessToken, groupID string) error
+
+	// Group member and owner operations
+	ListGroupMembers(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error)
+	AddGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error
+	RemoveGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error
+	ListGroupOwners(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error)
+	AddGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error
+	RemoveGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error
+
+	// Administrative Unit member operations
+	ListAdminUnitUserMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error)
+	ListAdminUnitGroupMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error)
+	ListAdminUnitScopedRoleMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]AdminUnitScopedRoleMember, error)
+	AddAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error
+	AddAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID string, request *AddScopedRoleMemberRequest) (*AdminUnitScopedRoleMember, error)
+	RemoveAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error
+	RemoveAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID, scopedRoleMemberID string) error
+
+	// Team operations
+	GetTeam(ctx context.Context, token *auth.AccessToken, groupID string) (*Team, error)
+	CreateTeam(ctx context.Context, token *auth.AccessToken, groupID string, request *CreateTeamRequest) error
+	UpdateTeamSettings(ctx context.Context, token *auth.AccessToken, teamID string, request *UpdateTeamSettingsRequest) error
 }
 
 // User represents a Microsoft Graph user object
@@ -276,6 +300,23 @@ type UpdateDeviceConfigurationRequest struct {
 	Settings    map[string]interface{} `json:"settings,omitempty"`
 }
 
+// DeviceConfigurationAssignment represents a single assignment of a device configuration to a target
+type DeviceConfigurationAssignment struct {
+	ID     string                              `json:"id,omitempty"`
+	Target DeviceConfigurationAssignmentTarget `json:"target"`
+}
+
+// DeviceConfigurationAssignmentTarget describes what the assignment targets
+type DeviceConfigurationAssignmentTarget struct {
+	ODataType string `json:"@odata.type"`
+	GroupID   string `json:"groupId,omitempty"`
+}
+
+// AssignDeviceConfigurationRequest is the request body for POST /deviceConfigurations/{id}/assign
+type AssignDeviceConfigurationRequest struct {
+	Assignments []DeviceConfigurationAssignment `json:"assignments"`
+}
+
 // GraphError represents an error response from Microsoft Graph API
 type GraphError struct {
 	Code       string                 `json:"code"`
@@ -382,7 +423,7 @@ type Application struct {
 // ApplicationWeb represents web settings for an application
 type ApplicationWeb struct {
 	RedirectUris []string `json:"redirectUris"`
-	LogoutUrl    string   `json:"logoutUrl,omitempty"`
+	LogoutURL    string   `json:"logoutUrl,omitempty"`
 }
 
 // ApplicationSpa represents SPA settings for an application
@@ -392,7 +433,7 @@ type ApplicationSpa struct {
 
 // ApplicationResourceAccess represents required resource access
 type ApplicationResourceAccess struct {
-	ResourceAppId  string                       `json:"resourceAppId"`
+	ResourceAppID  string                       `json:"resourceAppId"`
 	ResourceAccess []ApplicationPermissionScope `json:"resourceAccess"`
 }
 
@@ -446,7 +487,7 @@ type ApplicationPasswordCredential struct {
 
 // ApplicationOptionalClaims represents optional claims configuration
 type ApplicationOptionalClaims struct {
-	IdToken     []ApplicationOptionalClaim `json:"idToken"`
+	IDToken     []ApplicationOptionalClaim `json:"idToken"`
 	AccessToken []ApplicationOptionalClaim `json:"accessToken"`
 	Saml2Token  []ApplicationOptionalClaim `json:"saml2Token"`
 }
@@ -559,4 +600,77 @@ type UpdateGroupRequest struct {
 	MailNickname    *string  `json:"mailNickname,omitempty"`
 	Visibility      *string  `json:"visibility,omitempty"`
 	MembershipRule  *string  `json:"membershipRule,omitempty"`
+}
+
+// AdminUnitScopedRoleMember represents a scoped role assignment in an administrative unit
+type AdminUnitScopedRoleMember struct {
+	ID             string                  `json:"id"`
+	RoleID         string                  `json:"roleId"`
+	RoleMemberInfo AdminUnitRoleMemberInfo `json:"roleMemberInfo"`
+}
+
+// AdminUnitRoleMemberInfo contains principal information for a scoped role assignment
+type AdminUnitRoleMemberInfo struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName,omitempty"`
+}
+
+// AddScopedRoleMemberRequest represents a request to add a scoped role member to an administrative unit
+type AddScopedRoleMemberRequest struct {
+	RoleID         string                  `json:"roleId"`
+	RoleMemberInfo AdminUnitRoleMemberInfo `json:"roleMemberInfo"`
+}
+
+// Team represents a Microsoft Teams team backed by a Microsoft 365 group
+type Team struct {
+	ID                string                 `json:"id"`
+	DisplayName       string                 `json:"displayName,omitempty"`
+	Description       string                 `json:"description,omitempty"`
+	MemberSettings    *TeamMemberSettings    `json:"memberSettings,omitempty"`
+	MessagingSettings *TeamMessagingSettings `json:"messagingSettings,omitempty"`
+	FunSettings       *TeamFunSettings       `json:"funSettings,omitempty"`
+	GuestSettings     *TeamGuestSettings     `json:"guestSettings,omitempty"`
+}
+
+// CreateTeamRequest represents a request to create a team from an existing Microsoft 365 group
+type CreateTeamRequest struct {
+	MemberSettings    *TeamMemberSettings    `json:"memberSettings,omitempty"`
+	MessagingSettings *TeamMessagingSettings `json:"messagingSettings,omitempty"`
+	FunSettings       *TeamFunSettings       `json:"funSettings,omitempty"`
+	GuestSettings     *TeamGuestSettings     `json:"guestSettings,omitempty"`
+}
+
+// UpdateTeamSettingsRequest represents a request to update team settings via PATCH /teams/{teamId}
+type UpdateTeamSettingsRequest struct {
+	MemberSettings    *TeamMemberSettings    `json:"memberSettings,omitempty"`
+	MessagingSettings *TeamMessagingSettings `json:"messagingSettings,omitempty"`
+	FunSettings       *TeamFunSettings       `json:"funSettings,omitempty"`
+	GuestSettings     *TeamGuestSettings     `json:"guestSettings,omitempty"`
+}
+
+// TeamMemberSettings controls what team members can do
+type TeamMemberSettings struct {
+	AllowCreatePrivateChannels *bool `json:"allowCreatePrivateChannels,omitempty"`
+	AllowCreateUpdateChannels  *bool `json:"allowCreateUpdateChannels,omitempty"`
+	AllowDeleteChannels        *bool `json:"allowDeleteChannels,omitempty"`
+	AllowAddRemoveApps         *bool `json:"allowAddRemoveApps,omitempty"`
+}
+
+// TeamMessagingSettings controls messaging capabilities for team members
+type TeamMessagingSettings struct {
+	AllowUserEditMessages *bool `json:"allowUserEditMessages,omitempty"`
+}
+
+// TeamFunSettings controls use of Giphy, memes, and stickers in the team
+type TeamFunSettings struct {
+	AllowGiphy            *bool   `json:"allowGiphy,omitempty"`
+	GiphyContentRating    *string `json:"giphyContentRating,omitempty"`
+	AllowStickersAndMemes *bool   `json:"allowStickersAndMemes,omitempty"`
+	AllowCustomMemes      *bool   `json:"allowCustomMemes,omitempty"`
+}
+
+// TeamGuestSettings controls what guests can do in the team
+type TeamGuestSettings struct {
+	AllowCreateUpdateChannels *bool `json:"allowCreateUpdateChannels,omitempty"`
+	AllowDeleteChannels       *bool `json:"allowDeleteChannels,omitempty"`
 }

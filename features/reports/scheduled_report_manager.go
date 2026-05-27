@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package reports
 
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -291,10 +293,8 @@ func (m *ScheduledReportManager) validateSchedule(schedule interfaces.ReportSche
 
 	switch schedule.Type {
 	case interfaces.ScheduleTypeCron:
-		// Validate cron expression (basic validation)
-		// In a real implementation, you'd use a cron parsing library
-		if len(schedule.Expression) < 5 {
-			return fmt.Errorf("invalid cron expression")
+		if _, err := parseCronNextTime(schedule.Expression, time.Now()); err != nil {
+			return fmt.Errorf("invalid cron expression: %w", err)
 		}
 	case interfaces.ScheduleTypeInterval:
 		// Validate interval expression
@@ -384,10 +384,7 @@ func (m *ScheduledReportManager) calculateNextRun(schedule interfaces.ReportSche
 
 	switch schedule.Type {
 	case interfaces.ScheduleTypeCron:
-		// Simplified cron calculation - in reality you'd use a proper cron library
-		// For now, assume expression is in format "0 H * * *" (daily at hour H)
-		// This is just a placeholder implementation
-		return now.Add(24 * time.Hour), nil
+		return parseCronNextTime(schedule.Expression, now)
 
 	case interfaces.ScheduleTypeInterval:
 		interval, err := time.ParseDuration(schedule.Expression)
@@ -407,4 +404,84 @@ func (m *ScheduledReportManager) calculateNextRun(schedule interfaces.ReportSche
 	default:
 		return time.Time{}, fmt.Errorf("unsupported schedule type: %s", schedule.Type)
 	}
+}
+
+// parseCronNextTime returns the next time after `from` that satisfies the standard
+// 5-field cron expression "min hour dom month dow" (e.g. "0 9 * * 1" = every Monday at 09:00).
+// Supports: specific values, * (wildcard), */N (step), comma-separated lists, and hyphen ranges.
+func parseCronNextTime(expr string, from time.Time) (time.Time, error) {
+	fields := strings.Fields(expr)
+	if len(fields) != 5 {
+		return time.Time{}, fmt.Errorf("cron expression must have exactly 5 fields (min hour dom month dow), got %d", len(fields))
+	}
+
+	type fieldRange struct{ min, max int }
+	ranges := []fieldRange{{0, 59}, {0, 23}, {1, 31}, {1, 12}, {0, 6}}
+
+	matchers := make([]func(int) bool, 5)
+	for i, field := range fields {
+		fn, err := parseCronField(field, ranges[i].min, ranges[i].max)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("field %d (%s): %w", i+1, field, err)
+		}
+		matchers[i] = fn
+	}
+
+	// Search minute-by-minute; cap at 1 year to prevent infinite loops on unmatchable expressions.
+	t := from.Truncate(time.Minute).Add(time.Minute)
+	limit := from.Add(366 * 24 * time.Hour)
+	for t.Before(limit) {
+		if matchers[3](int(t.Month())) && matchers[2](t.Day()) &&
+			matchers[4](int(t.Weekday())) && matchers[1](t.Hour()) &&
+			matchers[0](t.Minute()) {
+			return t, nil
+		}
+		t = t.Add(time.Minute)
+	}
+
+	return time.Time{}, fmt.Errorf("no matching time found within 1 year for expression %q", expr)
+}
+
+// parseCronField parses a single cron field and returns a matcher function.
+// Supports: * (all), specific integer, */N (step), A-B (range), A,B,C (list).
+func parseCronField(field string, minVal, maxVal int) (func(int) bool, error) {
+	if field == "*" {
+		return func(int) bool { return true }, nil
+	}
+
+	if strings.HasPrefix(field, "*/") {
+		n, err := strconv.Atoi(field[2:])
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("invalid step value %q", field)
+		}
+		return func(v int) bool { return (v-minVal)%n == 0 }, nil
+	}
+
+	if strings.Contains(field, ",") {
+		values := make(map[int]bool)
+		for _, part := range strings.Split(field, ",") {
+			n, err := strconv.Atoi(strings.TrimSpace(part))
+			if err != nil || n < minVal || n > maxVal {
+				return nil, fmt.Errorf("invalid list value %q (allowed %d-%d)", part, minVal, maxVal)
+			}
+			values[n] = true
+		}
+		return func(v int) bool { return values[v] }, nil
+	}
+
+	if strings.Contains(field, "-") {
+		parts := strings.SplitN(field, "-", 2)
+		lo, err1 := strconv.Atoi(parts[0])
+		hi, err2 := strconv.Atoi(parts[1])
+		if err1 != nil || err2 != nil || lo < minVal || hi > maxVal || lo > hi {
+			return nil, fmt.Errorf("invalid range %q (allowed %d-%d)", field, minVal, maxVal)
+		}
+		return func(v int) bool { return v >= lo && v <= hi }, nil
+	}
+
+	n, err := strconv.Atoi(field)
+	if err != nil || n < minVal || n > maxVal {
+		return nil, fmt.Errorf("invalid value %q (allowed %d-%d)", field, minVal, maxVal)
+	}
+	return func(v int) bool { return v == n }, nil
 }

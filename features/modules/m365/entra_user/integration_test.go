@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package entra_user
 
@@ -17,6 +17,8 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
+	"github.com/cfgis/cfgms/pkg/logging"
+	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 )
 
 // loadTestEnvironment loads environment variables from .env.local if it exists
@@ -309,11 +311,16 @@ func TestEntraUser_Integration_FullSuite(t *testing.T) {
 
 // createRealAuthProvider creates a real OAuth2Provider for integration testing
 func createRealAuthProvider(t *testing.T) auth.Provider {
-	tempDir := t.TempDir()
-
-	// Create credential store
-	credStore, err := auth.NewFileCredentialStore(tempDir, "integration-test-passphrase")
-	require.NoError(t, err, "Failed to create credential store")
+	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
+		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
+	}
+	sp := &stewardprovider.StewardProvider{}
+	secretStore, err := sp.CreateSecretStore(map[string]interface{}{
+		"secrets_dir": t.TempDir(),
+	})
+	require.NoError(t, err, "Failed to create secret store")
+	t.Cleanup(func() { _ = secretStore.Close() })
+	credStore := auth.NewSecretStoreCredentialStore(secretStore)
 
 	// Create OAuth2 config from environment
 	config := &auth.OAuth2Config{
@@ -327,7 +334,7 @@ func createRealAuthProvider(t *testing.T) auth.Provider {
 	}
 
 	// Create provider
-	provider := auth.NewOAuth2Provider(credStore, config)
+	provider := auth.NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 
 	return provider
 }

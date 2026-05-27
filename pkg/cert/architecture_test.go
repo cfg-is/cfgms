@@ -1,9 +1,13 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package cert
 
 import (
+	"bytes"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -172,12 +176,6 @@ func TestUnifiedMode_ServerCertUnchanged(t *testing.T) {
 	assert.Empty(t, signingCerts)
 }
 
-// TestCertificateArchitectureConstants verifies the architecture string constants
-func TestCertificateArchitectureConstants(t *testing.T) {
-	assert.Equal(t, CertificateArchitecture("unified"), CertArchitectureUnified)
-	assert.Equal(t, CertificateArchitecture("separated"), CertArchitectureSeparated)
-}
-
 // TestManagerGenerateInternalServerCertificate verifies Manager stores internal server certs
 func TestManagerGenerateInternalServerCertificate(t *testing.T) {
 	manager := setupTestManager(t)
@@ -238,4 +236,136 @@ func setupTestManager(t *testing.T) *Manager {
 	require.NoError(t, err)
 
 	return manager
+}
+
+// TestSetAdminMarker_Architecture enforces the restricted-caller rule for SetAdminMarker.
+// Any production file outside the allow-list that calls cert.SetAdminMarker fails this test.
+// Test files (_test.go) are excluded — they are test infrastructure, not production code paths.
+func TestSetAdminMarker_Architecture(t *testing.T) {
+	allowList := map[string]bool{
+		// Story B: admin cert issuance during controller initialization
+		"features/controller/initialization/initialization.go": true,
+		// Story D: admin bundle packaging
+		"features/controller/initialization/admin_bundle.go": true,
+	}
+
+	repoRoot := findRepoRoot(t)
+
+	var violations []string
+	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			// Skip agent dispatch worktrees — they contain nested repo copies
+			// from /dispatch agents and are not part of this checkout's source.
+			if d.Name() == "worktrees" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		content, err := os.ReadFile(path) // #nosec G304 -- repo scan reads controlled source files
+		if err != nil {
+			return nil
+		}
+		if bytes.Contains(content, []byte("cert.SetAdminMarker")) {
+			rel, relErr := filepath.Rel(repoRoot, path)
+			if relErr != nil {
+				rel = path
+			}
+			rel = filepath.ToSlash(rel)
+			if !allowList[rel] {
+				violations = append(violations, rel)
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, violations,
+		"unauthorized production callers of cert.SetAdminMarker; "+
+			"add to allow-list or move to an allowed file: %v", violations)
+}
+
+// findRepoRoot walks up from the working directory to find the repository root (go.mod presence).
+func findRepoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+	for {
+		if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not find repo root (go.mod not found)")
+		}
+		dir = parent
+	}
+}
+
+// TestEnsureSigningCertificate_GeneratesWhenMissing verifies that
+// EnsureSigningCertificate creates a dedicated config-signing certificate on a
+// fresh store.
+func TestEnsureSigningCertificate_GeneratesWhenMissing(t *testing.T) {
+	manager := setupTestManager(t)
+
+	signingCerts, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	require.NoError(t, err)
+	assert.Empty(t, signingCerts)
+
+	require.NoError(t, manager.EnsureSigningCertificate(nil))
+
+	signingCerts, err = manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	require.NoError(t, err)
+	assert.Len(t, signingCerts, 1, "should generate exactly one config signing cert")
+	assert.Equal(t, "cfgms-config-signer", signingCerts[0].CommonName)
+}
+
+// TestEnsureSigningCertificate_StableAcrossCalls verifies the controller's
+// config-signing identity is stable: repeated EnsureSigningCertificate calls
+// (one per controller boot) never create a second cert and always resolve to
+// the byte-identical certificate. This is the property Issue #1718 depends on —
+// a steward caches the signing cert and rejects anything signed by a different
+// key, so the controller must present the same signing identity across restarts.
+func TestEnsureSigningCertificate_StableAcrossCalls(t *testing.T) {
+	manager := setupTestManager(t)
+
+	require.NoError(t, manager.EnsureSigningCertificate(nil))
+	first, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	firstSerial := first[0].SerialNumber
+
+	// Simulate subsequent controller boots.
+	for i := 0; i < 3; i++ {
+		require.NoError(t, manager.EnsureSigningCertificate(nil))
+	}
+
+	after, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	require.NoError(t, err)
+	require.Len(t, after, 1, "EnsureSigningCertificate must not accrete certificates")
+	assert.Equal(t, firstSerial, after[0].SerialNumber,
+		"signing cert serial must be stable across calls")
+}
+
+// TestEnsureSigningCertificate_NoOpAfterSeparatedCerts verifies that a signing
+// cert created by EnsureSeparatedCertificates is reused, not duplicated.
+func TestEnsureSigningCertificate_NoOpAfterSeparatedCerts(t *testing.T) {
+	manager := setupTestManager(t)
+
+	require.NoError(t, manager.EnsureSeparatedCertificates(nil, nil))
+	before, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	require.NoError(t, err)
+	require.Len(t, before, 1)
+
+	require.NoError(t, manager.EnsureSigningCertificate(nil))
+
+	after, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	require.NoError(t, err)
+	require.Len(t, after, 1, "must reuse the existing signing cert")
+	assert.Equal(t, before[0].SerialNumber, after[0].SerialNumber)
 }

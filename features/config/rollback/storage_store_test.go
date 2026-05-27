@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rollback_test
 
@@ -13,8 +13,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database" // Register database provider
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"      // Register git provider
+	_ "github.com/cfgis/cfgms/pkg/testing"
 	teststorage "github.com/cfgis/cfgms/pkg/testing/storage"
 )
 
@@ -25,16 +24,16 @@ func createTestStorageStore(t *testing.T) (rollback.RollbackStore, func()) {
 	// Create test storage fixture
 	fixture := teststorage.NewStorageTestFixture(t)
 
-	// Get git provider (always available for testing)
-	provider, err := interfaces.GetStorageProvider("git")
-	require.NoError(t, err, "Git provider should be available")
+	// Get flatfile provider (always available for testing)
+	provider, err := interfaces.GetStorageProvider("flatfile")
+	require.NoError(t, err, "Flatfile provider should be available")
 
-	// Get git config
-	gitConfig, exists := fixture.GetProviderConfig("git")
-	require.True(t, exists, "Git config should exist")
+	// Get flatfile config
+	flatfileConfig, exists := fixture.GetProviderConfig("flatfile")
+	require.True(t, exists, "Flatfile config should exist")
 
 	// Create config store
-	configStore, err := provider.CreateConfigStore(gitConfig.Config)
+	configStore, err := provider.CreateConfigStore(flatfileConfig.Config)
 	require.NoError(t, err, "ConfigStore creation should succeed")
 	require.NotNil(t, configStore, "ConfigStore should not be nil")
 
@@ -568,20 +567,56 @@ func TestStorageRollbackStore_ConcurrentAuditEntries(t *testing.T) {
 	assert.Len(t, retrieved.AuditTrail, 11, "Should have 11 audit entries (1 initial + 10 concurrent)")
 }
 
+func TestInMemoryRollbackStore_ListOperations_SortedNewestFirst(t *testing.T) {
+	store := rollback.NewInMemoryRollbackStore()
+	ctx := context.Background()
+
+	now := time.Now()
+	op1 := createSampleOperation()
+	op1.InitiatedAt = now.Add(-2 * time.Hour)
+
+	op2 := createSampleOperation()
+	op2.InitiatedAt = now.Add(-1 * time.Hour)
+
+	op3 := createSampleOperation()
+	op3.InitiatedAt = now
+
+	// Save in non-chronological order to confirm sort is applied regardless of insertion order
+	require.NoError(t, store.SaveOperation(ctx, op2))
+	require.NoError(t, store.SaveOperation(ctx, op3))
+	require.NoError(t, store.SaveOperation(ctx, op1))
+
+	operations, err := store.ListOperations(ctx, rollback.RollbackFilters{})
+	require.NoError(t, err, "ListOperations should succeed")
+	require.Len(t, operations, 3, "Should return all 3 operations")
+
+	// Verify newest-first ordering
+	for i := 0; i < len(operations)-1; i++ {
+		assert.True(t,
+			operations[i].InitiatedAt.After(operations[i+1].InitiatedAt) ||
+				operations[i].InitiatedAt.Equal(operations[i+1].InitiatedAt),
+			"operations[%d].InitiatedAt (%v) should be >= operations[%d].InitiatedAt (%v)",
+			i, operations[i].InitiatedAt, i+1, operations[i+1].InitiatedAt)
+	}
+	// Explicitly verify the first result is the newest
+	assert.True(t, operations[0].InitiatedAt.Equal(op3.InitiatedAt),
+		"first result should be the most recent operation")
+}
+
 func TestStorageRollbackStore_PersistenceAfterReload(t *testing.T) {
 	// This test verifies durability by creating a new store instance
 	fixture := teststorage.NewStorageTestFixture(t)
 	defer fixture.Cleanup()
 
-	// Get git provider
-	provider, err := interfaces.GetStorageProvider("git")
-	require.NoError(t, err, "Git provider should be available")
+	// Get flatfile provider
+	provider, err := interfaces.GetStorageProvider("flatfile")
+	require.NoError(t, err, "Flatfile provider should be available")
 
-	gitConfig, exists := fixture.GetProviderConfig("git")
-	require.True(t, exists, "Git config should exist")
+	flatfileConfig, exists := fixture.GetProviderConfig("flatfile")
+	require.True(t, exists, "Flatfile config should exist")
 
 	// Create first store instance
-	configStore1, err := provider.CreateConfigStore(gitConfig.Config)
+	configStore1, err := provider.CreateConfigStore(flatfileConfig.Config)
 	require.NoError(t, err, "ConfigStore creation should succeed")
 	store1 := rollback.NewStorageRollbackStore(configStore1)
 
@@ -598,7 +633,7 @@ func TestStorageRollbackStore_PersistenceAfterReload(t *testing.T) {
 	}
 
 	// Create second store instance (simulating controller restart)
-	configStore2, err := provider.CreateConfigStore(gitConfig.Config)
+	configStore2, err := provider.CreateConfigStore(flatfileConfig.Config)
 	require.NoError(t, err, "ConfigStore creation should succeed")
 	defer func() {
 		if closer, ok := configStore2.(interface{ Close() error }); ok {

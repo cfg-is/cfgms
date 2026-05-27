@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package entra_group
 
@@ -16,6 +16,8 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
+	"github.com/cfgis/cfgms/pkg/logging"
+	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 )
 
 // loadTestEnvironment loads environment variables from .env.local if it exists
@@ -282,12 +284,268 @@ func TestEntraGroup_Integration_AuthenticationFlow(t *testing.T) {
 	assert.True(t, isValid, "Token should be valid")
 }
 
+// TestEntraGroup_Integration_MemberOwnerSync verifies member and owner sync against the real Graph API.
+func TestEntraGroup_Integration_MemberOwnerSync(t *testing.T) {
+	checkM365Integration(t)
+
+	authProvider := createRealAuthProvider(t)
+	graphClient := createRealGraphClient(t)
+	module := New(authProvider, graphClient).(*entraGroupModule)
+
+	ctx := context.Background()
+	tenantID := os.Getenv("M365_TENANT_ID")
+	timestamp := time.Now().Format("20060102-150405")
+
+	// Create a test group to work with
+	groupName := fmt.Sprintf("cfgmsmemtest%s", timestamp)
+	createConfig := &EntraGroupConfig{
+		DisplayName:     fmt.Sprintf("CFGMS Member Test %s", timestamp),
+		Description:     "Integration test for member/owner sync",
+		MailNickname:    groupName,
+		MailEnabled:     false,
+		SecurityEnabled: true,
+		GroupType:       "Security",
+		Visibility:      "Private",
+		TenantID:        tenantID,
+	}
+
+	resourceID := tenantID + ":" + groupName
+	err := module.Set(ctx, resourceID, createConfig)
+	require.NoError(t, err, "Should be able to create group")
+
+	token, err := authProvider.GetAccessToken(ctx, tenantID)
+	require.NoError(t, err)
+
+	groups, err := graphClient.ListGroups(ctx, token, fmt.Sprintf("displayName eq '%s'", createConfig.DisplayName))
+	require.NoError(t, err)
+	require.NotEmpty(t, groups, "Should find the created group")
+
+	var createdGroup *graph.Group
+	for i := range groups {
+		if groups[i].DisplayName == createConfig.DisplayName {
+			createdGroup = &groups[i]
+			break
+		}
+	}
+	require.NotNil(t, createdGroup)
+
+	t.Cleanup(func() {
+		cleanupToken, tokenErr := authProvider.GetAccessToken(ctx, tenantID)
+		if tokenErr != nil {
+			t.Logf("Failed to get token for cleanup: %v", tokenErr)
+			return
+		}
+		if err := graphClient.DeleteGroup(ctx, cleanupToken, createdGroup.ID); err != nil {
+			t.Logf("Failed to cleanup group %s: %v", createdGroup.ID, err)
+		}
+	})
+
+	groupID := createdGroup.ID
+
+	// Verify initial state: no members, no owners
+	members, err := graphClient.ListGroupMembers(ctx, token, groupID)
+	require.NoError(t, err)
+	assert.Empty(t, members, "New group should have no members")
+
+	owners, err := graphClient.ListGroupOwners(ctx, token, groupID)
+	require.NoError(t, err)
+	assert.Empty(t, owners, "New group should have no owners")
+
+	// Resolve a test user from the tenant to use for member/owner operations.
+	// The test requires M365_TEST_USER_UPN to be set to a valid UPN in the tenant.
+	testUserUPN := os.Getenv("M365_TEST_USER_UPN")
+	if testUserUPN == "" {
+		if os.Getenv("ALLOW_SKIP_INTEGRATION") == "true" {
+			t.Skip("M365 member/owner sync test - M365_TEST_USER_UPN not available (dev mode)")
+		}
+		t.Fatalf("TestEntraGroup_Integration_MemberOwnerSync requires M365_TEST_USER_UPN. Set a valid UPN in .env.local or the environment")
+	}
+
+	// Add member and sync
+	syncConfigMembers := &EntraGroupConfig{
+		DisplayName:       createConfig.DisplayName,
+		MailNickname:      createConfig.MailNickname,
+		MailEnabled:       false,
+		SecurityEnabled:   true,
+		TenantID:          tenantID,
+		Members:           []string{testUserUPN},
+		ManagedFieldsList: []string{"display_name", "mail_enabled", "security_enabled", "members"},
+	}
+	realResourceID := tenantID + ":" + groupID
+	err = module.Set(ctx, realResourceID, syncConfigMembers)
+	require.NoError(t, err, "Should be able to sync members")
+
+	members, err = graphClient.ListGroupMembers(ctx, token, groupID)
+	require.NoError(t, err)
+	assert.Contains(t, members, testUserUPN, "Member should be present after sync")
+
+	// Remove member via sync (empty desired list)
+	syncConfigNoMembers := &EntraGroupConfig{
+		DisplayName:       createConfig.DisplayName,
+		MailNickname:      createConfig.MailNickname,
+		MailEnabled:       false,
+		SecurityEnabled:   true,
+		TenantID:          tenantID,
+		Members:           []string{},
+		ManagedFieldsList: []string{"display_name", "mail_enabled", "security_enabled", "members"},
+	}
+	err = module.Set(ctx, realResourceID, syncConfigNoMembers)
+	require.NoError(t, err, "Should be able to remove members via sync")
+
+	members, err = graphClient.ListGroupMembers(ctx, token, groupID)
+	require.NoError(t, err)
+	assert.NotContains(t, members, testUserUPN, "Member should be removed after sync")
+
+	// Add owner and sync
+	syncConfigOwners := &EntraGroupConfig{
+		DisplayName:       createConfig.DisplayName,
+		MailNickname:      createConfig.MailNickname,
+		MailEnabled:       false,
+		SecurityEnabled:   true,
+		TenantID:          tenantID,
+		Owners:            []string{testUserUPN},
+		ManagedFieldsList: []string{"display_name", "mail_enabled", "security_enabled", "owners"},
+	}
+	err = module.Set(ctx, realResourceID, syncConfigOwners)
+	require.NoError(t, err, "Should be able to sync owners")
+
+	owners, err = graphClient.ListGroupOwners(ctx, token, groupID)
+	require.NoError(t, err)
+	assert.Contains(t, owners, testUserUPN, "Owner should be present after sync")
+
+	t.Log("✅ Member/owner sync integration test passed")
+}
+
+// TestEntraGroup_Integration_TeamOperations verifies team create and settings update
+// against the real Graph API. Requires the target group to be a Microsoft 365 (Unified) group.
+func TestEntraGroup_Integration_TeamOperations(t *testing.T) {
+	checkM365Integration(t)
+
+	authProvider := createRealAuthProvider(t)
+	graphClient := createRealGraphClient(t)
+	module := New(authProvider, graphClient).(*entraGroupModule)
+
+	ctx := context.Background()
+	tenantID := os.Getenv("M365_TENANT_ID")
+	timestamp := time.Now().Format("20060102-150405")
+
+	groupName := fmt.Sprintf("cfgmsteamtest%s", timestamp)
+	createConfig := &EntraGroupConfig{
+		DisplayName:     fmt.Sprintf("CFGMS Team Test %s", timestamp),
+		Description:     "Integration test for team operations",
+		MailNickname:    groupName,
+		MailEnabled:     true,
+		SecurityEnabled: false,
+		GroupType:       "Unified",
+		Visibility:      "Private",
+		TenantID:        tenantID,
+	}
+
+	t.Log("🔄 STEP 1: CREATE Unified group for team provisioning")
+	resourceID := tenantID + ":" + groupName
+	err := module.Set(ctx, resourceID, createConfig)
+	require.NoError(t, err, "Should be able to create Unified group")
+	t.Log("✅ CREATE: Unified group created")
+
+	token, err := authProvider.GetAccessToken(ctx, tenantID)
+	require.NoError(t, err)
+
+	groups, err := graphClient.ListGroups(ctx, token, fmt.Sprintf("displayName eq '%s'", createConfig.DisplayName))
+	require.NoError(t, err)
+	require.NotEmpty(t, groups, "Should find created group")
+
+	var createdGroup *graph.Group
+	for i := range groups {
+		if groups[i].DisplayName == createConfig.DisplayName {
+			createdGroup = &groups[i]
+			break
+		}
+	}
+	require.NotNil(t, createdGroup, "Created group must be findable")
+
+	t.Cleanup(func() {
+		cleanupToken, tokenErr := authProvider.GetAccessToken(ctx, tenantID)
+		if tokenErr != nil {
+			t.Logf("Failed to get token for cleanup: %v", tokenErr)
+			return
+		}
+		if err := graphClient.DeleteGroup(ctx, cleanupToken, createdGroup.ID); err != nil {
+			t.Logf("Failed to cleanup group %s: %v", createdGroup.ID, err)
+		}
+	})
+
+	groupID := createdGroup.ID
+	realResourceID := tenantID + ":" + groupID
+
+	t.Log("🔄 STEP 2: CREATE team from group")
+	teamConfig := &EntraGroupConfig{
+		DisplayName:     createConfig.DisplayName,
+		MailNickname:    createConfig.MailNickname,
+		MailEnabled:     true,
+		SecurityEnabled: false,
+		GroupType:       "Unified",
+		TenantID:        tenantID,
+		IsTeamEnabled:   true,
+		TeamSettings: &TeamSettings{
+			AllowCreateUpdateChannels:  true,
+			AllowDeleteChannels:        false,
+			AllowCreatePrivateChannels: false,
+			AllowAddRemoveApps:         true,
+			AllowUserEditMessages:      true,
+			Fun:                        "moderate",
+		},
+		ManagedFieldsList: []string{
+			"display_name", "mail_enabled", "security_enabled", "is_team_enabled", "team_settings",
+		},
+	}
+	err = module.Set(ctx, realResourceID, teamConfig)
+	require.NoError(t, err, "Should be able to create team from Unified group")
+	t.Log("✅ CREATE TEAM: Team provisioned")
+
+	t.Log("🔄 STEP 3: Verify team exists via isTeamGroup")
+	freshToken, err := authProvider.GetAccessToken(ctx, tenantID)
+	require.NoError(t, err, "Should be able to refresh token before team verification")
+	assert.True(t, module.isTeamGroup(ctx, freshToken, groupID), "isTeamGroup should return true after team creation")
+	t.Log("✅ isTeamGroup: confirmed true")
+
+	t.Log("🔄 STEP 4: UPDATE team settings")
+	updateConfig := &EntraGroupConfig{
+		DisplayName:     createConfig.DisplayName,
+		MailNickname:    createConfig.MailNickname,
+		MailEnabled:     true,
+		SecurityEnabled: false,
+		GroupType:       "Unified",
+		TenantID:        tenantID,
+		IsTeamEnabled:   true,
+		TeamSettings: &TeamSettings{
+			AllowCreateUpdateChannels:  true,
+			AllowDeleteChannels:        true,
+			AllowCreatePrivateChannels: true,
+			AllowAddRemoveApps:         true,
+			AllowUserEditMessages:      true,
+			Fun:                        "enabled",
+		},
+		ManagedFieldsList: []string{
+			"display_name", "mail_enabled", "security_enabled", "is_team_enabled", "team_settings",
+		},
+	}
+	err = module.Set(ctx, realResourceID, updateConfig)
+	require.NoError(t, err, "Should be able to update team settings")
+	t.Log("✅ UPDATE TEAM SETTINGS: Settings updated")
+
+	t.Log("✅ TEAM OPERATIONS INTEGRATION TEST COMPLETED SUCCESSFULLY")
+}
+
 // TestEntraGroup_Integration_FullSuite runs comprehensive integration tests
 func TestEntraGroup_Integration_FullSuite(t *testing.T) {
 	checkM365Integration(t)
 
 	t.Run("FullCRUD", func(t *testing.T) {
 		TestEntraGroup_Integration_FullCRUD(t)
+	})
+
+	t.Run("MemberOwnerSync", func(t *testing.T) {
+		TestEntraGroup_Integration_MemberOwnerSync(t)
 	})
 
 	t.Run("ConfigValidation", func(t *testing.T) {
@@ -297,15 +555,24 @@ func TestEntraGroup_Integration_FullSuite(t *testing.T) {
 	t.Run("AuthenticationFlow", func(t *testing.T) {
 		TestEntraGroup_Integration_AuthenticationFlow(t)
 	})
+
+	t.Run("TeamOperations", func(t *testing.T) {
+		TestEntraGroup_Integration_TeamOperations(t)
+	})
 }
 
 // createRealAuthProvider creates a real OAuth2Provider for integration testing
 func createRealAuthProvider(t *testing.T) auth.Provider {
-	tempDir := t.TempDir()
-
-	// Create credential store
-	credStore, err := auth.NewFileCredentialStore(tempDir, "integration-test-passphrase")
-	require.NoError(t, err, "Failed to create credential store")
+	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
+		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
+	}
+	sp := &stewardprovider.StewardProvider{}
+	secretStore, err := sp.CreateSecretStore(map[string]interface{}{
+		"secrets_dir": t.TempDir(),
+	})
+	require.NoError(t, err, "Failed to create secret store")
+	t.Cleanup(func() { _ = secretStore.Close() })
+	credStore := auth.NewSecretStoreCredentialStore(secretStore)
 
 	// Create OAuth2 config from environment
 	config := &auth.OAuth2Config{
@@ -319,7 +586,7 @@ func createRealAuthProvider(t *testing.T) auth.Provider {
 	}
 
 	// Create provider
-	provider := auth.NewOAuth2Provider(credStore, config)
+	provider := auth.NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 
 	return provider
 }

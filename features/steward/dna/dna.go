@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package dna provides system DNA (system attributes) collection for stewards.
 //
@@ -10,7 +10,7 @@
 // Basic usage:
 //
 //	collector := dna.NewCollector(logger)
-//	dna, err := collector.Collect()
+//	dna, err := collector.Collect(ctx)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
@@ -20,11 +20,14 @@
 package dna
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -38,8 +41,24 @@ import (
 // The collector gathers hardware, software, and network information to create
 // a comprehensive system profile. This information is used by the controller
 // for configuration targeting and system management.
+//
+// Static hardware data (CPU, memory, motherboard, BIOS) is cached after the
+// first collection and reused on subsequent calls. Software inventory
+// (packages, services, processes) is collected asynchronously in a background
+// goroutine after the first Collect() call, so startup is never blocked.
 type Collector struct {
 	logger logging.Logger
+
+	// Hardware cache — static hardware data collected once and reused.
+	hwCacheOnce sync.Once
+	hwCacheMu   sync.RWMutex
+	hwCache     map[string]string
+
+	// Background collection — slow software/security data collected asynchronously.
+	bgOnce    sync.Once
+	bgDone    chan struct{} // closed when background collection completes
+	slowMu    sync.RWMutex
+	slowAttrs map[string]string
 }
 
 // NewCollector creates a new DNA collector.
@@ -49,54 +68,73 @@ type Collector struct {
 func NewCollector(logger logging.Logger) *Collector {
 	return &Collector{
 		logger: logger,
+		bgDone: make(chan struct{}),
 	}
 }
 
 // Collect gathers the current system DNA (attributes).
 //
-// This method collects comprehensive system information including:
-//   - Hardware: CPU, memory, architecture
-//   - Software: OS, kernel, runtime version
-//   - Network: Hostname, IP addresses, MAC addresses
-//   - Environment: User, working directory, environment variables
+// On the first call, this method synchronously collects fast data (basic system
+// info, cached hardware, network, environment) and immediately returns. Slow
+// data (installed packages, services, processes, security) is collected
+// asynchronously in a background goroutine.
+//
+// On subsequent calls, if the background collection has completed, the returned
+// DNA includes the full merged dataset. If background collection is still
+// running, only fast data is returned.
+//
+// The context controls per-command timeouts for platform-specific WMI and
+// shell commands. A 30-second per-command timeout is applied automatically.
 //
 // Returns a DNA structure with a unique system ID and all collected attributes.
-// The system ID is generated from stable hardware identifiers.
-func (c *Collector) Collect() (*commonpb.DNA, error) {
+func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 	startTime := time.Now()
 	c.logger.Debug("Collecting system DNA")
 
 	attributes := make(map[string]string)
 
-	// Collect basic system information (fastest first)
+	// Collect basic system information (always fast)
 	basicStart := time.Now()
 	c.collectBasicInfo(attributes)
 	c.logger.Debug("Basic info collected", "duration", time.Since(basicStart))
 
-	// Collect hardware information
+	// Collect hardware information (cached after first call)
 	hwStart := time.Now()
-	c.collectHardwareInfo(attributes)
+	c.collectHardwareInfo(ctx, attributes)
 	c.logger.Debug("Hardware info collected", "duration", time.Since(hwStart))
 
-	// Collect software information (potentially slow)
-	swStart := time.Now()
-	c.collectSoftwareInfo(attributes)
-	c.logger.Debug("Software info collected", "duration", time.Since(swStart))
-
-	// Collect network information
+	// Collect network information (fast on all platforms)
 	netStart := time.Now()
-	c.collectNetworkInfo(attributes)
+	c.collectNetworkInfo(ctx, attributes)
 	c.logger.Debug("Network info collected", "duration", time.Since(netStart))
 
-	// Collect environment information (fast)
+	// Collect environment information (always fast)
 	envStart := time.Now()
 	c.collectEnvironmentInfo(attributes)
 	c.logger.Debug("Environment info collected", "duration", time.Since(envStart))
 
-	// Collect security information (potentially slow)
-	secStart := time.Now()
-	c.collectSecurityInfo(attributes)
-	c.logger.Debug("Security info collected", "duration", time.Since(secStart))
+	// Start background goroutine for slow data on first call.
+	// Uses context.Background() with a generous timeout so the goroutine
+	// runs to completion even if the caller's context is short-lived.
+	c.bgOnce.Do(func() {
+		bgCtx, bgCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		go func() {
+			defer bgCancel()
+			c.runBackgroundCollection(bgCtx)
+		}()
+	})
+
+	// Merge background data if it has already completed.
+	select {
+	case <-c.bgDone:
+		c.slowMu.RLock()
+		for k, v := range c.slowAttrs {
+			attributes[k] = v
+		}
+		c.slowMu.RUnlock()
+	default:
+		// Background not yet complete; return fast data only.
+	}
 
 	// Generate stable system ID from hardware characteristics
 	systemID := c.generateSystemID(attributes)
@@ -110,7 +148,7 @@ func (c *Collector) Collect() (*commonpb.DNA, error) {
 		LastUpdated: timestamppb.New(now),
 
 		// Sync metadata (will be updated by steward with config info)
-		ConfigHash:      "", // Will be set when steward loads configuration
+		ConfigHash:      "",
 		LastSyncTime:    timestamppb.New(now),
 		AttributeCount:  c.safeInt32(len(attributes)), // Safe conversion with bounds validation
 		SyncFingerprint: c.generateSyncFingerprint(systemID, attributes, ""),
@@ -122,6 +160,46 @@ func (c *Collector) Collect() (*commonpb.DNA, error) {
 		"total_duration", totalDuration)
 
 	return dna, nil
+}
+
+// runBackgroundCollection collects slow software and security data asynchronously.
+// Software and security run concurrently since they write to separate attribute keys.
+// It merges results into slowAttrs and closes bgDone when finished.
+func (c *Collector) runBackgroundCollection(ctx context.Context) {
+	c.logger.Debug("Starting background DNA collection (software + security)")
+	start := time.Now()
+
+	swAttrs := make(map[string]string)
+	secAttrs := make(map[string]string)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		c.collectSoftwareInfo(ctx, swAttrs)
+	}()
+	go func() {
+		defer wg.Done()
+		c.collectSecurityInfo(ctx, secAttrs)
+	}()
+	wg.Wait()
+
+	slowAttrs := make(map[string]string, len(swAttrs)+len(secAttrs))
+	for k, v := range swAttrs {
+		slowAttrs[k] = v
+	}
+	for k, v := range secAttrs {
+		slowAttrs[k] = v
+	}
+
+	c.slowMu.Lock()
+	c.slowAttrs = slowAttrs
+	c.slowMu.Unlock()
+
+	close(c.bgDone)
+	c.logger.Info("Background DNA collection completed",
+		"attributes", len(slowAttrs),
+		"duration", time.Since(start))
 }
 
 // collectBasicInfo collects basic system information.
@@ -142,55 +220,72 @@ func (c *Collector) collectBasicInfo(attributes map[string]string) {
 }
 
 // collectHardwareInfo collects hardware-specific information using platform-specific collectors.
-func (c *Collector) collectHardwareInfo(attributes map[string]string) {
-	hwCollector := NewHardwareCollector()
+// Static hardware data (CPU, memory, disk model, motherboard) is cached after the first call.
+func (c *Collector) collectHardwareInfo(ctx context.Context, attributes map[string]string) {
+	// Populate the hardware cache exactly once. Use a background context with a
+	// generous timeout so the cache is always filled even when the caller's
+	// context has a short deadline.
+	c.hwCacheOnce.Do(func() {
+		cacheCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
 
-	// Collect CPU information
-	if err := hwCollector.CollectCPU(attributes); err != nil {
-		c.logger.Error("Failed to collect CPU information", "error", err)
+		cache := make(map[string]string)
+		hwCollector := NewHardwareCollector(cacheCtx)
+
+		if err := hwCollector.CollectCPU(cacheCtx, cache); err != nil {
+			c.logger.Error("Failed to collect CPU information", "error", err)
+		}
+
+		if err := hwCollector.CollectMemory(cacheCtx, cache); err != nil {
+			c.logger.Error("Failed to collect memory information", "error", err)
+		}
+
+		if err := hwCollector.CollectDisk(cacheCtx, cache); err != nil {
+			c.logger.Error("Failed to collect disk information", "error", err)
+		}
+
+		if err := hwCollector.CollectMotherboard(cacheCtx, cache); err != nil {
+			c.logger.Error("Failed to collect motherboard information", "error", err)
+		}
+
+		c.hwCacheMu.Lock()
+		c.hwCache = cache
+		c.hwCacheMu.Unlock()
+	})
+
+	// Copy cached hardware data into the caller's attribute map.
+	c.hwCacheMu.RLock()
+	for k, v := range c.hwCache {
+		attributes[k] = v
 	}
+	c.hwCacheMu.RUnlock()
 
-	// Collect memory information
-	if err := hwCollector.CollectMemory(attributes); err != nil {
-		c.logger.Error("Failed to collect memory information", "error", err)
-	}
-
-	// Collect disk information
-	if err := hwCollector.CollectDisk(attributes); err != nil {
-		c.logger.Error("Failed to collect disk information", "error", err)
-	}
-
-	// Collect motherboard/system information
-	if err := hwCollector.CollectMotherboard(attributes); err != nil {
-		c.logger.Error("Failed to collect motherboard information", "error", err)
-	}
-
-	// Add basic runtime information as backup
+	// Runtime fallback — always present, fast.
 	attributes["runtime_arch"] = runtime.GOARCH
 	attributes["runtime_os"] = runtime.GOOS
 }
 
 // collectSoftwareInfo collects software and OS information using platform-specific collectors.
-func (c *Collector) collectSoftwareInfo(attributes map[string]string) {
-	swCollector := NewSoftwareCollector()
+func (c *Collector) collectSoftwareInfo(ctx context.Context, attributes map[string]string) {
+	swCollector := NewSoftwareCollector(ctx)
 
 	// Collect OS information
-	if err := swCollector.CollectOS(attributes); err != nil {
+	if err := swCollector.CollectOS(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect OS information", "error", err)
 	}
 
 	// Collect installed packages/applications
-	if err := swCollector.CollectPackages(attributes); err != nil {
+	if err := swCollector.CollectPackages(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect package information", "error", err)
 	}
 
 	// Collect service information
-	if err := swCollector.CollectServices(attributes); err != nil {
+	if err := swCollector.CollectServices(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect service information", "error", err)
 	}
 
 	// Collect process information
-	if err := swCollector.CollectProcesses(attributes); err != nil {
+	if err := swCollector.CollectProcesses(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect process information", "error", err)
 	}
 
@@ -201,51 +296,51 @@ func (c *Collector) collectSoftwareInfo(attributes map[string]string) {
 }
 
 // collectNetworkInfo collects network configuration information using platform-specific collectors.
-func (c *Collector) collectNetworkInfo(attributes map[string]string) {
+func (c *Collector) collectNetworkInfo(ctx context.Context, attributes map[string]string) {
 	netCollector := NewNetworkCollector()
 
 	// Collect network interface information
-	if err := netCollector.CollectInterfaces(attributes); err != nil {
+	if err := netCollector.CollectInterfaces(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect network interface information", "error", err)
 	}
 
 	// Collect routing information
-	if err := netCollector.CollectRouting(attributes); err != nil {
+	if err := netCollector.CollectRouting(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect routing information", "error", err)
 	}
 
 	// Collect DNS configuration
-	if err := netCollector.CollectDNS(attributes); err != nil {
+	if err := netCollector.CollectDNS(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect DNS information", "error", err)
 	}
 
 	// Collect firewall configuration
-	if err := netCollector.CollectFirewall(attributes); err != nil {
+	if err := netCollector.CollectFirewall(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect firewall information", "error", err)
 	}
 }
 
 // collectSecurityInfo collects security attributes using platform-specific collectors.
-func (c *Collector) collectSecurityInfo(attributes map[string]string) {
+func (c *Collector) collectSecurityInfo(ctx context.Context, attributes map[string]string) {
 	secCollector := NewSecurityCollector()
 
 	// Collect user information
-	if err := secCollector.CollectUsers(attributes); err != nil {
+	if err := secCollector.CollectUsers(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect user information", "error", err)
 	}
 
 	// Collect group information
-	if err := secCollector.CollectGroups(attributes); err != nil {
+	if err := secCollector.CollectGroups(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect group information", "error", err)
 	}
 
 	// Collect permission information
-	if err := secCollector.CollectPermissions(attributes); err != nil {
+	if err := secCollector.CollectPermissions(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect permission information", "error", err)
 	}
 
 	// Collect certificate information
-	if err := secCollector.CollectCertificates(attributes); err != nil {
+	if err := secCollector.CollectCertificates(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect certificate information", "error", err)
 	}
 }
@@ -331,40 +426,6 @@ func (c *Collector) generateSystemID(attributes map[string]string) string {
 	return fmt.Sprintf("%x", hash[:8])
 }
 
-// RefreshDNA collects fresh DNA information.
-//
-// This is a convenience method that calls Collect() to get fresh system information.
-// It's useful for periodic DNA updates where some attributes may have changed.
-func (c *Collector) RefreshDNA() (*commonpb.DNA, error) {
-	return c.Collect()
-}
-
-// CompareDNA compares two DNA structures and returns true if they represent the same system.
-//
-// This method compares the system IDs and key hardware characteristics to determine
-// if two DNA structures represent the same physical system.
-func CompareDNA(dna1, dna2 *commonpb.DNA) bool {
-	if dna1 == nil || dna2 == nil {
-		return false
-	}
-
-	// Primary comparison: system ID
-	if dna1.Id != dna2.Id {
-		return false
-	}
-
-	// Secondary comparison: key hardware characteristics
-	keyAttributes := []string{"primary_mac", "hostname", "cpu_count", "arch"}
-
-	for _, attr := range keyAttributes {
-		if dna1.Attributes[attr] != dna2.Attributes[attr] {
-			return false
-		}
-	}
-
-	return true
-}
-
 // generateSyncFingerprint creates a fingerprint for sync verification.
 //
 // This combines the system ID, number of attributes, and config hash into a single
@@ -385,19 +446,31 @@ func (c *Collector) generateSyncFingerprint(systemID string, attributes map[stri
 	return fmt.Sprintf("%x", hash[:6])
 }
 
-// UpdateSyncMetadata updates the sync-related fields in DNA.
+// ComputeHash computes a deterministic SHA-256 hash of the given DNA attributes.
 //
-// This should be called by the steward when configuration changes or when
-// sync verification needs to be updated.
-func (c *Collector) UpdateSyncMetadata(dna *commonpb.DNA, configHash string) {
-	if dna == nil {
-		return
+// The hash is stable across Go map iteration order: keys are sorted before
+// hashing so the same attribute set always produces the same hash regardless
+// of insertion order. Returns an empty string when attributes is nil or empty.
+//
+// Both the steward and the controller call this function with the same attribute
+// set so that matching hashes confirm synchronisation without full retransmission.
+func ComputeHash(attributes map[string]string) string {
+	if len(attributes) == 0 {
+		return ""
 	}
 
-	dna.ConfigHash = configHash
-	dna.LastSyncTime = timestamppb.New(time.Now())
-	dna.AttributeCount = c.safeInt32(len(dna.Attributes)) // Safe conversion with bounds validation
-	dna.SyncFingerprint = c.generateSyncFingerprint(dna.Id, dna.Attributes, configHash)
+	keys := make([]string, 0, len(attributes))
+	for k := range attributes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	h := sha256.New()
+	for _, k := range keys {
+		// Write errors on hash.Hash are documented as always nil; ignore per io.Writer contract.
+		_, _ = fmt.Fprintf(h, "%s=%s\n", k, attributes[k])
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 // safeInt32 safely converts an int to int32 with bounds validation

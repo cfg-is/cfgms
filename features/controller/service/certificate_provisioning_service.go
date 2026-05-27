@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package service
 
@@ -171,11 +171,4 @@ func (s *CertificateProvisioningService) GetCertificateInfo(serialNumber string)
 // ListCertificatesBySteward retrieves all certificates for a specific steward
 func (s *CertificateProvisioningService) ListCertificatesBySteward(stewardID string) ([]*cert.CertificateInfo, error) {
 	return s.certManager.GetCertificateByCommonName(stewardID)
-}
-
-// RevokeCertificate revokes a certificate (placeholder for future implementation)
-func (s *CertificateProvisioningService) RevokeCertificate(serialNumber string, reason string) error {
-	// Certificate revocation is not yet implemented in the underlying cert manager
-	// This is a placeholder for future implementation
-	return fmt.Errorf("certificate revocation not yet implemented")
 }

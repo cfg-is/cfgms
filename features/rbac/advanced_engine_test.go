@@ -1,153 +1,199 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rbac
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac/memory"
 )
 
-// Simplified test without direct zero-trust mocking due to circular import constraints
+// errPermissionStore is a minimal PermissionStore test double that returns a configurable
+// error from GetPermission. Used to exercise the non-not-found error branch of getPermissionByID.
+type errPermissionStore struct{ getErr error }
 
-// Mock stores for testing
-type MockPermissionStore struct{ mock.Mock }
-type MockRoleStore struct{ mock.Mock }
-type MockSubjectStore struct{ mock.Mock }
-type MockRoleAssignmentStore struct{ mock.Mock }
-
-func (m *MockPermissionStore) CreatePermission(ctx context.Context, permission *common.Permission) error {
+func (s *errPermissionStore) GetPermission(_ context.Context, _ string) (*common.Permission, error) {
+	return nil, s.getErr
+}
+func (s *errPermissionStore) CreatePermission(_ context.Context, _ *common.Permission) error {
 	return nil
 }
-func (m *MockPermissionStore) GetPermission(ctx context.Context, id string) (*common.Permission, error) {
+func (s *errPermissionStore) ListPermissions(_ context.Context, _ string) ([]*common.Permission, error) {
 	return nil, nil
 }
-func (m *MockPermissionStore) ListPermissions(ctx context.Context, resourceType string) ([]*common.Permission, error) {
-	return nil, nil
-}
-func (m *MockPermissionStore) UpdatePermission(ctx context.Context, permission *common.Permission) error {
+func (s *errPermissionStore) UpdatePermission(_ context.Context, _ *common.Permission) error {
 	return nil
 }
-func (m *MockPermissionStore) DeletePermission(ctx context.Context, id string) error { return nil }
+func (s *errPermissionStore) DeletePermission(_ context.Context, _ string) error { return nil }
 
-func (m *MockRoleStore) CreateRole(ctx context.Context, role *common.Role) error { return nil }
-func (m *MockRoleStore) GetRole(ctx context.Context, id string) (*common.Role, error) {
-	return nil, nil
+func setupAdvancedEngineStore(t *testing.T) (*memory.Store, context.Context) {
+	t.Helper()
+	store := memory.NewStore()
+	ctx := context.Background()
+	require.NoError(t, store.Initialize(ctx))
+	return store, ctx
 }
-func (m *MockRoleStore) ListRoles(ctx context.Context, tenantID string) ([]*common.Role, error) {
-	return nil, nil
-}
-func (m *MockRoleStore) UpdateRole(ctx context.Context, role *common.Role) error { return nil }
-func (m *MockRoleStore) DeleteRole(ctx context.Context, id string) error         { return nil }
-func (m *MockRoleStore) GetRolePermissions(ctx context.Context, roleID string) ([]*common.Permission, error) {
-	return []*common.Permission{
+
+func TestAdvancedAuthEngine_CheckPermission(t *testing.T) {
+	store, ctx := setupAdvancedEngineStore(t)
+
+	store.LoadPermissions([]*common.Permission{
 		{Id: "steward.register", Name: "Register Steward", Description: "Allow steward registration"},
-	}, nil
-}
-func (m *MockRoleStore) GetRoleHierarchy(ctx context.Context, roleID string) (*memory.RoleHierarchy, error) {
-	return nil, nil
-}
-func (m *MockRoleStore) GetChildRoles(ctx context.Context, roleID string) ([]*common.Role, error) {
-	return nil, nil
-}
-func (m *MockRoleStore) GetParentRole(ctx context.Context, roleID string) (*common.Role, error) {
-	return nil, nil
-}
-func (m *MockRoleStore) SetRoleParent(ctx context.Context, roleID, parentRoleID string, inheritanceType common.RoleInheritanceType) error {
-	return nil
-}
-func (m *MockRoleStore) RemoveRoleParent(ctx context.Context, roleID string) error      { return nil }
-func (m *MockRoleStore) ValidateRoleHierarchy(ctx context.Context, roleID string) error { return nil }
-
-func (m *MockSubjectStore) CreateSubject(ctx context.Context, subject *common.Subject) error {
-	return nil
-}
-func (m *MockSubjectStore) GetSubject(ctx context.Context, id string) (*common.Subject, error) {
-	return &common.Subject{
-		Id:          id,
+	})
+	store.LoadRoles([]*common.Role{
+		{Id: "admin", Name: "Administrator", Description: "Full admin access", TenantId: "tenant456",
+			PermissionIds: []string{"steward.register"}},
+	})
+	require.NoError(t, store.CreateSubject(ctx, &common.Subject{
+		Id:          "user123",
 		Type:        common.SubjectType_SUBJECT_TYPE_USER,
 		DisplayName: "Test User",
+		TenantId:    "tenant456",
 		IsActive:    true,
-	}, nil
-}
-func (m *MockSubjectStore) ListSubjects(ctx context.Context, tenantID string, subjectType common.SubjectType) ([]*common.Subject, error) {
-	return nil, nil
-}
-func (m *MockSubjectStore) UpdateSubject(ctx context.Context, subject *common.Subject) error {
-	return nil
-}
-func (m *MockSubjectStore) DeleteSubject(ctx context.Context, id string) error { return nil }
-func (m *MockSubjectStore) GetSubjectRoles(ctx context.Context, subjectID, tenantID string) ([]*common.Role, error) {
-	return []*common.Role{
-		{Id: "admin", Name: "Administrator", Description: "Full admin access"},
-	}, nil
+	}))
+	require.NoError(t, store.AssignRole(ctx, &common.RoleAssignment{
+		SubjectId: "user123",
+		RoleId:    "admin",
+		TenantId:  "tenant456",
+	}))
+
+	engine := NewAdvancedAuthEngine(store, store, store, store)
+
+	t.Run("RBAC granted", func(t *testing.T) {
+		request := &common.AccessRequest{
+			SubjectId:    "user123",
+			PermissionId: "steward.register",
+			TenantId:     "tenant456",
+			Context: map[string]string{
+				"source_ip":  "192.168.1.100",
+				"user_agent": "test-agent",
+			},
+		}
+
+		response, err := engine.CheckPermission(ctx, request)
+
+		require.NoError(t, err)
+		require.NotNil(t, response)
+		assert.True(t, response.Granted)
+		assert.Contains(t, response.Reason, "Access granted via role 'Administrator' with permission 'Register Steward'")
+	})
+
+	t.Run("RBAC denied", func(t *testing.T) {
+		request := &common.AccessRequest{
+			SubjectId:    "user123",
+			PermissionId: "steward.delete",
+			TenantId:     "tenant456",
+			Context: map[string]string{
+				"source_ip":  "192.168.1.100",
+				"user_agent": "test-agent",
+			},
+		}
+
+		response, err := engine.CheckPermission(ctx, request)
+
+		require.NoError(t, err)
+		require.NotNil(t, response)
+		assert.False(t, response.Granted)
+	})
 }
 
-func (m *MockRoleAssignmentStore) AssignRole(ctx context.Context, assignment *common.RoleAssignment) error {
-	return nil
-}
-func (m *MockRoleAssignmentStore) RevokeRole(ctx context.Context, subjectID, roleID, tenantID string) error {
-	return nil
-}
-func (m *MockRoleAssignmentStore) GetAssignment(ctx context.Context, id string) (*common.RoleAssignment, error) {
-	return nil, nil
-}
-func (m *MockRoleAssignmentStore) ListAssignments(ctx context.Context, subjectID, roleID, tenantID string) ([]*common.RoleAssignment, error) {
-	return nil, nil
-}
-func (m *MockRoleAssignmentStore) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) {
-	return nil, nil
-}
+// TestAdvancedAuthEngine_GetDelegatedPermissions_UsesPermissionStore verifies that
+// getPermissionByID calls permissionStore.GetPermission and falls back gracefully.
+func TestAdvancedAuthEngine_GetDelegatedPermissions_UsesPermissionStore(t *testing.T) {
+	store, ctx := setupAdvancedEngineStore(t)
 
-func TestAdvancedAuthEngine_BasicRBACFlow(t *testing.T) {
-	// Setup
-	mockPerm := &MockPermissionStore{}
-	mockRole := &MockRoleStore{}
-	mockSubject := &MockSubjectStore{}
-	mockAssignment := &MockRoleAssignmentStore{}
+	// Register the permission that will be delegated
+	store.LoadPermissions([]*common.Permission{
+		{Id: "files.read", Name: "Read Files", Description: "Allows reading files"},
+	})
 
-	engine := NewAdvancedAuthEngine(mockPerm, mockRole, mockSubject, mockAssignment)
+	// Set up delegator and delegatee subjects
+	require.NoError(t, store.CreateSubject(ctx, &common.Subject{
+		Id: "delegator1", Type: common.SubjectType_SUBJECT_TYPE_USER,
+		DisplayName: "Delegator", TenantId: "t1", IsActive: true,
+	}))
+	require.NoError(t, store.CreateSubject(ctx, &common.Subject{
+		Id: "delegatee1", Type: common.SubjectType_SUBJECT_TYPE_USER,
+		DisplayName: "Delegatee", TenantId: "t1", IsActive: true,
+	}))
 
-	// Test basic RBAC flow without zero-trust (disabled mode)
-	assert.Equal(t, ZeroTrustModeDisabled, engine.GetZeroTrustMode())
+	engine := NewAdvancedAuthEngine(store, store, store, store)
 
-	// Create test request
-	request := &common.AccessRequest{
-		SubjectId:    "user123",
-		PermissionId: "steward.register",
-		TenantId:     "tenant456",
-		Context: map[string]string{
-			"source_ip":  "192.168.1.100",
-			"user_agent": "test-agent",
-		},
+	// Inject a delegation directly (same package access to unexported map)
+	dm := NewDelegationManager(nil)
+	dm.mu.Lock()
+	dm.delegations["del-1"] = &common.PermissionDelegation{
+		Id:            "del-1",
+		DelegatorId:   "delegator1",
+		DelegateeId:   "delegatee1",
+		PermissionIds: []string{"files.read"},
+		TenantId:      "t1",
+		Revoked:       false,
 	}
+	dm.mu.Unlock()
+	engine.SetDelegationManager(dm)
 
-	// Execute
-	response, err := engine.CheckPermission(context.Background(), request)
+	t.Run("uses permission store for known permission", func(t *testing.T) {
+		perms, err := engine.GetSubjectPermissions(ctx, "delegatee1", "t1")
+		require.NoError(t, err)
 
-	// Verify
-	assert.NoError(t, err)
-	assert.NotNil(t, response)
-	assert.True(t, response.Granted)
-	assert.Contains(t, response.Reason, "Access granted via role 'Administrator' with permission 'Register Steward'")
-}
+		var found *common.Permission
+		for _, p := range perms {
+			if p.Id == "files.read" {
+				found = p
+				break
+			}
+		}
+		require.NotNil(t, found, "delegated permission should appear in subject permissions")
+		assert.Equal(t, "Read Files", found.Name, "name should come from permission store, not synthetic fallback")
+	})
 
-func TestAdvancedAuthEngine_ZeroTrustModeConfiguration(t *testing.T) {
-	engine := NewAdvancedAuthEngine(nil, nil, nil, nil)
+	t.Run("falls back gracefully for unknown delegated permission", func(t *testing.T) {
+		dm2 := NewDelegationManager(nil)
+		dm2.mu.Lock()
+		dm2.delegations["del-2"] = &common.PermissionDelegation{
+			Id:            "del-2",
+			DelegatorId:   "delegator1",
+			DelegateeId:   "delegatee1",
+			PermissionIds: []string{"nonexistent.permission"},
+			TenantId:      "t1",
+			Revoked:       false,
+		}
+		dm2.mu.Unlock()
+		engine.SetDelegationManager(dm2)
 
-	// Test initial state
-	assert.Equal(t, ZeroTrustModeDisabled, engine.GetZeroTrustMode())
+		perms, err := engine.GetSubjectPermissions(ctx, "delegatee1", "t1")
+		require.NoError(t, err)
 
-	// Test that nil zero-trust engine doesn't enable zero-trust
-	engine.EnableZeroTrust(ZeroTrustModeAugmented)
-	assert.Equal(t, ZeroTrustModeDisabled, engine.GetZeroTrustMode())
+		var found *common.Permission
+		for _, p := range perms {
+			if p.Id == "nonexistent.permission" {
+				found = p
+				break
+			}
+		}
+		require.NotNil(t, found, "synthetic fallback permission should be returned for unknown IDs")
+		assert.Equal(t, "Delegated: nonexistent.permission", found.Name)
+	})
 
-	// Test disabling zero-trust
-	engine.DisableZeroTrust()
-	assert.Equal(t, ZeroTrustModeDisabled, engine.GetZeroTrustMode())
+	t.Run("falls back and does not propagate non-not-found store error", func(t *testing.T) {
+		// Directly test getPermissionByID with a store that returns a non-not-found error
+		// (e.g. connection failure). The helper must return the synthetic fallback, not the error.
+		storeErr := fmt.Errorf("connection timeout to permission store")
+		errorEngine := &AdvancedAuthEngine{
+			baseEngine: &AuthEngine{permissionStore: &errPermissionStore{getErr: storeErr}},
+		}
+
+		perm := errorEngine.getPermissionByID(ctx, "some.permission", "some-delegator")
+		require.NotNil(t, perm, "should return synthetic fallback when store returns non-not-found error")
+		assert.Equal(t, "some.permission", perm.Id)
+		assert.Equal(t, "Delegated: some.permission", perm.Name)
+		assert.Contains(t, perm.Description, "some-delegator")
+	})
 }

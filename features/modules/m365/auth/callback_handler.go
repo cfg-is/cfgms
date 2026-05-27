@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package auth
 
@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // CallbackHandler manages OAuth2 callback processing and flow state
@@ -21,6 +23,9 @@ type CallbackHandler struct {
 	// HTTP server for handling callbacks
 	server     *http.Server
 	serverPort string
+	listener   net.Listener
+
+	logger logging.Logger
 }
 
 // NewCallbackHandler creates a new callback handler
@@ -28,7 +33,16 @@ func NewCallbackHandler() *CallbackHandler {
 	return &CallbackHandler{
 		flowStates: make(map[string]*AuthFlowState),
 		serverPort: "8080", // Default port
+		logger:     logging.NewNoopLogger(),
 	}
+}
+
+// WithLogger sets the logger for the callback handler and returns h for chaining.
+func (h *CallbackHandler) WithLogger(logger logging.Logger) *CallbackHandler {
+	if logger != nil {
+		h.logger = logger
+	}
+	return h
 }
 
 // StartCallbackServer starts the HTTP server to handle OAuth2 callbacks
@@ -50,6 +64,7 @@ func (h *CallbackHandler) StartCallbackServer(ctx context.Context, port string) 
 
 	// Update serverPort with actual port (important when using "0")
 	h.serverPort = fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+	h.listener = listener
 
 	h.server = &http.Server{
 		Handler:      mux,
@@ -59,7 +74,7 @@ func (h *CallbackHandler) StartCallbackServer(ctx context.Context, port string) 
 
 	go func() {
 		if err := h.server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			fmt.Printf("Callback server error: %v\n", err)
+			h.logger.Error("callback server error", "error", err)
 		}
 	}()
 
@@ -170,8 +185,7 @@ func (h *CallbackHandler) handleCallback(w http.ResponseWriter, r *http.Request)
 	if r.Header.Get("Accept") == "application/json" {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(response); err != nil {
-			// Log error - we could add a logger field to CallbackHandler in the future
-			_ = err // Acknowledge error
+			h.logger.Error("failed to encode callback response", "error", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 		return
@@ -181,8 +195,7 @@ func (h *CallbackHandler) handleCallback(w http.ResponseWriter, r *http.Request)
 	html := h.generateCallbackHTML(response)
 	w.Header().Set("Content-Type", "text/html")
 	if _, err := w.Write([]byte(html)); err != nil {
-		// Log error - we could add a logger field to CallbackHandler in the future
-		_ = err // Acknowledge error
+		h.logger.Error("failed to write callback html", "error", err)
 	}
 }
 
@@ -203,8 +216,7 @@ func (h *CallbackHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"success": result.Success,
 			"state":   result.State,
 		}); err != nil {
-			// Log error - we could add a logger field to CallbackHandler in the future
-			_ = err // Acknowledge error
+			h.logger.Error("failed to encode status response", "error", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 	} else {
@@ -212,8 +224,7 @@ func (h *CallbackHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"ready": false,
 			"state": state,
 		}); err != nil {
-			// Log error - we could add a logger field to CallbackHandler in the future
-			_ = err // Acknowledge error
+			h.logger.Error("failed to encode status response", "error", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 	}
@@ -226,8 +237,7 @@ func (h *CallbackHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"timestamp": time.Now().Format(time.RFC3339),
 		"version":   "1.0.0",
 	}); err != nil {
-		// Could add logging here if needed
-		_ = err
+		h.logger.Error("failed to encode health response", "error", err)
 	}
 }
 

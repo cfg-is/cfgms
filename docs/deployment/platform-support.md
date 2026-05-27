@@ -9,12 +9,12 @@ CFGMS is designed as a cross-platform configuration management system that suppo
 The CFGMS Steward is designed for broad cross-platform deployment to managed endpoints:
 
 | Platform | Architecture | Status | Notes |
-|----------|-------------|--------|-------|
+| -------- | ------------ | ------ | ----- |
 | **Linux** | AMD64 (x86_64) | ✅ Fully Supported | Primary development platform |
 | **Linux** | ARM64 (aarch64) | ✅ Fully Supported | Raspberry Pi, AWS Graviton, etc. |
 | **Windows** | AMD64 (x86_64) | ✅ Fully Supported | Windows 10, 11, Server 2019+ |
-| **Windows** | ARM64 | ✅ Fully Supported | Surface Pro X, Windows on ARM |
-| **macOS** | ARM64 (M series) | ✅ Fully Supported | Apple Silicon Macs (M1, M2, M3+) |
+| **macOS** | AMD64 (x86_64) | ✅ Fully Supported | Intel Macs |
+| **macOS** | ARM64 (M series) | ✅ Fully Supported | Apple Silicon Macs |
 
 ### Controller Support
 
@@ -36,7 +36,7 @@ The CFGMS Controller is designed for infrastructure deployment:
 - **Process Management**: Full Unix process control and monitoring
 - **File System**: POSIX-compliant file and directory management with ownership/permissions
 - **Network**: Native network interface and routing table access
-- **Security**: User/group management, SSH key handling, firewall configuration
+- **Security**: User/group management, SSH key handling, firewall configuration (iptables — Linux only; Windows/macOS not yet implemented)
 
 #### Windows
 
@@ -101,16 +101,11 @@ The CFGMS Controller is designed for infrastructure deployment:
 CFGMS supports native cross-compilation for all target platforms:
 
 ```bash
-# Steward builds for all supported platforms
-make build-steward-linux-amd64    # Linux x86_64
-make build-steward-linux-arm64    # Linux ARM64
-make build-steward-windows-amd64  # Windows x86_64
-make build-steward-windows-arm64  # Windows ARM64
-make build-steward-darwin-arm64   # macOS Apple Silicon
+# Build all binaries for all supported platforms (outputs to bin/<os>-<arch>/)
+make build-cross-platform
 
-# Controller builds
-make build-controller-linux-amd64   # Linux x86_64 (primary)
-make build-controller-windows-amd64 # Windows x86_64 (development)
+# Validate cross-platform compilation without saving binaries (CI-friendly)
+make build-cross-validate
 ```
 
 ### GitHub Actions CI/CD
@@ -139,9 +134,11 @@ make build
 ### Cross-Platform Steward Builds
 
 ```bash
-# Build for a specific platform
+# Build steward for a specific platform
+make build-steward-cross GOOS=linux GOARCH=amd64
 make build-steward-cross GOOS=linux GOARCH=arm64
 make build-steward-cross GOOS=windows GOARCH=amd64
+make build-steward-cross GOOS=darwin GOARCH=amd64
 make build-steward-cross GOOS=darwin GOARCH=arm64
 ```
 
@@ -155,7 +152,7 @@ sudo chmod +x /usr/local/bin/cfgms-steward
 # Register with controller and start
 ./cfgms-steward --regtoken <TOKEN>
 
-# systemd service (optional, see home-lab-deployment-guide.md)
+# systemd service (optional, see single-controller/walkthrough.md)
 sudo systemctl enable cfgms-steward
 sudo systemctl start cfgms-steward
 ```
@@ -270,4 +267,4 @@ Each platform logs to appropriate system locations:
 
 ### Community Contributions
 
-Platform support contributions are welcome. See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines on adding new platform support.
+Platform support contributions are welcome. Open a GitHub issue describing the target platform before starting work.

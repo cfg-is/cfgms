@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package security
 
@@ -16,38 +16,48 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	"github.com/cfgis/cfgms/pkg/audit"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // TestCrossTenantPermissionIsolationIntegration tests tenant isolation using real RBAC components
 // This is an integration test that validates the complete authorization pipeline
 func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 	ctx := context.Background()
+	// M-AUTH-2: inject justification so sensitive RBAC operations pass the gate
+	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: cross-tenant isolation integration")
 
 	// Setup REAL RBAC and tenant infrastructure with git storage
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
-	require.NoError(t, err)
+	storageManager := pkgtesting.SetupTestStorage(t)
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
-	err = rbacManager.Initialize(ctx)
+	err := rbacManager.Initialize(ctx)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		// 30s allows the rbac drain goroutine to finish on slow Windows CI
+		// runners (concurrent load test writes ~300 entries sharing one store).
+		flushCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = rbacManager.FlushAudit(flushCtx)
+	})
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
-	auditLogger := NewTenantSecurityAuditLogger()
-	isolationEngine := NewTenantIsolationEngine(tenantManager)
+	securityAuditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "tenant-security-integration")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// 30s — same reasoning as FlushAudit above; both managers share the
+		// same flatfile store and their drains are serialised by its mutex.
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = securityAuditMgr.Stop(stopCtx)
+	})
+	auditLogger := NewTenantSecurityAuditLogger(securityAuditMgr)
+	isolationEngine := NewTenantIsolationEngine(tenantManager, securityAuditMgr)
 
 	// Create comprehensive tenant hierarchy for integration testing
 	err = setupRealTenantHierarchy(t, ctx, tenantStore, tenantManager)
@@ -220,13 +230,9 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 			err = rbacManager.CreateRoleWithParent(ctx, childRole, "parent-admin-role",
 				common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE)
 
-			// Current RBAC system doesn't enforce cross-tenant role restrictions yet
-			// This test documents the current behavior for future enhancement
-			if err != nil {
-				t.Logf("✅ Cross-tenant role inheritance blocked: %v", err)
-			} else {
-				t.Logf("ℹ️  Cross-tenant role inheritance allowed - RBAC system needs cross-tenant validation enhancement")
-			}
+			// M-TENANT-2: cross-tenant role inheritance is blocked by the RBAC system.
+			require.Error(t, err, "cross-tenant role inheritance must be blocked")
+			assert.Contains(t, err.Error(), "cross-tenant role inheritance not allowed")
 		})
 
 		t.Run("SameTenantRoleInheritanceAllowed", func(t *testing.T) {
@@ -420,8 +426,6 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 						}
 					}
 
-					// Small delay to vary timing
-					time.Sleep(time.Millisecond * time.Duration((id%5)+1))
 				}
 			}(userID)
 		}

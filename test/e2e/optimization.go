@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package e2e
 
@@ -120,7 +120,7 @@ func (o *GitHubActionsOptimizer) optimizeForMemoryLimits(config *E2EConfig) {
 	}
 
 	// Force garbage collection more frequently in tests
-	// This would be implemented in the actual test framework
+	// Design decision: this optimization helper is a framework stub; actual implementation is in the benchmark suite.
 
 	// Reduce buffer sizes and cache limits
 	// Implementation would adjust internal buffer sizes

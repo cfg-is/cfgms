@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package modules
 
@@ -7,11 +7,29 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// notifyOnErrorLogger wraps MockLogger and signals errCh when Error is called,
+// allowing tests to synchronize on error-level log writes without time.Sleep.
+type notifyOnErrorLogger struct {
+	*pkgtesting.MockLogger
+	errCh chan struct{}
+}
+
+func (n *notifyOnErrorLogger) Error(msg string, keysAndValues ...interface{}) {
+	n.MockLogger.Error(msg, keysAndValues...)
+	select {
+	case n.errCh <- struct{}{}:
+	default:
+	}
+}
 
 func TestNewModuleLifecycleManager(t *testing.T) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	if manager.registry != registry {
 		t.Error("Registry should be set correctly")
@@ -36,7 +54,7 @@ func TestNewModuleLifecycleManager(t *testing.T) {
 
 func TestModuleLifecycleManager_StartStop(t *testing.T) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	// Test Start
 	err := manager.Start()
@@ -73,7 +91,7 @@ func TestModuleLifecycleManager_StartStop(t *testing.T) {
 
 func TestModuleLifecycleManager_RegisterModule(t *testing.T) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	metadata := &ModuleMetadata{
 		Name:    "test-module",
@@ -113,7 +131,7 @@ func TestModuleLifecycleManager_RegisterModule(t *testing.T) {
 
 func TestModuleLifecycleManager_UnregisterModule(t *testing.T) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	metadata := &ModuleMetadata{
 		Name:    "test-module",
@@ -149,7 +167,7 @@ func TestModuleLifecycleManager_UnregisterModule(t *testing.T) {
 
 func TestModuleLifecycleManager_LoadModule(t *testing.T) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	// Test loading non-existent module
 	err := manager.LoadModule("non-existent")
@@ -215,7 +233,7 @@ func TestModuleLifecycleManager_LoadModule(t *testing.T) {
 
 func TestModuleLifecycleManager_StartStopModule(t *testing.T) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	// Register and load module
 	module := &mockLifecycleModule{
@@ -262,7 +280,7 @@ func TestModuleLifecycleManager_StartStopModule(t *testing.T) {
 
 func TestModuleLifecycleManager_StartStopAllModules(t *testing.T) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	// Register modules with dependencies (base <- app)
 	baseModule := &mockLifecycleModule{
@@ -338,7 +356,7 @@ func TestModuleLifecycleManager_StartStopAllModules(t *testing.T) {
 
 func TestModuleLifecycleManager_GetSystemHealth(t *testing.T) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	// Test empty system
 	health := manager.GetSystemHealth()
@@ -402,7 +420,7 @@ func TestModuleLifecycleManager_GetSystemHealth(t *testing.T) {
 
 func TestModuleLifecycleManager_EventSystem(t *testing.T) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	var receivedEvents []LifecycleEvent
 	var mu sync.Mutex
@@ -499,7 +517,7 @@ func TestModuleLifecycleManager_EventSystem(t *testing.T) {
 
 func TestModuleLifecycleManager_HealthCheckInterval(t *testing.T) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	// Test default interval
 	if manager.healthCheckInterval != 60*time.Second {
@@ -517,7 +535,7 @@ func TestModuleLifecycleManager_HealthCheckInterval(t *testing.T) {
 
 func TestModuleLifecycleManager_ConcurrentAccess(t *testing.T) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	err := manager.Start()
 	if err != nil {
@@ -596,7 +614,7 @@ func TestModuleLifecycleManager_ConcurrentAccess(t *testing.T) {
 // Benchmark tests
 func BenchmarkModuleLifecycleManager_GetModuleInstance(b *testing.B) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	// Register test module
 	module := &mockLifecycleModule{
@@ -617,7 +635,7 @@ func BenchmarkModuleLifecycleManager_GetModuleInstance(b *testing.B) {
 
 func BenchmarkModuleLifecycleManager_GetSystemHealth(b *testing.B) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	// Register multiple modules
 	for i := 0; i < 100; i++ {
@@ -643,7 +661,7 @@ func BenchmarkModuleLifecycleManager_GetSystemHealth(b *testing.B) {
 
 func BenchmarkModuleLifecycleManager_ListModuleInstances(b *testing.B) {
 	registry := NewModuleRegistry()
-	manager := NewModuleLifecycleManager(registry)
+	manager := NewModuleLifecycleManager(registry, logging.NewNoopLogger())
 
 	// Register multiple modules
 	for i := 0; i < 1000; i++ {
@@ -664,5 +682,44 @@ func BenchmarkModuleLifecycleManager_ListModuleInstances(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = manager.ListModuleInstances()
+	}
+}
+
+func TestModuleLifecycleManager_panicRecovery_logsError(t *testing.T) {
+	registry := NewModuleRegistry()
+	mock := pkgtesting.NewMockLogger(true)
+	nl := &notifyOnErrorLogger{MockLogger: mock, errCh: make(chan struct{}, 1)}
+	manager := NewModuleLifecycleManager(registry, nl)
+
+	// Add a listener that panics when called
+	listener := NewLifecycleEventHandler("panic-listener", func(event LifecycleEvent) {
+		panic("test panic in listener")
+	})
+	manager.AddEventListener(listener)
+
+	// Start() publishes an event which dispatches to listener goroutines
+	err := manager.Start()
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() {
+		if stopErr := manager.Stop(); stopErr != nil {
+			t.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
+
+	// Wait for the panic-recovery goroutine to write the error log (channel sync, no sleep).
+	select {
+	case <-nl.errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for error log from panic recovery")
+	}
+
+	logs := mock.GetLogs("error")
+	if len(logs) == 0 {
+		t.Fatal("expected error log from panic recovery, got none")
+	}
+	if logs[0].Message != "panic in lifecycle event listener" {
+		t.Errorf("error log message = %q, want %q", logs[0].Message, "panic in lifecycle event listener")
 	}
 }

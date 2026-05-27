@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package terminal
 
@@ -9,16 +9,18 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/terminal/shell"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // MessageType represents the type of WebSocket message
 type MessageType string
 
 const (
-	MessageTypeData   MessageType = "data"
-	MessageTypeResize MessageType = "resize"
-	MessageTypeClose  MessageType = "close"
-	MessageTypeError  MessageType = "error"
+	MessageTypeData         MessageType = "data"
+	MessageTypeResize       MessageType = "resize"
+	MessageTypeClose        MessageType = "close"
+	MessageTypeError        MessageType = "error"
+	MessageTypeTokenRefresh MessageType = "token-refresh"
 )
 
 // DataDirection represents the direction of terminal data flow
@@ -35,11 +37,14 @@ type TerminalMessage struct {
 	SessionID string      `json:"session_id,omitempty"`
 	Data      []byte      `json:"data,omitempty"`
 	Error     string      `json:"error,omitempty"`
+	Token     string      `json:"token,omitempty"`
+	ExpiresAt *time.Time  `json:"expires_at,omitempty"`
 	Timestamp time.Time   `json:"timestamp,omitempty"`
 }
 
 // SessionRequest represents a request to create a new terminal session
 type SessionRequest struct {
+	TenantID  string            `json:"tenant_id"`
 	StewardID string            `json:"steward_id"`
 	UserID    string            `json:"user_id"`
 	Shell     string            `json:"shell"`
@@ -62,6 +67,8 @@ type Session struct {
 	closed       bool
 	recorder     Recorder
 	executor     shell.Executor
+	outputCh     chan []byte // buffered relay channel: steward → WebSocket client
+	logger       logging.Logger
 	mu           sync.RWMutex // Mutex for thread-safe access to session fields
 }
 
@@ -135,16 +142,6 @@ type Recorder interface {
 // WebSocketHandler interface defines WebSocket handling operations
 type WebSocketHandler interface {
 	HandleWebSocket(w http.ResponseWriter, r *http.Request)
-}
-
-// ShellExecutor interface defines shell execution operations
-type ShellExecutor interface {
-	Start(ctx context.Context, session *Session) error
-	WriteData(ctx context.Context, data []byte) error
-	Resize(ctx context.Context, cols, rows int) error
-	Close(ctx context.Context) error
-	OutputChannel() <-chan []byte
-	ErrorChannel() <-chan error
 }
 
 // SupportedShells contains the list of supported shell types

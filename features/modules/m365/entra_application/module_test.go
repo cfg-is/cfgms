@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package entra_application
 
@@ -155,6 +155,14 @@ func (m *MockGraphClient) DeleteDeviceConfiguration(ctx context.Context, token *
 	return args.Error(0)
 }
 
+func (m *MockGraphClient) ListDeviceConfigurationAssignments(ctx context.Context, token *auth.AccessToken, configurationID string) ([]graph.DeviceConfigurationAssignment, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) AssignDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, assignments []graph.DeviceConfigurationAssignment) error {
+	return nil
+}
+
 // Application operations
 func (m *MockGraphClient) GetApplication(ctx context.Context, token *auth.AccessToken, applicationID string) (*graph.Application, error) {
 	args := m.Called(ctx, token, applicationID)
@@ -239,6 +247,76 @@ func (m *MockGraphClient) UpdateGroup(ctx context.Context, token *auth.AccessTok
 
 func (m *MockGraphClient) DeleteGroup(ctx context.Context, token *auth.AccessToken, groupID string) error {
 	args := m.Called(ctx, token, groupID)
+	return args.Error(0)
+}
+
+func (m *MockGraphClient) ListAdminUnitUserMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) ListAdminUnitGroupMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) ListAdminUnitScopedRoleMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]graph.AdminUnitScopedRoleMember, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) AddAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error {
+	return nil
+}
+
+func (m *MockGraphClient) AddAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID string, request *graph.AddScopedRoleMemberRequest) (*graph.AdminUnitScopedRoleMember, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) RemoveAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error {
+	return nil
+}
+
+func (m *MockGraphClient) RemoveAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID, scopedRoleMemberID string) error {
+	return nil
+}
+
+func (m *MockGraphClient) ListGroupMembers(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) AddGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error {
+	return nil
+}
+
+func (m *MockGraphClient) RemoveGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error {
+	return nil
+}
+
+func (m *MockGraphClient) ListGroupOwners(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *MockGraphClient) AddGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error {
+	return nil
+}
+
+func (m *MockGraphClient) RemoveGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error {
+	return nil
+}
+
+func (m *MockGraphClient) GetTeam(ctx context.Context, token *auth.AccessToken, groupID string) (*graph.Team, error) {
+	args := m.Called(ctx, token, groupID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.Team), args.Error(1)
+}
+
+func (m *MockGraphClient) CreateTeam(ctx context.Context, token *auth.AccessToken, groupID string, request *graph.CreateTeamRequest) error {
+	args := m.Called(ctx, token, groupID, request)
+	return args.Error(0)
+}
+
+func (m *MockGraphClient) UpdateTeamSettings(ctx context.Context, token *auth.AccessToken, teamID string, request *graph.UpdateTeamSettingsRequest) error {
+	args := m.Called(ctx, token, teamID, request)
 	return args.Error(0)
 }
 
@@ -420,10 +498,10 @@ func TestEntraApplicationConfig_AsMap(t *testing.T) {
 		RedirectUris: &RedirectUris{
 			Web: []string{"https://example.com/callback"},
 		},
-		LogoutUrl: "https://example.com/logout",
+		LogoutURL: "https://example.com/logout",
 		RequiredResourceAccess: []ResourceAccess{
 			{
-				ResourceAppId: "00000003-0000-0000-c000-000000000000",
+				ResourceAppID: "00000003-0000-0000-c000-000000000000",
 				ResourceAccess: []PermissionScope{
 					{ID: "e1fe6dd8-ba31-4d61-89e7-88639da4683d", Type: "Scope"},
 				},
@@ -462,7 +540,7 @@ func TestEntraApplicationConfig_AsMap(t *testing.T) {
 			},
 		},
 		OptionalClaims: &OptionalClaims{
-			IdToken: []OptionalClaim{
+			IDToken: []OptionalClaim{
 				{Name: "email", Essential: true},
 			},
 		},
@@ -537,7 +615,7 @@ func TestEntraApplicationConfig_GetManagedFields(t *testing.T) {
 					Web: []string{"https://example.com/callback"},
 				},
 				RequiredResourceAccess: []ResourceAccess{
-					{ResourceAppId: "test-app-id"},
+					{ResourceAppID: "test-app-id"},
 				},
 				OAuth2Permissions: []OAuth2Scope{
 					{Value: "read"},
@@ -795,7 +873,7 @@ func TestComplexStructureSerialization(t *testing.T) {
 		SignInAudience: "AzureADMultipleOrgs",
 		TenantID:       "tenant-123",
 		OptionalClaims: &OptionalClaims{
-			IdToken: []OptionalClaim{
+			IDToken: []OptionalClaim{
 				{
 					Name:      "email",
 					Essential: true,
@@ -813,7 +891,7 @@ func TestComplexStructureSerialization(t *testing.T) {
 		},
 		RequiredResourceAccess: []ResourceAccess{
 			{
-				ResourceAppId: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
+				ResourceAppID: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
 				ResourceAccess: []PermissionScope{
 					{ID: "e1fe6dd8-ba31-4d61-89e7-88639da4683d", Type: "Scope"}, // User.Read
 					{ID: "405a51b5-8d8d-430b-9842-8be4b0e9f324", Type: "Role"},  // User.Read.All
@@ -834,13 +912,13 @@ func TestComplexStructureSerialization(t *testing.T) {
 	assert.Equal(t, config.DisplayName, deserializedConfig.DisplayName)
 	assert.Equal(t, config.SignInAudience, deserializedConfig.SignInAudience)
 	assert.NotNil(t, deserializedConfig.OptionalClaims)
-	assert.Len(t, deserializedConfig.OptionalClaims.IdToken, 1)
-	assert.Equal(t, "email", deserializedConfig.OptionalClaims.IdToken[0].Name)
-	assert.True(t, deserializedConfig.OptionalClaims.IdToken[0].Essential)
-	assert.Len(t, deserializedConfig.OptionalClaims.IdToken[0].AdditionalProperties, 1)
+	assert.Len(t, deserializedConfig.OptionalClaims.IDToken, 1)
+	assert.Equal(t, "email", deserializedConfig.OptionalClaims.IDToken[0].Name)
+	assert.True(t, deserializedConfig.OptionalClaims.IDToken[0].Essential)
+	assert.Len(t, deserializedConfig.OptionalClaims.IDToken[0].AdditionalProperties, 1)
 
 	assert.Len(t, deserializedConfig.RequiredResourceAccess, 1)
-	assert.Equal(t, "00000003-0000-0000-c000-000000000000", deserializedConfig.RequiredResourceAccess[0].ResourceAppId)
+	assert.Equal(t, "00000003-0000-0000-c000-000000000000", deserializedConfig.RequiredResourceAccess[0].ResourceAppID)
 	assert.Len(t, deserializedConfig.RequiredResourceAccess[0].ResourceAccess, 2)
 }
 

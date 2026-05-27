@@ -1,7 +1,7 @@
 //go:build !integration
 // +build !integration
 
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
 package logging_test
@@ -111,7 +111,7 @@ func testModuleFactoryLoggerInjection(t *testing.T) {
 	errorConfig := config.ErrorHandlingConfig{
 		ModuleLoadFailure: config.ActionFail,
 	}
-	moduleFactory := factory.NewWithStewardID(registry, errorConfig, stewardID)
+	moduleFactory := factory.NewWithStewardID(registry, errorConfig, stewardID, logging.NewNoopLogger())
 
 	// Test each module type
 	testCases := []struct {
@@ -336,7 +336,7 @@ func testCentralLoggingControllerVisibility(t *testing.T) {
 
 	// Create factories for each steward
 	for _, stewardID := range stewardIDs {
-		moduleFactory := factory.NewWithStewardID(registry, errorConfig, stewardID)
+		moduleFactory := factory.NewWithStewardID(registry, errorConfig, stewardID, logging.NewNoopLogger())
 		factoryMap[stewardID] = moduleFactory
 	}
 

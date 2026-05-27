@@ -1,16 +1,19 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package workflow
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestWorkflowError(t *testing.T) {
@@ -296,12 +299,37 @@ func TestDefaultErrorHandler(t *testing.T) {
 }
 
 func TestErrorHandlingIntegration(t *testing.T) {
-	t.Skip("Skipping integration test - requires module factory setup")
-
 	t.Run("Workflow handles step errors appropriately", func(t *testing.T) {
-		// Test is skipped - would require proper module factory setup
-		// This test would create a workflow with a failing step and verify
-		// that error handling works correctly throughout the execution chain
+		factory := createTestFactory()
+		logger := logging.NewNoopLogger()
+
+		stepErr := fmt.Errorf("step execution failed: injected error")
+		exec := &testTransformExecutor{
+			result: StepResult{Status: StatusFailed},
+			err:    stepErr,
+		}
+		engine := NewEngine(factory, logger, exec)
+		engine.errorHandler = &testErrorHandler{
+			decision: ErrorHandlingDecision{Action: ErrorActionStop},
+		}
+
+		wf := Workflow{
+			Name: "error-handling-integration-test",
+			Steps: []Step{
+				{Name: "failing-step", Type: StepTypeTransform},
+			},
+		}
+
+		ctx := context.Background()
+		execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+		require.NoError(t, err)
+
+		waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+		final, err := engine.GetExecution(execution.ID)
+		require.NoError(t, err)
+		assert.Equal(t, StatusFailed, final.GetStatus())
+		assert.NotEmpty(t, final.GetError())
 	})
 }
 

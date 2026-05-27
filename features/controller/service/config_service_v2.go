@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package service provides Epic 6 compliant configuration service using ConfigStore interface
 package service
@@ -7,56 +7,91 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/features/validation"
+	"github.com/cfgis/cfgms/features/config/rollback"
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/pkg/config"
+	controllerrouter "github.com/cfgis/cfgms/pkg/configrouting/providers/controller"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
+
+// FanoutCallback is invoked inside SetConfiguration after a successful ConfigStore write.
+// tenantID matches the authenticated tenant that issued the write; cfgID is the steward
+// config identifier. The callback must not block — hand off expensive work to a goroutine.
+type FanoutCallback func(ctx context.Context, tenantID string, cfgID string)
 
 // ConfigurationServiceV2 implements Epic 6 compliant Configuration service
 // This replaces the in-memory storage with persistent ConfigStore
 type ConfigurationServiceV2 struct {
 	logger              logging.Logger
 	configManager       *config.Manager
-	rollbackManager     *config.RollbackManager
+	rollbackManager     rollback.RollbackManager
 	inheritanceResolver *config.InheritanceResolver
 	validationManager   *config.ValidationManager
 	controllerSvc       *ControllerService
-	validator           *validation.Validator
 	storageManager      *interfaces.StorageManager
+	fanoutCallback      FanoutCallback
+	callbackMu          sync.RWMutex
 }
 
-// NewConfigurationServiceV2 creates a new Epic 6 compliant Configuration service
+// NewConfigurationServiceV2 creates a new Epic 6 compliant Configuration service.
+// A ConfigSourceRouter wrapping the storage manager's config and tenant stores is
+// constructed here and injected into the InheritanceResolver so that SnapshotSources
+// is called once per cascade (atomic source resolution, per story #1393).
 func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces.StorageManager, controllerSvc *ControllerService) *ConfigurationServiceV2 {
+	router := controllerrouter.NewControllerRouter(
+		storageManager.GetConfigStore(),
+		storageManager.GetTenantStore(),
+	)
 	return &ConfigurationServiceV2{
 		logger:              logger,
 		configManager:       config.NewManagerWithStorageManager(storageManager),
-		rollbackManager:     config.NewRollbackManagerWithStorageManager(storageManager),
-		inheritanceResolver: config.NewInheritanceResolverWithStorageManager(storageManager),
-		validationManager:   config.NewValidationManager(storageManager.GetConfigStore()),
+		inheritanceResolver: config.NewInheritanceResolver(router, storageManager.GetClientTenantStore(), storageManager.GetTenantStore()),
+		validationManager:   config.NewValidationManager(storageManager.GetConfigStore(), storageManager.GetTenantStore()),
 		controllerSvc:       controllerSvc,
-		validator:           validation.NewValidator(),
 		storageManager:      storageManager,
 	}
 }
 
+// SetRollbackManager wires the canonical rollback manager into the service.
+func (s *ConfigurationServiceV2) SetRollbackManager(m rollback.RollbackManager) {
+	s.rollbackManager = m
+}
+
+// RegisterFanoutCallback registers a callback that is invoked once, synchronously,
+// after every successful ConfigStore write in SetConfiguration. The callback is
+// unreachable from any other code path. Pass nil to deregister.
+func (s *ConfigurationServiceV2) RegisterFanoutCallback(fn FanoutCallback) {
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
+	s.fanoutCallback = fn
+}
+
 // GetConfiguration retrieves configuration for a specific steward using ConfigStore
 func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *controller.ConfigRequest) (*controller.ConfigResponse, error) {
-	s.logger.Debug("Configuration request received", "steward_id", req.StewardId, "modules", req.Modules)
+	sanitizedModules := make([]string, len(req.Modules))
+	for i, m := range req.Modules {
+		sanitizedModules[i] = logging.SanitizeLogValue(m)
+	}
+	s.logger.Debug("Configuration request received", "steward_id", logging.SanitizeLogValue(req.StewardId), "modules", sanitizedModules)
 
-	// Extract tenant context
-	tenantID := s.extractTenantID(ctx)
+	// Resolve the tenant the configuration is stored under. Per-steward config
+	// lives under the steward's own tenant, so look the steward up first and
+	// use its tenant for retrieval — not the ctx tenant, which the
+	// mTLS-authenticated data-plane sync path does not set. (Issue #1572)
+	tenantID := extractTenantID(ctx)
 
-	// Verify steward exists and belongs to the tenant
 	if s.controllerSvc != nil {
 		stewardInfo, exists := s.controllerSvc.GetStewardInfo(req.StewardId)
 		if !exists {
-			s.logger.Warn("Configuration request from unknown steward", "steward_id", req.StewardId)
+			s.logger.Warn("Configuration request from unknown steward", "steward_id", logging.SanitizeLogValue(req.StewardId))
 			return &controller.ConfigResponse{
 				Status: &common.Status{
 					Code:    common.Status_NOT_FOUND,
@@ -65,12 +100,15 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 			}, nil
 		}
 
-		// Check tenant isolation
-		if stewardInfo.TenantID != tenantID {
+		// Cross-tenant guard: a caller presenting an explicit, non-empty tenant
+		// context must match the steward's tenant. The data-plane sync path
+		// (steward authenticated by its mTLS CN) carries no tenant context and
+		// is trusted to resolve to the steward's own tenant. (Issue #1572)
+		if reqTenant, ok := ctx.Value(ctxkeys.TenantID).(string); ok && reqTenant != "" && reqTenant != stewardInfo.TenantID {
 			s.logger.Warn("Configuration request cross-tenant access denied",
-				"steward_id", req.StewardId,
-				"steward_tenant", stewardInfo.TenantID,
-				"request_tenant", tenantID)
+				"steward_id", logging.SanitizeLogValue(req.StewardId),
+				"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
+				"request_tenant", logging.SanitizeLogValue(reqTenant))
 			return &controller.ConfigResponse{
 				Status: &common.Status{
 					Code:    common.Status_UNAUTHORIZED,
@@ -78,12 +116,35 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 				},
 			}, nil
 		}
+		tenantID = stewardInfo.TenantID
 	}
 
-	// Get configuration with inheritance from storage
-	stewardConfig, err := s.configManager.GetConfigurationWithInheritance(ctx, tenantID, req.StewardId)
+	// Resolve full tenant-cascade-merged effective config via InheritanceResolver.
+	// ResolveConfiguration walks the ancestor chain (MSP→Client→Group→Device),
+	// child resources overriding parent resources of the same name (Issue #1722).
+	effective, err := s.inheritanceResolver.ResolveConfiguration(ctx, tenantID, req.StewardId)
 	if err != nil {
-		s.logger.Debug("No configuration found for steward", "steward_id", req.StewardId, "error", err)
+		// ResolveConfiguration walks the steward's tenant ancestor chain, which
+		// requires the tenant to exist as a full tenant-hierarchy record. A
+		// steward can be registered under a tenant that exists only as an
+		// identifier — created from a registration token, never promoted to a
+		// TenantData record — and such a tenant has no ancestor chain to walk.
+		// Fall back to delivering the device-level config directly so SyncConfig
+		// still serves the steward; the full cascade still applies whenever the
+		// tenant hierarchy is known. (Issue #1722)
+		effective = s.resolveDeviceLevelFallback(ctx, tenantID, req.StewardId)
+		if effective == nil {
+			s.logger.Debug("No configuration found for steward", "steward_id", logging.SanitizeLogValue(req.StewardId), "error", err)
+			return &controller.ConfigResponse{
+				Status: &common.Status{
+					Code:    common.Status_NOT_FOUND,
+					Message: "No configuration found for steward",
+				},
+			}, nil
+		}
+	}
+	if len(effective.Sources) == 0 {
+		s.logger.Debug("No configuration found for steward at any hierarchy level", "steward_id", logging.SanitizeLogValue(req.StewardId))
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_NOT_FOUND,
@@ -93,12 +154,12 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 	}
 
 	// Filter configuration by requested modules if specified
-	filteredConfig := s.filterConfigByModules(stewardConfig, req.Modules)
+	filteredConfig := s.filterConfigByModules(effective.Config, req.Modules)
 
 	// Convert Go struct to protobuf
-	protoConfig, err := stewardconfig.ToProto(filteredConfig)
+	protoConfig, err := stewardtypes.ToProto(filteredConfig)
 	if err != nil {
-		s.logger.Error("Failed to convert configuration to protobuf", "steward_id", req.StewardId, "error", err)
+		s.logger.Error("Failed to convert configuration to protobuf", "steward_id", logging.SanitizeLogValue(req.StewardId), "error", err)
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_ERROR,
@@ -114,7 +175,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 		version = fmt.Sprintf("v%d", history[0].Version)
 	}
 
-	s.logger.Debug("Configuration retrieved successfully", "steward_id", req.StewardId, "version", version)
+	s.logger.Debug("Configuration retrieved successfully", "steward_id", logging.SanitizeLogValue(req.StewardId), "version", version)
 
 	return &controller.ConfigResponse{
 		Status: &common.Status{
@@ -126,8 +187,41 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 	}, nil
 }
 
+// resolveDeviceLevelFallback returns the steward's device-level configuration as an
+// EffectiveConfiguration when the full tenant cascade cannot be resolved because the
+// steward's tenant has no tenant-hierarchy record. It returns nil — leaving the caller
+// to report NOT_FOUND — when the tenant does exist (the cascade error is then a genuine
+// failure that must not be masked) or when no device-level config is stored for the
+// steward. (Issue #1722)
+func (s *ConfigurationServiceV2) resolveDeviceLevelFallback(ctx context.Context, tenantID, stewardID string) *config.EffectiveConfiguration {
+	if _, err := s.storageManager.GetTenantStore().GetTenant(ctx, tenantID); err == nil {
+		// The tenant exists as a full record, so the cascade failure is a real
+		// error — do not paper over it with a device-only fallback.
+		return nil
+	}
+
+	deviceCfg, err := s.configManager.GetConfiguration(ctx, tenantID, stewardID)
+	if err != nil {
+		return nil
+	}
+
+	return &config.EffectiveConfiguration{
+		StewardID: stewardID,
+		TenantID:  tenantID,
+		Config:    deviceCfg,
+		Sources: map[string]*config.InheritanceSource{
+			"steward.config": {
+				Level:    int(config.LevelDevice),
+				TenantID: tenantID,
+				Source:   "Device Configuration (tenant has no hierarchy record)",
+			},
+		},
+		GeneratedAt: time.Now(),
+	}
+}
+
 // SetConfiguration stores a configuration for a specific steward using ConfigStore
-func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID, stewardID string, config *stewardconfig.StewardConfig) error {
+func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID, stewardID string, config *stewardtypes.StewardConfig) error {
 	// Validate configuration before storing
 	validationResult := s.validationManager.ValidateConfiguration(ctx, tenantID, stewardID, config)
 	if !validationResult.Valid {
@@ -141,9 +235,9 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 	// Log validation warnings
 	for _, warning := range validationResult.Warnings {
 		s.logger.Warn("Configuration validation warning",
-			"steward_id", stewardID,
-			"field", warning.Field,
-			"message", warning.Message)
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"field", logging.SanitizeLogValue(warning.Field),
+			"message", logging.SanitizeLogValue(warning.Message))
 	}
 
 	// Store configuration
@@ -152,8 +246,15 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 	}
 
 	s.logger.Info("Configuration stored successfully",
-		"tenant_id", tenantID,
-		"steward_id", stewardID)
+		"tenant_id", logging.SanitizeLogValue(tenantID),
+		"steward_id", logging.SanitizeLogValue(stewardID))
+
+	s.callbackMu.RLock()
+	cb := s.fanoutCallback
+	s.callbackMu.RUnlock()
+	if cb != nil {
+		cb(ctx, tenantID, stewardID)
+	}
 
 	return nil
 }
@@ -163,41 +264,77 @@ func (s *ConfigurationServiceV2) GetEffectiveConfiguration(ctx context.Context, 
 	return s.inheritanceResolver.ResolveConfiguration(ctx, tenantID, stewardID)
 }
 
-// RollbackConfiguration performs configuration rollback using storage versioning
+// RollbackConfiguration performs configuration rollback via the canonical rollback manager.
 func (s *ConfigurationServiceV2) RollbackConfiguration(ctx context.Context, request *config.RollbackRequest) (*config.RollbackResponse, error) {
-	s.logger.Info("Configuration rollback requested",
-		"tenant_id", request.TenantID,
-		"steward_id", request.StewardID,
-		"target_version", request.TargetVersion,
-		"reason", request.Reason,
-		"requested_by", request.RequestedBy)
+	if s.rollbackManager == nil {
+		return nil, fmt.Errorf("rollback manager not initialized")
+	}
 
-	response, err := s.rollbackManager.PerformRollback(ctx, request)
+	s.logger.Info("Configuration rollback requested",
+		"steward_id", logging.SanitizeLogValue(request.StewardID),
+		"target_version", request.TargetVersion,
+		"reason", logging.SanitizeLogValue(request.Reason))
+
+	translated := s.translateRollbackRequest(request)
+	op, err := s.rollbackManager.ExecuteRollback(ctx, translated)
 	if err != nil {
 		s.logger.Error("Configuration rollback failed",
-			"tenant_id", request.TenantID,
-			"steward_id", request.StewardID,
+			"steward_id", logging.SanitizeLogValue(request.StewardID),
 			"target_version", request.TargetVersion,
 			"error", err)
-		return response, err
+		return &config.RollbackResponse{
+			Success:  false,
+			Errors:   []string{err.Error()},
+			Warnings: []string{},
+		}, err
+	}
+
+	var errors []string
+	if op.Result != nil {
+		for _, f := range op.Result.Failures {
+			errors = append(errors, f.Error)
+		}
+	}
+
+	response := &config.RollbackResponse{
+		RollbackID: op.ID,
+		Success:    op.Status == rollback.RollbackStatusCompleted,
+		Errors:     errors,
+		Warnings:   []string{},
 	}
 
 	if response.Success {
 		s.logger.Info("Configuration rollback successful",
-			"tenant_id", request.TenantID,
-			"steward_id", request.StewardID,
-			"rollback_id", response.RollbackID,
-			"from_version", response.PreviousVersion,
-			"to_version", response.NewVersion,
-			"risk_level", response.RiskLevel)
+			"steward_id", logging.SanitizeLogValue(request.StewardID),
+			"rollback_id", op.ID)
 	}
 
 	return response, nil
 }
 
+// translateRollbackRequest maps a config.RollbackRequest to the canonical rollback.RollbackRequest.
+// RollbackTo uses fmt.Sprintf("v%d", ...) — the git-backed rollback manager resolves version refs.
+func (s *ConfigurationServiceV2) translateRollbackRequest(req *config.RollbackRequest) rollback.RollbackRequest {
+	return rollback.RollbackRequest{
+		TargetID:   req.StewardID,
+		TargetType: rollback.TargetTypeSteward,
+		RollbackTo: fmt.Sprintf("v%d", req.TargetVersion),
+		Reason:     req.Reason,
+		DryRun:     req.ValidateOnly,
+		Options: rollback.RollbackOptions{
+			SkipValidation: req.SkipValidation,
+		},
+	}
+}
+
 // ListConfigurations lists all configurations for a tenant
 func (s *ConfigurationServiceV2) ListConfigurations(ctx context.Context, tenantID string) ([]*config.ConfigurationSummary, error) {
 	return s.configManager.ListConfigurations(ctx, tenantID)
+}
+
+// DeleteConfiguration removes a stored steward configuration
+func (s *ConfigurationServiceV2) DeleteConfiguration(ctx context.Context, tenantID, stewardID string) error {
+	return s.configManager.DeleteConfiguration(ctx, tenantID, stewardID)
 }
 
 // GetConfigurationHistory retrieves version history for a configuration
@@ -230,10 +367,10 @@ func (s *ConfigurationServiceV2) BatchSetConfigurations(ctx context.Context, con
 
 // ValidateConfig validates a configuration using comprehensive validation
 func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *controller.ConfigValidationRequest) (*controller.ConfigValidationResponse, error) {
-	s.logger.Debug("Configuration validation request received", "version", req.Version)
+	s.logger.Debug("Configuration validation request received", "version", logging.SanitizeLogValue(req.Version))
 
 	// Parse configuration
-	var stewardConfig stewardconfig.StewardConfig
+	var stewardConfig stewardtypes.StewardConfig
 	if err := json.Unmarshal(req.Config, &stewardConfig); err != nil {
 		s.logger.Error("Failed to parse configuration for validation", "error", err)
 		return &controller.ConfigValidationResponse{
@@ -253,7 +390,7 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 	}
 
 	// Extract tenant and steward ID from context (simplified)
-	tenantID := s.extractTenantID(ctx)
+	tenantID := extractTenantID(ctx)
 	stewardID := "validation" // For validation-only requests
 
 	// Use comprehensive validation framework
@@ -303,7 +440,7 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 	}
 
 	s.logger.Debug("Configuration validation completed",
-		"version", req.Version,
+		"version", logging.SanitizeLogValue(req.Version),
 		"valid", validationResult.Valid,
 		"errors", len(validationResult.Errors),
 		"warnings", len(validationResult.Warnings))
@@ -319,17 +456,10 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 	}, nil
 }
 
-// StreamConfigurationUpdates streams configuration updates to stewards
-// NOTE: Disabled - gRPC streaming removed. Use MQTT for real-time updates.
-// This would need to be enhanced with storage-based change notifications
-func (s *ConfigurationServiceV2) StreamConfigurationUpdates(req *controller.ConfigStreamRequest, stream interface{}) error {
-	return fmt.Errorf("streaming not supported: gRPC removed, use MQTT for real-time configuration updates")
-}
-
 // Helper methods
 
 // filterConfigByModules filters configuration to include only requested modules
-func (s *ConfigurationServiceV2) filterConfigByModules(config *stewardconfig.StewardConfig, modules []string) *stewardconfig.StewardConfig {
+func (s *ConfigurationServiceV2) filterConfigByModules(config *stewardtypes.StewardConfig, modules []string) *stewardtypes.StewardConfig {
 	if len(modules) == 0 {
 		return config
 	}
@@ -369,18 +499,7 @@ func (s *ConfigurationServiceV2) convertValidationLevel(level string) controller
 	}
 }
 
-// extractTenantID extracts tenant ID from context
-func (s *ConfigurationServiceV2) extractTenantID(ctx context.Context) string {
-	// Extract tenant ID from context value (set by MQTT/HTTP handlers)
-	if tenantID, ok := ctx.Value("tenant-id").(string); ok && tenantID != "" {
-		return tenantID
-	}
-
-	s.logger.Debug("No tenant-id in context, using default tenant")
-	return "default"
-}
-
 // GetStorageStats returns storage statistics
-func (s *ConfigurationServiceV2) GetStorageStats(ctx context.Context) (*interfaces.ConfigStats, error) {
+func (s *ConfigurationServiceV2) GetStorageStats(ctx context.Context) (*cfgconfig.ConfigStats, error) {
 	return s.configManager.GetConfigurationStats(ctx)
 }

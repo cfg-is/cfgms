@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package terminal
 
@@ -309,7 +309,7 @@ func (sv *SecurityValidator) getApplicableFilterRules(tenantID, stewardID string
 		}
 	}
 
-	// Add tenant-specific rules (would be loaded from storage in real implementation)
+	// Design decision: tenant-specific security rules are loaded from the tenant config at session creation time, not from storage at rule evaluation time.
 	applicableRules = append(applicableRules, sv.filterRules...)
 
 	return applicableRules

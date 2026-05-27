@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
 // Package integration contains integration tests that validate CFGMS deployment scenarios
@@ -93,11 +93,13 @@ resources:
         No controller, no network, no complexity!
       state: present
       mode: "0644"
+      allowed_base_path: ` + s.tempDir + `
 
   # Create a directory
   - name: test-directory
     module: directory
     config:
+      allowed_base_path: ` + s.tempDir + `
       path: ` + testDir + `
       state: present
       mode: "0755"
@@ -109,6 +111,7 @@ resources:
       path: ` + infoFile + `
       content: "CFGMS standalone mode is working!"
       state: present
+      allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)
 	require.NoError(s.T(), err, "Should write config file")
@@ -172,6 +175,7 @@ resources:
       path: ` + testFile + `
       content: "Initial content"
       state: present
+      allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(initialConfig), 0644)
 	require.NoError(s.T(), err)
@@ -199,6 +203,7 @@ resources:
       path: ` + testFile + `
       content: "Updated content! CFGMS detects changes."
       state: present
+      allowed_base_path: ` + s.tempDir + `
 `
 	err = os.WriteFile(s.configPath, []byte(updatedConfig), 0644)
 	require.NoError(s.T(), err)
@@ -234,6 +239,7 @@ resources:
     config:
       path: ` + testFile + `
       state: absent
+      allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)
 	require.NoError(s.T(), err)
@@ -270,6 +276,7 @@ resources:
   - name: base-directory
     module: directory
     config:
+      allowed_base_path: ` + s.tempDir + `
       path: ` + baseDir + `
       state: present
       mode: "0755"
@@ -278,6 +285,7 @@ resources:
   - name: data-directory
     module: directory
     config:
+      allowed_base_path: ` + baseDir + `
       path: ` + dataDir + `
       state: present
       mode: "0755"
@@ -294,6 +302,7 @@ resources:
         }
       state: present
       mode: "0644"
+      allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)
 	require.NoError(s.T(), err)
@@ -331,6 +340,7 @@ resources:
       path: ` + testFile + `
       content: "` + expectedContent + `"
       state: present
+      allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)
 	require.NoError(s.T(), err)
@@ -368,6 +378,7 @@ resources:
       path: ` + testFile + `
       content: "Created via ExecuteConfiguration"
       state: present
+      allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)
 	require.NoError(s.T(), err)
@@ -408,6 +419,7 @@ resources:
       path: /tmp/test.txt
       content: "test"
       state: present
+      allowed_base_path: /tmp
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)
 	require.NoError(s.T(), err)

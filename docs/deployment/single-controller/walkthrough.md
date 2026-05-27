@@ -1,0 +1,339 @@
+# Single Controller Deployment
+
+Deploy one CFGMS controller and set up the controller-steward to keep the node in the desired state.
+
+**Time**: ~30 minutes (first-time setup)
+
+**What you'll have when done**:
+- A running controller accepting steward connections
+- A controller-steward managing the controller node (directories, firewall, systemd service)
+- Validated end-to-end connectivity
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│          Controller Node (Linux)            │
+│                                             │
+│  ┌───────────────────────────────────────┐  │
+│  │  Controller                           │  │
+│  │                                       │  │
+│  │  REST API (HTTPS)       :9080/TCP     │  │
+│  │  gRPC-over-QUIC (mTLS) :4433/UDP     │  │
+│  │  Auto-generated CA + certificates     │  │
+│  │  Flatfile+SQLite config storage       │  │
+│  └───────────────────────────────────────┘  │
+│                                             │
+│  ┌───────────────────────────────────────┐  │
+│  │  Controller-Steward                   │  │
+│  │                                       │  │
+│  │  Manages: directories, packages,      │  │
+│  │  firewall rules, systemd service,     │  │
+│  │  controller.cfg                       │  │
+│  │  Convergence loop: 30 min             │  │
+│  └───────────────────────────────────────┘  │
+└─────────────────────────────────────────────┘
+```
+
+## Prerequisites
+
+- **Linux VM**: Debian/Ubuntu (recommended) or RHEL/CentOS
+- **Go toolchain**: v1.25+ (on the build machine, can be the controller VM)
+- **Git**: installed on the controller VM
+- **Network**: Ports 9080/TCP and 4433/UDP available on the controller
+
+## Step 1: Build Binaries
+
+On your build machine (can be the controller VM):
+
+```bash
+git clone https://github.com/cfg-is/cfgms.git
+cd cfgms
+make build
+```
+
+This produces `bin/controller`, `bin/cfgms-steward`, and `bin/cfg`.
+
+## Step 2: Deploy the Controller
+
+Copy the controller binary to the controller VM:
+
+```bash
+sudo cp bin/controller /usr/local/bin/cfgms-controller
+sudo chmod +x /usr/local/bin/cfgms-controller
+```
+
+### Create directories
+
+```bash
+sudo mkdir -p /etc/cfgms /var/lib/cfgms/storage /var/lib/cfgms/certs/ca /var/log/cfgms
+```
+
+### Copy and configure controller.cfg
+
+Copy [controller.cfg](../controller.cfg) to `/etc/cfgms/controller.cfg`:
+
+```bash
+sudo cp docs/deployment/controller.cfg /etc/cfgms/controller.cfg
+```
+
+Open `/etc/cfgms/controller.cfg` in your editor and verify the following variables:
+
+| Variable | Location in file | What to set it to |
+|----------|-----------------|-------------------|
+| `common_name` | `certificate.server` | Your controller's hostname or IP (e.g. `ctrl.mylab.local`) |
+| `dns_names` | `certificate.server` | All hostnames/domains the controller is reachable at |
+| `ip_addresses` | `certificate.server` | All IPs the controller is reachable at (include `127.0.0.1`) |
+| `organization` | `certificate.server` | Your organization name |
+| `listen_addr` | `transport` | Transport bind address and port (default `0.0.0.0:4433`) |
+
+The REST API listens on port 9080 by default. To change it, set `CFGMS_HTTP_LISTEN_ADDR` in the systemd unit's `Environment=` directive.
+
+### Install the systemd service
+
+Copy [cfgms-controller.service](cfgms-controller.service) to `/etc/systemd/system/`:
+
+```bash
+sudo cp cfgms-controller.service /etc/systemd/system/cfgms-controller.service
+sudo systemctl daemon-reload
+```
+
+### Initialize the controller
+
+This is a one-time operation that creates the CA, server certificates, storage backend, and admin credential bundle:
+
+```bash
+sudo cfgms-controller --init --config /etc/cfgms/controller.cfg
+```
+
+You should see:
+
+```
+Controller initialization complete:
+  CA Fingerprint:    SHA256:xxxx...
+  Storage Provider:  flatfile
+  Initialized At:    2026-05-19T00:00:00Z
+
+The controller is now ready to start with: cfgms-controller --config <path>
+```
+
+Save the CA fingerprint — stewards verify it during registration. Detailed initialization
+logs (CA creation, storage setup, RBAC, bundle issuance) are written to
+`/var/log/cfgms/cfgms.log`.
+
+### Admin credential bundle
+
+`--init` writes an admin credential bundle to `/etc/cfgms/admin.bundle.yaml` (mode `0600`, owned by the `cfgms` daemon user). The bundle contains:
+
+- The admin mTLS client certificate and private key
+- The CA certificate for server verification
+- The controller URL
+- The cert serial number and fingerprint (for revocation lookup)
+
+**Protect this file.** It grants full admin access to the controller REST API. Treat it like a root SSH key.
+
+| Platform | Default path |
+|----------|-------------|
+| Linux    | `/etc/cfgms/admin.bundle.yaml` |
+| Windows  | `%ProgramData%\cfgms\admin.bundle.yaml` |
+
+An idempotency marker is written alongside the bundle at `/etc/cfgms/.admin-bundle-issued`. If `--init` is re-run and the bundle file already exists, issuance is skipped and the existing bundle is preserved.
+
+### Bundle recovery
+
+If the bundle file is accidentally deleted after a successful `--init`, the controller detects this on the next `--init` run and refuses to start:
+
+```
+controller is initialized (CA fingerprint: <fp>) but admin bundle is missing at /etc/cfgms/admin.bundle.yaml.
+To regenerate the bundle, run: cfgms-controller bootstrap-admin --regenerate
+```
+
+Run `cfgms-controller bootstrap-admin --regenerate` to re-issue the admin bundle without reinitializing the CA or storage.
+
+### Start the controller
+
+```bash
+sudo systemctl enable cfgms-controller
+sudo systemctl start cfgms-controller
+```
+
+### Validate
+
+```bash
+# Service is running
+sudo systemctl status cfgms-controller
+
+# REST API responds
+curl -k https://localhost:9080/api/v1/health
+
+# Logs show clean startup
+sudo journalctl -u cfgms-controller --no-pager -n 20
+```
+
+Look for: `Certificate manager initialized`, `Transport server listening on :4433`, `REST API server listening on :9080`.
+
+## Step 3: Deploy the Controller-Steward
+
+The controller-steward is the first steward in your environment. It manages the controller node itself — directories, packages, firewall rules, systemd service, and the controller config file. If anything drifts from the desired state, the steward converges it back.
+
+### Copy the steward binary
+
+```bash
+sudo cp bin/cfgms-steward /usr/local/bin/cfgms-steward
+sudo chmod +x /usr/local/bin/cfgms-steward
+```
+
+### Copy and configure controller-steward.cfg
+
+Copy [controller-steward.cfg](controller-steward.cfg) to `/etc/cfgms/controller-steward.cfg`:
+
+```bash
+sudo cp controller-steward.cfg /etc/cfgms/controller-steward.cfg
+```
+
+Open `/etc/cfgms/controller-steward.cfg` in your editor and verify the following variables. These **must match** the values you set in `controller.cfg`:
+
+| Variable | Where it appears | What to set it to |
+|----------|-----------------|-------------------|
+| `common_name` | `resources → controller-config → content` | Same hostname/IP as controller.cfg |
+| `dns_names` | `resources → controller-config → content` | Same hostnames as controller.cfg |
+| `ip_addresses` | `resources → controller-config → content` | Same IPs as controller.cfg |
+| `organization` | `resources → controller-config → content` | Same org as controller.cfg |
+| `port: 9080` | `resources → controller-rest-port` | Must match REST API port (default 9080) |
+| `port: 4433` | `resources → controller-transport-port` | Must match `transport.listen_addr` port in controller.cfg |
+
+### Run the controller-steward
+
+```bash
+sudo cfgms-steward --config /etc/cfgms/controller-steward.cfg
+```
+
+The steward converges the node:
+- Verifies all directories exist with correct permissions
+- Installs `git` if missing
+- Writes `/etc/cfgms/controller.cfg` (matching your configuration)
+- Opens firewall ports 9080/TCP and 4433/UDP
+- Installs the systemd unit file
+- Starts the controller service (if initialized)
+
+### Validate
+
+```bash
+# Firewall rules are in place
+sudo ufw status | grep -E "9080|4433"
+# or: sudo iptables -L -n | grep -E "9080|4433"
+
+# Controller is still running after steward convergence
+sudo systemctl status cfgms-controller
+
+# Health check still responds
+curl -k https://localhost:9080/api/v1/health
+```
+
+## Step 4: Validate End-to-End
+
+Run through this checklist to confirm the deployment is working:
+
+- [ ] **Controller service**: `sudo systemctl status cfgms-controller` shows `active (running)`
+- [ ] **REST API**: `curl -k https://localhost:9080/api/v1/health` returns a healthy response
+- [ ] **Transport**: logs show `Transport server listening on :4433`
+- [ ] **Certificates**: `sudo journalctl -u cfgms-controller | grep "Certificate manager initialized"`
+- [ ] **Firewall**: ports 9080/TCP and 4433/UDP are open
+- [ ] **Controller restart recovery**: `sudo systemctl restart cfgms-controller` — service comes back cleanly
+- [ ] **Steward re-convergence**: run `sudo cfgms-steward --config /etc/cfgms/controller-steward.cfg` again — no errors, no unexpected changes
+
+## Troubleshooting
+
+### Controller won't start
+
+```bash
+sudo journalctl -u cfgms-controller -n 50
+```
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `bind: address already in use` | Another process on port 9080 or 4433 | `ss -tlnp \| grep 9080` to find it |
+| `permission denied` | Data directories not writable | `ls -la /var/lib/cfgms /var/log/cfgms` |
+| Certificate errors | CA not initialized or corrupt | `sudo rm -rf /var/lib/cfgms/certs && sudo cfgms-controller --init --config /etc/cfgms/controller.cfg` |
+
+### Controller-steward reports errors
+
+```bash
+# Check steward output for specific module failures
+sudo cfgms-steward --config /etc/cfgms/controller-steward.cfg 2>&1 | grep -i error
+```
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `Controller not yet initialized` | Normal on first run before `--init` | Run `sudo cfgms-controller --init` first |
+| Package install fails | No internet or package manager issue | `sudo apt update` and retry |
+| Firewall module fails | `ufw` or `iptables` not available | Install your distro's firewall tooling |
+
+## Adding Operators
+
+After initialization, you can issue additional admin credential bundles for team members
+or automation systems. Each bundle grants full admin access to the controller REST API.
+
+```bash
+sudo cfgms-controller bootstrap-admin \
+  --config /etc/cfgms/controller.cfg \
+  --name alice \
+  --output /etc/cfgms/alice.bundle.yaml
+```
+
+Copy `alice.bundle.yaml` to the operator securely (treat it like a root SSH key). The
+bundle contains the mTLS client certificate and key, the CA certificate, and the
+controller URL.
+
+**Name rules:** Alphanumeric characters and hyphens only, max 64 characters. Names must
+not begin or end with a hyphen. The following names are reserved and will be rejected:
+`system`, `cfgms`, `cfgms-internal`, `cfgms-admin`, and any UUID-format string (reserved
+for steward certificates).
+
+**Validity:** Admin certificates are valid for 365 days. When a bundle expires, issue a
+new one and revoke the old serial.
+
+### Listing bundles
+
+```bash
+cfgms-controller bootstrap-admin --config /etc/cfgms/controller.cfg --list
+```
+
+This shows all issued admin certs with their serial numbers and revocation status.
+
+## Revoking Access
+
+When an operator leaves, a machine is decommissioned, or a bundle is compromised,
+revoke the cert immediately using the serial number printed at issuance time (also
+stored in the bundle file under `cert_serial`).
+
+```bash
+cfgms-controller bootstrap-admin \
+  --config /etc/cfgms/controller.cfg \
+  --revoke <serial>
+```
+
+The revocation takes effect immediately — the serial is added to the persistent
+revoked-serials list and all subsequent authentication attempts with that cert are
+rejected with `CERT_REVOKED`.
+
+**After regenerating the system bundle**, also revoke the old serial:
+
+```bash
+# Step 1: note the old serial from the current bundle
+OLD_SERIAL=$(grep cert_serial /etc/cfgms/admin.bundle.yaml | awk '{print $2}')
+
+# Step 2: regenerate (follow the interactive confirmation)
+sudo cfgms-controller bootstrap-admin --config /etc/cfgms/controller.cfg --regenerate
+
+# Step 3: revoke the old bundle
+sudo cfgms-controller bootstrap-admin \
+  --config /etc/cfgms/controller.cfg \
+  --revoke "$OLD_SERIAL"
+```
+
+## Next Steps
+
+- **Connect stewards**: Create a registration token and deploy stewards to your endpoints.
+- **Configure server roles**: See [Role Config Recipes](../../examples/role-configs/README.md) for ready-to-use configs for domain controllers, file servers, SQL servers, web servers, and more.
+- **Scale up**: When you're ready for geo-redundant deployment, see [Controller Cluster](../controller-cluster/walkthrough.md).

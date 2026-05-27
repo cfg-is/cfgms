@@ -10,13 +10,13 @@
 
 ## Context
 
-During Story #239 security audit remediation, we discovered a critical bug: the controller maintained separate Certificate Authorities for HTTP (`CFGMS Root CA`) and MQTT (`CFGMS MQTT CA`). This dual-CA configuration caused mTLS failures even when certificates were properly signed, because HTTP connections expected HTTP CA signatures while MQTT connections expected MQTT CA signatures.
+During Story #239 security audit remediation, we discovered a critical bug: the controller maintained separate Certificate Authorities for HTTP (`CFGMS Root CA`) and internal transport (`CFGMS Transport CA`). This dual-CA configuration caused mTLS failures even when certificates were properly signed, because HTTP connections expected HTTP CA signatures while transport connections expected transport CA signatures.
 
 ### Root Cause Analysis
 
 The dual-CA bug occurred because:
 
-1. Certificate generation logic was duplicated between HTTP and MQTT initialization
+1. Certificate generation logic was duplicated between HTTP and transport initialization
 2. No enforcement mechanism prevented bypassing the central `pkg/cert.Manager`
 3. Developers were unaware of the existing central certificate provider
 4. Code review did not catch the architectural violation
@@ -42,7 +42,7 @@ CFGMS implements a **pluggable provider architecture** where cross-cutting conce
 - `pkg/cache` - Write-through caching
 - `pkg/session` - Session management
 - `pkg/directory` - Directory services (M365, Active Directory)
-- `pkg/mqtt` - MQTT broker abstraction
+- `pkg/transport` - gRPC-over-QUIC transport
 - And 5 others (see `CLAUDE.md`)
 
 **Architecture Pattern**:

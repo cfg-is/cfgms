@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package cache
 
@@ -188,8 +188,7 @@ func (ac *AdvancedCache) PrewarmCache(ctx context.Context, reportRequests []inte
 
 	ac.logger.Info("prewarming cache", "request_count", len(reportRequests))
 
-	// This would typically be implemented to generate and cache common reports
-	// For now, just log the intent
+	// Logs prewarm intent; report generation and caching are deferred.
 	for _, req := range reportRequests {
 		ac.logger.Debug("cache prewarm request", "template", req.Template, "type", req.Type)
 	}

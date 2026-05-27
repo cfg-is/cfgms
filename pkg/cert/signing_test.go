@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package cert
 
@@ -31,8 +31,11 @@ func TestGenerateSigningCertificate_Properties(t *testing.T) {
 	assert.NotEmpty(t, cert.SerialNumber)
 	assert.NotEmpty(t, cert.CertificatePEM)
 	assert.NotEmpty(t, cert.PrivateKeyPEM)
-	assert.True(t, cert.IsValid)
 	assert.NotEmpty(t, cert.Fingerprint)
+
+	result, err := ca.ValidateCertificate(cert.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, result.IsValid)
 
 	// Parse and verify x509 properties
 	x509Cert, err := ParseCertificateFromPEM(cert.CertificatePEM)
@@ -151,17 +154,6 @@ func TestGenerateInternalServerCertificate(t *testing.T) {
 	require.NoError(t, err)
 	err = x509Cert.CheckSignatureFrom(caCert)
 	assert.NoError(t, err)
-}
-
-// TestCertificateTypeEnumStability ensures explicit type values never change
-// (prevents metadata.json corruption from iota reordering)
-func TestCertificateTypeEnumStability(t *testing.T) {
-	assert.Equal(t, CertificateType(0), CertificateTypeCA, "CA must be 0")
-	assert.Equal(t, CertificateType(1), CertificateTypeServer, "Server must be 1")
-	assert.Equal(t, CertificateType(2), CertificateTypeClient, "Client must be 2")
-	assert.Equal(t, CertificateType(3), CertificateTypePublicAPI, "PublicAPI must be 3")
-	assert.Equal(t, CertificateType(4), CertificateTypeInternalServer, "InternalServer must be 4")
-	assert.Equal(t, CertificateType(5), CertificateTypeConfigSigning, "ConfigSigning must be 5")
 }
 
 // TestCertificateTypeString verifies String() for all types

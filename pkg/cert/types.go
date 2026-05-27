@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package cert provides certificate management functionality for CFGMS.
 //
@@ -61,7 +61,7 @@ const (
 
 	// CertificateTypePublicAPI is for HTTPS REST API only (external-facing)
 	CertificateTypePublicAPI CertificateType = 3
-	// CertificateTypeInternalServer is for MQTT + QUIC mutual TLS (internal)
+	// CertificateTypeInternalServer is for gRPC-over-QUIC mutual TLS (internal)
 	CertificateTypeInternalServer CertificateType = 4
 	// CertificateTypeConfigSigning is for config/DNA signing only (CodeSigning EKU)
 	CertificateTypeConfigSigning CertificateType = 5
@@ -86,16 +86,6 @@ func (ct CertificateType) String() string {
 		return "Unknown"
 	}
 }
-
-// CertificateArchitecture represents the certificate deployment mode
-type CertificateArchitecture string
-
-const (
-	// CertArchitectureUnified uses a single server certificate for all purposes (backward compatible)
-	CertArchitectureUnified CertificateArchitecture = "unified"
-	// CertArchitectureSeparated uses purpose-specific certificates (public API, internal mTLS, config signing)
-	CertArchitectureSeparated CertificateArchitecture = "separated"
-)
 
 // SigningCertConfig contains configuration for config signing certificate generation
 type SigningCertConfig struct {
@@ -179,6 +169,10 @@ type ClientCertConfig struct {
 
 	// Client identifier for tracking
 	ClientID string
+
+	// TemplateModifier is an optional function applied to the certificate template
+	// before signing. Pass SetAdminMarker (from the cert package) to issue admin certificates.
+	TemplateModifier func(*x509.Certificate)
 }
 
 // Certificate represents a generated certificate with its metadata
@@ -293,106 +287,4 @@ type RenewalInfo struct {
 
 	// Whether renewal is urgent
 	IsUrgent bool
-}
-
-// CAManager provides Certificate Authority management functionality
-type CAManager interface {
-	// Initialize creates a new Certificate Authority
-	Initialize(config *CAConfig) error
-
-	// LoadCA loads an existing Certificate Authority
-	LoadCA(storagePath string) error
-
-	// GetCACertificate returns the CA certificate in PEM format
-	GetCACertificate() ([]byte, error)
-
-	// IsInitialized returns true if the CA is initialized
-	IsInitialized() bool
-
-	// GetCAInfo returns information about the CA
-	GetCAInfo() (*CertificateInfo, error)
-
-	// GenerateServerCertificate creates a new server certificate
-	GenerateServerCertificate(config *ServerCertConfig) (*Certificate, error)
-
-	// GenerateClientCertificate creates a new client certificate
-	GenerateClientCertificate(config *ClientCertConfig) (*Certificate, error)
-
-	// GenerateSigningCertificate creates a config signing certificate (CodeSigning EKU, 4096-bit RSA)
-	GenerateSigningCertificate(config *SigningCertConfig) (*Certificate, error)
-
-	// GenerateInternalServerCertificate creates an internal mTLS server certificate
-	GenerateInternalServerCertificate(config *ServerCertConfig) (*Certificate, error)
-
-	// ValidateCertificate validates a certificate against this CA
-	ValidateCertificate(certPEM []byte) (*ValidationResult, error)
-
-	// RevokeCertificate revokes a certificate
-	RevokeCertificate(serialNumber string, reason string) error
-
-	// GetRevokedCertificates returns the list of revoked certificates
-	GetRevokedCertificates() ([]string, error)
-}
-
-// CertificateStore provides certificate storage and retrieval functionality
-type CertificateStore interface {
-	// StoreCertificate stores a certificate
-	StoreCertificate(cert *Certificate) error
-
-	// GetCertificate retrieves a certificate by serial number
-	GetCertificate(serialNumber string) (*Certificate, error)
-
-	// GetCertificateByCommonName retrieves certificates by common name
-	GetCertificateByCommonName(commonName string) ([]*CertificateInfo, error)
-
-	// GetCertificatesByType retrieves certificates by type
-	GetCertificatesByType(certType CertificateType) ([]*CertificateInfo, error)
-
-	// ListCertificates returns all certificates
-	ListCertificates() ([]*CertificateInfo, error)
-
-	// DeleteCertificate removes a certificate from storage
-	DeleteCertificate(serialNumber string) error
-
-	// GetExpiringCertificates returns certificates expiring within the specified days
-	GetExpiringCertificates(withinDays int) ([]*CertificateInfo, error)
-
-	// GetStoragePath returns the base storage path
-	GetStoragePath() string
-}
-
-// CertificateValidator provides certificate validation functionality
-type CertificateValidator interface {
-	// ValidateChain validates a certificate chain
-	ValidateChain(certChain []*x509.Certificate) (*ValidationResult, error)
-
-	// ValidateCertificate validates a single certificate
-	ValidateCertificate(cert *x509.Certificate) (*ValidationResult, error)
-
-	// ValidateCertificateFile validates a certificate from PEM file data
-	ValidateCertificateFile(certPEM []byte) (*ValidationResult, error)
-
-	// ValidateCertificateChainFiles validates a certificate chain from PEM file data
-	ValidateCertificateChainFiles(certChainPEM []byte) (*ValidationResult, error)
-
-	// CheckExpiration checks if certificates are expiring
-	CheckExpiration(certs []*CertificateInfo, withinDays int) ([]*RenewalInfo, error)
-
-	// VerifyHostname verifies if a certificate is valid for a hostname
-	VerifyHostname(cert *x509.Certificate, hostname string) error
-}
-
-// CertificateRenewer provides certificate renewal functionality
-type CertificateRenewer interface {
-	// GetRenewalCandidates returns certificates that need renewal
-	GetRenewalCandidates(withinDays int) ([]*RenewalInfo, error)
-
-	// RenewCertificate renews a certificate
-	RenewCertificate(serialNumber string, config interface{}) (*Certificate, error)
-
-	// AutoRenewCertificates automatically renews expiring certificates
-	AutoRenewCertificates(withinDays int) ([]*Certificate, error)
-
-	// ScheduleRenewal schedules automatic renewal for a certificate
-	ScheduleRenewal(serialNumber string, renewalDate time.Time) error
 }

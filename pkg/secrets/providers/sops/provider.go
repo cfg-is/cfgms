@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package sops implements SOPS-based secrets provider for CFGMS
 // M-AUTH-1: Secure secret storage using Mozilla SOPS with git backend
@@ -85,9 +85,9 @@ func parseStoreConfig(config map[string]interface{}) (*SOPSSecretStoreConfig, er
 	if storageConfig, ok := config["storage_config"].(map[string]interface{}); ok {
 		storeConfig.StorageConfig = storageConfig
 	} else {
-		// Default storage configuration (git with SOPS)
+		// Default storage configuration (flatfile for SOPS secrets)
 		storeConfig.StorageConfig = map[string]interface{}{
-			"repository_path": "/var/lib/cfgms/secrets",
+			"root": "/var/lib/cfgms/secrets",
 		}
 	}
 
@@ -95,7 +95,7 @@ func parseStoreConfig(config map[string]interface{}) (*SOPSSecretStoreConfig, er
 	if providerName, ok := config["storage_provider"].(string); ok {
 		storeConfig.StorageProvider = providerName
 	} else {
-		storeConfig.StorageProvider = "git" // Default to git
+		storeConfig.StorageProvider = "flatfile" // Default to flatfile
 	}
 
 	// Parse cache settings

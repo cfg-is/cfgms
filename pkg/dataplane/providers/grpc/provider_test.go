@@ -1,0 +1,373 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package grpc
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"net"
+	"testing"
+
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	cfgcert "github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/dataplane/interfaces"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+)
+
+// newTestServerTLSConfig creates a self-signed TLS config suitable for starting
+// the QUIC listener in tests. Uses cfgcert.NewCA to avoid static test certs.
+func newTestServerTLSConfig(t *testing.T) *tls.Config {
+	t.Helper()
+
+	ca, err := cfgcert.NewCA(&cfgcert.CAConfig{
+		Organization: "CFGMS Test",
+		Country:      "US",
+		ValidityDays: 1,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+	require.NoError(t, ca.Initialize(nil))
+
+	caPEM, err := ca.GetCACertificate()
+	require.NoError(t, err)
+
+	serverCert, err := ca.GenerateServerCertificate(&cfgcert.ServerCertConfig{
+		CommonName:   "localhost",
+		DNSNames:     []string{"localhost"},
+		ValidityDays: 1,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+
+	serverTLS, err := cfgcert.CreateServerTLSConfig(
+		serverCert.CertificatePEM, serverCert.PrivateKeyPEM,
+		caPEM, tls.VersionTLS13,
+	)
+	require.NoError(t, err)
+	serverTLS.NextProtos = []string{quictransport.ALPNProtocol}
+	return serverTLS
+}
+
+// TestProvider_Registration verifies the provider registers itself as "grpc" via init().
+func TestProvider_Registration(t *testing.T) {
+	p := interfaces.GetProvider("grpc")
+	require.NotNil(t, p, "grpc provider should be registered via init()")
+	assert.Equal(t, "grpc", p.Name())
+}
+
+// TestProvider_Name verifies Name() returns "grpc".
+func TestProvider_Name(t *testing.T) {
+	p := New()
+	assert.Equal(t, "grpc", p.Name())
+}
+
+// TestProvider_Description verifies Description() is non-empty.
+func TestProvider_Description(t *testing.T) {
+	p := New()
+	assert.NotEmpty(t, p.Description())
+}
+
+// TestProvider_InitializeServer verifies server mode initialization with valid config.
+func TestProvider_InitializeServer(t *testing.T) {
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"listen_addr": "127.0.0.1:0",
+		"tls_config":  &tls.Config{MinVersion: tls.VersionTLS13}, //nolint:gosec // test config
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "server", p.mode)
+	assert.Equal(t, "127.0.0.1:0", p.listenAddr)
+}
+
+// TestProvider_InitializeClient verifies client mode initialization with grpc_conn.
+func TestProvider_InitializeClient(t *testing.T) {
+	p := New()
+	// Use a nil *grpc.ClientConn placeholder — the provider only checks for
+	// key presence in Initialize; actual usage happens in Start/Connect.
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "client",
+		"server_addr": "127.0.0.1:4433",
+		"tls_config":  &tls.Config{MinVersion: tls.VersionTLS13}, //nolint:gosec // test config
+		"steward_id":  "steward-test",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "client", p.mode)
+	assert.Equal(t, "steward-test", p.stewardID)
+}
+
+// TestProvider_InitializeMissingMode verifies an error when mode is absent.
+func TestProvider_InitializeMissingMode(t *testing.T) {
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"listen_addr": "127.0.0.1:0",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mode")
+}
+
+// TestProvider_InitializeInvalidMode verifies an error for unknown mode strings.
+func TestProvider_InitializeInvalidMode(t *testing.T) {
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode": "banana",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mode")
+}
+
+// TestProvider_InitializeServerMissingAddr verifies an error when listen_addr is absent in server mode.
+func TestProvider_InitializeServerMissingAddr(t *testing.T) {
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"tls_config": &tls.Config{MinVersion: tls.VersionTLS13}, //nolint:gosec // test config
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "listen_addr")
+}
+
+// TestProvider_InitializeClientMissingAddrAndConn verifies an error when neither
+// server_addr nor grpc_conn is provided in client mode.
+func TestProvider_InitializeClientMissingAddrAndConn(t *testing.T) {
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "client",
+		"tls_config": &tls.Config{MinVersion: tls.VersionTLS13}, //nolint:gosec // test config
+		"steward_id": "steward-test",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server_addr")
+}
+
+// TestProvider_Available_Uninitialized verifies Available returns false before init.
+func TestProvider_Available_Uninitialized(t *testing.T) {
+	p := New()
+	ok, err := p.Available()
+	assert.False(t, ok)
+	require.Error(t, err)
+}
+
+// TestProvider_Available_Server verifies Available returns true after server init.
+func TestProvider_Available(t *testing.T) {
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"listen_addr": "127.0.0.1:0",
+		"tls_config":  &tls.Config{MinVersion: tls.VersionTLS13}, //nolint:gosec // test config
+	})
+	require.NoError(t, err)
+
+	ok, err := p.Available()
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+// TestProvider_Stats verifies GetStats returns a correctly named stats struct.
+func TestProvider_Stats(t *testing.T) {
+	p := New()
+	stats, err := p.GetStats(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, stats)
+	assert.Equal(t, "grpc", stats.ProviderName)
+	assert.Equal(t, 0, stats.ActiveSessions)
+}
+
+// TestProvider_StatsTracking verifies that AcceptConnection increments session counters.
+func TestProvider_StatsTracking(t *testing.T) {
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"listen_addr": "127.0.0.1:0",
+		"tls_config":  &tls.Config{MinVersion: tls.VersionTLS13}, //nolint:gosec // test config
+	})
+	require.NoError(t, err)
+
+	// Manually mark as started to avoid needing real QUIC
+	p.started.Store(true)
+	p.sessions = make(map[string]*Session)
+
+	_, err = p.AcceptConnection(context.Background())
+	require.NoError(t, err)
+
+	stats, err := p.GetStats(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), stats.TotalSessionsAccepted)
+	assert.Equal(t, 1, stats.ActiveSessions)
+}
+
+// TestProvider_IsListening returns false before Start.
+func TestProvider_IsListening(t *testing.T) {
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"listen_addr": "127.0.0.1:0",
+		"tls_config":  &tls.Config{MinVersion: tls.VersionTLS13}, //nolint:gosec // test config
+	})
+	require.NoError(t, err)
+	assert.False(t, p.IsListening(), "not listening before Start")
+}
+
+// TestProvider_IsConnected returns false before Start.
+func TestProvider_IsConnected(t *testing.T) {
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "client",
+		"server_addr": "127.0.0.1:4433",
+		"tls_config":  &tls.Config{MinVersion: tls.VersionTLS13}, //nolint:gosec // test config
+		"steward_id":  "steward-test",
+	})
+	require.NoError(t, err)
+	assert.False(t, p.IsConnected(), "not connected before Start")
+}
+
+// TestProvider_ServerOptions_Applied verifies that a gRPC server built with
+// ServerOptions() actually rejects a message larger than 8 MB with
+// codes.ResourceExhausted. Uses a plain TCP listener so no QUIC/mTLS is needed.
+//
+// The test would fail if maxRecvMsgSize were changed to a value > 9 MB because
+// the 9 MB payload would no longer be rejected.
+func TestProvider_ServerOptions_Applied(t *testing.T) {
+	opts := ServerOptions()
+	require.Len(t, opts, 5,
+		"ServerOptions must return 5 options: MaxRecvMsgSize, MaxSendMsgSize, MaxConcurrentStreams, KeepaliveParams, KeepaliveEnforcementPolicy")
+
+	// Start a real TCP gRPC server with the DoS limits applied.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	srv := grpc.NewServer(opts...)
+	transportpb.RegisterStewardTransportServer(srv, &dosLimitTestHandler{})
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.GracefulStop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := transportpb.NewStewardTransportClient(conn)
+	stream, err := client.SyncDNA(context.Background())
+	require.NoError(t, err)
+
+	// 9 MB is 1 MB over the 8 MB maxRecvMsgSize limit.
+	sendErr := stream.Send(&transportpb.DNAChunk{
+		StewardId: "dos-unit-test",
+		Data:      bytes.Repeat([]byte("X"), 9*1024*1024),
+	})
+	if sendErr == nil {
+		_, sendErr = stream.CloseAndRecv()
+	}
+
+	require.Error(t, sendErr, "server built with ServerOptions must reject messages > 8 MB")
+	assert.Equal(t, codes.ResourceExhausted, status.Code(sendErr),
+		"oversized message must yield codes.ResourceExhausted, got %v", sendErr)
+}
+
+// dosLimitTestHandler is a minimal StewardTransportServer that calls Recv()
+// on the first SyncDNA message, triggering the gRPC MaxRecvMsgSize check.
+// The handler returns the Recv error directly so gRPC propagates it to the client.
+type dosLimitTestHandler struct {
+	transportpb.UnimplementedStewardTransportServer
+}
+
+func (h *dosLimitTestHandler) SyncDNA(stream grpc.ClientStreamingServer[transportpb.DNAChunk, transportpb.DNASyncResponse]) error {
+	_, err := stream.Recv()
+	return err
+}
+
+// TestDataPlaneProvider_Start_server_logsStarted verifies that Start() in server mode
+// emits an info log with message "gRPC data plane server started".
+func TestDataPlaneProvider_Start_server_logsStarted(t *testing.T) {
+	mock := pkgtesting.NewMockLogger(true)
+	serverTLS := newTestServerTLSConfig(t)
+
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"listen_addr": "127.0.0.1:0",
+		"tls_config":  serverTLS,
+		"logger":      mock,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, p.Start(context.Background()))
+	t.Cleanup(func() { assert.NoError(t, p.Stop(context.Background())) })
+
+	infoLogs := mock.GetLogs("info")
+	found := false
+	for _, entry := range infoLogs {
+		if entry.Message == "gRPC data plane server started" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected info log 'gRPC data plane server started', got: %v", infoLogs)
+}
+
+// TestDataPlaneProvider_Stop_logsStop verifies that Stop() emits an info log
+// with message "gRPC data plane provider stopped".
+func TestDataPlaneProvider_Stop_logsStop(t *testing.T) {
+	mock := pkgtesting.NewMockLogger(true)
+	serverTLS := newTestServerTLSConfig(t)
+
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"listen_addr": "127.0.0.1:0",
+		"tls_config":  serverTLS,
+		"logger":      mock,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, p.Start(context.Background()))
+	require.NoError(t, p.Stop(context.Background()))
+
+	infoLogs := mock.GetLogs("info")
+	found := false
+	for _, entry := range infoLogs {
+		if entry.Message == "gRPC data plane provider stopped" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected info log 'gRPC data plane provider stopped', got: %v", infoLogs)
+}
+
+// TestDataPlaneProvider_Initialize_injectsLogger verifies that Initialize() correctly
+// stores the injected logging.Logger and that it is used for subsequent log calls.
+// This exercises the `config["logger"].(logging.Logger)` type assertion path.
+func TestDataPlaneProvider_Initialize_injectsLogger(t *testing.T) {
+	mock := pkgtesting.NewMockLogger(true)
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"listen_addr": "127.0.0.1:0",
+		"tls_config":  &tls.Config{MinVersion: tls.VersionTLS13}, //nolint:gosec // test config
+		"logger":      mock,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, mock, p.logger, "Initialize must store the injected logging.Logger")
+}
+
+// TestDataPlaneProvider_Initialize_noopLoggerDefault verifies that New() initialises the
+// logger field to a non-nil NoopLogger (not slog.Default()) so that callers who
+// do not inject a logger get silent behaviour rather than a panic or global slog output.
+func TestDataPlaneProvider_Initialize_noopLoggerDefault(t *testing.T) {
+	p := New()
+	assert.NotNil(t, p.logger, "New() must initialise logger to a non-nil NoopLogger")
+	// A NoopLogger absorbs all calls without panicking.
+	assert.NotPanics(t, func() {
+		p.logger.Info("test", "key", "value")
+		p.logger.Error("test error", "key", "value")
+		p.logger.Debug("test debug", "key", "value")
+	})
+}

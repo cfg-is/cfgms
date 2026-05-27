@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package network_activedirectory
 
@@ -11,20 +11,39 @@ import (
 	"github.com/jcmturner/gokrb5/v8/client"
 	"github.com/jcmturner/gokrb5/v8/config"
 	"github.com/jcmturner/gokrb5/v8/credentials"
+
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // AuthenticationManager handles different authentication methods for Active Directory
 type AuthenticationManager struct {
-	config     *ADModuleConfig
-	krb5Config *config.Config
-	krb5Client *client.Client
+	config      *ADModuleConfig
+	secretStore secretsinterfaces.SecretStore
+	krb5Config  *config.Config
+	krb5Client  *client.Client
 }
 
 // NewAuthenticationManager creates a new authentication manager
-func NewAuthenticationManager(config *ADModuleConfig) *AuthenticationManager {
+func NewAuthenticationManager(config *ADModuleConfig, secretStore secretsinterfaces.SecretStore) *AuthenticationManager {
 	return &AuthenticationManager{
-		config: config,
+		config:      config,
+		secretStore: secretStore,
 	}
+}
+
+// resolvePassword retrieves the service account password from the secret store.
+func (a *AuthenticationManager) resolvePassword(ctx context.Context) (string, error) {
+	if a.secretStore == nil {
+		return "", fmt.Errorf("ADModuleConfig: no SecretStore configured")
+	}
+	if a.config.PasswordSecretKey == "" {
+		return "", fmt.Errorf("ADModuleConfig.PasswordSecretKey is required for auth_method %q; store the password in pkg/secrets and set password_secret_key", a.config.AuthMethod)
+	}
+	secret, err := a.secretStore.GetSecret(ctx, a.config.PasswordSecretKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to retrieve password from secret store (key=%q): %w", a.config.PasswordSecretKey, err)
+	}
+	return secret.Value, nil
 }
 
 // Authenticate authenticates to Active Directory using the configured method
@@ -43,8 +62,13 @@ func (a *AuthenticationManager) Authenticate(ctx context.Context, conn *ldap.Con
 
 // authenticateSimple performs simple bind authentication
 func (a *AuthenticationManager) authenticateSimple(ctx context.Context, conn *ldap.Conn) error {
-	if a.config.Username == "" || a.config.Password == "" {
+	if a.config.Username == "" {
 		return fmt.Errorf("username and password required for simple authentication")
+	}
+
+	password, err := a.resolvePassword(ctx)
+	if err != nil {
+		return fmt.Errorf("simple authentication failed: %w", err)
 	}
 
 	// Convert username to proper format
@@ -63,8 +87,7 @@ func (a *AuthenticationManager) authenticateSimple(ctx context.Context, conn *ld
 	}
 
 	// Perform bind
-	err := conn.Bind(userDN, a.config.Password)
-	if err != nil {
+	if err := conn.Bind(userDN, password); err != nil {
 		return fmt.Errorf("simple bind failed for user %s: %w", userDN, err)
 	}
 
@@ -73,8 +96,13 @@ func (a *AuthenticationManager) authenticateSimple(ctx context.Context, conn *ld
 
 // authenticateKerberos performs Kerberos authentication
 func (a *AuthenticationManager) authenticateKerberos(ctx context.Context, conn *ldap.Conn) error {
-	if a.config.Username == "" || a.config.Password == "" {
+	if a.config.Username == "" {
 		return fmt.Errorf("username and password required for Kerberos authentication")
+	}
+
+	password, err := a.resolvePassword(ctx)
+	if err != nil {
+		return fmt.Errorf("kerberos authentication failed: %w", err)
 	}
 
 	// Initialize Kerberos configuration
@@ -84,14 +112,13 @@ func (a *AuthenticationManager) authenticateKerberos(ctx context.Context, conn *
 
 	// Create Kerberos credentials
 	creds := credentials.New(a.config.Username, strings.ToUpper(a.config.Domain))
-	creds.WithPassword(a.config.Password)
+	creds.WithPassword(password)
 
 	// Create Kerberos client
 	krb5Client := client.NewWithPassword(creds.UserName(), strings.ToUpper(a.config.Domain), creds.Password(), a.krb5Config)
 
 	// Login to get TGT
-	err := krb5Client.Login()
-	if err != nil {
+	if err := krb5Client.Login(); err != nil {
 		return fmt.Errorf("kerberos login failed: %w", err)
 	}
 
@@ -99,12 +126,11 @@ func (a *AuthenticationManager) authenticateKerberos(ctx context.Context, conn *
 
 	// For LDAP, we can use the TGT to get a service ticket
 	// However, go-ldap doesn't directly support Kerberos SASL
-	// For now, fall back to simple bind with the same credentials
-	// In a production implementation, this would use SASL GSSAPI
+	// go-ldap lacks native SASL/GSSAPI support; uses simple bind with the Kerberos-authenticated principal.
+	// A future implementation would use SASL GSSAPI for proper Kerberos-based LDAP binding.
 
 	userPrincipal := fmt.Sprintf("%s@%s", a.config.Username, strings.ToUpper(a.config.Domain))
-	err = conn.Bind(userPrincipal, a.config.Password)
-	if err != nil {
+	if err := conn.Bind(userPrincipal, password); err != nil {
 		return fmt.Errorf("kerberos-authenticated bind failed: %w", err)
 	}
 
@@ -113,10 +139,7 @@ func (a *AuthenticationManager) authenticateKerberos(ctx context.Context, conn *
 
 // authenticateNTLM performs NTLM authentication
 func (a *AuthenticationManager) authenticateNTLM(ctx context.Context, conn *ldap.Conn) error {
-	// NTLM authentication using Azure/go-ntlmssp
-	// This would require implementing NTLM SASL mechanism for LDAP
-	// For now, return an informative error
-
+	// NTLM for LDAP requires SASL/NTLM binding not available in go-ldap; callers must use 'simple' or 'kerberos'.
 	return fmt.Errorf("NTLM authentication requires SASL implementation - use 'simple' or 'kerberos' authentication methods")
 }
 
@@ -221,31 +244,4 @@ func (a *AuthenticationManager) GetAuthenticationStatus() map[string]interface{}
 	}
 
 	return status
-}
-
-// SecureCredentialStorage provides secure storage for authentication credentials
-type SecureCredentialStorage struct {
-	// In a production implementation, this would integrate with:
-	// - Windows Credential Manager on Windows
-	// - Linux keyring on Linux
-	// - External secret management systems (Vault, etc.)
-}
-
-// StoreCredentials securely stores authentication credentials
-func (s *SecureCredentialStorage) StoreCredentials(domain, username, password string) error {
-	// This would implement secure credential storage
-	// For now, return a placeholder
-	return fmt.Errorf("secure credential storage not yet implemented - use configuration files with proper permissions")
-}
-
-// RetrieveCredentials securely retrieves authentication credentials
-func (s *SecureCredentialStorage) RetrieveCredentials(domain, username string) (string, error) {
-	// This would implement secure credential retrieval
-	return "", fmt.Errorf("secure credential retrieval not yet implemented")
-}
-
-// RotateCredentials handles automatic credential rotation
-func (s *SecureCredentialStorage) RotateCredentials(domain, username string) error {
-	// This would implement automatic password rotation
-	return fmt.Errorf("credential rotation not yet implemented")
 }

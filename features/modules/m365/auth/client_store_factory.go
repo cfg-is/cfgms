@@ -1,15 +1,17 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package auth
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // ClientStoreType defines the type of client tenant store to use
@@ -22,7 +24,7 @@ const (
 	// ClientStoreFile uses file-based storage (simple deployments)
 	ClientStoreFile ClientStoreType = "file"
 
-	// ClientStoreGit uses git-based storage with Mozilla's secret management (default CFGMS approach)
+	// ClientStoreGit uses flatfile storage (previously git; git provider removed in Issue #664)
 	ClientStoreGit ClientStoreType = "git"
 
 	// ClientStoreDatabase uses database storage (production deployments)
@@ -105,39 +107,33 @@ func generateUniqueID() string {
 	return hex.EncodeToString(bytes)
 }
 
-// NewClientTenantStore creates a new ClientTenantStore based on configuration
-// This factory now uses the global plugin architecture with git as the unified backend:
-// - All storage types now use git provider (memory option removed for simplicity)
-// - Production deployments: Database backend with full ACID transactions (coming in Epic 5)
-func NewClientTenantStore(config *ClientStoreConfig, logger interface{}) (ClientTenantStore, error) {
+// NewClientTenantStore creates a new business.ClientTenantStore based on configuration.
+// All storage selection is delegated to the central pkg/storage plugin system
+// (interfaces.CreateClientTenantStoreFromConfig), so no local adapter layer is required.
+func NewClientTenantStore(config *ClientStoreConfig) (business.ClientTenantStore, error) {
 	// Convert the local config to the global storage config format
 	var providerName string
 	globalConfig := make(map[string]interface{})
 
 	switch config.Type {
 	case ClientStoreMemory:
-		// Memory storage deprecated - use git provider instead
-		providerName = "git"
-		globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-memory-replacement-%s.git", generateUniqueID())
+		// Memory storage deprecated - use sqlite provider (business data tier per ADR-003)
+		providerName = "sqlite"
+		globalConfig["path"] = filepath.Join(os.TempDir(), fmt.Sprintf("cfgms-memory-replacement-%s.db", generateUniqueID()))
 
 	case ClientStoreFile:
-		// Use git provider with local repository path
-		providerName = "git"
-		globalConfig["repository_path"] = config.FilePath
-		if config.FilePath == "" {
-			globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.git", generateUniqueID())
+		// Use sqlite provider for client tenant store (business data tier per ADR-003)
+		providerName = "sqlite"
+		if config.FilePath != "" {
+			globalConfig["path"] = config.FilePath
+		} else {
+			globalConfig["path"] = filepath.Join(os.TempDir(), fmt.Sprintf("cfgms-client-tenants-%s.db", generateUniqueID()))
 		}
 
 	case ClientStoreGit:
-		providerName = "git"
-		if config.GitRepository != "" {
-			globalConfig["remote_url"] = config.GitRepository
-			// Use unique path to avoid test conflicts
-			globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-client-git-%s", generateUniqueID())
-		} else {
-			// Use unique path to avoid test conflicts
-			globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.git", generateUniqueID())
-		}
+		// Git provider removed (Issue #664) - use sqlite provider (business data tier per ADR-003)
+		providerName = "sqlite"
+		globalConfig["path"] = filepath.Join(os.TempDir(), fmt.Sprintf("cfgms-client-tenants-%s.db", generateUniqueID()))
 
 	case ClientStoreDatabase:
 		providerName = "database"
@@ -158,145 +154,14 @@ func NewClientTenantStore(config *ClientStoreConfig, logger interface{}) (Client
 		return nil, fmt.Errorf("unsupported client store type: %s", config.Type)
 	}
 
-	// Use the global storage interface to create the store
+	// Delegate construction to the central storage plugin system — the returned
+	// store already implements business.ClientTenantStore, so no adapter is needed.
 	store, err := interfaces.CreateClientTenantStoreFromConfig(providerName, globalConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client tenant store via global plugin system: %w", err)
 	}
 
-	// Wrap the global interface to match our local interface
-	return &GlobalStorageAdapter{store: store}, nil
-}
-
-// GlobalStorageAdapter adapts the global storage interface to our local interface
-// This allows gradual migration from local to global interfaces
-type GlobalStorageAdapter struct {
-	store interfaces.ClientTenantStore
-}
-
-func (g *GlobalStorageAdapter) StoreClientTenant(ctx context.Context, client *ClientTenant) error {
-	globalClient := &interfaces.ClientTenant{
-		ID:               client.ID,
-		TenantID:         client.TenantID,
-		TenantName:       client.TenantName,
-		DomainName:       client.DomainName,
-		AdminEmail:       client.AdminEmail,
-		ConsentedAt:      client.ConsentedAt,
-		Status:           interfaces.ClientTenantStatus(client.Status),
-		ClientIdentifier: client.ClientIdentifier,
-		Metadata:         client.Metadata,
-		CreatedAt:        client.CreatedAt,
-		UpdatedAt:        client.UpdatedAt,
-	}
-	return g.store.StoreClientTenant(globalClient)
-}
-
-func (g *GlobalStorageAdapter) GetClientTenant(ctx context.Context, tenantID string) (*ClientTenant, error) {
-	globalClient, err := g.store.GetClientTenant(tenantID)
-	if err != nil {
-		return nil, err
-	}
-	return &ClientTenant{
-		ID:               globalClient.ID,
-		TenantID:         globalClient.TenantID,
-		TenantName:       globalClient.TenantName,
-		DomainName:       globalClient.DomainName,
-		AdminEmail:       globalClient.AdminEmail,
-		ConsentedAt:      globalClient.ConsentedAt,
-		Status:           ClientTenantStatus(globalClient.Status),
-		ClientIdentifier: globalClient.ClientIdentifier,
-		Metadata:         globalClient.Metadata,
-		CreatedAt:        globalClient.CreatedAt,
-		UpdatedAt:        globalClient.UpdatedAt,
-	}, nil
-}
-
-func (g *GlobalStorageAdapter) GetClientTenantByIdentifier(ctx context.Context, clientIdentifier string) (*ClientTenant, error) {
-	globalClient, err := g.store.GetClientTenantByIdentifier(clientIdentifier)
-	if err != nil {
-		return nil, err
-	}
-	return &ClientTenant{
-		ID:               globalClient.ID,
-		TenantID:         globalClient.TenantID,
-		TenantName:       globalClient.TenantName,
-		DomainName:       globalClient.DomainName,
-		AdminEmail:       globalClient.AdminEmail,
-		ConsentedAt:      globalClient.ConsentedAt,
-		Status:           ClientTenantStatus(globalClient.Status),
-		ClientIdentifier: globalClient.ClientIdentifier,
-		Metadata:         globalClient.Metadata,
-		CreatedAt:        globalClient.CreatedAt,
-		UpdatedAt:        globalClient.UpdatedAt,
-	}, nil
-}
-
-func (g *GlobalStorageAdapter) ListClientTenants(ctx context.Context, status ClientTenantStatus) ([]*ClientTenant, error) {
-	globalStatus := interfaces.ClientTenantStatus(status)
-	globalClients, err := g.store.ListClientTenants(globalStatus)
-	if err != nil {
-		return nil, err
-	}
-
-	var clients []*ClientTenant
-	for _, globalClient := range globalClients {
-		clients = append(clients, &ClientTenant{
-			ID:               globalClient.ID,
-			TenantID:         globalClient.TenantID,
-			TenantName:       globalClient.TenantName,
-			DomainName:       globalClient.DomainName,
-			AdminEmail:       globalClient.AdminEmail,
-			ConsentedAt:      globalClient.ConsentedAt,
-			Status:           ClientTenantStatus(globalClient.Status),
-			ClientIdentifier: globalClient.ClientIdentifier,
-			Metadata:         globalClient.Metadata,
-			CreatedAt:        globalClient.CreatedAt,
-			UpdatedAt:        globalClient.UpdatedAt,
-		})
-	}
-	return clients, nil
-}
-
-func (g *GlobalStorageAdapter) UpdateClientTenantStatus(ctx context.Context, tenantID string, status ClientTenantStatus) error {
-	globalStatus := interfaces.ClientTenantStatus(status)
-	return g.store.UpdateClientTenantStatus(tenantID, globalStatus)
-}
-
-func (g *GlobalStorageAdapter) DeleteClientTenant(ctx context.Context, tenantID string) error {
-	return g.store.DeleteClientTenant(tenantID)
-}
-
-func (g *GlobalStorageAdapter) StoreAdminConsentRequest(ctx context.Context, request *AdminConsentRequest) error {
-	globalRequest := &interfaces.AdminConsentRequest{
-		ClientIdentifier: request.ClientIdentifier,
-		ClientName:       request.ClientName,
-		RequestedBy:      request.RequestedBy,
-		State:            request.State,
-		ExpiresAt:        request.ExpiresAt,
-		CreatedAt:        request.CreatedAt,
-		Metadata:         request.Metadata,
-	}
-	return g.store.StoreAdminConsentRequest(globalRequest)
-}
-
-func (g *GlobalStorageAdapter) GetAdminConsentRequest(ctx context.Context, state string) (*AdminConsentRequest, error) {
-	globalRequest, err := g.store.GetAdminConsentRequest(state)
-	if err != nil {
-		return nil, err
-	}
-	return &AdminConsentRequest{
-		ClientIdentifier: globalRequest.ClientIdentifier,
-		ClientName:       globalRequest.ClientName,
-		RequestedBy:      globalRequest.RequestedBy,
-		State:            globalRequest.State,
-		ExpiresAt:        globalRequest.ExpiresAt,
-		CreatedAt:        globalRequest.CreatedAt,
-		Metadata:         globalRequest.Metadata,
-	}, nil
-}
-
-func (g *GlobalStorageAdapter) DeleteAdminConsentRequest(ctx context.Context, state string) error {
-	return g.store.DeleteAdminConsentRequest(state)
+	return store, nil
 }
 
 // Legacy functions removed - now using global plugin architecture

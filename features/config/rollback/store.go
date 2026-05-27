@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rollback
 
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -92,8 +93,9 @@ func (s *InMemoryRollbackStore) ListOperations(ctx context.Context, filters Roll
 		}
 	}
 
-	// Sort by initiated time (newest first)
-	// In a real implementation, would use proper sorting
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].InitiatedAt.After(results[j].InitiatedAt)
+	})
 
 	return results, nil
 }

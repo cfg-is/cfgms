@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package trigger
 
@@ -6,10 +6,13 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +20,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/workflow"
 )
 
 func TestHTTPWebhookHandler_NewHTTPWebhookHandler(t *testing.T) {
@@ -309,7 +314,7 @@ func TestHTTPWebhookHandler_AuthenticateRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := handler.authenticateRequest(tt.webhook, tt.payload, tt.headers)
+			err := handler.authenticateRequest(tt.webhook, tt.payload, tt.headers, "test-trigger-id")
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -668,10 +673,10 @@ func TestHTTPWebhookHandler_HandleWebhookRequest(t *testing.T) {
 
 	// Mock successful workflow execution
 	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(
-		&WorkflowExecution{
+		&workflow.WorkflowExecution{
 			ID:           "exec-123",
 			WorkflowName: "test-workflow",
-			Status:       "running",
+			Status:       workflow.StatusRunning,
 			StartTime:    time.Now(),
 		}, nil)
 
@@ -796,7 +801,7 @@ func TestHTTPWebhookHandler_RateLimit(t *testing.T) {
 
 	// Mock workflow execution
 	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(
-		&WorkflowExecution{ID: "exec-1", WorkflowName: "test", Status: "running", StartTime: time.Now()}, nil)
+		&workflow.WorkflowExecution{ID: "exec-1", WorkflowName: "test", Status: workflow.StatusRunning, StartTime: time.Now()}, nil)
 
 	// First request should succeed
 	req1, _ := http.NewRequest("POST", "/webhook/webhook-ratelimited", strings.NewReader(`{"test": "data"}`))
@@ -809,6 +814,540 @@ func TestHTTPWebhookHandler_RateLimit(t *testing.T) {
 	rr2 := httptest.NewRecorder()
 	handler.router.ServeHTTP(rr2, req2)
 	assert.Equal(t, http.StatusTooManyRequests, rr2.Code)
+}
+
+// TestValidateBearerTokenConstantTimeCompare verifies that validateBearerToken uses
+// subtle.ConstantTimeCompare and NFC normalization. Wall-clock timing is statistically
+// unreliable on shared CI runners at sub-microsecond resolution, so we use a structural
+// source inspection check (same pattern as TestWebhookHandlerUsesHmacEqual in security_test.go).
+func TestValidateBearerTokenConstantTimeCompare(t *testing.T) {
+	source, err := os.ReadFile("webhook.go")
+	require.NoError(t, err, "failed to read webhook.go")
+	assert.True(t, strings.Contains(string(source), "subtle.ConstantTimeCompare("),
+		"webhook.go must use subtle.ConstantTimeCompare() in validateBearerToken to prevent timing attacks")
+	assert.True(t, strings.Contains(string(source), "norm.NFC.String("),
+		"webhook.go must apply NFC normalization before bearer token comparison to prevent Unicode normalization attacks")
+}
+
+// TestValidateBearerTokenFailClosed asserts that an empty BearerToken config rejects all requests.
+func TestValidateBearerTokenFailClosed(t *testing.T) {
+	handler := &HTTPWebhookHandler{}
+	auth := &WebhookAuth{
+		BearerToken: "",
+	}
+
+	headers := map[string]string{
+		"Authorization": "Bearer anything",
+	}
+
+	err := handler.validateBearerToken(auth, headers, "test-trigger")
+	require.Error(t, err)
+	assert.Equal(t, "invalid Bearer token", err.Error())
+	assert.NotContains(t, err.Error(), "anything")
+}
+
+// TestAuthFailureRateLimit asserts that 11 consecutive bearer auth failures for the same
+// trigger ID return HTTP 429 on the 11th attempt.
+func TestAuthFailureRateLimit(t *testing.T) {
+	mockTriggerManager := &MockTriggerManager{}
+	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	handler := NewHTTPWebhookHandler(mockTriggerManager, mockWorkflowTrigger, "localhost", 0)
+
+	trigger := &Trigger{
+		ID:   "rate-limit-trigger",
+		Type: TriggerTypeWebhook,
+		Webhook: &WebhookConfig{
+			Path:    "/webhook/rate-limit-trigger",
+			Method:  []string{"POST"},
+			Enabled: true,
+			Authentication: &WebhookAuth{
+				Type:        WebhookAuthBearer,
+				BearerToken: "correct-token",
+			},
+		},
+	}
+
+	ctx := context.Background()
+	err := handler.RegisterWebhook(ctx, trigger)
+	require.NoError(t, err)
+
+	// First 10 failures should return 500 (auth failed, limiter not yet exhausted)
+	for i := 0; i < 10; i++ {
+		req, _ := http.NewRequest("POST", "/webhook/rate-limit-trigger",
+			strings.NewReader(`{"test": "data"}`))
+		req.Header.Set("Authorization", "Bearer wrong-token")
+		rr := httptest.NewRecorder()
+		handler.router.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusInternalServerError, rr.Code,
+			fmt.Sprintf("request %d should fail with 500 (auth error)", i+1))
+	}
+
+	// 11th failure should return 429 (rate limit exhausted)
+	req, _ := http.NewRequest("POST", "/webhook/rate-limit-trigger",
+		strings.NewReader(`{"test": "data"}`))
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	rr := httptest.NewRecorder()
+	handler.router.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusTooManyRequests, rr.Code,
+		"11th consecutive auth failure should return HTTP 429")
+}
+
+// TestMapPayloadToVariablesHeaderSanitization asserts that auth-related headers are stripped
+// from the workflow variable bag to prevent credential leaks into execution records.
+func TestMapPayloadToVariablesHeaderSanitization(t *testing.T) {
+	handler := &HTTPWebhookHandler{}
+
+	trigger := &Trigger{
+		Webhook: &WebhookConfig{},
+	}
+	payload := []byte(`{"event": "test"}`)
+	headers := map[string]string{
+		"Authorization":   "Bearer super-secret-token",
+		"Cookie":          "session=abc123",
+		"X-Api-Key":       "api-key-value",
+		"X-Auth-Token":    "auth-token-value",
+		"Content-Type":    "application/json",
+		"X-Custom-Header": "allowed-value",
+	}
+
+	variables, err := handler.mapPayloadToVariables(trigger, payload, headers)
+	require.NoError(t, err)
+
+	// Blocked headers must not appear in any form
+	for key, val := range variables {
+		assert.NotContains(t, key, "authorization", "authorization header must be stripped from variable bag")
+		assert.NotContains(t, key, "cookie", "cookie header must be stripped from variable bag")
+		assert.NotContains(t, key, "x-api-key", "x-api-key header must be stripped from variable bag")
+		assert.NotContains(t, key, "x-auth-token", "x-auth-token header must be stripped from variable bag")
+		// Token values must not appear in any variable value
+		assert.NotContains(t, fmt.Sprintf("%v", val), "super-secret-token")
+		assert.NotContains(t, fmt.Sprintf("%v", val), "session=abc123")
+		assert.NotContains(t, fmt.Sprintf("%v", val), "api-key-value")
+		assert.NotContains(t, fmt.Sprintf("%v", val), "auth-token-value")
+	}
+
+	// Allowed headers must still be present
+	assert.Equal(t, "application/json", variables["header_content-type"])
+	assert.Equal(t, "allowed-value", variables["header_x-custom-header"])
+}
+
+// TestHandleWebhookNoAuthHeadersInWorkflowVariables asserts that auth-related headers
+// never reach TriggerWorkflow via webhook_headers or any other path in HandleWebhook.
+func TestHandleWebhookNoAuthHeadersInWorkflowVariables(t *testing.T) {
+	mockTriggerManager := &MockTriggerManager{}
+	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	handler := NewHTTPWebhookHandler(mockTriggerManager, mockWorkflowTrigger, "localhost", 0)
+
+	trigger := &Trigger{
+		ID:           "sanitize-e2e",
+		Type:         TriggerTypeWebhook,
+		WorkflowName: "test-workflow",
+		Webhook: &WebhookConfig{
+			Path:    "/webhook/sanitize-e2e",
+			Method:  []string{"POST"},
+			Enabled: true,
+			Authentication: &WebhookAuth{
+				Type:        WebhookAuthBearer,
+				BearerToken: "correct-token",
+			},
+		},
+	}
+
+	ctx := context.Background()
+	err := handler.RegisterWebhook(ctx, trigger)
+	require.NoError(t, err)
+
+	// Use a channel to synchronize with the async goroutine in HandleWebhook.
+	// The channel send happens-before the receive, ensuring capturedVariables is
+	// visible to the test goroutine without a data race.
+	triggerCalled := make(chan struct{}, 1)
+	var capturedVariables map[string]interface{}
+	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.MatchedBy(func(vars map[string]interface{}) bool {
+		capturedVariables = vars
+		select {
+		case triggerCalled <- struct{}{}:
+		default:
+		}
+		return true
+	})).Return(
+		&workflow.WorkflowExecution{ID: "exec-sanitize", WorkflowName: "test-workflow", Status: workflow.StatusRunning, StartTime: time.Now()},
+		nil,
+	)
+
+	headers := map[string]string{
+		"Authorization":   "Bearer correct-token",
+		"Cookie":          "session=secret123",
+		"X-Api-Key":       "api-key-secret",
+		"X-Auth-Token":    "auth-secret",
+		"Content-Type":    "application/json",
+		"X-Custom-Header": "safe-value",
+	}
+
+	payload := []byte(`{"event": "test"}`)
+	_, err = handler.HandleWebhook(ctx, "sanitize-e2e", payload, headers)
+	require.NoError(t, err)
+
+	// Wait for the async goroutine to invoke TriggerWorkflow.
+	select {
+	case <-triggerCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("TriggerWorkflow was not called within 2 seconds")
+	}
+
+	require.NotNil(t, capturedVariables, "TriggerWorkflow must have been called with variables")
+
+	// Stringify all variable values and assert no auth credentials appear.
+	combined := fmt.Sprintf("%v", capturedVariables)
+	assert.NotContains(t, combined, "correct-token", "bearer token must not reach workflow variables")
+	assert.NotContains(t, combined, "secret123", "cookie value must not reach workflow variables")
+	assert.NotContains(t, combined, "api-key-secret", "x-api-key value must not reach workflow variables")
+	assert.NotContains(t, combined, "auth-secret", "x-auth-token value must not reach workflow variables")
+
+	// Auth header keys must not appear either.
+	assert.NotContains(t, combined, "authorization", "authorization key must not appear in workflow variables")
+	assert.NotContains(t, combined, "cookie", "cookie key must not appear in workflow variables")
+
+	// Safe headers must still be present.
+	assert.Contains(t, combined, "safe-value", "non-auth headers must still be present")
+}
+
+// TestWebhookPayloadSchemaValidation covers valid payload, invalid payload, and no-schema cases.
+func TestWebhookPayloadSchemaValidation(t *testing.T) {
+	handler := &HTTPWebhookHandler{}
+
+	tests := []struct {
+		name          string
+		webhook       *WebhookConfig
+		payload       []byte
+		expectError   bool
+		errorContains string
+	}{
+		{
+			name: "no schema configured accepts any payload",
+			webhook: &WebhookConfig{
+				PayloadValidation: &PayloadValidation{
+					JSONSchema: "",
+				},
+			},
+			payload:     []byte(`{"anything": "accepted"}`),
+			expectError: false,
+		},
+		{
+			name: "valid payload matching schema",
+			webhook: &WebhookConfig{
+				PayloadValidation: &PayloadValidation{
+					JSONSchema: `{"type": "object", "required": ["id", "name"], "properties": {"id": {"type": "string"}, "name": {"type": "string"}}}`,
+				},
+			},
+			payload:     []byte(`{"id": "123", "name": "test", "extra": "ignored"}`),
+			expectError: false,
+		},
+		{
+			name: "payload missing required field rejected with schema error",
+			webhook: &WebhookConfig{
+				PayloadValidation: &PayloadValidation{
+					JSONSchema: `{"type": "object", "required": ["id", "name"]}`,
+				},
+			},
+			payload:       []byte(`{"id": "123"}`),
+			expectError:   true,
+			errorContains: "payload does not match JSON schema",
+		},
+		{
+			name: "payload wrong root type rejected",
+			webhook: &WebhookConfig{
+				PayloadValidation: &PayloadValidation{
+					JSONSchema: `{"type": "object"}`,
+				},
+			},
+			payload:       []byte(`["not", "an", "object"]`),
+			expectError:   true,
+			errorContains: "payload does not match JSON schema",
+		},
+		{
+			name: "property type mismatch rejected",
+			webhook: &WebhookConfig{
+				PayloadValidation: &PayloadValidation{
+					JSONSchema: `{"type": "object", "properties": {"count": {"type": "integer"}}}`,
+				},
+			},
+			payload:       []byte(`{"count": "not-a-number"}`),
+			expectError:   true,
+			errorContains: "payload does not match JSON schema",
+		},
+		{
+			name: "invalid JSON schema config returns error",
+			webhook: &WebhookConfig{
+				PayloadValidation: &PayloadValidation{
+					JSONSchema: `{invalid json`,
+				},
+			},
+			payload:       []byte(`{"id": "123"}`),
+			expectError:   true,
+			errorContains: "invalid JSON schema",
+		},
+		{
+			name: "no validation config accepts payload",
+			webhook: &WebhookConfig{
+				PayloadValidation: nil,
+			},
+			payload:     []byte(`{"anything": "accepted"}`),
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := handler.validatePayload(tt.webhook, tt.payload)
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestWebhookBasicAuth covers correct credentials, wrong password, and missing header cases.
+func TestWebhookBasicAuth(t *testing.T) {
+	handler := &HTTPWebhookHandler{}
+
+	auth := &WebhookAuth{
+		BasicAuth: &BasicAuth{
+			Username: "admin",
+			Password: "s3cr3t!",
+		},
+	}
+
+	basicHeader := func(username, password string) string {
+		return "Basic " + base64.StdEncoding.EncodeToString([]byte(username+":"+password))
+	}
+
+	tests := []struct {
+		name        string
+		headers     map[string]string
+		expectError bool
+		errorIs     error
+	}{
+		{
+			name:        "correct credentials accepted",
+			headers:     map[string]string{"Authorization": basicHeader("admin", "s3cr3t!")},
+			expectError: false,
+		},
+		{
+			name:        "wrong password rejected",
+			headers:     map[string]string{"Authorization": basicHeader("admin", "wrong")},
+			expectError: true,
+			errorIs:     errBasicAuthUnauthorized,
+		},
+		{
+			name:        "wrong username rejected",
+			headers:     map[string]string{"Authorization": basicHeader("other", "s3cr3t!")},
+			expectError: true,
+			errorIs:     errBasicAuthUnauthorized,
+		},
+		{
+			name:        "missing Authorization header rejected",
+			headers:     map[string]string{},
+			expectError: true,
+			errorIs:     errBasicAuthUnauthorized,
+		},
+		{
+			name:        "malformed base64 rejected",
+			headers:     map[string]string{"Authorization": "Basic not-valid-base64!!!"},
+			expectError: true,
+			errorIs:     errBasicAuthUnauthorized,
+		},
+		{
+			name:        "non-Basic scheme rejected",
+			headers:     map[string]string{"Authorization": "Bearer some-token"},
+			expectError: true,
+			errorIs:     errBasicAuthUnauthorized,
+		},
+		{
+			name:        "password mismatch confirms split on first colon only",
+			headers:     map[string]string{"Authorization": basicHeader("admin", "s3cr3t!:extra")},
+			expectError: true, // "s3cr3t!:extra" != "s3cr3t!" — correct first-colon split, wrong password
+			errorIs:     errBasicAuthUnauthorized,
+		},
+	}
+
+	// Nil BasicAuth config tested separately since it requires a different auth struct.
+	t.Run("nil BasicAuth config returns configuration error", func(t *testing.T) {
+		err := handler.validateBasicAuth(&WebhookAuth{BasicAuth: nil}, map[string]string{
+			"Authorization": basicHeader("admin", "s3cr3t!"),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "basic auth configuration is required")
+	})
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := handler.validateBasicAuth(auth, tt.headers)
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorIs != nil {
+					assert.ErrorIs(t, err, tt.errorIs)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestWebhookBasicAuthHTTP verifies that the HTTP handler returns 401 for missing or wrong
+// Basic auth credentials and 202 for correct credentials.
+func TestWebhookBasicAuthHTTP(t *testing.T) {
+	mockTriggerManager := &MockTriggerManager{}
+	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	handler := NewHTTPWebhookHandler(mockTriggerManager, mockWorkflowTrigger, "localhost", 0)
+
+	trigger := &Trigger{
+		ID:           "webhook-basic",
+		Type:         TriggerTypeWebhook,
+		WorkflowName: "test-workflow",
+		Webhook: &WebhookConfig{
+			Path:    "/webhook/basic-auth-test",
+			Method:  []string{"POST"},
+			Enabled: true,
+			Authentication: &WebhookAuth{
+				Type: WebhookAuthBasic,
+				BasicAuth: &BasicAuth{
+					Username: "user",
+					Password: "pass",
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	err := handler.RegisterWebhook(ctx, trigger)
+	require.NoError(t, err)
+
+	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(
+		&workflow.WorkflowExecution{
+			ID:           "exec-basic",
+			WorkflowName: "test-workflow",
+			Status:       workflow.StatusRunning,
+			StartTime:    time.Now(),
+		}, nil)
+
+	basicHeader := func(username, password string) string {
+		return "Basic " + base64.StdEncoding.EncodeToString([]byte(username+":"+password))
+	}
+
+	tests := []struct {
+		name           string
+		authHeader     string
+		expectedStatus int
+	}{
+		{
+			name:           "missing Authorization header returns 401",
+			authHeader:     "",
+			expectedStatus: http.StatusUnauthorized,
+		},
+		{
+			name:           "wrong password returns 401",
+			authHeader:     basicHeader("user", "wrong"),
+			expectedStatus: http.StatusUnauthorized,
+		},
+		{
+			name:           "correct credentials returns 202",
+			authHeader:     basicHeader("user", "pass"),
+			expectedStatus: http.StatusAccepted,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest("POST", "/webhook/basic-auth-test",
+				strings.NewReader(`{"event": "test"}`))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
+			}
+
+			rr := httptest.NewRecorder()
+			handler.router.ServeHTTP(rr, req)
+
+			assert.Equal(t, tt.expectedStatus, rr.Code)
+		})
+	}
+}
+
+// TestWebhookPayloadSchemaValidationHTTP verifies that the HTTP handler returns 400 for
+// payloads that fail JSON schema validation and 202 for valid payloads.
+func TestWebhookPayloadSchemaValidationHTTP(t *testing.T) {
+	mockTriggerManager := &MockTriggerManager{}
+	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	handler := NewHTTPWebhookHandler(mockTriggerManager, mockWorkflowTrigger, "localhost", 0)
+
+	trigger := &Trigger{
+		ID:           "webhook-schema",
+		Type:         TriggerTypeWebhook,
+		WorkflowName: "test-workflow",
+		Webhook: &WebhookConfig{
+			Path:    "/webhook/schema-test",
+			Method:  []string{"POST"},
+			Enabled: true,
+			PayloadValidation: &PayloadValidation{
+				JSONSchema: `{"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}`,
+			},
+		},
+	}
+
+	ctx := context.Background()
+	err := handler.RegisterWebhook(ctx, trigger)
+	require.NoError(t, err)
+
+	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(
+		&workflow.WorkflowExecution{
+			ID:           "exec-schema",
+			WorkflowName: "test-workflow",
+			Status:       workflow.StatusRunning,
+			StartTime:    time.Now(),
+		}, nil)
+
+	tests := []struct {
+		name           string
+		payload        string
+		expectedStatus int
+	}{
+		{
+			name:           "schema-invalid payload returns 400",
+			payload:        `{"name": "missing-id-field"}`,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "wrong root type returns 400",
+			payload:        `["not", "an", "object"]`,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "valid payload returns 202",
+			payload:        `{"id": "abc123"}`,
+			expectedStatus: http.StatusAccepted,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest("POST", "/webhook/schema-test",
+				strings.NewReader(tt.payload))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+
+			rr := httptest.NewRecorder()
+			handler.router.ServeHTTP(rr, req)
+
+			assert.Equal(t, tt.expectedStatus, rr.Code)
+		})
+	}
 }
 
 // Helper function to generate HMAC signature for tests

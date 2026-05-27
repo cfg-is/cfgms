@@ -14,7 +14,7 @@ This directory contains comprehensive integration tests for the High Availabilit
 - **`geographic_test.go`** - Tests geographic distribution and cross-region behavior
 
 **Steward HA Testing:**
-- **`steward_ha_test.go`** - Tests real steward-to-controller HA behavior with MQTT+QUIC sessions
+- **`steward_ha_test.go`** - Tests real steward-to-controller HA behavior with gRPC-over-QUIC sessions
 - **`configuration_continuity_test.go`** - Tests configuration push continuity during failover
 - **`authentication_workflow_test.go`** - Tests authentication persistence and workflow resilience
 
@@ -136,7 +136,7 @@ docker-compose -f docker-compose.ha-test.yml down -v --remove-orphans
 - **Purpose**: Test real steward-to-controller HA behavior
 - **Validates**:
   - Steward connection failover to new controller leader
-  - MQTT+QUIC session persistence during controller failover
+  - gRPC-over-QUIC session persistence during controller failover
   - Real authentication state maintenance
   - Steward reconnection timing (< 15 seconds)
 

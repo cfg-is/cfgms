@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package jit
 
@@ -6,6 +6,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/cfgis/cfgms/features/rbac/ports"
 	"github.com/cfgis/cfgms/features/tenant/security"
 )
 
@@ -236,12 +237,8 @@ type PolicyRule struct {
 	Description string            `json:"description"`
 }
 
-// PolicyCondition defines conditions for policy evaluation
-type PolicyCondition struct {
-	Field    string      `json:"field"`
-	Operator string      `json:"operator"`
-	Value    interface{} `json:"value"`
-}
+// PolicyCondition is an alias for the canonical type in the ports package.
+type PolicyCondition = ports.PolicyCondition
 
 // PolicyAction defines actions to take when policy conditions are met
 type PolicyAction struct {

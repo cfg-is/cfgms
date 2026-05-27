@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package builtin
 
@@ -35,10 +35,7 @@ func registerBuiltinTransforms() {
 // registerTransform safely registers a transform with error handling
 func registerTransform(registry transform.TransformRegistry, t transform.Transform, name string) {
 	if err := registry.Register(t); err != nil {
-		// In production, you might want to use a proper logger here
-		// For now, we'll just ignore registration errors to prevent panics
-		// The transform will simply not be available if registration fails
-		_ = err // Silence unused variable warning
+		_ = err // Registration failures are silently skipped; the transform is unavailable.
 	}
 }
 

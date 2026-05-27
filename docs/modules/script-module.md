@@ -2,7 +2,22 @@
 
 ## Overview
 
-The Script Module provides cross-platform script execution capabilities for CFGMS, supporting Windows (PowerShell, CMD) and Unix-like systems (Bash, Zsh, Python). It implements the standard CFGMS module interface with comprehensive audit logging and security features.
+The Script Module provides cross-platform script execution capabilities for CFGMS, supporting Windows (PowerShell, CMD) and Unix-like systems (Bash, Zsh, sh, Python). It implements the standard CFGMS module interface with comprehensive audit logging and security features.
+
+## Implementation References
+
+- Schema: [`features/modules/script/module.yaml`](../../features/modules/script/module.yaml)
+- Implementation: [`features/modules/script/module.go`](../../features/modules/script/module.go)
+- Configuration type: [`features/modules/script/config.go`](../../features/modules/script/config.go)
+- Execution monitor: [`features/modules/script/execution_monitor.go`](../../features/modules/script/execution_monitor.go)
+
+## Platform Support
+
+| Platform | Supported shells |
+|----------|-----------------|
+| Linux    | `bash`, `zsh`, `sh`, `python`, `python3` |
+| macOS    | `bash`, `zsh`, `sh`, `python`, `python3` |
+| Windows  | `powershell`, `cmd`, `python`, `python3` |
 
 ## Table of Contents
 
@@ -11,7 +26,6 @@ The Script Module provides cross-platform script execution capabilities for CFGM
 - [Security Features](#security-features)
 - [Execution Environment](#execution-environment)
 - [Audit and Monitoring](#audit-and-monitoring)
-- [API Integration](#api-integration)
 - [Examples](#examples)
 
 ## Basic Usage
@@ -32,13 +46,6 @@ script:
   signing_policy: none
 ```
 
-### Supported Shells
-
-| Platform | Supported Shells |
-|----------|------------------|
-| Linux/macOS | `bash`, `zsh`, `python` |
-| Windows | `powershell`, `cmd` |
-
 ## Configuration Options
 
 ### Core Configuration
@@ -46,12 +53,21 @@ script:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `content` | string | Yes | The script content to execute |
-| `shell` | string | Yes | Shell/interpreter to use |
-| `timeout` | duration | No | Maximum execution time (default: 30s) |
+| `shell` | string | Yes | Shell/interpreter to use (see [Platform Support](#platform-support)) |
+| `timeout` | duration | No | Maximum execution time. Default: **5 minutes** (`5m`). |
 | `description` | string | No | Human-readable description |
-| `working_dir` | string | No | Working directory for execution |
-| `environment` | map | No | Environment variables |
-| `signing_policy` | string | No | Script signing requirement |
+| `working_dir` | string | No | Working directory for execution (defaults to system temp) |
+| `environment` | map | No | Environment variables injected into the script process |
+| `signing_policy` | string | No | Script signing requirement: `none` (default), `optional`, `required` |
+| `execution_context` | string | No | User context for execution: `system` (default) or `logged_in_user` |
+| `metadata` | map | No | Arbitrary key-value metadata stored with the execution record |
+
+#### `execution_context`
+
+Controls the user account under which the script runs:
+
+- `system` (default): runs as SYSTEM on Windows or as the steward process user (typically root) on Linux/macOS. No credential switching.
+- `logged_in_user`: runs as the currently logged-in console user. If no interactive user is logged in, execution returns `ErrNoUserLoggedIn` so the caller can queue the request for retry rather than failing permanently.
 
 ### Security Configuration
 
@@ -86,14 +102,22 @@ script:
 
 ### Signing Policies
 
-1. **None** (`none`): No signature validation
-2. **Optional** (`optional`): Validate signature if present
-3. **Required** (`required`): Signature must be present and valid
+1. **None** (`none`): No signature validation (default when `signing_policy` is omitted)
+2. **Optional** (`optional`): Validate signature if present; execute without validation if absent
+3. **Required** (`required`): Signature must be present and cryptographically valid
 
 ### Supported Algorithms
 
-- RSA with SHA-256 (`RSA-SHA256`)
-- ECDSA with SHA-256 (`ECDSA-SHA256`)
+| Value | Description |
+|-------|-------------|
+| `RSA-SHA256` | RSA with SHA-256 digest |
+| `RSA-SHA512` | RSA with SHA-512 digest |
+| `ECDSA-SHA256` | ECDSA with SHA-256 digest |
+| `ECDSA-SHA384` | ECDSA with SHA-384 digest |
+
+Algorithm matching is case-insensitive (`RSA-SHA256` and `rsa-sha256` are equivalent).
+
+For PowerShell scripts on Windows, Authenticode verification is used instead of detached signature verification.
 
 ### Example with Signature
 
@@ -119,8 +143,8 @@ script:
 
 - **Timeout Handling**: Graceful termination with SIGTERM, followed by SIGKILL
 - **Resource Isolation**: Each script runs in its own process
-- **Working Directory**: Configurable working directory (defaults to system temp)
-- **Environment**: Clean environment with configurable variables
+- **Working Directory**: Configurable via `working_dir`; defaults to system temp
+- **Environment**: Clean environment with configurable variables via `environment`
 
 ### Output Capture
 
@@ -129,6 +153,8 @@ script:
 - **Exit Code**: Process exit code for success/failure determination
 
 ## Audit and Monitoring
+
+The script module maintains an in-process `AuditLogger` (capped at 1000 records per steward by default) and an `ExecutionMonitor` for cross-device execution tracking. These are internal components accessible via the `Module` struct's `GetExecutionHistory`, `QueryExecutions`, and `GetExecutionMetrics` methods — they are not exposed as REST endpoints.
 
 ### Execution Records
 
@@ -169,41 +195,6 @@ Aggregated metrics include:
 - **Average Duration**: Mean execution time
 - **Shell Usage**: Distribution of shell usage
 - **Failure Analysis**: Common failure patterns
-
-## API Integration
-
-### REST API Endpoints
-
-The script module integrates with CFGMS REST API:
-
-```bash
-# List script executions
-GET /api/v1/stewards/{id}/scripts/executions?since=2025-07-28T00:00:00Z
-
-# Get specific execution
-GET /api/v1/stewards/{id}/scripts/executions/{execution_id}
-
-# Get performance metrics
-GET /api/v1/stewards/{id}/scripts/metrics?since=2025-07-27T00:00:00Z
-
-# Get current script status
-GET /api/v1/stewards/{id}/scripts/status
-
-# Retry failed execution
-POST /api/v1/stewards/{id}/scripts/executions/{execution_id}/retry
-```
-
-### Query Parameters
-
-| Parameter | Description | Example |
-|-----------|-------------|---------|
-| `since` | Filter executions since timestamp | `2025-07-28T00:00:00Z` |
-| `until` | Filter executions until timestamp | `2025-07-28T23:59:59Z` |
-| `status` | Filter by execution status | `completed`, `failed`, `running` |
-| `resource_id` | Filter by script resource | `backup-script` |
-| `user_id` | Filter by executing user | `admin` |
-| `limit` | Limit number of results | `50` |
-| `offset` | Pagination offset | `100` |
 
 ## Examples
 
@@ -361,6 +352,67 @@ modules:
       signing_policy: optional
 ```
 
+### Example: Simple idempotent health-check script (no signing)
+
+**Use Case:** Run a lightweight health check on every convergence cycle to verify that a critical service is running. No code-signing required because the script performs read-only checks and the risk profile is low.
+
+**Configuration:**
+
+```yaml
+modules:
+  service_health_check:
+    type: script
+    config:
+      content: |
+        #!/bin/bash
+        set -e
+        SERVICE=my-service
+        if systemctl is-active --quiet "$SERVICE"; then
+          echo "$SERVICE is running"
+        else
+          echo "$SERVICE is NOT running" >&2
+          exit 1
+        fi
+      shell: bash
+      timeout: 10s
+      description: Verify that my-service is active
+      signing_policy: none
+```
+
+**Expected Outcome:** The script exits 0 when `my-service` is active. If the service is stopped the script exits 1 and the steward records an execution failure in the audit log. Because the script is idempotent (read-only), re-running it on every cycle is safe and produces no side-effects.
+
+### Example: Production deployment with script signing
+
+**Use Case:** Restart a service after a deployment. The script is signed with an RSA key so the steward rejects any unsigned or tampered version before execution.
+
+**Configuration:**
+
+```yaml
+modules:
+  deploy_restart:
+    type: script
+    config:
+      content: |
+        #!/bin/bash
+        set -e
+        systemctl restart my-service
+        systemctl is-active --quiet my-service
+        echo "my-service restarted successfully"
+      shell: bash
+      timeout: 30s
+      description: Restart my-service after deployment
+      signing_policy: required
+      signature:
+        algorithm: RSA-SHA256
+        signature: "MEQCIBxQ7..."
+        public_key: |
+          -----BEGIN PUBLIC KEY-----
+          MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
+          -----END PUBLIC KEY-----
+```
+
+**Expected Outcome:** The steward validates the RSA-SHA256 signature against the script content before executing. If the signature is missing or invalid the script is rejected with a signing error and no `systemctl` call is made. A valid signature triggers the restart and returns exit 0; the result is recorded in the audit log.
+
 ## Best Practices
 
 ### 1. Script Design
@@ -379,15 +431,13 @@ modules:
 
 ### 3. Performance
 
-- **Appropriate Timeouts**: Set realistic timeouts based on expected execution time
+- **Appropriate Timeouts**: Set realistic timeouts based on expected execution time. The default is 5 minutes; set an explicit `timeout:` for scripts that should complete faster.
 - **Resource Management**: Monitor CPU and memory usage for long-running scripts
-- **Parallel Execution**: Use parallel execution for independent operations
 - **Caching**: Cache expensive operations when possible
 
 ### 4. Monitoring
 
 - **Comprehensive Logging**: Use structured logging for better searchability
-- **Metrics Collection**: Track execution metrics for performance optimization
 - **Alert Configuration**: Set up alerts for script failures and performance issues
 - **Regular Audits**: Review script execution patterns and audit logs
 
@@ -396,7 +446,7 @@ modules:
 ### Common Issues
 
 1. **Timeout Errors**
-   - Increase timeout value
+   - Increase timeout value (default is 5 minutes — adjust downward to fail fast or upward for long operations)
    - Optimize script performance
    - Break long operations into smaller chunks
 
@@ -408,6 +458,7 @@ modules:
 3. **Shell Not Available**
    - Verify shell is installed on target system
    - Check shell path and availability
+   - See [Platform Support](#platform-support) for supported shells per platform
    - Use cross-platform compatible commands
 
 4. **Environment Variable Issues**
@@ -431,62 +482,12 @@ script:
 
 ## Integration with CFGMS
 
-### Module Registration
-
-The script module is automatically registered with the CFGMS module system:
-
-```go
-// Automatic registration in module factory
-func init() {
-    modules.RegisterModule("script", script.New)
-}
-```
-
 ### Steward Integration
 
 Scripts are executed through the steward's module system:
 
 1. Configuration received from controller
-2. Script module validates configuration
+2. Script module validates configuration (including shell availability and signature if required)
 3. Executor prepares execution environment
-4. Script runs with monitoring and timeout
-5. Results and audit data sent to controller
-
-### Workflow Integration
-
-Scripts can be integrated into CFGMS workflows:
-
-```yaml
-workflow:
-  name: "System Maintenance"
-  steps:
-    - name: "pre_checks"
-      type: task
-      module: script
-      config:
-        content: "systemctl status critical-service"
-        shell: bash
-    
-    - name: "maintenance"
-      type: task
-      module: script
-      config:
-        content: "apt update && apt upgrade -y"
-        shell: bash
-        timeout: 600s
-    
-    - name: "post_checks"
-      type: task
-      module: script
-      config:
-        content: "systemctl status critical-service"
-        shell: bash
-```
-
-## Future Enhancements
-
-- **Container Execution**: Support for containerized script execution
-- **Resource Limits**: CPU and memory limits for script execution
-- **Script Library**: Shared script repository with versioning
-- **Advanced Monitoring**: Real-time execution monitoring and metrics
-- **Interactive Scripts**: Support for scripts requiring user input
+4. Script runs with timeout enforcement
+5. Results and audit data stored in the in-process audit logger

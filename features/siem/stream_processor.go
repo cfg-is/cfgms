@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package siem
 
@@ -11,16 +11,19 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // StreamProcessorImpl implements the StreamProcessor interface with high-performance
 // buffered processing capabilities designed to handle 10,000+ log entries per second
 // with <100ms processing latency.
 type StreamProcessorImpl struct {
-	logger *logging.ModuleLogger
-	config ProcessingConfig
+	logger       *logging.ModuleLogger
+	config       ProcessingConfig
+	auditManager *audit.Manager
 
 	// Processing components
 	patternMatcher  PatternMatcher
@@ -64,6 +67,7 @@ type StreamWorker struct {
 	inputChan       chan *ProcessingBatch
 	logger          *logging.ModuleLogger
 	processingStats *WorkerStats
+	auditManager    *audit.Manager
 }
 
 // WorkerStats tracks individual worker performance
@@ -75,9 +79,12 @@ type WorkerStats struct {
 	Errors           int64
 }
 
+// streamWorkerQueueSize is the per-worker batch queue depth inside StreamProcessorImpl.
+const streamWorkerQueueSize = 1000
+
 // NewStreamProcessor creates a new high-performance stream processor
 func NewStreamProcessor(config ProcessingConfig, patternMatcher PatternMatcher,
-	eventCorrelator EventCorrelator, ruleManager RuleManager) *StreamProcessorImpl {
+	eventCorrelator EventCorrelator, ruleManager RuleManager, auditManager *audit.Manager) *StreamProcessorImpl {
 
 	logger := logging.ForModule("siem.stream_processor").WithField("component", "processor")
 
@@ -94,9 +101,6 @@ func NewStreamProcessor(config ProcessingConfig, patternMatcher PatternMatcher,
 	if config.WorkerCount == 0 {
 		config.WorkerCount = runtime.NumCPU() * 2 // CPU-bound optimization
 	}
-	if config.WorkerQueueSize == 0 {
-		config.WorkerQueueSize = 1000
-	}
 	if config.MaxLatency == 0 {
 		config.MaxLatency = 100 * time.Millisecond // Target latency
 	}
@@ -107,6 +111,7 @@ func NewStreamProcessor(config ProcessingConfig, patternMatcher PatternMatcher,
 	return &StreamProcessorImpl{
 		logger:          logger,
 		config:          config,
+		auditManager:    auditManager,
 		patternMatcher:  patternMatcher,
 		eventCorrelator: eventCorrelator,
 		ruleManager:     ruleManager,
@@ -149,9 +154,10 @@ func (sp *StreamProcessorImpl) Start(ctx context.Context) error {
 		sp.workers[i] = &StreamWorker{
 			id:              i,
 			processor:       sp,
-			inputChan:       make(chan *ProcessingBatch, sp.config.WorkerQueueSize),
+			inputChan:       make(chan *ProcessingBatch, streamWorkerQueueSize),
 			logger:          logger.WithField("worker_id", i),
 			processingStats: &WorkerStats{},
+			auditManager:    sp.auditManager,
 		}
 	}
 
@@ -223,6 +229,24 @@ func (sp *StreamProcessorImpl) Stop(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// ProcessEntry sends a single log entry into the processing pipeline.
+// Non-blocking: drops the entry and returns an error when the internal buffer is full.
+func (sp *StreamProcessorImpl) ProcessEntry(ctx context.Context, entry interfaces.LogEntry) error {
+	if atomic.LoadInt32(&sp.running) == 0 {
+		return fmt.Errorf("stream processor not running")
+	}
+
+	atomic.AddInt64(&sp.metrics.EntriesProcessed, 1)
+
+	select {
+	case sp.inputBuffer <- entry:
+		return nil
+	default:
+		atomic.AddInt64(&sp.metrics.DroppedEntries, 1)
+		return fmt.Errorf("input buffer full, entry dropped")
+	}
 }
 
 // ProcessStream processes a continuous stream of log entries
@@ -367,14 +391,47 @@ func (sp *StreamProcessorImpl) updateMetrics() {
 	sp.metrics.GoroutineCount = runtime.NumGoroutine()
 }
 
-// GetMetrics returns current processing metrics
+// GetMetrics returns current processing metrics.
+// Counter fields updated via atomic.AddInt64 outside metricsLock are read with
+// atomic.LoadInt64 to avoid races with the struct copy of non-atomic fields.
 func (sp *StreamProcessorImpl) GetMetrics(ctx context.Context) (*ProcessingMetrics, error) {
+	// Read non-atomic fields under the RLock (updated only in updateMetrics).
 	sp.metricsLock.RLock()
-	defer sp.metricsLock.RUnlock()
+	uptime := sp.metrics.Uptime
+	lastProcessedTime := sp.metrics.LastProcessedTime
+	startTime := sp.metrics.StartTime
+	entriesPerSecond := sp.metrics.EntriesPerSecond
+	batchesProcessed := sp.metrics.BatchesProcessed
+	averageLatency := sp.metrics.AverageLatency
+	p95Latency := sp.metrics.P95Latency
+	p99Latency := sp.metrics.P99Latency
+	bufferUtilization := sp.metrics.BufferUtilization
+	memoryUsage := sp.metrics.MemoryUsage
+	goroutineCount := sp.metrics.GoroutineCount
+	workflowsTriggered := sp.metrics.WorkflowsTriggered
+	sp.metricsLock.RUnlock()
 
-	// Return a copy to prevent concurrent modification
-	metricsCopy := *sp.metrics
-	return &metricsCopy, nil
+	// Atomic loads for fields updated via atomic.AddInt64 without holding metricsLock.
+	return &ProcessingMetrics{
+		EntriesProcessed:        atomic.LoadInt64(&sp.metrics.EntriesProcessed),
+		DroppedEntries:          atomic.LoadInt64(&sp.metrics.DroppedEntries),
+		ProcessingErrors:        atomic.LoadInt64(&sp.metrics.ProcessingErrors),
+		PatternsMatched:         atomic.LoadInt64(&sp.metrics.PatternsMatched),
+		EventsCorrelated:        atomic.LoadInt64(&sp.metrics.EventsCorrelated),
+		SecurityEventsGenerated: atomic.LoadInt64(&sp.metrics.SecurityEventsGenerated),
+		WorkflowsTriggered:      workflowsTriggered,
+		BatchesProcessed:        batchesProcessed,
+		EntriesPerSecond:        entriesPerSecond,
+		AverageLatency:          averageLatency,
+		P95Latency:              p95Latency,
+		P99Latency:              p99Latency,
+		BufferUtilization:       bufferUtilization,
+		MemoryUsage:             memoryUsage,
+		GoroutineCount:          goroutineCount,
+		StartTime:               startTime,
+		LastProcessedTime:       lastProcessedTime,
+		Uptime:                  uptime,
+	}, nil
 }
 
 // Run executes the main worker processing loop
@@ -473,7 +530,7 @@ func (w *StreamWorker) convertMatchesToEvents(matches []*PatternMatch, tenantID 
 			ID:          generateEventID(),
 			Timestamp:   match.Timestamp,
 			EventType:   "pattern_match",
-			Severity:    SeverityMedium, // Default severity, can be configured per pattern
+			Severity:    business.AuditSeverityMedium, // Default severity, can be configured per pattern
 			Source:      match.LogEntry.ServiceName,
 			Description: fmt.Sprintf("Pattern '%s' matched in %s", match.PatternID, match.Field),
 			RuleID:      match.PatternID,
@@ -491,16 +548,41 @@ func (w *StreamWorker) convertMatchesToEvents(matches []*PatternMatch, tenantID 
 	return events
 }
 
-// processSecurityEvents processes individual security events (stub for workflow integration)
+// processSecurityEvents records each detected security event in the audit log.
 func (w *StreamWorker) processSecurityEvents(ctx context.Context, events []*SecurityEvent) {
-	// TODO: Implement workflow trigger integration
 	for _, event := range events {
 		w.logger.DebugCtx(ctx, "Processing security event",
 			"event_id", event.ID,
 			"event_type", event.EventType,
 			"severity", event.Severity,
 			"tenant_id", event.TenantID)
+
+		if w.auditManager == nil {
+			continue
+		}
+		builder := audit.SecurityEvent(event.TenantID, "siem", event.EventType, event.Description, event.Severity).
+			Detail("rule_id", event.RuleID).
+			Detail("source", logging.SanitizeLogValue(event.Source)).
+			Details(sanitizedFields(event.Fields))
+		if err := w.auditManager.RecordEvent(ctx, builder); err != nil {
+			w.logger.ErrorCtx(ctx, "Failed to record security event in audit log",
+				"event_id", event.ID,
+				"error", err.Error())
+		}
 	}
+}
+
+// sanitizedFields returns a copy of fields with each value sanitized via
+// logging.SanitizeLogValue to prevent user-controlled data from reaching logs or audit records.
+func sanitizedFields(fields map[string]interface{}) map[string]interface{} {
+	if fields == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		out[k] = logging.SanitizeLogValue(fmt.Sprintf("%v", v))
+	}
+	return out
 }
 
 // processCorrelatedEvents processes correlated events (stub for workflow integration)

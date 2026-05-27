@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package engine implements advanced reporting engine for Story #173.
 // This extends the existing DNA-focused engine to include audit data integration
@@ -7,6 +7,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -15,8 +16,9 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
-	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // AdvancedEngine implements AdvancedReportEngine interface
@@ -582,15 +584,38 @@ func (e *AdvancedEngine) ValidateAdvancedRequest(ctx context.Context, req interf
 }
 
 func (e *AdvancedEngine) validateTenantAccess(ctx context.Context, tenantIDs []string) error {
-	// This would typically get the user ID from the context
-	// For now, we'll skip detailed RBAC validation
 	if len(tenantIDs) > e.config.MaxTenantsPerReport {
 		return fmt.Errorf("too many tenants requested: %d (max: %d)", len(tenantIDs), e.config.MaxTenantsPerReport)
 	}
+
+	if e.rbacManager == nil {
+		return nil
+	}
+
+	uid, _ := ctx.Value(ctxkeys.UserIDKey).(string)
+	if uid == "" {
+		return errors.New("permission denied")
+	}
+
+	for _, tenantID := range tenantIDs {
+		resp, err := e.rbacManager.CheckPermission(ctx, &common.AccessRequest{
+			SubjectId:    uid,
+			PermissionId: "reports:read",
+			ResourceId:   tenantID,
+			TenantId:     tenantID,
+		})
+		if err != nil {
+			return errors.New("permission denied")
+		}
+		if !resp.Granted {
+			return errors.New("permission denied")
+		}
+	}
+
 	return nil
 }
 
-func (e *AdvancedEngine) getAuditDataForReport(ctx context.Context, req interfaces.AdvancedReportRequest) ([]storageInterfaces.AuditEntry, error) {
+func (e *AdvancedEngine) getAuditDataForReport(ctx context.Context, req interfaces.AdvancedReportRequest) ([]business.AuditEntry, error) {
 	query := interfaces.AuditDataQuery{
 		TimeRange: req.TimeRange,
 		TenantIDs: req.TenantIDs,
@@ -653,7 +678,7 @@ func (e *AdvancedEngine) generateRiskAssessment(ctx context.Context, report *int
 	if len(report.SecurityEvents) > 0 {
 		criticalEvents := 0
 		for _, event := range report.SecurityEvents {
-			if event.Severity == storageInterfaces.AuditSeverityCritical {
+			if event.Severity == business.AuditSeverityCritical {
 				criticalEvents++
 			}
 		}
@@ -823,13 +848,13 @@ func (e *AdvancedEngine) calculateSecurityScore(events []interfaces.SecurityEven
 		eventScore := 100.0
 
 		switch event.Severity {
-		case storageInterfaces.AuditSeverityCritical:
+		case business.AuditSeverityCritical:
 			eventScore = 0.0
-		case storageInterfaces.AuditSeverityHigh:
+		case business.AuditSeverityHigh:
 			eventScore = 25.0
-		case storageInterfaces.AuditSeverityMedium:
+		case business.AuditSeverityMedium:
 			eventScore = 60.0
-		case storageInterfaces.AuditSeverityLow:
+		case business.AuditSeverityLow:
 			eventScore = 85.0
 		}
 
@@ -846,7 +871,7 @@ func (e *AdvancedEngine) calculateSecurityScore(events []interfaces.SecurityEven
 func (e *AdvancedEngine) determineThreatLevel(securityScore float64, events []interfaces.SecurityEvent) string {
 	criticalEvents := 0
 	for _, event := range events {
-		if event.Severity == storageInterfaces.AuditSeverityCritical && !event.Resolved {
+		if event.Severity == business.AuditSeverityCritical && !event.Resolved {
 			criticalEvents++
 		}
 	}
@@ -874,7 +899,7 @@ func (e *AdvancedEngine) detectSecurityAnomalies(events []interfaces.SecurityEve
 					ID:          uuid.New().String(),
 					Type:        "high_failure_rate",
 					Description: fmt.Sprintf("User %s has unusually high failure rate: %.1f%%", activity.UserID, failureRate*100),
-					Severity:    storageInterfaces.AuditSeverityMedium,
+					Severity:    business.AuditSeverityMedium,
 					Confidence:  0.8,
 					UserID:      activity.UserID,
 					DetectedAt:  time.Now(),
@@ -921,7 +946,7 @@ func (e *AdvancedEngine) generateSecurityCharts(events []interfaces.SecurityEven
 
 	// Security events by severity
 	if len(events) > 0 {
-		severityCounts := make(map[storageInterfaces.AuditSeverity]int)
+		severityCounts := make(map[business.AuditSeverity]int)
 		for _, event := range events {
 			severityCounts[event.Severity]++
 		}

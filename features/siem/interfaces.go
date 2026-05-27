@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package siem provides lightweight SIEM stream processing capabilities for CFGMS.
 //
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // StreamProcessor defines the core interface for SIEM stream processing
@@ -24,6 +25,10 @@ type StreamProcessor interface {
 
 	// ProcessStream processes a stream of log entries
 	ProcessStream(ctx context.Context, entries <-chan interfaces.LogEntry) error
+
+	// ProcessEntry sends a single log entry into the processing pipeline.
+	// Non-blocking: returns an error if the internal buffer is full.
+	ProcessEntry(ctx context.Context, entry interfaces.LogEntry) error
 
 	// GetMetrics returns current processing metrics
 	GetMetrics(ctx context.Context) (*ProcessingMetrics, error)
@@ -94,7 +99,7 @@ type SecurityEvent struct {
 	ID          string                 `json:"id"`
 	Timestamp   time.Time              `json:"timestamp"`
 	EventType   string                 `json:"event_type"`
-	Severity    EventSeverity          `json:"severity"`
+	Severity    business.AuditSeverity `json:"severity"`
 	Source      string                 `json:"source"`
 	Description string                 `json:"description"`
 	RuleID      string                 `json:"rule_id"`
@@ -102,17 +107,6 @@ type SecurityEvent struct {
 	Fields      map[string]interface{} `json:"fields"`
 	RawLog      interfaces.LogEntry    `json:"raw_log"`
 }
-
-// EventSeverity defines the severity levels for security events
-type EventSeverity string
-
-const (
-	SeverityCritical EventSeverity = "critical"
-	SeverityHigh     EventSeverity = "high"
-	SeverityMedium   EventSeverity = "medium"
-	SeverityLow      EventSeverity = "low"
-	SeverityInfo     EventSeverity = "info"
-)
 
 // CorrelatedEvent represents multiple related security events
 type CorrelatedEvent struct {
@@ -122,7 +116,7 @@ type CorrelatedEvent struct {
 	Timestamp   time.Time              `json:"timestamp"`
 	WindowStart time.Time              `json:"window_start"`
 	WindowEnd   time.Time              `json:"window_end"`
-	Severity    EventSeverity          `json:"severity"`
+	Severity    business.AuditSeverity `json:"severity"`
 	Description string                 `json:"description"`
 	TenantID    string                 `json:"tenant_id"`
 	Metadata    map[string]interface{} `json:"metadata"`
@@ -169,12 +163,12 @@ type PatternMatch struct {
 
 // DetectionRule represents a complete SIEM detection rule
 type DetectionRule struct {
-	ID          string        `json:"id" yaml:"id"`
-	Name        string        `json:"name" yaml:"name"`
-	Description string        `json:"description" yaml:"description"`
-	Enabled     bool          `json:"enabled" yaml:"enabled"`
-	Severity    EventSeverity `json:"severity" yaml:"severity"`
-	TenantID    string        `json:"tenant_id" yaml:"tenant_id"`
+	ID          string                 `json:"id" yaml:"id"`
+	Name        string                 `json:"name" yaml:"name"`
+	Description string                 `json:"description" yaml:"description"`
+	Enabled     bool                   `json:"enabled" yaml:"enabled"`
+	Severity    business.AuditSeverity `json:"severity" yaml:"severity"`
+	TenantID    string                 `json:"tenant_id" yaml:"tenant_id"`
 
 	// Pattern matching configuration
 	Patterns []*DetectionPattern `json:"patterns" yaml:"patterns"`
@@ -263,15 +257,15 @@ type Condition struct {
 
 // RuleFilter defines filtering options for listing rules
 type RuleFilter struct {
-	TenantID      string        `json:"tenant_id,omitempty"`
-	Enabled       *bool         `json:"enabled,omitempty"`
-	Severity      EventSeverity `json:"severity,omitempty"`
-	Category      string        `json:"category,omitempty"`
-	Tags          []string      `json:"tags,omitempty"`
-	CreatedAfter  *time.Time    `json:"created_after,omitempty"`
-	CreatedBefore *time.Time    `json:"created_before,omitempty"`
-	Limit         int           `json:"limit,omitempty"`
-	Offset        int           `json:"offset,omitempty"`
+	TenantID      string                 `json:"tenant_id,omitempty"`
+	Enabled       *bool                  `json:"enabled,omitempty"`
+	Severity      business.AuditSeverity `json:"severity,omitempty"`
+	Category      string                 `json:"category,omitempty"`
+	Tags          []string               `json:"tags,omitempty"`
+	CreatedAfter  *time.Time             `json:"created_after,omitempty"`
+	CreatedBefore *time.Time             `json:"created_before,omitempty"`
+	Limit         int                    `json:"limit,omitempty"`
+	Offset        int                    `json:"offset,omitempty"`
 }
 
 // RuleConfig defines configuration for loading rules
@@ -326,8 +320,7 @@ type ProcessingConfig struct {
 	BatchTimeout time.Duration `json:"batch_timeout" yaml:"batch_timeout"`
 
 	// Worker configuration
-	WorkerCount     int `json:"worker_count" yaml:"worker_count"`
-	WorkerQueueSize int `json:"worker_queue_size" yaml:"worker_queue_size"`
+	WorkerCount int `json:"worker_count" yaml:"worker_count"`
 
 	// Performance configuration
 	MaxLatency       time.Duration `json:"max_latency" yaml:"max_latency"`

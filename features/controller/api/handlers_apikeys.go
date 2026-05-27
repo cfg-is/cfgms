@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package api
 
@@ -17,19 +17,28 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // handleListAPIKeys handles GET /api/v1/api-keys
-// M-AUTH-1: List API keys from central secret store
+// M-AUTH-1: List API keys from central secret store, filtered to the authenticated tenant
 func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
-	// M-AUTH-1: For now, list ALL API keys across all tenants from memory cache
-	// TODO: Add proper tenant filtering based on RBAC permissions
+	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	apiKeys := make([]APIKeyInfo, 0, len(s.apiKeys))
+	apiKeys := make([]APIKeyInfo, 0)
 	for _, key := range s.apiKeys {
+		if key.TenantID != tenantID {
+			continue
+		}
 		apiKeys = append(apiKeys, APIKeyInfo{
 			ID:          key.ID,
 			Name:        key.Name,
@@ -57,6 +66,15 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if createReq.Name == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "API key name is required", "MISSING_NAME")
 		return
+	}
+
+	// C1: Validate permissions against the known allow-list. "*" and unknown IDs are rejected.
+	for _, p := range createReq.Permissions {
+		if !isKnownPermission(p) {
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				"Unknown or reserved permission ID: "+p, "INVALID_PERMISSION")
+			return
+		}
 	}
 
 	// Set default tenant if not specified
@@ -141,8 +159,8 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("Created new API key",
 		"id", keyID,
-		"name", createReq.Name,
-		"tenant_id", tenantID)
+		"name", logging.SanitizeLogValue(createReq.Name),
+		"tenant_id", logging.SanitizeLogValue(tenantID))
 
 	s.writeResponse(w, http.StatusCreated, result)
 }

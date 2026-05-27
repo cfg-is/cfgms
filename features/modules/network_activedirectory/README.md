@@ -35,7 +35,7 @@ This module provides:
 The AD module follows CFGMS's security-first design:
 - **Steward Deployment**: Runs on Windows servers with AD access
 - **Local Access**: Uses LDAP to access local/nearby domain controllers
-- **MQTT+QUIC Communication**: Controller accesses AD via secure steward communication
+- **gRPC-over-QUIC Communication**: Controller accesses AD via secure steward communication
 - **Zero Trust**: All communication uses mTLS authentication
 
 ## Configuration options
@@ -348,7 +348,7 @@ trusts, err := module.Get(ctx, "list:trust")
 ## Known limitations
 
 - **Write Operations**: Currently read-only mode; write operations planned for future release
-- **Real-time Monitoring**: DirSync change notifications not yet implemented
+- **Real-time Monitoring**: DirSync change notifications require an LDAP change notification channel; the LDAP client does not expose one
 - **Linux Limitations**: Full functionality requires Windows deployment; Linux provides LDAP-only access
 - **Forest Topology**: Complex forest topologies may require additional trust configuration
 - **Performance**: Large forests with 100k+ objects may require performance tuning

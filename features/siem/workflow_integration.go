@@ -1,11 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package siem
 
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/workflow/trigger"
@@ -280,43 +279,9 @@ func (wi *WorkflowIntegration) evaluateSIEMCondition(condition *trigger.SIEMCond
 		}
 	}
 
-	// Apply SIEM operator (reuse existing logic from SIEM processor)
-	return wi.applySIEMOperator(condition.Operator, fieldValue, condition.Value, condition.CaseSensitive)
-}
-
-// applySIEMOperator applies a SIEM operator for condition evaluation
-func (wi *WorkflowIntegration) applySIEMOperator(operator trigger.SIEMOperator, fieldValue, conditionValue interface{}, caseSensitive bool) bool {
-	// This mirrors the logic from the existing SIEM processor
-	// We could refactor to share this logic, but keeping it here for now for clarity
-
 	fieldStr := fmt.Sprintf("%v", fieldValue)
-	conditionStr := fmt.Sprintf("%v", conditionValue)
-
-	if !caseSensitive {
-		fieldStr = strings.ToLower(fieldStr)
-		conditionStr = strings.ToLower(conditionStr)
-	}
-
-	switch operator {
-	case trigger.SIEMOperatorEquals:
-		return fieldStr == conditionStr
-	case trigger.SIEMOperatorNotEquals:
-		return fieldStr != conditionStr
-	case trigger.SIEMOperatorContains:
-		return strings.Contains(fieldStr, conditionStr)
-	case trigger.SIEMOperatorNotContains:
-		return !strings.Contains(fieldStr, conditionStr)
-	case trigger.SIEMOperatorStartsWith:
-		return strings.HasPrefix(fieldStr, conditionStr)
-	case trigger.SIEMOperatorEndsWith:
-		return strings.HasSuffix(fieldStr, conditionStr)
-	case trigger.SIEMOperatorExists:
-		return fieldValue != nil
-	case trigger.SIEMOperatorNotExists:
-		return fieldValue == nil
-	default:
-		return false
-	}
+	conditionStr := fmt.Sprintf("%v", condition.Value)
+	return applyOperator(string(condition.Operator), fieldStr, conditionStr, condition.CaseSensitive)
 }
 
 // executeTrigger executes a workflow trigger for a security event
@@ -331,17 +296,13 @@ func (wi *WorkflowIntegration) executeTrigger(ctx context.Context, triggerConfig
 		triggerData[k] = v
 	}
 
-	// Set timeout
-	var execCtx context.Context
-	var cancel context.CancelFunc
+	// Set timeout — choose trigger-specific timeout when provided, else use default.
+	timeout := wi.config.DefaultTimeout
 	if triggerConfig.Timeout > 0 {
-		execCtx, cancel = context.WithTimeout(ctx, triggerConfig.Timeout)
-		defer cancel()
-	} else {
-		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(ctx, wi.config.DefaultTimeout)
-		defer cancel()
+		timeout = triggerConfig.Timeout
 	}
+	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	// Execute workflow with retry
 	var lastErr error

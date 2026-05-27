@@ -8,9 +8,11 @@ on:
     paths-ignore:
       - 'docs/**'
       - '*.md'
+      - '.claude/**'
       - 'LICENSE'
       - '.gitignore'
       - '.editorconfig'
+  merge_group:
   push:
     branches:
       - main  # Run on main for release security validation
@@ -28,11 +30,16 @@ on:
         - remediation-report
 
 env:
-  GO_VERSION: '1.23'
+  GO_VERSION: '1.26.3'
+
+permissions: {}
 
 jobs:
   # Parallel security scanning jobs for optimal performance
   trivy-scan:
+    permissions:
+      contents: read
+      security-events: write
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -40,17 +47,18 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Install Trivy
-      run: |
-        sudo apt-get update
-        sudo apt-get install wget apt-transport-https gnupg lsb-release
-        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
-        sudo apt-get update
-        sudo apt-get install trivy
-    
+      env:
+        # Trivy v0.69.4-v0.69.6 are compromised (CVE-2026-33634); v0.70.0 is
+        # the post-incident clean release. The install helper verifies the
+        # archive SHA-256 against this pinned value before extraction. See
+        # docs/runbooks/trivy-rollback.md for rollback procedure.
+        TRIVY_VERSION: 'v0.70.0'
+        TRIVY_SHA256: '8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9'
+      run: sudo .github/scripts/install-trivy.sh "$TRIVY_VERSION" "$TRIVY_SHA256"
+
     - name: Run Trivy Scan
       id: scan
       run: |
@@ -71,7 +79,7 @@ jobs:
         fi
     
     - name: Upload Trivy SARIF
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4
       if: always() && hashFiles('sarif-results/trivy.sarif') != ''
       with:
         sarif_file: sarif-results/trivy.sarif
@@ -79,7 +87,7 @@ jobs:
       continue-on-error: true
     
     - name: Upload Trivy Results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: trivy-results
@@ -87,6 +95,8 @@ jobs:
         retention-days: 30
 
   nancy-scan:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -94,16 +104,16 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
     
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
-    #   uses: actions/cache@v3
+    #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
     #   with:
     #     path: ~/go/pkg/mod
     #     key: ${{ runner.os }}-nancy-${{ hashFiles('**/go.sum') }}
@@ -129,6 +139,8 @@ jobs:
         fi
 
   gosec-scan:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -136,16 +148,16 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
-    
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
-    
+
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
-    #   uses: actions/cache@v3
+    #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
     #   with:
     #     path: ~/go/pkg/mod
     #     key: ${{ runner.os }}-gosec-${{ hashFiles('**/go.sum') }}
@@ -155,7 +167,7 @@ jobs:
     #   continue-on-error: true
     
     - name: Install gosec
-      run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+      run: go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
     
     - name: Run gosec Scan
       id: scan
@@ -188,7 +200,7 @@ jobs:
     # configuration, and results are still available via workflow artifacts.
     #
     # - name: Upload gosec SARIF
-    #   uses: github/codeql-action/upload-sarif@v3
+    #   uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4
     #   if: always() && hashFiles('sarif-results/gosec.sarif') != ''
     #   with:
     #     sarif_file: sarif-results/gosec.sarif
@@ -196,7 +208,7 @@ jobs:
     #   continue-on-error: true
 
     - name: Upload gosec Results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: gosec-results
@@ -204,6 +216,8 @@ jobs:
         retention-days: 30
 
   staticcheck-scan:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -211,16 +225,16 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
     
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
-    #   uses: actions/cache@v3
+    #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
     #   with:
     #     path: ~/go/pkg/mod
     #     key: ${{ runner.os }}-staticcheck-${{ hashFiles('**/go.sum') }}
@@ -230,7 +244,7 @@ jobs:
     #   continue-on-error: true
     
     - name: Install staticcheck
-      run: go install honnef.co/go/tools/cmd/staticcheck@latest
+      run: go install honnef.co/go/tools/cmd/staticcheck@2026.1
     
     - name: Run staticcheck Scan
       id: scan
@@ -247,6 +261,8 @@ jobs:
 
   # Consolidated security validation job
   security-validation:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     needs: [trivy-scan, nancy-scan, gosec-scan, staticcheck-scan]
     timeout-minutes: 5
@@ -259,10 +275,10 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
     
@@ -297,17 +313,15 @@ jobs:
         # Only install tools if we need to generate remediation report
         make install-nancy
         
-        # Install Trivy
-        sudo apt-get update
-        sudo apt-get install wget apt-transport-https gnupg lsb-release
-        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
-        sudo apt-get update
-        sudo apt-get install trivy
-        
+        # Install Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634);
+        # v0.70.0 is the post-incident clean release. The install helper
+        # verifies the archive SHA-256 against the pinned value before
+        # extraction. See docs/runbooks/trivy-rollback.md for rollback.
+        sudo .github/scripts/install-trivy.sh 'v0.70.0' '8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9'
+
         # Install gosec and staticcheck
-        go install github.com/securego/gosec/v2/cmd/gosec@latest
-        go install honnef.co/go/tools/cmd/staticcheck@latest
+        go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
+        go install honnef.co/go/tools/cmd/staticcheck@2026.1
     
     - name: Generate Remediation Report on Failure
       if: steps.summary.outputs.issues-found == 'true'
@@ -325,7 +339,7 @@ jobs:
         fi
     
     - name: Upload Consolidated Security Results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: security-scan-consolidated
@@ -336,6 +350,8 @@ jobs:
 
   # Production Deployment Gate
   production-gate:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     needs: security-validation
     if: github.ref == 'refs/heads/main'
@@ -369,6 +385,7 @@ jobs:
 
   # Summary Report
   security-summary:
+    permissions: {}
     runs-on: ubuntu-latest
     needs: security-validation
     if: always()

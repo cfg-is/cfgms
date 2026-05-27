@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package workflow
 
@@ -19,6 +19,8 @@ import (
 func TestHTTPClient_ExecuteRequest(t *testing.T) {
 	// Create a test server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Ensure measurable duration on all platforms (Windows timer resolution ~1ms)
+		time.Sleep(time.Millisecond)
 		// Check authentication header
 		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -111,7 +113,7 @@ func TestEngine_ExecuteHTTPStep(t *testing.T) {
 	// Create engine
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 
 	workflow := Workflow{
 		Name: "http-test-workflow",
@@ -176,7 +178,7 @@ func TestEngine_ExecuteAPIStep(t *testing.T) {
 	// Create engine
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 
 	// Mock the Microsoft Graph API URL by overriding the buildMicrosoftGraphRequest method
 	// For this test, we'll create a simpler API config that uses our test server
@@ -237,7 +239,7 @@ func TestEngine_ExecuteWebhookStep(t *testing.T) {
 	// Create engine
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 
 	workflow := Workflow{
 		Name: "webhook-test-workflow",
@@ -284,7 +286,7 @@ func TestEngine_ExecuteDelayStep(t *testing.T) {
 	// Create engine
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 
 	workflow := Workflow{
 		Name: "delay-test-workflow",
@@ -356,7 +358,7 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 	// Create engine
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 
 	workflow := Workflow{
 		Name: "complex-api-workflow",

@@ -1,14 +1,10 @@
-//go:build commercial
-
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-// +build commercial
 
 package ha
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -21,7 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/commercial/ha"
+	"github.com/cfgis/cfgms/pkg/ha"
 )
 
 // ControllerInstance represents a running controller instance
@@ -262,14 +258,23 @@ func getAPIKeyForURL(url string) string {
 	return "test-api-key-east" // default
 }
 
+// containerNameForURL maps a controller URL to its Docker container name.
+func containerNameForURL(url string) string {
+	switch {
+	case strings.Contains(url, "9080"):
+		return "controller-east"
+	case strings.Contains(url, "9081"):
+		return "controller-central"
+	case strings.Contains(url, "9082"):
+		return "controller-west"
+	default:
+		return "controller-east"
+	}
+}
+
 // getControllerState gets the basic state of a controller
 func getControllerState(url string) (ControllerInstance, error) {
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
+	client := buildTLSClient(containerNameForURL(url))
 
 	// Use TCP health check since HTTP endpoint might not be available yet
 	health := "unhealthy"
@@ -329,12 +334,7 @@ func getControllerState(url string) (ControllerInstance, error) {
 
 // getClusterView gets the cluster view from a controller
 func getClusterView(url string) (ClusterView, error) {
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
+	client := buildTLSClient(containerNameForURL(url))
 
 	req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/ha/cluster", url), nil)
 	if err != nil {

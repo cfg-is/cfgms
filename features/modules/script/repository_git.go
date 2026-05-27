@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2025 CFGMS Contributors
 package script
 
@@ -11,23 +11,21 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // GitScriptRepository implements ScriptRepository using the global git storage provider via ConfigStore
 type GitScriptRepository struct {
-	configStore interfaces.ConfigStore
+	configStore cfgconfig.ConfigStore
 	tenantID    string
 	namespace   string // Namespace for scripts in storage (e.g., "scripts" or "scripts/templates")
 	global      bool   // Whether this is the global template repository
 }
 
 // NewGitScriptRepository creates a new git-based script repository
-func NewGitScriptRepository(storage interfaces.StorageProvider, tenantID string, global bool) (*GitScriptRepository, error) {
-	// Create ConfigStore from provider
-	configStore, err := storage.CreateConfigStore(nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create config store: %w", err)
+func NewGitScriptRepository(configStore cfgconfig.ConfigStore, tenantID string, global bool) (*GitScriptRepository, error) {
+	if configStore == nil {
+		return nil, fmt.Errorf("configStore is required")
 	}
 
 	namespace := "scripts"
@@ -73,7 +71,7 @@ func (r *GitScriptRepository) Get(id string, version string) (*VersionedScript, 
 		version = "latest"
 	}
 
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  r.tenantID,
 		Namespace: r.namespace,
 		Name:      id,
@@ -97,13 +95,18 @@ func (r *GitScriptRepository) Get(id string, version string) (*VersionedScript, 
 		return nil, fmt.Errorf("script integrity check failed: hash mismatch")
 	}
 
+	// Apply system default timeout for scripts stored with Timeout == 0.
+	if script.Metadata != nil && script.Metadata.Timeout == 0 {
+		script.Metadata.Timeout = 15 * time.Minute
+	}
+
 	return &script, nil
 }
 
 // List lists all scripts with optional filtering
 func (r *GitScriptRepository) List(filter *ScriptFilter) ([]*ScriptMetadata, error) {
 	// List all scripts in this namespace with scope="latest"
-	configFilter := &interfaces.ConfigFilter{
+	configFilter := &cfgconfig.ConfigFilter{
 		TenantID:  r.tenantID,
 		Namespace: r.namespace,
 		// We'll filter by scope="latest" after retrieval since ConfigFilter might not support scope
@@ -185,7 +188,7 @@ func (r *GitScriptRepository) Delete(id string, version string) error {
 
 		// Delete each version
 		for _, v := range versions {
-			key := &interfaces.ConfigKey{
+			key := &cfgconfig.ConfigKey{
 				TenantID:  r.tenantID,
 				Namespace: r.namespace,
 				Name:      id,
@@ -197,7 +200,7 @@ func (r *GitScriptRepository) Delete(id string, version string) error {
 		}
 
 		// Delete "latest" pointer
-		latestKey := &interfaces.ConfigKey{
+		latestKey := &cfgconfig.ConfigKey{
 			TenantID:  r.tenantID,
 			Namespace: r.namespace,
 			Name:      id,
@@ -207,7 +210,7 @@ func (r *GitScriptRepository) Delete(id string, version string) error {
 	}
 
 	// Delete specific version
-	key := &interfaces.ConfigKey{
+	key := &cfgconfig.ConfigKey{
 		TenantID:  r.tenantID,
 		Namespace: r.namespace,
 		Name:      id,
@@ -219,7 +222,7 @@ func (r *GitScriptRepository) Delete(id string, version string) error {
 	}
 
 	// If we deleted the latest version, update the "latest" pointer
-	latestKey := &interfaces.ConfigKey{
+	latestKey := &cfgconfig.ConfigKey{
 		TenantID:  r.tenantID,
 		Namespace: r.namespace,
 		Name:      id,
@@ -259,7 +262,7 @@ func (r *GitScriptRepository) Delete(id string, version string) error {
 // ListVersions lists all versions of a script
 func (r *GitScriptRepository) ListVersions(id string) ([]*Version, error) {
 	// List all configs for this script
-	filter := &interfaces.ConfigFilter{
+	filter := &cfgconfig.ConfigFilter{
 		TenantID:  r.tenantID,
 		Namespace: r.namespace,
 		Names:     []string{id}, // Filter by script ID
@@ -347,17 +350,17 @@ func (r *GitScriptRepository) storeScript(ctx context.Context, script *Versioned
 	checksum := fmt.Sprintf("%x", sha256.Sum256(data))
 
 	// Store versioned entry
-	versionKey := &interfaces.ConfigKey{
+	versionKey := &cfgconfig.ConfigKey{
 		TenantID:  r.tenantID,
 		Namespace: r.namespace,
 		Name:      script.Metadata.ID,
 		Scope:     script.Metadata.Version.String(),
 	}
 
-	versionEntry := &interfaces.ConfigEntry{
+	versionEntry := &cfgconfig.ConfigEntry{
 		Key:       versionKey,
 		Data:      data,
-		Format:    interfaces.ConfigFormatYAML,
+		Format:    cfgconfig.ConfigFormatYAML,
 		Checksum:  checksum,
 		CreatedAt: script.Metadata.CreatedAt,
 		UpdatedAt: script.Metadata.UpdatedAt,
@@ -379,17 +382,17 @@ func (r *GitScriptRepository) storeScript(ctx context.Context, script *Versioned
 	}
 
 	// Update "latest" pointer
-	latestKey := &interfaces.ConfigKey{
+	latestKey := &cfgconfig.ConfigKey{
 		TenantID:  r.tenantID,
 		Namespace: r.namespace,
 		Name:      script.Metadata.ID,
 		Scope:     "latest",
 	}
 
-	latestEntry := &interfaces.ConfigEntry{
+	latestEntry := &cfgconfig.ConfigEntry{
 		Key:       latestKey,
 		Data:      data,
-		Format:    interfaces.ConfigFormatYAML,
+		Format:    cfgconfig.ConfigFormatYAML,
 		Checksum:  checksum,
 		CreatedAt: script.Metadata.CreatedAt,
 		UpdatedAt: script.Metadata.UpdatedAt,

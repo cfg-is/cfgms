@@ -1,6 +1,6 @@
 ---
 name: story-commit
-description: Commit changes with mandatory validation checks and story progress tracking
+description: Commit changes with mandatory validation checks and story progress tracking. MUST use for ALL commits during story development — never use raw git commit. Use when the user says "commit", "save changes", "checkpoint", or wants to commit their work.
 parameters:
   - name: message
     description: The commit message (optional - auto-generates from diff if omitted)

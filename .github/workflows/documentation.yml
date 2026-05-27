@@ -3,11 +3,12 @@ name: Documentation Validation
 on:
   pull_request:
     branches: [ main, develop ]
-    # ONLY run when documentation actually changes
+    # ONLY run when documentation or agent definitions change
     # Does NOT run on code-only PRs
     paths:
       - 'docs/**'
       - '*.md'
+      - '.claude/**'
   push:
     branches:
       - main
@@ -16,22 +17,28 @@ on:
     paths:
       - 'docs/**'
       - '*.md'
+      - '.claude/**'
+  merge_group:
   workflow_dispatch:
 
 env:
   NODE_VERSION: '20'
 
+permissions: {}
+
 jobs:
   # Quick markdown linting
   lint-markdown:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -48,14 +55,16 @@ jobs:
 
   # Validate markdown link integrity
   check-links:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -74,49 +83,50 @@ jobs:
 
   # Validate CLAUDE.md structure and links
   validate-claude-md:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: contains(github.event.pull_request.changed_files, 'CLAUDE.md') || github.event_name == 'push'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Validate CLAUDE.md Structure
         run: |
           echo "## CLAUDE.md Validation" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          # Check required sections exist
-          if grep -q "## Project Overview" CLAUDE.md; then
-            echo "✅ Project Overview section found" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Missing Project Overview section" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
+          # Check essential content exists (concept-based, not exact heading names)
+          errors=0
 
-          if grep -q "## Development Workflow" CLAUDE.md; then
-            echo "✅ Development Workflow section found" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Missing Development Workflow section" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
+          check_content() {
+            local description="$1"
+            local pattern="$2"
+            if grep -qi "$pattern" CLAUDE.md; then
+              echo "✅ $description" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Missing: $description (pattern: $pattern)" >> $GITHUB_STEP_SUMMARY
+              errors=$((errors + 1))
+            fi
+          }
 
-          if grep -q "## Core Architecture" CLAUDE.md; then
-            echo "✅ Core Architecture section found" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Missing Core Architecture section" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-
-          if grep -q "## Central Provider System" CLAUDE.md; then
-            echo "✅ Central Provider System section found" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Missing Central Provider System section" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
+          check_content "Project overview" "CFGMS"
+          check_content "Agent workflow" "CFGMS_AGENT_MODE"
+          check_content "Slash commands" "story-start\|story-commit\|story-complete"
+          check_content "Git workflow (PRs target develop)" "base develop"
+          check_content "Central providers" "central provider"
+          check_content "Testing standards" "TDD\|real.*components\|no.*mock"
+          check_content "DSD principles" "Desired State"
+          check_content "Security rules" "mTLS\|mutual TLS"
 
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ CLAUDE.md structure validation passed" >> $GITHUB_STEP_SUMMARY
+          if [ $errors -eq 0 ]; then
+            echo "✅ CLAUDE.md structure validation passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ CLAUDE.md validation failed: $errors missing sections" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
 
       - name: Check Internal File References
         run: |
@@ -149,12 +159,14 @@ jobs:
 
   # Validate roadmap structure
   validate-roadmap:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: contains(github.event.pull_request.changed_files, 'docs/product/roadmap.md') || github.event_name == 'push'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Validate Roadmap Format
         run: |
@@ -193,6 +205,8 @@ jobs:
 
   # Documentation summary
   documentation-summary:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     needs: [lint-markdown, check-links]
     if: always()
@@ -227,8 +241,9 @@ jobs:
 
   unit-tests:
     name: unit-tests
+    permissions: {}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - name: Docs-only PR validation
         run: |
@@ -238,8 +253,9 @@ jobs:
 
   security-deployment-gate:
     name: security-deployment-gate
+    permissions: {}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - name: Docs-only security validation
         run: |
@@ -249,8 +265,9 @@ jobs:
 
   build-gate:
     name: Build Gate
+    permissions: {}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - name: Docs-only build validation
         run: |
@@ -260,11 +277,36 @@ jobs:
 
   integration-tests:
     name: integration-tests
+    permissions: {}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - name: Docs-only integration test validation
         run: |
           echo "Documentation-only PR detected"
           echo "   Skipping integration tests (no code changes)"
           echo "   No integration test validation required for docs-only changes"
+
+  integration-tests-controller:
+    name: Controller Integration Tests (Linux)
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    steps:
+      - name: Docs-only controller integration test validation
+        run: |
+          echo "✅ Documentation-only PR detected"
+          echo "   Skipping controller integration tests (no code changes)"
+          echo "   No controller test validation required for docs-only changes"
+
+  fleet-e2e-tests:
+    name: fleet-e2e-tests
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    steps:
+      - name: Docs-only fleet E2E validation
+        run: |
+          echo "✅ Documentation-only PR detected"
+          echo "   Skipping fleet E2E tests (no code changes)"
+          echo "   No fleet test validation required for docs-only changes"

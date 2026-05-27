@@ -1,0 +1,59 @@
+# Build stage
+FROM golang:1.26.3-alpine3.23 AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates
+
+# Set working directory
+WORKDIR /src
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build steward with compile-time controller URL
+ARG STEWARD_CONTROLLER_URL=https://localhost:9080
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
+    -ldflags="-s -w -X main.ControllerURL=${STEWARD_CONTROLLER_URL}" \
+    -o steward ./cmd/steward
+
+# Final stage - Debian bookworm-slim for fleet testing
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -g 1001 cfgms && \
+    useradd -u 1001 -g cfgms -M -s /usr/sbin/nologin cfgms
+
+# Set working directory
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /src/steward .
+
+# Pre-create the steward's certificate store directory and hand it to the
+# cfgms user. defaultCertStoreDir() resolves to /var/lib/cfgms/steward/certs on
+# Linux; the steward runs as a non-root user and cannot create directories
+# under root-owned /var/lib at runtime. Without this, cert.NewManager fails to
+# initialize, the steward builds a nil TLS config, and control-plane
+# registration aborts with "client mode requires 'tls_config' in config".
+RUN mkdir -p /var/lib/cfgms/steward/certs
+
+# Change ownership
+RUN chown -R cfgms:cfgms /app /var/lib/cfgms
+
+# Switch to non-root user
+USER cfgms
+
+CMD ["./steward"]

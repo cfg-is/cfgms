@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package dna
 
@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/steward/dna/storage"
+	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -545,42 +545,159 @@ func TestStoreAndGetRelationships(t *testing.T) {
 }
 
 func TestGetDirectoryStats(t *testing.T) {
-	backend := NewMockBackend()
-	compressor := NewMockCompressor()
-	indexer := NewMockIndexer()
-	logger := logging.NewNoopLogger()
-
-	adapter := NewDirectoryDNAStorageAdapter(backend, compressor, indexer, logger)
-
 	ctx := context.Background()
 
-	stats, err := adapter.GetDirectoryStats(ctx)
+	t.Run("empty store returns zero type counts", func(t *testing.T) {
+		adapter := NewDirectoryDNAStorageAdapter(NewMockBackend(), NewMockCompressor(), NewMockIndexer(), logging.NewNoopLogger())
 
-	require.NoError(t, err)
-	assert.NotNil(t, stats)
-	assert.GreaterOrEqual(t, stats.TotalObjects, int64(0))
-	assert.GreaterOrEqual(t, stats.TotalStorageUsed, int64(0))
-	assert.GreaterOrEqual(t, stats.CompressionRatio, float64(0))
-	assert.Equal(t, "healthy", stats.CollectionHealth)
+		stats, err := adapter.GetDirectoryStats(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, stats)
+		assert.Equal(t, int64(0), stats.UserCount)
+		assert.Equal(t, int64(0), stats.GroupCount)
+		assert.Equal(t, int64(0), stats.OUCount)
+		assert.Equal(t, int64(0), stats.TotalObjects)
+		assert.Equal(t, "healthy", stats.CollectionHealth)
+	})
+
+	t.Run("type counts reflect seeded objects", func(t *testing.T) {
+		adapter := NewDirectoryDNAStorageAdapter(NewMockBackend(), NewMockCompressor(), NewMockIndexer(), logging.NewNoopLogger())
+
+		now := time.Now()
+		for _, id := range []string{"u1", "u2"} {
+			require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+				ObjectID: id, ObjectType: interfaces.DirectoryObjectTypeUser,
+				ID: "dna_" + id, Attributes: map[string]string{}, LastUpdated: &now,
+			}))
+		}
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "g1", ObjectType: interfaces.DirectoryObjectTypeGroup,
+			ID: "dna_g1", Attributes: map[string]string{}, LastUpdated: &now,
+		}))
+
+		stats, err := adapter.GetDirectoryStats(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), stats.UserCount)
+		assert.Equal(t, int64(1), stats.GroupCount)
+		assert.Equal(t, int64(0), stats.OUCount)
+		assert.Equal(t, int64(3), stats.TotalObjects)
+		assert.GreaterOrEqual(t, stats.TotalStorageUsed, int64(0))
+		assert.GreaterOrEqual(t, stats.CompressionRatio, float64(0))
+		assert.Equal(t, "healthy", stats.CollectionHealth)
+	})
 }
 
 func TestGetObjectStats(t *testing.T) {
-	backend := NewMockBackend()
-	compressor := NewMockCompressor()
-	indexer := NewMockIndexer()
-	logger := logging.NewNoopLogger()
-
-	adapter := NewDirectoryDNAStorageAdapter(backend, compressor, indexer, logger)
-
 	ctx := context.Background()
 
-	stats, err := adapter.GetObjectStats(ctx, interfaces.DirectoryObjectTypeUser)
+	t.Run("empty store returns zero counts", func(t *testing.T) {
+		adapter := NewDirectoryDNAStorageAdapter(NewMockBackend(), NewMockCompressor(), NewMockIndexer(), logging.NewNoopLogger())
 
-	require.NoError(t, err)
-	assert.NotNil(t, stats)
-	assert.Equal(t, interfaces.DirectoryObjectTypeUser, stats.ObjectType)
-	assert.GreaterOrEqual(t, stats.TotalCount, int64(0))
-	assert.GreaterOrEqual(t, stats.ActiveCount, int64(0))
+		for _, objType := range []interfaces.DirectoryObjectType{
+			interfaces.DirectoryObjectTypeUser,
+			interfaces.DirectoryObjectTypeGroup,
+			interfaces.DirectoryObjectTypeOU,
+		} {
+			stats, err := adapter.GetObjectStats(ctx, objType)
+			require.NoError(t, err)
+			require.NotNil(t, stats)
+			assert.Equal(t, objType, stats.ObjectType)
+			assert.Equal(t, int64(0), stats.TotalCount)
+			assert.Equal(t, int64(0), stats.ActiveCount)
+		}
+	})
+
+	t.Run("counts reflect seeded objects by type", func(t *testing.T) {
+		adapter := NewDirectoryDNAStorageAdapter(NewMockBackend(), NewMockCompressor(), NewMockIndexer(), logging.NewNoopLogger())
+
+		storeObj := func(id string, objType interfaces.DirectoryObjectType) {
+			now := time.Now()
+			err := adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+				ObjectID:    id,
+				ObjectType:  objType,
+				ID:          "dna_" + id,
+				Attributes:  map[string]string{"name": id},
+				LastUpdated: &now,
+			})
+			require.NoError(t, err)
+		}
+
+		// Seed: 3 users, 2 groups, 1 OU
+		storeObj("user1", interfaces.DirectoryObjectTypeUser)
+		storeObj("user2", interfaces.DirectoryObjectTypeUser)
+		storeObj("user3", interfaces.DirectoryObjectTypeUser)
+		storeObj("group1", interfaces.DirectoryObjectTypeGroup)
+		storeObj("group2", interfaces.DirectoryObjectTypeGroup)
+		storeObj("ou1", interfaces.DirectoryObjectTypeOU)
+
+		userStats, err := adapter.GetObjectStats(ctx, interfaces.DirectoryObjectTypeUser)
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), userStats.TotalCount)
+		assert.Equal(t, int64(3), userStats.ActiveCount)
+		assert.Equal(t, interfaces.DirectoryObjectTypeUser, userStats.ObjectType)
+		assert.False(t, userStats.LastUpdated.IsZero(), "LastUpdated should be set after writes")
+
+		groupStats, err := adapter.GetObjectStats(ctx, interfaces.DirectoryObjectTypeGroup)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), groupStats.TotalCount)
+
+		ouStats, err := adapter.GetObjectStats(ctx, interfaces.DirectoryObjectTypeOU)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), ouStats.TotalCount)
+	})
+
+	t.Run("re-storing same object ID does not inflate count", func(t *testing.T) {
+		adapter := NewDirectoryDNAStorageAdapter(NewMockBackend(), NewMockCompressor(), NewMockIndexer(), logging.NewNoopLogger())
+
+		now := time.Now()
+		dna := &DirectoryDNA{
+			ObjectID:    "user1",
+			ObjectType:  interfaces.DirectoryObjectTypeUser,
+			ID:          "dna_user1",
+			Attributes:  map[string]string{"name": "first"},
+			LastUpdated: &now,
+		}
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, dna))
+
+		// Update the same object
+		later := now.Add(time.Minute)
+		dna.Attributes = map[string]string{"name": "updated"}
+		dna.LastUpdated = &later
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, dna))
+
+		stats, err := adapter.GetObjectStats(ctx, interfaces.DirectoryObjectTypeUser)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), stats.TotalCount, "storing same objectID twice should not double count")
+		// LastUpdated should reflect the more recent write
+		assert.Equal(t, later.Unix(), stats.LastUpdated.Unix())
+	})
+
+	t.Run("last updated reflects most recent write", func(t *testing.T) {
+		adapter := NewDirectoryDNAStorageAdapter(NewMockBackend(), NewMockCompressor(), NewMockIndexer(), logging.NewNoopLogger())
+
+		earlier := time.Now().Add(-time.Hour)
+		later := time.Now()
+
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID:    "user_a",
+			ObjectType:  interfaces.DirectoryObjectTypeUser,
+			ID:          "dna_a",
+			Attributes:  map[string]string{},
+			LastUpdated: &earlier,
+		}))
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID:    "user_b",
+			ObjectType:  interfaces.DirectoryObjectTypeUser,
+			ID:          "dna_b",
+			Attributes:  map[string]string{},
+			LastUpdated: &later,
+		}))
+
+		stats, err := adapter.GetObjectStats(ctx, interfaces.DirectoryObjectTypeUser)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), stats.TotalCount)
+		assert.Equal(t, later.Unix(), stats.LastUpdated.Unix())
+	})
 }
 
 func TestStorageConfiguration(t *testing.T) {

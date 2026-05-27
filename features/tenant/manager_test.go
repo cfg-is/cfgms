@@ -1,273 +1,33 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package tenant
 
 import (
 	"context"
 	"fmt"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	cfgpkg "github.com/cfgis/cfgms/pkg/config"
+	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgmstesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// setupTestRBACManager creates an RBAC manager with git storage for tenant testing
-func setupTestRBACManager(t *testing.T) *rbac.Manager {
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
-	require.NoError(t, err)
-
-	manager := rbac.NewManagerWithStorage(
-		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
-		storageManager.GetRBACStore(),
-	)
-
-	err = manager.Initialize(context.Background())
-	require.NoError(t, err)
-
-	return manager
-}
-
-// mockStore implements Store interface for testing
-type mockStore struct {
-	mu        sync.RWMutex
-	tenants   map[string]*Tenant
-	hierarchy map[string]*TenantHierarchy
-}
-
-func newMockStore() *mockStore {
-	store := &mockStore{
-		tenants:   make(map[string]*Tenant),
-		hierarchy: make(map[string]*TenantHierarchy),
-	}
-
-	// Initialize with default tenant
-	defaultTenant := &Tenant{
-		ID:          "default",
-		Name:        "Default Tenant",
-		Description: "Default system tenant",
-		Status:      TenantStatusActive,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-	}
-
-	store.tenants["default"] = defaultTenant
-	store.hierarchy["default"] = &TenantHierarchy{
-		TenantID: "default",
-		Path:     []string{"default"},
-		Depth:    0,
-		Children: []string{},
-	}
-
-	return store
-}
-
-func (s *mockStore) CreateTenant(ctx context.Context, t *Tenant) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, exists := s.tenants[t.ID]; exists {
-		return ErrTenantExists
-	}
-
-	var parentHierarchy *TenantHierarchy
-	if t.ParentID != "" {
-		parent, exists := s.tenants[t.ParentID]
-		if !exists {
-			return ErrInvalidParent
-		}
-		if parent.Status != TenantStatusActive {
-			return fmt.Errorf("parent tenant is not active")
-		}
-		parentHierarchy = s.hierarchy[t.ParentID]
-	}
-
-	now := time.Now()
-	t.CreatedAt = now
-	t.UpdatedAt = now
-
-	s.tenants[t.ID] = t
-
-	hierarchy := &TenantHierarchy{
-		TenantID: t.ID,
-		Children: []string{},
-	}
-
-	if parentHierarchy != nil {
-		hierarchy.Path = append(parentHierarchy.Path, t.ID)
-		hierarchy.Depth = parentHierarchy.Depth + 1
-		parentHierarchy.Children = append(parentHierarchy.Children, t.ID)
-	} else {
-		hierarchy.Path = []string{t.ID}
-		hierarchy.Depth = 0
-	}
-
-	s.hierarchy[t.ID] = hierarchy
-	return nil
-}
-
-func (s *mockStore) GetTenant(ctx context.Context, tenantID string) (*Tenant, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	t, exists := s.tenants[tenantID]
-	if !exists {
-		return nil, ErrTenantNotFound
-	}
-
-	result := *t
-	return &result, nil
-}
-
-func (s *mockStore) UpdateTenant(ctx context.Context, t *Tenant) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existing, exists := s.tenants[t.ID]
-	if !exists {
-		return ErrTenantNotFound
-	}
-
-	t.CreatedAt = existing.CreatedAt
-	t.UpdatedAt = time.Now()
-	s.tenants[t.ID] = t
-	return nil
-}
-
-func (s *mockStore) DeleteTenant(ctx context.Context, tenantID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	t, exists := s.tenants[tenantID]
-	if !exists {
-		return ErrTenantNotFound
-	}
-
-	hierarchy := s.hierarchy[tenantID]
-	if len(hierarchy.Children) > 0 {
-		return ErrTenantHasChildren
-	}
-
-	if tenantID == "default" {
-		return fmt.Errorf("cannot delete default tenant")
-	}
-
-	t.Status = TenantStatusInactive
-	t.UpdatedAt = time.Now()
-	return nil
-}
-
-func (s *mockStore) ListTenants(ctx context.Context, filter *TenantFilter) ([]*Tenant, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var result []*Tenant
-	for _, t := range s.tenants {
-		if filter != nil {
-			if filter.ParentID != "" && t.ParentID != filter.ParentID {
-				continue
-			}
-			if filter.Status != "" && t.Status != filter.Status {
-				continue
-			}
-		}
-
-		tenantCopy := *t
-		result = append(result, &tenantCopy)
-	}
-
-	return result, nil
-}
-
-func (s *mockStore) GetTenantHierarchy(ctx context.Context, tenantID string) (*TenantHierarchy, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	hierarchy, exists := s.hierarchy[tenantID]
-	if !exists {
-		return nil, ErrTenantNotFound
-	}
-
-	result := *hierarchy
-	result.Children = make([]string, len(hierarchy.Children))
-	copy(result.Children, hierarchy.Children)
-	result.Path = make([]string, len(hierarchy.Path))
-	copy(result.Path, hierarchy.Path)
-
-	return &result, nil
-}
-
-func (s *mockStore) GetChildTenants(ctx context.Context, parentID string) ([]*Tenant, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	hierarchy, exists := s.hierarchy[parentID]
-	if !exists {
-		return nil, ErrTenantNotFound
-	}
-
-	var children []*Tenant
-	for _, childID := range hierarchy.Children {
-		if child, exists := s.tenants[childID]; exists {
-			childCopy := *child
-			children = append(children, &childCopy)
-		}
-	}
-
-	return children, nil
-}
-
-func (s *mockStore) GetTenantPath(ctx context.Context, tenantID string) ([]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	hierarchy, exists := s.hierarchy[tenantID]
-	if !exists {
-		return nil, ErrTenantNotFound
-	}
-
-	path := make([]string, len(hierarchy.Path))
-	copy(path, hierarchy.Path)
-	return path, nil
-}
-
-func (s *mockStore) IsTenantAncestor(ctx context.Context, ancestorID, descendantID string) (bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	descendantHierarchy, exists := s.hierarchy[descendantID]
-	if !exists {
-		return false, ErrTenantNotFound
-	}
-
-	for _, pathTenantID := range descendantHierarchy.Path {
-		if pathTenantID == ancestorID {
-			return true, nil
-		}
-	}
-
-	return false, nil
+// newTestTenantManager creates a Manager backed by real SQLite+flatfile storage.
+func newTestTenantManager(t *testing.T) *Manager {
+	t.Helper()
+	storageManager := cfgmstesting.SetupTestStorage(t)
+	rbacManager := cfgmstesting.SetupTestRBACManager(t)
+	return NewManager(storageManager.GetTenantStore(), rbacManager)
 }
 
 func TestManager_CreateTenant(t *testing.T) {
-	// Setup
-	tenantStore := newMockStore()
-	rbacManager := setupTestRBACManager(t)
-
-	manager := NewManager(tenantStore, rbacManager)
+	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
 	// Test creating a new tenant
@@ -284,7 +44,7 @@ func TestManager_CreateTenant(t *testing.T) {
 	assert.NotEmpty(t, tenant.ID)
 	assert.Equal(t, "Test-Tenant", tenant.Name)
 	assert.Equal(t, "A test tenant", tenant.Description)
-	assert.Equal(t, TenantStatusActive, tenant.Status)
+	assert.Equal(t, business.TenantStatusActive, tenant.Status)
 	assert.Equal(t, "test@example.com", tenant.Metadata["owner"])
 	assert.NotZero(t, tenant.CreatedAt)
 	assert.NotZero(t, tenant.UpdatedAt)
@@ -297,11 +57,7 @@ func TestManager_CreateTenant(t *testing.T) {
 }
 
 func TestManager_CreateTenant_WithParent(t *testing.T) {
-	// Setup
-	tenantStore := newMockStore()
-	rbacManager := setupTestRBACManager(t)
-
-	manager := NewManager(tenantStore, rbacManager)
+	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
 	// Create parent tenant
@@ -335,11 +91,7 @@ func TestManager_CreateTenant_WithParent(t *testing.T) {
 }
 
 func TestManager_CreateTenant_Validation(t *testing.T) {
-	// Setup
-	tenantStore := newMockStore()
-	rbacManager := setupTestRBACManager(t)
-
-	manager := NewManager(tenantStore, rbacManager)
+	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
 	// Test validation errors
@@ -374,11 +126,7 @@ func TestManager_CreateTenant_Validation(t *testing.T) {
 }
 
 func TestManager_ListTenants(t *testing.T) {
-	// Setup
-	tenantStore := newMockStore()
-	rbacManager := setupTestRBACManager(t)
-
-	manager := NewManager(tenantStore, rbacManager)
+	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
 	// Create test tenants
@@ -388,13 +136,13 @@ func TestManager_ListTenants(t *testing.T) {
 	tenant2, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Tenant2", ParentID: tenant1.ID})
 	require.NoError(t, err)
 
-	// List all tenants
+	// List all tenants (real storage starts empty — only tenant1 and tenant2 present)
 	tenants, err := manager.ListTenants(ctx, nil)
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, len(tenants), 3) // default + tenant1 + tenant2
+	assert.GreaterOrEqual(t, len(tenants), 2)
 
 	// List tenants with filter
-	filter := &TenantFilter{ParentID: tenant1.ID}
+	filter := &business.TenantFilter{ParentID: tenant1.ID}
 	filteredTenants, err := manager.ListTenants(ctx, filter)
 	require.NoError(t, err)
 	assert.Len(t, filteredTenants, 1)
@@ -402,11 +150,7 @@ func TestManager_ListTenants(t *testing.T) {
 }
 
 func TestManager_UpdateTenant(t *testing.T) {
-	// Setup
-	tenantStore := newMockStore()
-	rbacManager := setupTestRBACManager(t)
-
-	manager := NewManager(tenantStore, rbacManager)
+	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
 	// Create tenant
@@ -431,17 +175,13 @@ func TestManager_UpdateTenant(t *testing.T) {
 	assert.Equal(t, "Updated-Name", updated.Name)
 	assert.Equal(t, "Updated Description", updated.Description)
 	assert.Equal(t, "true", updated.Metadata["updated"])
-	assert.Equal(t, tenant.CreatedAt, updated.CreatedAt)
+	assert.True(t, tenant.CreatedAt.Equal(updated.CreatedAt), "CreatedAt should not change after update")
 	// UpdatedAt should be at or after the original (may be equal on fast systems)
 	assert.False(t, updated.UpdatedAt.Before(tenant.UpdatedAt))
 }
 
 func TestManager_DeleteTenant(t *testing.T) {
-	// Setup
-	tenantStore := newMockStore()
-	rbacManager := setupTestRBACManager(t)
-
-	manager := NewManager(tenantStore, rbacManager)
+	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
 	// Create tenant
@@ -452,18 +192,13 @@ func TestManager_DeleteTenant(t *testing.T) {
 	err = manager.DeleteTenant(ctx, tenant.ID)
 	require.NoError(t, err)
 
-	// Verify tenant is soft deleted
-	deleted, err := manager.GetTenant(ctx, tenant.ID)
-	require.NoError(t, err)
-	assert.Equal(t, TenantStatusInactive, deleted.Status)
+	// Verify tenant was removed (real storage hard-deletes)
+	_, err = manager.GetTenant(ctx, tenant.ID)
+	require.Error(t, err)
 }
 
 func TestManager_DeleteTenant_WithChildren(t *testing.T) {
-	// Setup
-	tenantStore := newMockStore()
-	rbacManager := setupTestRBACManager(t)
-
-	manager := NewManager(tenantStore, rbacManager)
+	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
 	// Create parent and child tenants
@@ -480,11 +215,7 @@ func TestManager_DeleteTenant_WithChildren(t *testing.T) {
 }
 
 func TestManager_IsTenantAncestor(t *testing.T) {
-	// Setup
-	tenantStore := newMockStore()
-	rbacManager := setupTestRBACManager(t)
-
-	manager := NewManager(tenantStore, rbacManager)
+	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
 	// Create hierarchy: grandparent -> parent -> child
@@ -513,4 +244,345 @@ func TestManager_IsTenantAncestor(t *testing.T) {
 	isAncestor, err = manager.IsTenantAncestor(ctx, child.ID, parent.ID)
 	require.NoError(t, err)
 	assert.False(t, isAncestor)
+}
+
+// setupRealTenantManager creates a Manager backed by real SQLite storage for cascade tests.
+func setupRealTenantManager(t *testing.T, rbacManager *rbac.Manager) *Manager {
+	t.Helper()
+	storageManager := cfgmstesting.SetupTestStorage(t)
+	return NewManager(storageManager.GetTenantStore(), rbacManager)
+}
+
+func TestDeleteTenant_CascadesRBACCleanup(t *testing.T) {
+	rbacManager := cfgmstesting.SetupTestRBACManager(t)
+	manager := setupRealTenantManager(t, rbacManager)
+	ctx := context.Background()
+	// M-AUTH-2: CreateRole requires justification in context
+	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: tenant RBAC cleanup cascade")
+
+	// Create a tenant — this also calls CreateTenantDefaultRoles (in-memory only)
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "RBACCleanupTenant"})
+	require.NoError(t, err)
+	tenantID := tenant.ID
+
+	// Explicitly create a persisted role and two subjects for this tenant
+	role := &common.Role{
+		Id:       tenantID + ".custom-role",
+		Name:     "Custom Role",
+		TenantId: tenantID,
+	}
+	require.NoError(t, rbacManager.CreateRole(ctx, role))
+
+	for _, s := range []*common.Subject{
+		{Id: "user-" + tenantID, Type: common.SubjectType_SUBJECT_TYPE_USER, TenantId: tenantID, IsActive: true},
+		{Id: "svc-" + tenantID, Type: common.SubjectType_SUBJECT_TYPE_SERVICE, TenantId: tenantID, IsActive: true},
+	} {
+		require.NoError(t, rbacManager.CreateSubject(ctx, s))
+	}
+
+	// Verify the persisted role and subjects exist before deletion
+	_, err = rbacManager.GetRole(ctx, role.Id)
+	require.NoError(t, err, "custom role must exist before deletion")
+
+	subjectsBefore, err := rbacManager.ListAllSubjects(ctx, tenantID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, subjectsBefore, "expected subjects before tenant deletion")
+
+	// Delete the tenant — must cascade RBAC cleanup
+	require.NoError(t, manager.DeleteTenant(ctx, tenantID))
+
+	// Persisted role must be gone
+	_, err = rbacManager.GetRole(ctx, role.Id)
+	assert.Error(t, err, "custom role should not exist after tenant deletion")
+
+	// No subjects must remain for this tenant
+	subjectsAfter, err := rbacManager.ListAllSubjects(ctx, tenantID)
+	require.NoError(t, err)
+	assert.Empty(t, subjectsAfter, "expected no subjects after tenant deletion")
+
+	// No tenant-scoped roles must remain (ListRoles also returns system roles; skip those)
+	rolesAfter, err := rbacManager.ListRoles(ctx, tenantID)
+	require.NoError(t, err)
+	for _, r := range rolesAfter {
+		assert.NotEqual(t, tenantID, r.TenantId, "tenant-scoped role should have been deleted: %s", r.Id)
+	}
+}
+
+func TestDeleteTenant_CascadesRBACCleanup_NilRBACManager(t *testing.T) {
+	// Manager with nil rbacManager — must not panic, must succeed
+	manager := setupRealTenantManager(t, nil)
+	ctx := context.Background()
+
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "NoRBACTenant"})
+	require.NoError(t, err)
+
+	require.NoError(t, manager.DeleteTenant(ctx, tenant.ID))
+}
+
+// TestDeleteTenant_CascadesRBACCleanup_PartialFailureContinues verifies that
+// DeleteTenant returns nil even when individual RBAC cascade deletions encounter
+// errors. CreateTenant loads default tenant roles into the in-memory RBAC store
+// without persisting them to durable storage. The cascade deletes them from
+// in-memory but the durable delete fails; the warning is logged and the tenant
+// deletion proceeds successfully.
+func TestDeleteTenant_CascadesRBACCleanup_PartialFailureContinues(t *testing.T) {
+	rbacManager := cfgmstesting.SetupTestRBACManager(t)
+	manager := setupRealTenantManager(t, rbacManager)
+	ctx := context.Background()
+
+	// CreateTenant triggers CreateTenantDefaultRoles which loads roles into the
+	// in-memory store only (not the durable RBAC store). The cascade will
+	// encounter "role not found" errors from the durable layer — those must be
+	// logged as warnings, not returned as failures.
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "PartialFailureTenant"})
+	require.NoError(t, err)
+
+	// DeleteTenant must return nil despite individual cascade errors
+	require.NoError(t, manager.DeleteTenant(ctx, tenant.ID))
+}
+
+// recordingInvalidator records every tenant ID passed to InvalidateTenantCache.
+type recordingInvalidator struct {
+	calls []string
+}
+
+func (r *recordingInvalidator) InvalidateTenantCache(id string) {
+	r.calls = append(r.calls, id)
+}
+
+func TestManager_UpdateTenant_InvalidatesConfigCache(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Cache-Invalidation-Test"})
+	require.NoError(t, err)
+
+	inv := &recordingInvalidator{}
+	manager.WithConfigRouter(inv)
+
+	updateReq := &TenantRequest{
+		Name: tenant.Name,
+		Metadata: map[string]string{
+			"config_source_type": "controller",
+		},
+	}
+	_, err = manager.UpdateTenant(ctx, tenant.ID, updateReq)
+	require.NoError(t, err)
+
+	require.Len(t, inv.calls, 1, "InvalidateTenantCache must be called exactly once after UpdateTenant")
+	assert.Equal(t, tenant.ID, inv.calls[0], "InvalidateTenantCache must receive the updated tenant ID")
+}
+
+func TestManager_UpdateTenant_NoRouterWired_NoError(t *testing.T) {
+	// Manager with no router wired must not panic on UpdateTenant.
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "No-Router-Tenant"})
+	require.NoError(t, err)
+
+	_, err = manager.UpdateTenant(ctx, tenant.ID, &TenantRequest{Name: tenant.Name})
+	require.NoError(t, err, "UpdateTenant without a wired router must succeed")
+}
+
+// --- Validator and audit coverage ---
+
+// testMountPointValidator is a real test double (not a mock) implementing cfgpkg.MountPointValidator.
+type testMountPointValidator struct {
+	err error
+}
+
+func (v *testMountPointValidator) ValidateMountPoint(_ context.Context, _ *cfgpkg.ConfigSourceInfo, _ secretsiface.SecretStore) error {
+	return v.err
+}
+
+// TestManager_WithMountPointValidator_BlocksCreateOnFailure verifies that a wired
+// validator returning an error causes CreateTenant to return that error when the
+// metadata includes a git config source.
+func TestManager_WithMountPointValidator_BlocksCreateOnFailure(t *testing.T) {
+	manager := newTestTenantManager(t)
+	manager.WithMountPointValidator(&testMountPointValidator{
+		err: fmt.Errorf("mount point connection test failed: connection refused"),
+	}, nil)
+
+	ctx := context.Background()
+	_, err := manager.CreateTenant(ctx, &TenantRequest{
+		Name: "BlockedTenant",
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType: "git",
+			cfgpkg.MetaKeyConfigSourceURL:  "https://github.com/example/configs.git",
+		},
+	})
+	require.Error(t, err, "CreateTenant must fail when validator rejects the mount point")
+	assert.Contains(t, err.Error(), "config source validation failed")
+}
+
+// TestManager_WithMountPointValidator_AllowsCreateOnSuccess verifies that a wired
+// validator returning nil allows CreateTenant to succeed for git config sources.
+func TestManager_WithMountPointValidator_AllowsCreateOnSuccess(t *testing.T) {
+	manager := newTestTenantManager(t)
+	manager.WithMountPointValidator(&testMountPointValidator{err: nil}, nil)
+
+	ctx := context.Background()
+	td, err := manager.CreateTenant(ctx, &TenantRequest{
+		Name: "AllowedTenant",
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType: "git",
+			cfgpkg.MetaKeyConfigSourceURL:  "https://github.com/example/configs.git",
+		},
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, td.ID)
+}
+
+// TestManager_WithMountPointValidator_BlocksUpdateOnFailure verifies that UpdateTenant
+// returns an error when the new metadata includes a git config source that fails validation.
+func TestManager_WithMountPointValidator_BlocksUpdateOnFailure(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{Name: "UpdateBlockedTenant"})
+	require.NoError(t, err)
+
+	manager.WithMountPointValidator(&testMountPointValidator{
+		err: fmt.Errorf("mount point connection test failed: connection refused"),
+	}, nil)
+
+	_, err = manager.UpdateTenant(ctx, td.ID, &TenantRequest{
+		Name: td.Name,
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType: "git",
+			cfgpkg.MetaKeyConfigSourceURL:  "https://github.com/example/configs.git",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "config source validation failed")
+}
+
+// TestManager_ResolveConfigSourceAuditAction_AllBranches verifies all four branches of
+// resolveConfigSourceAuditAction.
+func TestManager_ResolveConfigSourceAuditAction_AllBranches(t *testing.T) {
+	m := &Manager{}
+	const git = "git"
+
+	tests := []struct {
+		name             string
+		oldType, newType string
+		oldMeta, newMeta map[string]string
+		wantAction       string
+		wantURL          string
+	}{
+		{
+			name:    "no-git to git emits created",
+			oldType: "controller", newType: git,
+			oldMeta:    map[string]string{},
+			newMeta:    map[string]string{cfgpkg.MetaKeyConfigSourceURL: "https://example.com/repo.git"},
+			wantAction: "config_source_created",
+			wantURL:    "https://example.com/repo.git",
+		},
+		{
+			name:    "git to no-git emits deleted",
+			oldType: git, newType: "controller",
+			oldMeta:    map[string]string{cfgpkg.MetaKeyConfigSourceURL: "https://example.com/repo.git"},
+			newMeta:    map[string]string{},
+			wantAction: "config_source_deleted",
+			wantURL:    "https://example.com/repo.git",
+		},
+		{
+			name:    "git to git with URL change emits updated",
+			oldType: git, newType: git,
+			oldMeta:    map[string]string{cfgpkg.MetaKeyConfigSourceURL: "https://old.example.com/repo.git"},
+			newMeta:    map[string]string{cfgpkg.MetaKeyConfigSourceURL: "https://new.example.com/repo.git"},
+			wantAction: "config_source_updated",
+			wantURL:    "https://new.example.com/repo.git",
+		},
+		{
+			name:    "git to git unchanged emits nothing",
+			oldType: git, newType: git,
+			oldMeta:    map[string]string{cfgpkg.MetaKeyConfigSourceURL: "https://example.com/repo.git"},
+			newMeta:    map[string]string{cfgpkg.MetaKeyConfigSourceURL: "https://example.com/repo.git"},
+			wantAction: "",
+			wantURL:    "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			action, url := m.resolveConfigSourceAuditAction(tc.oldType, tc.newType, tc.oldMeta, tc.newMeta)
+			assert.Equal(t, tc.wantAction, action)
+			assert.Equal(t, tc.wantURL, url)
+		})
+	}
+}
+
+// TestManager_WithAuditManager_RecordsEventOnCreate verifies that a wired audit manager
+// durably records a config_source_created event when CreateTenant includes a git config source.
+func TestManager_WithAuditManager_RecordsEventOnCreate(t *testing.T) {
+	manager := newTestTenantManager(t)
+	auditMgr := cfgmstesting.SetupTestAuditManager(t)
+	manager.WithAuditManager(auditMgr)
+
+	ctx := context.Background()
+	td, err := manager.CreateTenant(ctx, &TenantRequest{
+		Name: "AuditedTenant",
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType: "git",
+			cfgpkg.MetaKeyConfigSourceURL:  "https://github.com/example/configs.git",
+		},
+	})
+	require.NoError(t, err)
+
+	// Flush drains the async audit queue so the event is durable before querying.
+	require.NoError(t, auditMgr.Flush(ctx))
+
+	entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: td.ID,
+		Actions:  []string{"config_source_created"},
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "expected exactly one config_source_created audit entry")
+	assert.Equal(t, "config_source_created", entries[0].Action)
+	assert.Equal(t, td.ID, entries[0].TenantID)
+}
+
+// TestSanitizeAuditURL verifies that sanitizeAuditURL redacts userinfo from URLs.
+func TestSanitizeAuditURL_RedactsUserinfo(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawURL  string
+		wantSub string // substring that must NOT appear
+		wantURL string // expected result (empty = any non-secret value is OK)
+	}{
+		{
+			name:    "plain URL unchanged",
+			rawURL:  "https://github.com/example/repo.git",
+			wantURL: "https://github.com/example/repo.git",
+		},
+		{
+			name:    "URL with password redacted",
+			rawURL:  "https://user:supersecret@github.com/example/repo.git",
+			wantSub: "supersecret",
+		},
+		{
+			name:    "URL with token-as-username stripped",
+			rawURL:  "https://token@github.com/example/repo.git",
+			wantURL: "https://github.com/example/repo.git",
+		},
+		{
+			name:    "empty URL returns empty",
+			rawURL:  "",
+			wantURL: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeAuditURL(tc.rawURL)
+			if tc.wantURL != "" {
+				assert.Equal(t, tc.wantURL, got)
+			}
+			if tc.wantSub != "" {
+				assert.NotContains(t, got, tc.wantSub, "sanitizeAuditURL must redact credential from URL")
+			}
+		})
+	}
 }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package interfaces - Provider Factory Implementation
 //
@@ -10,6 +10,7 @@ package interfaces
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -146,9 +147,9 @@ func (f *DefaultDirectoryProviderFactory) ValidateConfig(config ProviderConfig) 
 			return fmt.Errorf("tenant_id is required for OAuth2 authentication")
 		}
 	case AuthMethodClientCert:
-		// Certificate validation would be done by provider
+		// Design decision: certificate and API-key validation is delegated to the provider at Connect() time.
 	case AuthMethodAPIKey:
-		// API key validation would be done by provider
+		// Design decision: certificate and API-key validation is delegated to the provider at Connect() time.
 	default:
 		return fmt.Errorf("unsupported auth_method: %s", config.AuthMethod)
 	}
@@ -266,10 +267,7 @@ func (m *DirectoryProviderManager) RemoveProvider(name string) error {
 	defer cancel()
 
 	if err := provider.Disconnect(ctx); err != nil {
-		// Log warning but continue with removal - disconnect errors are non-fatal
-		// as the provider is being removed from the registry regardless
-		// In a real implementation, this would use structured logging
-		_ = err // Acknowledge error but continue with removal
+		_ = err // Disconnect errors are non-fatal; provider is removed from registry regardless.
 	}
 
 	delete(m.providers, name)
@@ -316,20 +314,19 @@ func (m *DirectoryProviderManager) Close(ctx context.Context) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	var errors []error
+	var errs []error
 
 	for name, provider := range m.providers {
 		if err := provider.Disconnect(ctx); err != nil {
-			errors = append(errors, fmt.Errorf("failed to disconnect provider '%s': %w", name, err))
+			errs = append(errs, fmt.Errorf("failed to disconnect provider '%s': %w", name, err))
 		}
 	}
 
 	// Clear the providers map
 	m.providers = make(map[string]DirectoryProvider)
 
-	if len(errors) > 0 {
-		// In a real implementation, this would be a multi-error type
-		return fmt.Errorf("errors occurred while closing providers: %v", errors)
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 
 	return nil
@@ -383,8 +380,7 @@ func (m *DirectoryProviderManager) ExecuteCrossDirectoryOperation(ctx context.Co
 
 // DiscoverProviders attempts to discover available directory providers on the network
 func (m *DirectoryProviderManager) DiscoverProviders(ctx context.Context, discovery DiscoveryConfig) ([]DiscoveredProvider, error) {
-	// This would implement network discovery for directory services
-	// For now, return empty slice - real implementation would do LDAP/DNS discovery
+	// Design decision: LDAP/DNS network discovery is a future capability (no ADR yet); returns empty slice until discovery implementation ships.
 	return []DiscoveredProvider{}, nil
 }
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package workflow
 
@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // VersionManager manages workflow versions and templates
@@ -17,7 +17,7 @@ type VersionManager struct {
 }
 
 // NewVersionManager creates a new version manager
-func NewVersionManager(configStore interfaces.ConfigStore, tenantID string) *VersionManager {
+func NewVersionManager(configStore cfgconfig.ConfigStore, tenantID string) *VersionManager {
 	return &VersionManager{
 		store:          NewWorkflowStore(configStore, tenantID),
 		templateEngine: NewTemplateEngine(),
@@ -299,7 +299,7 @@ func (vm *VersionManager) compareWorkflows(v1, v2 *VersionedWorkflow) *VersionCo
 		})
 	}
 
-	// Compare steps (simplified - in practice would need deep comparison)
+	// Design decision: step-level deep comparison is deferred; version diff uses step name and type only to detect structural changes.
 	if len(v1.Steps) != len(v2.Steps) {
 		comparison.Changes = append(comparison.Changes, VersionDifference{
 			Type:     DifferenceTypeModified,

@@ -1,13 +1,17 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package types provides message types for the control plane communication layer.
 //
 // This package defines semantic message types for controller-steward communication,
-// abstracting away transport-specific details (MQTT, gRPC, etc.).
+// abstracting away transport-specific details (gRPC, WebSocket, etc.).
 package types
 
 import (
+	"encoding/json"
+	"fmt"
 	"time"
+
+	"github.com/cfgis/cfgms/features/config/signature"
 )
 
 // CommandType defines the type of command being sent.
@@ -20,17 +24,16 @@ const (
 	// CommandSyncDNA requests DNA synchronization via data plane
 	CommandSyncDNA CommandType = "sync_dna"
 
-	// CommandConnectDataPlane requests data plane connection establishment
-	CommandConnectDataPlane CommandType = "connect_dataplane"
+	// CommandReconnect instructs the steward to reconnect to the controller (HA failover)
+	CommandReconnect CommandType = "reconnect"
 
-	// CommandValidateConfig requests configuration validation (dry-run)
-	CommandValidateConfig CommandType = "validate_config"
+	// CommandExecuteScript runs a script on the steward via the script module executor.
+	// Params: script_content (base64), shell, execution_id, timeout_seconds, execution_context.
+	CommandExecuteScript CommandType = "execute_script"
 
-	// CommandExecuteTask requests execution of a specific task
-	CommandExecuteTask CommandType = "execute_task"
-
-	// CommandShutdown requests graceful shutdown
-	CommandShutdown CommandType = "shutdown"
+	// CommandRelayResponse carries the controller's HTTP response back to the steward
+	// relay goroutine. Params: execution_id, sequence, status (int), headers (map), body (base64).
+	CommandRelayResponse CommandType = "relay_response"
 )
 
 // Command represents a command sent from controller to steward.
@@ -55,9 +58,6 @@ type Command struct {
 
 	// Params contains command-specific parameters
 	Params map[string]interface{} `json:"params,omitempty"`
-
-	// Priority allows prioritization (0 = normal, higher = more urgent)
-	Priority int `json:"priority,omitempty"`
 }
 
 // EventType defines the type of event being reported.
@@ -90,6 +90,15 @@ const (
 
 	// EventDNAChanged indicates DNA attributes changed
 	EventDNAChanged EventType = "dna_changed"
+
+	// EventScriptCompleted indicates an execute_script command finished running.
+	// The exit code may be non-zero; this event is emitted regardless of exit code.
+	EventScriptCompleted EventType = "script_completed"
+
+	// EventRelayRequest is published by the steward to relay a script's REST API
+	// call to the controller. Details carry method, path, headers, body, execution_id,
+	// and a per-execution sequence number for correlation.
+	EventRelayRequest EventType = "relay_request"
 )
 
 // Event represents an event published from steward to controller.
@@ -161,6 +170,21 @@ type Heartbeat struct {
 
 	// Version is the steward software version
 	Version string `json:"version,omitempty"`
+
+	// DNAHash is a deterministic SHA-256 hash of the steward's current DNA attributes.
+	// The controller uses this to detect drift without transmitting the full DNA dataset.
+	// When the controller sees a hash it did not expect (e.g. after missed deltas) it
+	// sends a CommandSyncDNA to request a full sync over the data plane.
+	// Empty for older stewards that do not support hash-based sync.
+	DNAHash string `json:"dna_hash,omitempty"`
+
+	// ActiveSessions is the number of active control-channel streams the steward holds.
+	// Value is 1 when connected, 0 otherwise.
+	ActiveSessions int32 `json:"active_sessions,omitempty"`
+
+	// ConnectionState is the steward's current connection state string.
+	// Values: "connected", "disconnected", "connecting", "reconnecting".
+	ConnectionState string `json:"connection_state,omitempty"`
 }
 
 // Response represents a command response/acknowledgment.
@@ -233,6 +257,90 @@ type ConfigStatusReport struct {
 
 	// ExecutionTimeMs is how long the configuration took to apply (milliseconds)
 	ExecutionTimeMs int64 `json:"execution_time_ms,omitempty"`
+}
+
+// SignedCommand wraps a Command with a cryptographic signature for authenticated delivery.
+//
+// The Signature field contains the signature over CommandSigningBytes(Command, rawParams).
+// The inner Command stays a pure value type; the wire envelope is SignedCommand.
+// Verification happens in the steward handler before dispatch.
+type SignedCommand struct {
+	// Command is the inner command value.
+	Command Command `json:"command"`
+
+	// Signature is the cryptographic signature over CommandSigningBytes(Command, rawParams).
+	// Nil when the controller is not configured with a signer (unsecured mode).
+	Signature *signature.ConfigSignature `json:"signature,omitempty"`
+
+	// RawParams holds the proto-wire string map of Command.Params, populated only
+	// by the gRPC transport on receive. Used for signature verification to avoid
+	// round-trip type mutations from stringMapToInterfaceMap.
+	// Never transmitted on the wire or serialised to JSON.
+	RawParams map[string]string `json:"-"`
+}
+
+// commandSigningPayload is the stable canonical form used when signing/verifying commands.
+// Using map[string]string for Params avoids mutations from JSON-decoding proto string values,
+// and UTC normalisation avoids timezone-dependent JSON output.
+type commandSigningPayload struct {
+	ID        string            `json:"id"`
+	Type      CommandType       `json:"type"`
+	StewardID string            `json:"steward_id,omitempty"`
+	TenantID  string            `json:"tenant_id,omitempty"`
+	Timestamp time.Time         `json:"timestamp"`
+	Params    map[string]string `json:"params,omitempty"`
+}
+
+// InterfaceParamsToStringMap converts map[string]interface{} command params to the
+// proto-wire-stable map[string]string form. String values are stored as-is; other
+// values are JSON-encoded to strings. This is identical to what the gRPC transport
+// does in interfaceMapToStringMap, so signing with this form matches the wire form.
+func InterfaceParamsToStringMap(m map[string]interface{}) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(m))
+	for k, v := range m {
+		if s, ok := v.(string); ok {
+			result[k] = s
+		} else {
+			data, err := json.Marshal(v)
+			if err != nil {
+				result[k] = fmt.Sprintf("%v", v)
+			} else {
+				result[k] = string(data)
+			}
+		}
+	}
+	return result
+}
+
+// CommandSigningBytes returns the canonical JSON bytes for signing or verifying a Command.
+//
+// rawParams must be the proto-wire string map of cmd.Params — either the map produced
+// by the gRPC transport on receive (RawParams field of SignedCommand), or the result of
+// InterfaceParamsToStringMap(cmd.Params) on the originating side. Using this canonical
+// form ensures that both the signer (controller) and verifier (steward) produce identical
+// bytes regardless of JSON-decode type coercions and timezone differences.
+func CommandSigningBytes(cmd *Command, rawParams map[string]string) ([]byte, error) {
+	payload := commandSigningPayload{
+		ID:        cmd.ID,
+		Type:      cmd.Type,
+		StewardID: cmd.StewardID,
+		TenantID:  cmd.TenantID,
+		Timestamp: cmd.Timestamp.UTC(),
+		Params:    rawParams,
+	}
+	return json.Marshal(payload)
+}
+
+// FanOutResult reports per-steward delivery status from a FanOutCommand.
+type FanOutResult struct {
+	// Succeeded contains steward IDs that received the command
+	Succeeded []string
+
+	// Failed maps steward IDs to their delivery errors
+	Failed map[string]error
 }
 
 // EventFilter defines criteria for filtering events during subscription.

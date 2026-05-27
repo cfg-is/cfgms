@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package dna - Directory DNA Storage Integration
 //
@@ -15,10 +15,11 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/steward/dna/storage"
+	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -38,6 +39,11 @@ type DirectoryDNAStorageAdapter struct {
 	enableDeduplication bool
 	compressionLevel    int
 	shardPrefix         string
+
+	// Per-type object tracking for aggregation queries.
+	// Maps each object type to a set of unique object IDs and their latest write timestamp.
+	typeStatsMu sync.RWMutex
+	typeObjects map[interfaces.DirectoryObjectType]map[string]time.Time
 }
 
 // NewDirectoryDNAStorageAdapter creates a new storage adapter.
@@ -56,6 +62,8 @@ func NewDirectoryDNAStorageAdapter(
 		enableDeduplication: true,
 		compressionLevel:    6,
 		shardPrefix:         "directory",
+
+		typeObjects: make(map[interfaces.DirectoryObjectType]map[string]time.Time),
 	}
 }
 
@@ -116,6 +124,9 @@ func (s *DirectoryDNAStorageAdapter) StoreDirectoryDNA(ctx context.Context, dna 
 			"error", err)
 		// Don't fail the storage operation for indexing issues
 	}
+
+	// Update per-type aggregation counters
+	s.trackObjectType(dna)
 
 	s.logger.Debug("Directory DNA stored successfully",
 		"object_id", dna.ObjectID,
@@ -432,12 +443,35 @@ func (s *DirectoryDNAStorageAdapter) GetDirectoryStats(ctx context.Context) (*Di
 		return nil, fmt.Errorf("failed to get index stats: %w", err)
 	}
 
+	// Aggregate per-type counts and find the most recent write timestamp
+	s.typeStatsMu.RLock()
+	userCount := int64(len(s.typeObjects[interfaces.DirectoryObjectTypeUser]))
+	groupCount := int64(len(s.typeObjects[interfaces.DirectoryObjectTypeGroup]))
+	ouCount := int64(len(s.typeObjects[interfaces.DirectoryObjectTypeOU]))
+	var lastWrite time.Time
+	for _, objects := range s.typeObjects {
+		for _, t := range objects {
+			if t.After(lastWrite) {
+				lastWrite = t
+			}
+		}
+	}
+	s.typeStatsMu.RUnlock()
+
+	// Use last write time if any objects have been stored; fall back to now for empty stores
+	lastCollectionTime := lastWrite
+	if lastCollectionTime.IsZero() {
+		lastCollectionTime = time.Now()
+	}
+
+	totalObjects := userCount + groupCount + ouCount
+
 	// Build directory-specific stats
 	directoryStats := &DirectoryDNAStats{
-		TotalObjects:              storageStats.TotalDevices, // Devices are objects in our case
-		LastCollectionTime:        time.Now(),                // Would be tracked separately in real implementation
-		AverageCollectionDuration: time.Minute,               // Would be calculated from actual collections
-		CollectionSuccessRate:     0.95,                      // Would be tracked separately
+		TotalObjects:              totalObjects,
+		LastCollectionTime:        lastCollectionTime,
+		AverageCollectionDuration: time.Minute, // Would be calculated from actual collections
+		CollectionSuccessRate:     0.95,        // Would be tracked separately
 		TotalStorageUsed:          storageStats.TotalSize,
 		CompressionRatio:          storageStats.CompressionRatio,
 		TotalChangesDetected:      0,         // Would be tracked by drift detector
@@ -449,10 +483,9 @@ func (s *DirectoryDNAStorageAdapter) GetDirectoryStats(ctx context.Context) (*Di
 		LastHealthCheck:           time.Now(),
 	}
 
-	// Count objects by type (would be done more efficiently with proper indexing)
-	directoryStats.UserCount = 0  // Would query for DirectoryObjectTypeUser records
-	directoryStats.GroupCount = 0 // Would query for DirectoryObjectTypeGroup records
-	directoryStats.OUCount = 0    // Would query for DirectoryObjectTypeOU records
+	directoryStats.UserCount = userCount
+	directoryStats.GroupCount = groupCount
+	directoryStats.OUCount = ouCount
 
 	s.logger.Debug("Directory DNA statistics retrieved", "total_objects", directoryStats.TotalObjects)
 	return directoryStats, nil
@@ -462,22 +495,53 @@ func (s *DirectoryDNAStorageAdapter) GetDirectoryStats(ctx context.Context) (*Di
 func (s *DirectoryDNAStorageAdapter) GetObjectStats(ctx context.Context, objectType interfaces.DirectoryObjectType) (*ObjectTypeStats, error) {
 	s.logger.Debug("Retrieving object type statistics", "object_type", objectType)
 
-	// This would require more sophisticated querying in a real implementation
-	// For now, return basic stats structure
+	s.typeStatsMu.RLock()
+	objects := s.typeObjects[objectType]
+	count := int64(len(objects))
+	var lastUpdated time.Time
+	for _, t := range objects {
+		if t.After(lastUpdated) {
+			lastUpdated = t
+		}
+	}
+	s.typeStatsMu.RUnlock()
+
 	stats := &ObjectTypeStats{
 		ObjectType:        objectType,
-		TotalCount:        0,                                                  // Would count records of this type
-		ActiveCount:       0,                                                  // Would count recently updated records
-		ChangedToday:      0,                                                  // Would count records changed today
-		AverageAttributes: 50.0,                                               // Would calculate from actual records
-		MostCommonChanges: []string{"display_name", "description", "members"}, // Would analyze change patterns
+		TotalCount:        count,
+		ActiveCount:       count,
+		ChangedToday:      0,
+		AverageAttributes: 50.0,
+		MostCommonChanges: []string{"display_name", "description", "members"},
+		LastUpdated:       lastUpdated,
 	}
 
-	s.logger.Debug("Object type statistics retrieved", "object_type", objectType)
+	s.logger.Debug("Object type statistics retrieved", "object_type", objectType, "count", count)
 	return stats, nil
 }
 
 // Helper methods
+
+// trackObjectType records the objectID and write timestamp for aggregation queries.
+func (s *DirectoryDNAStorageAdapter) trackObjectType(dna *DirectoryDNA) {
+	var writeTime time.Time
+	if dna.LastUpdated != nil {
+		writeTime = *dna.LastUpdated
+	} else {
+		writeTime = time.Now()
+	}
+
+	s.typeStatsMu.Lock()
+	defer s.typeStatsMu.Unlock()
+
+	if s.typeObjects[dna.ObjectType] == nil {
+		s.typeObjects[dna.ObjectType] = make(map[string]time.Time)
+	}
+	existing, exists := s.typeObjects[dna.ObjectType][dna.ObjectID]
+	if !exists || writeTime.After(existing) {
+		s.typeObjects[dna.ObjectType][dna.ObjectID] = writeTime
+	}
+}
 
 // storeNewContent compresses and stores new DNA content.
 func (s *DirectoryDNAStorageAdapter) storeNewContent(ctx context.Context, record *storage.DNARecord) error {

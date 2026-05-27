@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package database implements AuditStore interface using PostgreSQL
 package database
@@ -16,7 +16,7 @@ import (
 
 	"github.com/lib/pq"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // DatabaseAuditStore implements AuditStore using PostgreSQL for persistence
@@ -101,7 +101,7 @@ func (s *DatabaseAuditStore) initializeSchema() error {
 }
 
 // StoreAuditEntry stores an audit entry in the database
-func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *interfaces.AuditEntry) error {
+func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *business.AuditEntry) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -125,23 +125,28 @@ func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *interfa
 		entry.Timestamp = time.Now()
 	}
 	if entry.Severity == "" {
-		entry.Severity = interfaces.AuditSeverityLow
+		entry.Severity = business.AuditSeverityLow
 	}
 	if entry.UserType == "" {
-		entry.UserType = interfaces.AuditUserTypeHuman
+		entry.UserType = business.AuditUserTypeHuman
 	}
 	if entry.Version == "" {
 		entry.Version = "1.0"
 	}
 
-	// Calculate checksum for integrity
-	entryJSON, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("failed to marshal audit entry: %w", err)
+	// Preserve the Manager-computed HMAC-SHA256 checksum when present.
+	// Only compute a fallback checksum for entries written directly (outside Manager),
+	// where no HMAC key is available. Overwriting a Manager-set checksum would
+	// corrupt the hash chain stored by the audit.Manager drain goroutine.
+	if entry.Checksum == "" {
+		entryJSON, err := json.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf("failed to marshal audit entry for checksum: %w", err)
+		}
+		hasher := sha256.New()
+		hasher.Write(entryJSON)
+		entry.Checksum = hex.EncodeToString(hasher.Sum(nil))
 	}
-	hasher := sha256.New()
-	hasher.Write(entryJSON)
-	entry.Checksum = hex.EncodeToString(hasher.Sum(nil))
 
 	// Serialize complex fields
 	detailsJSON, err := serializeMetadata(entry.Details)
@@ -166,9 +171,9 @@ func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *interfa
 			id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 			resource_type, resource_id, resource_name, result, error_code, error_message,
 			request_id, ip_address, user_agent, method, path, details, changes, tags,
-			severity, source, version, checksum
+			severity, source, version, checksum, sequence_number, previous_checksum
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
 		)
 	`
 
@@ -199,6 +204,8 @@ func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *interfa
 		entry.Source,
 		entry.Version,
 		entry.Checksum,
+		entry.SequenceNumber,
+		entry.PreviousChecksum,
 	)
 
 	if err != nil {
@@ -214,7 +221,7 @@ func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *interfa
 }
 
 // GetAuditEntry retrieves a specific audit entry by ID
-func (s *DatabaseAuditStore) GetAuditEntry(ctx context.Context, id string) (*interfaces.AuditEntry, error) {
+func (s *DatabaseAuditStore) GetAuditEntry(ctx context.Context, id string) (*business.AuditEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -222,7 +229,7 @@ func (s *DatabaseAuditStore) GetAuditEntry(ctx context.Context, id string) (*int
 		SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 			   resource_type, resource_id, resource_name, result, error_code, error_message,
 			   request_id, ip_address, user_agent, method, path, details, changes, tags,
-			   severity, source, version, checksum
+			   severity, source, version, checksum, sequence_number, previous_checksum
 		FROM audit_entries
 		WHERE id = $1
 	`
@@ -232,7 +239,7 @@ func (s *DatabaseAuditStore) GetAuditEntry(ctx context.Context, id string) (*int
 	entry, err := s.scanAuditEntry(row)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, interfaces.ErrAuditNotFound
+			return nil, business.ErrAuditNotFound
 		}
 		return nil, fmt.Errorf("failed to get audit entry: %w", err)
 	}
@@ -241,7 +248,7 @@ func (s *DatabaseAuditStore) GetAuditEntry(ctx context.Context, id string) (*int
 }
 
 // ListAuditEntries lists audit entries matching the filter with optimized database queries
-func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *interfaces.AuditFilter) ([]*interfaces.AuditEntry, error) {
+func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *business.AuditFilter) ([]*business.AuditEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -250,7 +257,7 @@ func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *inter
 		SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 			   resource_type, resource_id, resource_name, result, error_code, error_message,
 			   request_id, ip_address, user_agent, method, path, details, changes, tags,
-			   severity, source, version, checksum
+			   severity, source, version, checksum, sequence_number, previous_checksum
 		FROM audit_entries
 	`
 
@@ -267,7 +274,7 @@ func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *inter
 	}
 	defer func() { _ = rows.Close() }()
 
-	var entries []*interfaces.AuditEntry
+	var entries []*business.AuditEntry
 
 	for rows.Next() {
 		entry, err := s.scanAuditEntry(rows)
@@ -285,7 +292,7 @@ func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *inter
 }
 
 // StoreAuditBatch stores multiple audit entries efficiently in a single transaction
-func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*interfaces.AuditEntry) error {
+func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*business.AuditEntry) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -302,9 +309,9 @@ func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*int
 			id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 			resource_type, resource_id, resource_name, result, error_code, error_message,
 			request_id, ip_address, user_agent, method, path, details, changes, tags,
-			severity, source, version, checksum
+			severity, source, version, checksum, sequence_number, previous_checksum
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
 		)
 	`
 
@@ -328,23 +335,25 @@ func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*int
 			entry.Timestamp = time.Now()
 		}
 		if entry.Severity == "" {
-			entry.Severity = interfaces.AuditSeverityLow
+			entry.Severity = business.AuditSeverityLow
 		}
 		if entry.UserType == "" {
-			entry.UserType = interfaces.AuditUserTypeHuman
+			entry.UserType = business.AuditUserTypeHuman
 		}
 		if entry.Version == "" {
 			entry.Version = "1.0"
 		}
 
-		// Calculate checksum
-		entryJSON, err := json.Marshal(entry)
-		if err != nil {
-			return fmt.Errorf("failed to marshal audit entry: %w", err)
+		// Preserve Manager-computed HMAC checksum; compute fallback only for direct writes.
+		if entry.Checksum == "" {
+			entryJSON, err := json.Marshal(entry)
+			if err != nil {
+				return fmt.Errorf("failed to marshal audit entry for checksum: %w", err)
+			}
+			hasher := sha256.New()
+			hasher.Write(entryJSON)
+			entry.Checksum = hex.EncodeToString(hasher.Sum(nil))
 		}
-		hasher := sha256.New()
-		hasher.Write(entryJSON)
-		entry.Checksum = hex.EncodeToString(hasher.Sum(nil))
 
 		// Serialize complex fields
 		detailsJSON, err := serializeMetadata(entry.Details)
@@ -391,6 +400,8 @@ func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*int
 			entry.Source,
 			entry.Version,
 			entry.Checksum,
+			entry.SequenceNumber,
+			entry.PreviousChecksum,
 		)
 
 		if err != nil {
@@ -407,8 +418,8 @@ func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*int
 }
 
 // GetAuditsByUser gets audit entries for a specific user
-func (s *DatabaseAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	filter := &interfaces.AuditFilter{
+func (s *DatabaseAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	filter := &business.AuditFilter{
 		UserIDs:   []string{userID},
 		TimeRange: timeRange,
 		SortBy:    "timestamp",
@@ -418,8 +429,8 @@ func (s *DatabaseAuditStore) GetAuditsByUser(ctx context.Context, userID string,
 }
 
 // GetAuditsByResource gets audit entries for a specific resource
-func (s *DatabaseAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	filter := &interfaces.AuditFilter{
+func (s *DatabaseAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	filter := &business.AuditFilter{
 		ResourceTypes: []string{resourceType},
 		ResourceIDs:   []string{resourceID},
 		TimeRange:     timeRange,
@@ -430,8 +441,8 @@ func (s *DatabaseAuditStore) GetAuditsByResource(ctx context.Context, resourceTy
 }
 
 // GetAuditsByAction gets audit entries for a specific action
-func (s *DatabaseAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	filter := &interfaces.AuditFilter{
+func (s *DatabaseAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	filter := &business.AuditFilter{
 		Actions:   []string{action},
 		TimeRange: timeRange,
 		SortBy:    "timestamp",
@@ -441,9 +452,9 @@ func (s *DatabaseAuditStore) GetAuditsByAction(ctx context.Context, action strin
 }
 
 // GetFailedActions gets recent failed actions for security monitoring
-func (s *DatabaseAuditStore) GetFailedActions(ctx context.Context, timeRange *interfaces.TimeRange, limit int) ([]*interfaces.AuditEntry, error) {
-	filter := &interfaces.AuditFilter{
-		Results:   []interfaces.AuditResult{interfaces.AuditResultFailure, interfaces.AuditResultError, interfaces.AuditResultDenied},
+func (s *DatabaseAuditStore) GetFailedActions(ctx context.Context, timeRange *business.TimeRange, limit int) ([]*business.AuditEntry, error) {
+	filter := &business.AuditFilter{
+		Results:   []business.AuditResult{business.AuditResultFailure, business.AuditResultError, business.AuditResultDenied},
 		TimeRange: timeRange,
 		Limit:     limit,
 		SortBy:    "timestamp",
@@ -453,11 +464,11 @@ func (s *DatabaseAuditStore) GetFailedActions(ctx context.Context, timeRange *in
 }
 
 // GetSuspiciousActivity gets suspicious activity for a tenant
-func (s *DatabaseAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	filter := &interfaces.AuditFilter{
+func (s *DatabaseAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	filter := &business.AuditFilter{
 		TenantID:   tenantID,
-		EventTypes: []interfaces.AuditEventType{interfaces.AuditEventSecurityEvent},
-		Severities: []interfaces.AuditSeverity{interfaces.AuditSeverityHigh, interfaces.AuditSeverityCritical},
+		EventTypes: []business.AuditEventType{business.AuditEventSecurityEvent},
+		Severities: []business.AuditSeverity{business.AuditSeverityHigh, business.AuditSeverityCritical},
 		TimeRange:  timeRange,
 		SortBy:     "timestamp",
 		Order:      "desc",
@@ -466,11 +477,11 @@ func (s *DatabaseAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID
 }
 
 // GetAuditStats returns statistics about stored audit entries using optimized database queries
-func (s *DatabaseAuditStore) GetAuditStats(ctx context.Context) (*interfaces.AuditStats, error) {
+func (s *DatabaseAuditStore) GetAuditStats(ctx context.Context) (*business.AuditStats, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
-	stats := &interfaces.AuditStats{
+	stats := &business.AuditStats{
 		EntriesByTenant:   make(map[string]int64),
 		EntriesByType:     make(map[string]int64),
 		EntriesByResult:   make(map[string]int64),
@@ -550,10 +561,36 @@ func (s *DatabaseAuditStore) GetAuditStats(ctx context.Context) (*interfaces.Aud
 	return stats, nil
 }
 
+// GetLastAuditEntry returns the entry with the highest sequence_number for tenantID,
+// or nil if no entries exist for that tenant.
+func (s *DatabaseAuditStore) GetLastAuditEntry(ctx context.Context, tenantID string) (*business.AuditEntry, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	query := `
+		SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
+			   resource_type, resource_id, resource_name, result, error_code, error_message,
+			   request_id, ip_address, user_agent, method, path, details, changes, tags,
+			   severity, source, version, checksum, sequence_number, previous_checksum
+		FROM audit_entries
+		WHERE tenant_id = $1
+		ORDER BY sequence_number DESC
+		LIMIT 1
+	`
+	row := s.db.QueryRowContext(ctx, query, tenantID)
+	entry, err := s.scanAuditEntry(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get last audit entry: %w", err)
+	}
+	return entry, nil
+}
+
 // ArchiveAuditEntries archives old audit entries (for compliance, implement as needed)
 func (s *DatabaseAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
-	// For PostgreSQL, this could move entries to an archive table or partition
-	// For now, return 0 as no physical archival is implemented
+	// Physical archival to a partition or archive table is deferred; returns zero rows.
 	return 0, nil
 }
 
@@ -587,21 +624,21 @@ func (s *DatabaseAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate t
 // Helper methods
 
 // validateAuditEntry validates an audit entry
-func (s *DatabaseAuditStore) validateAuditEntry(entry *interfaces.AuditEntry) error {
+func (s *DatabaseAuditStore) validateAuditEntry(entry *business.AuditEntry) error {
 	if entry.TenantID == "" {
-		return interfaces.ErrTenantIDRequired
+		return business.ErrTenantIDRequired
 	}
 	if entry.UserID == "" {
-		return interfaces.ErrUserIDRequired
+		return business.ErrUserIDRequired
 	}
 	if entry.Action == "" {
-		return interfaces.ErrActionRequired
+		return business.ErrActionRequired
 	}
 	if entry.ResourceType == "" {
-		return interfaces.ErrResourceTypeRequired
+		return business.ErrResourceTypeRequired
 	}
 	if entry.ResourceID == "" {
-		return interfaces.ErrResourceIDRequired
+		return business.ErrResourceIDRequired
 	}
 	if entry.Source == "" {
 		return fmt.Errorf("audit entry source is required")
@@ -611,7 +648,7 @@ func (s *DatabaseAuditStore) validateAuditEntry(entry *interfaces.AuditEntry) er
 }
 
 // generateAuditID generates a unique ID for an audit entry
-func (s *DatabaseAuditStore) generateAuditID(entry *interfaces.AuditEntry) string {
+func (s *DatabaseAuditStore) generateAuditID(entry *business.AuditEntry) string {
 	// Create a deterministic ID based on entry contents and timestamp
 	data := fmt.Sprintf("%s-%s-%s-%s-%d",
 		entry.TenantID, entry.UserID, entry.Action, entry.ResourceID, time.Now().UnixNano())
@@ -624,8 +661,8 @@ func (s *DatabaseAuditStore) generateAuditID(entry *interfaces.AuditEntry) strin
 // scanAuditEntry scans an audit entry from a database row
 func (s *DatabaseAuditStore) scanAuditEntry(scanner interface {
 	Scan(dest ...interface{}) error
-}) (*interfaces.AuditEntry, error) {
-	entry := &interfaces.AuditEntry{}
+}) (*business.AuditEntry, error) {
+	entry := &business.AuditEntry{}
 	var eventTypeStr, userTypeStr, resultStr, severityStr string
 	var detailsJSON, changesJSON []byte
 	var tags pq.StringArray
@@ -659,6 +696,8 @@ func (s *DatabaseAuditStore) scanAuditEntry(scanner interface {
 		&entry.Source,
 		&entry.Version,
 		&entry.Checksum,
+		&entry.SequenceNumber,
+		&entry.PreviousChecksum,
 	)
 
 	if err != nil {
@@ -666,10 +705,10 @@ func (s *DatabaseAuditStore) scanAuditEntry(scanner interface {
 	}
 
 	// Convert string fields to typed enums
-	entry.EventType = interfaces.AuditEventType(eventTypeStr)
-	entry.UserType = interfaces.AuditUserType(userTypeStr)
-	entry.Result = interfaces.AuditResult(resultStr)
-	entry.Severity = interfaces.AuditSeverity(severityStr)
+	entry.EventType = business.AuditEventType(eventTypeStr)
+	entry.UserType = business.AuditUserType(userTypeStr)
+	entry.Result = business.AuditResult(resultStr)
+	entry.Severity = business.AuditSeverity(severityStr)
 	entry.Tags = []string(tags)
 
 	// Convert nullable strings

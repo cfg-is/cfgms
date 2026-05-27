@@ -4,7 +4,7 @@
 
 CFGMS supports two certificate deployment architectures:
 
-- **Unified** (default): A single `CertificateTypeServer` certificate serves all purposes (HTTPS API, MQTT mTLS, QUIC mTLS, config signing). Backward compatible with all existing deployments.
+- **Unified** (default): A single `CertificateTypeServer` certificate serves all purposes (HTTPS API, gRPC mTLS, config signing). Backward compatible with all existing deployments.
 
 - **Separated**: Three purpose-specific certificates with distinct lifecycles, key properties, and trust boundaries.
 
@@ -22,7 +22,7 @@ CFGMS supports two certificate deployment architectures:
 
 ```
 CertificateTypeServer (=1)
-  Purpose:  Everything (HTTPS, MQTT, QUIC, signing)
+  Purpose:  Everything (HTTPS, gRPC-over-QUIC, signing)
   EKU:      ServerAuth
   Lifetime: 365 days
   Key:      2048-bit RSA
@@ -39,7 +39,7 @@ CertificateTypePublicAPI (=3)
 
 CertificateTypeInternalServer (=4)
   Source:   Internal CA
-  Purpose:  MQTT + QUIC mutual TLS
+  Purpose:  gRPC-over-QUIC mutual TLS
   EKU:      ServerAuth
   Lifetime: 365 days
 

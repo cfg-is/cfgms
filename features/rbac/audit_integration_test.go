@@ -1,32 +1,27 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rbac
 
 import (
 	"context"
 	"testing"
+	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage providers to register them
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // TestRBACManager_AuditIntegration tests that RBAC operations generate proper audit events
 func TestRBACManager_AuditIntegration(t *testing.T) {
 	// Setup git storage provider for testing
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	// Create RBAC manager with audit integration
 	manager := NewManagerWithStorage(
@@ -34,12 +29,29 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	require.NotNil(t, manager)
 	require.NotNil(t, manager.auditManager)
 
 	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctx = WithSensitiveOperationJustification(ctx, "test: RBAC audit integration")
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
+
+	// Issue #764: audit writes are now asynchronous. Tests that query the audit
+	// store must Flush first to guarantee pending entries have landed. Drain
+	// shutdown is handled by manager.Close cleanup registered above (Issue #848).
+	flushAudit := func(t *testing.T) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, manager.auditManager.Flush(ctx))
+	}
 
 	t.Run("CreateRole generates audit event", func(t *testing.T) {
 		role := &common.Role{
@@ -55,27 +67,28 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		require.NoError(t, err)
 
 		// Query the audit store to verify the audit event was recorded
-		auditFilter := &interfaces.AuditFilter{
+		auditFilter := &business.AuditFilter{
 			TenantID:      "test-tenant",
-			EventTypes:    []interfaces.AuditEventType{interfaces.AuditEventUserManagement},
+			EventTypes:    []business.AuditEventType{business.AuditEventUserManagement},
 			Actions:       []string{"create_role"},
 			ResourceTypes: []string{"role"},
 			ResourceIDs:   []string{"test-role-audit"},
 			Limit:         10,
 		}
 
+		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		require.Len(t, auditEntries, 1, "Should have exactly one audit entry for role creation")
 
 		entry := auditEntries[0]
 		assert.Equal(t, "test-tenant", entry.TenantID)
-		assert.Equal(t, interfaces.AuditEventUserManagement, entry.EventType)
+		assert.Equal(t, business.AuditEventUserManagement, entry.EventType)
 		assert.Equal(t, "create_role", entry.Action)
 		assert.Equal(t, "role", entry.ResourceType)
 		assert.Equal(t, "test-role-audit", entry.ResourceID)
-		assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
-		assert.Equal(t, interfaces.AuditSeverityHigh, entry.Severity)
+		assert.Equal(t, business.AuditResultSuccess, entry.Result)
+		assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 		assert.Equal(t, "rbac", entry.Source)
 
 		// Verify audit integrity
@@ -108,22 +121,23 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		require.NoError(t, err)
 
 		// Query audit entries for the update
-		auditFilter := &interfaces.AuditFilter{
+		auditFilter := &business.AuditFilter{
 			TenantID:      "test-tenant",
-			EventTypes:    []interfaces.AuditEventType{interfaces.AuditEventUserManagement},
+			EventTypes:    []business.AuditEventType{business.AuditEventUserManagement},
 			Actions:       []string{"update_role"},
 			ResourceTypes: []string{"role"},
 			ResourceIDs:   []string{"test-role-update-audit"},
 			Limit:         10,
 		}
 
+		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		require.Len(t, auditEntries, 1, "Should have exactly one audit entry for role update")
 
 		entry := auditEntries[0]
 		assert.Equal(t, "update_role", entry.Action)
-		assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
+		assert.Equal(t, business.AuditResultSuccess, entry.Result)
 
 		// Verify change tracking is present
 		assert.NotNil(t, entry.Changes, "Should have change tracking information")
@@ -154,23 +168,24 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		require.NoError(t, err)
 
 		// Query audit entries for the deletion
-		auditFilter := &interfaces.AuditFilter{
+		auditFilter := &business.AuditFilter{
 			TenantID:      "test-tenant",
-			EventTypes:    []interfaces.AuditEventType{interfaces.AuditEventUserManagement},
+			EventTypes:    []business.AuditEventType{business.AuditEventUserManagement},
 			Actions:       []string{"delete_role"},
 			ResourceTypes: []string{"role"},
 			ResourceIDs:   []string{"test-role-delete-audit"},
 			Limit:         10,
 		}
 
+		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		require.Len(t, auditEntries, 1, "Should have exactly one audit entry for role deletion")
 
 		entry := auditEntries[0]
 		assert.Equal(t, "delete_role", entry.Action)
-		assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
-		assert.Equal(t, interfaces.AuditSeverityCritical, entry.Severity, "Role deletion should be critical severity")
+		assert.Equal(t, business.AuditResultSuccess, entry.Result)
+		assert.Equal(t, business.AuditSeverityCritical, entry.Severity, "Role deletion should be critical severity")
 
 		// Verify deleted role information is captured
 		assert.Contains(t, entry.Details, "deleted_permissions")
@@ -217,14 +232,15 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		require.NoError(t, err)
 
 		// Query audit entries for the revocation
-		auditFilter := &interfaces.AuditFilter{
+		auditFilter := &business.AuditFilter{
 			TenantID:      "test-tenant",
-			EventTypes:    []interfaces.AuditEventType{interfaces.AuditEventUserManagement},
+			EventTypes:    []business.AuditEventType{business.AuditEventUserManagement},
 			Actions:       []string{"revoke_role"},
 			ResourceTypes: []string{"role_assignment"},
 			Limit:         10,
 		}
 
+		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		require.Len(t, auditEntries, 1, "Should have exactly one audit entry for role revocation")
@@ -232,8 +248,8 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		entry := auditEntries[0]
 		assert.Equal(t, "revoke_role", entry.Action)
 		assert.Equal(t, "test-user-revoke", entry.UserID)
-		assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
-		assert.Equal(t, interfaces.AuditSeverityHigh, entry.Severity)
+		assert.Equal(t, business.AuditResultSuccess, entry.Result)
+		assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 
 		// Verify revocation details
 		assert.Contains(t, entry.Details, "revoked_role")
@@ -243,46 +259,50 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 	})
 
 	t.Run("Failed operations generate error audit events", func(t *testing.T) {
-		// Try to create a role with invalid data (empty ID)
+		// Use a case that deterministically fails at the manager level:
+		// a role claiming a non-existent parent triggers the explicit error
+		// path in Manager.CreateRole (RBAC_PARENT_ROLE_NOT_FOUND), which
+		// synchronously emits an error audit event.
 		invalidRole := &common.Role{
-			Id:       "", // Invalid - empty ID
-			Name:     "Invalid Role",
-			TenantId: "test-tenant",
+			Id:           "test-role-parent-missing",
+			Name:         "Role with missing parent",
+			TenantId:     "test-tenant",
+			ParentRoleId: "does-not-exist",
 		}
 
-		_ = manager.CreateRole(ctx, invalidRole)
-		// This should fail, but let's check if we still get an audit event
+		err := manager.CreateRole(ctx, invalidRole)
+		require.Error(t, err, "CreateRole must return an error when parent role does not exist")
+		require.Contains(t, err.Error(), "not found")
 
-		// Query for any audit entries with error result
-		auditFilter := &interfaces.AuditFilter{
-			TenantID:   "test-tenant",
-			EventTypes: []interfaces.AuditEventType{interfaces.AuditEventUserManagement},
-			Actions:    []string{"create_role"},
-			Results:    []interfaces.AuditResult{interfaces.AuditResultError},
-			Limit:      10,
+		auditFilter := &business.AuditFilter{
+			TenantID:    "test-tenant",
+			EventTypes:  []business.AuditEventType{business.AuditEventUserManagement},
+			Actions:     []string{"create_role"},
+			Results:     []business.AuditResult{business.AuditResultError},
+			ResourceIDs: []string{"test-role-parent-missing"},
+			Limit:       10,
 		}
 
-		// Note: This test depends on whether the underlying store validates the role
-		// If validation passes through, we won't get an error audit event
+		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
+		require.Len(t, auditEntries, 1, "failed CreateRole must produce exactly one error audit entry")
 
-		// If there are error entries, verify they have proper error information
-		for _, entry := range auditEntries {
-			assert.Equal(t, interfaces.AuditResultError, entry.Result)
-			assert.NotEmpty(t, entry.ErrorCode)
-			assert.NotEmpty(t, entry.ErrorMessage)
-		}
+		entry := auditEntries[0]
+		assert.Equal(t, business.AuditResultError, entry.Result)
+		assert.Equal(t, "RBAC_PARENT_ROLE_NOT_FOUND", entry.ErrorCode)
+		assert.NotEmpty(t, entry.ErrorMessage)
 	})
 
 	t.Run("Audit entries maintain integrity", func(t *testing.T) {
 		// Query all audit entries we've created
-		auditFilter := &interfaces.AuditFilter{
+		auditFilter := &business.AuditFilter{
 			TenantID:   "test-tenant",
-			EventTypes: []interfaces.AuditEventType{interfaces.AuditEventUserManagement},
+			EventTypes: []business.AuditEventType{business.AuditEventUserManagement},
 			Limit:      100,
 		}
 
+		flushAudit(t)
 		auditEntries, err := manager.auditManager.QueryEntries(ctx, auditFilter)
 		require.NoError(t, err)
 		assert.NotEmpty(t, auditEntries, "Should have audit entries from previous tests")
@@ -301,14 +321,10 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 // TestRBACManager_AuditFailureHandling tests audit failure scenarios
 func TestRBACManager_AuditFailureHandling(t *testing.T) {
 	// Setup git storage provider
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	// Create manager but then simulate audit failure by setting auditManager to nil
 	manager := NewManagerWithStorage(
@@ -316,9 +332,16 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	require.NotNil(t, manager)
 
 	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctx = WithSensitiveOperationJustification(ctx, "test: audit failure handling")
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -350,13 +373,10 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 	t.Run("Audit system is resilient to nil manager", func(t *testing.T) {
 		// With Epic 6, all managers require proper storage configuration
 		// Test that operations work normally even if audit events might fail
-		config := map[string]interface{}{
-			"repository_path": t.TempDir(),
-			"branch":          "main",
-			"auto_init":       true,
-		}
-		storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+		tmpDir := t.TempDir()
+		storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 		require.NoError(t, err)
+		t.Cleanup(func() { _ = storageManager.Close() })
 
 		// Create a properly configured manager (audit manager is always present in Epic 6)
 		manager := NewManagerWithStorage(
@@ -364,6 +384,11 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 			storageManager.GetClientTenantStore(),
 			storageManager.GetRBACStore(),
 		)
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = manager.Close(ctx)
+		})
 		err = manager.Initialize(ctx)
 		require.NoError(t, err)
 

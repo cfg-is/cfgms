@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package config
 
@@ -92,14 +92,63 @@ type Config struct {
 	// Logging configuration for global logging provider system
 	Logging *LoggingConfig `yaml:"logging"`
 
-	// High Availability configuration
-	HA *HAConfig `yaml:"ha"`
+	// Transport is the unified, protocol-agnostic transport configuration.
+	Transport *TransportConfig `yaml:"transport"`
 
-	// MQTT broker configuration for control plane communication
-	MQTT *MQTTConfig `yaml:"mqtt"`
+	// Registration holds registration approval workflow settings.
+	// When nil or when Workflow is empty and no custom workflow exists in the store,
+	// the controller seeds the built-in "auto-approve" workflow (Issue #1527).
+	Registration *RegistrationConfig `yaml:"registration,omitempty"`
 
-	// QUIC server configuration for data plane communication
-	QUIC *QUICConfig `yaml:"quic"`
+	// AdminBundlePath is the path where --init writes the admin credential bundle.
+	// Default: /etc/cfgms/admin.bundle.yaml (Linux) or %ProgramData%\cfgms\admin.bundle.yaml (Windows).
+	// Mode 0600, daemon-user-owned. Contains the admin mTLS cert, key, CA, and controller URL.
+	AdminBundlePath string `yaml:"admin_bundle_path,omitempty"`
+}
+
+// RegistrationConfig holds registration approval workflow settings.
+type RegistrationConfig struct {
+	// Workflow selects the built-in registration approval workflow.
+	// Valid values:
+	//   "ip-trust" (default) — auto-approve if the source IP is trusted for the tenant;
+	//     quarantine otherwise. The first steward from a new tenant always quarantines
+	//     until its IP is established via the 30-minute liveness window (Issue #1694).
+	//   "manual-review"      — stewards quarantined pending operator approval via
+	//     `cfg registration approve`.
+	//   "auto-approve"       — DEPRECATED. Approves all registrations immediately.
+	//     Use only in dev/test environments. A startup warning is logged.
+	// If empty, defaults to "ip-trust".
+	Workflow string `yaml:"workflow"`
+
+	// TrustedProxies is a list of CIDR ranges identifying reverse proxies that are
+	// trusted to set the X-Forwarded-For header. When empty (the default),
+	// X-Forwarded-For is never trusted and the TCP peer address is always used
+	// for the IP-trust decision. Parse once at startup, not per-request (Issue #1695).
+	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
+
+	// ApprovalMode selects the registration approval hook implementation.
+	// Valid values:
+	//   "" (default) — use the workflow engine hook (WorkflowApprovalHook).
+	//   "manual-review" — use ManualReviewApprovalHook which stores requests in
+	//     PendingRegistrationStore and holds the steward in quarantine until an
+	//     operator acts via `cfg registration approve/deny` (#1522-B).
+	ApprovalMode string `yaml:"approval_mode,omitempty"`
+
+	// IPTrustThreshold is the minimum continuous liveness duration before an IP
+	// is promoted to trusted status (Issue #1694). Default: 30 minutes.
+	// Sandbox-detonation attempts (3–15 min lifetime) cannot sustain this window.
+	IPTrustThreshold Duration `yaml:"ip_trust_threshold,omitempty"`
+
+	// IPTrustDarkWindow is the consecutive inactivity period after which a
+	// non-pre-seeded trusted IP range is auto-revoked (Issue #1697).
+	// Default: 30 days. Pre-seeded entries are exempt and can only be revoked
+	// explicitly via `cfg registration ip-trust revoke`.
+	IPTrustDarkWindow Duration `yaml:"ip_trust_dark_window,omitempty"`
+
+	// PendingReviewTimeout is the maximum time a pending registration may wait
+	// for operator action before it is automatically expired (Issue #1697).
+	// Default: 5 days.
+	PendingReviewTimeout Duration `yaml:"pending_review_timeout,omitempty"`
 }
 
 // CertificateConfig contains certificate management settings
@@ -220,12 +269,25 @@ type ServerCertificateConfig struct {
 
 // StorageConfig contains global storage provider configuration
 type StorageConfig struct {
-	// Provider specifies which storage provider to use (database, git)
+	// Provider specifies which storage provider to use (database, flatfile, sqlite).
+	// The "git" provider is no longer supported; run "cfg storage migrate --from git --to flatfile"
+	// to migrate an existing git-backed deployment.
 	Provider string `yaml:"provider"`
 
 	// Configuration options passed to the storage provider
 	// The structure depends on the specific provider being used
 	Config map[string]interface{} `yaml:"config"`
+
+	// FlatfileRoot is the directory root for the flat-file storage provider.
+	// When set, the OSS composite storage manager is used (flatfile + SQLite) instead
+	// of the single-provider path. Requires SQLitePath to also be set.
+	// Example: "/var/lib/cfgms/config"
+	FlatfileRoot string `yaml:"flatfile_root,omitempty"`
+
+	// SQLitePath is the file path for the SQLite database used by the OSS composite
+	// storage manager. Caller-controlled DSN — use a file path such as
+	// "/var/lib/cfgms/cfgms.db". Only used when FlatfileRoot is set.
+	SQLitePath string `yaml:"sqlite_path,omitempty"`
 }
 
 // LoggingConfig contains global logging provider configuration
@@ -270,173 +332,69 @@ type SubscriberConfig struct {
 	Enabled bool                   `yaml:"enabled"` // Enable/disable subscriber
 }
 
-// HAConfig contains high availability configuration
-type HAConfig struct {
-	// Deployment mode (single, blue-green, cluster)
-	Mode string `yaml:"mode"`
+// Duration is a time.Duration that supports YAML string parsing ("30s", "5m", etc.)
+// This allows human-readable duration values in configuration files.
+type Duration time.Duration
 
-	// Node configuration
-	Node *HANodeConfig `yaml:"node"`
-
-	// Cluster configuration (used in cluster mode)
-	Cluster *HAClusterConfig `yaml:"cluster"`
-
-	// Health check configuration
-	HealthCheck *HAHealthCheckConfig `yaml:"health_check"`
-
-	// Failover configuration
-	Failover *HAFailoverConfig `yaml:"failover"`
-
-	// Load balancing configuration
-	LoadBalancing *HALoadBalancingConfig `yaml:"load_balancing"`
-
-	// Split-brain prevention configuration
-	SplitBrain *HASplitBrainConfig `yaml:"split_brain"`
+// UnmarshalYAML parses duration strings like "30s", "5m", "1h" from YAML.
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	dur, err := time.ParseDuration(value.Value)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", value.Value, err)
+	}
+	*d = Duration(dur)
+	return nil
 }
 
-// HANodeConfig contains node-specific HA configuration
-type HANodeConfig struct {
-	ID              string            `yaml:"id"`
-	Name            string            `yaml:"name"`
-	ExternalAddress string            `yaml:"external_address"`
-	InternalAddress string            `yaml:"internal_address"`
-	Capabilities    []string          `yaml:"capabilities"`
-	Metadata        map[string]string `yaml:"metadata"`
+// MarshalYAML serializes the duration as a human-readable string.
+func (d Duration) MarshalYAML() (interface{}, error) {
+	return time.Duration(d).String(), nil
 }
 
-// HAClusterConfig contains cluster-wide HA configuration
-type HAClusterConfig struct {
-	ExpectedSize      int                  `yaml:"expected_size"`
-	MinQuorum         int                  `yaml:"min_quorum"`
-	ElectionTimeout   string               `yaml:"election_timeout"`   // Duration string
-	HeartbeatInterval string               `yaml:"heartbeat_interval"` // Duration string
-	Discovery         *HADiscoveryConfig   `yaml:"discovery"`
-	SessionSync       *HASessionSyncConfig `yaml:"session_sync"`
+// AsDuration returns the underlying time.Duration value.
+func (d Duration) AsDuration() time.Duration {
+	return time.Duration(d)
 }
 
-// HADiscoveryConfig contains node discovery configuration
-type HADiscoveryConfig struct {
-	Method      string                 `yaml:"method"`
-	Config      map[string]interface{} `yaml:"config"`
-	Interval    string                 `yaml:"interval"`     // Duration string
-	NodeTimeout string                 `yaml:"node_timeout"` // Duration string
-}
-
-// HASessionSyncConfig contains session synchronization configuration
-type HASessionSyncConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	SyncInterval string `yaml:"sync_interval"` // Duration string
-	StateTimeout string `yaml:"state_timeout"` // Duration string
-	MaxStateSize int    `yaml:"max_state_size"`
-}
-
-// HAHealthCheckConfig contains health check configuration
-type HAHealthCheckConfig struct {
-	Interval         string `yaml:"interval"` // Duration string
-	Timeout          string `yaml:"timeout"`  // Duration string
-	FailureThreshold int    `yaml:"failure_threshold"`
-	SuccessThreshold int    `yaml:"success_threshold"`
-	EnableInternal   bool   `yaml:"enable_internal"`
-	EnableExternal   bool   `yaml:"enable_external"`
-}
-
-// HAFailoverConfig contains failover configuration
-type HAFailoverConfig struct {
-	Enabled             bool   `yaml:"enabled"`
-	Timeout             string `yaml:"timeout"`      // Duration string
-	MaxDuration         string `yaml:"max_duration"` // Duration string
-	GracePeriod         string `yaml:"grace_period"` // Duration string
-	MaxSessionMigration int    `yaml:"max_session_migration"`
-}
-
-// HALoadBalancingConfig contains load balancing configuration
-type HALoadBalancingConfig struct {
-	Strategy        string                   `yaml:"strategy"`
-	HealthBased     *HAHealthBasedConfig     `yaml:"health_based"`
-	ConnectionBased *HAConnectionBasedConfig `yaml:"connection_based"`
-}
-
-// HAHealthBasedConfig contains health-based load balancing configuration
-type HAHealthBasedConfig struct {
-	MinHealthScore     float64 `yaml:"min_health_score"`
-	HealthWeightFactor float64 `yaml:"health_weight_factor"`
-}
-
-// HAConnectionBasedConfig contains connection-based load balancing configuration
-type HAConnectionBasedConfig struct {
-	MaxConnectionsPerNode int     `yaml:"max_connections_per_node"`
-	ConnectionThreshold   float64 `yaml:"connection_threshold"`
-}
-
-// HASplitBrainConfig contains split-brain prevention configuration
-type HASplitBrainConfig struct {
-	Enabled            bool   `yaml:"enabled"`
-	DetectionInterval  string `yaml:"detection_interval"` // Duration string
-	QuorumInterval     string `yaml:"quorum_interval"`    // Duration string
-	ResolutionStrategy string `yaml:"resolution_strategy"`
-}
-
-// MQTTConfig contains MQTT broker configuration
-type MQTTConfig struct {
-	// Enable MQTT broker
-	Enabled bool `yaml:"enabled"`
-
-	// MQTT listen address (e.g., "0.0.0.0:1883")
+// TransportConfig is the unified, protocol-agnostic transport configuration.
+// A single listen address serves both control plane and data plane over gRPC-over-QUIC,
+// and can accommodate future transport implementations without config changes.
+type TransportConfig struct {
+	// ListenAddr is the address for the unified transport server (e.g., "0.0.0.0:4433")
 	ListenAddr string `yaml:"listen_addr"`
 
-	// Enable TLS for MQTT
-	EnableTLS bool `yaml:"enable_tls"`
-
-	// Use certificate manager for MQTT certificates
+	// UseCertManager enables the controller's certificate manager for TLS.
+	// When true (default), certificates are managed automatically.
 	UseCertManager bool `yaml:"use_cert_manager"`
 
-	// TLS certificate path (if not using cert manager)
-	TLSCertPath string `yaml:"tls_cert_path,omitempty"`
+	// MaxConnections is the maximum number of concurrent client connections.
+	MaxConnections int `yaml:"max_connections"`
 
-	// TLS key path (if not using cert manager)
-	TLSKeyPath string `yaml:"tls_key_path,omitempty"`
+	// KeepalivePeriod is how often keepalive probes are sent to detect dead connections.
+	// Minimum: 1s. Default: 30s.
+	KeepalivePeriod Duration `yaml:"keepalive_period"`
 
-	// CA certificate path for client verification
-	TLSCAPath string `yaml:"tls_ca_path,omitempty"`
-
-	// Require client certificates (mTLS)
-	RequireClientCert bool `yaml:"require_client_cert"`
-
-	// Maximum concurrent clients
-	MaxClients int `yaml:"max_clients"`
-
-	// Maximum message size in bytes
-	MaxMessageSize int64 `yaml:"max_message_size"`
-
-	// Session expiry interval in seconds
-	SessionExpiryInterval int64 `yaml:"session_expiry_interval"`
-
-	// Keepalive multiplier for heartbeat detection
-	KeepaliveMultiplier float64 `yaml:"keepalive_multiplier"`
+	// IdleTimeout is how long a connection can remain idle before being closed.
+	// Default: 5m.
+	IdleTimeout Duration `yaml:"idle_timeout"`
 }
 
-// QUICConfig contains QUIC server configuration for data plane
-type QUICConfig struct {
-	// Enable QUIC server
-	Enabled bool `yaml:"enabled"`
-
-	// QUIC listen address (e.g., "0.0.0.0:4433")
-	ListenAddr string `yaml:"listen_addr"`
-
-	// Use certificate manager for QUIC certificates
-	UseCertManager bool `yaml:"use_cert_manager"`
-
-	// TLS certificate path (if not using cert manager)
-	TLSCertPath string `yaml:"tls_cert_path,omitempty"`
-
-	// TLS key path (if not using cert manager)
-	TLSKeyPath string `yaml:"tls_key_path,omitempty"`
-
-	// CA certificate path for client verification
-	TLSCAPath string `yaml:"tls_ca_path,omitempty"`
-
-	// Session timeout in seconds
-	SessionTimeout int `yaml:"session_timeout"`
+// Validate checks the TransportConfig for invalid values.
+// Returns an error if listen_addr is empty, max_connections < 1, or keepalive_period < 1s.
+func (t *TransportConfig) Validate() error {
+	if t == nil {
+		return fmt.Errorf("transport config must not be nil")
+	}
+	if t.ListenAddr == "" {
+		return fmt.Errorf("transport.listen_addr must not be empty")
+	}
+	if t.MaxConnections < 1 {
+		return fmt.Errorf("transport.max_connections must be at least 1, got %d", t.MaxConnections)
+	}
+	if t.KeepalivePeriod.AsDuration() < time.Second {
+		return fmt.Errorf("transport.keepalive_period must be at least 1s, got %v", t.KeepalivePeriod.AsDuration())
+	}
+	return nil
 }
 
 // DefaultConfig returns a Config with reasonable defaults
@@ -461,12 +419,9 @@ func DefaultConfig() *Config {
 			},
 		},
 		Storage: &StorageConfig{
-			Provider: "git", // Epic 6: Use git as minimum viable storage (no in-memory fallbacks)
-			Config: map[string]interface{}{
-				"repository_path": "data/cfgms-storage", // Default local git repository
-				"branch":          "main",
-				"auto_init":       true,
-			},
+			Provider:     "flatfile",
+			FlatfileRoot: "data/cfgms-config",
+			SQLitePath:   "data/cfgms.db",
 		},
 		Logging: &LoggingConfig{
 			Provider: "file", // Default to file-based time-series logging
@@ -491,79 +446,12 @@ func DefaultConfig() *Config {
 			EnableCorrelation: true,
 			EnableTracing:     true,
 		},
-		HA: &HAConfig{
-			Mode: "single", // Default to single server mode for seamless operation
-			Node: &HANodeConfig{
-				Capabilities: []string{"config", "rbac", "monitoring", "workflow"},
-				Metadata:     make(map[string]string),
-			},
-			Cluster: &HAClusterConfig{
-				ExpectedSize:      3,
-				MinQuorum:         2,
-				ElectionTimeout:   "10s",
-				HeartbeatInterval: "2s",
-				Discovery: &HADiscoveryConfig{
-					Method:      "static",
-					Config:      make(map[string]interface{}),
-					Interval:    "30s",
-					NodeTimeout: "60s",
-				},
-				SessionSync: &HASessionSyncConfig{
-					Enabled:      true,
-					SyncInterval: "5s",
-					StateTimeout: "300s",
-					MaxStateSize: 1024 * 1024, // 1MB
-				},
-			},
-			HealthCheck: &HAHealthCheckConfig{
-				Interval:         "10s",
-				Timeout:          "5s",
-				FailureThreshold: 3,
-				SuccessThreshold: 2,
-				EnableInternal:   true,
-				EnableExternal:   true,
-			},
-			Failover: &HAFailoverConfig{
-				Enabled:             true,
-				Timeout:             "30s",
-				MaxDuration:         "5m",
-				GracePeriod:         "10s",
-				MaxSessionMigration: 1000,
-			},
-			LoadBalancing: &HALoadBalancingConfig{
-				Strategy: "health-based",
-				HealthBased: &HAHealthBasedConfig{
-					MinHealthScore:     0.7,
-					HealthWeightFactor: 1.0,
-				},
-				ConnectionBased: &HAConnectionBasedConfig{
-					MaxConnectionsPerNode: 1000,
-					ConnectionThreshold:   0.8,
-				},
-			},
-			SplitBrain: &HASplitBrainConfig{
-				Enabled:            true,
-				DetectionInterval:  "15s",
-				QuorumInterval:     "30s",
-				ResolutionStrategy: "quorum-based",
-			},
-		},
-		MQTT: &MQTTConfig{
-			Enabled:               true, // Core communication channel - enabled by default
-			ListenAddr:            "0.0.0.0:1883",
-			EnableTLS:             true,
-			UseCertManager:        true, // Use controller's certificate manager
-			RequireClientCert:     true, // mTLS for security
-			MaxClients:            10000,
-			MaxMessageSize:        1024 * 1024, // 1MB
-			SessionExpiryInterval: 3600,        // 1 hour
-			KeepaliveMultiplier:   1.5,         // Disconnect if no activity for keepalive * 1.5
-		},
-		QUIC: &QUICConfig{
-			Enabled:        true, // Core data plane - enabled by default (Story #198)
-			ListenAddr:     "0.0.0.0:4433",
-			UseCertManager: true, // Use controller's certificate manager
-			SessionTimeout: 300,  // 5 minutes
+		Transport: &TransportConfig{
+			ListenAddr:      "0.0.0.0:4433",
+			UseCertManager:  true,
+			MaxConnections:  50000,
+			KeepalivePeriod: Duration(30 * time.Second),
+			IdleTimeout:     Duration(5 * time.Minute),
 		},
 	}
 }
@@ -652,10 +540,12 @@ func LoadWithPath(configPath string) (*Config, error) {
 		// Expand environment variables in the configuration content
 		// This supports ${VAR} and ${VAR:-default} syntax for explicit env var references
 		expandedData := expandEnvWithDefaults(content)
+		expandedBytes := []byte(expandedData)
 
-		if err := yaml.Unmarshal([]byte(expandedData), cfg); err != nil {
+		if err := yaml.Unmarshal(expandedBytes, cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse config file %s: %w", foundPath, err)
 		}
+
 	}
 
 	// Override with environment variables if set
@@ -842,67 +732,49 @@ func LoadWithPath(configPath string) (*Config, error) {
 		cfg.Logging.Component = component
 	}
 
-	// MQTT configuration environment variables
-	if mqttEnabled := os.Getenv("CFGMS_MQTT_ENABLED"); mqttEnabled != "" {
-		if val, err := strconv.ParseBool(mqttEnabled); err == nil {
-			cfg.MQTT.Enabled = val
+	// Transport configuration environment variables
+	if transportListenAddr := os.Getenv("CFGMS_TRANSPORT_LISTEN_ADDR"); transportListenAddr != "" && cfg.Transport != nil {
+		cfg.Transport.ListenAddr = transportListenAddr
+	}
+
+	if transportUseCertManager := os.Getenv("CFGMS_TRANSPORT_USE_CERT_MANAGER"); transportUseCertManager != "" && cfg.Transport != nil {
+		if val, err := strconv.ParseBool(transportUseCertManager); err == nil {
+			cfg.Transport.UseCertManager = val
 		}
 	}
 
-	if mqttListenAddr := os.Getenv("CFGMS_MQTT_LISTEN_ADDR"); mqttListenAddr != "" {
-		cfg.MQTT.ListenAddr = mqttListenAddr
-	}
-
-	if mqttEnableTLS := os.Getenv("CFGMS_MQTT_ENABLE_TLS"); mqttEnableTLS != "" {
-		if val, err := strconv.ParseBool(mqttEnableTLS); err == nil {
-			cfg.MQTT.EnableTLS = val
+	if transportMaxConns := os.Getenv("CFGMS_TRANSPORT_MAX_CONNECTIONS"); transportMaxConns != "" && cfg.Transport != nil {
+		if val, err := strconv.Atoi(transportMaxConns); err == nil {
+			cfg.Transport.MaxConnections = val
 		}
 	}
 
-	if mqttUseCertManager := os.Getenv("CFGMS_MQTT_USE_CERT_MANAGER"); mqttUseCertManager != "" {
-		if val, err := strconv.ParseBool(mqttUseCertManager); err == nil {
-			cfg.MQTT.UseCertManager = val
+	if transportKeepalive := os.Getenv("CFGMS_TRANSPORT_KEEPALIVE_PERIOD"); transportKeepalive != "" && cfg.Transport != nil {
+		if dur, err := time.ParseDuration(transportKeepalive); err == nil {
+			cfg.Transport.KeepalivePeriod = Duration(dur)
 		}
 	}
 
-	if mqttRequireClientCert := os.Getenv("CFGMS_MQTT_REQUIRE_CLIENT_CERT"); mqttRequireClientCert != "" {
-		if val, err := strconv.ParseBool(mqttRequireClientCert); err == nil {
-			cfg.MQTT.RequireClientCert = val
-		}
-	}
-
-	if mqttTLSCertPath := os.Getenv("CFGMS_MQTT_TLS_CERT_PATH"); mqttTLSCertPath != "" {
-		cfg.MQTT.TLSCertPath = mqttTLSCertPath
-	}
-
-	if mqttTLSKeyPath := os.Getenv("CFGMS_MQTT_TLS_KEY_PATH"); mqttTLSKeyPath != "" {
-		cfg.MQTT.TLSKeyPath = mqttTLSKeyPath
-	}
-
-	if mqttTLSCAPath := os.Getenv("CFGMS_MQTT_TLS_CA_PATH"); mqttTLSCAPath != "" {
-		cfg.MQTT.TLSCAPath = mqttTLSCAPath
-	}
-
-	// QUIC configuration environment variables
-	if quicEnabled := os.Getenv("CFGMS_QUIC_ENABLED"); quicEnabled != "" {
-		if val, err := strconv.ParseBool(quicEnabled); err == nil {
-			cfg.QUIC.Enabled = val
-		}
-	}
-
-	if quicListenAddr := os.Getenv("CFGMS_QUIC_LISTEN_ADDR"); quicListenAddr != "" {
-		cfg.QUIC.ListenAddr = quicListenAddr
-	}
-
-	if quicUseCertManager := os.Getenv("CFGMS_QUIC_USE_CERT_MANAGER"); quicUseCertManager != "" {
-		if val, err := strconv.ParseBool(quicUseCertManager); err == nil {
-			cfg.QUIC.UseCertManager = val
+	if transportIdleTimeout := os.Getenv("CFGMS_TRANSPORT_IDLE_TIMEOUT"); transportIdleTimeout != "" && cfg.Transport != nil {
+		if dur, err := time.ParseDuration(transportIdleTimeout); err == nil {
+			cfg.Transport.IdleTimeout = Duration(dur)
 		}
 	}
 
 	// HTTP API configuration environment variables
 	if httpListenAddr := os.Getenv("CFGMS_HTTP_LISTEN_ADDR"); httpListenAddr != "" {
 		cfg.ListenAddr = httpListenAddr
+	}
+
+	// Registration configuration environment variables (Issue #1695).
+	// CFGMS_REGISTRATION_WORKFLOW selects the approval workflow ("ip-trust",
+	// "manual-review", "auto-approve"). Test/dev environments use this to opt
+	// into "auto-approve" without mounting a config file.
+	if regWorkflow := os.Getenv("CFGMS_REGISTRATION_WORKFLOW"); regWorkflow != "" {
+		if cfg.Registration == nil {
+			cfg.Registration = &RegistrationConfig{}
+		}
+		cfg.Registration.Workflow = regWorkflow
 	}
 
 	return cfg, nil
@@ -975,4 +847,31 @@ func (cc *CertificateConfig) GetPublicAPISource() string {
 		return cc.PublicAPI.Source
 	}
 	return "internal"
+}
+
+// GetIPTrustThreshold returns the IP-trust establishment threshold, defaulting
+// to 30 minutes when not configured (Issue #1694).
+func (rc *RegistrationConfig) GetIPTrustThreshold() time.Duration {
+	if rc == nil || rc.IPTrustThreshold == 0 {
+		return 30 * time.Minute
+	}
+	return rc.IPTrustThreshold.AsDuration()
+}
+
+// GetIPTrustDarkWindow returns the inactivity period after which a non-pre-seeded
+// trusted IP range is auto-revoked, defaulting to 30 days (Issue #1697).
+func (rc *RegistrationConfig) GetIPTrustDarkWindow() time.Duration {
+	if rc == nil || rc.IPTrustDarkWindow == 0 {
+		return 30 * 24 * time.Hour
+	}
+	return rc.IPTrustDarkWindow.AsDuration()
+}
+
+// GetPendingReviewTimeout returns the maximum time a pending registration may
+// wait for operator action before it is auto-expired, defaulting to 5 days (Issue #1697).
+func (rc *RegistrationConfig) GetPendingReviewTimeout() time.Duration {
+	if rc == nil || rc.PendingReviewTimeout == 0 {
+		return 5 * 24 * time.Hour
+	}
+	return rc.PendingReviewTimeout.AsDuration()
 }

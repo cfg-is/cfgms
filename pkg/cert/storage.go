@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package cert
 
@@ -13,11 +13,12 @@ import (
 	"time"
 )
 
-// FileStore implements CertificateStore using filesystem storage
+// FileStore provides filesystem-based certificate storage
 type FileStore struct {
 	mu       sync.RWMutex
 	basePath string
-	certs    map[string]*CertificateInfo // indexed by serial number
+	// Disk-synchronised index: authoritative in-memory snapshot of PEM files on disk. Populated by loadCertificates on init and kept consistent on every StoreCertificate/DeleteCertificate call. Not a cache — migrating to pkg/cache would lose the write-through-to-disk invariant.
+	certs map[string]*CertificateInfo // indexed by serial number
 }
 
 // NewFileStore creates a new filesystem-based certificate store
@@ -152,6 +153,13 @@ func (fs *FileStore) GetCertificate(serialNumber string) (*Certificate, error) {
 		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
 
+	// Recompute dynamic validity fields from the current wall clock so that a
+	// cert stored as "valid" does not appear valid after it has expired.
+	now := time.Now()
+	metadata.IsValid = now.Before(metadata.ExpiresAt) && now.After(metadata.CreatedAt)
+	metadata.DaysUntilExpiration = int(time.Until(metadata.ExpiresAt).Hours() / 24)
+	metadata.NeedsRenewal = metadata.DaysUntilExpiration < 30
+
 	return &Certificate{
 		Type:           metadata.Type,
 		CommonName:     metadata.CommonName,
@@ -181,6 +189,10 @@ func (fs *FileStore) GetCertificateByCommonName(commonName string) ([]*Certifica
 		if cert.CommonName == commonName {
 			// Create a copy to avoid mutation
 			certCopy := *cert
+			// Recompute dynamic fields so callers always see current validity.
+			certCopy.DaysUntilExpiration = int(time.Until(certCopy.ExpiresAt).Hours() / 24)
+			certCopy.NeedsRenewal = certCopy.DaysUntilExpiration < 30
+			certCopy.IsValid = time.Now().Before(certCopy.ExpiresAt) && time.Now().After(certCopy.CreatedAt)
 			results = append(results, &certCopy)
 		}
 	}
@@ -203,6 +215,10 @@ func (fs *FileStore) GetCertificatesByType(certType CertificateType) ([]*Certifi
 		if cert.Type == certType {
 			// Create a copy to avoid mutation
 			certCopy := *cert
+			// Recompute dynamic fields so callers always see current validity.
+			certCopy.DaysUntilExpiration = int(time.Until(certCopy.ExpiresAt).Hours() / 24)
+			certCopy.NeedsRenewal = certCopy.DaysUntilExpiration < 30
+			certCopy.IsValid = time.Now().Before(certCopy.ExpiresAt) && time.Now().After(certCopy.CreatedAt)
 			results = append(results, &certCopy)
 		}
 	}
@@ -232,7 +248,7 @@ func (fs *FileStore) ListCertificates() ([]*CertificateInfo, error) {
 		// Update dynamic fields
 		certCopy.DaysUntilExpiration = int(time.Until(certCopy.ExpiresAt).Hours() / 24)
 		certCopy.NeedsRenewal = certCopy.DaysUntilExpiration < 30
-		certCopy.IsValid = time.Now().Before(certCopy.ExpiresAt)
+		certCopy.IsValid = time.Now().Before(certCopy.ExpiresAt) && time.Now().After(certCopy.CreatedAt)
 
 		results = append(results, &certCopy)
 	}
@@ -336,6 +352,12 @@ func (fs *FileStore) loadCertificates() error {
 			continue // Skip if metadata is invalid
 		}
 
+		// Recompute dynamic fields so the cache reflects current validity,
+		// not the snapshot values written at store time.
+		metadata.DaysUntilExpiration = int(time.Until(metadata.ExpiresAt).Hours() / 24)
+		metadata.NeedsRenewal = metadata.DaysUntilExpiration < 30
+		metadata.IsValid = time.Now().Before(metadata.ExpiresAt) && time.Now().After(metadata.CreatedAt)
+
 		// Add to in-memory cache
 		fs.certs[serialNumber] = &metadata
 	}
@@ -343,41 +365,9 @@ func (fs *FileStore) loadCertificates() error {
 	return nil
 }
 
-// RefreshCache reloads all certificates from storage
-func (fs *FileStore) RefreshCache() error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	// Clear existing cache
-	fs.certs = make(map[string]*CertificateInfo)
-
-	// Reload certificates
-	return fs.loadCertificates()
-}
-
 // GetStoragePath returns the base storage path
 func (fs *FileStore) GetStoragePath() string {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 	return fs.basePath
-}
-
-// GetCertificateCount returns the number of certificates in storage
-func (fs *FileStore) GetCertificateCount() int {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-	return len(fs.certs)
-}
-
-// GetCertificateCountByType returns the number of certificates by type
-func (fs *FileStore) GetCertificateCountByType() map[CertificateType]int {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-
-	counts := make(map[CertificateType]int)
-	for _, cert := range fs.certs {
-		counts[cert.Type]++
-	}
-
-	return counts
 }

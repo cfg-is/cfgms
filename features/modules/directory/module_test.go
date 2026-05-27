@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package directory
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -22,6 +23,141 @@ func createConfigFromYAML(yamlData string) modules.ConfigState {
 		return nil
 	}
 	return &config
+}
+
+// testDirConfigYAML returns a directory config YAML string appropriate for the platform.
+// On Windows, omits permissions since NTFS does not support Unix permission bits.
+func testDirConfigYAML(basePath, path, owner, group string, extraFields string) string {
+	cfg := "allowed_base_path: " + basePath
+	cfg += "\npath: " + path
+	if platformSupportsPermissions() {
+		cfg += "\npermissions: 0755"
+	}
+	if owner != "" {
+		cfg += "\nowner: " + owner
+	}
+	if group != "" {
+		cfg += "\ngroup: " + group
+	}
+	if extraFields != "" {
+		cfg += "\n" + extraFields
+	}
+	return cfg
+}
+
+// TestDirectoryConfig_Validate_AllowedBasePath tests AllowedBasePath validation in validate()
+func TestDirectoryConfig_Validate_AllowedBasePath(t *testing.T) {
+	tempDir := t.TempDir()
+	validPath := filepath.Join(tempDir, "target")
+
+	tests := []struct {
+		name    string
+		config  directoryConfig
+		wantErr error
+	}{
+		{
+			name:    "empty AllowedBasePath returns ErrAllowedBasePathRequired",
+			config:  directoryConfig{AllowedBasePath: "", Path: validPath},
+			wantErr: ErrAllowedBasePathRequired,
+		},
+		{
+			name:    "relative AllowedBasePath returns ErrAllowedBasePathRequired",
+			config:  directoryConfig{AllowedBasePath: "relative/path", Path: validPath},
+			wantErr: ErrAllowedBasePathRequired,
+		},
+		{
+			name:   "absolute AllowedBasePath passes the base check",
+			config: directoryConfig{AllowedBasePath: tempDir, Path: validPath},
+			// No ErrAllowedBasePathRequired — may return other errors for permissions/state
+			wantErr: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.validate()
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Errorf("validate() error = %v, want %v", err, tt.wantErr)
+				}
+				return
+			}
+			// For the valid case we allow any error except ErrAllowedBasePathRequired
+			if errors.Is(err, ErrAllowedBasePathRequired) {
+				t.Errorf("validate() returned ErrAllowedBasePathRequired unexpectedly")
+			}
+		})
+	}
+}
+
+// TestDirectoryModule_Set_EmptyAllowedBasePath verifies Set fails before any OS call when
+// AllowedBasePath is empty.
+func TestDirectoryModule_Set_EmptyAllowedBasePath(t *testing.T) {
+	tempDir := t.TempDir()
+	targetPath := filepath.Join(tempDir, "should-not-exist")
+
+	m := New()
+	cfg := createConfigFromYAML("allowed_base_path: \npath: " + targetPath)
+	err := m.Set(context.Background(), targetPath, cfg)
+	if !errors.Is(err, ErrAllowedBasePathRequired) {
+		t.Errorf("Set() with empty AllowedBasePath = %v, want ErrAllowedBasePathRequired", err)
+	}
+
+	// The directory must NOT have been created
+	if _, statErr := os.Stat(targetPath); !os.IsNotExist(statErr) {
+		t.Error("Set() with empty AllowedBasePath must not create any directory")
+	}
+}
+
+// TestDirectoryModule_Get_BeforeSet verifies Get returns ErrAllowedBasePathRequired when
+// configuredBasePath has never been populated (i.e., Configure was never called).
+// The execution engine calls Configure(desiredState) before Get() for Configurable modules,
+// so this error only fires if Configure is bypassed or returns an error.
+func TestDirectoryModule_Get_BeforeSet(t *testing.T) {
+	m := New()
+	_, err := m.Get(context.Background(), "/some/path")
+	if !errors.Is(err, ErrAllowedBasePathRequired) {
+		t.Errorf("Get() before Configure() = %v, want errors.Is(err, ErrAllowedBasePathRequired) true", err)
+	}
+}
+
+// TestDirectoryModule_Set_PathTraversal verifies that ../path traversal in dirConfig.Path is rejected.
+func TestDirectoryModule_Set_PathTraversal(t *testing.T) {
+	base := t.TempDir()
+	// Path attempts to escape the base directory
+	traversalPath := filepath.Join(base, "subdir", "..", "..", "escape")
+
+	m := New()
+	cfg := createConfigFromYAML(testDirConfigYAML(base, traversalPath, "", "", ""))
+	err := m.Set(context.Background(), traversalPath, cfg)
+	if err == nil {
+		t.Error("Set() with path traversal should return an error")
+	}
+}
+
+// TestDirectoryModule_ValidEndToEnd verifies a full create+get cycle within t.TempDir().
+func TestDirectoryModule_ValidEndToEnd(t *testing.T) {
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "mydir")
+
+	m := New()
+	cfg := createConfigFromYAML(testDirConfigYAML(base, targetPath, "", "", ""))
+	if err := m.Set(context.Background(), targetPath, cfg); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+
+	got, err := m.Get(context.Background(), targetPath)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("Get() returned nil")
+	}
+
+	gotMap := got.AsMap()
+	if gotMap["path"] != targetPath {
+		t.Errorf("Get() path = %v, want %v", gotMap["path"], targetPath)
+	}
 }
 
 func TestDirectoryModule(t *testing.T) {
@@ -49,68 +185,61 @@ func TestDirectoryModule(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		resourceID string
-		configData string
-		setup      func() error
-		cleanup    func() error
-		wantErr    bool
+		name          string
+		resourceID    string
+		configData    string
+		setup         func() error
+		cleanup       func() error
+		wantErr       bool
+		skipOnWindows bool
 	}{
 		{
 			name:       "Create new directory",
 			resourceID: filepath.Join(tempDir, "newdir"),
-			configData: `path: ` + filepath.Join(tempDir, "newdir") + `
-permissions: 0755`,
-			wantErr: false,
+			configData: testDirConfigYAML(tempDir, filepath.Join(tempDir, "newdir"), "", "", ""),
+			wantErr:    false,
 		},
 		{
-			name:       "Create directory with ownership",
-			resourceID: filepath.Join(tempDir, "owned-dir"),
-			configData: `path: ` + filepath.Join(tempDir, "owned-dir") + `
-permissions: 0750
-owner: ` + currentUser.Username + `
-group: ` + currentGroup.Name,
-			wantErr: false,
+			name:          "Create directory with ownership",
+			resourceID:    filepath.Join(tempDir, "owned-dir"),
+			configData:    testDirConfigYAML(tempDir, filepath.Join(tempDir, "owned-dir"), currentUser.Username, currentGroup.Name, ""),
+			wantErr:       false,
+			skipOnWindows: true, // os.Chown is not supported on Windows
 		},
 		{
 			name:       "Invalid path",
 			resourceID: "",
-			configData: `path: ""
-permissions: 0755`,
-			wantErr: true,
+			configData: testDirConfigYAML(tempDir, "", "", "", ""),
+			wantErr:    true,
 		},
 		{
 			name:       "Invalid permissions",
 			resourceID: filepath.Join(tempDir, "invalid-perms"),
-			configData: `path: ` + filepath.Join(tempDir, "invalid-perms") + `
-permissions: 9999`,
-			wantErr: true,
+			configData: "allowed_base_path: " + tempDir + "\npath: " + filepath.Join(tempDir, "invalid-perms") + "\npermissions: 9999",
+			wantErr:    true,
 		},
 		{
 			name:       "Invalid owner",
 			resourceID: filepath.Join(tempDir, "invalid-owner"),
-			configData: `path: ` + filepath.Join(tempDir, "invalid-owner") + `
-permissions: 0755
-owner: nonexistentuser`,
-			wantErr: true,
+			configData: testDirConfigYAML(tempDir, filepath.Join(tempDir, "invalid-owner"), "nonexistentuser", "", ""),
+			wantErr:    true,
 		},
 		{
 			name:       "Invalid group",
 			resourceID: filepath.Join(tempDir, "invalid-group"),
-			configData: `path: ` + filepath.Join(tempDir, "invalid-group") + `
-permissions: 0755
-group: nonexistentgroup`,
-			wantErr: true,
+			configData: testDirConfigYAML(tempDir, filepath.Join(tempDir, "invalid-group"), "", "nonexistentgroup", ""),
+			wantErr:    true,
 		},
 	}
 
-	module := New()
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Skip ownership tests on Windows (chown not supported)
-			if runtime.GOOS == "windows" && tt.name == "Create directory with ownership" {
-				t.Skip("Skipping ownership test on Windows - chown not supported")
+			// Each subtest gets its own module instance to prevent state leakage via
+			// configuredBasePath across subtests.
+			module := New()
+
+			if tt.skipOnWindows && runtime.GOOS == "windows" {
+				t.Skip("not supported on Windows")
 			}
 
 			if tt.setup != nil {
@@ -129,7 +258,11 @@ group: nonexistentgroup`,
 
 			// Create ConfigState from YAML
 			configState := createConfigFromYAML(tt.configData)
-			if configState == nil && !tt.wantErr {
+			if configState == nil {
+				if tt.wantErr {
+					// Treat unparseable YAML as an expected error (the YAML itself is the bad input)
+					return
+				}
 				t.Errorf("Failed to create config from YAML: %s", tt.configData)
 				return
 			}
@@ -149,10 +282,77 @@ group: nonexistentgroup`,
 					return
 				}
 				if config == nil {
-					t.Error("Get() returned nil config")
+					t.Fatal("Get() returned nil config")
+				}
+				gotMap := config.AsMap()
+				if gotMap["state"] != "present" {
+					t.Errorf("Get() state = %v, want %q", gotMap["state"], "present")
+				}
+				if gotMap["path"] != tt.resourceID {
+					t.Errorf("Get() path = %v, want %v", gotMap["path"], tt.resourceID)
 				}
 			}
 		})
+	}
+}
+
+// TestDirectoryModule_Get_EmitsModeAlias verifies that Get()/AsMap() emits the
+// "mode" octal-string alias alongside "permissions". Set() accepts a config
+// declared with either field; without "mode" in the read-back state the drift
+// comparator reports a phantom added field that no convergence pass can resolve.
+func TestDirectoryModule_Get_EmitsModeAlias(t *testing.T) {
+	if !platformSupportsPermissions() {
+		t.Skip("Unix permission bits not applicable on this platform")
+	}
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "managed-dir")
+	module := New()
+
+	// testDirConfigYAML sets permissions: 0755.
+	configState := createConfigFromYAML(testDirConfigYAML(base, targetPath, "", "", ""))
+	if err := module.Set(context.Background(), targetPath, configState); err != nil {
+		t.Fatalf("Set() failed: %v", err)
+	}
+
+	state, err := module.Get(context.Background(), targetPath)
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	gotMap := state.AsMap()
+	if gotMap["mode"] != "0755" {
+		t.Errorf("AsMap()[mode] = %v (%T), want \"0755\"", gotMap["mode"], gotMap["mode"])
+	}
+	if gotMap["permissions"] != 0755 {
+		t.Errorf("AsMap()[permissions] = %v, want 493 (0755)", gotMap["permissions"])
+	}
+}
+
+// TestDirectoryModule_Get_AbsentOmitsModeAlias verifies the "mode" alias is
+// omitted for absent state, matching the existing "permissions" omission.
+func TestDirectoryModule_Get_AbsentOmitsModeAlias(t *testing.T) {
+	base := t.TempDir()
+	module := New()
+	missing := filepath.Join(base, "missing-dir")
+
+	// Get requires a configured base path; establish it without creating a directory.
+	configurable, ok := module.(modules.Configurable)
+	if !ok {
+		t.Fatal("directory module must implement modules.Configurable")
+	}
+	if err := configurable.Configure(createConfigFromYAML("allowed_base_path: " + base)); err != nil {
+		t.Fatalf("Configure() failed: %v", err)
+	}
+
+	state, err := module.Get(context.Background(), missing)
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	gotMap := state.AsMap()
+	if gotMap["state"] != "absent" {
+		t.Fatalf("Get() state = %v, want \"absent\"", gotMap["state"])
+	}
+	if _, ok := gotMap["mode"]; ok {
+		t.Errorf("AsMap() for absent state should omit \"mode\", got %v", gotMap["mode"])
 	}
 }
 
@@ -168,44 +368,100 @@ func TestDirectoryModule_EdgeCases(t *testing.T) {
 		}
 	}()
 
-	module := New()
-
 	// Test with existing file (not directory)
-	filePath := filepath.Join(tempDir, "testfile")
-	if err := os.WriteFile(filePath, []byte("test"), 0644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	configData := `path: ` + filePath + `
-permissions: 0755`
-
-	// Should fail because path exists but is not a directory
-	configState := createConfigFromYAML(configData)
-	err = module.Set(context.Background(), filePath, configState)
-	if err != ErrNotADirectory {
-		t.Errorf("Set() with existing file error = %v, want %v", err, ErrNotADirectory)
-	}
+	// Each scenario gets its own module instance to prevent configuredBasePath state
+	// leakage between test cases (same isolation pattern as TestDirectoryModule).
+	t.Run("path is existing file not directory", func(t *testing.T) {
+		filePath := filepath.Join(tempDir, "testfile")
+		if err := os.WriteFile(filePath, []byte("test"), 0644); err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
+		configData := testDirConfigYAML(tempDir, filePath, "", "", "")
+		configState := createConfigFromYAML(configData)
+		err := New().Set(context.Background(), filePath, configState)
+		if err != ErrNotADirectory {
+			t.Errorf("Set() with existing file error = %v, want %v", err, ErrNotADirectory)
+		}
+	})
 
 	// Test with non-existent parent directory and recursive=false
-	nonExistentPath := filepath.Join(tempDir, "nonexistent", "dir")
-	configData = `path: ` + nonExistentPath + `
-permissions: 0755
-recursive: false`
-
-	configState = createConfigFromYAML(configData)
-	err = module.Set(context.Background(), nonExistentPath, configState)
-	if err == nil {
-		t.Error("Set() with non-existent parent and recursive=false should fail")
-	}
+	t.Run("non-existent parent recursive=false", func(t *testing.T) {
+		nonExistentPath := filepath.Join(tempDir, "nonexistent", "dir")
+		configData := testDirConfigYAML(tempDir, nonExistentPath, "", "", "recursive: false")
+		configState := createConfigFromYAML(configData)
+		err := New().Set(context.Background(), nonExistentPath, configState)
+		if err == nil {
+			t.Error("Set() with non-existent parent and recursive=false should fail")
+		}
+	})
 
 	// Test with non-existent parent directory and recursive=true
-	configData = `path: ` + nonExistentPath + `
-permissions: 0755
-recursive: true`
+	t.Run("non-existent parent recursive=true", func(t *testing.T) {
+		nonExistentPath := filepath.Join(tempDir, "nonexistent", "dir")
+		configData := testDirConfigYAML(tempDir, nonExistentPath, "", "", "recursive: true")
+		configState := createConfigFromYAML(configData)
+		err := New().Set(context.Background(), nonExistentPath, configState)
+		if err != nil {
+			t.Errorf("Set() with non-existent parent and recursive=true error = %v", err)
+		}
+	})
+}
 
-	configState = createConfigFromYAML(configData)
-	err = module.Set(context.Background(), nonExistentPath, configState)
-	if err != nil {
-		t.Errorf("Set() with non-existent parent and recursive=true error = %v", err)
+// TestDirectoryConfig_Validate_WindowsACL_MutualExclusion verifies that specifying
+// both permissions and windows_acl in the same config returns a validation error.
+func TestDirectoryConfig_Validate_WindowsACL_MutualExclusion(t *testing.T) {
+	cfg := &directoryConfig{
+		AllowedBasePath: "/tmp",
+		Path:            "/tmp/testdir",
+		Permissions:     0755,
+		WindowsACL: &modules.WindowsACL{
+			Entries: []modules.ACLEntry{
+				{Principal: `BUILTIN\Administrators`, Access: "FullControl"},
+			},
+		},
+	}
+	err := cfg.validate()
+	if err == nil {
+		t.Fatal("validate() with both permissions and windows_acl should return an error")
+	}
+}
+
+// TestDirectoryModule_Set_StateAbsent verifies that Set() returns an explicit error when
+// state: absent is passed, and does not create the directory at the target path.
+func TestDirectoryModule_Set_StateAbsent(t *testing.T) {
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "should-not-be-created")
+
+	m := New()
+	cfg := createConfigFromYAML("allowed_base_path: " + base + "\npath: " + targetPath + "\nstate: absent")
+	err := m.Set(context.Background(), targetPath, cfg)
+	if err == nil {
+		t.Fatal("Set() with state: absent must return a non-nil error")
+	}
+	if !errors.Is(err, modules.ErrNotImplemented) {
+		t.Errorf("Set() with state: absent error = %v, want errors.Is(err, modules.ErrNotImplemented) true", err)
+	}
+
+	// The directory must NOT have been created
+	if _, statErr := os.Stat(targetPath); !os.IsNotExist(statErr) {
+		t.Error("Set() with state: absent must not create any directory")
+	}
+}
+
+func TestDirectoryModule_PermissionsRejectedOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only test")
+	}
+
+	tempDir := t.TempDir()
+	module := New()
+
+	dirPath := filepath.Join(tempDir, "testdir")
+	configData := "allowed_base_path: " + tempDir + "\npath: " + dirPath + "\npermissions: 0755"
+	configState := createConfigFromYAML(configData)
+
+	err := module.Set(context.Background(), dirPath, configState)
+	if err == nil {
+		t.Error("Set() with Unix permissions on Windows should fail")
 	}
 }

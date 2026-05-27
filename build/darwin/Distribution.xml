@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright 2026 Jordan Ritz -->
+<!--
+  Distribution.xml — productbuild distribution descriptor for cfgms-steward.
+
+  Produces a flat macOS .pkg suitable for silent MDM deployment (Jamf / Mosyle).
+  No interactive choices are presented; the package installs silently with:
+    sudo installer -pkg cfgms-steward-darwin-<arch>.pkg -target /
+
+  The postinstall script reads /Library/Application Support/cfgms/steward-deploy.plist
+  (deployed by the MDM before the .pkg) to obtain REGTOKEN, CA_FINGERPRINT, and
+  CA_CERT_PATH, then calls cfgms-steward install to register the launchd service.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>CFGMS Steward</title>
+    <options customize="never" require-scripts="false" rootVolumeOnly="true"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.cfgms.steward"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.cfgms.steward" visible="false">
+        <pkg-ref id="com.cfgms.steward"/>
+    </choice>
+    <pkg-ref id="com.cfgms.steward" version="0" onConclusion="none">cfgms-steward.pkg</pkg-ref>
+</installer-gui-script>

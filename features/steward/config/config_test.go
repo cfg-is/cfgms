@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package config
 
@@ -6,9 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules/script"
 )
 
 func TestLoadConfiguration(t *testing.T) {
@@ -179,6 +183,20 @@ func TestValidateConfiguration(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			// An uploaded config that omits the logging section is valid:
+			// applyDefaults supplies "info". The controller validates uploaded
+			// configs before applying defaults, so an empty level must not be
+			// rejected — fleet-config.yaml omits it.
+			name: "empty log level is valid (default applies)",
+			config: StewardConfig{
+				Steward: StewardSettings{
+					ID:   "test-steward",
+					Mode: ModeController,
+				},
+			},
+			wantErr: false,
 		},
 		{
 			name: "resource missing name",
@@ -484,4 +502,628 @@ func TestValidateEnvVars(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConvergeIntervalDefault(t *testing.T) {
+	cfg := StewardConfig{
+		Steward: StewardSettings{
+			ID: "test-steward",
+		},
+	}
+	applyDefaults(&cfg)
+	assert.Equal(t, "30m", cfg.Steward.ConvergeInterval)
+}
+
+func TestConvergeIntervalValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval string
+		wantErr  bool
+	}{
+		{"valid 30m", "30m", false},
+		{"valid 5m", "5m", false},
+		{"valid 1h", "1h", false},
+		{"valid 45s", "45s", false},
+		{"invalid string", "invalid", true},
+		{"zero duration", "0s", true},
+		{"negative duration", "-5m", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := StewardConfig{
+				Steward: StewardSettings{
+					ID:               "test-steward",
+					Mode:             ModeStandalone,
+					Logging:          LoggingConfig{Level: "info"},
+					ConvergeInterval: tt.interval,
+				},
+			}
+			err := ValidateConfiguration(cfg)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestGetConvergeInterval(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval string
+		expected time.Duration
+	}{
+		{"30m returns 30 minutes", "30m", 30 * time.Minute},
+		{"5m returns 5 minutes", "5m", 5 * time.Minute},
+		{"1h returns 1 hour", "1h", time.Hour},
+		{"empty falls back to default", "", 30 * time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := StewardConfig{
+				Steward: StewardSettings{
+					ConvergeInterval: tt.interval,
+				},
+			}
+			assert.Equal(t, tt.expected, GetConvergeInterval(cfg))
+		})
+	}
+}
+
+func TestConvergeIntervalInConfigFile(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  converge_interval: 15m
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err)
+	assert.Equal(t, "15m", cfg.Steward.ConvergeInterval)
+	assert.Equal(t, 15*time.Minute, GetConvergeInterval(cfg))
+}
+
+// --- ScriptSigningConfig tests ---
+
+func TestValidateScriptSigningConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     ScriptSigningConfig
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "empty config is valid (no signing)",
+			cfg:     ScriptSigningConfig{},
+			wantErr: false,
+		},
+		{
+			name: "none policy with no trust mode is valid",
+			cfg: ScriptSigningConfig{
+				Policy: ScriptSigningPolicyNone,
+			},
+			wantErr: false,
+		},
+		{
+			name: "optional policy with any_valid trust mode is valid",
+			cfg: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyOptional,
+				TrustMode: TrustModeAnyValid,
+			},
+			wantErr: false,
+		},
+		{
+			name: "required policy with trusted_keys and non-empty key list is valid",
+			cfg: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeTrustedKeys,
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "corp-signing-key", Thumbprint: "abc123"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "trusted_keys mode with empty key list is invalid",
+			cfg: ScriptSigningConfig{
+				Policy:      ScriptSigningPolicyRequired,
+				TrustMode:   TrustModeTrustedKeys,
+				TrustedKeys: []TrustedKeyRef{},
+			},
+			wantErr: true,
+			errMsg:  "trusted_keys",
+		},
+		{
+			name: "trusted_keys_and_public mode with keys and AllowPublicCA is valid",
+			cfg: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeTrustedKeysAndPublic,
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "corp-signing-key", Thumbprint: "abc123"},
+				},
+				AllowPublicCA: true,
+			},
+			wantErr: false,
+		},
+		{
+			name: "trusted_keys_and_public mode with empty key list is invalid",
+			cfg: ScriptSigningConfig{
+				Policy:        ScriptSigningPolicyRequired,
+				TrustMode:     TrustModeTrustedKeysAndPublic,
+				TrustedKeys:   []TrustedKeyRef{},
+				AllowPublicCA: true,
+			},
+			wantErr: true,
+			errMsg:  "trusted_keys",
+		},
+		{
+			name: "invalid policy value is rejected",
+			cfg: ScriptSigningConfig{
+				Policy: ScriptSigningPolicy("bogus"),
+			},
+			wantErr: true,
+			errMsg:  "invalid",
+		},
+		{
+			name: "invalid trust mode value is rejected",
+			cfg: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: ScriptTrustMode("bogus"),
+			},
+			wantErr: true,
+			errMsg:  "invalid",
+		},
+		{
+			name: "key ref with neither thumbprint nor public_key_ref is invalid",
+			cfg: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeTrustedKeys,
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "incomplete-key"},
+				},
+			},
+			wantErr: true,
+			errMsg:  "thumbprint or public_key_ref",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateScriptSigningConfig(tt.cfg)
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestMergeScriptSigningConfig(t *testing.T) {
+	tests := []struct {
+		name       string
+		parent     ScriptSigningConfig
+		child      ScriptSigningConfig
+		wantErr    bool
+		errMsg     string
+		wantPolicy ScriptSigningPolicy
+		wantMode   ScriptTrustMode
+	}{
+		{
+			name:       "empty parent and child returns empty",
+			parent:     ScriptSigningConfig{},
+			child:      ScriptSigningConfig{},
+			wantPolicy: ScriptSigningPolicyNone,
+		},
+		{
+			name: "child inherits parent policy when child is empty",
+			parent: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyOptional,
+				TrustMode: TrustModeAnyValid,
+			},
+			child:      ScriptSigningConfig{},
+			wantPolicy: ScriptSigningPolicyOptional,
+			wantMode:   TrustModeAnyValid,
+		},
+		{
+			name: "child can tighten policy from optional to required",
+			parent: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyOptional,
+				TrustMode: TrustModeAnyValid,
+			},
+			child: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeTrustedKeys,
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "child-key", Thumbprint: "def456"},
+				},
+			},
+			wantPolicy: ScriptSigningPolicyRequired,
+			wantMode:   TrustModeTrustedKeys,
+		},
+		{
+			name: "child can tighten policy from none to required",
+			parent: ScriptSigningConfig{
+				Policy: ScriptSigningPolicyNone,
+			},
+			child: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeAnyValid,
+			},
+			wantPolicy: ScriptSigningPolicyRequired,
+			wantMode:   TrustModeAnyValid,
+		},
+		{
+			name: "child cannot loosen policy from required to optional",
+			parent: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeAnyValid,
+			},
+			child: ScriptSigningConfig{
+				Policy: ScriptSigningPolicyOptional,
+			},
+			wantErr: true,
+			errMsg:  "loosen",
+		},
+		{
+			name: "child cannot loosen policy from required to none",
+			parent: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeAnyValid,
+			},
+			child: ScriptSigningConfig{
+				Policy: ScriptSigningPolicyNone,
+			},
+			wantErr: true,
+			errMsg:  "loosen",
+		},
+		{
+			name: "child cannot loosen policy from optional to none",
+			parent: ScriptSigningConfig{
+				Policy: ScriptSigningPolicyOptional,
+			},
+			child: ScriptSigningConfig{
+				Policy: ScriptSigningPolicyNone,
+			},
+			wantErr: true,
+			errMsg:  "loosen",
+		},
+		{
+			name: "child overrides trusted keys",
+			parent: ScriptSigningConfig{
+				Policy:    ScriptSigningPolicyRequired,
+				TrustMode: TrustModeTrustedKeys,
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "parent-key", Thumbprint: "parent123"},
+				},
+			},
+			child: ScriptSigningConfig{
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "child-key", Thumbprint: "child456"},
+				},
+			},
+			wantPolicy: ScriptSigningPolicyRequired,
+			wantMode:   TrustModeTrustedKeys,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := MergeScriptSigningConfig(tt.parent, tt.child)
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantPolicy, result.Policy)
+			if tt.wantMode != "" {
+				assert.Equal(t, tt.wantMode, result.TrustMode)
+			}
+		})
+	}
+}
+
+func TestScriptSigningConfigInConfigFile(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  script_signing:
+    policy: required
+    trust_mode: trusted_keys
+    trusted_keys:
+      - name: corp-cert
+        thumbprint: abc123def456
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err)
+	assert.Equal(t, ScriptSigningPolicyRequired, cfg.Steward.ScriptSigning.Policy)
+	assert.Equal(t, TrustModeTrustedKeys, cfg.Steward.ScriptSigning.TrustMode)
+	assert.Len(t, cfg.Steward.ScriptSigning.TrustedKeys, 1)
+	assert.Equal(t, "corp-cert", cfg.Steward.ScriptSigning.TrustedKeys[0].Name)
+	assert.Equal(t, "abc123def456", cfg.Steward.ScriptSigning.TrustedKeys[0].Thumbprint)
+}
+
+// TestLoadConfiguration_ScriptRepoURLIsRejected verifies that a config file containing
+// the removed script_repo_url field is rejected with a clear error (clean break).
+func TestLoadConfiguration_ScriptRepoURLIsRejected(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  script_signing:
+    policy: none
+    script_repo_url: https://git.example.com/msp/scripts.git
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	_, err := LoadConfiguration(configFile)
+	require.Error(t, err, "config with removed script_repo_url field must fail to load")
+}
+
+// TestLoadConfiguration_EmptyFileAppliesDefaults verifies that a completely empty
+// configuration file loads without error and falls through to default application.
+// The streaming YAML decoder returns io.EOF on an empty document; loadFromPath must
+// treat that as an empty config rather than a parse failure.
+func TestLoadConfiguration_EmptyFileAppliesDefaults(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "empty.cfg")
+	require.NoError(t, os.WriteFile(configFile, []byte(""), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err, "empty config file must load without error")
+
+	assert.Equal(t, ModeStandalone, cfg.Steward.Mode, "empty config defaults to standalone mode")
+	assert.NotEmpty(t, cfg.Steward.ID, "empty config defaults ID to hostname")
+}
+
+func TestValidateScriptSigningConfig_RequireSignedAdhoc_PolicyNone_Rejected(t *testing.T) {
+	cfg := ScriptSigningConfig{
+		Policy:             ScriptSigningPolicyNone,
+		RequireSignedAdhoc: true,
+	}
+	err := validateScriptSigningConfig(cfg)
+	require.Error(t, err, "require_signed_adhoc with policy:none must fail validation")
+	assert.Contains(t, err.Error(), "require_signed_adhoc")
+}
+
+func TestValidateScriptSigningConfig_RequireSignedAdhoc_EmptyPolicy_Rejected(t *testing.T) {
+	cfg := ScriptSigningConfig{
+		// Policy is empty (equivalent to none)
+		RequireSignedAdhoc: true,
+	}
+	err := validateScriptSigningConfig(cfg)
+	require.Error(t, err, "require_signed_adhoc with empty policy must fail validation")
+	assert.Contains(t, err.Error(), "require_signed_adhoc")
+}
+
+func TestValidateScriptSigningConfig_RequireSignedAdhoc_PolicyOptional_Valid(t *testing.T) {
+	cfg := ScriptSigningConfig{
+		Policy:             ScriptSigningPolicyOptional,
+		RequireSignedAdhoc: true,
+	}
+	err := validateScriptSigningConfig(cfg)
+	assert.NoError(t, err, "require_signed_adhoc with policy:optional must be valid")
+}
+
+func TestValidateScriptSigningConfig_RequireSignedAdhoc_PolicyRequired_Valid(t *testing.T) {
+	cfg := ScriptSigningConfig{
+		Policy:             ScriptSigningPolicyRequired,
+		TrustMode:          TrustModeAnyValid,
+		RequireSignedAdhoc: true,
+	}
+	err := validateScriptSigningConfig(cfg)
+	assert.NoError(t, err, "require_signed_adhoc with policy:required must be valid")
+}
+
+func TestMergeScriptSigningConfig_RequireSignedAdhoc_InheritedFromParent(t *testing.T) {
+	parent := ScriptSigningConfig{
+		Policy:             ScriptSigningPolicyOptional,
+		TrustMode:          TrustModeAnyValid,
+		RequireSignedAdhoc: true,
+	}
+	child := ScriptSigningConfig{
+		// Child does not set RequireSignedAdhoc
+	}
+	result, err := MergeScriptSigningConfig(parent, child)
+	require.NoError(t, err)
+	assert.True(t, result.RequireSignedAdhoc, "child must inherit RequireSignedAdhoc from parent")
+}
+
+func TestMergeScriptSigningConfig_RequireSignedAdhoc_ChildKeepsOwnTrue(t *testing.T) {
+	parent := ScriptSigningConfig{
+		Policy:             ScriptSigningPolicyOptional,
+		RequireSignedAdhoc: false,
+	}
+	child := ScriptSigningConfig{
+		Policy:             ScriptSigningPolicyOptional,
+		RequireSignedAdhoc: true,
+	}
+	result, err := MergeScriptSigningConfig(parent, child)
+	require.NoError(t, err)
+	assert.True(t, result.RequireSignedAdhoc, "child's explicit RequireSignedAdhoc=true must be preserved")
+}
+
+func TestMergeScriptSigningConfig_RequireSignedAdhoc_ParentFalseChildFalse(t *testing.T) {
+	parent := ScriptSigningConfig{
+		Policy: ScriptSigningPolicyOptional,
+	}
+	child := ScriptSigningConfig{}
+	result, err := MergeScriptSigningConfig(parent, child)
+	require.NoError(t, err)
+	assert.False(t, result.RequireSignedAdhoc, "RequireSignedAdhoc must be false when neither parent nor child sets it")
+}
+
+func TestBuildModuleSigningConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  ScriptSigningConfig
+		want script.ModuleSigningConfig
+	}{
+		{
+			name: "empty config maps to zero-value module config",
+			cfg:  ScriptSigningConfig{},
+			want: script.ModuleSigningConfig{TrustedKeys: []script.TrustedKeyEntry{}},
+		},
+		{
+			name: "trust mode and allow_public_ca pass through",
+			cfg: ScriptSigningConfig{
+				TrustMode:     TrustModeTrustedKeysAndPublic,
+				AllowPublicCA: true,
+			},
+			want: script.ModuleSigningConfig{
+				TrustMode:     script.TrustMode("trusted_keys_and_public"),
+				TrustedKeys:   []script.TrustedKeyEntry{},
+				AllowPublicCA: true,
+			},
+		},
+		{
+			name: "trusted key fields are mapped per entry",
+			cfg: ScriptSigningConfig{
+				TrustMode: TrustModeTrustedKeys,
+				TrustedKeys: []TrustedKeyRef{
+					{Name: "ci-key", Thumbprint: "abc123"},
+					{Name: "ref-key", PublicKeyRef: "secret://ref"},
+				},
+			},
+			want: script.ModuleSigningConfig{
+				TrustMode: script.TrustMode("trusted_keys"),
+				TrustedKeys: []script.TrustedKeyEntry{
+					{Name: "ci-key", Thumbprint: "abc123"},
+					{Name: "ref-key", PublicKeyRef: "secret://ref"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildModuleSigningConfig(tt.cfg)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestScriptSigningConfigValidationInLoadConfiguration(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	// trusted_keys mode with empty key list should fail validation
+	configData := `steward:
+  id: test-steward
+  script_signing:
+    policy: required
+    trust_mode: trusted_keys
+    trusted_keys: []
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	_, err := LoadConfiguration(configFile)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "trusted_keys")
+}
+
+// TestDriftModeFromControllerCfgBytes asserts that DriftMode is correctly parsed
+// from controller-delivered cfg bytes (YAML), and that absence of drift_mode
+// results in an empty field (treated as DriftModeApply by the executor).
+func TestDriftModeFromControllerCfgBytes(t *testing.T) {
+	// Simulate controller-delivered YAML bytes containing drift_mode: monitor.
+	yamlMonitor := []byte(`
+steward:
+  id: test-steward
+  drift_mode: monitor
+resources: []
+`)
+	var cfgMonitor StewardConfig
+	require.NoError(t, yaml.Unmarshal(yamlMonitor, &cfgMonitor))
+	assert.Equal(t, DriftModeMonitor, cfgMonitor.Steward.DriftMode,
+		"drift_mode: monitor must parse to DriftModeMonitor")
+
+	// Simulate controller-delivered YAML bytes with drift_mode: apply.
+	yamlApply := []byte(`
+steward:
+  id: test-steward
+  drift_mode: apply
+resources: []
+`)
+	var cfgApply StewardConfig
+	require.NoError(t, yaml.Unmarshal(yamlApply, &cfgApply))
+	assert.Equal(t, DriftModeApply, cfgApply.Steward.DriftMode,
+		"drift_mode: apply must parse to DriftModeApply")
+
+	// Absence of drift_mode field defaults to empty (executor treats empty as apply).
+	yamlNoMode := []byte(`
+steward:
+  id: test-steward
+resources: []
+`)
+	var cfgNoMode StewardConfig
+	require.NoError(t, yaml.Unmarshal(yamlNoMode, &cfgNoMode))
+	assert.Empty(t, cfgNoMode.Steward.DriftMode,
+		"missing drift_mode must be empty (executor default: apply)")
+}
+
+// TestDriftMode_LocalFileCannotSetIt asserts the security invariant:
+// LoadConfiguration clears DriftMode so a tampered local file cannot flip
+// a controller-connected steward into monitor mode.
+func TestDriftMode_LocalFileCannotSetIt(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  drift_mode: monitor
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err, "config with drift_mode must load without error")
+	assert.Empty(t, cfg.Steward.DriftMode,
+		"DriftMode must be cleared after loading from local file (security invariant)")
 }

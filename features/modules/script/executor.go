@@ -1,8 +1,9 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package script
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -13,12 +14,15 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // Executor handles cross-platform script execution
 type Executor struct {
-	config *ScriptConfig
-	logger logging.Logger
+	config         *ScriptConfig
+	logger         logging.Logger
+	secretStore    interfaces.SecretStore
+	secretBindings []ParamBinding
 }
 
 // NewExecutor creates a new script executor with the given configuration
@@ -26,6 +30,18 @@ func NewExecutor(config *ScriptConfig) *Executor {
 	return &Executor{
 		config: config,
 		logger: logging.NewLogger("info"),
+	}
+}
+
+// NewExecutorWithSecrets creates a script executor that resolves secret
+// bindings from the provided store at execution time. Secrets are delivered
+// via process-scoped environment variables and cleared after the script exits.
+func NewExecutorWithSecrets(config *ScriptConfig, store interfaces.SecretStore, bindings []ParamBinding) *Executor {
+	return &Executor{
+		config:         config,
+		logger:         logging.NewLogger("info"),
+		secretStore:    store,
+		secretBindings: bindings,
 	}
 }
 
@@ -39,7 +55,37 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		"working_dir", e.config.WorkingDir,
 		"timeout", e.config.Timeout,
 		"content_hash", hashScriptContent(e.config.Content),
-		"env_vars", len(e.config.Environment))
+		"env_vars", len(e.config.Environment),
+		"execution_context", string(e.config.ExecutionContext))
+
+	// Resolve param bindings before building the command. All params — both
+	// secret-store and literal — are injected exclusively into cmd.Env on the
+	// child process; the parent process environment is never modified, eliminating
+	// race conditions at 50k+ steward scale and preventing value leakage via
+	// /proc/pid/cmdline (Linux), ps output, or Windows Event 4688.
+	//
+	// Env var naming by binding type:
+	//   secret-store  → SecretEnvVarName(): CFGMS_SECRET_<PARAM> on Windows (avoids
+	//                   Event 4688 cmdline logging), <PARAM> on Unix (12-factor)
+	//   literal       → strings.ToUpper(param.Name) on all platforms — no secret
+	//                   prefix because the value is not a credential
+	var secretEnvEntries []string
+	if len(e.secretBindings) > 0 {
+		resolved, err := ResolveSecretBindings(ctx, e.secretStore, e.secretBindings)
+		if err != nil {
+			return nil, fmt.Errorf("secret injection blocked: %w", err)
+		}
+		secretEnvEntries = make([]string, 0, len(resolved))
+		for _, param := range resolved {
+			var envKey string
+			if param.IsSecret {
+				envKey = SecretEnvVarName(e.config.Shell, param.Name)
+			} else {
+				envKey = strings.ToUpper(param.Name)
+			}
+			secretEnvEntries = append(secretEnvEntries, fmt.Sprintf("%s=%s", envKey, param.Value))
+		}
+	}
 
 	// Create timeout context
 	timeoutCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
@@ -51,79 +97,58 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		return nil, fmt.Errorf("failed to build command: %w", err)
 	}
 
-	// Set working directory if specified
+	// Apply execution context: may replace cmd with a sudo wrapper (Unix) or attach a
+	// user token (Windows). This must happen before Dir/Env are set so those values
+	// land on the final command regardless of which platform path is taken.
+	cmd, actualUser, cleanupToken, err := applyExecutionContext(timeoutCtx, e.config, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply execution context: %w", err)
+	}
+
+	// Set working directory on the (potentially wrapped) command
 	if e.config.WorkingDir != "" {
 		cmd.Dir = e.config.WorkingDir
 	}
 
-	// Set environment variables
-	if len(e.config.Environment) > 0 {
+	// Build child process environment from the parent snapshot plus any
+	// configured env vars and resolved secrets. Always set cmd.Env explicitly
+	// when there is anything to add so secrets are isolated to the child.
+	if len(e.config.Environment) > 0 || len(secretEnvEntries) > 0 {
 		env := os.Environ()
 		for key, value := range e.config.Environment {
 			env = append(env, fmt.Sprintf("%s=%s", key, value))
 		}
+		env = append(env, secretEnvEntries...)
 		cmd.Env = env
 	}
 
 	// Execute the command
 	result := &ExecutionResult{
-		StartTime: startTime,
+		StartTime:  startTime,
+		ActualUser: actualUser,
 	}
 
-	// Capture stdout and stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
+	// Capture stdout and stderr into buffers. Assigning *bytes.Buffer directly to
+	// cmd.Stdout/cmd.Stderr lets exec.Cmd own the output-copy goroutines: cmd.Wait
+	// blocks until that copying finishes, so there is no race between draining the
+	// output and Wait closing the underlying pipes. The StdoutPipe/StderrPipe
+	// contract explicitly forbids reading the pipe concurrently with Wait, which
+	// silently truncated output from fast-exiting scripts.
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
 
 	// Start the command
 	if err := cmd.Start(); err != nil {
+		cleanupToken()
 		return nil, fmt.Errorf("failed to start command: %w", err)
 	}
+	// Token (Windows) or no-op (Unix): release the handle after the process is created.
+	cleanupToken()
 
 	result.PID = cmd.Process.Pid
 
-	// Read output
-	stdoutData := make([]byte, 0)
-	stderrData := make([]byte, 0)
-
-	// Use goroutines to read stdout and stderr concurrently
-	stdoutDone := make(chan error, 1)
-	stderrDone := make(chan error, 1)
-
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := stdout.Read(buf)
-			if n > 0 {
-				stdoutData = append(stdoutData, buf[:n]...)
-			}
-			if err != nil {
-				stdoutDone <- err
-				return
-			}
-		}
-	}()
-
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := stderr.Read(buf)
-			if n > 0 {
-				stderrData = append(stderrData, buf[:n]...)
-			}
-			if err != nil {
-				stderrDone <- err
-				return
-			}
-		}
-	}()
-
-	// Wait for command completion or timeout
+	// Wait for command completion or timeout.
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
@@ -131,14 +156,11 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 
 	select {
 	case err := <-done:
-		// Command completed
-		<-stdoutDone
-		<-stderrDone
-
+		// Command completed; cmd.Wait has flushed all output into the buffers.
 		result.EndTime = time.Now()
 		result.Duration = result.EndTime.Sub(result.StartTime)
-		result.Stdout = string(stdoutData)
-		result.Stderr = string(stderrData)
+		result.Stdout = stdoutBuf.String()
+		result.Stderr = stderrBuf.String()
 
 		if err != nil {
 			if exitError, ok := err.(*exec.ExitError); ok {
@@ -155,9 +177,11 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 	case <-timeoutCtx.Done():
 		// Timeout occurred
 		if err := cmd.Process.Kill(); err != nil {
-			// Log or handle kill error if needed, but don't fail the timeout handling
-			_ = err // Explicitly ignore kill errors during timeout handling
+			e.logger.Warn("failed to kill timed-out script process", "error", err)
 		}
+		// Reap the killed process so cmd.Wait returns and its output-copy
+		// goroutines exit; partial output is discarded on timeout.
+		<-done
 		result.EndTime = time.Now()
 		result.Duration = result.EndTime.Sub(result.StartTime)
 		result.ExitCode = -1

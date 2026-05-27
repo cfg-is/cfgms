@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package workflow
 
@@ -15,7 +15,7 @@ import (
 
 func TestWorkflowForLoop(t *testing.T) {
 	logger := logging.NewLogger("info")
-	engine := NewEngine(nil, logger)
+	engine := NewEngine(nil, logger, nil)
 
 	tests := []struct {
 		name      string
@@ -151,7 +151,7 @@ func TestWorkflowForLoop(t *testing.T) {
 
 func TestWorkflowWhileLoop(t *testing.T) {
 	logger := logging.NewLogger("info")
-	engine := NewEngine(nil, logger)
+	engine := NewEngine(nil, logger, nil)
 
 	t.Run("while loop with max iterations safety", func(t *testing.T) {
 		workflow := Workflow{
@@ -217,7 +217,7 @@ func TestWorkflowWhileLoop(t *testing.T) {
 
 func TestWorkflowForeachLoop(t *testing.T) {
 	logger := logging.NewLogger("info")
-	engine := NewEngine(nil, logger)
+	engine := NewEngine(nil, logger, nil)
 
 	tests := []struct {
 		name      string
@@ -347,7 +347,7 @@ func TestWorkflowForeachLoop(t *testing.T) {
 
 func TestLoopUtilityFunctions(t *testing.T) {
 	logger := logging.NewLogger("info")
-	engine := NewEngine(nil, logger)
+	engine := NewEngine(nil, logger, nil)
 
 	t.Run("resolveLoopValue", func(t *testing.T) {
 		execution := &WorkflowExecution{
@@ -440,7 +440,7 @@ func TestLoopUtilityFunctions(t *testing.T) {
 
 func TestNestedLoops(t *testing.T) {
 	logger := logging.NewLogger("info")
-	engine := NewEngine(nil, logger)
+	engine := NewEngine(nil, logger, nil)
 
 	workflow := Workflow{
 		Name: "nested-loops-test",

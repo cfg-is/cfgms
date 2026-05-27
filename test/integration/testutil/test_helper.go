@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package testutil
 
@@ -14,27 +14,31 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller"
 	"github.com/cfgis/cfgms/features/controller/config"
-	"github.com/cfgis/cfgms/features/steward"
+	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/pkg/cert"
+	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
+	"github.com/cfgis/cfgms/pkg/registration"
 	testpkg "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// TestEnv provides a test environment for integration testing
+// TestEnv provides a test environment for integration testing.
+// Controller-connected tests use TransportClient directly (production-mirroring pattern).
+// For steward convergence-loop testing, build a *steward.Steward via steward.NewStandalone().
 type TestEnv struct {
 	T                    *testing.T
 	TempDir              string
 	Logger               *testpkg.MockLogger
 	Controller           *controller.Controller
 	ControllerCfg        *config.Config
-	Steward              *steward.Steward
-	StewardCfg           *steward.Config
+	TransportClient      *client.TransportClient
 	CertManager          *cert.Manager
 	ctx                  context.Context
 	cancel               context.CancelFunc
 	useDockerController  bool   // If true, connect to Docker controller instead of in-process
 	dockerControllerAddr string // Address of Docker controller (e.g., "localhost:50054")
-	registrationToken    string // MQTT registration token for testing
+	registrationToken    string // Registration token for testing
+	certStoragePath      string // Certificate storage path used for TransportClient TLS
 }
 
 // NewTestEnvWithDocker creates a test environment that connects to Docker controller
@@ -127,18 +131,15 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	require.NoError(t, err)
 
 	controllerCfg := &config.Config{
-		ListenAddr: "127.0.0.1:0",   // Use random port
-		CertPath:   certStoragePath, // Legacy cert path for backward compatibility
-		DataDir:    filepath.Join(tempDir, "controller-data"),
-		LogLevel:   "debug",
+		ListenAddr:      "127.0.0.1:0",   // Use random port
+		CertPath:        certStoragePath, // Legacy cert path for backward compatibility
+		DataDir:         filepath.Join(tempDir, "controller-data"),
+		LogLevel:        "debug",
+		AdminBundlePath: filepath.Join(tempDir, "admin.bundle.yaml"),
 		Storage: &config.StorageConfig{
-			Provider: "git",
-			Config: map[string]interface{}{
-				"repository_path": filepath.Join(tempDir, "storage-git"),
-				"encryption": map[string]interface{}{
-					"enabled": false, // Disable encryption for tests
-				},
-			},
+			Provider:     "flatfile",
+			FlatfileRoot: filepath.Join(tempDir, "storage-flatfile"),
+			SQLitePath:   filepath.Join(tempDir, "cfgms.db"),
 		},
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement:   true, // Enable full certificate lifecycle management
@@ -153,16 +154,8 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 				Organization: "CFGMS Test",
 			},
 		},
-		MQTT: &config.MQTTConfig{
-			Enabled:        true,
-			ListenAddr:     "127.0.0.1:1883",
-			EnableTLS:      false,
-			UseCertManager: true,
-		},
-		QUIC: &config.QUICConfig{
-			Enabled:        true,
-			ListenAddr:     "127.0.0.1:4433",
-			SessionTimeout: 300,
+		Transport: &config.TransportConfig{
+			ListenAddr:     "127.0.0.1:0",
 			UseCertManager: true,
 		},
 	}
@@ -176,10 +169,16 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	err = os.MkdirAll(storageDir, 0755)
 	require.NoError(t, err)
 
-	// Create controller - it will handle certificate lifecycle automatically
-	// If EnableCertManagement: true (which we set), the controller will:
-	// - Generate CA and certs if they don't exist (first deployment)
-	// - Load CA and certs if they exist (reboot scenario)
+	// Pre-initialize if not already initialized (Story #410: first-run init guard)
+	caPath := controllerCfg.Certificate.CAPath
+	if !initialization.IsInitialized(caPath) && !initialization.CAFilesExist(caPath) {
+		t.Logf("Pre-initializing controller for test (Story #410 init guard)")
+		initResult, initErr := initialization.Run(controllerCfg, logger)
+		require.NoError(t, initErr, "Failed to pre-initialize controller for test")
+		t.Logf("Controller pre-initialized, CA fingerprint: %s", initResult.CAFingerprint)
+	}
+
+	// Create controller - loads existing CA from pre-initialization
 	ctrl, err := controller.New(controllerCfg, logger)
 	require.NoError(t, err)
 
@@ -198,40 +197,30 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		t.Logf("Note: Client certificate generation failed: %v (may already exist)", err)
 	}
 
-	stewardCfg := &steward.Config{
-		ControllerAddr: controllerCfg.ListenAddr,
-		CertPath:       certStoragePath, // Legacy cert path for backward compatibility
-		DataDir:        filepath.Join(tempDir, "steward-data"),
-		LogLevel:       "debug",
-		ID:             "test-steward",
-		Certificate: &steward.CertificateConfig{
-			EnableCertManagement: false, // Disable cert management for steward in tests - uses controller's certs
-			CertStoragePath:      certStoragePath,
-			RenewalThresholdDays: 30,
-			Provisioning: &steward.ProvisioningConfig{
-				EnableAutoProvisioning: false, // Disable for tests
-				ProvisioningEndpoint:   "/api/v1/certificates/provision",
-				ValidityDays:           365,
-				Organization:           "CFGMS Test Stewards",
-			},
-		},
+	// Generate a cryptographically-random registration token.
+	// Hardcoded credentials are banned by CLAUDE.md and flagged by gosec G101.
+	tokenStoreIface := ctrl.GetRegistrationTokenStore()
+	if tokenStoreIface == nil {
+		t.Fatalf("registration token store is nil — controller not initialized")
 	}
-
-	// Create steward data directory
-	err = os.MkdirAll(stewardCfg.DataDir, 0755)
-	require.NoError(t, err)
-
-	// Create steward using new MQTT+QUIC testing mode
-	s, err := steward.NewForControllerTesting(stewardCfg, logger)
-	require.NoError(t, err)
-
-	// Create simple registration token for testing
-	// Format: cfgms_reg_{tenant_id}_{steward_id}_{random}
-	regToken := "cfgms_reg_test_tenant_test_steward_12345"
-
-	// Create MQTT client for steward (will be set up during Start())
-	// Note: We'll create this in Start() since we need the actual controller address
-	// For now, just create the steward with the testing constructor
+	tokenStore, ok := tokenStoreIface.(registration.Store)
+	if !ok {
+		t.Fatalf("failed to obtain registration token store: unexpected type %T", tokenStoreIface)
+	}
+	tokenReq := &registration.TokenCreateRequest{
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://localhost:0",
+		Group:         "test-group",
+		ExpiresIn:     "",
+	}
+	regTokenObj, regTokenErr := registration.CreateToken(tokenReq)
+	if regTokenErr != nil {
+		t.Fatalf("failed to create test registration token: %v", regTokenErr)
+	}
+	if err := tokenStore.SaveToken(ctx, regTokenObj); err != nil {
+		t.Fatalf("failed to save test registration token: %v", err)
+	}
+	regToken := regTokenObj.Token
 
 	return &TestEnv{
 		T:                 t,
@@ -239,61 +228,65 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		Logger:            logger,
 		Controller:        ctrl,
 		ControllerCfg:     controllerCfg,
-		Steward:           s,
-		StewardCfg:        stewardCfg,
 		CertManager:       certManager,
 		ctx:               ctx,
 		cancel:            cancel,
 		registrationToken: regToken,
+		certStoragePath:   certStoragePath,
 	}
 }
 
-// Start starts the controller and steward in the test environment
+// Start starts the controller and creates the transport client.
+// Mirrors the production pattern in cmd/steward/main.go: controller-connected
+// operation uses client.NewTransportClient directly.
 func (e *TestEnv) Start() {
-	var mqttBrokerAddr string
 	var quicAddr string
 
 	if e.useDockerController {
-		// Using Docker controller - use docker addresses
-		// Docker standalone controller uses ports 1886 (MQTT) and 4436 (QUIC)
-		mqttBrokerAddr = "tcp://localhost:1886"
+		// Using Docker controller - use docker gRPC transport address (port 4436)
 		quicAddr = "localhost:4436"
-		e.StewardCfg.ControllerAddr = e.dockerControllerAddr
 	} else {
 		// Start the in-process controller
-		_ = e.Controller.Start(e.ctx)
+		if err := e.Controller.Start(e.ctx); err != nil {
+			e.T.Fatalf("Failed to start controller: %v", err)
+		}
 
-		// Get actual controller addresses
-		controllerAddr := e.Controller.GetListenAddr()
-		e.StewardCfg.ControllerAddr = controllerAddr
-
-		// Extract host for MQTT/QUIC (controller provides these on fixed ports)
-		mqttBrokerAddr = "tcp://localhost:1883" // Controller MQTT broker
-		quicAddr = "localhost:4433"             // Controller QUIC server
+		// Get actual QUIC transport address (may be OS-assigned if port 0 is configured)
+		quicAddr = e.Controller.GetTransportListenAddr()
 	}
 
-	// Create MQTT client for steward
-	mqttClient, err := client.NewMQTTClient(&client.MQTTConfig{
-		ControllerURL:     mqttBrokerAddr,
-		QUICAddress:       quicAddr,
+	// Get CA cert PEM from cert manager so the transport client can verify the
+	// controller's server certificate (issued by the same CA).
+	caCertPEM, caErr := e.CertManager.GetCACertificate()
+	if caErr != nil {
+		e.T.Logf("Warning: Could not get CA cert for transport client TLS: %v", caErr)
+	}
+
+	// Create transport client — mirrors cmd/steward/main.go production pattern.
+	// Pass the CertManager from the test environment so on-demand cert loading is
+	// exercised in integration tests (Issue #920).
+	transportClient, err := client.NewTransportClient(&client.TransportConfig{
+		ControllerURL:     quicAddr,
 		RegistrationToken: e.registrationToken,
-		TLSCertPath:       e.StewardCfg.CertPath,
+		TLSCertPath:       e.certStoragePath,
+		CACertPEM:         string(caCertPEM),
+		CertManager:       e.CertManager,
 		Logger:            e.Logger,
 	})
 	if err != nil {
-		e.T.Fatalf("Failed to create MQTT client: %v", err)
+		e.T.Fatalf("Failed to create transport client: %v", err)
 	}
+	e.TransportClient = transportClient
 
-	// For integration tests, skip registration and directly set steward ID
-	// This avoids needing the full registration service to be running
-	// The client will be configured when we call Connect() in the steward Start() method
+	// Set steward ID before connecting — Connect() requires this to subscribe to commands.
+	// In production this is set after HTTP registration; for integration tests we use the
+	// test steward ID derived from the registration token (format: cfgms_reg_{tenant}_{steward}_{rand}).
+	transportClient.SetStewardID("test-steward")
 
-	// Inject MQTT client into steward for testing
-	e.Steward.SetMQTTClientForTesting(mqttClient)
-
-	// Start the steward (will use injected MQTT client)
-	if err := e.Steward.Start(e.ctx); err != nil {
-		e.T.Logf("Warning: Steward start returned error (may be expected for testing): %v", err)
+	// Attempt to connect — failure is expected in some test configurations where
+	// the QUIC transport listener is not yet accepting (logged as warning, not fatal).
+	if err := transportClient.Connect(e.ctx); err != nil {
+		e.T.Logf("Warning: Transport connect returned error (may be expected for testing): %v", err)
 	}
 
 	// Wait for components to initialize
@@ -304,10 +297,20 @@ func (e *TestEnv) Start() {
 	}
 }
 
-// Stop stops the controller and steward in the test environment
+// Stop stops the transport client and controller in the test environment
 func (e *TestEnv) Stop() {
-	// Stop the steward
-	_ = e.Steward.Stop(e.ctx)
+	// Disconnect transport client if started
+	if e.TransportClient != nil {
+		_ = e.TransportClient.Disconnect(e.ctx)
+		e.TransportClient = nil
+	}
+
+	// Stop global data plane provider to allow subsequent Connect() calls in the same process.
+	// The gRPC data plane provider is a process-level singleton; Disconnect() closes the session
+	// but leaves the provider in "started" state — Stop() resets it for re-use.
+	if dpProvider := dataplaneInterfaces.GetProvider("grpc"); dpProvider != nil {
+		_ = dpProvider.Stop(e.ctx)
+	}
 
 	// Only stop controller if it's in-process (not Docker)
 	if !e.useDockerController && e.Controller != nil {
@@ -391,11 +394,3 @@ func (e *TestEnv) GenerateNewClientCertificate(clientID string) (*cert.Certifica
 func (e *TestEnv) GetCertificateInfo(certType cert.CertificateType) ([]*cert.CertificateInfo, error) {
 	return e.CertManager.GetCertificatesByType(certType)
 }
-
-// CreateStewardClient is OBSOLETE - removed as part of Story #198 (MQTT+QUIC migration)
-// The old gRPC client.Client no longer exists. Use client.NewMQTTClient() instead.
-// Tests using this method need to be updated for MQTT+QUIC architecture.
-// func (e *TestEnv) CreateStewardClient() (*client.Client, error) {
-// 	actualAddr := e.Controller.GetListenAddr()
-// 	return client.New(actualAddr, e.CertManager.GetStoragePath(), e.Logger)
-// }

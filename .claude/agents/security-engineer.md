@@ -51,8 +51,7 @@ Get changed files with `git diff --name-only develop...HEAD`, then review for:
    - `sql.Open()` or `git.PlainInit()` outside `pkg/storage/` — MUST use `pkg/storage/interfaces`
    - `logrus.New()` or `zap.New()` outside `pkg/logging/` — MUST use `pkg/logging` provider
    - Custom cache implementations outside `pkg/cache/` — MUST use `pkg/cache.Cache`
-   - Direct MQTT client imports from `pkg/mqtt/client` — MUST use `pkg/controlplane/interfaces`
-   - Direct QUIC imports from `pkg/quic/client` — MUST use `pkg/dataplane/interfaces`
+   - Direct imports of deleted packages (`pkg/mqtt/`, `pkg/quic/`) — use `pkg/controlplane/interfaces` and `pkg/dataplane/interfaces`
 
 5. **Missing Input Validation**: User-supplied data must be validated before use.
 
@@ -73,11 +72,11 @@ Get changed files with `git diff --name-only develop...HEAD`, then review for:
 
 ### WARNING Issues (Should Fix, Not Blocking)
 
-8. **OWASP Top 10 Patterns**: Command injection, SSRF, broken access control.
+9. **OWASP Top 10 Patterns**: Command injection, SSRF, broken access control.
 
-9. **Cryptographic Concerns**: Weak algorithms, insufficient key lengths, predictable randomness.
+10. **Cryptographic Concerns**: Weak algorithms, insufficient key lengths, predictable randomness.
 
-10. **Logging Sensitive Data**: Secrets, tokens, or PII in log statements.
+11. **Logging Sensitive Data**: Secrets, tokens, or PII in log statements.
 
 ## Output Format
 

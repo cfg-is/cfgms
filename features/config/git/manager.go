@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2025 CFGMS Contributors
 package git
 
@@ -10,20 +10,24 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // DefaultGitManager implements the GitManager interface
 type DefaultGitManager struct {
-	provider     GitProvider
-	store        RepositoryStore
-	syncManager  SyncManager
-	hookManager  HookManager
-	sopsManager  *SOPSManager
+	provider    GitProvider
+	store       RepositoryStore
+	syncManager SyncManager
+	hookManager HookManager
+	sopsManager *SOPSManager
+	// Authoritative in-memory state: RepositoryStore (git filesystem) has no metadata persistence layer. These maps are the only record of registered repositories and their local paths. Not a cache — pkg/cache migration would make repository registration non-durable across restarts.
 	repositories map[string]*Repository
 	localCache   map[string]string // repoID -> local path
 	mu           sync.RWMutex
 	cacheDir     string
 	config       GitManagerConfig
+	logger       logging.Logger
 }
 
 // GitManagerConfig contains configuration for the Git manager
@@ -48,7 +52,10 @@ type GitManagerConfig struct {
 }
 
 // NewGitManager creates a new Git manager
-func NewGitManager(provider GitProvider, store RepositoryStore, config GitManagerConfig) *DefaultGitManager {
+func NewGitManager(provider GitProvider, store RepositoryStore, config GitManagerConfig, logger logging.Logger) *DefaultGitManager {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	if config.DefaultBranch == "" {
 		config.DefaultBranch = "main"
 	}
@@ -66,6 +73,7 @@ func NewGitManager(provider GitProvider, store RepositoryStore, config GitManage
 		localCache:   make(map[string]string),
 		cacheDir:     config.CacheDir,
 		config:       config,
+		logger:       logger,
 	}
 
 	// Initialize SOPS manager
@@ -121,8 +129,10 @@ func (m *DefaultGitManager) CreateRepository(ctx context.Context, config Reposit
 	// Generate SOPS configuration if enabled
 	if repo.SOPSConfig != nil && repo.SOPSConfig.Enabled {
 		if err := m.sopsManager.GenerateSOPSConfig(repo.SOPSConfig, localPath); err != nil {
-			// Log warning but don't fail repository creation
-			fmt.Printf("warning: failed to generate .sops.yaml: %v\n", err)
+			m.logger.Warn("failed to generate .sops.yaml",
+				"repo", logging.SanitizeLogValue(repo.Name),
+				"error", err,
+			)
 		}
 	}
 
@@ -339,8 +349,10 @@ func (m *DefaultGitManager) SaveConfiguration(ctx context.Context, ref Configura
 
 	// Store commit metadata
 	if err := m.storeCommitMetadata(ctx, ref.RepositoryID, sha, config); err != nil {
-		// Log error but don't fail the operation
-		fmt.Printf("warning: failed to store commit metadata: %v\n", err)
+		m.logger.Warn("failed to store commit metadata",
+			"repo", logging.SanitizeLogValue(ref.RepositoryID),
+			"error", err,
+		)
 	}
 
 	return nil
@@ -643,8 +655,7 @@ func (m *DefaultGitManager) ensureRepository(ctx context.Context, repoID string)
 	if exists {
 		// Pull latest changes
 		if err := m.store.Pull(ctx, localPath); err != nil {
-			// Log error but continue - we can work with cached version
-			fmt.Printf("warning: failed to pull latest changes: %v\n", err)
+			m.logger.Warn("failed to pull latest changes, using cached version", "error", err)
 		}
 		return localPath, nil
 	}
@@ -722,13 +733,16 @@ func (m *DefaultGitManager) backgroundSync() {
 			Type: RepositoryTypeClient,
 		})
 		if err != nil {
-			fmt.Printf("error listing repositories for sync: %v\n", err)
+			m.logger.Error("error listing repositories for sync", "error", err)
 			continue
 		}
 
 		for _, repo := range repos {
 			if err := m.SyncTemplates(context.Background(), repo.ID); err != nil {
-				fmt.Printf("error syncing templates for %s: %v\n", repo.ID, err)
+				m.logger.Error("error syncing templates",
+					"repo", logging.SanitizeLogValue(repo.ID),
+					"error", err,
+				)
 			}
 		}
 	}
@@ -741,7 +755,7 @@ type repoNameParts struct {
 }
 
 func parseRepositoryName(fullName string) repoNameParts {
-	// Simple implementation - in production this would be more robust
+	// Design decision: owner always defaults to "cfgms"; multi-owner name parsing deferred.
 	return repoNameParts{
 		owner: "cfgms",
 		name:  fullName,

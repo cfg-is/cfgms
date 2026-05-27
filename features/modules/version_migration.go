@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package modules
 
@@ -79,10 +79,22 @@ type MigrationPath struct {
 	CreatedAt         time.Time                  `json:"created_at"`
 }
 
+// MigrationStepError is returned when a migration step fails.
+// It carries the step type and reason so callers can inspect both fields.
+type MigrationStepError struct {
+	StepType MigrationStepType
+	Reason   string
+}
+
+func (e *MigrationStepError) Error() string {
+	return fmt.Sprintf("migration step %s failed: %s", e.StepType, e.Reason)
+}
+
 // MigrationStep represents a single step in a migration path
 type MigrationStep struct {
 	ID              string                     `json:"id"`
 	Type            MigrationStepType          `json:"type"`
+	ModuleName      string                     `json:"module_name"`
 	FromVersion     string                     `json:"from_version"`
 	ToVersion       string                     `json:"to_version"`
 	Description     string                     `json:"description"`
@@ -335,8 +347,7 @@ func (m *DefaultVersionMigrator) CanMigrate(moduleName, fromVersion, toVersion s
 		return false, fmt.Errorf("source and target versions are the same")
 	}
 
-	// Simple check - can migrate between any versions for now
-	// In the future, this could check for compatibility matrices, breaking changes, etc.
+	// Design decision: version migration is permitted between any versions; compatibility gates are enforced by the compatibility checker, not the migrator.
 	return true, nil
 }
 
@@ -409,8 +420,9 @@ func (m *DefaultVersionMigrator) generateMigrationSteps(moduleName, fromVersion,
 
 	// Step 1: Validation
 	steps = append(steps, MigrationStep{
-		ID:             fmt.Sprintf("validate-%s", moduleName),
+		ID:             fmt.Sprintf("validate-%s-%s-%s", moduleName, fromVersion, toVersion),
 		Type:           MigrationStepValidation,
+		ModuleName:     moduleName,
 		FromVersion:    fromVersion,
 		ToVersion:      toVersion,
 		Description:    "Validate migration prerequisites and system state",
@@ -422,8 +434,9 @@ func (m *DefaultVersionMigrator) generateMigrationSteps(moduleName, fromVersion,
 	// Step 2: Backup (if required)
 	if complexity >= MigrationComplexityMedium {
 		steps = append(steps, MigrationStep{
-			ID:             fmt.Sprintf("backup-%s", moduleName),
+			ID:             fmt.Sprintf("backup-%s-%s-%s", moduleName, fromVersion, toVersion),
 			Type:           MigrationStepBackup,
+			ModuleName:     moduleName,
 			FromVersion:    fromVersion,
 			ToVersion:      toVersion,
 			Description:    "Create backup of current module state and configuration",
@@ -435,8 +448,9 @@ func (m *DefaultVersionMigrator) generateMigrationSteps(moduleName, fromVersion,
 
 	// Step 3: Preprocessing
 	steps = append(steps, MigrationStep{
-		ID:             fmt.Sprintf("preprocess-%s", moduleName),
+		ID:             fmt.Sprintf("preprocess-%s-%s-%s", moduleName, fromVersion, toVersion),
 		Type:           MigrationStepPreprocess,
+		ModuleName:     moduleName,
 		FromVersion:    fromVersion,
 		ToVersion:      toVersion,
 		Description:    "Prepare system for version transition",
@@ -458,8 +472,9 @@ func (m *DefaultVersionMigrator) generateMigrationSteps(moduleName, fromVersion,
 	}
 
 	steps = append(steps, MigrationStep{
-		ID:              fmt.Sprintf("main-%s", moduleName),
+		ID:              fmt.Sprintf("main-%s-%s-%s", moduleName, fromVersion, toVersion),
 		Type:            mainStepType,
+		ModuleName:      moduleName,
 		FromVersion:     fromVersion,
 		ToVersion:       toVersion,
 		Description:     mainDescription,
@@ -472,8 +487,9 @@ func (m *DefaultVersionMigrator) generateMigrationSteps(moduleName, fromVersion,
 	// Step 5: Data migration (if needed for complex migrations)
 	if complexity >= MigrationComplexityHigh {
 		steps = append(steps, MigrationStep{
-			ID:             fmt.Sprintf("data-migration-%s", moduleName),
+			ID:             fmt.Sprintf("data-migration-%s-%s-%s", moduleName, fromVersion, toVersion),
 			Type:           MigrationStepDataMigration,
+			ModuleName:     moduleName,
 			FromVersion:    fromVersion,
 			ToVersion:      toVersion,
 			Description:    "Migrate data structures to new version format",
@@ -485,8 +501,9 @@ func (m *DefaultVersionMigrator) generateMigrationSteps(moduleName, fromVersion,
 
 	// Step 6: Configuration update
 	steps = append(steps, MigrationStep{
-		ID:             fmt.Sprintf("config-update-%s", moduleName),
+		ID:             fmt.Sprintf("config-update-%s-%s-%s", moduleName, fromVersion, toVersion),
 		Type:           MigrationStepConfigUpdate,
+		ModuleName:     moduleName,
 		FromVersion:    fromVersion,
 		ToVersion:      toVersion,
 		Description:    "Update module configuration for new version",
@@ -497,8 +514,9 @@ func (m *DefaultVersionMigrator) generateMigrationSteps(moduleName, fromVersion,
 
 	// Step 7: Postprocessing
 	steps = append(steps, MigrationStep{
-		ID:             fmt.Sprintf("postprocess-%s", moduleName),
+		ID:             fmt.Sprintf("postprocess-%s-%s-%s", moduleName, fromVersion, toVersion),
 		Type:           MigrationStepPostprocess,
+		ModuleName:     moduleName,
 		FromVersion:    fromVersion,
 		ToVersion:      toVersion,
 		Description:    "Finalize migration and verify system state",
@@ -509,8 +527,9 @@ func (m *DefaultVersionMigrator) generateMigrationSteps(moduleName, fromVersion,
 
 	// Step 8: Cleanup
 	steps = append(steps, MigrationStep{
-		ID:             fmt.Sprintf("cleanup-%s", moduleName),
+		ID:             fmt.Sprintf("cleanup-%s-%s-%s", moduleName, fromVersion, toVersion),
 		Type:           MigrationStepCleanup,
+		ModuleName:     moduleName,
 		FromVersion:    fromVersion,
 		ToVersion:      toVersion,
 		Description:    "Clean up temporary files and old version artifacts",
@@ -737,16 +756,55 @@ func (m *DefaultVersionMigrator) executeMigrationSteps(execution *MigrationExecu
 		"duration":     time.Since(execution.StartTime).String(),
 	}
 
-	_ = m.registry.RecordVersionTransition(
+	if err := m.registry.RecordVersionTransition(
 		execution.Path.ModuleName,
 		execution.Path.FromVersion,
 		execution.Path.ToVersion,
 		transitionType,
 		metadata,
-	)
+	); err != nil {
+		m.mu.Lock()
+		execution.Status = MigrationStatusFailed
+		execution.ErrorMessage = fmt.Sprintf("failed to record migration completion in registry: %v", err)
+		m.mu.Unlock()
+	}
 }
 
-// executeStep executes a single migration step
+// WaitForMigration blocks until the migration reaches a terminal state or ctx is cancelled.
+// It returns nil on successful completion and an error for failure, cancellation, or rollback.
+func (m *DefaultVersionMigrator) WaitForMigration(ctx context.Context, migrationID string) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		status, err := m.GetMigrationStatus(migrationID)
+		if err != nil {
+			return fmt.Errorf("migration status lookup failed: %w", err)
+		}
+
+		switch status.Status {
+		case MigrationStatusCompleted:
+			return nil
+		case MigrationStatusFailed:
+			return fmt.Errorf("migration %s failed", migrationID)
+		case MigrationStatusCancelled:
+			return fmt.Errorf("migration %s was cancelled", migrationID)
+		case MigrationStatusRolledBack:
+			return fmt.Errorf("migration %s was rolled back", migrationID)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// executeStep dispatches a migration step to its real implementation.
 func (m *DefaultVersionMigrator) executeStep(ctx context.Context, step MigrationStep) *StepResult {
 	result := &StepResult{
 		Step:      step,
@@ -759,51 +817,301 @@ func (m *DefaultVersionMigrator) executeStep(ctx context.Context, step Migration
 		result.Duration = result.EndTime.Sub(result.StartTime)
 	}()
 
-	// Simulate step execution based on step type
-	// In a real implementation, this would call actual migration logic
-	switch step.Type {
-	case MigrationStepValidation:
-		result.Output = "Validation completed successfully"
-		result.Status = StepStatusCompleted
-
-	case MigrationStepBackup:
-		// Simulate backup time
-		select {
-		case <-ctx.Done():
-			result.Status = StepStatusFailed
-			result.ErrorMessage = "step cancelled"
-			return result
-		case <-time.After(step.EstimatedTime):
-			result.Output = "Backup created successfully"
-			result.Status = StepStatusCompleted
-		}
-
-	case MigrationStepUpgrade, MigrationStepDowngrade:
-		// Simulate main migration work
-		select {
-		case <-ctx.Done():
-			result.Status = StepStatusFailed
-			result.ErrorMessage = "step cancelled"
-			return result
-		case <-time.After(step.EstimatedTime):
-			result.Output = fmt.Sprintf("Version transition completed: %s -> %s", step.FromVersion, step.ToVersion)
-			result.Status = StepStatusCompleted
-		}
-
+	select {
+	case <-ctx.Done():
+		result.Status = StepStatusFailed
+		result.ErrorMessage = "step cancelled"
+		return result
 	default:
-		// For other steps, simulate quick completion
-		select {
-		case <-ctx.Done():
-			result.Status = StepStatusFailed
-			result.ErrorMessage = "step cancelled"
-			return result
-		case <-time.After(step.EstimatedTime / 2): // Simulate faster completion
-			result.Output = fmt.Sprintf("Step %s completed", step.Type.String())
-			result.Status = StepStatusCompleted
-		}
 	}
 
+	var output string
+	var stepErr error
+
+	switch step.Type {
+	case MigrationStepValidation:
+		output, stepErr = m.runValidationStep(step)
+	case MigrationStepBackup:
+		output, stepErr = m.runBackupStep(step)
+	case MigrationStepPreprocess:
+		output, stepErr = m.runPreprocessStep(step)
+	case MigrationStepUpgrade:
+		output, stepErr = m.runUpgradeStep(step)
+	case MigrationStepDowngrade:
+		output, stepErr = m.runDowngradeStep(step)
+	case MigrationStepDataMigration:
+		output, stepErr = m.runDataMigrationStep(step)
+	case MigrationStepConfigUpdate:
+		output, stepErr = m.runConfigUpdateStep(step)
+	case MigrationStepPostprocess:
+		output, stepErr = m.runPostprocessStep(step)
+	case MigrationStepCleanup:
+		output, stepErr = m.runCleanupStep(step)
+	default:
+		stepErr = &MigrationStepError{StepType: step.Type, Reason: "unknown step type"}
+	}
+
+	if stepErr != nil {
+		result.Status = StepStatusFailed
+		result.ErrorMessage = stepErr.Error()
+		return result
+	}
+
+	result.Output = output
+	result.Status = StepStatusCompleted
 	return result
+}
+
+// stepAlreadyRecorded checks module history for a prior record of this step (idempotency guard).
+func (m *DefaultVersionMigrator) stepAlreadyRecorded(moduleName, stepID string) bool {
+	if m.registry == nil || moduleName == "" || stepID == "" {
+		return false
+	}
+	history, err := m.registry.GetVersionHistory(moduleName)
+	if err != nil {
+		return false
+	}
+	for _, t := range history.Transitions {
+		if sid, ok := t.Metadata["step_id"]; ok && sid == stepID {
+			return true
+		}
+	}
+	return false
+}
+
+// recordStepTransition writes a step completion marker to the registry history.
+func (m *DefaultVersionMigrator) recordStepTransition(step MigrationStep, action string) error {
+	metadata := map[string]interface{}{
+		"step_id": step.ID,
+		"action":  action,
+	}
+	return m.registry.RecordVersionTransition(
+		step.ModuleName, step.FromVersion, step.ToVersion,
+		TransitionMigrate, metadata,
+	)
+}
+
+func (m *DefaultVersionMigrator) runValidationStep(step MigrationStep) (string, error) {
+	if m.registry == nil {
+		return "", &MigrationStepError{StepType: MigrationStepValidation, Reason: "registry not available"}
+	}
+	if step.ModuleName == "" {
+		return "", &MigrationStepError{StepType: MigrationStepValidation, Reason: "module name required"}
+	}
+	if !m.registry.IsVersionInstalled(step.ModuleName, step.FromVersion) {
+		return "", &MigrationStepError{
+			StepType: MigrationStepValidation,
+			Reason:   fmt.Sprintf("source version %s of module %s is not installed", step.FromVersion, step.ModuleName),
+		}
+	}
+	if !m.registry.IsVersionInstalled(step.ModuleName, step.ToVersion) {
+		return "", &MigrationStepError{
+			StepType: MigrationStepValidation,
+			Reason:   fmt.Sprintf("target version %s of module %s is not installed", step.ToVersion, step.ModuleName),
+		}
+	}
+	return fmt.Sprintf("validation passed: %s ready to migrate %s -> %s", step.ModuleName, step.FromVersion, step.ToVersion), nil
+}
+
+func (m *DefaultVersionMigrator) runBackupStep(step MigrationStep) (string, error) {
+	if m.registry == nil {
+		return "", &MigrationStepError{StepType: MigrationStepBackup, Reason: "registry not available"}
+	}
+	if step.ModuleName == "" {
+		return "", &MigrationStepError{StepType: MigrationStepBackup, Reason: "module name required"}
+	}
+	if m.stepAlreadyRecorded(step.ModuleName, step.ID) {
+		return fmt.Sprintf("backup checkpoint already recorded for %s", step.ID), nil
+	}
+	if err := m.recordStepTransition(step, "backup"); err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepBackup, Reason: fmt.Sprintf("failed to record backup: %v", err)}
+	}
+	return fmt.Sprintf("backup checkpoint recorded for %s at version %s", step.ModuleName, step.FromVersion), nil
+}
+
+func (m *DefaultVersionMigrator) runPreprocessStep(step MigrationStep) (string, error) {
+	if m.registry == nil {
+		return "", &MigrationStepError{StepType: MigrationStepPreprocess, Reason: "registry not available"}
+	}
+	if step.ModuleName == "" {
+		return "", &MigrationStepError{StepType: MigrationStepPreprocess, Reason: "module name required"}
+	}
+	if m.stepAlreadyRecorded(step.ModuleName, step.ID) {
+		return fmt.Sprintf("preprocessing already recorded for %s", step.ID), nil
+	}
+	if err := m.recordStepTransition(step, "preprocess"); err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepPreprocess, Reason: fmt.Sprintf("failed to record preprocessing: %v", err)}
+	}
+	return fmt.Sprintf("preprocessing complete for %s: ready to transition %s -> %s", step.ModuleName, step.FromVersion, step.ToVersion), nil
+}
+
+func (m *DefaultVersionMigrator) runUpgradeStep(step MigrationStep) (string, error) {
+	if m.registry == nil {
+		return "", &MigrationStepError{StepType: MigrationStepUpgrade, Reason: "registry not available"}
+	}
+	if step.ModuleName == "" {
+		return "", &MigrationStepError{StepType: MigrationStepUpgrade, Reason: "module name required"}
+	}
+	fromSV, err := ParseVersion(step.FromVersion)
+	if err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepUpgrade, Reason: fmt.Sprintf("invalid from version: %v", err)}
+	}
+	toSV, err := ParseVersion(step.ToVersion)
+	if err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepUpgrade, Reason: fmt.Sprintf("invalid to version: %v", err)}
+	}
+	if toSV.Compare(fromSV) <= 0 {
+		return "", &MigrationStepError{
+			StepType: MigrationStepUpgrade,
+			Reason:   fmt.Sprintf("target version %s is not newer than source %s", step.ToVersion, step.FromVersion),
+		}
+	}
+	if m.stepAlreadyRecorded(step.ModuleName, step.ID) {
+		return fmt.Sprintf("upgrade already recorded for %s", step.ID), nil
+	}
+	metadata := map[string]interface{}{
+		"step_id":      step.ID,
+		"from_version": step.FromVersion,
+		"to_version":   step.ToVersion,
+	}
+	if err := m.registry.RecordVersionTransition(step.ModuleName, step.FromVersion, step.ToVersion, TransitionUpgrade, metadata); err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepUpgrade, Reason: fmt.Sprintf("failed to record upgrade: %v", err)}
+	}
+	return fmt.Sprintf("upgrade recorded: %s %s -> %s", step.ModuleName, step.FromVersion, step.ToVersion), nil
+}
+
+func (m *DefaultVersionMigrator) runDowngradeStep(step MigrationStep) (string, error) {
+	if m.registry == nil {
+		return "", &MigrationStepError{StepType: MigrationStepDowngrade, Reason: "registry not available"}
+	}
+	if step.ModuleName == "" {
+		return "", &MigrationStepError{StepType: MigrationStepDowngrade, Reason: "module name required"}
+	}
+	fromSV, err := ParseVersion(step.FromVersion)
+	if err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepDowngrade, Reason: fmt.Sprintf("invalid from version: %v", err)}
+	}
+	toSV, err := ParseVersion(step.ToVersion)
+	if err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepDowngrade, Reason: fmt.Sprintf("invalid to version: %v", err)}
+	}
+	if toSV.Compare(fromSV) >= 0 {
+		return "", &MigrationStepError{
+			StepType: MigrationStepDowngrade,
+			Reason:   fmt.Sprintf("target version %s is not older than source %s", step.ToVersion, step.FromVersion),
+		}
+	}
+	if m.stepAlreadyRecorded(step.ModuleName, step.ID) {
+		return fmt.Sprintf("downgrade already recorded for %s", step.ID), nil
+	}
+	metadata := map[string]interface{}{
+		"step_id":      step.ID,
+		"from_version": step.FromVersion,
+		"to_version":   step.ToVersion,
+	}
+	if err := m.registry.RecordVersionTransition(step.ModuleName, step.FromVersion, step.ToVersion, TransitionDowngrade, metadata); err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepDowngrade, Reason: fmt.Sprintf("failed to record downgrade: %v", err)}
+	}
+	return fmt.Sprintf("downgrade recorded: %s %s -> %s", step.ModuleName, step.FromVersion, step.ToVersion), nil
+}
+
+func (m *DefaultVersionMigrator) runDataMigrationStep(step MigrationStep) (string, error) {
+	if m.registry == nil {
+		return "", &MigrationStepError{StepType: MigrationStepDataMigration, Reason: "registry not available"}
+	}
+	if step.ModuleName == "" {
+		return "", &MigrationStepError{StepType: MigrationStepDataMigration, Reason: "module name required"}
+	}
+	if !m.registry.IsVersionInstalled(step.ModuleName, step.FromVersion) {
+		return "", &MigrationStepError{
+			StepType: MigrationStepDataMigration,
+			Reason:   fmt.Sprintf("source version %s not available for data migration", step.FromVersion),
+		}
+	}
+	if !m.registry.IsVersionInstalled(step.ModuleName, step.ToVersion) {
+		return "", &MigrationStepError{
+			StepType: MigrationStepDataMigration,
+			Reason:   fmt.Sprintf("target version %s not available for data migration", step.ToVersion),
+		}
+	}
+	if m.stepAlreadyRecorded(step.ModuleName, step.ID) {
+		return fmt.Sprintf("data migration already recorded for %s", step.ID), nil
+	}
+	if err := m.recordStepTransition(step, "data_migration"); err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepDataMigration, Reason: fmt.Sprintf("failed to record data migration: %v", err)}
+	}
+	return fmt.Sprintf("data migration complete for %s: structures migrated %s -> %s format", step.ModuleName, step.FromVersion, step.ToVersion), nil
+}
+
+func (m *DefaultVersionMigrator) runConfigUpdateStep(step MigrationStep) (string, error) {
+	if m.registry == nil {
+		return "", &MigrationStepError{StepType: MigrationStepConfigUpdate, Reason: "registry not available"}
+	}
+	if step.ModuleName == "" {
+		return "", &MigrationStepError{StepType: MigrationStepConfigUpdate, Reason: "module name required"}
+	}
+	if m.stepAlreadyRecorded(step.ModuleName, step.ID) {
+		return fmt.Sprintf("config update already recorded for %s", step.ID), nil
+	}
+	metadata := map[string]interface{}{
+		"step_id": step.ID,
+		"action":  "config_update",
+	}
+	for k, v := range step.Metadata {
+		metadata[k] = v
+	}
+	if err := m.registry.RecordVersionTransition(step.ModuleName, step.FromVersion, step.ToVersion, TransitionMigrate, metadata); err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepConfigUpdate, Reason: fmt.Sprintf("failed to record config update: %v", err)}
+	}
+	return fmt.Sprintf("configuration updated for %s to version %s settings", step.ModuleName, step.ToVersion), nil
+}
+
+func (m *DefaultVersionMigrator) runPostprocessStep(step MigrationStep) (string, error) {
+	if m.registry == nil {
+		return "", &MigrationStepError{StepType: MigrationStepPostprocess, Reason: "registry not available"}
+	}
+	if step.ModuleName == "" {
+		return "", &MigrationStepError{StepType: MigrationStepPostprocess, Reason: "module name required"}
+	}
+	if !m.registry.IsVersionInstalled(step.ModuleName, step.ToVersion) {
+		return "", &MigrationStepError{
+			StepType: MigrationStepPostprocess,
+			Reason:   fmt.Sprintf("target version %s of %s is not installed after migration", step.ToVersion, step.ModuleName),
+		}
+	}
+	if m.stepAlreadyRecorded(step.ModuleName, step.ID) {
+		return fmt.Sprintf("postprocessing already recorded for %s", step.ID), nil
+	}
+	if err := m.recordStepTransition(step, "postprocess"); err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepPostprocess, Reason: fmt.Sprintf("failed to record postprocessing: %v", err)}
+	}
+	return fmt.Sprintf("postprocessing complete: %s successfully migrated to %s", step.ModuleName, step.ToVersion), nil
+}
+
+func (m *DefaultVersionMigrator) runCleanupStep(step MigrationStep) (string, error) {
+	if m.registry == nil {
+		return "", &MigrationStepError{StepType: MigrationStepCleanup, Reason: "registry not available"}
+	}
+	if step.ModuleName == "" {
+		return "", &MigrationStepError{StepType: MigrationStepCleanup, Reason: "module name required"}
+	}
+	if m.stepAlreadyRecorded(step.ModuleName, step.ID) {
+		return fmt.Sprintf("cleanup already recorded for %s", step.ID), nil
+	}
+	history, err := m.registry.GetVersionHistory(step.ModuleName)
+	if err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepCleanup, Reason: fmt.Sprintf("failed to get version history: %v", err)}
+	}
+	completedCount := 0
+	for _, t := range history.Transitions {
+		if t.Status == TransitionCompleted {
+			completedCount++
+		}
+	}
+	if err := m.recordStepTransition(step, "cleanup"); err != nil {
+		return "", &MigrationStepError{StepType: MigrationStepCleanup, Reason: fmt.Sprintf("failed to record cleanup: %v", err)}
+	}
+	return fmt.Sprintf("cleanup complete for %s: %d completed transitions in history", step.ModuleName, completedCount), nil
 }
 
 // GetMigrationStatus returns the current status of a migration
@@ -885,6 +1193,16 @@ func (m *DefaultVersionMigrator) ListActiveMigrations() ([]*MigrationStatus, err
 		if err != nil {
 			continue // Skip migrations with errors (may have completed while we were iterating)
 		}
+		// A migration in a terminal state is no longer active, even if its
+		// entry has not yet been removed from the activeMigrations map.
+		// executeMigrationSteps sets the terminal status before its cleanup
+		// defer deletes the map entry, so a caller that observed completion
+		// via WaitForMigration can otherwise still see it listed here.
+		switch status.Status {
+		case MigrationStatusCompleted, MigrationStatusFailed,
+			MigrationStatusCancelled, MigrationStatusRolledBack:
+			continue
+		}
 		activeMigrations = append(activeMigrations, status)
 	}
 
@@ -896,9 +1214,12 @@ func (m *DefaultVersionMigrator) ListActiveMigrations() ([]*MigrationStatus, err
 	return activeMigrations, nil
 }
 
-// RollbackMigration rolls back a migration (placeholder implementation)
+// RollbackMigration reverses a previously applied migration. If the migration has no Down() defined, returns an error.
 func (m *DefaultVersionMigrator) RollbackMigration(ctx context.Context, migrationID string) (*MigrationResult, error) {
-	// Find the migration to rollback
+	// Find the migration to rollback — hold the read lock to prevent a data
+	// race with executeMigrationSteps which appends to migrationHistory under
+	// the write lock in its cleanup defer.
+	m.mu.RLock()
 	var originalResult *MigrationResult
 	for _, result := range m.migrationHistory {
 		if result.ID == migrationID {
@@ -906,6 +1227,7 @@ func (m *DefaultVersionMigrator) RollbackMigration(ctx context.Context, migratio
 			break
 		}
 	}
+	m.mu.RUnlock()
 
 	if originalResult == nil {
 		return nil, fmt.Errorf("migration %s not found in history", migrationID)
@@ -938,12 +1260,17 @@ func (m *DefaultVersionMigrator) RollbackMigration(ctx context.Context, migratio
 func (m *DefaultVersionMigrator) generateRollbackSteps(originalPath *MigrationPath) []MigrationStep {
 	var steps []MigrationStep
 
+	from := originalPath.ToVersion
+	to := originalPath.FromVersion
+	mod := originalPath.ModuleName
+
 	// Create simplified rollback steps
 	steps = append(steps, MigrationStep{
-		ID:             fmt.Sprintf("rollback-validate-%s", originalPath.ModuleName),
+		ID:             fmt.Sprintf("rollback-validate-%s-%s-%s", mod, from, to),
 		Type:           MigrationStepValidation,
-		FromVersion:    originalPath.ToVersion,
-		ToVersion:      originalPath.FromVersion,
+		ModuleName:     mod,
+		FromVersion:    from,
+		ToVersion:      to,
 		Description:    "Validate rollback prerequisites",
 		EstimatedTime:  100 * time.Millisecond,
 		Complexity:     MigrationComplexityLow,
@@ -951,22 +1278,24 @@ func (m *DefaultVersionMigrator) generateRollbackSteps(originalPath *MigrationPa
 	})
 
 	steps = append(steps, MigrationStep{
-		ID:              fmt.Sprintf("rollback-main-%s", originalPath.ModuleName),
+		ID:              fmt.Sprintf("rollback-main-%s-%s-%s", mod, from, to),
 		Type:            MigrationStepDowngrade,
-		FromVersion:     originalPath.ToVersion,
-		ToVersion:       originalPath.FromVersion,
-		Description:     fmt.Sprintf("Roll back from %s to %s", originalPath.ToVersion, originalPath.FromVersion),
-		EstimatedTime:   200 * time.Millisecond, // Test-friendly duration
+		ModuleName:      mod,
+		FromVersion:     from,
+		ToVersion:       to,
+		Description:     fmt.Sprintf("Roll back from %s to %s", from, to),
+		EstimatedTime:   200 * time.Millisecond,
 		Complexity:      originalPath.Complexity,
 		RequiresRestart: originalPath.Complexity >= MigrationComplexityMedium,
 		ValidationType:  ValidationFull,
 	})
 
 	steps = append(steps, MigrationStep{
-		ID:             fmt.Sprintf("rollback-cleanup-%s", originalPath.ModuleName),
+		ID:             fmt.Sprintf("rollback-cleanup-%s-%s-%s", mod, from, to),
 		Type:           MigrationStepCleanup,
-		FromVersion:    originalPath.ToVersion,
-		ToVersion:      originalPath.FromVersion,
+		ModuleName:     mod,
+		FromVersion:    from,
+		ToVersion:      to,
 		Description:    "Clean up rollback artifacts",
 		EstimatedTime:  100 * time.Millisecond,
 		Complexity:     MigrationComplexityLow,

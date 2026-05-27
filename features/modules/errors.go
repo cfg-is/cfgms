@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package modules
 
@@ -11,4 +11,6 @@ var (
 	ErrInvalidInput = errors.New("invalid input")
 	// ErrUnsupportedPlatform is returned when a feature is not supported on the current platform
 	ErrUnsupportedPlatform = errors.New("unsupported platform")
+	// ErrNotImplemented is returned when a requested operation is not yet supported.
+	ErrNotImplemented = errors.New("operation not implemented")
 )

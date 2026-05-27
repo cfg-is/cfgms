@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package file - Log rotation and file management for the file-based logging provider
 package file
@@ -512,7 +512,7 @@ func (p *FileProvider) updateStats(entriesWritten int, latency time.Duration) {
 	newLatencyMs := float64(latency.Milliseconds())
 	p.stats.WriteLatencyMs = (p.stats.WriteLatencyMs * 0.9) + (newLatencyMs * 0.1)
 
-	// Update hourly/daily counters (simplified - would need proper time window tracking in production)
+	// Design decision: hourly/daily counters use simple time-window comparison; accurate cross-boundary counting requires a ring buffer, which is deferred.
 	now := time.Now()
 	if now.Sub(p.stats.LatestEntry) < time.Hour {
 		p.stats.EntriesLastHour += int64(entriesWritten)

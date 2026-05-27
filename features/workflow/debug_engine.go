@@ -1,10 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package workflow
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -389,56 +393,107 @@ func (de *DebugEngineImpl) GetAPICallHistory(sessionID string) ([]APICallInfo, e
 	return history, nil
 }
 
-// ReplayAPICall replays a previous API call
+// ReplayAPICall replays a previous API call by re-issuing the original HTTP request
+// and returning the actual response received from the server.
 func (de *DebugEngineImpl) ReplayAPICall(sessionID string, callID string) (*APICallInfo, error) {
 	session, err := de.GetDebugSession(sessionID)
 	if err != nil {
 		return nil, err
 	}
 
+	// Copy the call info under the read lock so we don't hold it during the HTTP call.
 	session.mutex.RLock()
-	defer session.mutex.RUnlock()
-
-	// Find the API call to replay
-	var originalCall *APICallInfo
+	var original APICallInfo
+	found := false
 	for _, call := range session.APICallLog {
 		if call.ID == callID {
-			originalCall = &call
+			original = call
+			found = true
 			break
 		}
 	}
+	session.mutex.RUnlock()
 
-	if originalCall == nil {
+	if !found {
 		return nil, fmt.Errorf("API call not found: %s", callID)
 	}
-
-	if !originalCall.CanReplay {
+	if !original.CanReplay {
 		return nil, fmt.Errorf("API call cannot be replayed: %s", callID)
 	}
 
-	// TODO: Implement actual API call replay logic
-	// This would involve re-executing the HTTP request with the same parameters
-	// For now, return a placeholder response
+	// Prepare the request body.
+	var bodyReader io.Reader
+	if original.RequestBody != nil {
+		bodyBytes, err := json.Marshal(original.RequestBody)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+		bodyReader = bytes.NewReader(bodyBytes)
+	}
+
+	req, err := http.NewRequestWithContext(session.Context, original.Method, original.URL, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create replay request: %w", err)
+	}
+	for k, v := range original.RequestHeaders {
+		req.Header.Set(k, v)
+	}
+
+	startTime := time.Now()
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, doErr := client.Do(req)
+	duration := time.Since(startTime)
 
 	replayCall := &APICallInfo{
-		ID:              generateAPICallID(),
-		StepName:        originalCall.StepName + "_replay",
-		Timestamp:       time.Now(),
-		Method:          originalCall.Method,
-		URL:             originalCall.URL,
-		RequestHeaders:  originalCall.RequestHeaders,
-		RequestBody:     originalCall.RequestBody,
-		ResponseStatus:  200, // Placeholder
-		ResponseHeaders: map[string]string{"X-Replay": "true"},
-		ResponseBody:    map[string]interface{}{"replayed": true},
-		Duration:        100 * time.Millisecond,
-		CanReplay:       true,
+		ID:             generateAPICallID(),
+		StepName:       original.StepName + "_replay",
+		Timestamp:      time.Now(),
+		Method:         original.Method,
+		URL:            original.URL,
+		RequestHeaders: original.RequestHeaders,
+		RequestBody:    original.RequestBody,
+		Duration:       duration,
+		CanReplay:      true,
+	}
+
+	if doErr != nil {
+		replayCall.Error = doErr.Error()
+		de.logger.Warn("Replay HTTP request failed",
+			"session_id", sessionID,
+			"call_id", callID,
+			"error", doErr)
+		return replayCall, nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		replayCall.ResponseStatus = resp.StatusCode
+		replayCall.Error = fmt.Sprintf("failed to read response body: %s", readErr)
+		return replayCall, nil
+	}
+	replayCall.ResponseStatus = resp.StatusCode
+
+	responseHeaders := make(map[string]string, len(resp.Header))
+	for k, v := range resp.Header {
+		if len(v) > 0 {
+			responseHeaders[k] = v[0]
+		}
+	}
+	replayCall.ResponseHeaders = responseHeaders
+
+	var jsonBody interface{}
+	if json.Unmarshal(body, &jsonBody) == nil {
+		replayCall.ResponseBody = jsonBody
+	} else {
+		replayCall.ResponseBody = string(body)
 	}
 
 	de.logger.Info("Replayed API call",
 		"session_id", sessionID,
 		"original_call_id", callID,
-		"replay_call_id", replayCall.ID)
+		"replay_call_id", replayCall.ID,
+		"status", replayCall.ResponseStatus)
 
 	return replayCall, nil
 }
@@ -460,25 +515,52 @@ func (de *DebugEngineImpl) GetStepHistory(sessionID string) ([]DebugStepInfo, er
 	return history, nil
 }
 
-// RollbackToStep rolls back execution to a previous step (for safe testing)
+// RollbackToStep rolls back execution to a previous step by truncating the step
+// history and restoring variables to the snapshot recorded before that step ran.
 func (de *DebugEngineImpl) RollbackToStep(sessionID string, stepName string) error {
-	_, err := de.GetDebugSession(sessionID)
+	session, err := de.GetDebugSession(sessionID)
 	if err != nil {
 		return err
 	}
 
-	// TODO: Implement rollback functionality
-	// This would involve:
-	// 1. Finding the target step in the step history
-	// 2. Restoring variable state from that point
-	// 3. Resetting execution position
-	// 4. Clearing subsequent step results
+	// Truncate step history and reset execution position under the session lock.
+	// Do NOT hold session.mutex while acquiring VariableInspector.mutex — other
+	// methods (InspectVariables, UpdateVariable) take only VariableInspector.mutex,
+	// so nesting them would create an inconsistent lock ordering.
+	session.mutex.Lock()
+	targetIdx := -1
+	for i, step := range session.StepHistory {
+		if step.StepName == stepName {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx < 0 {
+		session.mutex.Unlock()
+		return fmt.Errorf("step not found in history: %s", stepName)
+	}
+	targetStep := session.StepHistory[targetIdx]
+	session.StepHistory = session.StepHistory[:targetIdx]
+	session.CurrentStep = stepName
+	session.mutex.Unlock()
 
-	de.logger.Warn("Rollback functionality not yet implemented",
+	// Restore variable state under the variable inspector lock (taken separately).
+	if targetStep.VariablesBefore != nil {
+		restoredVars := make(map[string]interface{}, len(targetStep.VariablesBefore))
+		for k, v := range targetStep.VariablesBefore {
+			restoredVars[k] = v
+		}
+		session.VariableInspector.mutex.Lock()
+		session.VariableInspector.CurrentVariables = restoredVars
+		session.VariableInspector.mutex.Unlock()
+	}
+
+	de.logger.Info("Rolled back to step",
 		"session_id", sessionID,
-		"target_step", stepName)
+		"target_step", stepName,
+		"history_length", len(session.StepHistory))
 
-	return fmt.Errorf("rollback functionality not yet implemented")
+	return nil
 }
 
 // checkBreakpoint checks if execution should pause at a breakpoint
@@ -492,11 +574,12 @@ func (de *DebugEngineImpl) checkBreakpoint(session *DebugSession, stepName strin
 			continue
 		}
 
-		// Check condition if present
+		// Check condition if present; skip this breakpoint when the condition is false.
 		if breakpoint.Condition != nil {
-			// TODO: Implement condition evaluation
-			// For now, assume conditions pass
-			_ = breakpoint.Condition // Acknowledge the condition for linting
+			conditionMet, err := de.workflowEngine.evaluateCondition(breakpoint.Condition, variables)
+			if err != nil || !conditionMet {
+				continue
+			}
 		}
 
 		// Update breakpoint hit information

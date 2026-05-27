@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package logging
 
@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 )
+
+// maxRecursionDepth is the maximum recursion depth for SanitizeFieldsRecursive.
+const maxRecursionDepth = 10
 
 // maxLogValueLength is the maximum length for a sanitized log value.
 // Values exceeding this length are truncated with a [truncated] suffix.
@@ -120,6 +123,32 @@ func SanitizeLogValue(s string) string {
 	return s
 }
 
+// RedactedID truncates an opaque identifier to an 8-character prefix followed by
+// "…" (U+2026) for safe log inclusion. Short identifiers (≤8 bytes) are returned
+// in full with the ellipsis appended. The empty string is returned unchanged.
+//
+// Control characters in the prefix are neutralised via SanitizeLogValue so that
+// callers need not pre-clean token or session ID values before logging.
+//
+// When SensitiveLogConfig.UnredactedSensitiveValues is true (development opt-in),
+// the full sanitized value is returned without truncation.
+//
+// Usage:
+//
+//	logger.Info("session opened", "session_id", logging.RedactedID(sessionID))
+func RedactedID(s string) string {
+	if s == "" {
+		return ""
+	}
+	if GetSensitiveLogConfig().UnredactedSensitiveValues {
+		return SanitizeLogValue(s)
+	}
+	if len(s) <= 8 {
+		return SanitizeLogValue(s) + "…"
+	}
+	return SanitizeLogValue(s[:8]) + "…"
+}
+
 // sanitizeMapValues sanitizes all string values in a map for safe logging.
 // Non-string values are left unchanged.
 func sanitizeMapValues(fields map[string]any) {
@@ -156,7 +185,7 @@ func formatKeysAndValues(keysAndValues []any) string {
 		if str, ok := val.(string); ok {
 			b.WriteString(SanitizeLogValue(str))
 		} else {
-			b.WriteString(fmt.Sprintf("%v", val))
+			fmt.Fprintf(&b, "%v", val)
 		}
 	}
 
@@ -181,5 +210,56 @@ func sanitizeKeysAndValues(keysAndValues []any) []any {
 		}
 	}
 
+	return result
+}
+
+// SanitizeFieldsRecursive sanitizes all string keys and values in fields for safe
+// log inclusion. It recurses into nested map[string]interface{} and []interface{}
+// values up to 10 levels deep. Values implementing error have Error() sanitized;
+// fmt.Stringer values have String() sanitized. Non-string scalars pass through
+// unchanged. Maps at depth >= 10 are replaced with {"_truncated": "max depth exceeded"}.
+func SanitizeFieldsRecursive(fields map[string]interface{}) map[string]interface{} {
+	return sanitizeMapRecursive(fields, 0)
+}
+
+func sanitizeMapRecursive(fields map[string]interface{}, depth int) map[string]interface{} {
+	if depth >= maxRecursionDepth {
+		return map[string]interface{}{"_truncated": "max depth exceeded"}
+	}
+	result := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		result[SanitizeLogValue(k)] = sanitizeValueRecursive(v, depth+1)
+	}
+	return result
+}
+
+func sanitizeValueRecursive(v interface{}, depth int) interface{} {
+	if v == nil {
+		return nil
+	}
+	switch val := v.(type) {
+	case string:
+		return SanitizeLogValue(val)
+	case map[string]interface{}:
+		return sanitizeMapRecursive(val, depth)
+	case []interface{}:
+		return sanitizeSliceRecursive(val, depth)
+	case error:
+		return SanitizeLogValue(val.Error())
+	case fmt.Stringer:
+		return SanitizeLogValue(val.String())
+	default:
+		return v
+	}
+}
+
+func sanitizeSliceRecursive(items []interface{}, depth int) []interface{} {
+	if depth >= maxRecursionDepth {
+		return []interface{}{"_truncated: max depth exceeded"}
+	}
+	result := make([]interface{}, len(items))
+	for i, item := range items {
+		result[i] = sanitizeValueRecursive(item, depth+1)
+	}
 	return result
 }

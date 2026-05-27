@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package reports provides comprehensive DNA monitoring and reporting capabilities for CFGMS.
 //
@@ -48,7 +48,7 @@
 //
 // Integration:
 // This package integrates with existing CFGMS components:
-//   - features/steward/dna/storage: DNA data storage and querying
+//   - features/controller/fleet/storage: DNA data storage and querying
 //   - features/steward/dna/drift: Drift detection and event management
 //   - features/templates: Template processing and rendering
 //   - features/controller/api: REST API infrastructure
@@ -65,13 +65,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/reports/engine"
 	"github.com/cfgis/cfgms/features/reports/exporters"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/reports/provider"
 	"github.com/cfgis/cfgms/features/reports/templates"
-	"github.com/cfgis/cfgms/features/steward/dna/drift"
-	"github.com/cfgis/cfgms/features/steward/dna/storage"
+	"github.com/cfgis/cfgms/pkg/dna/drift"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 

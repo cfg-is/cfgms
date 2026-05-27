@@ -1,11 +1,17 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package gdap
 
 import (
+	"net/http"
+	"os"
 	"testing"
 
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	saas "github.com/cfgis/cfgms/features/saas"
+	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestGDAPTypes tests the GDAP data structures and basic functionality
@@ -188,54 +194,38 @@ func TestGDAPRoleRequirements(t *testing.T) {
 	})
 
 	t.Run("UnknownResourceDefault", func(t *testing.T) {
-		// Test that unknown resources default to Global Administrator
-		defaultRoles := []string{"Global Administrator"}
-		assert.Equal(t, defaultRoles, []string{"Global Administrator"})
-	})
-}
-
-func TestGDAPCredentialStoreAdapter(t *testing.T) {
-	// Simple test to validate the adapter structure exists
-	// This would be expanded with real credential store implementation
-
-	t.Run("AdapterStructure", func(t *testing.T) {
-		// Test that we can create the adapter (even with nil CredentialStore)
-		adapter := &credentialStoreAdapter{nil}
-		assert.NotNil(t, adapter)
-
-		// Test IsAvailable method
-		assert.True(t, adapter.IsAvailable())
-
-		// Test error methods return meaningful errors
-		err := adapter.StoreClientSecret("test", "secret")
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "client secret storage not implemented")
-
-		_, err = adapter.GetClientSecret("test")
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "client secret retrieval not implemented")
+		// Verify the production method returns ["Global Administrator"] for unmapped resources.
+		provider := NewGDAPProvider(nil, &http.Client{}, "partner-tenant")
+		roles := provider.GetGDAPRoleRequirements("unknown_resource", "read")
+		assert.Equal(t, []string{"Global Administrator"}, roles)
 	})
 }
 
 func TestGDAPProviderCreation(t *testing.T) {
-	// Test that we can create a GDAP provider (focusing on structure, not functionality)
+	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
+		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
+	}
 
-	t.Run("NewGDAPProviderStructure", func(t *testing.T) {
-		// This test validates the provider can be created
-		// Even though we can't easily test the full functionality without complex mocking
+	tmpDir := t.TempDir()
+	provider := &stewardprovider.StewardProvider{}
+	store, err := provider.CreateSecretStore(map[string]interface{}{"secrets_dir": tmpDir})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 
-		// Note: We can't create a real provider in unit tests without mocking saas.NewMicrosoftMultiTenantProvider
-		// But we can test the structure and constants
+	credStore := saas.NewSecretStoreCredentialStore(store)
+	var _ auth.CredentialStore = credStore
 
-		partnerTenantID := "test-partner-tenant"
-		assert.NotEmpty(t, partnerTenantID)
+	httpClient := &http.Client{}
+	partnerTenantID := "test-partner-tenant"
 
-		// Test that we have the required types and constants
-		assert.Equal(t, GDAPStatusActive, GDAPStatusActive)
-		assert.Equal(t, GDAPStatusPending, GDAPStatusPending)
-		assert.Equal(t, GDAPStatusExpired, GDAPStatusExpired)
-		assert.Equal(t, GDAPStatusTerminated, GDAPStatusTerminated)
-	})
+	gdapProvider := NewGDAPProvider(credStore, httpClient, partnerTenantID)
+	assert.NotNil(t, gdapProvider)
+	assert.Equal(t, partnerTenantID, gdapProvider.partnerTenantID)
+	assert.NotNil(t, gdapProvider.gdapClient)
+
+	// Smoke-test: provider info is populated by the embedded MicrosoftMultiTenantProvider.
+	info := gdapProvider.GetInfo()
+	assert.NotEmpty(t, info.Name)
 }
 
 // TestGDAPImplementationComplete validates that all required types and functions are implemented
@@ -251,8 +241,7 @@ func TestGDAPImplementationComplete(t *testing.T) {
 		var _ = CustomerInfo{}
 		var _ = GDAPClientConfig{}
 
-		// This test will fail at compile time if any of these types don't exist
-		assert.True(t, true)
+		// Compile-time guard: the test fails to build if any type is removed.
 	})
 
 	t.Run("RequiredFunctionsExist", func(t *testing.T) {

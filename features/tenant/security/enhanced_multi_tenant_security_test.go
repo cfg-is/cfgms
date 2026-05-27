@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package security
 
@@ -11,25 +11,26 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/tenant"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	"github.com/cfgis/cfgms/pkg/audit"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 func TestEnhancedMultiTenantSecurity(t *testing.T) {
 	ctx := context.Background()
 
 	// Setup test infrastructure with durable storage (git-backed)
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
-	require.NoError(t, err)
+	storageManager := pkgtesting.SetupTestStorage(t)
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, nil)
-	isolationEngine := NewTenantIsolationEngine(tenantManager)
+	securityAuditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "tenant-security-enhanced")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_ = securityAuditMgr.Stop(stopCtx)
+	})
+	isolationEngine := NewTenantIsolationEngine(tenantManager, securityAuditMgr)
 	// Get the audit logger from the isolation engine to ensure we query the same logger that receives events
 	auditLogger := isolationEngine.GetAuditLogger()
 	policyEngine := NewTenantSecurityPolicyEngine(tenantManager, auditLogger, isolationEngine)
@@ -558,6 +559,7 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 			ResourceID:   "patient-data/records",
 			Context: map[string]string{
 				"mfa_verified": "true",
+				"encrypted":    "true",
 			},
 			Permissions: []string{"patient_read"},
 		}

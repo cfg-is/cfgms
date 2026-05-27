@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package authdefense provides three-tier authorization defense: per-IP rate limiting,
 // per-tenant circuit breakers, and a global circuit breaker to protect against

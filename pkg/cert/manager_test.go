@@ -1,10 +1,18 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package cert
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,7 +131,10 @@ func TestManager_GenerateServerCertificate(t *testing.T) {
 	assert.NotEmpty(t, cert.SerialNumber)
 	assert.NotEmpty(t, cert.CertificatePEM)
 	assert.NotEmpty(t, cert.PrivateKeyPEM)
-	assert.True(t, cert.IsValid)
+
+	serverResult, err := manager.ValidateCertificate(cert.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, serverResult.IsValid)
 
 	// Verify certificate is stored
 	storedCert, err := manager.GetCertificate(cert.SerialNumber)
@@ -170,7 +181,10 @@ func TestManager_GenerateClientCertificate(t *testing.T) {
 	assert.NotEmpty(t, cert.SerialNumber)
 	assert.NotEmpty(t, cert.CertificatePEM)
 	assert.NotEmpty(t, cert.PrivateKeyPEM)
-	assert.True(t, cert.IsValid)
+
+	clientResult, err := manager.ValidateCertificate(cert.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, clientResult.IsValid)
 
 	// Verify certificate is stored
 	storedCert, err := manager.GetCertificate(cert.SerialNumber)
@@ -467,4 +481,134 @@ func TestManager_SaveCertificateFiles(t *testing.T) {
 	savedKeyPEM, err := os.ReadFile(keyPath)
 	require.NoError(t, err)
 	assert.Equal(t, cert.PrivateKeyPEM, savedKeyPEM)
+}
+
+func TestManager_GetClientCertificate(t *testing.T) {
+	tempDir := t.TempDir()
+	manager, err := NewManager(&ManagerConfig{
+		StoragePath: tempDir,
+		CAConfig: &CAConfig{
+			Organization: "Test",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// No client cert in store yet — must return an error.
+	_, err = manager.GetClientCertificate(ctx)
+	assert.Error(t, err, "should error when no client cert exists")
+
+	// Generate the first client certificate.
+	cert1, err := manager.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-001",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// GetClientCertificate must return the cert successfully.
+	tlsCert1, err := manager.GetClientCertificate(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, tlsCert1)
+	assert.NotEmpty(t, tlsCert1.Certificate, "TLS cert must contain the leaf certificate bytes")
+
+	// Generate a second client certificate (simulates rotation).
+	cert2, err := manager.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-001-renewed",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// GetClientCertificate must now return the newest cert — leaf bytes differ.
+	tlsCert2, err := manager.GetClientCertificate(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, tlsCert2)
+	assert.NotEqual(t, cert1.SerialNumber, cert2.SerialNumber,
+		"rotation must produce a cert with a different serial")
+	// The leaf DER bytes are different between the two generated certs.
+	assert.NotEqual(t, tlsCert1.Certificate[0], tlsCert2.Certificate[0],
+		"second call must return the newer cert after rotation")
+}
+
+func TestManager_ValidateCertificate_SignedByDifferentCA(t *testing.T) {
+	tempDir1 := t.TempDir()
+	tempDir2 := t.TempDir()
+
+	manager1, err := NewManager(&ManagerConfig{
+		StoragePath: tempDir1,
+		CAConfig:    &CAConfig{Organization: "TestOrg1", Country: "US", ValidityDays: 365},
+	})
+	require.NoError(t, err)
+
+	manager2, err := NewManager(&ManagerConfig{
+		StoragePath: tempDir2,
+		CAConfig:    &CAConfig{Organization: "TestOrg2", Country: "US", ValidityDays: 365},
+	})
+	require.NoError(t, err)
+
+	// Cert issued by manager2's CA — manager1 should reject it.
+	cert, err := manager2.GenerateServerCertificate(&ServerCertConfig{
+		CommonName:   "cross-ca-server",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	result, err := manager1.ValidateCertificate(cert.CertificatePEM)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.False(t, result.IsValid, "cert signed by a different CA must not be valid")
+	require.NotEmpty(t, result.Errors, "expected at least one error")
+	foundSig := false
+	for _, e := range result.Errors {
+		if strings.Contains(e, "signature") {
+			foundSig = true
+			break
+		}
+	}
+	assert.True(t, foundSig, "expected a signature error; got: %v", result.Errors)
+}
+
+func TestManager_ValidateCertificate_Expired(t *testing.T) {
+	tempDir := t.TempDir()
+	manager, err := NewManager(&ManagerConfig{
+		StoragePath: tempDir,
+		CAConfig:    &CAConfig{Organization: "Test", Country: "US", ValidityDays: 365},
+	})
+	require.NoError(t, err)
+
+	expiredPEM := generateExpiredCertPEM(t, manager.ca)
+
+	result, err := manager.ValidateCertificate(expiredPEM)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.False(t, result.IsValid, "expired cert must not be valid")
+	assert.True(t, result.IsExpired, "IsExpired must be true for expired cert")
+}
+
+// generateExpiredCertPEM creates a cert signed by ca with NotAfter in the past.
+func generateExpiredCertPEM(t *testing.T, ca *CA) []byte {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "expired-test"},
+		NotBefore:    time.Now().Add(-48 * time.Hour),
+		NotAfter:     time.Now().Add(-24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.certificate, &key.PublicKey, ca.privateKey)
+	require.NoError(t, err)
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 }

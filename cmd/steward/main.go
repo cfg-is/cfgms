@@ -1,51 +1,134 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
+
 package main
 
 import (
+	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/cfgis/cfgms/cmd/steward/service"
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/registration"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/version"
+	"github.com/spf13/cobra"
 
 	// Import logging providers to register them
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
-	_ "github.com/cfgis/cfgms/pkg/logging/providers/timescale"
-
-	// Import storage providers to register them
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 
 	// Import secrets providers to register them
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 )
 
-func main() {
-	// Parse command line arguments
-	var (
-		configPath = flag.String("config", "", "Path to configuration file (enables standalone mode)")
-		mode       = flag.String("mode", "", "Operation mode: 'standalone' or 'controller' (optional if config provided)")
-		logLevel   = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-		provider   = flag.String("log-provider", "file", "Logging provider: file, timescale")
-		regCode    = flag.String("regcode", "", "Registration code for automatic tenant registration (deprecated, use --regtoken)")
-		regToken   = flag.String("regtoken", "", "Registration token for automatic tenant registration")
-	)
-	flag.Parse()
+// ControllerURL is the controller address baked in at build time via ldflags.
+// Set during build: go build -ldflags "-X main.ControllerURL=https://ctrl.example.com"
+// No runtime override is supported — the signed binary is a trust assertion about
+// which controller it connects to.
+var ControllerURL string
 
-	// Initialize global logging provider
+func main() {
+	// On Windows: detect if launched by the Service Control Manager and run as
+	// a Windows service. This must happen before any cobra / flag parsing.
+	if checkAndRunAsWindowsService() {
+		return
+	}
+
+	rootCmd := buildRootCommand()
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// buildRootCommand constructs the cobra command tree for cfgms-steward.
+func buildRootCommand() *cobra.Command {
+	var (
+		configPath string
+		regToken   string
+	)
+
+	root := &cobra.Command{
+		Use:   "cfgms-steward",
+		Short: "CFGMS Steward — endpoint configuration management agent",
+		Long: fmt.Sprintf(`CFGMS Steward %s
+
+Manages the local endpoint configuration on behalf of a CFGMS controller.
+
+Entry paths:
+  cfgms-steward --regtoken TOKEN     Run in foreground (controller-connected)
+  cfgms-steward --config path.cfg    Run in standalone mode
+  cfgms-steward install --regtoken TOKEN  Install as OS service
+  cfgms-steward                      Interactive mode (prompts for token)`, version.Short()),
+		// SilenceUsage prevents cobra printing usage on every error.
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRootCommand(cmd, regToken, configPath)
+		},
+	}
+
+	// Flags used by the root command (foreground run mode).
+	root.Flags().StringVar(&configPath, "config", "", "Path to configuration file (enables standalone mode)")
+	root.Flags().StringVar(&regToken, "regtoken", "", "Registration token for controller registration")
+
+	// Subcommands.
+	root.AddCommand(
+		buildInstallCommand(),
+		buildUninstallCommand(),
+		buildStatusCommand(),
+	)
+
+	return root
+}
+
+// runRootCommand implements the default (foreground) run behaviour.
+// When no meaningful flags are provided it enters interactive mode.
+func runRootCommand(cmd *cobra.Command, regToken, configPath string) error {
+	// Interactive mode: no flags set and no subcommand selected.
+	noFlags := regToken == "" && configPath == ""
+	if noFlags {
+		return runInteractive()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		cancel()
+	}()
+
+	return runSteward(ctx, regToken, configPath)
+}
+
+// runSteward starts the steward with the given configuration and blocks until
+// ctx is cancelled. It is called from both the root cobra command and the
+// Windows service handler.
+func runSteward(ctx context.Context, regToken, configPath string) error {
+	// Initialize global logging provider. File is the only supported provider
+	// for the steward binary. Log level is read from CFGMS_LOG_LEVEL (default INFO).
+	logDir := os.Getenv("CFGMS_LOG_DIR")
+	if logDir == "" {
+		logDir = "/tmp/cfgms"
+		log.Printf("WARNING: Using /tmp/cfgms for logs — set CFGMS_LOG_DIR for production deployments")
+	}
 	loggingConfig := &logging.LoggingConfig{
-		Provider:          *provider,
-		Level:             strings.ToUpper(*logLevel),
+		Provider:          "file",
+		Level:             logLevelFromEnv(),
 		ServiceName:       "steward",
 		Component:         "main",
 		TenantIsolation:   true,
@@ -55,288 +138,709 @@ func main() {
 		BatchSize:         100,
 		FlushInterval:     5 * time.Second,
 		RetentionDays:     30,
-		Config:            make(map[string]interface{}),
-	}
-
-	// Configure file provider if selected
-	if *provider == "file" {
-		logDir := os.Getenv("CFGMS_LOG_DIR")
-		if logDir == "" {
-			logDir = "/tmp/cfgms"
-			log.Printf("WARNING: Using /tmp/cfgms for logs — set CFGMS_LOG_DIR for production deployments")
-		}
-		loggingConfig.Config["directory"] = logDir
+		Config: map[string]interface{}{
+			"directory": logDir,
+		},
 	}
 
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
-		log.Fatalf("Failed to initialize global logging: %v", err)
+		return fmt.Errorf("failed to initialize global logging: %w", err)
 	}
+	(&logging.TelemetryBridge{}).Initialize()
 
-	// Initialize global logger factory
 	logging.InitializeGlobalLoggerFactory("steward", "main")
-
-	// Set up logging using global provider
 	logger := logging.ForComponent("steward")
 
-	// Set up context with cancellation (BEFORE registration)
-	// This context is used for long-lived MQTT operations
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Set up signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// Handle registration token
-	var mqttClient *client.MQTTClient
-	if *regToken != "" {
-		// Registration token (new method - API key style - Story #198)
-		tokenPrefix := *regToken
-		if len(*regToken) > 15 {
-			tokenPrefix = (*regToken)[:15] + "..."
-		}
-		logger.Info("Using registration token for auto-registration (MQTT+QUIC mode)",
+	// gRPC transport registration flow.
+	if regToken != "" {
+		logger.Info("Using registration token for auto-registration (gRPC transport mode)",
 			"operation", "registration_init",
-			"token_prefix", tokenPrefix)
+			"token_prefix", logging.RedactedID(regToken))
 
-		// Use new MQTT+QUIC registration flow
-		// Pass main application context for long-lived MQTT operations
-		mqttCl, err := registerAndConnectMQTT(ctx, *regToken, logger)
+		transportCl, err := registerAndConnect(ctx, regToken, logger)
 		if err != nil {
-			logger.Fatal("Failed to register with MQTT",
-				"operation", "registration_mqtt",
-				"error", err.Error())
+			return fmt.Errorf("failed to register with controller: %w", err)
 		}
 
-		mqttClient = mqttCl
-
-		logger.Info("Steward registered and connected successfully via MQTT",
+		logger.Info("Steward registered and connected successfully via gRPC transport",
 			"operation", "registration_complete",
-			"steward_id", mqttClient.GetStewardID(),
-			"tenant_id", mqttClient.GetTenantID())
+			"steward_id", transportCl.GetStewardID(),
+			"tenant_id", transportCl.GetTenantID())
 
-		// Continue running with MQTT+QUIC mode (controller-connected steward)
-		// The steward will maintain connection, receive commands, and send heartbeats
-
-	} else if *regCode != "" {
-		// Registration code support removed in Story #198
-		// Use --regtoken for MQTT+QUIC registration
-		logger.Fatal("Registration codes (--regcode) are no longer supported",
-			"operation", "registration_error",
-			"solution", "Use --regtoken with MQTT+QUIC registration tokens")
-	}
-
-	// If using MQTT+QUIC mode with registration token, run in controller-connected mode
-	if mqttClient != nil {
-		logger.Info("Running in MQTT+QUIC controller-connected mode",
+		logger.Info("Running in gRPC controller-connected mode",
 			"operation", "steward_mode",
-			"mode", "mqtt_quic")
+			"mode", "grpc_transport")
 
-		// The MQTT client is already connected and will:
-		// - Send automatic heartbeats every 30 seconds
-		// - Listen for commands from controller
-		// - Handle DNA sync requests
-		// - Handle config sync requests (via QUIC)
+		// Start scheduled convergence loop. The initial interval defaults to
+		// 30 minutes. When the controller delivers a cfg, the loop reads
+		// converge_interval from it and resets the ticker accordingly.
+		// sync_config commands from the controller also trigger immediate
+		// convergence as an out-of-band optimization on top of the schedule.
+		transportCl.StartConvergenceLoop(ctx)
 
-		logger.Info("Steward running and connected to controller",
-			"operation", "steward_running",
-			"steward_id", mqttClient.GetStewardID())
+		// Wait for context cancellation (signal or SCM stop).
+		<-ctx.Done()
+		logger.Info("Shutdown signal received, disconnecting...",
+			"operation", "steward_shutdown")
 
-		fmt.Printf("[DEBUG] Steward entering signal wait loop, PID=%d\n", os.Getpid())
-		logger.Info("Waiting for termination signal",
-			"operation", "steward_wait",
-			"pid", os.Getpid())
-
-		// Wait for termination signal
-		sig := <-sigChan
-		fmt.Printf("[DEBUG] Steward received signal: %v\n", sig)
-		logger.Info("Received signal, shutting down...",
-			"operation", "steward_shutdown",
-			"signal", sig.String())
-
-		// Disconnect MQTT client
-		if err := mqttClient.Disconnect(ctx); err != nil {
-			logger.Error("Error during MQTT disconnect",
-				"operation", "mqtt_disconnect",
+		disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer disconnectCancel()
+		if err := transportCl.Disconnect(disconnectCtx); err != nil {
+			logger.Error("Error during transport disconnect",
+				"operation", "transport_disconnect",
 				"error", err.Error())
 		}
 
-		logger.Info("Steward shutdown completed",
-			"operation", "steward_shutdown",
-			"status", "completed")
-		return
+		logger.Info("Steward shutdown completed", "operation", "steward_shutdown", "status", "completed")
+		return nil
 	}
 
-	// Determine operation mode (standalone vs legacy controller)
-	useStandalone := *configPath != "" || *mode == "standalone"
-
-	var s *steward.Steward
-	var err error
-
+	// Standalone mode: --config was provided.
+	useStandalone := configPath != ""
 	if useStandalone {
-		// Standalone mode - use hostname.cfg or provided config path
-		configFile := *configPath
-		if configFile == "" {
-			// No config path provided, try to find hostname.cfg
-			// This will be handled by the config loader's search logic
-			configFile = "" // Default to empty - config loader will search for hostname.cfg
-		}
-
-		// For now, create legacy logger for steward constructor (TODO: update steward to use global provider)
 		legacyLogger := logging.GetLogger()
-		s, err = steward.NewStandalone(configFile, legacyLogger)
+		s, err := steward.NewStandalone(configPath, legacyLogger)
 		if err != nil {
-			logger.Fatal("Failed to create standalone steward",
-				"operation", "steward_init",
-				"mode", "standalone",
-				"config_path", configFile,
-				"error", err.Error())
+			return fmt.Errorf("failed to create standalone steward: %w", err)
 		}
-
 		logger.Info("Starting steward in standalone mode",
-			"operation", "steward_start",
-			"mode", "standalone",
-			"config_path", configFile)
-	} else {
-		// Controller mode (legacy)
-		cfg := steward.DefaultConfig()
-		cfg.LogLevel = *logLevel
+			"operation", "steward_start", "mode", "standalone", "config_path", configPath)
 
-		// TODO: Load additional configuration from file and environment
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- s.Start(ctx)
+		}()
 
-		// For now, create legacy logger for steward constructor (TODO: update steward to use global provider)
-		legacyLogger := logging.GetLogger()
-		s, err = steward.New(cfg, legacyLogger)
-		if err != nil {
-			logger.Fatal("Failed to create steward",
-				"operation", "steward_init",
-				"mode", "controller",
-				"error", err.Error())
+		<-ctx.Done()
+		logger.Info("Shutdown signal received", "operation", "steward_shutdown")
+
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer stopCancel()
+		if stopErr := s.Stop(stopCtx); stopErr != nil {
+			logger.Error("Error during shutdown", "operation", "steward_shutdown", "error", stopErr.Error())
 		}
 
-		logger.Info("Starting steward in controller mode",
-			"operation", "steward_start",
-			"mode", "controller")
-	}
-
-	// Start steward in a goroutine
-	go func() {
-		if err := s.Start(ctx); err != nil {
-			logger.Fatal("Steward failed",
-				"operation", "steward_run",
-				"error", err.Error())
+		if startErr := <-errCh; startErr != nil && startErr != context.Canceled {
+			logger.Error("Steward start failed", "operation", "steward_run", "error", startErr.Error())
+			return fmt.Errorf("steward start failed: %w", startErr)
 		}
-	}()
 
-	// Wait for termination signal
-	sig := <-sigChan
-	logger.Info("Received signal, shutting down...",
-		"operation", "steward_shutdown",
-		"signal", sig.String())
-
-	// Initiate graceful shutdown
-	if err := s.Stop(ctx); err != nil {
-		logger.Error("Error during shutdown",
-			"operation", "steward_shutdown",
-			"error", err.Error())
+		logger.Info("Steward shutdown completed", "operation", "steward_shutdown", "status", "completed")
+		return nil
 	}
 
-	logger.Info("Steward shutdown completed",
-		"operation", "steward_shutdown",
-		"status", "completed")
+	// Structurally unreachable: runRootCommand's noFlags guard prevents calling
+	// runSteward with both regToken and configPath empty.
+	return nil
 }
 
-// registerAndConnectMQTT registers the steward using HTTP REST API
-// and then establishes MQTT+QUIC connections for ongoing communication.
-func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Logger) (*client.MQTTClient, error) {
+// buildInstallCommand builds the `cfgms-steward install` subcommand.
+func buildInstallCommand() *cobra.Command {
+	var regToken, caCertPath, fingerprint string
+
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Copy binary to platform path and register as OS service",
+		Long: `Install copies the cfgms-steward binary to the platform-standard location
+and registers it as a persistent OS service that starts automatically on boot.
+
+Platforms:
+  Windows  C:\Program Files\CFGMS\cfgms-steward.exe  (Windows Service)
+  Linux    /usr/local/bin/cfgms-steward               (systemd)
+  macOS    /usr/local/bin/cfgms-steward               (launchd)
+
+Requires elevated privileges (Administrator on Windows, root on Linux/macOS).
+Install is idempotent: running it again updates the binary and restarts the service.
+
+For controllers with a private CA, pass --ca-cert and --fingerprint to perform
+fingerprint-verified trust-on-first-use (TOFU) of the controller CA certificate.
+The fingerprint is printed by the controller during --init.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInstall(regToken, caCertPath, fingerprint)
+		},
+	}
+
+	cmd.Flags().StringVar(&regToken, "regtoken", "", "Registration token (required)")
+	_ = cmd.MarkFlagRequired("regtoken")
+	cmd.Flags().StringVar(&caCertPath, "ca-cert", "", "Path to controller CA certificate PEM file (private-CA deployments)")
+	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "Expected SHA-256 fingerprint of the CA certificate (hex, from controller --init output)")
+
+	return cmd
+}
+
+// buildUninstallCommand builds the `cfgms-steward uninstall` subcommand.
+func buildUninstallCommand() *cobra.Command {
+	var purge bool
+
+	cmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Stop and remove the OS service",
+		Long: `Uninstall stops the running cfgms-steward service and removes the service
+definition from the OS service manager. With --purge the installed binary is
+also deleted.
+
+Requires elevated privileges (Administrator on Windows, root on Linux/macOS).`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runUninstall(purge)
+		},
+	}
+
+	cmd.Flags().BoolVar(&purge, "purge", false, "Also remove the installed binary")
+
+	return cmd
+}
+
+// buildStatusCommand builds the `cfgms-steward status` subcommand.
+func buildStatusCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show service state, install path, and controller URL",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runStatus()
+		},
+	}
+}
+
+// runInstall performs the install operation for the current platform.
+func runInstall(regToken, caCertPath, fingerprint string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to determine executable path: %w", err)
+	}
+
+	var caCertPEM string
+	if caCertPath != "" {
+		data, readErr := os.ReadFile(caCertPath)
+		if readErr != nil {
+			return fmt.Errorf("failed to read CA cert file %s: %w", caCertPath, readErr)
+		}
+		caCertPEM = string(data)
+	}
+
+	mgr := service.New(exe)
+
+	if !mgr.IsElevated() {
+		return fmt.Errorf("install requires elevated privileges\n" +
+			"  Windows: right-click the binary and select 'Run as administrator'\n" +
+			"  Linux/macOS: re-run with sudo")
+	}
+
+	return mgr.Install(regToken, caCertPEM, fingerprint)
+}
+
+// runUninstall performs the uninstall operation for the current platform.
+func runUninstall(purge bool) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to determine executable path: %w", err)
+	}
+
+	mgr := service.New(exe)
+
+	if !mgr.IsElevated() {
+		return fmt.Errorf("uninstall requires elevated privileges\n" +
+			"  Windows: right-click the binary and select 'Run as administrator'\n" +
+			"  Linux/macOS: re-run with sudo")
+	}
+
+	return mgr.Uninstall(purge)
+}
+
+// runStatus prints the current service state without requiring elevated privileges.
+func runStatus() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to determine executable path: %w", err)
+	}
+
+	mgr := service.New(exe)
+	status, err := mgr.Status()
+	if err != nil {
+		return fmt.Errorf("failed to query service status: %w", err)
+	}
+
+	fmt.Printf("CFGMS Steward %s\n\n", version.Short())
+	fmt.Printf("  Service name:  %s\n", status.ServiceName)
+	fmt.Printf("  Install path:  %s\n", status.InstallPath)
+	fmt.Printf("  Controller:    %s\n", controllerURLOrUnknown())
+
+	if !status.Installed {
+		fmt.Printf("  Status:        not installed\n")
+		fmt.Printf("\n  To install: cfgms-steward install --regtoken TOKEN\n")
+		return nil
+	}
+
+	state := "stopped"
+	if status.Running {
+		state = "running"
+	}
+	fmt.Printf("  Status:        %s\n", state)
+	return nil
+}
+
+// controllerURLOrUnknown returns the compile-time controller URL or a
+// human-friendly placeholder when the binary was built without one.
+func controllerURLOrUnknown() string {
+	if ControllerURL == "" {
+		return "(not set — binary built without -ldflags \"-X main.ControllerURL=...\")"
+	}
+	return ControllerURL
+}
+
+// runInteractive enters the interactive terminal UI shown when the binary is
+// launched with no arguments (including Windows double-click).
+//
+// Flow:
+//  1. Print header with version
+//  2. Prompt for registration token
+//  3. Offer: [1] Install as service  [2] Run once  [3] Exit
+//  4. Execute chosen action
+func runInteractive() error {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Printf("CFGMS Steward %s\n\n", version.Short())
+	fmt.Printf("Controller: %s\n\n", controllerURLOrUnknown())
+
+	fmt.Print("Registration token: ")
+	token, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read registration token: %w", err)
+	}
+	token = strings.TrimSpace(token)
+
+	if token == "" {
+		return fmt.Errorf("registration token cannot be empty")
+	}
+
+	fmt.Println()
+	fmt.Println("  [1] Install as service (recommended)")
+	fmt.Println("  [2] Run once (foreground)")
+	fmt.Println("  [3] Exit")
+	fmt.Println()
+	fmt.Print("Choice: ")
+
+	choice, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read choice: %w", err)
+	}
+	choice = strings.TrimSpace(choice)
+
+	fmt.Println()
+
+	switch choice {
+	case "1":
+		return runInstall(token, "", "")
+	case "2":
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-sigChan
+			cancel()
+		}()
+
+		fmt.Println("Running in foreground. Press Ctrl+C to stop.")
+		return runSteward(ctx, token, "")
+	case "3", "":
+		fmt.Println("Exiting.")
+		return nil
+	default:
+		return fmt.Errorf("invalid choice %q — enter 1, 2, or 3", choice)
+	}
+}
+
+// logLevelFromEnv reads CFGMS_LOG_LEVEL and returns the uppercased level string.
+// Accepts debug, info, warn, error (case-insensitive). Returns "INFO" for empty
+// or unrecognised values.
+func logLevelFromEnv() string {
+	switch strings.ToLower(os.Getenv("CFGMS_LOG_LEVEL")) {
+	case "debug", "info", "warn", "error":
+		return strings.ToUpper(os.Getenv("CFGMS_LOG_LEVEL"))
+	default:
+		return "INFO"
+	}
+}
+
+// buildHTTPConfig constructs an HTTPConfig from environment variables and the provided arguments.
+func buildHTTPConfig(controllerURL string, timeout time.Duration, logger logging.Logger) *registration.HTTPConfig {
+	return &registration.HTTPConfig{
+		ControllerURL: controllerURL,
+		Timeout:       timeout,
+		CACertPath:    resolveRegistrationCACertPath(logger),
+		Logger:        logger,
+	}
+}
+
+// resolveRegistrationCACertPath returns the first CA cert path that exists on disk,
+// checking in priority order: env var override, platform-standard installer path,
+// then empty string (system trust store). See doResolveRegistrationCACertPath for logic.
+func resolveRegistrationCACertPath(logger logging.Logger) string {
+	return doResolveRegistrationCACertPath(logger, defaultPlatformCACertPath())
+}
+
+// doResolveRegistrationCACertPath is the testable core of resolveRegistrationCACertPath.
+// platformPath is injected so tests can exercise all priority levels without root access.
+func doResolveRegistrationCACertPath(logger logging.Logger, platformPath string) string {
+	// Priority 1: explicit env var override.
+	if envPath := os.Getenv("CFGMS_HTTP_CA_CERT_PATH"); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			return envPath
+		}
+		logger.Warn("CFGMS_HTTP_CA_CERT_PATH set but file not found, falling through", "path", envPath)
+	}
+
+	// Priority 2: platform-standard path written by the installer.
+	if _, err := os.Stat(platformPath); err == nil {
+		logger.Info("Using platform-standard CA cert path", "path", platformPath)
+		return platformPath
+	}
+
+	// Priority 3: no cert found; caller uses system trust store.
+	logger.Info("No CA cert found; using system trust store")
+	return ""
+}
+
+// defaultPlatformCACertPath returns the OS-specific path where the installer writes
+// the controller CA cert, mirroring the path convention used by the install package.
+func defaultPlatformCACertPath() string {
+	switch runtime.GOOS {
+	case "windows":
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		return filepath.Join(programData, "cfgms", "controller-ca.crt")
+	default: // linux and darwin
+		return "/etc/cfgms/controller-ca.crt"
+	}
+}
+
+// registerAndConnect registers the steward using HTTP REST API
+// and then establishes gRPC-over-QUIC connections for ongoing communication.
+// Both control plane and data plane use the transport_address from the registration response.
+//
+// On restart with a valid stored cert and identity, HTTP registration is skipped
+// and the steward reconnects directly using the persisted credentials (Issue #1719).
+func registerAndConnect(ctx context.Context, token string, logger logging.Logger) (*client.TransportClient, error) {
+	logger.Info("Starting steward connect sequence")
+
+	certStoreDir := defaultCertStoreDir()
+
+	// Attempt cert-reuse reconnect (skips HTTP registration on restart).
+	if tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, logger); tc != nil {
+		return tc, nil
+	} else if reconnErr != nil {
+		logger.Warn("Stored-identity reconnect failed; falling back to HTTP registration", "error", reconnErr)
+	}
+
 	logger.Info("Registering steward via HTTP API")
 
-	// Get controller URL from environment — REQUIRED, no insecure defaults
-	controllerURL := os.Getenv("CFGMS_CONTROLLER_URL")
+	controllerURL := ControllerURL
 	if controllerURL == "" {
-		return nil, fmt.Errorf("CFGMS_CONTROLLER_URL environment variable is required. " +
-			"Set this to your controller's address (e.g., https://controller:9080). " +
-			"See docs/deployment/ for configuration examples")
+		return nil, fmt.Errorf("controller URL not set: binary must be built with " +
+			"-ldflags \"-X main.ControllerURL=https://your-controller.example.com\". " +
+			"See docs/deployment/ for build instructions")
 	}
 
-	// Check if we should skip TLS verification (test mode only)
-	insecureSkipVerify := false
-	if skipVerify := os.Getenv("CFGMS_HTTP_INSECURE_SKIP_VERIFY"); skipVerify == "true" {
-		insecureSkipVerify = true
-		logger.Warn("HTTP TLS verification disabled (test mode only)")
-	}
-
-	// Create HTTP registration client
-	httpClient, err := registration.NewHTTPClient(&registration.HTTPConfig{
-		ControllerURL:      controllerURL,
-		Timeout:            30 * time.Second,
-		InsecureSkipVerify: insecureSkipVerify,
-		Logger:             logger,
-	})
+	httpClient, err := registration.NewHTTPClient(buildHTTPConfig(controllerURL, 30*time.Second, logger))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP registration client: %w", err)
 	}
 
-	// Register via HTTP with timeout (prevent hanging indefinitely)
-	// Use child context for HTTP call, but keep parent ctx for MQTT operations
 	regCtx, regCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer regCancel()
 
-	regResp, err := httpClient.Register(regCtx, token)
+	regResp, pendingResp, err := httpClient.Register(regCtx, token)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP registration failed: %w", err)
+	}
+
+	// Issue #1693: quarantine returns 202 with no certificates. The steward cannot
+	// proceed to transport setup without certs. The poll loop is deferred to story 7;
+	// surface the pending state as a retriable error so the caller knows to retry.
+	if pendingResp != nil {
+		logger.Info("Registration is pending operator approval — no certificates issued",
+			"pending_id", pendingResp.PendingID,
+			"steward_id", pendingResp.StewardID,
+			"tenant_id", pendingResp.TenantID,
+			"status", pendingResp.Status)
+		return nil, fmt.Errorf("registration pending operator approval (pending_id=%s): administrator must run 'cfg registration approve %s'",
+			pendingResp.PendingID, pendingResp.PendingID)
 	}
 
 	logger.Info("Registration successful via HTTP",
 		"steward_id", regResp.StewardID,
 		"tenant_id", regResp.TenantID,
 		"group", regResp.Group,
-		"mqtt_broker", regResp.MQTTBroker)
+		"transport_address", regResp.TransportAddress)
 
-	// Now create MQTT+QUIC client with credentials from registration
-	mqttBroker := regResp.MQTTBroker
-	quicAddress := regResp.QUICAddress
+	// Persist the identity record immediately after registration so that a
+	// subsequent restart can reconnect without HTTP re-registration (Issue #1719).
+	identity := StewardIdentity{
+		StewardID:        regResp.StewardID,
+		TenantID:         regResp.TenantID,
+		TransportAddress: regResp.TransportAddress,
+		CACertPEM:        regResp.CACert,
+		ServerCertPEM:    regResp.ServerCert,
+		SigningCertPEM:   regResp.SigningCert,
+	}
+	if saveErr := saveIdentity(certStoreDir, identity); saveErr != nil {
+		logger.Warn("Failed to persist steward identity; next restart will re-register", "error", saveErr)
+	} else {
+		logger.Info("Steward identity persisted for restart reuse", "steward_id", identity.StewardID)
+	}
 
-	mqttClient, err := client.NewMQTTClient(&client.MQTTConfig{
-		ControllerURL:     mqttBroker,
-		QUICAddress:       quicAddress,
-		RegistrationToken: token,
-		CACertPEM:         regResp.CACert,
-		ClientCertPEM:     regResp.ClientCert,
-		ClientKeyPEM:      regResp.ClientKey,
-		ServerCertPEM:     regResp.ServerCert, // Story #315: Controller's server cert for signature verification
-		Logger:            logger,
+	// Optionally load the local steward config to apply custom replay window and
+	// params-size limits. If no config file is found (the common case when the
+	// steward is purely controller-managed), defaults apply in commands.Handler.
+	var commandReplayWindow time.Duration
+	var commandMaxParamsBytes int
+	var scriptSigning stewardconfig.ScriptSigningConfig
+	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
+		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
+		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
+		scriptSigning = cfg.Steward.ScriptSigning
+	}
+
+	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
+	// offline queue encryption (Issue #920).
+	certMgr, secretStore := buildCertManagerAndSecretStore(regResp.ClientCert, regResp.ClientKey, logger)
+
+	transportClient, err := client.NewTransportClient(&client.TransportConfig{
+		ControllerURL:               regResp.TransportAddress,
+		RegistrationToken:           token,
+		CACertPEM:                   regResp.CACert,
+		ClientCertPEM:               regResp.ClientCert,
+		ServerCertPEM:               regResp.ServerCert,
+		CertManager:                 certMgr,
+		SecretStore:                 secretStore,
+		SignedCommandReplayWindow:   commandReplayWindow,
+		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
+		ScriptSigning:               scriptSigning,
+		Logger:                      logger,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create MQTT client: %w", err)
+		return nil, fmt.Errorf("failed to create transport client: %w", err)
 	}
 
-	// Set steward ID and tenant ID from registration response
-	mqttClient.SetStewardID(regResp.StewardID)
-	mqttClient.SetTenantID(regResp.TenantID)
+	transportClient.SetStewardID(regResp.StewardID)
+	transportClient.SetTenantID(regResp.TenantID)
 
-	// Connect to MQTT
-	if err := mqttClient.Connect(ctx); err != nil {
-		return nil, fmt.Errorf("failed to connect to MQTT: %w", err)
+	if err := transportClient.Connect(ctx); err != nil {
+		return nil, fmt.Errorf("failed to connect to controller: %w", err)
 	}
 
-	logger.Info("Connected to controller via MQTT+QUIC",
-		"mqtt_broker", mqttBroker,
-		"quic_address", quicAddress)
+	logger.Info("Connected to controller via gRPC transport",
+		"transport_address", regResp.TransportAddress)
 
-	// Send initial heartbeat
-	if err := mqttClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
+	if err := transportClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat", "error", err)
 	}
 
-	// Initialize configuration executor (Story #315: Required for config sync)
-	// The executor needs to be initialized after MQTT connection for config application
-	if err := mqttClient.InitializeConfigExecutor(regResp.TenantID); err != nil {
+	if err := transportClient.InitializeConfigExecutor(regResp.TenantID); err != nil {
 		return nil, fmt.Errorf("failed to initialize config executor: %w", err)
 	}
 
 	logger.Info("Configuration executor initialized", "tenant_id", regResp.TenantID)
 
-	// Return connected client (do NOT disconnect - maintain connection)
-	return mqttClient, nil
+	return transportClient, nil
+}
+
+// tryReconnectWithStoredIdentity attempts to reconnect using the steward's
+// persisted identity record and the client cert already in the cert store,
+// skipping HTTP re-registration entirely.
+//
+// Returns (nil, nil) when no stored identity exists — caller falls through to
+// HTTP registration (first run or manually cleared identity).
+// Returns (nil, err) when a stored identity exists but reconnect fails — caller
+// should log the error and fall back to HTTP registration.
+func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token string, logger logging.Logger) (*client.TransportClient, error) {
+	id, err := loadIdentity(certStoreDir)
+	if err != nil {
+		// corrupt/unreadable identity: log and treat as absent so the caller falls through
+		logger.Warn("Could not load stored identity; falling back to HTTP registration", "error", err)
+		return nil, nil
+	}
+	if id == nil {
+		return nil, nil // first run; no stored identity
+	}
+
+	// The reconnect path must be able to verify signed sync_config commands.
+	// Without a controller server/signing cert the steward would reconnect but
+	// silently reject every signed command, so treat an identity record that
+	// lacks both as unusable and fall back to HTTP re-registration.
+	if id.ServerCertPEM == "" && id.SigningCertPEM == "" {
+		return nil, fmt.Errorf("stored identity missing controller server/signing certificate; cannot verify signed commands")
+	}
+
+	// Load the cert manager from the existing cert store.
+	certMgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath:    certStoreDir,
+		LoadExistingCA: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cert store not loadable: %w", err)
+	}
+
+	// Require at least one valid (non-expired) client cert in the store.
+	certs, err := certMgr.ListCertificates()
+	if err != nil {
+		return nil, fmt.Errorf("cert list unavailable: %w", err)
+	}
+	if !hasValidClientCert(certs) {
+		return nil, fmt.Errorf("no valid client certificate found in cert store")
+	}
+
+	logger.Info("Stored identity and cert found; reconnecting without HTTP registration",
+		"steward_id", logging.SanitizeLogValue(id.StewardID),
+		"tenant_id", logging.SanitizeLogValue(id.TenantID),
+		"transport_address", logging.SanitizeLogValue(id.TransportAddress))
+
+	// Best-effort secret store for offline queue encryption.
+	var secretStore secretsif.SecretStore
+	if sp, spErr := secretsif.GetSecretProvider("steward"); spErr == nil {
+		if store, storeErr := sp.CreateSecretStore(map[string]interface{}{}); storeErr == nil {
+			secretStore = store
+		}
+	}
+
+	var commandReplayWindow time.Duration
+	var commandMaxParamsBytes int
+	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
+		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
+		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
+	}
+
+	transportClient, err := client.NewTransportClient(&client.TransportConfig{
+		ControllerURL:               id.TransportAddress,
+		RegistrationToken:           token,
+		CACertPEM:                   id.CACertPEM,
+		ServerCertPEM:               id.ServerCertPEM,
+		SigningCertPEM:              id.SigningCertPEM,
+		CertManager:                 certMgr,
+		SecretStore:                 secretStore,
+		SignedCommandReplayWindow:   commandReplayWindow,
+		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
+		Logger:                      logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transport client: %w", err)
+	}
+
+	transportClient.SetStewardID(id.StewardID)
+	transportClient.SetTenantID(id.TenantID)
+
+	if err := transportClient.Connect(ctx); err != nil {
+		return nil, fmt.Errorf("failed to connect to controller with stored identity: %w", err)
+	}
+
+	logger.Info("Reconnected to controller via stored identity",
+		"steward_id", logging.SanitizeLogValue(id.StewardID),
+		"transport_address", logging.SanitizeLogValue(id.TransportAddress))
+
+	if err := transportClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
+		logger.Warn("Failed to send initial heartbeat after reconnect", "error", err)
+	}
+
+	if err := transportClient.InitializeConfigExecutor(id.TenantID); err != nil {
+		return nil, fmt.Errorf("failed to initialize config executor: %w", err)
+	}
+
+	logger.Info("Configuration executor initialized after reconnect", "tenant_id", logging.SanitizeLogValue(id.TenantID))
+
+	return transportClient, nil
+}
+
+// hasValidClientCert reports whether certs contains at least one non-expired client certificate.
+func hasValidClientCert(certs []*cert.CertificateInfo) bool {
+	for _, c := range certs {
+		if c.Type == cert.CertificateTypeClient && c.IsValid {
+			return true
+		}
+	}
+	return false
+}
+
+// buildCertManagerAndSecretStore initialises a cert.Manager (holding the
+// steward's client certificate for on-demand TLS loading) and a SecretStore
+// (for offline queue encryption key persistence). Both are best-effort — a nil
+// return from either does not prevent the steward from connecting, it just
+// disables the respective feature.
+func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM string, logger logging.Logger) (*cert.Manager, secretsif.SecretStore) {
+	// ── SecretStore ──────────────────────────────────────────────────────────
+	var secretStore secretsif.SecretStore
+	secretsProvider, err := secretsif.GetSecretProvider("steward")
+	if err == nil {
+		if store, storeErr := secretsProvider.CreateSecretStore(map[string]interface{}{}); storeErr == nil {
+			secretStore = store
+		} else {
+			logger.Warn("Failed to create steward secret store; offline-queue key will not persist", "error", storeErr)
+		}
+	} else {
+		logger.Warn("Steward secrets provider unavailable; offline-queue key will not persist", "error", err)
+	}
+
+	// ── cert.Manager ─────────────────────────────────────────────────────────
+	if clientCertPEM == "" || clientKeyPEM == "" {
+		return nil, secretStore
+	}
+
+	certStorePath := defaultCertStoreDir()
+
+	// Try to load an existing local CA (created on a previous run).
+	certMgr, mgrErr := cert.NewManager(&cert.ManagerConfig{
+		StoragePath:    certStorePath,
+		LoadExistingCA: true,
+	})
+	if mgrErr != nil {
+		// First run — create a local CA used only as a cert store.
+		certMgr, mgrErr = cert.NewManager(&cert.ManagerConfig{
+			StoragePath:    certStorePath,
+			LoadExistingCA: false,
+			CAConfig: &cert.CAConfig{
+				Organization: "CFGMS Steward",
+				Country:      "US",
+				ValidityDays: 3650,
+			},
+		})
+		if mgrErr != nil {
+			logger.Warn("Failed to create cert.Manager; on-demand TLS cert loading disabled", "error", mgrErr)
+			return nil, secretStore
+		}
+	}
+
+	// Import the client cert+key from the registration response.
+	if _, impErr := certMgr.ImportCertificate(
+		[]byte(clientCertPEM), []byte(clientKeyPEM), cert.CertificateTypeClient,
+	); impErr != nil {
+		logger.Warn("Failed to import client certificate into cert.Manager", "error", impErr)
+		return nil, secretStore
+	}
+
+	return certMgr, secretStore
+}
+
+// defaultCertStoreDir returns the platform-specific stable directory for the
+// steward's on-demand client certificate store. Uses the same path convention
+// as the StewardProvider's defaultSecretsDir so operators find both under the
+// same platform root (e.g. /var/lib/cfgms/ on Linux).
+func defaultCertStoreDir() string {
+	switch runtime.GOOS {
+	case "windows":
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		return filepath.Join(programData, "cfgms", "steward", "certs")
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		if home == "" {
+			home = "/tmp"
+		}
+		return filepath.Join(home, "Library", "Application Support", "cfgms", "steward", "certs")
+	default:
+		return "/var/lib/cfgms/steward/certs"
+	}
 }

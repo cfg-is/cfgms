@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package siem
 
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // EventCorrelatorImpl implements event correlation across time windows for SIEM analysis.
@@ -52,6 +53,7 @@ type EventWindow struct {
 	TenantID   string
 	GroupKey   string
 	Metadata   map[string]interface{}
+	Triggered  bool // true after the window has emitted one CorrelatedEvent
 }
 
 // NewEventCorrelator creates a new event correlator
@@ -310,35 +312,9 @@ func (ec *EventCorrelatorImpl) evaluateCondition(condition *Condition, event *Se
 	}
 
 	// Apply operator
-	return ec.applyConditionOperator(condition.Operator, fieldValue, condition.Value, condition.CaseSensitive)
-}
-
-// applyConditionOperator applies a condition operator
-func (ec *EventCorrelatorImpl) applyConditionOperator(operator string, fieldValue, conditionValue interface{}, caseSensitive bool) bool {
 	fieldStr := fmt.Sprintf("%v", fieldValue)
-	conditionStr := fmt.Sprintf("%v", conditionValue)
-
-	if !caseSensitive {
-		fieldStr = strings.ToLower(fieldStr)
-		conditionStr = strings.ToLower(conditionStr)
-	}
-
-	switch operator {
-	case "equals":
-		return fieldStr == conditionStr
-	case "not_equals":
-		return fieldStr != conditionStr
-	case "contains":
-		return strings.Contains(fieldStr, conditionStr)
-	case "not_contains":
-		return !strings.Contains(fieldStr, conditionStr)
-	case "starts_with":
-		return strings.HasPrefix(fieldStr, conditionStr)
-	case "ends_with":
-		return strings.HasSuffix(fieldStr, conditionStr)
-	default:
-		return false
-	}
+	conditionStr := fmt.Sprintf("%v", condition.Value)
+	return applyOperator(condition.Operator, fieldStr, conditionStr, condition.CaseSensitive)
 }
 
 // buildWindowKey builds a unique key for an event window
@@ -446,6 +422,10 @@ func (ec *EventCorrelatorImpl) addEventToWindow(window *EventWindow, event *Secu
 
 // checkCorrelationConditions checks if correlation conditions are met for a window
 func (ec *EventCorrelatorImpl) checkCorrelationConditions(window *EventWindow, rule *CorrelationRule) *CorrelatedEvent {
+	if window.Triggered {
+		return nil
+	}
+
 	eventCount := len(window.Events)
 
 	// Check minimum events requirement
@@ -459,7 +439,9 @@ func (ec *EventCorrelatorImpl) checkCorrelationConditions(window *EventWindow, r
 	}
 
 	// Correlation conditions met, create correlated event
-	return ec.createCorrelatedEvent(window, rule)
+	correlated := ec.createCorrelatedEvent(window, rule)
+	window.Triggered = true
+	return correlated
 }
 
 // createCorrelatedEvent creates a correlated event from a window
@@ -472,7 +454,8 @@ func (ec *EventCorrelatorImpl) createCorrelatedEvent(window *EventWindow, rule *
 	})
 
 	// Determine severity (use highest severity)
-	severity := SeverityInfo
+	// SeverityInfo has no business.AuditSeverity equivalent; mapped to Low
+	severity := business.AuditSeverityLow
 	for _, event := range sortedEvents {
 		if ec.severityLevel(event.Severity) > ec.severityLevel(severity) {
 			severity = event.Severity
@@ -507,17 +490,15 @@ func (ec *EventCorrelatorImpl) createCorrelatedEvent(window *EventWindow, rule *
 }
 
 // severityLevel returns a numeric level for severity comparison
-func (ec *EventCorrelatorImpl) severityLevel(severity EventSeverity) int {
+func (ec *EventCorrelatorImpl) severityLevel(severity business.AuditSeverity) int {
 	switch severity {
-	case SeverityCritical:
-		return 5
-	case SeverityHigh:
+	case business.AuditSeverityCritical:
 		return 4
-	case SeverityMedium:
+	case business.AuditSeverityHigh:
 		return 3
-	case SeverityLow:
+	case business.AuditSeverityMedium:
 		return 2
-	case SeverityInfo:
+	case business.AuditSeverityLow:
 		return 1
 	default:
 		return 0

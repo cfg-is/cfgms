@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package gdap implements Microsoft GDAP (Granular Delegated Admin Privileges)
 // integration for MSP scenarios with partner tenant relationships.
@@ -21,60 +21,9 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	gdaptypes "github.com/cfgis/cfgms/features/modules/m365/gdap/types"
 	"github.com/cfgis/cfgms/features/saas"
 )
-
-// credentialStoreAdapter adapts auth.CredentialStore to saas.CredentialStore
-type credentialStoreAdapter struct {
-	auth.CredentialStore
-}
-
-// Implement missing methods for saas.CredentialStore compatibility
-func (a *credentialStoreAdapter) StoreTokenSet(provider string, tokens *saas.TokenSet) error {
-	// Convert saas.TokenSet to auth.AccessToken
-	authToken := &auth.AccessToken{
-		Token:        tokens.AccessToken,
-		TokenType:    tokens.TokenType,
-		RefreshToken: tokens.RefreshToken,
-		ExpiresAt:    tokens.ExpiresAt,
-		TenantID:     provider, // Use provider as tenant ID
-	}
-	return a.StoreToken(provider, authToken)
-}
-
-func (a *credentialStoreAdapter) GetTokenSet(provider string) (*saas.TokenSet, error) {
-	token, err := a.GetToken(provider)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert auth.AccessToken to saas.TokenSet
-	tokenSet := &saas.TokenSet{
-		AccessToken:  token.Token,
-		TokenType:    token.TokenType,
-		RefreshToken: token.RefreshToken,
-		ExpiresAt:    token.ExpiresAt,
-	}
-	return tokenSet, nil
-}
-
-func (a *credentialStoreAdapter) DeleteTokenSet(provider string) error {
-	return a.DeleteToken(provider)
-}
-
-func (a *credentialStoreAdapter) StoreClientSecret(provider, clientSecret string) error {
-	// Not implemented in base auth store - would need extension
-	return fmt.Errorf("client secret storage not implemented in auth credential store")
-}
-
-func (a *credentialStoreAdapter) GetClientSecret(provider string) (string, error) {
-	// Not implemented in base auth store - would need extension
-	return "", fmt.Errorf("client secret retrieval not implemented in auth credential store")
-}
-
-func (a *credentialStoreAdapter) IsAvailable() bool {
-	return true // File-based store is always available
-}
 
 // GDAPProvider implements GDAP-aware M365 operations for MSP scenarios
 type GDAPProvider struct {
@@ -85,9 +34,7 @@ type GDAPProvider struct {
 
 // NewGDAPProvider creates a new GDAP-enabled M365 provider
 func NewGDAPProvider(credStore auth.CredentialStore, httpClient *http.Client, partnerTenantID string) *GDAPProvider {
-	// Adapt auth.CredentialStore to saas.CredentialStore
-	adaptedCredStore := &credentialStoreAdapter{credStore}
-	multiTenant := saas.NewMicrosoftMultiTenantProvider(adaptedCredStore, httpClient)
+	multiTenant := saas.NewMicrosoftMultiTenantProvider(credStore, httpClient)
 
 	return &GDAPProvider{
 		MicrosoftMultiTenantProvider: multiTenant,
@@ -116,34 +63,20 @@ type GDAPConfig struct {
 	RequireActiveRelationship bool `json:"require_active_relationship"`
 }
 
-// GDAPRelationship represents a GDAP relationship with a customer tenant
-type GDAPRelationship struct {
-	RelationshipID   string                 `json:"relationship_id"`
-	CustomerTenantID string                 `json:"customer_tenant_id"`
-	CustomerName     string                 `json:"customer_name"`
-	Status           GDAPRelationshipStatus `json:"status"`
-	Roles            []GDAPRole             `json:"roles"`
-	ExpiresAt        time.Time              `json:"expires_at"`
-	CreatedAt        time.Time              `json:"created_at"`
-	LastModified     time.Time              `json:"last_modified"`
-}
-
-// GDAPRelationshipStatus represents the status of a GDAP relationship
-type GDAPRelationshipStatus string
-
-const (
-	GDAPStatusPending    GDAPRelationshipStatus = "pending"
-	GDAPStatusActive     GDAPRelationshipStatus = "active"
-	GDAPStatusExpired    GDAPRelationshipStatus = "expired"
-	GDAPStatusTerminated GDAPRelationshipStatus = "terminated"
+// Type aliases re-export the canonical types from gdaptypes so existing
+// code in this package compiles without modification.
+type (
+	GDAPRelationship       = gdaptypes.GDAPRelationship
+	GDAPRelationshipStatus = gdaptypes.GDAPRelationshipStatus
+	GDAPRole               = gdaptypes.GDAPRole
 )
 
-// GDAPRole represents a role assignment within a GDAP relationship
-type GDAPRole struct {
-	RoleDefinitionID string `json:"role_definition_id"`
-	RoleName         string `json:"role_name"`
-	RoleDescription  string `json:"role_description"`
-}
+const (
+	GDAPStatusPending    = gdaptypes.GDAPStatusPending
+	GDAPStatusActive     = gdaptypes.GDAPStatusActive
+	GDAPStatusExpired    = gdaptypes.GDAPStatusExpired
+	GDAPStatusTerminated = gdaptypes.GDAPStatusTerminated
+)
 
 // DiscoverGDAPCustomers discovers customer tenants accessible via GDAP
 func (p *GDAPProvider) DiscoverGDAPCustomers(ctx context.Context) ([]GDAPRelationship, error) {

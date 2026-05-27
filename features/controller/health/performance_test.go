@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package health_test
 
@@ -22,21 +22,20 @@ func TestCollectorPerformanceOverhead(t *testing.T) {
 	}
 
 	// Create mock collectors
-	mqttCollector := &MockMQTTCollector{
-		metrics: &health.MQTTMetrics{
-			ActiveConnections:     100,
-			MessageQueueDepth:     250,
-			MessageThroughput:     150.5,
-			TotalMessagesSent:     10000,
-			TotalMessagesReceived: 9500,
-			ConnectionErrors:      5,
-			CollectedAt:           time.Now(),
+	transportCollector := &MockTransportCollector{
+		metrics: &health.TransportMetrics{
+			ConnectedStewards:    100,
+			StreamErrors:         5,
+			MessagesSent:         10000,
+			MessagesReceived:     9500,
+			ReconnectionAttempts: 3,
+			CollectedAt:          time.Now(),
 		},
 	}
 
 	storageCollector := &MockStorageCollector{
 		metrics: &health.StorageMetrics{
-			Provider:          "git",
+			Provider:          "flatfile",
 			PoolUtilization:   0.45,
 			AvgQueryLatencyMs: 12.5,
 			P95QueryLatencyMs: 25.3,
@@ -62,7 +61,7 @@ func TestCollectorPerformanceOverhead(t *testing.T) {
 
 	sysCollector := &MockSystemCollector{}
 
-	collector := health.NewCollector(mqttCollector, storageCollector, appCollector, sysCollector)
+	collector := health.NewCollector(transportCollector, storageCollector, appCollector, sysCollector)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -105,7 +104,7 @@ func TestCollectorPerformanceOverhead(t *testing.T) {
 	metrics, err := collector.GetCurrentMetrics()
 	require.NoError(t, err)
 	assert.NotNil(t, metrics)
-	assert.NotNil(t, metrics.MQTT)
+	assert.NotNil(t, metrics.Transport)
 	assert.NotNil(t, metrics.Storage)
 	assert.NotNil(t, metrics.Application)
 	assert.NotNil(t, metrics.System)
@@ -117,15 +116,15 @@ func TestCollectorPerformanceOverhead(t *testing.T) {
 
 // BenchmarkMetricsCollection benchmarks the metrics collection operation
 func BenchmarkMetricsCollection(b *testing.B) {
-	mqttCollector := &MockMQTTCollector{
-		metrics: &health.MQTTMetrics{
-			ActiveConnections: 100,
+	transportCollector := &MockTransportCollector{
+		metrics: &health.TransportMetrics{
+			ConnectedStewards: 100,
 			CollectedAt:       time.Now(),
 		},
 	}
 	storageCollector := &MockStorageCollector{
 		metrics: &health.StorageMetrics{
-			Provider:    "git",
+			Provider:    "flatfile",
 			CollectedAt: time.Now(),
 		},
 	}
@@ -137,7 +136,7 @@ func BenchmarkMetricsCollection(b *testing.B) {
 	}
 	sysCollector := &MockSystemCollector{}
 
-	collector := health.NewCollector(mqttCollector, storageCollector, appCollector, sysCollector)
+	collector := health.NewCollector(transportCollector, storageCollector, appCollector, sysCollector)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -169,15 +168,15 @@ func TestMetricsCollectionMemoryUsage(t *testing.T) {
 	)
 
 	// Create mock collectors
-	mqttCollector := &MockMQTTCollector{
-		metrics: &health.MQTTMetrics{
-			ActiveConnections: 50,
+	transportCollector := &MockTransportCollector{
+		metrics: &health.TransportMetrics{
+			ConnectedStewards: 50,
 			CollectedAt:       time.Now(),
 		},
 	}
 	storageCollector := &MockStorageCollector{
 		metrics: &health.StorageMetrics{
-			Provider:    "git",
+			Provider:    "flatfile",
 			CollectedAt: time.Now(),
 		},
 	}
@@ -189,7 +188,7 @@ func TestMetricsCollectionMemoryUsage(t *testing.T) {
 	}
 	sysCollector := &MockSystemCollector{}
 
-	collector := health.NewCollector(mqttCollector, storageCollector, appCollector, sysCollector)
+	collector := health.NewCollector(transportCollector, storageCollector, appCollector, sysCollector)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -249,15 +248,15 @@ func TestCollectionInterval(t *testing.T) {
 
 	const collectionInterval = 500 * time.Millisecond
 
-	mqttCollector := &MockMQTTCollector{
-		metrics: &health.MQTTMetrics{
-			ActiveConnections: 50,
+	transportCollector := &MockTransportCollector{
+		metrics: &health.TransportMetrics{
+			ConnectedStewards: 50,
 			CollectedAt:       time.Now(),
 		},
 	}
 	storageCollector := &MockStorageCollector{
 		metrics: &health.StorageMetrics{
-			Provider:    "git",
+			Provider:    "flatfile",
 			CollectedAt: time.Now(),
 		},
 	}
@@ -269,7 +268,7 @@ func TestCollectionInterval(t *testing.T) {
 	}
 	sysCollector := &MockSystemCollector{}
 
-	collector := health.NewCollector(mqttCollector, storageCollector, appCollector, sysCollector)
+	collector := health.NewCollector(transportCollector, storageCollector, appCollector, sysCollector)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -305,16 +304,16 @@ func TestCollectionInterval(t *testing.T) {
 
 // Mock collectors for testing
 
-type MockMQTTCollector struct {
-	metrics *health.MQTTMetrics
+type MockTransportCollector struct {
+	metrics *health.TransportMetrics
 }
 
-func (m *MockMQTTCollector) CollectMetrics(ctx context.Context) error {
+func (m *MockTransportCollector) CollectMetrics(ctx context.Context) error {
 	m.metrics.CollectedAt = time.Now()
 	return nil
 }
 
-func (m *MockMQTTCollector) GetMetrics() *health.MQTTMetrics {
+func (m *MockTransportCollector) GetMetrics() *health.TransportMetrics {
 	return m.metrics
 }
 

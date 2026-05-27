@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package workflow
 
@@ -154,7 +154,7 @@ func TestSwitchStep_BasicFunctionality(t *testing.T) {
 			// Create engine and execute workflow
 			moduleFactory := createTestFactory()
 			logger := pkgtesting.NewMockLogger(true)
-			engine := NewEngine(moduleFactory, logger)
+			engine := NewEngine(moduleFactory, logger, nil)
 			ctx := context.Background()
 
 			execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -235,7 +235,7 @@ func TestSwitchStep_DefaultCase(t *testing.T) {
 
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -289,7 +289,7 @@ func TestSwitchStep_NoMatchNoDefault(t *testing.T) {
 
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -368,7 +368,7 @@ func TestSwitchStep_ExpressionBasedSwitch(t *testing.T) {
 
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -418,7 +418,7 @@ func TestSwitchStep_VariableResolutionError(t *testing.T) {
 
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -498,7 +498,7 @@ func TestSwitchStep_NestedSwitchStatements(t *testing.T) {
 
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)

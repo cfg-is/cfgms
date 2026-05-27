@@ -1,14 +1,13 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package interfaces defines the pluggable control plane abstraction for CFGMS.
 //
 // The control plane handles commands, events, and heartbeats between controller
-// and stewards, abstracting away transport-specific details (MQTT, gRPC, etc.).
+// and stewards, abstracting away transport-specific details (gRPC, WebSocket, etc.).
 package interfaces
 
 import (
 	"context"
-	"time"
 
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 )
@@ -18,14 +17,13 @@ import (
 // The control plane is responsible for command/event/heartbeat communication
 // between controllers and stewards. It provides semantic methods that hide
 // transport-specific details like topics, QoS levels, and subscriptions.
+// SendResponse is not part of this interface — it lives on the concrete
+// *grpc.Provider to prevent cross-steward response injection (epic #747).
 //
 // Implementations must be thread-safe and support concurrent operations.
 type ControlPlaneProvider interface {
-	// Name returns the provider name (e.g., "mqtt", "grpc", "websocket")
+	// Name returns the provider name (e.g., "grpc", "websocket")
 	Name() string
-
-	// Description returns a human-readable description
-	Description() string
 
 	// Initialize configures the provider with implementation-specific settings
 	//
@@ -48,21 +46,35 @@ type ControlPlaneProvider interface {
 	// The context can be used to force shutdown if graceful shutdown times out.
 	Stop(ctx context.Context) error
 
+	// Reconnect tears down the current connection and re-establishes it without
+	// cancelling the provider's internal context (client mode only).
+	// Returns an error if called on a server-mode provider.
+	Reconnect(ctx context.Context) error
+
 	// =================================================================
 	// Commands (Controller → Steward)
 	// =================================================================
 
-	// SendCommand sends a command to a specific steward
+	// SendCommand sends a signed command to a specific steward.
+	//
+	// The cmd envelope must already be signed by the controller before calling
+	// this method. The transport layer carries the signature intact; verification
+	// is performed by the steward handler on receipt.
 	//
 	// Returns an error if the command cannot be delivered. Does not wait
-	// for command execution - use SubscribeEvents to receive completion events.
-	SendCommand(ctx context.Context, cmd *types.Command) error
+	// for command execution — use SubscribeEvents to receive completion events.
+	SendCommand(ctx context.Context, cmd *types.SignedCommand) error
 
-	// BroadcastCommand sends a command to all stewards in a tenant
+	// FanOutCommand sends a signed command to a specific list of stewards.
 	//
-	// The command's TenantID field is used to target stewards. Stewards
-	// filter broadcasts based on their tenant membership.
-	BroadcastCommand(ctx context.Context, cmd *types.Command) error
+	// The caller is responsible for resolving target steward IDs (by tenant,
+	// search results, online status, etc.). The transport layer delivers to
+	// each steward without knowledge of organizational hierarchy.
+	//
+	// Returns FanOutResult with per-steward delivery status. The error return
+	// is for systemic failures (provider not started, etc.), not per-steward
+	// delivery failures which are reported in FanOutResult.Failed.
+	FanOutCommand(ctx context.Context, cmd *types.SignedCommand, stewardIDs []string) (*types.FanOutResult, error)
 
 	// SubscribeCommands subscribes to commands (steward-side)
 	//
@@ -103,33 +115,11 @@ type ControlPlaneProvider interface {
 	SubscribeHeartbeats(ctx context.Context, handler HeartbeatHandler) error
 
 	// =================================================================
-	// Responses (Steward → Controller, synchronous acknowledgment)
-	// =================================================================
-
-	// SendResponse sends a command response/acknowledgment (steward-side)
-	//
-	// Responses provide immediate feedback about command acceptance/rejection,
-	// distinct from Events which provide asynchronous progress updates.
-	SendResponse(ctx context.Context, response *types.Response) error
-
-	// WaitForResponse waits for a command response with timeout (controller-side)
-	//
-	// Blocks until a response is received for the given commandID or the
-	// context/timeout expires. Returns error if timeout occurs.
-	WaitForResponse(ctx context.Context, commandID string, timeout time.Duration) (*types.Response, error)
-
-	// =================================================================
 	// Status & Monitoring
 	// =================================================================
 
 	// GetStats returns provider operational statistics
 	GetStats(ctx context.Context) (*types.ControlPlaneStats, error)
-
-	// Available checks if the provider can be started
-	//
-	// Returns false and an error if prerequisites are missing (e.g.,
-	// certificates, broker connectivity, configuration).
-	Available() (bool, error)
 
 	// IsConnected reports connection status
 	//
@@ -138,11 +128,13 @@ type ControlPlaneProvider interface {
 	IsConnected() bool
 }
 
-// CommandHandler is called when a command is received (steward-side).
+// CommandHandler is called when a signed command is received (steward-side).
 //
-// The handler should process the command and publish events/responses
-// to notify the controller of progress and completion.
-type CommandHandler func(ctx context.Context, cmd *types.Command) error
+// The handler receives the full SignedCommand envelope so that it can verify
+// the signature and metadata (StewardID, replay window) before dispatching.
+// The handler should publish events/responses to notify the controller of
+// progress and completion.
+type CommandHandler func(ctx context.Context, cmd *types.SignedCommand) error
 
 // EventHandler is called when an event is received (controller-side).
 //
@@ -154,34 +146,3 @@ type EventHandler func(ctx context.Context, event *types.Event) error
 //
 // Heartbeats allow monitoring of steward connectivity and health status.
 type HeartbeatHandler func(ctx context.Context, heartbeat *types.Heartbeat) error
-
-// ProviderRegistry manages control plane provider registration and discovery.
-var providerRegistry = make(map[string]ControlPlaneProvider)
-
-// RegisterProvider registers a control plane provider implementation.
-//
-// This should be called from init() functions in provider packages.
-// Panics if a provider with the same name is already registered.
-func RegisterProvider(provider ControlPlaneProvider) {
-	name := provider.Name()
-	if _, exists := providerRegistry[name]; exists {
-		panic("control plane provider already registered: " + name)
-	}
-	providerRegistry[name] = provider
-}
-
-// GetProvider retrieves a registered provider by name.
-//
-// Returns nil if no provider with that name exists.
-func GetProvider(name string) ControlPlaneProvider {
-	return providerRegistry[name]
-}
-
-// GetAvailableProviders returns all registered provider names.
-func GetAvailableProviders() []string {
-	names := make([]string, 0, len(providerRegistry))
-	for name := range providerRegistry {
-		names = append(names, name)
-	}
-	return names
-}

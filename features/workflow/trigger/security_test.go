@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package trigger
 
@@ -20,6 +20,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/workflow"
 )
 
 func TestSecurityEdgeCases_WebhookAuthentication(t *testing.T) {
@@ -164,7 +166,7 @@ func TestSecurityEdgeCases_WebhookAuthentication(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := handler.authenticateRequest(tt.webhook, tt.payload, tt.headers)
+			err := handler.authenticateRequest(tt.webhook, tt.payload, tt.headers, "test-trigger-id")
 
 			if tt.expectedResult {
 				assert.NoError(t, err, tt.description)
@@ -416,6 +418,7 @@ func TestSecurityEdgeCases_TenantIsolation(t *testing.T) {
 		mockWebhookHandler,
 		mockSIEMIntegration,
 		mockWorkflowTrigger,
+		nil,
 	)
 
 	// Setup storage mock expectations
@@ -516,7 +519,8 @@ func TestSecurityEdgeCases_APIEndpointSecurity(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 	handler := NewAPIHandler(mockTriggerManager)
 	router := mux.NewRouter()
-	handler.RegisterRoutes(router)
+	sub := router.PathPrefix("/triggers").Subrouter()
+	handler.RegisterRoutes(sub)
 
 	tests := []struct {
 		name           string
@@ -645,7 +649,7 @@ func TestSecurityEdgeCases_RateLimitBypass(t *testing.T) {
 
 	// Mock workflow execution
 	mockWorkflowTrigger.On("TriggerWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(
-		&WorkflowExecution{ID: "exec-1", WorkflowName: "test", Status: "running", StartTime: time.Now()}, nil)
+		&workflow.WorkflowExecution{ID: "exec-1", WorkflowName: "test", Status: workflow.StatusRunning, StartTime: time.Now()}, nil)
 
 	tests := []struct {
 		name        string
@@ -755,27 +759,49 @@ func TestSecurityEdgeCases_CryptographicSafety(t *testing.T) {
 
 			assert.Equal(t, expectedSignature, signature, tt.description)
 
-			// Test timing attack resistance
-			// Both comparisons should take similar time
-			start1 := time.Now()
-			hmac.Equal([]byte(signature), []byte(expectedSignature))
-			duration1 := time.Since(start1)
-
-			start2 := time.Now()
-			hmac.Equal([]byte("wrong-signature"), []byte(expectedSignature))
-			duration2 := time.Since(start2)
-
-			// The timing difference should be minimal (within reasonable bounds)
-			// This is a basic check - real timing attack detection would require more sophisticated testing
-			timingDiff := duration1 - duration2
-			if timingDiff < 0 {
-				timingDiff = -timingDiff
-			}
-
-			// Allow for up to 1ms difference (this is quite generous for testing)
-			assert.LessOrEqual(t, timingDiff, time.Millisecond, "HMAC comparison should be timing-safe")
+			// Wall-clock timing is statistically unreliable for single calls; tampered-signature
+			// rejection is covered by TestWebhookHandler_TamperedSignatureRejected.
 		})
 	}
+}
+
+// TestWebhookHandler_TamperedSignatureRejected verifies that the webhook handler rejects
+// a request whose HMAC signature has been tampered with (one hex byte flipped), guarding
+// the property that tampered signatures are rejected regardless of implementation details.
+func TestWebhookHandler_TamperedSignatureRejected(t *testing.T) {
+	// authenticateRequest only uses webhook config + payload; triggerManager and
+	// workflowTrigger are never called, so nil is safe here.
+	handler := NewHTTPWebhookHandler(nil, nil, "localhost", 8080)
+
+	secret := "test-webhook-secret"
+	payload := []byte(`{"event":"push","repo":"example"}`)
+
+	// Compute a valid HMAC-SHA256 signature.
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(payload)
+	validSig := hex.EncodeToString(mac.Sum(nil))
+
+	// Flip the first hex character to produce a one-byte-different signature.
+	sigBytes := []byte(validSig)
+	if sigBytes[0] == '0' {
+		sigBytes[0] = '1'
+	} else {
+		sigBytes[0] = '0'
+	}
+	tamperedSig := string(sigBytes)
+
+	webhook := &WebhookConfig{
+		Authentication: &WebhookAuth{
+			Type:            WebhookAuthHMAC,
+			Secret:          secret,
+			SignatureHeader: "X-Signature-256",
+		},
+	}
+
+	err := handler.authenticateRequest(webhook, payload, map[string]string{
+		"X-Signature-256": tamperedSig,
+	}, "test-trigger-id")
+	assert.Error(t, err, "a one-byte-flipped HMAC signature must be rejected")
 }
 
 // Helper function to generate random bytes for testing

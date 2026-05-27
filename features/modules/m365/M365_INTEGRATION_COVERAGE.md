@@ -164,25 +164,6 @@ This document provides a comprehensive analysis of CFGMS's M365 integration cove
 
 ## Real-World Testing Framework
 
-### Testing Components
-
-1. **Interactive Test Tool** (`cmd/m365-test`)
-   - Live authentication testing
-   - Permission scope validation
-   - Multi-user scenario testing
-   - Results collection and analysis
-
-2. **Scenario Testing** (`features/modules/m365/testing`)
-   - Realistic M365 operations
-   - Edge case handling
-   - Permission boundary testing
-   - Error condition simulation
-
-3. **Setup Automation** (`scripts/setup-m365-testing.sh`)
-   - Environment configuration
-   - Credential management
-   - Test execution automation
-
 ### Test Coverage
 
 - ✅ **Authentication Flows**: OAuth2, PKCE, token refresh

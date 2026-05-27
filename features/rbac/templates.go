@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rbac
 
@@ -126,8 +126,14 @@ func (t *TemplateManager) ApplyTemplate(ctx context.Context, templateID, subject
 		UpdatedAt:     time.Now().Unix(),
 	}
 
+	// Inject system justification for the M-AUTH-2 sensitive-operation gate. Template
+	// application is an automated system operation; justification records the template origin.
+	// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+	ctxWithJustification := WithSensitiveOperationJustification(ctx,
+		fmt.Sprintf("system: role created from template %s during automated template application", templateID))
+
 	// Create the role
-	if err := t.rbacManager.CreateRole(ctx, role); err != nil {
+	if err := t.rbacManager.CreateRole(ctxWithJustification, role); err != nil {
 		return fmt.Errorf("failed to create role from template: %w", err)
 	}
 
@@ -138,16 +144,17 @@ func (t *TemplateManager) ApplyTemplate(ctx context.Context, templateID, subject
 		TenantId:  tenantID,
 	}
 
-	if err := t.rbacManager.AssignRole(ctx, assignment); err != nil {
-		// Cleanup: delete the created role if assignment fails
-		_ = t.rbacManager.DeleteRole(ctx, role.Id)
-		return fmt.Errorf("failed to assign template role: %w", err)
+	if templateID == "emergency.break-glass" {
+		assignment.ExpiresAt = time.Now().Add(4 * time.Hour).Unix()
 	}
 
-	// Handle conditional permissions if any
-	// In the current implementation, conditional permissions are not stored with role assignments
-	// This is a limitation that would need to be addressed in a future version
-	// For now, we acknowledge but do not process conditional permissions from templates
+	if err := t.rbacManager.AssignRole(ctxWithJustification, assignment); err != nil {
+		// Cleanup: delete the created role if assignment fails
+		ctxWithDeleteJustification := WithSensitiveOperationJustification(ctx,
+			fmt.Sprintf("system: rollback — deleting role created from template %s after failed assignment", templateID))
+		_ = t.rbacManager.DeleteRole(ctxWithDeleteJustification, role.Id)
+		return fmt.Errorf("failed to assign template role: %w", err)
+	}
 
 	return nil
 }
@@ -325,18 +332,18 @@ func (t *TemplateManager) getSystemTemplates() []*common.PermissionTemplate {
 		{
 			Id:            "emergency.break-glass",
 			Name:          "Emergency Break-Glass Access",
-			Description:   "Emergency access template with time-limited full privileges",
+			Description:   "Emergency access template. Assignments expire after 4 hours and must be renewed explicitly. Grants emergency.access on system resources only.",
 			Category:      "emergency",
-			PermissionIds: []string{"*"}, // All permissions
+			PermissionIds: []string{"emergency.break-glass"},
 			ConditionalPermissions: []*common.ConditionalPermission{
 				{
 					Id:           "emergency-time-limited",
-					PermissionId: "*",
+					PermissionId: "emergency.break-glass",
 					Conditions: []*common.Condition{
 						{
 							Type:     "time",
 							Operator: common.ConditionOperator_CONDITION_OPERATOR_LESS_THAN,
-							Values:   []string{time.Now().Add(4 * time.Hour).Format(time.RFC3339)},
+							Values:   []string{"4h"}, // duration resolved at assignment time, not template load time
 						},
 					},
 				},

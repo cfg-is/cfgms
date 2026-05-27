@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package terminal
 
@@ -8,9 +8,26 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+)
+
+var (
+	// outputScrubPattern matches sensitive key=value or key: value patterns in terminal output.
+	// Capture group 1 preserves the key and separator; capture group 2 (the value) is replaced.
+	outputScrubPattern = regexp.MustCompile(
+		`(?i)(\b\w*(?:password|secret|token|api[-_]?key|apikey|credential|private[-_]?key|access[-_]?key)\w*\s*[=:]\s*)(\S{4,})`,
+	)
+	// outputJWTPattern matches JWT-format bearer tokens (three base64url-encoded segments).
+	// Minimum 10 chars per segment avoids false positives on short base64 fragments.
+	outputJWTPattern = regexp.MustCompile(
+		`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`,
+	)
 )
 
 // CommandInterceptor intercepts and processes terminal commands for security filtering
@@ -108,11 +125,17 @@ func (ci *CommandInterceptor) InterceptInput(ctx context.Context, input []byte) 
 	return processedOutput.Bytes(), nil
 }
 
-// InterceptOutput processes output data from the shell (for audit purposes)
+// scrubSensitiveData applies the package-level scrub patterns to data, replacing
+// sensitive values (passwords, tokens, keys, JWTs) with [REDACTED].
+func scrubSensitiveData(data []byte) []byte {
+	scrubbed := outputScrubPattern.ReplaceAll(data, []byte("${1}[REDACTED]"))
+	return outputJWTPattern.ReplaceAll(scrubbed, []byte("[REDACTED]"))
+}
+
+// InterceptOutput scrubs sensitive data (passwords, tokens, keys) from shell output
+// before the data is forwarded to the user or written to audit logs.
 func (ci *CommandInterceptor) InterceptOutput(ctx context.Context, output []byte) ([]byte, error) {
-	// For now, just pass through output
-	// In future versions, we could filter sensitive output
-	return output, nil
+	return scrubSensitiveData(output), nil
 }
 
 // validateAndFilterCommand validates a complete command against security rules
@@ -174,6 +197,7 @@ type CommandFilter struct {
 	outputWriter io.Writer
 	shellInput   io.Writer
 	shellOutput  io.Reader
+	auditManager *audit.Manager
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -181,6 +205,11 @@ type CommandFilter struct {
 	// Control channels
 	done   chan struct{}
 	errors chan error
+}
+
+// SetAuditManager wires the centralized audit manager for command audit event delivery.
+func (cf *CommandFilter) SetAuditManager(m *audit.Manager) {
+	cf.auditManager = m
 }
 
 // NewCommandFilter creates a new command filter that sits between user and shell
@@ -315,7 +344,7 @@ func (cf *CommandFilter) filterOutput() {
 				return
 			}
 
-			// Apply output filtering (currently pass-through)
+			// Apply output filtering (sensitive data scrubbing)
 			filtered, err := cf.interceptor.InterceptOutput(cf.ctx, buffer[:n])
 			if err != nil {
 				select {
@@ -354,33 +383,30 @@ func (cf *CommandFilter) handleBlockedCommand(command string, reason string) err
 	return nil
 }
 
-// handleAuditCommand handles when a command requires auditing
+// handleAuditCommand delivers a command audit event to the centralized audit log pipeline.
 func (cf *CommandFilter) handleAuditCommand(event *CommandAuditEvent) error {
-	// For now, just log audit events
-	// In production, this would send to audit logging system
-	return nil
-}
+	if cf.auditManager == nil {
+		return nil
+	}
 
-// StreamInterceptor provides real-time command interception for streaming data
-type StreamInterceptor struct {
-	validator       *SecurityValidator
-	securityContext *SessionSecurityContext
+	severity := business.AuditSeverityMedium
+	switch event.Severity {
+	case FilterSeverityCritical:
+		severity = business.AuditSeverityCritical
+	case FilterSeverityHigh:
+		severity = business.AuditSeverityHigh
+	case FilterSeverityLow:
+		severity = business.AuditSeverityLow
+	}
 
-	// Stream processing
-	inputProcessor  *CommandProcessor
-	outputProcessor *OutputProcessor
+	builder := audit.SystemAccessEvent(event.TenantID, event.UserID, event.SessionID, "terminal.command.executed").
+		Detail("command", string(scrubSensitiveData([]byte(event.Command)))).
+		Detail("steward_id", event.StewardID).
+		Detail("rule_id", event.RuleID).
+		Detail("action", string(event.Action)).
+		Severity(severity)
 
-	// Security events
-	auditChannel chan<- *CommandAuditEvent
-	alertChannel chan<- *SecurityAlert
-}
-
-// CommandProcessor processes command streams and extracts complete commands
-type CommandProcessor struct {
-}
-
-// OutputProcessor processes output streams for sensitive data detection
-type OutputProcessor struct {
+	return cf.auditManager.RecordEvent(context.Background(), builder)
 }
 
 // SensitiveDataRule defines patterns for detecting sensitive data in output
@@ -404,35 +430,4 @@ type SecurityAlert struct {
 	Context     map[string]interface{} `json:"context"`
 	Timestamp   time.Time              `json:"timestamp"`
 	ActionTaken string                 `json:"action_taken"`
-}
-
-// NewStreamInterceptor creates a new stream interceptor for real-time processing
-func NewStreamInterceptor(
-	validator *SecurityValidator,
-	context *SessionSecurityContext,
-	auditChan chan<- *CommandAuditEvent,
-	alertChan chan<- *SecurityAlert,
-) *StreamInterceptor {
-	return &StreamInterceptor{
-		validator:       validator,
-		securityContext: context,
-		auditChannel:    auditChan,
-		alertChannel:    alertChan,
-		inputProcessor:  &CommandProcessor{},
-		outputProcessor: &OutputProcessor{},
-	}
-}
-
-// ProcessInput processes input stream and returns filtered data
-func (si *StreamInterceptor) ProcessInput(ctx context.Context, data []byte) ([]byte, error) {
-	// Implementation would process streaming input data
-	// This is a placeholder for the streaming command processing logic
-	return data, nil
-}
-
-// ProcessOutput processes output stream and returns filtered data
-func (si *StreamInterceptor) ProcessOutput(ctx context.Context, data []byte) ([]byte, error) {
-	// Implementation would process streaming output data
-	// This is a placeholder for the streaming output processing logic
-	return data, nil
 }

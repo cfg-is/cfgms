@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2025 CFGMS Contributors
 package git
 
@@ -155,7 +155,7 @@ func TestGitManager_CreateRepository(t *testing.T) {
 		EnableHooks:   false, // Disable hooks for simple test
 	}
 
-	manager := NewGitManager(mockProvider, mockStore, config)
+	manager := NewGitManager(mockProvider, mockStore, config, nil)
 
 	// Test repository configuration
 	repoConfig := RepositoryConfig{
@@ -215,7 +215,7 @@ func TestGitManager_SaveConfiguration(t *testing.T) {
 		EnableHooks:   false,
 	}
 
-	manager := NewGitManager(mockProvider, mockStore, config)
+	manager := NewGitManager(mockProvider, mockStore, config, nil)
 
 	// Add a test repository to the manager
 	testRepo := &Repository{
@@ -266,7 +266,7 @@ func TestGitManager_GetConfiguration(t *testing.T) {
 		DefaultBranch: "main",
 	}
 
-	manager := NewGitManager(mockProvider, mockStore, config)
+	manager := NewGitManager(mockProvider, mockStore, config, nil)
 
 	// Add a test repository to the manager
 	testRepo := &Repository{
@@ -326,7 +326,7 @@ func TestGitManager_ListRepositories(t *testing.T) {
 		CacheDir: "/tmp/test-cache",
 	}
 
-	manager := NewGitManager(mockProvider, mockStore, config)
+	manager := NewGitManager(mockProvider, mockStore, config, nil)
 
 	// Add test repositories
 	repo1 := &Repository{
@@ -377,7 +377,7 @@ func TestGitManager_CreateBranch(t *testing.T) {
 		CacheDir: "/tmp/test-cache",
 	}
 
-	manager := NewGitManager(mockProvider, mockStore, config)
+	manager := NewGitManager(mockProvider, mockStore, config, nil)
 
 	// Add test repository
 	testRepo := &Repository{
@@ -406,7 +406,7 @@ func TestGitManager_GenerateRepositoryName(t *testing.T) {
 	mockStore := &MockRepositoryStore{}
 
 	config := GitManagerConfig{}
-	manager := NewGitManager(mockProvider, mockStore, config)
+	manager := NewGitManager(mockProvider, mockStore, config, nil)
 
 	tests := []struct {
 		name     string

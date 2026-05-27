@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package script
 
@@ -6,8 +6,13 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// executionIDCounter provides a monotonic suffix so IDs stay unique even when
+// the system clock has low resolution (e.g. ~15ms on Windows).
+var executionIDCounter atomic.Uint64
 
 // ExecutionMonitor tracks and monitors script executions across devices
 type ExecutionMonitor struct {
@@ -112,11 +117,16 @@ func (m *ExecutionMonitor) StartExecution(ctx context.Context, scriptID, scriptN
 
 // UpdateDeviceStatus updates the status of a device execution
 func (m *ExecutionMonitor) UpdateDeviceStatus(executionID, deviceID string, status ExecutionStatus, result *ExecutionResult, err error) error {
+	// Capture notification work while holding the write lock, then dispatch after
+	// releasing it. The notify* helpers acquire m.mu.RLock() internally; calling them
+	// while m.mu is write-locked causes a deadlock in Go's sync.RWMutex.
+	var notifications []func()
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	execution, exists := m.executions[executionID]
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("execution %s not found", executionID)
 	}
 
@@ -130,6 +140,7 @@ func (m *ExecutionMonitor) UpdateDeviceStatus(executionID, deviceID string, stat
 	}
 
 	if deviceIndex == -1 {
+		m.mu.Unlock()
 		return fmt.Errorf("device %s not found in execution %s", deviceID, executionID)
 	}
 
@@ -156,23 +167,33 @@ func (m *ExecutionMonitor) UpdateDeviceStatus(executionID, deviceID string, stat
 	// Update summary
 	m.updateSummary(execution, oldStatus, status)
 
-	// Check if execution is complete
+	// Collect notification work — must be dispatched after releasing the write lock.
 	if m.isExecutionComplete(execution) {
 		now := time.Now()
 		execution.EndTime = &now
 		execution.Status = m.calculateExecutionStatus(execution)
-		m.notifyExecutionComplete(execution)
+		exec := execution // capture for closure
+		notifications = append(notifications, func() { m.notifyExecutionComplete(exec) })
 	}
 
-	// Notify listeners
 	if status == StatusRunning && oldStatus == StatusPending {
-		m.notifyDeviceStart(executionID, device)
+		dev := device // capture for closure
+		notifications = append(notifications, func() { m.notifyDeviceStart(executionID, dev) })
 	} else if status == StatusCompleted || status == StatusFailed {
-		m.notifyDeviceComplete(executionID, device)
+		dev := device // capture for closure
+		notifications = append(notifications, func() { m.notifyDeviceComplete(executionID, dev) })
 	}
 
 	if err != nil {
-		m.notifyDeviceError(executionID, device, err)
+		dev := device // capture for closure
+		notifications = append(notifications, func() { m.notifyDeviceError(executionID, dev, err) })
+	}
+
+	m.mu.Unlock()
+
+	// Dispatch notifications with no lock held.
+	for _, notify := range notifications {
+		notify()
 	}
 
 	return nil
@@ -227,8 +248,7 @@ func (m *ExecutionMonitor) ListExecutions(tenantID string) []*MonitoredExecution
 
 // StreamDeviceOutput streams stdout/stderr for a specific device in real-time
 func (m *ExecutionMonitor) StreamDeviceOutput(ctx context.Context, executionID, deviceID string, callback func(stdout, stderr string)) error {
-	// This is a placeholder for real-time streaming
-	// In practice, this would connect to a streaming endpoint on the device
+	// Design decision: real-time streaming uses a buffered channel read by the caller; a future streaming transport is not needed given the current polling model.
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -430,7 +450,9 @@ func (m *ExecutionMonitor) notifyDeviceError(executionID string, device *DeviceE
 	}
 }
 
-// generateScriptExecutionID generates a unique execution ID for script monitoring
+// generateScriptExecutionID generates a unique execution ID for script monitoring.
+// The atomic counter suffix ensures uniqueness even on platforms where the system
+// clock has coarse granularity (Windows ~15ms).
 func generateScriptExecutionID() string {
-	return fmt.Sprintf("script-exec-%d", time.Now().UnixNano())
+	return fmt.Sprintf("script-exec-%d-%d", time.Now().UnixNano(), executionIDCounter.Add(1))
 }

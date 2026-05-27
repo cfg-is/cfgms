@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package registration
 
@@ -11,15 +11,13 @@ import (
 )
 
 const (
-	// TokenPrefix is the prefix for all registration tokens
-	TokenPrefix = "cfgms_reg_"
-
 	// TokenLength is the length of the random part (before encoding)
 	TokenLength = 16 // 16 bytes = 128 bits of entropy
 )
 
 // GenerateToken generates a new random registration token.
-// Format: cfgms_reg_XXXXXXXXXXXXXXXXXXXXX (base32 encoded random bytes)
+// Format: bare base32-encoded random bytes (lowercase, no padding, ~26 chars).
+// The --regtoken flag identifies the token type; no prefix is needed.
 func GenerateToken() (string, error) {
 	// Generate random bytes
 	randomBytes := make([]byte, TokenLength)
@@ -28,10 +26,7 @@ func GenerateToken() (string, error) {
 	}
 
 	// Encode to base32 (no padding, lowercase)
-	encoded := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randomBytes))
-
-	// Add prefix
-	token := TokenPrefix + encoded
+	token := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randomBytes))
 
 	return token, nil
 }
@@ -95,7 +90,6 @@ func CreateToken(req *TokenCreateRequest) (*Token, error) {
 		Group:         req.Group,
 		CreatedAt:     time.Now(),
 		ExpiresAt:     expiresAt,
-		SingleUse:     req.SingleUse,
 	}
 
 	return token, nil

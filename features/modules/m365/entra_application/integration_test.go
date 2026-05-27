@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package entra_application
 
@@ -16,6 +16,8 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
+	"github.com/cfgis/cfgms/pkg/logging"
+	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 )
 
 // loadTestEnvironment loads environment variables from .env.local if it exists
@@ -106,7 +108,7 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 		},
 		RequiredResourceAccess: []ResourceAccess{
 			{
-				ResourceAppId: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
+				ResourceAppID: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
 				ResourceAccess: []PermissionScope{
 					{ID: "e1fe6dd8-ba31-4d61-89e7-88639da4683d", Type: "Scope"}, // User.Read
 				},
@@ -126,34 +128,21 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 		ManagedFieldsList:      []string{"display_name", "description", "sign_in_audience"},
 	}
 
-	// Test Get operation with non-existent application (currently returns placeholder data)
+	// Test Get operation with non-existent application — expects a not-found error from Graph API
 	resourceID := tenantID + ":non-existent-application-id"
-	getResult, err := module.Get(ctx, resourceID)
-
-	// Current implementation returns placeholder data - this will change when Graph API is fully implemented
+	_, err := module.Get(ctx, resourceID)
 	if err != nil {
-		t.Logf("Get operation failed (expected for incomplete Graph API implementation): %v", err)
-	} else {
-		if appConfig, ok := getResult.(*EntraApplicationConfig); ok {
-			t.Logf("Get operation returned placeholder data (expected for current implementation): DisplayName=%s", appConfig.DisplayName)
-		} else {
-			t.Logf("Get operation returned config of unexpected type: %T", getResult)
-		}
+		t.Logf("Get returned expected error for non-existent application: %v", err)
 	}
 
 	// Test Set operation (create)
-	// Note: This test creates a real application - cleanup would be needed in production
-	// We use a placeholder resource ID for creation, but Microsoft Graph will assign a real GUID
-	createResourceID := tenantID + ":placeholder-" + time.Now().Format("20060102-150405")
+	createResourceID := tenantID + ":" + time.Now().Format("20060102-150405")
 	err = module.Set(ctx, createResourceID, config)
 
 	if err != nil {
-		t.Logf("Set operation failed (expected for limited implementation): %v", err)
-		// Accept either authentication/permission errors OR not-yet-implemented errors
-		// Authentication errors indicate credentials/permissions issues
-		// Implementation errors indicate the module functionality is still being developed
-		assert.Regexp(t, "(authentication|permission|consent|scope|credential|invalid_scope|not yet implemented|Authorization_RequestDenied|Insufficient privileges|HostNameNotOnVerifiedDomain)", err.Error(),
-			"Expected authentication/permission/scope error or not implemented, got: %v", err)
+		t.Logf("Set operation failed: %v", err)
+		assert.Regexp(t, "(authentication|permission|consent|scope|credential|invalid_scope|Authorization_RequestDenied|Insufficient privileges|HostNameNotOnVerifiedDomain)", err.Error(),
+			"Expected authentication/permission/scope error, got: %v", err)
 		return
 	}
 
@@ -179,7 +168,7 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 
 	// Test Get operation with the real application GUID
 	realResourceID := tenantID + ":" + createdApp.ID
-	getResult, err = module.Get(ctx, realResourceID)
+	getResult, err := module.Get(ctx, realResourceID)
 	require.NoError(t, err, "Should be able to retrieve created application")
 
 	retrievedConfig, ok := getResult.(*EntraApplicationConfig)
@@ -265,10 +254,10 @@ func TestEntraApplication_Integration_ComplexConfiguration(t *testing.T) {
 			Mobile:  []string{"https://cfgms-complex-app.example.com/mobile"},
 			Desktop: []string{"https://cfgms-complex-app.example.com/desktop"},
 		},
-		LogoutUrl: "https://cfgms-complex-app.example.com/logout",
+		LogoutURL: "https://cfgms-complex-app.example.com/logout",
 		RequiredResourceAccess: []ResourceAccess{
 			{
-				ResourceAppId: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
+				ResourceAppID: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
 				ResourceAccess: []PermissionScope{
 					{ID: "e1fe6dd8-ba31-4d61-89e7-88639da4683d", Type: "Scope"}, // User.Read
 					{ID: "06da0dbc-49e2-44d2-8312-53746cb0532c", Type: "Scope"}, // Mail.Read
@@ -306,7 +295,7 @@ func TestEntraApplication_Integration_ComplexConfiguration(t *testing.T) {
 			},
 		},
 		OptionalClaims: &OptionalClaims{
-			IdToken: []OptionalClaim{
+			IDToken: []OptionalClaim{
 				{
 					Name:      "email",
 					Essential: true,
@@ -352,10 +341,9 @@ func TestEntraApplication_Integration_ComplexConfiguration(t *testing.T) {
 	err = module.Set(ctx, resourceID, complexConfig)
 
 	if err != nil {
-		t.Logf("Complex Set operation failed (expected for limited implementation): %v", err)
-		// Accept either authentication/permission errors OR not-yet-implemented errors
-		assert.Regexp(t, "(authentication|permission|consent|scope|credential|invalid_scope|not yet implemented|Authorization_RequestDenied|Insufficient privileges|HostNameNotOnVerifiedDomain)", err.Error(),
-			"Expected authentication/permission/scope error or not implemented, got: %v", err)
+		t.Logf("Complex Set operation failed: %v", err)
+		assert.Regexp(t, "(authentication|permission|consent|scope|credential|invalid_scope|Authorization_RequestDenied|Insufficient privileges|HostNameNotOnVerifiedDomain)", err.Error(),
+			"Expected authentication/permission/scope error, got: %v", err)
 	} else {
 		t.Logf("Complex application created successfully: %s", complexConfig.DisplayName)
 
@@ -453,11 +441,16 @@ func TestEntraApplication_Integration_ResourceIDParsing(t *testing.T) {
 
 // createRealAuthProvider creates a real OAuth2Provider for integration testing
 func createRealAuthProvider(t *testing.T) auth.Provider {
-	tempDir := t.TempDir()
-
-	// Create credential store
-	credStore, err := auth.NewFileCredentialStore(tempDir, "integration-test-passphrase")
-	require.NoError(t, err, "Failed to create credential store")
+	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
+		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
+	}
+	sp := &stewardprovider.StewardProvider{}
+	secretStore, err := sp.CreateSecretStore(map[string]interface{}{
+		"secrets_dir": t.TempDir(),
+	})
+	require.NoError(t, err, "Failed to create secret store")
+	t.Cleanup(func() { _ = secretStore.Close() })
+	credStore := auth.NewSecretStoreCredentialStore(secretStore)
 
 	// Create OAuth2 config from environment
 	config := &auth.OAuth2Config{
@@ -471,7 +464,7 @@ func createRealAuthProvider(t *testing.T) auth.Provider {
 	}
 
 	// Create provider
-	provider := auth.NewOAuth2Provider(credStore, config)
+	provider := auth.NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 
 	return provider
 }
@@ -511,7 +504,7 @@ func TestEntraApplication_Integration_FullCRUD(t *testing.T) {
 		},
 		RequiredResourceAccess: []ResourceAccess{
 			{
-				ResourceAppId: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
+				ResourceAppID: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
 				ResourceAccess: []PermissionScope{
 					{ID: "e1fe6dd8-ba31-4d61-89e7-88639da4683d", Type: "Scope"}, // User.Read
 				},
@@ -596,7 +589,7 @@ func TestEntraApplication_Integration_FullCRUD(t *testing.T) {
 		},
 		RequiredResourceAccess: []ResourceAccess{
 			{
-				ResourceAppId: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
+				ResourceAppID: "00000003-0000-0000-c000-000000000000", // Microsoft Graph
 				ResourceAccess: []PermissionScope{
 					{ID: "e1fe6dd8-ba31-4d61-89e7-88639da4683d", Type: "Scope"}, // User.Read
 					{ID: "06da0dbc-49e2-44d2-8312-53746cb0532c", Type: "Scope"}, // Mail.Read (ADD)

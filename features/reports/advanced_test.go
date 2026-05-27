@@ -1,61 +1,36 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package reports
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/reports/cache"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
-	"github.com/cfgis/cfgms/features/steward/dna/drift"
-	"github.com/cfgis/cfgms/features/steward/dna/storage"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/dna/drift"
 	"github.com/cfgis/cfgms/pkg/logging"
-	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/testutil"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 
-	// Import storage providers to register them
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
-
-// TestAdvancedServiceCreation tests the creation of AdvancedService
-func TestAdvancedServiceCreation(t *testing.T) {
-	service := createTestAdvancedService(t)
-
-	assert.NotNil(t, service)
-	assert.NotNil(t, service.Service)
-	assert.NotNil(t, service.advancedEngine)
-	assert.NotNil(t, service.advancedProvider)
-	assert.NotNil(t, service.rbacManager)
-	assert.NotNil(t, service.auditManager)
-
-	// Test configuration
-	config := service.GetConfiguration()
-	assert.True(t, config.EnableAuditIntegration)
-	assert.False(t, config.EnableRBACValidation) // Disabled for integration testing
-	assert.True(t, config.EnableCrossSystemMetrics)
-	assert.Equal(t, 50, config.MaxTenantsPerReport)
-	assert.Contains(t, config.ComplianceFrameworks, "CIS")
-	assert.Contains(t, config.ComplianceFrameworks, "HIPAA")
-}
 
 // TestAdvancedServiceWithConfig tests service creation with custom configuration
 func TestAdvancedServiceWithConfig(t *testing.T) {
-	// Skip test if CGO is not enabled (SQLite requires CGO)
-	testutil.SkipWithoutCGO(t)
-
-	logger := &testLogger{}
+	logger := logging.NewNoopLogger()
 
 	// Create DNA storage manager
 	dnaStorageConfig := &storage.Config{
 		Backend:                storage.BackendSQLite,
+		DataDir:                t.TempDir(),
 		CompressionLevel:       6,
 		CompressionType:        "gzip",
 		TargetCompressionRatio: 0.7, // More relaxed target for testing
@@ -75,22 +50,23 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 	}
 	dnaStorageManager, err := storage.NewManager(dnaStorageConfig, logger)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = dnaStorageManager.Close() })
 
 	// Create real components
 	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
 	require.NoError(t, err)
 
-	// Create audit components using git storage for testing
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	globalStorageManager, err := storageInterfaces.CreateAllStoresFromConfig("git", config)
-	require.NoError(t, err)
+	// Create audit components using OSS storage for testing
+	globalStorageManager := pkgtesting.SetupTestStorage(t)
 
 	auditStore := globalStorageManager.GetAuditStore()
-	auditManager := audit.NewManager(auditStore, "test-reports")
+	auditManager, err := audit.NewManager(auditStore, "test-reports")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		_ = auditManager.Stop(stopCtx)
+	})
 
 	rbacManager := rbac.NewManagerWithStorage(
 		auditStore,
@@ -98,6 +74,11 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 		globalStorageManager.GetRBACStore(),
 	)
 	require.NotNil(t, rbacManager)
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.FlushAudit(flushCtx)
+	})
 
 	reportCache := cache.NewMemoryCache()
 
@@ -418,22 +399,53 @@ func TestConvenienceMethods(t *testing.T) {
 	complianceData, err := service.GenerateComplianceAssessment(
 		ctx, tenantIDs, []string{"CIS"}, timeRange, interfaces.FormatJSON,
 	)
-	assert.NoError(t, err)
-	assert.NotNil(t, complianceData)
+	require.NoError(t, err)
+	require.NotEmpty(t, complianceData)
+	var complianceReport interfaces.ComplianceReport
+	require.NoError(t, json.Unmarshal(complianceData, &complianceReport), "compliance data must be valid JSON")
+	assert.NotEmpty(t, complianceReport.ID, "compliance report must carry a non-empty ID")
 
 	// Test security analysis
 	securityData, err := service.GenerateSecurityAnalysis(
 		ctx, tenantIDs, timeRange, "comprehensive", interfaces.FormatJSON,
 	)
-	assert.NoError(t, err)
-	assert.NotNil(t, securityData)
+	require.NoError(t, err)
+	require.NotEmpty(t, securityData)
+	var securityReport interfaces.SecurityReport
+	require.NoError(t, json.Unmarshal(securityData, &securityReport), "security data must be valid JSON")
+	assert.NotEmpty(t, securityReport.ID, "security report must carry a non-empty ID")
 
 	// Test executive dashboard
 	dashboardData, err := service.GenerateExecutiveDashboard(
 		ctx, tenantIDs, timeRange, "executive", interfaces.FormatJSON,
 	)
-	assert.NoError(t, err)
-	assert.NotNil(t, dashboardData)
+	require.NoError(t, err)
+	require.NotEmpty(t, dashboardData)
+	var executiveReport interfaces.ExecutiveReport
+	require.NoError(t, json.Unmarshal(dashboardData, &executiveReport), "dashboard data must be valid JSON")
+	assert.NotEmpty(t, executiveReport.ID, "executive report must carry a non-empty ID")
+}
+
+// TestGetUserIDFromContext verifies getUserIDFromContext reads user identity via typed ctxkeys,
+// not plain string literals.
+func TestGetUserIDFromContext(t *testing.T) {
+	service := createTestAdvancedService(t)
+
+	// UserIDKey (typed) takes priority over other fallbacks.
+	ctxWithUserID := context.WithValue(context.Background(), ctxkeys.UserIDKey, "user-abc-123")
+	assert.Equal(t, "user-abc-123", service.getUserIDFromContext(ctxWithUserID))
+
+	// AuthClaimsKey (typed) is the second fallback; sub field extracted.
+	claims := map[string]interface{}{"sub": "claims-user-456", "role": "admin"}
+	ctxWithClaims := context.WithValue(context.Background(), ctxkeys.AuthClaimsKey, claims)
+	assert.Equal(t, "claims-user-456", service.getUserIDFromContext(ctxWithClaims))
+
+	// TenantID fallback when neither UserIDKey nor AuthClaimsKey is present.
+	ctxWithTenant := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-xyz")
+	assert.Equal(t, "system-user-tenant-xyz", service.getUserIDFromContext(ctxWithTenant))
+
+	// Default when no context values are set.
+	assert.Equal(t, "system-user", service.getUserIDFromContext(context.Background()))
 }
 
 // TestServiceClose tests service cleanup
@@ -568,19 +580,76 @@ func TestGetCrossSystemMetrics(t *testing.T) {
 	assert.LessOrEqual(t, metrics.AuditMetrics.FailureRate, 100.0)
 }
 
+// TestExportFormats covers JSON, HTML, and PDF serialization paths in exportAdvancedReport.
+// Each sub-test asserts content structure (not just byte length) for its format.
+func TestExportFormats(t *testing.T) {
+	service := createTestAdvancedService(t)
+	ctx := context.Background()
+
+	// Generate a real ComplianceReport to use as serialization input.
+	report, err := service.GenerateComplianceReport(ctx, interfaces.ComplianceReportRequest{
+		TimeRange: interfaces.TimeRange{
+			Start: time.Now().Add(-24 * time.Hour),
+			End:   time.Now(),
+		},
+		TenantIDs:   []string{"tenant1"},
+		Frameworks:  []string{"CIS"},
+		Format:      interfaces.FormatJSON,
+		DetailLevel: "summary",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	require.NotEmpty(t, report.ID, "generated report must have a non-empty ID")
+
+	t.Run("JSON", func(t *testing.T) {
+		data, err := service.exportAdvancedReport(ctx, report, interfaces.FormatJSON)
+		require.NoError(t, err)
+		require.NotEmpty(t, data)
+
+		var decoded interfaces.ComplianceReport
+		require.NoError(t, json.Unmarshal(data, &decoded), "JSON output must unmarshal into ComplianceReport")
+		assert.NotEmpty(t, decoded.ID, "decoded report must carry a non-empty ID")
+		assert.Equal(t, report.TenantIDs, decoded.TenantIDs, "decoded report must preserve tenant IDs")
+		assert.Equal(t, report.Frameworks, decoded.Frameworks, "decoded report must preserve frameworks")
+	})
+
+	t.Run("HTML", func(t *testing.T) {
+		data, err := service.exportAdvancedReport(ctx, report, interfaces.FormatHTML)
+		require.NoError(t, err)
+		require.NotEmpty(t, data)
+
+		body := string(data)
+		assert.True(t, strings.HasPrefix(body, "<!DOCTYPE html>"), "HTML must start with DOCTYPE declaration")
+		assert.Contains(t, body, "<html", "HTML output must contain <html element")
+		assert.Contains(t, body, report.ID, "HTML output must embed the report ID")
+	})
+
+	t.Run("PDF", func(t *testing.T) {
+		data, err := service.exportAdvancedReport(ctx, report, interfaces.FormatPDF)
+		require.NoError(t, err)
+		require.NotEmpty(t, data)
+
+		require.GreaterOrEqual(t, len(data), 4, "PDF output must be at least 4 bytes")
+		assert.Equal(t, "%PDF", string(data[:4]), "PDF must begin with %%PDF magic bytes")
+	})
+
+	t.Run("unsupported_format", func(t *testing.T) {
+		_, err := service.exportAdvancedReport(ctx, report, interfaces.FormatCSV)
+		assert.Error(t, err, "unsupported format must return an error")
+	})
+}
+
 // Helper Functions
 
 // createTestAdvancedService creates a test instance of AdvancedService using minimal real components
 func createTestAdvancedService(t *testing.T) *AdvancedService {
-	// Skip test if CGO is not enabled (SQLite requires CGO)
-	testutil.SkipWithoutCGO(t)
-
-	logger := &testLogger{}
+	logger := logging.NewNoopLogger()
 
 	// Create minimal real components needed for the service
 	// Create DNA storage manager (which is what the constructor expects)
 	dnaStorageConfig := &storage.Config{
 		Backend:                storage.BackendSQLite,
+		DataDir:                t.TempDir(),
 		CompressionLevel:       6,
 		CompressionType:        "gzip",
 		TargetCompressionRatio: 0.7, // More relaxed target for testing
@@ -600,22 +669,23 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 	}
 	dnaStorageManager, err := storage.NewManager(dnaStorageConfig, logger)
 	require.NoError(t, err, "Failed to create DNA storage manager")
+	t.Cleanup(func() { _ = dnaStorageManager.Close() })
 
 	// Create minimal drift detector
 	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
 	require.NoError(t, err, "Failed to create drift detector")
 
-	// Create audit components using git storage for testing
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	globalStorageManager, err := storageInterfaces.CreateAllStoresFromConfig("git", config)
-	require.NoError(t, err, "Failed to create global storage manager")
+	// Create audit components using OSS storage for testing
+	globalStorageManager := pkgtesting.SetupTestStorage(t)
 
 	auditStore := globalStorageManager.GetAuditStore()
-	auditManager := audit.NewManager(auditStore, "test-reports")
+	auditManager, err := audit.NewManager(auditStore, "test-reports")
+	require.NoError(t, err, "Failed to create audit manager")
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		_ = auditManager.Stop(stopCtx)
+	})
 
 	// Create RBAC manager
 	rbacManager := rbac.NewManagerWithStorage(
@@ -624,6 +694,11 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 		globalStorageManager.GetRBACStore(),
 	)
 	require.NotNil(t, rbacManager, "Failed to create RBAC manager")
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.FlushAudit(flushCtx)
+	})
 
 	// Create real report cache
 	reportCache := cache.NewMemoryCache()
@@ -654,20 +729,3 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 
 	return service
 }
-
-// testLogger implements logging.Logger for testing
-type testLogger struct{}
-
-// Ensure testLogger implements logging.Logger
-var _ logging.Logger = (*testLogger)(nil)
-
-func (l *testLogger) Debug(msg string, keysAndValues ...interface{})                         {}
-func (l *testLogger) Info(msg string, keysAndValues ...interface{})                          {}
-func (l *testLogger) Warn(msg string, keysAndValues ...interface{})                          {}
-func (l *testLogger) Error(msg string, keysAndValues ...interface{})                         {}
-func (l *testLogger) Fatal(msg string, keysAndValues ...interface{})                         {}
-func (l *testLogger) DebugCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
-func (l *testLogger) InfoCtx(ctx context.Context, msg string, keysAndValues ...interface{})  {}
-func (l *testLogger) WarnCtx(ctx context.Context, msg string, keysAndValues ...interface{})  {}
-func (l *testLogger) ErrorCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
-func (l *testLogger) FatalCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}

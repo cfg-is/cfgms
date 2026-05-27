@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package database provides schema management for PostgreSQL storage provider
 package database
@@ -224,7 +224,9 @@ func (s DatabaseSchemas) CreateAuditEntriesTable(ctx context.Context, db *sql.DB
 			severity VARCHAR(20) NOT NULL DEFAULT 'low',
 			source VARCHAR(100) NOT NULL,
 			version VARCHAR(20) DEFAULT '1.0',
-			checksum VARCHAR(64) NOT NULL
+			checksum VARCHAR(64) NOT NULL,
+			sequence_number BIGINT NOT NULL DEFAULT 0,
+			previous_checksum VARCHAR(64) NOT NULL DEFAULT ''
 		);
 	`
 
@@ -582,7 +584,9 @@ func (s DatabaseSchemas) CreateRBACRoleAssignmentsTable(ctx context.Context, db 
 	return nil
 }
 
-// CreateRegistrationTokensTable creates the registration_tokens table for token persistence
+// CreateRegistrationTokensTable creates the registration_tokens table for token persistence.
+// Migration note: single_use, used_at, and used_by columns were removed in Issue #1690
+// (perennial token model with immediate-invalidation rotation).
 func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *sql.DB) error {
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_registration_tokens (
@@ -592,9 +596,6 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 			group_name VARCHAR(255) DEFAULT '',
 			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 			expires_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
-			single_use BOOLEAN NOT NULL DEFAULT FALSE,
-			used_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
-			used_by VARCHAR(255) DEFAULT '',
 			revoked BOOLEAN NOT NULL DEFAULT FALSE,
 			revoked_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
 		);
@@ -611,9 +612,7 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_created_at ON cfgms_registration_tokens(created_at);",
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_expires_at ON cfgms_registration_tokens(expires_at);",
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_revoked ON cfgms_registration_tokens(revoked);",
-		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_single_use ON cfgms_registration_tokens(single_use);",
-		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_used_at ON cfgms_registration_tokens(used_at);",
-		// Composite index for filtering unused, non-revoked tokens by tenant
+		// Composite index for filtering non-revoked tokens by tenant
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_tenant_active ON cfgms_registration_tokens(tenant_id) WHERE revoked = FALSE;",
 	}
 
@@ -623,6 +622,75 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 		}
 	}
 
+	return nil
+}
+
+// CreateIPTrustRangesTable creates the cfgms_ip_trust_ranges table for tenant-scoped IP trust.
+func (s DatabaseSchemas) CreateIPTrustRangesTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS cfgms_ip_trust_ranges (
+			id              TEXT PRIMARY KEY,
+			tenant_id       TEXT NOT NULL,
+			cidr            TEXT NOT NULL,
+			pre_seeded      BOOLEAN NOT NULL DEFAULT FALSE,
+			trusted_since   TIMESTAMP WITH TIME ZONE NOT NULL,
+			last_activity   TIMESTAMP WITH TIME ZONE,
+			last_activity_ip TEXT,
+			revoked         BOOLEAN NOT NULL DEFAULT FALSE,
+			revoked_at      TIMESTAMP WITH TIME ZONE,
+			UNIQUE(tenant_id, cidr)
+		);
+	`
+
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_ip_trust_ranges table: %w", err)
+	}
+
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_ip_trust_tenant_revoked ON cfgms_ip_trust_ranges(tenant_id, revoked);",
+		"CREATE INDEX IF NOT EXISTS idx_ip_trust_tenant_cidr    ON cfgms_ip_trust_ranges(tenant_id, cidr);",
+	}
+
+	for _, indexQuery := range indexes {
+		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
+			return fmt.Errorf("failed to create cfgms_ip_trust_ranges index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// CreatePendingRegistrationsTable creates the cfgms_pending_registrations table (Issue #1696).
+// No cert bundle columns are included — generate-on-claim issues certs in memory only.
+func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS cfgms_pending_registrations (
+			pending_id    TEXT PRIMARY KEY,
+			steward_id    TEXT NOT NULL DEFAULT '',
+			tenant_id     TEXT NOT NULL,
+			token_str     TEXT NOT NULL,
+			source_ip     TEXT NOT NULL DEFAULT '',
+			registered_at TIMESTAMP WITH TIME ZONE NOT NULL,
+			expires_at    TIMESTAMP WITH TIME ZONE NOT NULL,
+			claimed_at    TIMESTAMP WITH TIME ZONE,
+			status        TEXT NOT NULL DEFAULT 'pending'
+		);
+	`
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_pending_registrations table: %w", err)
+	}
+
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_tenant_id  ON cfgms_pending_registrations(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_status     ON cfgms_pending_registrations(status);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_expires_at ON cfgms_pending_registrations(expires_at);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_token_str  ON cfgms_pending_registrations(token_str);",
+	}
+	for _, idx := range indexes {
+		if _, err := db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("failed to create cfgms_pending_registrations index: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -661,6 +729,10 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 		return err
 	}
 
+	if err := s.CreateIPTrustRangesTable(ctx, db); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -676,6 +748,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS admin_consent_requests;",
 		"DROP TABLE IF EXISTS client_tenants;",
 		"DROP TABLE IF EXISTS cfgms_registration_tokens;",
+		"DROP TABLE IF EXISTS cfgms_ip_trust_ranges;",
 		"DROP TABLE IF EXISTS rbac_role_assignments;", // Has foreign keys to subjects and roles
 		"DROP TABLE IF EXISTS rbac_subjects;",
 		"DROP TABLE IF EXISTS rbac_roles;", // Has self-reference foreign key

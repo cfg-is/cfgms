@@ -1,8 +1,9 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package exporters
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/csv"
@@ -28,15 +29,13 @@ type MultiFormatExporter struct {
 type Config struct {
 	HTMLTemplate string `json:"html_template"`
 	PDFEnabled   bool   `json:"pdf_enabled"`
-	PDFCommand   string `json:"pdf_command"` // Command to convert HTML to PDF
 }
 
 // DefaultConfig returns default exporter configuration
 func DefaultConfig() Config {
 	return Config{
 		HTMLTemplate: defaultHTMLTemplate,
-		PDFEnabled:   false, // Disable PDF by default as it requires external tools
-		PDFCommand:   "wkhtmltopdf --page-size A4 --orientation Portrait --margin-top 1in --margin-bottom 1in --margin-left 0.75in --margin-right 0.75in",
+		PDFEnabled:   true,
 	}
 }
 
@@ -56,7 +55,7 @@ func (e *MultiFormatExporter) WithConfig(config Config) *MultiFormatExporter {
 
 // Export exports a report in the specified format
 func (e *MultiFormatExporter) Export(ctx context.Context, report *interfaces.Report, format interfaces.ExportFormat) ([]byte, error) {
-	e.logger.Debug("exporting report", "format", format, "report_id", report.ID)
+	e.logger.Debug("exporting report", "format", logging.SanitizeLogValue(string(format)), "report_id", logging.SanitizeLogValue(report.ID))
 
 	switch format {
 	case interfaces.FormatJSON:
@@ -80,14 +79,12 @@ func (e *MultiFormatExporter) SupportedFormats() []interfaces.ExportFormat {
 		interfaces.FormatJSON,
 		interfaces.FormatCSV,
 		interfaces.FormatHTML,
+		interfaces.FormatExcel,
 	}
 
 	if e.config.PDFEnabled {
 		formats = append(formats, interfaces.FormatPDF)
 	}
-
-	// Excel export would require additional dependencies
-	// formats = append(formats, interfaces.FormatExcel)
 
 	return formats
 }
@@ -252,26 +249,251 @@ func (e *MultiFormatExporter) exportHTML(report *interfaces.Report) ([]byte, err
 	return buf.Bytes(), nil
 }
 
-// exportPDF exports the report as PDF (requires external tool)
-func (e *MultiFormatExporter) exportPDF(ctx context.Context, report *interfaces.Report) ([]byte, error) {
+// exportPDF generates a minimal valid PDF-1.4 document using pure stdlib byte-stream
+// construction — no external tools or libraries required.
+func (e *MultiFormatExporter) exportPDF(_ context.Context, report *interfaces.Report) ([]byte, error) {
 	if !e.config.PDFEnabled {
-		return nil, fmt.Errorf("PDF export is not enabled")
+		return nil, fmt.Errorf("PDF export is not enabled; set Config.PDFEnabled = true to enable")
 	}
 
-	// This would require implementing HTML-to-PDF conversion
-	// using an external tool like wkhtmltopdf or a Go library
-	// For now, return an error indicating it's not implemented
-	e.logger.Warn("PDF export not fully implemented - would require external tool integration")
-	return nil, fmt.Errorf("PDF export not implemented - requires external PDF generation tool")
+	stream := buildReportPDFContentStream(report)
+
+	var buf bytes.Buffer
+	buf.WriteString("%PDF-1.4\n")
+
+	// Track byte offset of each object (1-indexed; index 0 unused).
+	var offsets [5]int
+
+	offsets[1] = buf.Len()
+	fmt.Fprintf(&buf, "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+
+	offsets[2] = buf.Len()
+	fmt.Fprintf(&buf, "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
+
+	offsets[3] = buf.Len()
+	fmt.Fprintf(&buf, "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"+
+		" /Contents 4 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1"+
+		" /BaseFont /Helvetica >> >> >> >>\nendobj\n")
+
+	offsets[4] = buf.Len()
+	fmt.Fprintf(&buf, "4 0 obj\n<< /Length %d >>\nstream\n%sendstream\nendobj\n",
+		len(stream), stream)
+
+	xrefOffset := buf.Len()
+	fmt.Fprintf(&buf, "xref\n0 5\n")
+	// Each xref entry must be exactly 20 bytes: 10-digit-offset SP 5-digit-gen SP n|f CR LF
+	fmt.Fprintf(&buf, "0000000000 65535 f\r\n")
+	for i := 1; i <= 4; i++ {
+		fmt.Fprintf(&buf, "%010d 00000 n\r\n", offsets[i])
+	}
+	fmt.Fprintf(&buf, "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n%d\n", xrefOffset)
+	buf.WriteString("%%EOF\n")
+
+	return buf.Bytes(), nil
 }
 
-// exportExcel exports the report as Excel file
-func (e *MultiFormatExporter) exportExcel(report *interfaces.Report) ([]byte, error) {
-	// Excel export would require a library like excelize
-	// For now, return an error indicating it's not implemented
-	e.logger.Warn("Excel export not implemented - would require additional dependencies")
-	return nil, fmt.Errorf("excel export not implemented - requires additional dependencies")
+// buildReportPDFContentStream builds a BT…ET text block for a single-page report PDF.
+func buildReportPDFContentStream(report *interfaces.Report) string {
+	body := fmt.Sprintf(
+		"Generated: %s | Type: %s | Devices: %d | Compliance: %.1f%% | Drift: %d | Critical: %d | Trend: %s",
+		report.GeneratedAt.Format(time.RFC3339),
+		string(report.Type),
+		report.Summary.DevicesAnalyzed,
+		report.Summary.ComplianceScore*100,
+		report.Summary.DriftEventsTotal,
+		report.Summary.CriticalIssues,
+		string(report.Summary.TrendDirection),
+	)
+
+	var b strings.Builder
+	b.WriteString("BT\n")
+	fmt.Fprintf(&b, "/F1 14 Tf\n50 730 Td\n(%s) Tj\n", pdfEscapeString(report.Title))
+	fmt.Fprintf(&b, "/F1 10 Tf\n0 -25 Td\n(%s) Tj\n", pdfEscapeString(body))
+	b.WriteString("ET\n")
+	return b.String()
 }
+
+// pdfEscapeString escapes characters that are special inside PDF literal strings.
+func pdfEscapeString(s string) string {
+	var b strings.Builder
+	for _, ch := range s {
+		switch ch {
+		case '\\':
+			b.WriteString("\\\\")
+		case '(':
+			b.WriteString("\\(")
+		case ')':
+			b.WriteString("\\)")
+		case '\n', '\r':
+			b.WriteByte(' ')
+		default:
+			if ch > 126 {
+				b.WriteByte(' ') // Type1 fonts only cover printable ASCII
+			} else {
+				b.WriteRune(ch)
+			}
+		}
+	}
+	return b.String()
+}
+
+// exportExcel generates a minimal valid XLSX file using archive/zip and inline XML.
+// XLSX is the Open XML Spreadsheet format (ISO/IEC 29500); it requires no external dependencies.
+func (e *MultiFormatExporter) exportExcel(report *interfaces.Report) ([]byte, error) {
+	rows := buildExcelRows(report)
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	entries := []struct {
+		name    string
+		content string
+	}{
+		{"[Content_Types].xml", xlsxContentTypes},
+		{"_rels/.rels", xlsxRootRels},
+		{"xl/workbook.xml", xlsxWorkbook},
+		{"xl/_rels/workbook.xml.rels", xlsxWorkbookRels},
+		{"xl/worksheets/sheet1.xml", buildSheetXML(rows)},
+	}
+	for _, e := range entries {
+		w, err := zw.Create(e.name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create XLSX entry %s: %w", e.name, err)
+		}
+		if _, err := fmt.Fprint(w, e.content); err != nil {
+			return nil, fmt.Errorf("failed to write XLSX entry %s: %w", e.name, err)
+		}
+	}
+
+	if err := zw.Close(); err != nil {
+		return nil, fmt.Errorf("failed to finalize XLSX: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// buildExcelRows converts a report into a two-column row slice suitable for an XLSX sheet.
+func buildExcelRows(report *interfaces.Report) [][]string {
+	var rows [][]string
+
+	rows = append(rows,
+		[]string{"Report Title", report.Title},
+		[]string{"Report Type", string(report.Type)},
+		[]string{"Generated At", report.GeneratedAt.Format(time.RFC3339)},
+		[]string{"Time Range", fmt.Sprintf("%s to %s",
+			report.TimeRange.Start.Format(time.RFC3339),
+			report.TimeRange.End.Format(time.RFC3339))},
+		[]string{},
+		[]string{"Summary"},
+		[]string{"Devices Analyzed", strconv.Itoa(report.Summary.DevicesAnalyzed)},
+		[]string{"Drift Events Total", strconv.Itoa(report.Summary.DriftEventsTotal)},
+		[]string{"Compliance Score", fmt.Sprintf("%.2f", report.Summary.ComplianceScore)},
+		[]string{"Critical Issues", strconv.Itoa(report.Summary.CriticalIssues)},
+		[]string{"Trend Direction", string(report.Summary.TrendDirection)},
+		[]string{},
+	)
+
+	if len(report.Summary.KeyInsights) > 0 {
+		rows = append(rows, []string{"Key Insights"})
+		for i, insight := range report.Summary.KeyInsights {
+			rows = append(rows, []string{strconv.Itoa(i + 1), insight})
+		}
+		rows = append(rows, []string{})
+	}
+
+	if len(report.Summary.RecommendedActions) > 0 {
+		rows = append(rows, []string{"Recommended Actions"})
+		for i, action := range report.Summary.RecommendedActions {
+			rows = append(rows, []string{strconv.Itoa(i + 1), action})
+		}
+		rows = append(rows, []string{})
+	}
+
+	for _, section := range report.Sections {
+		rows = append(rows, []string{fmt.Sprintf("Section: %s", section.Title)})
+		rows = append(rows, []string{"Content", fmt.Sprintf("%v", section.Content)})
+		rows = append(rows, []string{})
+	}
+
+	return rows
+}
+
+// buildSheetXML produces the xl/worksheets/sheet1.xml content for the given rows.
+func buildSheetXML(rows [][]string) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`)
+	b.WriteString(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`)
+	b.WriteString(`<sheetData>`)
+	for rowIdx, row := range rows {
+		rowNum := rowIdx + 1
+		fmt.Fprintf(&b, `<row r="%d">`, rowNum)
+		for colIdx, cell := range row {
+			cellRef := fmt.Sprintf("%s%d", xlsxColLetter(colIdx+1), rowNum)
+			fmt.Fprintf(&b, `<c r="%s" t="inlineStr"><is><t>%s</t></is></c>`,
+				cellRef, xmlEscapeString(cell))
+		}
+		b.WriteString(`</row>`)
+	}
+	b.WriteString(`</sheetData>`)
+	b.WriteString(`</worksheet>`)
+	return b.String()
+}
+
+// xlsxColLetter converts a 1-based column index to an Excel column letter (A–Z, AA–AZ, …).
+func xlsxColLetter(col int) string {
+	if col <= 26 {
+		return string(rune('A' + col - 1))
+	}
+	return string(rune('A'+(col-1)/26-1)) + string(rune('A'+(col-1)%26))
+}
+
+// xmlEscapeString escapes the five predefined XML entities.
+func xmlEscapeString(s string) string {
+	var b strings.Builder
+	for _, ch := range s {
+		switch ch {
+		case '&':
+			b.WriteString("&amp;")
+		case '<':
+			b.WriteString("&lt;")
+		case '>':
+			b.WriteString("&gt;")
+		case '"':
+			b.WriteString("&quot;")
+		case '\'':
+			b.WriteString("&apos;")
+		default:
+			b.WriteRune(ch)
+		}
+	}
+	return b.String()
+}
+
+// XLSX static components — these are fixed for any single-sheet workbook.
+const xlsxContentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+	`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+	`<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
+	`<Default Extension="xml" ContentType="application/xml"/>` +
+	`<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>` +
+	`<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>` +
+	`</Types>`
+
+const xlsxRootRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+	`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+	`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>` +
+	`</Relationships>`
+
+const xlsxWorkbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+	`<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"` +
+	` xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
+	`<sheets><sheet name="Report" sheetId="1" r:id="rId1"/></sheets>` +
+	`</workbook>`
+
+const xlsxWorkbookRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+	`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+	`<Relationship Id="rId1"` +
+	` Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"` +
+	` Target="worksheets/sheet1.xml"/>` +
+	`</Relationships>`
 
 // writeTableDataToCSV writes table data to CSV writer
 func (e *MultiFormatExporter) writeTableDataToCSV(writer *csv.Writer, data map[string]interface{}) error {

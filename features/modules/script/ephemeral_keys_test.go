@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package script
 
@@ -171,8 +171,7 @@ func TestEphemeralKeyRevocation(t *testing.T) {
 }
 
 func TestEphemeralKeyCleanup(t *testing.T) {
-	t.Skip("Skipping due to race condition with cleanupInterval - cleanup is tested in other ways")
-	manager := NewEphemeralKeyManager()
+	manager := newEphemeralKeyManagerWithInterval(10 * time.Millisecond)
 	defer manager.Stop()
 
 	// Generate expired keys
@@ -189,10 +188,20 @@ func TestEphemeralKeyCleanup(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Wait for keys to expire and cleanup to run
-	time.Sleep(300 * time.Millisecond)
+	// All 5 keys should be present before expiry.
+	require.Equal(t, 5, manager.GetKeyCount())
 
-	// All keys should be cleaned up
+	// Poll until the background cleanup goroutine removes all expired keys,
+	// or until the deadline is reached. Using a poll loop instead of a fixed
+	// sleep avoids flakiness under load while honouring the race detector.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if manager.GetKeyCount() == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	assert.Equal(t, 0, manager.GetKeyCount())
 }
 

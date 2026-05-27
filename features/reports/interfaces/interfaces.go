@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package interfaces defines the core interfaces for the reports subsystem.
 // This package exists to break import cycles between the main reports package
@@ -9,8 +9,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/cfgis/cfgms/features/steward/dna/drift"
-	"github.com/cfgis/cfgms/features/steward/dna/storage"
+	"github.com/cfgis/cfgms/features/controller/fleet/storage"
+	"github.com/cfgis/cfgms/pkg/dna/drift"
 )
 
 // ExportFormat defines supported export formats

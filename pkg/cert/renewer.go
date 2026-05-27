@@ -1,22 +1,21 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package cert
 
 import (
 	"fmt"
 	"sort"
-	"time"
 )
 
-// Renewer implements CertificateRenewer for certificate renewal operations
+// Renewer provides certificate renewal operations
 type Renewer struct {
-	ca        CAManager
-	store     CertificateStore
-	validator CertificateValidator
+	ca        *CA
+	store     *FileStore
+	validator *Validator
 }
 
 // NewRenewer creates a new certificate renewer
-func NewRenewer(ca CAManager, store CertificateStore, validator CertificateValidator) *Renewer {
+func NewRenewer(ca *CA, store *FileStore, validator *Validator) *Renewer {
 	return &Renewer{
 		ca:        ca,
 		store:     store,
@@ -243,191 +242,4 @@ func (r *Renewer) AutoRenewCertificates(withinDays int) ([]*Certificate, error) 
 	}
 
 	return renewedCerts, nil
-}
-
-// ScheduleRenewal schedules automatic renewal for a certificate
-func (r *Renewer) ScheduleRenewal(serialNumber string, renewalDate time.Time) error {
-	// This is a placeholder implementation
-	// In a real system, this would integrate with a job scheduler or cron system
-
-	if serialNumber == "" {
-		return fmt.Errorf("serial number is required")
-	}
-
-	if renewalDate.Before(time.Now()) {
-		return fmt.Errorf("renewal date cannot be in the past")
-	}
-
-	// Verify the certificate exists
-	_, err := r.store.GetCertificate(serialNumber)
-	if err != nil {
-		return fmt.Errorf("certificate not found: %w", err)
-	}
-
-	// TODO: Implement actual scheduling mechanism
-	// This could involve:
-	// - Adding to a database table with renewal schedules
-	// - Creating cron jobs
-	// - Adding to a job queue system
-	// - Integrating with Kubernetes CronJobs
-
-	return fmt.Errorf("automatic renewal scheduling not yet implemented")
-}
-
-// GetRenewalSchedule returns the renewal schedule for a certificate
-func (r *Renewer) GetRenewalSchedule(serialNumber string) (time.Time, error) {
-	if serialNumber == "" {
-		return time.Time{}, fmt.Errorf("serial number is required")
-	}
-
-	// TODO: Implement actual schedule retrieval
-	// This would query the scheduling system for the renewal date
-
-	return time.Time{}, fmt.Errorf("renewal schedule retrieval not yet implemented")
-}
-
-// CancelRenewalSchedule cancels a scheduled renewal
-func (r *Renewer) CancelRenewalSchedule(serialNumber string) error {
-	if serialNumber == "" {
-		return fmt.Errorf("serial number is required")
-	}
-
-	// TODO: Implement actual schedule cancellation
-	// This would remove the certificate from the scheduling system
-
-	return fmt.Errorf("renewal schedule cancellation not yet implemented")
-}
-
-// RenewServerCertificate is a convenience method for renewing server certificates
-func (r *Renewer) RenewServerCertificate(serialNumber string, config *ServerCertConfig) (*Certificate, error) {
-	return r.RenewCertificate(serialNumber, config)
-}
-
-// RenewClientCertificate is a convenience method for renewing client certificates
-func (r *Renewer) RenewClientCertificate(serialNumber string, config *ClientCertConfig) (*Certificate, error) {
-	return r.RenewCertificate(serialNumber, config)
-}
-
-// GetCertificatesByExpirationPriority returns certificates grouped by renewal priority
-func (r *Renewer) GetCertificatesByExpirationPriority(withinDays int) (map[string][]*CertificateInfo, error) {
-	renewalCandidates, err := r.GetRenewalCandidates(withinDays)
-	if err != nil {
-		return nil, err
-	}
-
-	priorityGroups := map[string][]*CertificateInfo{
-		"high":   {},
-		"medium": {},
-		"low":    {},
-	}
-
-	for _, candidate := range renewalCandidates {
-		priorityGroups[candidate.Priority] = append(priorityGroups[candidate.Priority], candidate.Certificate)
-	}
-
-	return priorityGroups, nil
-}
-
-// ValidateRenewalConfig validates renewal configuration for a certificate type
-func (r *Renewer) ValidateRenewalConfig(certType CertificateType, config interface{}) error {
-	switch certType {
-	case CertificateTypeServer:
-		if config == nil {
-			return nil // Default config will be used
-		}
-
-		serverConfig, ok := config.(*ServerCertConfig)
-		if !ok {
-			return fmt.Errorf("expected ServerCertConfig for server certificate renewal")
-		}
-
-		if serverConfig.CommonName == "" {
-			return fmt.Errorf("common name is required for server certificate")
-		}
-
-		if serverConfig.ValidityDays <= 0 {
-			return fmt.Errorf("validity days must be positive")
-		}
-
-		if serverConfig.KeySize != 0 && serverConfig.KeySize < 2048 {
-			return fmt.Errorf("key size must be at least 2048 bits")
-		}
-
-	case CertificateTypeClient:
-		if config == nil {
-			return nil // Default config will be used
-		}
-
-		clientConfig, ok := config.(*ClientCertConfig)
-		if !ok {
-			return fmt.Errorf("expected ClientCertConfig for client certificate renewal")
-		}
-
-		if clientConfig.CommonName == "" {
-			return fmt.Errorf("common name is required for client certificate")
-		}
-
-		if clientConfig.ValidityDays <= 0 {
-			return fmt.Errorf("validity days must be positive")
-		}
-
-		if clientConfig.KeySize != 0 && clientConfig.KeySize < 2048 {
-			return fmt.Errorf("key size must be at least 2048 bits")
-		}
-
-	case CertificateTypeInternalServer:
-		if config == nil {
-			return nil
-		}
-
-		serverConfig, ok := config.(*ServerCertConfig)
-		if !ok {
-			return fmt.Errorf("expected ServerCertConfig for internal server certificate renewal")
-		}
-
-		if serverConfig.CommonName == "" {
-			return fmt.Errorf("common name is required for internal server certificate")
-		}
-
-		if serverConfig.ValidityDays <= 0 {
-			return fmt.Errorf("validity days must be positive")
-		}
-
-		if serverConfig.KeySize != 0 && serverConfig.KeySize < 2048 {
-			return fmt.Errorf("key size must be at least 2048 bits")
-		}
-
-	case CertificateTypeConfigSigning:
-		if config == nil {
-			return nil
-		}
-
-		signingConfig, ok := config.(*SigningCertConfig)
-		if !ok {
-			return fmt.Errorf("expected SigningCertConfig for config signing certificate renewal")
-		}
-
-		if signingConfig.CommonName == "" {
-			return fmt.Errorf("common name is required for signing certificate")
-		}
-
-		if signingConfig.ValidityDays <= 0 {
-			return fmt.Errorf("validity days must be positive")
-		}
-
-		if signingConfig.KeySize != 0 && signingConfig.KeySize < 2048 {
-			return fmt.Errorf("key size must be at least 2048 bits")
-		}
-
-	case CertificateTypePublicAPI:
-		return fmt.Errorf("public API certificates are externally managed")
-
-	case CertificateTypeCA:
-		return fmt.Errorf("CA certificate renewal is not supported")
-
-	default:
-		return fmt.Errorf("unsupported certificate type: %s", certType.String())
-	}
-
-	return nil
 }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package logging provides telemetry integration for correlation ID and trace extraction.
 //
@@ -9,7 +9,9 @@ package logging
 
 import (
 	"context"
+	"sync/atomic"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -18,37 +20,16 @@ import (
 // from context without directly importing the telemetry package.
 type TelemetryBridge struct{}
 
-// GetCorrelationIDFromContext extracts correlation ID using the telemetry package's key structure.
-// This is the actual implementation that replaces the placeholder in extractCorrelationID.
+// GetCorrelationIDFromContext extracts correlation ID using the canonical ctxkeys.CorrelationIDKey.
 func (t *TelemetryBridge) GetCorrelationIDFromContext(ctx context.Context) string {
-	// Try to get correlation ID using the telemetry package's CorrelationIDKey{}
-	// We need to match the exact type from the telemetry package
-
-	// Create the key type that matches telemetry.CorrelationIDKey{}
-	type correlationIDKey struct{}
-	if value := ctx.Value(correlationIDKey{}); value != nil {
-		if correlationID, ok := value.(string); ok {
-			return correlationID
-		}
+	if correlationID, ok := ctx.Value(ctxkeys.CorrelationIDKey).(string); ok {
+		return correlationID
 	}
 
-	// Fallback: Try to extract from span context if available
+	// Fallback: extract from OTel span context if available
 	span := trace.SpanFromContext(ctx)
 	if span.SpanContext().IsValid() {
-		// Use trace ID as correlation ID if no explicit ID is set
 		return span.SpanContext().TraceID().String()
-	}
-
-	// Additional fallback keys for compatibility
-	for _, key := range []interface{}{
-		"correlation_id",
-		"cfgms_correlation_id",
-	} {
-		if value := ctx.Value(key); value != nil {
-			if correlationID, ok := value.(string); ok {
-				return correlationID
-			}
-		}
 	}
 
 	return ""
@@ -67,49 +48,36 @@ func (t *TelemetryBridge) GetTraceInfoFromContext(ctx context.Context) (string, 
 	return spanCtx.TraceID().String(), spanCtx.SpanID().String()
 }
 
-// Initialize sets up the telemetry bridge to replace placeholder functions.
+// Initialize activates the telemetry bridge for correlation ID and trace extraction.
 // This should be called during application initialization after telemetry setup.
+// It is safe to call concurrently and from multiple goroutines.
 func (t *TelemetryBridge) Initialize() {
-	// Replace the placeholder functions with actual implementations
-	// This is done to avoid circular dependencies while maintaining functionality
-	globalTelemetryBridge = t
+	globalTelemetryBridge.Store(t)
 }
 
-// Global bridge instance for function replacement
-var globalTelemetryBridge *TelemetryBridge
+// globalTelemetryBridge is the atomic bridge instance. Atomic access ensures
+// Initialize() and the extractor functions are race-free when called concurrently.
+var globalTelemetryBridge atomic.Pointer[TelemetryBridge]
 
 // UpdatedExtractCorrelationID is the enhanced correlation ID extractor.
 func UpdatedExtractCorrelationID(ctx context.Context) string {
-	if globalTelemetryBridge != nil {
-		return globalTelemetryBridge.GetCorrelationIDFromContext(ctx)
+	if b := globalTelemetryBridge.Load(); b != nil {
+		return b.GetCorrelationIDFromContext(ctx)
 	}
 
-	// Fallback to the original implementation
-	return extractCorrelationIDFallback(ctx)
+	// Direct read from the canonical key — no bridge required.
+	if correlationID, ok := ctx.Value(ctxkeys.CorrelationIDKey).(string); ok {
+		return correlationID
+	}
+	return ""
 }
 
 // UpdatedExtractTraceInfo is the enhanced trace info extractor.
 func UpdatedExtractTraceInfo(ctx context.Context) (string, string) {
-	if globalTelemetryBridge != nil {
-		return globalTelemetryBridge.GetTraceInfoFromContext(ctx)
+	if b := globalTelemetryBridge.Load(); b != nil {
+		return b.GetTraceInfoFromContext(ctx)
 	}
 
 	// Fallback: no trace information available
 	return "", ""
-}
-
-// extractCorrelationIDFallback provides basic correlation ID extraction without telemetry integration.
-func extractCorrelationIDFallback(ctx context.Context) string {
-	// Basic implementation that works without telemetry package
-	type correlationKey struct{}
-	if correlationID, ok := ctx.Value(correlationKey{}).(string); ok {
-		return correlationID
-	}
-
-	// Try string key as well
-	if correlationID, ok := ctx.Value("correlation_id").(string); ok {
-		return correlationID
-	}
-
-	return ""
 }

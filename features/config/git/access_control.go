@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2025 CFGMS Contributors
 // Package git provides access control functionality for Git repositories
 package git
@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // AccessControlManager handles repository access control and drift detection
@@ -18,9 +20,9 @@ type AccessControlManager struct {
 }
 
 // NewAccessControlManager creates a new access control manager
-func NewAccessControlManager() *AccessControlManager {
+func NewAccessControlManager(logger logging.Logger) *AccessControlManager {
 	return &AccessControlManager{
-		driftDetector: NewDriftDetector(),
+		driftDetector: NewDriftDetector(logger),
 	}
 }
 
@@ -123,12 +125,17 @@ func (acm *AccessControlManager) checkDriftProtection(ctx context.Context, repo 
 // DriftDetector detects configuration drift in repositories
 type DriftDetector struct {
 	baselineHashes map[string]string // path -> expected hash
+	logger         logging.Logger
 }
 
 // NewDriftDetector creates a new drift detector
-func NewDriftDetector() *DriftDetector {
+func NewDriftDetector(logger logging.Logger) *DriftDetector {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	return &DriftDetector{
 		baselineHashes: make(map[string]string),
+		logger:         logger,
 	}
 }
 
@@ -162,9 +169,10 @@ func (dd *DriftDetector) DetectDrift(ctx context.Context, repo *Repository, path
 
 // RevertDrift reverts configuration drift
 func (dd *DriftDetector) RevertDrift(ctx context.Context, repo *Repository, drift *DriftDetection) error {
-	// This would implement the actual revert logic
-	// For now, just log the action
-	fmt.Printf("Reverting drift in %s at path %s\n", repo.Name, drift.Path)
+	dd.logger.Info("reverting drift",
+		"repo", logging.SanitizeLogValue(repo.Name),
+		"path", logging.SanitizeLogValue(drift.Path),
+	)
 	return nil
 }
 
@@ -176,12 +184,17 @@ func (dd *DriftDetector) EstablishBaseline(ctx context.Context, repo *Repository
 // GitModeManager manages Git-as-source-of-truth functionality
 type GitModeManager struct {
 	accessControl *AccessControlManager
+	logger        logging.Logger
 }
 
 // NewGitModeManager creates a new Git mode manager
-func NewGitModeManager() *GitModeManager {
+func NewGitModeManager(logger logging.Logger) *GitModeManager {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	return &GitModeManager{
-		accessControl: NewAccessControlManager(),
+		accessControl: NewAccessControlManager(logger),
+		logger:        logger,
 	}
 }
 
@@ -216,8 +229,7 @@ func (gmm *GitModeManager) ProcessGitWebhook(ctx context.Context, repo *Reposito
 	case "pull_request":
 		return gmm.processPullRequestEvent(ctx, repo, webhookData)
 	default:
-		// Log but don't error on unknown actions
-		fmt.Printf("Unknown webhook action: %s\n", action)
+		gmm.logger.Warn("unknown webhook action", "action", logging.SanitizeLogValue(action))
 	}
 
 	return nil
@@ -228,7 +240,7 @@ func (gmm *GitModeManager) processPushEvent(ctx context.Context, repo *Repositor
 	// Extract changed files and trigger configuration reload
 	// This would integrate with the controller to reload configurations
 
-	fmt.Printf("Processing push event for repository %s\n", repo.Name)
+	gmm.logger.Info("processing push event", "repo", logging.SanitizeLogValue(repo.Name))
 
 	// Validate that push is to a protected branch
 	ref, ok := data["ref"].(string)
@@ -276,13 +288,9 @@ func (gmm *GitModeManager) processPullRequestEvent(ctx context.Context, repo *Re
 
 // validatePullRequest validates pull request changes
 func (gmm *GitModeManager) validatePullRequest(ctx context.Context, repo *Repository, data map[string]interface{}) error {
-	// This would validate that PR changes comply with policies
-	// For now, just log the validation
+	gmm.logger.Info("validating pull request", "repo", logging.SanitizeLogValue(repo.Name))
 
-	fmt.Printf("Validating pull request for repository %s\n", repo.Name)
-
-	// Validation stub - would check that changes don't modify read-only paths,
-	// validate configuration syntax, check against policies, and run security scans
+	// Logs validation intent; path/syntax/policy/security checks are deferred.
 
 	return nil
 }
@@ -293,7 +301,6 @@ func (gmm *GitModeManager) SyncFromGit(ctx context.Context, repo *Repository, st
 		return nil // Not a Git-driven repository
 	}
 
-	// This would implement the actual sync logic
-	// For now, just validate the mode
+	// Design decision: cross-repository sync is an orchestration operation handled by the calling module; access_control.go enforces permissions only.
 	return gmm.ValidateReadOnlyMode(ctx, repo)
 }

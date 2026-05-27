@@ -1,17 +1,19 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package workflow
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/pkg/logging"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 func TestDebugEngine_StartDebugSession(t *testing.T) {
@@ -210,6 +212,12 @@ func TestDebugEngine_APICallHistory(t *testing.T) {
 	engine, _ := createTestEngineWithDebug(t)
 	debugEngine := engine.GetDebugEngine()
 
+	// Start a local test server so replay makes a real but controlled HTTP call.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
 	// Create workflow and execution
 	workflow := createTestWorkflow()
 	ctx := context.Background()
@@ -224,14 +232,14 @@ func TestDebugEngine_APICallHistory(t *testing.T) {
 	session, err := debugEngine.StartDebugSession(ctx, execution.ID, settings)
 	require.NoError(t, err)
 
-	// Simulate API call recording
+	// Simulate API call recording — use the local server URL so replay works
 	session.mutex.Lock()
 	apiCall := APICallInfo{
 		ID:              "test_call_1",
 		StepName:        "http_step",
 		Timestamp:       time.Now(),
 		Method:          "GET",
-		URL:             "https://api.example.com/test",
+		URL:             ts.URL + "/test",
 		RequestHeaders:  map[string]string{"Authorization": "Bearer token"},
 		ResponseStatus:  200,
 		ResponseHeaders: map[string]string{"Content-Type": "application/json"},
@@ -250,12 +258,13 @@ func TestDebugEngine_APICallHistory(t *testing.T) {
 	assert.Equal(t, "GET", history[0].Method)
 	assert.True(t, history[0].CanReplay)
 
-	// Test API call replay
+	// Test API call replay — real HTTP round-trip to the test server
 	replayCall, err := debugEngine.ReplayAPICall(session.ID, "test_call_1")
 	require.NoError(t, err)
 	assert.NotNil(t, replayCall)
 	assert.Contains(t, replayCall.StepName, "replay")
 	assert.Equal(t, "GET", replayCall.Method)
+	assert.Equal(t, http.StatusOK, replayCall.ResponseStatus)
 }
 
 func TestDebugEngine_StepHistory(t *testing.T) {
@@ -342,7 +351,7 @@ func TestWorkflowEngine_PauseResumeExecution(t *testing.T) {
 	assert.Contains(t, err.Error(), "execution not found")
 
 	// Test pausing already paused execution
-	_ = engine.PauseExecution(execution.ID)
+	require.NoError(t, engine.PauseExecution(execution.ID))
 	err = engine.PauseExecution(execution.ID)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot pause execution in status")
@@ -463,26 +472,169 @@ func TestDebugEngine_SecurityAndTenantIsolation(t *testing.T) {
 	assert.Contains(t, session.VariableInspector.ModifiedVariables, "sensitive_data")
 }
 
+// TestReplayAPICall_MakesRealRequest verifies that ReplayAPICall issues an actual
+// HTTP round-trip and returns the response received from the server.
+func TestReplayAPICall_MakesRealRequest(t *testing.T) {
+	requestReceived := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestReceived = true
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "test-value", r.Header.Get("X-Test-Header"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"replayed"}`))
+	}))
+	defer ts.Close()
+
+	engine, _ := createTestEngineWithDebug(t)
+	debugEngine := engine.GetDebugEngine()
+
+	workflow := createTestWorkflow()
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{})
+	require.NoError(t, err)
+
+	settings := DebugSettings{MaxHistorySize: 100}
+	session, err := debugEngine.StartDebugSession(ctx, execution.ID, settings)
+	require.NoError(t, err)
+
+	session.mutex.Lock()
+	session.APICallLog = append(session.APICallLog, APICallInfo{
+		ID:             "call_replay_test",
+		StepName:       "http_step",
+		Timestamp:      time.Now(),
+		Method:         http.MethodGet,
+		URL:            ts.URL + "/replay",
+		RequestHeaders: map[string]string{"X-Test-Header": "test-value"},
+		CanReplay:      true,
+	})
+	session.mutex.Unlock()
+
+	replayCall, err := debugEngine.ReplayAPICall(session.ID, "call_replay_test")
+	require.NoError(t, err)
+	require.NotNil(t, replayCall)
+
+	assert.True(t, requestReceived, "test server must have received the replayed request")
+	assert.Equal(t, http.StatusOK, replayCall.ResponseStatus)
+	assert.Contains(t, replayCall.StepName, "replay")
+	assert.Equal(t, http.MethodGet, replayCall.Method)
+	assert.Equal(t, ts.URL+"/replay", replayCall.URL)
+	assert.NotNil(t, replayCall.ResponseBody)
+}
+
+// TestRollbackToStep_RestoresState verifies that RollbackToStep truncates the step
+// history and restores variables to the snapshot recorded before the target step ran.
+func TestRollbackToStep_RestoresState(t *testing.T) {
+	engine, _ := createTestEngineWithDebug(t)
+	debugEngine := engine.GetDebugEngine()
+
+	workflow := createTestWorkflow()
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{"x": "initial"})
+	require.NoError(t, err)
+
+	settings := DebugSettings{MaxHistorySize: 100}
+	session, err := debugEngine.StartDebugSession(ctx, execution.ID, settings)
+	require.NoError(t, err)
+
+	// Populate step history with variable snapshots
+	session.mutex.Lock()
+	session.StepHistory = []DebugStepInfo{
+		{
+			StepName:        "step1",
+			StepType:        StepTypeDelay,
+			Timestamp:       time.Now(),
+			Status:          StatusCompleted,
+			VariablesBefore: map[string]interface{}{"x": "initial"},
+			VariablesAfter:  map[string]interface{}{"x": "after_step1"},
+		},
+		{
+			StepName:        "step2",
+			StepType:        StepTypeDelay,
+			Timestamp:       time.Now(),
+			Status:          StatusCompleted,
+			VariablesBefore: map[string]interface{}{"x": "after_step1"},
+			VariablesAfter:  map[string]interface{}{"x": "after_step2"},
+		},
+		{
+			StepName:        "step3",
+			StepType:        StepTypeDelay,
+			Timestamp:       time.Now(),
+			Status:          StatusCompleted,
+			VariablesBefore: map[string]interface{}{"x": "after_step2"},
+			VariablesAfter:  map[string]interface{}{"x": "after_step3"},
+		},
+	}
+	session.mutex.Unlock()
+
+	err = debugEngine.RollbackToStep(session.ID, "step2")
+	require.NoError(t, err)
+
+	// History must be truncated: only step1 remains
+	history, err := debugEngine.GetStepHistory(session.ID)
+	require.NoError(t, err)
+	assert.Len(t, history, 1)
+	assert.Equal(t, "step1", history[0].StepName)
+
+	// Variables must reflect the state before step2 ran
+	variables, err := debugEngine.InspectVariables(session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "after_step1", variables["x"])
+
+	// CurrentStep must point to the rollback target
+	retrievedSession, err := debugEngine.GetDebugSession(session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "step2", retrievedSession.CurrentStep)
+
+	// Rollback to a non-existent step returns an error
+	err = debugEngine.RollbackToStep(session.ID, "nonexistent_step")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "nonexistent_step")
+}
+
+// TestBreakpointCondition_RespectedOnHit verifies that a conditional breakpoint only
+// pauses execution when Engine.evaluateCondition returns true for the given variables.
+func TestBreakpointCondition_RespectedOnHit(t *testing.T) {
+	engine, _ := createTestEngineWithDebug(t)
+
+	workflow := createTestWorkflow()
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{})
+	require.NoError(t, err)
+
+	settings := DebugSettings{MaxHistorySize: 100}
+	// Use the concrete DebugEngineImpl so we can call the internal checkBreakpoint method.
+	debugImpl := engine.debugEngine
+	session, err := debugImpl.StartDebugSession(ctx, execution.ID, settings)
+	require.NoError(t, err)
+
+	// Conditional breakpoint: pause only when env == "prod"
+	condition := &Condition{
+		Type:     ConditionTypeVariable,
+		Variable: "env",
+		Operator: OperatorEqual,
+		Value:    "prod",
+	}
+	_, err = debugImpl.SetBreakpoint(session.ID, "step1", condition)
+	require.NoError(t, err)
+
+	// Condition is false (env == "dev") — breakpoint must not fire
+	bp, hit := debugImpl.checkBreakpoint(session, "step1", map[string]interface{}{"env": "dev"})
+	assert.Nil(t, bp, "breakpoint must not trigger when condition is false")
+	assert.False(t, hit)
+
+	// Condition is true (env == "prod") — breakpoint must fire
+	bp, hit = debugImpl.checkBreakpoint(session, "step1", map[string]interface{}{"env": "prod"})
+	assert.NotNil(t, bp, "breakpoint must trigger when condition is true")
+	assert.True(t, hit)
+}
+
 // Helper functions for testing
 
-// mockLogger implements a simple test logger
-type mockLogger struct{}
-
-func (l *mockLogger) Debug(msg string, fields ...interface{})                         {}
-func (l *mockLogger) Info(msg string, fields ...interface{})                          {}
-func (l *mockLogger) Warn(msg string, fields ...interface{})                          {}
-func (l *mockLogger) Error(msg string, fields ...interface{})                         {}
-func (l *mockLogger) Fatal(msg string, fields ...interface{})                         {}
-func (l *mockLogger) DebugCtx(ctx context.Context, msg string, fields ...interface{}) {}
-func (l *mockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{})  {}
-func (l *mockLogger) WarnCtx(ctx context.Context, msg string, fields ...interface{})  {}
-func (l *mockLogger) ErrorCtx(ctx context.Context, msg string, fields ...interface{}) {}
-func (l *mockLogger) FatalCtx(ctx context.Context, msg string, fields ...interface{}) {}
-
 func createTestEngineWithDebug(t *testing.T) (*Engine, logging.Logger) {
-	logger := &mockLogger{}
-	moduleFactory := &factory.ModuleFactory{} // Mock factory for testing
-	engine := NewEngine(moduleFactory, logger)
+	t.Helper()
+	logger := pkgtesting.NewMockLogger(true)
+	engine := NewEngine(createTestFactory(), logger, nil)
 	return engine, logger
 }
 

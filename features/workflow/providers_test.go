@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package workflow
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -72,10 +73,15 @@ func TestProviderRegistry_ExecuteOperation(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
 	registry := NewProviderRegistry(logger)
 
-	// Test executing operation with Microsoft provider
+	// Use a mock provider so the test is build-tag-neutral; the builtin provider
+	// gate is verified by TestDefaultBuildProvidersReturnErrNotImplemented.
+	mockProvider := &MockProvider{name: "test-exec"}
+	err := registry.RegisterProvider("test-exec", mockProvider)
+	require.NoError(t, err)
+
 	config := &APIConfig{
-		Provider:  "microsoft",
-		Service:   "users",
+		Provider:  "test-exec",
+		Service:   "test",
 		Operation: "list",
 		Parameters: map[string]interface{}{
 			"top": 10,
@@ -87,8 +93,6 @@ func TestProviderRegistry_ExecuteOperation(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, response.Success)
 	assert.Equal(t, 200, response.StatusCode)
-	assert.Contains(t, response.Metadata, "provider")
-	assert.Equal(t, "microsoft", response.Metadata["provider"])
 }
 
 func TestProviderRegistry_ExecuteOperation_InvalidProvider(t *testing.T) {
@@ -216,10 +220,16 @@ func TestConnectWiseProvider(t *testing.T) {
 }
 
 func TestEngine_ExecuteAPIStep_WithProviderRegistry(t *testing.T) {
-	// Create engine with provider registry
+	// Create engine and register a succeeding mock provider to test engine plumbing.
+	// The builtin providers return ErrProviderNotImplemented in default builds;
+	// this test exercises the engine's variable-storage path, not the provider stubs.
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger)
+	engine := NewEngine(moduleFactory, logger, nil)
+
+	const providerName = "test-api-provider"
+	err := engine.providerRegistry.RegisterProvider(providerName, &MockProvider{name: providerName})
+	require.NoError(t, err)
 
 	workflow := Workflow{
 		Name: "api-provider-test",
@@ -228,8 +238,8 @@ func TestEngine_ExecuteAPIStep_WithProviderRegistry(t *testing.T) {
 				Name: "test-api-call",
 				Type: StepTypeAPI,
 				API: &APIConfig{
-					Provider:  "microsoft",
-					Service:   "users",
+					Provider:  providerName,
+					Service:   "test",
 					Operation: "list",
 					Parameters: map[string]interface{}{
 						"top": 10,
@@ -254,7 +264,53 @@ func TestEngine_ExecuteAPIStep_WithProviderRegistry(t *testing.T) {
 	assert.True(t, finalExecution.Variables["test-api-call_api_success"].(bool))
 	assert.Equal(t, 200, finalExecution.Variables["test-api-call_api_status"])
 	assert.NotNil(t, finalExecution.Variables["test-api-call_api_response"])
-	assert.NotNil(t, finalExecution.Variables["test-api-call_api_metadata"])
+}
+
+// TestProviderNoPayloadLogging verifies that config.Parameters and config.Auth credential
+// values never appear in log output at any level in either build.
+func TestProviderNoPayloadLogging(t *testing.T) {
+	logger := pkgtesting.NewMockLogger(true)
+	registry := NewProviderRegistry(logger)
+
+	// Register a succeeding mock so the completion-log path is exercised.
+	const providerName = "test-log-provider"
+	err := registry.RegisterProvider(providerName, &MockProvider{name: providerName})
+	require.NoError(t, err)
+
+	const sensitiveParam = "super-secret-param-value-7f3x"
+	const sensitiveCredential = "super-secret-bearer-token-9z2q"
+
+	config := &APIConfig{
+		Provider:  providerName,
+		Service:   "test",
+		Operation: "test",
+		Parameters: map[string]interface{}{
+			"secret_key": sensitiveParam,
+		},
+		Auth: &AuthConfig{
+			Type:        AuthTypeBearer,
+			BearerToken: sensitiveCredential,
+		},
+	}
+
+	_, execErr := registry.ExecuteOperation(context.Background(), config)
+	require.NoError(t, execErr)
+
+	for _, level := range []string{"debug", "info", "warn", "error", "fatal"} {
+		for _, entry := range logger.GetLogs(level) {
+			assert.NotContains(t, entry.Message, sensitiveParam,
+				"level=%s message contains sensitive parameter value", level)
+			assert.NotContains(t, entry.Message, sensitiveCredential,
+				"level=%s message contains sensitive credential value", level)
+			for _, kv := range entry.Data {
+				s := fmt.Sprintf("%v", kv)
+				assert.NotContains(t, s, sensitiveParam,
+					"level=%s log data contains sensitive parameter value", level)
+				assert.NotContains(t, s, sensitiveCredential,
+					"level=%s log data contains sensitive credential value", level)
+			}
+		}
+	}
 }
 
 // MockProvider is a test implementation of APIProvider

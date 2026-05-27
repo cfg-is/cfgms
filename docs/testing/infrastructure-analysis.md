@@ -12,7 +12,7 @@ CFGMS has a **comprehensive, production-aligned test infrastructure** that close
 
 ### 1.1 Test Infrastructure Organization
 
-#### Location: `/home/jrdn/git/cfg.is/cfgms/test/`
+#### Location: `test/`
 
 **Directory Structure:**
 
@@ -20,7 +20,7 @@ CFGMS has a **comprehensive, production-aligned test infrastructure** that close
 test/
 ├── e2e/                          # End-to-end tests (9 files)
 ├── integration/                  # Integration tests (40+ files, 5,972 lines)
-│   ├── mqtt_quic/               # MQTT+QUIC protocol tests (15+ files)
+│   ├── transport/               # gRPC-over-QUIC protocol tests (15+ files)
 │   ├── ha/                       # High availability cluster tests (13 files)
 │   ├── logging/                  # Logging provider integration (3 files)
 │   └── [other integration tests] # Docker, certificate, steward-controller
@@ -29,7 +29,7 @@ test/
 │   └── steward/                  # Steward unit tests
 ├── configs/                      # Test configuration files
 ├── testdata/                      # Test fixtures (YAML configs, test data)
-├── integration/mqtt_quic/certs/   # Test certificates (23 files)
+├── integration/transport/certs/   # Test certificates (23 files)
 ├── sql/                          # Database initialization scripts
 ├── gitea-init/                   # Gitea repository setup
 ├── module-execution/             # Module test workspace
@@ -60,7 +60,7 @@ test/
 | steward-central | Container | HA steward 2 | ha |
 | steward-west | Container | HA steward 3 | ha |
 | git-server-ha | Container | Git for HA tests | ha |
-| controller-standalone | Container | MQTT+QUIC standalone | ha |
+| controller-standalone | Container | Standalone controller | ha |
 | steward-standalone | Container | Standalone steward | ha |
 | steward-tenant1/2/3 | Container | Multi-tenant isolation | ha |
 
@@ -82,7 +82,6 @@ test/
 | `/scripts/wait-for-services.sh` | Health check orchestration | 144 |
 | `/scripts/test-with-infrastructure.sh` | CI integration wrapper | 62 |
 | `/scripts/generate-invalid-test-certs.sh` | Invalid certificate generation (negative testing) | 150 |
-| `/scripts/setup-m365-testing.sh` | M365 integration setup | 150 |
 | `/scripts/load-credentials-from-keychain.sh` | OS keychain integration | 100+ |
 | `/scripts/migrate-credentials-to-keychain.sh` | Credential migration | 150+ |
 
@@ -90,15 +89,15 @@ test/
 
 ### 1.4 CI/CD Test Setup
 
-**Note**: `.github/workflows/` directory does NOT exist in repository
+**Note**: GitHub Actions workflows are in `.github/workflows/` (CI orchestration via GitHub Actions + Makefile)
 
-**Test Orchestration**: All via Makefile targets (90+ test-related targets)
+**Test Orchestration**: Via Makefile targets and GitHub Actions workflows
 
 **Key CI Targets**:
 
 - `make test-ci` - Full CI validation (8-12 min)
 - `make test-integration-complete` - Docker-based integration
-- `make test-mqtt-quic` - MQTT+QUIC protocol tests
+- `make test-transport` - gRPC-over-QUIC transport tests
 - `make security-scan` - Security validation gates
 - `make test-infrastructure-required` - CI-hardened tests
 
@@ -113,9 +112,9 @@ test/
 **Three official deployment patterns**:
 
 1. **Option A: Standalone Steward** (5 min)
-   - Local configuration file: `/etc/cfgms/config.yaml`
+   - Local configuration file: `/etc/cfgms/<hostname>.cfg`
    - No network/controller required
-   - Direct: `./bin/cfgms-steward -config /etc/cfgms/config.yaml`
+   - Direct: `./bin/cfgms-steward -config /etc/cfgms/<hostname>.cfg`
 
 2. **Option B: Standalone Controller** (10 min)
    - Workflow engine only, no agents
@@ -152,8 +151,8 @@ test/
 
 **Config File Locations**:
 
-- `/etc/cfgms/config.yaml` - Steward config
-- `/etc/cfgms/controller.yaml` - Controller config (documented in runbooks)
+- `/etc/cfgms/<hostname>.cfg` - Steward config (YAML format)
+- `/etc/cfgms/controller.cfg` - Controller config (YAML format)
 - Environment variables (all services support env override)
 
 **Storage Providers**:
@@ -184,14 +183,14 @@ test/
 **Evidence**:
 
 ```makefile
-test-mqtt-quic-setup: # Requires Docker Compose --profile ha
+test-transport-setup: # Requires Docker Compose --profile ha
   docker compose -f docker-compose.test.yml --profile ha up
 ```
 
 **Recommendation**:
 
 - Add in-process HA cluster tests (non-Docker)
-- Use test mocks for MQTT broker instead of full container
+- Use test implementations for transport instead of full container
 - Allow HA testing in CI without Docker
 
 ---
@@ -225,7 +224,7 @@ test-mqtt-quic-setup: # Requires Docker Compose --profile ha
 **Issue**: Auto-certificate registration documented but not tested
 
 - QUICK_START promises: "Certificates are auto-generated and auto-approved"
-- Reality: Tests use pre-generated certificates from `/test/integration/mqtt_quic/certs/`
+- Reality: Tests use pre-generated certificates from `/test/integration/transport/certs/`
 - No test validates the registration flow shown in QUICK_START
 
 **Evidence**:
@@ -243,8 +242,8 @@ test-mqtt-quic-setup: # Requires Docker Compose --profile ha
 
 ```go
 // From docker_test.go
-CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
-CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
+CFGMS_TRANSPORT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
+CFGMS_TRANSPORT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
 ```
 
 **Recommendation**:
@@ -282,15 +281,15 @@ CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
 
 **Issue**: YAML config files shown in QUICK_START not validated in tests
 
-- QUICK_START shows: `sudo tee /etc/cfgms/config.yaml << EOF`
-- Tests use environment variables and Docker compose, not YAML files
+- QUICK_START shows: `sudo tee /etc/cfgms/quickstart.cfg << EOF`
+- Tests use environment variables and Docker compose, not config files
 - Config parsing untested
 
 **Evidence**:
 
 ```bash
 # QUICK_START step 2
-sudo tee /etc/cfgms/config.yaml > /dev/null <<EOF
+sudo tee /etc/cfgms/quickstart.cfg > /dev/null <<EOF
 steward:
   id: quickstart-steward
 resources:

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package network_activedirectory
 
@@ -7,21 +7,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-ldap/ldap/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestADModuleConfig(t *testing.T) {
 	t.Run("valid configuration", func(t *testing.T) {
 		config := &ADModuleConfig{
-			Domain:        "example.com",
-			AuthMethod:    "simple",
-			OperationType: "read",
-			ObjectTypes:   []string{"user", "group"},
-			Username:      "service-account",
-			Password:      "password123",
+			Domain:            "example.com",
+			AuthMethod:        "simple",
+			OperationType:     "read",
+			ObjectTypes:       []string{"user", "group"},
+			Username:          "service-account",
+			PasswordSecretKey: "ad/example.com/svc_password",
 		}
 
 		err := config.Validate()
@@ -90,21 +92,21 @@ func TestADModuleConfig(t *testing.T) {
 
 	t.Run("YAML serialization", func(t *testing.T) {
 		config := &ADModuleConfig{
-			Domain:        "example.com",
-			AuthMethod:    "simple",
-			OperationType: "read",
-			ObjectTypes:   []string{"user", "group"},
-			Username:      "service-account",
-			Password:      "secret123",
+			Domain:            "example.com",
+			AuthMethod:        "simple",
+			OperationType:     "read",
+			ObjectTypes:       []string{"user", "group"},
+			Username:          "service-account",
+			PasswordSecretKey: "ad/example.com/svc_password",
 		}
 
-		// Test ToYAML (should redact password)
+		// Test ToYAML — password_secret_key is serialized; no plaintext password exists
 		yamlData, err := config.ToYAML()
 		require.NoError(t, err)
 		yamlStr := string(yamlData)
 		assert.Contains(t, yamlStr, "domain: example.com")
-		assert.Contains(t, yamlStr, "[REDACTED]")
-		assert.NotContains(t, yamlStr, "secret123")
+		assert.Contains(t, yamlStr, "password_secret_key: ad/example.com/svc_password")
+		assert.NotContains(t, yamlStr, "password:")
 
 		// Test FromYAML
 		newConfig := &ADModuleConfig{}
@@ -112,6 +114,7 @@ func TestADModuleConfig(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "example.com", newConfig.Domain)
 		assert.Equal(t, "simple", newConfig.AuthMethod)
+		assert.Equal(t, "ad/example.com/svc_password", newConfig.PasswordSecretKey)
 	})
 }
 
@@ -289,6 +292,157 @@ func TestADQueryResult(t *testing.T) {
 		assert.False(t, result.Success)
 		assert.Equal(t, "object not found", result.Error)
 		assert.Equal(t, "NOT_FOUND", result.ErrorCode)
+	})
+}
+
+func TestLDAPEntryToDirectoryComputer(t *testing.T) {
+	logger := logging.NewNoopLogger()
+	module := New(logger).(*activeDirectoryModule)
+
+	t.Run("objectClass=computer maps to DirectoryComputer not user type", func(t *testing.T) {
+		entry := ldap.NewEntry("CN=WORKSTATION01,OU=Computers,DC=example,DC=com", map[string][]string{
+			"objectGUID":             {"test-guid-001"},
+			"objectClass":            {"top", "person", "organizationalPerson", "user", "computer"},
+			"sAMAccountName":         {"WORKSTATION01$"},
+			"dNSHostName":            {"workstation01.example.com"},
+			"displayName":            {"WORKSTATION01"},
+			"distinguishedName":      {"CN=WORKSTATION01,OU=Computers,DC=example,DC=com"},
+			"operatingSystem":        {"Windows 11 Pro"},
+			"operatingSystemVersion": {"10.0 (22000)"},
+			"userAccountControl":     {"4096"}, // WORKSTATION_TRUST_ACCOUNT, enabled
+		})
+
+		computer := module.ldapEntryToDirectoryComputer(entry)
+
+		require.NotNil(t, computer)
+		assert.Equal(t, "test-guid-001", computer.ID)
+		assert.Equal(t, "WORKSTATION01", computer.Name)
+		assert.Equal(t, "WORKSTATION01$", computer.SAMAccountName)
+		assert.Equal(t, "workstation01.example.com", computer.DNSHostName)
+		assert.Equal(t, "CN=WORKSTATION01,OU=Computers,DC=example,DC=com", computer.DN)
+		assert.Equal(t, "Windows 11 Pro", computer.OperatingSystem)
+		assert.Equal(t, "10.0 (22000)", computer.OperatingSystemVersion)
+		assert.True(t, computer.Enabled)
+		assert.Equal(t, "activedirectory", computer.Source)
+		assert.NotNil(t, computer.ProviderAttributes)
+	})
+
+	t.Run("computer with lastLogonTimestamp is parsed to time.Time", func(t *testing.T) {
+		// Windows FILETIME for 2024-01-01T00:00:00Z = 133486560000000000
+		entry := ldap.NewEntry("CN=SERVER01,OU=Servers,DC=example,DC=com", map[string][]string{
+			"objectGUID":         {"test-guid-002"},
+			"objectClass":        {"top", "person", "organizationalPerson", "user", "computer"},
+			"sAMAccountName":     {"SERVER01$"},
+			"distinguishedName":  {"CN=SERVER01,OU=Servers,DC=example,DC=com"},
+			"lastLogonTimestamp": {"133486560000000000"},
+		})
+
+		computer := module.ldapEntryToDirectoryComputer(entry)
+
+		require.NotNil(t, computer)
+		require.NotNil(t, computer.LastLogon)
+		assert.Equal(t, 2024, computer.LastLogon.Year())
+	})
+
+	t.Run("disabled computer account has Enabled=false", func(t *testing.T) {
+		// userAccountControl with ACCOUNTDISABLE (0x2) set: 4096 | 2 = 4098
+		entry := ldap.NewEntry("CN=DISABLED01,OU=Computers,DC=example,DC=com", map[string][]string{
+			"objectGUID":         {"test-guid-003"},
+			"objectClass":        {"top", "person", "organizationalPerson", "user", "computer"},
+			"sAMAccountName":     {"DISABLED01$"},
+			"distinguishedName":  {"CN=DISABLED01,OU=Computers,DC=example,DC=com"},
+			"userAccountControl": {"4098"},
+		})
+
+		computer := module.ldapEntryToDirectoryComputer(entry)
+
+		require.NotNil(t, computer)
+		assert.False(t, computer.Enabled)
+	})
+
+	t.Run("computer timestamps are parsed correctly", func(t *testing.T) {
+		entry := ldap.NewEntry("CN=TS01,OU=Computers,DC=example,DC=com", map[string][]string{
+			"objectGUID":        {"test-guid-004"},
+			"objectClass":       {"top", "person", "organizationalPerson", "user", "computer"},
+			"sAMAccountName":    {"TS01$"},
+			"distinguishedName": {"CN=TS01,OU=Computers,DC=example,DC=com"},
+			"whenCreated":       {"20240101120000.0Z"},
+			"whenChanged":       {"20240601120000.0Z"},
+		})
+
+		computer := module.ldapEntryToDirectoryComputer(entry)
+
+		require.NotNil(t, computer)
+		require.NotNil(t, computer.Created)
+		require.NotNil(t, computer.Modified)
+		assert.Equal(t, 2024, computer.Created.Year())
+		assert.Equal(t, 6, int(computer.Modified.Month()))
+	})
+
+	t.Run("OU is extracted from distinguished name", func(t *testing.T) {
+		entry := ldap.NewEntry("CN=PC01,OU=Workstations,OU=IT,DC=example,DC=com", map[string][]string{
+			"objectGUID":        {"test-guid-005"},
+			"objectClass":       {"top", "person", "organizationalPerson", "user", "computer"},
+			"sAMAccountName":    {"PC01$"},
+			"distinguishedName": {"CN=PC01,OU=Workstations,OU=IT,DC=example,DC=com"},
+		})
+
+		computer := module.ldapEntryToDirectoryComputer(entry)
+
+		require.NotNil(t, computer)
+		assert.Equal(t, "Workstations", computer.OU)
+	})
+}
+
+func TestLDAPEntryToDirectoryUser_NoRegression(t *testing.T) {
+	logger := logging.NewNoopLogger()
+	module := New(logger).(*activeDirectoryModule)
+
+	t.Run("user objectClass still maps to DirectoryUser", func(t *testing.T) {
+		entry := ldap.NewEntry("CN=John Doe,OU=Users,DC=example,DC=com", map[string][]string{
+			"objectGUID":         {"user-guid-001"},
+			"objectClass":        {"top", "person", "organizationalPerson", "user"},
+			"sAMAccountName":     {"john.doe"},
+			"userPrincipalName":  {"john.doe@example.com"},
+			"displayName":        {"John Doe"},
+			"mail":               {"john.doe@example.com"},
+			"distinguishedName":  {"CN=John Doe,OU=Users,DC=example,DC=com"},
+			"userAccountControl": {"512"}, // Normal enabled account
+		})
+
+		user := module.ldapEntryToDirectoryUser(entry)
+
+		require.NotNil(t, user)
+		assert.Equal(t, "john.doe", user.SAMAccountName)
+		assert.Equal(t, "john.doe@example.com", user.UserPrincipalName)
+		assert.Equal(t, "John Doe", user.DisplayName)
+		assert.True(t, user.AccountEnabled)
+		assert.Equal(t, "activedirectory", user.Source)
+	})
+
+	t.Run("ADQueryResult Computer field is set for computer query", func(t *testing.T) {
+		result := &ADQueryResult{
+			QueryType: "computer",
+			ObjectID:  "WORKSTATION01$",
+			Success:   true,
+		}
+
+		// Verify the Computer field exists on the result type (not User)
+		assert.Nil(t, result.Computer)
+		assert.Nil(t, result.User)
+
+		// Set up a computer result
+		result.Computer = &interfaces.DirectoryComputer{
+			ID:             "guid-001",
+			Name:           "WORKSTATION01",
+			SAMAccountName: "WORKSTATION01$",
+			Source:         "activedirectory",
+		}
+
+		assert.NotNil(t, result.Computer)
+		assert.Equal(t, "WORKSTATION01$", result.Computer.SAMAccountName)
+		// Confirm user is not populated for computer results
+		assert.Nil(t, result.User)
 	})
 }
 

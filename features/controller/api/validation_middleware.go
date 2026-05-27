@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package api
 
@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/security"
 )
 
@@ -46,8 +48,14 @@ func (s *Server) validationMiddleware(next http.Handler) http.Handler {
 
 		// If validation failed, return error response
 		if !result.Valid {
-			// Log validation errors for debugging
-			s.logger.Debug("Request validation failed", "errors", result.Errors, "path", r.URL.Path)
+			// Log validation failure for debugging. We intentionally avoid
+			// logging the raw r.URL.Path or result.Errors slice — both can
+			// contain user-controlled values and trip CWE-117 / CWE-312
+			// rules. The error count + method give enough signal for triage;
+			// full details ship in the JSON response body.
+			s.logger.Debug("Request validation failed",
+				"error_count", len(result.Errors),
+				"method", r.Method)
 			s.writeValidationErrorResponse(w, result)
 			return
 		}
@@ -65,10 +73,10 @@ func (s *Server) buildSecurityContext(r *http.Request) *security.SecurityContext
 	}
 
 	// Extract user and tenant info from context if available
-	if userID, ok := r.Context().Value(userIDContextKey).(string); ok {
+	if userID, ok := r.Context().Value(ctxkeys.UserIDKey).(string); ok {
 		ctx.UserID = userID
 	}
-	if tenantID, ok := r.Context().Value(tenantIDContextKey).(string); ok {
+	if tenantID, ok := r.Context().Value(ctxkeys.TenantID).(string); ok {
 		ctx.TenantID = tenantID
 	}
 
@@ -88,11 +96,14 @@ func (s *Server) validateURLParameters(validator *security.EnhancedValidator, re
 			// Certificate serial numbers
 			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric", "max_length:40")
 		case "tenantId", "tenant_id":
-			// Tenant IDs should be UUIDs
-			validator.ValidateString(result, "path."+param, value, "required", "uuid")
+			// Tenant IDs are human-readable identifiers (e.g., "acme-corp", "test-tenant")
+			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric_dash", "max_length:128")
 		case "stewardId", "steward_id":
 			// Steward IDs
 			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric_dash", "max_length:64")
+		case "cidr":
+			// CIDR ranges: IPv4 (10.0.0.0/8) and IPv6 (2001:db8::/32)
+			validator.ValidateString(result, "path."+param, value, "required", "charset:cidr", "max_length:64")
 		default:
 			// Generic validation for other path parameters
 			validator.ValidateString(result, "path."+param, value, "charset:safe_text", "max_length:128", "no_control_chars")
@@ -130,7 +141,7 @@ func (s *Server) validateQueryParameters(validator *security.EnhancedValidator, 
 				validator.ValidateString(result, fieldName, value, "charset:alphanumeric_dash", "max_length:64")
 			case "filter", "search":
 				// Search and filter parameters
-				validator.ValidateString(result, fieldName, value, "max_length:256", "no_control_chars")
+				validator.ValidateString(result, fieldName, value, "charset:safe_text", "max_length:256", "no_control_chars")
 			case "format":
 				// Output format validation
 				if value != "json" && value != "xml" && value != "csv" {
@@ -141,7 +152,7 @@ func (s *Server) validateQueryParameters(validator *security.EnhancedValidator, 
 				validator.ValidateString(result, fieldName, value, "charset:alphanumeric_dash", "max_length:32")
 			default:
 				// Generic query parameter validation
-				validator.ValidateString(result, fieldName, value, "max_length:512", "no_control_chars")
+				validator.ValidateString(result, fieldName, value, "charset:safe_text", "max_length:512", "no_control_chars")
 			}
 		}
 	}
@@ -153,9 +164,15 @@ func (s *Server) validateRequestHeaders(validator *security.EnhancedValidator, r
 	if r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" {
 		contentType := r.Header.Get("Content-Type")
 		if contentType != "" {
+			// YAML content types are accepted because the steward config
+			// upload endpoint (handleUpdateStewardConfig) ingests production
+			// .cfg files sent as application/yaml by `cfg config upload`.
 			if !strings.HasPrefix(contentType, "application/json") &&
 				!strings.HasPrefix(contentType, "application/x-www-form-urlencoded") &&
-				!strings.HasPrefix(contentType, "multipart/form-data") {
+				!strings.HasPrefix(contentType, "multipart/form-data") &&
+				!strings.HasPrefix(contentType, "application/yaml") &&
+				!strings.HasPrefix(contentType, "application/x-yaml") &&
+				!strings.HasPrefix(contentType, "text/yaml") {
 				result.AddError("header.Content-Type", contentType, "content_type", "unsupported content type")
 			}
 		}
@@ -264,7 +281,7 @@ func (s *Server) validateStewardRequest(validator *security.EnhancedValidator, r
 	}
 
 	if version, ok := data["version"].(string); ok {
-		validator.ValidateString(result, "body.version", version, "required", "max_length:32")
+		validator.ValidateString(result, "body.version", version, "required", "charset:safe_text", "max_length:32")
 	}
 
 	if status, ok := data["status"].(string); ok {
@@ -283,14 +300,14 @@ func (s *Server) validateStewardRequest(validator *security.EnhancedValidator, r
 // validateCertificateRequest validates certificate request fields
 func (s *Server) validateCertificateRequest(validator *security.EnhancedValidator, result *security.ValidationResult, data map[string]interface{}) {
 	if commonName, ok := data["common_name"].(string); ok {
-		validator.ValidateString(result, "body.common_name", commonName, "required", "hostname", "max_length:253")
+		validator.ValidateString(result, "body.common_name", commonName, "required", "charset:hostname", "max_length:253")
 	}
 
 	if sans, ok := data["sans"].([]interface{}); ok {
 		validator.ValidateSlice(result, "body.sans", len(sans), "max_items:50")
 		for i, san := range sans {
 			if sanStr, ok := san.(string); ok {
-				validator.ValidateString(result, fmt.Sprintf("body.sans[%d]", i), sanStr, "hostname", "max_length:253")
+				validator.ValidateString(result, fmt.Sprintf("body.sans[%d]", i), sanStr, "charset:hostname", "max_length:253")
 			}
 		}
 	}
@@ -322,7 +339,7 @@ func (s *Server) validateRBACRequest(validator *security.EnhancedValidator, resu
 		validator.ValidateSlice(result, "body.subjects", len(subjects), "max_items:1000")
 		for i, subject := range subjects {
 			if subjectStr, ok := subject.(string); ok {
-				validator.ValidateWithContext(result, fmt.Sprintf("body.subjects[%d]", i), subjectStr, "uuid", "tenant_scoped")
+				validator.ValidateWithContext(result, fmt.Sprintf("body.subjects[%d]", i), subjectStr, "charset:uuid", "tenant_scoped")
 			}
 		}
 	}
@@ -355,14 +372,14 @@ func (s *Server) validateAPIKeyRequest(validator *security.EnhancedValidator, re
 
 	if expiresAt, ok := data["expires_at"].(string); ok {
 		// Validate RFC3339 timestamp format
-		validator.ValidateString(result, "body.expires_at", expiresAt, "max_length:64")
+		validator.ValidateString(result, "body.expires_at", expiresAt, "charset:safe_text", "max_length:64")
 	}
 }
 
 // validateDNAObject validates DNA object structure
 func (s *Server) validateDNAObject(validator *security.EnhancedValidator, result *security.ValidationResult, dna map[string]interface{}) {
 	if id, ok := dna["id"].(string); ok {
-		validator.ValidateString(result, "body.dna.id", id, "required", "uuid")
+		validator.ValidateString(result, "body.dna.id", id, "required", "charset:uuid")
 	}
 
 	if attributes, ok := dna["attributes"].(map[string]interface{}); ok {
@@ -409,7 +426,7 @@ func (s *Server) writeValidationErrorResponse(w http.ResponseWriter, result *sec
 				"validation_errors": result.Errors,
 			},
 		},
-		Timestamp: getCurrentTimestamp(),
+		Timestamp: time.Now().UTC(),
 	}
 
 	_ = json.NewEncoder(w).Encode(errorResponse)

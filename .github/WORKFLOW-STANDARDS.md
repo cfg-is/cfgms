@@ -16,12 +16,9 @@ This document defines standards and best practices for GitHub Actions workflows 
    - `documentation.yml` - Documentation validation (docs/**, *.md)
    - `docker-security.yml` - Container security (Dockerfile*, go.mod, go.sum)
    - `license-check.yml` - License compliance (go.mod, go.sum)
-   - `template-validation.yml` - Template validation (features/templates/**)
 
 3. **Production Workflows** (run on main/releases)
    - `production-gates.yml` - Comprehensive production readiness validation
-   - `release.yml` - Release automation
-   - `release-automation.yml` - Automated release process
 
 ## Branch Protection & Required Checks
 
@@ -36,7 +33,7 @@ This document defines standards and best practices for GitHub Actions workflows 
 **Configuration**:
 - No review requirements (solo-friendly)
 - Squash merge only
-- Strict up-to-date branch enforcement
+- Merge queue enabled (Story #801) — replaces strict up-to-date enforcement; queue auto-rebases and re-validates before merge
 - No admin bypass needed (tests provide sufficient protection)
 
 ### Main Branch

@@ -8,9 +8,11 @@ on:
     paths-ignore:
       - 'docs/**'
       - '*.md'
+      - '.claude/**'
       - 'LICENSE'
       - '.gitignore'
       - '.editorconfig'
+  merge_group:
   push:
     branches:
       - main  # Run on main for production deployment validation and production-readiness-validation (load testing, benchmarks)
@@ -26,10 +28,14 @@ on:
         required: false
         type: string
 
+permissions: {}
+
 jobs:
   # Security Gate - Critical Vulnerability Blocking (Story #99)
   # NOTE: Runs on PRs and push to main only (skips post-merge to develop to avoid redundancy)
   security-deployment-gate:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
@@ -39,30 +45,28 @@ jobs:
       override-required: ${{ steps.security-gate.outputs.override-required }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
-        go-version: '1.23'
-    
+        go-version: '1.26.3'
+
     - name: Install Security Tools
       run: |
         echo "🔧 Installing Security Tools for Production Gate"
         echo "=============================================="
         
-        # Install Trivy
-        sudo apt-get update
-        sudo apt-get install wget apt-transport-https gnupg lsb-release
-        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
-        sudo apt-get update
-        sudo apt-get install trivy
-        
+        # Install Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634);
+        # v0.70.0 is the post-incident clean release. The install helper
+        # verifies the archive SHA-256 against the pinned value before
+        # extraction. See docs/runbooks/trivy-rollback.md for rollback.
+        sudo .github/scripts/install-trivy.sh 'v0.70.0' '8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9'
+
         # Install other security tools
         make install-nancy
-        go install github.com/securego/gosec/v2/cmd/gosec@latest
-        go install honnef.co/go/tools/cmd/staticcheck@latest
+        go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
+        go install honnef.co/go/tools/cmd/staticcheck@2026.1
         
         echo "✅ Security tools installed"
     
@@ -201,7 +205,7 @@ jobs:
         EOF
     
     - name: Upload Security Audit Trail
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: security-deployment-audit
@@ -230,12 +234,12 @@ jobs:
   #     needs: security-deployment-gate
   #     if: needs.security-deployment-gate.outputs.deployment-allowed == 'true'
   #     steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
   #     - name: Set up Go
-  #       uses: actions/setup-go@v4
+  #       uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
   #       with:
-  #         go-version: '1.23'
+  #         go-version: '1.26.3'
     
   #     - name: Install dependencies
   #       run: go mod download
@@ -269,16 +273,18 @@ jobs:
   # Only run on main branch (releases) to reduce CI overhead
   # These are expensive, long-running load tests more appropriate for release validation
   production-readiness-validation:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 60
     if: github.ref == 'refs/heads/main'
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
-        go-version: '1.23'
+        go-version: '1.26.3'
 
     - name: Install dependencies
       run: go mod download
@@ -286,7 +292,7 @@ jobs:
     - name: Set up Docker Test Infrastructure
       run: |
         echo "🐳 Setting up Docker test infrastructure for load testing..."
-        make test-mqtt-quic-setup
+        make test-transport-setup
         echo "✅ Docker infrastructure ready"
 
     - name: Production Readiness - Load Testing
@@ -343,19 +349,19 @@ jobs:
       if: always()
       run: |
         echo "🧹 Cleaning up Docker test infrastructure..."
-        make test-mqtt-quic-cleanup || true
+        make test-transport-cleanup || true
 
   # Synthetic Monitoring Setup
   #   synthetic-monitoring-validation:
   #     runs-on: ubuntu-latest
   #     timeout-minutes: 30
   #     steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
   #     - name: Set up Go
-  #       uses: actions/setup-go@v4
+  #       uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
   #       with:
-  #         go-version: '1.23'
+  #         go-version: '1.26.3'
     
   #     - name: Install dependencies
   #       run: go mod download
@@ -375,12 +381,12 @@ jobs:
   #   cost-monitoring:
   #     runs-on: ubuntu-latest
   #     steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
   #     - name: Set up Go
-  #       uses: actions/setup-go@v4
+  #       uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
   #       with:
-  #         go-version: '1.23'
+  #         go-version: '1.26.3'
     
   #     - name: Install dependencies
   #       run: go mod download
@@ -405,14 +411,16 @@ jobs:
   #   # Cross-platform integration testing
   integration-tests-controller:
     name: Controller Integration Tests (Linux)
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
-        go-version: '1.23'
+        go-version: '1.26.3'
 
     - name: Install dependencies
       run: go mod download
@@ -425,8 +433,8 @@ jobs:
         echo "🔐 Generating TLS test certificates..."
         make generate-test-certificates
         echo ""
-        echo "🌐 Starting MQTT+QUIC controller for integration tests..."
-        make test-mqtt-quic-setup
+        echo "🌐 Starting transport controller for integration tests..."
+        make test-transport-setup
         echo "✅ Docker infrastructure ready"
 
     - name: Run Controller Integration Tests
@@ -480,6 +488,8 @@ jobs:
 
   integration-tests-steward:
     name: Steward Integration Tests
+    permissions:
+      contents: read
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -492,16 +502,16 @@ jobs:
             platform: macOS
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
-        go-version: '1.23'
-    
+        go-version: '1.26.3'
+
     - name: Install dependencies
       run: go mod download
-    
+
     - name: Run Steward Cross-Platform Tests
       shell: bash
       run: |
@@ -540,19 +550,21 @@ jobs:
 
   comprehensive-e2e-tests:
     name: Comprehensive E2E Testing
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     needs: [integration-tests-controller]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
-        go-version: '1.23'
-    
+        go-version: '1.26.3'
+
     - name: Install dependencies
       run: go mod download
-    
+
     - name: Run Full E2E Test Suite
       run: |
         echo "🎯 COMPREHENSIVE E2E TESTING"
@@ -625,7 +637,7 @@ jobs:
     
     - name: Upload Test Reports
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: integration-test-reports
         path: |
@@ -635,6 +647,7 @@ jobs:
 
   # Automated Notifications for Security-Blocked Deployments (Story #99)
   deployment-notification:
+    permissions: {}
     runs-on: ubuntu-latest
     needs: security-deployment-gate
     if: always()
@@ -737,7 +750,7 @@ jobs:
         EOF
     
     - name: Upload Notification Data
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: deployment-notification
@@ -747,19 +760,21 @@ jobs:
   # Story #85: Cross-Feature Integration Testing
   cross-feature-integration-tests:
     name: Cross-Feature Integration Tests
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     needs: [integration-tests-controller, integration-tests-steward]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
-        go-version: '1.23'
-    
+        go-version: '1.26.3'
+
     - name: Install dependencies
       run: go mod download
-    
+
     - name: Run Cross-Feature Integration Scenarios
       run: |
         echo "🔗 CROSS-FEATURE INTEGRATION TESTING (Story #85)"
@@ -813,7 +828,7 @@ jobs:
     
     - name: Upload Cross-Feature Test Reports
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: cross-feature-test-reports
         path: |

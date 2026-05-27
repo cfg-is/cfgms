@@ -1,22 +1,30 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rollback
 
 import (
+	"bytes"
 	"context"
-	"log"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // DefaultRollbackNotifier provides a default implementation of RollbackNotifier
 type DefaultRollbackNotifier struct {
-	// In a real implementation, this would have email, webhook, or message queue clients
-	logger *log.Logger
+	logger          logging.Logger
+	webhookNotifier *WebhookNotifier
 }
 
-// NewDefaultRollbackNotifier creates a new default notifier
-func NewDefaultRollbackNotifier(logger *log.Logger) RollbackNotifier {
+// NewDefaultRollbackNotifier creates a new default notifier without webhook delivery.
+func NewDefaultRollbackNotifier(logger logging.Logger) RollbackNotifier {
 	if logger == nil {
-		logger = log.Default()
+		logger = logging.NewNoopLogger()
 	}
 
 	return &DefaultRollbackNotifier{
@@ -24,36 +32,53 @@ func NewDefaultRollbackNotifier(logger *log.Logger) RollbackNotifier {
 	}
 }
 
+// NewDefaultRollbackNotifierWithWebhook creates a notifier that logs all events and
+// delivers them via webhook when the operation completes.
+func NewDefaultRollbackNotifierWithWebhook(webhookURL string, logger logging.Logger) RollbackNotifier {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
+	wn := &WebhookNotifier{
+		webhookURL: webhookURL,
+		logger:     logger,
+		retryBase:  time.Second,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+	return &DefaultRollbackNotifier{
+		logger:          logger,
+		webhookNotifier: wn,
+	}
+}
+
 // NotifyRollbackStarted sends a notification when rollback starts
 func (n *DefaultRollbackNotifier) NotifyRollbackStarted(ctx context.Context, operation *RollbackOperation) error {
-	n.logger.Printf("ROLLBACK STARTED: ID=%s, Target=%s/%s, Type=%s, User=%s",
-		operation.ID,
-		operation.Request.TargetType,
-		operation.Request.TargetID,
-		operation.Request.RollbackType,
-		operation.InitiatedBy,
+	n.logger.Info("rollback started",
+		"id", logging.SanitizeLogValue(operation.ID),
+		"target_type", logging.SanitizeLogValue(string(operation.Request.TargetType)),
+		"target_id", logging.SanitizeLogValue(operation.Request.TargetID),
+		"rollback_type", logging.SanitizeLogValue(string(operation.Request.RollbackType)),
+		"initiated_by", logging.SanitizeLogValue(operation.InitiatedBy),
 	)
 
-	// In a real implementation, this would:
-	// - Send email notifications to stakeholders
-	// - Post to webhook endpoints
-	// - Send to message queues (Slack, Teams, etc.)
-	// - Update monitoring dashboards
+	if n.webhookNotifier != nil {
+		return n.webhookNotifier.NotifyRollbackStarted(ctx, operation)
+	}
 
 	return nil
 }
 
 // NotifyRollbackProgress sends progress updates
 func (n *DefaultRollbackNotifier) NotifyRollbackProgress(ctx context.Context, operation *RollbackOperation) error {
-	n.logger.Printf("ROLLBACK PROGRESS: ID=%s, Stage=%s, Progress=%d%%, Action=%s",
-		operation.ID,
-		operation.Progress.Stage,
-		operation.Progress.Percentage,
-		operation.Progress.CurrentAction,
+	n.logger.Info("rollback progress",
+		"id", logging.SanitizeLogValue(operation.ID),
+		"stage", logging.SanitizeLogValue(operation.Progress.Stage),
+		"percentage", operation.Progress.Percentage,
+		"current_action", logging.SanitizeLogValue(operation.Progress.CurrentAction),
 	)
 
-	// In a real implementation, this would send progress updates
-	// only at significant milestones to avoid notification spam
+	if n.webhookNotifier != nil {
+		return n.webhookNotifier.NotifyRollbackProgress(ctx, operation)
+	}
 
 	return nil
 }
@@ -65,59 +90,88 @@ func (n *DefaultRollbackNotifier) NotifyRollbackCompleted(ctx context.Context, o
 		duration = operation.CompletedAt.Sub(operation.InitiatedAt).String()
 	}
 
-	n.logger.Printf("ROLLBACK COMPLETED: ID=%s, Success=%v, Duration=%s, Configs=%d, Devices=%d",
-		operation.ID,
-		operation.Result.Success,
-		duration,
-		operation.Result.ConfigurationsRolledBack,
-		operation.Result.DevicesAffected,
+	n.logger.Info("rollback completed",
+		"id", logging.SanitizeLogValue(operation.ID),
+		"success", operation.Result.Success,
+		"duration", duration,
+		"configs_rolled_back", operation.Result.ConfigurationsRolledBack,
+		"devices_affected", operation.Result.DevicesAffected,
 	)
 
-	// In a real implementation, this would send detailed completion reports
+	if n.webhookNotifier != nil {
+		return n.webhookNotifier.NotifyRollbackCompleted(ctx, operation)
+	}
 
 	return nil
 }
 
 // NotifyRollbackFailed sends failure notification
 func (n *DefaultRollbackNotifier) NotifyRollbackFailed(ctx context.Context, operation *RollbackOperation, err error) error {
-	n.logger.Printf("ROLLBACK FAILED: ID=%s, Error=%v",
-		operation.ID,
-		err,
+	// err is expected non-nil (this is the failure-notify path), but guard
+	// defensively so a buggy caller can't crash the notifier.
+	errMsg := ""
+	if err != nil {
+		errMsg = err.Error()
+	}
+	n.logger.Error("rollback failed",
+		"id", logging.SanitizeLogValue(operation.ID),
+		"error", logging.SanitizeLogValue(errMsg),
 	)
 
 	if operation.Result != nil && len(operation.Result.Failures) > 0 {
 		for _, failure := range operation.Result.Failures {
-			n.logger.Printf("  - Component: %s, Error: %s, Recoverable: %v",
-				failure.Component,
-				failure.Error,
-				failure.Recoverable,
+			n.logger.Error("rollback failure detail",
+				"component", logging.SanitizeLogValue(failure.Component),
+				"error", logging.SanitizeLogValue(failure.Error),
+				"recoverable", failure.Recoverable,
 			)
 		}
 	}
 
-	// In a real implementation, this would:
-	// - Send high-priority alerts
-	// - Page on-call personnel for critical failures
-	// - Create incident tickets
+	if n.webhookNotifier != nil {
+		return n.webhookNotifier.NotifyRollbackFailed(ctx, operation, err)
+	}
 
 	return nil
+}
+
+// WebhookConfig holds configuration for a WebhookNotifier.
+type WebhookConfig struct {
+	// RetryBase is the initial delay before the first retry. Subsequent delays
+	// double with each attempt. Defaults to 1 second when zero.
+	RetryBase time.Duration
 }
 
 // WebhookNotifier sends notifications via webhooks
 type WebhookNotifier struct {
 	webhookURL string
-	logger     *log.Logger
+	logger     logging.Logger
+	retryBase  time.Duration
+	httpClient *http.Client
 }
 
-// NewWebhookNotifier creates a new webhook notifier
-func NewWebhookNotifier(webhookURL string, logger *log.Logger) RollbackNotifier {
-	if logger == nil {
-		logger = log.Default()
-	}
+// NewWebhookNotifier creates a new webhook notifier with production defaults
+// (1-second exponential backoff, 10-second per-request timeout).
+func NewWebhookNotifier(webhookURL string, logger logging.Logger) RollbackNotifier {
+	return NewWebhookNotifierWithConfig(webhookURL, logger, WebhookConfig{})
+}
 
+// NewWebhookNotifierWithConfig creates a webhook notifier with caller-supplied
+// configuration. Intended for use in tests where a shorter RetryBase speeds
+// up the retry-behavior tests without changing production behavior.
+func NewWebhookNotifierWithConfig(webhookURL string, logger logging.Logger, cfg WebhookConfig) RollbackNotifier {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
+	retryBase := cfg.RetryBase
+	if retryBase <= 0 {
+		retryBase = time.Second
+	}
 	return &WebhookNotifier{
 		webhookURL: webhookURL,
 		logger:     logger,
+		retryBase:  retryBase,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -162,25 +216,97 @@ func (w *WebhookNotifier) NotifyRollbackCompleted(ctx context.Context, operation
 
 // NotifyRollbackFailed sends webhook notification for failure
 func (w *WebhookNotifier) NotifyRollbackFailed(ctx context.Context, operation *RollbackOperation, err error) error {
+	errMsg := ""
+	if err != nil {
+		errMsg = err.Error()
+	}
 	payload := map[string]interface{}{
 		"event":     "rollback.failed",
 		"operation": operation,
-		"error":     err.Error(),
+		"error":     errMsg,
 		"result":    operation.Result,
 	}
 
 	return w.sendWebhook(ctx, payload)
 }
 
+// sendWebhook marshals payload to JSON and POSTs it to the configured URL,
+// retrying up to 3 times with exponential backoff on 5xx responses or network
+// errors. On permanent failure the error is logged and returned.
+//
+// URL scheme is validated before any network I/O — only http and https are
+// accepted to prevent SSRF via exotic schemes. Only the host is logged so that
+// secrets embedded in webhook URL paths (e.g. Slack signed URLs) are never
+// written to log sinks.
 func (w *WebhookNotifier) sendWebhook(ctx context.Context, payload interface{}) error {
-	// In a real implementation, this would:
-	// - Marshal payload to JSON
-	// - Send HTTP POST to webhook URL
-	// - Handle retries and failures
-	// - Respect rate limits
+	// Validate URL scheme before any network I/O to prevent SSRF via exotic schemes.
+	u, err := url.Parse(w.webhookURL)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("invalid webhook URL: must use http or https scheme")
+	}
 
-	w.logger.Printf("Webhook notification: %+v", payload)
-	return nil
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal webhook payload: %w", err)
+	}
+
+	// Log only the host, not the full URL, to avoid leaking webhook secrets
+	// that may be embedded in the URL path (e.g. Slack, PagerDuty signed URLs).
+	safeHost := logging.SanitizeLogValue(u.Host)
+
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(1<<uint(attempt-1)) * w.retryBase
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.webhookURL, bytes.NewReader(data))
+		if err != nil {
+			// Malformed URL after scheme check — no point retrying.
+			return fmt.Errorf("create webhook request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := w.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("webhook POST attempt %d: %w", attempt+1, err)
+			w.logger.Warn("webhook delivery attempt failed",
+				"attempt", attempt+1,
+				"host", safeHost,
+				"error", logging.SanitizeLogValue(lastErr.Error()),
+			)
+			continue
+		}
+		// Drain with a cap to enable connection reuse and bound memory on large responses.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		if err := resp.Body.Close(); err != nil {
+			w.logger.Warn("failed to close webhook response body", "error", err)
+		}
+
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("webhook server error on attempt %d: status %d", attempt+1, resp.StatusCode)
+			w.logger.Warn("webhook delivery attempt failed",
+				"attempt", attempt+1,
+				"host", safeHost,
+				"status", resp.StatusCode,
+			)
+			continue
+		}
+
+		w.logger.Debug("webhook notification sent", "host", safeHost)
+		return nil
+	}
+
+	w.logger.Error("webhook delivery permanently failed",
+		"host", safeHost,
+		"error", logging.SanitizeLogValue(lastErr.Error()),
+	)
+	return lastErr
 }
 
 // CompositeNotifier combines multiple notifiers

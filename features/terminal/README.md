@@ -20,7 +20,7 @@ The Terminal module provides secure remote terminal access to managed Stewards t
 ### Integration Points
 1. **Controller REST API** (`features/controller/api/server.go:200`): Add terminal WebSocket endpoints
 2. **QUIC Data Plane** (via `pkg/quic`): Terminal data streaming over existing QUIC connections
-3. **MQTT Control Plane**: Terminal session management commands
+3. **gRPC Control Plane**: Terminal session management commands
 4. **RBAC System** (`features/rbac/manager.go`): Terminal access permissions
 5. **Certificate Management** (`pkg/cert/manager.go`): mTLS for terminal streams
 
@@ -58,17 +58,15 @@ const (
 )
 ```
 
-### MQTT+QUIC Protocol Extensions
+### gRPC-over-QUIC Protocol Extensions
 
-**MQTT Control Messages** (Session Management):
-```
-cfgms/steward/{id}/terminal/start   - Start terminal session command
-cfgms/steward/{id}/terminal/end     - End terminal session command
-cfgms/steward/{id}/terminal/status  - Terminal session status updates
-```
+**gRPC Control Messages** (Session Management):
+- `TerminalStart` RPC — Start terminal session command
+- `TerminalEnd` RPC — End terminal session command
+- `TerminalStatus` RPC — Terminal session status updates
 
-**QUIC Data Streams** (Terminal I/O):
-- Bi-directional QUIC streams for terminal data transfer
+**gRPC Data Streams** (Terminal I/O):
+- Bi-directional gRPC streams for terminal data transfer
 - Low-latency terminal I/O over existing QUIC connection
 - Multiplexed streams for concurrent terminal sessions
 
@@ -80,7 +78,7 @@ cfgms/steward/{id}/terminal/status  - Terminal session status updates
 
 ## Implementation Phases
 1. **Core Terminal Module**: Session management, WebSocket handling
-2. **MQTT+QUIC Integration**: Controller-Steward terminal communication via existing protocol
+2. **Transport Integration**: Controller-Steward terminal communication via gRPC-over-QUIC
 3. **Shell Support**: Multi-platform shell execution (bash, zsh, PowerShell, cmd)
 4. **Security Features**: Session recording, access control, encryption
 5. **Performance Optimization**: Session multiplexing, resource cleanup

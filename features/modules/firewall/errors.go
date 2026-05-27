@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package firewall
 
@@ -7,6 +7,9 @@ import "errors"
 var (
 	// ErrInvalidName is returned when the rule name is invalid
 	ErrInvalidName = errors.New("invalid rule name")
+
+	// ErrInvalidDirection is returned when the direction is invalid
+	ErrInvalidDirection = errors.New("invalid direction (must be 'input', 'output', or 'forward')")
 
 	// ErrInvalidAction is returned when the action is invalid
 	ErrInvalidAction = errors.New("invalid action (must be 'allow' or 'deny')")

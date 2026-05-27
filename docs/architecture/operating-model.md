@@ -37,9 +37,56 @@ A cfg is a YAML file (`hostname.cfg`) that declares the desired state of a devic
 
 - **Resource configurations**: each block references a module and describes the desired state for that resource (e.g., a `file` module block declares a file's path, content, and permissions)
 - **Schedule**: how often to re-check compliance
-- **Mode**: whether to enforce desired state (`apply`) or only monitor and report drift (`monitor`)
+- **Mode**: whether to enforce desired state (`apply`) or only monitor and report drift (`monitor`) [GAP: apply/monitor mode toggle not yet implemented in steward cfg or execution engine — see issue #1524]
 
 The cfg is the single source of truth for a steward. Whether it came from a local file or was pushed by a controller, the steward treats it the same way.
+
+## Core Primitives
+
+CFGMS is built from a small set of powerful primitives. New features compose existing primitives rather than introducing parallel mechanisms.
+
+- **Config management** — the cfg + steward convergence loop is the substrate for all device state management.
+- **Workflow engine** — handles cloud/SaaS desired-state, orchestration, and event-driven automation. Registration approval, drift response policies, and third-party integrations all express through workflows.
+- **Durable job queue (controller-side)** — fanout, retries, deferred operations, and HA failover replay all use the same queue. Survives controller restarts and leader failover.
+- **DNA** — deterministic, hashable representation of managed-object state. Underlies sync, drift detection, and compliance reporting.
+- **Central providers** (storage, logging, secrets, directory, transport) — pluggable interfaces. New backends extend an existing provider rather than introducing a parallel system.
+
+If a feature can use an existing primitive, that's the path. Building a parallel mechanism requires justification.
+
+## Save = Deploy
+
+Any source that writes a cfg to the controller's ConfigStore (CLI, web UI, GitOps webhook, workflow output) triggers automatic distribution to matched stewards. There is no separate "push" action — save IS deploy. [GAP: storage-watch auto-trigger not yet wired; config saves currently require an explicit `POST /api/v1/config/push` call — see issue #1525]
+
+```
+ ┌───────────────┐   write   ┌─────────────┐  storage-watch  ┌──────────┐
+ │ Author        │ ─────────▶│ ConfigStore │ ──────────────▶│  Fanout  │
+ │ (CLI/UI/Hook) │           │ (durable)   │ debounce ~500ms │ (queue)  │
+ └───────────────┘           └─────────────┘                 └─────┬────┘
+                                                                   ▼
+                                                            ┌──────────────┐
+                                                            │  Stewards    │
+                                                            │  (converge   │
+                                                            │   on next hb)│
+                                                            └──────────────┘
+```
+
+- **Single write path.** All sources write to ConfigStore via the same path.
+- **Debounce.** Storage-watch waits ~500ms (configurable) before triggering fanout. Absorbs burst edits invisibly. [GAP: debounce not yet implemented — see issue #1525]
+- **Durable queue.** Fanout uses the controller's durable job queue — the same primitive used for retries, deferred operations, and HA failover replay.
+- **Idempotency carries load.** A steward already at the target DNA hash treats a sync command as a no-op.
+- **Resource-bounded fanout.** Fanout is bounded by controller capacity (CPU, outbound bandwidth) to prevent thundering-herd saturation.
+
+Stewards' own heartbeat-driven loops also notice config divergence via DNA hash mismatch — the fanout command is an optimization on top of that steady-state loop, not a dependency for correctness.
+
+## Safety Primitives
+
+Safety against bad configs comes from operator-controllable primitives:
+
+- **Targeting precision** — a cfg explicitly lists which stewards / groups / tenant paths / DNA-attributes it applies to. A bad change is bounded by what it was authored to target.
+- **Deployment rings (convention)** — steward tags (`ring=canary`, `ring=prod-early`, `ring=prod-broad`) let operators author phased rollouts as separate configs or staged target lists. v1 is convention; auto-progressive ring machinery is a future enhancement.
+- **Deployment visibility** — `cfg config deployments <id>` shows applied / pending / failed / halted counts and per-steward status.
+- **E-stop (planned)** — `cfg config halt <id>` cancels remaining queued sends for a config.
+- **Rollback (planned CLI; underlying infrastructure exists)** — restore a previous cfg version via `features/controller/api/rollback_handler.go`.
 
 ## Component Roles
 
@@ -49,10 +96,19 @@ The steward is a daemon that maintains a device in the state described by its cf
 
 **Core behaviors:**
 
-1. **Apply** — On startup and when the cfg changes, evaluate each resource's current state against desired state. In `apply` mode, converge the device (Get → Compare → Set → Verify). In `monitor` mode, detect and report drift without making changes
+1. **Apply** — On startup and when the cfg changes, evaluate each resource's current state against desired state. In `apply` mode, converge the device (Get → Compare → Set → Verify). In `monitor` mode, detect and report drift without making changes [GAP: monitor mode not yet implemented — see issue #1524]
 2. **Maintain** — Re-check compliance on the schedule defined in the cfg. In `apply` mode, correct any drift. In `monitor` mode, report drift. Respond to module-defined event hooks (e.g., file change triggers re-check of that resource)
 3. **Know itself** — Collect DNA (hardware, software, network, security attributes). Monitor its own health and performance
 4. **Report** — Always log locally. When connected to a controller, also report events, status, and DNA upstream. When disconnected, queue reports locally and resync on reconnect
+
+**Apply mode vs Monitor mode (configurable per steward):** [GAP: apply/monitor mode toggle not yet implemented — see issue #1524]
+
+- **`apply` mode** (default for managed devices): the steward actively converges the device to match its cfg. When drift is detected, the steward attempts local convergence and reports the outcome as a single combined message containing `{drift_detected, drift_setting, convergence_result, final_state}` — one message per drift event.
+- **`monitor` mode**: the steward detects drift but does not act. Emits a non-compliance event upstream; operator action (or a separate `apply` workflow) decides whether to correct.
+
+Mode is set in steward configuration. A single steward operates in one mode at a time across all its managed resources. Per-resource override is not in scope for v1.
+
+Controller-side logging captures both the drift event and convergence result regardless of mode — flapping detection can be added later without wire-protocol changes.
 
 These four behaviors are the same regardless of deployment mode. The only difference between standalone and controller-connected is **where the cfg comes from** and **where reports go**.
 
@@ -109,10 +165,39 @@ Controller                              Steward
     │                                      │
 ```
 
-- **Control plane (MQTT)**: lightweight messages — heartbeats (including DNA hash), commands, status, events, DNA deltas
-- **Data plane (QUIC)**: bulk transfers — cfgs, full DNA snapshots (on hash mismatch), performance metrics
+- **Control plane**: lightweight messages — heartbeats (including DNA hash), commands, status, events, DNA deltas
+- **Data plane**: bulk transfers — cfgs, full DNA snapshots (on hash mismatch), performance metrics
+
+Both planes use the unified **gRPC-over-QUIC** transport (port 4433, mTLS). All controller-steward communication flows over a single multiplexed QUIC connection with distinct gRPC services for control and data operations.
 
 The controller can tell a steward to sync its cfg immediately (e.g., after an admin pushes a change). But the steward also re-checks on its own schedule. The command is an optimization, not a dependency.
+
+### Trust Model
+
+mTLS for all controller↔steward traffic, with three layers of identity.
+
+**Controller identity is anchored at build time.**
+The steward binary is built with the controller's URL compiled in (`-ldflags="-X main.ControllerURL=..."`). Scope: per controller (or controller cluster), not per tenant. One steward binary serves all tenants the controller manages.
+
+**Steward identity is established at registration.**
+Two credential flavors:
+
+- **Short-lived / single-use registration tokens** — manual onboarding, small fleets, time-bounded provisioning. Generated on the controller, handed to the steward as a string. Consumed at registration; expiry enforces time bounds.
+- **Long-lived tenant/group registration codes** — RMM/GPO mass deployment. Same string-on-the-wire pattern, baked into deployment scripts and reused by many devices. Encodes tenant/group target.
+
+Both flow through the controller's registration approval workflow (`RegistrationApprovalHook`). The controller ships two built-in workflows selectable via `registration.workflow` in `controller.cfg`:
+
+- **`auto-approve`** (default) — approves all valid registrations immediately. Uses `Variables: {policy: accept}` to short-circuit the engine without running steps. Safe for development and small trusted fleets.
+- **`manual-review`** — quarantines each new steward pending operator action via `cfg registration approve`. Sets `registration_decision: quarantine` so the hook restricts the steward to baseline config only until promoted.
+
+Custom workflows implement arbitrary policy via the workflow engine by deploying a workflow named `steward-registration-approval`.
+
+**Admin identity is a single-file mTLS bundle.**
+On `--init`, the controller writes the bundle to a known path:
+- Linux/macOS: `/etc/cfgms/admin.bundle.yaml`
+- Windows: `%ProgramData%\cfgms\admin.bundle.yaml`
+
+YAML containing cert + key + CA inline. The `cfg` CLI auto-discovers via: `--bundle <path>` → `CFGMS_ADMIN_BUNDLE` env → `~/.config/cfgms/admin.bundle.yaml` → system path. `cfgms-controller bootstrap-admin` issues named bundles per operator, regenerates the system bundle, lists issued bundles, and revokes by serial.
 
 ### Outpost (Future)
 
@@ -141,7 +226,7 @@ When connection is restored:
 ### Controller restarts
 
 Stewards are unaffected. They continue maintaining their cfgs independently. When the controller comes back:
-- Stewards reconnect automatically (MQTT reconnect)
+- Stewards reconnect automatically (gRPC-over-QUIC transport reconnect with exponential backoff)
 - Queued reports are delivered
 - Controller rebuilds its view of fleet state from steward reports
 
@@ -185,3 +270,19 @@ controller ← admin authors workflows
 ```
 
 This is the same controller — it just has no stewards registered. The workflow engine operates independently of steward management.
+
+## UX Surfaces
+
+Operators interact with CFGMS through layered UX surfaces.
+
+**`cfg` CLI — first-class community UI.** The canonical interaction surface for the open-source distribution. Every documented operator action works through the CLI. The CLI wraps REST endpoints so operators don't need to script against REST for documented workflows.
+
+**Web UI (planned before v1).** A separate UX layer for operators who prefer graphical workflows or shared-team views. Some power-user flows may remain CLI-only.
+
+**REST API — underlying contract.** The wire format the CLI and web UI both use. Stable, versioned, and documented at `docs/api/rest-api.md`. Available to operators and integrators for scripting and third-party tools.
+
+**Workflow engine — automation surface.** For SaaS/cloud operations that don't require a steward (M365, identity providers, ticketing systems), the workflow engine is the primary expression mechanism. See [controller operating model](controller-operating-model.md#workflow-engine).
+
+## Monitoring Export Credentials
+
+OTLP exporter credentials (API keys / bearer tokens) are stored in `pkg/secrets`, not in config files. Configure the secret key name via `config["secret_key"]` and use `NewOTLPExporterWithSecrets` to wire the store at construction time.

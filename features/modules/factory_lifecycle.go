@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package modules
 
@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/steward/discovery"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // ModuleLoader defines the interface for loading modules
@@ -38,6 +39,9 @@ type LifecycleAwareModuleFactory struct {
 	// config contains lifecycle configuration defaults
 	config ModuleConfig
 
+	// logger receives structured log output
+	logger logging.Logger
+
 	// mu protects concurrent access
 	mu sync.RWMutex
 }
@@ -47,10 +51,14 @@ func NewLifecycleAwareModuleFactory(
 	discoveryRegistry discovery.ModuleRegistry,
 	moduleRegistry *ModuleRegistry,
 	loader ModuleLoader,
+	logger logging.Logger,
 ) *LifecycleAwareModuleFactory {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 
-	// Create lifecycle manager
-	lifecycleManager := NewModuleLifecycleManager(moduleRegistry)
+	// Create lifecycle manager with the same logger
+	lifecycleManager := NewModuleLifecycleManager(moduleRegistry, logger)
 
 	return &LifecycleAwareModuleFactory{
 		loader:            loader,
@@ -58,6 +66,7 @@ func NewLifecycleAwareModuleFactory(
 		registry:          moduleRegistry,
 		discoveryRegistry: discoveryRegistry,
 		config:            DefaultModuleConfig(),
+		logger:            logger,
 	}
 }
 
@@ -120,7 +129,7 @@ func (laf *LifecycleAwareModuleFactory) LoadModule(moduleName string) (Module, e
 		// Unregister on failure
 		if unregErr := laf.lifecycleManager.UnregisterModule(moduleName); unregErr != nil {
 			// Log the unregister error but don't change the return error
-			fmt.Printf("Warning: failed to unregister module '%s' after load failure: %v\n", moduleName, unregErr)
+			laf.logger.Warn("failed to unregister module after load failure", "module", moduleName, "error", unregErr)
 		}
 		return nil, fmt.Errorf("failed to initialize module '%s': %v", moduleName, err)
 	}
@@ -165,7 +174,7 @@ func (laf *LifecycleAwareModuleFactory) LoadModuleWithConfig(moduleName string, 
 		// Unregister on failure
 		if unregErr := laf.lifecycleManager.UnregisterModule(moduleName); unregErr != nil {
 			// Log the unregister error but don't change the return error
-			fmt.Printf("Warning: failed to unregister module '%s' after load failure: %v\n", moduleName, unregErr)
+			laf.logger.Warn("failed to unregister module after load failure", "module", moduleName, "error", unregErr)
 		}
 		return nil, fmt.Errorf("failed to initialize module '%s': %v", moduleName, err)
 	}
@@ -338,65 +347,4 @@ func (laf *LifecycleAwareModuleFactory) Shutdown(ctx context.Context) error {
 	laf.loader.UnloadAllModules()
 
 	return nil
-}
-
-// ModuleFactoryBridge provides a bridge between the lifecycle-aware factory and the existing steward code
-// This allows gradual migration from the standard factory to the lifecycle-aware factory
-type ModuleFactoryBridge struct {
-	lifecycleFactory *LifecycleAwareModuleFactory
-}
-
-// NewModuleFactoryBridge creates a new bridge to the lifecycle-aware factory
-func NewModuleFactoryBridge(lifecycleFactory *LifecycleAwareModuleFactory) *ModuleFactoryBridge {
-	return &ModuleFactoryBridge{
-		lifecycleFactory: lifecycleFactory,
-	}
-}
-
-// LoadModule implements the standard factory interface
-func (mfb *ModuleFactoryBridge) LoadModule(moduleName string) (Module, error) {
-	return mfb.lifecycleFactory.LoadModule(moduleName)
-}
-
-// CreateModuleInstance implements the standard factory interface
-func (mfb *ModuleFactoryBridge) CreateModuleInstance(moduleName string) (Module, error) {
-	return mfb.lifecycleFactory.GetModule(moduleName)
-}
-
-// GetLoadedModules implements the standard factory interface
-func (mfb *ModuleFactoryBridge) GetLoadedModules() []string {
-	return mfb.lifecycleFactory.ListModules()
-}
-
-// UnloadModule implements the standard factory interface
-func (mfb *ModuleFactoryBridge) UnloadModule(moduleName string) {
-	// Ignore errors for compatibility with existing interface
-	if err := mfb.lifecycleFactory.UnloadModule(moduleName); err != nil {
-		// Log error but don't return it to maintain interface compatibility
-		fmt.Printf("Warning: failed to unload module '%s': %v\n", moduleName, err)
-	}
-}
-
-// UnloadAllModules implements the standard factory interface
-func (mfb *ModuleFactoryBridge) UnloadAllModules() {
-	// Stop and unload all modules
-	if err := mfb.lifecycleFactory.Stop(); err != nil {
-		// Log error but don't return it to maintain interface compatibility
-		fmt.Printf("Warning: failed to stop lifecycle factory: %v\n", err)
-	}
-}
-
-// ValidateModuleInterface implements the standard factory interface
-func (mfb *ModuleFactoryBridge) ValidateModuleInterface(module interface{}) error {
-	return mfb.lifecycleFactory.ValidateModuleInterface(module)
-}
-
-// GetModuleInfo provides access to module information (delegates to underlying loader)
-func (mfb *ModuleFactoryBridge) GetModuleInfo(moduleName string) (discovery.ModuleInfo, bool) {
-	return mfb.lifecycleFactory.loader.GetModuleInfo(moduleName)
-}
-
-// GetLifecycleFactory returns the underlying lifecycle-aware factory for advanced operations
-func (mfb *ModuleFactoryBridge) GetLifecycleFactory() *LifecycleAwareModuleFactory {
-	return mfb.lifecycleFactory
 }

@@ -1,21 +1,20 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package auth
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // TestSimpleInteractiveFlow tests basic interactive flow components
 func TestSimpleInteractiveFlow(t *testing.T) {
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "simple-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:             "simple-test-client-id",
@@ -30,7 +29,7 @@ func TestSimpleInteractiveFlow(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	flow := NewInteractiveAuthFlow(provider, config)
 	ctx := context.Background()
 
@@ -135,16 +134,8 @@ func TestCallbackServer(t *testing.T) {
 	}()
 
 	t.Run("TestHealthEndpoint", func(t *testing.T) {
-		// Get the actual port being used
 		port := handler.serverPort
-		if port == "0" {
-			t.Skip("Unable to determine server port")
-		}
-
-		// This is a basic test - more comprehensive testing would require
-		// actual HTTP calls which are done in the main test file
-		t.Logf("Callback server started on port: %s", port)
-		t.Logf("Health endpoint: http://localhost:%s/health", port)
-		t.Logf("Callback endpoint: http://localhost:%s/auth/callback", port)
+		assert.NotEmpty(t, port, "server port must be assigned after StartCallbackServer")
+		assert.NotEqual(t, "0", port, "server port must be a real port, not the placeholder 0")
 	})
 }

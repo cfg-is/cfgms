@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package transform provides extensible data transformation capabilities for workflows
 //
@@ -449,6 +449,9 @@ type TransformStep struct {
 	// OnError defines error handling behavior
 	OnError TransformErrorAction `json:"on_error,omitempty"`
 
+	// FallbackTransform names a registered transform to execute if this step fails
+	FallbackTransform string `json:"fallback_transform,omitempty"`
+
 	// CacheKey provides a key for caching this step's result
 	CacheKey string `json:"cache_key,omitempty"`
 
@@ -471,6 +474,14 @@ const (
 
 	// ErrorActionRetry retries the failed transform
 	ErrorActionRetry TransformErrorAction = "retry"
+
+	// TransformErrorActionContinueWith has no named target in a chain; appends a
+	// warning and skips remaining chain steps (same effect as ErrorActionSkip).
+	TransformErrorActionContinueWith TransformErrorAction = "continue_with"
+
+	// TransformErrorActionFallback executes the step's FallbackTransform on error;
+	// if no FallbackTransform is set the chain stops (same effect as ErrorActionStop).
+	TransformErrorActionFallback TransformErrorAction = "fallback"
 )
 
 // TransformCache defines the interface for caching transform results

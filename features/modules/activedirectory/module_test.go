@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package activedirectory
 
@@ -501,6 +501,71 @@ func TestActiveDirectoryModule_GetHostname(t *testing.T) {
 	hostname := module.getHostname()
 	assert.NotEmpty(t, hostname)
 	// On non-Windows systems this might return "unknown" but should not panic
+}
+
+func TestValidateObjectID(t *testing.T) {
+	tests := []struct {
+		name      string
+		objectID  string
+		wantError bool
+	}{
+		{
+			name:      "injection with quote and ampersand",
+			objectID:  "' & Remove-ADUser",
+			wantError: true,
+		},
+		{
+			name:      "injection with semicolon",
+			objectID:  "user;whoami",
+			wantError: true,
+		},
+		{
+			name:      "injection with subshell",
+			objectID:  "admin$(rm -rf)",
+			wantError: true,
+		},
+		{
+			name:      "raw DN with comma and space",
+			objectID:  "CN=John,DC=domain,DC=com",
+			wantError: true,
+		},
+		{
+			name:      "simple dotted username",
+			objectID:  "john.doe",
+			wantError: false,
+		},
+		{
+			name:      "UPN format",
+			objectID:  "john.doe@domain.com",
+			wantError: false,
+		},
+		{
+			name:      "computer name with hyphen",
+			objectID:  "DOMAIN-PC01",
+			wantError: false,
+		},
+		{
+			name:      "GUID format",
+			objectID:  "550e8400-e29b-41d4-a716-446655440000",
+			wantError: false,
+		},
+		{
+			name:      "empty objectID rejected",
+			objectID:  "",
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateObjectID(tt.objectID)
+			if tt.wantError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }
 
 // Integration test functions that would run on actual Windows AD systems

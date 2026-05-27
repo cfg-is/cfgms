@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package modules
 
@@ -31,6 +31,15 @@ type ConfigState interface {
 
 	// GetManagedFields returns the list of fields this configuration manages
 	GetManagedFields() []string
+}
+
+// Configurable is implemented by modules that require initialization from
+// operator config before Get() can safely read the current resource state.
+// The execution engine calls Configure(desiredState) before Get() when the
+// module implements this interface, allowing security boundaries to be
+// established without modifying any files.
+type Configurable interface {
+	Configure(config ConfigState) error
 }
 
 // Monitor interface for modules that support real-time monitoring (optional)

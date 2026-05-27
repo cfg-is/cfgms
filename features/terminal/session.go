@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package terminal
 
@@ -56,6 +56,8 @@ func NewSession(req *SessionRequest, logger logging.Logger) (*Session, error) {
 		LastActivity: now,
 		Environment:  req.Env,
 		closed:       false,
+		outputCh:     make(chan []byte, 64),
+		logger:       logger,
 	}
 
 	// Initialize shell executor
@@ -75,7 +77,7 @@ func NewSession(req *SessionRequest, logger logging.Logger) (*Session, error) {
 	session.executor = executor
 
 	logger.Info("Created new terminal session",
-		"session_id", sessionID,
+		"session_id", logging.RedactedID(sessionID),
 		"steward_id", req.StewardID,
 		"user_id", req.UserID,
 		"shell", req.Shell,
@@ -132,6 +134,14 @@ func (s *Session) HandleOutput(ctx context.Context, data []byte) error {
 			// Log error but don't fail the operation
 			_ = err // Explicitly ignore recording errors for resilience
 		}
+	}
+
+	// Relay to WebSocket client. Non-blocking: drop and warn when the consumer is slow.
+	select {
+	case s.outputCh <- data:
+	default:
+		s.logger.Warn("Terminal output dropped; WebSocket client is not consuming output fast enough",
+			"session_id", logging.RedactedID(s.ID))
 	}
 
 	return nil
@@ -313,8 +323,7 @@ func (s *Session) handleShellOutput(ctx context.Context) {
 				return // Channel closed
 			}
 
-			// Handle errors (could send error message to WebSocket)
-			_ = err // For now, just ignore errors
+			_ = err // Shell errors are non-fatal in the output loop; WebSocket error reporting is deferred.
 		}
 	}
 }
@@ -337,4 +346,18 @@ func (s *Session) GetErrorChannel() <-chan error {
 		return nil
 	}
 	return s.executor.ErrorChannel()
+}
+
+// OutputChan returns the session-level relay channel that carries steward output
+// destined for the WebSocket client. Writers use HandleOutput; readers are
+// WebSocket write loops. The channel is buffered; messages are dropped (with a
+// warning log) when the buffer is full so a slow consumer never stalls the
+// steward output path.
+//
+// The channel is intentionally never closed: HandleOutput may be invoked from
+// handleShellOutput after Close, so closing would risk a send-on-closed panic.
+// Readers must detect session termination via context cancellation, not a
+// channel-close signal.
+func (s *Session) OutputChan() <-chan []byte {
+	return s.outputCh
 }

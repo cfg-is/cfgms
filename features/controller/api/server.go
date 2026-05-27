@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package api
 
@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,24 +16,32 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/commercial/ha"
+	"github.com/cfgis/cfgms/features/config/rollback"
+	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/features/controller/health"
+	"github.com/cfgis/cfgms/features/controller/push"
+	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/authdefense"
+	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
-	pkgmonitoring "github.com/cfgis/cfgms/pkg/monitoring"
 	"github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
-	"github.com/cfgis/cfgms/pkg/telemetry"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
-
-// QUICTriggerFunc is a function that triggers a QUIC connection for a steward
-type QUICTriggerFunc func(ctx context.Context, stewardID string) (string, error)
 
 // Server represents the REST API server component of the controller
 type Server struct {
@@ -42,24 +51,48 @@ type Server struct {
 	httpServer              *http.Server
 	router                  *mux.Router
 	controllerService       *service.ControllerService
-	configService           *service.ConfigurationService
+	configService           *service.ConfigurationServiceV2
 	certProvisioningService *service.CertificateProvisioningService
 	rbacService             *service.RBACService
 	certManager             *cert.Manager
 	tenantManager           *tenant.Manager
 	rbacManager             *rbac.Manager
 	systemMonitor           *monitoring.SystemMonitor
-	platformMonitor         pkgmonitoring.PlatformMonitor
-	tracer                  *telemetry.Tracer
+	healthCollector         *health.Collector
 	haManager               *ha.Manager
-	apiKeys                 map[string]*APIKey             // In-memory cache for fast lookup
-	secretStore             secretsif.SecretStore          // M-AUTH-1: Central secrets provider for API keys
-	registrationTokenStore  registration.Store             // Registration token store for steward registration
-	registeredStewards      map[string]*RegisteredSteward  // In-memory store for registered stewards
-	corsConfig              *CORSConfig                    // CORS configuration
-	quicTriggerFunc         QUICTriggerFunc                // Function to trigger QUIC connections
-	signerCertSerial        string                         // Story #378: Serial of cert used for config signing
-	authDefense             *authdefense.AuthDefenseSystem // Story #380: Three-tier auth defense
+	apiKeys                 map[string]*APIKey                // In-memory cache for fast lookup
+	secretStore             secretsif.SecretStore             // M-AUTH-1: Central secrets provider for API keys
+	registrationTokenStore  registration.Store                // Registration token store for steward registration
+	corsConfig              *CORSConfig                       // CORS configuration
+	signerCertSerial        string                            // Story #378: Serial of cert used for config signing
+	authDefense             *authdefense.AuthDefenseSystem    // Story #380: Three-tier auth defense
+	rollbackManager         rollback.RollbackManager          // Story #416: Rollback system
+	reportsHandler          *reportapi.Handler                // Story #416: Reports engine
+	workflowHandler         *WorkflowHandler                  // Story #414: Workflow engine REST API
+	approvalHook            RegistrationApprovalHook          // Issue #422: Registration approval hook
+	fleetQuery              fleet.FleetQuery                  // Issue #603: Single query path for device filtering
+	gitSyncWebhookHandler   http.Handler                      // Issue #666: git-sync webhook endpoint (optional)
+	auditManager            *audit.Manager                    // Issue #775: registration audit events
+	scriptTracker           script.ExecutionTracker           // Issue #708: durable execution audit records
+	scriptAuditLogger       *script.AuditLogger               // Issue #708: in-memory execution metrics
+	scriptMonitor           *script.ExecutionMonitor          // Issue #708: active execution tracking
+	scriptRepo              script.ScriptRepository           // Issue #1670: git-backed script library
+	privilegeStore          cfgconfig.ConfigStore             // Issue #1670: controller-side script privilege metadata
+	pushLeaderStatus        leaderStatus                      // Issue #1318: leader check for config push (nil = leader)
+	commandPublisher        *commands.Publisher               // Issue #1319: fan-out config push to active stewards
+	pushStore               business.PushStore                // Issue #1320: durable push-state persistence for HA failover
+	registry                registry.Registry                 // Issue #1323: active steward connection registry
+	mountPointValidator     MountPointValidator               // Issue #1396: config source connection test
+	configSourceSecretStore secretsif.SecretStore             // Issue #1396: secrets for config source validator
+	configSourceRateLimits  sync.Map                          // Issue #1396: per-tenant rate-limit counters
+	pendingStore            business.PendingRegistrationStore // Issue #1696: durable pending-registration queue
+	ipTrustStore            business.IPTrustStore             // Issue #1698: operator IP-trust management
+	runManager              *controllerrun.Manager            // Issue #1673: run/job/execution model
+	runExecutionQueue       *script.ExecutionQueue            // Issue #1673: queue for ad-hoc run synthesis
+	trustedProxies          []net.IPNet                       // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
+	stopCleanup             chan struct{}                     // signals startAPIKeyCleanup to exit
+	cleanupDone             chan struct{}                     // closed when cleanup goroutine exits
+	closeOnce               sync.Once                         // idempotent Close
 }
 
 // APIKey represents an API key for external authentication
@@ -71,18 +104,6 @@ type APIKey struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	TenantID    string     `json:"tenant_id"`
-}
-
-// RegisteredSteward represents a steward that has registered with the controller
-type RegisteredSteward struct {
-	StewardID     string    `json:"steward_id"`
-	TenantID      string    `json:"tenant_id"`
-	Group         string    `json:"group"`
-	RegisteredAt  time.Time `json:"registered_at"`
-	LastHeartbeat time.Time `json:"last_heartbeat,omitempty"`
-	Status        string    `json:"status"` // online, offline, unknown
-	MQTTBroker    string    `json:"mqtt_broker,omitempty"`
-	QUICAddress   string    `json:"quic_address,omitempty"`
 }
 
 // ServerConfig contains configuration for the REST API server
@@ -103,27 +124,44 @@ func New(
 	cfg *config.Config,
 	logger logging.Logger,
 	controllerService *service.ControllerService,
-	configService *service.ConfigurationService,
+	configService *service.ConfigurationServiceV2,
 	certProvisioningService *service.CertificateProvisioningService,
 	rbacService *service.RBACService,
 	certManager *cert.Manager,
 	tenantManager *tenant.Manager,
 	rbacManager *rbac.Manager,
 	systemMonitor *monitoring.SystemMonitor,
-	platformMonitor pkgmonitoring.PlatformMonitor,
-	tracer *telemetry.Tracer,
 	haManager *ha.Manager,
 	registrationTokenStore registration.Store,
 	signerCertSerial string, // Story #378: Serial of cert used for config signing
+	healthCollector *health.Collector, // Story #417: CFGMS health monitoring
+	auditManager *audit.Manager, // Issue #775: registration audit events
+	commandPublisher *commands.Publisher, // Issue #1319: fan-out config push to active stewards
+	pushStore business.PushStore, // Issue #1320: durable push-state persistence for HA failover
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
 	// M-AUTH-1: Initialize central secrets provider for API key storage
-	secretStore, err := initializeSecretStore(cfg, logger)
+	secretStore, err := NewSecretStore(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize secret store: %w", err)
+	}
+
+	// Issue #1695: Parse TrustedProxies CIDRs once at startup so per-request
+	// extractSourceIP calls never parse strings.
+	var trustedProxies []net.IPNet
+	if cfg.Registration != nil {
+		for _, cidr := range cfg.Registration.TrustedProxies {
+			_, ipNet, parseErr := net.ParseCIDR(cidr)
+			if parseErr != nil {
+				logger.Warn("Invalid trusted_proxy CIDR, skipping",
+					"cidr", logging.SanitizeLogValue(cidr), "error", parseErr)
+				continue
+			}
+			trustedProxies = append(trustedProxies, *ipNet)
+		}
 	}
 
 	server := &Server{
@@ -137,14 +175,24 @@ func New(
 		tenantManager:           tenantManager,
 		rbacManager:             rbacManager,
 		systemMonitor:           systemMonitor,
-		platformMonitor:         platformMonitor,
-		tracer:                  tracer,
+		healthCollector:         healthCollector,
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
-		signerCertSerial:        signerCertSerial,                    // Story #378: For registration handler
-		apiKeys:                 make(map[string]*APIKey),            // In-memory cache
-		secretStore:             secretStore,                         // M-AUTH-1: Central secrets provider
-		registeredStewards:      make(map[string]*RegisteredSteward), // In-memory steward registry
+		signerCertSerial:        signerCertSerial,         // Story #378: For registration handler
+		apiKeys:                 make(map[string]*APIKey), // In-memory cache
+		secretStore:             secretStore,              // M-AUTH-1: Central secrets provider
+		approvalHook:            &IPTrustApprovalHook{},   // Issue #1695: nil store → fail-closed (quarantine all)
+		trustedProxies:          trustedProxies,           // Issue #1695: parsed from TrustedProxies config
+		auditManager:            auditManager,             // Issue #775: registration audit events
+		commandPublisher:        commandPublisher,         // Issue #1319: fan-out config push to active stewards
+		pushStore:               pushStore,                // Issue #1320: durable push-state persistence for HA failover
+		stopCleanup:             make(chan struct{}),
+		cleanupDone:             make(chan struct{}),
+	}
+
+	// Issue #1318: wire leader-check for config push; nil haManager = OSS single-node = always leader
+	if haManager != nil {
+		server.pushLeaderStatus = haManager
 	}
 
 	// Story #380: Initialize three-tier auth defense system
@@ -152,7 +200,7 @@ func New(
 		authdefense.DefaultConfig(),
 		logger,
 		authdefense.WithTenantExtractor(func(r *http.Request) string {
-			if tid, ok := r.Context().Value(tenantIDContextKey).(string); ok {
+			if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok {
 				return tid
 			}
 			return ""
@@ -170,13 +218,87 @@ func New(
 		logger.Warn("Failed to load API keys from store", "error", err)
 	}
 
+	// Seed test API keys only when explicitly requested via environment variable.
+	// Never runs in production — must be set deliberately in test environments.
+	if os.Getenv("CFGMS_SEED_TEST_API_KEYS") == "1" {
+		for _, envVar := range []string{"CFGMS_API_KEY_EAST", "CFGMS_API_KEY_CENTRAL", "CFGMS_API_KEY_WEST"} {
+			if keyVal := os.Getenv(envVar); keyVal != "" {
+				server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+					Key:         keyVal,
+					Permissions: []string{"steward:read", "steward:auth-refresh", "workflow:execute", "workflow:read"},
+					TenantID:    "default",
+				}
+			}
+		}
+	}
+
 	// M-AUTH-1: Do NOT generate default API keys (security anti-pattern)
 	// API keys must be explicitly created by administrators
+
+	// Issue #603: Initialize fleet query using the controller service as the steward provider
+	server.fleetQuery = fleet.NewMemoryQuery(&controllerServiceAdapter{svc: controllerService})
+
+	// Issue #1521: register save=deploy fanout callback so every successful SetConfiguration
+	// automatically distributes to all active stewards of the affected tenant.
+	if configService != nil && commandPublisher != nil {
+		configService.RegisterFanoutCallback(func(ctx context.Context, tenantID, cfgID string) {
+			if checker := server.pushLeaderStatus; checker != nil && !checker.IsLeader() {
+				return
+			}
+			cfg := &push.StewardConfiguration{
+				ConfigID:  cfgID,
+				TenantID:  tenantID,
+				Version:   fmt.Sprintf("%d", time.Now().UnixNano()),
+				AppliedAt: time.Now().UTC(),
+				Source:    "save-deploy",
+			}
+			allStewards := controllerService.GetAllStewards()
+			var tenantStewards []*service.StewardInfo
+			for _, st := range allStewards {
+				if st.TenantID == tenantID {
+					tenantStewards = append(tenantStewards, st)
+				}
+			}
+			go func() {
+				result := push.Fanout(context.Background(), cfg, tenantStewards, commandPublisher, logger)
+				logger.Info("Save=deploy fan-out complete",
+					"tenant_id", logging.SanitizeLogValue(tenantID),
+					"cfg_id", logging.SanitizeLogValue(cfgID),
+					"succeeded", len(result.Succeeded),
+					"failed", len(result.Failed))
+			}()
+		})
+		logger.Info("Save=deploy fanout callback registered on config service")
+	}
 
 	// Start background cleanup for expired API keys
 	server.startAPIKeyCleanup()
 
 	return server, nil
+}
+
+// controllerServiceAdapter adapts *service.ControllerService to fleet.StewardProvider.
+type controllerServiceAdapter struct {
+	svc *service.ControllerService
+}
+
+func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
+	infos := a.svc.GetAllStewards()
+	result := make([]fleet.StewardData, 0, len(infos))
+	for _, info := range infos {
+		var attrs map[string]string
+		if info.DNA != nil {
+			attrs = info.DNA.Attributes
+		}
+		result = append(result, fleet.StewardData{
+			ID:            info.ID,
+			TenantID:      info.TenantID,
+			Status:        info.Status,
+			LastHeartbeat: info.LastHeartbeat,
+			DNAAttributes: attrs,
+		})
+	}
+	return result
 }
 
 // setupRouter initializes the HTTP router with all routes and middleware
@@ -200,31 +322,29 @@ func (s *Server) setupRouter() {
 	// Steward registration (no auth required - uses registration token)
 	s.router.HandleFunc("/api/v1/register", s.handleRegister).Methods("POST", "OPTIONS")
 
+	// Registration status poll (no API-key auth — authenticated by regtoken Bearer header)
+	s.router.HandleFunc("/api/v1/registration/status/{pending_id}", s.handleRegistrationStatus).Methods("GET")
+
 	// Test-mode config upload (no auth required - for integration tests only)
 	// Use separate path to avoid conflict with authenticated subrouter
 	// TODO: Remove or protect this endpoint in production
 	s.router.HandleFunc("/api/v1/test/stewards/{id}/config", s.handleUpdateStewardConfig).Methods("PUT", "OPTIONS")
-
-	// Test-mode QUIC trigger (no auth required - for integration tests only)
-	// TODO: Remove or protect this endpoint in production
-	s.router.HandleFunc("/api/v1/test/stewards/{id}/quic/connect", s.handleTriggerQUICConnection).Methods("POST", "OPTIONS")
 
 	// Steward management endpoints (require API key authentication)
 	stewards := api.PathPrefix("/stewards").Subrouter()
 	stewards.Handle("", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleListStewards))).Methods("GET")
 	stewards.Handle("/{id}", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleGetSteward))).Methods("GET")
 	stewards.Handle("/{id}/dna", s.requirePermission("steward", "read-dna")(http.HandlerFunc(s.handleGetStewardDNA))).Methods("GET")
+	stewards.Handle("/{id}/auth/refresh", s.requirePermission("steward", "auth-refresh")(http.HandlerFunc(s.handleStewardAuthRefresh))).Methods("POST")
 
 	// Configuration management endpoints
 	stewards.Handle("/{id}/config", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetStewardConfig))).Methods("GET")
 	stewards.Handle("/{id}/config", s.requirePermission("steward", "write-config")(http.HandlerFunc(s.handleUpdateStewardConfig))).Methods("PUT")
+	stewards.Handle("/{id}/config", s.requirePermission("steward", "delete-config")(http.HandlerFunc(s.handleDeleteStewardConfig))).Methods("DELETE")
 	stewards.Handle("/{id}/config/validate", s.requirePermission("steward", "validate-config")(http.HandlerFunc(s.handleValidateConfig))).Methods("POST")
-	stewards.Handle("/{id}/config/status", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetConfigStatus))).Methods("GET")
 	stewards.Handle("/{id}/config/effective", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetEffectiveConfig))).Methods("GET")
 
 	// QUIC connection management endpoints
-	stewards.Handle("/{id}/quic/connect", s.requirePermission("steward", "manage")(http.HandlerFunc(s.handleTriggerQUICConnection))).Methods("POST")
-
 	// Script management endpoints
 	stewards.Handle("/{id}/scripts/executions", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptExecutions))).Methods("GET")
 	stewards.Handle("/{id}/scripts/executions/{execution_id}", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptExecution))).Methods("GET")
@@ -232,11 +352,30 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/scripts/metrics", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptMetrics))).Methods("GET")
 	stewards.Handle("/{id}/scripts/status", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptStatus))).Methods("GET")
 
+	// Script library endpoints (Issue #1670)
+	scripts := api.PathPrefix("/scripts").Subrouter()
+	scripts.Handle("", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleListScripts))).Methods("GET")
+	scripts.Handle("/{id}", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleGetScriptLibraryItem))).Methods("GET")
+	scripts.Handle("/{id}/privilege", s.requirePermission("script", "admin")(http.HandlerFunc(s.handlePutScriptPrivilege))).Methods("PUT")
+
+	// Configuration list endpoint (Issue #1570)
+	api.Handle("/configs", s.requirePermission("config", "list")(http.HandlerFunc(s.handleListConfigs))).Methods("GET")
+
+	// Configuration deployments endpoint (Issue #1598)
+	api.Handle("/configs/{id}/deployments", s.requirePermission("config", "list-deployments")(http.HandlerFunc(s.handleGetConfigDeployments))).Methods("GET")
+
+	// Fleet selector resolve endpoint (Issue #1640)
+	fleetRouter := api.PathPrefix("/fleet").Subrouter()
+	fleetRouter.Handle("/resolve", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleResolveSelector))).Methods("POST")
+
+	// Configuration push endpoint (Issue #1318)
+	cfgPush := api.PathPrefix("/config").Subrouter()
+	cfgPush.Handle("/push", s.requirePermission("config", "push")(http.HandlerFunc(s.handleConfigPush))).Methods("POST")
+
 	// Certificate management endpoints
 	certs := api.PathPrefix("/certificates").Subrouter()
 	certs.Handle("", s.requirePermission("certificate", "list")(http.HandlerFunc(s.handleListCertificates))).Methods("GET")
 	certs.Handle("/provision", s.requirePermission("certificate", "provision")(http.HandlerFunc(s.handleProvisionCertificate))).Methods("POST")
-	certs.Handle("/{serial}/revoke", s.requirePermission("certificate", "revoke")(http.HandlerFunc(s.handleRevokeCertificate))).Methods("POST")
 
 	// RBAC management endpoints
 	rbac := api.PathPrefix("/rbac").Subrouter()
@@ -252,22 +391,6 @@ func (s *Server) setupRouter() {
 	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "update-role")(http.HandlerFunc(s.handleUpdateRole))).Methods("PUT")
 	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "delete-role")(http.HandlerFunc(s.handleDeleteRole))).Methods("DELETE")
 
-	// Subjects
-	rbac.Handle("/subjects", s.requirePermission("rbac", "list-subjects")(http.HandlerFunc(s.handleListSubjects))).Methods("GET")
-	rbac.Handle("/subjects", s.requirePermission("rbac", "create-subject")(http.HandlerFunc(s.handleCreateSubject))).Methods("POST")
-	rbac.Handle("/subjects/{id}", s.requirePermission("rbac", "read-subject")(http.HandlerFunc(s.handleGetSubject))).Methods("GET")
-	rbac.Handle("/subjects/{id}", s.requirePermission("rbac", "update-subject")(http.HandlerFunc(s.handleUpdateSubject))).Methods("PUT")
-	rbac.Handle("/subjects/{id}", s.requirePermission("rbac", "delete-subject")(http.HandlerFunc(s.handleDeleteSubject))).Methods("DELETE")
-
-	// Role assignments
-	rbac.Handle("/subjects/{id}/roles", s.requirePermission("rbac", "read-assignments")(http.HandlerFunc(s.handleGetSubjectRoles))).Methods("GET")
-	rbac.Handle("/subjects/{id}/roles", s.requirePermission("rbac", "assign-role")(http.HandlerFunc(s.handleAssignRole))).Methods("POST")
-	rbac.Handle("/subjects/{id}/roles/{role_id}", s.requirePermission("rbac", "revoke-role")(http.HandlerFunc(s.handleRevokeRole))).Methods("DELETE")
-
-	// Permission checking
-	rbac.Handle("/subjects/{id}/permissions", s.requirePermission("rbac", "read-permissions")(http.HandlerFunc(s.handleGetSubjectPermissions))).Methods("GET")
-	rbac.Handle("/check", s.requirePermission("rbac", "check-permission")(http.HandlerFunc(s.handleCheckPermission))).Methods("POST")
-
 	// API key management endpoints (for managing API keys themselves)
 	apiKeys := api.PathPrefix("/api-keys").Subrouter()
 	apiKeys.Handle("", s.requirePermission("api-key", "list")(http.HandlerFunc(s.handleListAPIKeys))).Methods("GET")
@@ -282,24 +405,27 @@ func (s *Server) setupRouter() {
 	regTokens.Handle("/{token}", s.requirePermission("registration", "read-token")(http.HandlerFunc(s.handleGetRegistrationToken))).Methods("GET")
 	regTokens.Handle("/{token}", s.requirePermission("registration", "delete-token")(http.HandlerFunc(s.handleDeleteRegistrationToken))).Methods("DELETE")
 	regTokens.Handle("/{token}/revoke", s.requirePermission("registration", "revoke-token")(http.HandlerFunc(s.handleRevokeRegistrationToken))).Methods("POST")
+	regTokens.Handle("/{tenant_id}/rotate", s.requirePermission("registration", "rotate-token")(http.HandlerFunc(s.handleRotateRegistrationToken))).Methods("POST")
+
+	// Registration approval endpoints (Issue #1568)
+	api.Handle("/registration/pending", s.requirePermission("registration", "list-pending")(http.HandlerFunc(s.handleListPendingRegistrations))).Methods("GET")
+	api.Handle("/registration/{id}/approve", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveRegistration))).Methods("POST")
+	api.Handle("/registration/{id}/deny", s.requirePermission("registration", "deny")(http.HandlerFunc(s.handleDenyRegistration))).Methods("POST")
+
+	// Bulk registration approval and IP-trust management (Issue #1698)
+	api.Handle("/registration/approve-all", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveAllRegistrations))).Methods("POST")
+	api.Handle("/registration/approve-by-cidr", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveByCIDR))).Methods("POST")
+	api.Handle("/registration/ip-trust", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleAddIPTrust))).Methods("POST")
+	// {cidr:.+} allows the CIDR slash to appear literally in the URL path after decoding.
+	api.Handle("/registration/ip-trust/{tenant_id}/{cidr:.+}", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleRevokeIPTrust))).Methods("DELETE")
 
 	// Monitoring endpoints
 	monitoring := api.PathPrefix("/monitoring").Subrouter()
 	monitoring.Handle("/health", s.requirePermission("monitoring", "read-health")(http.HandlerFunc(s.handleSystemHealth))).Methods("GET")
 	monitoring.Handle("/metrics", s.requirePermission("monitoring", "read-metrics")(http.HandlerFunc(s.handleSystemMetrics))).Methods("GET")
-	monitoring.Handle("/resources", s.requirePermission("monitoring", "read-resources")(http.HandlerFunc(s.handleResourceMetrics))).Methods("GET")
-	monitoring.Handle("/logs", s.requirePermission("monitoring", "read-logs")(http.HandlerFunc(s.handleMonitoringLogs))).Methods("GET")
-	monitoring.Handle("/traces", s.requirePermission("monitoring", "read-traces")(http.HandlerFunc(s.handleMonitoringTraces))).Methods("GET")
-	monitoring.Handle("/events", s.requirePermission("monitoring", "read-events")(http.HandlerFunc(s.handleMonitoringEvents))).Methods("GET")
 	monitoring.Handle("/config", s.requirePermission("monitoring", "read-config")(http.HandlerFunc(s.handleMonitoringConfig))).Methods("GET")
 
-	// Steward-specific monitoring
-	monitoring.Handle("/stewards/{id}/metrics", s.requirePermission("monitoring", "read-steward-metrics")(http.HandlerFunc(s.handleStewardMetrics))).Methods("GET")
-
-	// Controller service monitoring
-	monitoring.Handle("/controller/services", s.requirePermission("monitoring", "read-services")(http.HandlerFunc(s.handleControllerServices))).Methods("GET")
-
-	// New platform monitoring endpoints
+	// Platform monitoring endpoints
 	monitoring.Handle("/anomalies", s.requirePermission("monitoring", "read-anomalies")(http.HandlerFunc(s.handleMonitoringAnomalies))).Methods("GET")
 	monitoring.Handle("/components/{component}/health", s.requirePermission("monitoring", "read-component-health")(http.HandlerFunc(s.handleMonitoringComponentHealth))).Methods("GET")
 	monitoring.Handle("/components/{component}/metrics", s.requirePermission("monitoring", "read-component-metrics")(http.HandlerFunc(s.handleMonitoringComponentMetrics))).Methods("GET")
@@ -320,9 +446,69 @@ func (s *Server) setupRouter() {
 	compliance := api.PathPrefix("/compliance").Subrouter()
 	compliance.Handle("/summary", s.requirePermission("compliance", "read-summary")(http.HandlerFunc(s.handleGetComplianceSummary))).Methods("GET")
 
-	// Raft consensus endpoints (no auth required - internal cluster communication)
+	// Tenant config-source management endpoints (Issue #1396)
+	tenants := api.PathPrefix("/tenants").Subrouter()
+	tenants.Handle("/{id}/config-source/test",
+		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
+
+	// Ad-hoc run endpoints (Issue #1673). Always registered — returns 503 when
+	// run manager is not wired (transport-disabled deployments).
+	runs := api.PathPrefix("/runs").Subrouter()
+	runs.Handle("/script", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostRunScript))).Methods("POST")
+	runs.Handle("/command", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostRunCommand))).Methods("POST")
+	runs.Handle("/{run_id}", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetRun))).Methods("GET")
+	runs.Handle("/{run_id}/jobs", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetRunJobs))).Methods("GET")
+	runs.Handle("/{run_id}", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handleDeleteRun))).Methods("DELETE")
+
+	// Git-sync webhook is registered lazily by SetGitSyncWebhookHandler (Issue #666).
+	// No route is pre-registered here; the endpoint only exists when a git-sync
+	// handler is explicitly wired in after server creation.
+
+	// Raft message endpoint: mTLS peer CN verification is enforced inside HandleMessage
 	s.router.HandleFunc("/raft/message", s.handleRaftMessage).Methods("POST")
-	s.router.HandleFunc("/raft/status", s.handleRaftStatus).Methods("GET")
+	// Raft status endpoint: requires HA read-status permission via API authentication
+	api.Handle("/raft/status", s.requirePermission("ha", "read-status")(http.HandlerFunc(s.handleRaftStatus))).Methods("GET")
+
+	// Rollback management endpoints (Story #416)
+	if s.rollbackManager != nil {
+		rollbackHandler := NewRollbackHandler(s.rollbackManager)
+		rollbackRouter := api.PathPrefix("/rollback").Subrouter()
+		rollbackHandler.RegisterRoutes(rollbackRouter)
+		s.logger.Info("Rollback API routes registered")
+	}
+
+	// Reports engine endpoints (Story #416)
+	if s.reportsHandler != nil {
+		reportsRouter := api.PathPrefix("/reports").Subrouter()
+		s.reportsHandler.RegisterRoutes(reportsRouter)
+		s.logger.Info("Reports API routes registered")
+	}
+
+	// Workflow engine endpoints (Issue #414)
+	if s.workflowHandler != nil {
+		workflowRouter := api.PathPrefix("/workflows").Subrouter()
+		s.workflowHandler.RegisterWorkflowRoutes(workflowRouter)
+
+		triggerRouter := api.PathPrefix("/triggers").Subrouter()
+		s.workflowHandler.RegisterTriggerRoutes(triggerRouter)
+		s.logger.Info("Workflow and trigger API routes registered")
+	}
+
+	// TODO(#997): Wire terminal WebSocket handler when HTTP route is added (gated on epic #750).
+	// When the terminal route is registered, parse CFGMS_TERMINAL_ALLOWED_ORIGINS and pass the
+	// resulting slice to terminal.NewWebSocketHandler as the third argument. Parsing pattern
+	// mirrors CFGMS_ALLOWED_ORIGINS (comma-separated, strings.TrimSpace per entry, empty filtered):
+	//
+	//   var terminalOrigins []string
+	//   if raw := os.Getenv("CFGMS_TERMINAL_ALLOWED_ORIGINS"); raw != "" {
+	//       for _, o := range strings.Split(raw, ",") {
+	//           if trimmed := strings.TrimSpace(o); trimmed != "" {
+	//               terminalOrigins = append(terminalOrigins, trimmed)
+	//           }
+	//       }
+	//   }
+	//   terminalHandler, err := terminal.NewWebSocketHandler(sessionManager, s.logger, terminalOrigins)
+	//   // then register: api.Handle("/terminal/ws/{steward_id}", ...).Methods("GET")
 }
 
 // Start starts the HTTP server
@@ -378,40 +564,207 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Stop gracefully shuts down the HTTP server
-func (s *Server) Stop() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.logger.Info("Shutting down REST API server")
-
-	// Story #380: Stop auth defense system
-	if s.authDefense != nil {
-		s.authDefense.Stop()
-	}
-
-	if s.httpServer != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := s.httpServer.Shutdown(ctx); err != nil {
-			s.logger.Error("Failed to shutdown HTTP server gracefully", "error", err)
-			return err
+// Close gracefully stops all background goroutines owned by this Server and
+// shuts down the HTTP listener. It is safe to call more than once (idempotent).
+func (s *Server) Close(ctx context.Context) error {
+	var firstErr error
+	s.closeOnce.Do(func() {
+		// Signal the cleanup goroutine to exit — do this before acquiring s.mu
+		// to avoid deadlock: cleanupExpiredAPIKeys also holds s.mu.
+		close(s.stopCleanup)
+		select {
+		case <-s.cleanupDone:
+		case <-ctx.Done():
+			firstErr = fmt.Errorf("api server close: timed out waiting for cleanup goroutine: %w", ctx.Err())
 		}
-	}
 
-	return nil
+		// Stop audit manager before closing the HTTP server so that any
+		// in-flight audit writes can still reach storage.
+		if s.auditManager != nil {
+			if err := s.auditManager.Stop(ctx); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		// authDefense.Stop() and secretStore.Close() both call cache.Close() →
+		// c.cleanupDone.Wait() with no built-in timeout. On Windows, slower goroutine
+		// scheduling can cause them to block well past ctx's deadline. Run them in a
+		// single goroutine so Close() always honours the caller's context.
+		authDef := s.authDefense
+		secStore := s.secretStore
+		cacheDone := make(chan error, 1)
+		go func() {
+			// Story #380: Stop auth defense system
+			if authDef != nil {
+				authDef.Stop()
+			}
+			// M-AUTH-1: Close secret store to stop its internal cache cleanup goroutine.
+			var storeErr error
+			if secStore != nil {
+				storeErr = secStore.Close()
+			}
+			cacheDone <- storeErr
+		}()
+		select {
+		case storeErr := <-cacheDone:
+			if storeErr != nil && firstErr == nil {
+				firstErr = storeErr
+			}
+		case <-ctx.Done():
+			if firstErr == nil {
+				firstErr = fmt.Errorf("api server close: timed out stopping auth defense and secret store: %w", ctx.Err())
+			}
+		}
+
+		if s.httpServer != nil {
+			if err := s.httpServer.Shutdown(ctx); err != nil && firstErr == nil {
+				s.logger.Error("Failed to shutdown HTTP server gracefully", "error", err)
+				firstErr = err
+			}
+		}
+	})
+	return firstErr
 }
 
-// SetQUICTriggerFunc sets the function used to trigger QUIC connections
-func (s *Server) SetQUICTriggerFunc(fn QUICTriggerFunc) {
+// Stop gracefully shuts down the HTTP server. Prefer Close when a context is available.
+func (s *Server) Stop() error {
+	s.logger.Info("Shutting down REST API server")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.Close(ctx)
+}
+
+// SetRollbackManager sets the rollback manager for rollback API routes (Story #416)
+func (s *Server) SetRollbackManager(m rollback.RollbackManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.quicTriggerFunc = fn
+	s.rollbackManager = m
 }
 
-// getHTTPListenAddr determines the HTTP listen address
-// For now, we'll use the gRPC port + 1000 to avoid conflicts
+// SetReportsHandler sets the reports handler for reports API routes (Story #416)
+func (s *Server) SetReportsHandler(h *reportapi.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reportsHandler = h
+}
+
+// SetWorkflowHandler sets the workflow handler for workflow and trigger API routes (Issue #414).
+// Propagates the server's fleet query so that script dispatch targeting is wired at setup time (Issue #609).
+func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workflowHandler = h
+	if h != nil && s.fleetQuery != nil {
+		h.SetFleetQuery(s.fleetQuery)
+	}
+}
+
+// GetRouter returns the HTTP router for testing purposes.
+func (s *Server) GetRouter() http.Handler {
+	return s.router
+}
+
+// SetApprovalHook replaces the registration approval hook (Issue #422).
+// Called during server startup when a workflow engine is available.
+func (s *Server) SetApprovalHook(hook RegistrationApprovalHook) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if hook != nil {
+		s.approvalHook = hook
+	}
+}
+
+// SetScriptModule wires the script module components so the script API handlers
+// return real execution data (Issue #708). Call this after New() returns but
+// before Start() is called.
+func (s *Server) SetScriptModule(tracker script.ExecutionTracker, auditLogger *script.AuditLogger, monitor *script.ExecutionMonitor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scriptTracker = tracker
+	s.scriptAuditLogger = auditLogger
+	s.scriptMonitor = monitor
+}
+
+// SetScriptRepository wires the git-backed script library so that
+// GET /api/v1/scripts returns real script metadata (Issue #1670).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetScriptRepository(r script.ScriptRepository) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scriptRepo = r
+}
+
+// SetPrivilegeStore wires the config store used to persist controller-side
+// script privilege metadata (Issue #1670).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetPrivilegeStore(cs cfgconfig.ConfigStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.privilegeStore = cs
+}
+
+// SetRegistry wires the active-steward connection registry so that
+// GET /api/v1/stewards/{id} can report connection_state and active_sessions
+// (Issue #1323). Call this after New() returns but before Start() is called.
+func (s *Server) SetRegistry(r registry.Registry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.registry = r
+}
+
+// Registry returns the wired active-steward connection registry, or nil if
+// none has been set. Used by controller wiring and tests to verify the API
+// server and the control-plane provider share a single registry instance.
+func (s *Server) Registry() registry.Registry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.registry
+}
+
+// SetGitSyncWebhookHandler registers the git-sync push-event webhook handler.
+// The handler is mounted at POST /api/v1/webhooks/git-push and uses its own
+// HMAC-SHA256 signature validation (no API-key auth). Call this after New()
+// returns but before Start() is called (Issue #666).
+func (s *Server) SetGitSyncWebhookHandler(h http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gitSyncWebhookHandler = h
+	if h != nil {
+		s.router.Handle("/api/v1/webhooks/git-push", h).Methods("POST")
+		s.logger.Info("git-sync webhook endpoint registered at /api/v1/webhooks/git-push")
+	}
+}
+
+// SetRunManager wires the run manager and execution queue for ad-hoc run endpoints
+// (Issue #1673). Call this after New() returns but before Start() is called.
+func (s *Server) SetRunManager(m *controllerrun.Manager, queue *script.ExecutionQueue) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runManager = m
+	s.runExecutionQueue = queue
+}
+
+// SetPendingStore wires the durable pending-registration store (Issue #1696).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetPendingStore(store business.PendingRegistrationStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingStore = store
+}
+
+// SetIPTrustStore wires the IP-trust store for operator ip-trust management (Issue #1698).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetIPTrustStore(store business.IPTrustStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ipTrustStore = store
+}
+
+// getHTTPListenAddr determines the HTTP listen address.
+// HTTP port defaults to 9080; override with CFGMS_HTTP_LISTEN_ADDR.
 func (s *Server) getHTTPListenAddr() string {
 	// If environment variable is set, use it
 	if addr := os.Getenv("CFGMS_HTTP_LISTEN_ADDR"); addr != "" {
@@ -425,10 +778,6 @@ func (s *Server) getHTTPListenAddr() string {
 
 // shouldUseTLS determines if TLS should be enabled for the HTTP server
 func (s *Server) shouldUseTLS() bool {
-	// Alpha (Story #198): Disable TLS for HTTP API if MQTT TLS is disabled
-	if s.cfg.MQTT != nil && !s.cfg.MQTT.EnableTLS {
-		return false
-	}
 	return s.certManager != nil || s.hasLegacyCertificates()
 }
 
@@ -454,7 +803,7 @@ func (s *Server) setupTLS() (*tls.Config, error) {
 	return s.setupLegacyTLS()
 }
 
-// setupManagedTLS configures TLS using managed certificates
+// setupManagedTLS configures TLS using managed certificates.
 func (s *Server) setupManagedTLS() (*tls.Config, error) {
 	// Story #377: In separated mode with external source, load from disk
 	if s.cfg.Certificate != nil && s.cfg.Certificate.IsSeparatedArchitecture() {
@@ -471,11 +820,31 @@ func (s *Server) setupManagedTLS() (*tls.Config, error) {
 		return nil, fmt.Errorf("failed to get server certificate: %w", err)
 	}
 
-	// Load the certificate and key
-	// Create TLS config using pkg/cert helper (no client auth for API server)
-	tlsConfig, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, nil, tls.VersionTLS12)
+	// Populate ClientCAs with the controller CA so that presented admin certs
+	// are chain-verified at the TLS handshake layer (Story #1415).
+	controllerCACertPEM, err := s.certManager.GetCACertificate()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get controller CA certificate: %w", err)
+	}
+
+	tlsConfig, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, controllerCACertPEM, tls.VersionTLS12)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TLS config: %w", err)
+	}
+
+	// Use VerifyClientCertIfGiven (not RequireAndVerifyClientCert): when a client
+	// presents a cert the TLS stack verifies it against ClientCAs; clients without
+	// a cert fall through to API-key auth in the application layer. This implements
+	// mTLS admin auth alongside the existing API-key path (H2).
+	tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
+
+	// Cluster mode (HA): merge the HA peer CA into ClientCAs so that both admin
+	// certs (controller CA) and HA peer certs (HA CA) pass TLS chain verification.
+	inClusterMode := s.haManager != nil && s.haManager.GetDeploymentMode() == ha.ClusterMode
+	if inClusterMode {
+		if haCACertPEM := s.haManager.GetCACertPEM(); len(haCACertPEM) > 0 {
+			tlsConfig.ClientCAs.AppendCertsFromPEM(haCACertPEM)
+		}
 	}
 
 	return tlsConfig, nil
@@ -608,16 +977,23 @@ func (s *Server) GetListenAddr() string {
 	return s.getHTTPListenAddr()
 }
 
-// startAPIKeyCleanup starts a background goroutine to clean up expired API keys
+// startAPIKeyCleanup starts a background goroutine to clean up expired API keys.
+// The goroutine exits when Close is called.
 func (s *Server) startAPIKeyCleanup() {
 	go func() {
-		ticker := time.NewTicker(10 * time.Minute) // Clean up every 10 minutes
+		defer close(s.cleanupDone)
+		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 
 		s.logger.Info("Started API key cleanup background process", "interval", "10 minutes")
 
-		for range ticker.C {
-			s.cleanupExpiredAPIKeys()
+		for {
+			select {
+			case <-s.stopCleanup:
+				return
+			case <-ticker.C:
+				s.cleanupExpiredAPIKeys()
+			}
 		}
 	}()
 }
@@ -690,20 +1066,22 @@ func (s *Server) configureCORS() {
 	}
 }
 
-// M-AUTH-1: Initialize central secrets provider for API key storage
-// Replaces the incorrect file-based APIKeyStore implementation
-func initializeSecretStore(cfg *config.Config, logger logging.Logger) (secretsif.SecretStore, error) {
-	// Determine repository path for secrets (git+SOPS backend)
-	repoPath := os.Getenv("CFGMS_SECRETS_REPO_PATH")
-	if repoPath == "" {
+// NewSecretStore initializes and returns the central secrets provider for the controller.
+// It is exported so that cmd/controller/main.go can initialize the store before logging
+// is configured, while server.New continues to call it internally unchanged.
+func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
+	logger := logging.ForComponent("controller")
+	// Determine secrets storage path
+	secretsPath := os.Getenv("CFGMS_SECRETS_REPO_PATH")
+	if secretsPath == "" {
 		// Use temporary directory for testing/development
 		tmpDir := os.TempDir()
-		repoPath = filepath.Join(tmpDir, "cfgms-secrets-test")
-		logger.Debug("Using temporary secrets repository for testing", "path", repoPath)
+		secretsPath = filepath.Join(tmpDir, "cfgms-secrets-test")
+		logger.Debug("Using temporary secrets storage for testing", "path", secretsPath)
 	}
 
 	// Create secrets provider configuration
-	// M-AUTH-1: Use global storage provider for secrets (git or database)
+	// M-AUTH-1: Use global storage provider for secrets (flatfile or database)
 	secretsConfig := map[string]interface{}{
 		"storage_provider": cfg.Storage.Provider, // Use controller's global storage provider
 		"cache_enabled":    true,
@@ -716,9 +1094,9 @@ func initializeSecretStore(cfg *config.Config, logger logging.Logger) (secretsif
 		// For database provider, use the full database configuration
 		secretsConfig["storage_config"] = cfg.Storage.Config
 	} else {
-		// For git provider, set the repository path
+		// For flatfile provider, set the root directory
 		secretsConfig["storage_config"] = map[string]interface{}{
-			"repository_path": repoPath,
+			"root": secretsPath,
 		}
 	}
 
@@ -745,7 +1123,7 @@ func initializeSecretStore(cfg *config.Config, logger logging.Logger) (secretsif
 	logger.Info("Secret store initialized",
 		"provider", "sops",
 		"backend", cfg.Storage.Provider,
-		"repo_path", repoPath,
+		"secrets_path", secretsPath,
 		"encryption", "SOPS (AES-256-GCM)")
 	return store, nil
 }

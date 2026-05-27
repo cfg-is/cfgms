@@ -1,0 +1,209 @@
+# Dependency Pin Freshness Check
+# Checks pinned Go security tools and binary downloads against their latest
+# releases. Opens a GitHub issue if any are outdated.
+#
+# Dependabot handles GitHub Actions SHA pins automatically (see dependabot.yml).
+# This workflow covers tools installed via `go install` and binary download
+# that Dependabot cannot track.
+#
+# Runs weekly on Wednesday (offset from Dependabot's Monday schedule).
+
+name: Dependency Pin Check
+
+on:
+  schedule:
+    - cron: '0 9 * * 3'  # Wednesday 09:00 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.devcontainer/Dockerfile'
+      - '.github/workflows/**'
+      - '.github/scripts/install-trivy.sh'
+      - 'Makefile'
+
+jobs:
+  # Hard-fail any PR (or schedule run) that reintroduces a compromised Trivy
+  # version (v0.69.4 / v0.69.5 / v0.69.6) into the build. CVE-2026-33634.
+  # Runs first so a bad pin can't sneak in even if a newer freshness check
+  # later relabels something.
+  denylist-check:
+    name: Compromised Version Denylist
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+    - name: Scan for known-compromised trivy versions
+      run: |
+        # Match v0.69.4 / v0.69.5 / v0.69.6 (plus pre-release suffixes like
+        # -rc1) ONLY when they appear in a pin-usage context: quoted string
+        # value, env-var assignment (`=`), or Go module ref (`@`). This
+        # avoids false positives on documentation prose that mentions the
+        # compromised versions to warn against them.
+        if grep -rEn $'(\'|"|=|@)v0\\.69\\.[456]([.-][[:alnum:]_.-]*)?' \
+              --include='Dockerfile' --include='*.yml' --include='*.yaml' \
+              --include='Makefile' --include='*.sh' \
+              .devcontainer/ .github/ Makefile 2>/dev/null; then
+          echo "" >&2
+          echo "ERROR: a known-compromised Trivy version (v0.69.4 - v0.69.6) was found in a pin-usage context." >&2
+          echo "These releases are part of the CVE-2026-33634 supply-chain compromise." >&2
+          echo "Use v0.70.0 (post-incident clean release) or v0.69.3 (pre-incident)." >&2
+          echo "See docs/runbooks/trivy-rollback.md for context." >&2
+          exit 1
+        fi
+        echo "No compromised trivy versions detected in any pin-usage context."
+
+  check-tool-versions:
+    name: Check Pinned Tool Versions
+    runs-on: ubuntu-latest
+    # Only run the freshness check on schedule/manual triggers — on PR we don't
+    # want to open new GitHub issues; the denylist-check above is the gate.
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+    - name: Check for outdated pinned tools
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        outdated=""
+        warnings=""
+
+        check_version() {
+          local name="$1" repo="$2" pinned="$3"
+          local owner="${repo%/*}" repo_name="${repo#*/}"
+          local latest
+
+          # GraphQL first (preferred — official API, lightweight). On failure,
+          # stderr is preserved in the workflow log for diagnostics, then we
+          # fall through. `|| latest=""` prevents `set -e` from killing the job
+          # when one tool fails (so the other seven still get checked).
+          latest=$(gh api graphql \
+            -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){latestRelease{tagName}}}' \
+            -f owner="$owner" -f name="$repo_name" \
+            --jq '.data.repository.latestRelease.tagName') || latest=""
+
+          if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+            # Fallback: HTTP HEAD against the public release-redirect URL.
+            # Bypasses org IP allowlists (e.g. aquasecurity blocks GitHub
+            # Actions runner IPs from authenticated API access) since this is
+            # an unauthenticated public web request, not an api.github.com call.
+            echo "  INFO: ${repo} GraphQL returned empty/null or failed — trying redirect parse"
+            latest=$(curl -sI "https://github.com/${repo}/releases/latest" \
+                     | sed -n 's|^location: .*/tag/||Ip' | tr -d '\r\n')
+          fi
+
+          if [ -z "$latest" ]; then
+            echo "  WARN: Both GraphQL and redirect-parse failed for ${repo}"
+            warnings="${warnings}- **${name}**: could not fetch latest version from \`${repo}\` (GraphQL + redirect parse both failed)\n"
+            return
+          fi
+
+          if [ "$pinned" != "$latest" ]; then
+            echo "  OUTDATED: ${name} pinned=${pinned} latest=${latest}"
+            outdated="${outdated}- **${name}**: pinned \`${pinned}\`, latest \`${latest}\` ([releases](https://github.com/${repo}/releases))\n"
+          else
+            echo "  OK: ${name} ${pinned}"
+          fi
+        }
+
+        echo "Checking pinned tool versions..."
+        check_version "gosec"       "securego/gosec"                          "v2.26.1"
+        check_version "staticcheck" "dominikh/go-tools"                       "2026.1"
+        check_version "gitleaks"    "zricethezav/gitleaks"                    "v8.30.1"
+        check_version "nancy"       "sonatype-nexus-community/nancy"          "v1.2.0"
+        check_version "trufflehog"  "trufflesecurity/trufflehog"              "v3.95.3"
+        check_version "trivy"       "aquasecurity/trivy"                      "v0.70.0"
+        check_version "go-licenses" "google/go-licenses"                      "v2.0.1"
+        check_version "golangci-lint" "golangci/golangci-lint"                "v2.12.2"
+
+        # Go toolchain freshness check. Go's release index doesn't fit the
+        # GitHub Releases pattern of check_version above, so it gets its own
+        # handler. The toolchain version is pinned in go.mod and in workflow
+        # GO_VERSION env vars; the freshness check uses go.mod as the source
+        # of truth, and lockstep-check below catches drift across files.
+        echo "Checking Go toolchain version..."
+        go_pinned=$(grep -E "^toolchain go" go.mod | sed 's/^toolchain go//')
+        go_latest=$(curl -fsSL "https://go.dev/dl/?mode=json" 2>/dev/null \
+                    | jq -r '[.[] | select(.stable)][0].version' 2>/dev/null \
+                    | sed 's/^go//')
+        if [ -z "$go_latest" ] || [ "$go_latest" = "null" ]; then
+          echo "  WARN: Could not fetch latest Go version from go.dev/dl"
+          warnings="${warnings}- **Go toolchain**: could not fetch latest from go.dev/dl?mode=json\n"
+        elif [ "$go_pinned" != "$go_latest" ]; then
+          echo "  OUTDATED: Go toolchain pinned=${go_pinned} latest=${go_latest}"
+          outdated="${outdated}- **Go toolchain**: pinned \`${go_pinned}\`, latest \`${go_latest}\` ([release notes](https://go.dev/doc/devel/release))\n"
+        else
+          echo "  OK: Go toolchain ${go_pinned}"
+        fi
+
+        # Lockstep validator. The Go toolchain version is pinned in MULTIPLE
+        # places (go.mod, workflow GO_VERSION/go-version, cmd/*/Dockerfile FROM
+        # golang:X-alpine, .devcontainer/Dockerfile). All must move together.
+        # This check caught the 2026-05-12 drift where go.mod was bumped ahead
+        # of the Dockerfile FROM lines, causing Trivy to keep reporting stdlib
+        # CVEs on PRs against develop.
+        echo "Checking Go toolchain lockstep across all pin locations..."
+        lockstep_versions=$(
+          {
+            grep -hoE "^toolchain go[0-9.]+" go.mod | sed 's/^toolchain go//'
+            grep -hoE "(GO_VERSION|go-version):[[:space:]]*['\"]?[0-9]+\.[0-9]+\.[0-9]+['\"]?" .github/workflows/*.yml \
+              | grep -oE "[0-9]+\.[0-9]+\.[0-9]+"
+            grep -hoE "^FROM golang:[0-9]+\.[0-9]+\.[0-9]+" cmd/*/Dockerfile .devcontainer/Dockerfile 2>/dev/null \
+              | grep -oE "[0-9]+\.[0-9]+\.[0-9]+"
+          } | sort -u
+        )
+        lockstep_count=$(printf '%s\n' "$lockstep_versions" | grep -c .)
+        if [ "$lockstep_count" -gt 1 ]; then
+          echo "  ERROR: Go toolchain pin drift — multiple versions in use:"
+          printf '%s\n' "$lockstep_versions" | sed 's/^/    /'
+          outdated="${outdated}- **Go toolchain (lockstep drift)**: multiple versions present in repo — \`$(printf '%s, ' $lockstep_versions | sed 's/, $//')\`. Bump all locations to the same version (run \`./.claude/skills/refresh-pins/scripts/discover-pins.py\` to see every file:line).\n"
+        else
+          echo "  OK: Go toolchain lockstep version=${lockstep_versions}"
+        fi
+
+        if [ -z "$outdated" ] && [ -z "$warnings" ]; then
+          echo ""
+          echo "All pinned tools are up to date."
+          exit 0
+        fi
+
+        # Build issue body sections
+        body=""
+        title_parts=""
+        if [ -n "$outdated" ]; then
+          body="${body}## Outdated Pinned Tool Versions\n\nThe following tools pinned in CI have newer releases available:\n\n${outdated}\n"
+          title_parts="outdated pins"
+        fi
+        if [ -n "$warnings" ]; then
+          body="${body}## Version Check Warnings\n\nThe following tools could not be checked — investigate why the API calls are failing:\n\n${warnings}\n"
+          if [ -n "$title_parts" ]; then
+            title_parts="${title_parts} + check failures"
+          else
+            title_parts="version check failures"
+          fi
+        fi
+        if [ -n "$outdated" ]; then
+          body="${body}### How to update\n\n1. Update the version in \`.devcontainer/Dockerfile\`, \`.github/workflows/*.yml\`, and \`Makefile\`\n2. For APT packages (trivy): update the \`=X.Y.Z\` version constraint\n3. For \`go install\`: update the \`@vX.Y.Z\` suffix\n4. For binary downloads (nancy, trufflehog): update the URL version\n5. Run the full CI suite to validate before merging\n\n"
+        fi
+        body="${body}### Why we pin\n\nAll tool versions are pinned to prevent supply chain attacks (see CVE-2026-33634). Never use \`@latest\`.\n\n---\n*Auto-generated by dependency-pin-check workflow*"
+
+        echo ""
+        echo "Issues found. Checking for existing issue..."
+
+        # Check if an open issue already exists (avoid duplicates)
+        existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "dependency-pins" --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
+        if [ -n "$existing" ]; then
+          echo "Open issue #${existing} already exists — adding comment instead."
+          printf "## Weekly Pin Check — $(date +%Y-%m-%d)\n\n${body}" \
+            | gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file -
+          exit 0
+        fi
+
+        echo "Creating issue..."
+        printf "${body}" \
+          | gh issue create --repo "$GITHUB_REPOSITORY" --title "deps: ${title_parts} ($(date +%Y-%m-%d))" --label "dependency-pins,dependencies,security,automated" --body-file -

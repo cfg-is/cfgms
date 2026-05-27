@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,20 +17,55 @@ const (
 	GraphBaseURL = "https://graph.microsoft.com/v1.0"
 )
 
-// extractUserContext extracts user information from ID token
-// NOTE: This function is deprecated for MSP scenarios using application permissions
-// MSP applications don't use user context since they operate with application permissions
+// extractUserContext parses the JWT payload from the M365 access token and extracts
+// user identity claims. Signature validation is intentionally omitted — the token
+// is already validated by the M365 auth flow before this function is called.
 func (f *InteractiveAuthFlow) extractUserContext(idToken, tenantID string) (*UserContext, error) {
 	if idToken == "" {
 		return nil, fmt.Errorf("no ID token provided")
 	}
 
-	// In a real implementation, you would parse and validate the JWT
-	// For now, return a basic user context that can be enhanced
+	// JWTs are three base64url segments: header.payload.signature
+	parts := strings.Split(idToken, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("malformed JWT: expected 3 parts, got %d", len(parts))
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("malformed JWT: failed to decode payload: %w", err)
+	}
+
+	var claims struct {
+		OID   string   `json:"oid"`
+		UPN   string   `json:"upn"`
+		TID   string   `json:"tid"`
+		Roles []string `json:"roles"`
+		Name  string   `json:"name"`
+	}
+
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, fmt.Errorf("malformed JWT: failed to parse claims: %w", err)
+	}
+
+	if claims.OID == "" {
+		return nil, fmt.Errorf("JWT missing required claim: oid")
+	}
+	if claims.UPN == "" {
+		return nil, fmt.Errorf("JWT missing required claim: upn")
+	}
+	if claims.TID == "" {
+		return nil, fmt.Errorf("JWT missing required claim: tid")
+	}
+	if tenantID != "" && claims.TID != tenantID {
+		return nil, fmt.Errorf("JWT tid claim does not match expected tenant")
+	}
+
 	return &UserContext{
-		UserID:            "extracted-from-id-token",
-		UserPrincipalName: "user@" + tenantID + ".onmicrosoft.com",
-		DisplayName:       "Authenticated User",
+		UserID:            claims.OID,
+		UserPrincipalName: claims.UPN,
+		DisplayName:       claims.Name,
+		Roles:             claims.Roles,
 		LastAuthenticated: time.Now(),
 	}, nil
 }
@@ -51,12 +87,7 @@ func (f *InteractiveAuthFlow) testUserReadAccess(ctx context.Context, token *Acc
 		test.Error = fmt.Sprintf("API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -98,12 +129,7 @@ func (f *InteractiveAuthFlow) testDirectoryReadAccess(ctx context.Context, token
 		test.Error = fmt.Sprintf("Organization API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -153,12 +179,7 @@ func (f *InteractiveAuthFlow) testGroupManagementAccess(ctx context.Context, tok
 		test.Error = fmt.Sprintf("Group read API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -210,12 +231,7 @@ func (f *InteractiveAuthFlow) testConditionalAccessAccess(ctx context.Context, t
 		test.Error = fmt.Sprintf("Conditional Access API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -263,12 +279,7 @@ func (f *InteractiveAuthFlow) testIntuneManagementAccess(ctx context.Context, to
 		test.Error = fmt.Sprintf("Intune managed devices API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -316,12 +327,7 @@ func (f *InteractiveAuthFlow) testOrganizationManagementAccess(ctx context.Conte
 		test.Error = fmt.Sprintf("Organization API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -374,12 +380,7 @@ func (f *InteractiveAuthFlow) testAuditLogAccess(ctx context.Context, token *Acc
 		test.Error = fmt.Sprintf("Audit log API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -421,12 +422,7 @@ func (f *InteractiveAuthFlow) testUsageReportsAccess(ctx context.Context, token 
 		test.Error = fmt.Sprintf("Usage reports API call failed: %v", err)
 		return test
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Could add logging here if needed
-			_ = err
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -575,9 +571,9 @@ type FullCapabilityReport struct {
 func (r *FullCapabilityReport) GetCapabilitySummary() string {
 	var summary strings.Builder
 
-	summary.WriteString(fmt.Sprintf("Capability Test Results for Tenant: %s\n", r.TenantID))
-	summary.WriteString(fmt.Sprintf("Success Rate: %.1f%%\n", r.SuccessRate*100))
-	summary.WriteString(fmt.Sprintf("Overall Success: %t\n\n", r.OverallSuccess))
+	fmt.Fprintf(&summary, "Capability Test Results for Tenant: %s\n", r.TenantID)
+	fmt.Fprintf(&summary, "Success Rate: %.1f%%\n", r.SuccessRate*100)
+	fmt.Fprintf(&summary, "Overall Success: %t\n\n", r.OverallSuccess)
 
 	summary.WriteString("Available Capabilities:\n")
 	for capability, available := range r.Capabilities {
@@ -585,13 +581,13 @@ func (r *FullCapabilityReport) GetCapabilitySummary() string {
 		if available {
 			status = "✅"
 		}
-		summary.WriteString(fmt.Sprintf("  %s %s\n", status, capability))
+		fmt.Fprintf(&summary, "  %s %s\n", status, capability)
 	}
 
 	if len(r.Recommendations) > 0 {
 		summary.WriteString("\nRecommendations:\n")
 		for _, rec := range r.Recommendations {
-			summary.WriteString(fmt.Sprintf("  • %s\n", rec))
+			fmt.Fprintf(&summary, "  • %s\n", rec)
 		}
 	}
 
@@ -696,9 +692,9 @@ func TestMSPCapabilitiesWithClient(ctx context.Context, config *MSPOAuth2Config,
 func (r *FullCapabilityReport) GetMSPCapabilitySummary() string {
 	var summary strings.Builder
 
-	summary.WriteString(fmt.Sprintf("MSP Capability Assessment - Client Tenant: %s\n", r.TenantID))
-	summary.WriteString(fmt.Sprintf("Tested: %s\n", r.TestedAt.Format("2006-01-02 15:04:05 UTC")))
-	summary.WriteString(fmt.Sprintf("Operational Readiness: %.1f%%\n", r.SuccessRate*100))
+	fmt.Fprintf(&summary, "MSP Capability Assessment - Client Tenant: %s\n", r.TenantID)
+	fmt.Fprintf(&summary, "Tested: %s\n", r.TestedAt.Format("2006-01-02 15:04:05 UTC"))
+	fmt.Fprintf(&summary, "Operational Readiness: %.1f%%\n", r.SuccessRate*100)
 
 	if r.OverallSuccess {
 		summary.WriteString("Status: ✅ MSP READY - Client tenant is ready for management operations\n\n")
@@ -717,7 +713,7 @@ func (r *FullCapabilityReport) GetMSPCapabilitySummary() string {
 	}
 
 	for category, capList := range capabilities {
-		summary.WriteString(fmt.Sprintf("\n%s:\n", category))
+		fmt.Fprintf(&summary, "\n%s:\n", category)
 		for _, capability := range capList {
 			if available, exists := r.Capabilities[capability]; exists {
 				status := "❌"
@@ -726,9 +722,9 @@ func (r *FullCapabilityReport) GetMSPCapabilitySummary() string {
 				}
 				// Get the test details for better display name
 				if test, testExists := r.Tests[capability]; testExists {
-					summary.WriteString(fmt.Sprintf("  %s %s\n", status, test.Description))
+					fmt.Fprintf(&summary, "  %s %s\n", status, test.Description)
 				} else {
-					summary.WriteString(fmt.Sprintf("  %s %s\n", status, capability))
+					fmt.Fprintf(&summary, "  %s %s\n", status, capability)
 				}
 			}
 		}
@@ -737,7 +733,7 @@ func (r *FullCapabilityReport) GetMSPCapabilitySummary() string {
 	if len(r.Recommendations) > 0 {
 		summary.WriteString("\nMSP Setup Recommendations:\n")
 		for i, rec := range r.Recommendations {
-			summary.WriteString(fmt.Sprintf("  %d. %s\n", i+1, rec))
+			fmt.Fprintf(&summary, "  %d. %s\n", i+1, rec)
 		}
 	}
 

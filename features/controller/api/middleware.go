@@ -1,18 +1,24 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -22,10 +28,24 @@ type contextKey string
 const (
 	// Context keys
 	apiKeyContextKey       contextKey = "api_key"
-	userIDContextKey       contextKey = "user_id"
-	tenantIDContextKey     contextKey = "tenant_id"
 	authDecisionContextKey contextKey = "auth_decision"
+	principalContextKey    contextKey = "principal"
 )
+
+// Principal represents an authenticated entity — either an mTLS admin cert or an API key.
+// Admin principals (IsAdmin == true) are set exclusively by the cert-auth path after
+// admin-extension verification. API-key principals are converted from APIKey structs.
+type Principal struct {
+	ID          string
+	Name        string
+	IsAdmin     bool
+	Permissions []string
+	TenantID    string
+	// Cert-auth fields — non-empty only when IsAdmin == true (H3)
+	CertSerial      string
+	CertFingerprint string
+	CertNotAfter    time.Time
+}
 
 // loggingMiddleware logs HTTP requests
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
@@ -113,10 +133,64 @@ func (s *Server) contentTypeMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// authenticationMiddleware validates API keys for protected endpoints
-// M-AUTH-1: Load API keys from secret store on-demand if not in cache
+// extractAdminPrincipal inspects r.TLS.PeerCertificates[0] for the CFGMS admin extension.
+// Returns a non-nil *Principal when the cert carries the admin marker AND is not revoked.
+// Chain verification is done at the TLS layer (VerifyClientCertIfGiven + ClientCAs).
+// Returns nil when no cert is presented, the cert lacks the admin marker, or the cert
+// serial is in the revoked-serials list (Story D: C2 fix).
+func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return nil
+	}
+	peerCert := r.TLS.PeerCertificates[0]
+	if !cert.HasAdminMarker(peerCert) {
+		return nil
+	}
+	serial := peerCert.SerialNumber.String()
+	// Story D: C2 fix — check revocation on every cert-auth request.
+	// certManager may be nil in OSS deployments that haven't initialised cert management.
+	if s.certManager != nil && s.certManager.IsRevoked(serial) {
+		return nil
+	}
+	fpSum := sha256.Sum256(peerCert.Raw)
+	return &Principal{
+		ID:              peerCert.Subject.CommonName,
+		Name:            "mtls-admin:" + peerCert.Subject.CommonName,
+		IsAdmin:         true,
+		TenantID:        "default",
+		CertSerial:      serial,
+		CertFingerprint: hex.EncodeToString(fpSum[:]),
+		CertNotAfter:    peerCert.NotAfter,
+	}
+}
+
+// hasHeaderCredentials reports whether the request carries an API key or Bearer token header.
+func hasHeaderCredentials(r *http.Request) bool {
+	if r.Header.Get("X-API-Key") != "" {
+		return true
+	}
+	return strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")
+}
+
+// authenticationMiddleware validates incoming requests via mTLS admin cert or API key.
+// States: (a) admin-marked cert only → admin principal; (b) admin-marked cert + header → 400;
+// (c) cert without admin marker → fall through to API-key auth; (d) no cert → API-key auth.
+// M-AUTH-1: Load API keys from secret store on-demand if not in cache.
+// Issue #1675: relay-injected principals bypass normal auth when relayPrincipalKey is set.
 func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Issue #1675: relay principal — pre-validated by RelayHandler after grant check.
+		// The relayPrincipalKey is set only in the relay handler after LookupGrant succeeds,
+		// so this path can only be reached via an internal in-process call, never from the
+		// network. The principalContextKey is also set by the relay handler before calling
+		// ServeHTTP, so the context already carries both keys.
+		if injected, ok := r.Context().Value(relayPrincipalKey).(*Principal); ok && injected != nil {
+			// principalContextKey is already set by the relay handler; just proceed.
+			_ = injected // already in context
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Test endpoints require explicit opt-in via CFGMS_ENABLE_TEST_ENDPOINTS=true.
 		// Without this env var, test endpoints require authentication like everything else.
 		if os.Getenv("CFGMS_ENABLE_TEST_ENDPOINTS") == "true" {
@@ -135,29 +209,48 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
+		// H2: mTLS-presented identity always wins.
+		if adminPrincipal := s.extractAdminPrincipal(r); adminPrincipal != nil {
+			// H2/L5: Conflicting credentials — cert AND header present → reject.
+			if hasHeaderCredentials(r) {
+				s.writeErrorResponse(w, http.StatusBadRequest,
+					"Conflicting credentials: mTLS admin cert and API key header cannot both be present",
+					"CONFLICTING_CREDENTIALS")
+				return
+			}
+			// Cert-auth success: set principal context and proceed.
+			ctx := context.WithValue(r.Context(), principalContextKey, adminPrincipal)
+			ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(adminPrincipal.ID))
+			ctx = context.WithValue(ctx, ctxkeys.TenantID, adminPrincipal.TenantID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// State (c)/(d): no admin cert presented — use API-key path.
+
 		// Extract API key from header
-		apiKey := r.Header.Get("X-API-Key")
-		if apiKey == "" {
+		apiKeyStr := r.Header.Get("X-API-Key")
+		if apiKeyStr == "" {
 			// Also check Authorization header for Bearer token
 			authHeader := r.Header.Get("Authorization")
 			if strings.HasPrefix(authHeader, "Bearer ") {
-				apiKey = strings.TrimPrefix(authHeader, "Bearer ")
+				apiKeyStr = strings.TrimPrefix(authHeader, "Bearer ")
 			}
 		}
 
-		if apiKey == "" {
+		if apiKeyStr == "" {
 			s.writeErrorResponse(w, http.StatusUnauthorized, "API key required", "MISSING_API_KEY")
 			return
 		}
 
 		// Check memory cache first
 		s.mu.RLock()
-		keyInfo, exists := s.apiKeys[apiKey]
+		keyInfo, exists := s.apiKeys[apiKeyStr]
 		s.mu.RUnlock()
 
 		// M-AUTH-1: If not in cache, try to load from secret store
 		if !exists {
-			loadedKey, err := s.loadAPIKeyFromStore(r.Context(), apiKey)
+			loadedKey, err := s.loadAPIKeyFromStore(r.Context(), apiKeyStr)
 			if err != nil {
 				s.logger.Debug("Failed to load API key from store", "error", err)
 				s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
@@ -172,10 +265,20 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Add key info to request context
+		// Convert API key to Principal for uniform authorization handling.
+		principal := &Principal{
+			ID:          keyInfo.ID,
+			Name:        keyInfo.Name,
+			IsAdmin:     false,
+			Permissions: keyInfo.Permissions,
+			TenantID:    keyInfo.TenantID,
+		}
+
+		// Add key info and principal to request context
 		ctx := context.WithValue(r.Context(), apiKeyContextKey, keyInfo)
-		ctx = context.WithValue(ctx, userIDContextKey, keyInfo.ID)
-		ctx = context.WithValue(ctx, tenantIDContextKey, keyInfo.TenantID)
+		ctx = context.WithValue(ctx, principalContextKey, principal)
+		ctx = context.WithValue(ctx, ctxkeys.UserIDKey, keyInfo.ID)
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, keyInfo.TenantID)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -274,40 +377,52 @@ type AuthorizationDecision struct {
 	ConditionalVars map[string]interface{} `json:"conditional_vars,omitempty"`
 }
 
-// requirePermission creates middleware that enforces specific permission requirements
+// requirePermission creates middleware that enforces specific permission requirements.
+// Admin principals (IsAdmin == true) short-circuit to ALLOW for any permission.
 func (s *Server) requirePermission(resourceType, action string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip permission check if RBAC service is not available
+			// Skip permission check if RBAC service is not available.
+			// Relay principals are always enforced inline — scope isolation is their
+			// entire security guarantee and must hold even without the RBAC audit path.
 			if s.rbacService == nil {
+				if _, isRelay := r.Context().Value(relayPrincipalKey).(*Principal); isRelay {
+					p, _ := r.Context().Value(principalContextKey).(*Principal)
+					permID := s.buildPermissionID(resourceType, action)
+					if !s.hasPermission(p, permID) {
+						s.writeErrorResponse(w, http.StatusForbidden, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS")
+						return
+					}
+					next.ServeHTTP(w, r)
+					return
+				}
 				s.logger.Warn("RBAC service not available, skipping permission check")
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			// Get authentication context
-			apiKey, ok := r.Context().Value(apiKeyContextKey).(*APIKey)
+			// Get authenticated principal from context (set by authenticationMiddleware).
+			principal, ok := r.Context().Value(principalContextKey).(*Principal)
 			if !ok {
 				s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 				return
 			}
 
-			userID, _ := r.Context().Value(userIDContextKey).(string)
-			tenantID, _ := r.Context().Value(tenantIDContextKey).(string)
+			userID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
+			tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
 
 			// Build resource identifier from URL path variables
 			resource := s.buildResourceIdentifier(r, resourceType)
 
-			// Check API key permissions first (simple permission check)
 			permissionID := s.buildPermissionID(resourceType, action)
-			if !s.hasAPIKeyPermission(apiKey, permissionID) {
+			if !s.hasPermission(principal, permissionID) {
 				decision := &AuthorizationDecision{
 					Granted:      false,
 					PermissionID: permissionID,
 					Resource:     resource,
 					Action:       action,
 					Decision:     "DENY",
-					Reason:       "API key lacks required permission: " + permissionID,
+					Reason:       "Principal lacks required permission: " + permissionID,
 					CheckedAt:    time.Now(),
 					SubjectID:    userID,
 					TenantID:     tenantID,
@@ -318,14 +433,18 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				return
 			}
 
-			// API key has correct permissions - grant access and skip RBAC check
+			// Principal has required permission — grant access.
+			reason := "API key has required permission: " + permissionID
+			if principal.IsAdmin {
+				reason = "Admin principal granted full access"
+			}
 			decision := &AuthorizationDecision{
 				Granted:      true,
 				PermissionID: permissionID,
 				Resource:     resource,
 				Action:       action,
 				Decision:     "ALLOW",
-				Reason:       "API key has required permission: " + permissionID,
+				Reason:       reason,
 				CheckedAt:    time.Now(),
 				SubjectID:    userID,
 				TenantID:     tenantID,
@@ -334,8 +453,9 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// Add decision to context
 			ctx := context.WithValue(r.Context(), authDecisionContextKey, decision)
 
-			s.logger.Debug("Access granted via API key permission",
+			s.logger.Debug("Access granted",
 				"subject_id", userID,
+				"is_admin", principal.IsAdmin,
 				"permission_id", permissionID,
 				"resource", resource,
 			)
@@ -387,7 +507,7 @@ func (s *Server) buildPermissionID(resourceType, action string) string {
 
 // generateRequestID generates a unique request ID for tracing
 func (s *Server) generateRequestID() string {
-	return time.Now().Format("20060102150405.999999999")
+	return uuid.New().String()
 }
 
 // writeAuthorizationError writes an authorization error response with decision metadata
@@ -409,46 +529,63 @@ func (s *Server) writeAuthorizationError(w http.ResponseWriter, message, code st
 	_ = json.NewEncoder(w).Encode(errorResponse)
 }
 
-// auditAuthorizationDecision logs authorization decisions for security auditing
+// auditAuthorizationDecision logs authorization decisions for security auditing (H3).
 func (s *Server) auditAuthorizationDecision(r *http.Request, decision *AuthorizationDecision) {
-	// Create comprehensive audit log entry
 	auditFields := map[string]interface{}{
 		"event_type":     "api_authorization",
 		"timestamp":      decision.CheckedAt.UTC().Format(time.RFC3339Nano),
-		"subject_id":     decision.SubjectID,
-		"tenant_id":      decision.TenantID,
-		"permission_id":  decision.PermissionID,
-		"resource":       decision.Resource,
-		"action":         decision.Action,
-		"decision":       decision.Decision,
+		"subject_id":     logging.SanitizeLogValue(decision.SubjectID),
+		"tenant_id":      logging.SanitizeLogValue(decision.TenantID),
+		"permission_id":  logging.SanitizeLogValue(decision.PermissionID),
+		"resource":       logging.SanitizeLogValue(decision.Resource),
+		"action":         logging.SanitizeLogValue(decision.Action),
+		"decision":       logging.SanitizeLogValue(decision.Decision),
 		"granted":        decision.Granted,
-		"reason":         decision.Reason,
+		"reason":         logging.SanitizeLogValue(decision.Reason),
 		"duration_ms":    decision.DurationMs,
 		"request_path":   logging.SanitizeLogValue(r.URL.Path),
-		"request_method": r.Method,
+		"request_method": logging.SanitizeLogValue(r.Method),
 		"remote_addr":    logging.SanitizeLogValue(r.RemoteAddr),
 		"user_agent":     logging.SanitizeLogValue(r.Header.Get("User-Agent")),
-		"request_id":     s.getRequestID(r),
+		"request_id":     logging.SanitizeLogValue(s.getRequestID(r)),
 		"severity":       s.getAuditSeverity(decision),
 	}
 
-	// Add conditional variables if present
-	if decision.ConditionalVars != nil {
-		auditFields["conditional_vars"] = decision.ConditionalVars
-	}
-
-	// Log at appropriate level based on decision outcome
-	if decision.Granted {
-		s.logger.Info("Authorization audit", auditFields)
+	// H3: Include auth method and cert details in audit log.
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if principal != nil && principal.IsAdmin {
+		auditFields["auth_method"] = "cert"
+		auditFields["cert_serial"] = logging.SanitizeLogValue(principal.CertSerial)
+		auditFields["cert_fingerprint"] = logging.SanitizeLogValue(principal.CertFingerprint)
+		auditFields["cert_not_after"] = principal.CertNotAfter.UTC().Format(time.RFC3339)
 	} else {
-		// Failed authorization attempts need higher visibility
-		s.logger.Warn("Authorization audit - access denied", auditFields)
+		auditFields["auth_method"] = "api_key"
 	}
 
-	// If RBAC manager supports audit trail, also log there
-	if s.rbacManager != nil {
-		s.auditToRBACManager(decision, r)
+	if decision.ConditionalVars != nil {
+		auditFields["conditional_vars"] = logging.SanitizeFieldsRecursive(decision.ConditionalVars)
 	}
+
+	if decision.Granted {
+		s.logger.Info("Authorization audit", flattenFieldsToKV(auditFields)...)
+	} else {
+		s.logger.Warn("Authorization audit - access denied", flattenFieldsToKV(auditFields)...)
+	}
+}
+
+// flattenFieldsToKV converts a map to a sorted flat key/value slice for variadic logger calls.
+// Keys are sorted alphabetically to make log output deterministic.
+func flattenFieldsToKV(fields map[string]interface{}) []interface{} {
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]interface{}, 0, 2*len(fields))
+	for _, k := range keys {
+		out = append(out, k, fields[k])
+	}
+	return out
 }
 
 // getRequestID extracts or generates a request ID for audit correlation
@@ -485,47 +622,20 @@ func (s *Server) getAuditSeverity(decision *AuthorizationDecision) string {
 	return "LOW" // Regular authorized operations
 }
 
-// hasAPIKeyPermission checks if an API key has a specific permission
-func (s *Server) hasAPIKeyPermission(apiKey *APIKey, permissionID string) bool {
-	if apiKey == nil || apiKey.Permissions == nil {
-		s.logger.Debug("API key permission check failed - nil key or permissions",
-			"key_id", func() string {
-				if apiKey != nil {
-					return apiKey.ID
-				}
-				return "nil"
-			}())
+// hasPermission checks whether principal has permissionID.
+// Admin principals (IsAdmin == true) short-circuit to true regardless of permissionID.
+// C1: "*" is treated as a literal permission name — it will not match any real permissionID.
+func (s *Server) hasPermission(principal *Principal, permissionID string) bool {
+	if principal == nil {
 		return false
 	}
-
-	s.logger.Debug("Checking API key permission",
-		"key_id", apiKey.ID,
-		"required_permission", permissionID,
-		"available_permissions", apiKey.Permissions)
-
-	for _, permission := range apiKey.Permissions {
-		if permission == permissionID {
-			s.logger.Debug("API key permission granted",
-				"key_id", apiKey.ID,
-				"permission", permissionID)
+	if principal.IsAdmin {
+		return true
+	}
+	for _, p := range principal.Permissions {
+		if p == permissionID {
 			return true
 		}
 	}
-
-	s.logger.Debug("API key permission denied",
-		"key_id", apiKey.ID,
-		"required_permission", permissionID,
-		"available_permissions", apiKey.Permissions)
 	return false
-}
-
-// auditToRBACManager sends audit information to RBAC manager if supported
-func (s *Server) auditToRBACManager(decision *AuthorizationDecision, r *http.Request) {
-	// This would integrate with the RBAC manager's audit trail
-	// For now, we'll just log that we would send it
-	s.logger.Debug("Would audit to RBAC manager",
-		"subject_id", decision.SubjectID,
-		"decision", decision.Decision,
-		"resource", decision.Resource,
-	)
 }

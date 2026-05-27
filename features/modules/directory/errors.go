@@ -1,10 +1,13 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package directory
 
 import "errors"
 
 var (
+	// ErrAllowedBasePathRequired is returned when AllowedBasePath is missing or not absolute
+	ErrAllowedBasePathRequired = errors.New("AllowedBasePath is required and must be an absolute path; see docs/modules/directory.md")
+
 	// ErrInvalidPath is returned when the path is invalid
 	ErrInvalidPath = errors.New("invalid path")
 

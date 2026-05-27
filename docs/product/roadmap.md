@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-02-19
+**Last Updated**: 2026-05-25
 
 ## Versioning Strategy
 
@@ -70,7 +70,7 @@ Policy-driven automation with advanced script execution (Issue #210 - Git-versio
 
 #### v0.7.0 (Pre-OSS / Alpha) - Open Source Preparation - ✅ COMPLETED
 
-Codebase prepared for open source launch with proper licensing, clean architecture, and production-ready security. See [v0.7.0-epic.md](./v0.7.0-epic.md) and [feature-boundaries.md](./feature-boundaries.md).
+Codebase prepared for open source launch with proper licensing, clean architecture, and production-ready security. See [v0.7.0-epic.md](./v0.7.0-epic.md).
 
 #### v0.7.1: Code Cleanup - ✅ COMPLETED
 
@@ -125,9 +125,9 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [x] Configure MQTT broker ACLs for topic-level access control by steward ID (issue #313) ✅ COMPLETED
 - [x] Align test-complete with CI required checks for 100% local validation parity (issue #315) ✅ COMPLETED
 
-### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
+### v0.9.x Series — Production Stability & Foundation
 
-Path to functioning beta: deploy controller on test cluster, manage Windows and Linux VMs with existing modules.
+v0.9.0–v0.9.5 work has shipped to `develop` but no v0.9.x tags have been cut.
 
 #### v0.9.0 — Test & Architecture Foundation ✅ COMPLETED
 
@@ -163,30 +163,78 @@ Minimum security hygiene before deploying on a real network.
 - [x] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
 - [x] Fix Windows workflow test failures (Issue #309) - Required for Windows VM management in v0.9.2
 
+#### v0.9.1.1 — Agent Dispatch Infrastructure (~60 pts, ~3 sprints)
+
+Transition from interactive Claude Code sessions to headless agent dispatch in Docker containers. Adapts Stripe's "Minion" model for solo developer workflow: architect writes PRDs/stories, agents implement in sandboxed containers, developer reviews PRs and merges. See [Agent Dispatch PRD](../archive/prd-agent-dispatch.md).
+
+**Sprint 1 — Prerequisites & Configuration (~13 pts):**
+- [x] CI: add integration-tests-controller as required check on develop (Issue #433 - 2 points) - Close CI coverage gap before agents skip Docker tests
+- [x] CLAUDE.md: add agent execution mode and headless workflow (Issue #434 - 5 points) - Dual-mode CLAUDE.md with CFGMS_AGENT_MODE detection
+- [x] Makefile: add test-agent-complete target for container validation (Issue #435 - 2 points) - test-complete minus Docker targets (~95% coverage)
+- [x] GitHub: create agent-story issue template for dispatch workflow (Issue #436 - 3 points) - Structured YAML template with reference impl, acceptance criteria
+- [x] GitHub: create agent dispatch label set (Issue #437 - 1 point) - agent:ready/in-progress/success/failed/blocked labels ✅ COMPLETED
+
+**Sprint 2 — Devcontainer Image (~21 pts):**
+- [x] Devcontainer: base Dockerfile with Go toolchain and security tools (Issue #438 - 8 points) - golang:1.25-bookworm, gosec, staticcheck, trivy, nancy, gitleaks, trufflehog, Claude Code, pre-cached Go modules + Trivy DB
+- [x] Devcontainer: firewall script with allowlisted outbound networking (Issue #439 - 5 points) - iptables default-deny, allowlist GitHub/Anthropic/Go proxy only
+- [x] Devcontainer: entrypoint script with issue fetch and agent prompt (Issue #440 - 8 points) - 4-phase agent workflow, credential restore, label management, draft PR on failure
+
+**Sprint 3 — Skills & Setup (~26 pts) — Pivoted from bash scripts to Claude Code skills:**
+- [x] Skill: `/dispatch` for launching agent containers from issues (Issue #441 - 8 points) - Replaces dispatch.sh; worktree creation, `docker run -d` (non-blocking), quality checks
+- [x] Skill: `/isoagents` for agent status and lifecycle management (Issues #442, #443 - 8 points) - Replaces monitor.sh + status.sh; status dashboard, detailed logs, cleanup, PR review suggestions
+- [x] Skill: `/agent-setup` one-time bootstrap (Issue #444 - 5 points) - Replaces setup.sh; image build, credential setup, label creation, directory setup
+- [x] Docs: agent dispatch infrastructure developer reference (Issue #445 - 5 points) - Story sizing guidelines, CI failure workflow, troubleshooting
+
+#### v0.9.1.2 — Code Structure Refactoring (~23 pts, ~2 sprints)
+
+Split oversized Go source files into cohesive, single-responsibility modules. 183 of 598 source files (31%) exceed 500 lines. This milestone targets the 7 worst offenders (1,233–3,110 lines each) that violate SRP with multiple unrelated concerns in a single file. Pure mechanical refactoring — no behavior changes, no API changes.
+
+- [x] Split features/workflow/engine.go into 5 cohesive modules (Issue #449 - 5 points) - 3110 lines, 75 methods across 6 concerns: conditions, loops, HTTP, sync, composition
+- [x] Split pkg/storage/providers/git/plugin.go by store type (Issue #450 - 3 points) - 2354 lines, 4 store types with duplicated git helpers
+- [x] Split features/tenant/security/isolation.go into 4 security domains (Issue #451 - 3 points) - 1794 lines, 4 concerns: rules, vulnerabilities, zero-trust, adaptive
+- [x] Split pkg/storage/providers/database/rbac_store.go by entity type (Issue #452 - 3 points) - 1387 lines, 4 entity types with repetitive CRUD
+- [x] Split pkg/directory/interfaces/schema.go — extract transformers and validators (Issue #453 - 3 points) - 1367 lines, schema mapping mixed with implementations
+- [x] Split features/rbac/risk/integration.go into focused modules (Issue #454 - 3 points) - 1329 lines, 8+ responsibilities in one file
+- [x] Split features/tenant/security/policy_engine.go — extract coordination and audit (Issue #455 - 3 points) - 1233 lines, policy eval + zero-trust coordination + audit
+
 #### v0.9.2 — Beta Deployment Validation
 
 Deploy on test cluster and manage real VMs — the core beta milestone.
 
 **Blockers (must resolve before E2E validation):**
-- [ ] Controller: wire ConfigurationServiceV2 durable storage — V1 is in-memory (Issue #409) - Configs lost on controller restart, deployment blocker
-- [ ] Controller: separate first-run initialization from normal startup (Issue #410) - Prevent silent CA regeneration on misconfigured restart
-- [ ] Steward: compile-time controller URL, remove regtoken prefix (Issue #421) - Controller URL baked in at build for signed binary security, shorter tokens for MDM deployment
+- [x] Controller: wire ConfigurationServiceV2 durable storage — V1 is in-memory (Issue #409) - Configs lost on controller restart, deployment blocker
+- [x] Controller: separate first-run initialization from normal startup (Issue #410) - Prevent silent CA regeneration on misconfigured restart
+- [x] Steward: compile-time controller URL, remove regtoken prefix (Issue #421) - Controller URL baked in at build for signed binary security, shorter tokens for MDM deployment
+- [x] Steward: self-install subcommand with interactive mode for GUI launch (Issue #472 - 8-13 points) - `install`/`uninstall`/`status` subcommands, interactive token prompt on double-click, native Windows Service/systemd/launchd registration
 
 **E2E validation:**
 - [ ] End-to-end deployment validation on real VMs (Issue #390 - 13-21 points) - Deploy controller + stewards on actual Windows/Linux VMs, test all modules, fix blockers
 - [ ] Beta deployment guide (Issue #391 - 3-5 points) - Production-like deployment documentation beyond dev-focused QUICK_START.md
 
 **Post-validation (discovered gaps, do not block #390):**
-- [ ] Steward: unify operating model — cfg-driven convergence with optional controller channel (Issue #411) - Two divergent code paths that should be one
-- [ ] Steward: unify execution engines — standalone has 7 modules, controller has 3 (Issue #412) - Controller-connected steward has fewer capabilities
-- [ ] Steward: wire drift detection and performance monitoring into lifecycle (Issue #413) - Built but never started
-- [ ] Steward: implement offline report queueing (Issue #419) - Reports discarded when controller unreachable
-- [ ] Steward/Controller: implement hash-based DNA sync (Issue #418) - Full DNA sent every time, QUIC handler is a stub
-- [ ] Controller: wire monitoring and health infrastructure into server (Issue #417) - Passed as nil, placeholder responses
-- [ ] Controller: wire reports engine and rollback system into API (Issue #416) - Built but routes never registered
-- [ ] Controller: implement multi-node orchestration (Issue #415) - No multi-steward coordination
-- [ ] Controller: implement workflow engine (Issue #414) - Documented as core capability, no code exists
-- [ ] Steward: registration approval via workflow engine hook (Issue #422) - Approval logic as workflow policy, default accept-all, depends on #414
+- [x] Steward: unify operating model — cfg-driven convergence with optional controller channel (Issue #411) - Single code path, 30-min default converge_interval, controller as additive overlay
+- [x] Steward: unify execution engines — standalone has 7 modules, controller has 3 (Issue #412) - Single Get→Compare→Set→Verify engine, platform-aware permissions
+- [x] Steward: wire drift detection and performance monitoring into lifecycle (Issue #413) - Drift as part of convergence cycle, performance collector wired into lifecycle
+- [x] Steward: implement offline report queueing (Issue #419) - File-backed FIFO queue, atomic writes, ordered delivery on reconnect
+- [x] Steward/Controller: implement hash-based DNA sync (Issue #418) - DNA hash in heartbeats, delta over control plane, full sync over data plane
+- [x] Controller: wire monitoring and health infrastructure into server (Issue #417) - Passed as nil, placeholder responses
+- [x] Controller: wire reports engine and rollback system into API (Issue #416) - Built but routes never registered
+- [x] Controller: wire existing workflow engine into REST API and startup (Issue #414) - 7 REST endpoints, trigger manager lifecycle, tenant-scoped
+- [x] Steward: registration approval via workflow engine hook (Issue #422) - Hook point with default accept-all, quarantine/reject support
+- [x] Controller: per-tenant config source routing Phase 1 (Issue #555, from #428) - ConfigSourceRouter with tenant metadata inheritance, backward compatible
+- [x] Controller: fix tenant context key mismatch between auth middleware and config handlers (Issue #430) - Tenant ID never flows from auth to config operations, all ops use "default"
+- [x] Controller: replace MockConfigStore in config_service_storage_test.go with real storage (Issue #431) - Testing standards violation, uses mock instead of real git backend
+- [x] Steward: optimize Windows DNA collection (Issue #567) - Eliminate Win32_Product, add exec.CommandContext timeouts, cache static hardware data
+- [x] Agent dispatch: close quality gaps with adversarial review and enforcement (Issue #557) - 3-specialist review, shell-level validation, strengthened prompts
+- [x] Steward: implement Windows ACL support for file/directory modules (Issue #553) - Created, future work
+
+**Post-E2E infrastructure:**
+- [ ] Deploy self-hosted CI runners on Hyper-V managed by CFGMS (Issue #565) - Linux + Windows runners, 3x CI speed improvement, dog-food validation
+- [ ] GitHub Actions dispatch — trigger agent containers from label changes (Issue #596) - Depends on #565, replaces manual `/dispatch` with Actions workflows triggered by `agent:ready`/`pipeline:fix` labels on self-hosted runners
+
+**Deferred to v0.10.0:**
+- [ ] Controller: implement multi-node orchestration (Issue #415) - Rolling updates, cluster quorum, dependency awareness
+- [ ] Controller: per-tenant config source routing Phases 2-3 (Issue #428) - External git integration, observability
 
 #### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks)
 
@@ -204,10 +252,62 @@ Authorization hardening + fixes from deployment validation.
 - [ ] Complete high availability validation on real cluster (multi-node, beyond Docker E2E)
 - [ ] Deployment validation fixes (TBD based on v0.9.2 findings)
 
-#### v0.10.0 - Web Interface Foundation & Deferred Features
+#### v0.9.5 — Steward-First Controller Bootstrap (~18 pts, ~2 weeks)
+
+Controller nodes managed by stewards — clean separation of node management from fleet orchestration. See [ADR-002](../architecture/decisions/002-steward-bootstrap-for-controllers.md).
+
+- [x] Controller: remove writeTransportCertsToDir — certs used in-memory only (Issue #576 - 5 points) - Removed test-only cert file export, fixed cert_path config alignment, cleaned up docker-compose test-certs mounts
+- [x] Steward: implement service module for idempotent OS service management (Issue #577 - 8 points) - systemd/Windows Service/launchd Get→Compare→Set→Verify, replaces script workaround
+- [x] Controller: add install/uninstall/status subcommands (Issue #578 - 5 points) - Mirror steward self-install pattern for OS service registration
+
+#### Post-v0.9.5 epics on develop (untagged)
+
+- [x] Epic #786 — CI: pre-merge validation runs against branch state
+- [x] Epic #1414 — mTLS admin authentication for controller REST API
+- [x] Epic #1500 — Operating-model docs audit/walkthrough/consolidation
+- [x] Epic #1501 — Operating-model CLI surface + docker fleet validation
+- [x] Epic #1523 — Steward job execution (scripts, inline commands, dispatch)
+- [x] Epic #1550 — Post-audit follow-ups
+- [x] Epic #1664 — Steward registration trust model (perennial tokens, IP-trust)
+- [x] Epic #1714 — Fleet resilience (restart-recovery, cert-reuse, drift)
+- [ ] Epic #1661 — Steward provisioning installer + trust bootstrap (in flight)
+- [ ] Epic #1754 — Decouple controller from steward-internal packages (in flight)
+
+#### v0.9.6 — Consolidation + AGPL Governance Release
+
+- [ ] Epic #1716 — Migrate licensing model to AGPL-3.0 single license (in flight)
+
+#### v0.9.7 — Tier 1 Hyper-V controller bringup
+
+- [ ] Epic #1787 — persistent controller on Hyper-V cluster VM, manual install, durable git+SOPS storage, mTLS
+
+#### v0.9.8 — `cfg` CLI on agent containers + Tier 1 connectivity
+
+- [ ] Epic #1788 — `cfg` CLI baked into agent image, per-agent mTLS bundle, routable reach to Tier 1
+
+#### v0.9.9 — Hyper-V management module
+
+- [ ] Epic #1789 — `features/modules/hyperv/`: VM lifecycle, snapshot/restore, vSwitch (PowerShell-over-WinRM)
+
+#### v0.9.10 — Stewards on Hyper-V hosts
+
+- [ ] Epic #1790 — registered, healthy stewards on every Hyper-V cluster node; service account, WinRM, module loading
+
+#### v0.9.11 — Phase 2 dev-agent conventions
+
+- [ ] Epic #1791 — tenant-scoping, breakage-tolerance ceremony, agent guardrails for Tier 1
+
+#### v0.9.12 — Ephemeral per-agent dev infrastructure (DRAFT)
+
+- [ ] Epic #1792 — each dispatched agent runs against its own ephemeral controller + steward VMs built from its branch
+
+#### v0.9.13 — Beta deployment validation on real VMs
+
+Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock. New issue to be filed when ready.
+
+#### v0.10.0 - Web Interface Foundation
 
 **Deferred from v0.9.x** (functional but not on beta critical path):
-- [ ] Service module implementation (script module covers as workaround)
 - [ ] Workflow management REST API (engine works internally, API needed for Web UI)
 - [ ] Config broadcast push API (individual `PUT /stewards/{id}/config` works)
 - [ ] Session/connection monitoring API (steward list + health endpoints cover beta)
@@ -399,11 +499,11 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Document Version**: 3.0
-- **Last Updated**: 2026-02-19
+- **Document Version**: 4.0
+- **Last Updated**: 2026-05-25
 
 ### Related Documentation
 
 - [Versioning Policy](../development/versioning-policy.md) - Semantic versioning details
 - [CHANGELOG.md](../../CHANGELOG.md) - Complete version history
-- [Feature Boundaries](./feature-boundaries.md) - OSS vs Commercial features
+- [LICENSING.md](../../LICENSING.md) - Licensing details and FAQ

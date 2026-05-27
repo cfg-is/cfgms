@@ -1,0 +1,441 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package cmd
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestGetTraceClient_TLSCACertFlagWired(t *testing.T) {
+	certPEM := generateTestCACert(t)
+
+	tmpFile, err := os.CreateTemp(t.TempDir(), "ca-cert-*.pem")
+	require.NoError(t, err)
+	_, err = tmpFile.Write(certPEM)
+	require.NoError(t, err)
+	require.NoError(t, tmpFile.Close())
+
+	origURL := traceURL
+	origCACert := traceTLSCACert
+	origInsecure := traceTLSInsecure
+	t.Cleanup(func() {
+		traceURL = origURL
+		traceTLSCACert = origCACert
+		traceTLSInsecure = origInsecure
+	})
+
+	traceURL = "https://controller.example.com"
+	traceTLSCACert = tmpFile.Name()
+	traceTLSInsecure = false
+
+	client, err := getTraceClient()
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	transport := client.httpClient.Transport.(*http.Transport)
+	assert.NotNil(t, transport.TLSClientConfig.RootCAs)
+	assert.False(t, transport.TLSClientConfig.InsecureSkipVerify)
+}
+
+func TestGetTraceClient_TLSInsecureFlagWired(t *testing.T) {
+	origURL := traceURL
+	origCACert := traceTLSCACert
+	origInsecure := traceTLSInsecure
+	t.Cleanup(func() {
+		traceURL = origURL
+		traceTLSCACert = origCACert
+		traceTLSInsecure = origInsecure
+	})
+
+	traceURL = "https://controller.example.com"
+	traceTLSCACert = ""
+	traceTLSInsecure = true
+
+	client, err := getTraceClient()
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	transport := client.httpClient.Transport.(*http.Transport)
+	assert.True(t, transport.TLSClientConfig.InsecureSkipVerify)
+}
+
+func TestGetTraceClient_TLSCACertEnvWired(t *testing.T) {
+	certPEM := generateTestCACert(t)
+
+	tmpFile, err := os.CreateTemp(t.TempDir(), "ca-cert-*.pem")
+	require.NoError(t, err)
+	_, err = tmpFile.Write(certPEM)
+	require.NoError(t, err)
+	require.NoError(t, tmpFile.Close())
+
+	origURL := traceURL
+	origCACert := traceTLSCACert
+	origInsecure := traceTLSInsecure
+	t.Cleanup(func() {
+		traceURL = origURL
+		traceTLSCACert = origCACert
+		traceTLSInsecure = origInsecure
+	})
+	t.Setenv("CFGMS_TLS_CA_CERT", tmpFile.Name())
+	t.Setenv("CFGMS_TLS_INSECURE", "")
+
+	traceURL = "https://controller.example.com"
+	traceTLSCACert = ""
+	traceTLSInsecure = false
+
+	client, err := getTraceClient()
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	transport := client.httpClient.Transport.(*http.Transport)
+	assert.NotNil(t, transport.TLSClientConfig.RootCAs)
+}
+
+func TestGetTraceClient_TLSInsecureEnvWired(t *testing.T) {
+	origURL := traceURL
+	origCACert := traceTLSCACert
+	origInsecure := traceTLSInsecure
+	t.Cleanup(func() {
+		traceURL = origURL
+		traceTLSCACert = origCACert
+		traceTLSInsecure = origInsecure
+	})
+	t.Setenv("CFGMS_TLS_INSECURE", "true")
+
+	traceURL = "https://controller.example.com"
+	traceTLSCACert = ""
+	traceTLSInsecure = false
+
+	client, err := getTraceClient()
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	transport := client.httpClient.Transport.(*http.Transport)
+	assert.True(t, transport.TLSClientConfig.InsecureSkipVerify)
+}
+
+func TestTraceCmd_TLSFlagsRegistered(t *testing.T) {
+	assert.NotNil(t, traceCmd.Flags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered on traceCmd")
+	assert.NotNil(t, traceCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered on traceCmd")
+}
+
+func TestGetTraceClient_BundleFound_UsesMTLS(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundleFilePath := filepath.Join(tmpDir, "admin.bundle.yaml")
+	generateTestBundleFile(t, bundleFilePath, "https://bundle-trace-controller.local:9443")
+
+	origUserConfigDirFn := userConfigDirFn
+	origSystemBundlePathFn := systemBundlePathFn
+	origBundlePath := bundlePath
+	origNoBundle := noBundle
+	origTraceURL := traceURL
+	t.Cleanup(func() {
+		userConfigDirFn = origUserConfigDirFn
+		systemBundlePathFn = origSystemBundlePathFn
+		bundlePath = origBundlePath
+		noBundle = origNoBundle
+		traceURL = origTraceURL
+	})
+	userConfigDirFn = func() (string, error) { return filepath.Join(tmpDir, "no-userconfig"), nil }
+	systemBundlePathFn = func() string { return filepath.Join(tmpDir, "no-system.bundle.yaml") }
+
+	// Ensure env var is not set
+	origEnv, wasSet := os.LookupEnv("CFGMS_ADMIN_BUNDLE")
+	require.NoError(t, os.Unsetenv("CFGMS_ADMIN_BUNDLE"))
+	t.Cleanup(func() {
+		if wasSet {
+			require.NoError(t, os.Setenv("CFGMS_ADMIN_BUNDLE", origEnv))
+		} else {
+			require.NoError(t, os.Unsetenv("CFGMS_ADMIN_BUNDLE"))
+		}
+	})
+
+	bundlePath = bundleFilePath
+	noBundle = false
+	traceURL = "https://flag-trace-url.local:9443" // --url flag takes precedence over bundle URL
+
+	client, err := getTraceClient()
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	// Bundle was used: client must have mTLS certificates loaded
+	transport := client.httpClient.Transport.(*http.Transport)
+	assert.NotEmpty(t, transport.TLSClientConfig.Certificates)
+	// URL comes from the flag (not the bundle), since traceURL was set
+	assert.Equal(t, "https://flag-trace-url.local:9443", client.baseURL)
+}
+
+func TestGetTraceClient_NoBundleFlag_FallsBackToAPIKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundleFilePath := filepath.Join(tmpDir, "admin.bundle.yaml")
+	generateTestBundleFile(t, bundleFilePath, "https://bundle-trace-controller.local:9443")
+
+	origUserConfigDirFn := userConfigDirFn
+	origSystemBundlePathFn := systemBundlePathFn
+	origBundlePath := bundlePath
+	origNoBundle := noBundle
+	origTraceURL := traceURL
+	origTraceAPIKey := traceAPIKey
+	t.Cleanup(func() {
+		userConfigDirFn = origUserConfigDirFn
+		systemBundlePathFn = origSystemBundlePathFn
+		bundlePath = origBundlePath
+		noBundle = origNoBundle
+		traceURL = origTraceURL
+		traceAPIKey = origTraceAPIKey
+	})
+	userConfigDirFn = func() (string, error) { return filepath.Join(tmpDir, "no-userconfig"), nil }
+	systemBundlePathFn = func() string { return filepath.Join(tmpDir, "no-system.bundle.yaml") }
+	t.Setenv("CFGMS_ADMIN_BUNDLE", bundleFilePath)
+
+	bundlePath = bundleFilePath
+	noBundle = true // explicit opt-out
+	traceURL = "https://api-key-trace.local:9080"
+	traceAPIKey = "trace-test-key"
+
+	client, err := getTraceClient()
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	// --no-bundle means API key path; no mTLS certificates
+	assert.Equal(t, "https://api-key-trace.local:9080", client.baseURL)
+	assert.Equal(t, "trace-test-key", client.apiKey)
+	transport := client.httpClient.Transport.(*http.Transport)
+	assert.Empty(t, transport.TLSClientConfig.Certificates)
+}
+
+func newTraceServer(t *testing.T, requestID string) *httptest.Server {
+	t.Helper()
+
+	now := time.Now().UTC()
+	endTime := now.Add(50 * time.Millisecond)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/health/trace/" + requestID:
+			resp := map[string]interface{}{
+				"request_id":  requestID,
+				"trace_id":    "trace-abc",
+				"start_time":  now.Format(time.RFC3339Nano),
+				"end_time":    endTime.Format(time.RFC3339Nano),
+				"duration_ms": 50.0,
+				"operation":   "test-op",
+				"component":   "test",
+				"status":      "success",
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestRunTrace_TextOutput(t *testing.T) {
+	const reqID = "req123abc"
+	server := newTraceServer(t, reqID)
+	defer server.Close()
+
+	origURL := traceURL
+	origFormat := traceFormat
+	origInsecure := traceTLSInsecure
+	t.Cleanup(func() {
+		traceURL = origURL
+		traceFormat = origFormat
+		traceTLSInsecure = origInsecure
+	})
+
+	traceURL = server.URL
+	traceFormat = "text"
+	traceTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runTrace(traceCmd, []string{reqID})
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, output, "Request Trace:")
+	assert.Contains(t, output, reqID)
+	assert.Contains(t, output, "SUCCESS")
+}
+
+func TestRunTrace_JSONOutput(t *testing.T) {
+	const reqID = "req123abc"
+	server := newTraceServer(t, reqID)
+	defer server.Close()
+
+	origURL := traceURL
+	origFormat := traceFormat
+	origInsecure := traceTLSInsecure
+	t.Cleanup(func() {
+		traceURL = origURL
+		traceFormat = origFormat
+		traceTLSInsecure = origInsecure
+	})
+
+	traceURL = server.URL
+	traceFormat = "json"
+	traceTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runTrace(traceCmd, []string{reqID})
+		require.NoError(t, err)
+	})
+
+	assert.True(t, json.Valid([]byte(output)), "output must be valid JSON")
+}
+
+func TestRunTrace_NotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	origURL := traceURL
+	origInsecure := traceTLSInsecure
+	t.Cleanup(func() {
+		traceURL = origURL
+		traceTLSInsecure = origInsecure
+	})
+
+	traceURL = server.URL
+	traceTLSInsecure = true
+
+	err := runTrace(traceCmd, []string{"nonexistent-id"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "trace not found")
+	assert.Contains(t, err.Error(), "nonexistent-id")
+}
+
+func TestRunTrace_APIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal error"))
+	}))
+	defer server.Close()
+
+	origURL := traceURL
+	origInsecure := traceTLSInsecure
+	t.Cleanup(func() {
+		traceURL = origURL
+		traceTLSInsecure = origInsecure
+	})
+
+	traceURL = server.URL
+	traceTLSInsecure = true
+
+	err := runTrace(traceCmd, []string{"some-id"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "API request failed")
+}
+
+func TestPrintSpans_OutputMatchesConsolidation(t *testing.T) {
+	now := time.Now().UTC()
+	endTime := now.Add(10 * time.Millisecond)
+
+	spans := []spanType{
+		{
+			SpanID:     "span-1",
+			Operation:  "root-op",
+			StartTime:  now,
+			EndTime:    &endTime,
+			DurationMs: 10.0,
+			Status:     "success",
+		},
+		{
+			SpanID:       "span-2",
+			ParentSpanID: "span-1",
+			Operation:    "child-op",
+			StartTime:    now,
+			EndTime:      &endTime,
+			DurationMs:   5.0,
+			Status:       "success",
+			Tags:         map[string]string{"key": "value"},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		printSpans(spans, "", make(map[string]bool))
+	})
+
+	assert.Contains(t, output, "root-op")
+	assert.Contains(t, output, "child-op")
+	assert.Contains(t, output, "SUCCESS")
+	assert.Contains(t, output, "key: value")
+	assert.Contains(t, output, "10.00 ms")
+	assert.Contains(t, output, "5.00 ms")
+}
+
+func TestRunTrace_WithSpans(t *testing.T) {
+	const reqID = "req-with-spans"
+	now := time.Now().UTC()
+	endTime := now.Add(50 * time.Millisecond)
+	childEnd := now.Add(20 * time.Millisecond)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"request_id":  reqID,
+			"trace_id":    "trace-xyz",
+			"start_time":  now.Format(time.RFC3339Nano),
+			"end_time":    endTime.Format(time.RFC3339Nano),
+			"duration_ms": 50.0,
+			"operation":   "test-op",
+			"component":   "test",
+			"status":      "success",
+			"spans": []map[string]interface{}{
+				{
+					"span_id":     "s1",
+					"operation":   "fetch",
+					"start_time":  now.Format(time.RFC3339Nano),
+					"end_time":    endTime.Format(time.RFC3339Nano),
+					"duration_ms": 50.0,
+					"status":      "success",
+				},
+				{
+					"span_id":        "s2",
+					"parent_span_id": "s1",
+					"operation":      "db-query",
+					"start_time":     now.Format(time.RFC3339Nano),
+					"end_time":       childEnd.Format(time.RFC3339Nano),
+					"duration_ms":    20.0,
+					"status":         "success",
+					"tags":           map[string]string{"table": "configs"},
+				},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	origURL := traceURL
+	origFormat := traceFormat
+	origInsecure := traceTLSInsecure
+	t.Cleanup(func() {
+		traceURL = origURL
+		traceFormat = origFormat
+		traceTLSInsecure = origInsecure
+	})
+
+	traceURL = server.URL
+	traceFormat = "text"
+	traceTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runTrace(traceCmd, []string{reqID})
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, output, "Sub-Operations (Spans)")
+	assert.Contains(t, output, "fetch")
+	assert.Contains(t, output, "db-query")
+	assert.Contains(t, output, "table: configs")
+}

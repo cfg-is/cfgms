@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package auth
 
@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/cache"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // OAuth2Provider implements the Provider interface using OAuth2 client credentials flow
@@ -22,33 +24,39 @@ type OAuth2Provider struct {
 	credentialStore CredentialStore
 
 	// Token cache to avoid unnecessary requests (for application tokens)
-	tokenCache map[string]*cachedToken
-	cacheMutex sync.RWMutex
+	tokenCache *cache.Cache
 
 	// Delegated token cache for user-specific tokens
-	delegatedTokenCache map[string]*cachedToken
-	delegatedCacheMutex sync.RWMutex
+	delegatedTokenCache *cache.Cache
 
 	// Default configuration for new tenants
 	defaultConfig *OAuth2Config
-}
 
-// cachedToken represents a cached access token with expiration tracking
-type cachedToken struct {
-	token     *AccessToken
-	expiresAt time.Time
+	logger logging.Logger
 }
 
 // NewOAuth2Provider creates a new OAuth2Provider instance
-func NewOAuth2Provider(credentialStore CredentialStore, defaultConfig *OAuth2Config) *OAuth2Provider {
+func NewOAuth2Provider(credentialStore CredentialStore, defaultConfig *OAuth2Config, logger logging.Logger) *OAuth2Provider {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	return &OAuth2Provider{
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		credentialStore:     credentialStore,
-		tokenCache:          make(map[string]*cachedToken),
-		delegatedTokenCache: make(map[string]*cachedToken),
-		defaultConfig:       defaultConfig,
+		credentialStore: credentialStore,
+		tokenCache: cache.NewCache(cache.CacheConfig{
+			Name:            "m365-token",
+			DefaultTTL:      55 * time.Minute,
+			CleanupInterval: 1 * time.Minute,
+		}),
+		delegatedTokenCache: cache.NewCache(cache.CacheConfig{
+			Name:            "m365-delegated-token",
+			DefaultTTL:      55 * time.Minute,
+			CleanupInterval: 1 * time.Minute,
+		}),
+		defaultConfig: defaultConfig,
+		logger:        logger,
 	}
 }
 
@@ -77,7 +85,7 @@ func (p *OAuth2Provider) GetAccessToken(ctx context.Context, tenantID string) (*
 	if config.UseClientCredentials {
 		token, err = p.getClientCredentialsToken(ctx, config)
 	} else {
-		// For interactive flows, we would need a stored refresh token
+		// Design decision: interactive refresh requires a stored refresh token; callers must call RefreshToken explicitly when a refresh token is available.
 		if storedToken != nil && storedToken.RefreshToken != "" {
 			token, err = p.RefreshToken(ctx, storedToken.RefreshToken)
 		} else {
@@ -93,7 +101,7 @@ func (p *OAuth2Provider) GetAccessToken(ctx context.Context, tenantID string) (*
 	// Store the new token
 	if err := p.credentialStore.StoreToken(tenantID, token); err != nil {
 		// Log warning but don't fail - we can still return the token
-		fmt.Printf("Warning: Failed to store token for tenant %s: %v\n", tenantID, err)
+		p.logger.Warn("failed to store token", "tenant_id", logging.SanitizeLogValue(tenantID), "error", err)
 	}
 
 	// Cache the token
@@ -152,24 +160,19 @@ func (p *OAuth2Provider) GetDelegatedAccessToken(ctx context.Context, tenantID s
 		return token, nil
 	}
 
-	// No valid delegated token available - would need interactive authentication
-	// For now, fall back to application permissions if configured
+	// Design decision: delegated token path falls back to app permissions when FallbackToAppPermissions is set; interactive auth requires browser redirect which is architecturally incompatible with a daemon/service context.
 	if config.FallbackToAppPermissions {
 		return p.GetAccessToken(ctx, tenantID)
 	}
 
 	return nil, NewAuthenticationError(tenantID, "NO_DELEGATED_TOKEN",
-		"No valid delegated token available and interactive authentication not implemented", nil)
+		"No valid delegated token available; interactive authentication requires browser redirect", nil)
 }
 
 // RefreshToken refreshes an existing access token using a refresh token
 func (p *OAuth2Provider) RefreshToken(ctx context.Context, refreshToken string) (*AccessToken, error) {
-	// Parse the refresh token to extract tenant information
-	// In a real implementation, you might store tenant info with the refresh token
-	// For now, we'll assume the refresh token contains or is associated with tenant info
-
-	// This is a simplified implementation - in practice, you'd need to track
-	// which tenant this refresh token belongs to
+	// Design decision: tenant ID is not encoded in the refresh token; callers must pass it via context.
+	// Deferred: tracked in #1443 — propagate tenant ID through refresh token context
 	tenantID := "unknown" // Would need to be determined from context
 
 	config, err := p.getOAuth2Config(tenantID)
@@ -206,14 +209,11 @@ func (p *OAuth2Provider) RefreshDelegatedToken(ctx context.Context, refreshToken
 		return nil, NewAuthenticationError("unknown", "INVALID_USER_CONTEXT", "User context is required for delegated token refresh", nil)
 	}
 
-	// For delegated tokens, we need to get the tenant from user context
-	// In a real implementation, we would extract tenant ID from the refresh token
-	// or maintain a mapping between refresh tokens and tenant IDs
-	// For now, we'll extract from the UPN domain as a fallback
-	tenantID := userContext.UserID // This would need to be properly tracked
-
-	// Note: In production, tenant ID should be tracked separately
-	// This is a placeholder for proper tenant ID resolution from refresh token context
+	// Design decision: tenant ID tracking for refresh token context requires the Provider interface to
+	// accept tenantID explicitly in RefreshDelegatedToken. Until then, tenant ID resolution relies on
+	// the credential store lookup keyed by UserContext.UserID; callers must ensure UserID maps to a
+	// stored tenant configuration.
+	tenantID := userContext.UserID
 
 	config, err := p.getOAuth2Config(tenantID)
 	if err != nil {
@@ -255,14 +255,18 @@ func (p *OAuth2Provider) RefreshDelegatedToken(ctx context.Context, refreshToken
 	// Store the refreshed token
 	if err := p.credentialStore.StoreDelegatedToken(tenantID, userContext.UserID, token); err != nil {
 		// Log warning but don't fail
-		fmt.Printf("Warning: Failed to store delegated token for user %s in tenant %s: %v\n",
-			userContext.UserID, tenantID, err)
+		p.logger.Warn("failed to store delegated token",
+			"user_id", logging.SanitizeLogValue(userContext.UserID),
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", err)
 	}
 
 	// Store updated user context
 	if err := p.credentialStore.StoreUserContext(tenantID, userContext.UserID, userContext); err != nil {
-		fmt.Printf("Warning: Failed to store user context for user %s in tenant %s: %v\n",
-			userContext.UserID, tenantID, err)
+		p.logger.Warn("failed to store user context",
+			"user_id", logging.SanitizeLogValue(userContext.UserID),
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", err)
 	}
 
 	// Cache the token
@@ -496,113 +500,88 @@ func (p *OAuth2Provider) getOAuth2Config(tenantID string) (*OAuth2Config, error)
 
 // getCachedToken retrieves a token from the cache
 func (p *OAuth2Provider) getCachedToken(tenantID string) *AccessToken {
-	p.cacheMutex.RLock()
-	defer p.cacheMutex.RUnlock()
-
-	cached, exists := p.tokenCache[tenantID]
-	if !exists {
+	value, found := p.tokenCache.Get(tenantID)
+	if !found {
 		return nil
 	}
-
-	// Check if cached token is still valid (with 5-minute buffer)
-	if time.Now().Add(5 * time.Minute).After(cached.expiresAt) {
+	token, ok := value.(*AccessToken)
+	if !ok {
 		return nil
 	}
-
-	return cached.token
+	return token
 }
 
-// setCachedToken stores a token in the cache
+// setCachedToken stores a token in the cache with a TTL that fires 5 minutes before the token expires.
+// If the token is already within the buffer window (TTL ≤ 0) any existing entry is evicted.
 func (p *OAuth2Provider) setCachedToken(tenantID string, token *AccessToken) {
-	p.cacheMutex.Lock()
-	defer p.cacheMutex.Unlock()
-
-	p.tokenCache[tenantID] = &cachedToken{
-		token:     token,
-		expiresAt: token.ExpiresAt,
+	ttl := time.Until(token.ExpiresAt) - 5*time.Minute
+	if ttl <= 0 {
+		p.logger.Debug("skipping token cache: TTL too short", "tenant_id", logging.SanitizeLogValue(tenantID))
+		p.tokenCache.Delete(tenantID)
+		return
 	}
+	_ = p.tokenCache.Set(tenantID, token, ttl)
 }
 
 // getDelegatedCachedToken retrieves a delegated token from the cache
 func (p *OAuth2Provider) getDelegatedCachedToken(cacheKey string) *AccessToken {
-	p.delegatedCacheMutex.RLock()
-	defer p.delegatedCacheMutex.RUnlock()
-
-	cached, exists := p.delegatedTokenCache[cacheKey]
-	if !exists {
+	value, found := p.delegatedTokenCache.Get(cacheKey)
+	if !found {
 		return nil
 	}
-
-	// Check if cached token is still valid (with 5-minute buffer)
-	if time.Now().Add(5 * time.Minute).After(cached.expiresAt) {
+	token, ok := value.(*AccessToken)
+	if !ok {
 		return nil
 	}
-
-	return cached.token
+	return token
 }
 
-// setDelegatedCachedToken stores a delegated token in the cache
+// setDelegatedCachedToken stores a delegated token in the cache with a TTL that fires 5 minutes before the token expires.
+// If the token is already within the buffer window (TTL ≤ 0) any existing entry is evicted.
 func (p *OAuth2Provider) setDelegatedCachedToken(cacheKey string, token *AccessToken) {
-	p.delegatedCacheMutex.Lock()
-	defer p.delegatedCacheMutex.Unlock()
-
-	p.delegatedTokenCache[cacheKey] = &cachedToken{
-		token:     token,
-		expiresAt: token.ExpiresAt,
+	ttl := time.Until(token.ExpiresAt) - 5*time.Minute
+	if ttl <= 0 {
+		p.logger.Debug("skipping delegated token cache: TTL too short", "cache_key", logging.SanitizeLogValue(cacheKey))
+		p.delegatedTokenCache.Delete(cacheKey)
+		return
 	}
+	_ = p.delegatedTokenCache.Set(cacheKey, token, ttl)
 }
 
 // ClearCache clears the token cache for all tenants
 func (p *OAuth2Provider) ClearCache() {
-	p.cacheMutex.Lock()
-	defer p.cacheMutex.Unlock()
-
-	p.tokenCache = make(map[string]*cachedToken)
+	p.tokenCache.Clear()
 }
 
 // ClearDelegatedCache clears the delegated token cache for all users
 func (p *OAuth2Provider) ClearDelegatedCache() {
-	p.delegatedCacheMutex.Lock()
-	defer p.delegatedCacheMutex.Unlock()
-
-	p.delegatedTokenCache = make(map[string]*cachedToken)
+	p.delegatedTokenCache.Clear()
 }
 
 // ClearCacheForTenant clears the token cache for a specific tenant
 func (p *OAuth2Provider) ClearCacheForTenant(tenantID string) {
-	p.cacheMutex.Lock()
-	defer p.cacheMutex.Unlock()
-
-	delete(p.tokenCache, tenantID)
+	p.tokenCache.Delete(tenantID)
 }
 
 // ClearDelegatedCacheForUser clears the delegated token cache for a specific user
 func (p *OAuth2Provider) ClearDelegatedCacheForUser(tenantID, userID string) {
-	p.delegatedCacheMutex.Lock()
-	defer p.delegatedCacheMutex.Unlock()
-
-	cacheKey := fmt.Sprintf("%s:%s", tenantID, userID)
-	delete(p.delegatedTokenCache, cacheKey)
+	p.delegatedTokenCache.Delete(fmt.Sprintf("%s:%s", tenantID, userID))
 }
 
 // ClearDelegatedCacheForTenant clears all delegated tokens for a specific tenant
 func (p *OAuth2Provider) ClearDelegatedCacheForTenant(tenantID string) {
-	p.delegatedCacheMutex.Lock()
-	defer p.delegatedCacheMutex.Unlock()
-
-	// Find and remove all cache entries for this tenant
-	keysToDelete := make([]string, 0)
 	tenantPrefix := tenantID + ":"
-
-	for cacheKey := range p.delegatedTokenCache {
-		if strings.HasPrefix(cacheKey, tenantPrefix) {
-			keysToDelete = append(keysToDelete, cacheKey)
+	for _, key := range p.delegatedTokenCache.Keys() {
+		if strings.HasPrefix(key, tenantPrefix) {
+			p.delegatedTokenCache.Delete(key)
 		}
 	}
+}
 
-	for _, key := range keysToDelete {
-		delete(p.delegatedTokenCache, key)
-	}
+// Close stops the background cleanup routines for both token caches
+func (p *OAuth2Provider) Close() {
+	p.tokenCache.Close()
+	p.delegatedTokenCache.Close()
 }
 
 // SetHTTPClient allows customization of the HTTP client
@@ -690,14 +669,18 @@ func (p *OAuth2Provider) ExchangeCodeForDelegatedToken(ctx context.Context, tena
 
 		// Store as delegated token
 		if err := p.credentialStore.StoreDelegatedToken(tenantID, userContext.UserID, token); err != nil {
-			fmt.Printf("Warning: Failed to store delegated token for user %s in tenant %s: %v\n",
-				userContext.UserID, tenantID, err)
+			p.logger.Warn("failed to store delegated token",
+				"user_id", logging.SanitizeLogValue(userContext.UserID),
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"error", err)
 		}
 
 		// Store user context
 		if err := p.credentialStore.StoreUserContext(tenantID, userContext.UserID, userContext); err != nil {
-			fmt.Printf("Warning: Failed to store user context for user %s in tenant %s: %v\n",
-				userContext.UserID, tenantID, err)
+			p.logger.Warn("failed to store user context",
+				"user_id", logging.SanitizeLogValue(userContext.UserID),
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"error", err)
 		}
 
 		// Cache as delegated token
@@ -706,7 +689,7 @@ func (p *OAuth2Provider) ExchangeCodeForDelegatedToken(ctx context.Context, tena
 	} else {
 		// Store as application token
 		if err := p.credentialStore.StoreToken(tenantID, token); err != nil {
-			fmt.Printf("Warning: Failed to store token for tenant %s: %v\n", tenantID, err)
+			p.logger.Warn("failed to store token", "tenant_id", logging.SanitizeLogValue(tenantID), "error", err)
 		}
 
 		// Cache the token

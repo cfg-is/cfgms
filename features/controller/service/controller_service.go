@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package service
 
@@ -12,17 +12,21 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // ControllerService implements the Controller service
 type ControllerService struct {
-	logger   logging.Logger
-	mu       sync.RWMutex
-	stewards map[string]*StewardInfo
+	logger     logging.Logger
+	mu         sync.RWMutex
+	stewards   map[string]*StewardInfo
+	dnaStorage *fleetStorage.Manager
 }
 
-// StewardInfo holds information about a registered steward
+// StewardInfo holds connection/heartbeat state for a registered steward.
+// Full DNA is persisted to durable storage; this struct tracks only live state.
 type StewardInfo struct {
 	ID            string
 	TenantID      string // Multi-tenant support
@@ -34,7 +38,8 @@ type StewardInfo struct {
 	Token         string
 }
 
-// NewControllerService creates a new Controller service
+// NewControllerService creates a new Controller service without DNA storage.
+// Use NewControllerServiceWithStorage to enable durable DNA persistence.
 func NewControllerService(logger logging.Logger) *ControllerService {
 	return &ControllerService{
 		logger:   logger,
@@ -42,35 +47,62 @@ func NewControllerService(logger logging.Logger) *ControllerService {
 	}
 }
 
-// Authenticate handles authentication requests
-func (s *ControllerService) Authenticate(ctx context.Context, creds *common.Credentials) (*common.Token, error) {
-	s.logger.Info("Authentication request received",
-		"tenant_id", creds.TenantId,
-		"client_id", creds.ClientId,
-		"cert_subject", creds.Certificate)
+// NewControllerServiceWithStorage creates a new Controller service with a durable
+// DNA storage backend. DNA is written on every heartbeat and full sync, and
+// reloaded from storage on controller startup to warm the in-memory registry.
+func NewControllerServiceWithStorage(logger logging.Logger, storage *fleetStorage.Manager) *ControllerService {
+	svc := &ControllerService{
+		logger:     logger,
+		stewards:   make(map[string]*StewardInfo),
+		dnaStorage: storage,
+	}
+	return svc
+}
 
-	// Validate tenant ID
-	tenantID := creds.TenantId
-	if tenantID == "" {
-		tenantID = "default" // Default to "default" tenant if not specified
+// LoadFromStorage warms the in-memory steward registry by loading the latest
+// DNA record for every device persisted in the fleet storage backend. Call
+// this once during controller startup, after NewControllerServiceWithStorage.
+func (s *ControllerService) LoadFromStorage(ctx context.Context) error {
+	if s.dnaStorage == nil {
+		return nil
 	}
 
-	// Basic authentication implementation
-	// In a real implementation, this would validate certificates and tenant access
-	token, err := s.generateToken()
+	deviceIDs, err := s.dnaStorage.ListAllDeviceIDs(ctx)
 	if err != nil {
-		s.logger.Error("Failed to generate authentication token", "error", err)
-		return nil, fmt.Errorf("authentication failed: %w", err)
+		return fmt.Errorf("failed to list device IDs from storage: %w", err)
 	}
 
-	s.logger.Info("Authentication successful",
-		"tenant_id", tenantID,
-		"client_id", creds.ClientId,
-		"token", token[:16]+"...")
-	return &common.Token{
-		AccessToken: token,
-		ExpiresAt:   time.Now().Add(24 * time.Hour).Unix(),
-	}, nil
+	s.logger.Info("Loading steward registry from DNA storage", "device_count", len(deviceIDs))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, deviceID := range deviceIDs {
+		// Read via the SQL-backed path: a freshly started controller has an
+		// empty in-memory index, so GetLatest (index-based) would miss every
+		// device persisted by the previous run.
+		record, err := s.dnaStorage.GetLatestByDeviceID(ctx, deviceID)
+		if err != nil {
+			s.logger.Warn("Failed to load DNA for device from storage",
+				"device_id", deviceID, "error", err)
+			continue
+		}
+
+		// Populate in-memory entry only if not already present (live steward takes precedence)
+		if _, exists := s.stewards[deviceID]; !exists {
+			s.stewards[deviceID] = &StewardInfo{
+				ID:            deviceID,
+				TenantID:      record.TenantID,
+				DNA:           record.DNA,
+				LastHeartbeat: record.StoredAt,
+				Status:        record.Status,
+				Metrics:       make(map[string]string),
+			}
+		}
+	}
+
+	s.logger.Info("Steward registry warm-load complete", "loaded", len(deviceIDs))
+	return nil
 }
 
 // AcceptRegistration handles steward registration requests
@@ -79,10 +111,10 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 	tenantID := s.extractTenantID(ctx)
 
 	s.logger.Info("Registration request received",
-		"tenant_id", tenantID,
-		"version", req.Version,
+		"tenant_id", logging.SanitizeLogValue(tenantID),
+		"version", logging.SanitizeLogValue(req.Version),
 		"is_reconnection", req.IsReconnection,
-		"steward_dna_id", req.InitialDna.Id)
+		"steward_dna_id", logging.SanitizeLogValue(req.InitialDna.Id))
 
 	var stewardID string
 	var syncStatus *common.SyncStatus
@@ -98,7 +130,7 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 			// Verify sync status
 			syncStatus, requiresDNAResync, requiresConfigResync = s.verifySyncStatus(existingSteward, req)
 		} else {
-			s.logger.Warn("Reconnection claimed but no existing steward found", "dna_id", req.InitialDna.Id)
+			s.logger.Warn("Reconnection claimed but no existing steward found", "dna_id", logging.SanitizeLogValue(req.InitialDna.Id))
 			// Treat as new registration
 			req.IsReconnection = false
 		}
@@ -143,9 +175,12 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 	}
 	s.mu.Unlock()
 
+	// Persist initial DNA to durable storage
+	s.storeDNA(ctx, stewardID, tenantID, req.InitialDna, "registered")
+
 	s.logger.Info("Steward registration completed",
 		"steward_id", stewardID,
-		"version", req.Version,
+		"version", logging.SanitizeLogValue(req.Version),
 		"requires_dna_resync", requiresDNAResync,
 		"requires_config_resync", requiresConfigResync)
 
@@ -165,28 +200,36 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 	}, nil
 }
 
-// ProcessHeartbeat handles heartbeat requests from stewards
+// ProcessHeartbeat handles heartbeat requests from stewards.
+// When a heartbeat includes DNA updates, the DNA is written to durable storage.
 func (s *ControllerService) ProcessHeartbeat(ctx context.Context, req *controller.HeartbeatRequest) (*common.Status, error) {
-	s.logger.Debug("Heartbeat received", "steward_id", req.StewardId, "status", req.Status)
+	s.logger.Debug("Heartbeat received", "steward_id", logging.SanitizeLogValue(req.StewardId), "status", logging.SanitizeLogValue(req.Status))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	steward, exists := s.stewards[req.StewardId]
 	if !exists {
-		s.logger.Warn("Heartbeat from unknown steward", "steward_id", req.StewardId)
+		s.logger.Warn("Heartbeat from unknown steward", "steward_id", logging.SanitizeLogValue(req.StewardId))
 		return &common.Status{
 			Code:    common.Status_NOT_FOUND,
 			Message: "Steward not found",
 		}, nil
 	}
 
-	// Update steward heartbeat information
+	// Update live connection state (heartbeat tracks only status/metrics, not full DNA)
 	steward.LastHeartbeat = time.Now()
 	steward.Status = req.Status
 	steward.Metrics = req.Metrics
 
-	s.logger.Debug("Heartbeat processed successfully", "steward_id", req.StewardId)
+	// Persist updated status to durable storage if DNA is known for this steward.
+	// Full DNA snapshots are written by SyncDNA; here we only update status on
+	// existing records when the steward's DNA is already stored.
+	if steward.DNA != nil {
+		s.storeDNA(ctx, req.StewardId, steward.TenantID, steward.DNA, req.Status)
+	}
+
+	s.logger.Debug("Heartbeat processed successfully", "steward_id", logging.SanitizeLogValue(req.StewardId))
 
 	return &common.Status{
 		Code:    common.Status_OK,
@@ -194,26 +237,30 @@ func (s *ControllerService) ProcessHeartbeat(ctx context.Context, req *controlle
 	}, nil
 }
 
-// SyncDNA handles DNA synchronization requests
+// SyncDNA handles DNA synchronization requests.
+// The full DNA snapshot is written to durable storage on every sync.
 func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*common.Status, error) {
-	s.logger.Debug("DNA sync request received", "steward_id", dna.Id)
+	s.logger.Debug("DNA sync request received", "steward_id", logging.SanitizeLogValue(dna.Id))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	steward, exists := s.stewards[dna.Id]
 	if !exists {
-		s.logger.Warn("DNA sync from unknown steward", "steward_id", dna.Id)
+		s.logger.Warn("DNA sync from unknown steward", "steward_id", logging.SanitizeLogValue(dna.Id))
 		return &common.Status{
 			Code:    common.Status_NOT_FOUND,
 			Message: "Steward not found",
 		}, nil
 	}
 
-	// Update steward DNA
+	// Update in-memory DNA
 	steward.DNA = dna
 
-	s.logger.Debug("DNA synchronized successfully", "steward_id", dna.Id)
+	// Persist full DNA snapshot to durable storage
+	s.storeDNA(ctx, dna.Id, steward.TenantID, dna, steward.Status)
+
+	s.logger.Debug("DNA synchronized successfully", "steward_id", logging.SanitizeLogValue(dna.Id))
 
 	return &common.Status{
 		Code:    common.Status_OK,
@@ -223,19 +270,37 @@ func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*comm
 
 // GetStewardDNA retrieves DNA information for a specific steward
 func (s *ControllerService) GetStewardDNA(ctx context.Context, req *controller.StewardRequest) (*common.DNA, error) {
-	s.logger.Debug("DNA retrieval request", "steward_id", req.StewardId)
+	s.logger.Debug("DNA retrieval request", "steward_id", logging.SanitizeLogValue(req.StewardId))
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	steward, exists := s.stewards[req.StewardId]
 	if !exists {
-		s.logger.Warn("DNA request for unknown steward", "steward_id", req.StewardId)
-		return nil, fmt.Errorf("steward not found: %s", req.StewardId)
+		s.logger.Warn("DNA request for unknown steward", "steward_id", logging.SanitizeLogValue(req.StewardId))
+		return nil, fmt.Errorf("steward not found: %s", logging.SanitizeLogValue(req.StewardId))
 	}
 
-	s.logger.Debug("DNA retrieved successfully", "steward_id", req.StewardId)
+	s.logger.Debug("DNA retrieved successfully", "steward_id", logging.SanitizeLogValue(req.StewardId))
 	return steward.DNA, nil
+}
+
+// storeDNA writes a DNA snapshot to durable storage. It is safe to call
+// concurrently; errors are logged but do not propagate to callers.
+func (s *ControllerService) storeDNA(ctx context.Context, stewardID, tenantID string, dna *common.DNA, status string) {
+	if s.dnaStorage == nil || dna == nil {
+		return
+	}
+	opts := &fleetStorage.StoreOptions{
+		TenantID: tenantID,
+		Status:   status,
+	}
+	if err := s.dnaStorage.Store(ctx, stewardID, dna, opts); err != nil {
+		s.logger.Error("Failed to persist DNA to fleet storage",
+			"steward_id", stewardID,
+			"tenant_id", tenantID,
+			"error", err)
+	}
 }
 
 // generateStewardID generates a unique steward ID
@@ -269,6 +334,45 @@ func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool
 	defer s.mu.RUnlock()
 	info, exists := s.stewards[stewardID]
 	return info, exists
+}
+
+// RegisterSteward records or updates a steward that registered via the HTTP path.
+// It is idempotent: calling it twice with the same stewardID overwrites the entry.
+//
+// The steward is also persisted to durable DNA storage. Registration is the only
+// live-path entry point into the registry, so without this write the registry is
+// memory-only and a controller restart loses every steward (LoadFromStorage finds
+// device_count: 0). Persisting here lets the next startup warm-load the steward
+// before it reconnects, so GET /api/v1/stewards/{id} keeps returning it.
+func (s *ControllerService) RegisterSteward(stewardID, tenantID, transportAddr, status string) error {
+	dna := &common.DNA{Id: stewardID}
+
+	s.mu.Lock()
+	s.stewards[stewardID] = &StewardInfo{
+		ID:            stewardID,
+		TenantID:      tenantID,
+		DNA:           dna,
+		LastHeartbeat: time.Now(),
+		Status:        status,
+		Metrics:       make(map[string]string),
+	}
+	s.mu.Unlock()
+
+	s.storeDNA(context.Background(), stewardID, tenantID, dna, status)
+	return nil
+}
+
+// UpdateStewardStatus updates the status of a registered steward.
+// Returns an error if the steward is not found.
+func (s *ControllerService) UpdateStewardStatus(stewardID, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	steward, exists := s.stewards[stewardID]
+	if !exists {
+		return fmt.Errorf("steward %s not found", stewardID)
+	}
+	steward.Status = status
+	return nil
 }
 
 // GetAllStewards returns a list of all registered stewards
@@ -341,11 +445,11 @@ func (s *ControllerService) verifySyncStatus(existingSteward *StewardInfo, req *
 
 // extractTenantID extracts tenant ID from context
 func (s *ControllerService) extractTenantID(ctx context.Context) string {
-	// Extract tenant ID from context value (set by MQTT/HTTP handlers)
-	if tenantID, ok := ctx.Value("tenant-id").(string); ok && tenantID != "" {
+	// Extract tenant ID from context value (set by auth middleware)
+	if tenantID, ok := ctx.Value(ctxkeys.TenantID).(string); ok && tenantID != "" {
 		return tenantID
 	}
 
-	s.logger.Debug("No tenant-id in context, using default tenant")
+	s.logger.Debug("No tenant ID in context, using default tenant")
 	return "default"
 }

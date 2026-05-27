@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
 package steward
@@ -17,6 +17,13 @@ import (
 
 func newTestStore(t *testing.T) *StewardSecretStore {
 	t.Helper()
+
+	// The steward secrets provider requires OS-level machine identity for key derivation.
+	// On Linux this is /etc/machine-id. Skip gracefully when it's absent (e.g. containers).
+	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
+		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
+	}
+
 	tmpDir := t.TempDir()
 
 	provider := &StewardProvider{}
@@ -364,6 +371,10 @@ func TestStoreSecret_Validation(t *testing.T) {
 }
 
 func TestStore_PersistenceAcrossReload(t *testing.T) {
+	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
+		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
+	}
+
 	tmpDir := t.TempDir()
 	ctx := context.Background()
 

@@ -1,49 +1,34 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rbac
 
 import (
 	"context"
 	"testing"
+	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage providers to register them
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // TestNewManagerWithStorage tests the new constructor that accepts storage interfaces
 func TestNewManagerWithStorage(t *testing.T) {
+	// The database provider is exercised by its own provider-specific tests
+	// under pkg/storage/providers/database/. This test covers the OSS
+	// flatfile+sqlite composite path that the controller actually uses.
 	tests := []struct {
 		name         string
 		setupStorage func(t *testing.T) (*interfaces.StorageManager, error)
 		wantErr      bool
 	}{
 		{
-			name: "with database storage provider (if configured)",
+			name: "with flatfile+sqlite storage provider",
 			setupStorage: func(t *testing.T) (*interfaces.StorageManager, error) {
-				// Skip database tests for now due to configuration complexity
-				// In production, database provider will be properly configured
-				t.Skip("database provider requires complex configuration - skipping for basic test")
-				return nil, nil
-			},
-			wantErr: false,
-		},
-		{
-			name: "with git storage provider",
-			setupStorage: func(t *testing.T) (*interfaces.StorageManager, error) {
-				// Git provider with temporary directory
-				config := map[string]interface{}{
-					"repository_path": t.TempDir(),
-					"branch":          "main",
-					"auto_init":       true,
-				}
-				return interfaces.CreateAllStoresFromConfig("git", config)
+				tmpDir := t.TempDir()
+				return interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 			},
 			wantErr: false,
 		},
@@ -58,6 +43,7 @@ func TestNewManagerWithStorage(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.NotNil(t, storageManager)
+			t.Cleanup(func() { _ = storageManager.Close() })
 
 			// Test creating manager with storage interfaces
 			manager := NewManagerWithStorage(
@@ -65,10 +51,17 @@ func TestNewManagerWithStorage(t *testing.T) {
 				storageManager.GetClientTenantStore(),
 				storageManager.GetRBACStore(),
 			)
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = manager.Close(ctx)
+			})
 			require.NotNil(t, manager)
 
 			// Verify manager initializes correctly with pluggable storage
 			ctx := context.Background()
+			// M-AUTH-2: sensitive operations require justification in context
+			ctx = WithSensitiveOperationJustification(ctx, "test: storage backend operations")
 			err = manager.Initialize(ctx)
 			require.NoError(t, err)
 
@@ -152,55 +145,38 @@ func TestNewManagerWithStorage(t *testing.T) {
 // deliberately removed to eliminate package-level storage mechanisms
 // All RBAC managers now require explicit storage configuration via NewManagerWithStorage()
 
-// TestNewManagerWithStorage_NilStorageHandling tests error handling for nil storage interfaces
+// TestNewManagerWithStorage_NilStorageHandling verifies that NewManagerWithStorage
+// panics when any required store is nil. All three stores (audit, clientTenant,
+// rbac) are required — passing nil for any of them is a programmer error.
 func TestNewManagerWithStorage_NilStorageHandling(t *testing.T) {
-	tests := []struct {
-		name              string
-		auditStore        interfaces.AuditStore
-		clientTenantStore interfaces.ClientTenantStore
-		expectPanic       bool
-	}{
-		{
-			name:              "nil audit store",
-			auditStore:        nil,
-			clientTenantStore: nil,
-			expectPanic:       true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.expectPanic {
-				assert.Panics(t, func() {
-					NewManagerWithStorage(tt.auditStore, tt.clientTenantStore, nil)
-				})
-			} else {
-				manager := NewManagerWithStorage(tt.auditStore, tt.clientTenantStore, nil)
-				assert.NotNil(t, manager)
-			}
-		})
-	}
+	assert.Panics(t, func() {
+		NewManagerWithStorage(nil, nil, nil)
+	}, "NewManagerWithStorage must panic when all stores are nil")
 }
 
 // TestManagerWithStorage_TenantIsolation tests that tenant isolation works correctly with pluggable storage
 func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 	// Create storage manager using git provider
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	require.NotNil(t, manager)
 
 	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctx = WithSensitiveOperationJustification(ctx, "test: tenant isolation operations")
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -257,22 +233,26 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 // TestManagerWithStorage_AuditTrail tests that RBAC operations are properly audited
 func TestManagerWithStorage_AuditTrail(t *testing.T) {
 	// Create storage manager using git provider
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	require.NotNil(t, manager)
 
 	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctx = WithSensitiveOperationJustification(ctx, "test: audit trail operations")
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -289,7 +269,7 @@ func TestManagerWithStorage_AuditTrail(t *testing.T) {
 
 	// TODO: Once audit integration is implemented, verify audit entries exist
 	// For now, this test establishes the structure for future audit validation
-	// auditEntries, err := storageManager.GetAuditStore().ListAuditEntries(ctx, &interfaces.AuditFilter{
+	// auditEntries, err := storageManager.GetAuditStore().ListAuditEntries(ctx, &business.AuditFilter{
 	// 	ResourceTypes: []string{"role"},
 	// 	Actions:       []string{"create"},
 	// })

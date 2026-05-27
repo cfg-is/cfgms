@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package auth
 
@@ -9,20 +9,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // TestDirectAppAccessConfiguration tests direct app registration configuration
 // This test validates delegated permissions setup without requiring CSP sandbox
 func TestDirectAppAccessConfiguration(t *testing.T) {
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "direct-app-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	// Direct app configuration with delegated permissions
 	config := &OAuth2Config{
@@ -62,7 +61,7 @@ func TestDirectAppAccessConfiguration(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	t.Run("TestDirectAppConfigurationStorage", func(t *testing.T) {
@@ -276,9 +275,7 @@ func TestDirectAppAccessTokenFlow(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "token-flow-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:                 "token-flow-client-id",
@@ -292,7 +289,7 @@ func TestDirectAppAccessTokenFlow(t *testing.T) {
 		Scopes:                   []string{"User.Read.All", "Directory.Read.All"},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	t.Run("TestApplicationTokenFlow", func(t *testing.T) {
@@ -340,9 +337,7 @@ func TestDirectAppAccessTokenFlow(t *testing.T) {
 
 // TestDirectAppAccessPermissionScenarios tests realistic M365 permission scenarios
 func TestDirectAppAccessPermissionScenarios(t *testing.T) {
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "scenario-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:             "scenario-client-id",
@@ -355,7 +350,7 @@ func TestDirectAppAccessPermissionScenarios(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	// Define realistic scenarios for different M365 operations
@@ -472,9 +467,7 @@ func TestDirectAppAccessIntegration(t *testing.T) {
 		t.Skip("Skipping real M365 integration test - credentials not available")
 	}
 
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "integration-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:                 clientID,
@@ -493,7 +486,7 @@ func TestDirectAppAccessIntegration(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	t.Run("TestRealApplicationToken", func(t *testing.T) {

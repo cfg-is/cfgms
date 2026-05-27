@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package script
 
@@ -15,24 +15,26 @@ import (
 
 // ScriptConfig represents the configuration for a script resource
 type ScriptConfig struct {
-	Content       string                 `yaml:"content"`               // Script content
-	Shell         ShellType              `yaml:"shell"`                 // Required shell type
-	Timeout       time.Duration          `yaml:"timeout"`               // Execution timeout
-	Environment   map[string]string      `yaml:"environment,omitempty"` // Environment variables
-	WorkingDir    string                 `yaml:"working_dir,omitempty"` // Working directory
-	Signature     *ScriptSignature       `yaml:"signature,omitempty"`   // Script signature
-	SigningPolicy SigningPolicy          `yaml:"signing_policy"`        // Signing policy
-	Description   string                 `yaml:"description,omitempty"` // Script description
-	Metadata      map[string]interface{} `yaml:"metadata,omitempty"`    // Additional metadata
+	Content          string                 `yaml:"content"`                     // Script content
+	Shell            ShellType              `yaml:"shell"`                       // Required shell type
+	Timeout          time.Duration          `yaml:"timeout"`                     // Execution timeout
+	Environment      map[string]string      `yaml:"environment,omitempty"`       // Environment variables
+	WorkingDir       string                 `yaml:"working_dir,omitempty"`       // Working directory
+	Signature        *ScriptSignature       `yaml:"signature,omitempty"`         // Script signature
+	SigningPolicy    SigningPolicy          `yaml:"signing_policy"`              // Signing policy
+	ExecutionContext ExecutionContext       `yaml:"execution_context,omitempty"` // How the script runs (system or logged_in_user)
+	Description      string                 `yaml:"description,omitempty"`       // Script description
+	Metadata         map[string]interface{} `yaml:"metadata,omitempty"`          // Additional metadata
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
 func (c *ScriptConfig) AsMap() map[string]interface{} {
 	result := map[string]interface{}{
-		"content":        c.Content,
-		"shell":          string(c.Shell),
-		"timeout":        c.Timeout.String(),
-		"signing_policy": string(c.SigningPolicy),
+		"content":           c.Content,
+		"shell":             string(c.Shell),
+		"timeout":           c.Timeout.String(),
+		"signing_policy":    string(c.SigningPolicy),
+		"execution_context": string(c.ExecutionContext),
 	}
 
 	if len(c.Environment) > 0 {
@@ -64,6 +66,63 @@ func (c *ScriptConfig) FromYAML(data []byte) error {
 	return yaml.Unmarshal(data, c)
 }
 
+// scriptConfigFromMap builds a ScriptConfig from a generic config map — the form
+// the convergence executor delivers (a map-backed modules.ConfigState rather
+// than a typed *ScriptConfig). Mirrors the file/directory modules' map-based
+// decode. Config values arrive as strings via the controller→steward proto, so
+// timeout is parsed from its duration string. (Issue #1572)
+func scriptConfigFromMap(m map[string]interface{}) (*ScriptConfig, error) {
+	c := &ScriptConfig{}
+	if v, ok := m["content"].(string); ok {
+		c.Content = v
+	}
+	if v, ok := m["shell"].(string); ok {
+		c.Shell = ShellType(v)
+	}
+	if v, ok := m["working_dir"].(string); ok {
+		c.WorkingDir = v
+	}
+	if v, ok := m["description"].(string); ok {
+		c.Description = v
+	}
+	if v, ok := m["signing_policy"].(string); ok {
+		c.SigningPolicy = SigningPolicy(v)
+	}
+	if v, ok := m["execution_context"].(string); ok {
+		c.ExecutionContext = ExecutionContext(v)
+	}
+	switch env := m["environment"].(type) {
+	case map[string]string:
+		c.Environment = env
+	case map[string]interface{}:
+		c.Environment = make(map[string]string, len(env))
+		for k, val := range env {
+			if s, ok := val.(string); ok {
+				c.Environment[k] = s
+			}
+		}
+	}
+	switch t := m["timeout"].(type) {
+	case string:
+		if t != "" {
+			d, err := time.ParseDuration(t)
+			if err != nil {
+				return nil, fmt.Errorf("invalid timeout %q: %w", t, err)
+			}
+			c.Timeout = d
+		}
+	case time.Duration:
+		c.Timeout = t
+	case int:
+		c.Timeout = time.Duration(t)
+	case int64:
+		c.Timeout = time.Duration(t)
+	case float64:
+		c.Timeout = time.Duration(t)
+	}
+	return c, nil
+}
+
 // Validate ensures the configuration is valid
 func (c *ScriptConfig) Validate() error {
 	if c.Content == "" {
@@ -87,6 +146,16 @@ func (c *ScriptConfig) Validate() error {
 	// Set default timeout if not specified
 	if c.Timeout == 0 {
 		c.Timeout = 5 * time.Minute // Default 5 minute timeout
+	}
+
+	// Validate and default execution context
+	switch c.ExecutionContext {
+	case ExecutionContextSystem, ExecutionContextLoggedInUser:
+		// Valid
+	case "":
+		c.ExecutionContext = ExecutionContextSystem // default
+	default:
+		return fmt.Errorf("%w: invalid execution context: %s", modules.ErrInvalidInput, c.ExecutionContext)
 	}
 
 	// Validate signing policy
@@ -114,9 +183,26 @@ func (c *ScriptConfig) Validate() error {
 	return nil
 }
 
+// EffectiveSigningPolicy returns the more restrictive of the script's own signing policy
+// and the steward-level minimum enforced by the operator. This allows the steward config
+// to mandate a floor (e.g. "required") without having to modify every individual script config.
+func (c *ScriptConfig) EffectiveSigningPolicy(stewardMinimum SigningPolicy) SigningPolicy {
+	level := map[SigningPolicy]int{
+		SigningPolicyNone:     0,
+		SigningPolicyOptional: 1,
+		SigningPolicyRequired: 2,
+	}
+	scriptLevel := level[c.SigningPolicy]
+	stewardLevel := level[stewardMinimum]
+	if stewardLevel > scriptLevel {
+		return stewardMinimum
+	}
+	return c.SigningPolicy
+}
+
 // GetManagedFields returns the list of fields this configuration manages
 func (c *ScriptConfig) GetManagedFields() []string {
-	fields := []string{"content", "shell", "timeout", "signing_policy"}
+	fields := []string{"content", "shell", "timeout", "signing_policy", "execution_context"}
 
 	if len(c.Environment) > 0 {
 		fields = append(fields, "environment")

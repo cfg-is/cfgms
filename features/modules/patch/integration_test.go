@@ -1,6 +1,6 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-package patch_test
+package patch
 
 import (
 	"context"
@@ -9,14 +9,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/cfgis/cfgms/features/modules/patch"
 )
 
 // TestPatchModule_WithPolicyEngine tests the patch module with policy engine integration
 func TestPatchModule_WithPolicyEngine(t *testing.T) {
 	// Create a custom policy with strict deadlines
-	policy := patch.PatchPolicy{
+	policy := PatchPolicy{
 		Critical:          3 * 24 * time.Hour, // 3 days for critical
 		Important:         7 * 24 * time.Hour, // 7 days for important
 		Moderate:          14 * 24 * time.Hour,
@@ -26,11 +24,11 @@ func TestPatchModule_WithPolicyEngine(t *testing.T) {
 	}
 
 	// Create mock patch manager with no pending patches
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{}) // Clear default patches
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{}) // Clear default patches
 
 	// Create patch module with policy
-	module, err := patch.NewPatchModuleWithPolicy(mockManager, policy, nil, "test-device")
+	module, err := NewPatchModuleWithPolicy(mockManager, policy, nil, "test-device")
 	require.NoError(t, err)
 	require.NotNil(t, module)
 
@@ -42,17 +40,17 @@ func TestPatchModule_WithPolicyEngine(t *testing.T) {
 	assert.NotNil(t, report)
 
 	// Should be compliant with no pending patches
-	assert.Equal(t, patch.ComplianceStatusCompliant, report.Status)
+	assert.Equal(t, ComplianceStatusCompliant, report.Status)
 }
 
 func TestPatchModule_ComplianceWithOverduePatches(t *testing.T) {
-	policy := patch.DefaultPolicy()
+	policy := DefaultPolicy()
 
 	// Create mock manager with overdue patches
-	mockManager := patch.NewMockPatchManager()
+	mockManager := NewMockPatchManager()
 
 	// Add an overdue critical patch (10 days old)
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB9999999",
 			Title:       "Critical Security Update",
@@ -63,7 +61,7 @@ func TestPatchModule_ComplianceWithOverduePatches(t *testing.T) {
 		},
 	})
 
-	module, err := patch.NewPatchModuleWithPolicy(mockManager, policy, nil, "test-device")
+	module, err := NewPatchModuleWithPolicy(mockManager, policy, nil, "test-device")
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -73,21 +71,21 @@ func TestPatchModule_ComplianceWithOverduePatches(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should be non-compliant due to overdue critical patch
-	assert.Equal(t, patch.ComplianceStatusNonCompliant, report.Status)
+	assert.Equal(t, ComplianceStatusNonCompliant, report.Status)
 	assert.Equal(t, 1, len(report.MissingPatches))
 	assert.True(t, report.MissingPatches[0].DaysOverdue > 0)
 }
 
 func TestPatchModule_ComplianceWithWarningState(t *testing.T) {
-	policy := patch.DefaultPolicy()
+	policy := DefaultPolicy()
 
-	mockManager := patch.NewMockPatchManager()
+	mockManager := NewMockPatchManager()
 
 	// Add a patch that's approaching deadline (3 days old, 4 days left)
 	// Critical policy is 7 days, so 3 days old = 4 days until breach
 	// CriticalThreshold is 1 day, WarningThreshold is 7 days
 	// With 4 days left, it's > 1 day but < 7 days, so should be Warning
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB8888888",
 			Title:       "Important Security Update",
@@ -98,7 +96,7 @@ func TestPatchModule_ComplianceWithWarningState(t *testing.T) {
 		},
 	})
 
-	module, err := patch.NewPatchModuleWithPolicy(mockManager, policy, nil, "test-device")
+	module, err := NewPatchModuleWithPolicy(mockManager, policy, nil, "test-device")
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -107,18 +105,18 @@ func TestPatchModule_ComplianceWithWarningState(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should be in warning state (within 7-day warning threshold, but > 1-day critical threshold)
-	assert.Equal(t, patch.ComplianceStatusWarning, report.Status)
+	assert.Equal(t, ComplianceStatusWarning, report.Status)
 	assert.True(t, report.DaysUntilBreach > 1 && report.DaysUntilBreach < 7,
 		"Expected days until breach between 1 and 7, got %d", report.DaysUntilBreach)
 }
 
 func TestPatchModule_SetPolicy(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	module, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	module, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
 	// Update policy
-	newPolicy := patch.PatchPolicy{
+	newPolicy := PatchPolicy{
 		Critical:          1 * 24 * time.Hour, // Very strict 1-day deadline
 		Important:         2 * 24 * time.Hour,
 		Moderate:          7 * 24 * time.Hour,
@@ -130,7 +128,7 @@ func TestPatchModule_SetPolicy(t *testing.T) {
 	module.SetPolicy(newPolicy)
 
 	// Add a 2-day old critical patch
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB7777777",
 			Title:       "Critical Update",
@@ -146,7 +144,7 @@ func TestPatchModule_SetPolicy(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should be non-compliant with strict 1-day policy
-	assert.Equal(t, patch.ComplianceStatusNonCompliant, report.Status)
+	assert.Equal(t, ComplianceStatusNonCompliant, report.Status)
 }
 
 // mockWindowManager is a test implementation of WindowManager
@@ -190,8 +188,8 @@ func (m *mockWindowManager) GetNextWindow(ctx context.Context, deviceID string) 
 }
 
 func TestPatchModule_WithMaintenanceWindow(t *testing.T) {
-	policy := patch.DefaultPolicy()
-	mockManager := patch.NewMockPatchManager()
+	policy := DefaultPolicy()
+	mockManager := NewMockPatchManager()
 
 	// Create mock window manager - not in window
 	mockWindow := &mockWindowManager{
@@ -201,7 +199,7 @@ func TestPatchModule_WithMaintenanceWindow(t *testing.T) {
 		nextWindow:      time.Now().Add(2 * time.Hour),
 	}
 
-	module, err := patch.NewPatchModuleWithPolicy(mockManager, policy, mockWindow, "test-device")
+	module, err := NewPatchModuleWithPolicy(mockManager, policy, mockWindow, "test-device")
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -213,8 +211,8 @@ func TestPatchModule_WithMaintenanceWindow(t *testing.T) {
 }
 
 func TestPatchModule_RebootBlockedByMaintenanceWindow(t *testing.T) {
-	policy := patch.DefaultPolicy()
-	mockManager := patch.NewMockPatchManager()
+	policy := DefaultPolicy()
+	mockManager := NewMockPatchManager()
 
 	// Set mock to require reboot
 	mockManager.SetRebootRequired(true)
@@ -227,11 +225,11 @@ func TestPatchModule_RebootBlockedByMaintenanceWindow(t *testing.T) {
 		nextWindow:      time.Now().Add(2 * time.Hour),
 	}
 
-	module, err := patch.NewPatchModuleWithPolicy(mockManager, policy, mockWindow, "test-device")
+	module, err := NewPatchModuleWithPolicy(mockManager, policy, mockWindow, "test-device")
 	require.NoError(t, err)
 
 	// Create config with auto-reboot
-	config := &patch.Config{
+	config := &Config{
 		PatchType:  "security",
 		AutoReboot: true,
 		TestMode:   true,
@@ -246,8 +244,8 @@ func TestPatchModule_RebootBlockedByMaintenanceWindow(t *testing.T) {
 }
 
 func TestPatchModule_RebootAllowedInMaintenanceWindow(t *testing.T) {
-	policy := patch.DefaultPolicy()
-	mockManager := patch.NewMockPatchManager()
+	policy := DefaultPolicy()
+	mockManager := NewMockPatchManager()
 
 	// Set mock to require reboot
 	mockManager.SetRebootRequired(true)
@@ -260,11 +258,11 @@ func TestPatchModule_RebootAllowedInMaintenanceWindow(t *testing.T) {
 		nextWindow:      time.Now().Add(-1 * time.Hour), // Already in window
 	}
 
-	module, err := patch.NewPatchModuleWithPolicy(mockManager, policy, mockWindow, "test-device")
+	module, err := NewPatchModuleWithPolicy(mockManager, policy, mockWindow, "test-device")
 	require.NoError(t, err)
 
 	// Create config with auto-reboot
-	config := &patch.Config{
+	config := &Config{
 		PatchType:  "security",
 		AutoReboot: true,
 		TestMode:   true,
@@ -278,11 +276,11 @@ func TestPatchModule_RebootAllowedInMaintenanceWindow(t *testing.T) {
 }
 
 func TestPatchModule_CheckCompliance(t *testing.T) {
-	policy := patch.DefaultPolicy()
-	mockManager := patch.NewMockPatchManager()
-	mockManager.SetAvailablePatches([]patch.PatchInfo{}) // Clear default patches
+	policy := DefaultPolicy()
+	mockManager := NewMockPatchManager()
+	mockManager.SetAvailablePatches([]PatchInfo{}) // Clear default patches
 
-	module, err := patch.NewPatchModuleWithPolicy(mockManager, policy, nil, "test-device")
+	module, err := NewPatchModuleWithPolicy(mockManager, policy, nil, "test-device")
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -290,28 +288,28 @@ func TestPatchModule_CheckCompliance(t *testing.T) {
 	// Check compliance status
 	status, err := module.CheckCompliance(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusCompliant, status)
+	assert.Equal(t, ComplianceStatusCompliant, status)
 }
 
 func TestPatchModule_MultipleComplianceChecks(t *testing.T) {
-	policy := patch.DefaultPolicy()
+	policy := DefaultPolicy()
 	ctx := context.Background()
 
 	// First scenario: compliant system
-	mockManager1 := patch.NewMockPatchManager()
-	mockManager1.SetAvailablePatches([]patch.PatchInfo{}) // No patches
+	mockManager1 := NewMockPatchManager()
+	mockManager1.SetAvailablePatches([]PatchInfo{}) // No patches
 
-	module1, err := patch.NewPatchModuleWithPolicy(mockManager1, policy, nil, "test-device")
+	module1, err := NewPatchModuleWithPolicy(mockManager1, policy, nil, "test-device")
 	require.NoError(t, err)
 
 	status1, err := module1.CheckCompliance(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusCompliant, status1)
+	assert.Equal(t, ComplianceStatusCompliant, status1)
 
 	// Second scenario: non-compliant system with overdue patch
 	// Create a new module instance to test different state
-	mockManager2 := patch.NewMockPatchManager()
-	mockManager2.SetAvailablePatches([]patch.PatchInfo{
+	mockManager2 := NewMockPatchManager()
+	mockManager2.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB6666666",
 			Title:       "Overdue Critical Patch",
@@ -322,16 +320,16 @@ func TestPatchModule_MultipleComplianceChecks(t *testing.T) {
 		},
 	})
 
-	module2, err := patch.NewPatchModuleWithPolicy(mockManager2, policy, nil, "test-device")
+	module2, err := NewPatchModuleWithPolicy(mockManager2, policy, nil, "test-device")
 	require.NoError(t, err)
 
 	status2, err := module2.CheckCompliance(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, patch.ComplianceStatusNonCompliant, status2)
+	assert.Equal(t, ComplianceStatusNonCompliant, status2)
 }
 
 func TestPatchModule_GetComplianceReport_Detailed(t *testing.T) {
-	policy := patch.PatchPolicy{
+	policy := PatchPolicy{
 		Critical:          5 * 24 * time.Hour,
 		Important:         10 * 24 * time.Hour,
 		Moderate:          20 * 24 * time.Hour,
@@ -340,11 +338,11 @@ func TestPatchModule_GetComplianceReport_Detailed(t *testing.T) {
 		CriticalThreshold: 24 * time.Hour,
 	}
 
-	mockManager := patch.NewMockPatchManager()
+	mockManager := NewMockPatchManager()
 
 	// Add multiple patches with different severities and ages
 	// Policy: Critical=5d, Important=10d, Moderate=20d, CriticalThreshold=1d, WarningThreshold=3d
-	mockManager.SetAvailablePatches([]patch.PatchInfo{
+	mockManager.SetAvailablePatches([]PatchInfo{
 		{
 			ID:          "KB1111111",
 			Title:       "Critical Patch 1",
@@ -371,7 +369,7 @@ func TestPatchModule_GetComplianceReport_Detailed(t *testing.T) {
 		},
 	})
 
-	module, err := patch.NewPatchModuleWithPolicy(mockManager, policy, nil, "test-device")
+	module, err := NewPatchModuleWithPolicy(mockManager, policy, nil, "test-device")
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -385,7 +383,7 @@ func TestPatchModule_GetComplianceReport_Detailed(t *testing.T) {
 
 	// Critical patch should be in warning state (1 day old, 4 days left)
 	// This is the patch closest to deadline, so it determines overall status
-	assert.Equal(t, patch.ComplianceStatusWarning, report.Status)
+	assert.Equal(t, ComplianceStatusWarning, report.Status)
 
 	// Verify each patch is tracked
 	var criticalFound, importantFound, moderateFound bool
@@ -409,8 +407,8 @@ func TestPatchModule_GetComplianceReport_Detailed(t *testing.T) {
 }
 
 func TestPatchModule_SetDeviceID(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	module, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	module, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
 	// Set device ID

@@ -1,8 +1,9 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package cert
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -120,75 +121,25 @@ func CreateBasicTLSConfig(certPEM, keyPEM []byte, minVersion uint16) (*tls.Confi
 	}, nil
 }
 
-// GetTLSCertificateFromManager loads a certificate from the manager and converts it to tls.Certificate
-func (m *Manager) GetTLSCertificate(serialNumber string) (tls.Certificate, error) {
-	cert, err := m.GetCertificate(serialNumber)
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("failed to get certificate: %w", err)
+// CreateOnDemandClientTLSConfig creates a client TLS config that fetches the client
+// certificate on every TLS handshake via the Manager, enabling transparent rotation.
+// When caCertPEM is non-empty it is used for server verification; otherwise system roots apply.
+func (m *Manager) CreateOnDemandClientTLSConfig(caCertPEM []byte, minVersion uint16) (*tls.Config, error) {
+	if minVersion < tls.VersionTLS12 {
+		return nil, fmt.Errorf("minimum TLS version must be 1.2 or higher, got 0x%04x", minVersion)
 	}
-
-	if cert.PrivateKeyPEM == nil {
-		return tls.Certificate{}, fmt.Errorf("certificate does not have private key")
+	tlsConfig := &tls.Config{
+		MinVersion: minVersion, // #nosec G402 -- TLS 1.2+ enforced by validation above
+		GetClientCertificate: func(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return m.GetClientCertificate(context.Background())
+		},
 	}
-
-	return LoadTLSCertificate(cert.CertificatePEM, cert.PrivateKeyPEM)
-}
-
-// CreateServerTLSConfigFromManager creates a server TLS config using certificates from the manager
-// Parameters:
-// - serverCertSerialNumber: Serial number of the server certificate to use
-// - requireClientCert: Whether to require and verify client certificates
-// Returns a TLS config ready for use with HTTP/gRPC/QUIC servers
-func (m *Manager) CreateServerTLSConfigFromManager(serverCertSerialNumber string, requireClientCert bool, minVersion uint16) (*tls.Config, error) {
-	// Load server certificate
-	serverCert, err := m.GetCertificate(serverCertSerialNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get server certificate: %w", err)
-	}
-
-	if serverCert.PrivateKeyPEM == nil {
-		return nil, fmt.Errorf("server certificate does not have private key")
-	}
-
-	// Get CA certificate for client verification
-	var caCertPEM []byte
-	if requireClientCert {
-		caCertPEM, err = m.GetCACertificate()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get CA certificate: %w", err)
+	if len(caCertPEM) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCertPEM) {
+			return nil, fmt.Errorf("failed to append CA certificate to pool")
 		}
+		tlsConfig.RootCAs = pool
 	}
-
-	return CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, caCertPEM, minVersion)
-}
-
-// CreateClientTLSConfigFromManager creates a client TLS config using certificates from the manager
-// Parameters:
-// - clientCertSerialNumber: Serial number of the client certificate to use (empty string for server-auth-only)
-// - serverName: Server name for SNI and certificate verification
-// Returns a TLS config ready for use with HTTP/gRPC/QUIC clients
-func (m *Manager) CreateClientTLSConfigFromManager(clientCertSerialNumber string, serverName string, minVersion uint16) (*tls.Config, error) {
-	// Get CA certificate for server verification
-	caCertPEM, err := m.GetCACertificate()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get CA certificate: %w", err)
-	}
-
-	// Load client certificate if serial number provided (for mTLS)
-	var clientCertPEM, clientKeyPEM []byte
-	if clientCertSerialNumber != "" {
-		clientCert, err := m.GetCertificate(clientCertSerialNumber)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get client certificate: %w", err)
-		}
-
-		if clientCert.PrivateKeyPEM == nil {
-			return nil, fmt.Errorf("client certificate does not have private key")
-		}
-
-		clientCertPEM = clientCert.CertificatePEM
-		clientKeyPEM = clientCert.PrivateKeyPEM
-	}
-
-	return CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM, serverName, minVersion)
+	return tlsConfig, nil
 }

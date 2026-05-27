@@ -1,6 +1,6 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-package steward
+package steward_test
 
 import (
 	"context"
@@ -10,138 +10,39 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	steward "github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/testutil"
 )
-
-func TestStewardCreation(t *testing.T) {
-	// Test cases
-	tests := []struct {
-		name    string
-		cfg     *Config
-		wantErr bool
-	}{
-		{
-			name:    "with default config",
-			cfg:     nil, // Use nil to get a config with test certificates
-			wantErr: false,
-		},
-		{
-			name:    "with nil config",
-			cfg:     nil,
-			wantErr: false,
-		},
-		{
-			name:    "with custom config",
-			cfg:     nil, // Will be set up with test certificates
-			wantErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create a test logger
-			logger := logging.NewLogger("info")
-
-			var testCfg *Config
-
-			if tt.cfg == nil {
-				// Use test configuration with certificates
-				if tt.name == "with custom config" {
-					testConfig := &testutil.StewardTestConfig{
-						ControllerAddr: "localhost:9090",
-						StewardID:      "test-steward-1",
-						LogLevel:       "debug",
-					}
-					certDir, dataDir, cleanup := testutil.SetupTestEnvironment(t, testConfig)
-					testCfg = &Config{
-						ControllerAddr: testConfig.ControllerAddr,
-						CertPath:       certDir,
-						DataDir:        dataDir,
-						LogLevel:       testConfig.LogLevel,
-						ID:             testConfig.StewardID,
-					}
-					t.Cleanup(cleanup)
-				} else {
-					testConfig := testutil.DefaultStewardTestConfig()
-					certDir, dataDir, cleanup := testutil.SetupTestEnvironment(t, testConfig)
-					testCfg = &Config{
-						ControllerAddr: testConfig.ControllerAddr,
-						CertPath:       certDir,
-						DataDir:        dataDir,
-						LogLevel:       testConfig.LogLevel,
-						ID:             testConfig.StewardID,
-					}
-					t.Cleanup(cleanup)
-				}
-			} else {
-				testCfg = tt.cfg
-			}
-
-			steward, err := New(testCfg, logger)
-			// Story #198: Controller mode deprecated - all calls to New() should fail
-			assert.Error(t, err)
-			assert.Nil(t, steward)
-			assert.Contains(t, err.Error(), "deprecated")
-		})
-	}
-}
-
-func TestStewardLifecycle(t *testing.T) {
-	// Create a test logger
-	logger := logging.NewLogger("info")
-
-	// Set up test configuration with certificates
-	testConfig := testutil.DefaultStewardTestConfig()
-	testConfig.StewardID = "test-steward-lifecycle"
-	certDir, dataDir, cleanup := testutil.SetupTestEnvironment(t, testConfig)
-	t.Cleanup(cleanup)
-
-	cfg := &Config{
-		ControllerAddr: testConfig.ControllerAddr,
-		CertPath:       certDir,
-		DataDir:        dataDir,
-		LogLevel:       testConfig.LogLevel,
-		ID:             testConfig.StewardID,
-	}
-
-	steward, err := New(cfg, logger)
-	// Story #198: Controller mode deprecated
-	require.Error(t, err)
-	require.Nil(t, steward)
-	require.Contains(t, err.Error(), "deprecated")
-	// Skip rest of test - controller mode not supported
-}
 
 func TestHealthMonitor(t *testing.T) {
 	// Test cases for health monitor
 	tests := []struct {
 		name        string
-		setupFn     func(*HealthMonitor)
-		checkStatus HealthStatus
+		setupFn     func(*steward.HealthMonitor)
+		checkStatus steward.HealthStatus
 	}{
 		{
 			name: "default is healthy",
-			setupFn: func(hm *HealthMonitor) {
+			setupFn: func(hm *steward.HealthMonitor) {
 				// No setup, should be healthy by default
 			},
-			checkStatus: StatusHealthy,
+			checkStatus: steward.StatusHealthy,
 		},
 		{
 			name: "record error changes metrics",
-			setupFn: func(hm *HealthMonitor) {
+			setupFn: func(hm *steward.HealthMonitor) {
 				hm.RecordConfigError()
 				hm.RecordConfigError()
 				hm.RecordConfigError()
 			},
-			checkStatus: StatusDegraded, // Status changes to degraded after errors
+			checkStatus: steward.StatusDegraded, // Status changes to degraded after errors
 		},
 		{
 			name: "record latency updates metrics",
-			setupFn: func(hm *HealthMonitor) {
+			setupFn: func(hm *steward.HealthMonitor) {
 				hm.RecordTaskLatency(500 * time.Millisecond)
 			},
-			checkStatus: StatusDegraded, // Status changes to degraded after high latency
+			checkStatus: steward.StatusDegraded, // Status changes to degraded after high latency
 		},
 	}
 
@@ -151,28 +52,15 @@ func TestHealthMonitor(t *testing.T) {
 			logger := logging.NewLogger("info")
 
 			// Create a health monitor
-			monitor := NewHealthMonitor(logger)
+			monitor := steward.NewHealthMonitor(logger)
 
 			// Apply setup function
 			if tt.setupFn != nil {
 				tt.setupFn(monitor)
 			}
 
-			// Check status
+			// Check status — assertions happen synchronously; no goroutine needed
 			assert.Equal(t, tt.checkStatus, monitor.GetStatus())
-
-			// Create context for monitor
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			defer cancel()
-
-			// Start the monitor
-			go monitor.Start(ctx)
-
-			// Let it run briefly
-			time.Sleep(50 * time.Millisecond)
-
-			// Stop the monitor
-			monitor.Stop()
 		})
 	}
 }
@@ -181,10 +69,25 @@ func TestNewStandalone(t *testing.T) {
 	// Test standalone creation with empty config (should fail)
 	logger := logging.NewLogger("info")
 
-	steward, err := NewStandalone("", logger)
+	s, err := steward.NewStandalone("", logger)
 
 	// Should fail because no config found
 	assert.Error(t, err)
-	assert.Nil(t, steward)
-	assert.Contains(t, err.Error(), "no configuration file found")
+	assert.Nil(t, s)
+	assert.Contains(t, err.Error(), "failed to load configuration")
+}
+
+// TestNewStandaloneWithConfig tests that NewStandalone succeeds with a valid config file.
+func TestNewStandaloneWithConfig(t *testing.T) {
+	logger := logging.NewLogger("info")
+	dir := t.TempDir()
+	cfgPath := writeMinimalCfg(t, dir, "standalone-test-steward")
+
+	s, err := steward.NewStandalone(cfgPath, logger)
+	require.NoError(t, err)
+	require.NotNil(t, s)
+
+	assert.Equal(t, "standalone-test-steward", s.GetStewardID())
+	// Constructor success + Start()/Stop() succeeding proves healthCheck and executor wiring.
+	require.NoError(t, s.Stop(context.Background()))
 }

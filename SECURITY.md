@@ -173,12 +173,12 @@ CFGMS enforces an explicit environment variable policy to prevent environment va
 **Why This Matters**:
 - **Prevents Silent Hijacking**: An attacker with env var control cannot redirect the steward to a malicious controller without also modifying the configuration file
 - **Defense in Depth**: Configuration files are protected by ACLs and cryptographic signatures (Story #250), so modifying config requires additional privileges
-- **Audit Trail**: `cat config.yaml` shows exactly which values come from env vars
+- **Audit Trail**: `cat hostname.cfg` shows exactly which values come from env vars
 - **Fail-Safe**: Missing required env vars (without defaults) cause immediate startup failure
 
 **How It Works**:
 ```yaml
-# In config.yaml:
+# In hostname.cfg (YAML format):
 controller_url: ${CFGMS_CONTROLLER_URL:-https://controller.example.com:9080}
 log_dir: ${CFGMS_LOG_DIR:-/var/log/cfgms}
 db_password: ${CFGMS_DB_PASSWORD}  # Required - fails if not set

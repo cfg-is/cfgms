@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package network_activedirectory
 
@@ -525,4 +525,102 @@ func TestActiveDirectoryProviderErrors(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "steward communication failed")
 	})
+}
+
+func TestNewFromRegistry_WithRegistry_ReturnsConfiguredProvider(t *testing.T) {
+	globalRegistryMu.Lock()
+	orig := globalRegistry
+	globalRegistryMu.Unlock()
+	t.Cleanup(func() {
+		globalRegistryMu.Lock()
+		globalRegistry = orig
+		globalRegistryMu.Unlock()
+	})
+
+	client := NewMockStewardClient()
+	client.AddSteward(StewardInfo{
+		ID:        "steward-dc01",
+		Hostname:  "dc01.example.com",
+		Platform:  "windows",
+		Modules:   []string{"activedirectory"},
+		Tags:      map[string]string{"ad_domain": "example.com"},
+		IsHealthy: true,
+	})
+
+	SetStewardClientRegistry(func() (StewardClient, error) {
+		return client, nil
+	})
+
+	provider := newFromRegistry()
+	require.NotNil(t, provider)
+
+	ap, ok := provider.(*ActiveDirectoryProvider)
+	require.True(t, ok, "expected *ActiveDirectoryProvider")
+	assert.Nil(t, ap.notConfiguredErr, "provider should be configured when registry is set")
+	assert.NotNil(t, ap.stewardClient, "stewardClient must be non-nil when registry is set")
+
+	ctx := context.Background()
+	err := ap.Connect(ctx, interfaces.ProviderConfig{
+		ServerAddress: "example.com",
+		AuthMethod:    interfaces.AuthMethodLDAP,
+		Username:      "sa",
+		Password:      "pass",
+	})
+	require.NoError(t, err, "Connect should succeed with a configured provider")
+}
+
+func TestNewFromRegistry_NoRegistry_ConnectReturnsErrNotConfigured(t *testing.T) {
+	globalRegistryMu.Lock()
+	orig := globalRegistry
+	globalRegistry = nil
+	globalRegistryMu.Unlock()
+	t.Cleanup(func() {
+		globalRegistryMu.Lock()
+		globalRegistry = orig
+		globalRegistryMu.Unlock()
+	})
+
+	provider := newFromRegistry()
+	require.NotNil(t, provider)
+
+	ap, ok := provider.(*ActiveDirectoryProvider)
+	require.True(t, ok)
+	require.NotNil(t, ap.notConfiguredErr, "notConfiguredErr must be set when no registry is registered")
+
+	ctx := context.Background()
+	err := ap.Connect(ctx, interfaces.ProviderConfig{})
+	require.Error(t, err)
+
+	var notConfigured *ErrNotConfigured
+	assert.ErrorAs(t, err, &notConfigured, "Connect must return *ErrNotConfigured when no registry is set")
+}
+
+func TestNewFromRegistry_RegistryReturnsError_ConnectReturnsErrNotConfigured(t *testing.T) {
+	globalRegistryMu.Lock()
+	orig := globalRegistry
+	globalRegistryMu.Unlock()
+	t.Cleanup(func() {
+		globalRegistryMu.Lock()
+		globalRegistry = orig
+		globalRegistryMu.Unlock()
+	})
+
+	SetStewardClientRegistry(func() (StewardClient, error) {
+		return nil, fmt.Errorf("no AD endpoint registered for this tenant")
+	})
+
+	provider := newFromRegistry()
+	require.NotNil(t, provider)
+
+	ap, ok := provider.(*ActiveDirectoryProvider)
+	require.True(t, ok)
+	require.NotNil(t, ap.notConfiguredErr)
+
+	ctx := context.Background()
+	err := ap.Connect(ctx, interfaces.ProviderConfig{})
+	require.Error(t, err)
+
+	var notConfigured *ErrNotConfigured
+	require.ErrorAs(t, err, &notConfigured, "Connect must return *ErrNotConfigured when registry errors")
+	assert.Contains(t, notConfigured.Reason, "no AD endpoint registered for this tenant")
 }

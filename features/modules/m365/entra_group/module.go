@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package entra_group
 
@@ -13,19 +13,23 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // entraGroupModule implements the Module interface for Entra ID group management
 type entraGroupModule struct {
-	authProvider auth.Provider
-	graphClient  graph.Client
+	modules.DefaultLoggingSupport
+	authProvider     auth.Provider
+	graphClient      graph.Client
+	propagationDelay time.Duration // wait after CreateGroup before adding members; 0 uses default
 }
 
 // New creates a new instance of the Entra Group module
 func New(authProvider auth.Provider, graphClient graph.Client) modules.Module {
 	return &entraGroupModule{
-		authProvider: authProvider,
-		graphClient:  graphClient,
+		authProvider:     authProvider,
+		graphClient:      graphClient,
+		propagationDelay: 2 * time.Second,
 	}
 }
 
@@ -298,15 +302,19 @@ func (m *entraGroupModule) Set(ctx context.Context, resourceID string, config mo
 		return fmt.Errorf("failed to authenticate with Microsoft Graph: %w", err)
 	}
 
-	// Check if group exists by searching for it
-	// Note: The graph client would need to be extended with group search capabilities
-	// For now, we'll implement a placeholder
-
-	// Try to get group by display name or ID
+	// Check if group exists: first try GetGroup by ID from resourceID, then fall back to
+	// ListGroups with $filter=displayName eq '...' for cases where the resource ID carries
+	// a display-name slug rather than a Graph object ID.
+	// Design decision: group search uses /groups?$filter=displayName eq '...' via ListGroups;
+	// $search requires ConsistencyLevel:eventual header not yet propagated through the client.
 	groupID := extractGroupID(resourceID)
 	existingGroup, err := m.getGroupByID(ctx, token, groupID)
 	if err != nil {
-		// Group doesn't exist, create it
+		// ID lookup failed; search by display name before creating to avoid duplicates.
+		found, searchErr := m.findGroupByDisplayName(ctx, token, groupConfig.DisplayName)
+		if searchErr == nil && found != nil {
+			return m.updateGroup(ctx, token, groupConfig, found)
+		}
 		return m.createGroup(ctx, token, groupConfig)
 	}
 
@@ -358,10 +366,10 @@ func (m *entraGroupModule) Get(ctx context.Context, resourceID string) (modules.
 		Owners:          owners,
 	}
 
-	// Check if this is a Microsoft Teams-enabled group
-	if m.isTeamGroup(ctx, token, groupID) {
+	// Check if this is a Microsoft Teams-enabled group and populate team settings
+	if team, err := m.graphClient.GetTeam(ctx, token, groupID); err == nil {
 		config.IsTeamEnabled = true
-		// Get team settings and channels would be implemented here
+		config.TeamSettings = graphTeamToTeamSettings(team)
 	}
 
 	return config, nil
@@ -410,8 +418,13 @@ func (m *entraGroupModule) createGroup(ctx context.Context, token *auth.AccessTo
 		return fmt.Errorf("failed to create group via Graph API: %w", err)
 	}
 
-	// Wait for group creation to propagate
-	time.Sleep(2 * time.Second)
+	// Wait for group creation to propagate before adding members/owners.
+	// Graph replication is eventually consistent; a brief pause avoids spurious 404s.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(m.propagationDelay):
+	}
 
 	// Add members and owners if specified
 	if len(config.Members) > 0 {
@@ -432,7 +445,7 @@ func (m *entraGroupModule) createGroup(ctx context.Context, token *auth.AccessTo
 
 	// Create Microsoft Team if enabled
 	if config.IsTeamEnabled {
-		if err := m.createTeam(ctx, token, group.ID, config.TeamSettings); err != nil {
+		if err := m.createTeam(ctx, token, group.ID, config.GroupType, config.TeamSettings); err != nil {
 			return fmt.Errorf("failed to create team: %w", err)
 		}
 	}
@@ -507,7 +520,7 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 	// Handle team settings if managed
 	if contains(managedFields, "is_team_enabled") && config.IsTeamEnabled {
 		if !m.isTeamGroup(ctx, token, existingGroup.ID) {
-			if err := m.createTeam(ctx, token, existingGroup.ID, config.TeamSettings); err != nil {
+			if err := m.createTeam(ctx, token, existingGroup.ID, config.GroupType, config.TeamSettings); err != nil {
 				return fmt.Errorf("failed to create team: %w", err)
 			}
 		} else if contains(managedFields, "team_settings") {
@@ -520,51 +533,139 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 	return nil
 }
 
-// Additional helper methods (placeholders)
+// findGroupByDisplayName searches for a group by display name using the $filter OData query.
+func (m *entraGroupModule) findGroupByDisplayName(ctx context.Context, token *auth.AccessToken, displayName string) (*GroupInfo, error) {
+	sanitized := strings.ReplaceAll(displayName, "'", "''")
+	filter := fmt.Sprintf("displayName eq '%s'", sanitized)
+	groups, err := m.graphClient.ListGroups(ctx, token, filter)
+	if err != nil {
+		return nil, err
+	}
+	if len(groups) == 0 {
+		return nil, fmt.Errorf("group with displayName %q not found", displayName)
+	}
+	g := &groups[0]
+	return &GroupInfo{
+		ID:              g.ID,
+		DisplayName:     g.DisplayName,
+		Description:     g.Description,
+		MailNickname:    g.MailNickname,
+		MailEnabled:     g.MailEnabled,
+		SecurityEnabled: g.SecurityEnabled,
+	}, nil
+}
 
 func (m *entraGroupModule) getGroupMembers(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
-	// Placeholder - would use Graph API /groups/{id}/members
-	return []string{}, nil
+	upns, err := m.graphClient.ListGroupMembers(ctx, token, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list group members: %w", err)
+	}
+	return upns, nil
 }
 
 func (m *entraGroupModule) getGroupOwners(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
-	// Placeholder - would use Graph API /groups/{id}/owners
-	return []string{}, nil
+	upns, err := m.graphClient.ListGroupOwners(ctx, token, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list group owners: %w", err)
+	}
+	return upns, nil
 }
 
-func (m *entraGroupModule) addGroupMember(ctx context.Context, token *auth.AccessToken, groupID, userID string) error {
-	// Placeholder - would use Graph API POST /groups/{id}/members/$ref
-	return nil
+func (m *entraGroupModule) addGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error {
+	return m.graphClient.AddGroupMember(ctx, token, groupID, memberUPN)
 }
 
-func (m *entraGroupModule) addGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, userID string) error {
-	// Placeholder - would use Graph API POST /groups/{id}/owners/$ref
-	return nil
+func (m *entraGroupModule) addGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error {
+	return m.graphClient.AddGroupOwner(ctx, token, groupID, ownerUPN)
 }
 
 func (m *entraGroupModule) syncGroupMembers(ctx context.Context, token *auth.AccessToken, groupID string, desiredMembers []string) error {
-	// Similar to user license sync logic
+	current, err := m.graphClient.ListGroupMembers(ctx, token, groupID)
+	if err != nil {
+		return fmt.Errorf("failed to list current group members: %w", err)
+	}
+	toAdd, toRemove := diffUPNSets(current, desiredMembers)
+	for _, upn := range toRemove {
+		if err := m.graphClient.RemoveGroupMember(ctx, token, groupID, upn); err != nil {
+			return fmt.Errorf("failed to remove member %s: %w", upn, err)
+		}
+	}
+	for _, upn := range toAdd {
+		if err := m.graphClient.AddGroupMember(ctx, token, groupID, upn); err != nil {
+			return fmt.Errorf("failed to add member %s: %w", upn, err)
+		}
+	}
 	return nil
 }
 
 func (m *entraGroupModule) syncGroupOwners(ctx context.Context, token *auth.AccessToken, groupID string, desiredOwners []string) error {
-	// Similar to user license sync logic
+	current, err := m.graphClient.ListGroupOwners(ctx, token, groupID)
+	if err != nil {
+		return fmt.Errorf("failed to list current group owners: %w", err)
+	}
+	toAdd, toRemove := diffUPNSets(current, desiredOwners)
+	for _, upn := range toRemove {
+		if err := m.graphClient.RemoveGroupOwner(ctx, token, groupID, upn); err != nil {
+			return fmt.Errorf("failed to remove owner %s: %w", upn, err)
+		}
+	}
+	for _, upn := range toAdd {
+		if err := m.graphClient.AddGroupOwner(ctx, token, groupID, upn); err != nil {
+			return fmt.Errorf("failed to add owner %s: %w", upn, err)
+		}
+	}
 	return nil
+}
+
+// diffUPNSets computes the add/remove diff between current and desired UPN sets.
+func diffUPNSets(current, desired []string) (toAdd, toRemove []string) {
+	currentSet := make(map[string]struct{}, len(current))
+	for _, upn := range current {
+		currentSet[upn] = struct{}{}
+	}
+	desiredSet := make(map[string]struct{}, len(desired))
+	for _, upn := range desired {
+		desiredSet[upn] = struct{}{}
+	}
+	for _, upn := range desired {
+		if _, exists := currentSet[upn]; !exists {
+			toAdd = append(toAdd, upn)
+		}
+	}
+	for _, upn := range current {
+		if _, exists := desiredSet[upn]; !exists {
+			toRemove = append(toRemove, upn)
+		}
+	}
+	return toAdd, toRemove
 }
 
 func (m *entraGroupModule) isTeamGroup(ctx context.Context, token *auth.AccessToken, groupID string) bool {
-	// Placeholder - would check if group has an associated team
+	_, err := m.graphClient.GetTeam(ctx, token, groupID)
+	if err == nil {
+		return true
+	}
+	if graph.IsNotFoundError(err) {
+		return false
+	}
+	m.GetEffectiveLogger(logging.NewNoopLogger()).Warn(
+		"could not determine team status for group; treating as non-team",
+		"group_id", groupID, "error", err,
+	)
 	return false
 }
 
-func (m *entraGroupModule) createTeam(ctx context.Context, token *auth.AccessToken, groupID string, settings *TeamSettings) error {
-	// Placeholder - would use Graph API PUT /groups/{id}/team
-	return nil
+func (m *entraGroupModule) createTeam(ctx context.Context, token *auth.AccessToken, groupID, groupType string, settings *TeamSettings) error {
+	if groupType != "Unified" {
+		return fmt.Errorf("team can only be created for a Microsoft 365 (Unified) group, got group_type %q", groupType)
+	}
+	req := mapTeamSettingsToCreateRequest(settings)
+	return m.graphClient.CreateTeam(ctx, token, groupID, req)
 }
 
 func (m *entraGroupModule) updateTeamSettings(ctx context.Context, token *auth.AccessToken, groupID string, settings *TeamSettings) error {
-	// Placeholder - would use Graph API PATCH /teams/{id}
-	return nil
+	req := mapTeamSettingsToUpdateRequest(settings)
+	return m.graphClient.UpdateTeamSettings(ctx, token, groupID, req)
 }
 
 // Utility types and functions
@@ -598,4 +699,123 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// mapFunSettings maps a CFGMS fun level string to a Graph API TeamFunSettings.
+// "strict"   → all fun features disabled
+// "moderate" → Giphy allowed at strict content rating, stickers allowed, custom memes disabled
+// "enabled"  → all fun features enabled with moderate Giphy content rating
+func mapFunSettings(fun string) *graph.TeamFunSettings {
+	t, f := true, false
+	strictRating, moderateRating := "strict", "moderate"
+	switch fun {
+	case "strict":
+		return &graph.TeamFunSettings{
+			AllowGiphy:            &f,
+			AllowStickersAndMemes: &f,
+			AllowCustomMemes:      &f,
+		}
+	case "moderate":
+		return &graph.TeamFunSettings{
+			AllowGiphy:            &t,
+			GiphyContentRating:    &strictRating,
+			AllowStickersAndMemes: &t,
+			AllowCustomMemes:      &f,
+		}
+	case "enabled":
+		return &graph.TeamFunSettings{
+			AllowGiphy:            &t,
+			GiphyContentRating:    &moderateRating,
+			AllowStickersAndMemes: &t,
+			AllowCustomMemes:      &t,
+		}
+	default:
+		return nil
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// graphTeamToTeamSettings converts a graph.Team response to the local TeamSettings struct.
+func graphTeamToTeamSettings(team *graph.Team) *TeamSettings {
+	if team == nil {
+		return nil
+	}
+	s := &TeamSettings{}
+	if ms := team.MemberSettings; ms != nil {
+		if ms.AllowCreatePrivateChannels != nil {
+			s.AllowCreatePrivateChannels = *ms.AllowCreatePrivateChannels
+		}
+		if ms.AllowCreateUpdateChannels != nil {
+			s.AllowCreateUpdateChannels = *ms.AllowCreateUpdateChannels
+		}
+		if ms.AllowDeleteChannels != nil {
+			s.AllowDeleteChannels = *ms.AllowDeleteChannels
+		}
+		if ms.AllowAddRemoveApps != nil {
+			s.AllowAddRemoveApps = *ms.AllowAddRemoveApps
+		}
+	}
+	if msg := team.MessagingSettings; msg != nil {
+		if msg.AllowUserEditMessages != nil {
+			s.AllowUserEditMessages = *msg.AllowUserEditMessages
+		}
+	}
+	if gs := team.GuestSettings; gs != nil {
+		if gs.AllowCreateUpdateChannels != nil {
+			s.AllowGuestCreateChannels = *gs.AllowCreateUpdateChannels
+		}
+		if gs.AllowDeleteChannels != nil {
+			s.AllowGuestDeleteChannels = *gs.AllowDeleteChannels
+		}
+	}
+	return s
+}
+
+func mapTeamSettingsToCreateRequest(settings *TeamSettings) *graph.CreateTeamRequest {
+	req := &graph.CreateTeamRequest{}
+	if settings == nil {
+		return req
+	}
+	req.MemberSettings = &graph.TeamMemberSettings{
+		AllowCreatePrivateChannels: boolPtr(settings.AllowCreatePrivateChannels),
+		AllowCreateUpdateChannels:  boolPtr(settings.AllowCreateUpdateChannels),
+		AllowDeleteChannels:        boolPtr(settings.AllowDeleteChannels),
+		AllowAddRemoveApps:         boolPtr(settings.AllowAddRemoveApps),
+	}
+	req.MessagingSettings = &graph.TeamMessagingSettings{
+		AllowUserEditMessages: boolPtr(settings.AllowUserEditMessages),
+	}
+	req.GuestSettings = &graph.TeamGuestSettings{
+		AllowCreateUpdateChannels: boolPtr(settings.AllowGuestCreateChannels),
+		AllowDeleteChannels:       boolPtr(settings.AllowGuestDeleteChannels),
+	}
+	if settings.Fun != "" {
+		req.FunSettings = mapFunSettings(settings.Fun)
+	}
+	return req
+}
+
+func mapTeamSettingsToUpdateRequest(settings *TeamSettings) *graph.UpdateTeamSettingsRequest {
+	req := &graph.UpdateTeamSettingsRequest{}
+	if settings == nil {
+		return req
+	}
+	req.MemberSettings = &graph.TeamMemberSettings{
+		AllowCreatePrivateChannels: boolPtr(settings.AllowCreatePrivateChannels),
+		AllowCreateUpdateChannels:  boolPtr(settings.AllowCreateUpdateChannels),
+		AllowDeleteChannels:        boolPtr(settings.AllowDeleteChannels),
+		AllowAddRemoveApps:         boolPtr(settings.AllowAddRemoveApps),
+	}
+	req.MessagingSettings = &graph.TeamMessagingSettings{
+		AllowUserEditMessages: boolPtr(settings.AllowUserEditMessages),
+	}
+	req.GuestSettings = &graph.TeamGuestSettings{
+		AllowCreateUpdateChannels: boolPtr(settings.AllowGuestCreateChannels),
+		AllowDeleteChannels:       boolPtr(settings.AllowGuestDeleteChannels),
+	}
+	if settings.Fun != "" {
+		req.FunSettings = mapFunSettings(settings.Fun)
+	}
+	return req
 }

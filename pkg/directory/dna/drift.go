@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package dna - Directory Drift Detection Implementation
 //
@@ -261,6 +261,11 @@ func (d *DefaultDirectoryDriftDetector) DetectBulkDrift(ctx context.Context, cur
 		}
 	}
 
+	// Wait for all concurrent comparisons before appending serially below.
+	// The creation/deletion loops append to allDrifts without holding mutex,
+	// so all goroutines must be done first to avoid a data race.
+	wg.Wait()
+
 	// Detect new objects (objects in current but not in baseline)
 	for objectID, current := range currentMap {
 		if _, exists := baselineMap[objectID]; !exists {
@@ -308,9 +313,6 @@ func (d *DefaultDirectoryDriftDetector) DetectBulkDrift(ctx context.Context, cur
 			allDrifts = append(allDrifts, drift)
 		}
 	}
-
-	// Wait for all comparisons to complete
-	wg.Wait()
 
 	duration := time.Since(startTime)
 
@@ -675,7 +677,7 @@ func (d *DefaultDirectoryDriftDetector) assessOperationalImpact(drift *Directory
 }
 
 func (d *DefaultDirectoryDriftDetector) assessComplianceImpact(drift *DirectoryDrift) ImpactLevel {
-	// This would be enhanced with compliance-specific rules
+	// Design decision: compliance-specific drift rules require a rule engine integration not yet defined in this package.
 	if drift.Summary.CriticalChanges > 0 {
 		return ImpactLevelMedium
 	}

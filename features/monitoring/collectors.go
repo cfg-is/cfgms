@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package monitoring
 
@@ -134,8 +134,7 @@ func (sm *SystemMonitor) collectResourceMetrics(ctx context.Context) {
 	// Collect GC metrics if enabled
 	if sm.config.EnableDetailedGCMetrics {
 		sm.resourceMetrics.GCCycles = memStats.NumGC
-		// Note: CPU usage would require platform-specific implementations
-		// For now, we'll use a placeholder that could be enhanced with cgo or platform-specific packages
+		// CPU core count uses runtime.NumCPU(); per-process CPU usage percentage requires platform-specific sampling and is not collected.
 	}
 
 	// Collect goroutine count

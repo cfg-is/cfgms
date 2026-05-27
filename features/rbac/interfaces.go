@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rbac
 
@@ -129,6 +129,13 @@ type PolicyEngine interface {
 
 	// GetPolicies retrieves policies for a tenant/resource combination
 	GetPolicies(ctx context.Context, tenantID, resourceType string) ([]memory.Policy, error)
+}
+
+// RBACStoreAccessor is a narrow interface used by EscalationPreventionManager to reach the
+// underlying RoleStore directly without going through the full RBACManager dispatch, which
+// would cause infinite recursion via SetRoleParent.
+type RBACStoreAccessor interface {
+	GetStore() *memory.Store
 }
 
 // RBACManager provides a high-level interface for RBAC operations

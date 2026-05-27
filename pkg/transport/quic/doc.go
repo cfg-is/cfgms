@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 CFGMS Contributors
+
+// Package quic provides net.Listener and net.Conn adapters that allow gRPC to
+// run over QUIC streams.
+//
+// gRPC requires a net.Listener (server) and net.Conn (both sides) to operate
+// its HTTP/2 transport. QUIC provides quic.Listener and quic.Stream. This
+// package bridges the two with thin adapters so gRPC can run over QUIC without
+// any gRPC-internal modifications.
+//
+// # Architecture
+//
+// One QUIC connection maps to one gRPC connection. gRPC handles its own HTTP/2
+// stream multiplexing within that single QUIC stream. This is the correct
+// mapping: each QUIC connection carries exactly one bidirectional stream, which
+// gRPC uses for its entire HTTP/2 connection lifetime. MaxIncomingStreams=1 is
+// enforced by the default QUIC config to prevent stream-flood attacks.
+//
+// Listen() starts a background goroutine (acceptLoop) that accepts QUIC
+// connections concurrently. Each accepted connection gets its own goroutine
+// (acceptStream) that waits up to 5 seconds for the peer to open its first
+// bidirectional stream. Peers that stall are closed via CloseWithError and do
+// not prevent other peers from being accepted. Ready connections are queued in
+// a buffered channel (capacity 64); Accept() returns the next queued connection
+// or blocks until one is available.
+//
+// # Server usage
+//
+//	lis, err := quic.Listen(addr, tlsConfig, nil)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	grpcServer := grpc.NewServer()
+//	grpcServer.Serve(lis)
+//
+// # Client usage
+//
+//	dialer := quic.NewDialer(tlsConfig, nil)
+//	conn, err := grpc.NewClient(addr,
+//	    grpc.WithContextDialer(dialer),
+//	    grpc.WithTransportCredentials(insecure.NewCredentials()),
+//	)
+//
+// # TLS
+//
+// TLS is handled entirely by the QUIC layer. Callers must provide a *tls.Config
+// with NextProtos set to a common value on both ends. gRPC should be configured
+// with insecure credentials since security is provided by the QUIC transport.
+//
+// Use pkg/cert.CreateServerTLSConfig and pkg/cert.CreateClientTLSConfig to
+// build the *tls.Config for each side. The only QUIC-specific requirement is
+// that NextProtos must include ALPNProtocol on both client and server:
+//
+//	tlsConfig.NextProtos = []string{quic.ALPNProtocol}
+//
+// Listen() enforces QUIC address validation (Retry) on every inbound connection
+// as an anti-amplification measure. Connections from unverified source addresses
+// are rejected via GetConfigForClient, causing quic-go to refuse the initial
+// packet. Honest clients whose address has been verified via the QUIC Retry
+// round-trip proceed normally. Callers may supply their own GetConfigForClient
+// callback to override this behaviour.
+//
+// This package contains no CFGMS business logic and may be used independently.
+package quic

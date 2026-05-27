@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package patch
 
@@ -6,7 +6,7 @@ import "errors"
 
 var (
 	// ErrInvalidPatchType is returned when the patch type is not valid
-	ErrInvalidPatchType = errors.New("invalid patch type (must be 'security', 'all', 'kernel', or 'critical')")
+	ErrInvalidPatchType = errors.New("invalid patch type (must be 'security', 'all', 'kernel', 'critical', or 'feature-update')")
 
 	// ErrInvalidMaxDowntime is returned when the max downtime format is invalid
 	ErrInvalidMaxDowntime = errors.New("invalid max downtime format (must be a valid duration like '30m', '1h')")

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package continuous
 
@@ -12,8 +12,16 @@ import (
 	"github.com/cfgis/cfgms/pkg/cache"
 )
 
+// cacheKeyMeta holds the index identifiers for a cache key, enabling O(1) cross-index cleanup.
+type cacheKeyMeta struct {
+	sessionID    string
+	subjectID    string
+	tenantID     string
+	permissionID string
+}
+
 // CacheManager provides high-performance caching for authorization decisions
-// Now uses centralized pkg/cache with session indexing for O(1) invalidation
+// Now uses centralized pkg/cache with index-based O(1) invalidation for all dimensions.
 type CacheManager struct {
 	// L1 Cache (in-memory, fastest access) - uses pkg/cache
 	l1Cache *cache.Cache
@@ -21,10 +29,20 @@ type CacheManager struct {
 	// L2 Cache (session-based, longer retention) - uses pkg/cache
 	l2Cache *cache.Cache
 
-	// Session index for O(1) session invalidation
-	// Maps sessionID -> list of cache keys
-	sessionIndex map[string][]string
-	indexMutex   sync.RWMutex
+	// Forward indexes for O(1) invalidation by dimension.
+	// Each maps an identifier to the set of cache keys associated with it.
+	// Sets (map[string]struct{}) provide O(1) insertion and O(1) deletion,
+	// avoiding the linear scan required by slices.
+	sessionIndex    map[string]map[string]struct{} // sessionID → key set
+	subjectIndex    map[string]map[string]struct{} // subjectID → key set
+	tenantIndex     map[string]map[string]struct{} // tenantID → key set
+	permissionIndex map[string]map[string]struct{} // permissionID → key set
+
+	// Reverse index: cache key → metadata. Enables O(1) cross-index cleanup when
+	// a key is removed via one dimension (e.g., subject invalidation must also
+	// remove the key from the session, tenant, and permission indexes).
+	keyMeta    map[string]cacheKeyMeta
+	indexMutex sync.RWMutex
 
 	// Cache configuration
 	config *CacheConfig
@@ -203,10 +221,55 @@ func NewCacheManager(ttl time.Duration, maxLatencyMs int) *CacheManager {
 	}
 
 	return &CacheManager{
-		l1Cache:      cache.NewCache(l1Config),
-		l2Cache:      cache.NewCache(l2Config),
-		sessionIndex: make(map[string][]string),
-		config:       config,
+		l1Cache:         cache.NewCache(l1Config),
+		l2Cache:         cache.NewCache(l2Config),
+		sessionIndex:    make(map[string]map[string]struct{}),
+		subjectIndex:    make(map[string]map[string]struct{}),
+		tenantIndex:     make(map[string]map[string]struct{}),
+		permissionIndex: make(map[string]map[string]struct{}),
+		keyMeta:         make(map[string]cacheKeyMeta),
+		config:          config,
+	}
+}
+
+// newCacheManagerSized creates a CacheManager with custom L1/L2 max sizes.
+// Use in benchmarks to avoid L1 eviction overhead during setup.
+func newCacheManagerSized(ttl time.Duration, maxLatencyMs, l1MaxSize, l2MaxSize int) *CacheManager {
+	config := &CacheConfig{
+		L1MaxSize:            l1MaxSize,
+		L1TTL:                ttl,
+		L1CleanupInterval:    1 * time.Minute,
+		L2MaxSize:            l2MaxSize,
+		L2TTL:                ttl * 2,
+		L2CleanupInterval:    5 * time.Minute,
+		MaxLatencyMs:         maxLatencyMs,
+		CacheNegativeResults: false,
+		CacheFailures:        false,
+		RefreshThreshold:     0.8,
+	}
+	l1Config := cache.CacheConfig{
+		Name:            "continuous-auth-l1",
+		MaxRuntimeItems: config.L1MaxSize,
+		DefaultTTL:      config.L1TTL,
+		CleanupInterval: config.L1CleanupInterval,
+		EvictionPolicy:  cache.EvictionLRU,
+	}
+	l2Config := cache.CacheConfig{
+		Name:            "continuous-auth-l2",
+		MaxRuntimeItems: config.L2MaxSize,
+		DefaultTTL:      config.L2TTL,
+		CleanupInterval: config.L2CleanupInterval,
+		EvictionPolicy:  cache.EvictionLRU,
+	}
+	return &CacheManager{
+		l1Cache:         cache.NewCache(l1Config),
+		l2Cache:         cache.NewCache(l2Config),
+		sessionIndex:    make(map[string]map[string]struct{}),
+		subjectIndex:    make(map[string]map[string]struct{}),
+		tenantIndex:     make(map[string]map[string]struct{}),
+		permissionIndex: make(map[string]map[string]struct{}),
+		keyMeta:         make(map[string]cacheKeyMeta),
+		config:          config,
 	}
 }
 
@@ -307,9 +370,18 @@ func (cm *CacheManager) CacheAuth(request *ContinuousAuthRequest, response *Cont
 		return fmt.Errorf("failed to cache auth in L2: %w", err)
 	}
 
-	// Update session index for O(1) session invalidation
+	// Update all indexes for O(1) invalidation by any dimension.
 	cm.indexMutex.Lock()
-	cm.sessionIndex[request.SessionID] = append(cm.sessionIndex[request.SessionID], cacheKey)
+	addToIndex(cm.sessionIndex, request.SessionID, cacheKey)
+	addToIndex(cm.subjectIndex, request.SubjectId, cacheKey)
+	addToIndex(cm.tenantIndex, request.TenantId, cacheKey)
+	addToIndex(cm.permissionIndex, request.PermissionId, cacheKey)
+	cm.keyMeta[cacheKey] = cacheKeyMeta{
+		sessionID:    request.SessionID,
+		subjectID:    request.SubjectId,
+		tenantID:     request.TenantId,
+		permissionID: request.PermissionId,
+	}
 	cm.indexMutex.Unlock()
 
 	return nil
@@ -350,20 +422,20 @@ func (cm *CacheManager) EvictSessionCache(sessionID string) {
 func (cm *CacheManager) EvictSubjectPermissions(sessionID string, permissions []string) {
 	// Get all keys for this session
 	cm.indexMutex.RLock()
-	keys, exists := cm.sessionIndex[sessionID]
+	keySet, exists := cm.sessionIndex[sessionID]
 	cm.indexMutex.RUnlock()
 
 	if !exists {
 		return
 	}
 
-	// Remove specific permissions
+	// Remove specific permissions and clean up all indexes for deleted keys.
 	for _, permission := range permissions {
-		for _, key := range keys {
-			// Check if cache key contains the permission
+		for key := range keySet {
 			if cm.keyContainsPermission(key, permission) {
 				cm.l1Cache.Delete(key)
 				cm.l2Cache.Delete(key)
+				cm.removeKeyFromSessionIndex(key)
 			}
 		}
 	}
@@ -435,99 +507,104 @@ func (cm *CacheManager) promoteToL1(cacheKey string, cached *CachedAuthDecision)
 // Cache invalidation methods
 
 func (cm *CacheManager) invalidateSession(sessionID, reason string) error {
-	// Use session index for O(1) lookup of all keys for this session
 	cm.indexMutex.Lock()
-	keys, exists := cm.sessionIndex[sessionID]
+	keySet, exists := cm.sessionIndex[sessionID]
 	if exists {
 		delete(cm.sessionIndex, sessionID)
+		for key := range keySet {
+			cm.removeKeyFromAllIndexesLocked(key)
+		}
 	}
 	cm.indexMutex.Unlock()
 
-	if !exists {
-		return nil // No entries for this session
-	}
-
-	// Remove all keys from both caches using pkg/cache
-	for _, key := range keys {
+	for key := range keySet {
 		cm.l1Cache.Delete(key)
 		cm.l2Cache.Delete(key)
 	}
 
 	return nil
+}
+
+// InvalidateSubject removes all cached authorization decisions for the given subject
+// from both L1 and L2. Uses the subject index for O(1) key lookup; L2 is covered
+// independently because CacheAuth writes every entry to both L1 and L2 under the same key.
+func (cm *CacheManager) InvalidateSubject(subjectID string) error {
+	return cm.invalidateSubject(subjectID, "subject_invalidated")
 }
 
 func (cm *CacheManager) invalidateSubject(subjectID, reason string) error {
-	// Simplified - iterate through L1 cache entries to find matches
-	keysToRemove := make([]string, 0)
-	for _, key := range cm.l1Cache.Keys() {
-		if value, found := cm.l1Cache.Get(key); found {
-			if cached, ok := value.(*CachedAuthDecision); ok && cached.SubjectID == subjectID {
-				keysToRemove = append(keysToRemove, key)
-			}
+	cm.indexMutex.Lock()
+	keySet, exists := cm.subjectIndex[subjectID]
+	if exists {
+		delete(cm.subjectIndex, subjectID)
+		for key := range keySet {
+			cm.removeKeyFromAllIndexesLocked(key)
 		}
 	}
+	cm.indexMutex.Unlock()
 
-	// Remove from both L1 and L2
-	for _, key := range keysToRemove {
+	for key := range keySet {
 		cm.l1Cache.Delete(key)
 		cm.l2Cache.Delete(key)
-		// Also clean up session index
-		cm.removeKeyFromSessionIndex(key)
 	}
 
 	return nil
 }
 
+// InvalidateTenant removes all cached authorization decisions for the given tenant
+// from both L1 and L2. Uses the tenant index for O(1) key lookup.
+func (cm *CacheManager) InvalidateTenant(tenantID string) error {
+	return cm.invalidateTenant(tenantID, "tenant_invalidated")
+}
+
 func (cm *CacheManager) invalidateTenant(tenantID, reason string) error {
-	// Simplified - iterate through L1 cache entries to find matches
-	keysToRemove := make([]string, 0)
-	for _, key := range cm.l1Cache.Keys() {
-		if value, found := cm.l1Cache.Get(key); found {
-			if cached, ok := value.(*CachedAuthDecision); ok && cached.TenantID == tenantID {
-				keysToRemove = append(keysToRemove, key)
-			}
+	cm.indexMutex.Lock()
+	keySet, exists := cm.tenantIndex[tenantID]
+	if exists {
+		delete(cm.tenantIndex, tenantID)
+		for key := range keySet {
+			cm.removeKeyFromAllIndexesLocked(key)
 		}
 	}
+	cm.indexMutex.Unlock()
 
-	// Remove from both L1 and L2
-	for _, key := range keysToRemove {
+	for key := range keySet {
 		cm.l1Cache.Delete(key)
 		cm.l2Cache.Delete(key)
-		cm.removeKeyFromSessionIndex(key)
 	}
 
 	return nil
 }
 
 func (cm *CacheManager) invalidatePermission(permissionID, reason string) error {
-	// Simplified - iterate through L1 cache entries to find matches
-	keysToRemove := make([]string, 0)
-	for _, key := range cm.l1Cache.Keys() {
-		if value, found := cm.l1Cache.Get(key); found {
-			if cached, ok := value.(*CachedAuthDecision); ok && cached.PermissionID == permissionID {
-				keysToRemove = append(keysToRemove, key)
-			}
+	cm.indexMutex.Lock()
+	keySet, exists := cm.permissionIndex[permissionID]
+	if exists {
+		delete(cm.permissionIndex, permissionID)
+		for key := range keySet {
+			cm.removeKeyFromAllIndexesLocked(key)
 		}
 	}
+	cm.indexMutex.Unlock()
 
-	// Remove from both L1 and L2
-	for _, key := range keysToRemove {
+	for key := range keySet {
 		cm.l1Cache.Delete(key)
 		cm.l2Cache.Delete(key)
-		cm.removeKeyFromSessionIndex(key)
 	}
 
 	return nil
 }
 
 func (cm *CacheManager) invalidateAll(reason string) error {
-	// Simplified - use pkg/cache Clear() method
 	cm.l1Cache.Clear()
 	cm.l2Cache.Clear()
 
-	// Clear session index
 	cm.indexMutex.Lock()
-	cm.sessionIndex = make(map[string][]string)
+	cm.sessionIndex = make(map[string]map[string]struct{})
+	cm.subjectIndex = make(map[string]map[string]struct{})
+	cm.tenantIndex = make(map[string]map[string]struct{})
+	cm.permissionIndex = make(map[string]map[string]struct{})
+	cm.keyMeta = make(map[string]cacheKeyMeta)
 	cm.indexMutex.Unlock()
 
 	return nil
@@ -535,24 +612,46 @@ func (cm *CacheManager) invalidateAll(reason string) error {
 
 // Helper methods
 
-// removeKeyFromSessionIndex removes a key from the session index
+// removeKeyFromSessionIndex removes a key from all indexes.
+// Uses keyMeta for O(1) reverse lookup and set-based O(1) deletion.
 func (cm *CacheManager) removeKeyFromSessionIndex(key string) {
 	cm.indexMutex.Lock()
 	defer cm.indexMutex.Unlock()
+	cm.removeKeyFromAllIndexesLocked(key)
+}
 
-	// Find and remove the key from all session indices
-	for sessionID, keys := range cm.sessionIndex {
-		for i, k := range keys {
-			if k == key {
-				// Remove key from slice
-				cm.sessionIndex[sessionID] = append(keys[:i], keys[i+1:]...)
-				// If session now has no keys, remove the session entry
-				if len(cm.sessionIndex[sessionID]) == 0 {
-					delete(cm.sessionIndex, sessionID)
-				}
-				return
-			}
-		}
+// removeKeyFromAllIndexesLocked removes a key from all forward indexes and the reverse keyMeta map.
+// Uses set-based O(1) deletion for each index.
+// Caller MUST hold indexMutex.Lock().
+func (cm *CacheManager) removeKeyFromAllIndexesLocked(key string) {
+	meta, ok := cm.keyMeta[key]
+	if !ok {
+		return
+	}
+	delete(cm.keyMeta, key)
+	removeFromIndex(cm.sessionIndex, meta.sessionID, key)
+	removeFromIndex(cm.subjectIndex, meta.subjectID, key)
+	removeFromIndex(cm.tenantIndex, meta.tenantID, key)
+	removeFromIndex(cm.permissionIndex, meta.permissionID, key)
+}
+
+// addToIndex adds key to index[id], creating the inner set if needed.
+func addToIndex(index map[string]map[string]struct{}, id, key string) {
+	if index[id] == nil {
+		index[id] = make(map[string]struct{})
+	}
+	index[id][key] = struct{}{}
+}
+
+// removeFromIndex removes key from index[id] in O(1), deleting the map entry when empty.
+func removeFromIndex(index map[string]map[string]struct{}, id, key string) {
+	keySet, ok := index[id]
+	if !ok {
+		return
+	}
+	delete(keySet, key)
+	if len(keySet) == 0 {
+		delete(index, id)
 	}
 }
 

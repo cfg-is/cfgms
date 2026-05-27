@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package trigger
 
@@ -17,6 +17,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// newTestTriggerRouter wires handler onto a /triggers-prefixed subrouter, matching
+// how server.go registers it: api.PathPrefix("/triggers").Subrouter().
+func newTestTriggerRouter(handler *APIHandler) *mux.Router {
+	router := mux.NewRouter()
+	sub := router.PathPrefix("/triggers").Subrouter()
+	handler.RegisterRoutes(sub)
+	return router
+}
+
 func TestAPIHandler_NewAPIHandler(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 
@@ -30,9 +39,7 @@ func TestAPIHandler_NewAPIHandler(t *testing.T) {
 func TestAPIHandler_RegisterRoutes(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 	handler := NewAPIHandler(mockTriggerManager)
-	router := mux.NewRouter()
-
-	handler.RegisterRoutes(router)
+	router := newTestTriggerRouter(handler)
 
 	// Test that routes are registered by attempting to match them
 	tests := []struct {
@@ -64,8 +71,7 @@ func TestAPIHandler_RegisterRoutes(t *testing.T) {
 func TestAPIHandler_HandleCreateTrigger(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 	handler := NewAPIHandler(mockTriggerManager)
-	router := mux.NewRouter()
-	handler.RegisterRoutes(router)
+	router := newTestTriggerRouter(handler)
 
 	tests := []struct {
 		name           string
@@ -227,8 +233,7 @@ func TestAPIHandler_HandleListTriggers(t *testing.T) {
 			// Create fresh mock for each test
 			mockTriggerManager := &MockTriggerManager{}
 			handler := NewAPIHandler(mockTriggerManager)
-			router := mux.NewRouter()
-			handler.RegisterRoutes(router)
+			router := newTestTriggerRouter(handler)
 
 			tt.setupMocks(mockTriggerManager)
 
@@ -258,8 +263,7 @@ func TestAPIHandler_HandleListTriggers(t *testing.T) {
 func TestAPIHandler_HandleGetTrigger(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 	handler := NewAPIHandler(mockTriggerManager)
-	router := mux.NewRouter()
-	handler.RegisterRoutes(router)
+	router := newTestTriggerRouter(handler)
 
 	testTrigger := &Trigger{
 		ID:           "test-1",
@@ -336,8 +340,7 @@ func TestAPIHandler_HandleGetTrigger(t *testing.T) {
 func TestAPIHandler_HandleUpdateTrigger(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 	handler := NewAPIHandler(mockTriggerManager)
-	router := mux.NewRouter()
-	handler.RegisterRoutes(router)
+	router := newTestTriggerRouter(handler)
 
 	updatedTrigger := Trigger{
 		ID:           "test-1",
@@ -419,8 +422,7 @@ func TestAPIHandler_HandleUpdateTrigger(t *testing.T) {
 func TestAPIHandler_HandleDeleteTrigger(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 	handler := NewAPIHandler(mockTriggerManager)
-	router := mux.NewRouter()
-	handler.RegisterRoutes(router)
+	router := newTestTriggerRouter(handler)
 
 	tests := []struct {
 		name           string
@@ -484,8 +486,7 @@ func TestAPIHandler_HandleDeleteTrigger(t *testing.T) {
 func TestAPIHandler_HandleEnableDisableTrigger(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 	handler := NewAPIHandler(mockTriggerManager)
-	router := mux.NewRouter()
-	handler.RegisterRoutes(router)
+	router := newTestTriggerRouter(handler)
 
 	tests := []struct {
 		name                  string
@@ -571,8 +572,7 @@ func TestAPIHandler_HandleEnableDisableTrigger(t *testing.T) {
 func TestAPIHandler_HandleExecuteTrigger(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 	handler := NewAPIHandler(mockTriggerManager)
-	router := mux.NewRouter()
-	handler.RegisterRoutes(router)
+	router := newTestTriggerRouter(handler)
 
 	executionResult := &TriggerExecution{
 		ID:                  "exec-123",
@@ -674,8 +674,7 @@ func TestAPIHandler_HandleExecuteTrigger(t *testing.T) {
 func TestAPIHandler_HandleGetTriggerExecutions(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 	handler := NewAPIHandler(mockTriggerManager)
-	router := mux.NewRouter()
-	handler.RegisterRoutes(router)
+	router := newTestTriggerRouter(handler)
 
 	executions := []*TriggerExecution{
 		{
@@ -774,8 +773,7 @@ func TestAPIHandler_HandleGetTriggerExecutions(t *testing.T) {
 func TestAPIHandler_HandleHealthCheck(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 	handler := NewAPIHandler(mockTriggerManager)
-	router := mux.NewRouter()
-	handler.RegisterRoutes(router)
+	router := newTestTriggerRouter(handler)
 
 	req, err := http.NewRequest("GET", "/triggers/health", nil)
 	require.NoError(t, err)

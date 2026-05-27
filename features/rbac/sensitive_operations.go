@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package rbac - Sensitive operation controls for admin actions
 package rbac
@@ -7,9 +7,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 
 	"github.com/cfgis/cfgms/pkg/audit"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 var (
@@ -36,18 +38,27 @@ const (
 	SensitiveOpDeletePermission SensitiveOperationType = "delete_permission"
 
 	// User management operations
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpCreateUser SensitiveOperationType = "create_user"
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpDeleteUser SensitiveOperationType = "delete_user"
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpModifyUser SensitiveOperationType = "modify_user"
 
 	// System configuration operations
-	SensitiveOpModifyConfig    SensitiveOperationType = "modify_config"
+	// TODO(#742): enforce when user management moves through Manager
+	SensitiveOpModifyConfig SensitiveOperationType = "modify_config"
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpDisableSecurity SensitiveOperationType = "disable_security"
-	SensitiveOpViewAuditLogs   SensitiveOperationType = "view_audit_logs"
+	// TODO(#742): enforce when user management moves through Manager
+	SensitiveOpViewAuditLogs SensitiveOperationType = "view_audit_logs"
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpModifyAuditLogs SensitiveOperationType = "modify_audit_logs"
 
 	// Data operations
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpBulkDelete SensitiveOperationType = "bulk_delete"
+	// TODO(#742): enforce when user management moves through Manager
 	SensitiveOpDataExport SensitiveOperationType = "data_export"
 )
 
@@ -70,13 +81,14 @@ func ValidateSensitiveOperation(opCtx *SensitiveOperationContext) error {
 	}
 
 	// M-AUTH-2: Justification is mandatory for all sensitive operations
-	if opCtx.Justification == "" {
+	trimmed := strings.TrimSpace(opCtx.Justification)
+	if trimmed == "" {
 		return fmt.Errorf("%w: operation '%s' requires justification",
 			ErrJustificationRequired, opCtx.OperationType)
 	}
 
 	// M-AUTH-2: Minimum justification length (prevent empty/trivial justifications)
-	if len(opCtx.Justification) < 10 {
+	if len(trimmed) < 10 {
 		return fmt.Errorf("justification too short (minimum 10 characters): operation '%s'",
 			opCtx.OperationType)
 	}
@@ -116,7 +128,7 @@ func IsSensitiveOperation(opType SensitiveOperationType) bool {
 
 // AuditSensitiveOperation logs a sensitive operation with full context
 // M-AUTH-2: Comprehensive audit logging for sensitive admin operations
-func (m *Manager) AuditSensitiveOperation(ctx context.Context, opCtx *SensitiveOperationContext, result interfaces.AuditResult, operationErr error) {
+func (m *Manager) AuditSensitiveOperation(ctx context.Context, opCtx *SensitiveOperationContext, result business.AuditResult, operationErr error) {
 	if m.auditManager == nil {
 		return
 	}
@@ -135,7 +147,7 @@ func (m *Manager) AuditSensitiveOperation(ctx context.Context, opCtx *SensitiveO
 		Detail("operation_type", string(opCtx.OperationType)).
 		// M-AUTH-2: Mark as sensitive operation
 		Detail("security_classification", "sensitive_admin_operation").
-		Severity(interfaces.AuditSeverityCritical)
+		Severity(business.AuditSeverityCritical)
 
 	// M-AUTH-2: Include any additional metadata
 	for key, value := range opCtx.Metadata {
@@ -147,8 +159,14 @@ func (m *Manager) AuditSensitiveOperation(ctx context.Context, opCtx *SensitiveO
 		event = event.Error("SENSITIVE_OPERATION_FAILED", operationErr.Error())
 	}
 
-	// Record the audit event
-	_ = m.auditManager.RecordEvent(ctx, event)
+	// Record the audit event. Issue #764: surface queue-full / manager-stopped
+	// errors via the operator log instead of silently discarding them.
+	if err := m.auditManager.RecordEvent(ctx, event); err != nil {
+		slog.Warn("rbac: failed to record sensitive-operation audit event",
+			"error", err,
+			"operation_type", string(opCtx.OperationType),
+		)
+	}
 }
 
 // GetSensitiveOperationJustification retrieves justification from context

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package saas provider implements the universal API provider interface
 // for SaaS platform integrations in CFGMS.
@@ -30,6 +30,8 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
 )
 
 // Provider defines the universal interface for SaaS platform integrations.
@@ -39,13 +41,13 @@ type Provider interface {
 	GetInfo() ProviderInfo
 
 	// Authenticate performs authentication for this provider
-	Authenticate(ctx context.Context, config ProviderConfig, credStore CredentialStore) error
+	Authenticate(ctx context.Context, config ProviderConfig, credStore auth.CredentialStore) error
 
 	// IsAuthenticated checks if the provider has valid credentials
-	IsAuthenticated(ctx context.Context, credStore CredentialStore) bool
+	IsAuthenticated(ctx context.Context, credStore auth.CredentialStore) bool
 
 	// RefreshAuth refreshes authentication credentials if needed
-	RefreshAuth(ctx context.Context, credStore CredentialStore) error
+	RefreshAuth(ctx context.Context, credStore auth.CredentialStore) error
 
 	// Normalized Operations Interface
 	// These provide standardized CRUD operations across all providers
@@ -391,7 +393,7 @@ func (r *ProviderRegistry) UnregisterProvider(name string) error {
 type BaseProvider struct {
 	info       ProviderInfo
 	httpClient *http.Client
-	credStore  CredentialStore
+	credStore  auth.CredentialStore
 }
 
 // NewBaseProvider creates a new base provider
@@ -408,7 +410,7 @@ func (bp *BaseProvider) GetInfo() ProviderInfo {
 }
 
 // SetCredentialStore sets the credential store
-func (bp *BaseProvider) SetCredentialStore(credStore CredentialStore) {
+func (bp *BaseProvider) SetCredentialStore(credStore auth.CredentialStore) {
 	bp.credStore = credStore
 }
 
@@ -473,4 +475,12 @@ type JWTConfig struct {
 	PrivateKey string                 `json:"private_key"`
 	Algorithm  string                 `json:"algorithm"`
 	Claims     map[string]interface{} `json:"claims"`
+}
+
+// AWSSignatureConfig contains AWS Signature V4 credentials
+type AWSSignatureConfig struct {
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+	Region          string `json:"region"`
+	Service         string `json:"service"`
 }

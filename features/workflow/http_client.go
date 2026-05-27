@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package workflow provides HTTP client capabilities for workflow engine API operations.
 //
@@ -311,9 +311,10 @@ func (c *HTTPClient) applyAuthentication(req *http.Request, auth *AuthConfig) er
 		req.SetBasicAuth(auth.Username, auth.Password)
 
 	case AuthTypeOAuth2:
-		// OAuth2 requires token acquisition - this would need to be implemented
-		// based on the specific OAuth2 flow and token storage
-		return fmt.Errorf("OAuth2 authentication not yet implemented")
+		// Design decision: OAuth2 token acquisition is the caller's responsibility; HTTPClient is a
+		// transport layer only. Callers must set Authorization headers via custom headers or supply a
+		// bearer token through HTTPClientConfig.
+		return fmt.Errorf("OAuth2 authentication must be handled by the caller: use AuthTypeCustom with a pre-acquired token")
 
 	case AuthTypeCustom:
 		for key, value := range auth.CustomHeaders {

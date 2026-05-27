@@ -8,9 +8,11 @@ on:
     paths-ignore:
       - 'docs/**'
       - '*.md'              # Root-level markdown only (README.md, CONTRIBUTING.md)
+      - '.claude/**'
       - 'LICENSE'
       - '.gitignore'
       - '.editorconfig'
+  merge_group:
   push:
     branches:
       - main  # Run on main for release validation
@@ -28,7 +30,7 @@ on:
         - full
 
 env:
-  GO_VERSION: '1.23'
+  GO_VERSION: '1.26.3'
 
 jobs:
   # Fast unit tests - runs on every push/PR
@@ -36,15 +38,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
     
     - name: Cache Go modules
-      uses: actions/cache@v3
+      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
@@ -61,7 +63,7 @@ jobs:
       run: make test
     
     - name: Upload test results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: unit-test-results
@@ -77,15 +79,15 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     needs: unit-tests
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
     
     - name: Cache Go modules
-      uses: actions/cache@v3
+      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
@@ -103,7 +105,7 @@ jobs:
       run: make test-production-critical
     
     - name: Upload integration test results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: integration-test-results
@@ -128,15 +130,15 @@ jobs:
           "multi-tenant-saas"
         ]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
     
     - name: Cache Go modules
-      uses: actions/cache@v3
+      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
@@ -183,15 +185,15 @@ jobs:
           "monitoring-integration"
         ]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
     
     - name: Cache Go modules
-      uses: actions/cache@v3
+      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
@@ -223,7 +225,7 @@ jobs:
         esac
     
     - name: Upload production test results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: production-test-results-${{ matrix.readiness-test }}
@@ -239,15 +241,15 @@ jobs:
     if: github.event.inputs.test_level == 'full'
     needs: production-readiness
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
     
     - name: Cache Go modules
-      uses: actions/cache@v3
+      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}

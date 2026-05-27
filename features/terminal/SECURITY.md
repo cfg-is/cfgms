@@ -6,6 +6,8 @@ This document describes the comprehensive security controls implemented for CFGM
 
 The terminal security system provides granular access controls, command filtering, real-time session monitoring, and tamper-proof audit logging for all terminal sessions. It integrates with the existing mTLS authentication framework and implements multiple layers of security controls.
 
+**Tenant scoping is enforced at session creation.** `DefaultSessionManager.CreateSession` rejects any `SessionRequest` with an empty `TenantID` — sessions cannot be created without a tenant ID. The WebSocket handler reads the tenant from `r.Context().Value(ctxkeys.TenantID)` (populated by the auth middleware) and returns HTTP 400 if it is absent.
+
 ## Security Architecture
 
 ### Multi-Layer Security Model
@@ -93,30 +95,40 @@ SSH/Remote access         -> AUDIT (Medium)
 - Integration with external SIEM systems
 - Escalation procedures for critical threats
 
-### 4. Audit Logging System (`audit.go`)
+### 4. Audit Logging System (`pkg/audit.Manager`)
 
-**Tamper-Proof Logging:**
-- HMAC-based integrity protection
-- Cryptographic hash chaining
-- Sequential audit entry numbering
-- Content-addressable storage
+Terminal audit events are routed through the central `pkg/audit.Manager` provider
+rather than a terminal-specific logger. This gives all terminal audit events the same
+chain integrity, HMAC signing, and pluggable storage as every other CFGMS component.
 
-**Comprehensive Audit Events:**
-```go
-SessionStart/End          -> User access tracking
-CommandExecuted          -> Full command history
-CommandBlocked           -> Security violations
-SecurityViolation        -> Threat detection
-PrivilegeEscalation     -> Suspicious activity
-```
+**Event Routing:**
+- Security violations → `audit.NewEventBuilder().Action("terminal.<violation_type>")`
+- Session start/end → `Action("terminal.session.start")` / `Action("terminal.session.end")`
+- Command authorization → `Action("terminal.command_authorized")` / `Action("terminal.command_authorization_denied")`
+- JIT access → `Action("terminal.jit_access_attempt")` / `Action("terminal.jit_access_failure")`
+- Permission revocation → `Action("terminal.permission_revocation_termination")`
+
+**Integrity:**
+- HMAC-SHA256 chain managed by `pkg/audit.Manager` (key at `audit/hmac-key`)
+- Sequential entry numbering across all components sharing the same store
+- Per-entry checksum computed by the drain goroutine before storage
 
 **Audit Features:**
 - Immutable log entries with integrity verification
-- Configurable retention policies (default 90 days)
-- Compressed storage with optional encryption
-- Multi-format export (JSON, CSV, PDF)
+- Pluggable storage backend (configured at controller bootstrap)
+- Bounded write queue prevents terminal code from blocking on a slow audit store
 
-### 5. mTLS Integration (`auth_integration.go`)
+### 5. WebSocket Origin Enforcement (`websocket.go`)
+
+**Same-Origin Policy:**
+The WebSocket upgrader enforces origin validation on every upgrade request. Connections are accepted only when the `Origin` header host matches `r.Host` (same-origin) or appears in the configured `originAllowlist`. Requests with a missing or unparseable `Origin` header are rejected with HTTP 403.
+
+- Default allowlist: empty (same-origin only)
+- Allowlist is a constructor parameter: `NewWebSocketHandler(sessionManager, logger, originAllowlist)`
+- The allowlist is sourced from controller configuration; the terminal feature does not read config directly
+- Production allowlist source: `CFGMS_TERMINAL_ALLOWED_ORIGINS` env var (comma-separated `host` or `host:port` entries, trimmed and empty-filtered), parsed at controller startup and passed to the constructor
+
+### 6. mTLS Integration (`auth_integration.go`)
 
 **Certificate-Based Authentication:**
 - Client certificate requirement for terminal access
@@ -134,7 +146,7 @@ PrivilegeEscalation     -> Suspicious activity
 **Session Token Security:**
 ```go
 type SessionToken struct {
-    Token           string      // Cryptographically secure token
+    Token           string      // 32-byte crypto/rand, base64url-encoded (44 chars)
     ClientIP        string      // Bound IP address
     TLSFingerprint  string      // TLS connection fingerprint
     CertificateHash string      // Client certificate hash
@@ -142,6 +154,8 @@ type SessionToken struct {
     LastRotated     time.Time   // Last rotation time
 }
 ```
+
+Token generation uses `crypto/rand.Read` over 32 bytes (256 bits of entropy), base64-URL-encoded. `time.Now()`, `os.Getpid()`, and formatted strings are not used in the token generation path.
 
 ## Security Controls Configuration
 
@@ -251,9 +265,6 @@ TestCommandInterceptor_InputFiltering()
 // Session Monitoring Tests
 TestSessionMonitor_ThreatLevelCalculation()
 
-// Audit System Tests
-TestAuditLogger_IntegrityProtection()
-
 // Performance Tests
 BenchmarkCommandValidation()
 ```
@@ -284,6 +295,81 @@ The terminal security implementation meets various compliance requirements:
 - **SIEM Integration**: Export to external security systems
 - **Webhook Notifications**: Custom alert handling
 - **Email/SMS Alerts**: Multi-channel notification system
+
+## Session Recording Integrity
+
+Session recordings carry per-event HMAC-SHA256 chain integrity (Story #910).
+
+### File Format
+
+Each event is written in a binary length-prefixed frame:
+
+```
+[4 bytes: content length][N bytes: event content][32 bytes: HMAC-SHA256]
+```
+
+Compression (gzip) is applied per-event before framing. The HMAC is computed
+over the post-compression bytes that land on disk, binding integrity to the
+exact bytes stored.
+
+### Chain Construction
+
+Each HMAC binds the current event to its sequence position and the previous
+event's checksum:
+
+```
+HMAC-SHA256(key, sequence_bytes || previous_checksum || content)
+```
+
+- `sequence` starts at 1 and increments by 1 per event.
+- `previous_checksum` for the first event is the all-zero 32-byte slice.
+- Any reordering or insertion of events breaks the chain.
+
+### Metadata Anchors
+
+At `EndRecording`, a JSON sidecar file (`<sessionID>.rec.meta`) is written
+with:
+
+```json
+{
+  "session_id": "...",
+  "first_checksum": "<hex>",
+  "last_checksum":  "<hex>",
+  "event_count":    1234,
+  "started_at":     "...",
+  "ended_at":       "..."
+}
+```
+
+`first_checksum` and `last_checksum` are the HMACs of the first and last
+events. Comparing these against a fresh walk of the file detects both
+content tampering and metadata tampering.
+
+### HMAC Key Management
+
+The HMAC key for recordings is stored at secrets slot
+`terminal/recording-hmac-key` (separate from `audit/hmac-key`). A 32-byte
+random key is generated on first boot via `crypto/rand` and persisted via
+`pkg/secrets`. Without a secrets store the key is ephemeral — per-event
+integrity is maintained within the process run, but cross-restart
+verification requires `WithSecretsStore`.
+
+### Verification
+
+`DefaultSessionRecorder.VerifyRecording(sessionID)` walks the `.rec` file
+event by event, recomputes each HMAC, and confirms the accumulated
+first/last checksums against the metadata. It returns `(false, error)` if:
+
+- Metadata file is missing or unparseable.
+- Any event's HMAC does not match (content has been altered).
+- The total event count differs from metadata.
+- The computed first or last checksum diverges from the stored anchor.
+
+### Legacy File Cleanup
+
+On `NewSessionRecorder`, any `.rec` file whose sidecar lacks
+`first_checksum` (written before Story #910) is deleted and an `Info` log
+entry is emitted. Pre-production only — no in-flight recordings to preserve.
 
 ## Future Enhancements
 

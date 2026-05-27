@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package entra_admin_unit
 
@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -262,9 +261,18 @@ func (m *entraAdminUnitModule) Set(ctx context.Context, resourceID string, confi
 		auConfig.GroupMembers = groupMembers
 	}
 
-	// Map scoped role members (simplified - would need proper type conversion)
+	// Map scoped role members using direct type assertion; graph.AdminUnitScopedRoleMember converts
+	// via the ScopedRoleMember local type which shares the same principal/role fields.
 	if scopedRoleMembers, ok := configMap["scoped_role_members"].([]ScopedRoleMember); ok {
 		auConfig.ScopedRoleMembers = scopedRoleMembers
+	} else if rawMembers, ok := configMap["scoped_role_members"].([]graph.AdminUnitScopedRoleMember); ok {
+		auConfig.ScopedRoleMembers = make([]ScopedRoleMember, 0, len(rawMembers))
+		for _, rm := range rawMembers {
+			auConfig.ScopedRoleMembers = append(auConfig.ScopedRoleMembers, ScopedRoleMember{
+				PrincipalID:      rm.RoleMemberInfo.ID,
+				RoleDefinitionID: rm.RoleID,
+			})
+		}
 	}
 
 	// Validate configuration
@@ -388,9 +396,6 @@ func (m *entraAdminUnitModule) createAdminUnit(ctx context.Context, token *auth.
 		return fmt.Errorf("failed to create administrative unit via Graph API: %w", err)
 	}
 
-	// Wait for creation to propagate
-	time.Sleep(2 * time.Second)
-
 	// Add user members if specified and not dynamic
 	if len(config.UserMembers) > 0 && config.MembershipType != "Dynamic" {
 		for _, userID := range config.UserMembers {
@@ -496,50 +501,165 @@ func (m *entraAdminUnitModule) updateAdminUnit(ctx context.Context, token *auth.
 	return nil
 }
 
-// Additional helper methods (placeholders)
+// Additional helper methods
 
 func (m *entraAdminUnitModule) getAdminUnitUserMembers(ctx context.Context, token *auth.AccessToken, auID string) ([]string, error) {
-	// Placeholder - would use Graph API /administrativeUnits/{id}/members/microsoft.graph.user
-	return []string{}, nil
+	members, err := m.graphClient.ListAdminUnitUserMembers(ctx, token, auID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list user members for admin unit %s: %w", auID, err)
+	}
+	return members, nil
 }
 
 func (m *entraAdminUnitModule) getAdminUnitGroupMembers(ctx context.Context, token *auth.AccessToken, auID string) ([]string, error) {
-	// Placeholder - would use Graph API /administrativeUnits/{id}/members/microsoft.graph.group
-	return []string{}, nil
+	members, err := m.graphClient.ListAdminUnitGroupMembers(ctx, token, auID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list group members for admin unit %s: %w", auID, err)
+	}
+	return members, nil
 }
 
 func (m *entraAdminUnitModule) getAdminUnitScopedRoleMembers(ctx context.Context, token *auth.AccessToken, auID string) ([]ScopedRoleMember, error) {
-	// Placeholder - would use Graph API /administrativeUnits/{id}/scopedRoleMembers
-	return []ScopedRoleMember{}, nil
+	graphMembers, err := m.graphClient.ListAdminUnitScopedRoleMembers(ctx, token, auID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list scoped role members for admin unit %s: %w", auID, err)
+	}
+	members := make([]ScopedRoleMember, 0, len(graphMembers))
+	for _, gm := range graphMembers {
+		members = append(members, ScopedRoleMember{
+			PrincipalID:      gm.RoleMemberInfo.ID,
+			RoleDefinitionID: gm.RoleID,
+		})
+	}
+	return members, nil
 }
 
 func (m *entraAdminUnitModule) addUserMember(ctx context.Context, token *auth.AccessToken, auID, userID string) error {
-	// Placeholder - would use Graph API POST /administrativeUnits/{id}/members/$ref
+	if err := m.graphClient.AddAdminUnitMember(ctx, token, auID, userID); err != nil {
+		return fmt.Errorf("failed to add user member %s to admin unit %s: %w", userID, auID, err)
+	}
 	return nil
 }
 
 func (m *entraAdminUnitModule) addGroupMember(ctx context.Context, token *auth.AccessToken, auID, groupID string) error {
-	// Placeholder - would use Graph API POST /administrativeUnits/{id}/members/$ref
+	if err := m.graphClient.AddAdminUnitMember(ctx, token, auID, groupID); err != nil {
+		return fmt.Errorf("failed to add group member %s to admin unit %s: %w", groupID, auID, err)
+	}
 	return nil
 }
 
 func (m *entraAdminUnitModule) addScopedRoleMember(ctx context.Context, token *auth.AccessToken, auID string, roleMember *ScopedRoleMember) error {
-	// Placeholder - would use Graph API POST /administrativeUnits/{id}/scopedRoleMembers
+	request := &graph.AddScopedRoleMemberRequest{
+		RoleID: roleMember.RoleDefinitionID,
+		RoleMemberInfo: graph.AdminUnitRoleMemberInfo{
+			ID: roleMember.PrincipalID,
+		},
+	}
+	if _, err := m.graphClient.AddAdminUnitScopedRoleMember(ctx, token, auID, request); err != nil {
+		return fmt.Errorf("failed to add scoped role member %s to admin unit %s: %w", roleMember.PrincipalID, auID, err)
+	}
 	return nil
 }
 
 func (m *entraAdminUnitModule) syncUserMembers(ctx context.Context, token *auth.AccessToken, auID string, desiredMembers []string) error {
-	// Similar logic to user license/group sync
+	currentMembers, err := m.getAdminUnitUserMembers(ctx, token, auID)
+	if err != nil {
+		return fmt.Errorf("failed to get current user members: %w", err)
+	}
+	currentSet := make(map[string]bool, len(currentMembers))
+	for _, id := range currentMembers {
+		currentSet[id] = true
+	}
+	desiredSet := make(map[string]bool, len(desiredMembers))
+	for _, id := range desiredMembers {
+		desiredSet[id] = true
+	}
+	for _, id := range desiredMembers {
+		if !currentSet[id] {
+			if err := m.addUserMember(ctx, token, auID, id); err != nil {
+				return fmt.Errorf("failed to add user member %s: %w", id, err)
+			}
+		}
+	}
+	for _, id := range currentMembers {
+		if !desiredSet[id] {
+			if err := m.graphClient.RemoveAdminUnitMember(ctx, token, auID, id); err != nil {
+				return fmt.Errorf("failed to remove user member %s: %w", id, err)
+			}
+		}
+	}
 	return nil
 }
 
 func (m *entraAdminUnitModule) syncGroupMembers(ctx context.Context, token *auth.AccessToken, auID string, desiredMembers []string) error {
-	// Similar logic to user license/group sync
+	currentMembers, err := m.getAdminUnitGroupMembers(ctx, token, auID)
+	if err != nil {
+		return fmt.Errorf("failed to get current group members: %w", err)
+	}
+	currentSet := make(map[string]bool, len(currentMembers))
+	for _, id := range currentMembers {
+		currentSet[id] = true
+	}
+	desiredSet := make(map[string]bool, len(desiredMembers))
+	for _, id := range desiredMembers {
+		desiredSet[id] = true
+	}
+	for _, id := range desiredMembers {
+		if !currentSet[id] {
+			if err := m.addGroupMember(ctx, token, auID, id); err != nil {
+				return fmt.Errorf("failed to add group member %s: %w", id, err)
+			}
+		}
+	}
+	for _, id := range currentMembers {
+		if !desiredSet[id] {
+			if err := m.graphClient.RemoveAdminUnitMember(ctx, token, auID, id); err != nil {
+				return fmt.Errorf("failed to remove group member %s: %w", id, err)
+			}
+		}
+	}
 	return nil
 }
 
 func (m *entraAdminUnitModule) syncScopedRoleMembers(ctx context.Context, token *auth.AccessToken, auID string, desiredMembers []ScopedRoleMember) error {
-	// Would implement scoped role member synchronization
+	graphMembers, err := m.graphClient.ListAdminUnitScopedRoleMembers(ctx, token, auID)
+	if err != nil {
+		return fmt.Errorf("failed to get current scoped role members: %w", err)
+	}
+
+	type assignmentKey struct {
+		roleID      string
+		principalID string
+	}
+	currentAssignments := make(map[assignmentKey]string, len(graphMembers))
+	for _, gm := range graphMembers {
+		key := assignmentKey{roleID: gm.RoleID, principalID: gm.RoleMemberInfo.ID}
+		currentAssignments[key] = gm.ID
+	}
+
+	desiredSet := make(map[assignmentKey]bool, len(desiredMembers))
+	for _, dm := range desiredMembers {
+		key := assignmentKey{roleID: dm.RoleDefinitionID, principalID: dm.PrincipalID}
+		desiredSet[key] = true
+	}
+
+	for i := range desiredMembers {
+		dm := &desiredMembers[i]
+		key := assignmentKey{roleID: dm.RoleDefinitionID, principalID: dm.PrincipalID}
+		if _, exists := currentAssignments[key]; !exists {
+			if err := m.addScopedRoleMember(ctx, token, auID, dm); err != nil {
+				return fmt.Errorf("failed to add scoped role member %s: %w", dm.PrincipalID, err)
+			}
+		}
+	}
+
+	for key, assignmentID := range currentAssignments {
+		if !desiredSet[key] {
+			if err := m.graphClient.RemoveAdminUnitScopedRoleMember(ctx, token, auID, assignmentID); err != nil {
+				return fmt.Errorf("failed to remove scoped role member %s: %w", key.principalID, err)
+			}
+		}
+	}
 	return nil
 }
 

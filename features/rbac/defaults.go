@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rbac
 
@@ -209,6 +209,33 @@ var DefaultPermissions = []*common.Permission{
 		Description:  "Full system administration access",
 		ResourceType: "system",
 		Actions:      []string{"create", "read", "update", "delete", "execute"},
+	},
+
+	// Emergency Access Permissions
+	// emergency.break-glass authorises break-glass emergency access on system resources only.
+	// Must never be granted to non-emergency roles.
+	{
+		Id:           "emergency.break-glass",
+		Name:         "Emergency Break-Glass Access",
+		Description:  "Authorises emergency break-glass access on system resources only. Must never be granted to non-emergency roles.",
+		ResourceType: "system",
+		Actions:      []string{"emergency.access"},
+	},
+
+	// Rollback Permissions
+	{
+		Id:           "rollback.emergency",
+		Name:         "Emergency Rollback",
+		Description:  "Perform emergency configuration rollback without the normal approval flow",
+		ResourceType: "rollback",
+		Actions:      []string{"emergency"},
+	},
+	{
+		Id:           "rollback.msp",
+		Name:         "MSP-Level Rollback",
+		Description:  "Perform configuration rollback at MSP scope",
+		ResourceType: "rollback",
+		Actions:      []string{"rollback"},
 	},
 }
 

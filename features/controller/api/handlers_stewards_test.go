@@ -1,0 +1,653 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/api/proto/common"
+	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
+)
+
+// ---- buildFleetFilter unit tests (no server required) ----
+
+func TestBuildFleetFilter_Empty(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	filter, err := buildFleetFilter(req, "")
+	require.NoError(t, err)
+	assert.True(t, isEmptyFilter(filter))
+}
+
+func TestBuildFleetFilter_OS(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/v1/stewards?os=linux", nil)
+	filter, err := buildFleetFilter(req, "")
+	require.NoError(t, err)
+	assert.Equal(t, "linux", filter.OS)
+	assert.False(t, isEmptyFilter(filter))
+}
+
+func TestBuildFleetFilter_AllParams(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/v1/stewards?os=windows&platform=server&arch=amd64&status=online&hostname=web&tag=prod&tag=web", nil)
+	filter, err := buildFleetFilter(req, "tenant-a")
+	require.NoError(t, err)
+
+	assert.Equal(t, "windows", filter.OS)
+	assert.Equal(t, "server", filter.Platform)
+	assert.Equal(t, "amd64", filter.Architecture)
+	assert.Equal(t, "online", filter.Status)
+	assert.Equal(t, "web", filter.Hostname)
+	assert.Equal(t, "tenant-a", filter.TenantID) // comes from context, not query param
+	assert.Equal(t, []string{"prod", "web"}, filter.Tags)
+	assert.False(t, isEmptyFilter(filter))
+}
+
+func TestBuildFleetFilter_Tags_MultiValue(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/v1/stewards?tag=production&tag=web&tag=db", nil)
+	filter, err := buildFleetFilter(req, "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"production", "web", "db"}, filter.Tags)
+}
+
+func TestBuildFleetFilter_TenantID_FromContext_NotQueryParam(t *testing.T) {
+	// tenant_id in query param must be ignored; it comes from context only
+	req := httptest.NewRequest("GET", "/api/v1/stewards?tenant_id=injected-tenant", nil)
+	filter, err := buildFleetFilter(req, "real-tenant-from-context")
+	require.NoError(t, err)
+	assert.Equal(t, "real-tenant-from-context", filter.TenantID)
+}
+
+func TestBuildFleetFilter_InvalidStatus_ReturnsError(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/v1/stewards?status=invalid", nil)
+	_, err := buildFleetFilter(req, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid status")
+}
+
+func TestBuildFleetFilter_FieldTooLong_ReturnsError(t *testing.T) {
+	longVal := strings.Repeat("a", 300)
+	req := httptest.NewRequest("GET", "/api/v1/stewards?hostname="+longVal, nil)
+	_, err := buildFleetFilter(req, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum length")
+}
+
+// ---- isEmptyFilter unit tests ----
+
+func TestIsEmptyFilter_AllEmpty(t *testing.T) {
+	assert.True(t, isEmptyFilter(fleet.Filter{}))
+}
+
+func TestIsEmptyFilter_WithTags(t *testing.T) {
+	assert.False(t, isEmptyFilter(fleet.Filter{Tags: []string{"production"}}))
+}
+
+func TestIsEmptyFilter_WithDNAAttributes(t *testing.T) {
+	assert.False(t, isEmptyFilter(fleet.Filter{DNAAttributes: map[string]string{"env": "prod"}}))
+}
+
+// ---- Error path tests: handleListStewards with failing fleet query ----
+
+// failingFleetQuery is a real implementation of fleet.FleetQuery that always returns an error.
+// It is not a mock — it satisfies the interface with deterministic error behavior for error-path testing.
+type failingFleetQuery struct{}
+
+func (f *failingFleetQuery) Search(_ context.Context, _ fleet.Filter) ([]fleet.StewardResult, error) {
+	return nil, errors.New("forced fleet query failure")
+}
+
+func (f *failingFleetQuery) Count(_ context.Context, _ fleet.Filter) (int, error) {
+	return 0, errors.New("forced fleet query failure")
+}
+
+func TestHandleListStewards_FleetQueryError_Returns500(t *testing.T) {
+	server := setupTestServer(t)
+	// Replace the fleet query with one that always fails.
+	server.fleetQuery = &failingFleetQuery{}
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	// Any filter triggers the fleet query code path.
+	req := httptest.NewRequest("GET", "/api/v1/stewards?os=linux", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// ---- Integration tests: handleListStewards with fleet filtering ----
+
+// registerTestSteward adds a steward to the controller service via AcceptRegistration.
+// It uses the "test-tenant" tenant ID (same as NewTestKey) so fleet filter scoping works.
+func registerTestSteward(t *testing.T, svc interface {
+	AcceptRegistration(context.Context, *controller.RegisterRequest) (*controller.RegisterResponse, error)
+}, attrs map[string]string) string {
+	t.Helper()
+	req := &controller.RegisterRequest{
+		Version: "v1.0",
+		InitialDna: &common.DNA{
+			Id:         "dna-" + attrs["hostname"],
+			Attributes: attrs,
+		},
+	}
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
+	resp, err := svc.AcceptRegistration(ctx, req)
+	require.NoError(t, err)
+	return resp.StewardId
+}
+
+func TestHandleListStewards_NoFilter_ReturnsAll(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	// Register two stewards
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-linux-1", "os": "linux", "arch": "amd64",
+	})
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-windows-1", "os": "windows", "arch": "amd64",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Len(t, resp.Data, 2)
+}
+
+func TestHandleListStewards_FilterByOS_ReturnsSubset(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-linux-1", "os": "linux", "arch": "amd64",
+	})
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-windows-1", "os": "windows", "arch": "amd64",
+	})
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-linux-2", "os": "linux", "arch": "arm64",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards?os=linux", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Len(t, resp.Data, 2)
+	for _, s := range resp.Data {
+		require.NotNil(t, s.DNA)
+		assert.Equal(t, "linux", s.DNA.OS)
+	}
+}
+
+func TestHandleListStewards_FilterByStatus_ReturnsOnlineOnly(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-1", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards?status=online", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	// Registered stewards have status "registered", not "online", so filter returns none
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	// No stewards with status=online; empty result is correct behavior
+	assert.NotNil(t, resp.Data)
+	assert.Empty(t, resp.Data)
+}
+
+func TestHandleListStewards_FilterByHostname_SubstringMatch(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "web-server-01", "os": "linux",
+	})
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "db-server-01", "os": "linux",
+	})
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "web-server-02", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards?hostname=web-server", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Len(t, resp.Data, 2)
+	for _, s := range resp.Data {
+		require.NotNil(t, s.DNA)
+		assert.Contains(t, s.DNA.Hostname, "web-server")
+	}
+}
+
+func TestHandleListStewards_CombinedFilter_AND(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	// linux + amd64
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-1", "os": "linux", "arch": "amd64",
+	})
+	// linux + arm64 (should not match amd64 filter)
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-2", "os": "linux", "arch": "arm64",
+	})
+	// windows + amd64 (should not match linux filter)
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-3", "os": "windows", "arch": "amd64",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards?os=linux&arch=amd64", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Len(t, resp.Data, 1)
+	assert.Equal(t, "amd64", resp.Data[0].DNA.Architecture)
+}
+
+func TestHandleListStewards_NoMatch_ReturnsEmptyArray(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-1", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards?os=windows", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotNil(t, resp.Data)
+	assert.Empty(t, resp.Data)
+}
+
+// TestHandleListStewards_HTTPRegisteredSteward_AppearsInList verifies that a steward
+// registered via the HTTP path (RegisterSteward on ControllerService) appears in the
+// list response.
+func TestHandleListStewards_HTTPRegisteredSteward_AppearsInList(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	// Simulate HTTP registration writing into the single authoritative registry
+	require.NoError(t, server.controllerService.RegisterSteward("http-steward-1", "test-tenant", "addr-1", "registered"))
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 1)
+	assert.Equal(t, "http-steward-1", resp.Data[0].ID)
+	assert.Equal(t, "registered", resp.Data[0].Status)
+}
+
+// TestHandleListStewards_HTTPRegistration_NoDuplicates verifies that registering the same
+// steward ID twice produces exactly one entry in the list.
+func TestHandleListStewards_HTTPRegistration_NoDuplicates(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	require.NoError(t, server.controllerService.RegisterSteward("dup-steward", "test-tenant", "addr-1", "registered"))
+	require.NoError(t, server.controllerService.RegisterSteward("dup-steward", "test-tenant", "addr-2", "quarantined"))
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Len(t, resp.Data, 1, "duplicate steward ID should produce exactly one entry")
+	assert.Equal(t, "quarantined", resp.Data[0].Status)
+}
+
+// noopSender is a minimal transport stub that satisfies registry.MessageSender
+// so that registry.Register's nil-Sender guard passes in tests. It is not a
+// mock of a CFGMS business component — MessageSender is a low-level transport
+// interface whose production implementation is a gRPC stream that cannot be
+// instantiated in unit tests without a live gRPC server. Tests here validate
+// registry lookup behavior, not message delivery.
+type noopSender struct{}
+
+func (n *noopSender) SendMsg(_ interface{}) error { return nil }
+
+// TestHandleGetSteward_ConnectedSteward verifies that active_sessions == 1 and
+// connection_state == "connected" when the steward has an entry in the registry.
+func TestHandleGetSteward_ConnectedSteward(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+	// Register the steward in the controller service so GetStewardInfo can find it.
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "connected-host", "os": "linux",
+	})
+
+	// Wire a real InMemoryRegistry with the steward registered.
+	reg := registry.NewRegistry()
+	require.NoError(t, reg.Register(&registry.StewardConnection{
+		StewardID:   stewardID,
+		Sender:      &noopSender{},
+		ConnectedAt: time.Now(),
+	}))
+	server.SetRegistry(reg)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, stewardID, resp.Data.ID)
+	assert.NotEmpty(t, resp.Data.Status)
+	assert.Equal(t, 1, resp.Data.ActiveSessions)
+	assert.Equal(t, "connected", resp.Data.ConnectionState)
+}
+
+// TestHandleGetSteward_DisconnectedSteward verifies that active_sessions == 0 and
+// connection_state == "disconnected" when the steward is not in the registry.
+func TestHandleGetSteward_DisconnectedSteward(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+	// Register the steward in the controller service but not in the connection registry.
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "disconnected-host", "os": "linux",
+	})
+
+	// Wire a real InMemoryRegistry with no entry for this steward.
+	reg := registry.NewRegistry()
+	server.SetRegistry(reg)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, stewardID, resp.Data.ID)
+	assert.NotEmpty(t, resp.Data.Status)
+	assert.Equal(t, 0, resp.Data.ActiveSessions)
+	assert.Equal(t, "disconnected", resp.Data.ConnectionState)
+}
+
+// TestHandleGetSteward_NilRegistry verifies that active_sessions == 0 and
+// connection_state == "disconnected" when no registry is wired (OSS single-node).
+func TestHandleGetSteward_NilRegistry(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "no-registry-host", "os": "linux",
+	})
+	// registry is nil by default in setupTestServer — no SetRegistry call.
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, stewardID, resp.Data.ID)
+	assert.NotEmpty(t, resp.Data.Status)
+	assert.Equal(t, 0, resp.Data.ActiveSessions)
+	assert.Equal(t, "disconnected", resp.Data.ConnectionState)
+}
+
+// TestHandleStewardAuthRefresh_UnknownSteward_Returns404 verifies that POSTing to
+// /api/v1/stewards/{id}/auth/refresh with an unregistered steward ID returns 404.
+func TestHandleStewardAuthRefresh_UnknownSteward_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:auth-refresh"})
+
+	req := httptest.NewRequest("POST", "/api/v1/stewards/nonexistent-steward-id/auth/refresh", strings.NewReader("{}"))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestHandleStewardAuthRefresh_KnownSteward_Returns200 verifies that POSTing to
+// /api/v1/stewards/{id}/auth/refresh with a registered steward returns 200 with
+// {"steward_id":"...","status":"refresh_requested"}.
+func TestHandleStewardAuthRefresh_KnownSteward_Returns200(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:auth-refresh"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "auth-refresh-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/stewards/"+stewardID+"/auth/refresh", strings.NewReader("{}"))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	assert.Equal(t, stewardID, body["steward_id"])
+	assert.Equal(t, "refresh_requested", body["status"])
+}
+
+// TestServer_ConfigStatusRouteDeregistered verifies that GET /api/v1/stewards/{id}/config/status
+// is no longer registered and returns 404 or 405, never 200 with hardcoded "unknown" data.
+func TestServer_ConfigStatusRouteDeregistered(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-config"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/any-steward-id/config/status", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusOK, rec.Code, "config/status route must not return 200 after deregistration")
+	assert.True(t, rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed,
+		"expected 404 or 405, got %d", rec.Code)
+}
+
+func TestHandleDeleteStewardConfig(t *testing.T) {
+	t.Run("success 204 when config exists", func(t *testing.T) {
+		server := setupTestServer(t)
+		apiKey := NewEphemeralTestKey(t, server, []string{"steward:delete-config"}, "test-tenant", 5*time.Minute)
+
+		storeTestConfig(t, server, "test-tenant", "steward-to-delete")
+
+		req := httptest.NewRequest("DELETE", "/api/v1/stewards/steward-to-delete/config", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+	})
+
+	t.Run("not-found 404 when config does not exist", func(t *testing.T) {
+		server := setupTestServer(t)
+		apiKey := NewEphemeralTestKey(t, server, []string{"steward:delete-config"}, "test-tenant", 5*time.Minute)
+
+		req := httptest.NewRequest("DELETE", "/api/v1/stewards/nonexistent-steward/config", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		var errResp ErrorResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+		assert.Equal(t, "CONFIG_NOT_FOUND", errResp.Error.Code)
+	})
+
+	t.Run("bad steward ID 400", func(t *testing.T) {
+		server := setupTestServer(t)
+		apiKey := NewEphemeralTestKey(t, server, []string{"steward:delete-config"}, "test-tenant", 5*time.Minute)
+
+		// Dots and colons are URL-safe but fail identifierRegex (^[a-zA-Z0-9_-]+$)
+		req := httptest.NewRequest("DELETE", "/api/v1/stewards/steward.invalid:id/config", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("missing permission returns 403", func(t *testing.T) {
+		server := setupTestServer(t)
+		apiKey := NewTestKey(t, server, []string{"steward:read-config"})
+
+		req := httptest.NewRequest("DELETE", "/api/v1/stewards/some-steward/config", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("internal error 500 when storage backend fails", func(t *testing.T) {
+		server := setupTestServer(t)
+		apiKey := NewEphemeralTestKey(t, server, []string{"steward:delete-config"}, "test-tenant", 5*time.Minute)
+		useFailingConfigService(t, server)
+
+		req := httptest.NewRequest("DELETE", "/api/v1/stewards/steward-x/config", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
+		var errResp ErrorResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+		assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+	})
+}
+
+// TestHandleGetStewardConfig_HappyPath exercises the stewardtypes.FromProto conversion
+// path inside handleGetStewardConfig: register a steward, store a config, then GET it.
+func TestHandleGetStewardConfig_HappyPath(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-config"})
+
+	// Register a steward so GetConfiguration can look up its tenant.
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "cfg-test-host", "os": "linux",
+	})
+
+	// Store a config — uses the same "test-tenant" that registerTestSteward injects
+	// via context. The inheritance resolver will fall back to device-level config since
+	// "test-tenant" has no full TenantData record in this in-memory test setup.
+	storeTestConfig(t, server, "test-tenant", stewardID)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/config", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp APIResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	data, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok, "response data must be a map, got %T", resp.Data)
+	assert.Equal(t, stewardID, data["steward_id"])
+	assert.Contains(t, data, "config")
+}
+
+// TestHandleGetStewardConfig_StewardNotRegistered verifies that requesting config for
+// an unknown steward returns 400 CONFIG_ERROR (configService returns NOT_FOUND).
+func TestHandleGetStewardConfig_StewardNotRegistered(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-config"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/nonexistent-steward/config", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CONFIG_ERROR", errResp.Error.Code)
+}
+
+// TestHandleGetStewardConfig_InsufficientPermission verifies 403 when the API key
+// lacks steward:read-config permission.
+func TestHandleGetStewardConfig_InsufficientPermission(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/any-steward/config", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}

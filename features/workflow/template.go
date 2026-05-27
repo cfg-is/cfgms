@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package workflow
 
@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // WorkflowTemplate represents a reusable workflow template
@@ -277,16 +279,16 @@ func (te *TemplateEngine) MergeWithDefaults(template *WorkflowTemplate, paramete
 
 // ProcessTemplateSubstitutions processes template variable substitutions
 func (te *TemplateEngine) ProcessTemplateSubstitutions(workflow Workflow, parameters map[string]interface{}) (Workflow, error) {
-	// Convert workflow to string for processing
-	workflowStr := te.workflowToString(workflow)
+	workflowStr, err := te.workflowToString(workflow)
+	if err != nil {
+		return workflow, fmt.Errorf("serializing workflow for template substitution: %w", err)
+	}
 
-	// Process substitutions
 	processedStr, err := te.processSubstitutions(workflowStr, parameters)
 	if err != nil {
 		return workflow, err
 	}
 
-	// Convert back to workflow
 	processedWorkflow, err := te.stringToWorkflow(processedStr)
 	if err != nil {
 		return workflow, err
@@ -437,17 +439,20 @@ func (te *TemplateEngine) processSubstitutions(content string, parameters map[st
 	return result, nil
 }
 
-// workflowToString and stringToWorkflow would need proper YAML marshaling/unmarshaling
-// This is a simplified implementation for demonstration
-func (te *TemplateEngine) workflowToString(workflow Workflow) string {
-	// In a real implementation, this would use yaml.Marshal
-	return fmt.Sprintf("workflow: %+v", workflow)
+func (te *TemplateEngine) workflowToString(workflow Workflow) (string, error) {
+	data, err := yaml.Marshal(workflow)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func (te *TemplateEngine) stringToWorkflow(content string) (Workflow, error) {
-	// In a real implementation, this would use yaml.Unmarshal
-	// For now, return the original workflow
-	return Workflow{}, nil
+	var w Workflow
+	if err := yaml.Unmarshal([]byte(content), &w); err != nil {
+		return Workflow{}, err
+	}
+	return w, nil
 }
 
 // Utility functions

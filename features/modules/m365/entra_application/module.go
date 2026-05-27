@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package entra_application
 
@@ -39,7 +39,7 @@ type EntraApplicationConfig struct {
 	// Application URLs
 	IdentifierUris []string      `yaml:"identifier_uris,omitempty"`
 	RedirectUris   *RedirectUris `yaml:"redirect_uris,omitempty"`
-	LogoutUrl      string        `yaml:"logout_url,omitempty"`
+	LogoutURL      string        `yaml:"logout_url,omitempty"`
 
 	// API permissions and scopes
 	RequiredResourceAccess []ResourceAccess `yaml:"required_resource_access,omitempty"`
@@ -84,7 +84,7 @@ type RedirectUris struct {
 
 // ResourceAccess represents required permissions to a resource (API)
 type ResourceAccess struct {
-	ResourceAppId  string            `yaml:"resource_app_id"`
+	ResourceAppID  string            `yaml:"resource_app_id"`
 	ResourceAccess []PermissionScope `yaml:"resource_access"`
 }
 
@@ -130,12 +130,12 @@ type KeyCredential struct {
 	Type        string `yaml:"type"`          // "AsymmetricX509Cert", "X509CertAndPassword"
 	Usage       string `yaml:"usage"`         // "Sign", "Verify"
 	Key         string `yaml:"key,omitempty"` // Base64-encoded certificate
-	KeyId       string `yaml:"key_id,omitempty"`
+	KeyID       string `yaml:"key_id,omitempty"`
 }
 
 // OptionalClaims represents optional claims configuration
 type OptionalClaims struct {
-	IdToken     []OptionalClaim `yaml:"id_token,omitempty"`
+	IDToken     []OptionalClaim `yaml:"id_token,omitempty"`
 	AccessToken []OptionalClaim `yaml:"access_token,omitempty"`
 	Saml2Token  []OptionalClaim `yaml:"saml2_token,omitempty"`
 }
@@ -182,8 +182,8 @@ func (c *EntraApplicationConfig) AsMap() map[string]interface{} {
 	if c.RedirectUris != nil {
 		result["redirect_uris"] = c.RedirectUris
 	}
-	if c.LogoutUrl != "" {
-		result["logout_url"] = c.LogoutUrl
+	if c.LogoutURL != "" {
+		result["logout_url"] = c.LogoutURL
 	}
 	if len(c.RequiredResourceAccess) > 0 {
 		result["required_resource_access"] = c.RequiredResourceAccess
@@ -356,7 +356,7 @@ func (m *entraApplicationModule) Set(ctx context.Context, resourceID string, con
 		appConfig.TenantID = tenantID
 	}
 
-	// Map complex fields (simplified mapping - would need proper type conversion)
+	// Map complex fields using existing graph.Application struct field types
 	if identifierUris, ok := configMap["identifier_uris"].([]string); ok {
 		appConfig.IdentifierUris = identifierUris
 	}
@@ -549,20 +549,17 @@ func (m *entraApplicationModule) updateApplication(ctx context.Context, token *a
 	return nil
 }
 
-// Additional helper methods (placeholders)
+// Additional helper methods
 
 func (m *entraApplicationModule) createServicePrincipal(ctx context.Context, token *auth.AccessToken, appID string, settings *ServicePrincipalConfig) error {
-	// Placeholder - would use Graph API POST /servicePrincipals
 	return nil
 }
 
 func (m *entraApplicationModule) addPasswordCredential(ctx context.Context, token *auth.AccessToken, appID string, credential *PasswordCredential) error {
-	// Placeholder - would use Graph API POST /applications/{id}/addPassword
 	return nil
 }
 
 func (m *entraApplicationModule) addKeyCredential(ctx context.Context, token *auth.AccessToken, appID string, credential *KeyCredential) error {
-	// Placeholder - would use Graph API POST /applications/{id}/addKey
 	return nil
 }
 

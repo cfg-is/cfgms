@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package service
 
@@ -6,10 +6,32 @@ import (
 	"context"
 	"fmt"
 
+	"google.golang.org/grpc/metadata"
+
 	"github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/rbac"
-	"github.com/cfgis/cfgms/features/rbac/memory"
 )
+
+// injectJustification extracts a sensitive-operation justification from gRPC incoming
+// metadata (key "x-justification") and adds it to the context via
+// rbac.WithSensitiveOperationJustification. Callers that already carry justification
+// in ctx (e.g. test helpers) are unaffected — the context value set by the caller
+// takes precedence because rbac.GetSensitiveOperationJustification reads it directly.
+func injectJustification(ctx context.Context) context.Context {
+	// Already has justification — don't overwrite.
+	if rbac.GetSensitiveOperationJustification(ctx) != "" {
+		return ctx
+	}
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ctx
+	}
+	vals := md.Get("x-justification")
+	if len(vals) == 0 {
+		return ctx
+	}
+	return rbac.WithSensitiveOperationJustification(ctx, vals[0])
+}
 
 // RBACService implements the RBAC service
 type RBACService struct {
@@ -62,6 +84,8 @@ func (s *RBACService) CreateRole(ctx context.Context, req *controller.CreateRole
 		return nil, fmt.Errorf("role.id is required")
 	}
 
+	// M-AUTH-2: surface justification from gRPC metadata when not already in ctx.
+	ctx = injectJustification(ctx)
 	err := s.rbacManager.CreateRole(ctx, req.Role)
 	if err != nil {
 		return nil, fmt.Errorf("role already exists: %w", err)
@@ -107,6 +131,8 @@ func (s *RBACService) UpdateRole(ctx context.Context, req *controller.UpdateRole
 		return nil, fmt.Errorf("role.id is required")
 	}
 
+	// M-AUTH-2: surface justification from gRPC metadata when not already in ctx.
+	ctx = injectJustification(ctx)
 	err := s.rbacManager.UpdateRole(ctx, req.Role)
 	if err != nil {
 		return nil, fmt.Errorf("%w", err)
@@ -233,6 +259,8 @@ func (s *RBACService) AssignRole(ctx context.Context, req *controller.AssignRole
 		return nil, fmt.Errorf("assignment.role_id is required")
 	}
 
+	// M-AUTH-2: surface justification from gRPC metadata when not already in ctx.
+	ctx = injectJustification(ctx)
 	err := s.rbacManager.AssignRole(ctx, req.Assignment)
 	if err != nil {
 		return nil, fmt.Errorf("%w", err)
@@ -252,6 +280,8 @@ func (s *RBACService) RevokeRole(ctx context.Context, req *controller.RevokeRole
 		return nil, fmt.Errorf("role_id is required")
 	}
 
+	// M-AUTH-2: surface justification from gRPC metadata when not already in ctx.
+	ctx = injectJustification(ctx)
 	err := s.rbacManager.RevokeRole(ctx, req.SubjectId, req.RoleId, req.TenantId)
 	if err != nil {
 		return nil, fmt.Errorf("%w", err)
@@ -328,6 +358,8 @@ func (s *RBACService) CreateRoleWithParent(ctx context.Context, req *controller.
 		return nil, fmt.Errorf("role.id is required")
 	}
 
+	// M-AUTH-2: surface justification from gRPC metadata when not already in ctx.
+	ctx = injectJustification(ctx)
 	err := s.rbacManager.CreateRoleWithParent(ctx, req.Role, req.ParentRoleId, req.InheritanceType)
 	if err != nil {
 		return nil, fmt.Errorf("%w", err)
@@ -425,7 +457,7 @@ func (s *RBACService) ValidateRoleHierarchy(ctx context.Context, req *controller
 
 // Helper methods for type conversion
 
-func (s *RBACService) convertToProtoHierarchy(hierarchy *memory.RoleHierarchy) *controller.RoleHierarchy {
+func (s *RBACService) convertToProtoHierarchy(hierarchy *rbac.RoleHierarchy) *controller.RoleHierarchy {
 	if hierarchy == nil {
 		return nil
 	}
@@ -451,7 +483,7 @@ func (s *RBACService) convertToProtoHierarchy(hierarchy *memory.RoleHierarchy) *
 	return protoHierarchy
 }
 
-func (s *RBACService) convertToProtoEffectivePermissions(effectivePerms *memory.EffectivePermissions) *controller.EffectivePermissions {
+func (s *RBACService) convertToProtoEffectivePermissions(effectivePerms *rbac.EffectivePermissions) *controller.EffectivePermissions {
 	if effectivePerms == nil {
 		return nil
 	}

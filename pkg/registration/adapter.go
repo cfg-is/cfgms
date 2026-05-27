@@ -1,22 +1,22 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package registration
 
 import (
 	"context"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// StorageAdapter adapts interfaces.RegistrationTokenStore to registration.Store
+// StorageAdapter adapts business.RegistrationTokenStore to registration.Store
 // This allows the registration system to use durable storage while maintaining
 // backward compatibility with the existing Store interface.
 type StorageAdapter struct {
-	store interfaces.RegistrationTokenStore
+	store business.RegistrationTokenStore
 }
 
 // NewStorageAdapter creates a new adapter that wraps a RegistrationTokenStore
-func NewStorageAdapter(store interfaces.RegistrationTokenStore) *StorageAdapter {
+func NewStorageAdapter(store business.RegistrationTokenStore) *StorageAdapter {
 	return &StorageAdapter{store: store}
 }
 
@@ -37,7 +37,7 @@ func (a *StorageAdapter) GetToken(ctx context.Context, tokenStr string) (*Token,
 
 // ListTokens lists all tokens for a tenant
 func (a *StorageAdapter) ListTokens(ctx context.Context, tenantID string) ([]*Token, error) {
-	filter := &interfaces.RegistrationTokenFilter{
+	filter := &business.RegistrationTokenFilter{
 		TenantID: tenantID,
 	}
 	dataList, err := a.store.ListTokens(ctx, filter)
@@ -63,25 +63,31 @@ func (a *StorageAdapter) DeleteToken(ctx context.Context, tokenStr string) error
 	return a.store.DeleteToken(ctx, tokenStr)
 }
 
+// RotateToken atomically revokes all prior tokens for tenant+group and returns the new token.
+func (a *StorageAdapter) RotateToken(ctx context.Context, tenantID, group string) (*Token, error) {
+	data, err := a.store.RotateToken(ctx, tenantID, group)
+	if err != nil {
+		return nil, err
+	}
+	return dataToToken(data), nil
+}
+
 // tokenToData converts a Token to RegistrationTokenData
-func tokenToData(token *Token) *interfaces.RegistrationTokenData {
-	return &interfaces.RegistrationTokenData{
+func tokenToData(token *Token) *business.RegistrationTokenData {
+	return &business.RegistrationTokenData{
 		Token:         token.Token,
 		TenantID:      token.TenantID,
 		ControllerURL: token.ControllerURL,
 		Group:         token.Group,
 		CreatedAt:     token.CreatedAt,
 		ExpiresAt:     token.ExpiresAt,
-		SingleUse:     token.SingleUse,
-		UsedAt:        token.UsedAt,
-		UsedBy:        token.UsedBy,
 		Revoked:       token.Revoked,
 		RevokedAt:     token.RevokedAt,
 	}
 }
 
 // dataToToken converts a RegistrationTokenData to Token
-func dataToToken(data *interfaces.RegistrationTokenData) *Token {
+func dataToToken(data *business.RegistrationTokenData) *Token {
 	return &Token{
 		Token:         data.Token,
 		TenantID:      data.TenantID,
@@ -89,9 +95,6 @@ func dataToToken(data *interfaces.RegistrationTokenData) *Token {
 		Group:         data.Group,
 		CreatedAt:     data.CreatedAt,
 		ExpiresAt:     data.ExpiresAt,
-		SingleUse:     data.SingleUse,
-		UsedAt:        data.UsedAt,
-		UsedBy:        data.UsedBy,
 		Revoked:       data.Revoked,
 		RevokedAt:     data.RevokedAt,
 	}

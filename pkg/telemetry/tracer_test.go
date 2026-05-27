@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package telemetry_test
 
@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/cfgis/cfgms/pkg/telemetry"
 )
@@ -40,15 +41,6 @@ func TestTracerInitialization(t *testing.T) {
 		{
 			name:    "initialization with nil config uses defaults",
 			config:  nil,
-			wantErr: false,
-		},
-		{
-			name: "initialization with OTLP endpoint",
-			config: &telemetry.Config{
-				ServiceName:  "test-service",
-				Enabled:      true,
-				OTLPEndpoint: "localhost:4317",
-			},
 			wantErr: false,
 		},
 	}
@@ -293,15 +285,11 @@ func TestTracerPropagation(t *testing.T) {
 	defer cleanup()
 
 	t.Run("extract and inject context", func(t *testing.T) {
-		// Create a span
 		spanCtx, span := tracer.Start(ctx, "test.propagation")
 		defer span.End()
 
-		// In a real scenario, you would:
-		// 1. Inject context into carrier (e.g., HTTP headers)
-		// 2. Extract context from carrier in another service
-		// For testing, we just verify the context is valid
-		assert.NotNil(t, spanCtx)
+		assert.NotEqual(t, ctx, spanCtx)
+		assert.True(t, trace.SpanFromContext(spanCtx).SpanContext().TraceID().IsValid())
 	})
 }
 

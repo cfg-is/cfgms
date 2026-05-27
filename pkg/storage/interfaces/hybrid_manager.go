@@ -1,13 +1,17 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-// Package interfaces provides hybrid storage management for mixed backend deployments
+// Package interfaces provides hybrid storage management for mixed backend deployments.
 package interfaces
 
 import (
+	"errors"
 	"fmt"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
-// HybridStorageConfig defines configuration for hybrid storage deployments
+// HybridStorageConfig defines configuration for hybrid storage deployments.
 type HybridStorageConfig struct {
 	// Operational data storage (audit, tenant data, sessions, health monitoring)
 	Operational StorageBackendConfig `json:"operational" yaml:"operational"`
@@ -16,25 +20,27 @@ type HybridStorageConfig struct {
 	Configuration StorageBackendConfig `json:"configuration" yaml:"configuration"`
 }
 
-// StorageBackendConfig defines a storage backend configuration
+// StorageBackendConfig defines a storage backend configuration.
 type StorageBackendConfig struct {
 	Provider string                 `json:"provider" yaml:"provider"`
 	Config   map[string]interface{} `json:"config" yaml:"config"`
 }
 
-// HybridStorageManager manages multiple storage backends for different data types
+// HybridStorageManager manages multiple storage backends for different data types.
 type HybridStorageManager struct {
 	operationalProvider   StorageProvider
 	configurationProvider StorageProvider
 
-	clientTenantStore ClientTenantStore
-	auditStore        AuditStore
-	configStore       ConfigStore
+	clientTenantStore        business.ClientTenantStore
+	auditStore               business.AuditStore
+	configStore              cfgconfig.ConfigStore
+	ipTrustStore             business.IPTrustStore
+	pendingRegistrationStore business.PendingRegistrationStore
 
 	config HybridStorageConfig
 }
 
-// NewHybridStorageManager creates a new hybrid storage manager
+// NewHybridStorageManager creates a new hybrid storage manager.
 func NewHybridStorageManager(config HybridStorageConfig) (*HybridStorageManager, error) {
 	manager := &HybridStorageManager{
 		config: config,
@@ -69,6 +75,22 @@ func NewHybridStorageManager(config HybridStorageConfig) (*HybridStorageManager,
 	}
 	manager.auditStore = auditStore
 
+	// IP trust storage is database-tier only; operational providers that do not
+	// implement it (e.g. sqlite) leave the accessor nil rather than failing.
+	ipTrustStore, err := opProvider.CreateIPTrustStore(config.Operational.Config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create IP trust store: %w", err)
+	}
+	manager.ipTrustStore = ipTrustStore
+
+	// Pending registration storage is operational-tier; providers that do not
+	// implement it leave the accessor nil rather than failing.
+	pendingRegistrationStore, err := opProvider.CreatePendingRegistrationStore(config.Operational.Config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create pending registration store: %w", err)
+	}
+	manager.pendingRegistrationStore = pendingRegistrationStore
+
 	// Create configuration store (GitOps workflow)
 	configStore, err := cfgProvider.CreateConfigStore(config.Configuration.Config)
 	if err != nil {
@@ -79,42 +101,55 @@ func NewHybridStorageManager(config HybridStorageConfig) (*HybridStorageManager,
 	return manager, nil
 }
 
-// GetClientTenantStore returns the client tenant storage interface (operational backend)
-func (h *HybridStorageManager) GetClientTenantStore() ClientTenantStore {
+// GetClientTenantStore returns the client tenant storage interface (operational backend).
+func (h *HybridStorageManager) GetClientTenantStore() business.ClientTenantStore {
 	return h.clientTenantStore
 }
 
-// GetAuditStore returns the audit storage interface (operational backend)
-func (h *HybridStorageManager) GetAuditStore() AuditStore {
+// GetAuditStore returns the audit storage interface (operational backend).
+func (h *HybridStorageManager) GetAuditStore() business.AuditStore {
 	return h.auditStore
 }
 
-// GetConfigStore returns the configuration storage interface (configuration backend)
-func (h *HybridStorageManager) GetConfigStore() ConfigStore {
+// GetConfigStore returns the configuration storage interface (configuration backend).
+func (h *HybridStorageManager) GetConfigStore() cfgconfig.ConfigStore {
 	return h.configStore
 }
 
-// GetOperationalProvider returns the operational storage provider
+// GetIPTrustStore returns the IP trust storage interface (operational backend,
+// nil if the operational provider does not support IP trust storage).
+func (h *HybridStorageManager) GetIPTrustStore() business.IPTrustStore {
+	return h.ipTrustStore
+}
+
+// GetPendingRegistrationStore returns the pending registration storage interface
+// (operational backend, nil if the operational provider does not support pending
+// registration storage).
+func (h *HybridStorageManager) GetPendingRegistrationStore() business.PendingRegistrationStore {
+	return h.pendingRegistrationStore
+}
+
+// GetOperationalProvider returns the operational storage provider.
 func (h *HybridStorageManager) GetOperationalProvider() StorageProvider {
 	return h.operationalProvider
 }
 
-// GetConfigurationProvider returns the configuration storage provider
+// GetConfigurationProvider returns the configuration storage provider.
 func (h *HybridStorageManager) GetConfigurationProvider() StorageProvider {
 	return h.configurationProvider
 }
 
-// GetOperationalCapabilities returns the operational provider's capabilities
+// GetOperationalCapabilities returns the operational provider's capabilities.
 func (h *HybridStorageManager) GetOperationalCapabilities() ProviderCapabilities {
 	return h.operationalProvider.GetCapabilities()
 }
 
-// GetConfigurationCapabilities returns the configuration provider's capabilities
+// GetConfigurationCapabilities returns the configuration provider's capabilities.
 func (h *HybridStorageManager) GetConfigurationCapabilities() ProviderCapabilities {
 	return h.configurationProvider.GetCapabilities()
 }
 
-// GetBackendInfo returns information about the hybrid storage backends
+// GetBackendInfo returns information about the hybrid storage backends.
 func (h *HybridStorageManager) GetBackendInfo() HybridBackendInfo {
 	return HybridBackendInfo{
 		Operational: BackendInfo{
@@ -132,13 +167,13 @@ func (h *HybridStorageManager) GetBackendInfo() HybridBackendInfo {
 	}
 }
 
-// HybridBackendInfo provides information about hybrid storage backends
+// HybridBackendInfo provides information about hybrid storage backends.
 type HybridBackendInfo struct {
 	Operational   BackendInfo `json:"operational"`
 	Configuration BackendInfo `json:"configuration"`
 }
 
-// BackendInfo provides information about a storage backend
+// BackendInfo provides information about a storage backend.
 type BackendInfo struct {
 	Provider     string               `json:"provider"`
 	Description  string               `json:"description"`
@@ -146,7 +181,7 @@ type BackendInfo struct {
 	Capabilities ProviderCapabilities `json:"capabilities"`
 }
 
-// ValidateHybridConfig validates hybrid storage configuration
+// ValidateHybridConfig validates hybrid storage configuration.
 func ValidateHybridConfig(config HybridStorageConfig) error {
 	// Validate operational provider
 	if config.Operational.Provider == "" {
@@ -164,7 +199,7 @@ func ValidateHybridConfig(config HybridStorageConfig) error {
 		return fmt.Errorf("configuration storage provider is required")
 	}
 
-	cfgProvider, err := GetStorageProvider(config.Configuration.Provider)
+	_, err = GetStorageProvider(config.Configuration.Provider)
 	if err != nil {
 		return fmt.Errorf("configuration storage provider '%s' not available: %w",
 			config.Configuration.Provider, err)
@@ -176,16 +211,10 @@ func ValidateHybridConfig(config HybridStorageConfig) error {
 		return fmt.Errorf("operational storage provider should support transactions for data consistency")
 	}
 
-	// Validate configuration provider capabilities for GitOps workflow
-	cfgCaps := cfgProvider.GetCapabilities()
-	if !cfgCaps.SupportsVersioning {
-		return fmt.Errorf("configuration storage provider should support versioning for change tracking")
-	}
-
 	return nil
 }
 
-// CreateHybridStorageFromConfig creates hybrid storage manager from configuration
+// CreateHybridStorageFromConfig creates hybrid storage manager from configuration.
 func CreateHybridStorageFromConfig(config HybridStorageConfig) (*HybridStorageManager, error) {
 	// Validate configuration first
 	if err := ValidateHybridConfig(config); err != nil {
@@ -196,7 +225,7 @@ func CreateHybridStorageFromConfig(config HybridStorageConfig) (*HybridStorageMa
 	return NewHybridStorageManager(config)
 }
 
-// GetRecommendedHybridConfig returns recommended hybrid storage configuration
+// GetRecommendedHybridConfig returns recommended hybrid storage configuration.
 func GetRecommendedHybridConfig() HybridStorageConfig {
 	return HybridStorageConfig{
 		Operational: StorageBackendConfig{
@@ -214,13 +243,9 @@ func GetRecommendedHybridConfig() HybridStorageConfig {
 			},
 		},
 		Configuration: StorageBackendConfig{
-			Provider: "git",
+			Provider: "flatfile",
 			Config: map[string]interface{}{
-				"repository_path": "/data/cfgms-configs",
-				"remote_url":      "git@github.com:msp-corp/cfgms-configs.git",
-				"branch":          "main",
-				"auto_sync":       true,
-				"sops_enabled":    true,
+				"root": "/var/lib/cfgms/config",
 			},
 		},
 	}
@@ -228,7 +253,7 @@ func GetRecommendedHybridConfig() HybridStorageConfig {
 
 // Migration helpers for existing deployments
 
-// MigrationStrategy defines how to migrate from single to hybrid storage
+// MigrationStrategy defines how to migrate from single to hybrid storage.
 type MigrationStrategy struct {
 	SourceProvider string                 `json:"source_provider"`
 	SourceConfig   map[string]interface{} `json:"source_config"`
@@ -237,7 +262,7 @@ type MigrationStrategy struct {
 	BackupFirst    bool                   `json:"backup_first"`
 }
 
-// PlanHybridMigration helps plan migration from single-backend to hybrid storage
+// PlanHybridMigration helps plan migration from single-backend to hybrid storage.
 func PlanHybridMigration(currentProvider string, currentConfig map[string]interface{}) MigrationStrategy {
 	strategy := MigrationStrategy{
 		SourceProvider: currentProvider,
@@ -246,25 +271,21 @@ func PlanHybridMigration(currentProvider string, currentConfig map[string]interf
 		BackupFirst:    true,
 	}
 
-	// Recommend hybrid configuration based on current setup
 	switch currentProvider {
 	case "database":
-		// Already using database - keep for operational, add git for configs
 		strategy.TargetConfig = HybridStorageConfig{
 			Operational: StorageBackendConfig{
 				Provider: "database",
-				Config:   currentConfig, // Keep existing DB config
+				Config:   currentConfig,
 			},
 			Configuration: StorageBackendConfig{
-				Provider: "git",
+				Provider: "flatfile",
 				Config: map[string]interface{}{
-					"repository_path": "/data/cfgms-configs",
-					"remote_url":      "", // Must be configured by user
+					"root": "/var/lib/cfgms/config",
 				},
 			},
 		}
 	case "git":
-		// Already using git - keep for configs, add database for operational
 		strategy.TargetConfig = HybridStorageConfig{
 			Operational: StorageBackendConfig{
 				Provider: "database",
@@ -276,8 +297,10 @@ func PlanHybridMigration(currentProvider string, currentConfig map[string]interf
 				},
 			},
 			Configuration: StorageBackendConfig{
-				Provider: "git",
-				Config:   currentConfig, // Keep existing git config
+				Provider: "flatfile",
+				Config: map[string]interface{}{
+					"root": "/var/lib/cfgms/config",
+				},
 			},
 		}
 	}

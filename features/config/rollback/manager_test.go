@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rollback_test
 
@@ -9,9 +9,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/config/git"
 	"github.com/cfgis/cfgms/features/config/rollback"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // Mock implementations
@@ -337,7 +339,7 @@ func TestRollbackManager_PreviewRollback(t *testing.T) {
 }
 
 func TestRollbackManager_ExecuteRollback_RequiresApproval(t *testing.T) {
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "test-user")
 
 	// Setup mocks
 	gitManager := new(MockGitManager)
@@ -386,10 +388,8 @@ func TestRollbackManager_ExecuteRollback_RequiresApproval(t *testing.T) {
 func TestRollbackValidator_ValidateRollback(t *testing.T) {
 	ctx := context.Background()
 
-	// Create validator with mocks
-	moduleRegistry := new(MockModuleRegistry)
-	configParser := new(MockConfigParser)
-	validator := rollback.NewRollbackValidator(moduleRegistry, configParser)
+	// Use no-op implementations for interfaces not exercised by these test cases.
+	validator := rollback.NewRollbackValidator(&noopModuleRegistry{}, &noopConfigParser{}, nil)
 
 	// Test cases
 	tests := []struct {
@@ -454,51 +454,92 @@ func TestRollbackValidator_ValidateRollback(t *testing.T) {
 	}
 }
 
-// Mock module registry for validator tests
-type MockModuleRegistry struct {
-	mock.Mock
+// noopModuleRegistry satisfies rollback.ModuleRegistry for tests that don't exercise
+// module-compatibility paths.
+type noopModuleRegistry struct{}
+
+func (r *noopModuleRegistry) GetModuleVersion(_ context.Context, _ string) (string, error) {
+	return "1.0.0", nil
 }
 
-func (m *MockModuleRegistry) GetModuleVersion(ctx context.Context, moduleName string) (string, error) {
-	args := m.Called(ctx, moduleName)
-	return args.String(0), args.Error(1)
+func (r *noopModuleRegistry) GetModuleDependencies(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
 }
 
-func (m *MockModuleRegistry) GetModuleDependencies(ctx context.Context, moduleName string) ([]string, error) {
-	args := m.Called(ctx, moduleName)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+func (r *noopModuleRegistry) IsModuleCompatible(_ context.Context, _, _ string) (bool, error) {
+	return true, nil
+}
+
+// noopConfigParser satisfies rollback.ConfigurationParser for tests that don't exercise
+// configuration-parsing paths.
+type noopConfigParser struct{}
+
+func (p *noopConfigParser) ParseConfiguration(_ []byte, _ string) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
+
+func (p *noopConfigParser) ValidateSchema(_ map[string]interface{}, _ string) error {
+	return nil
+}
+
+func (p *noopConfigParser) GetRequiredFields(_ string) []string {
+	return nil
+}
+
+func TestRollbackManager_ExecuteRollback_ErrorWithoutUserInContext(t *testing.T) {
+	// CancelRollback and ExecuteRollback both call getCurrentUser first;
+	// use a context with no user ID to assert the auth guard is in place.
+	ctx := context.Background()
+
+	store := rollback.NewInMemoryRollbackStore()
+	manager := rollback.NewRollbackManager(nil, nil, store, nil)
+
+	request := rollback.RollbackRequest{
+		TargetType:   rollback.TargetTypeDevice,
+		TargetID:     "123",
+		RollbackType: rollback.RollbackTypeFull,
+		RollbackTo:   "abc123",
+		Reason:       "test",
 	}
-	return args.Get(0).([]string), args.Error(1)
+
+	_, err := manager.ExecuteRollback(ctx, request)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unauthenticated")
 }
 
-func (m *MockModuleRegistry) IsModuleCompatible(ctx context.Context, moduleName, version string) (bool, error) {
-	args := m.Called(ctx, moduleName, version)
-	return args.Bool(0), args.Error(1)
-}
+func TestRollbackManager_CancelRollback_UserIDFromContext(t *testing.T) {
+	// Seeds an operation directly in the store, then cancels it with a known user in context.
+	// Verifies that getCurrentUser reads the user ID from context and records it in the audit trail.
+	ctx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "cancel-actor")
 
-// Mock config parser for validator tests
-type MockConfigParser struct {
-	mock.Mock
-}
+	store := rollback.NewInMemoryRollbackStore()
+	manager := rollback.NewRollbackManager(nil, nil, store, nil)
 
-func (m *MockConfigParser) ParseConfiguration(content []byte, format string) (map[string]interface{}, error) {
-	args := m.Called(content, format)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	op := &rollback.RollbackOperation{
+		ID:          "op-ctx-test",
+		Status:      rollback.RollbackStatusPending,
+		InitiatedBy: "original-user",
+		AuditTrail:  []rollback.AuditEntry{},
 	}
-	return args.Get(0).(map[string]interface{}), args.Error(1)
+	require.NoError(t, store.SaveOperation(ctx, op))
+
+	require.NoError(t, manager.CancelRollback(ctx, "op-ctx-test", "context test"))
+
+	updated, err := store.GetOperation(ctx, "op-ctx-test")
+	require.NoError(t, err)
+	require.NotEmpty(t, updated.AuditTrail)
+	assert.Equal(t, "cancel-actor", updated.AuditTrail[len(updated.AuditTrail)-1].Actor)
 }
 
-func (m *MockConfigParser) ValidateSchema(config map[string]interface{}, schema string) error {
-	args := m.Called(config, schema)
-	return args.Error(0)
-}
+func TestRollbackManager_CancelRollback_ErrorWithoutUserInContext(t *testing.T) {
+	ctx := context.Background() // No user ID in context
 
-func (m *MockConfigParser) GetRequiredFields(schema string) []string {
-	args := m.Called(schema)
-	if args.Get(0) == nil {
-		return nil
-	}
-	return args.Get(0).([]string)
+	store := rollback.NewInMemoryRollbackStore()
+	manager := rollback.NewRollbackManager(nil, nil, store, nil)
+
+	err := manager.CancelRollback(ctx, "any-op-id", "reason")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unauthenticated")
 }

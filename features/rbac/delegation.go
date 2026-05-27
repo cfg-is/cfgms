@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rbac
 
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,6 +15,7 @@ import (
 
 // DelegationManager handles permission delegation operations
 type DelegationManager struct {
+	mu          sync.RWMutex
 	delegations map[string]*common.PermissionDelegation
 	rbacManager RBACManager
 }
@@ -58,22 +60,29 @@ func (d *DelegationManager) CreateDelegation(ctx context.Context, req *Delegatio
 	}
 
 	// Store the delegation
+	d.mu.Lock()
 	d.delegations[delegation.Id] = delegation
+	d.mu.Unlock()
 
 	return delegation, nil
 }
 
 // RevokeDelegation revokes an existing permission delegation
 func (d *DelegationManager) RevokeDelegation(ctx context.Context, delegationID string, revokerID string) error {
+	d.mu.Lock()
 	delegation, exists := d.delegations[delegationID]
 	if !exists {
+		d.mu.Unlock()
 		return fmt.Errorf("delegation %s not found", delegationID)
 	}
+	delegatorID := delegation.DelegatorId
+	tenantID := delegation.TenantId
+	d.mu.Unlock()
 
 	// Check if the revoker has the authority to revoke this delegation
-	if delegation.DelegatorId != revokerID {
+	if delegatorID != revokerID {
 		// Check if revoker is a system admin or has delegation management permission
-		hasRevokePermission, err := d.checkRevocationPermission(ctx, revokerID, delegation.TenantId)
+		hasRevokePermission, err := d.checkRevocationPermission(ctx, revokerID, tenantID)
 		if err != nil {
 			return fmt.Errorf("failed to check revocation permission: %w", err)
 		}
@@ -82,13 +91,25 @@ func (d *DelegationManager) RevokeDelegation(ctx context.Context, delegationID s
 		}
 	}
 
-	delegation.Revoked = true
+	d.mu.Lock()
+	del, ok := d.delegations[delegationID]
+	if ok {
+		del.Revoked = true
+	}
+	d.mu.Unlock()
+	if !ok {
+		// Delegation was removed (e.g. by concurrent CleanupExpiredDelegations) between
+		// the two lock acquisitions; treat as not found.
+		return fmt.Errorf("delegation %s not found", delegationID)
+	}
 	return nil
 }
 
 // GetDelegation retrieves a delegation by ID
 func (d *DelegationManager) GetDelegation(ctx context.Context, delegationID string) (*common.PermissionDelegation, error) {
+	d.mu.RLock()
 	delegation, exists := d.delegations[delegationID]
+	d.mu.RUnlock()
 	if !exists {
 		return nil, fmt.Errorf("delegation %s not found", delegationID)
 	}
@@ -99,15 +120,16 @@ func (d *DelegationManager) GetDelegation(ctx context.Context, delegationID stri
 func (d *DelegationManager) ListDelegations(ctx context.Context, subjectID string, tenantID string) ([]*common.PermissionDelegation, error) {
 	var result []*common.PermissionDelegation
 
+	d.mu.RLock()
 	for _, delegation := range d.delegations {
 		if delegation.TenantId != tenantID {
 			continue
 		}
-
 		if delegation.DelegatorId == subjectID || delegation.DelegateeId == subjectID {
 			result = append(result, delegation)
 		}
 	}
+	d.mu.RUnlock()
 
 	return result, nil
 }
@@ -117,23 +139,20 @@ func (d *DelegationManager) GetActiveDelegations(ctx context.Context, delegateeI
 	var result []*common.PermissionDelegation
 	currentTime := time.Now().Unix()
 
+	d.mu.RLock()
 	for _, delegation := range d.delegations {
 		if delegation.TenantId != tenantID || delegation.DelegateeId != delegateeID {
 			continue
 		}
-
-		// Skip revoked delegations
 		if delegation.Revoked {
 			continue
 		}
-
-		// Skip expired delegations
 		if delegation.ExpiresAt > 0 && delegation.ExpiresAt < currentTime {
 			continue
 		}
-
 		result = append(result, delegation)
 	}
+	d.mu.RUnlock()
 
 	return result, nil
 }
@@ -182,11 +201,13 @@ func (d *DelegationManager) CheckDelegatedPermission(ctx context.Context, subjec
 func (d *DelegationManager) CleanupExpiredDelegations(ctx context.Context) error {
 	currentTime := time.Now().Unix()
 
+	d.mu.Lock()
 	for id, delegation := range d.delegations {
 		if delegation.ExpiresAt > 0 && delegation.ExpiresAt < currentTime {
 			delete(d.delegations, id)
 		}
 	}
+	d.mu.Unlock()
 
 	return nil
 }
@@ -289,13 +310,12 @@ func (d *DelegationManager) GetDelegationStats(ctx context.Context, tenantID str
 
 	currentTime := time.Now().Unix()
 
+	d.mu.RLock()
 	for _, delegation := range d.delegations {
 		if delegation.TenantId != tenantID {
 			continue
 		}
-
 		stats.TotalDelegations++
-
 		if delegation.Revoked {
 			stats.RevokedDelegations++
 		} else if delegation.ExpiresAt > 0 && delegation.ExpiresAt < currentTime {
@@ -304,6 +324,7 @@ func (d *DelegationManager) GetDelegationStats(ctx context.Context, tenantID str
 			stats.ActiveDelegations++
 		}
 	}
+	d.mu.RUnlock()
 
 	return stats, nil
 }

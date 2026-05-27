@@ -118,21 +118,6 @@ This directory contains automated CI/CD workflows for CFGMS. All workflows are n
 
 ### Compliance & Quality Workflows
 
-#### `template-validation.yml`
-**Purpose**: Template and configuration file validation
-
-**Triggers**: Push to main/develop, Pull Requests
-
-**What it does**:
-- Validates workflow templates
-- Checks configuration file syntax
-- Validates YAML schema compliance
-- Ensures template consistency
-
-**Runtime**: ~1-2 minutes
-
----
-
 #### `license-check.yml`
 **Purpose**: License compliance and dependency validation
 
@@ -150,21 +135,7 @@ This directory contains automated CI/CD workflows for CFGMS. All workflows are n
 
 ### Release Workflows
 
-#### `release.yml`
-**Purpose**: Automated release build and deployment
-
-**Triggers**: Tag creation (v*), Manual dispatch
-
-**What it does**:
-- Multi-platform binary builds (Linux, Windows, macOS)
-- Cross-compilation for all supported architectures
-- Release artifact generation
-- GitHub Release creation
-- Changelog generation
-
-**Platforms**: Linux AMD64/ARM64, Windows AMD64/ARM64, macOS ARM64
-
-**Runtime**: ~10-15 minutes
+CFGMS does not currently ship signed release binaries from CI. The `release.yml` and `release-automation.yml` workflows were removed on 2026-05-25 — pre-1.0, distribution is via `git clone && make build` against a tagged commit. A proper release-engineering pipeline (cross-platform signed builds, SBOM attestation, MSI/pkg installers) will land once the Hyper-V dev infrastructure (Phase 2, Epic #390) provides controlled build hosts.
 
 ---
 
@@ -212,9 +183,7 @@ make test-integration-setup && make generate-test-certificates
 | security-scan.yml | ✅ | ✅ | Daily (3 AM UTC) | ❌ |
 | codeql-analysis.yml | ✅ | ✅ | Weekly | ❌ |
 | docker-security.yml | ✅ | ✅ | ❌ | ✅ |
-| template-validation.yml | ✅ | ✅ | ❌ | ❌ |
 | license-check.yml | ✅ | ✅ | ❌ | ❌ |
-| release.yml | ❌ | ❌ | ❌ | ✅ (tags: v*) |
 
 ## Required Status Checks for Branch Protection
 

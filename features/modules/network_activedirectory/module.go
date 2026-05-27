@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package network_activedirectory
 
@@ -15,11 +15,13 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // activeDirectoryModule implements the Module interface for Active Directory management
 type activeDirectoryModule struct {
-	logger logging.Logger
+	logger      logging.Logger
+	secretStore secretsinterfaces.SecretStore
 
 	// Connection management
 	conn    *ldap.Conn
@@ -37,6 +39,11 @@ type activeDirectoryModule struct {
 		lastRequest  time.Time
 		connectedAt  time.Time
 	}
+}
+
+// SetSecretStore injects a secret store for password resolution.
+func (m *activeDirectoryModule) SetSecretStore(store secretsinterfaces.SecretStore) {
+	m.secretStore = store
 }
 
 // New creates a new instance of the Active Directory module
@@ -127,8 +134,8 @@ func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, conf
 	if username, ok := configMap["username"].(string); ok {
 		adConfig.Username = username
 	}
-	if password, ok := configMap["password"].(string); ok {
-		adConfig.Password = password
+	if passwordSecretKey, ok := configMap["password_secret_key"].(string); ok {
+		adConfig.PasswordSecretKey = passwordSecretKey
 	}
 	if searchBase, ok := configMap["search_base"].(string); ok {
 		adConfig.SearchBase = searchBase
@@ -187,7 +194,7 @@ func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, conf
 	m.config = adConfig
 
 	// Initialize authentication manager
-	m.authManager = NewAuthenticationManager(adConfig)
+	m.authManager = NewAuthenticationManager(adConfig, m.secretStore)
 
 	// Establish new connection
 	if err := m.connect(ctx); err != nil {
@@ -493,29 +500,16 @@ func (m *activeDirectoryModule) queryADObject(ctx context.Context, objectType, o
 		result.OU = ou
 
 	case "computer":
-		// For now, represent computer as a special user object
-		// In a full implementation, we'd have a DirectoryComputer type
-		user := m.ldapEntryToDirectoryUser(entry)
-		user.ProviderAttributes["object_class"] = "computer"
-		// Add computer-specific attributes
-		if os := entry.GetAttributeValue("operatingSystem"); os != "" {
-			user.ProviderAttributes["operating_system"] = os
-		}
-		if osVer := entry.GetAttributeValue("operatingSystemVersion"); osVer != "" {
-			user.ProviderAttributes["operating_system_version"] = osVer
-		}
-		if spn := entry.GetAttributeValues("servicePrincipalName"); len(spn) > 0 {
-			user.ProviderAttributes["service_principal_names"] = spn
-		}
-		result.User = user
+		computer := m.ldapEntryToDirectoryComputer(entry)
+		result.Computer = computer
 
 	case "gpo", "group_policy":
-		// Convert GPO to generic object for now
+		// Design decision: GPO objects use a generic representation pending a typed GPO schema.
 		gpo := m.ldapEntryToGenericObject(entry, "groupPolicyContainer")
 		result.GenericObject = gpo
 
 	case "domain_trust", "trust":
-		// Convert trust to generic object for now
+		// Design decision: GPO objects use a generic representation pending a typed GPO schema.
 		trust := m.ldapEntryToGenericObject(entry, "trustedDomain")
 		result.GenericObject = trust
 	}
@@ -662,18 +656,9 @@ func (m *activeDirectoryModule) listADObjects(ctx context.Context, objectType st
 		}
 
 	case "computer":
-		result.Users = make([]interfaces.DirectoryUser, len(searchResult.Entries))
+		result.Computers = make([]interfaces.DirectoryComputer, len(searchResult.Entries))
 		for i, entry := range searchResult.Entries {
-			user := m.ldapEntryToDirectoryUser(entry)
-			user.ProviderAttributes["object_class"] = "computer"
-			// Add computer-specific attributes
-			if os := entry.GetAttributeValue("operatingSystem"); os != "" {
-				user.ProviderAttributes["operating_system"] = os
-			}
-			if spn := entry.GetAttributeValues("servicePrincipalName"); len(spn) > 0 {
-				user.ProviderAttributes["service_principal_names"] = spn
-			}
-			result.Users[i] = *user
+			result.Computers[i] = *m.ldapEntryToDirectoryComputer(entry)
 		}
 
 	case "gpo", "group_policy":
@@ -758,19 +743,12 @@ func (m *activeDirectoryModule) Close(ctx context.Context) error {
 	return nil
 }
 
-// Monitor implements optional real-time monitoring for AD changes
-func (m *activeDirectoryModule) Monitor(ctx context.Context, resourceID string, config modules.ConfigState) (<-chan modules.ConfigState, error) {
-	// AD monitoring would require DirSync or similar change tracking
-	// For initial implementation, return an error indicating it's not supported
-	return nil, fmt.Errorf("real-time monitoring not yet implemented for Active Directory")
-}
-
 // GetCapabilities returns the capabilities of this module
 func (m *activeDirectoryModule) GetCapabilities() map[string]interface{} {
 	return map[string]interface{}{
 		"supports_read":      true,
 		"supports_write":     true,
-		"supports_monitor":   false, // Not yet implemented
+		"supports_monitor":   false, // Design decision: real-time AD monitoring requires an LDAP change notification channel; the LDAP client does not expose one
 		"supports_bulk":      true,
 		"object_types":       []string{"user", "group", "organizational_unit", "computer", "gpo", "group_policy", "domain_trust", "trust"},
 		"auth_methods":       []string{"simple", "kerberos"},

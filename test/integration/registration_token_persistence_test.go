@@ -1,21 +1,35 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 //go:build integration
 
 package integration
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	controllerapi "github.com/cfgis/cfgms/features/controller/api"
+	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/storage/providers/git"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // TestRegistrationTokenPersistence_AcrossRestart validates that registration tokens
@@ -31,8 +45,9 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 
 	// Phase 1: Create store and add tokens (simulates first controller run)
 	t.Log("Phase 1: Creating tokens in first store instance")
-	store1, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store1, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store1.Close() })
 	err = store1.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -50,7 +65,6 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 			ControllerURL: "tcp://localhost:1883",
 			Group:         "test-group",
 			CreatedAt:     now,
-			SingleUse:     false,
 			Revoked:       false,
 		},
 		{
@@ -60,7 +74,6 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 			Group:         "test-group",
 			CreatedAt:     now,
 			ExpiresAt:     &futureExpiry,
-			SingleUse:     true,
 			Revoked:       false,
 		},
 		{
@@ -69,7 +82,6 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 			ControllerURL: "tcp://localhost:1883",
 			Group:         "other-group",
 			CreatedAt:     now,
-			SingleUse:     false,
 			Revoked:       false,
 		},
 	}
@@ -80,13 +92,13 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 		t.Logf("Saved token: %s (tenant: %s)", token.Token, token.TenantID)
 	}
 
-	// Mark one token as used
+	// Revoke token 2 to test revocation persistence.
 	token2, err := adapter1.GetToken(ctx, "cfgms_reg_persist_test_2")
 	require.NoError(t, err)
-	token2.MarkUsed("steward-001")
+	token2.Revoke()
 	err = adapter1.UpdateToken(ctx, token2)
 	require.NoError(t, err)
-	t.Log("Marked token 2 as used by steward-001")
+	t.Log("Revoked token 2")
 
 	// Verify tokens exist in first store
 	allTokens, err := adapter1.ListTokens(ctx, "tenant-persistence-1")
@@ -100,8 +112,9 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 	// In production, this happens when controller process terminates
 
 	// Create new store instance pointing to same directory
-	store2, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store2, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store2.Close() })
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -119,13 +132,13 @@ func TestRegistrationTokenPersistence_AcrossRestart(t *testing.T) {
 	assert.True(t, retrieved1.IsValid(), "Token 1 should be valid")
 	t.Log("Token 1 persisted correctly and is valid")
 
-	// Verify token 2 exists with used status preserved
+	// Verify token 2 exists with revoked status preserved.
 	retrieved2, err := adapter2.GetToken(ctx, "cfgms_reg_persist_test_2")
 	require.NoError(t, err, "Token 2 should persist after restart")
-	assert.NotNil(t, retrieved2.UsedAt, "Token 2 should retain used status")
-	assert.Equal(t, "steward-001", retrieved2.UsedBy, "Token 2 should retain used_by")
-	assert.False(t, retrieved2.IsValid(), "Token 2 should be invalid (single-use and used)")
-	t.Log("Token 2 persisted with used status preserved")
+	assert.True(t, retrieved2.Revoked, "Token 2 should retain revoked status")
+	assert.NotNil(t, retrieved2.RevokedAt, "Token 2 should retain revoked_at")
+	assert.False(t, retrieved2.IsValid(), "Token 2 should be invalid (revoked)")
+	t.Log("Token 2 persisted with revoked status preserved")
 
 	// Verify token 3 exists
 	retrieved3, err := adapter2.GetToken(ctx, "cfgms_reg_persist_test_3")
@@ -156,15 +169,16 @@ func TestRegistrationTokenPersistence_TokenExpiration(t *testing.T) {
 	ctx := context.Background()
 
 	// Create store and token with past expiry
-	store, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 	err = store.Initialize(ctx)
 	require.NoError(t, err)
 
 	now := time.Now()
 	pastExpiry := now.Add(-1 * time.Hour)
 
-	expiredToken := &interfaces.RegistrationTokenData{
+	expiredToken := &business.RegistrationTokenData{
 		Token:     "cfgms_reg_expired_test",
 		TenantID:  "tenant-expiry",
 		CreatedAt: now.Add(-2 * time.Hour),
@@ -175,8 +189,9 @@ func TestRegistrationTokenPersistence_TokenExpiration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reload store
-	store2, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store2, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store2.Close() })
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -196,8 +211,9 @@ func TestRegistrationTokenPersistence_TokenRevocation(t *testing.T) {
 	ctx := context.Background()
 
 	// Create store and add token
-	store, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 	err = store.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -217,8 +233,9 @@ func TestRegistrationTokenPersistence_TokenRevocation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reload store
-	store2, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store2, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store2.Close() })
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -242,8 +259,9 @@ func TestRegistrationTokenPersistence_DeletePersists(t *testing.T) {
 	ctx := context.Background()
 
 	// Create store and add token
-	store, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 	err = store.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -262,8 +280,9 @@ func TestRegistrationTokenPersistence_DeletePersists(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reload store
-	store2, err := git.NewGitRegistrationTokenStore(tempDir, "")
+	store2, err := interfaces.CreateRegistrationTokenStoreFromConfig("sqlite", map[string]interface{}{"path": tempDir + "/tokens.db"})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = store2.Close() })
 	err = store2.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -273,4 +292,120 @@ func TestRegistrationTokenPersistence_DeletePersists(t *testing.T) {
 	_, err = adapter2.GetToken(ctx, "cfgms_reg_delete_test")
 	assert.Error(t, err, "Deleted token should not exist after reload")
 	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestConcurrentRegistration_PerennialToken_AllRequestsSucceed validates that
+// multiple concurrent HTTP POST /api/v1/register requests with the same perennial
+// token all succeed (200 OK). Perennial tokens survive multiple registrations and
+// are never consumed on use (Issue #1690).
+func TestConcurrentRegistration_PerennialToken_AllRequestsSucceed(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "reg-concurrent-*")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	ctx := context.Background()
+
+	// Build storage manager (RBAC + tenant)
+	storageManager, err := interfaces.CreateOSSStorageManager(
+		tempDir+"/flatfile",
+		tempDir+"/cfgms.db",
+	)
+	require.NoError(t, err)
+	defer func() { _ = storageManager.Close() }()
+
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacManager.Initialize(ctx))
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.FlushAudit(flushCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+
+	// Build cert manager so handleRegister can reach the 200 path
+	certMgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: tempDir + "/certs",
+		CAConfig: &cert.CAConfig{
+			Organization: "Test CFGMS Concurrent",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+
+	// Build SQLite-backed registration token store
+	regTokenStore, err := interfaces.CreateRegistrationTokenStoreFromConfig(
+		"sqlite",
+		map[string]interface{}{"path": tempDir + "/tokens.db"},
+	)
+	require.NoError(t, err)
+	defer func() { _ = regTokenStore.Close() }()
+	require.NoError(t, regTokenStore.Initialize(ctx))
+
+	tokenStore := registration.NewStorageAdapter(regTokenStore)
+
+	// Build minimal controller services
+	logger := logging.NewNoopLogger()
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+
+	controllerService := service.NewControllerService(logger)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	server, err := controllerapi.New(
+		cfg, logger, controllerService, configService, nil, rbacService,
+		certMgr, tenantManager, rbacManager,
+		nil, nil, nil, nil,
+		tokenStore,
+		"",
+		nil,
+	)
+	require.NoError(t, err)
+
+	// Seed a perennial token (no expiry, not revoked).
+	tok := &registration.Token{
+		Token:         "cfgms_reg_concurrent_integ_test",
+		TenantID:      "integ-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(ctx, tok))
+
+	// Serve over a real HTTP test server
+	ts := httptest.NewServer(server.GetRouter())
+	defer ts.Close()
+
+	const concurrency = 3
+	type result struct{ code int }
+	results := make([]result, concurrency)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			body, _ := json.Marshal(map[string]string{"token": "cfgms_reg_concurrent_integ_test"})
+			resp, postErr := ts.Client().Post(
+				ts.URL+"/api/v1/register",
+				"application/json",
+				bytes.NewReader(body),
+			)
+			if postErr != nil {
+				return
+			}
+			defer resp.Body.Close()
+			results[idx] = result{code: resp.StatusCode}
+		}(i)
+	}
+	wg.Wait()
+
+	// Perennial tokens are never consumed: all concurrent registrations must succeed.
+	for i, r := range results {
+		assert.Equal(t, http.StatusOK, r.code, "request %d must succeed with 200 (perennial token)", i)
+	}
 }

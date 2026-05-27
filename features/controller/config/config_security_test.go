@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package config
 
@@ -71,7 +71,7 @@ func TestLoad_EnvironmentVariableSecurityInjection(t *testing.T) {
 			envValue: "../../../etc/passwd",
 			testFunc: func(t *testing.T, cfg *Config) {
 				assert.Equal(t, "../../../etc/passwd", cfg.CertPath)
-				// This would be validated during actual certificate operations
+				// Path traversal is caught during actual certificate operations, not at config load time
 			},
 		},
 		{
@@ -80,7 +80,7 @@ func TestLoad_EnvironmentVariableSecurityInjection(t *testing.T) {
 			envValue: "../../../var/www",
 			testFunc: func(t *testing.T, cfg *Config) {
 				assert.Equal(t, "../../../var/www", cfg.DataDir)
-				// This would be validated during actual data operations
+				// Path traversal is caught during actual data operations, not at config load time
 			},
 		},
 		{

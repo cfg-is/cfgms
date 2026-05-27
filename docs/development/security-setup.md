@@ -15,9 +15,10 @@ CFGMS uses a multi-layered security scanning approach with four primary tools:
 
 ```bash
 # 1. Install security tools
-go install github.com/aquasecurity/trivy/cmd/trivy@latest
-go install github.com/securego/gosec/v2/cmd/gosec@latest
-go install honnef.co/go/tools/cmd/staticcheck@latest
+./.github/scripts/install-trivy.sh v0.70.0 \
+    8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9
+go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
+go install honnef.co/go/tools/cmd/staticcheck@2026.1
 make install-nancy     # Auto-install Nancy for your platform
 
 # 2. Verify installation and run security scan
@@ -39,35 +40,34 @@ make security-check    # Same as security-scan but optimized for development
 
 Trivy scans for vulnerabilities, secrets, and misconfigurations in the filesystem.
 
-#### Linux (x86_64)
+**Pin v0.70.0 (post-CVE-2026-33634 clean release).** NEVER use v0.69.4-v0.69.6 (compromised) and NEVER use `@latest`. The `go install` route is unsupported by Trivy upstream since v0.29.0 and must not be used.
+
+#### Linux / macOS (x86_64 + arm64)
 
 ```bash
-# Recommended: Go installation
-go install github.com/aquasecurity/trivy/cmd/trivy@latest
-
-# Alternative: Binary download
-curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.48.3
+# Recommended: verified install via project helper (SHA-256 pinned)
+./.github/scripts/install-trivy.sh v0.70.0 \
+    8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9
 ```
 
-#### macOS
+The helper refuses any version in the v0.69.4-v0.69.6 compromised range and verifies the SHA-256 of the release archive before extraction. See `docs/runbooks/trivy-rollback.md` for rollback procedure.
+
+#### macOS (alternative)
 
 ```bash
-# Recommended: Homebrew
+# Homebrew (verify version after install matches v0.70.0: trivy --version)
 brew install trivy
-
-# Alternative: Go installation
-go install github.com/aquasecurity/trivy/cmd/trivy@latest
 ```
 
 #### Windows (PowerShell)
 
 ```powershell
-# Go installation
-go install github.com/aquasecurity/trivy/cmd/trivy@latest
-
-# Alternative: Binary download
-$version = "v0.48.3"
+# Binary download with hash verification
+$version = "v0.70.0"
+$expectedHash = "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"
 Invoke-WebRequest -Uri "https://github.com/aquasecurity/trivy/releases/download/$version/trivy_$($version.TrimStart('v'))_Windows-64bit.zip" -OutFile "trivy.zip"
+$actual = (Get-FileHash trivy.zip -Algorithm SHA256).Hash.ToLower()
+if ($actual -ne $expectedHash) { throw "SHA-256 mismatch: expected $expectedHash, got $actual" }
 Expand-Archive trivy.zip -DestinationPath .
 Move-Item trivy.exe $env:USERPROFILE\go\bin\trivy.exe
 ```
@@ -82,7 +82,7 @@ Nancy scans Go dependencies for known vulnerabilities.
 # Cross-platform automatic installation
 make install-nancy
 
-# This automatically detects your platform and installs Nancy v1.0.51
+# This automatically detects your platform and installs Nancy v1.2.0
 # to your Go bin directory (already in PATH)
 ```
 
@@ -92,7 +92,7 @@ make install-nancy
 
 ```bash
 # Binary download to Go bin directory
-curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-linux-amd64 -o ~/nancy
+curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-linux-amd64 -o ~/nancy
 chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
@@ -103,7 +103,7 @@ chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 brew install nancy
 
 # Binary download to Go bin directory
-curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-amd64 -o ~/nancy
+curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-amd64 -o ~/nancy
 chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
@@ -111,7 +111,7 @@ chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 
 ```bash
 # Binary download to Go bin directory
-curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-arm64 -o ~/nancy
+curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-arm64 -o ~/nancy
 chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
@@ -126,7 +126,7 @@ yay -S nancy-bin
 
 ```powershell
 # Binary download to Go bin directory
-Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-windows-amd64.exe' -OutFile 'nancy.exe'
+Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-windows-amd64.exe' -OutFile 'nancy.exe'
 Move-Item nancy.exe $(go env GOPATH)\bin\nancy.exe
 ```
 
@@ -136,7 +136,7 @@ gosec analyzes Go source code for security problems and anti-patterns.
 
 ```bash
 # Go installation (all platforms) - RECOMMENDED
-go install github.com/securego/gosec/v2/cmd/gosec@latest
+go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
 
 # Verify installation
 gosec --version
@@ -155,7 +155,7 @@ staticcheck provides advanced static analysis for Go with curated rule sets that
 
 ```bash
 # Go installation (all platforms) 
-go install honnef.co/go/tools/cmd/staticcheck@latest
+go install honnef.co/go/tools/cmd/staticcheck@2026.1
 ```
 
 **Configuration**: CFGMS includes a `staticcheck.conf` file with curated rules that:
@@ -420,10 +420,10 @@ make security-check      # Quick security validation for development
 
 Current tool versions (as of v0.3.1):
 
-- **Trivy**: v0.48.3+ (latest recommended)
-- **Nancy**: v1.0.51
-- **gosec**: v2.22.7+ (latest recommended via `go install @latest`)
-- **staticcheck**: latest (v2023.1.7+ recommended via `go install @latest`)
+- **Trivy**: v0.70.0 (pinned — v0.69.4-v0.69.6 compromised per CVE-2026-33634; v0.70.0 is the post-incident clean rebuild with new GPG key. Install via `./.github/scripts/install-trivy.sh`. NEVER use @latest, NEVER use `go install`.)
+- **Nancy**: v1.2.0
+- **gosec**: v2.26.1 (pinned — avoid @latest)
+- **staticcheck**: 2026.1 (pinned — avoid @latest)
 
 ## Contributing to Security Setup
 
@@ -559,8 +559,8 @@ pre-commit install --install-hooks
 
 ```bash
 # Install missing Go tools
-go install honnef.co/go/tools/cmd/staticcheck@latest
-go install github.com/securego/gosec/v2/cmd/gosec@latest
+go install honnef.co/go/tools/cmd/staticcheck@2026.1
+go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
 
 # Verify PATH
 which staticcheck gosec

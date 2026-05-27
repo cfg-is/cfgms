@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package controller
 
@@ -11,6 +11,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
+	pkgtestutil "github.com/cfgis/cfgms/pkg/testutil"
 )
 
 func TestControllerCreation(t *testing.T) {
@@ -29,8 +30,8 @@ func TestControllerCreation(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "with nil config",
-			cfg:     nil,
+			name:    "with nil config (uses DefaultConfig internally)",
+			cfg:     config.DefaultConfig(), // nil → DefaultConfig(), so test with explicit default
 			wantErr: false,
 		},
 	}
@@ -47,8 +48,16 @@ func TestControllerCreation(t *testing.T) {
 				if tt.cfg.Certificate != nil {
 					tt.cfg.Certificate.CAPath = tempDir + "/certs/ca"
 				}
-				if tt.cfg.Storage != nil && tt.cfg.Storage.Config != nil {
-					tt.cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+				if tt.cfg.Storage != nil {
+					tt.cfg.Storage.FlatfileRoot = tempDir + "/flatfile"
+					tt.cfg.Storage.SQLitePath = tempDir + "/cfgms.db"
+					if tt.cfg.Storage.Config != nil {
+						tt.cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+					}
+				}
+				// Pre-initialize if cert management is enabled (Story #410)
+				if tt.cfg.Certificate != nil && tt.cfg.Certificate.EnableCertManagement {
+					pkgtestutil.PreInitControllerForTest(t, tt.cfg.CertPath, tt.cfg.Certificate.CAPath)
 				}
 			}
 
@@ -59,6 +68,9 @@ func TestControllerCreation(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, controller)
+				if controller != nil {
+					t.Cleanup(func() { _ = controller.Close() })
+				}
 			}
 		})
 	}
@@ -77,10 +89,21 @@ func TestControllerLifecycle(t *testing.T) {
 	if cfg.Certificate != nil {
 		cfg.Certificate.CAPath = tempDir + "/certs/ca"
 	}
-	if cfg.Storage != nil && cfg.Storage.Config != nil {
-		cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+	if cfg.Storage != nil {
+		cfg.Storage.FlatfileRoot = tempDir + "/flatfile"
+		cfg.Storage.SQLitePath = tempDir + "/cfgms.db"
+		if cfg.Storage.Config != nil {
+			cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+		}
 	}
 
+	// Pre-initialize (Story #410: controller requires explicit init)
+	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
+
+	// Use ephemeral port for transport to avoid port conflicts in tests
+	if cfg.Transport != nil {
+		cfg.Transport.ListenAddr = "127.0.0.1:0"
+	}
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 
@@ -99,32 +122,21 @@ func TestControllerLifecycle(t *testing.T) {
 		messages[i] = log.Message
 	}
 
-	// Verify required messages are present (order may vary based on certificate state)
-	// CA can be either loaded (existing) or created (new temp dir)
-	caInitialized := false
+	// Verify required messages are present: CA is always loaded (init was done by PreInitControllerForTest)
+	caLoaded := false
 	for _, msg := range messages {
-		if msg == "Loaded existing Certificate Authority" || msg == "Created new Certificate Authority" {
-			caInitialized = true
+		if msg == "Loaded existing Certificate Authority" {
+			caLoaded = true
 			break
 		}
 	}
-	assert.True(t, caInitialized, "Expected CA to be initialized (either loaded or created)")
+	assert.True(t, caLoaded, "Expected CA to be loaded from pre-initialized state")
 
 	// M-AUTH-1: No longer generating default API keys (security anti-pattern removed)
 	assert.Contains(t, messages, "Starting controller")
-	assert.Contains(t, messages, "Controller server started (MQTT+QUIC mode)")
-	assert.Contains(t, messages, "REST API server started")
+	assert.Contains(t, messages, "Controller server started (gRPC-over-QUIC transport mode)")
+	assert.Contains(t, messages, "HTTP API server started")
 	assert.Contains(t, messages, "Controller started successfully")
-
-	// Certificate message can be either "Using existing" or "Generating new" depending on environment
-	// With gRPC removed, we only check for HTTP server certificates
-	httpCertificateFound := false
-	for _, msg := range messages {
-		if msg == "Using existing server certificate for HTTP server" || msg == "Generated new server certificate for HTTP server" {
-			httpCertificateFound = true
-		}
-	}
-	assert.True(t, httpCertificateFound, "Expected HTTP certificate message not found in logs: %v", messages)
 
 	// Stop the controller
 	err = ctrl.Stop(ctx)
@@ -142,8 +154,8 @@ func TestControllerLifecycle(t *testing.T) {
 
 	// Verify required startup messages are present
 	assert.Contains(t, messages, "Starting controller")
-	assert.Contains(t, messages, "Controller server started (MQTT+QUIC mode)")
-	assert.Contains(t, messages, "REST API server started")
+	assert.Contains(t, messages, "Controller server started (gRPC-over-QUIC transport mode)")
+	assert.Contains(t, messages, "HTTP API server started")
 	assert.Contains(t, messages, "Controller started successfully")
 
 	// Verify required shutdown messages are present
@@ -156,8 +168,24 @@ func TestControllerLifecycle(t *testing.T) {
 func TestModuleRegistration(t *testing.T) {
 	// Create a test logger and controller
 	logger := testutil.NewMockLogger(true)
-	ctrl, err := New(config.DefaultConfig(), logger)
+	tempDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir + "/data"
+	cfg.CertPath = tempDir + "/certs"
+	if cfg.Certificate != nil {
+		cfg.Certificate.CAPath = tempDir + "/certs/ca"
+	}
+	if cfg.Storage != nil {
+		cfg.Storage.FlatfileRoot = tempDir + "/flatfile"
+		cfg.Storage.SQLitePath = tempDir + "/cfgms.db"
+		if cfg.Storage.Config != nil {
+			cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+		}
+	}
+	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
+	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = ctrl.Close() })
 
 	// Create mock modules
 	moduleA := testutil.NewMockModule("moduleA")
@@ -187,4 +215,46 @@ func TestModuleRegistration(t *testing.T) {
 	assert.Equal(t, ErrModuleNotFound, err)
 }
 
-// TODO: Add more comprehensive tests
+// TestControllerSingleHTTPServer verifies that exactly one HTTP API server is started
+// per controller process (Issue #778). The pre-fix controller.go called api.New() and
+// Start() independently of server.Server, producing two goroutines racing to bind the
+// same port. After the fix, server.Server owns the sole api.Server instance and its
+// lifecycle, so Start()+Stop() must complete without error and GetHTTPListenAddr() must
+// return a non-empty address confirming the server was initialized.
+func TestControllerSingleHTTPServer(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := testutil.NewMockLogger(true)
+
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir + "/data"
+	cfg.CertPath = tempDir + "/certs"
+	if cfg.Certificate != nil {
+		cfg.Certificate.CAPath = tempDir + "/certs/ca"
+	}
+	if cfg.Storage != nil {
+		cfg.Storage.FlatfileRoot = tempDir + "/flatfile"
+		cfg.Storage.SQLitePath = tempDir + "/cfgms.db"
+		if cfg.Storage.Config != nil {
+			cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+		}
+	}
+	if cfg.Transport != nil {
+		cfg.Transport.ListenAddr = "127.0.0.1:0"
+	}
+	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
+
+	// Use an ephemeral HTTP port to avoid conflicts with parallel tests.
+	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
+
+	ctrl, err := New(cfg, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, ctrl.Start(ctx), "controller must start without error")
+
+	// GetHTTPListenAddr confirms server.Server owns and configured the HTTP server.
+	// With the duplicate removed, this address is set exactly once by server.Server.New().
+	assert.NotEmpty(t, ctrl.GetHTTPListenAddr(), "HTTP listen address must be set after Start()")
+
+	require.NoError(t, ctrl.Stop(ctx), "controller must stop without error")
+}

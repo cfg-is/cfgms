@@ -1,8 +1,9 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2025 CFGMS Contributors
 package git
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -22,7 +23,8 @@ import (
 // - Processing encrypted secrets for configuration management
 // All file operations are within controlled repository contexts
 type SOPSManager struct {
-	sopsPath string // Path to SOPS binary
+	sopsPath string                              // Path to SOPS binary
+	onChmod  func(path string, mode os.FileMode) // test-only hook; nil in production
 }
 
 // NewSOPSManager creates a new SOPS manager
@@ -54,23 +56,60 @@ func (s *SOPSManager) IsSOPSEncrypted(content []byte) bool {
 		strings.Contains(contentStr, "ENC[")
 }
 
-// EncryptContent encrypts content using SOPS
+// EncryptContent encrypts content using SOPS.
+// The plaintext temp file is chmod-0000 immediately after write, before SOPS is invoked,
+// to minimize the window during which plaintext is readable on disk.
 func (s *SOPSManager) EncryptContent(ctx context.Context, content []byte, config *SOPSConfig, filePath string) ([]byte, error) {
 	if !config.Enabled {
 		return content, nil
 	}
 
-	// Create temporary file for SOPS processing
-	tmpFile, err := s.createTempFile(content, filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	// Preserve file extension for SOPS to detect format
+	ext := filepath.Ext(filePath)
+	if ext == "" {
+		ext = ".yaml"
 	}
-	defer func() {
-		if err := os.Remove(tmpFile); err != nil {
-			// Log error but continue - temp file cleanup is best effort
-			_ = err // Explicitly ignore temp file cleanup errors
-		}
-	}()
+
+	// Write plaintext to temp file
+	plainTmpFile, err := os.CreateTemp("", fmt.Sprintf("cfgms-sops-plain-*%s", ext))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create plaintext temp file: %w", err)
+	}
+	plainTmpPath := plainTmpFile.Name()
+
+	if _, err := plainTmpFile.Write(content); err != nil {
+		_ = plainTmpFile.Close()
+		_ = os.Remove(plainTmpPath)
+		return nil, fmt.Errorf("failed to write plaintext temp file: %w", err)
+	}
+	if err := plainTmpFile.Close(); err != nil {
+		_ = os.Remove(plainTmpPath)
+		return nil, fmt.Errorf("failed to close plaintext temp file: %w", err)
+	}
+
+	// Minimize read window: remove all access immediately after write, before SOPS exec.
+	// There is a small race between WriteFile and Chmod that cannot be closed without
+	// O_TMPFILE / /proc/self/fd tricks that are unreliable with SOPS --in-place.
+	if err := os.Chmod(plainTmpPath, 0000); err != nil {
+		_ = os.Remove(plainTmpPath)
+		return nil, fmt.Errorf("failed to chmod plaintext temp file: %w", err)
+	}
+	if s.onChmod != nil {
+		s.onChmod(plainTmpPath, 0000)
+	}
+	defer func() { _ = os.Remove(plainTmpPath) }()
+
+	// Create output temp file for ciphertext (empty; SOPS writes into it via --output)
+	encTmpFile, err := os.CreateTemp("", fmt.Sprintf("cfgms-sops-enc-*%s", ext))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ciphertext temp file: %w", err)
+	}
+	encTmpPath := encTmpFile.Name()
+	if err := encTmpFile.Close(); err != nil {
+		_ = os.Remove(encTmpPath)
+		return nil, fmt.Errorf("failed to close ciphertext temp file: %w", err)
+	}
+	defer func() { _ = os.Remove(encTmpPath) }()
 
 	// Determine KMS key to use
 	kmsKey, err := s.selectKMSKey(filePath, config)
@@ -78,21 +117,23 @@ func (s *SOPSManager) EncryptContent(ctx context.Context, content []byte, config
 		return nil, fmt.Errorf("failed to select KMS key: %w", err)
 	}
 
-	// Build SOPS command
-	args := []string{"--encrypt"}
+	// Build SOPS encrypt command; write ciphertext to separate output file
+	args := []string{"--encrypt", "--output", encTmpPath}
 
 	// Add KMS configuration
 	if kmsKey != "" {
 		provider := s.getKMSProvider(kmsKey, config)
-		switch provider.Type {
-		case "aws":
-			args = append(args, "--kms", kmsKey)
-		case "gcp":
-			args = append(args, "--gcp-kms", kmsKey)
-		case "azure":
-			args = append(args, "--azure-kv", kmsKey)
-		case "pgp":
-			args = append(args, "--pgp", provider.KeyID)
+		if provider != nil {
+			switch provider.Type {
+			case "aws":
+				args = append(args, "--kms", kmsKey)
+			case "gcp":
+				args = append(args, "--gcp-kms", kmsKey)
+			case "azure":
+				args = append(args, "--azure-kv", kmsKey)
+			case "pgp":
+				args = append(args, "--pgp", provider.KeyID)
+			}
 		}
 	}
 
@@ -102,18 +143,21 @@ func (s *SOPSManager) EncryptContent(ctx context.Context, content []byte, config
 		args = append(args, "--encrypted-regex", fmt.Sprintf("^(%s)$", encryptedRegex))
 	}
 
-	args = append(args, "--in-place", tmpFile)
+	args = append(args, plainTmpPath)
 
-	// Execute SOPS encryption
+	// Execute SOPS encryption with separate stdout/stderr buffers
+	var stdout, stderr bytes.Buffer
 	// #nosec G204 - SOPS encryption management requires SOPS binary execution
 	cmd := exec.CommandContext(ctx, s.sopsPath, args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("sops encryption failed: %s", string(output))
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("sops encrypt: %w (stderr: %s)", err, stderr.String())
 	}
 
-	// Read encrypted content
+	// Read encrypted content from the output temp file
 	// #nosec G304 - SOPS operation requires reading temporary encrypted files
-	encryptedContent, err := os.ReadFile(tmpFile)
+	encryptedContent, err := os.ReadFile(encTmpPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read encrypted content: %w", err)
 	}
@@ -121,39 +165,23 @@ func (s *SOPSManager) EncryptContent(ctx context.Context, content []byte, config
 	return encryptedContent, nil
 }
 
-// DecryptContent decrypts SOPS encrypted content
+// DecryptContent decrypts SOPS encrypted content.
+// Encrypted content is piped to sops via stdin; no plaintext temp file is written.
 func (s *SOPSManager) DecryptContent(ctx context.Context, content []byte) ([]byte, error) {
 	if !s.IsSOPSEncrypted(content) {
 		return content, nil
 	}
 
-	// Create temporary file for SOPS processing
-	tmpFile, err := s.createTempFile(content, "encrypted.yaml")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp file: %w", err)
-	}
-	defer func() {
-		if err := os.Remove(tmpFile); err != nil {
-			// Log error but continue - temp file cleanup is best effort
-			_ = err // Explicitly ignore temp file cleanup errors
-		}
-	}()
-
-	// Execute SOPS decryption
+	var stdout, stderr bytes.Buffer
 	// #nosec G204 - SOPS encryption management requires SOPS binary execution
-	cmd := exec.CommandContext(ctx, s.sopsPath, "--decrypt", "--in-place", tmpFile)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("sops decryption failed: %s", string(output))
+	cmd := exec.CommandContext(ctx, s.sopsPath, "--decrypt", "--input-type", "yaml", "--output-type", "yaml", "/dev/stdin")
+	cmd.Stdin = bytes.NewReader(content)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("sops decrypt: %w (stderr: %s)", err, stderr.String())
 	}
-
-	// Read decrypted content
-	// #nosec G304 - SOPS operation requires reading temporary decrypted files
-	decryptedContent, err := os.ReadFile(tmpFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read decrypted content: %w", err)
-	}
-
-	return decryptedContent, nil
+	return stdout.Bytes(), nil
 }
 
 // ShouldEncryptFile determines if a file should be encrypted based on rules
@@ -175,8 +203,7 @@ func (s *SOPSManager) ShouldEncryptFile(filePath string, config *SOPSConfig) (bo
 
 	// Check for sensitive fields if auto-encrypt is enabled
 	if config.AutoEncrypt {
-		// This would require parsing the content to check for sensitive fields
-		// For now, we'll use file naming conventions
+		// Sensitive-field detection uses file naming conventions; content parsing is deferred.
 		lowerPath := strings.ToLower(filePath)
 		if strings.Contains(lowerPath, "secret") ||
 			strings.Contains(lowerPath, "password") ||
@@ -251,31 +278,6 @@ func (s *SOPSManager) GenerateSOPSConfig(config *SOPSConfig, repoPath string) er
 }
 
 // Helper methods
-
-func (s *SOPSManager) createTempFile(content []byte, filePath string) (string, error) {
-	// Preserve file extension for SOPS to detect format
-	ext := filepath.Ext(filePath)
-	if ext == "" {
-		ext = ".yaml"
-	}
-
-	tmpFile, err := os.CreateTemp("", fmt.Sprintf("cfgms-sops-*%s", ext))
-	if err != nil {
-		return "", err
-	}
-
-	if _, err := tmpFile.Write(content); err != nil {
-		_ = tmpFile.Close()           // Best effort cleanup
-		_ = os.Remove(tmpFile.Name()) // Best effort cleanup
-		return "", err
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		// Log error but continue - file was written successfully
-		_ = err // Explicitly ignore file close errors after successful write
-	}
-	return tmpFile.Name(), nil
-}
 
 func (s *SOPSManager) selectKMSKey(filePath string, config *SOPSConfig) (string, error) {
 	// Check encryption rules first

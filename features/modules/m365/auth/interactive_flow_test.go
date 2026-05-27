@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package auth
 
@@ -10,20 +10,22 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // TestInteractiveAuthFlowSetup tests the setup button experience backend
 func TestInteractiveAuthFlowSetup(t *testing.T) {
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "interactive-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:                 "test-interactive-client-id",
@@ -47,7 +49,7 @@ func TestInteractiveAuthFlowSetup(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	flow := NewInteractiveAuthFlow(provider, config)
 	ctx := context.Background()
 
@@ -414,9 +416,7 @@ func TestCapabilityTesting(t *testing.T) {
 	}))
 	defer mockGraphServer.Close()
 
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "capability-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:             "capability-test-client",
@@ -425,7 +425,7 @@ func TestCapabilityTesting(t *testing.T) {
 		Scopes:               []string{"https://graph.microsoft.com/.default"}, // Application permissions use .default scope
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	flow := NewInteractiveAuthFlow(provider, config)
 
 	// Note: GraphBaseURL is a const, so we use HTTP transport override instead
@@ -556,9 +556,7 @@ func TestRealM365InteractiveIntegration(t *testing.T) {
 		t.Skip("Skipping real M365 interactive integration test - credentials not available")
 	}
 
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "real-integration-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:             clientID,
@@ -573,7 +571,7 @@ func TestRealM365InteractiveIntegration(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	flow := NewInteractiveAuthFlow(provider, config)
 	ctx := context.Background()
 
@@ -599,6 +597,134 @@ func TestRealM365InteractiveIntegration(t *testing.T) {
 
 	// Note: Real callback testing would require manual interaction
 	// or browser automation (which is beyond scope of this test)
+}
+
+// newTestFlowStateStore creates a steward-backed SecretStore in a temp directory.
+// Skips the test if /etc/machine-id is absent (required for platform key derivation on Linux).
+func newTestFlowStateStore(tb testing.TB, dir string) secretsif.SecretStore {
+	tb.Helper()
+	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
+		tb.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
+	}
+	provider := &stewardprovider.StewardProvider{}
+	store, err := provider.CreateSecretStore(map[string]interface{}{
+		"secrets_dir": dir,
+	})
+	if err != nil {
+		tb.Fatalf("create steward store: %v", err)
+	}
+	tb.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+// TestFlowStateDurableStorage verifies that M365 auth flow state survives a simulated
+// controller restart. Instance 1 writes state; a new instance backed by the same store
+// dir reads it back successfully.
+func TestFlowStateDurableStorage(t *testing.T) {
+	secretsDir := t.TempDir()
+
+	config := &OAuth2Config{
+		ClientID:    "test-durable-client",
+		TenantID:    "test-durable-tenant",
+		RedirectURI: "http://localhost:8080/auth/callback",
+	}
+
+	credStore := newTestCredentialStore(t)
+	oauthProvider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
+
+	// Instance 1 — before simulated restart
+	store1 := newTestFlowStateStore(t, secretsDir)
+	flow1 := NewInteractiveAuthFlowWithStore(oauthProvider, config, store1)
+
+	ctx := context.Background()
+	flowState, _, err := flow1.StartAuthFlow(ctx, config.TenantID, []string{"User.Read"})
+	require.NoError(t, err)
+	capturedState := flowState.State
+
+	// Flush to disk before opening a second instance
+	require.NoError(t, store1.Close())
+
+	// Instance 2 — after simulated restart, same secrets directory
+	provider2 := &stewardprovider.StewardProvider{}
+	store2, err := provider2.CreateSecretStore(map[string]interface{}{
+		"secrets_dir": secretsDir,
+	})
+	require.NoError(t, err)
+	defer func() { _ = store2.Close() }()
+
+	flow2 := NewInteractiveAuthFlowWithStore(oauthProvider, config, store2)
+
+	retrieved, err := flow2.getFlowState(capturedState)
+	require.NoError(t, err)
+	require.NotNil(t, retrieved, "flow state must survive simulated restart")
+
+	assert.Equal(t, flowState.TenantID, retrieved.TenantID)
+	assert.Equal(t, flowState.CodeVerifier, retrieved.CodeVerifier)
+	assert.Equal(t, flowState.CodeChallenge, retrieved.CodeChallenge)
+	assert.Equal(t, flowState.Nonce, retrieved.Nonce)
+}
+
+// TestFlowStateExpiredReturnsDistinctError verifies that reading a flow state whose
+// ExpiresAt is in the past returns ErrFlowStateExpired — not stale or zero state.
+func TestFlowStateExpiredReturnsDistinctError(t *testing.T) {
+	store := newTestFlowStateStore(t, t.TempDir())
+
+	config := &OAuth2Config{
+		ClientID: "test-expiry-client",
+		TenantID: "test-expiry-tenant",
+	}
+	credStore := newTestCredentialStore(t)
+	oauthProvider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
+	flow := NewInteractiveAuthFlowWithStore(oauthProvider, config, store)
+
+	// Write an already-expired flow state directly — no store-level TTL so the
+	// store returns the value, and expiry is caught by the embedded ExpiresAt check.
+	stateID := "test-expired-state-id"
+	expiredState := &AuthFlowState{
+		TenantID:        "test-expiry-tenant",
+		State:           stateID,
+		CodeVerifier:    "test-verifier",
+		CodeChallenge:   "test-challenge",
+		Nonce:           "test-nonce",
+		RequestedScopes: []string{"User.Read"},
+		CreatedAt:       time.Now().Add(-20 * time.Minute),
+		ExpiresAt:       time.Now().Add(-10 * time.Minute), // already expired
+		RedirectURI:     "http://localhost:8080/auth/callback",
+	}
+	data, err := json.Marshal(expiredState)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = store.StoreSecret(ctx, &secretsif.SecretRequest{
+		Key:       flowStateKey(stateID),
+		Value:     string(data),
+		TenantID:  "m365",
+		CreatedBy: "test",
+		// No TTL — store does not expire it; expiry is enforced by our code.
+	})
+	require.NoError(t, err)
+
+	_, err = flow.getFlowState(stateID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrFlowStateExpired, "expired flow state must return ErrFlowStateExpired")
+}
+
+// TestFlowStateMissingReturnsError verifies that reading a non-existent flow state
+// returns an error and not nil/zero state.
+func TestFlowStateMissingReturnsError(t *testing.T) {
+	store := newTestFlowStateStore(t, t.TempDir())
+
+	config := &OAuth2Config{
+		ClientID: "test-missing-client",
+		TenantID: "test-missing-tenant",
+	}
+	credStore := newTestCredentialStore(t)
+	oauthProvider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
+	flow := NewInteractiveAuthFlowWithStore(oauthProvider, config, store)
+
+	result, err := flow.getFlowState("nonexistent-flow-state-id")
+	assert.Nil(t, result, "result must be nil for missing flow state")
+	assert.Error(t, err, "missing flow state must return an error")
 }
 
 // Helper type for mocking HTTP transport

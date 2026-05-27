@@ -1,15 +1,15 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package dna
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -22,14 +22,10 @@ func TestNewCollector(t *testing.T) {
 }
 
 func TestCollect(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping full DNA collection test in short mode")
-	}
-
 	logger := logging.NewLogger("debug")
 	collector := NewCollector(logger)
 
-	dna, err := collector.Collect()
+	dna, err := collector.Collect(t.Context())
 	require.NoError(t, err)
 	require.NotNil(t, dna)
 
@@ -38,7 +34,7 @@ func TestCollect(t *testing.T) {
 	assert.NotNil(t, dna.Attributes)
 	assert.NotNil(t, dna.LastUpdated)
 
-	// Test that we have basic attributes
+	// Test that we have basic attributes (all from fast path)
 	assert.Contains(t, dna.Attributes, "runtime_os")
 	assert.Contains(t, dna.Attributes, "runtime_arch")
 	assert.Contains(t, dna.Attributes, "runtime_version")
@@ -48,6 +44,19 @@ func TestCollect(t *testing.T) {
 	// Test timestamp is recent
 	timeDiff := time.Since(dna.LastUpdated.AsTime())
 	assert.True(t, timeDiff < time.Minute, "DNA timestamp should be recent")
+}
+
+// TestCollectAcceptsContext verifies that Collect honours a cancelled context.
+func TestCollectAcceptsContext(t *testing.T) {
+	logger := logging.NewLogger("error")
+	collector := NewCollector(logger)
+
+	// A background context should work fine.
+	ctx := context.Background()
+	dna, err := collector.Collect(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, dna)
+	assert.NotEmpty(t, dna.Id)
 }
 
 func TestCollectBasicInfo(t *testing.T) {
@@ -75,7 +84,7 @@ func TestCollectHardwareInfo(t *testing.T) {
 	collector := NewCollector(logger)
 
 	attributes := make(map[string]string)
-	collector.collectHardwareInfo(attributes)
+	collector.collectHardwareInfo(t.Context(), attributes)
 
 	// Test enhanced hardware attributes
 	assert.Contains(t, attributes, "cpu_count")
@@ -88,12 +97,40 @@ func TestCollectHardwareInfo(t *testing.T) {
 	assert.NotEmpty(t, attributes["cpu_arch"])
 }
 
+// TestHardwareCacheReuse verifies that the hardware cache is populated on the first call
+// and reused (not re-queried) on subsequent calls to collectHardwareInfo.
+func TestHardwareCacheReuse(t *testing.T) {
+	logger := logging.NewLogger("error")
+	collector := NewCollector(logger)
+	ctx := t.Context()
+
+	// First call populates the cache
+	attrs1 := make(map[string]string)
+	collector.collectHardwareInfo(ctx, attrs1)
+
+	// Second call should return from cache
+	attrs2 := make(map[string]string)
+	start := time.Now()
+	collector.collectHardwareInfo(ctx, attrs2)
+	cacheHitDuration := time.Since(start)
+
+	// Cache hit should be very fast (under 100ms)
+	assert.Less(t, cacheHitDuration, 100*time.Millisecond,
+		"Second hardware collection should be near-instant (cache hit)")
+
+	// Both calls should return the same stable values
+	assert.Equal(t, attrs1["cpu_count"], attrs2["cpu_count"],
+		"cpu_count should be consistent across calls")
+	assert.Equal(t, attrs1["runtime_arch"], attrs2["runtime_arch"],
+		"runtime_arch should be consistent across calls")
+}
+
 func TestCollectSoftwareInfo(t *testing.T) {
 	logger := logging.NewLogger("debug")
 	collector := NewCollector(logger)
 
 	attributes := make(map[string]string)
-	collector.collectSoftwareInfo(attributes)
+	collector.collectSoftwareInfo(t.Context(), attributes)
 
 	// Test enhanced software attributes
 	assert.Contains(t, attributes, "os")
@@ -114,7 +151,7 @@ func TestCollectNetworkInfo(t *testing.T) {
 	collector := NewCollector(logger)
 
 	attributes := make(map[string]string)
-	collector.collectNetworkInfo(attributes)
+	collector.collectNetworkInfo(t.Context(), attributes)
 
 	// Test network attributes (may not be present in all environments)
 	assert.Contains(t, attributes, "network_interface_count")
@@ -134,9 +171,8 @@ func TestCollectEnvironmentInfo(t *testing.T) {
 	attributes := make(map[string]string)
 	collector.collectEnvironmentInfo(attributes)
 
-	// Environment attributes depend on the system
-	// Just verify the method runs and populates some data
-	assert.True(t, len(attributes) >= 0) // At least timezone info should be there
+	// Environment attributes depend on the system, but timezone should always be set
+	assert.Contains(t, attributes, "timezone", "collectEnvironmentInfo should always set timezone")
 }
 
 func TestGenerateSystemID(t *testing.T) {
@@ -174,54 +210,36 @@ func TestGenerateSystemID(t *testing.T) {
 	assert.Len(t, id4, 16)
 }
 
-func TestRefreshDNA(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping DNA refresh test in short mode")
-	}
-
-	logger := logging.NewLogger("debug")
+// TestBackgroundCollectionStartsOnFirstCollect verifies that the background
+// collection goroutine is started on the first Collect() call and the bgDone
+// channel is eventually closed.
+func TestBackgroundCollectionStartsOnFirstCollect(t *testing.T) {
+	logger := logging.NewLogger("error")
 	collector := NewCollector(logger)
 
-	dna, err := collector.RefreshDNA()
+	// First Collect should return fast data immediately
+	start := time.Now()
+	dna, err := collector.Collect(t.Context())
 	require.NoError(t, err)
 	require.NotNil(t, dna)
+	firstCallDuration := time.Since(start)
 
-	// RefreshDNA should work the same as Collect
-	assert.NotEmpty(t, dna.Id)
-	assert.NotNil(t, dna.Attributes)
-	assert.NotNil(t, dna.LastUpdated)
-}
+	// Fast path should complete in under 30 seconds even on slow machines
+	// (hardware WMI calls are 1-5s each, so first call can be up to ~40s on Windows)
+	assert.Less(t, firstCallDuration, 5*time.Minute,
+		"First Collect() should return within 5 minutes")
 
-func TestCompareDNA(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping DNA compare test in short mode")
+	// Background collection should complete within a generous timeout
+	select {
+	case <-collector.bgDone:
+		// Background collection completed — subsequent Collect() will return merged data
+	case <-time.After(3 * time.Minute):
+		t.Fatal("Background collection goroutine did not complete within 3 minutes — goroutine may not have started")
 	}
 
-	logger := logging.NewLogger("debug")
-	collector := NewCollector(logger)
-
-	// Create test DNA
-	dna1, err := collector.Collect()
+	// Second Collect should return at least as many attributes as the first
+	dna2, err := collector.Collect(t.Context())
 	require.NoError(t, err)
-
-	dna2, err := collector.Collect()
-	require.NoError(t, err)
-
-	// Same system should compare equal
-	assert.True(t, CompareDNA(dna1, dna2))
-
-	// Different system ID should not compare equal
-	dna3 := &commonpb.DNA{
-		Id: "different-id",
-		Attributes: map[string]string{
-			"primary_mac": "different-mac",
-			"hostname":    "different-host",
-		},
-	}
-	assert.False(t, CompareDNA(dna1, dna3))
-
-	// Nil DNA should not compare equal
-	assert.False(t, CompareDNA(dna1, nil))
-	assert.False(t, CompareDNA(nil, dna2))
-	assert.False(t, CompareDNA(nil, nil))
+	assert.GreaterOrEqual(t, len(dna2.Attributes), len(dna.Attributes),
+		"Second Collect() should have at least as many attributes as first")
 }

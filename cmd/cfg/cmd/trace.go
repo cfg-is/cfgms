@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package cmd implements the CLI commands for cfg
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,9 +18,11 @@ import (
 
 var (
 	// Trace command flags
-	traceURL    string
-	traceAPIKey string
-	traceFormat string
+	traceURL         string
+	traceAPIKey      string
+	traceFormat      string
+	traceTLSCACert   string
+	traceTLSInsecure bool
 )
 
 // traceCmd represents the trace command
@@ -48,16 +51,57 @@ func init() {
 	traceCmd.Flags().StringVar(&traceURL, "url", "", "Controller API URL (required)")
 	traceCmd.Flags().StringVar(&traceAPIKey, "api-key", "", "API key for authentication")
 	traceCmd.Flags().StringVar(&traceFormat, "format", "text", "Output format (text, json)")
+	traceCmd.Flags().StringVar(&traceTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	traceCmd.Flags().BoolVar(&traceTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 
 	_ = traceCmd.MarkFlagRequired("url")
+}
+
+// getTraceClient creates an API client using bundle auth (mTLS) when available,
+// falling back to API key auth when no bundle is found or discovery is opted out.
+func getTraceClient() (*APIClient, error) {
+	apiURL := strings.TrimSuffix(traceURL, "/")
+	if apiURL == "" {
+		apiURL = os.Getenv("CFGMS_API_URL")
+	}
+
+	// Try admin bundle first (mTLS auto-discovery)
+	client, err := resolveBundleClient(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("bundle lookup failed: %w", err)
+	}
+	if client != nil {
+		return client, nil
+	}
+
+	// Fallback: API key path
+	apiKey := traceAPIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("CFGMS_API_KEY")
+	}
+
+	tlsInsecure := traceTLSInsecure
+	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
+		tlsInsecure = true
+	}
+
+	tlsCACertPath := traceTLSCACert
+	if tlsCACertPath == "" {
+		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
+	}
+
+	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
 }
 
 func runTrace(cmd *cobra.Command, args []string) error {
 	requestID := args[0]
 
-	// Make API request
-	url := strings.TrimSuffix(traceURL, "/") + "/api/v1/health/trace/" + requestID
-	resp, err := makeAPIRequest(url, traceAPIKey)
+	client, err := getTraceClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/health/trace/"+requestID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch trace: %w", err)
 	}
@@ -89,16 +133,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		Status          string                 `json:"status"`
 		Error           string                 `json:"error,omitempty"`
 		Metadata        map[string]interface{} `json:"metadata,omitempty"`
-		Spans           []struct {
-			SpanID       string            `json:"span_id"`
-			ParentSpanID string            `json:"parent_span_id,omitempty"`
-			Operation    string            `json:"operation"`
-			StartTime    time.Time         `json:"start_time"`
-			EndTime      *time.Time        `json:"end_time,omitempty"`
-			DurationMs   float64           `json:"duration_ms,omitempty"`
-			Status       string            `json:"status"`
-			Tags         map[string]string `json:"tags,omitempty"`
-		} `json:"spans,omitempty"`
+		Spans           []spanType             `json:"spans,omitempty"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&trace); err != nil {
@@ -149,21 +184,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	// Spans
 	if len(trace.Spans) > 0 {
 		fmt.Println("\n=== Sub-Operations (Spans) ===")
-		// Convert anonymous struct to spanType
-		spans := make([]spanType, len(trace.Spans))
-		for i, s := range trace.Spans {
-			spans[i] = spanType{
-				SpanID:       s.SpanID,
-				ParentSpanID: s.ParentSpanID,
-				Operation:    s.Operation,
-				StartTime:    s.StartTime,
-				EndTime:      s.EndTime,
-				DurationMs:   s.DurationMs,
-				Status:       s.Status,
-				Tags:         s.Tags,
-			}
-		}
-		printSpans(spans, "", make(map[string]bool))
+		printSpans(trace.Spans, "", make(map[string]bool))
 	}
 
 	fmt.Println()

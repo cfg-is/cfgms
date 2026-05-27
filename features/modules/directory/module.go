@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package directory
 
@@ -8,18 +8,23 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // directoryModule implements the Module interface for directory management
 type directoryModule struct {
 	// Embed default logging support for automatic injection capability
 	modules.DefaultLoggingSupport
+	// configuredBasePath is populated only after a successful Set(); no default value.
+	// Get() returns ErrAllowedBasePathRequired if this is empty.
+	configuredBasePath string
 }
 
 // New creates a new instance of the Directory module
@@ -27,19 +32,40 @@ func New() modules.Module {
 	return &directoryModule{}
 }
 
+// Configure extracts AllowedBasePath from the operator config so that Get() can
+// validate paths before any Set() has been called.
+// This implements modules.Configurable and is called by the execution engine
+// before the Get→Compare→Set→Verify cycle begins.
+func (m *directoryModule) Configure(config modules.ConfigState) error {
+	if config == nil {
+		return ErrAllowedBasePathRequired
+	}
+	configMap := config.AsMap()
+	basePath, _ := configMap["allowed_base_path"].(string)
+	if basePath == "" || !filepath.IsAbs(basePath) {
+		return ErrAllowedBasePathRequired
+	}
+	m.configuredBasePath = basePath
+	return nil
+}
+
 // directoryConfig represents the configuration for a directory
 type directoryConfig struct {
-	State       string `yaml:"state"`                 // "present" or "absent"
-	Path        string `yaml:"path"`                  // Directory path
-	Permissions int    `yaml:"permissions,omitempty"` // Directory permissions (e.g., 0755)
-	Owner       string `yaml:"owner,omitempty"`       // Directory owner
-	Group       string `yaml:"group,omitempty"`       // Directory group
-	Recursive   bool   `yaml:"recursive,omitempty"`   // Create parent directories if needed
+	AllowedBasePath string              `yaml:"allowed_base_path"`     // Security boundary for all OS calls
+	State           string              `yaml:"state"`                 // "present" or "absent"
+	Path            string              `yaml:"path"`                  // Directory path
+	Permissions     int                 `yaml:"permissions,omitempty"` // Directory permissions (e.g., 0755); mutually exclusive with WindowsACL
+	Owner           string              `yaml:"owner,omitempty"`       // Directory owner
+	Group           string              `yaml:"group,omitempty"`       // Directory group
+	Recursive       bool                `yaml:"recursive,omitempty"`   // Create parent directories if needed
+	WindowsACL      *modules.WindowsACL `yaml:"windows_acl,omitempty"` // Windows NTFS ACL; mutually exclusive with Permissions; Windows only
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
 func (c *directoryConfig) AsMap() map[string]interface{} {
 	result := map[string]interface{}{}
+
+	result["allowed_base_path"] = c.AllowedBasePath
 
 	// Always include state
 	if c.State != "" {
@@ -54,6 +80,12 @@ func (c *directoryConfig) AsMap() map[string]interface{} {
 	// Only include permissions for present state
 	if c.State != "absent" {
 		result["permissions"] = c.Permissions
+		// mode mirrors permissions as an octal string. Set() accepts either
+		// "permissions" (int) or the "mode" (octal-string) alias, so Get() must
+		// emit both — otherwise a config declared with "mode" compares against a
+		// state map that lacks it and the comparator reports a phantom added
+		// field that no Set() can ever resolve.
+		result["mode"] = fmt.Sprintf("%#o", c.Permissions)
 	}
 
 	if c.Owner != "" {
@@ -64,6 +96,9 @@ func (c *directoryConfig) AsMap() map[string]interface{} {
 	}
 	if c.Recursive {
 		result["recursive"] = c.Recursive
+	}
+	if c.WindowsACL != nil {
+		result["windows_acl"] = c.WindowsACL
 	}
 
 	return result
@@ -88,7 +123,7 @@ func (c *directoryConfig) Validate() error {
 func (c *directoryConfig) GetManagedFields() []string {
 	fields := []string{"state", "path"}
 
-	if c.State != "absent" {
+	if c.State != "absent" && platformSupportsPermissions() {
 		fields = append(fields, "permissions")
 	}
 
@@ -99,11 +134,31 @@ func (c *directoryConfig) GetManagedFields() []string {
 		fields = append(fields, "group")
 	}
 
+	if c.WindowsACL != nil && runtime.GOOS == "windows" {
+		fields = append(fields, "windows_acl")
+	}
+
 	return fields
 }
 
 // validateConfig checks if the configuration is valid
 func (c *directoryConfig) validate() error {
+	// AllowedBasePath must be set and absolute — checked before Path to surface the
+	// security boundary error first.
+	if c.AllowedBasePath == "" || !filepath.IsAbs(c.AllowedBasePath) {
+		return ErrAllowedBasePathRequired
+	}
+
+	// windows_acl and permissions are mutually exclusive.
+	if c.Permissions != 0 && c.WindowsACL != nil {
+		return fmt.Errorf("windows_acl and permissions are mutually exclusive; use windows_acl on Windows or permissions on Unix")
+	}
+
+	// windows_acl is only valid on Windows.
+	if c.WindowsACL != nil && runtime.GOOS != "windows" {
+		return fmt.Errorf("windows_acl is only supported on Windows (GOOS=%s); use the permissions field instead", runtime.GOOS)
+	}
+
 	// Validate path is always required
 	if c.Path == "" {
 		return ErrInvalidPath
@@ -150,10 +205,14 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		"resource_id", resourceID,
 		"tenant_id", tenantID,
 		"resource_type", "directory")
-	// Convert ConfigState to directoryConfig
+
+	// Step 1: Extract config from configMap (populates AllowedBasePath and other fields)
 	configMap := config.AsMap()
 	dirConfig := &directoryConfig{}
 
+	if allowedBasePath, ok := configMap["allowed_base_path"].(string); ok {
+		dirConfig.AllowedBasePath = allowedBasePath
+	}
 	if path, ok := configMap["path"].(string); ok {
 		dirConfig.Path = path
 	}
@@ -179,13 +238,30 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 	if recursive, ok := configMap["recursive"].(bool); ok {
 		dirConfig.Recursive = recursive
 	}
-
-	// Apply default permissions if not specified (0755 is a safe default for directories)
-	if dirConfig.Permissions == 0 {
-		dirConfig.Permissions = 0755
+	if aclData, ok := configMap["windows_acl"].(*modules.WindowsACL); ok {
+		dirConfig.WindowsACL = aclData
+	}
+	if state, ok := configMap["state"].(string); ok {
+		dirConfig.State = state
 	}
 
-	// Validate configuration
+	// Deletion is not implemented; return an explicit error rather than silently creating the dir.
+	if dirConfig.State == "absent" {
+		return fmt.Errorf("directory deletion is not supported: %w", modules.ErrNotImplemented)
+	}
+
+	// Step 2: Platform-specific permissions handling (must remain before validate)
+	if !platformSupportsPermissions() && dirConfig.Permissions != 0 {
+		return fmt.Errorf("unix-style permissions are not supported on this platform (NTFS uses ACLs); remove the permissions field from your configuration")
+	}
+
+	// Apply default permissions only when windows_acl is not set; avoids a false mutual-exclusion
+	// error in validate() when the operator omits both fields.
+	if dirConfig.Permissions == 0 && dirConfig.WindowsACL == nil {
+		dirConfig.Permissions = int(defaultDirectoryMode())
+	}
+
+	// Step 3: Validate configuration — return on any error, storing nothing in m
 	if err := dirConfig.validate(); err != nil {
 		logger.ErrorCtx(ctx, "Directory configuration validation failed",
 			"operation", "directory_set",
@@ -197,33 +273,49 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		return err
 	}
 
+	// Step 4: Validate path is within AllowedBasePath — return on any error, storing nothing in m
+	cleanPath, err := security.ValidateAndCleanPath(dirConfig.AllowedBasePath, dirConfig.Path)
+	if err != nil {
+		logger.ErrorCtx(ctx, "Directory path traversal check failed",
+			"operation", "directory_set",
+			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "directory",
+			"error_code", "PATH_TRAVERSAL_DETECTED",
+			"error_details", err.Error())
+		return fmt.Errorf("path security check failed: %w", err)
+	}
+
+	// Step 5: Store configuredBasePath only after both validate() and ValidateAndCleanPath succeed
+	m.configuredBasePath = dirConfig.AllowedBasePath
+
+	// Step 6: Use cleanPath for ALL OS calls — no raw dirConfig.Path reaches any OS call
+
 	// Check if path exists and is a directory
-	info, err := os.Stat(dirConfig.Path)
+	info, err := os.Stat(cleanPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("failed to stat path: %w", err)
 		}
 		// Path doesn't exist, create it
-		// Validate permissions are within os.FileMode range
-		// Validate and safely convert permissions to os.FileMode
 		if dirConfig.Permissions < 0 || dirConfig.Permissions > 0777 {
 			return modules.ErrInvalidInput
 		}
 		fileMode := os.FileMode(dirConfig.Permissions) // Safe: bounds validated above
 
 		if dirConfig.Recursive {
-			if err := os.MkdirAll(dirConfig.Path, fileMode); err != nil {
+			if err := os.MkdirAll(cleanPath, fileMode); err != nil {
 				return fmt.Errorf("failed to create directory: %w", err)
 			}
 		} else {
-			parent := filepath.Dir(dirConfig.Path)
+			parent := filepath.Dir(cleanPath)
 			if _, err := os.Stat(parent); err != nil {
 				if os.IsNotExist(err) {
 					return ErrRecursiveRequired
 				}
 				return fmt.Errorf("failed to stat parent directory: %w", err)
 			}
-			if err := os.Mkdir(dirConfig.Path, fileMode); err != nil {
+			if err := os.Mkdir(cleanPath, fileMode); err != nil {
 				return fmt.Errorf("failed to create directory: %w", err)
 			}
 		}
@@ -231,14 +323,15 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		return ErrNotADirectory
 	}
 
-	// Set permissions
-	// Validate permissions are within os.FileMode range (check again for existing directories)
-	if dirConfig.Permissions < 0 || dirConfig.Permissions > 0777 {
-		return modules.ErrInvalidInput
-	}
-	fileMode := os.FileMode(dirConfig.Permissions) // Safe: bounds validated above
-	if err := os.Chmod(dirConfig.Path, fileMode); err != nil {
-		return fmt.Errorf("failed to set permissions: %w", err)
+	// Set permissions (only meaningful on platforms that support Unix permission bits)
+	if platformSupportsPermissions() {
+		if dirConfig.Permissions < 0 || dirConfig.Permissions > 0777 {
+			return modules.ErrInvalidInput
+		}
+		fileMode := os.FileMode(dirConfig.Permissions) // Safe: bounds validated above
+		if err := os.Chmod(cleanPath, fileMode); err != nil {
+			return fmt.Errorf("failed to set permissions: %w", err)
+		}
 	}
 
 	// Set ownership if specified
@@ -249,7 +342,10 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 			if err != nil {
 				return ErrInvalidOwner
 			}
-			uid, _ = strconv.Atoi(u.Uid)
+			uid, err = strconv.Atoi(u.Uid)
+			if err != nil {
+				return fmt.Errorf("failed to parse uid for owner %q: %w", dirConfig.Owner, err)
+			}
 		} else {
 			uid = -1
 		}
@@ -259,23 +355,40 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 			if err != nil {
 				return ErrInvalidGroup
 			}
-			gid, _ = strconv.Atoi(g.Gid)
+			gid, err = strconv.Atoi(g.Gid)
+			if err != nil {
+				return fmt.Errorf("failed to parse gid for group %q: %w", dirConfig.Group, err)
+			}
 		} else {
 			gid = -1
 		}
 
-		if err := os.Chown(dirConfig.Path, uid, gid); err != nil {
+		if err := os.Chown(cleanPath, uid, gid); err != nil {
 			logger.ErrorCtx(ctx, "Failed to set directory ownership",
 				"operation", "directory_set",
 				"resource_id", resourceID,
 				"tenant_id", tenantID,
 				"resource_type", "directory",
 				"error_code", "OWNERSHIP_FAILED",
-				"path", dirConfig.Path,
+				"path", cleanPath,
 				"owner", dirConfig.Owner,
 				"group", dirConfig.Group,
 				"error_details", err.Error())
 			return fmt.Errorf("failed to set ownership: %w", err)
+		}
+	}
+
+	// Apply Windows ACL if specified (platform stub returns nil on non-Windows).
+	if dirConfig.WindowsACL != nil {
+		if err := setDirectoryACL(cleanPath, dirConfig.WindowsACL); err != nil {
+			logger.ErrorCtx(ctx, "Failed to set Windows ACL",
+				"operation", "directory_set",
+				"resource_id", resourceID,
+				"tenant_id", tenantID,
+				"resource_type", "directory",
+				"error_code", "WINDOWS_ACL_FAILED",
+				"error_details", err.Error())
+			return fmt.Errorf("setDirectoryACL: %w", err)
 		}
 	}
 
@@ -284,7 +397,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		"resource_id", resourceID,
 		"tenant_id", tenantID,
 		"resource_type", "directory",
-		"path", dirConfig.Path,
+		"path", cleanPath,
 		"permissions", fmt.Sprintf("0%o", dirConfig.Permissions),
 		"status", "completed")
 
@@ -296,13 +409,23 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 // If the directory does not exist, returns a directoryConfig with State: "absent".
 // This allows the execution engine to detect that the directory needs to be created.
 func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
-	info, err := os.Stat(resourceID)
+	if m.configuredBasePath == "" {
+		return nil, ErrAllowedBasePathRequired
+	}
+
+	cleanPath, err := security.ValidateAndCleanPath(m.configuredBasePath, resourceID)
+	if err != nil {
+		return nil, fmt.Errorf("path security check failed: %w", err)
+	}
+
+	info, err := os.Stat(cleanPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Directory doesn't exist - return state: absent
 			return &directoryConfig{
-				State: "absent",
-				Path:  resourceID,
+				AllowedBasePath: m.configuredBasePath,
+				State:           "absent",
+				Path:            resourceID,
 			}, nil
 		}
 		return nil, fmt.Errorf("failed to stat directory: %w", err)
@@ -311,8 +434,8 @@ func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.C
 		return nil, ErrNotADirectory
 	}
 
-	// Get current permissions
-	perms := info.Mode().Perm()
+	// Get current permissions (platform-aware)
+	perms := getDirectoryPermissions(info)
 
 	// Get current ownership (cross-platform)
 	ownerName, groupName, err := getFileOwnership(info)
@@ -320,12 +443,20 @@ func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.C
 		return nil, fmt.Errorf("failed to get file ownership: %w", err)
 	}
 
+	// Read Windows ACL; nil on non-Windows platforms.
+	aclData, err := getDirectoryACL(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("getDirectoryACL: %w", err)
+	}
+
 	config := &directoryConfig{
-		State:       "present",
-		Path:        resourceID,
-		Permissions: int(perms),
-		Owner:       ownerName,
-		Group:       groupName,
+		AllowedBasePath: m.configuredBasePath,
+		State:           "present",
+		Path:            resourceID,
+		Permissions:     perms,
+		Owner:           ownerName,
+		Group:           groupName,
+		WindowsACL:      aclData,
 	}
 
 	return config, nil

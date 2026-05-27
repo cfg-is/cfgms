@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package network_activedirectory
 
@@ -34,25 +34,25 @@ func TestADModuleIntegration(t *testing.T) {
 
 	// Test configuration for basic domain
 	basicConfig := &ADModuleConfig{
-		Domain:         "test.local",
-		AuthMethod:     "simple",
-		Username:       "testuser",
-		Password:       "testpass",
-		OperationType:  "read",
-		ObjectTypes:    []string{"user", "group", "organizational_unit"},
-		UseTLS:         false,
-		Port:           389,
-		PageSize:       100,
-		MaxConnections: 5,
-		RequestTimeout: 30 * time.Second,
+		Domain:            "test.local",
+		AuthMethod:        "simple",
+		Username:          "testuser",
+		PasswordSecretKey: "ad/test.local/svc_password",
+		OperationType:     "read",
+		ObjectTypes:       []string{"user", "group", "organizational_unit"},
+		UseTLS:            false,
+		Port:              389,
+		PageSize:          100,
+		MaxConnections:    5,
+		RequestTimeout:    30 * time.Second,
 	}
 
 	t.Run("Basic Domain Operations", func(t *testing.T) {
 		t.Run("Set Configuration", func(t *testing.T) {
 			err := module.Set(ctx, "config", basicConfig)
 			if err != nil {
-				t.Logf("Note: Actual AD server required for real connection test. Mock error: %v", err)
-				// Continue with mock tests
+				t.Logf("Note: Actual AD server required for real connection test. Connection error: %v", err)
+				// Continue with remaining subtests; they assert "not connected" for any AD operations
 			}
 		})
 
@@ -570,19 +570,20 @@ func TestADModuleRealWorldScenarios(t *testing.T) {
 
 		t.Run("Credential Security", func(t *testing.T) {
 			configWithCreds := &ADModuleConfig{
-				Domain:        "test.local",
-				AuthMethod:    "simple",
-				Username:      "serviceaccount",
-				Password:      "supersecret",
-				OperationType: "read",
-				ObjectTypes:   []string{"user"},
+				Domain:            "test.local",
+				AuthMethod:        "simple",
+				Username:          "serviceaccount",
+				PasswordSecretKey: "ad/test.local/svc_password",
+				OperationType:     "read",
+				ObjectTypes:       []string{"user"},
 			}
 
-			// Test that YAML serialization hides passwords
+			// Test that YAML serialization contains the secret key reference but no plaintext password
 			yamlData, err := configWithCreds.ToYAML()
 			require.NoError(t, err)
-			assert.Contains(t, string(yamlData), "[REDACTED]")
-			assert.NotContains(t, string(yamlData), "supersecret")
+			yamlStr := string(yamlData)
+			assert.Contains(t, yamlStr, "password_secret_key")
+			assert.NotContains(t, yamlStr, "password:")
 		})
 	})
 }
@@ -690,12 +691,12 @@ func TestADModuleFailureScenarios(t *testing.T) {
 	t.Run("Authentication Failure Scenarios", func(t *testing.T) {
 		// Test behavior with invalid credentials
 		invalidAuthConfig := &ADModuleConfig{
-			Domain:        "test.local",
-			AuthMethod:    "simple",
-			Username:      "invalid_user",
-			Password:      "wrong_password",
-			OperationType: "read",
-			ObjectTypes:   []string{"user"},
+			Domain:            "test.local",
+			AuthMethod:        "simple",
+			Username:          "invalid_user",
+			PasswordSecretKey: "ad/test.local/invalid_password",
+			OperationType:     "read",
+			ObjectTypes:       []string{"user"},
 		}
 
 		err := module.Set(ctx, "config", invalidAuthConfig)

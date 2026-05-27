@@ -20,8 +20,8 @@ If you're new to the project, start with these essential documents:
 - [Architecture Document](architecture.md) - Detailed architecture documentation
 - [Plugin Architecture](architecture/plugin-architecture.md) - Extensible module system design
 - [Git Backend Design](architecture/git-backend-design.md) - GitOps storage backend
-- [Hybrid Storage Solution](architecture/hybrid-storage-solution.md) - Flexible storage options
-- [MQTT+QUIC Protocol](architecture/mqtt-quic-protocol.md) - Communication protocol design
+- [Storage Architecture](architecture/storage-architecture.md) - Five-type storage taxonomy (ADR-003)
+- [Communication Layer Migration](architecture/communication-layer-migration.md) - Transport architecture (gRPC-over-QUIC)
 - [Rollback Design](architecture/rollback-design.md) - Configuration rollback system
 - [Template Engine Design](architecture/template-engine-design.md) - Configuration templating
 - [Workflow Debug System](architecture/workflow-debug-system.md) - Workflow debugging capabilities
@@ -37,20 +37,16 @@ If you're new to the project, start with these essential documents:
 - [Architecture Decision Records](architecture/decisions/README.md) - Index of all ADRs
 - [ADR-001: Central Provider Compliance Enforcement](architecture/decisions/001-central-provider-compliance-enforcement.md)
 
-### High Availability & Commercial Split
-
-- [HA Commercial Split](architecture/ha-commercial-split.md) - Open source vs commercial boundaries
-
 ### Historical Design Documents
 
-- [gRPC Usage Analysis](architecture/grpc-usage-analysis.md) - Historical: Why we migrated from gRPC to MQTT+QUIC
+- [gRPC Usage Analysis](archive/grpc-usage-analysis.md) - Historical: Analysis that led to the gRPC-over-QUIC unified transport
 
 ## Development Guides
 
 ### Getting Started
 
-- [Development Workflow](development/guides/development-workflow.md) - Daily development workflow
-- [Getting Started Guide](development/guides/getting-started.md) - Onboarding for new developers
+- [Autonomous Dev Team](development/autonomous-dev-team.md) - How the agent pipeline turns ideas into code
+- [Agent Dispatch Reference](development/agent-dispatch.md) - Container infrastructure, credentials, troubleshooting
 - [Standalone Steward Implementation](development/guides/standalone-steward-implementation.md)
 
 ### Development Standards
@@ -71,7 +67,6 @@ If you're new to the project, start with these essential documents:
 ### Development Infrastructure
 
 - [CI Infrastructure Setup](development/ci-infrastructure-setup.md) - GitHub Actions configuration
-- [Test Cache Architecture](development/test-cache-architecture.md) - Test performance optimization
 
 ### Security Development
 
@@ -109,7 +104,6 @@ If you're new to the project, start with these essential documents:
 
 - [Product Vision](product/vision.md) - Long-term product vision and strategy
 - [Product Roadmap](product/roadmap.md) - Development roadmap and release planning
-- [Feature Boundaries](product/feature-boundaries.md) - Open source vs commercial features
 - [v0.7.0 Epic](product/v0.7.0-epic.md) - OSS launch preparation and business model
 
 ## Integration Guides
@@ -137,7 +131,7 @@ If you're new to the project, start with these essential documents:
 ## Deployment
 
 - [Platform Support](deployment/platform-support.md) - Supported platforms and requirements
-- [Registration Codes](deployment/registration-codes.md) - Steward registration system
+- [Deployment Guide](deployment/README.md) - Deployment modes and walkthroughs
 
 ## Configuration
 

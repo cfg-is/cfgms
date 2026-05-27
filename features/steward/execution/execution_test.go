@@ -1,81 +1,93 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-package execution
+// Executor-wiring and ExecuteConfiguration tests. TestGenericConfigState_* are
+// intentionally kept in execution_internal_test.go (package execution) — see that
+// file for the exemption rationale.
+package execution_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
+	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/logging"
-
-	"github.com/stretchr/testify/assert"
 )
 
-func TestNew(t *testing.T) {
-	// Create real implementations for testing
+func newTestExecutor(t *testing.T, errorConfig config.ErrorHandlingConfig) *execution.Executor {
+	t.Helper()
+	registry := discovery.ModuleRegistry{}
+	moduleFactory := factory.New(registry, errorConfig, logging.NewNoopLogger())
+	comparator := stewardtesting.NewStateComparator()
+	logger := logging.NewLogger("info")
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logger,
+		Factory:       moduleFactory,
+		Comparator:    comparator,
+		ErrorHandling: errorConfig,
+	})
+	require.NoError(t, err)
+	return executor
+}
+
+func TestNewExecutorWithComponents(t *testing.T) {
 	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{}
-	moduleFactory := factory.New(registry, errorConfig)
+	moduleFactory := factory.New(registry, errorConfig, logging.NewNoopLogger())
 	comparator := stewardtesting.NewStateComparator()
 	logger := logging.NewLogger("info")
 
-	engine := New(moduleFactory, comparator, errorConfig, logger)
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logger,
+		Factory:       moduleFactory,
+		Comparator:    comparator,
+		ErrorHandling: errorConfig,
+	})
 
-	assert.NotNil(t, engine)
-	assert.Equal(t, moduleFactory, engine.factory)
-	assert.Equal(t, comparator, engine.comparator)
-	assert.Equal(t, errorConfig, engine.config)
-	assert.Equal(t, logger, engine.logger)
+	require.NoError(t, err)
+	assert.NotNil(t, executor)
+	assert.Equal(t, moduleFactory, execution.ExecutorFactory(executor))
+	assert.Equal(t, comparator, execution.ExecutorComparator(executor))
+	// executor.config and executor.logger are not bridged; their wiring is verified
+	// functionally by the ExecuteConfiguration and HandleResourceError tests below.
 }
 
 func TestExecuteConfiguration_EmptyResources(t *testing.T) {
-	// Setup with real implementations
-	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{
 		ResourceFailure: config.ActionFail,
 	}
-	moduleFactory := factory.New(registry, errorConfig)
-	comparator := stewardtesting.NewStateComparator()
-	logger := logging.NewLogger("info")
+	executor := newTestExecutor(t, errorConfig)
 
-	engine := New(moduleFactory, comparator, errorConfig, logger)
-
-	// Create empty configuration
 	cfg := config.StewardConfig{
 		Resources: []config.ResourceConfig{},
 	}
 
 	ctx := context.Background()
-	report := engine.ExecuteConfiguration(ctx, cfg)
+	report := executor.ExecuteConfiguration(ctx, cfg)
 
-	// Verify report for empty configuration
 	assert.Equal(t, 0, report.TotalResources)
 	assert.Equal(t, 0, report.SuccessfulCount)
 	assert.Equal(t, 0, report.FailedCount)
 	assert.Equal(t, 0, report.SkippedCount)
 	assert.Len(t, report.ResourceResults, 0)
-	assert.True(t, report.EndTime.After(report.StartTime))
+	assert.False(t, report.EndTime.Before(report.StartTime))
 }
 
 func TestExecuteConfiguration_WithUnknownModule(t *testing.T) {
-	// Setup with real implementations
-	registry := discovery.ModuleRegistry{} // Empty registry - no modules available
 	errorConfig := config.ErrorHandlingConfig{
-		ModuleLoadFailure: config.ActionContinue, // Continue on module load failure
+		ModuleLoadFailure: config.ActionContinue,
 		ResourceFailure:   config.ActionWarn,
 	}
-	moduleFactory := factory.New(registry, errorConfig)
-	comparator := stewardtesting.NewStateComparator()
-	logger := logging.NewLogger("info")
+	executor := newTestExecutor(t, errorConfig)
 
-	engine := New(moduleFactory, comparator, errorConfig, logger)
-
-	// Create configuration with unknown module
 	cfg := config.StewardConfig{
 		Resources: []config.ResourceConfig{
 			{
@@ -87,9 +99,8 @@ func TestExecuteConfiguration_WithUnknownModule(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	report := engine.ExecuteConfiguration(ctx, cfg)
+	report := executor.ExecuteConfiguration(ctx, cfg)
 
-	// Verify report shows skipped resource due to module not found
 	assert.Equal(t, 1, report.TotalResources)
 	assert.Equal(t, 0, report.SuccessfulCount)
 	assert.Equal(t, 0, report.FailedCount)
@@ -99,21 +110,14 @@ func TestExecuteConfiguration_WithUnknownModule(t *testing.T) {
 	result := report.ResourceResults[0]
 	assert.Equal(t, "test-resource", result.ResourceName)
 	assert.Equal(t, "unknown-module", result.ModuleName)
-	assert.Equal(t, StatusSkipped, result.Status)
+	assert.Equal(t, execution.StatusSkipped, result.Status)
 	assert.GreaterOrEqual(t, result.ExecutionTime, time.Duration(0))
 }
 
 func TestExecuteConfiguration_CanceledContext(t *testing.T) {
-	// Setup with real implementations
-	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{}
-	moduleFactory := factory.New(registry, errorConfig)
-	comparator := stewardtesting.NewStateComparator()
-	logger := logging.NewLogger("info")
+	executor := newTestExecutor(t, errorConfig)
 
-	engine := New(moduleFactory, comparator, errorConfig, logger)
-
-	// Create configuration with a resource
 	cfg := config.StewardConfig{
 		Resources: []config.ResourceConfig{
 			{
@@ -124,46 +128,60 @@ func TestExecuteConfiguration_CanceledContext(t *testing.T) {
 		},
 	}
 
-	// Create canceled context
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	cancel()
 
-	report := engine.ExecuteConfiguration(ctx, cfg)
+	report := executor.ExecuteConfiguration(ctx, cfg)
 
-	// Verify that execution was cancelled
 	assert.Equal(t, 1, report.TotalResources)
 	assert.Contains(t, report.Errors, "execution cancelled: context canceled")
 }
 
-func TestGenericConfigState(t *testing.T) {
-	data := map[string]interface{}{
-		"key1": "value1",
-		"key2": 42,
-		"key3": true,
+// TestHandleResourceError_ActionFail_NoPanic verifies that ActionFail returns an
+// error instead of panicking, so the steward process survives a policy failure.
+func TestHandleResourceError_ActionFail_NoPanic(t *testing.T) {
+	errorConfig := config.ErrorHandlingConfig{
+		ResourceFailure: config.ActionFail,
 	}
+	executor := newTestExecutor(t, errorConfig)
 
-	state := &genericConfigState{data: data}
+	resource := config.ResourceConfig{
+		Name:   "test-resource",
+		Module: "test-module",
+		Config: map[string]interface{}{"key": "value"},
+	}
+	origErr := fmt.Errorf("something went wrong")
 
-	// Test AsMap
-	assert.Equal(t, data, state.AsMap())
+	// Must not panic — ActionFail used to panic, now returns an error.
+	var rerr error
+	require.NotPanics(t, func() {
+		rerr = execution.HandleResourceError(executor, resource, origErr)
+	})
+	require.Error(t, rerr)
+	assert.Contains(t, rerr.Error(), "convergence aborted by ActionFail policy")
+	assert.ErrorIs(t, rerr, origErr)
+}
 
-	// Test GetManagedFields
-	fields := state.GetManagedFields()
-	assert.Len(t, fields, 3)
-	assert.Contains(t, fields, "key1")
-	assert.Contains(t, fields, "key2")
-	assert.Contains(t, fields, "key3")
+// TestHandleResourceError_ActionContinue_NoError verifies ActionContinue returns nil.
+func TestHandleResourceError_ActionContinue_NoError(t *testing.T) {
+	errorConfig := config.ErrorHandlingConfig{
+		ResourceFailure: config.ActionContinue,
+	}
+	executor := newTestExecutor(t, errorConfig)
 
-	// Test ToYAML (mock implementation)
-	yaml, err := state.ToYAML()
-	assert.NoError(t, err)
-	assert.NotEmpty(t, yaml)
+	resource := config.ResourceConfig{Name: "r", Module: "m", Config: map[string]interface{}{}}
+	rerr := execution.HandleResourceError(executor, resource, fmt.Errorf("oops"))
+	assert.NoError(t, rerr)
+}
 
-	// Test FromYAML (mock implementation)
-	err = state.FromYAML([]byte("test"))
-	assert.NoError(t, err)
+// TestHandleResourceError_ActionWarn_NoError verifies ActionWarn returns nil.
+func TestHandleResourceError_ActionWarn_NoError(t *testing.T) {
+	errorConfig := config.ErrorHandlingConfig{
+		ResourceFailure: config.ActionWarn,
+	}
+	executor := newTestExecutor(t, errorConfig)
 
-	// Test Validate (mock implementation)
-	err = state.Validate()
-	assert.NoError(t, err)
+	resource := config.ResourceConfig{Name: "r", Module: "m", Config: map[string]interface{}{}}
+	rerr := execution.HandleResourceError(executor, resource, fmt.Errorf("oops"))
+	assert.NoError(t, rerr)
 }

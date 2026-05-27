@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package reports
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/reports/interfaces"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestScheduledReportManager(t *testing.T) {
@@ -22,7 +24,7 @@ func TestScheduledReportManager(t *testing.T) {
 			store:           store,
 			templateManager: templateManager,
 			reportBuilder:   reportBuilder,
-			logger:          &MockLogger{},
+			logger:          logging.NewNoopLogger(),
 		}
 
 		req := interfaces.ScheduleReportRequest{
@@ -65,7 +67,7 @@ func TestScheduledReportManager(t *testing.T) {
 			store:           store,
 			templateManager: templateManager,
 			reportBuilder:   reportBuilder,
-			logger:          &MockLogger{},
+			logger:          logging.NewNoopLogger(),
 		}
 
 		req := interfaces.ScheduleReportRequest{
@@ -93,7 +95,7 @@ func TestScheduledReportManager(t *testing.T) {
 			store:           store,
 			templateManager: templateManager,
 			reportBuilder:   reportBuilder,
-			logger:          &MockLogger{},
+			logger:          logging.NewNoopLogger(),
 		}
 
 		// Setup scheduled report in store
@@ -121,7 +123,7 @@ func TestScheduledReportManager(t *testing.T) {
 
 	t.Run("ValidateSchedule_CronExpression", func(t *testing.T) {
 		manager := &ScheduledReportManager{
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		// Valid cron expression
@@ -141,7 +143,7 @@ func TestScheduledReportManager(t *testing.T) {
 
 	t.Run("ValidateSchedule_IntervalExpression", func(t *testing.T) {
 		manager := &ScheduledReportManager{
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		// Valid interval
@@ -160,7 +162,7 @@ func TestScheduledReportManager(t *testing.T) {
 
 	t.Run("ValidateDeliveryMode_Email", func(t *testing.T) {
 		manager := &ScheduledReportManager{
-			logger: &MockLogger{},
+			logger: logging.NewNoopLogger(),
 		}
 
 		// Valid email delivery
@@ -179,6 +181,144 @@ func TestScheduledReportManager(t *testing.T) {
 		err = manager.validateDeliveryMode(interfaces.DeliveryModeEmail, recipients)
 		assert.Error(t, err)
 	})
+
+	t.Run("ExecuteScheduledReport_TemplateGetError", func(t *testing.T) {
+		store := &MockScheduledReportStore{}
+		templateManager := &MockCustomTemplateManager{
+			getErr: fmt.Errorf("template store unavailable"),
+		}
+		reportBuilder := &MockCustomReportBuilder{}
+		manager := &ScheduledReportManager{
+			store:           store,
+			templateManager: templateManager,
+			reportBuilder:   reportBuilder,
+			logger:          logging.NewNoopLogger(),
+		}
+
+		schedule := &interfaces.ScheduledReport{
+			ID:         "schedule-err",
+			Name:       "Error Schedule",
+			TemplateID: "template-missing",
+			TenantID:   "tenant-123",
+			Format:     interfaces.FormatJSON,
+		}
+		store.schedules = []*interfaces.ScheduledReport{schedule}
+
+		_, err := manager.ExecuteScheduledReport(context.Background(), "schedule-err")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to get template")
+	})
+
+	t.Run("ScheduleReport_TemplateGetError", func(t *testing.T) {
+		store := &MockScheduledReportStore{}
+		templateManager := &MockCustomTemplateManager{
+			getErr: fmt.Errorf("template store unavailable"),
+		}
+		reportBuilder := &MockCustomReportBuilder{}
+		manager := &ScheduledReportManager{
+			store:           store,
+			templateManager: templateManager,
+			reportBuilder:   reportBuilder,
+			logger:          logging.NewNoopLogger(),
+		}
+
+		req := interfaces.ScheduleReportRequest{
+			Name:       "Report With Bad Template",
+			TemplateID: "missing-template",
+			Schedule: interfaces.ReportSchedule{
+				Type:       interfaces.ScheduleTypeInterval,
+				Expression: "1h",
+				Timezone:   "UTC",
+			},
+			Format:       interfaces.FormatJSON,
+			DeliveryMode: interfaces.DeliveryModeEmail,
+			Recipients: []interfaces.ReportRecipient{
+				{Type: "email", Address: "test@example.com"},
+			},
+			TenantID:  "tenant-123",
+			CreatedBy: "user-123",
+		}
+
+		_, err := manager.ScheduleReport(context.Background(), req)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to verify template")
+	})
+}
+
+// --- parseCronNextTime ---
+
+func TestParseCronNextTime(t *testing.T) {
+	// Anchor: a Tuesday at 08:00 UTC
+	base := time.Date(2026, 1, 6, 8, 0, 0, 0, time.UTC) // Tue 2026-01-06 08:00
+
+	cases := []struct {
+		name    string
+		expr    string
+		wantMin time.Time // expected next-fire time (inclusive lower bound)
+		wantErr bool
+	}{
+		{
+			name:    "wildcard fires next minute",
+			expr:    "* * * * *",
+			wantMin: base.Add(time.Minute),
+		},
+		{
+			name:    "step */5 fires on next :05",
+			expr:    "*/5 * * * *",
+			wantMin: time.Date(2026, 1, 6, 8, 5, 0, 0, time.UTC),
+		},
+		{
+			name:    "comma list 0,30 fires on :30",
+			expr:    "0,30 * * * *",
+			wantMin: time.Date(2026, 1, 6, 8, 30, 0, 0, time.UTC),
+		},
+		{
+			name:    "minute range 10-15 fires at 08:10",
+			expr:    "10-15 * * * *",
+			wantMin: time.Date(2026, 1, 6, 8, 10, 0, 0, time.UTC),
+		},
+		{
+			name:    "specific hour 0 9 fires next 09:00",
+			expr:    "0 9 * * *",
+			wantMin: time.Date(2026, 1, 6, 9, 0, 0, 0, time.UTC),
+		},
+		{
+			name:    "specific weekday monday 0 9 * * 1",
+			expr:    "0 9 * * 1",
+			wantMin: time.Date(2026, 1, 12, 9, 0, 0, 0, time.UTC), // next Monday
+		},
+		{
+			name:    "specific month 0 0 1 6 * fires next June 1st",
+			expr:    "0 0 1 6 *",
+			wantMin: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			name:    "exact minute fires exactly at :59 next hour",
+			expr:    "59 * * * *",
+			wantMin: time.Date(2026, 1, 6, 8, 59, 0, 0, time.UTC),
+		},
+		// Error cases
+		{name: "too few fields", expr: "* * * *", wantErr: true},
+		{name: "too many fields", expr: "* * * * * *", wantErr: true},
+		{name: "invalid step zero", expr: "*/0 * * * *", wantErr: true},
+		{name: "invalid step non-numeric", expr: "*/x * * * *", wantErr: true},
+		{name: "invalid range reversed", expr: "50-10 * * * *", wantErr: true},
+		{name: "invalid list value out of range", expr: "0,61 * * * *", wantErr: true},
+		{name: "invalid exact value out of range", expr: "60 * * * *", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseCronNextTime(tc.expr, base)
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantMin, got,
+				"expr %q from %v: want %v, got %v", tc.expr, base, tc.wantMin, got)
+		})
+	}
 }
 
 // Mock implementations for testing
@@ -246,6 +386,7 @@ func (m *MockScheduledReportStore) Delete(ctx context.Context, id string) error 
 
 type MockCustomTemplateManager struct {
 	templates []*interfaces.CustomReportTemplate
+	getErr    error // if non-nil, GetTemplate returns this error
 }
 
 func (m *MockCustomTemplateManager) SaveTemplate(ctx context.Context, template *interfaces.CustomReportTemplate) (*interfaces.CustomReportTemplate, error) {
@@ -253,6 +394,9 @@ func (m *MockCustomTemplateManager) SaveTemplate(ctx context.Context, template *
 }
 
 func (m *MockCustomTemplateManager) GetTemplate(ctx context.Context, templateID, tenantID string) (*interfaces.CustomReportTemplate, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
 	// Return a mock template
 	return &interfaces.CustomReportTemplate{
 		ID:       templateID,

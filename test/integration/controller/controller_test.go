@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
 // Package controller contains Docker-based E2E tests for controller + steward deployment
@@ -118,34 +118,6 @@ func (s *ControllerTestSuite) TestStewardContainer() {
 	s.T().Log("Steward container validated")
 }
 
-// TestMQTTBroker validates that the MQTT broker is running inside the controller
-func (s *ControllerTestSuite) TestMQTTBroker() {
-	s.T().Log("Validating MQTT broker is running")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Verify MQTT port (8883 TLS) is listening inside the controller container
-	output, err := s.docker.ExecInController(ctx, "sh", "-c",
-		"netstat -tlnp 2>/dev/null | grep 8883 || ss -tlnp | grep 8883 || echo 'port-check-tools-unavailable'")
-	s.T().Logf("MQTT port check: %s", output)
-
-	if strings.Contains(output, "port-check-tools-unavailable") {
-		// Fallback: check controller logs for MQTT evidence
-		logs, logErr := s.docker.GetControllerLogs(ctx)
-		require.NoError(s.T(), logErr)
-		assert.True(s.T(),
-			strings.Contains(strings.ToLower(logs), "mqtt") || strings.Contains(logs, "8883"),
-			"Controller logs should reference MQTT")
-	} else {
-		require.NoError(s.T(), err, "Port check should succeed")
-		assert.True(s.T(), strings.Contains(output, "8883"),
-			"MQTT TLS port 8883 should be listening")
-	}
-
-	s.T().Log("MQTT broker validated")
-}
-
 // TestStorageInitialization validates that the controller initialized storage
 func (s *ControllerTestSuite) TestStorageInitialization() {
 	s.T().Log("Validating controller storage initialization")
@@ -199,24 +171,15 @@ func (s *ControllerTestSuite) TestCertificateManagement() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Controller with CFGMS_MQTT_USE_CERT_MANAGER=true should have generated certificates
-	// Check for CA certificate in the controller's cert storage
+	// Controller with cert manager enabled should have generated certificates
+	// Check for CA certificate and steward certs in the controller's cert storage (CFGMS_CERT_PATH=/app/certs)
 	output, err := s.docker.ExecInController(ctx, "sh", "-c",
-		"find /tmp -name 'ca.crt' -o -name 'ca-cert.pem' -o -name '*.crt' 2>/dev/null | head -5")
+		"find /app/certs -name 'ca.crt' -o -name 'ca.key' -o -name '*.pem' 2>/dev/null | head -10")
 	s.T().Logf("Certificate files found: %s", output)
 
-	// The controller should have generated at least one certificate file
-	if err != nil || strings.TrimSpace(output) == "" {
-		// Fallback: check logs for certificate generation evidence
-		logs, logErr := s.docker.GetControllerLogs(ctx)
-		require.NoError(s.T(), logErr)
-		assert.True(s.T(),
-			strings.Contains(logs, "certificate") || strings.Contains(logs, "cert") || strings.Contains(logs, "TLS") || strings.Contains(logs, "tls"),
-			"Controller should show evidence of certificate management in logs")
-	} else {
-		assert.NotEmpty(s.T(), strings.TrimSpace(output),
-			"Controller should have certificate files")
-	}
+	require.NoError(s.T(), err, "Should be able to search cert directory")
+	assert.NotEmpty(s.T(), strings.TrimSpace(output),
+		"Controller should have generated certificate files in /app/certs")
 
 	s.T().Log("Certificate management validated")
 }

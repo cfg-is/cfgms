@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package modules
 
@@ -9,7 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/cfgis/cfgms/features/steward/discovery"
+	"github.com/cfgis/cfgms/pkg/logging"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // mockModuleLoader implements ModuleLoader for testing
@@ -59,7 +64,7 @@ func TestNewLifecycleAwareModuleFactory(t *testing.T) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 
 	if factory == nil {
 		t.Fatal("NewLifecycleAwareModuleFactory() should return non-nil factory")
@@ -83,7 +88,7 @@ func TestLifecycleAwareModuleFactory_StartStop(t *testing.T) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 
 	// Test Start
 	err := factory.Start()
@@ -109,7 +114,7 @@ func TestLifecycleAwareModuleFactory_LoadModule(t *testing.T) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 
 	err := factory.Start()
 	if err != nil {
@@ -137,7 +142,7 @@ func TestLifecycleAwareModuleFactory_LoadModuleWithConfig(t *testing.T) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 
 	err := factory.Start()
 	if err != nil {
@@ -167,7 +172,7 @@ func TestLifecycleAwareModuleFactory_ModuleOperations(t *testing.T) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 
 	err := factory.Start()
 	if err != nil {
@@ -216,7 +221,7 @@ func TestLifecycleAwareModuleFactory_ListModules(t *testing.T) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 
 	err := factory.Start()
 	if err != nil {
@@ -240,7 +245,7 @@ func TestLifecycleAwareModuleFactory_GetSystemHealth(t *testing.T) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 
 	err := factory.Start()
 	if err != nil {
@@ -268,7 +273,7 @@ func TestLifecycleAwareModuleFactory_EventSystem(t *testing.T) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 
 	var receivedEvents []LifecycleEvent
 	var mu sync.Mutex
@@ -311,7 +316,7 @@ func TestLifecycleAwareModuleFactory_Configuration(t *testing.T) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 
 	// Test default configuration
 	defaultConfig := factory.GetDefaultConfig()
@@ -349,7 +354,7 @@ func TestLifecycleAwareModuleFactory_UnloadModule(t *testing.T) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 
 	err := factory.Start()
 	if err != nil {
@@ -373,7 +378,7 @@ func TestLifecycleAwareModuleFactory_Shutdown(t *testing.T) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 
 	err := factory.Start()
 	if err != nil {
@@ -384,53 +389,6 @@ func TestLifecycleAwareModuleFactory_Shutdown(t *testing.T) {
 	err = factory.Shutdown(ctx)
 	if err != nil {
 		t.Errorf("Shutdown() error = %v, want nil", err)
-	}
-}
-
-func TestModuleFactoryBridge(t *testing.T) {
-	discoveryRegistry := make(discovery.ModuleRegistry)
-	moduleRegistry := NewModuleRegistry()
-	mockLoader := newMockModuleLoader()
-
-	lifecycleFactory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
-	bridge := NewModuleFactoryBridge(lifecycleFactory)
-
-	// Test bridge methods
-	_, err := bridge.LoadModule("non-existent")
-	if err == nil {
-		t.Error("Bridge LoadModule() should return error for non-existent module")
-	}
-
-	_, err = bridge.CreateModuleInstance("non-existent")
-	if err == nil {
-		t.Error("Bridge CreateModuleInstance() should return error for non-existent module")
-	}
-
-	modules := bridge.GetLoadedModules()
-	if len(modules) != 0 {
-		t.Errorf("Bridge GetLoadedModules() should return empty slice, got %d", len(modules))
-	}
-
-	// Test that UnloadModule and UnloadAllModules don't panic
-	bridge.UnloadModule("non-existent")
-	bridge.UnloadAllModules()
-
-	// Test ValidateModuleInterface
-	err = bridge.ValidateModuleInterface(&mockModule{})
-	if err != nil {
-		t.Errorf("ValidateModuleInterface() error = %v, want nil", err)
-	}
-
-	// Test GetModuleInfo
-	_, exists := bridge.GetModuleInfo("non-existent")
-	if exists {
-		t.Error("GetModuleInfo() should return false for non-existent module")
-	}
-
-	// Test GetLifecycleFactory
-	retrievedFactory := bridge.GetLifecycleFactory()
-	if retrievedFactory != lifecycleFactory {
-		t.Error("GetLifecycleFactory() should return the original factory")
 	}
 }
 
@@ -465,7 +423,7 @@ func TestLifecycleAwareModuleFactory_Integration(t *testing.T) {
 	}
 
 	mockLoader := newMockModuleLoader()
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 
 	err = factory.Start()
 	if err != nil {
@@ -556,7 +514,7 @@ func BenchmarkLifecycleAwareModuleFactory_GetModule(b *testing.B) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 	if err := factory.Start(); err != nil {
 		b.Fatalf("Start() error = %v", err)
 	}
@@ -577,7 +535,7 @@ func BenchmarkLifecycleAwareModuleFactory_GetSystemHealth(b *testing.B) {
 	moduleRegistry := NewModuleRegistry()
 	mockLoader := newMockModuleLoader()
 
-	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, logging.NewNoopLogger())
 	if err := factory.Start(); err != nil {
 		b.Fatalf("Start() error = %v", err)
 	}
@@ -591,4 +549,36 @@ func BenchmarkLifecycleAwareModuleFactory_GetSystemHealth(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = factory.GetSystemHealth()
 	}
+}
+
+func TestLifecycleAwareModuleFactory_logsThroughInjectedLogger(t *testing.T) {
+	discoveryRegistry := make(discovery.ModuleRegistry)
+	moduleRegistry := NewModuleRegistry()
+	mockLoader := newMockModuleLoader()
+
+	mock := pkgtesting.NewMockLogger(false)
+	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader, mock)
+
+	err := factory.Start()
+	require.NoError(t, err)
+	defer func() {
+		if stopErr := factory.Stop(); stopErr != nil {
+			t.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
+
+	// A module that fails to initialize AND fails to stop triggers the
+	// unregister-failure warning log path in LoadModule.
+	failingModule := &mockLifecycleModule{
+		initError: fmt.Errorf("init failed"),
+		stopError: fmt.Errorf("stop also failed"),
+	}
+	mockLoader.modules["log-test-module"] = failingModule
+
+	_, err = factory.LoadModule("log-test-module")
+	assert.Error(t, err, "LoadModule should fail when module cannot be initialized")
+
+	warnLogs := mock.GetLogs("warn")
+	require.NotEmpty(t, warnLogs, "expected warning log from unregister failure after load failure")
+	assert.Equal(t, "failed to unregister module after load failure", warnLogs[0].Message)
 }

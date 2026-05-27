@@ -1,0 +1,79 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Jordan Ritz
+#
+# postinstall — runs as root during macOS .pkg installation.
+#
+# Reads deployment parameters from the companion plist file deployed by the MDM,
+# then calls cfgms-steward install to register the launchd service.
+#
+# Plist location (in priority order):
+#   1. $CFGMS_DEPLOY_PLIST env var (overrides default — used in tests)
+#   2. /Library/Application Support/cfgms/steward-deploy.plist (MDM-deployed)
+#
+# Plist format (Apple XML plist <dict>):
+#   REGTOKEN       — required; one-time registration token from the controller
+#   CA_FINGERPRINT — optional; SHA-256 hex fingerprint for private-CA TOFU
+#   CA_CERT_PATH   — optional; path to controller CA cert PEM for private-CA installs
+#
+# CFGMS_INSTALL_PREFIX — optional; prefix for the installed binary path (tests only)
+
+set -euo pipefail
+
+# ── Locate the plist ──────────────────────────────────────────────────────────
+
+DEFAULT_PLIST="/Library/Application Support/cfgms/steward-deploy.plist"
+PLIST="${CFGMS_DEPLOY_PLIST:-$DEFAULT_PLIST}"
+
+if [[ ! -f "$PLIST" ]]; then
+    echo "cfgms postinstall: ERROR — deployment plist not found: $PLIST" >&2
+    echo "  Deploy steward-deploy.plist via MDM before installing the .pkg." >&2
+    echo "  Expected plist keys: REGTOKEN (required), CA_FINGERPRINT, CA_CERT_PATH (optional)." >&2
+    exit 1
+fi
+
+# ── Extract keys from plist ───────────────────────────────────────────────────
+# Use PlistBuddy (always present on macOS) to read values by key.
+
+read_plist_key() {
+    local key="$1"
+    /usr/libexec/PlistBuddy -c "Print :$key" "$PLIST" 2>/dev/null || true
+}
+
+REGTOKEN="$(read_plist_key REGTOKEN)"
+CA_FINGERPRINT="$(read_plist_key CA_FINGERPRINT)"
+CA_CERT_PATH="$(read_plist_key CA_CERT_PATH)"
+
+if [[ -z "$REGTOKEN" ]]; then
+    echo "cfgms postinstall: ERROR — REGTOKEN is missing or empty in: $PLIST" >&2
+    exit 1
+fi
+
+# ── Locate the installed binary ───────────────────────────────────────────────
+# CFGMS_INSTALL_PREFIX lets tests redirect the binary path without root access.
+
+INSTALL_PREFIX="${CFGMS_INSTALL_PREFIX:-}"
+BINARY_PATH="${INSTALL_PREFIX}/usr/local/bin/cfgms-steward"
+
+if [[ ! -x "$BINARY_PATH" ]]; then
+    echo "cfgms postinstall: ERROR — binary not found or not executable: $BINARY_PATH" >&2
+    exit 1
+fi
+
+# ── Call cfgms-steward install ────────────────────────────────────────────────
+
+echo "cfgms postinstall: registering steward service..."
+
+INSTALL_ARGS=(install --regtoken "$REGTOKEN")
+
+if [[ -n "$CA_FINGERPRINT" ]]; then
+    INSTALL_ARGS+=(--fingerprint "$CA_FINGERPRINT")
+fi
+
+if [[ -n "$CA_CERT_PATH" ]]; then
+    INSTALL_ARGS+=(--ca-cert "$CA_CERT_PATH")
+fi
+
+"$BINARY_PATH" "${INSTALL_ARGS[@]}"
+
+echo "cfgms postinstall: done."

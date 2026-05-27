@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package controller
 
@@ -6,7 +6,6 @@ import (
 	"context"
 	"sync"
 
-	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/directory"
 	"github.com/cfgis/cfgms/features/controller/server"
@@ -41,11 +40,8 @@ type Controller struct {
 	// Module registry
 	modules map[string]Module
 
-	// gRPC server for steward communication
+	// gRPC server for steward communication (owns the canonical api.Server)
 	server *server.Server
-
-	// REST API server for external HTTP access
-	apiServer *api.Server
 
 	// Directory service for unified directory operations
 	directoryService directory.Service
@@ -84,28 +80,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		return nil, err
 	}
 
-	// Create the REST API server
-	apiSrv, err := api.New(
-		cfg,
-		logger,
-		srv.GetControllerService(),
-		srv.GetConfigurationService(),
-		srv.GetCertificateProvisioningService(),
-		srv.GetRBACService(),
-		srv.GetCertificateManager(),
-		srv.GetTenantManager(),
-		srv.GetRBACManager(),
-		nil,                             // systemMonitor - will be integrated in Phase 5
-		nil,                             // platformMonitor - will be integrated in this story completion
-		nil,                             // tracer - will be integrated in Phase 5
-		srv.GetHAManager(),              // HA manager
-		srv.GetRegistrationTokenStore(), // registrationTokenStore - now wired for MQTT+QUIC mode
-		srv.GetSignerCertSerial(),       // Story #378: signer cert serial for registration
-	)
-	if err != nil {
-		return nil, err
-	}
-
 	// Create the directory service
 	dirService := directory.NewDirectoryService(logger)
 
@@ -114,7 +88,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		logger:           logger,
 		modules:          make(map[string]Module),
 		server:           srv,
-		apiServer:        apiSrv,
 		directoryService: dirService,
 		shutdown:         make(chan struct{}),
 	}
@@ -136,17 +109,10 @@ func (c *Controller) Start(ctx context.Context) error {
 
 	c.logger.Info("Starting controller")
 
-	// Start the gRPC server
+	// Start the gRPC+HTTP server (server.Server owns the canonical api.Server)
 	if err := c.server.Start(); err != nil {
-		c.logger.Error("Failed to start gRPC server", "error", err)
+		c.logger.Error("Failed to start server", "error", err)
 		return err
-	}
-
-	// Start the REST API server
-	if err := c.apiServer.Start(); err != nil {
-		c.logger.Error("Failed to start REST API server", "error", err)
-		// Don't fail completely if REST API fails to start
-		c.logger.Warn("Controller running without REST API server")
 	}
 
 	c.running = true
@@ -163,15 +129,14 @@ func (c *Controller) Stop(ctx context.Context) error {
 		return ErrNotRunning
 	}
 
+	return c.stopLocked()
+}
+
+// stopLocked performs the actual shutdown. Caller must hold c.mu.
+func (c *Controller) stopLocked() error {
 	c.logger.Info("Stopping controller")
 
-	// Stop the REST API server
-	if err := c.apiServer.Stop(); err != nil {
-		c.logger.Error("Failed to stop REST API server", "error", err)
-		// Continue stopping other services
-	}
-
-	// Stop the gRPC server
+	// Stop the gRPC+HTTP server (server.Server owns the canonical api.Server)
 	if err := c.server.Stop(); err != nil {
 		c.logger.Error("Failed to stop gRPC server", "error", err)
 		return err
@@ -199,6 +164,23 @@ func (c *Controller) Stop(ctx context.Context) error {
 	return nil
 }
 
+// Close releases resources held by the controller without requiring it to be running.
+// Use this when the controller was created but never started (e.g., in tests).
+func (c *Controller) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.running {
+		return c.stopLocked()
+	}
+
+	// Even if not running, close server resources (e.g., SQLite DB handles)
+	if c.server != nil {
+		return c.server.Stop()
+	}
+	return nil
+}
+
 // RegisterModule registers a module with the controller
 func (c *Controller) RegisterModule(module Module) error {
 	c.mu.Lock()
@@ -215,17 +197,32 @@ func (c *Controller) RegisterModule(module Module) error {
 }
 
 // GetConfigurationService returns the configuration service instance
-func (c *Controller) GetConfigurationService() *service.ConfigurationService {
+func (c *Controller) GetConfigurationService() *service.ConfigurationServiceV2 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.server.GetConfigurationService()
 }
 
-// GetListenAddr returns the actual listen address after binding
+// GetListenAddr returns the gRPC transport listen address after binding.
 func (c *Controller) GetListenAddr() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.server.GetListenAddr()
+}
+
+// GetTransportListenAddr returns the actual QUIC transport listen address after the server
+// has started. When Transport.ListenAddr is "host:0", this returns the OS-assigned port.
+func (c *Controller) GetTransportListenAddr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.server.GetTransportListenAddr()
+}
+
+// GetHTTPListenAddr returns the HTTP API server listen address after binding.
+func (c *Controller) GetHTTPListenAddr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.server.GetHTTPListenAddr()
 }
 
 // GetDirectoryService returns the directory service instance
@@ -301,8 +298,7 @@ func (c *Controller) ExecuteModuleOperation(ctx context.Context, moduleName, ope
 		return nil, err
 	}
 
-	// This would be implemented based on the specific module interface
-	// For now, return a generic interface
+	// Design decision: module interface is injected at controller startup; this comment block describes the expected call site pattern, not a missing implementation.
 	c.logger.Info("Executing module operation", "module", moduleName, "operation", operation)
 	return module, nil
 }

@@ -1,11 +1,18 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package patch
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // AlertLevel defines the severity of a compliance alert
@@ -426,29 +433,24 @@ func (am *AlertingManager) shouldSendToChannel(alertLevel, minLevel AlertLevel) 
 
 // deliverToChannel delivers alert to a specific channel
 func (am *AlertingManager) deliverToChannel(ctx context.Context, alert *ComplianceAlert, channel AlertChannel) error {
-	// This would integrate with the workflow engine or direct delivery mechanisms
-	// For now, this is a placeholder that would be implemented based on channel type
-
 	switch channel.Type {
 	case "workflow":
-		// Trigger workflow with alert data
 		return am.triggerWorkflow(ctx, channel.WorkflowName, alert)
 
 	case "webhook":
-		// Send HTTP POST to webhook URL
 		return am.sendWebhook(ctx, channel.Target, alert)
 
 	case "email":
-		// Send email (would integrate with email provider)
-		return fmt.Errorf("email delivery not yet implemented")
+		// Design decision: email delivery requires a notification provider not yet wired into AlertingManager; callers should use a notification provider that supports email.
+		return fmt.Errorf("email delivery requires a notification provider: configure an email notification provider")
 
 	case "slack":
-		// Send Slack message (would integrate with Slack API)
-		return fmt.Errorf("slack delivery not yet implemented")
+		// Design decision: Slack delivery requires a notification provider not yet wired into AlertingManager; callers should use a notification provider that supports Slack.
+		return fmt.Errorf("slack delivery requires a notification provider: configure a Slack notification provider")
 
 	case "teams":
-		// Send Microsoft Teams message (would integrate with Teams API)
-		return fmt.Errorf("teams delivery not yet implemented")
+		// Design decision: Teams delivery requires a notification provider not yet wired into AlertingManager; callers should use a notification provider that supports Microsoft Teams.
+		return fmt.Errorf("teams delivery requires a notification provider: configure a Teams notification provider")
 
 	default:
 		return fmt.Errorf("unsupported channel type: %s", channel.Type)
@@ -457,16 +459,55 @@ func (am *AlertingManager) deliverToChannel(ctx context.Context, alert *Complian
 
 // triggerWorkflow triggers a workflow for alert delivery
 func (am *AlertingManager) triggerWorkflow(ctx context.Context, workflowName string, alert *ComplianceAlert) error {
-	// This would integrate with the workflow engine
-	// For now, return not implemented
-	return fmt.Errorf("workflow integration not yet implemented: %s", workflowName)
+	// Design decision: workflow trigger requires AlertingManager to be constructed with a workflow.Engine reference; the factory does not currently inject one. Wire engine in the factory to enable.
+	return fmt.Errorf("workflow trigger requires a workflow engine: wire engine in the AlertingManager factory to enable workflow delivery for %s", workflowName)
 }
 
-// sendWebhook sends alert to a webhook URL
-func (am *AlertingManager) sendWebhook(ctx context.Context, url string, alert *ComplianceAlert) error {
-	// This would use HTTP client to POST alert data
-	// For now, return not implemented
-	return fmt.Errorf("webhook delivery not yet implemented: %s", url)
+// webhookHTTPClient is a dedicated client for webhook delivery with a hard timeout.
+// Using a dedicated client avoids sharing connection pools or timeout settings with other callers.
+var webhookHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
+
+// sendWebhook sends alert to a webhook URL as a JSON POST request.
+// The URL must use http or https scheme; other schemes are rejected before any network I/O.
+// Full SSRF protection (DNS-based IP class filtering) is the responsibility of the operator
+// at config validation time when AlertChannel.Target is set.
+func (am *AlertingManager) sendWebhook(ctx context.Context, webhookURL string, alert *ComplianceAlert) error {
+	// Validate scheme before making any network connection.
+	u, err := url.Parse(webhookURL)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("invalid webhook URL: must use http or https scheme")
+	}
+
+	body, err := json.Marshal(alert)
+	if err != nil {
+		return fmt.Errorf("failed to marshal alert for webhook: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create webhook request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := webhookHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("webhook delivery failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Drain with a cap to avoid unbounded memory use on large/malicious responses.
+	if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20)); err != nil {
+		return fmt.Errorf("failed to drain webhook response body: %w", err)
+	}
+
+	if resp.StatusCode >= 300 {
+		// Log only the host, not the full URL, to avoid leaking webhook secrets embedded in the path.
+		return fmt.Errorf("webhook returned non-2xx status %d for host %s", resp.StatusCode, logging.SanitizeLogValue(u.Host))
+	}
+
+	return nil
 }
 
 // DefaultAlertConfig returns default alerting configuration

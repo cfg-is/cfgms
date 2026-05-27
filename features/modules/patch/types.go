@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package patch
 
@@ -10,15 +10,18 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 var (
 	// Valid patch types
 	validPatchTypes = map[string]bool{
-		"security": true,
-		"all":      true,
-		"kernel":   true,
-		"critical": true,
+		"security":       true,
+		"all":            true,
+		"kernel":         true,
+		"critical":       true,
+		"feature-update": true,
 	}
 
 	// Maintenance window format validation (e.g., "sunday_3am", "daily_2am", "monthly_first_sunday_3am")
@@ -59,7 +62,7 @@ type PatchInfo struct {
 // Config represents the patch management configuration
 type Config struct {
 	// Core patch configuration
-	PatchType      string   `yaml:"patch_type"`      // "security", "all", "kernel", "critical"
+	PatchType      string   `yaml:"patch_type"`      // "security", "all", "kernel", "critical", "feature-update"
 	AutoReboot     bool     `yaml:"auto_reboot"`     // Automatically reboot if required
 	IncludePatches []string `yaml:"include_patches"` // Specific patches to include
 	ExcludePatches []string `yaml:"exclude_patches"` // Specific patches to exclude
@@ -280,6 +283,7 @@ func isValidPatchID(patchID string) bool {
 
 // PatchModule implements the Module interface for OS patch management
 type PatchModule struct {
+	modules.DefaultLoggingSupport
 	mu            sync.RWMutex
 	patchManager  PatchManager
 	policyEngine  *PolicyEngine
@@ -290,7 +294,6 @@ type PatchModule struct {
 }
 
 // WindowManager defines the interface for maintenance window management
-// This is imported from pkg/maintenance but defined here to avoid circular imports
 type WindowManager interface {
 	CanReboot(ctx context.Context, deviceID string) (bool, error)
 	CanPerformMaintenance(ctx context.Context, deviceID string) (bool, error)

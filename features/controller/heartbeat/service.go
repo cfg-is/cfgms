@@ -1,11 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package heartbeat provides heartbeat monitoring for steward connections.
 //
 // This service monitors steward heartbeats via the ControlPlaneProvider and provides
 // failover detection with <15 second detection time as required by Story #198.
 //
-// Story #363: Migrated from direct MQTT broker to ControlPlaneProvider abstraction.
+// Story #363: Uses ControlPlaneProvider abstraction for transport-agnostic heartbeat monitoring.
 package heartbeat
 
 import (
@@ -28,10 +28,46 @@ type StewardStatus struct {
 	Metrics        map[string]string
 	MissedBeats    int
 	ConnectedSince time.Time
+
+	// DNAHash is the most-recently reported DNA hash from the steward heartbeat.
+	// Empty when the steward has not yet sent a DNA hash (older steward versions).
+	DNAHash string
+
+	// ActiveSessions is the number of active control-channel streams reported by the steward.
+	// Value is 1 when connected, 0 otherwise.
+	ActiveSessions int
+
+	// ConnectionState is the steward's self-reported connection state string.
+	// Values: "connected", "disconnected", "connecting", "reconnecting".
+	ConnectionState string
+
+	// expectedDNAHash is the hash the controller expects the steward to have,
+	// set after a successful full DNA sync.  Compared against DNAHash on each
+	// heartbeat to detect missed deltas.
+	expectedDNAHash string
 }
 
 // StatusChangeCallback is called when a steward's status changes.
 type StatusChangeCallback func(stewardID string, healthy bool, status StewardStatus)
+
+// DNAHashMismatchCallback is called when a heartbeat carries a DNA hash that
+// differs from the expected hash.  The controller should respond by sending
+// CommandSyncDNA to request a full sync over the data plane.
+type DNAHashMismatchCallback func(stewardID string)
+
+// HeartbeatReceivedCallback is called on every heartbeat, unconditionally.
+// Unlike OnStatusChange which fires only on healthy→unhealthy transitions,
+// this fires on every received heartbeat so components like the job dispatcher
+// can use the heartbeat as a trigger to drain pending work.
+type HeartbeatReceivedCallback func(stewardID string)
+
+// TrustEvaluator receives liveness signals from the heartbeat service and
+// decides whether an IP should be promoted to trusted status (Issue #1694).
+// The implementation (e.g. IPTrustEvaluator via the server.go adapter) is
+// responsible for resolving tenant and IP information from the steward store.
+type TrustEvaluator interface {
+	RecordLiveness(ctx context.Context, stewardID string, healthy bool) error
+}
 
 // Service monitors steward heartbeats via the ControlPlaneProvider.
 type Service struct {
@@ -44,11 +80,20 @@ type Service struct {
 	stewards map[string]*StewardStatus
 
 	// Configuration
-	heartbeatTimeout time.Duration // Time before marking steward as unhealthy
-	checkInterval    time.Duration // How often to check for timeouts
+	// HeartbeatTimeout is the HA-failover detection threshold (Story #198, <15 s).
+	// StewardOfflineTimeout is the steward-liveness threshold (epic #1664, 60 s).
+	// Do not merge these fields.
+	heartbeatTimeout      time.Duration // HA-failover detection (Story #198, 15 s)
+	stewardOfflineTimeout time.Duration // Steward-liveness detection (epic #1664, 60 s)
+	checkInterval         time.Duration // How often to check for timeouts
 
 	// Callbacks
-	onStatusChange StatusChangeCallback
+	onStatusChange      StatusChangeCallback
+	onDNAHashMismatch   DNAHashMismatchCallback
+	onHeartbeatReceived HeartbeatReceivedCallback
+
+	// Trust evaluator for IP-trust establishment (Issue #1694). Optional — nil disables.
+	trustEvaluator TrustEvaluator
 
 	// Control
 	ctx    context.Context
@@ -61,9 +106,18 @@ type Config struct {
 	// ControlPlane is the control plane provider for heartbeat subscriptions (Story #363)
 	ControlPlane controlplaneInterfaces.ControlPlaneProvider
 
-	// HeartbeatTimeout is how long to wait before marking a steward unhealthy
-	// Default: 15 seconds (Story #198 requirement)
+	// HeartbeatTimeout is the HA-failover detection threshold (Story #198, <15 s).
+	// StewardOfflineTimeout is the steward-liveness threshold (epic #1664, 60 s).
+	// Do not merge these fields.
+
+	// HeartbeatTimeout is the HA-failover detection threshold.
+	// Default: 15 seconds (Story #198 requirement).
 	HeartbeatTimeout time.Duration
+
+	// StewardOfflineTimeout is the steward-liveness detection threshold used by
+	// checkStaleHeartbeats to mark a steward offline after extended silence.
+	// Default: 60 seconds (epic #1664 — 3 missed heartbeats at 20 s interval).
+	StewardOfflineTimeout time.Duration
 
 	// CheckInterval is how often to check for stale heartbeats
 	// Default: 5 seconds
@@ -71,6 +125,23 @@ type Config struct {
 
 	// OnStatusChange callback for status changes
 	OnStatusChange StatusChangeCallback
+
+	// OnDNAHashMismatch is called when a heartbeat carries a DNA hash that
+	// differs from the hash the controller expects (set via SetExpectedDNAHash).
+	// The controller should respond by sending CommandSyncDNA to the steward.
+	// Optional — if nil hash-mismatch detection is disabled.
+	OnDNAHashMismatch DNAHashMismatchCallback
+
+	// OnHeartbeatReceived is called unconditionally on every heartbeat, after
+	// status fields are updated. Use this to trigger work that must happen on
+	// every heartbeat (e.g., job dispatch). Unlike OnStatusChange, this fires
+	// even when the steward remains healthy. Optional — nil disables.
+	OnHeartbeatReceived HeartbeatReceivedCallback
+
+	// TrustEvaluator receives healthy/unhealthy liveness signals so the
+	// IP-trust establishment gate (Issue #1694) can promote IPs to trusted
+	// status after sustained liveness. Optional — nil disables.
+	TrustEvaluator TrustEvaluator
 
 	// Logger for service logging
 	Logger logging.Logger
@@ -87,6 +158,11 @@ func New(cfg *Config) (*Service, error) {
 		heartbeatTimeout = 15 * time.Second // Story #198 requirement: <15s failover detection
 	}
 
+	stewardOfflineTimeout := cfg.StewardOfflineTimeout
+	if stewardOfflineTimeout == 0 {
+		stewardOfflineTimeout = 60 * time.Second // epic #1664: 3 missed heartbeats at 20s interval
+	}
+
 	checkInterval := cfg.CheckInterval
 	if checkInterval == 0 {
 		checkInterval = 5 * time.Second
@@ -95,21 +171,26 @@ func New(cfg *Config) (*Service, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Service{
-		controlPlane:     cfg.ControlPlane,
-		stewards:         make(map[string]*StewardStatus),
-		heartbeatTimeout: heartbeatTimeout,
-		checkInterval:    checkInterval,
-		onStatusChange:   cfg.OnStatusChange,
-		ctx:              ctx,
-		cancel:           cancel,
-		logger:           cfg.Logger,
+		controlPlane:          cfg.ControlPlane,
+		stewards:              make(map[string]*StewardStatus),
+		heartbeatTimeout:      heartbeatTimeout,
+		stewardOfflineTimeout: stewardOfflineTimeout,
+		checkInterval:         checkInterval,
+		onStatusChange:        cfg.OnStatusChange,
+		onDNAHashMismatch:     cfg.OnDNAHashMismatch,
+		onHeartbeatReceived:   cfg.OnHeartbeatReceived,
+		trustEvaluator:        cfg.TrustEvaluator,
+		ctx:                   ctx,
+		cancel:                cancel,
+		logger:                cfg.Logger,
 	}, nil
 }
 
 // Start begins monitoring heartbeats.
 func (s *Service) Start(ctx context.Context) error {
 	s.logger.Info("Starting heartbeat monitoring service",
-		"timeout", s.heartbeatTimeout,
+		"ha_failover_timeout", s.heartbeatTimeout,
+		"steward_offline_timeout", s.stewardOfflineTimeout,
 		"check_interval", s.checkInterval)
 
 	// Subscribe to heartbeats via control plane provider (Story #363)
@@ -138,7 +219,8 @@ func (s *Service) Stop(ctx context.Context) error {
 }
 
 // handleHeartbeatFromProvider processes incoming heartbeats from the ControlPlaneProvider.
-// Story #363: Replaces direct MQTT handler with typed heartbeat handler.
+// Story #363: Processes typed heartbeat messages from ControlPlaneProvider.
+// Issue #418: Detects DNA hash mismatches and fires OnDNAHashMismatch callback.
 func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlplaneTypes.Heartbeat) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -169,12 +251,53 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 		status.Metrics = metrics
 	}
 
+	status.ActiveSessions = int(hb.ActiveSessions)
+	status.ConnectionState = hb.ConnectionState
+
 	status.MissedBeats = 0
 	status.Healthy = true
+
+	// DNA hash tracking (Issue #418).
+	// Only check for mismatch when:
+	//   1. The heartbeat carries a non-empty DNA hash (backward-compatible with older stewards).
+	//   2. An expected hash has been set (i.e. at least one full sync has completed).
+	//   3. The received hash differs from what the controller expects.
+	if hb.DNAHash != "" {
+		prevHash := status.DNAHash
+		status.DNAHash = hb.DNAHash
+
+		if status.expectedDNAHash != "" && hb.DNAHash != status.expectedDNAHash {
+			s.logger.Warn("DNA hash mismatch detected — requesting full sync",
+				"steward_id", hb.StewardID,
+				"heartbeat_hash", hb.DNAHash,
+				"expected_hash", status.expectedDNAHash)
+			if s.onDNAHashMismatch != nil {
+				s.onDNAHashMismatch(hb.StewardID)
+			}
+		} else if prevHash != hb.DNAHash {
+			s.logger.Debug("Steward DNA hash updated",
+				"steward_id", hb.StewardID,
+				"old_hash", prevHash,
+				"new_hash", hb.DNAHash)
+		}
+	}
 
 	// Trigger callback if status changed
 	if !previouslyHealthy && s.onStatusChange != nil {
 		s.onStatusChange(hb.StewardID, true, *status)
+	}
+
+	// Fire unconditional per-heartbeat hook (e.g. for job dispatch).
+	if s.onHeartbeatReceived != nil {
+		s.onHeartbeatReceived(hb.StewardID)
+	}
+
+	// Notify the trust evaluator of a healthy liveness event (Issue #1694).
+	if s.trustEvaluator != nil {
+		if err := s.trustEvaluator.RecordLiveness(ctx, hb.StewardID, true); err != nil {
+			s.logger.Warn("Trust evaluator error on healthy heartbeat",
+				"steward_id", hb.StewardID, "error", err)
+		}
 	}
 
 	return nil
@@ -204,7 +327,7 @@ func (s *Service) checkStaleHeartbeats() {
 	for stewardID, status := range s.stewards {
 		if status.Healthy {
 			timeSinceLastBeat := now.Sub(status.LastHeartbeat)
-			if timeSinceLastBeat > s.heartbeatTimeout {
+			if timeSinceLastBeat > s.stewardOfflineTimeout {
 				// Mark as unhealthy
 				status.Healthy = false
 				status.MissedBeats++
@@ -217,6 +340,14 @@ func (s *Service) checkStaleHeartbeats() {
 
 				if s.onStatusChange != nil {
 					s.onStatusChange(stewardID, false, *status)
+				}
+
+				// Notify the trust evaluator that this steward went offline (Issue #1694).
+				if s.trustEvaluator != nil {
+					if err := s.trustEvaluator.RecordLiveness(context.Background(), stewardID, false); err != nil {
+						s.logger.Warn("Trust evaluator error on stale detection",
+							"steward_id", stewardID, "error", err)
+					}
 				}
 			}
 		}
@@ -264,6 +395,24 @@ func (s *Service) GetHealthyStewards() []string {
 	}
 
 	return healthy
+}
+
+// SetExpectedDNAHash records the hash the controller expects the steward to report
+// in future heartbeats.  Call this after a successful full DNA sync via the data
+// plane so that subsequent heartbeats can be validated against the known-good hash.
+func (s *Service) SetExpectedDNAHash(stewardID, hash string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	status, exists := s.stewards[stewardID]
+	if !exists {
+		status = &StewardStatus{
+			StewardID:      stewardID,
+			ConnectedSince: time.Now(),
+		}
+		s.stewards[stewardID] = status
+	}
+	status.expectedDNAHash = hash
 }
 
 // GetUnhealthyStewards returns a list of unhealthy steward IDs.

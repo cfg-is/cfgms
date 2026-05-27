@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package database provides tests for PostgreSQL storage provider
 package database
@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
@@ -273,6 +273,7 @@ func TestDatabaseSchemas_CreateTables(t *testing.T) {
 		"config_history",
 		"audit_entries",
 		"storage_health",
+		"cfgms_ip_trust_ranges",
 	}
 
 	for _, table := range tables {
@@ -304,13 +305,13 @@ func TestDatabaseClientTenantStore_CRUD(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	// Create a test client tenant
-	tenant := &interfaces.ClientTenant{
+	tenant := &business.ClientTenant{
 		TenantID:         "test-tenant-123",
 		TenantName:       "Test Organization",
 		DomainName:       "test.com",
 		AdminEmail:       "admin@test.com",
 		ConsentedAt:      time.Now(),
-		Status:           interfaces.ClientTenantStatusActive,
+		Status:           business.ClientTenantStatusActive,
 		ClientIdentifier: "client-123",
 		Metadata: map[string]interface{}{
 			"region": "us-east-1",
@@ -341,21 +342,21 @@ func TestDatabaseClientTenantStore_CRUD(t *testing.T) {
 	assert.Len(t, allTenants, 1)
 
 	// Test List by status
-	activeTenants, err := store.ListClientTenants(interfaces.ClientTenantStatusActive)
+	activeTenants, err := store.ListClientTenants(business.ClientTenantStatusActive)
 	require.NoError(t, err)
 	assert.Len(t, activeTenants, 1)
 
-	pendingTenants, err := store.ListClientTenants(interfaces.ClientTenantStatusPending)
+	pendingTenants, err := store.ListClientTenants(business.ClientTenantStatusPending)
 	require.NoError(t, err)
 	assert.Len(t, pendingTenants, 0)
 
 	// Test Update status
-	err = store.UpdateClientTenantStatus("test-tenant-123", interfaces.ClientTenantStatusSuspended)
+	err = store.UpdateClientTenantStatus("test-tenant-123", business.ClientTenantStatusSuspended)
 	require.NoError(t, err)
 
 	updated, err := store.GetClientTenant("test-tenant-123")
 	require.NoError(t, err)
-	assert.Equal(t, interfaces.ClientTenantStatusSuspended, updated.Status)
+	assert.Equal(t, business.ClientTenantStatusSuspended, updated.Status)
 
 	// Test Delete
 	err = store.DeleteClientTenant("test-tenant-123")
@@ -378,7 +379,7 @@ func TestDatabaseClientTenantStore_AdminConsent(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	// Create a test admin consent request
-	request := &interfaces.AdminConsentRequest{
+	request := &business.AdminConsentRequest{
 		ClientIdentifier: "client-456",
 		ClientName:       "Test Client",
 		RequestedBy:      "admin@msp.com",
@@ -408,42 +409,6 @@ func TestDatabaseClientTenantStore_AdminConsent(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestDatabaseProvider_Integration(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping database integration tests in short mode")
-	}
-
-	// Skip if DATABASE_URL is not set (CI/CD environments)
-	if os.Getenv("DATABASE_URL") == "" {
-		t.Skip("DATABASE_URL not set, skipping integration test")
-	}
-
-	db := setupTestDatabase(t)
-	defer func() { _ = db.Close() }()
-
-	// Test provider registration
-	providerNames := interfaces.GetRegisteredProviderNames()
-	assert.Contains(t, providerNames, "database")
-
-	// Test getting the provider
-	provider, err := interfaces.GetStorageProvider("database")
-	require.NoError(t, err)
-	assert.NotNil(t, provider)
-
-	// Test creating storage manager
-	storageManager, err := interfaces.CreateAllStoresFromConfig("database", getTestConfig())
-	require.NoError(t, err)
-	require.NotNil(t, storageManager)
-
-	assert.Equal(t, "database", storageManager.GetProviderName())
-	assert.NotNil(t, storageManager.GetClientTenantStore())
-	assert.NotNil(t, storageManager.GetConfigStore())
-	assert.NotNil(t, storageManager.GetAuditStore())
-
-	capabilities := storageManager.GetCapabilities()
-	assert.True(t, capabilities.SupportsTransactions)
-}
-
 func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 	provider := &DatabaseProvider{}
 
@@ -470,6 +435,15 @@ func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 	_, err = provider.CreateClientTenantStore(missingPasswordConfig)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "password is required")
+}
+
+func TestDatabaseProvider_CreateCommandStoreReturnsErrNotSupported(t *testing.T) {
+	provider := &DatabaseProvider{}
+
+	store, err := provider.CreateCommandStore(map[string]interface{}{})
+	assert.Nil(t, store)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, business.ErrNotSupported)
 }
 
 func TestUtilityFunctions(t *testing.T) {

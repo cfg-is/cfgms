@@ -12,13 +12,13 @@ The formal legal agreement that contributors must accept before their contributi
 
 When you contribute to CFGMS, you agree to:
 1. **Assign copyright** to Jordan Ritz (current copyright holder)
-2. **Allow dual-licensing** of your contributions under both Apache 2.0 (OSS) and Elastic License 2.0 (commercial)
+2. **Allow outbound licensing** of your contributions under any license selected by the Copyright Holder at its sole discretion, including AGPL-3.0 and private commercial licenses
 3. **Future transfer** to cfg.is entity when it's formed
 4. **Certify** that your contribution is original work and doesn't violate anyone else's rights
 
 **Why do we need this?**
-- CFGMS has both open source (Apache 2.0) and commercial (Elastic 2.0) components
-- Clear copyright ownership is needed to enforce license terms
+- CFGMS is licensed under AGPL-3.0; clear copyright ownership is needed to enforce the license terms
+- Copyright assignment enables the Copyright Holder to exercise outbound license discretion
 - Protects both contributors and the project from legal issues
 
 **How to sign:**
@@ -28,31 +28,21 @@ Add your name to [CONTRIBUTORS.md](../../CONTRIBUTORS.md) in your first Pull Req
 
 ## Why a CLA?
 
-### Dual-License Model
+### AGPL-3.0 Single License
 
-CFGMS uses a dual-license model:
+CFGMS is distributed under the GNU Affero General Public License v3.0 (AGPL-3.0). The CLA ensures the Copyright Holder can:
 
-**Apache License 2.0** (Open Source)
-- Core platform features
-- Standard modules and plugins
-- Development tools
-- Located in: `cmd/`, `pkg/`, `features/`, `api/`
-
-**Elastic License 2.0** (Source-Available, Commercial)
-- High-availability features
-- Enterprise management capabilities
-- Advanced failover and clustering
-- Located in: `commercial/ha/`
-
-The CLA ensures contributions can be used under both licenses as appropriate.
+- Enforce the AGPL-3.0 copyleft requirements against third parties who violate source-disclosure obligations
+- Exercise outbound license discretion — including the right to apply a private commercial license to contributions where appropriate
+- Maintain clean copyright ownership across all contributions as the project grows
 
 ### Copyright Assignment
 
 Why assign copyright instead of just granting a license?
 
-1. **License Enforcement**: Only the copyright holder can enforce license violations (e.g., if someone violates the "no hosted service" restriction in Elastic License 2.0)
+1. **License Enforcement**: Only the copyright holder can enforce license violations (e.g., if someone fails to provide source code as required by AGPL-3.0)
 
-2. **Dual-License Management**: Allows flexibility to include contributions in either Apache 2.0 or Elastic 2.0 components
+2. **Outbound License Discretion**: Allows the Copyright Holder to determine the outbound license for any portion of the codebase without requiring contributor approval
 
 3. **Future Entity Formation**: Simplifies transfer when cfg.is becomes a legal entity
 
@@ -60,12 +50,12 @@ Why assign copyright instead of just granting a license?
 
 ### Similar Projects
 
-Many dual-license and commercial open source projects use CLAs with copyright assignment:
+Many open source and commercial open source projects use CLAs with copyright assignment:
 
-- **Elasticsearch** (Apache 2.0 + Elastic License) - Uses CLA
 - **MongoDB** (SSPL) - Uses CLA
 - **GitLab** (MIT + Enterprise) - Uses CLA
 - **Sentry** (BSL + Enterprise) - Uses CLA
+- **HashiCorp** (BSL) - Uses CLA
 
 ---
 
@@ -89,8 +79,7 @@ If your employer has rights to code you write, you need their permission to cont
 
 **If you're concerned about this:**
 - Consult a lawyer in your jurisdiction
-- Consider whether CFGMS's dual-license model aligns with your goals
-- Note that open source components remain Apache 2.0 licensed (permissive)
+- Consider whether CFGMS's license model aligns with your goals
 
 ### What happens when cfg.is is formed?
 
@@ -110,10 +99,10 @@ Yes, the copyright holder can update the CLA. If changes are made:
 ### What if I don't want to sign?
 
 That's okay! You can still:
-- Use CFGMS (under Apache 2.0 for OSS components, Elastic 2.0 for commercial)
+- Use CFGMS (under AGPL-3.0)
 - Report bugs and issues
 - Participate in discussions
-- Fork the project (under the respective licenses)
+- Fork the project (under AGPL-3.0)
 
 You just can't have your code merged into the official repository without signing the CLA.
 
@@ -161,4 +150,4 @@ If you have questions about your legal rights or obligations, consult an attorne
 
 ---
 
-**Last Updated:** 2026-01-10
+**Last Updated:** 2026-05-22

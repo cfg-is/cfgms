@@ -1,15 +1,21 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package nodes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
+
+var scriptNodeLogger = logging.NewLogger("warn")
 
 // ScriptStepConfig defines configuration for script execution workflow steps
 type ScriptStepConfig struct {
@@ -28,11 +34,14 @@ type ScriptStepConfig struct {
 	// Parameters are custom parameters to pass to the script
 	Parameters map[string]string `yaml:"parameters,omitempty" json:"parameters,omitempty"`
 
-	// Devices specifies which devices to run the script on
+	// Devices specifies explicit device IDs to run the script on.
+	// Takes priority over DeviceFilter when non-empty.
 	Devices []string `yaml:"devices,omitempty" json:"devices,omitempty"`
 
-	// DeviceFilter allows filtering devices by criteria
-	DeviceFilter *DeviceFilter `yaml:"device_filter,omitempty" json:"device_filter,omitempty"`
+	// DeviceFilter resolves target devices via the fleet package at execution
+	// time. Re-evaluated on every Execute call (recurring workflow support).
+	// Ignored when Devices is non-empty.
+	DeviceFilter *fleet.Filter `yaml:"device_filter,omitempty" json:"device_filter,omitempty"`
 
 	// Timeout for script execution
 	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
@@ -46,29 +55,22 @@ type ScriptStepConfig struct {
 	// APIKeyTTL is the time-to-live for the ephemeral API key
 	APIKeyTTL time.Duration `yaml:"api_key_ttl,omitempty" json:"api_key_ttl,omitempty"`
 
+	// ExecutionContext controls which OS user runs the script (system or logged_in_user)
+	ExecutionContext script.ExecutionContext `yaml:"execution_context,omitempty" json:"execution_context,omitempty"`
+
 	// WaitForCompletion determines if workflow should wait for script to complete
 	WaitForCompletion bool `yaml:"wait_for_completion,omitempty" json:"wait_for_completion,omitempty"`
+
+	// SecretBindings declares parameters that are resolved from the steward
+	// secret store at execution time. Secrets are delivered via env vars and
+	// never appear in command-line arguments or script block content.
+	SecretBindings []script.ParamBinding `yaml:"secret_bindings,omitempty" json:"secret_bindings,omitempty"`
 
 	// OnSuccess defines actions to take on successful execution
 	OnSuccess *ScriptActionConfig `yaml:"on_success,omitempty" json:"on_success,omitempty"`
 
 	// OnFailure defines actions to take on failed execution
 	OnFailure *ScriptActionConfig `yaml:"on_failure,omitempty" json:"on_failure,omitempty"`
-}
-
-// DeviceFilter defines criteria for filtering devices
-type DeviceFilter struct {
-	// Platform filters by platform (windows, linux, darwin)
-	Platform string `yaml:"platform,omitempty" json:"platform,omitempty"`
-
-	// DNAQuery filters by DNA properties
-	DNAQuery map[string]interface{} `yaml:"dna_query,omitempty" json:"dna_query,omitempty"`
-
-	// Tags filters by device tags
-	Tags []string `yaml:"tags,omitempty" json:"tags,omitempty"`
-
-	// Groups filters by device groups
-	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
 }
 
 // ScriptActionConfig defines actions to take based on script results
@@ -98,12 +100,16 @@ type NotificationConfig struct {
 // ScriptNode implements the workflow.Node interface for script execution
 type ScriptNode struct {
 	workflow.BaseNode
-	config         *ScriptStepConfig
-	repository     script.ScriptRepository
-	monitor        *script.ExecutionMonitor
-	keyManager     *script.EphemeralKeyManager
-	dnaProvider    script.DNAProvider
-	configProvider script.ConfigProvider
+	config           *ScriptStepConfig
+	repository       script.ScriptRepository
+	monitor          *script.ExecutionMonitor
+	keyManager       *script.EphemeralKeyManager
+	dnaProvider      script.DNAProvider
+	configProvider   script.ConfigProvider
+	secretStore      interfaces.SecretStore
+	fleetQuery       fleet.FleetQuery
+	executionQueue   *script.ExecutionQueue
+	executionTracker script.ExecutionTracker
 }
 
 // NewScriptNode creates a new script execution node
@@ -121,26 +127,148 @@ func NewScriptNode(id, name string, config *ScriptStepConfig, repository script.
 	}
 }
 
+// resolveDeviceIDs returns the device IDs to target for this execution.
+// Priority: explicit Devices > fleet filter > localhost fallback.
+// A fleet filter matching zero devices returns (nil, nil) — the caller logs a
+// warning and returns success rather than treating this as an error.
+// The filter is re-evaluated on every call to support recurring workflows.
+func (n *ScriptNode) resolveDeviceIDs(ctx context.Context) ([]string, error) {
+	// Priority 1: explicit device list wins
+	if len(n.config.Devices) > 0 {
+		return n.config.Devices, nil
+	}
+
+	// Priority 2: fleet filter (re-evaluated each call for recurring workflows)
+	if n.config.DeviceFilter != nil && n.fleetQuery != nil {
+		results, err := n.fleetQuery.Search(ctx, *n.config.DeviceFilter)
+		if err != nil {
+			return nil, fmt.Errorf("fleet query failed: %w", err)
+		}
+		if len(results) == 0 {
+			// Zero-match: not an error — caller logs warning and returns success.
+			return nil, nil
+		}
+		ids := make([]string, len(results))
+		for i, r := range results {
+			ids[i] = r.ID
+		}
+		return ids, nil
+	}
+
+	// Priority 3: localhost fallback
+	return []string{"localhost"}, nil
+}
+
 // Execute implements workflow.Node interface
 func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (workflow.NodeOutput, error) {
-	// Get script content
+	// Resolve device IDs — re-evaluated on each Execute for recurring workflows.
+	deviceIDs, err := n.resolveDeviceIDs(ctx)
+	if err != nil {
+		return workflow.NodeOutput{
+			Success: false,
+			Error:   fmt.Sprintf("failed to resolve device IDs: %v", err),
+		}, err
+	}
+	if len(deviceIDs) == 0 {
+		// Zero-match from fleet filter: success with warning, no dispatch.
+		scriptNodeLogger.Warn("fleet filter matched no devices; skipping script dispatch",
+			"node", n.Name)
+		return workflow.NodeOutput{
+			Success: true,
+			Data: map[string]interface{}{
+				"warning": "fleet filter matched no devices",
+			},
+		}, nil
+	}
+
+	// Queue path: enqueue each device; content resolution deferred to dispatch time.
+	// StartExecution is called per device so each queue entry has a unique ExecutionID
+	// (the queue store uses ExecutionID as the map key).
+	if n.executionQueue != nil {
+		// Build shared metadata once — the store deep-copies it on enqueue.
+		queueMeta := make(map[string]interface{})
+		if runID, ok := input.Context["workflow_run_id"]; ok {
+			queueMeta["workflow_run_id"] = runID
+		}
+		if wfName, ok := input.Context["workflow_name"]; ok {
+			queueMeta["workflow_name"] = wfName
+		}
+		if len(n.config.SecretBindings) > 0 {
+			bindingsJSON, err := json.Marshal(n.config.SecretBindings)
+			if err != nil {
+				return workflow.NodeOutput{
+					Success: false,
+					Error:   fmt.Sprintf("failed to encode secret bindings: %v", err),
+				}, err
+			}
+			queueMeta["secret_bindings"] = string(bindingsJSON)
+		}
+
+		var firstExecutionID string
+		for _, deviceID := range deviceIDs {
+			// Per-device execution so each queue entry gets a unique ExecutionID.
+			execution, err := n.monitor.StartExecution(ctx, n.config.ScriptID, n.Name, "", []string{deviceID})
+			if err != nil {
+				return workflow.NodeOutput{
+					Success: false,
+					Error:   fmt.Sprintf("failed to start execution monitoring: %v", err),
+				}, err
+			}
+			if firstExecutionID == "" {
+				firstExecutionID = execution.ID
+			}
+
+			qe := &script.QueuedExecution{
+				ExecutionID:      execution.ID,
+				ScriptRef:        n.config.ScriptID,
+				ScriptVersion:    n.config.ScriptVersion,
+				Shell:            n.config.Shell,
+				Parameters:       n.config.Parameters,
+				Timeout:          n.config.Timeout,
+				GenerateAPIKey:   n.config.GenerateAPIKey,
+				APIKeyTTL:        n.config.APIKeyTTL,
+				ExecutionContext: n.config.ExecutionContext,
+				Metadata:         queueMeta,
+			}
+			if err := n.executionQueue.QueueExecution(deviceID, qe); err != nil {
+				if err == script.ErrDuplicateExecution {
+					// Dedup: identical script+device+params already queued.
+					// Cancel the orphaned monitor entry to prevent leaks.
+					_ = n.monitor.CancelExecution(execution.ID)
+					continue
+				}
+				return workflow.NodeOutput{
+					Success: false,
+					Error:   fmt.Sprintf("failed to queue execution for device %s: %v", deviceID, err),
+				}, err
+			}
+		}
+
+		return workflow.NodeOutput{
+			Success: true,
+			Data: map[string]interface{}{
+				"execution_id": firstExecutionID,
+				"queued":       len(deviceIDs),
+			},
+		}, nil
+	}
+
+	// Inline execution path (no queue configured): resolve content and execute immediately.
 	var scriptContent string
-	var metadata *script.ScriptMetadata
+	var scriptMeta *script.ScriptMetadata
 
 	if n.config.InlineScript != "" {
-		// Use inline script
 		scriptContent = n.config.InlineScript
 	} else if n.config.ScriptID != "" {
-		// Get script from repository
-		script, err := n.repository.Get(n.config.ScriptID, n.config.ScriptVersion)
+		s, err := n.repository.Get(n.config.ScriptID, n.config.ScriptVersion)
 		if err != nil {
 			return workflow.NodeOutput{
 				Success: false,
 				Error:   fmt.Sprintf("failed to get script: %v", err),
 			}, err
 		}
-		scriptContent = script.Content
-		metadata = script.Metadata
+		scriptContent = s.Content
+		scriptMeta = s.Metadata
 	} else {
 		return workflow.NodeOutput{
 			Success: false,
@@ -161,15 +289,9 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 		scriptContent = injectedContent
 	}
 
-	// Start execution monitoring
-	deviceIDs := n.config.Devices
-	if len(deviceIDs) == 0 {
-		deviceIDs = []string{"localhost"} // Default to localhost
-	}
-
 	scriptName := n.Name
-	if metadata != nil {
-		scriptName = metadata.Name
+	if scriptMeta != nil {
+		scriptName = scriptMeta.Name
 	}
 
 	execution, err := n.monitor.StartExecution(ctx, n.config.ScriptID, scriptName, "", deviceIDs)
@@ -209,10 +331,11 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 	for _, deviceID := range deviceIDs {
 		// Create script config
 		scriptConfig := &script.ScriptConfig{
-			Content:     scriptContent,
-			Shell:       n.config.Shell,
-			Timeout:     n.config.Timeout,
-			Environment: make(map[string]string),
+			Content:          scriptContent,
+			Shell:            n.config.Shell,
+			Timeout:          n.config.Timeout,
+			ExecutionContext: n.config.ExecutionContext,
+			Environment:      make(map[string]string),
 		}
 
 		// Add API key to environment if generated
@@ -222,16 +345,33 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 			scriptConfig.Environment["CFGMS_DEVICE_ID"] = deviceID
 		}
 
-		// Execute script
-		executor := script.NewExecutor(scriptConfig)
+		// Execute script — use secret-aware executor when bindings are configured.
+		var executor *script.Executor
+		if n.secretStore != nil && len(n.config.SecretBindings) > 0 {
+			executor = script.NewExecutorWithSecrets(scriptConfig, n.secretStore, n.config.SecretBindings)
+		} else {
+			executor = script.NewExecutor(scriptConfig)
+		}
 		result, execErr := executor.Execute(ctx)
 
-		// Update execution monitor
+		// Update execution monitor. The error is intentionally ignored: a monitor
+		// tracking failure must not prevent the script result from being recorded
+		// in the results map or returned to the caller.
 		status := script.StatusCompleted
 		if execErr != nil {
 			status = script.StatusFailed
 		}
-		_ = n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr)
+		if monErr := n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr); monErr != nil {
+			scriptNodeLogger.Warn("failed to update device execution status", "device_id", deviceID, "error", monErr)
+		}
+
+		// Write durable tracking record on terminal state — best-effort.
+		if n.executionTracker != nil {
+			rec := buildInlineTrackingRecord(execution.ID, deviceID, n.config.ScriptID, n.config.Shell, status, result, input)
+			if trackErr := n.executionTracker.Record(ctx, rec); trackErr != nil {
+				scriptNodeLogger.Warn("failed to write execution tracking record", "device_id", deviceID, "error", trackErr)
+			}
+		}
 
 		results[deviceID] = result
 	}
@@ -311,13 +451,50 @@ func (n *ScriptNode) SetConfigProvider(provider script.ConfigProvider) {
 	n.configProvider = provider
 }
 
+// SetSecretStore sets the secret store used to resolve secret bindings at
+// execution time. Required when ScriptStepConfig.SecretBindings is non-empty.
+func (n *ScriptNode) SetSecretStore(store interfaces.SecretStore) {
+	n.secretStore = store
+}
+
+// SetFleetQuery sets the fleet query implementation used to resolve device IDs
+// from DeviceFilter at execution time.
+func (n *ScriptNode) SetFleetQuery(q fleet.FleetQuery) {
+	n.fleetQuery = q
+}
+
+// SetExecutionQueue sets the durable execution queue. When set, Execute routes
+// each per-device dispatch through the queue instead of executing inline.
+func (n *ScriptNode) SetExecutionQueue(q *script.ExecutionQueue) {
+	n.executionQueue = q
+	// Wire tracker into queue if already set so queue-path completions are tracked.
+	if n.executionTracker != nil && q != nil {
+		q.SetExecutionTracker(n.executionTracker)
+	}
+}
+
+// SetExecutionTracker sets the durable execution tracker. When set, Execute
+// writes one ExecutionRecord per device when it reaches a terminal state.
+// For the queue path, the tracker is also threaded into the ExecutionQueue so
+// that AcknowledgeCompletion writes the record on steward callback.
+func (n *ScriptNode) SetExecutionTracker(t script.ExecutionTracker) {
+	n.executionTracker = t
+	if n.executionQueue != nil {
+		n.executionQueue.SetExecutionTracker(t)
+	}
+}
+
 // ScriptStepExecutor executes script workflow steps
 type ScriptStepExecutor struct {
-	repository     script.ScriptRepository
-	monitor        *script.ExecutionMonitor
-	keyManager     *script.EphemeralKeyManager
-	dnaProvider    script.DNAProvider
-	configProvider script.ConfigProvider
+	repository       script.ScriptRepository
+	monitor          *script.ExecutionMonitor
+	keyManager       *script.EphemeralKeyManager
+	dnaProvider      script.DNAProvider
+	configProvider   script.ConfigProvider
+	secretStore      interfaces.SecretStore
+	fleetQuery       fleet.FleetQuery
+	executionQueue   *script.ExecutionQueue
+	executionTracker script.ExecutionTracker
 }
 
 // NewScriptStepExecutor creates a new script step executor
@@ -345,12 +522,25 @@ func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step
 	node := NewScriptNode(step.Name, step.Name, config, e.repository, e.monitor, e.keyManager)
 	node.SetDNAProvider(e.dnaProvider)
 	node.SetConfigProvider(e.configProvider)
+	node.SetSecretStore(e.secretStore)
+	node.SetFleetQuery(e.fleetQuery)
+	node.SetExecutionQueue(e.executionQueue)
+	node.SetExecutionTracker(e.executionTracker)
+
+	// Propagate workflow context so queue metadata includes workflow_run_id/workflow_name.
+	inputCtx := make(map[string]interface{})
+	if runID, ok := variables["workflow_run_id"]; ok {
+		inputCtx["workflow_run_id"] = runID
+	}
+	if wfName, ok := variables["workflow_name"]; ok {
+		inputCtx["workflow_name"] = wfName
+	}
 
 	// Execute node
 	startTime := time.Now()
 	output, err := node.Execute(ctx, workflow.NodeInput{
 		Data:    variables,
-		Context: make(map[string]interface{}),
+		Context: inputCtx,
 	})
 	endTime := time.Now()
 
@@ -380,6 +570,63 @@ func (e *ScriptStepExecutor) SetConfigProvider(provider script.ConfigProvider) {
 	e.configProvider = provider
 }
 
+// SetSecretStore sets the secret store for resolving secret bindings in steps.
+func (e *ScriptStepExecutor) SetSecretStore(store interfaces.SecretStore) {
+	e.secretStore = store
+}
+
+// SetFleetQuery sets the fleet query implementation propagated to created script nodes.
+func (e *ScriptStepExecutor) SetFleetQuery(q fleet.FleetQuery) {
+	e.fleetQuery = q
+}
+
+// SetExecutionQueue sets the durable execution queue propagated to created script nodes.
+func (e *ScriptStepExecutor) SetExecutionQueue(q *script.ExecutionQueue) {
+	e.executionQueue = q
+}
+
+// SetExecutionTracker sets the durable execution tracker propagated to created
+// script nodes so inline and queue-path completions are both recorded.
+func (e *ScriptStepExecutor) SetExecutionTracker(t script.ExecutionTracker) {
+	e.executionTracker = t
+}
+
+// buildInlineTrackingRecord constructs an ExecutionRecord for the inline
+// (non-queue) execution path. WorkflowRunID and WorkflowName are extracted
+// from input.Context if present.
+func buildInlineTrackingRecord(
+	executionID, deviceID, scriptRef string,
+	shell script.ShellType,
+	status script.ExecutionStatus,
+	result *script.ExecutionResult,
+	input workflow.NodeInput,
+) *script.ExecutionRecord {
+	rec := &script.ExecutionRecord{
+		ExecutionID: executionID,
+		DeviceID:    deviceID,
+		ScriptRef:   scriptRef,
+		Shell:       string(shell),
+		State:       string(status),
+		CompletedAt: time.Now(),
+	}
+
+	if v, ok := input.Context["workflow_run_id"]; ok {
+		rec.WorkflowRunID, _ = v.(string)
+	}
+	if v, ok := input.Context["workflow_name"]; ok {
+		rec.WorkflowName, _ = v.(string)
+	}
+
+	if result != nil {
+		rec.ExitCode = result.ExitCode
+		rec.Stdout = result.Stdout
+		rec.Stderr = result.Stderr
+		rec.DurationMs = result.Duration.Milliseconds()
+	}
+
+	return rec
+}
+
 // parseScriptStepConfig converts a map[string]interface{} to ScriptStepConfig
 func parseScriptStepConfig(configMap map[string]interface{}) (*ScriptStepConfig, error) {
 	if configMap == nil {
@@ -400,6 +647,9 @@ func parseScriptStepConfig(configMap map[string]interface{}) (*ScriptStepConfig,
 	}
 	if shell, ok := configMap["shell"].(string); ok {
 		config.Shell = script.ShellType(shell)
+	}
+	if ec, ok := configMap["execution_context"].(string); ok {
+		config.ExecutionContext = script.ExecutionContext(ec)
 	}
 
 	// Parse parameters map
@@ -422,6 +672,46 @@ func parseScriptStepConfig(configMap map[string]interface{}) (*ScriptStepConfig,
 				config.Devices = append(config.Devices, devStr)
 			}
 		}
+	}
+
+	// Parse device_filter into fleet.Filter
+	if df, ok := configMap["device_filter"].(map[string]interface{}); ok {
+		filter := &fleet.Filter{}
+		if v, ok := df["tenant_id"].(string); ok {
+			filter.TenantID = v
+		}
+		if v, ok := df["os"].(string); ok {
+			filter.OS = v
+		}
+		if v, ok := df["platform"].(string); ok {
+			filter.Platform = v
+		}
+		if v, ok := df["architecture"].(string); ok {
+			filter.Architecture = v
+		}
+		if v, ok := df["status"].(string); ok {
+			filter.Status = v
+		}
+		if v, ok := df["hostname"].(string); ok {
+			filter.Hostname = v
+		}
+		if rawTags, ok := df["tags"].([]interface{}); ok {
+			filter.Tags = make([]string, 0, len(rawTags))
+			for _, t := range rawTags {
+				if s, ok := t.(string); ok {
+					filter.Tags = append(filter.Tags, s)
+				}
+			}
+		}
+		if rawAttrs, ok := df["dna_attributes"].(map[string]interface{}); ok {
+			filter.DNAAttributes = make(map[string]string, len(rawAttrs))
+			for k, v := range rawAttrs {
+				if s, ok := v.(string); ok {
+					filter.DNAAttributes[k] = s
+				}
+			}
+		}
+		config.DeviceFilter = filter
 	}
 
 	// Parse timeout duration
@@ -455,6 +745,31 @@ func parseScriptStepConfig(configMap map[string]interface{}) (*ScriptStepConfig,
 		config.APIKeyTTL = time.Duration(apiKeyTTLInt)
 	} else if apiKeyTTLInt, ok := configMap["api_key_ttl"].(int); ok {
 		config.APIKeyTTL = time.Duration(apiKeyTTLInt)
+	}
+
+	// Parse secret_bindings slice
+	if rawBindings, ok := configMap["secret_bindings"].([]interface{}); ok {
+		config.SecretBindings = make([]script.ParamBinding, 0, len(rawBindings))
+		for i, rb := range rawBindings {
+			bm, ok := rb.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("secret_bindings[%d]: expected a mapping, got %T", i, rb)
+			}
+			var binding script.ParamBinding
+			if name, ok := bm["name"].(string); ok {
+				binding.Name = name
+			}
+			if from, ok := bm["from"].(string); ok {
+				binding.From = script.ParamSource(from)
+			}
+			if key, ok := bm["key"].(string); ok {
+				binding.Key = key
+			}
+			if value, ok := bm["value"].(string); ok {
+				binding.Value = value
+			}
+			config.SecretBindings = append(config.SecretBindings, binding)
+		}
 	}
 
 	return config, nil

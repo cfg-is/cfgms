@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package api
 
@@ -8,25 +8,72 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
+	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
+	cpInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	testutil "github.com/cfgis/cfgms/pkg/testing"
-
-	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
+// testControlPlane is a minimal in-process ControlPlaneProvider for server-wiring tests.
+// sendCommandCh receives a struct{} each time SendCommand is called, allowing tests to
+// observe fanout delivery without requiring a real gRPC connection.
+type testControlPlane struct {
+	sendCommandCh chan struct{}
+}
+
+var _ cpInterfaces.ControlPlaneProvider = (*testControlPlane)(nil)
+
+func (p *testControlPlane) Name() string                                                 { return "test" }
+func (p *testControlPlane) IsConnected() bool                                            { return true }
+func (p *testControlPlane) Initialize(_ context.Context, _ map[string]interface{}) error { return nil }
+func (p *testControlPlane) Start(_ context.Context) error                                { return nil }
+func (p *testControlPlane) Stop(_ context.Context) error                                 { return nil }
+func (p *testControlPlane) Reconnect(_ context.Context) error                            { return nil }
+func (p *testControlPlane) SendCommand(_ context.Context, _ *cpTypes.SignedCommand) error {
+	select {
+	case p.sendCommandCh <- struct{}{}:
+	default:
+	}
+	return nil
+}
+func (p *testControlPlane) FanOutCommand(_ context.Context, _ *cpTypes.SignedCommand, ids []string) (*cpTypes.FanOutResult, error) {
+	return &cpTypes.FanOutResult{Succeeded: ids, Failed: map[string]error{}}, nil
+}
+func (p *testControlPlane) SubscribeCommands(_ context.Context, _ string, _ cpInterfaces.CommandHandler) error {
+	return nil
+}
+func (p *testControlPlane) PublishEvent(_ context.Context, _ *cpTypes.Event) error { return nil }
+func (p *testControlPlane) SubscribeEvents(_ context.Context, _ *cpTypes.EventFilter, _ cpInterfaces.EventHandler) error {
+	return nil
+}
+func (p *testControlPlane) SendHeartbeat(_ context.Context, _ *cpTypes.Heartbeat) error { return nil }
+func (p *testControlPlane) SubscribeHeartbeats(_ context.Context, _ cpInterfaces.HeartbeatHandler) error {
+	return nil
+}
+func (p *testControlPlane) GetStats(_ context.Context) (*cpTypes.ControlPlaneStats, error) {
+	return &cpTypes.ControlPlaneStats{}, nil
+}
+
 func setupTestServer(t *testing.T) *Server {
+	// Isolate secrets storage per test. initializeSecretStore() defaults to a
+	// shared os.TempDir() path, which causes file-lock contention on Windows CI.
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
 	// Create test configuration
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false // Disable for testing
@@ -35,30 +82,34 @@ func setupTestServer(t *testing.T) *Server {
 	logger := logging.NewNoopLogger()
 
 	// Initialize RBAC system with git storage
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
-	require.NoError(t, err)
+	storageManager := pkgtesting.SetupTestStorage(t)
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
-	err = rbacManager.Initialize(context.Background())
+	err := rbacManager.Initialize(context.Background())
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
 
 	// Initialize tenant management with durable storage (git-backed)
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 
-	// Create mock services
+	// Create services
 	controllerService := service.NewControllerService(logger)
-	configService := service.NewConfigurationService(logger, controllerService)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 	rbacService := service.NewRBACService(rbacManager)
+
+	// Create audit manager backed by the SQLite audit store
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
 
 	// Create REST API server
 	server, err := New(
@@ -71,14 +122,23 @@ func setupTestServer(t *testing.T) *Server {
 		nil, // No cert manager for basic tests
 		tenantManager,
 		rbacManager,
-		nil, // No system monitor for basic tests
-		nil, // No platform monitor for basic tests
-		nil, // No tracer for basic tests
-		nil, // No HA manager for basic tests
-		nil, // No registration token store for basic tests
-		"",  // No signer cert serial for basic tests
+		nil,      // No system monitor for basic tests
+		nil,      // No HA manager for basic tests
+		nil,      // No registration token store for basic tests
+		"",       // No signer cert serial for basic tests
+		nil,      // No health collector for basic tests
+		auditMgr, // Issue #775: registration audit events
+		nil,      // No command publisher for basic tests
+		nil,      // No push store for basic tests
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
+	})
 
 	return server
 }
@@ -247,7 +307,7 @@ func TestAPIKeyManagement(t *testing.T) {
 	// Test creating a new API key
 	createReq := APIKeyCreateRequest{
 		Name:        "Test Key",
-		Permissions: []string{"stewards:read"},
+		Permissions: []string{"steward:read"},
 		TenantID:    "test-tenant",
 	}
 
@@ -362,7 +422,7 @@ func TestConfigurationValidation(t *testing.T) {
 
 	server.router.ServeHTTP(rec, req)
 
-	// Should return validation result (even if service is mock)
+	// Should return validation result
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var response APIResponse
@@ -719,7 +779,7 @@ func TestEphemeralAPIKeys(t *testing.T) {
 	})
 
 	t.Run("JIT key convenience function", func(t *testing.T) {
-		permissions := []string{"stewards:execute-scripts"}
+		permissions := []string{"steward:read"}
 
 		// Use convenience function for 1-hour JIT key
 		jitKey := NewJITTestKey(t, server, permissions)
@@ -735,11 +795,20 @@ func TestEphemeralAPIKeys(t *testing.T) {
 		// Should expire in approximately 1 hour (within 10 seconds tolerance for CI)
 		expectedExpiry := time.Now().Add(1 * time.Hour)
 		assert.WithinDuration(t, expectedExpiry, *keyInfo.ExpiresAt, 10*time.Second)
+
+		// Verify the JIT key actually grants access to an authorized endpoint
+		req := httptest.NewRequest("GET", "/api/v1/stewards/test-steward-id", nil)
+		req.Header.Set("X-API-Key", jitKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		// 404 means auth passed and the endpoint was reached (no steward with that ID exists)
+		assert.NotEqual(t, http.StatusUnauthorized, rec.Code, "JIT key must authenticate the request")
+		assert.NotEqual(t, http.StatusForbidden, rec.Code, "JIT key must have steward:read permission")
 	})
 
 	t.Run("automatic cleanup removes expired keys", func(t *testing.T) {
-		// Create a key that expires in 1 second
-		ephemeralKey := NewEphemeralTestKey(t, server, []string{"test"}, "test", 1*time.Second)
+		// Create a key then backdate its expiry so cleanup runs without sleeping
+		ephemeralKey := NewEphemeralTestKey(t, server, []string{"test"}, "test", time.Hour)
 
 		// Verify key exists
 		server.mu.RLock()
@@ -747,8 +816,11 @@ func TestEphemeralAPIKeys(t *testing.T) {
 		server.mu.RUnlock()
 		require.True(t, exists, "Key should exist initially")
 
-		// Wait for key to expire
-		time.Sleep(2 * time.Second)
+		// Backdate the expiry to the past so cleanupExpiredAPIKeys treats it as expired
+		pastTime := time.Now().Add(-time.Hour)
+		server.mu.Lock()
+		server.apiKeys[ephemeralKey].ExpiresAt = &pastTime
+		server.mu.Unlock()
 
 		// Manually trigger cleanup (normally happens every 10 minutes)
 		server.cleanupExpiredAPIKeys()
@@ -784,41 +856,87 @@ func TestEphemeralAPIKeys(t *testing.T) {
 	})
 }
 
+// capturingWarnLogger records Warn-level messages so tests can assert on security-relevant log output.
+type capturingWarnLogger struct {
+	logging.NoopLogger
+	mu      sync.Mutex
+	entries []string
+}
+
+func (l *capturingWarnLogger) Warn(msg string, _ ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, msg)
+}
+
+func (l *capturingWarnLogger) WarnCtx(_ context.Context, msg string, kvs ...interface{}) {
+	l.Warn(msg, kvs...)
+}
+
+func (l *capturingWarnLogger) reset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = nil
+}
+
+func (l *capturingWarnLogger) warnMessages() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, len(l.entries))
+	copy(out, l.entries)
+	return out
+}
+
 // setupTestServerWithLogger creates a test server using the provided logger.
-// Use this when you need to capture log output (e.g., with MockLogger).
+// Use this when you need to capture log output for assertions.
 func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
+	// Isolate secrets storage per test (same reason as setupTestServer).
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
 
-	storageConfig := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
-	require.NoError(t, err)
+	storageManager := pkgtesting.SetupTestStorage(t)
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
-	err = rbacManager.Initialize(context.Background())
+	err := rbacManager.Initialize(context.Background())
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 
 	controllerService := service.NewControllerService(logger)
-	configService := service.NewConfigurationService(logger, controllerService)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 	rbacService := service.NewRBACService(rbacManager)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
 
 	server, err := New(
 		cfg, logger, controllerService, configService,
 		nil, rbacService, nil, tenantManager, rbacManager,
-		nil, nil, nil, nil, nil, "",
+		nil, nil, nil, "", nil, auditMgr,
+		nil, // No command publisher for basic tests
+		nil, // No push store for basic tests
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
+	})
 
 	return server
 }
@@ -886,8 +1004,8 @@ func TestTestEndpointAuthGate(t *testing.T) {
 	})
 
 	t.Run("warn log emitted on bypass", func(t *testing.T) {
-		mockLogger := testutil.NewMockLogger(true)
-		server := setupTestServerWithLogger(t, mockLogger)
+		capLogger := &capturingWarnLogger{}
+		server := setupTestServerWithLogger(t, capLogger)
 
 		t.Setenv("CFGMS_ENABLE_TEST_ENDPOINTS", "true")
 
@@ -897,7 +1015,7 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		wrappedHandler := server.authenticationMiddleware(testHandler)
 
 		// Clear any startup log messages before testing
-		mockLogger.Reset()
+		capLogger.reset()
 
 		// Trigger bypass for config endpoint
 		req := httptest.NewRequest("PUT", "/api/v1/test/stewards/steward-abc/config", nil)
@@ -905,20 +1023,20 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		wrappedHandler.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusOK, rec.Code)
-		warnLogs := mockLogger.GetLogs("warn")
-		require.NotEmpty(t, warnLogs, "Should emit warn log on auth bypass")
-		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnLogs[0].Message)
+		warnMsgs := capLogger.warnMessages()
+		require.NotEmpty(t, warnMsgs, "Should emit warn log on auth bypass")
+		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnMsgs[0])
 
 		// Trigger bypass for QUIC endpoint
-		mockLogger.Reset()
+		capLogger.reset()
 		req = httptest.NewRequest("POST", "/api/v1/test/stewards/steward-abc/quic/connect", nil)
 		rec = httptest.NewRecorder()
 		wrappedHandler.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusOK, rec.Code)
-		warnLogs = mockLogger.GetLogs("warn")
-		require.NotEmpty(t, warnLogs, "Should emit warn log on QUIC auth bypass")
-		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnLogs[0].Message)
+		warnMsgs = capLogger.warnMessages()
+		require.NotEmpty(t, warnMsgs, "Should emit warn log on QUIC auth bypass")
+		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnMsgs[0])
 	})
 
 	t.Run("non-test endpoints still require auth when env var is set", func(t *testing.T) {
@@ -993,3 +1111,357 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		assert.False(t, handlerCalled, "Handler should not be called with non-exact env var value")
 	})
 }
+
+// TestTenantContextPropagation verifies that tenant ID set by the auth middleware flows
+// through to the config handler and is used for config storage (not silently falling back
+// to "default"). This is a regression test for the context key type mismatch fixed in
+// Issue #430: auth middleware used typed contextKey("tenant_id") while handlers used
+// plain string "tenant-id" — so context.Value() always returned nil before the fix.
+func TestTenantContextPropagation(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Create an API key for a specific tenant (not the default "test-tenant").
+	// NewEphemeralTestKey stores the key with this tenantID in the server's in-memory
+	// key map, so when the auth middleware validates the key it will read TenantID = "acme-corp"
+	// and store it under ctxkeys.TenantID in the request context.
+	configWriteKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "acme-corp", 5*time.Minute)
+
+	// Build a minimal valid StewardConfig that passes ValidateConfiguration.
+	configBody := []byte(`{
+		"steward": {
+			"id": "test-steward-1",
+			"mode": "standalone",
+			"logging": {"level": "info"}
+		},
+		"resources": []
+	}`)
+
+	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-1/config", bytes.NewReader(configBody))
+	req.Header.Set("X-API-Key", configWriteKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "Config write should succeed; body: %s", rec.Body.String())
+
+	var response APIResponse
+	err := json.Unmarshal(rec.Body.Bytes(), &response)
+	require.NoError(t, err)
+
+	data, ok := response.Data.(map[string]interface{})
+	require.True(t, ok, "Response data should be a map")
+
+	// The tenant_id in the response must match the key's tenant, not "default".
+	// Before the fix the handler extracted via plain string "tenant-id" which never
+	// matched the typed contextKey set by the middleware, so tenantID was always "default".
+	assert.Equal(t, "acme-corp", data["tenant_id"],
+		"tenant_id in response should reflect the authenticated API key's tenant, not 'default'")
+	assert.Equal(t, "test-steward-1", data["steward_id"])
+}
+
+// TestAPIServerStartStop verifies that a standalone api.Server created via api.New() can
+// start and stop cleanly. This exercises the same lifecycle path used by server.Server
+// (Issue #778): after removing the duplicate api.New() from controller.go, server.Server
+// is the sole owner of the api.Server instance and its Start/Stop lifecycle.
+func TestAPIServerStartStop(t *testing.T) {
+	// Use an ephemeral HTTP port so the test never conflicts with other tests or processes.
+	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
+
+	server := setupTestServer(t)
+
+	err := server.Start()
+	require.NoError(t, err, "api.Server.Start() must return no error")
+
+	// Stop() calls http.Server.Shutdown() which drains in-flight requests and returns
+	// cleanly even if ListenAndServe hasn't bound yet — no sleep required.
+	err = server.Stop()
+	assert.NoError(t, err, "api.Server.Stop() must return no error")
+}
+
+// TestServerClose_Idempotent verifies the Close contract: calling Close more than once
+// must not panic and must return nil on every call (Issue #862).
+func TestServerClose_Idempotent(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	err := server.Close(ctx)
+	assert.NoError(t, err, "first Close must succeed")
+
+	// Second call must be a no-op: no panic, no error.
+	err = server.Close(ctx)
+	assert.NoError(t, err, "second Close must be idempotent and return nil")
+
+	// Third call via Stop (which delegates to Close) must also be safe.
+	err = server.Stop()
+	assert.NoError(t, err, "Stop after Close must be idempotent")
+}
+
+// TestServerClose_CancelledContext verifies that Close with an already-cancelled
+// context does not panic and returns a wrapped context.Canceled error or nil
+// (non-deterministic: the cleanup goroutine may exit before the select checks ctx.Done).
+// What matters is that the server is safely stopped in either case (Issue #862).
+func TestServerClose_CancelledContext(t *testing.T) {
+	server := setupTestServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately before calling Close
+
+	err := server.Close(ctx)
+	// Either nil (goroutine exited via stopCleanup before ctx.Done) or context.Canceled.
+	if err != nil {
+		assert.ErrorIs(t, err, context.Canceled,
+			"non-nil error must wrap context.Canceled, got: %v", err)
+	}
+
+	// Server must be fully stopped regardless of which select arm won.
+	// A subsequent close with a valid context must be a no-op.
+	err2 := server.Close(context.Background())
+	assert.NoError(t, err2, "subsequent Close after cancelled-context Close must be idempotent")
+}
+
+// TestTenantContextKeyType verifies that ctxkeys.TenantID can be retrieved from a context
+// that was populated using the same key — confirming the type identity that was broken before.
+func TestTenantContextKeyType(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "acme-corp")
+
+	val, ok := ctx.Value(ctxkeys.TenantID).(string)
+	assert.True(t, ok, "ctxkeys.TenantID should be retrievable with the same typed key")
+	assert.Equal(t, "acme-corp", val)
+
+	// Plain string "tenant_id" must NOT match the typed key — this confirms the
+	// type-safe key prevents silent collisions with untyped string keys.
+	plainVal := ctx.Value("tenant_id")
+	assert.Nil(t, plainVal, "plain string 'tenant_id' must not match the typed ctxkeys.TenantID")
+
+	// Old hyphenated string "tenant-id" must also not match.
+	oldVal := ctx.Value("tenant-id")
+	assert.Nil(t, oldVal, "old plain string 'tenant-id' must not match the typed ctxkeys.TenantID")
+}
+
+// TestServer_CertificateRevokeRouteDeregistered confirms the POST
+// /api/v1/certificates/{serial}/revoke route has been removed.
+// Must return 404 (no route) or 405 (route exists, wrong method) — NOT 501.
+func TestServer_CertificateRevokeRouteDeregistered(t *testing.T) {
+	server := setupTestServer(t)
+
+	revokeKey := NewTestKey(t, server, []string{"certificate:revoke"})
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/any-serial/revoke", nil)
+	req.Header.Set("X-API-Key", revokeKey)
+	rec := httptest.NewRecorder()
+
+	server.router.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusNotImplemented, rec.Code,
+		"route must not return 501 — handler was deleted")
+	assert.True(t,
+		rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed,
+		"deregistered revoke route must return 404 or 405, got %d", rec.Code)
+}
+
+// TestServer_SetWorkflowHandler_PropagatesFleetQuery verifies that SetWorkflowHandler
+// propagates the server's fleet query to the workflow handler (Issue #609).
+// This exercises the integration path: server.fleetQuery → handler.fleetQuery.
+func TestServer_SetWorkflowHandler_PropagatesFleetQuery(t *testing.T) {
+	server := setupTestServer(t)
+	// server.fleetQuery is always set by New() via fleet.NewMemoryQuery.
+	require.NotNil(t, server.fleetQuery, "server must have a fleet query after New()")
+
+	handler := NewWorkflowHandler(nil, nil, nil, logging.NewNoopLogger())
+	assert.Nil(t, handler.fleetQuery, "handler fleetQuery must be nil before SetWorkflowHandler")
+
+	server.SetWorkflowHandler(handler)
+
+	assert.Equal(t, server.fleetQuery, handler.fleetQuery,
+		"SetWorkflowHandler must propagate the server fleet query to the handler")
+}
+
+// TestServer_SetWorkflowHandler_NilHandler_NoopSafe verifies that passing nil to
+// SetWorkflowHandler does not panic (defensive guard on the propagation branch).
+func TestServer_SetWorkflowHandler_NilHandler_NoopSafe(t *testing.T) {
+	server := setupTestServer(t)
+	assert.NotPanics(t, func() {
+		server.SetWorkflowHandler(nil)
+	}, "SetWorkflowHandler(nil) must not panic")
+	assert.Nil(t, server.workflowHandler, "workflowHandler must be nil after SetWorkflowHandler(nil)")
+}
+
+// TestServer_MonitoringStubRoutesDeregistered verifies that the 6 synthetic-data
+// monitoring routes have been removed and return 404 rather than 200 with fabricated data.
+func TestServer_MonitoringStubRoutesDeregistered(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Create a key with the permissions that the removed routes previously required.
+	// If the routes still exist, auth passes and the handler returns 200.
+	// If the routes are gone, the mux returns 404 regardless of auth.
+	monitoringKey := NewTestKey(t, server, []string{
+		"monitoring:read-resources",
+		"monitoring:read-logs",
+		"monitoring:read-traces",
+		"monitoring:read-events",
+		"monitoring:read-steward-metrics",
+		"monitoring:read-services",
+	})
+
+	stubRoutes := []string{
+		"/api/v1/monitoring/resources",
+		"/api/v1/monitoring/logs",
+		"/api/v1/monitoring/traces",
+		"/api/v1/monitoring/events",
+		"/api/v1/monitoring/stewards/any-id/metrics",
+		"/api/v1/monitoring/controller/services",
+	}
+
+	for _, path := range stubRoutes {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest("GET", path, nil)
+			req.Header.Set("X-API-Key", monitoringKey)
+			rec := httptest.NewRecorder()
+
+			server.router.ServeHTTP(rec, req)
+
+			assert.NotEqual(t, http.StatusOK, rec.Code,
+				"deregistered stub route must not return 200 with synthetic data")
+			assert.True(t,
+				rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed,
+				"deregistered stub route %s should return 404 or 405, got %d", path, rec.Code)
+		})
+	}
+}
+
+// setupServerWithPublisher creates a server with a real commands.Publisher backed by
+// the provided testControlPlane. Returns the server, configService, and controllerService
+// so tests can interact with them directly.
+func setupServerWithPublisher(t *testing.T, cp *testControlPlane) (*Server, *service.ConfigurationServiceV2, *service.ControllerService) {
+	t.Helper()
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+	logger := logging.NewNoopLogger()
+	storageManager := pkgtesting.SetupTestStorage(t)
+
+	controllerSvc := service.NewControllerService(logger)
+	configSvc := service.NewConfigurationServiceV2(logger, storageManager, controllerSvc)
+
+	rbacMgr := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacMgr.Initialize(context.Background()))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacMgr.Close(closeCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantMgr := tenant.NewManager(tenantStore, rbacMgr)
+	rbacSvc := service.NewRBACService(rbacMgr)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+	publisher, err := commands.New(&commands.Config{ControlPlane: cp, Logger: logger})
+	require.NoError(t, err)
+
+	server, err := New(
+		cfg, logger, controllerSvc, configSvc, nil, rbacSvc,
+		nil, tenantMgr, rbacMgr, nil, nil, nil, "", nil, auditMgr, publisher, nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Close(closeCtx)
+	})
+
+	return server, configSvc, controllerSvc
+}
+
+// TestNew_FanoutCallbackWired verifies that New() registers a save=deploy fanout callback
+// on the config service when commandPublisher is non-nil, and that the callback correctly
+// dispatches push.Fanout() to active stewards of the affected tenant only.
+func TestNew_FanoutCallbackWired(t *testing.T) {
+	minimalStewardCfg := func(id string) *stewardtypes.StewardConfig {
+		return &stewardtypes.StewardConfig{
+			Steward: stewardtypes.StewardSettings{
+				ID:      id,
+				Mode:    stewardtypes.ModeController,
+				Logging: stewardtypes.LoggingConfig{Level: "info", Format: "text"},
+				ErrorHandling: stewardtypes.ErrorHandlingConfig{
+					ModuleLoadFailure:  stewardtypes.ActionContinue,
+					ResourceFailure:    stewardtypes.ActionWarn,
+					ConfigurationError: stewardtypes.ActionFail,
+				},
+			},
+			Modules: map[string]string{"file": "file"},
+			Resources: []stewardtypes.ResourceConfig{
+				{Name: "f", Module: "file", Config: map[string]interface{}{"path": "/tmp/f", "content": "x"}},
+			},
+		}
+	}
+
+	t.Run("fanout dispatched to active steward of matching tenant", func(t *testing.T) {
+		cp := &testControlPlane{sendCommandCh: make(chan struct{}, 1)}
+		_, configSvc, controllerSvc := setupServerWithPublisher(t, cp)
+
+		// Register an active steward in the same tenant used for SetConfiguration.
+		require.NoError(t, controllerSvc.RegisterSteward("steward-1", "tenant-a", "", "active"))
+
+		err := configSvc.SetConfiguration(context.Background(), "tenant-a", "steward-1", minimalStewardCfg("steward-1"))
+		require.NoError(t, err)
+
+		// The goroutine inside the callback calls push.Fanout → TriggerConfigSync → SendCommand.
+		select {
+		case <-cp.sendCommandCh:
+			// success: fanout reached the steward
+		case <-time.After(3 * time.Second):
+			t.Fatal("save=deploy fanout did not deliver to active steward within timeout")
+		}
+	})
+
+	t.Run("fanout skipped for steward of different tenant", func(t *testing.T) {
+		cp := &testControlPlane{sendCommandCh: make(chan struct{}, 1)}
+		_, configSvc, controllerSvc := setupServerWithPublisher(t, cp)
+
+		// Register a steward in tenant-b; SetConfiguration is for tenant-a.
+		require.NoError(t, controllerSvc.RegisterSteward("steward-b", "tenant-b", "", "active"))
+
+		err := configSvc.SetConfiguration(context.Background(), "tenant-a", "steward-1", minimalStewardCfg("steward-1"))
+		require.NoError(t, err)
+
+		// No steward in tenant-a → fanout sends to nobody → SendCommand never called.
+		select {
+		case <-cp.sendCommandCh:
+			t.Fatal("cross-tenant fanout must not occur: SendCommand was called for a different tenant's steward")
+		case <-time.After(200 * time.Millisecond):
+			// success: no cross-tenant fanout
+		}
+	})
+
+	t.Run("leader check: follower skips fanout", func(t *testing.T) {
+		cp := &testControlPlane{sendCommandCh: make(chan struct{}, 1)}
+		server, configSvc, controllerSvc := setupServerWithPublisher(t, cp)
+
+		require.NoError(t, controllerSvc.RegisterSteward("steward-1", "tenant-a", "", "active"))
+
+		// Override the leader check to report this node as a follower.
+		server.pushLeaderStatus = &stubLeaderStatus{leader: false}
+
+		err := configSvc.SetConfiguration(context.Background(), "tenant-a", "steward-1", minimalStewardCfg("steward-1"))
+		require.NoError(t, err)
+
+		select {
+		case <-cp.sendCommandCh:
+			t.Fatal("follower node must not perform fanout")
+		case <-time.After(200 * time.Millisecond):
+			// success: fanout suppressed on follower
+		}
+	})
+}
+
+// stubLeaderStatus is defined in handlers_push_test.go (shared across api package tests).

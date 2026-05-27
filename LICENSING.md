@@ -1,328 +1,95 @@
 # CFGMS Licensing
 
-CFGMS uses a **dual licensing model** to balance open source community benefits with sustainable commercial development.
+CFGMS is licensed under the **[GNU Affero General Public License v3.0](LICENSE)** (AGPL-3.0).
 
-## License Overview
+## Copyright
 
-### Apache License 2.0 (Open Source)
+All CFGMS code is copyrighted by **Jordan Ritz** (as of January 2026). When cfg.is is formed as a legal entity, copyright will be assigned to that entity as documented in the CLA.
 
-The vast majority of CFGMS is licensed under the [Apache License 2.0](LICENSE), including:
+Every source file includes:
 
-- **Complete CLI and API** - Full command-line and REST API functionality
-- **All Modules and Integrations** - Endpoint management, M365, Active Directory, PSA/RMM connectors
-- **Workflow Engine** - Complete YAML execution with loops, conditions, error handling, and debugging
-- **DNA System** - Drift detection, system blueprints, and templates
-- **Security Features** - RBAC, audit logging, compliance, SIEM integration
-- **Monitoring & Alerting** - Performance metrics, health monitoring, threshold alerts
-- **Terminal Access** - Remote terminal capabilities
-- **All Tests and Documentation**
-
-### Elastic License 2.0 (Commercial)
-
-A small subset of enterprise features is licensed under the [Elastic License 2.0](LICENSE-ELASTIC-2.0):
-
-- **High Availability Clustering** - Raft-based consensus, automatic failover, load balancing (located in `commercial/ha/`)
-- **Web UI** (planned future feature) - Graphical interface for workflow building and system management
-
-The Elastic License v2 is source-available and prevents competitors from offering CFGMS as a hosted service while allowing you to use it freely in your own infrastructure.
-
-## Copyright and Ownership
-
-### Current Copyright Holder
-
-**All CFGMS code is copyrighted by Jordan Ritz** (as of January 2026).
-
-Every source file in the repository includes this copyright notice:
 ```go
-// SPDX-License-Identifier: Apache-2.0  (or Elastic-2.0 for commercial)
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 ```
 
-### Future Entity Assignment
+## Plain-English FAQ
 
-When cfg.is is formed as a legal entity, copyright will be assigned to that entity. This transition is planned and documented in the Contributor License Agreement.
+### Can I self-host CFGMS?
 
-### Why Copyright Assignment?
+Yes. Running CFGMS on your own infrastructure — whether on-premises or in your private cloud — is fully permitted under AGPL-3.0. No commercial license is required.
 
-Clear copyright ownership enables:
+### Can I use CFGMS to manage client endpoints as an MSP?
 
-1. **License Enforcement** - Only the copyright holder can enforce license violations (e.g., the "no hosted service" restriction in Elastic License 2.0)
-2. **Dual-License Management** - Flexibility to include contributions in either Apache 2.0 or Elastic 2.0 components
-3. **Legal Certainty** - Clear ownership prevents ambiguity about who controls the code
-4. **Future Planning** - Simplified transfer when cfg.is entity is formed
+Yes. Managing your clients' endpoints is standard self-hosted use and requires no commercial license.
 
-### Contributor License Agreement (CLA)
+### Can I modify CFGMS for internal use?
 
-**All contributors must sign the CLA before their code can be merged.**
+Yes. You may modify CFGMS and run the modified version internally without releasing your changes, as long as you are not distributing or providing network access to the modified software to external parties.
 
-The CLA establishes that:
-- Contributors **assign copyright** in their contributions to Jordan Ritz
-- Contributions can be licensed under **both Apache 2.0 and Elastic License 2.0**
-- Rights will **transfer to cfg.is** entity when formed
-- Contributors retain the right to use their own contributions (subject to local laws)
+### When do I need a commercial license?
 
-**To contribute:**
-1. Read the CLA: [docs/legal/CLA.md](docs/legal/CLA.md)
-2. Add your name to [CONTRIBUTORS.md](CONTRIBUTORS.md)
-3. Submit your Pull Request
+**The key question: are you embedding CFGMS source code inside your own product?**
 
-See [CONTRIBUTING.md](CONTRIBUTING.md#contributor-license-agreement-cla) for complete details.
+- **Code-level embedding** (you compile CFGMS source into your proprietary product) — AGPL-3.0 requires you to release your product's complete corresponding source under AGPL-3.0. A commercial license waives this obligation.
+- **Arm's-length API integration** (your product calls a separately running CFGMS controller over its REST or gRPC API) — this does **not** trigger AGPL-3.0's source-sharing obligation. Your product's source stays yours.
 
-## Why Dual Licensing?
+**You do NOT need a commercial license for:**
 
-This model provides:
+- Self-hosting CFGMS for your own organization or to manage your clients
+- Integrating with a running CFGMS controller over its network API
+- Modifying CFGMS for internal use
 
-1. **Community Trust** - All integrations and core logic are open source, enabling community contributions and audits
-2. **Flexibility** - Use OSS version free forever, or add commercial features when needed
-3. **Sustainability** - Commercial features fund continued development of both OSS and commercial code
-4. **Competitive Protection** - Prevents large cloud providers from offering CFGMS as a service without contributing back
+**You DO need a commercial license for:**
 
-## What Can I Do?
+- Shipping CFGMS source compiled into your own proprietary product without releasing that product's source under AGPL-3.0
+- Distributing modified CFGMS to third parties under terms incompatible with AGPL-3.0
 
-### With Apache 2.0 Code (OSS)
+### Does arm's-length API integration trigger AGPL?
 
-✅ Use commercially without restrictions
-✅ Modify and distribute
-✅ Create derivative works
-✅ Contribute back to the project
-✅ Use in proprietary products
-✅ Offer professional services
+No. If your product communicates with a separately running CFGMS controller over the network (REST API, gRPC), AGPL-3.0's network-copyleft clause applies only to the CFGMS binary itself — not to software that talks to it across a network boundary. Your integration code is unaffected.
 
-### With Elastic License 2.0 Code (Commercial)
+### Do I need to open source my own tools that call CFGMS?
 
-✅ Use in your own infrastructure
-✅ Modify for internal use
-✅ Self-host for your organization
-❌ Offer as a hosted/managed service to third parties
-❌ Remove or circumvent license key functionality
-
-## Building CFGMS
-
-### Open Source Build (Default)
-
-Build the OSS version with single-controller deployment:
-
-```bash
-# Build OSS binaries
-make build
-
-# Or build specific components
-go build ./cmd/controller
-go build ./cmd/steward
-go build ./cmd/cfg
-
-# Run OSS tests (HA tests automatically excluded)
-make test
-```
-
-**OSS Version Includes:**
-- Single controller deployment
-- All modules and integrations
-- Complete CLI/API functionality
-- Full workflow capabilities
-- DNA system with drift detection
-- RBAC, audit, compliance, monitoring
-- Terminal access
-
-**OSS Version Excludes:**
-- HA clustering (BlueGreenMode, ClusterMode)
-- Raft consensus and automatic failover
-- Load balancing and split-brain detection
-- Cross-node session synchronization
-
-### Commercial Build
-
-Build the commercial version with full HA clustering:
-
-```bash
-# Build commercial binaries with HA support
-make build TAGS=commercial
-
-# Or build with tags directly
-go build -tags commercial ./cmd/controller
-
-# Run all tests including HA cluster tests
-make test TAGS=commercial
-```
-
-**Commercial Version Adds:**
-- Full HA clustering capabilities
-- Raft-based consensus
-- Automatic failover with <1.5s recovery
-- Geographic load balancing
-- Split-brain detection and resolution
-- Cross-node session synchronization
-- Blue-green deployments
-
-## Feature Boundaries
-
-For a complete breakdown of what's included in OSS vs Commercial, see [docs/product/feature-boundaries.md](docs/product/feature-boundaries.md).
-
-### Key Principles
-
-- **"All code that touches client environments/APIs is OSS"** - This maximizes community trust and contribution velocity
-- **Platform features are commercial** - HA clustering, Web UI (future)
-- **CLI/API is always OSS** - Complete functionality available via command-line
-
-## Multi-Tenancy
-
-The licensing boundary is **single-root vs multi-root** tenant trees:
-
-### Single Root (OSS — Apache 2.0)
-✅ Recursive parent-child tenant hierarchy with unlimited depth
-✅ Path-based tenant identification (e.g., `acme-msp/client-a/production`)
-✅ Complete tenant isolation and security
-✅ Full multi-tenant capabilities within one root tree
-✅ One MSP operates their own controller
-
-### Multi-Root / Platform Mode (Commercial — Elastic 2.0)
-✅ Multiple independent root tenant trees on shared infrastructure
-✅ Per-MSP isolation (no cross-root visibility or inheritance)
-✅ Platform-level management, resource scheduling, and billing
-✅ Enables cfg.is to host hundreds of MSPs on a single cluster
-
-## FAQ
-
-### Can I use CFGMS commercially?
-
-Yes! Both OSS (Apache 2.0) and Commercial (Elastic License 2.0) code can be used commercially. The Apache 2.0 code has no restrictions, and the Elastic License 2.0 code can be used in your own infrastructure without limitation.
-
-### Can I offer CFGMS as a service?
-
-- **Apache 2.0 components** (all integrations, modules, CLI/API): Yes, with proper attribution
-- **Elastic License 2.0 components** (HA clustering, future Web UI): No, you cannot offer these as a hosted service to third parties
-
-### Do I need to open source my modifications?
-
-No. Neither Apache 2.0 nor Elastic License 2.0 requires you to open source your modifications. However, contributions back to the project are always welcome!
-
-### Can I contribute to CFGMS?
-
-Absolutely! We welcome contributions to all parts of CFGMS.
-
-**Before contributing code:**
-1. Read and sign the [Contributor License Agreement](docs/legal/CLA.md)
-2. Add your name to [CONTRIBUTORS.md](CONTRIBUTORS.md)
-3. Your contributions will be licensed under the same license as the component you're contributing to (Apache 2.0 for OSS, Elastic License 2.0 for commercial)
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete contribution process.
-
-### How do I know what's licensed under which license?
-
-- **Apache 2.0**: All source files contain Apache 2.0 license headers
-- **Elastic License 2.0**: Files in `commercial/ha/` with `//go:build commercial` tag, future Web UI code
-- See [docs/product/feature-boundaries.md](docs/product/feature-boundaries.md) for complete breakdown
-
-### What if I need HA but can't afford commercial licensing?
-
-Reach out to discuss your use case. We may have options for non-profits, educational institutions, or early-stage companies.
+Only if you compile CFGMS source directly into those tools. If your tools interact with CFGMS through its network API, AGPL-3.0 does not require you to release your tools' source.
 
 ### Can I fork CFGMS?
 
-Yes! Apache 2.0 components can be freely forked. Elastic License 2.0 components are source-available and can be viewed/modified but cannot be offered as a competing hosted service.
+Yes. You may fork CFGMS under AGPL-3.0. Forks distributed to third parties must be released under AGPL-3.0 with full corresponding source.
 
-### Which version should I use: OSS or Commercial?
+### What is the tenant hierarchy model?
 
-**Use OSS if**:
-- Running a single MSP with one controller (single root tenant tree, unlimited depth)
-- Don't need Web UI (CLI/API is sufficient)
-- Want maximum flexibility and no licensing restrictions
-- Evaluating CFGMS for your environment
+CFGMS supports a recursive parent-child tenant hierarchy with unlimited depth, using path-based identification (e.g., `acme-msp/client-a/production`). Each controller deployment has a single root tenant. This model supports MSPs managing many clients within one CFGMS deployment.
 
-**Upgrade to Commercial if**:
-- Need 99.99% uptime with automatic failover
-- Want Web UI for workflow building and dashboards (when available)
-- Running SaaS platform hosting multiple independent MSPs (multi-root tenant trees)
-- Need predictive analytics and ML-based monitoring (future)
+### How do I get a commercial license?
 
-You can start with OSS and upgrade anytime - it's the same codebase with features enabled via build tags.
+Contact [licensing@cfg.is](mailto:licensing@cfg.is).
 
-### What support options are available?
+## Contributor License Agreement (CLA)
 
-**Community Support** (OSS):
-- GitHub Issues and Discussions
-- Community-driven troubleshooting
-- Public roadmap and feature requests
+**All contributors must sign the CLA before their code can be merged.**
 
-**Commercial Support** (Paid):
-- Priority email support
-- SLA-backed response times
-- Direct access to maintainers
-- Custom feature development (contact us)
+The CLA (v2.0) establishes that:
 
-**Professional Services**:
-- Deployment assistance
-- Workflow development
-- Integration building
-- Training and best practices
+- Contributors **assign copyright** in their contributions to Jordan Ritz
+- The Copyright Holder retains discretion to license contributions under any license (including AGPL-3.0 or a commercial license)
+- Rights will **transfer to cfg.is** entity when formed
 
-Contact licensing@cfg.is for commercial support pricing.
+**To contribute:**
 
-### Is the roadmap public?
+1. Read the CLA: [docs/legal/CLA.md](docs/legal/CLA.md)
+2. Add your name to [CONTRIBUTORS.md](CONTRIBUTORS.md)
+3. Submit your pull request
 
-Yes! Our development roadmap is completely transparent:
-- **GitHub Project**: https://github.com/orgs/cfg-is/projects/1
-- **Roadmap Document**: `docs/product/roadmap.md`
-- **Feature Boundaries**: `docs/product/feature-boundaries.md`
-
-We plan features in public, accept community input, and maintain open sprint planning. OSS and commercial features are clearly marked.
-
-### Can I contribute to commercial features?
-
-Yes! Contributions to commercial features follow the same process as OSS contributions:
-
-1. **Sign the CLA**: Read [docs/legal/CLA.md](docs/legal/CLA.md) and add your name to [CONTRIBUTORS.md](CONTRIBUTORS.md)
-2. **Understand the license**: Your contribution will be licensed under Elastic License 2.0 (for commercial features) or Apache 2.0 (for OSS features)
-3. **Discuss first**: For major commercial feature contributions, open a GitHub Discussion to align on approach
-
-**Important**: The CLA is required for ALL contributions (OSS and commercial). By signing, you agree your contributions can be dual-licensed under both Apache 2.0 and Elastic License 2.0 as determined by the copyright holder.
-
-### Will features move from OSS to Commercial?
-
-**No.** Our commitment:
-- Features that are OSS will **remain OSS**
-- We will never take existing OSS features and make them commercial-only
-- New features follow the boundary: "Code that touches client environments is OSS"
-
-This is documented in our [feature boundaries](docs/product/feature-boundaries.md) and is a core principle of the project.
-
-### How do you sustain development without gatekeeping integrations?
-
-Our sustainable revenue model focuses on:
-1. **SaaS Platform**: Hosted multi-MSP deployments
-2. **Self-Hosted Commercial**: HA clustering licensing
-3. **Professional Services**: Implementation, training, custom development
-4. **Future Web UI**: Commercial tier (CLI/API always free)
-
-Contact licensing@cfg.is for commercial licensing information.
-
-We don't monetize integrations or module development - those are community-driven OSS. We monetize platform scale and convenience (HA, Web UI, managed SaaS).
-
-## License Compatibility
-
-### Apache 2.0 is Compatible With:
-- ✅ GPL v3 (but combined work becomes GPL v3)
-- ✅ MIT, BSD, ISC
-- ✅ Most permissive licenses
-- ✅ Commercial/proprietary code
-
-### Elastic License 2.0 is Compatible With:
-- ✅ Internal use in any environment
-- ✅ Commercial/proprietary code for internal use
-- ❌ Offering as a hosted service
+See [CONTRIBUTING.md](CONTRIBUTING.md#contributor-license-agreement-cla) for complete details.
 
 ## Contact
 
-- **General Questions**: Open a [GitHub Discussion](https://github.com/cfg-is/cfgms/discussions)
-- **Commercial Licensing**: Contact licensing@cfg.is
-- **Security Issues**: See [SECURITY.md](SECURITY.md)
+- **General questions**: Open a [GitHub Discussion](https://github.com/cfg-is/cfgms/discussions)
+- **Commercial licensing**: [licensing@cfg.is](mailto:licensing@cfg.is)
+- **Security issues**: See [SECURITY.md](SECURITY.md)
 - **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ---
 
-**Last Updated**: 2025-10-22
-**Version**: v0.7.0
-
-For the complete legal text:
-- [Apache License 2.0](LICENSE)
-- [Elastic License 2.0](LICENSE-ELASTIC-2.0)
+For the complete legal text, see [LICENSE](LICENSE).

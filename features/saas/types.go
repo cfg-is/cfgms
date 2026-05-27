@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package saas provides SaaS platform integration capabilities for CFGMS.
 //
@@ -28,6 +28,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
 )
 
 // SaaSteward is the main SaaS management component
@@ -112,13 +114,13 @@ type SaaSProvider interface {
 	GetOperations(service string) []string
 
 	// Authenticate performs OAuth2 authentication
-	Authenticate(ctx context.Context, config ProviderConfig, credStore CredentialStore) error
+	Authenticate(ctx context.Context, config ProviderConfig, credStore auth.CredentialStore) error
 
 	// IsAuthenticated checks if the provider has valid credentials
-	IsAuthenticated(ctx context.Context, credStore CredentialStore) bool
+	IsAuthenticated(ctx context.Context, credStore auth.CredentialStore) bool
 
 	// RefreshToken refreshes the access token if needed
-	RefreshToken(ctx context.Context, credStore CredentialStore) error
+	RefreshToken(ctx context.Context, credStore auth.CredentialStore) error
 
 	// ExecuteOperation executes a SaaS operation
 	ExecuteOperation(ctx context.Context, service, operation string, params map[string]interface{}) (*OperationResult, error)
@@ -137,27 +139,6 @@ type AuthenticationManager interface {
 
 	// RefreshToken refreshes an access token using a refresh token
 	RefreshToken(ctx context.Context, provider string, refreshToken string) (*TokenSet, error)
-}
-
-// CredentialStore handles secure storage of credentials and tokens
-type CredentialStore interface {
-	// StoreTokenSet stores a complete token set for a provider
-	StoreTokenSet(provider string, tokens *TokenSet) error
-
-	// GetTokenSet retrieves a token set for a provider
-	GetTokenSet(provider string) (*TokenSet, error)
-
-	// DeleteTokenSet removes a token set for a provider
-	DeleteTokenSet(provider string) error
-
-	// StoreClientSecret stores a client secret for a provider
-	StoreClientSecret(provider, clientSecret string) error
-
-	// GetClientSecret retrieves a client secret for a provider
-	GetClientSecret(provider string) (string, error)
-
-	// IsAvailable checks if the credential store is available
-	IsAvailable() bool
 }
 
 // OAuth2Flow represents an in-progress OAuth2 authentication flow
@@ -179,6 +160,15 @@ type OAuth2Flow struct {
 
 	// RedirectURI for OAuth2 callback
 	RedirectURI string `json:"redirect_uri"`
+
+	// TokenURL is the token endpoint for the authorization code exchange
+	TokenURL string `json:"token_url"`
+
+	// ClientID for the authorization code exchange
+	ClientID string `json:"client_id"`
+
+	// ClientSecret for the authorization code exchange
+	ClientSecret string `json:"client_secret"`
 
 	// Created timestamp
 	Created time.Time `json:"created"`

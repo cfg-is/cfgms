@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package siem
 
@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // RuleManagerImpl implements configurable rule management for SIEM detection rules.
@@ -224,10 +225,10 @@ func (rm *RuleManagerImpl) loadRulesFromDirectory(ctx context.Context, dirPath, 
 	return nil
 }
 
-// loadRulesFromDatabase loads rules from database (stub for future implementation)
+// loadRulesFromDatabase loads rules from database
 func (rm *RuleManagerImpl) loadRulesFromDatabase(ctx context.Context, config RuleConfig) error {
-	// TODO: Implement database rule loading
-	return fmt.Errorf("database rule loading not yet implemented")
+	// Design decision: database rule loading requires a storage.RuleStore interface not yet defined; in-memory rules are used until the store contract is specified.
+	return fmt.Errorf("database-backed rule source is not supported; use file or memory source")
 }
 
 // parseRules parses rule data in the specified format
@@ -605,12 +606,11 @@ func (rm *RuleManagerImpl) ValidateRule(rule *DetectionRule) error {
 	}
 
 	// Validate severity
-	validSeverities := map[EventSeverity]bool{
-		SeverityCritical: true,
-		SeverityHigh:     true,
-		SeverityMedium:   true,
-		SeverityLow:      true,
-		SeverityInfo:     true,
+	validSeverities := map[business.AuditSeverity]bool{
+		business.AuditSeverityCritical: true,
+		business.AuditSeverityHigh:     true,
+		business.AuditSeverityMedium:   true,
+		business.AuditSeverityLow:      true,
 	}
 	if !validSeverities[rule.Severity] {
 		return fmt.Errorf("invalid severity: %s", rule.Severity)
@@ -757,8 +757,8 @@ func (fw *FileWatcher) AddPath(path string) {
 
 // HasChanges checks if any watched files have changed
 func (fw *FileWatcher) HasChanges() bool {
-	fw.mutex.RLock()
-	defer fw.mutex.RUnlock()
+	fw.mutex.Lock()
+	defer fw.mutex.Unlock()
 
 	for path, lastMod := range fw.watchedPaths {
 		if stat, err := os.Stat(path); err == nil {

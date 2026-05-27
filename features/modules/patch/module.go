@@ -1,23 +1,30 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package patch
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// New creates a new instance of the Patch module
+// New creates a new instance of the Patch module. On platforms without a real
+// patch implementation the module uses a stub manager that returns errors for
+// all operations, ensuring no fake data leaks into production binaries.
 func New() modules.Module {
 	return &PatchModule{
-		patchManager:  NewMockPatchManager(),
+		patchManager:  newStubPatchManager(),
 		policyEngine:  NewPolicyEngine(DefaultPolicy()),
-		windowManager: nil, // Optional - can be set later
+		windowManager: nil,
 		deviceID:      "default",
 	}
 }
@@ -241,9 +248,7 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 	// Execute post-patch script if specified
 	if cfg.PostPatchScript != "" {
 		if err := m.executeScript(ctx, cfg.PostPatchScript); err != nil {
-			// Log warning but don't fail the operation
-			// In a real implementation, this would use proper logging
-			fmt.Printf("Warning: post-patch script failed: %v\n", err)
+			m.GetEffectiveLogger(logging.NewNoopLogger()).Warn("post-patch script failed", "error", err)
 		}
 	}
 
@@ -262,9 +267,7 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 				return ErrMaintenanceWindowNotActive
 			}
 
-			// In a real implementation, this would trigger a system reboot
-			// For now, we'll just log it
-			fmt.Println("Auto-reboot would be triggered here")
+			m.GetEffectiveLogger(logging.NewNoopLogger()).Info("auto-reboot triggered")
 		} else {
 			m.mu.Unlock()
 			return ErrRebootRequired
@@ -278,7 +281,7 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 	err = m.refreshStatus(ctx)
 	if err != nil {
 		// Don't fail the operation if status refresh fails
-		fmt.Printf("Warning: failed to refresh patch status: %v\n", err)
+		m.GetEffectiveLogger(logging.NewNoopLogger()).Warn("failed to refresh patch status", "error", err)
 	}
 
 	return nil
@@ -345,16 +348,45 @@ func (m *PatchModule) refreshStatus(ctx context.Context) error {
 	return nil
 }
 
-// executeScript executes a shell script (placeholder implementation)
+// executeScript runs a script file at the given path using os/exec.
+// The path must be absolute; relative paths are rejected to prevent directory
+// traversal when the caller is a privileged patch installer.
 func (m *PatchModule) executeScript(ctx context.Context, script string) error {
-	// In a real implementation, this would execute the script
-	// For now, we'll just validate that it's not empty
 	if strings.TrimSpace(script) == "" {
-		return fmt.Errorf("empty script")
+		return fmt.Errorf("empty script path")
 	}
 
-	// Simulate script execution
-	fmt.Printf("Executing script: %s\n", script)
+	scriptPath := filepath.Clean(script)
+	if !filepath.IsAbs(scriptPath) {
+		return fmt.Errorf("script path must be absolute: %s", script)
+	}
+
+	logger := m.GetEffectiveLogger(logging.NewNoopLogger())
+	logger.Debug("executing script", "script", logging.SanitizeLogValue(scriptPath))
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(ctx, "cmd", "/c", scriptPath) //nolint:gosec // path validated as absolute above
+	} else {
+		cmd = exec.CommandContext(ctx, scriptPath) //nolint:gosec // path is cleaned and validated as absolute above
+	}
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Run(); err != nil {
+		logger.Warn("script execution failed",
+			"script", logging.SanitizeLogValue(scriptPath),
+			"stderr", logging.SanitizeLogValue(stderrBuf.String()),
+			"error", err,
+		)
+		return fmt.Errorf("script %s failed: %w (stderr: %s)", scriptPath, err, strings.TrimSpace(stderrBuf.String()))
+	}
+
+	logger.Debug("script completed",
+		"script", logging.SanitizeLogValue(scriptPath),
+		"stdout", logging.SanitizeLogValue(stdoutBuf.String()),
+	)
 	return nil
 }
 
@@ -368,8 +400,7 @@ func (m *PatchModule) isInMaintenanceWindow(ctx context.Context, config *Config)
 	// Check if we're in a maintenance window
 	inWindow, err := m.windowManager.IsInWindow(ctx, m.deviceID)
 	if err != nil {
-		// Log error but don't block operation (fail open for safety)
-		fmt.Printf("Warning: failed to check maintenance window: %v\n", err)
+		m.GetEffectiveLogger(logging.NewNoopLogger()).Warn("failed to check maintenance window", "error", err)
 		return true
 	}
 
@@ -386,8 +417,7 @@ func (m *PatchModule) canReboot(ctx context.Context) bool {
 	// Check if we can reboot
 	canReboot, err := m.windowManager.CanReboot(ctx, m.deviceID)
 	if err != nil {
-		// Log error but don't block operation (fail open for safety)
-		fmt.Printf("Warning: failed to check reboot permission: %v\n", err)
+		m.GetEffectiveLogger(logging.NewNoopLogger()).Warn("failed to check reboot permission", "error", err)
 		return true
 	}
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package cmd implements the diff command for cfg
 package cmd
@@ -32,7 +32,6 @@ var (
 	colorizeOutput   bool
 	lineNumbers      bool
 	threeWay         bool
-	baseRef          string
 )
 
 // diffCmd represents the diff command
@@ -53,7 +52,7 @@ Examples:
   cfg diff --output json config-old.yaml config-new.yaml
 
   # Three-way comparison
-  cfg diff --three-way --base-ref main config-branch-1.yaml config-branch-2.yaml
+  cfg diff --three-way base.yaml config-branch-1.yaml config-branch-2.yaml
 
   # Show only high impact changes
   cfg diff --filter-by-impact high,critical config-old.yaml config-new.yaml
@@ -87,7 +86,6 @@ func init() {
 
 	// Three-way diff options
 	diffCmd.Flags().BoolVar(&threeWay, "three-way", false, "perform three-way comparison")
-	diffCmd.Flags().StringVar(&baseRef, "base-ref", "", "base reference for three-way comparison")
 }
 
 func runDiff(cmd *cobra.Command, args []string) error {

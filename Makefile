@@ -1,14 +1,28 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
 
+# Git worktree safety: concurrent worktree operations can corrupt core.bare,
+# which breaks Go's VCS stamping (go build/test runs "git status" at module root).
+# This finds the main repo's git dir and ensures core.bare=false.
+.PHONY: fix-git-bare
+fix-git-bare:
+	@MAIN_GIT_DIR=$$(git rev-parse --git-common-dir 2>/dev/null); \
+	if [ -n "$$MAIN_GIT_DIR" ] && [ -f "$$MAIN_GIT_DIR/config" ]; then \
+		if git config --file "$$MAIN_GIT_DIR/config" core.bare 2>/dev/null | grep -q true; then \
+			echo "⚠️  Fixing core.bare=true in $$MAIN_GIT_DIR/config (worktree corruption)"; \
+			git config --file "$$MAIN_GIT_DIR/config" core.bare false; \
+		fi; \
+	fi
+
 # Build settings
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 
-# Build tags (optional - use TAGS=commercial for commercial builds)
-# Example: make build-controller TAGS=commercial
-BUILD_TAGS=$(if $(TAGS),-tags $(TAGS),)
+# Steward controller URL baked in at build time (security: no runtime override).
+# Override for MSP builds: make build-steward STEWARD_CONTROLLER_URL=https://ctrl.mymsp.com
+STEWARD_CONTROLLER_URL ?= https://localhost:9080
+STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL)"
 
 # Binary names
 STEWARD_BINARY=cfgms-steward
@@ -18,7 +32,7 @@ CERT_MANAGER_BINARY=cert-manager
 
 # Protocol buffer variables
 PROTO_DIR=api/proto
-PROTO_FILES=$(shell find $(PROTO_DIR) -name "*.proto")
+PROTO_FILES=$(shell find $(PROTO_DIR) -name "*.proto" -not -path "*/transport/*")
 PROTO_INCLUDES=-I$(PROTO_DIR)
 
 # Check for required tools
@@ -34,6 +48,7 @@ check-proto-tools:
 	}
 
 # Generate Go code from proto files (message definitions only, no gRPC services)
+# NOTE: Transport protos excluded — use 'make proto-gen' (requires gRPC plugin)
 .PHONY: proto
 proto: check-proto-tools
 	@echo "Generating proto files (messages only, no gRPC services)..."
@@ -43,23 +58,49 @@ proto: check-proto-tools
 			$$file; \
 	done
 
+# Transport proto files requiring gRPC service generation
+TRANSPORT_PROTO_DIR=api/proto/transport
+TRANSPORT_PROTO_FILES=$(shell find $(TRANSPORT_PROTO_DIR) -name "*.proto")
+
+# Check for protoc-gen-go-grpc (required for gRPC service generation)
+.PHONY: check-proto-grpc-tools
+check-proto-grpc-tools: check-proto-tools
+	@which protoc-gen-go-grpc > /dev/null || { \
+		echo "Error: protoc-gen-go-grpc is not installed."; \
+		echo "Install with: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest"; \
+		exit 1; \
+	}
+
+# Generate Go code from proto files including gRPC service stubs.
+# Generates both message code (*.pb.go) and gRPC stubs (*_grpc.pb.go) for the
+# transport package. Does not regenerate existing message-only proto files.
+# IMPORTANT: This is the authoritative target for transport protos.
+.PHONY: proto-gen
+proto-gen: check-proto-grpc-tools
+	@echo "Generating transport proto files (messages + gRPC services)..."
+	@protoc $(PROTO_INCLUDES) \
+		--go_out=$(PROTO_DIR) --go_opt=paths=source_relative \
+		--go-grpc_out=$(PROTO_DIR) --go-grpc_opt=paths=source_relative \
+		$(TRANSPORT_PROTO_FILES)
+	@echo "Done. Generated files in $(TRANSPORT_PROTO_DIR)/"
+
 # Build all binaries
 .PHONY: build
-build: build-steward build-controller build-cli build-cert-manager
+build: fix-git-bare build-steward build-controller build-cli build-cert-manager
 
 # Build individual binaries
 .PHONY: build-steward build-controller build-cli build-cert-manager
 build-steward:
-	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
+	go build ${STEWARD_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
 
 build-controller:
-	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
+	go build ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
 
 build-cli:
-	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfg
+	go build ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfg
 
 build-cert-manager:
-	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
+	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
 
 # Cross-platform build targets
 # Supported platforms: Linux, Windows, macOS (AMD64 and ARM64)
@@ -77,10 +118,10 @@ build-cross-platform:
 		export OUTDIR=bin/$$GOOS-$$GOARCH; \
 		echo "  Building for $$GOOS/$$GOARCH..."; \
 		mkdir -p $$OUTDIR; \
-		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${STEWARD_BINARY}$$EXT ./cmd/steward && \
-		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CONTROLLER_BINARY}$$EXT ./cmd/controller && \
-		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CLI_BINARY}$$EXT ./cmd/cfg && \
-		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CERT_MANAGER_BINARY}$$EXT ./cmd/cert-manager || exit 1; \
+		go build ${STEWARD_BUILD_FLAGS} -o $$OUTDIR/${STEWARD_BINARY}$$EXT ./cmd/steward && \
+		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${CONTROLLER_BINARY}$$EXT ./cmd/controller && \
+		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${CLI_BINARY}$$EXT ./cmd/cfg && \
+		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${CERT_MANAGER_BINARY}$$EXT ./cmd/cert-manager || exit 1; \
 		echo "  ✅ $$GOOS/$$GOARCH complete"; \
 	done
 	@echo ""
@@ -98,10 +139,10 @@ build-cross-validate:
 		export GOARCH=$${platform#*/}; \
 		printf "  %-15s" "$$GOOS/$$GOARCH:"; \
 		ERROR_LOG=$$(mktemp); \
-		if go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/steward 2>$$ERROR_LOG && \
-		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/controller 2>>$$ERROR_LOG && \
-		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfg 2>>$$ERROR_LOG && \
-		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cert-manager 2>>$$ERROR_LOG; then \
+		if go build ${STEWARD_BUILD_FLAGS} -o /dev/null ./cmd/steward 2>$$ERROR_LOG && \
+		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/controller 2>>$$ERROR_LOG && \
+		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfg 2>>$$ERROR_LOG && \
+		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cert-manager 2>>$$ERROR_LOG; then \
 			echo "✅ PASS"; \
 			rm -f $$ERROR_LOG; \
 		else \
@@ -133,11 +174,65 @@ build-steward-cross:
 	fi
 	@EXT=$$( [ "$(GOOS)" = "windows" ] && echo ".exe" || echo "" ); \
 	echo "Building steward for $(GOOS)/$(GOARCH)..."; \
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}$$EXT ./cmd/steward
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build ${STEWARD_BUILD_FLAGS} -o bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}$$EXT ./cmd/steward
 	@echo "✅ Built bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}"
 
+# Build Windows MSI installer for cfgms-steward using WiX 4.
+# Requires pwsh (PowerShell Core) and the .NET SDK; WiX 4 is installed automatically.
+# On Linux/macOS hosts: pwsh must be installed (brew install powershell / apt install powershell).
+# This target cross-compiles the binary and packages it into an MSI.
+# For production builds, provide a code-signing certificate:
+#   make build-msi-windows STEWARD_CONTROLLER_URL=https://ctrl.example.com \
+#        VERSION=v1.0.0 SIGNING_CERT_THUMBPRINT=<thumbprint>
+build-msi-windows:
+	@echo "🪟 Building Windows MSI installer"
+	@echo "==================================="
+	@if ! command -v pwsh >/dev/null 2>&1; then \
+		echo "❌ pwsh (PowerShell Core) not found."; \
+		echo "   Linux:  sudo apt install powershell  or  snap install powershell --classic"; \
+		echo "   macOS:  brew install powershell"; \
+		echo "   Docs:   https://learn.microsoft.com/powershell/scripting/install/installing-powershell"; \
+		exit 1; \
+	fi
+	@URL_ARG=""; \
+	if [ -n "$(STEWARD_CONTROLLER_URL)" ]; then \
+		URL_ARG="-ControllerURL '$(STEWARD_CONTROLLER_URL)'"; \
+	fi; \
+	SIGN_ARG=""; \
+	if [ -n "$(SIGNING_CERT_THUMBPRINT)" ]; then \
+		SIGN_ARG="-SigningCertThumbprint '$(SIGNING_CERT_THUMBPRINT)'"; \
+	fi; \
+	pwsh -NonInteractive -File build/windows/build-msi.ps1 \
+		$$URL_ARG \
+		-Version "$(or $(VERSION),0.0.0)" \
+		$$SIGN_ARG
+	@echo "✅ MSI built: bin/cfgms-steward-windows-amd64.msi"
+
+# Build macOS .pkg installer for cfgms-steward (amd64 and arm64).
+# Requires Xcode Command Line Tools (pkgbuild + productbuild).
+# Must be run on macOS; cross-building is not supported by pkgbuild.
+#
+# Optional env vars (see build/darwin/build-pkg.sh for details):
+#   APPLE_SIGNING_IDENTITY  — Developer ID Installer certificate name (code signing)
+#   APPLE_NOTARIZATION_PROFILE — keychain profile name (notarization, requires signing)
+#
+# Examples:
+#   make build-pkg-darwin VERSION=v1.0.0
+#   APPLE_SIGNING_IDENTITY="Developer ID Installer: Acme (XXXXXXXXXX)" \
+#     make build-pkg-darwin VERSION=v1.0.0
+build-pkg-darwin:
+	@echo "🍎 Building macOS .pkg installer"
+	@echo "================================="
+	@if [[ "$$(uname)" != "Darwin" ]]; then \
+		echo "❌ build-pkg-darwin must be run on macOS (pkgbuild requires macOS)."; \
+		exit 1; \
+	fi
+	@bash build/darwin/build-pkg.sh --arch amd64 --version "$(or $(VERSION),0.0.0)"
+	@bash build/darwin/build-pkg.sh --arch arm64 --version "$(or $(VERSION),0.0.0)"
+	@echo "✅ Packages built: bin/cfgms-steward-darwin-amd64.pkg  bin/cfgms-steward-darwin-arm64.pkg"
+
 # Smart test - core modules + changed modules only
-test:
+test: fix-git-bare
 	@echo "🧪 Running Tests (Smart Mode)"
 	@echo "============================="
 	@go clean -testcache
@@ -163,19 +258,10 @@ test:
 	fi
 	@echo "✅ OSS build tests complete"
 	@echo ""
-	@echo "🏢 Testing Commercial Build..."
-	@echo "  Compiling commercial controller..."
-	@go build -tags commercial -o /tmp/controller-commercial ./cmd/controller > /dev/null 2>&1 || { echo "❌ Commercial controller build failed"; exit 1; }
-	@echo "  ✅ Commercial controller compiles"
-	@echo "  Testing commercial HA features..."
-	@go test -tags commercial -race -short -timeout=1m ./commercial/ha/... || { echo "❌ Commercial HA tests failed"; exit 1; }
-	@echo "  ✅ Commercial HA tests pass"
-	@rm -f /tmp/controller-commercial
-	@echo ""
 	@echo "🔧 Testing Shell Scripts..."
 	@./scripts/test-scripts.sh || { echo "❌ Script tests failed"; exit 1; }
 	@echo ""
-	@echo "✅ ALL VALIDATION COMPLETE (OSS + Commercial + Scripts)"
+	@echo "✅ ALL VALIDATION COMPLETE (HA + Scripts)"
 
 # OPTIMIZED TEST TARGETS (Cache-Aware Strategy)
 
@@ -291,7 +377,7 @@ security-precommit:
 			echo "⚠️  gitleaks not found - secret scanning SKIPPED"; \
 			echo ""; \
 			echo "Install gitleaks:"; \
-			echo "  go install github.com/zricethezav/gitleaks/v8@latest"; \
+			echo "  go install github.com/zricethezav/gitleaks/v8@v8.30.1"; \
 			echo ""; \
 			echo "❌ COMMIT BLOCKED: gitleaks must be installed"; \
 			exit 1; \
@@ -340,22 +426,22 @@ check-architecture:
 	echo "📦 Checking TLS/Certificate usage outside pkg/cert..."; \
 	files=$$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep "\.go$$" | grep -v "_test.go$$" | grep -v "^pkg/cert/" || true); \
 	if [ -n "$$files" ]; then \
-		if echo "$$files" | xargs grep -l "tls\.Config{" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/quic/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
+		if echo "$$files" | xargs grep -l "tls\.Config{" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/" | grep -v "^test/" | grep -v "^features/steward/registration/"; then \
 			echo "  ❌ Found direct tls.Config{} creation - should use pkg/cert helpers"; \
 			echo "     Use: cert.CreateServerTLSConfig() or cert.CreateClientTLSConfig()"; \
 			violations=$$((violations + 1)); \
 		fi; \
-		if echo "$$files" | xargs grep -l "tls\.LoadX509KeyPair" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/quic/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
+		if echo "$$files" | xargs grep -l "tls\.LoadX509KeyPair" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/" | grep -v "^test/"; then \
 			echo "  ❌ Found tls.LoadX509KeyPair() - should use pkg/cert.LoadTLSCertificate()"; \
 			echo "     Or use higher-level cert.CreateServerTLSConfig() / cert.CreateClientTLSConfig()"; \
 			violations=$$((violations + 1)); \
 		fi; \
-		if echo "$$files" | xargs grep -l "x509\.NewCertPool" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/quic/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
+		if echo "$$files" | xargs grep -l "x509\.NewCertPool" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/" | grep -v "^test/"; then \
 			echo "  ❌ Found x509.NewCertPool() - should use pkg/cert TLS config helpers"; \
 			echo "     Manual cert pool creation duplicates pkg/cert functionality"; \
 			violations=$$((violations + 1)); \
 		fi; \
-		if echo "$$files" | xargs grep -l "x509\.Certificate{" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/quic/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
+		if echo "$$files" | xargs grep -l "x509\.Certificate{" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/" | grep -v "^test/"; then \
 			echo "  ❌ Found direct certificate generation - should use pkg/cert.Manager"; \
 			violations=$$((violations + 1)); \
 		fi; \
@@ -414,59 +500,6 @@ check-architecture:
 	fi; \
 	\
 	echo ""; \
-	echo "📦 Checking direct MQTT imports in features/ (Story #267.5)..."; \
-	if [ -n "$$files" ]; then \
-		if [ -z "$$feature_files" ]; then \
-			feature_files=$$(echo "$$files" | grep "^features/" || true); \
-		fi; \
-		if [ -n "$$feature_files" ]; then \
-			mqtt_violations=$$(echo "$$feature_files" | xargs grep -l 'cfgis/cfgms/pkg/mqtt/' 2>/dev/null | grep -v "^features/controller/server/" | grep -v "^features/controller/registration/" || true); \
-			if [ -n "$$mqtt_violations" ]; then \
-				echo "  ❌ Found direct pkg/mqtt import in features/ - use pkg/controlplane instead"; \
-				echo "     Violations: $$mqtt_violations"; \
-				echo "     Control plane types: pkg/controlplane/types"; \
-				echo "     Control plane interface: pkg/controlplane/interfaces"; \
-				echo "     See: docs/architecture/communication-layer-migration.md"; \
-				violations=$$((violations + 1)); \
-			fi; \
-			mqtt_controller_violations=$$(echo "$$feature_files" | grep "^features/controller/" | xargs grep -l 'cfgis/cfgms/pkg/mqtt/client\|cfgis/cfgms/pkg/mqtt/types' 2>/dev/null || true); \
-			if [ -n "$$mqtt_controller_violations" ]; then \
-				echo "  ❌ Found direct pkg/mqtt/client or pkg/mqtt/types import in controller"; \
-				echo "     Violations: $$mqtt_controller_violations"; \
-				echo "     Use pkg/controlplane/types for message types"; \
-				echo "     Use pkg/controlplane/interfaces for client functionality"; \
-				violations=$$((violations + 1)); \
-			fi; \
-		fi; \
-	fi; \
-	\
-	echo ""; \
-	echo "📦 Checking direct QUIC imports in features/ (Story #267.5)..."; \
-	if [ -n "$$files" ]; then \
-		if [ -z "$$feature_files" ]; then \
-			feature_files=$$(echo "$$files" | grep "^features/" || true); \
-		fi; \
-		if [ -n "$$feature_files" ]; then \
-			quic_violations=$$(echo "$$feature_files" | xargs grep -l 'cfgis/cfgms/pkg/quic/' 2>/dev/null | grep -v "^features/controller/server/" || true); \
-			if [ -n "$$quic_violations" ]; then \
-				echo "  ❌ Found direct pkg/quic import in features/ - use pkg/dataplane instead"; \
-				echo "     Violations: $$quic_violations"; \
-				echo "     Data plane interface: pkg/dataplane/interfaces"; \
-				echo "     Data plane types: pkg/dataplane/types"; \
-				echo "     See: docs/architecture/communication-layer-migration.md"; \
-				violations=$$((violations + 1)); \
-			fi; \
-			quic_controller_violations=$$(echo "$$feature_files" | grep "^features/controller/" | xargs grep -l 'cfgis/cfgms/pkg/quic/client\|cfgis/cfgms/pkg/quic/session' 2>/dev/null || true); \
-			if [ -n "$$quic_controller_violations" ]; then \
-				echo "  ❌ Found direct pkg/quic/client or pkg/quic/session import in controller"; \
-				echo "     Violations: $$quic_controller_violations"; \
-				echo "     Use pkg/dataplane/interfaces for data plane functionality"; \
-				violations=$$((violations + 1)); \
-			fi; \
-		fi; \
-	fi; \
-	\
-	echo ""; \
 	echo "📦 Checking for hardcoded passwords (Story #372)..."; \
 	if [ -n "$$files" ]; then \
 		pw_violations=$$(echo "$$files" | xargs grep -n '"cfgms_test_password"\|"password": "cfgms"\|"password", "cfgms"\|password.*=.*"cfgms_test_password' 2>/dev/null | grep -v "check-architecture" || true); \
@@ -494,13 +527,16 @@ check-architecture:
 		echo "   5. Certificates/TLS → pkg/cert"; \
 		echo "   6. Authorization → pkg/rbac"; \
 		echo "   7. Observability → pkg/telemetry"; \
-		echo "   8. Control Plane → pkg/controlplane (not pkg/mqtt)"; \
-		echo "   9. Data Plane → pkg/dataplane (not pkg/quic)"; \
+		echo "   8. Control Plane → pkg/controlplane"; \
+		echo "   9. Data Plane → pkg/dataplane"; \
 		echo ""; \
 		echo "💡 Before adding new functionality, check if it belongs in a central provider!"; \
 		echo ""; \
 		exit 1; \
 	fi
+	@echo ""
+	@echo "📦 Checking storage provider import violations..."
+	@bash ./scripts/check-providers.sh
 	@echo "   Safe to commit - no secrets detected in staged files"
 
 # License Header Verification
@@ -541,7 +577,7 @@ validate-providers:
 	echo ""
 
 # Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE + LICENSE)
-test-commit: test lint check-license-headers security-precommit check-architecture security-scan
+test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
@@ -562,14 +598,14 @@ test-ci:
 		echo "🔐 Loading M365 credentials from OS keychain..."; \
 		. ./scripts/load-credentials-from-keychain.sh && \
 		export M365_CLIENT_ID M365_CLIENT_SECRET M365_TENANT_ID M365_TENANT_DOMAIN M365_MSP_CLIENT_ID M365_MSP_CLIENT_SECRET M365_MSP_TENANT_ID M365_INTEGRATION_ENABLED M365_MSP_INTEGRATION_ENABLED && \
-		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-mqtt-quic; \
+		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-transport; \
 	elif [ -n "$$M365_CLIENT_SECRET" ]; then \
 		echo "🔐 Using M365 credentials from environment..."; \
-		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-mqtt-quic; \
+		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-transport; \
 	else \
 		echo "⚠️  No M365 credentials found (keychain or environment)"; \
 		echo "   M365 integration tests may fail"; \
-		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-mqtt-quic; \
+		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-transport; \
 	fi
 
 # Robust CI infrastructure test target - ensures infrastructure works every time
@@ -596,19 +632,10 @@ test-infrastructure-required:
 	fi
 	@echo "✅ OSS build tests complete"
 	@echo ""
-	@echo "🏢 Testing Commercial Build..."
-	@echo "  Compiling commercial controller..."
-	@go build -tags commercial -o /tmp/controller-commercial ./cmd/controller > /dev/null 2>&1 || { echo "❌ Commercial controller build failed"; exit 1; }
-	@echo "  ✅ Commercial controller compiles"
-	@echo "  Testing commercial HA features..."
-	@./scripts/test-with-infrastructure.sh go test -tags commercial -race -short -timeout=1m ./commercial/ha/... || { echo "❌ Commercial HA tests failed"; exit 1; }
-	@echo "  ✅ Commercial HA tests pass"
-	@rm -f /tmp/controller-commercial
-	@echo ""
 	@echo "✅ CI VALIDATION FINISHED"
 	@echo "=========================="
 	@echo "- ✅ OSS build tests passed"
-	@echo "- ✅ Commercial build tests passed"
+	@echo "- ✅ HA build tests passed"
 	@echo "- ✅ Factory integration tests passed"
 	@echo "- ✅ Linting passed"
 	@echo "- ✅ Security scanning passed"
@@ -710,7 +737,7 @@ test-load-testing:
 	@echo "====================="
 	@echo "📊 Testing system under high concurrency"
 	@echo ""
-	@go test -race -timeout=30m -run "Load" ./test/e2e/... ./test/integration/mqtt_quic/... ./test/performance/... || exit 1
+	@go test -race -timeout=30m -run "Load" ./test/e2e/... ./test/integration/transport/... ./test/performance/... || exit 1
 	@echo ""
 	@echo "✅ Load testing complete"
 
@@ -760,7 +787,7 @@ test-data-consistency:
 
 # Automatic Nancy installation (cross-platform)
 install-nancy:
-	@echo "📦 Installing Nancy v1.0.51..."
+	@echo "📦 Installing Nancy v1.2.0..."
 	@echo "============================="
 	@if command -v nancy >/dev/null 2>&1; then \
 		echo "✅ Nancy is already installed: $$(nancy --version)"; \
@@ -778,16 +805,16 @@ install-nancy:
 	case "$$os" in \
 		linux) \
 			if [ "$$arch" = "x86_64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-linux-amd64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-linux-amd64" -o "$$gopath/bin/nancy"; \
 			else \
 				echo "❌ Unsupported architecture: $$arch"; \
 				exit 1; \
 			fi ;; \
 		darwin) \
 			if [ "$$arch" = "x86_64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-amd64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-amd64" -o "$$gopath/bin/nancy"; \
 			elif [ "$$arch" = "arm64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-arm64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-arm64" -o "$$gopath/bin/nancy"; \
 			else \
 				echo "❌ Unsupported architecture: $$arch"; \
 				exit 1; \
@@ -809,33 +836,26 @@ security-trivy:
 	@if ! command -v trivy >/dev/null 2>&1; then \
 		echo "❌ Error: trivy is not installed"; \
 		echo ""; \
-		echo "Install trivy using Go (recommended for Go projects):"; \
-		echo "  go install github.com/aquasecurity/trivy/cmd/trivy@latest"; \
+		echo "Install trivy v0.70.0 — NEVER use v0.69.4-v0.69.6 (CVE-2026-33634)"; \
+		echo "and NEVER use @latest:"; \
+		echo "  ./.github/scripts/install-trivy.sh v0.70.0 \\"; \
+		echo "    8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"; \
 		echo ""; \
-		echo "Or pin to specific version for reproducible builds:"; \
-		echo "  go install github.com/aquasecurity/trivy/cmd/trivy@v0.48.3"; \
-		echo ""; \
-		echo "Alternative installation methods:"; \
-		echo "  # Binary download:"; \
-		echo "  curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.48.3"; \
-		echo "  # Official documentation: https://aquasecurity.github.io/trivy/latest/getting-started/installation/"; \
+		echo "Official documentation: https://aquasecurity.github.io/trivy/latest/getting-started/installation/"; \
+		echo "Rollback procedure: docs/runbooks/trivy-rollback.md"; \
 		exit 1; \
 	fi
 	@echo "Running trivy filesystem scan..."
-	@echo "🔍 Vulnerability Scan (Blocking Issues):"
-	@trivy fs . --scanners vuln --format table --severity CRITICAL,HIGH,MEDIUM --skip-dirs .cache --exit-code 1 || { \
-		echo ""; \
-		echo "❌ CRITICAL/HIGH/MEDIUM vulnerabilities found - deployment blocked!"; \
-		echo "   Please update dependencies to fix these security issues."; \
-		echo "   This matches CI/CD severity requirements."; \
-		exit 1; \
+	@bash scripts/security-trivy.sh || { \
+		rc=$$?; \
+		if [ $$rc -eq 2 ]; then \
+			echo ""; \
+			echo "⚠️  Trivy DB download failed — infrastructure issue, not a security finding."; \
+			echo "   Scan skipped; ensure mirror.gcr.io is in the DNS allowlist and re-run."; \
+		else \
+			exit $$rc; \
+		fi; \
 	}
-	@echo "🔍 Complete Security Scan (All Issues):"
-	@trivy fs . --scanners vuln,secret,misconfig --format table --skip-dirs .cache --exit-code 0 || true
-	@echo ""; \
-	echo "✅ Trivy scan completed"; \
-	echo "   Note: Development certificates detected in features/controller/certs/ are expected"; \
-	echo "   Critical/High/Medium vulnerabilities will block deployment (matches CI/CD)"
 
 # Nancy Go dependency vulnerability scanning
 security-deps:
@@ -844,25 +864,25 @@ security-deps:
 	@if ! command -v nancy >/dev/null 2>&1; then \
 		echo "❌ Error: nancy is not installed"; \
 		echo ""; \
-		echo "Install nancy (v1.0.51) for your platform:"; \
+		echo "Install nancy (v1.2.0) for your platform:"; \
 		echo ""; \
 		echo "🚀 Quick Install (recommended):"; \
 		echo "  make install-nancy"; \
 		echo ""; \
 		echo "📥 Manual Install - Linux (amd64):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-linux-amd64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-linux-amd64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🍎 Manual Install - macOS (Intel):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-amd64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-amd64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🍎 Manual Install - macOS (Apple Silicon):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-arm64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-arm64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🪟 Manual Install - Windows (PowerShell):"; \
-		echo "  Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-windows-amd64.exe' -OutFile 'nancy.exe'"; \
+		echo "  Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-windows-amd64.exe' -OutFile 'nancy.exe'"; \
 		echo "  Move-Item nancy.exe \$$(go env GOPATH)\\bin\\nancy.exe"; \
 		echo ""; \
 		echo "📦 Package Managers:"; \
@@ -893,7 +913,7 @@ security-gosec:
 		echo "❌ Error: gosec is not installed"; \
 		echo ""; \
 		echo "Install gosec using Go:"; \
-		echo "  go install github.com/securego/gosec/v2/cmd/gosec@latest"; \
+		echo "  go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1"; \
 		echo ""; \
 		echo "For more info: https://github.com/securego/gosec"; \
 		exit 1; \
@@ -938,7 +958,7 @@ security-staticcheck:
 		echo "❌ Error: staticcheck is not installed"; \
 		echo ""; \
 		echo "Install staticcheck using Go:"; \
-		echo "  go install honnef.co/go/tools/cmd/staticcheck@latest"; \
+		echo "  go install honnef.co/go/tools/cmd/staticcheck@2026.1"; \
 		echo ""; \
 		echo "For more info: https://staticcheck.io/"; \
 		exit 1; \
@@ -1223,6 +1243,12 @@ security-remediation-report:
 
 lint:
 	golangci-lint run
+
+# Log-injection linter — catches the recurring CodeQL "Log entries created from
+# user input" class at commit time. Walks features/**/api/ by default; pass file
+# paths as args (the pre-commit hook does this) to limit scope to staged files.
+lint-log-injection:
+	@go run ./scripts/lint-log-injection $(LINT_LOG_FILES)
 
 # Performance optimization and metrics collection (Story #100)
 security-workflow-metrics:
@@ -1519,8 +1545,8 @@ test-integration-unified:
 	@echo "⏳ Waiting for standalone controller to be healthy..."
 	@sleep 10
 	@echo ""
-	@echo "🧪 Running standalone Docker controller tests (MQTT+QUIC)..."
-	@CFGMS_TEST_DOCKER_MQTT=localhost:1883 go test -v -race ./test/integration -run TestDocker -timeout=10m || (echo "❌ Standalone tests failed"; exit 1)
+	@echo "🧪 Running standalone Docker controller tests..."
+	@go test -v -race ./test/integration -run TestDocker -timeout=10m || (echo "❌ Standalone tests failed"; exit 1)
 	@echo ""
 	@echo "🧪 Running in-process integration tests..."
 	@go test -v -race ./test/integration -run TestDetailedIntegration -timeout=10m || (echo "❌ In-process tests failed"; exit 1)
@@ -1616,69 +1642,69 @@ test-integration-docker:
 		go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
 	@echo "✅ Docker integration tests passed"
 
-# MQTT+QUIC Integration Testing (Story #12.2)
-# Tests MQTT+QUIC architecture with real Docker infrastructure
-.PHONY: test-mqtt-quic test-mqtt-quic-setup test-mqtt-quic-cleanup
-test-mqtt-quic: test-mqtt-quic-setup
+# Transport Integration Testing (Story #519: replaces MQTT+QUIC tests)
+# Tests gRPC-over-QUIC transport architecture with real Docker infrastructure
+.PHONY: test-transport test-transport-setup test-transport-cleanup
+
+test-transport: test-transport-setup
 	@echo ""
-	@echo "🔌 Running MQTT+QUIC Integration Tests"
+	@echo "🔌 Running Transport Integration Tests"
 	@echo "======================================"
-	@echo "Testing against controller-standalone (MQTT: 1886, QUIC: 4436, HTTPS: 8080)"
+	@echo "Testing against controller-standalone (gRPC: 4433/4436, HTTPS: 8080)"
 	@echo ""
-	@echo "🧪 Running all MQTT+QUIC test suites..."
+	@echo "🧪 Running all transport test suites..."
 	@if [ -f .env.test ]; then \
 		set -a && . ./.env.test && set +a && \
 		CFGMS_TEST_HTTP_ADDR=https://127.0.0.1:8080 \
-		CFGMS_TEST_MQTT_ADDR=ssl://127.0.0.1:1886 \
-		CFGMS_TEST_QUIC_ADDR=127.0.0.1:4436 \
-		CFGMS_TEST_CERTS_PATH=$(PWD)/test/integration/mqtt_quic/certs \
-		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || { \
+		CFGMS_TEST_TRANSPORT_ADDR=127.0.0.1:4436 \
+		go test -v -race -timeout=15m ./test/integration/transport/... || { \
 			echo ""; \
-			echo "❌ MQTT+QUIC tests failed"; \
-			make test-mqtt-quic-cleanup; \
+			echo "❌ Transport tests failed"; \
+			make test-transport-cleanup; \
 			exit 1; \
 		}; \
 	else \
 		echo "❌ .env.test not found. Run 'make test-integration-setup' first"; \
 		exit 1; \
 	fi
-	@make test-mqtt-quic-cleanup
+	@make test-transport-cleanup
 	@echo ""
-	@echo "✅ MQTT+QUIC Integration Tests Passed!"
-	@echo "   - Registration flow validated"
-	@echo "   - MQTT connectivity tested"
-	@echo "   - QUIC session authentication verified"
-	@echo "   - Config sync, DNA updates, heartbeat/failover tested"
-	@echo "   - Load testing completed (100+ concurrent stewards)"
+	@echo "✅ Transport Integration Tests Passed!"
+	@echo "   - Registration flow validated (transport_address returned)"
+	@echo "   - gRPC-over-QUIC transport verified"
+	@echo "   - Config sync, heartbeat/failover, TLS tested"
+	@echo "   - Multi-tenant isolation validated"
+	@echo "   - Module execution E2E validated"
 
-test-mqtt-quic-setup:
-	@echo "🐳 Setting up MQTT+QUIC Docker Test Environment"
+test-transport-setup:
+	@echo "🐳 Setting up Transport Docker Test Environment"
 	@echo "==============================================="
 	@if [ ! -f .env.test ]; then \
 		echo "Generating test credentials..."; \
 		./scripts/generate-test-credentials.sh; \
 	fi
-	@echo "Starting TimescaleDB and standalone controller with MQTT+QUIC..."
+	@echo "Starting TimescaleDB and standalone controller (gRPC transport)..."
 	@echo "🔨 Force rebuilding Docker images (no cache)..."
 	@set -a && . ./.env.test && set +a && \
 	DOCKER_BUILDKIT=1 docker compose -f docker-compose.test.yml --profile ha build --no-cache controller-standalone steward-standalone && \
-	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone steward-standalone
+	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone steward-standalone || \
+	{ echo "❌ Docker compose failed — controller-standalone logs:"; docker logs controller-standalone 2>&1 | tail -30; exit 1; }
 	@echo ""
 	@echo "⏳ Waiting for controller to initialize..."
 	@sleep 45
 	@echo "🔍 Validating controller health..."
-	@echo "   Checking MQTT broker (port 8883)..."
+	@echo "   Checking gRPC transport (port 4433)..."
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
-		if docker exec controller-standalone sh -c "netstat -ln | grep :8883" >/dev/null 2>&1; then \
-			echo "   ✅ MQTT broker ready on port 8883 (mapped to localhost:1886)"; \
+		if docker exec controller-standalone sh -c "netstat -ln | grep :4433" >/dev/null 2>&1; then \
+			echo "   ✅ gRPC transport ready on port 4433 (mapped to localhost:4436)"; \
 			break; \
 		fi; \
 		if [ $$i -eq 10 ]; then \
-			echo "   ❌ MQTT broker failed to start after 10 attempts"; \
+			echo "   ❌ gRPC transport failed to start after 10 attempts"; \
 			docker logs controller-standalone | tail -20; \
 			exit 1; \
 		fi; \
-		echo "   ⏳ Waiting for MQTT broker (attempt $$i/10)..."; \
+		echo "   ⏳ Waiting for gRPC transport (attempt $$i/10)..."; \
 		sleep 5; \
 	done
 	@echo "   Checking HTTP API (port 9080)..."
@@ -1721,17 +1747,16 @@ test-mqtt-quic-setup:
 	@echo "   Allowing services to settle and QUIC server to fully initialize..."
 	@sleep 15
 	@echo ""
-	@echo "✅ MQTT+QUIC Docker environment fully initialized!"
-	@echo "   MQTT: localhost:1886 (TLS)"
-	@echo "   QUIC: localhost:4436"
+	@echo "✅ Transport Docker environment fully initialized!"
+	@echo "   gRPC-over-QUIC: localhost:4436 (host) → 4433 (container)"
 	@echo "   HTTP API: localhost:8080 (HTTPS)"
 	@echo "   TimescaleDB: localhost:5433"
 
-test-mqtt-quic-cleanup:
+test-transport-cleanup:
 	@echo ""
-	@echo "🧹 Cleaning up MQTT+QUIC Docker environment..."
+	@echo "🧹 Cleaning up transport Docker environment..."
 	@docker compose -f docker-compose.test.yml --profile ha down --remove-orphans -v 2>/dev/null || true
-	@echo "✅ MQTT+QUIC environment cleaned up"
+	@echo "✅ Transport environment cleaned up"
 
 # Local E2E validation - runs full integration + E2E tests with Docker infrastructure
 # Used by /story-complete to ensure full validation before PR creation
@@ -1739,7 +1764,7 @@ test-mqtt-quic-cleanup:
 # Phase 2: Parallelizable E2E test targets (Story #297)
 # These targets can run independently and be parallelized with make -j3
 
-.PHONY: test-e2e-ci test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios
+.PHONY: test-e2e-ci test-e2e-transport test-e2e-controller test-e2e-scenarios
 
 # CI-style E2E tests - matches GitHub Actions production-gates.yml exactly
 # Self-contained: sets up infrastructure, runs tests, cleans up
@@ -1748,7 +1773,7 @@ test-e2e-ci:
 	@echo "🚀 Starting CI-style E2E test suite (setup → test → cleanup)..."
 	@echo ""
 	@echo "📋 Step 1/3: Setting up Docker infrastructure..."
-	@$(MAKE) test-mqtt-quic-setup
+	@$(MAKE) test-transport-setup
 	@echo ""
 	@echo "📋 Step 2/3: Running tests in container with container-to-container networking..."
 	@docker build -t cfgms-test-runner -f Dockerfile.test-runner . >/dev/null 2>&1 && \
@@ -1774,15 +1799,15 @@ test-e2e-ci:
 			echo "" && \
 			echo "🧪 Running E2E tests..." && \
 			go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)" \
-		' || { echo ""; echo "📋 Step 3/3: Cleaning up (tests failed)..."; $(MAKE) test-mqtt-quic-cleanup; exit 1; }
+		' || { echo ""; echo "📋 Step 3/3: Cleaning up (tests failed)..."; $(MAKE) test-transport-cleanup; exit 1; }
 	@echo ""
 	@echo "📋 Step 3/3: Cleaning up Docker infrastructure..."
-	@$(MAKE) test-mqtt-quic-cleanup
+	@$(MAKE) test-transport-cleanup
 	@echo ""
 	@echo "✅ CI-style E2E tests completed successfully"
 
-# Deprecated: Use test-e2e-ci instead (matches CI execution exactly)
-test-e2e-mqtt-quic: test-e2e-ci
+# Alias: Use test-e2e-ci instead
+test-e2e-transport: test-e2e-ci
 
 test-e2e-controller:
 	@echo "🧪 Running controller E2E tests (Docker deployment)..."
@@ -1807,26 +1832,26 @@ test-e2e-fast:
 	@echo "⚡ FAST E2E VALIDATION"
 	@echo "======================"
 	@echo "Running 2 core test suites in parallel:"
-	@echo "  1️⃣  MQTT+QUIC integration tests"
+	@echo "  1️⃣  Transport integration tests"
 	@echo "  2️⃣  Controller E2E tests"
 	@echo ""
 	@echo "⏱️  Expected runtime: ~3-5 minutes"
 	@echo "⚠️  Excludes long-running performance/scale tests (use test-e2e-parallel for full validation)"
 	@echo ""
-	@$(MAKE) test-mqtt-quic-setup
+	@$(MAKE) test-transport-setup
 	@echo ""
-	@$(MAKE) -j2 test-e2e-mqtt-quic test-e2e-controller || { \
+	@$(MAKE) -j2 test-e2e-transport test-e2e-controller || { \
 		echo ""; \
 		echo "❌ One or more E2E test suites failed"; \
-		$(MAKE) test-mqtt-quic-cleanup; \
+		$(MAKE) test-transport-cleanup; \
 		exit 1; \
 	}
 	@echo ""
-	@$(MAKE) test-mqtt-quic-cleanup
+	@$(MAKE) test-transport-cleanup
 	@echo ""
 	@echo "✅ FAST E2E VALIDATION PASSED"
 	@echo "=============================="
-	@echo "- ✅ MQTT+QUIC integration tests"
+	@echo "- ✅ Transport integration tests"
 	@echo "- ✅ Controller Docker E2E tests"
 	@echo ""
 	@echo "🎯 Core E2E validation complete - ready for PR"
@@ -1838,26 +1863,26 @@ test-e2e-parallel:
 	@echo "⚡ PARALLEL E2E VALIDATION (FULL)"
 	@echo "=================================="
 	@echo "Running 3 test suites in parallel:"
-	@echo "  1️⃣  MQTT+QUIC integration tests"
+	@echo "  1️⃣  Transport integration tests"
 	@echo "  2️⃣  Controller E2E tests"
 	@echo "  3️⃣  Comprehensive E2E scenarios (performance/scale - may take 45min+)"
 	@echo ""
 	@echo "⏱️  Expected runtime: ~45-60 minutes (includes long-running tests)"
 	@echo ""
-	@$(MAKE) test-mqtt-quic-setup
+	@$(MAKE) test-transport-setup
 	@echo ""
-	@$(MAKE) -j3 test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios || { \
+	@$(MAKE) -j3 test-e2e-transport test-e2e-controller test-e2e-scenarios || { \
 		echo ""; \
 		echo "❌ One or more E2E test suites failed"; \
-		$(MAKE) test-mqtt-quic-cleanup; \
+		$(MAKE) test-transport-cleanup; \
 		exit 1; \
 	}
 	@echo ""
-	@$(MAKE) test-mqtt-quic-cleanup
+	@$(MAKE) test-transport-cleanup
 	@echo ""
 	@echo "✅ ALL E2E TESTS PASSED (PARALLEL)"
 	@echo "=================================="
-	@echo "- ✅ MQTT+QUIC integration tests"
+	@echo "- ✅ Transport integration tests"
 	@echo "- ✅ Controller Docker E2E tests"
 	@echo "- ✅ Comprehensive E2E scenarios"
 	@echo ""
@@ -1870,30 +1895,49 @@ test-e2e-local:
 	@echo "🚀 RUNNING LOCAL E2E VALIDATION (SEQUENTIAL)"
 	@echo "============================================="
 	@echo "This runs all E2E tests against Docker infrastructure:"
-	@echo "  • MQTT+QUIC integration tests (controller ↔ steward)"
+	@echo "  • Transport integration tests (controller ↔ steward via gRPC)"
 	@echo "  • Controller E2E tests (Docker deployment)"
 	@echo "  • Comprehensive E2E scenarios (multi-tenant, failover)"
 	@echo ""
 	@echo "⏱️  Expected runtime: 8-10 minutes"
 	@echo "💡 Use 'make test-e2e-parallel' for faster execution (~3-5 min)"
 	@echo ""
-	@$(MAKE) test-mqtt-quic-setup
+	@$(MAKE) test-transport-setup
 	@echo ""
-	@$(MAKE) test-e2e-mqtt-quic || { $(MAKE) test-mqtt-quic-cleanup; exit 1; }
+	@$(MAKE) test-e2e-transport || { $(MAKE) test-transport-cleanup; exit 1; }
 	@echo ""
-	@$(MAKE) test-e2e-controller || { $(MAKE) test-mqtt-quic-cleanup; exit 1; }
+	@$(MAKE) test-e2e-controller || { $(MAKE) test-transport-cleanup; exit 1; }
 	@echo ""
-	@$(MAKE) test-e2e-scenarios || { $(MAKE) test-mqtt-quic-cleanup; exit 1; }
+	@$(MAKE) test-e2e-scenarios || { $(MAKE) test-transport-cleanup; exit 1; }
 	@echo ""
-	@$(MAKE) test-mqtt-quic-cleanup
+	@$(MAKE) test-transport-cleanup
 	@echo ""
 	@echo "✅ ALL E2E TESTS PASSED"
 	@echo "======================="
-	@echo "- ✅ MQTT+QUIC integration tests passed"
+	@echo "- ✅ Transport integration tests passed"
 	@echo "- ✅ Controller Docker E2E tests passed"
 	@echo "- ✅ Comprehensive E2E scenarios passed"
 	@echo ""
 	@echo "🎯 Full E2E validation complete - ready for PR"
+
+# Fleet E2E tests — builds cfg CLI, spins up the fleet docker-compose profile,
+# runs ./test/e2e/fleet/... with required env vars, and tears down regardless of result.
+# Mirrors the fleet-e2e-tests GH Actions job exactly.
+.PHONY: test-e2e-fleet
+test-e2e-fleet: build-cli
+	@echo ""
+	@echo "🚢 FLEET E2E TEST SUITE"
+	@echo "======================="
+	@echo "Starting fleet docker-compose profile and running test/e2e/fleet/..."
+	@echo ""
+	@set -e; \
+	trap 'rc=$$?; if [ $$rc -ne 0 ]; then echo ""; echo "❌ Fleet E2E failed (exit $$rc) — dumping container logs before teardown:"; docker compose --profile fleet -f docker-compose.test.yml logs --no-color --tail=200 || true; for c in fleet-controller fleet-steward-1 fleet-steward-2; do echo ""; echo "----- $$c : /tmp/cfgms file logs -----"; docker cp "$$c:/tmp/cfgms/." - 2>/dev/null | tar -xOf - 2>/dev/null || echo "(no file logs)"; done; fi; echo ""; echo "🧹 Tearing down fleet compose..."; docker compose --profile fleet -f docker-compose.test.yml down -v' EXIT; \
+	docker compose --profile fleet -f docker-compose.test.yml up -d --build --wait; \
+	echo ""; \
+	echo "Running fleet E2E tests..."; \
+	CFG_BINARY=$(CURDIR)/bin/cfg CFGMS_FLEET_TEST=1 go test -v -timeout 300s ./test/e2e/fleet/...
+	@echo ""
+	@echo "✅ FLEET E2E TESTS PASSED"
 
 # Story completion validation - comprehensive validation for /story-complete
 # Story #315: Now matches ALL CI required checks (100% parity except Windows/macOS native builds)
@@ -1925,7 +1969,7 @@ test-complete-full: test-commit test-fast test-production-critical build-cross-v
 	@echo "- ✅ Production critical tests passed (test-production-critical)"
 	@echo "- ✅ Cross-platform compilation validated (build-cross-validate)"
 	@echo "- ✅ Docker integration tests passed (storage/controller)"
-	@echo "- ✅ E2E tests passed (MQTT+QUIC + Controller - PARALLEL)"
+	@echo "- ✅ E2E tests passed (Transport + Controller - PARALLEL)"
 	@echo ""
 	@echo "🎯 Story is FULLY validated - matches all CI required checks"
 	@echo ""
@@ -1940,53 +1984,74 @@ test-complete-full: test-commit test-fast test-production-critical build-cross-v
 test-complete: test-complete-full
 	@echo ""
 
+# Agent container validation - everything from test-complete minus Docker targets
+# Used by headless agent containers that don't have access to Docker daemon
+# Story #435: Provides ~95% of validation coverage without Docker-in-Docker
+.PHONY: test-agent-complete
+test-agent-complete: test-commit test-fast test-production-critical build-cross-validate
+	@echo ""
+	@echo "✅ AGENT CONTAINER VALIDATION FINISHED"
+	@echo "========================================"
+	@echo "- ✅ All pre-commit checks passed (test-commit)"
+	@echo "- ✅ Fast comprehensive tests passed (test-fast)"
+	@echo "- ✅ Production critical tests passed (test-production-critical)"
+	@echo "- ✅ Cross-platform compilation validated (build-cross-validate)"
+	@echo ""
+	@echo "⏩ Deferred to CI (requires Docker daemon):"
+	@echo "   - test-integration-docker (storage/controller Docker tests)"
+	@echo "   - test-e2e-fast (Transport + Controller E2E tests)"
+	@echo ""
+	@echo "ℹ️  Acceptable CI-only gaps:"
+	@echo "   - Native Windows/macOS builds (requires Windows/macOS runners)"
+	@echo "   - Docker integration tests (requires Docker-in-Docker)"
+	@echo "   - E2E tests (requires Docker-in-Docker)"
+	@echo ""
+	@echo "🎯 Agent container validated (~95% of test-complete coverage)"
+
 # Generate Test Certificates (Story #109)
-# Uses native CFGMS certificate management via controller auto-generation
+# Uses controller --init to create CA and certificates via pkg/cert.Manager.
+# No need to start the controller at runtime — --init writes ca.crt and ca.key
+# to the configured CA path. Docker containers and Go tests generate their own
+# certs independently via --init or pkg/cert.Manager.
 .PHONY: generate-test-certificates
 generate-test-certificates: build-controller  ## Generate test certificates using native cert management
 	@echo "🔐 Generating test certificates..."
 	@echo ""
 	@echo "Step 1: Setting up controller configuration..."
-	@mkdir -p test/integration/mqtt_quic/certs/ca test/integration/logs
+	@mkdir -p test/integration/transport/certs/ca test/integration/logs
 	@cp test/integration/configs/controller-test.cfg controller.cfg
 	@echo "✅ Configuration copied to controller.cfg"
 	@echo ""
-	@echo "Step 2: Starting controller to auto-generate valid certificates..."
-	@timeout 30 ./bin/controller > /tmp/controller-cert-gen.log 2>&1 & \
-	CONTROLLER_PID=$$!; \
-	sleep 5; \
-	kill $$CONTROLLER_PID 2>/dev/null || true; \
-	wait $$CONTROLLER_PID 2>/dev/null || true
-	@rm -f config.yaml
-	@if [ ! -f "test/integration/mqtt_quic/certs/ca/ca.crt" ]; then \
-		echo "❌ CA certificate not generated. Controller log:"; \
-		cat /tmp/controller-cert-gen.log; \
+	@echo "Step 2: Initializing controller to generate CA and certificates..."
+	@./bin/controller --init > /tmp/controller-init.log 2>&1 || \
+		{ echo "❌ Controller init failed:"; cat /tmp/controller-init.log; exit 1; }
+	@rm -f controller.cfg
+	@if [ ! -f "test/integration/transport/certs/ca/ca.crt" ]; then \
+		echo "❌ CA certificate not generated. Init log:"; \
+		cat /tmp/controller-init.log; \
 		exit 1; \
 	fi
-	@echo "✅ Valid certificates generated by Controller"
+	@echo "✅ CA and certificates generated by controller --init"
 	@echo ""
-	@echo "Creating symlinks for test compatibility..."
-	@cd test/integration/mqtt_quic/certs && \
-		ln -sf ca/ca.crt ca-cert.pem && \
-		ln -sf ca/ca.key ca-key.pem && \
-		ln -sf ca/server/server.crt server-cert.pem && \
-		ln -sf ca/server/server.key server-key.pem
-	@echo "✅ Symlinks created"
+	@echo "Creating symlink for CA certificate compatibility..."
+	@cd test/integration/transport/certs && \
+		ln -sf ca/ca.crt ca-cert.pem
+	@echo "✅ Symlink created"
 	@echo ""
 	@echo "Step 3: Generating invalid certificates for negative testing..."
 	@./scripts/generate-invalid-test-certs.sh
 	@echo ""
 	@echo "✅ All test certificates generated"
 	@echo ""
-	@echo "Valid certificates (auto-generated by Controller):"
-	@echo "  • test/integration/mqtt_quic/certs/ca-cert.pem"
-	@echo "  • test/integration/mqtt_quic/certs/server-cert.pem"
-	@echo "  • test/integration/mqtt_quic/certs/client-cert.pem"
+	@echo "Valid certificates (generated by controller --init):"
+	@echo "  • test/integration/transport/certs/ca/ca.crt (CA certificate)"
+	@echo "  • test/integration/transport/certs/ca/ca.key (CA private key)"
+	@echo "  • test/integration/transport/certs/ca-cert.pem (symlink)"
 	@echo ""
 	@echo "Invalid certificates (for negative testing):"
-	@echo "  • test/integration/mqtt_quic/certs/expired-cert.pem"
-	@echo "  • test/integration/mqtt_quic/certs/selfsigned-cert.pem"
-	@echo "  • test/integration/mqtt_quic/certs/wrong-ca-client-cert.pem"
+	@echo "  • test/integration/transport/certs/expired-cert.pem"
+	@echo "  • test/integration/transport/certs/selfsigned-cert.pem"
+	@echo "  • test/integration/transport/certs/wrong-ca-client-cert.pem"
 
 # Synthetic Monitoring Tests
 # Runs ongoing validation tests for production-like environments

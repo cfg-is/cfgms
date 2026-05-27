@@ -1,9 +1,8 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -12,6 +11,9 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // handleListPermissions handles GET /api/v1/rbac/permissions
@@ -30,7 +32,7 @@ func (s *Server) handleListPermissions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call gRPC service
-	resp, err := s.rbacService.ListPermissions(context.Background(), req)
+	resp, err := s.rbacService.ListPermissions(r.Context(), req)
 	if err != nil {
 		s.logger.Error("Failed to list permissions", "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list permissions", "INTERNAL_ERROR")
@@ -73,7 +75,7 @@ func (s *Server) handleGetPermission(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call gRPC service
-	resp, err := s.rbacService.GetPermission(context.Background(), req)
+	resp, err := s.rbacService.GetPermission(r.Context(), req)
 	if err != nil {
 		s.logger.Error("Failed to get permission", "permission_id", permissionID, "error", err)
 		s.writeErrorResponse(w, http.StatusNotFound, "Permission not found", "PERMISSION_NOT_FOUND")
@@ -99,8 +101,11 @@ func (s *Server) handleListRoles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get tenant_id filter from query params
-	tenantID := r.URL.Query().Get("tenant_id")
+	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return
+	}
 
 	// Create gRPC request
 	req := &controller.ListRolesRequest{
@@ -108,7 +113,7 @@ func (s *Server) handleListRoles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call gRPC service
-	resp, err := s.rbacService.ListRoles(context.Background(), req)
+	resp, err := s.rbacService.ListRoles(r.Context(), req)
 	if err != nil {
 		s.logger.Error("Failed to list roles", "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list roles", "INTERNAL_ERROR")
@@ -162,10 +167,16 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	// M-AUTH-2: Inject justification from X-Justification HTTP header when present.
+	ctx := r.Context()
+	if justification := r.Header.Get("X-Justification"); justification != "" {
+		ctx = rbac.WithSensitiveOperationJustification(ctx, justification)
+	}
+
 	// Call gRPC service
-	resp, err := s.rbacService.CreateRole(context.Background(), req)
+	resp, err := s.rbacService.CreateRole(ctx, req)
 	if err != nil {
-		s.logger.Error("Failed to create role", "name", roleInfo.Name, "error", err)
+		s.logger.Error("Failed to create role", "name", logging.SanitizeLogValue(roleInfo.Name), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create role", "INTERNAL_ERROR")
 		return
 	}
@@ -205,7 +216,7 @@ func (s *Server) handleGetRole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call gRPC service
-	resp, err := s.rbacService.GetRole(context.Background(), req)
+	resp, err := s.rbacService.GetRole(r.Context(), req)
 	if err != nil {
 		s.logger.Error("Failed to get role", "role_id", roleID, "error", err)
 		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
@@ -262,8 +273,14 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	// M-AUTH-2: Inject justification from X-Justification HTTP header when present.
+	ctx := r.Context()
+	if justification := r.Header.Get("X-Justification"); justification != "" {
+		ctx = rbac.WithSensitiveOperationJustification(ctx, justification)
+	}
+
 	// Call gRPC service
-	resp, err := s.rbacService.UpdateRole(context.Background(), req)
+	resp, err := s.rbacService.UpdateRole(ctx, req)
 	if err != nil {
 		s.logger.Error("Failed to update role", "role_id", roleID, "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update role", "INTERNAL_ERROR")
@@ -304,8 +321,14 @@ func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 		RoleId: roleID,
 	}
 
+	// M-AUTH-2: Inject justification from X-Justification HTTP header when present.
+	ctx := r.Context()
+	if justification := r.Header.Get("X-Justification"); justification != "" {
+		ctx = rbac.WithSensitiveOperationJustification(ctx, justification)
+	}
+
 	// Call gRPC service
-	resp, err := s.rbacService.DeleteRole(context.Background(), req)
+	resp, err := s.rbacService.DeleteRole(ctx, req)
 	if err != nil {
 		s.logger.Error("Failed to delete role", "role_id", roleID, "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete role", "INTERNAL_ERROR")
@@ -321,47 +344,4 @@ func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 		"id":      roleID,
 		"deleted": true,
 	})
-}
-
-// Placeholder handlers for other RBAC endpoints
-// TODO: Implement these when needed
-
-func (s *Server) handleListSubjects(w http.ResponseWriter, r *http.Request) {
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Subjects management not yet implemented", "NOT_IMPLEMENTED")
-}
-
-func (s *Server) handleCreateSubject(w http.ResponseWriter, r *http.Request) {
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Subjects management not yet implemented", "NOT_IMPLEMENTED")
-}
-
-func (s *Server) handleGetSubject(w http.ResponseWriter, r *http.Request) {
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Subjects management not yet implemented", "NOT_IMPLEMENTED")
-}
-
-func (s *Server) handleUpdateSubject(w http.ResponseWriter, r *http.Request) {
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Subjects management not yet implemented", "NOT_IMPLEMENTED")
-}
-
-func (s *Server) handleDeleteSubject(w http.ResponseWriter, r *http.Request) {
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Subjects management not yet implemented", "NOT_IMPLEMENTED")
-}
-
-func (s *Server) handleGetSubjectRoles(w http.ResponseWriter, r *http.Request) {
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Role assignments not yet implemented", "NOT_IMPLEMENTED")
-}
-
-func (s *Server) handleAssignRole(w http.ResponseWriter, r *http.Request) {
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Role assignments not yet implemented", "NOT_IMPLEMENTED")
-}
-
-func (s *Server) handleRevokeRole(w http.ResponseWriter, r *http.Request) {
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Role assignments not yet implemented", "NOT_IMPLEMENTED")
-}
-
-func (s *Server) handleGetSubjectPermissions(w http.ResponseWriter, r *http.Request) {
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Permission queries not yet implemented", "NOT_IMPLEMENTED")
-}
-
-func (s *Server) handleCheckPermission(w http.ResponseWriter, r *http.Request) {
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Permission checking not yet implemented", "NOT_IMPLEMENTED")
 }

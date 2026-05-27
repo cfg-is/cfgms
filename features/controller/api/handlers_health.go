@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package api
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/cfgis/cfgms/pkg/version"
 )
@@ -14,7 +15,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	health := HealthStatus{
 		Status:    "healthy",
 		Version:   version.ShortWithoutPrefix(),
-		Timestamp: getCurrentTimestamp(),
+		Timestamp: time.Now().UTC(),
 		Services:  make(map[string]string),
 	}
 
@@ -67,6 +68,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	} else {
 		health.Services["rbac_manager"] = "unavailable"
 		health.Status = "degraded"
+	}
+
+	// Workflow engine status (Issue #414)
+	if s.workflowHandler != nil && s.workflowHandler.engine != nil {
+		health.Services["workflow_engine"] = "healthy"
+	} else {
+		health.Services["workflow_engine"] = "unavailable"
 	}
 
 	// Return appropriate HTTP status

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package logging
 
@@ -13,6 +13,3 @@ type sessionIDKey struct{}
 
 // operationKey is the context key for operations
 type operationKey struct{}
-
-// correlationIDKey is the context key for correlation IDs
-type correlationIDKey struct{}

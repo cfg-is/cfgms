@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package engine
 
@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/reports/interfaces"
-	"github.com/cfgis/cfgms/features/steward/dna/drift"
+	"github.com/cfgis/cfgms/pkg/dna/drift"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -85,8 +85,8 @@ func (e *Engine) GenerateReport(ctx context.Context, req interfaces.ReportReques
 	if e.config.CacheEnabled {
 		if cached, err := e.cache.Get(ctx, cacheKey); err == nil && cached != nil {
 			e.logger.Info("report cache hit",
-				"request_type", req.Type,
-				"template", req.Template,
+				"request_type", logging.SanitizeLogValue(string(req.Type)),
+				"template", logging.SanitizeLogValue(req.Template),
 				"cache_key", cacheKey)
 
 			cached.Metadata.CacheHit = true
@@ -127,8 +127,8 @@ func (e *Engine) GenerateReport(ctx context.Context, req interfaces.ReportReques
 	}
 
 	e.logger.Info("report generated successfully",
-		"type", req.Type,
-		"template", req.Template,
+		"type", logging.SanitizeLogValue(string(req.Type)),
+		"template", logging.SanitizeLogValue(req.Template),
 		"devices", len(reportData.DNARecords),
 		"generation_ms", generationTime.Milliseconds())
 

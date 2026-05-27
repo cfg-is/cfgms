@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package integration
 
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -44,9 +46,10 @@ func (s *ControllerTestSuite) SetupSuite() {
 }
 
 func (s *ControllerTestSuite) waitForHTTPReady() {
+	client := s.tlsClient()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(fmt.Sprintf("http://%s/api/v1/health", s.httpAddr))
+		resp, err := client.Get(fmt.Sprintf("https://%s/api/v1/health", s.httpAddr))
 		if err == nil {
 			_ = resp.Body.Close()
 			return
@@ -54,6 +57,26 @@ func (s *ControllerTestSuite) waitForHTTPReady() {
 		time.Sleep(100 * time.Millisecond)
 	}
 	s.T().Log("Warning: HTTP API may not be ready yet")
+}
+
+// tlsClient returns an HTTP client configured with the test CA for TLS verification.
+func (s *ControllerTestSuite) tlsClient() *http.Client {
+	caCertPEM, err := s.env.CertManager.GetCACertificate()
+	if err != nil {
+		s.T().Fatalf("Failed to get CA certificate for test client: %v", err)
+	}
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCertPEM) {
+		s.T().Fatal("Failed to parse CA certificate PEM")
+	}
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS13,
+				RootCAs:    caCertPool,
+			},
+		},
+	}
 }
 
 func (s *ControllerTestSuite) TearDownSuite() {
@@ -80,7 +103,7 @@ func (s *ControllerTestSuite) TestControllerStartup() {
 
 // TestControllerHealthEndpoint verifies the health API responds with real status
 func (s *ControllerTestSuite) TestControllerHealthEndpoint() {
-	resp, err := http.Get(fmt.Sprintf("http://%s/api/v1/health", s.httpAddr))
+	resp, err := s.tlsClient().Get(fmt.Sprintf("https://%s/api/v1/health", s.httpAddr))
 	require.NoError(s.T(), err, "Health endpoint should be reachable")
 	defer func() { _ = resp.Body.Close() }()
 
@@ -116,10 +139,9 @@ func (s *ControllerTestSuite) TestStewardRegistration() {
 	// Create a real registration token
 	token, err := registration.CreateToken(&registration.TokenCreateRequest{
 		TenantID:      "test-tenant",
-		ControllerURL: "mqtt://localhost:1883",
+		ControllerURL: fmt.Sprintf("quic://%s", s.env.Controller.GetListenAddr()),
 		Group:         "test-group",
 		ExpiresIn:     "1h",
-		SingleUse:     false,
 	})
 	require.NoError(s.T(), err, "Should create registration token")
 
@@ -132,8 +154,8 @@ func (s *ControllerTestSuite) TestStewardRegistration() {
 	reqBody, err := json.Marshal(map[string]string{"token": token.Token})
 	require.NoError(s.T(), err)
 
-	resp, err := http.Post(
-		fmt.Sprintf("http://%s/api/v1/register", s.httpAddr),
+	resp, err := s.tlsClient().Post(
+		fmt.Sprintf("https://%s/api/v1/register", s.httpAddr),
 		"application/json",
 		bytes.NewReader(reqBody),
 	)
@@ -145,18 +167,20 @@ func (s *ControllerTestSuite) TestStewardRegistration() {
 	err = json.NewDecoder(resp.Body).Decode(&regResp)
 	require.NoError(s.T(), err, "Registration response should be valid JSON")
 
-	// Verify registration succeeded - response must contain a steward_id
+	// With ip-trust as the default workflow (Issue #1695), the first steward from a new
+	// tenant always quarantines because no source IP is yet trusted for that tenant.
+	// The controller returns 202 Accepted with status="pending".
+	s.Equal(http.StatusAccepted, resp.StatusCode, "First registration for new tenant should return 202 (quarantine)")
 	s.Contains(regResp, "steward_id", "Registration response should contain steward_id")
 	s.NotEmpty(regResp["steward_id"], "Steward ID should not be empty")
-
-	// Verify tenant info is correct
 	s.Equal("test-tenant", regResp["tenant_id"], "Response should contain correct tenant_id")
+	s.Equal("pending", regResp["status"], "First registration should be quarantined (status=pending)")
+	s.Contains(regResp, "pending_id", "Quarantined registration should include a pending_id")
 
-	// Verify certificates were provided (proves cert manager is working)
-	s.Contains(regResp, "ca_cert", "Registration response should contain CA certificate")
-	s.Contains(regResp, "client_cert", "Registration response should contain client certificate")
+	// No client cert is issued for quarantined stewards (Issue #1693).
+	s.NotContains(regResp, "client_cert", "Quarantined registration must not include a client certificate")
 
-	s.T().Logf("Registration successful: steward_id=%v, tenant_id=%v", regResp["steward_id"], regResp["tenant_id"])
+	s.T().Logf("Registration quarantined as expected: steward_id=%v, pending_id=%v", regResp["steward_id"], regResp["pending_id"])
 }
 
 func TestControllerIntegration(t *testing.T) {

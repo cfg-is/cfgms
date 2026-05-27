@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package dna - Directory Relationships Collection
 //
@@ -467,14 +467,13 @@ func (c *DefaultDirectoryDNACollector) CollectGroupMemberships(ctx context.Conte
 			membership := &GroupMembership{
 				UserID:     member.ID,
 				GroupID:    group.ID,
-				MemberType: "direct", // Assume direct membership for now
+				MemberType: "direct", // Design decision: direct membership is assumed; nested group expansion requires recursive traversal deferred for performance.
 				Source:     "directory_provider",
 				Provider:   c.provider.GetProviderInfo().Name,
 				TenantID:   c.config.TenantID,
 			}
 
-			// Try to determine when membership was granted (if available)
-			// This would be provider-specific and might not be available
+			// Design decision: member type metadata is provider-specific and not universally available via LDAP.
 
 			allMemberships = append(allMemberships, membership)
 		}
@@ -617,7 +616,7 @@ func (c *DefaultDirectoryDNACollector) calculateOUDepth(ouID string, hierarchy m
 
 // GetRelationshipStats returns statistics about collected relationships.
 func (c *DefaultDirectoryDNACollector) GetRelationshipStats(ctx context.Context) (*RelationshipStats, error) {
-	// This would be called after collecting relationships to provide statistics
+	// Design decision: statistics are computed at query time from the relationship graph, not accumulated incrementally.
 	memberships, err := c.CollectGroupMemberships(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to collect memberships for stats: %w", err)

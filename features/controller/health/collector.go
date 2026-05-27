@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package health
 
@@ -35,12 +35,6 @@ type ComponentCollector interface {
 	CollectMetrics(ctx context.Context) error
 }
 
-// MQTTCollector collects MQTT broker metrics
-type MQTTCollector interface {
-	ComponentCollector
-	GetMetrics() *MQTTMetrics
-}
-
 // StorageCollector collects storage provider metrics
 type StorageCollector interface {
 	ComponentCollector
@@ -61,7 +55,7 @@ type SystemCollector interface {
 
 // Collector implements MetricsCollector for comprehensive controller monitoring
 type Collector struct {
-	mqttCollector        MQTTCollector
+	transportCollector   TransportCollector
 	storageCollector     StorageCollector
 	applicationCollector ApplicationCollector
 	systemCollector      SystemCollector
@@ -80,15 +74,17 @@ type Collector struct {
 	startTime  time.Time
 }
 
-// NewCollector creates a new metrics collector
+// NewCollector creates a new metrics collector.
+// transportCollector may be nil when the transport has not yet started — the
+// corresponding Transport section of ControllerMetrics will be nil in that case.
 func NewCollector(
-	mqttCollector MQTTCollector,
+	transportCollector TransportCollector,
 	storageCollector StorageCollector,
 	applicationCollector ApplicationCollector,
 	systemCollector SystemCollector,
 ) *Collector {
 	return &Collector{
-		mqttCollector:        mqttCollector,
+		transportCollector:   transportCollector,
 		storageCollector:     storageCollector,
 		applicationCollector: applicationCollector,
 		systemCollector:      systemCollector,
@@ -210,23 +206,42 @@ func (c *Collector) collectMetrics() error {
 		}
 	}
 
-	// Start all collections
-	wg.Add(4)
-	go collectWithTimeout(c.mqttCollector, "MQTT")
-	go collectWithTimeout(c.storageCollector, "Storage")
-	go collectWithTimeout(c.applicationCollector, "Application")
-	go collectWithTimeout(c.systemCollector, "System")
+	// Start collections for non-nil collectors
+	if c.transportCollector != nil {
+		wg.Add(1)
+		go collectWithTimeout(c.transportCollector, "Transport")
+	}
+	if c.storageCollector != nil {
+		wg.Add(1)
+		go collectWithTimeout(c.storageCollector, "Storage")
+	}
+	if c.applicationCollector != nil {
+		wg.Add(1)
+		go collectWithTimeout(c.applicationCollector, "Application")
+	}
+	if c.systemCollector != nil {
+		wg.Add(1)
+		go collectWithTimeout(c.systemCollector, "System")
+	}
 
 	// Wait for all collections to complete
 	wg.Wait()
 
-	// Aggregate metrics
+	// Aggregate metrics — nil collectors produce nil metric sections
 	metrics := &ControllerMetrics{
-		Timestamp:   timestamp,
-		MQTT:        c.mqttCollector.GetMetrics(),
-		Storage:     c.storageCollector.GetMetrics(),
-		Application: c.applicationCollector.GetMetrics(),
-		System:      c.systemCollector.GetMetrics(),
+		Timestamp: timestamp,
+	}
+	if c.transportCollector != nil {
+		metrics.Transport = c.transportCollector.GetMetrics()
+	}
+	if c.storageCollector != nil {
+		metrics.Storage = c.storageCollector.GetMetrics()
+	}
+	if c.applicationCollector != nil {
+		metrics.Application = c.applicationCollector.GetMetrics()
+	}
+	if c.systemCollector != nil {
+		metrics.System = c.systemCollector.GetMetrics()
 	}
 
 	// Store metrics

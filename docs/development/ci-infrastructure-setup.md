@@ -213,4 +213,37 @@ make test-with-real-storage  # Tests storage providers with real infrastructure
 
 ---
 
+## Post-merge Develop Sanity
+
+### What it is
+
+`.github/workflows/develop-sanity.yml` triggers on every push to `develop` and runs `go build ./...` against the merged commit. It is the safety net for the rare case where a squash-merge lands a broken build on develop.
+
+### When it triggers
+
+On every push to `develop` — which in practice means every squash-merge from a feature PR. It does not run on feature branches or PRs.
+
+### What it runs
+
+A single `go build ./...` with a 10-minute timeout. The build is fast (under 2 minutes in CI); the generous timeout absorbs occasional runner delays without masking real failures.
+
+### What failure means
+
+If the build fails, the workflow automatically opens a GitHub issue tagged `pipeline:incident` and `bug`. The issue includes:
+
+- The commit SHA that broke the build
+- The GitHub username of the actor who merged
+- A direct link to the failed Actions run
+- The captured `go build` output
+
+The `pipeline:incident` label (color `#E11D48`) is created automatically if it does not yet exist.
+
+**When you see a `pipeline:incident` issue**: develop is broken and no one should merge new work until it is resolved. Fix the build on a feature branch, open a PR targeting `develop`, and close the incident issue once the post-merge sanity run is green.
+
+### How this relates to pre-merge validation
+
+Pre-merge CI (the required status checks on the develop ruleset) validates that a PR's branch compiles and passes tests. The strict up-to-date policy added in Story #793 means CI must run against the rebased tip of develop, which eliminates most breakage scenarios. The post-merge sanity workflow is a complementary catch for the residual cases — for example, if two PRs are merged in rapid succession and the second one was rebased against the first's pre-merge state.
+
+---
+
 **Note**: This infrastructure setup is critical for Epic 6 storage architecture testing and ensures all storage providers work correctly in production-like environments.

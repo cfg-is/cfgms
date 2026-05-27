@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package config provides configuration loading and validation for standalone steward operation.
 //
@@ -50,13 +50,53 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/config/stewardtypes"
+	"github.com/cfgis/cfgms/features/modules/script"
+)
+
+// Type aliases — re-export from stewardtypes so existing callers compile unchanged.
+type (
+	StewardConfig       = stewardtypes.StewardConfig
+	StewardSettings     = stewardtypes.StewardSettings
+	ResourceConfig      = stewardtypes.ResourceConfig
+	ErrorHandlingConfig = stewardtypes.ErrorHandlingConfig
+	DriftMode           = stewardtypes.DriftMode
+	LoggingConfig       = stewardtypes.LoggingConfig
+	SecretsConfig       = stewardtypes.SecretsConfig
+	ScriptSigningConfig = stewardtypes.ScriptSigningConfig
+	ScriptSigningPolicy = stewardtypes.ScriptSigningPolicy
+	ScriptTrustMode     = stewardtypes.ScriptTrustMode
+	TrustedKeyRef       = stewardtypes.TrustedKeyRef
+	OperationMode       = stewardtypes.OperationMode
+	ErrorAction         = stewardtypes.ErrorAction
+)
+
+// Constant re-exports from stewardtypes.
+const (
+	ScriptSigningPolicyNone       = stewardtypes.ScriptSigningPolicyNone
+	ScriptSigningPolicyOptional   = stewardtypes.ScriptSigningPolicyOptional
+	ScriptSigningPolicyRequired   = stewardtypes.ScriptSigningPolicyRequired
+	TrustModeAnyValid             = stewardtypes.TrustModeAnyValid
+	TrustModeTrustedKeys          = stewardtypes.TrustModeTrustedKeys
+	TrustModeTrustedKeysAndPublic = stewardtypes.TrustModeTrustedKeysAndPublic
+	ModeStandalone                = stewardtypes.ModeStandalone
+	ModeController                = stewardtypes.ModeController
+	DriftModeApply                = stewardtypes.DriftModeApply
+	DriftModeMonitor              = stewardtypes.DriftModeMonitor
+	ActionContinue                = stewardtypes.ActionContinue
+	ActionFail                    = stewardtypes.ActionFail
+	ActionWarn                    = stewardtypes.ActionWarn
 )
 
 // envVarPattern matches ${VAR} patterns without defaults
@@ -110,119 +150,6 @@ func expandEnvWithDefaults(content string) string {
 	// Then expand remaining ${VAR} patterns using os.ExpandEnv
 	return os.ExpandEnv(result)
 }
-
-// StewardConfig represents the complete steward configuration loaded from hostname.cfg.
-//
-// This is the root configuration structure that contains all settings needed
-// for standalone steward operation, including steward-specific settings,
-// resource definitions, and optional module path mappings.
-type StewardConfig struct {
-	// Steward contains steward-specific configuration settings
-	Steward StewardSettings `yaml:"steward" json:"steward"`
-
-	// Resources defines the list of resources to be managed
-	Resources []ResourceConfig `yaml:"resources" json:"resources"`
-
-	// Modules provides optional custom paths for specific modules
-	Modules map[string]string `yaml:"modules,omitempty" json:"modules,omitempty"` // module_name -> custom_path
-}
-
-// StewardSettings contains steward-specific configuration options.
-//
-// These settings control steward behavior, logging, error handling,
-// and module discovery paths.
-type StewardSettings struct {
-	// ID is the unique identifier for this steward instance
-	ID string `yaml:"id"`
-
-	// Mode defines the operation mode (standalone or controller)
-	Mode OperationMode `yaml:"mode"`
-
-	// ModulePaths lists additional directories to search for modules
-	ModulePaths []string `yaml:"module_paths,omitempty"`
-
-	// Logging configures log output format and verbosity
-	Logging LoggingConfig `yaml:"logging"`
-
-	// ErrorHandling defines how to handle various error conditions
-	ErrorHandling ErrorHandlingConfig `yaml:"error_handling"`
-
-	// Secrets configures the steward secret store
-	Secrets SecretsConfig `yaml:"secrets,omitempty"`
-}
-
-// SecretsConfig defines configuration for steward-side secret storage.
-type SecretsConfig struct {
-	// SecretsDir overrides the default platform-specific secrets directory
-	SecretsDir string `yaml:"secrets_dir,omitempty"`
-
-	// Provider selects the secrets provider (default: "steward")
-	Provider string `yaml:"provider,omitempty"`
-}
-
-// ResourceConfig defines a single resource to be managed by the steward.
-//
-// Each resource specifies which module should manage it and provides
-// module-specific configuration data.
-type ResourceConfig struct {
-	// Name is the unique identifier for this resource
-	Name string `yaml:"name" json:"name"`
-
-	// Module is the name of the module that will manage this resource
-	Module string `yaml:"module" json:"module"`
-
-	// Config contains module-specific configuration data
-	Config map[string]interface{} `yaml:"config" json:"config"`
-}
-
-// OperationMode defines how the steward operates.
-type OperationMode string
-
-const (
-	// ModeStandalone operates using local configuration files and modules
-	ModeStandalone OperationMode = "standalone"
-
-	// ModeController connects to a remote CFGMS controller (legacy)
-	ModeController OperationMode = "controller"
-)
-
-// LoggingConfig defines logging output settings.
-type LoggingConfig struct {
-	// Level sets the logging verbosity (debug, info, warn, error)
-	Level string `yaml:"level"`
-
-	// Format sets the log output format (text, json)
-	Format string `yaml:"format"`
-}
-
-// ErrorHandlingConfig defines how to handle various error conditions.
-//
-// Each error type can be configured to continue (log and proceed),
-// warn (log warning and proceed), or fail (log error and stop).
-type ErrorHandlingConfig struct {
-	// ModuleLoadFailure defines how to handle module loading errors
-	ModuleLoadFailure ErrorAction `yaml:"module_load_failure"`
-
-	// ResourceFailure defines how to handle resource execution errors
-	ResourceFailure ErrorAction `yaml:"resource_failure"`
-
-	// ConfigurationError defines how to handle configuration validation errors
-	ConfigurationError ErrorAction `yaml:"configuration_error"`
-}
-
-// ErrorAction defines the available error handling strategies.
-type ErrorAction string
-
-const (
-	// ActionContinue logs the error and continues execution
-	ActionContinue ErrorAction = "continue"
-
-	// ActionFail logs the error and stops execution
-	ActionFail ErrorAction = "fail"
-
-	// ActionWarn logs a warning and continues execution
-	ActionWarn ErrorAction = "warn"
-)
 
 // LoadConfiguration searches for and loads the steward configuration from hostname.cfg.
 //
@@ -280,9 +207,21 @@ func loadFromPath(configPath string) (StewardConfig, error) {
 	// This supports ${VAR} and ${VAR:-default} syntax for explicit env var references
 	expandedData := expandEnvWithDefaults(content)
 
-	if err := yaml.Unmarshal([]byte(expandedData), &config); err != nil {
-		return config, fmt.Errorf("failed to parse configuration: %w", err)
+	dec := yaml.NewDecoder(strings.NewReader(expandedData))
+	dec.KnownFields(true)
+	if err := dec.Decode(&config); err != nil {
+		// An empty (or whitespace-only) configuration file yields io.EOF from the
+		// streaming decoder. Treat it as an empty config: defaults are applied below
+		// and ID falls back to the hostname.
+		if !errors.Is(err, io.EOF) {
+			return config, fmt.Errorf("failed to parse configuration: %w", err)
+		}
 	}
+
+	// Security invariant: DriftMode must come from controller-delivered cfg only.
+	// Clear any local-file value so a tampered hostname.cfg cannot flip a
+	// controller-connected steward into monitor mode.
+	config.Steward.DriftMode = ""
 
 	// Apply defaults
 	applyDefaults(&config)
@@ -380,6 +319,11 @@ func applyDefaults(config *StewardConfig) {
 		config.Steward.ErrorHandling.ConfigurationError = ActionFail
 	}
 
+	// Set default convergence interval
+	if config.Steward.ConvergeInterval == "" {
+		config.Steward.ConvergeInterval = "30m"
+	}
+
 	// Set default steward ID if not provided
 	if config.Steward.ID == "" {
 		if hostname, err := os.Hostname(); err == nil {
@@ -390,70 +334,30 @@ func applyDefaults(config *StewardConfig) {
 	}
 }
 
-// ValidateConfiguration checks if the configuration is valid
-func ValidateConfiguration(config StewardConfig) error {
-	// Validate steward settings
-	if config.Steward.ID == "" {
-		return fmt.Errorf("steward ID is required")
-	}
-
-	// Validate operation mode
-	switch config.Steward.Mode {
-	case ModeStandalone, ModeController:
-		// Valid modes
-	default:
-		return fmt.Errorf("invalid operation mode: %s", config.Steward.Mode)
-	}
-
-	// Validate logging level
-	validLogLevels := []string{"debug", "info", "warn", "error"}
-	isValidLevel := false
-	for _, level := range validLogLevels {
-		if config.Steward.Logging.Level == level {
-			isValidLevel = true
-			break
-		}
-	}
-	if !isValidLevel {
-		return fmt.Errorf("invalid log level: %s", config.Steward.Logging.Level)
-	}
-
-	// Validate resources
-	resourceNames := make(map[string]bool)
-	for i, resource := range config.Resources {
-		if resource.Name == "" {
-			return fmt.Errorf("resource %d: name is required", i)
-		}
-
-		if resource.Module == "" {
-			return fmt.Errorf("resource %s: module is required", resource.Name)
-		}
-
-		if resourceNames[resource.Name] {
-			return fmt.Errorf("duplicate resource name: %s", resource.Name)
-		}
-		resourceNames[resource.Name] = true
-
-		if resource.Config == nil {
-			return fmt.Errorf("resource %s: config is required", resource.Name)
-		}
-	}
-
-	return nil
+// validateScriptSigningConfig delegates to the shared stewardtypes validator.
+// Kept as a package-internal function so tests in this package can call it directly.
+func validateScriptSigningConfig(cfg ScriptSigningConfig) error {
+	return stewardtypes.ValidateScriptSigningConfig(cfg)
 }
 
-// GetConfiguredModules returns a list of module names required by the configuration
-func GetConfiguredModules(config StewardConfig) []string {
-	moduleSet := make(map[string]bool)
-
-	for _, resource := range config.Resources {
-		moduleSet[resource.Module] = true
+// BuildModuleSigningConfig converts a steward ScriptSigningConfig into the
+// script.ModuleSigningConfig consumed by the script module and the steward
+// command handler's pre-dispatch signature verification (Issue #1671).
+//
+// It is used by both standalone-mode wiring (steward.go) and controller-connected
+// wiring (client.TransportClient) so the two paths cannot diverge.
+func BuildModuleSigningConfig(cfg ScriptSigningConfig) script.ModuleSigningConfig {
+	entries := make([]script.TrustedKeyEntry, len(cfg.TrustedKeys))
+	for i, key := range cfg.TrustedKeys {
+		entries[i] = script.TrustedKeyEntry{
+			Name:         key.Name,
+			Thumbprint:   key.Thumbprint,
+			PublicKeyRef: key.PublicKeyRef,
+		}
 	}
-
-	modules := make([]string, 0, len(moduleSet))
-	for module := range moduleSet {
-		modules = append(modules, module)
+	return script.ModuleSigningConfig{
+		TrustMode:     script.TrustMode(cfg.TrustMode),
+		TrustedKeys:   entries,
+		AllowPublicCA: cfg.AllowPublicCA,
 	}
-
-	return modules
 }

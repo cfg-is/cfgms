@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package server
 
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,43 +13,31 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/initialization"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage providers for Epic 6 compliance testing
-	// Note: memory provider is NOT imported as it's not a global provider
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // Security-focused tests for the controller server
 
-// Epic 6: Helper function to create storage configuration for all tests using Docker fixtures
+// Helper function to create storage configuration for all tests
 func createTestStorageConfig(tempDir, suffix string) *config.StorageConfig {
 	return &config.StorageConfig{
-		Provider: "git",
-		Config: map[string]interface{}{
-			"repository_path": tempDir + "/" + suffix + "-storage",
-			"branch":          "main",
-			"auto_init":       true,
-		},
+		Provider:     "flatfile",
+		FlatfileRoot: tempDir + "/" + suffix + "-flatfile",
+		SQLitePath:   tempDir + "/" + suffix + ".db",
 	}
 }
 
-// createDockerTestStorageConfig creates storage configs for Docker-based testing
-func createDockerTestStorageConfig(provider string) *config.StorageConfig {
+// createDockerTestStorageConfig creates storage configs for Docker-based testing.
+// For non-database providers, the flatfile+sqlite paths are scoped to t.TempDir()
+// so each test gets a fresh directory and no state persists in /tmp across runs —
+// stale on-disk schemas had previously broken tests after audit_entries migrations.
+func createDockerTestStorageConfig(t *testing.T, provider string) *config.StorageConfig {
+	t.Helper()
 	switch provider {
-	case "git":
-		return &config.StorageConfig{
-			Provider: "git",
-			Config: map[string]interface{}{
-				"repository_url": os.Getenv("CFGMS_TEST_GITEA_URL") + "/cfgms_test/cfgms-test-global.git",
-				"branch":         "main",
-				"auto_init":      true,
-				"username":       os.Getenv("CFGMS_TEST_GITEA_USER"),
-				"password":       os.Getenv("CFGMS_TEST_GITEA_PASSWORD"),
-			},
-		}
 	case "database":
 		return &config.StorageConfig{
 			Provider: "database",
@@ -62,7 +51,7 @@ func createDockerTestStorageConfig(provider string) *config.StorageConfig {
 			},
 		}
 	default:
-		return createTestStorageConfig(os.TempDir(), provider)
+		return createTestStorageConfig(t.TempDir(), provider)
 	}
 }
 
@@ -107,19 +96,19 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 			errMsg:  "storage configuration is required",
 		},
 		{
-			name: "invalid storage provider should fail",
+			name: "missing flatfile_root should fail",
 			config: &config.Config{
 				ListenAddr: "127.0.0.1:0",
 				Certificate: &config.CertificateConfig{
 					EnableCertManagement: false,
 				},
 				Storage: &config.StorageConfig{
-					Provider: "invalid-provider-name",
+					Provider: "flatfile",
 					Config:   make(map[string]interface{}),
 				},
 			},
 			wantErr: true,
-			errMsg:  "storage provider",
+			errMsg:  "flatfile_root is required",
 		},
 		{
 			name: "insecure config should create server but with warnings",
@@ -130,44 +119,42 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 				},
 				// Epic 6: Storage configuration now required
 				Storage: &config.StorageConfig{
-					Provider: "git",
-					Config: map[string]interface{}{
-						"repository_path": tempDir + "/test-storage",
-						"branch":          "main",
-						"auto_init":       true,
-					},
+					Provider:     "flatfile",
+					FlatfileRoot: tempDir + "/flatfile",
+					SQLitePath:   tempDir + "/cfgms.db",
 				},
 			},
 			wantErr: false,
 		},
 		{
 			name: "secure config with cert management",
-			config: &config.Config{
-				ListenAddr: "127.0.0.1:0",
-				CertPath:   tempDir,
-				Certificate: &config.CertificateConfig{
-					EnableCertManagement:   true,
-					ClientCertValidityDays: 30,
-					CAPath:                 tempDir,
-					ServerCertValidityDays: 90,
-					RenewalThresholdDays:   7,
-					Server: &config.ServerCertificateConfig{
-						CommonName:   "test-controller",
-						DNSNames:     []string{"localhost"},
-						IPAddresses:  []string{"127.0.0.1"},
-						Organization: "Test Org",
+			config: func() *config.Config {
+				certDir := tempDir + "/cert-mgmt"
+				_ = os.MkdirAll(certDir, 0700)
+				testutil.PreInitControllerForTest(t, certDir, certDir)
+				return &config.Config{
+					ListenAddr: "127.0.0.1:0",
+					CertPath:   certDir,
+					Certificate: &config.CertificateConfig{
+						EnableCertManagement:   true,
+						ClientCertValidityDays: 30,
+						CAPath:                 certDir,
+						ServerCertValidityDays: 90,
+						RenewalThresholdDays:   7,
+						Server: &config.ServerCertificateConfig{
+							CommonName:   "test-controller",
+							DNSNames:     []string{"localhost"},
+							IPAddresses:  []string{"127.0.0.1"},
+							Organization: "Test Org",
+						},
 					},
-				},
-				// Epic 6: Storage configuration now required
-				Storage: &config.StorageConfig{
-					Provider: "git",
-					Config: map[string]interface{}{
-						"repository_path": tempDir + "/secure-storage",
-						"branch":          "main",
-						"auto_init":       true,
+					Storage: &config.StorageConfig{
+						Provider:     "flatfile",
+						FlatfileRoot: tempDir + "/flatfile",
+						SQLitePath:   tempDir + "/cfgms.db",
 					},
-				},
-			},
+				}
+			}(),
 			wantErr: false,
 		},
 	}
@@ -185,14 +172,25 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, server)
+				if server != nil {
+					t.Cleanup(func() {
+						if err := server.Stop(); err != nil {
+							t.Errorf("server.Stop: %v", err)
+						}
+					})
+				}
 
 				// Verify security components are initialized
 				assert.NotNil(t, server.rbacManager)
 				assert.NotNil(t, server.tenantManager)
 				assert.NotNil(t, server.rbacService)
 
-				// Note: if certificate management is enabled, certManager might be nil if CA setup fails, which is expected in test environment
-				_ = tt.config.Certificate != nil && tt.config.Certificate.EnableCertManagement
+				// If certificate management is enabled and certs were pre-initialized, certManager must be set
+				if tt.config.Certificate != nil && tt.config.Certificate.EnableCertManagement {
+					assert.NotNil(t, server.certManager, "certManager must be initialized when EnableCertManagement is true")
+				} else {
+					assert.Nil(t, server.certManager, "certManager must be nil when EnableCertManagement is false")
+				}
 			}
 		})
 	}
@@ -201,11 +199,6 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 // TestServer_StorageProviderValidation dynamically validates storage provider configuration
 // against all registered global storage providers
 func TestServer_StorageProviderValidation(t *testing.T) {
-	// Skip if integration tests are explicitly disabled (e.g., cross-platform CI without Docker)
-	if os.Getenv("CFGMS_TEST_INTEGRATION") == "0" {
-		t.Skip("Skipping storage provider validation - integration tests disabled (CFGMS_TEST_INTEGRATION=0)")
-	}
-
 	logger := logging.NewNoopLogger()
 	tempDir, err := os.MkdirTemp("", "storage_provider_test")
 	require.NoError(t, err)
@@ -216,6 +209,11 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 	require.NotEmpty(t, registeredProviders, "No storage providers registered - this indicates a system configuration problem")
 
 	t.Run("ValidateRegisteredProvidersWork", func(t *testing.T) {
+		// Skip if integration tests are explicitly disabled (e.g., cross-platform CI without Docker)
+		if os.Getenv("CFGMS_TEST_INTEGRATION") == "0" {
+			t.Skip("Skipping storage provider validation - integration tests disabled (CFGMS_TEST_INTEGRATION=0)")
+		}
+
 		// Test each registered provider works
 		for _, providerInfo := range registeredProviders {
 			if !providerInfo.Available {
@@ -228,7 +226,7 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 
 				// Use Docker test configuration if available, otherwise fall back to local test
 				if isDockerTestEnvironment() {
-					storageConfig = createDockerTestStorageConfig(providerInfo.Name)
+					storageConfig = createDockerTestStorageConfig(t, providerInfo.Name)
 					t.Logf("Using Docker test configuration for provider '%s'", providerInfo.Name)
 				} else {
 					// For local testing, use appropriate configuration per provider
@@ -272,6 +270,11 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 				assert.NotNil(t, server, "Server should be created with valid provider '%s'", providerInfo.Name)
 
 				if server != nil {
+					t.Cleanup(func() {
+						if err := server.Stop(); err != nil {
+							t.Errorf("server.Stop: %v", err)
+						}
+					})
 					// Verify all storage interfaces are properly initialized
 					assert.NotNil(t, server.rbacManager, "RBAC manager should be initialized with provider '%s'", providerInfo.Name)
 					assert.NotNil(t, server.tenantManager, "Tenant manager should be initialized with provider '%s'", providerInfo.Name)
@@ -308,7 +311,7 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 		server, err := New(config, logger)
 		assert.Error(t, err, "Invalid storage provider should cause server creation to fail")
 		assert.Nil(t, server, "Server should not be created with invalid provider")
-		assert.Contains(t, err.Error(), "storage provider", "Error should mention storage provider issue")
+		assert.Contains(t, err.Error(), "flatfile_root is required", "Error should mention flatfile_root requirement for OSS composite storage")
 	})
 
 	t.Run("FutureProofProviderList", func(t *testing.T) {
@@ -321,7 +324,7 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 		t.Logf("Currently registered storage providers: %v", providerNames)
 
 		// These are the providers we expect to exist based on our architecture
-		expectedProviders := []string{"git", "database"}
+		expectedProviders := []string{"flatfile", "sqlite"}
 
 		for _, expected := range expectedProviders {
 			found := false
@@ -360,32 +363,33 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 	}{
 		{
 			name: "production security configuration",
-			config: &config.Config{
-				ListenAddr: "127.0.0.1:0",
-				CertPath:   tempDir,
-				// Epic 6: Storage configuration required
-				Storage: &config.StorageConfig{
-					Provider: "git",
-					Config: map[string]interface{}{
-						"repository_path": tempDir + "/prod-storage",
-						"branch":          "main",
-						"auto_init":       true,
+			config: func() *config.Config {
+				certDir := tempDir + "/prod-certs"
+				_ = os.MkdirAll(certDir, 0700)
+				testutil.PreInitControllerForTest(t, certDir, certDir)
+				return &config.Config{
+					ListenAddr: "127.0.0.1:0",
+					CertPath:   certDir,
+					Storage: &config.StorageConfig{
+						Provider:     "flatfile",
+						FlatfileRoot: tempDir + "/flatfile",
+						SQLitePath:   tempDir + "/cfgms.db",
 					},
-				},
-				Certificate: &config.CertificateConfig{
-					EnableCertManagement:   true,
-					ClientCertValidityDays: 30, // Short validity for security
-					ServerCertValidityDays: 90, // Short server cert validity
-					CAPath:                 tempDir,
-					RenewalThresholdDays:   7,
-					Server: &config.ServerCertificateConfig{
-						CommonName:   "prod-controller",
-						DNSNames:     []string{"localhost"},
-						IPAddresses:  []string{"127.0.0.1"},
-						Organization: "Production Org",
+					Certificate: &config.CertificateConfig{
+						EnableCertManagement:   true,
+						ClientCertValidityDays: 30,
+						ServerCertValidityDays: 90,
+						CAPath:                 certDir,
+						RenewalThresholdDays:   7,
+						Server: &config.ServerCertificateConfig{
+							CommonName:   "prod-controller",
+							DNSNames:     []string{"localhost"},
+							IPAddresses:  []string{"127.0.0.1"},
+							Organization: "Production Org",
+						},
 					},
-				},
-			},
+				}
+			}(),
 			expectSecure: true,
 			securityChecks: []func(*testing.T, *Server){
 				func(t *testing.T, s *Server) {
@@ -406,12 +410,9 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 				ListenAddr: "127.0.0.1:0",
 				// Epic 6: Storage configuration required
 				Storage: &config.StorageConfig{
-					Provider: "git",
-					Config: map[string]interface{}{
-						"repository_path": tempDir + "/dev-storage",
-						"branch":          "main",
-						"auto_init":       true,
-					},
+					Provider:     "flatfile",
+					FlatfileRoot: tempDir + "/flatfile",
+					SQLitePath:   tempDir + "/cfgms.db",
 				},
 				Certificate: &config.CertificateConfig{
 					EnableCertManagement: false, // Insecure for development
@@ -432,6 +433,11 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server, err := New(tt.config, logger)
 			require.NoError(t, err)
+			t.Cleanup(func() {
+				if err := server.Stop(); err != nil {
+					t.Errorf("server.Stop: %v", err)
+				}
+			})
 
 			// Run security checks
 			for _, check := range tt.securityChecks {
@@ -461,15 +467,11 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			configFunc: func() *config.Config {
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
-					CertPath:   tempDir, // Valid cert path for storage
-					// Epic 6: Storage configuration required
+					CertPath:   tempDir,
 					Storage: &config.StorageConfig{
-						Provider: "git",
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/malformed-paths-storage",
-							"branch":          "main",
-							"auto_init":       true,
-						},
+						Provider:     "flatfile",
+						FlatfileRoot: tempDir + "/flatfile",
+						SQLitePath:   tempDir + "/cfgms.db",
 					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: true,
@@ -481,29 +483,28 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					},
 				}
 			},
-			expectError: false, // Server creation should succeed, path validation happens during CA creation
-			description: "Path traversal in certificate paths should be handled securely",
+			expectError: true, // Init guard: path traversal path won't be initialized
+			description: "Path traversal in certificate paths should be rejected by init guard",
 		},
 		{
 			name: "excessive certificate validity periods",
 			configFunc: func() *config.Config {
+				certDir := tempDir + "/excessive-certs"
+				_ = os.MkdirAll(certDir, 0700)
+				testutil.PreInitControllerForTest(t, certDir, certDir)
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
-					CertPath:   tempDir,
-					// Epic 6: Storage configuration required
+					CertPath:   certDir,
 					Storage: &config.StorageConfig{
-						Provider: "git",
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/excessive-validity-storage",
-							"branch":          "main",
-							"auto_init":       true,
-						},
+						Provider:     "flatfile",
+						FlatfileRoot: tempDir + "/flatfile",
+						SQLitePath:   tempDir + "/cfgms.db",
 					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement:   true,
-						ClientCertValidityDays: 36500, // 100 years - excessive
-						ServerCertValidityDays: 36500, // 100 years - excessive
-						CAPath:                 tempDir,
+						ClientCertValidityDays: 36500,
+						ServerCertValidityDays: 36500,
+						CAPath:                 certDir,
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "test-controller",
 							Organization: "Test Org",
@@ -511,7 +512,7 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					},
 				}
 			},
-			expectError: false, // Should create but log warnings
+			expectError: false,
 			description: "Excessive certificate validity should be allowed but warned about",
 		},
 		{
@@ -521,12 +522,9 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					ListenAddr: "127.0.0.1:80", // Privileged port
 					// Epic 6: Storage configuration required
 					Storage: &config.StorageConfig{
-						Provider: "git",
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/privileged-port-storage",
-							"branch":          "main",
-							"auto_init":       true,
-						},
+						Provider:     "flatfile",
+						FlatfileRoot: tempDir + "/flatfile",
+						SQLitePath:   tempDir + "/cfgms.db",
 					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: false,
@@ -543,12 +541,9 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					ListenAddr: "127.0.0.1:0", // Localhost only
 					// Epic 6: Storage configuration required
 					Storage: &config.StorageConfig{
-						Provider: "git",
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/localhost-storage",
-							"branch":          "main",
-							"auto_init":       true,
-						},
+						Provider:     "flatfile",
+						FlatfileRoot: tempDir + "/flatfile",
+						SQLitePath:   tempDir + "/cfgms.db",
 					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: false,
@@ -561,21 +556,20 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 		{
 			name: "wildcard binding security check",
 			configFunc: func() *config.Config {
+				certDir := tempDir + "/wildcard-certs"
+				_ = os.MkdirAll(certDir, 0700)
+				testutil.PreInitControllerForTest(t, certDir, certDir)
 				return &config.Config{
-					ListenAddr: "0.0.0.0:0", // Wildcard binding
-					CertPath:   tempDir,
-					// Epic 6: Storage configuration required
+					ListenAddr: "0.0.0.0:0",
+					CertPath:   certDir,
 					Storage: &config.StorageConfig{
-						Provider: "git",
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/wildcard-storage",
-							"branch":          "main",
-							"auto_init":       true,
-						},
+						Provider:     "flatfile",
+						FlatfileRoot: tempDir + "/flatfile",
+						SQLitePath:   tempDir + "/cfgms.db",
 					},
 					Certificate: &config.CertificateConfig{
-						EnableCertManagement: true, // Should require TLS for wildcard
-						CAPath:               tempDir,
+						EnableCertManagement: true,
+						CAPath:               certDir,
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "wildcard-controller",
 							Organization: "Test Org",
@@ -600,6 +594,13 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			} else {
 				assert.NoError(t, err, tt.description)
 				assert.NotNil(t, server)
+				if server != nil {
+					t.Cleanup(func() {
+						if err := server.Stop(); err != nil {
+							t.Errorf("server.Stop: %v", err)
+						}
+					})
+				}
 
 				// Validate security components are still initialized
 				assert.NotNil(t, server.rbacManager)
@@ -619,11 +620,11 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 
 	const numConcurrent = 10
 
-	// Race detector adds 5-10x overhead, so increase timeout accordingly
+	// Race detector adds 5-10x overhead, and full suite load adds further contention
 	// Each concurrent server creation involves: Git init, RBAC setup, storage init
 	timeout := 5 * time.Second
 	if raceDetectorEnabled() {
-		timeout = 15 * time.Second // 3x longer for race detector overhead
+		timeout = 45 * time.Second // Race + full suite resource contention
 	}
 
 	// Test concurrent server creation (should be thread-safe)
@@ -654,6 +655,7 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 	// Collect results
 	successCount := 0
 	errorCount := 0
+	var createdServers []*Server
 
 	for i := 0; i < numConcurrent; i++ {
 		select {
@@ -661,6 +663,7 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 			assert.NotNil(t, server)
 			assert.NotNil(t, server.rbacManager)
 			successCount++
+			createdServers = append(createdServers, server)
 		case err := <-errors:
 			t.Errorf("Unexpected error in concurrent server creation: %v", err)
 			errorCount++
@@ -671,6 +674,15 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 
 	assert.Equal(t, numConcurrent, successCount)
 	assert.Equal(t, 0, errorCount)
+
+	// Stop all successfully created servers to prevent goroutine leaks.
+	t.Cleanup(func() {
+		for i, s := range createdServers {
+			if err := s.Stop(); err != nil {
+				t.Errorf("server[%d].Stop(): %v", i, err)
+			}
+		}
+	})
 }
 
 func TestServer_RBAC_SecurityIntegration(t *testing.T) {
@@ -693,6 +705,11 @@ func TestServer_RBAC_SecurityIntegration(t *testing.T) {
 	server, err := New(config, logger)
 	require.NoError(t, err)
 	require.NotNil(t, server)
+	t.Cleanup(func() {
+		if err := server.Stop(); err != nil {
+			t.Errorf("server.Stop: %v", err)
+		}
+	})
 
 	// Verify RBAC integration
 	assert.NotNil(t, server.rbacManager)
@@ -761,6 +778,13 @@ func TestServer_NetworkSecurity_And_Binding(t *testing.T) {
 			} else {
 				assert.NoError(t, err, tt.description)
 				assert.NotNil(t, server)
+				if server != nil {
+					t.Cleanup(func() {
+						if err := server.Stop(); err != nil {
+							t.Errorf("server.Stop: %v", err)
+						}
+					})
+				}
 			}
 		})
 	}
@@ -777,28 +801,33 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 	// Test certificate-related security validations
 	tests := []struct {
 		name           string
-		config         *config.Config
+		configFunc     func() *config.Config
 		description    string
 		securityChecks []func(*testing.T, *Server)
 	}{
 		{
 			name: "short certificate validity periods for security",
-			config: &config.Config{
-				ListenAddr: "127.0.0.1:0",
-				CertPath:   tempDir,
-				Certificate: &config.CertificateConfig{
-					EnableCertManagement:   true,
-					ClientCertValidityDays: 7,  // Very short for high security
-					ServerCertValidityDays: 30, // Short server cert validity
-					RenewalThresholdDays:   3,  // Early renewal
-					CAPath:                 tempDir,
-					Server: &config.ServerCertificateConfig{
-						CommonName:   "secure-controller",
-						DNSNames:     []string{"localhost"},
-						IPAddresses:  []string{"127.0.0.1"},
-						Organization: "Secure Org",
+			configFunc: func() *config.Config {
+				certDir := tempDir + "/short-validity-certs"
+				_ = os.MkdirAll(certDir, 0700)
+				testutil.PreInitControllerForTest(t, certDir, certDir)
+				return &config.Config{
+					ListenAddr: "127.0.0.1:0",
+					CertPath:   certDir,
+					Certificate: &config.CertificateConfig{
+						EnableCertManagement:   true,
+						ClientCertValidityDays: 7,
+						ServerCertValidityDays: 30,
+						RenewalThresholdDays:   3,
+						CAPath:                 certDir,
+						Server: &config.ServerCertificateConfig{
+							CommonName:   "secure-controller",
+							DNSNames:     []string{"localhost"},
+							IPAddresses:  []string{"127.0.0.1"},
+							Organization: "Secure Org",
+						},
 					},
-				},
+				}
 			},
 			description: "Short validity periods enhance security",
 			securityChecks: []func(*testing.T, *Server){
@@ -814,17 +843,22 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 		},
 		{
 			name: "auto-generation and renewal for operational security",
-			config: &config.Config{
-				ListenAddr: "127.0.0.1:0",
-				CertPath:   tempDir,
-				Certificate: &config.CertificateConfig{
-					EnableCertManagement: true,
-					CAPath:               tempDir,
-					Server: &config.ServerCertificateConfig{
-						CommonName:   "auto-controller",
-						Organization: "Auto Org",
+			configFunc: func() *config.Config {
+				certDir := tempDir + "/auto-renewal-certs"
+				_ = os.MkdirAll(certDir, 0700)
+				testutil.PreInitControllerForTest(t, certDir, certDir)
+				return &config.Config{
+					ListenAddr: "127.0.0.1:0",
+					CertPath:   certDir,
+					Certificate: &config.CertificateConfig{
+						EnableCertManagement: true,
+						CAPath:               certDir,
+						Server: &config.ServerCertificateConfig{
+							CommonName:   "auto-controller",
+							Organization: "Auto Org",
+						},
 					},
-				},
+				}
 			},
 			description: "Auto-generation and renewal reduce operational security risks",
 			securityChecks: []func(*testing.T, *Server){
@@ -843,12 +877,17 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 			require.NoError(t, err)
 			defer func() { _ = os.RemoveAll(storageDir) }()
 
-			// Add storage configuration to test config
-			tt.config.Storage = createTestStorageConfig(storageDir, "cert")
+			cfg := tt.configFunc()
+			cfg.Storage = createTestStorageConfig(storageDir, "cert")
 
-			server, err := New(tt.config, logger)
+			server, err := New(cfg, logger)
 			require.NoError(t, err)
 			require.NotNil(t, server)
+			t.Cleanup(func() {
+				if err := server.Stop(); err != nil {
+					t.Errorf("server.Stop: %v", err)
+				}
+			})
 
 			// Run security checks
 			for _, check := range tt.securityChecks {
@@ -870,6 +909,10 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tempDir2) }()
 
+	// Pre-initialize both CA directories before server creation
+	testutil.PreInitControllerForTest(t, tempDir1, tempDir1)
+	testutil.PreInitControllerForTest(t, tempDir2, tempDir2)
+
 	// Test that servers created with different configurations are properly isolated
 	config1 := &config.Config{
 		ListenAddr: "127.0.0.1:0",
@@ -883,7 +926,6 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 				Organization: "Server1 Org",
 			},
 		},
-		// Epic 6: Storage configuration required for server creation
 		Storage: createTestStorageConfig(tempDir1, "env1"),
 	}
 
@@ -899,17 +941,26 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 				Organization: "Server2 Org",
 			},
 		},
-		// Epic 6: Storage configuration required for server creation
 		Storage: createTestStorageConfig(tempDir2, "env2"),
 	}
 
 	server1, err := New(config1, logger)
 	require.NoError(t, err)
 	require.NotNil(t, server1)
+	t.Cleanup(func() {
+		if err := server1.Stop(); err != nil {
+			t.Errorf("server1.Stop: %v", err)
+		}
+	})
 
 	server2, err := New(config2, logger)
 	require.NoError(t, err)
 	require.NotNil(t, server2)
+	t.Cleanup(func() {
+		if err := server2.Stop(); err != nil {
+			t.Errorf("server2.Stop: %v", err)
+		}
+	})
 
 	// Verify isolation
 	assert.NotEqual(t, server1.cfg.DataDir, server2.cfg.DataDir,
@@ -945,9 +996,181 @@ func TestServer_DataDirectorySecurity(t *testing.T) {
 	server, err := New(config, logger)
 	require.NoError(t, err)
 	require.NotNil(t, server)
+	t.Cleanup(func() {
+		if err := server.Stop(); err != nil {
+			t.Errorf("server.Stop: %v", err)
+		}
+	})
 
 	// Verify data directory configuration is preserved
 	assert.Equal(t, tempDir, server.cfg.DataDir)
+}
+
+// TestServer_New_RefusesWithoutInit verifies that the server refuses to start
+// when certificate management is enabled but initialization has not been performed.
+func TestServer_New_RefusesWithoutInit(t *testing.T) {
+	logger := logging.NewNoopLogger()
+
+	tempDir, err := os.MkdirTemp("", "server_init_guard_test")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		CertPath:   tempDir,
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               tempDir + "/nonexistent-ca",
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "test-controller",
+				Organization: "Test Org",
+			},
+		},
+		Storage: createTestStorageConfig(tempDir, "init-guard"),
+	}
+
+	srv, err := New(cfg, logger)
+	assert.Error(t, err, "Server should refuse to start without initialization")
+	assert.Nil(t, srv)
+	assert.ErrorIs(t, err, ErrNotInitialized)
+}
+
+// TestServer_New_LegacyCompatibility verifies that an existing CA without an init
+// marker gets a marker auto-created (backward compatibility for pre-init deployments).
+func TestServer_New_LegacyCompatibility(t *testing.T) {
+	logger := logging.NewNoopLogger()
+
+	tempDir, err := os.MkdirTemp("", "server_legacy_compat_test")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	certDir := tempDir + "/legacy-ca"
+
+	// Create CA files without marker (simulates pre-init deployment)
+	_, err = cert.NewManager(&cert.ManagerConfig{
+		StoragePath: certDir,
+		CAConfig: &cert.CAConfig{
+			Organization: "Legacy Org",
+			Country:      "US",
+			ValidityDays: 3650,
+			StoragePath:  certDir,
+		},
+		LoadExistingCA: false,
+	})
+	require.NoError(t, err, "Failed to create legacy CA")
+
+	// Verify no marker exists yet
+	assert.False(t, initialization.IsInitialized(certDir), "Should not have marker before server start")
+
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		CertPath:   certDir,
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               certDir,
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "legacy-controller",
+				Organization: "Legacy Org",
+			},
+		},
+		Storage: createTestStorageConfig(tempDir, "legacy"),
+	}
+
+	srv, err := New(cfg, logger)
+	assert.NoError(t, err, "Server should start with legacy CA (auto-creates marker)")
+	assert.NotNil(t, srv)
+	if srv != nil {
+		t.Cleanup(func() {
+			if err := srv.Stop(); err != nil {
+				t.Errorf("srv.Stop: %v", err)
+			}
+		})
+	}
+
+	// Verify marker was created
+	assert.True(t, initialization.IsInitialized(certDir), "Marker should be auto-created for legacy CA")
+}
+
+// TestServer_New_MarkerButNoCA verifies that if the marker exists but CA files
+// are missing, the server fails with a clear error about loading the CA.
+func TestServer_New_MarkerButNoCA(t *testing.T) {
+	logger := logging.NewNoopLogger()
+
+	tempDir, err := os.MkdirTemp("", "server_marker_no_ca_test")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	certDir := tempDir + "/orphan-marker"
+	require.NoError(t, os.MkdirAll(certDir, 0700))
+
+	// Write marker without CA files (simulates deleted/missing CA)
+	err = initialization.CreateLegacyMarker(certDir)
+	require.NoError(t, err)
+
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		CertPath:   certDir,
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               certDir,
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "orphan-controller",
+				Organization: "Test Org",
+			},
+		},
+		Storage: createTestStorageConfig(tempDir, "orphan"),
+	}
+
+	srv, err := New(cfg, logger)
+	assert.Error(t, err, "Server should fail when marker exists but CA files are missing")
+	assert.Nil(t, srv)
+	assert.Contains(t, err.Error(), "load", "Error should mention loading CA")
+}
+
+// TestBuildGRPCControlPlaneTLSConfig_DoesNotWriteCertFilesToDisk verifies that
+// buildGRPCControlPlaneTLSConfig does not write cert files to disk.
+//
+// Per ADR-002: the function previously called writeTransportCertsToDir, which existed
+// solely so integration test infrastructure could find certs at well-known paths.
+// Certs must be used in-memory only — no filesystem side-effects.
+func TestBuildGRPCControlPlaneTLSConfig_DoesNotWriteCertFilesToDisk(t *testing.T) {
+	tempDir := t.TempDir()
+
+	certManager, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: tempDir,
+		CAConfig: &cert.CAConfig{
+			Organization: "CFGMS Test",
+			Country:      "US",
+			ValidityDays: 365,
+			KeySize:      2048,
+		},
+		LoadExistingCA:       false,
+		RenewalThresholdDays: 30,
+	})
+	require.NoError(t, err)
+
+	cfg := &config.Config{
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               tempDir,
+		},
+	}
+
+	logger := logging.NewNoopLogger()
+
+	tlsConfig, err := buildGRPCControlPlaneTLSConfig(cfg, certManager, logger)
+	require.NoError(t, err)
+	require.NotNil(t, tlsConfig)
+
+	// The TLS config must carry the server certificate in-memory.
+	assert.NotEmpty(t, tlsConfig.Certificates, "TLS config must contain server certificate in-memory")
+
+	// writeTransportCertsToDir wrote server cert/key to well-known paths under CAPath.
+	// After its removal these files must not exist — certs are in-memory only.
+	assert.NoFileExists(t, filepath.Join(tempDir, "server", "server.crt"),
+		"buildGRPCControlPlaneTLSConfig must not write server cert to disk")
+	assert.NoFileExists(t, filepath.Join(tempDir, "server", "server.key"),
+		"buildGRPCControlPlaneTLSConfig must not write server key to disk")
 }
 
 // Check if we're running in Docker integration test environment

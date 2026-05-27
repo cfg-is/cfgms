@@ -17,17 +17,38 @@
 name: CodeQL Security Analysis
 
 on:
+  # Trigger only on changes to Go sources or the module graph (Issue #1581).
+  # CodeQL is configured for `language: go` only, so PRs that don't touch any
+  # Go files have nothing to analyze. The strict allowlist supersedes the
+  # previous `paths-ignore` block — same behavior, fewer surprises for readers.
+  # CodeQL config + extension pack + workflow file are also included so config
+  # tweaks (sanitizer models, query suite changes) trigger a re-scan; without
+  # this, a config-only commit silently ran against the previous SARIF.
   push:
     branches: [ main, develop ]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/codeql/**'
+      - '.github/workflows/codeql-analysis.yml'
   pull_request:
     branches: [ main, develop ]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/codeql/**'
+      - '.github/workflows/codeql-analysis.yml'
   schedule:
     # Run weekly security scan on Wednesdays at 3 AM UTC
     - cron: '0 3 * * 3'
   workflow_dispatch:
 
 env:
-  GO_VERSION: '1.23'
+  GO_VERSION: '1.26.3'
+
+permissions: {}
 
 jobs:
   analyze:
@@ -39,6 +60,8 @@ jobs:
       actions: read
       contents: read
       security-events: write
+      # Required so init can pull cfg-is/cfgms-go-extensions from ghcr.io.
+      packages: read
 
     strategy:
       fail-fast: false
@@ -48,40 +71,50 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
       with:
         go-version: ${{ env.GO_VERSION }}
+        cache: true  # explicit default — module cache handled here, no separate actions/cache step needed
 
-    - name: Cache Go modules
-      uses: actions/cache@v4
+    # Cache the CodeQL database between runs (Issue #1581). Keyed on a digest
+    # of all Go sources + go.sum so a real code change invalidates the cache
+    # and forces a fresh DB build. PRs that re-trigger CodeQL after a rebase
+    # or a non-Go change in the same series get a fast restore + analyze.
+    # Cache scope: the CodeQL action stores its DB under runner.temp by default.
+    - name: Cache CodeQL database
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
       with:
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-        key: ${{ runner.os }}-go-codeql-${{ hashFiles('**/go.sum') }}
+        path: ${{ runner.temp }}/codeql_databases
+        key: ${{ runner.os }}-codeql-db-${{ matrix.language }}-${{ hashFiles('**/*.go', '**/go.sum') }}
         restore-keys: |
-          ${{ runner.os }}-go-codeql-
-          ${{ runner.os }}-go-
+          ${{ runner.os }}-codeql-db-${{ matrix.language }}-
 
     - name: Download dependencies
       run: go mod download
 
-    # Initialize CodeQL tools for scanning
+    # Initialize CodeQL tools for scanning.
+    #
+    # cfg-is/cfgms-go-extensions is resolved by name from ghcr.io. The pack
+    # is published by .github/workflows/codeql-pack-publish.yml (triggers
+    # on push to main/develop when .github/codeql/extensions/** changes,
+    # plus workflow_dispatch). For the first publish from a feature branch,
+    # run that workflow manually with `--ref <branch>` before re-running
+    # this one.
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
+      uses: github/codeql-action/init@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4
       with:
         languages: ${{ matrix.language }}
-        # Use security-extended query suite for comprehensive coverage
-        # Available suites:
-        #   - default: Standard security and quality queries
-        #   - security-extended: All security queries (recommended)
-        #   - security-and-quality: Security + code quality queries
-        queries: security-extended
+        config-file: ./.github/codeql/codeql-config.yml
+        # Persist per-language dependency caches across runs (Issue #1581).
+        # Official CodeQL-action support — complements the Go module cache
+        # above and the DB cache below to minimize cold-start work.
+        dependency-caching: true
+        db-location: ${{ runner.temp }}/codeql_databases
         # Enable automatic language detection
-        setup-python-dependencies: false
+
 
     # Build the Go code for CodeQL to analyze
     # CodeQL needs to trace the build to understand code flow
@@ -94,7 +127,7 @@ jobs:
 
     # Perform CodeQL Analysis
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
+      uses: github/codeql-action/analyze@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4
       with:
         category: "/language:${{ matrix.language }}"
         # Upload results to GitHub Security tab (SARIF format)
@@ -106,7 +139,7 @@ jobs:
         # fail-on: high
 
     - name: Upload CodeQL Results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
       if: always()
       with:
         name: codeql-results-${{ matrix.language }}

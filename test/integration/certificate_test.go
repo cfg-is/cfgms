@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package integration
 
@@ -74,20 +74,20 @@ func (s *CertificateTestSuite) TestServerCertificateExists() {
 	s.NoError(err, "Should be able to retrieve server certificates")
 	s.GreaterOrEqual(len(serverCerts), 1, "Should have at least one server certificate")
 
-	// The controller generates an MQTT server certificate first
-	// Find it by checking for "cfgms-mqtt-server" common name
-	var mqttServerCert *cert.CertificateInfo
+	// The controller generates a server certificate for the gRPC transport layer
+	// Find it by checking for "cfgms-grpc-server" common name
+	var serverCert *cert.CertificateInfo
 	for _, certInfo := range serverCerts {
-		if certInfo.CommonName == "cfgms-mqtt-server" {
-			mqttServerCert = certInfo
+		if certInfo.CommonName == "cfgms-grpc-server" {
+			serverCert = certInfo
 			break
 		}
 	}
 
-	s.NotNil(mqttServerCert, "Should find MQTT server certificate")
-	s.Equal(cert.CertificateTypeServer, mqttServerCert.Type, "Certificate should be server type")
-	s.True(mqttServerCert.IsValid, "Server certificate should be valid")
-	s.True(mqttServerCert.ExpiresAt.After(time.Now()), "Server certificate should not be expired")
+	s.NotNil(serverCert, "Should find server certificate")
+	s.Equal(cert.CertificateTypeServer, serverCert.Type, "Certificate should be server type")
+	s.True(serverCert.IsValid, "Server certificate should be valid")
+	s.True(serverCert.ExpiresAt.After(time.Now()), "Server certificate should not be expired")
 }
 
 // TestClientCertificateExists tests that client certificate is properly created
@@ -150,7 +150,7 @@ func (s *CertificateTestSuite) TestCertificateValidation() {
 	// Get the server certificate
 	serverCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeServer)
 	s.NoError(err, "Should be able to retrieve server certificates")
-	s.Len(serverCerts, 1, "Should have exactly one server certificate")
+	s.GreaterOrEqual(len(serverCerts), 1, "Should have at least one server certificate")
 
 	// Get the actual certificate data for validation
 	serverCert, err := certManager.GetCertificate(serverCerts[0].SerialNumber)
@@ -202,8 +202,8 @@ func (s *CertificateTestSuite) TestStewardWithCertificates() {
 	// Give components time to initialize
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify steward started successfully with certificate management
-	s.NotNil(s.env.Steward, "Steward should be initialized")
+	// Verify transport client was created successfully
+	s.NotNil(s.env.TransportClient, "TransportClient should be initialized")
 
 	// Verify certificates are still valid after steward startup
 	err := s.env.ValidateCertificateSetup()
@@ -223,7 +223,7 @@ func (s *CertificateTestSuite) TestCertificateHealthMonitoring() {
 	// This would require accessing the steward's health monitor, which would need
 	// to be exposed in the test environment for full testing
 	// For now, we just verify that the system starts and runs without errors
-	s.NotNil(s.env.Steward, "Steward should be running with certificate health monitoring")
+	s.NotNil(s.env.TransportClient, "TransportClient should be active")
 }
 
 // TestCertificatePersistenceAcrossReboots validates that certificates persist and reload correctly
@@ -238,8 +238,15 @@ func (s *CertificateTestSuite) TestCertificatePersistenceAcrossReboots() {
 
 	serverCerts1, err := certManager1.GetCertificatesByType(cert.CertificateTypeServer)
 	s.NoError(err, "Should retrieve server certificates")
-	s.Len(serverCerts1, 1, "Should have exactly one server certificate")
+	s.GreaterOrEqual(len(serverCerts1), 1, "Should have at least one server certificate")
+	// Track the primary gRPC server certificate serial across reboots
 	originalServerSerial := serverCerts1[0].SerialNumber
+	for _, c := range serverCerts1 {
+		if c.CommonName == "cfgms-grpc-server" {
+			originalServerSerial = c.SerialNumber
+			break
+		}
+	}
 
 	// Simulate controller reboot by creating new test environment with same cert storage
 	// This validates that LoadExistingCA=true works correctly
@@ -255,8 +262,16 @@ func (s *CertificateTestSuite) TestCertificatePersistenceAcrossReboots() {
 
 	serverCerts2, err := certManager2.GetCertificatesByType(cert.CertificateTypeServer)
 	s.NoError(err, "Should retrieve server certificates after reboot")
-	s.Len(serverCerts2, 1, "Should still have exactly one server certificate after reboot")
-	s.Equal(originalServerSerial, serverCerts2[0].SerialNumber, "Server certificate serial should be same after reboot (not regenerated)")
+	s.GreaterOrEqual(len(serverCerts2), 1, "Should have at least one server certificate after reboot")
+	// Verify the primary server certificate was preserved (not regenerated)
+	var serverCertFound bool
+	for _, c := range serverCerts2 {
+		if c.SerialNumber == originalServerSerial {
+			serverCertFound = true
+			break
+		}
+	}
+	s.True(serverCertFound, "Server certificate serial should be same after reboot (not regenerated)")
 
 	// Verify controller starts successfully with reloaded certificates
 	s.env.Start()

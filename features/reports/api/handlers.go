@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package api
 
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"strconv"
 	"time"
@@ -31,23 +32,22 @@ func New(engine interfaces.ReportEngine, exporter interfaces.Exporter, logger lo
 	}
 }
 
-// RegisterRoutes registers the reports API routes
+// RegisterRoutes registers the reports API routes on the provided subrouter.
+// The router should already be scoped to the reports path prefix.
 func (h *Handler) RegisterRoutes(router *mux.Router) {
-	reportsRouter := router.PathPrefix("/api/v1/reports").Subrouter()
-
 	// Report generation and management
-	reportsRouter.HandleFunc("/generate", h.generateReport).Methods("POST")
-	reportsRouter.HandleFunc("/templates", h.getTemplates).Methods("GET")
-	reportsRouter.HandleFunc("/templates/{template}", h.getTemplate).Methods("GET")
+	router.HandleFunc("/generate", h.generateReport).Methods("POST")
+	router.HandleFunc("/templates", h.getTemplates).Methods("GET")
+	router.HandleFunc("/templates/{template}", h.getTemplate).Methods("GET")
 
 	// Dashboard endpoints
-	reportsRouter.HandleFunc("/dashboard/overview", h.getDashboardOverview).Methods("GET")
-	reportsRouter.HandleFunc("/dashboard/trends", h.getDashboardTrends).Methods("GET")
-	reportsRouter.HandleFunc("/dashboard/alerts", h.getDashboardAlerts).Methods("GET")
+	router.HandleFunc("/dashboard/overview", h.getDashboardOverview).Methods("GET")
+	router.HandleFunc("/dashboard/trends", h.getDashboardTrends).Methods("GET")
+	router.HandleFunc("/dashboard/alerts", h.getDashboardAlerts).Methods("GET")
 
 	// Specific report types
-	reportsRouter.HandleFunc("/compliance/status", h.getComplianceStatus).Methods("GET")
-	reportsRouter.HandleFunc("/drift/summary", h.getDriftSummary).Methods("GET")
+	router.HandleFunc("/compliance/status", h.getComplianceStatus).Methods("GET")
+	router.HandleFunc("/drift/summary", h.getDriftSummary).Methods("GET")
 
 	h.logger.Info("registered reports API routes")
 }
@@ -68,7 +68,7 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	// Generate the report
 	report, err := h.engine.GenerateReport(r.Context(), req)
 	if err != nil {
-		h.logger.Error("failed to generate report", "error", err, "request", req)
+		h.logger.Error("failed to generate report", "error", logging.SanitizeLogValue(err.Error()), "format", logging.SanitizeLogValue(string(req.Format)))
 		h.writeError(w, http.StatusInternalServerError, "Failed to generate report", err)
 		return
 	}
@@ -76,12 +76,13 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	// Export in requested format
 	exportData, err := h.exporter.Export(r.Context(), report, req.Format)
 	if err != nil {
-		h.logger.Error("failed to export report", "error", err, "format", req.Format)
+		h.logger.Error("failed to export report", "error", logging.SanitizeLogValue(err.Error()), "format", logging.SanitizeLogValue(string(req.Format)))
 		h.writeError(w, http.StatusInternalServerError, "Failed to export report", err)
 		return
 	}
 
-	// Set appropriate content type and headers
+	// Set appropriate content type and headers (nosniff prevents MIME-type sniffing XSS)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	h.setExportHeaders(w, req.Format, report.ID)
 	if _, err := w.Write(exportData); err != nil {
 		h.logger.Error("failed to write export data", "error", err)
@@ -89,9 +90,9 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Info("report generated successfully",
-		"report_id", report.ID,
-		"type", report.Type,
-		"format", req.Format,
+		"report_id", logging.SanitizeLogValue(report.ID),
+		"type", logging.SanitizeLogValue(string(report.Type)),
+		"format", logging.SanitizeLogValue(string(req.Format)),
 		"generation_ms", report.Metadata.GenerationMS)
 }
 
@@ -424,7 +425,7 @@ func (h *Handler) parseTimeRange(r *http.Request) (interfaces.TimeRange, error) 
 		if parsedStart, err := time.Parse(time.RFC3339, startStr); err == nil {
 			start = parsedStart
 		} else {
-			return interfaces.TimeRange{}, fmt.Errorf("invalid start time format: %s", startStr)
+			return interfaces.TimeRange{}, fmt.Errorf("invalid start time format: %s", html.EscapeString(startStr))
 		}
 	}
 
@@ -432,7 +433,7 @@ func (h *Handler) parseTimeRange(r *http.Request) (interfaces.TimeRange, error) 
 		if parsedEnd, err := time.Parse(time.RFC3339, endStr); err == nil {
 			end = parsedEnd
 		} else {
-			return interfaces.TimeRange{}, fmt.Errorf("invalid end time format: %s", endStr)
+			return interfaces.TimeRange{}, fmt.Errorf("invalid end time format: %s", html.EscapeString(endStr))
 		}
 	}
 
@@ -487,6 +488,7 @@ func (h *Handler) setExportHeaders(w http.ResponseWriter, format interfaces.Expo
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report_%s.csv\"", reportID))
 	case interfaces.FormatHTML:
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report_%s.html\"", reportID))
 	case interfaces.FormatPDF:
 		w.Header().Set("Content-Type", "application/pdf")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report_%s.pdf\"", reportID))

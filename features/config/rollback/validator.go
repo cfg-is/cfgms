@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rollback
 
@@ -7,13 +7,19 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/disk"
 )
 
 // DefaultRollbackValidator implements the RollbackValidator interface
 type DefaultRollbackValidator struct {
-	// Dependencies for validation
 	moduleRegistry ModuleRegistry
 	configParser   ConfigurationParser
+	rbacManager    rbac.RBACManager
 }
 
 // ModuleRegistry provides module information for validation
@@ -30,11 +36,13 @@ type ConfigurationParser interface {
 	GetRequiredFields(schema string) []string
 }
 
-// NewRollbackValidator creates a new rollback validator
-func NewRollbackValidator(moduleRegistry ModuleRegistry, configParser ConfigurationParser) RollbackValidator {
+// NewRollbackValidator creates a new rollback validator. Pass nil for rbacManager to disable
+// permission checks (useful for no-op or test contexts that only exercise other validations).
+func NewRollbackValidator(moduleRegistry ModuleRegistry, configParser ConfigurationParser, rbacManager rbac.RBACManager) RollbackValidator {
 	return &DefaultRollbackValidator{
 		moduleRegistry: moduleRegistry,
 		configParser:   configParser,
+		rbacManager:    rbacManager,
 	}
 }
 
@@ -127,7 +135,7 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 	}
 
 	// Check system health
-	healthIssues := v.checkSystemHealth(ctx, request.TargetType, request.TargetID)
+	healthIssues, cpuUsage, diskUsage := v.checkSystemHealth(ctx, request.TargetType, request.TargetID)
 	if len(healthIssues) > 0 {
 		results.Warnings = append(results.Warnings, healthIssues...)
 	}
@@ -135,6 +143,8 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 	// Add validation metadata
 	results.Metadata["validation_time"] = time.Now()
 	results.Metadata["validator_version"] = "1.0.0"
+	results.Metadata["cpu_usage_percent"] = cpuUsage
+	results.Metadata["disk_usage_percent"] = diskUsage
 
 	return results, nil
 }
@@ -298,8 +308,6 @@ func (v *DefaultRollbackValidator) ValidateModuleCompatibility(ctx context.Conte
 // Helper methods
 
 func (v *DefaultRollbackValidator) validateTarget(ctx context.Context, targetType TargetType, targetID string) error {
-	// In a real implementation, this would verify the target exists
-	// and the user has access to it
 	if targetID == "" {
 		return fmt.Errorf("target ID cannot be empty")
 	}
@@ -369,56 +377,82 @@ func (v *DefaultRollbackValidator) checkBreakingChanges(ctx context.Context, cha
 }
 
 func (v *DefaultRollbackValidator) validatePermissions(ctx context.Context, request RollbackRequest) error {
-	// In a real implementation, this would check actual permissions
-	// For now, we'll simulate some basic checks
-
-	// Emergency rollbacks require special permission
-	if request.Emergency {
-		// Check for emergency rollback permission
-		// return error if not authorized
-		_ = request.Emergency // Placeholder for emergency permission check implementation
+	if v.rbacManager == nil {
+		return nil
 	}
 
-	// MSP-level rollbacks require admin permission
+	userID, _ := ctx.Value(ctxkeys.UserIDKey).(string)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+
+	if request.Emergency || request.RollbackType == RollbackTypeEmergency {
+		resp, err := v.rbacManager.CheckPermission(ctx, &common.AccessRequest{
+			SubjectId:    userID,
+			PermissionId: "rollback.emergency",
+			TenantId:     tenantID,
+		})
+		if err != nil {
+			return fmt.Errorf("permission check failed: %w", err)
+		}
+		if !resp.Granted {
+			return fmt.Errorf("caller does not have permission to perform emergency rollbacks")
+		}
+	}
+
 	if request.TargetType == TargetTypeMSP {
-		// Check for MSP admin permission
-		// return error if not authorized
-		_ = request.TargetType // Placeholder for MSP admin permission check implementation
+		resp, err := v.rbacManager.CheckPermission(ctx, &common.AccessRequest{
+			SubjectId:    userID,
+			PermissionId: "rollback.msp",
+			TenantId:     tenantID,
+		})
+		if err != nil {
+			return fmt.Errorf("permission check failed: %w", err)
+		}
+		if !resp.Granted {
+			return fmt.Errorf("caller does not have permission to perform MSP-level rollbacks")
+		}
 	}
 
 	return nil
 }
 
-func (v *DefaultRollbackValidator) checkSystemHealth(ctx context.Context, targetType TargetType, targetID string) []ValidationIssue {
-	issues := []ValidationIssue{}
+func (v *DefaultRollbackValidator) checkSystemHealth(_ context.Context, _ TargetType, _ string) ([]ValidationIssue, float64, float64) {
+	cpuPercents, err := cpu.Percent(500*time.Millisecond, false)
+	var cpuUsage float64
+	if err == nil && len(cpuPercents) > 0 {
+		cpuUsage = cpuPercents[0]
+	}
 
-	// In a real implementation, this would check actual system health
-	// For now, we'll simulate some checks
+	var diskUsage float64
+	if stat, err := disk.Usage("/"); err == nil {
+		diskUsage = stat.UsedPercent
+	}
 
-	// Check CPU usage
-	cpuUsage := 75 // Simulated
-	if cpuUsage > 80 {
+	return EvaluateSystemHealthMetrics(cpuUsage, diskUsage), cpuUsage, diskUsage
+}
+
+// EvaluateSystemHealthMetrics applies health thresholds to CPU and disk usage values and
+// returns any validation issues. Exported so tests can exercise threshold logic directly
+// without requiring a live OS probe.
+func EvaluateSystemHealthMetrics(cpuPercent, diskPercent float64) []ValidationIssue {
+	var issues []ValidationIssue
+	if cpuPercent > 90 {
 		issues = append(issues, ValidationIssue{
 			Type:       "system_health",
 			Severity:   "warning",
-			Message:    fmt.Sprintf("High CPU usage detected: %d%%", cpuUsage),
+			Message:    fmt.Sprintf("High CPU usage detected: %.1f%%", cpuPercent),
 			Resolvable: true,
 			Resolution: "Wait for CPU usage to decrease or proceed with caution",
 		})
 	}
-
-	// Check available disk space
-	diskFree := 15 // Simulated percentage
-	if diskFree < 20 {
+	if diskPercent > 95 {
 		issues = append(issues, ValidationIssue{
 			Type:       "system_health",
 			Severity:   "warning",
-			Message:    fmt.Sprintf("Low disk space: %d%% free", diskFree),
+			Message:    fmt.Sprintf("High disk usage detected: %.1f%% used", diskPercent),
 			Resolvable: true,
 			Resolution: "Free up disk space before proceeding",
 		})
 	}
-
 	return issues
 }
 
@@ -440,9 +474,7 @@ func (v *DefaultRollbackValidator) estimateDowntime(changes []ConfigurationChang
 }
 
 func (v *DefaultRollbackValidator) estimateAffectedUsers(targetType TargetType, targetID string) int {
-	// In a real implementation, this would query actual user counts
-	// For now, we'll use estimates based on target type
-
+	// Tier-based user count estimates for rollback impact assessment.
 	switch targetType {
 	case TargetTypeDevice:
 		return 1

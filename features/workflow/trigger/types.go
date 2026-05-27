@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package trigger
 
 import (
 	"context"
 	"time"
+
+	"github.com/cfgis/cfgms/features/workflow"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -702,18 +704,10 @@ type SIEMIntegration interface {
 	Stop(ctx context.Context) error
 }
 
-// WorkflowExecution represents a workflow execution result
-type WorkflowExecution struct {
-	ID           string    `json:"id"`
-	WorkflowName string    `json:"workflow_name"`
-	Status       string    `json:"status"`
-	StartTime    time.Time `json:"start_time"`
-}
-
 // WorkflowTrigger defines the interface for triggering workflow executions
 type WorkflowTrigger interface {
 	// TriggerWorkflow triggers a workflow execution
-	TriggerWorkflow(ctx context.Context, trigger *Trigger, data map[string]interface{}) (*WorkflowExecution, error)
+	TriggerWorkflow(ctx context.Context, trigger *Trigger, data map[string]interface{}) (*workflow.WorkflowExecution, error)
 
 	// ValidateTrigger validates a trigger configuration
 	ValidateTrigger(ctx context.Context, trigger *Trigger) error

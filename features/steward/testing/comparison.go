@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package testing provides intelligent configuration state comparison for steward.
 //
@@ -62,6 +62,11 @@ type StateDiff struct {
 
 	// RemovedFields contains fields present in current but not in desired
 	RemovedFields map[string]interface{}
+
+	// EventType classifies the drift event for upstream telemetry.
+	// "drift.detected" in apply mode; "drift.detected.monitor" in monitor mode.
+	// Set by the executor before invoking DriftEventHandler.
+	EventType string
 }
 
 // FieldDiff represents a difference in a specific configuration field.

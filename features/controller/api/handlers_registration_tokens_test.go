@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package api
 
@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -19,15 +18,19 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/storage/providers/git"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // setupTestServerWithTokenStore creates a test server with a real registration token store
 func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	t.Helper()
+
+	// Isolate secrets storage per test to prevent shared-path contention on Windows CI.
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
 
 	// Create test configuration
 	cfg := config.DefaultConfig()
@@ -36,46 +39,49 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	// Create test logger
 	logger := logging.NewNoopLogger()
 
-	// Create temporary directory for storage
-	tempDir := t.TempDir()
-
-	// Initialize RBAC system with git storage
-	storageConfig := map[string]interface{}{
-		"repository_path": tempDir,
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
-	require.NoError(t, err)
+	// Initialize RBAC system with OSS composite storage
+	storageManager := pkgtesting.SetupTestStorage(t)
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
-	err = rbacManager.Initialize(context.Background())
+	err := rbacManager.Initialize(context.Background())
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
 
 	// Initialize tenant management with durable storage
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 
 	// Create registration token store
-	tokenStorePath, err := os.MkdirTemp("", "token-store-test-*")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(tokenStorePath) })
+	tokenStorePath := t.TempDir()
 
-	gitTokenStore, err := git.NewGitRegistrationTokenStore(tokenStorePath, "")
+	regTokenStore, err := interfaces.CreateRegistrationTokenStoreFromConfig(
+		"sqlite",
+		map[string]interface{}{"path": tokenStorePath + "/tokens.db"},
+	)
 	require.NoError(t, err)
-	err = gitTokenStore.Initialize(context.Background())
+	t.Cleanup(func() { _ = regTokenStore.Close() })
+	err = regTokenStore.Initialize(context.Background())
 	require.NoError(t, err)
 
-	tokenStore := registration.NewStorageAdapter(gitTokenStore)
+	tokenStore := registration.NewStorageAdapter(regTokenStore)
 
-	// Create mock services
+	// Create services
 	controllerService := service.NewControllerService(logger)
-	configService := service.NewConfigurationService(logger, controllerService)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 	rbacService := service.NewRBACService(rbacManager)
+
+	// Create audit manager backed by the SQLite audit store
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
 
 	// Create REST API server with token store
 	server, err := New(
@@ -89,13 +95,22 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 		tenantManager,
 		rbacManager,
 		nil, // No system monitor for basic tests
-		nil, // No platform monitor for basic tests
-		nil, // No tracer for basic tests
 		nil, // No HA manager for basic tests
 		tokenStore,
-		"", // No signer cert serial for basic tests
+		"",       // No signer cert serial for basic tests
+		nil,      // No health collector for basic tests
+		auditMgr, // Issue #775: registration audit events
+		nil,      // No command publisher for basic tests
+		nil,      // No push store for basic tests
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
+	})
 
 	return server, tokenStore
 }
@@ -107,12 +122,11 @@ func TestCreateRegistrationToken(t *testing.T) {
 	apiKey := NewTestKey(t, server, []string{"registration:create-token"})
 
 	t.Run("successful token creation", func(t *testing.T) {
-		reqBody := TokenCreateRequest{
+		reqBody := registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 			Group:         "production",
 			ExpiresIn:     "7d",
-			SingleUse:     false,
 		}
 
 		body, err := json.Marshal(reqBody)
@@ -134,21 +148,14 @@ func TestCreateRegistrationToken(t *testing.T) {
 		assert.NotEmpty(t, resp.Token)
 		assert.True(t, len(resp.Token) > 10, "Token should be a reasonable length")
 		assert.Equal(t, "test-tenant", resp.TenantID)
-		assert.Equal(t, "mqtt://controller.example.com:8883", resp.ControllerURL)
+		assert.Equal(t, "grpc://controller.example.com:7443", resp.ControllerURL)
 		assert.Equal(t, "production", resp.Group)
-		assert.False(t, resp.SingleUse)
 		assert.NotNil(t, resp.ExpiresAt)
 	})
 
-	t.Run("single-use token creation", func(t *testing.T) {
-		reqBody := TokenCreateRequest{
-			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
-			SingleUse:     true,
-		}
-
-		body, err := json.Marshal(reqBody)
-		require.NoError(t, err)
+	t.Run("single_use field returns 400", func(t *testing.T) {
+		// single_use was removed in Issue #1690; sending it must return 400
+		body := []byte(`{"tenant_id":"test-tenant","controller_url":"grpc://controller.example.com:7443","single_use":true}`)
 
 		req := httptest.NewRequest("POST", "/api/v1/registration/tokens", bytes.NewReader(body))
 		req.Header.Set("X-API-Key", apiKey)
@@ -157,18 +164,13 @@ func TestCreateRegistrationToken(t *testing.T) {
 
 		server.router.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusCreated, rec.Code)
-
-		var resp TokenResponse
-		err = json.Unmarshal(rec.Body.Bytes(), &resp)
-		require.NoError(t, err)
-
-		assert.True(t, resp.SingleUse)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "single_use")
 	})
 
 	t.Run("missing tenant_id returns error", func(t *testing.T) {
-		reqBody := TokenCreateRequest{
-			ControllerURL: "mqtt://controller.example.com:8883",
+		reqBody := registration.TokenCreateRequest{
+			ControllerURL: "grpc://controller.example.com:7443",
 		}
 
 		body, err := json.Marshal(reqBody)
@@ -186,7 +188,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 	})
 
 	t.Run("missing controller_url returns error", func(t *testing.T) {
-		reqBody := TokenCreateRequest{
+		reqBody := registration.TokenCreateRequest{
 			TenantID: "test-tenant",
 		}
 
@@ -216,9 +218,9 @@ func TestCreateRegistrationToken(t *testing.T) {
 	})
 
 	t.Run("unauthorized without API key", func(t *testing.T) {
-		reqBody := TokenCreateRequest{
+		reqBody := registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 		}
 
 		body, err := json.Marshal(reqBody)
@@ -237,9 +239,9 @@ func TestCreateRegistrationToken(t *testing.T) {
 		// Create key with wrong permission
 		wrongKey := NewTestKey(t, server, []string{"steward:list"})
 
-		reqBody := TokenCreateRequest{
+		reqBody := registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 		}
 
 		body, err := json.Marshal(reqBody)
@@ -267,7 +269,7 @@ func TestListRegistrationTokens(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		token, err := registration.CreateToken(&registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 		})
 		require.NoError(t, err)
 		err = tokenStore.SaveToken(ctx, token)
@@ -277,7 +279,7 @@ func TestListRegistrationTokens(t *testing.T) {
 	// Create a token for a different tenant
 	otherToken, err := registration.CreateToken(&registration.TokenCreateRequest{
 		TenantID:      "other-tenant",
-		ControllerURL: "mqtt://controller.example.com:8883",
+		ControllerURL: "grpc://controller.example.com:7443",
 	})
 	require.NoError(t, err)
 	err = tokenStore.SaveToken(ctx, otherToken)
@@ -358,7 +360,7 @@ func TestGetRegistrationToken(t *testing.T) {
 	// Create a test token
 	token, err := registration.CreateToken(&registration.TokenCreateRequest{
 		TenantID:      "test-tenant",
-		ControllerURL: "mqtt://controller.example.com:8883",
+		ControllerURL: "grpc://controller.example.com:7443",
 		Group:         "test-group",
 	})
 	require.NoError(t, err)
@@ -380,7 +382,7 @@ func TestGetRegistrationToken(t *testing.T) {
 
 		assert.Equal(t, token.Token, resp.Token)
 		assert.Equal(t, "test-tenant", resp.TenantID)
-		assert.Equal(t, "mqtt://controller.example.com:8883", resp.ControllerURL)
+		assert.Equal(t, "grpc://controller.example.com:7443", resp.ControllerURL)
 		assert.Equal(t, "test-group", resp.Group)
 	})
 
@@ -415,7 +417,7 @@ func TestDeleteRegistrationToken(t *testing.T) {
 		// Create a test token
 		token, err := registration.CreateToken(&registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 		})
 		require.NoError(t, err)
 		err = tokenStore.SaveToken(ctx, token)
@@ -465,7 +467,7 @@ func TestRevokeRegistrationToken(t *testing.T) {
 		// Create a test token
 		token, err := registration.CreateToken(&registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 		})
 		require.NoError(t, err)
 		err = tokenStore.SaveToken(ctx, token)
@@ -513,6 +515,70 @@ func TestRevokeRegistrationToken(t *testing.T) {
 	})
 }
 
+func TestRotateRegistrationToken(t *testing.T) {
+	server, tokenStore := setupTestServerWithTokenStore(t)
+
+	// Create API key with rotate permission
+	apiKey := NewTestKey(t, server, []string{"registration:rotate-token"})
+	ctx := context.Background()
+
+	// Seed a token for rotation
+	seed, err := registration.CreateToken(&registration.TokenCreateRequest{
+		TenantID:      "rotate-tenant",
+		ControllerURL: "grpc://controller.example.com:7443",
+		Group:         "rotate-group",
+	})
+	require.NoError(t, err)
+	require.NoError(t, tokenStore.SaveToken(ctx, seed))
+
+	t.Run("rotate returns new token and revokes old", func(t *testing.T) {
+		body := []byte(`{"group":"rotate-group"}`)
+		req := httptest.NewRequest("POST", "/api/v1/registration/tokens/rotate-tenant/rotate", bytes.NewReader(body))
+		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusCreated, rec.Code)
+
+		var resp TokenResponse
+		err := json.Unmarshal(rec.Body.Bytes(), &resp)
+		require.NoError(t, err)
+
+		assert.NotEmpty(t, resp.Token)
+		assert.NotEqual(t, seed.Token, resp.Token, "rotated token must differ from seed")
+		assert.Equal(t, "rotate-tenant", resp.TenantID)
+		assert.Equal(t, "grpc://controller.example.com:7443", resp.ControllerURL)
+		assert.Equal(t, "rotate-group", resp.Group)
+		assert.False(t, resp.Revoked)
+
+		// Old token must be revoked in the store
+		old, err := tokenStore.GetToken(ctx, seed.Token)
+		require.NoError(t, err)
+		assert.True(t, old.Revoked, "seed token must be revoked after rotation")
+	})
+
+	t.Run("rotate with no active tokens returns 404", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/registration/tokens/nonexistent-tenant/rotate", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("unauthorized without API key", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/registration/tokens/rotate-tenant/rotate", nil)
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
+}
+
 func TestRegistrationTokenCRUDFlow(t *testing.T) {
 	server, _ := setupTestServerWithTokenStore(t)
 
@@ -529,12 +595,11 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 
 	// 1. Create a token
 	t.Run("1_create_token", func(t *testing.T) {
-		reqBody := TokenCreateRequest{
+		reqBody := registration.TokenCreateRequest{
 			TenantID:      "crud-test-tenant",
-			ControllerURL: "mqtt://controller.example.com:8883",
+			ControllerURL: "grpc://controller.example.com:7443",
 			Group:         "crud-test-group",
 			ExpiresIn:     "24h",
-			SingleUse:     false,
 		}
 
 		body, err := json.Marshal(reqBody)
@@ -671,19 +736,15 @@ func TestTokenResponseFormat(t *testing.T) {
 	// Create a token with all fields populated
 	now := time.Now()
 	expiresAt := now.Add(24 * time.Hour)
-	usedAt := now.Add(1 * time.Hour)
 	revokedAt := now.Add(2 * time.Hour)
 
 	token := &registration.Token{
-		Token:         "cfgms_reg_testformat123",
+		Token:         "testformat123",
 		TenantID:      "format-test-tenant",
-		ControllerURL: "mqtt://controller.example.com:8883",
+		ControllerURL: "grpc://controller.example.com:7443",
 		Group:         "format-group",
 		CreatedAt:     now,
 		ExpiresAt:     &expiresAt,
-		SingleUse:     true,
-		UsedAt:        &usedAt,
-		UsedBy:        "steward-001",
 		Revoked:       true,
 		RevokedAt:     &revokedAt,
 	}
@@ -704,15 +765,12 @@ func TestTokenResponseFormat(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify all fields are present and correctly formatted
-	assert.Equal(t, "cfgms_reg_testformat123", resp.Token)
+	assert.Equal(t, "testformat123", resp.Token)
 	assert.Equal(t, "format-test-tenant", resp.TenantID)
-	assert.Equal(t, "mqtt://controller.example.com:8883", resp.ControllerURL)
+	assert.Equal(t, "grpc://controller.example.com:7443", resp.ControllerURL)
 	assert.Equal(t, "format-group", resp.Group)
 	assert.NotEmpty(t, resp.CreatedAt)
 	assert.NotNil(t, resp.ExpiresAt)
-	assert.True(t, resp.SingleUse)
-	assert.NotNil(t, resp.UsedAt)
-	assert.Equal(t, "steward-001", resp.UsedBy)
 	assert.True(t, resp.Revoked)
 	assert.NotNil(t, resp.RevokedAt)
 

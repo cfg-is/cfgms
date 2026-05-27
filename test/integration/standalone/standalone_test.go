@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
 // Package standalone contains Docker-based E2E tests for standalone steward deployment
@@ -154,5 +154,8 @@ func (s *StandaloneTestSuite) TestIdempotency() {
 }
 
 func TestStandaloneSteward(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping standalone steward tests in short mode - requires Docker infrastructure")
+	}
 	suite.Run(t, new(StandaloneTestSuite))
 }

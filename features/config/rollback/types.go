@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package rollback provides configuration rollback capabilities for CFGMS.
 // It integrates with the Git backend to enable safe, auditable rollback
@@ -49,6 +49,9 @@ const (
 
 	// TargetTypeMSP rolls back MSP-level configurations
 	TargetTypeMSP TargetType = "msp"
+
+	// TargetTypeSteward rolls back a steward agent configuration
+	TargetTypeSteward TargetType = "steward"
 )
 
 // RollbackStatus represents the status of a rollback operation

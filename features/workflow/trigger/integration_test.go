@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package trigger
 
@@ -18,7 +18,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // IntegrationTestSuite provides integration testing for the complete trigger system
@@ -30,6 +33,8 @@ type IntegrationTestSuite struct {
 	apiHandler      *APIHandler
 	workflowTrigger *TestWorkflowTrigger
 	storage         *TestStorageProvider
+	triggerStore    *inMemoryTriggerStore
+	secretStore     *inMemorySecretStore
 	router          *mux.Router
 	server          *httptest.Server
 }
@@ -110,32 +115,56 @@ func (t *TestStorageProvider) Description() string {
 	return "Test storage provider for integration tests"
 }
 
-func (t *TestStorageProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
+func (t *TestStorageProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
-func (t *TestStorageProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
+func (t *TestStorageProvider) CreateConfigStore(config map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
-func (t *TestStorageProvider) CreateAuditStore(config map[string]interface{}) (interfaces.AuditStore, error) {
+func (t *TestStorageProvider) CreateAuditStore(config map[string]interface{}) (business.AuditStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
-func (t *TestStorageProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
+func (t *TestStorageProvider) CreateRBACStore(config map[string]interface{}) (business.RBACStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
-func (t *TestStorageProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
+func (t *TestStorageProvider) CreateTenantStore(config map[string]interface{}) (business.TenantStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
-func (t *TestStorageProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+func (t *TestStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
-func (t *TestStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
-	return nil, fmt.Errorf("not implemented in test provider")
+func (t *TestStorageProvider) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (t *TestStorageProvider) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (t *TestStorageProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (t *TestStorageProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
+	return newInMemoryTriggerStore(), nil
+}
+
+func (t *TestStorageProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (t *TestStorageProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (t *TestStorageProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, business.ErrNotSupported
 }
 
 func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
@@ -152,18 +181,18 @@ func (t *TestStorageProvider) GetVersion() string {
 
 // TestWorkflowTrigger implements a test workflow trigger that records executions
 type TestWorkflowTrigger struct {
-	executions []WorkflowExecution
+	executions []*workflow.WorkflowExecution
 	mutex      sync.RWMutex
 	failNext   bool
 }
 
 func NewTestWorkflowTrigger() *TestWorkflowTrigger {
 	return &TestWorkflowTrigger{
-		executions: make([]WorkflowExecution, 0),
+		executions: make([]*workflow.WorkflowExecution, 0),
 	}
 }
 
-func (t *TestWorkflowTrigger) TriggerWorkflow(ctx context.Context, trigger *Trigger, data map[string]interface{}) (*WorkflowExecution, error) {
+func (t *TestWorkflowTrigger) TriggerWorkflow(ctx context.Context, trigger *Trigger, data map[string]interface{}) (*workflow.WorkflowExecution, error) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 
@@ -172,15 +201,15 @@ func (t *TestWorkflowTrigger) TriggerWorkflow(ctx context.Context, trigger *Trig
 		return nil, fmt.Errorf("simulated workflow execution failure")
 	}
 
-	execution := WorkflowExecution{
+	execution := &workflow.WorkflowExecution{
 		ID:           fmt.Sprintf("exec-%d", len(t.executions)+1),
 		WorkflowName: trigger.WorkflowName,
-		Status:       "running",
+		Status:       workflow.StatusRunning,
 		StartTime:    time.Now(),
 	}
 
 	t.executions = append(t.executions, execution)
-	return &execution, nil
+	return execution, nil
 }
 
 func (t *TestWorkflowTrigger) ValidateTrigger(ctx context.Context, trigger *Trigger) error {
@@ -190,10 +219,10 @@ func (t *TestWorkflowTrigger) ValidateTrigger(ctx context.Context, trigger *Trig
 	return nil
 }
 
-func (t *TestWorkflowTrigger) GetExecutions() []WorkflowExecution {
+func (t *TestWorkflowTrigger) GetExecutions() []*workflow.WorkflowExecution {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
-	return append([]WorkflowExecution{}, t.executions...)
+	return append([]*workflow.WorkflowExecution{}, t.executions...)
 }
 
 func (t *TestWorkflowTrigger) SetFailNext(fail bool) {
@@ -206,6 +235,7 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	// Create components
 	storage := NewTestStorageProvider()
 	workflowTrigger := NewTestWorkflowTrigger()
+	secretStore := newInMemorySecretStore()
 
 	// Create manager first (we'll create scheduler separately)
 	manager := NewTriggerManager(
@@ -214,6 +244,7 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 		nil, // webhook handler will be set later
 		nil, // siem integration will be set later
 		workflowTrigger,
+		secretStore,
 	)
 
 	// Create scheduler
@@ -235,13 +266,20 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	// Create API handler
 	apiHandler := NewAPIHandler(manager)
 
-	// Set up router
+	// Set up router — subrouter mirrors server.go: api.PathPrefix("/triggers").Subrouter()
 	router := mux.NewRouter()
 	router.Use(TriggerAPIMiddleware)
-	apiHandler.RegisterRoutes(router)
+	sub := router.PathPrefix("/triggers").Subrouter()
+	apiHandler.RegisterRoutes(sub)
 
 	// Create test server
 	server := httptest.NewServer(router)
+
+	// Capture the trigger store created by NewTriggerManager for assertion use in tests.
+	var ts *inMemoryTriggerStore
+	if manager.triggerStore != nil {
+		ts = manager.triggerStore.(*inMemoryTriggerStore)
+	}
 
 	return &IntegrationTestSuite{
 		manager:         manager,
@@ -251,6 +289,8 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 		apiHandler:      apiHandler,
 		workflowTrigger: workflowTrigger,
 		storage:         storage,
+		triggerStore:    ts,
+		secretStore:     secretStore,
 		router:          router,
 		server:          server,
 	}
@@ -645,40 +685,28 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 		err := suite.manager.CreateTrigger(ctx, trigger)
 		require.NoError(t, err)
 
-		// Verify it's stored
-		exists, err := suite.storage.Exists(ctx, "triggers/persistence-test-1")
+		// Verify it's stored via TriggerStore (the authoritative persistence layer).
+		rec, err := suite.triggerStore.GetTrigger(ctx, "persistence-test-1")
 		require.NoError(t, err)
-		assert.True(t, exists)
-
-		// Retrieve from storage directly
-		data, err := suite.storage.Retrieve(ctx, "triggers/persistence-test-1")
-		require.NoError(t, err)
-
-		var storedTrigger Trigger
-		err = json.Unmarshal(data, &storedTrigger)
-		require.NoError(t, err)
-		assert.Equal(t, trigger.ID, storedTrigger.ID)
-		assert.Equal(t, trigger.Name, storedTrigger.Name)
+		assert.Equal(t, trigger.ID, rec.ID)
+		assert.Equal(t, trigger.Name, rec.Name)
 
 		// Update trigger
 		trigger.Name = "Updated Persistence Test"
 		err = suite.manager.UpdateTrigger(ctx, trigger)
 		require.NoError(t, err)
 
-		// Verify update is persisted
-		data, err = suite.storage.Retrieve(ctx, "triggers/persistence-test-1")
+		// Verify update is persisted.
+		rec, err = suite.triggerStore.GetTrigger(ctx, "persistence-test-1")
 		require.NoError(t, err)
-		err = json.Unmarshal(data, &storedTrigger)
-		require.NoError(t, err)
-		assert.Equal(t, "Updated Persistence Test", storedTrigger.Name)
+		assert.Equal(t, "Updated Persistence Test", rec.Name)
 
 		// Delete trigger
 		err = suite.manager.DeleteTrigger(ctx, trigger.ID)
 		require.NoError(t, err)
 
-		// Verify deletion from storage
-		exists, err = suite.storage.Exists(ctx, "triggers/persistence-test-1")
-		require.NoError(t, err)
-		assert.False(t, exists)
+		// Verify deletion from TriggerStore.
+		_, err = suite.triggerStore.GetTrigger(ctx, "persistence-test-1")
+		assert.ErrorIs(t, err, business.ErrTriggerNotFound)
 	})
 }

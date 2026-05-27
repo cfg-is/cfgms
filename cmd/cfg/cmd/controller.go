@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package cmd implements the CLI commands for cfg
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,9 +18,11 @@ import (
 
 var (
 	// Controller command flags
-	healthURL    string
-	healthAPIKey string
-	healthFormat string
+	healthURL             string
+	healthAPIKey          string
+	healthFormat          string
+	controllerTLSCACert   string
+	controllerTLSInsecure bool
 )
 
 // controllerCmd represents the controller command
@@ -30,7 +33,7 @@ var controllerCmd = &cobra.Command{
 
 Provides operational visibility into controller status including:
 - Overall health status and component health
-- Performance metrics (MQTT, storage, application, system)
+- Performance metrics (transport, storage, application, system)
 - Active alerts and threshold breaches
 - Request traces for debugging
 
@@ -51,7 +54,7 @@ var controllerStatusCmd = &cobra.Command{
 	Short: "Show controller health status",
 	Long: `Display human-readable controller health status including:
 - Overall health (healthy, degraded, unhealthy)
-- Component status (MQTT, storage, application, system)
+- Component status (transport, storage, application, system)
 - Active alerts
 - Uptime
 
@@ -69,7 +72,7 @@ var controllerMetricsCmd = &cobra.Command{
 	Use:   "metrics",
 	Short: "Show detailed controller metrics",
 	Long: `Display detailed controller performance metrics including:
-- MQTT broker: connections, queue depth, throughput
+- Transport: connected stewards, stream errors, message throughput
 - Storage: latency, pool utilization, slow queries
 - Application: workflow/script queue depths, active executions
 - System: CPU, memory, goroutines
@@ -90,6 +93,8 @@ func init() {
 	controllerCmd.PersistentFlags().StringVar(&healthURL, "url", "", "Controller API URL (required)")
 	controllerCmd.PersistentFlags().StringVar(&healthAPIKey, "api-key", "", "API key for authentication")
 	controllerCmd.PersistentFlags().StringVar(&healthFormat, "format", "text", "Output format (text, json)")
+	controllerCmd.PersistentFlags().StringVar(&controllerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	controllerCmd.PersistentFlags().BoolVar(&controllerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 
 	_ = controllerCmd.MarkPersistentFlagRequired("url")
 
@@ -98,10 +103,49 @@ func init() {
 	controllerCmd.AddCommand(controllerMetricsCmd)
 }
 
+// getControllerClient creates an API client using bundle auth (mTLS) when available,
+// falling back to API key auth when no bundle is found or discovery is opted out.
+func getControllerClient() (*APIClient, error) {
+	apiURL := strings.TrimSuffix(healthURL, "/")
+	if apiURL == "" {
+		apiURL = os.Getenv("CFGMS_API_URL")
+	}
+
+	// Try admin bundle first (mTLS auto-discovery)
+	client, err := resolveBundleClient(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("bundle lookup failed: %w", err)
+	}
+	if client != nil {
+		return client, nil
+	}
+
+	// Fallback: API key path
+	apiKey := healthAPIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("CFGMS_API_KEY")
+	}
+
+	tlsInsecure := controllerTLSInsecure
+	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
+		tlsInsecure = true
+	}
+
+	tlsCACertPath := controllerTLSCACert
+	if tlsCACertPath == "" {
+		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
+	}
+
+	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+}
+
 func runControllerStatus(cmd *cobra.Command, args []string) error {
-	// Make API request
-	url := strings.TrimSuffix(healthURL, "/") + "/api/v1/health/detailed"
-	resp, err := makeAPIRequest(url, healthAPIKey)
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/health/detailed")
 	if err != nil {
 		return fmt.Errorf("failed to fetch health status: %w", err)
 	}
@@ -192,9 +236,12 @@ func runControllerStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runControllerMetrics(cmd *cobra.Command, args []string) error {
-	// Make API request
-	url := strings.TrimSuffix(healthURL, "/") + "/api/v1/health/metrics"
-	resp, err := makeAPIRequest(url, healthAPIKey)
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/health/metrics")
 	if err != nil {
 		return fmt.Errorf("failed to fetch metrics: %w", err)
 	}
@@ -212,15 +259,15 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 	// Parse response
 	var metrics struct {
 		Timestamp time.Time `json:"timestamp"`
-		MQTT      *struct {
-			ActiveConnections     int64     `json:"active_connections"`
-			MessageQueueDepth     int64     `json:"message_queue_depth"`
-			MessageThroughput     float64   `json:"message_throughput"`
-			TotalMessagesSent     int64     `json:"total_messages_sent"`
-			TotalMessagesReceived int64     `json:"total_messages_received"`
-			ConnectionErrors      int64     `json:"connection_errors"`
-			CollectedAt           time.Time `json:"collected_at"`
-		} `json:"mqtt"`
+		Transport *struct {
+			ConnectedStewards    int       `json:"connected_stewards"`
+			StreamErrors         int64     `json:"stream_errors"`
+			MessagesSent         int64     `json:"messages_sent"`
+			MessagesReceived     int64     `json:"messages_received"`
+			ReconnectionAttempts int64     `json:"reconnection_attempts"`
+			AvgLatencyNs         int64     `json:"avg_latency_ns"`
+			CollectedAt          time.Time `json:"collected_at"`
+		} `json:"transport"`
 		Storage *struct {
 			Provider          string    `json:"provider"`
 			PoolUtilization   float64   `json:"pool_utilization"`
@@ -268,15 +315,15 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nController Metrics - %s\n", metrics.Timestamp.Format("2006-01-02 15:04:05 MST"))
 	fmt.Println()
 
-	// MQTT metrics
-	if metrics.MQTT != nil {
-		fmt.Println("=== MQTT Broker ===")
-		fmt.Printf("Active Connections:     %d\n", metrics.MQTT.ActiveConnections)
-		fmt.Printf("Message Queue Depth:    %d\n", metrics.MQTT.MessageQueueDepth)
-		fmt.Printf("Message Throughput:     %.2f msg/sec\n", metrics.MQTT.MessageThroughput)
-		fmt.Printf("Total Messages Sent:    %d\n", metrics.MQTT.TotalMessagesSent)
-		fmt.Printf("Total Messages Received: %d\n", metrics.MQTT.TotalMessagesReceived)
-		fmt.Printf("Connection Errors:      %d\n", metrics.MQTT.ConnectionErrors)
+	// Transport metrics
+	if metrics.Transport != nil {
+		fmt.Println("=== Transport (gRPC-over-QUIC) ===")
+		fmt.Printf("Connected Stewards:     %d\n", metrics.Transport.ConnectedStewards)
+		fmt.Printf("Stream Errors:          %d\n", metrics.Transport.StreamErrors)
+		fmt.Printf("Messages Sent:          %d\n", metrics.Transport.MessagesSent)
+		fmt.Printf("Messages Received:      %d\n", metrics.Transport.MessagesReceived)
+		fmt.Printf("Reconnection Attempts:  %d\n", metrics.Transport.ReconnectionAttempts)
+		fmt.Printf("Avg Latency:            %dns\n", metrics.Transport.AvgLatencyNs)
 		fmt.Println()
 	}
 
@@ -320,23 +367,6 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
-}
-
-func makeAPIRequest(url, apiKey string) (*http.Response, error) {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	return client.Do(req)
 }
 
 func getStatusIcon(status string) string {

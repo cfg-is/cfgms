@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package cert
 
@@ -145,18 +145,22 @@ func (ca *CA) LoadCA(storagePath string) error {
 		return fmt.Errorf("failed to read CA private key: %w", err)
 	}
 
-	keyBlock, _ := pem.Decode(caKeyPEM)
-	if keyBlock == nil {
-		return fmt.Errorf("failed to decode CA private key PEM")
-	}
-
-	caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	parsedKey, err := ParsePrivateKeyFromPEM(caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("failed to parse CA private key: %w", err)
 	}
 
+	rsaKey, ok := parsedKey.(*rsa.PrivateKey)
+	if !ok {
+		return fmt.Errorf("CA private key must be RSA, got unsupported key type")
+	}
+
+	if err := ValidateKeyPair(caCertPEM, caKeyPEM); err != nil {
+		return fmt.Errorf("CA key does not match certificate: %w", err)
+	}
+
 	ca.certificate = caCert
-	ca.privateKey = caKey
+	ca.privateKey = rsaKey
 	ca.initialized = true
 
 	return nil
@@ -339,17 +343,25 @@ func (ca *CA) GenerateClientCertificate(config *ClientCertConfig) (*Certificate,
 	}
 
 	// Create client certificate template
+	subject := pkix.Name{
+		Organization: []string{config.Organization},
+		CommonName:   config.CommonName,
+	}
+	if config.OrganizationalUnit != "" {
+		subject.OrganizationalUnit = []string{config.OrganizationalUnit}
+	}
+
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			Organization:       []string{config.Organization},
-			OrganizationalUnit: []string{config.OrganizationalUnit},
-			CommonName:         config.CommonName,
-		},
-		NotBefore:   time.Now(),
-		NotAfter:    time.Now().Add(time.Duration(config.ValidityDays) * 24 * time.Hour),
-		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		Subject:      subject,
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Duration(config.ValidityDays) * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	if config.TemplateModifier != nil {
+		config.TemplateModifier(template)
 	}
 
 	// Create the client certificate
@@ -472,7 +484,7 @@ func (ca *CA) GenerateSigningCertificate(config *SigningCertConfig) (*Certificat
 	}, nil
 }
 
-// GenerateInternalServerCertificate creates a server certificate for internal mTLS (MQTT + QUIC).
+// GenerateInternalServerCertificate creates a server certificate for internal mTLS (gRPC-over-QUIC).
 // This has the same properties as GenerateServerCertificate but returns CertificateTypeInternalServer.
 func (ca *CA) GenerateInternalServerCertificate(config *ServerCertConfig) (*Certificate, error) {
 	cert, err := ca.GenerateServerCertificate(config)
@@ -540,18 +552,6 @@ func (ca *CA) ValidateCertificate(certPEM []byte) (*ValidationResult, error) {
 	}
 
 	return result, nil
-}
-
-// RevokeCertificate revokes a certificate (implementation for future CRL support)
-func (ca *CA) RevokeCertificate(serialNumber string, reason string) error {
-	// TODO: Implement certificate revocation list (CRL) support
-	return fmt.Errorf("certificate revocation not yet implemented")
-}
-
-// GetRevokedCertificates returns the list of revoked certificates
-func (ca *CA) GetRevokedCertificates() ([]string, error) {
-	// TODO: Implement certificate revocation list (CRL) support
-	return []string{}, nil
 }
 
 // saveToStorage saves the CA certificate and private key to storage

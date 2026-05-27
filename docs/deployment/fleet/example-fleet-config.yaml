@@ -1,0 +1,78 @@
+# CFGMS Fleet Config — Simple File + Directory Example
+#
+# Push this config to registered stewards via the REST API (Phase 6 of the fleet
+# walkthrough: docs/deployment/fleet/walkthrough.md).
+#
+# This is NOT a steward boot config. The steward boot config lives at
+# /etc/cfgms/steward.cfg on each endpoint. This config defines what resources
+# the steward manages once registered — it is pushed from the controller.
+#
+# When cfg steward list / cfg config upload are implemented (Epic #1501),
+# the deploy command will be:
+#   cfg config upload --steward <STEWARD_ID> --config example-fleet-config.yaml
+#
+# Until then, upload via the REST API (see Phase 6 of the walkthrough).
+
+steward:
+  id: "web-01"                  # CHANGE: must match the registered steward ID
+  mode: "standalone"
+  converge_interval: "30m"
+
+  logging:
+    level: "info"
+
+resources:
+
+  # ── Managed directories ──────────────────────────────────────────────────────
+
+  - name: "app-config-dir"
+    module: "directory"
+    config:
+      path: "/etc/myapp"
+      owner: "root"
+      group: "myapp"
+      mode: "750"
+
+  - name: "app-data-dir"
+    module: "directory"
+    config:
+      path: "/var/lib/myapp"
+      owner: "myapp"
+      group: "myapp"
+      mode: "755"
+
+  - name: "app-log-dir"
+    module: "directory"
+    config:
+      path: "/var/log/myapp"
+      owner: "myapp"
+      group: "myapp"
+      mode: "755"
+
+  # ── Managed files ────────────────────────────────────────────────────────────
+  #
+  # The file module writes the specified content and enforces permissions.
+  # On the next convergence cycle the steward detects drift (any out-of-band
+  # change) and restores the desired state.
+
+  - name: "app-main-config"
+    module: "file"
+    config:
+      path: "/etc/myapp/config.yaml"
+      owner: "root"
+      group: "myapp"
+      mode: "640"
+      content: |
+        # Managed by CFGMS — changes will be overwritten on next convergence.
+        log_level: info
+        data_dir: /var/lib/myapp
+        listen_addr: "0.0.0.0:8080"
+
+  # ── Required packages ────────────────────────────────────────────────────────
+
+  - name: "myapp-package"
+    module: "package"
+    config:
+      packages:
+        - name: "myapp"
+          state: "installed"

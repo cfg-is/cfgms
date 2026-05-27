@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package terminal
 
@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/terminal/shell"
+	"github.com/cfgis/cfgms/pkg/logging"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -124,10 +125,6 @@ func TestSessionCreation(t *testing.T) {
 }
 
 func TestSessionDataHandling(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping shell integration test in short mode")
-	}
-
 	logger := testutil.NewMockLogger(true)
 	request := &SessionRequest{
 		StewardID: "test-steward-001",
@@ -245,45 +242,57 @@ func TestSessionRecordingIntegration(t *testing.T) {
 	session, err := NewSession(request, logger)
 	require.NoError(t, err)
 
-	// Enable recording
-	recorder := &MockRecorder{}
+	recorderConfig := &RecorderConfig{
+		StoragePath:    t.TempDir(),
+		MaxRecordingMB: 10,
+		Compression:    false,
+	}
+	recorder, err := NewSessionRecorder(recorderConfig, logger)
+	require.NoError(t, err)
+
 	session.SetRecorder(recorder)
 
 	ctx := context.Background()
 
-	// Test recording without starting shell (just the recording mechanism)
-	// Simulate output data (this doesn't require shell to be running)
+	// Simulate output data (does not require shell to be running)
 	outputData := []byte("total 0\ndrwxr-xr-x  2 user user 4096 Jan  1 00:00 .\n")
 	err = session.HandleOutput(ctx, outputData)
 	assert.NoError(t, err)
 
-	// Verify output was recorded
-	assert.True(t, recorder.RecordDataCalled)
-	assert.Equal(t, outputData, recorder.LastData)
-	assert.Equal(t, DataDirectionOutput, recorder.LastDirection)
+	// Flush recording to disk before reading it back
+	err = recorder.EndRecording(session.ID)
+	require.NoError(t, err)
+
+	// Verify output was persisted by the real recorder
+	recording, err := recorder.GetRecording(session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, recording)
+	assert.Equal(t, session.ID, recording.SessionID)
+	assert.Contains(t, string(recording.Data), "drwxr-xr-x")
 }
 
-// MockRecorder for testing
-type MockRecorder struct {
-	RecordDataCalled bool
-	LastData         []byte
-	LastDirection    DataDirection
-}
+// TestNewSession_RedactsSessionID verifies that NewSession never logs the raw
+// session UUID and always logs the redacted prefix form under the session_id key.
+func TestNewSession_RedactsSessionID(t *testing.T) {
+	capLogger := &kvCapturingLogger{}
+	req := &SessionRequest{
+		StewardID: "test-steward-001",
+		UserID:    "test-user",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	}
 
-func (m *MockRecorder) RecordData(sessionID string, data []byte, direction DataDirection) error {
-	m.RecordDataCalled = true
-	m.LastData = data
-	m.LastDirection = direction
-	return nil
-}
+	session, err := NewSession(req, capLogger)
+	require.NoError(t, err)
+	require.NotNil(t, session)
 
-func (m *MockRecorder) GetRecording(sessionID string) (*SessionRecording, error) {
-	return &SessionRecording{
-		SessionID: sessionID,
-		Data:      m.LastData,
-	}, nil
-}
+	// Full UUID must not appear in any logged kv value.
+	assert.False(t, capLogger.allKVContains(session.ID),
+		"raw session UUID must not appear in any log kv value after NewSession")
 
-func (m *MockRecorder) Close() error {
-	return nil
+	// Redacted form must be present under the session_id key.
+	redacted := logging.RedactedID(session.ID)
+	assert.True(t, capLogger.anyKVKeyHasValue("session_id", redacted),
+		"redacted session_id (%q) must appear in log kv values after NewSession", redacted)
 }

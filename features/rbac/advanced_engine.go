@@ -1,49 +1,25 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rbac
 
 import (
 	"context"
 	"fmt"
-	"strings"
-	"time"
+	"log/slog"
 
 	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/rbac/zerotrust"
-)
-
-// ZeroTrustMode defines how zero-trust policies are applied with RBAC
-type ZeroTrustMode string
-
-const (
-	// ZeroTrustModeDisabled disables zero-trust policy evaluation
-	ZeroTrustModeDisabled ZeroTrustMode = "disabled"
-
-	// ZeroTrustModeAugmented uses zero-trust policies to augment RBAC decisions
-	// RBAC must pass AND zero-trust policies must pass
-	ZeroTrustModeAugmented ZeroTrustMode = "augmented"
-
-	// ZeroTrustModeEnforced uses zero-trust policies as the primary authorization
-	// Zero-trust policies override RBAC decisions
-	ZeroTrustModeEnforced ZeroTrustMode = "enforced"
-
-	// ZeroTrustModeAuditing logs zero-trust policy decisions but doesn't enforce them
-	ZeroTrustModeAuditing ZeroTrustMode = "auditing"
+	"github.com/cfgis/cfgms/pkg/audit"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // AdvancedAuthEngine provides enhanced authorization with conditional permissions,
-// delegation, zero-trust policy validation, and comprehensive audit logging
+// delegation, and comprehensive audit logging.
 type AdvancedAuthEngine struct {
 	baseEngine        *AuthEngine
 	conditionEngine   *ConditionEngine
 	scopeEngine       *ScopeEngine
 	delegationManager *DelegationManager
-	auditLogger       *AuditLogger
-
-	// Zero-trust policy integration
-	zeroTrustEngine  *zerotrust.ZeroTrustPolicyEngine
-	zeroTrustEnabled bool
-	zeroTrustMode    ZeroTrustMode
+	auditManager      *audit.Manager
 }
 
 // NewAdvancedAuthEngine creates a new advanced authorization engine
@@ -60,12 +36,7 @@ func NewAdvancedAuthEngine(
 		conditionEngine:   NewConditionEngine(),
 		scopeEngine:       NewScopeEngine(),
 		delegationManager: NewDelegationManager(nil), // Will be set via SetRBACManager
-		auditLogger:       NewAuditLogger(),
-
-		// Zero-trust defaults
-		zeroTrustEngine:  nil, // Will be set via SetZeroTrustEngine
-		zeroTrustEnabled: false,
-		zeroTrustMode:    ZeroTrustModeDisabled,
+		auditManager:      nil,                       // Set via SetAuditManager from parent Manager
 	}
 }
 
@@ -79,38 +50,19 @@ func (a *AdvancedAuthEngine) SetDelegationManager(delegationManager *DelegationM
 	a.delegationManager = delegationManager
 }
 
-// SetAuditLogger sets a specific audit logger instance
-func (a *AdvancedAuthEngine) SetAuditLogger(auditLogger *AuditLogger) {
-	a.auditLogger = auditLogger
+// SetAuditManager sets the audit manager for recording permission events to durable storage.
+func (a *AdvancedAuthEngine) SetAuditManager(am *audit.Manager) {
+	a.auditManager = am
 }
 
-// SetZeroTrustEngine configures zero-trust policy integration
-func (a *AdvancedAuthEngine) SetZeroTrustEngine(engine *zerotrust.ZeroTrustPolicyEngine, mode ZeroTrustMode) {
-	a.zeroTrustEngine = engine
-	a.zeroTrustMode = mode
-	a.zeroTrustEnabled = (mode != ZeroTrustModeDisabled && engine != nil)
+// SetHierarchyEngine wires a HierarchyEngine into the base AuthEngine so that
+// GetEffectivePermissions traverses role inheritance chains through the production
+// call path (Manager → advancedEngine → baseEngine with hierarchy).
+func (a *AdvancedAuthEngine) SetHierarchyEngine(he *HierarchyEngine) {
+	a.baseEngine.SetHierarchyEngine(he)
 }
 
-// EnableZeroTrust enables zero-trust policy evaluation with the specified mode
-func (a *AdvancedAuthEngine) EnableZeroTrust(mode ZeroTrustMode) {
-	if a.zeroTrustEngine != nil {
-		a.zeroTrustMode = mode
-		a.zeroTrustEnabled = (mode != ZeroTrustModeDisabled)
-	}
-}
-
-// DisableZeroTrust disables zero-trust policy evaluation
-func (a *AdvancedAuthEngine) DisableZeroTrust() {
-	a.zeroTrustEnabled = false
-	a.zeroTrustMode = ZeroTrustModeDisabled
-}
-
-// GetZeroTrustMode returns the current zero-trust mode
-func (a *AdvancedAuthEngine) GetZeroTrustMode() ZeroTrustMode {
-	return a.zeroTrustMode
-}
-
-// CheckPermission performs comprehensive permission checking with all advanced features including zero-trust policies
+// CheckPermission performs comprehensive permission checking with RBAC and delegation.
 func (a *AdvancedAuthEngine) CheckPermission(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
 	// Extract context information for audit logging
 	sourceIP := ""
@@ -127,7 +79,7 @@ func (a *AdvancedAuthEngine) CheckPermission(ctx context.Context, request *commo
 			Granted: false,
 			Reason:  fmt.Sprintf("Error checking base permissions: %v", err),
 		}
-		_ = a.auditLogger.LogPermissionCheck(ctx, request, errorResponse, sourceIP, userAgent)
+		a.recordPermissionCheck(ctx, request, business.AuditResultError, errorResponse.Reason, sourceIP, userAgent)
 		return errorResponse, err
 	}
 
@@ -142,7 +94,7 @@ func (a *AdvancedAuthEngine) CheckPermission(ctx context.Context, request *commo
 				Granted: false,
 				Reason:  fmt.Sprintf("Error checking delegated permissions: %v", err),
 			}
-			_ = a.auditLogger.LogPermissionCheck(ctx, request, errorResponse, sourceIP, userAgent)
+			a.recordPermissionCheck(ctx, request, business.AuditResultError, errorResponse.Reason, sourceIP, userAgent)
 			return errorResponse, err
 		}
 	}
@@ -158,35 +110,37 @@ func (a *AdvancedAuthEngine) CheckPermission(ctx context.Context, request *commo
 		rbacReason = fmt.Sprintf("Base: %s. Delegation: %s", baseResponse.Reason, delegatedReason)
 	}
 
-	// Step 3: Evaluate zero-trust policies if enabled
-	var finalResponse *common.AccessResponse
-	if a.zeroTrustEnabled && a.zeroTrustEngine != nil {
-		zeroTrustResponse, err := a.evaluateZeroTrustPolicies(ctx, request, rbacGranted, rbacReason)
-		if err != nil {
-			errorResponse := &common.AccessResponse{
-				Granted: false,
-				Reason:  fmt.Sprintf("Error evaluating zero-trust policies: %v", err),
-			}
-			_ = a.auditLogger.LogPermissionCheck(ctx, request, errorResponse, sourceIP, userAgent)
-			return errorResponse, err
-		}
-		finalResponse = zeroTrustResponse
-	} else {
-		// No zero-trust evaluation - use RBAC result
-		finalResponse = &common.AccessResponse{
-			Granted:            rbacGranted,
-			Reason:             rbacReason,
-			AppliedRoles:       baseResponse.AppliedRoles,
-			AppliedPermissions: baseResponse.AppliedPermissions,
-		}
-		if delegatedGranted && !baseResponse.Granted {
-			finalResponse.AppliedPermissions = []string{request.PermissionId}
-		}
+	finalResponse := &common.AccessResponse{
+		Granted:            rbacGranted,
+		Reason:             rbacReason,
+		AppliedRoles:       baseResponse.AppliedRoles,
+		AppliedPermissions: baseResponse.AppliedPermissions,
+	}
+	if delegatedGranted && !baseResponse.Granted {
+		finalResponse.AppliedPermissions = []string{request.PermissionId}
 	}
 
-	// Step 4: Log the final decision
-	_ = a.auditLogger.LogPermissionCheck(ctx, request, finalResponse, sourceIP, userAgent)
+	// Step 3: Log the final decision to durable audit store
+	result := business.AuditResultDenied
+	if finalResponse.Granted {
+		result = business.AuditResultSuccess
+	}
+	a.recordPermissionCheck(ctx, request, result, finalResponse.Reason, sourceIP, userAgent)
 	return finalResponse, nil
+}
+
+// recordPermissionCheck emits a check_permission audit event to the durable store.
+// It is a no-op when auditManager is nil.
+func (a *AdvancedAuthEngine) recordPermissionCheck(ctx context.Context, request *common.AccessRequest, result business.AuditResult, reason, sourceIP, userAgent string) {
+	if a.auditManager == nil {
+		return
+	}
+	if err := a.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		request.TenantId, request.SubjectId, "permission", request.PermissionId,
+		"check_permission", result,
+	).Request("", "", "", sourceIP, userAgent).Detail("reason", reason)); err != nil {
+		slog.Warn("failed to record permission check audit event", "error", err)
+	}
 }
 
 // CheckConditionalPermission checks a conditional permission with context evaluation
@@ -283,14 +237,8 @@ func (a *AdvancedAuthEngine) GetSubjectPermissions(ctx context.Context, subjectI
 	for _, delegation := range delegations {
 		for _, permID := range delegation.PermissionIds {
 			if _, exists := permissionMap[permID]; !exists {
-				// Get the permission details
-				// Note: This would require access to the permission store
-				// For now, create a placeholder permission
-				permissionMap[permID] = &common.Permission{
-					Id:          permID,
-					Name:        fmt.Sprintf("Delegated: %s", permID),
-					Description: fmt.Sprintf("Permission delegated by %s", delegation.DelegatorId),
-				}
+				// Look up permission from store; fall back to constructed permission if not found or on error.
+				permissionMap[permID] = a.getPermissionByID(ctx, permID, delegation.DelegatorId)
 			}
 		}
 	}
@@ -304,14 +252,13 @@ func (a *AdvancedAuthEngine) GetSubjectPermissions(ctx context.Context, subjectI
 	return result, nil
 }
 
-// GetEffectivePermissions gets all effective permissions including conditional and delegated
+// GetEffectivePermissions returns all effective permissions considering role hierarchy.
+// Delegates to baseEngine.GetEffectivePermissions so the hierarchy traversal wired via
+// SetHierarchyEngine is exercised through the production call path
+// (Manager.GetEffectivePermissions → advancedEngine → baseEngine with hierarchy).
+// Conditional and delegated permissions are available via GetSubjectPermissions.
 func (a *AdvancedAuthEngine) GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
-	return a.GetSubjectPermissions(ctx, subjectID, tenantID)
-}
-
-// GetAuditLogger returns the audit logger for external access
-func (a *AdvancedAuthEngine) GetAuditLogger() *AuditLogger {
-	return a.auditLogger
+	return a.baseEngine.GetEffectivePermissions(ctx, subjectID, tenantID)
 }
 
 // GetDelegationManager returns the delegation manager for external access
@@ -346,14 +293,17 @@ func (a *AdvancedAuthEngine) CreateTemporaryPermission(ctx context.Context, req 
 		GrantedAt:    req.GrantedAt,
 	}
 
-	// Log the temporary permission grant
-	context := map[string]string{
-		"type":       "temporary",
-		"expires_at": fmt.Sprintf("%d", req.ExpiresAt),
-		"granted_by": req.GrantedBy,
+	// Record the temporary permission grant in the durable audit store
+	if a.auditManager != nil {
+		if err := a.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+			req.TenantID, req.SubjectID, "permission", req.PermissionID,
+			"grant_permission", business.AuditResultSuccess,
+		).Detail("granted_by", req.GrantedBy).
+			Detail("type", "temporary").
+			Detail("expires_at", fmt.Sprintf("%d", req.ExpiresAt))); err != nil {
+			slog.Warn("failed to record permission grant audit event", "error", err)
+		}
 	}
-
-	_ = a.auditLogger.LogPermissionGrant(ctx, req.SubjectID, req.PermissionID, req.ResourceID, req.TenantID, req.GrantedBy, context)
 
 	return conditionalPerm, nil
 }
@@ -398,6 +348,25 @@ func (a *AdvancedAuthEngine) validateTemporaryPermissionRequest(ctx context.Cont
 	return nil
 }
 
+// getPermissionByID looks up a permission from the store with fallback for delegated (potentially synthetic) permissions.
+// Not-found errors are silenced; other errors are logged and the constructed fallback is returned.
+func (a *AdvancedAuthEngine) getPermissionByID(ctx context.Context, permID string, delegatorID string) *common.Permission {
+	perm, err := a.baseEngine.permissionStore.GetPermission(ctx, permID)
+	if err == nil {
+		return perm
+	}
+	if !isNotFoundError(err) {
+		slog.Warn("permission store lookup failed for delegated permission, using synthetic fallback",
+			"permission_id", permID,
+			"error", err)
+	}
+	return &common.Permission{
+		Id:          permID,
+		Name:        fmt.Sprintf("Delegated: %s", permID),
+		Description: fmt.Sprintf("Permission delegated by %s", delegatorID),
+	}
+}
+
 // TemporaryPermissionRequest represents a request for temporary permission
 type TemporaryPermissionRequest struct {
 	SubjectID    string                  `json:"subject_id"`
@@ -409,118 +378,4 @@ type TemporaryPermissionRequest struct {
 	ExpiresAt    int64                   `json:"expires_at"`
 	GrantedBy    string                  `json:"granted_by"`
 	GrantedAt    int64                   `json:"granted_at"`
-}
-
-// evaluateZeroTrustPolicies evaluates zero-trust policies and combines them with RBAC decisions
-func (a *AdvancedAuthEngine) evaluateZeroTrustPolicies(ctx context.Context, request *common.AccessRequest, rbacGranted bool, rbacReason string) (*common.AccessResponse, error) {
-	// Convert common.AccessRequest to zerotrust.ZeroTrustAccessRequest
-	zeroTrustRequest := a.convertToZeroTrustRequest(request)
-
-	// Evaluate zero-trust policies
-	zeroTrustResponse, err := a.zeroTrustEngine.EvaluateAccess(ctx, zeroTrustRequest)
-	if err != nil {
-		return nil, fmt.Errorf("zero-trust policy evaluation failed: %w", err)
-	}
-
-	// Combine RBAC and zero-trust decisions based on the configured mode
-	finalResponse := a.combineAuthorizationDecisions(rbacGranted, rbacReason, zeroTrustResponse)
-	return finalResponse, nil
-}
-
-// convertToZeroTrustRequest converts a common AccessRequest to a ZeroTrustAccessRequest
-func (a *AdvancedAuthEngine) convertToZeroTrustRequest(request *common.AccessRequest) *zerotrust.ZeroTrustAccessRequest {
-	zeroTrustRequest := &zerotrust.ZeroTrustAccessRequest{
-		AccessRequest: request,
-		RequestID:     fmt.Sprintf("rbac-%d", time.Now().UnixNano()),
-		RequestTime:   time.Now(),
-		SubjectType:   zerotrust.SubjectTypeUser, // Default to user
-		ResourceType:  extractResourceType(request.ResourceId),
-		SourceSystem:  "rbac-engine",
-		RequestSource: zerotrust.RequestSourceSystem,
-		Priority:      zerotrust.RequestPriorityNormal,
-	}
-
-	// Extract environmental context from request context
-	if request.Context != nil {
-		zeroTrustRequest.EnvironmentContext = &zerotrust.EnvironmentContext{
-			IPAddress: request.Context["source_ip"],
-		}
-
-		zeroTrustRequest.SecurityContext = &zerotrust.SecurityContext{
-			AuthenticationMethod: request.Context["auth_method"],
-			TrustLevel:           zerotrust.TrustLevelMedium, // Default trust level
-		}
-
-		// Set MFA verified if available
-		if mfaStr := request.Context["mfa_verified"]; mfaStr == "true" {
-			zeroTrustRequest.SecurityContext.MFAVerified = true
-		}
-	}
-
-	return zeroTrustRequest
-}
-
-// combineAuthorizationDecisions combines RBAC and zero-trust decisions based on the configured mode
-func (a *AdvancedAuthEngine) combineAuthorizationDecisions(rbacGranted bool, rbacReason string, ztResponse *zerotrust.ZeroTrustAccessResponse) *common.AccessResponse {
-	response := &common.AccessResponse{
-		AppliedRoles:       make([]string, 0),
-		AppliedPermissions: make([]string, 0),
-	}
-
-	switch a.zeroTrustMode {
-	case ZeroTrustModeAugmented:
-		// Both RBAC and zero-trust must grant access
-		response.Granted = rbacGranted && ztResponse.Granted
-		if response.Granted {
-			response.Reason = fmt.Sprintf("Access granted by RBAC (%s) and zero-trust policies", rbacReason)
-		} else if !rbacGranted {
-			response.Reason = fmt.Sprintf("Access denied by RBAC: %s", rbacReason)
-		} else {
-			response.Reason = fmt.Sprintf("Access denied by zero-trust policies: %s", ztResponse.Reason)
-		}
-
-	case ZeroTrustModeEnforced:
-		// Zero-trust policies override RBAC decisions
-		response.Granted = ztResponse.Granted
-		if response.Granted {
-			response.Reason = fmt.Sprintf("Access granted by zero-trust policies (RBAC: %s)", rbacReason)
-		} else {
-			response.Reason = fmt.Sprintf("Access denied by zero-trust policies: %s (RBAC: %s)", ztResponse.Reason, rbacReason)
-		}
-
-	case ZeroTrustModeAuditing:
-		// Use RBAC decision but log zero-trust result
-		response.Granted = rbacGranted
-		response.Reason = fmt.Sprintf("%s (ZT audit: %s)", rbacReason, ztResponse.Reason)
-
-	default: // ZeroTrustModeDisabled
-		// Should never reach here, but fallback to RBAC
-		response.Granted = rbacGranted
-		response.Reason = rbacReason
-	}
-
-	// Note: Zero-trust metadata would be logged separately since AccessResponse doesn't support context
-
-	return response
-}
-
-// extractResourceType extracts the resource type from a resource ID
-func extractResourceType(resourceID string) string {
-	if resourceID == "" {
-		return "unknown"
-	}
-
-	// Simple heuristic: take the first part before a dot or slash
-	for _, sep := range []string{".", "/", ":"} {
-		if idx := strings.Index(resourceID, sep); idx != -1 {
-			return resourceID[:idx]
-		}
-	}
-
-	return resourceID
-}
-
-// GetZeroTrustEngine returns the zero-trust engine for external access
-func (a *AdvancedAuthEngine) GetZeroTrustEngine() *zerotrust.ZeroTrustPolicyEngine {
-	return a.zeroTrustEngine
 }

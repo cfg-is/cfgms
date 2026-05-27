@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package graph
 
@@ -29,6 +29,10 @@ type HTTPClient struct {
 
 	// Retry configuration
 	retryConfig *RetryConfig
+
+	// Team provisioning poll configuration (overrideable for tests)
+	teamPollMaxRetries int
+	teamPollBackoff    time.Duration
 }
 
 // NewHTTPClient creates a new HTTP-based Graph API client
@@ -37,8 +41,10 @@ func NewHTTPClient(options ...ClientOption) *HTTPClient {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		baseURL:     "https://graph.microsoft.com/v1.0",
-		retryConfig: DefaultRetryConfig(),
+		baseURL:            "https://graph.microsoft.com/v1.0",
+		retryConfig:        DefaultRetryConfig(),
+		teamPollMaxRetries: 10,
+		teamPollBackoff:    3 * time.Second,
 	}
 
 	// Apply options
@@ -97,9 +103,11 @@ func (c *HTTPClient) GetUser(ctx context.Context, token *auth.AccessToken, userP
 	return &user, nil
 }
 
-// ListUsers retrieves users with optional OData filter
+// ListUsers retrieves users with optional OData filter. It follows @odata.nextLink
+// pages transparently and caps the total at 1000 results.
 func (c *HTTPClient) ListUsers(ctx context.Context, token *auth.AccessToken, filter string) ([]User, error) {
-	// Explicitly select all the fields we need to ensure they're returned
+	const maxResults = 1000
+
 	selectFields := "id,userPrincipalName,displayName,mailNickname,accountEnabled,mail,mobilePhone,officeLocation,jobTitle,department,companyName,createdDateTime"
 
 	var endpoint string
@@ -109,15 +117,36 @@ func (c *HTTPClient) ListUsers(ctx context.Context, token *auth.AccessToken, fil
 		endpoint = fmt.Sprintf("/users?$select=%s", selectFields)
 	}
 
-	var response struct {
-		Value []User `json:"value"`
+	var allUsers []User
+	for {
+		var response struct {
+			Value    []User `json:"value"`
+			NextLink string `json:"@odata.nextLink"`
+		}
+
+		if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+			return nil, fmt.Errorf("failed to list users: %w", err)
+		}
+
+		allUsers = append(allUsers, response.Value...)
+
+		if response.NextLink == "" || len(allUsers) >= maxResults {
+			break
+		}
+
+		// Extract the relative path from the absolute nextLink URL so makeRequest
+		// can prepend its own baseURL (which may differ in tests).
+		if !strings.HasPrefix(response.NextLink, c.baseURL) {
+			break
+		}
+		endpoint = response.NextLink[len(c.baseURL):]
 	}
 
-	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
-		return nil, fmt.Errorf("failed to list users: %w", err)
+	if len(allUsers) > maxResults {
+		allUsers = allUsers[:maxResults]
 	}
 
-	return response.Value, nil
+	return allUsers, nil
 }
 
 // CreateUser creates a new user
@@ -162,7 +191,7 @@ func (c *HTTPClient) GetUserLicenses(ctx context.Context, token *auth.AccessToke
 		Value []struct {
 			SkuID        string `json:"skuId"`
 			ServicePlans []struct {
-				ServicePlanId      string `json:"servicePlanId"`
+				ServicePlanID      string `json:"servicePlanId"`
 				ProvisioningStatus string `json:"provisioningStatus"`
 			} `json:"servicePlans"`
 		} `json:"value"`
@@ -181,7 +210,7 @@ func (c *HTTPClient) GetUserLicenses(ctx context.Context, token *auth.AccessToke
 		// Collect disabled service plans
 		for _, plan := range license.ServicePlans {
 			if plan.ProvisioningStatus == "Disabled" {
-				assignment.DisabledPlans = append(assignment.DisabledPlans, plan.ServicePlanId)
+				assignment.DisabledPlans = append(assignment.DisabledPlans, plan.ServicePlanID)
 			}
 		}
 
@@ -396,6 +425,28 @@ func (c *HTTPClient) DeleteDeviceConfiguration(ctx context.Context, token *auth.
 		return fmt.Errorf("failed to delete device configuration: %w", err)
 	}
 
+	return nil
+}
+
+// ListDeviceConfigurationAssignments retrieves assignments for a device configuration
+func (c *HTTPClient) ListDeviceConfigurationAssignments(ctx context.Context, token *auth.AccessToken, configurationID string) ([]DeviceConfigurationAssignment, error) {
+	endpoint := fmt.Sprintf("/deviceManagement/deviceConfigurations/%s/assignments", configurationID)
+	var response struct {
+		Value []DeviceConfigurationAssignment `json:"value"`
+	}
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list assignments for configuration %s: %w", configurationID, err)
+	}
+	return response.Value, nil
+}
+
+// AssignDeviceConfiguration posts an assign action for a device configuration
+func (c *HTTPClient) AssignDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, assignments []DeviceConfigurationAssignment) error {
+	endpoint := fmt.Sprintf("/deviceManagement/deviceConfigurations/%s/assign", configurationID)
+	request := AssignDeviceConfigurationRequest{Assignments: assignments}
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to assign configuration %s: %w", configurationID, err)
+	}
 	return nil
 }
 
@@ -790,6 +841,249 @@ func (c *HTTPClient) DeleteGroup(ctx context.Context, token *auth.AccessToken, g
 	endpoint := fmt.Sprintf("/groups/%s", groupID)
 	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
 		return fmt.Errorf("failed to delete group: %w", err)
+	}
+	return nil
+}
+
+// ListGroupMembers retrieves the UPNs of members belonging to a group
+func (c *HTTPClient) ListGroupMembers(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
+	endpoint := fmt.Sprintf("/groups/%s/members", groupID)
+	var response struct {
+		Value []struct {
+			ID                string `json:"id"`
+			UserPrincipalName string `json:"userPrincipalName"`
+		} `json:"value"`
+	}
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list members for group %s: %w", groupID, err)
+	}
+	upns := make([]string, 0, len(response.Value))
+	for _, u := range response.Value {
+		if u.UserPrincipalName != "" {
+			upns = append(upns, u.UserPrincipalName)
+		}
+	}
+	return upns, nil
+}
+
+// AddGroupMember adds a user (by UPN) to a group
+func (c *HTTPClient) AddGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error {
+	user, err := c.GetUser(ctx, token, memberUPN)
+	if err != nil {
+		return fmt.Errorf("failed to resolve UPN %s: %w", memberUPN, err)
+	}
+	endpoint := fmt.Sprintf("/groups/%s/members/$ref", groupID)
+	request := struct {
+		ODataID string `json:"@odata.id"`
+	}{
+		ODataID: fmt.Sprintf("https://graph.microsoft.com/v1.0/directoryObjects/%s", user.ID),
+	}
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to add member %s to group %s: %w", memberUPN, groupID, err)
+	}
+	return nil
+}
+
+// RemoveGroupMember removes a user (by UPN) from a group
+func (c *HTTPClient) RemoveGroupMember(ctx context.Context, token *auth.AccessToken, groupID, memberUPN string) error {
+	user, err := c.GetUser(ctx, token, memberUPN)
+	if err != nil {
+		return fmt.Errorf("failed to resolve UPN %s: %w", memberUPN, err)
+	}
+	endpoint := fmt.Sprintf("/groups/%s/members/%s/$ref", groupID, user.ID)
+	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
+		return fmt.Errorf("failed to remove member %s from group %s: %w", memberUPN, groupID, err)
+	}
+	return nil
+}
+
+// ListGroupOwners retrieves the UPNs of owners of a group
+func (c *HTTPClient) ListGroupOwners(ctx context.Context, token *auth.AccessToken, groupID string) ([]string, error) {
+	endpoint := fmt.Sprintf("/groups/%s/owners", groupID)
+	var response struct {
+		Value []struct {
+			ID                string `json:"id"`
+			UserPrincipalName string `json:"userPrincipalName"`
+		} `json:"value"`
+	}
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list owners for group %s: %w", groupID, err)
+	}
+	upns := make([]string, 0, len(response.Value))
+	for _, u := range response.Value {
+		if u.UserPrincipalName != "" {
+			upns = append(upns, u.UserPrincipalName)
+		}
+	}
+	return upns, nil
+}
+
+// AddGroupOwner adds a user (by UPN) as an owner of a group
+func (c *HTTPClient) AddGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error {
+	user, err := c.GetUser(ctx, token, ownerUPN)
+	if err != nil {
+		return fmt.Errorf("failed to resolve UPN %s: %w", ownerUPN, err)
+	}
+	endpoint := fmt.Sprintf("/groups/%s/owners/$ref", groupID)
+	request := struct {
+		ODataID string `json:"@odata.id"`
+	}{
+		ODataID: fmt.Sprintf("https://graph.microsoft.com/v1.0/directoryObjects/%s", user.ID),
+	}
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to add owner %s to group %s: %w", ownerUPN, groupID, err)
+	}
+	return nil
+}
+
+// RemoveGroupOwner removes a user (by UPN) from the owners of a group
+func (c *HTTPClient) RemoveGroupOwner(ctx context.Context, token *auth.AccessToken, groupID, ownerUPN string) error {
+	user, err := c.GetUser(ctx, token, ownerUPN)
+	if err != nil {
+		return fmt.Errorf("failed to resolve UPN %s: %w", ownerUPN, err)
+	}
+	endpoint := fmt.Sprintf("/groups/%s/owners/%s/$ref", groupID, user.ID)
+	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
+		return fmt.Errorf("failed to remove owner %s from group %s: %w", ownerUPN, groupID, err)
+	}
+	return nil
+}
+
+// ListAdminUnitUserMembers retrieves user members of an administrative unit
+func (c *HTTPClient) ListAdminUnitUserMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error) {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/members/microsoft.graph.user", unitID)
+	var response struct {
+		Value []struct {
+			ID string `json:"id"`
+		} `json:"value"`
+	}
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list user members for admin unit %s: %w", unitID, err)
+	}
+	ids := make([]string, 0, len(response.Value))
+	for _, u := range response.Value {
+		ids = append(ids, u.ID)
+	}
+	return ids, nil
+}
+
+// ListAdminUnitGroupMembers retrieves group members of an administrative unit
+func (c *HTTPClient) ListAdminUnitGroupMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]string, error) {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/members/microsoft.graph.group", unitID)
+	var response struct {
+		Value []struct {
+			ID string `json:"id"`
+		} `json:"value"`
+	}
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list group members for admin unit %s: %w", unitID, err)
+	}
+	ids := make([]string, 0, len(response.Value))
+	for _, g := range response.Value {
+		ids = append(ids, g.ID)
+	}
+	return ids, nil
+}
+
+// ListAdminUnitScopedRoleMembers retrieves scoped role members of an administrative unit
+func (c *HTTPClient) ListAdminUnitScopedRoleMembers(ctx context.Context, token *auth.AccessToken, unitID string) ([]AdminUnitScopedRoleMember, error) {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/scopedRoleMembers", unitID)
+	var response struct {
+		Value []AdminUnitScopedRoleMember `json:"value"`
+	}
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list scoped role members for admin unit %s: %w", unitID, err)
+	}
+	return response.Value, nil
+}
+
+// AddAdminUnitMember adds a user or group to an administrative unit
+func (c *HTTPClient) AddAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/members/$ref", unitID)
+	request := struct {
+		ODataID string `json:"@odata.id"`
+	}{
+		ODataID: fmt.Sprintf("https://graph.microsoft.com/v1.0/directoryObjects/%s", memberID),
+	}
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to add member %s to admin unit %s: %w", memberID, unitID, err)
+	}
+	return nil
+}
+
+// AddAdminUnitScopedRoleMember assigns a scoped role to a principal in an administrative unit
+func (c *HTTPClient) AddAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID string, request *AddScopedRoleMemberRequest) (*AdminUnitScopedRoleMember, error) {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/scopedRoleMembers", unitID)
+	var result AdminUnitScopedRoleMember
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, &result); err != nil {
+		return nil, fmt.Errorf("failed to add scoped role member to admin unit %s: %w", unitID, err)
+	}
+	return &result, nil
+}
+
+// RemoveAdminUnitMember removes a user or group from an administrative unit
+func (c *HTTPClient) RemoveAdminUnitMember(ctx context.Context, token *auth.AccessToken, unitID, memberID string) error {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/members/%s/$ref", unitID, memberID)
+	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
+		return fmt.Errorf("failed to remove member %s from admin unit %s: %w", memberID, unitID, err)
+	}
+	return nil
+}
+
+// RemoveAdminUnitScopedRoleMember removes a scoped role assignment from an administrative unit
+func (c *HTTPClient) RemoveAdminUnitScopedRoleMember(ctx context.Context, token *auth.AccessToken, unitID, scopedRoleMemberID string) error {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s/scopedRoleMembers/%s", unitID, scopedRoleMemberID)
+	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
+		return fmt.Errorf("failed to remove scoped role member %s from admin unit %s: %w", scopedRoleMemberID, unitID, err)
+	}
+	return nil
+}
+
+// GetTeam retrieves the team associated with a Microsoft 365 group by its groupID.
+// Returns a not-found error (IsNotFoundError) if the group has no associated team.
+func (c *HTTPClient) GetTeam(ctx context.Context, token *auth.AccessToken, groupID string) (*Team, error) {
+	endpoint := fmt.Sprintf("/teams/%s", groupID)
+	var team Team
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &team); err != nil {
+		return nil, fmt.Errorf("failed to get team for group %s: %w", groupID, err)
+	}
+	return &team, nil
+}
+
+// CreateTeam provisions a Microsoft Teams team from an existing Microsoft 365 group.
+// Graph returns 202 Accepted; this method polls GET /teams/{groupId} until the team
+// is provisioned (200), the context is cancelled, or retries are exhausted.
+func (c *HTTPClient) CreateTeam(ctx context.Context, token *auth.AccessToken, groupID string, request *CreateTeamRequest) error {
+	endpoint := fmt.Sprintf("/groups/%s/team", groupID)
+	if err := c.makeRequest(ctx, token, "PUT", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to initiate team creation for group %s: %w", groupID, err)
+	}
+
+	for i := 0; i < c.teamPollMaxRetries; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(c.teamPollBackoff):
+		}
+
+		_, err := c.GetTeam(ctx, token, groupID)
+		if err == nil {
+			return nil
+		}
+		if IsNotFoundError(err) {
+			continue
+		}
+		return fmt.Errorf("team provisioning failed for group %s: %w", groupID, err)
+	}
+
+	return fmt.Errorf("team provisioning timed out for group %s after %d retries", groupID, c.teamPollMaxRetries)
+}
+
+// UpdateTeamSettings updates team settings for the team identified by teamID
+func (c *HTTPClient) UpdateTeamSettings(ctx context.Context, token *auth.AccessToken, teamID string, request *UpdateTeamSettingsRequest) error {
+	endpoint := fmt.Sprintf("/teams/%s", teamID)
+	if err := c.makeRequest(ctx, token, "PATCH", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to update team settings for team %s: %w", teamID, err)
 	}
 	return nil
 }

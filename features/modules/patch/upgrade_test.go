@@ -1,6 +1,6 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-package patch_test
+package patch
 
 import (
 	"context"
@@ -10,11 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/modules/patch"
 )
 
 func TestDefaultWindows11Requirements(t *testing.T) {
-	req := patch.DefaultWindows11Requirements()
+	req := DefaultWindows11Requirements()
 
 	assert.Equal(t, "2.0", req.TPMVersion)
 	assert.True(t, req.RequiresUEFI)
@@ -26,7 +25,7 @@ func TestDefaultWindows11Requirements(t *testing.T) {
 }
 
 func TestDefaultUpgradePolicy(t *testing.T) {
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 
 	assert.False(t, policy.Enabled, "Upgrades should be disabled by default for safety")
 	assert.False(t, policy.AutoUpgrade)
@@ -70,8 +69,8 @@ func createIncompatibleDNA() *commonpb.DNA {
 }
 
 func TestCompatibilityChecker_Compatible(t *testing.T) {
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
 	dna := createCompatibleDNA()
 
@@ -86,8 +85,8 @@ func TestCompatibilityChecker_Compatible(t *testing.T) {
 }
 
 func TestCompatibilityChecker_IncompatibleTPM(t *testing.T) {
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
 	dna := &commonpb.DNA{
 		Id: "test-device",
@@ -112,8 +111,8 @@ func TestCompatibilityChecker_IncompatibleTPM(t *testing.T) {
 }
 
 func TestCompatibilityChecker_IncompatibleBIOS(t *testing.T) {
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
 	dna := &commonpb.DNA{
 		Id: "test-device",
@@ -136,8 +135,8 @@ func TestCompatibilityChecker_IncompatibleBIOS(t *testing.T) {
 }
 
 func TestCompatibilityChecker_InsufficientRAM(t *testing.T) {
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
 	dna := &commonpb.DNA{
 		Id: "test-device",
@@ -160,8 +159,8 @@ func TestCompatibilityChecker_InsufficientRAM(t *testing.T) {
 }
 
 func TestCompatibilityChecker_InsufficientStorage(t *testing.T) {
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
 	dna := &commonpb.DNA{
 		Id: "test-device",
@@ -184,8 +183,8 @@ func TestCompatibilityChecker_InsufficientStorage(t *testing.T) {
 }
 
 func TestCompatibilityChecker_InsufficientCPUCores(t *testing.T) {
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
 	dna := &commonpb.DNA{
 		Id: "test-device",
@@ -208,8 +207,8 @@ func TestCompatibilityChecker_InsufficientCPUCores(t *testing.T) {
 }
 
 func TestCompatibilityChecker_SecureBootDisabled(t *testing.T) {
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
 	dna := &commonpb.DNA{
 		Id: "test-device",
@@ -232,8 +231,8 @@ func TestCompatibilityChecker_SecureBootDisabled(t *testing.T) {
 }
 
 func TestCompatibilityChecker_MultipleIssues(t *testing.T) {
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
 	dna := createIncompatibleDNA()
 
@@ -246,8 +245,8 @@ func TestCompatibilityChecker_MultipleIssues(t *testing.T) {
 }
 
 func TestCompatibilityChecker_MissingDNA(t *testing.T) {
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
 	result, err := checker.CheckCompatibility(nil, "11")
 	assert.Error(t, err)
@@ -256,8 +255,8 @@ func TestCompatibilityChecker_MissingDNA(t *testing.T) {
 }
 
 func TestCompatibilityChecker_PartialDNA(t *testing.T) {
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
 	// DNA with some missing attributes
 	dna := &commonpb.DNA{
@@ -278,17 +277,17 @@ func TestCompatibilityChecker_PartialDNA(t *testing.T) {
 }
 
 func TestUpgradeManager_CheckEligibility_PolicyDisabled(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = false // Disabled
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
 	dna := createCompatibleDNA()
 	ctx := context.Background()
@@ -300,17 +299,17 @@ func TestUpgradeManager_CheckEligibility_PolicyDisabled(t *testing.T) {
 }
 
 func TestUpgradeManager_CheckEligibility_Compatible(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
 	dna := createCompatibleDNA()
 	ctx := context.Background()
@@ -324,17 +323,17 @@ func TestUpgradeManager_CheckEligibility_Compatible(t *testing.T) {
 }
 
 func TestUpgradeManager_CheckEligibility_Incompatible(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
 	dna := createIncompatibleDNA()
 	ctx := context.Background()
@@ -348,18 +347,18 @@ func TestUpgradeManager_CheckEligibility_Incompatible(t *testing.T) {
 }
 
 func TestUpgradeManager_CheckEligibility_SkipCompatibilityCheck(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
 	policy.RequireCompatibilityCheck = false // Skip check
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
 	dna := createIncompatibleDNA() // Even incompatible device
 	ctx := context.Background()
@@ -374,18 +373,18 @@ func TestUpgradeManager_CheckEligibility_SkipCompatibilityCheck(t *testing.T) {
 }
 
 func TestUpgradeManager_PerformUpgrade_Incompatible_Blocked(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
 	policy.BlockIncompatible = true
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
 	dna := createIncompatibleDNA()
 	ctx := context.Background()
@@ -396,18 +395,18 @@ func TestUpgradeManager_PerformUpgrade_Incompatible_Blocked(t *testing.T) {
 }
 
 func TestUpgradeManager_PerformUpgrade_TestMode(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
 	policy.TestMode = true // Test mode
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
 	dna := createCompatibleDNA()
 	ctx := context.Background()
@@ -418,14 +417,14 @@ func TestUpgradeManager_PerformUpgrade_TestMode(t *testing.T) {
 }
 
 func TestUpgradeManager_CanUpgradeNow_PolicyDisabled(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = false
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
 
 	ctx := context.Background()
 	canUpgrade, reason, err := upgradeManager.CanUpgradeNow(ctx)
@@ -436,19 +435,19 @@ func TestUpgradeManager_CanUpgradeNow_PolicyDisabled(t *testing.T) {
 }
 
 func TestUpgradeManager_CanUpgradeNow_OutsideWindow(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
-	policy.UpgradeWindow = &patch.TimeWindow{
+	policy.UpgradeWindow = &TimeWindow{
 		StartHour:  2,           // 2 AM
 		EndHour:    4,           // 4 AM
 		DaysOfWeek: []int{0, 6}, // Sunday and Saturday only
 	}
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
 
 	ctx := context.Background()
 	canUpgrade, reason, err := upgradeManager.CanUpgradeNow(ctx)
@@ -461,11 +460,11 @@ func TestUpgradeManager_CanUpgradeNow_OutsideWindow(t *testing.T) {
 }
 
 func TestUpgradeManager_CanUpgradeNow_MaintenanceWindowBlocked(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
 
 	// Mock window manager that blocks maintenance
@@ -473,7 +472,7 @@ func TestUpgradeManager_CanUpgradeNow_MaintenanceWindowBlocked(t *testing.T) {
 		canPerformMaint: false,
 	}
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, nil, policy, mockWindow, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, nil, policy, mockWindow, "test-device")
 
 	ctx := context.Background()
 	canUpgrade, reason, err := upgradeManager.CanUpgradeNow(ctx)
@@ -484,11 +483,11 @@ func TestUpgradeManager_CanUpgradeNow_MaintenanceWindowBlocked(t *testing.T) {
 }
 
 func TestUpgradeManager_CanUpgradeNow_MaintenanceWindowAllowed(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
 
 	// Mock window manager that allows maintenance
@@ -496,7 +495,7 @@ func TestUpgradeManager_CanUpgradeNow_MaintenanceWindowAllowed(t *testing.T) {
 		canPerformMaint: true,
 	}
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, nil, policy, mockWindow, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, nil, policy, mockWindow, "test-device")
 
 	ctx := context.Background()
 	canUpgrade, reason, err := upgradeManager.CanUpgradeNow(ctx)
@@ -507,14 +506,14 @@ func TestUpgradeManager_CanUpgradeNow_MaintenanceWindowAllowed(t *testing.T) {
 }
 
 func TestUpgradeManager_SetPolicy(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	policy := patch.DefaultUpgradePolicy()
-	upgradeManager := patch.NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
+	policy := DefaultUpgradePolicy()
+	upgradeManager := NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
 
-	newPolicy := patch.UpgradePolicy{
+	newPolicy := UpgradePolicy{
 		Enabled:     true,
 		AutoUpgrade: true,
 	}
@@ -527,14 +526,14 @@ func TestUpgradeManager_SetPolicy(t *testing.T) {
 }
 
 func TestUpgradeManager_GetUpgradeStatus(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = false
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
 
 	ctx := context.Background()
 	status, err := upgradeManager.GetUpgradeStatus(ctx)
@@ -544,15 +543,15 @@ func TestUpgradeManager_GetUpgradeStatus(t *testing.T) {
 }
 
 func TestUpgradeManager_GetUpgradeStatus_AutoUpgrade(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
 	policy.AutoUpgrade = true
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
 
 	ctx := context.Background()
 	status, err := upgradeManager.GetUpgradeStatus(ctx)
@@ -562,20 +561,20 @@ func TestUpgradeManager_GetUpgradeStatus_AutoUpgrade(t *testing.T) {
 }
 
 func TestTimeWindow_NormalWindow(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	policy := patch.UpgradePolicy{
+	policy := UpgradePolicy{
 		Enabled: true,
-		UpgradeWindow: &patch.TimeWindow{
+		UpgradeWindow: &TimeWindow{
 			StartHour:  9,
 			EndHour:    17,
 			DaysOfWeek: []int{1, 2, 3, 4, 5}, // Monday-Friday
 		},
 	}
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
 	require.NotNil(t, upgradeManager)
 
 	// Test that upgrade manager was created successfully with time window
@@ -593,14 +592,14 @@ func TestTimeWindow_NormalWindow(t *testing.T) {
 }
 
 func TestUpgradeManager_PerformUpgrade_WithMaintenanceWindow(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
 	policy.TestMode = true
 
@@ -609,7 +608,7 @@ func TestUpgradeManager_PerformUpgrade_WithMaintenanceWindow(t *testing.T) {
 		canPerformMaint: true,
 	}
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, checker, policy, mockWindow, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, checker, policy, mockWindow, "test-device")
 
 	dna := createCompatibleDNA()
 	ctx := context.Background()
@@ -620,14 +619,14 @@ func TestUpgradeManager_PerformUpgrade_WithMaintenanceWindow(t *testing.T) {
 }
 
 func TestUpgradeManager_PerformUpgrade_BlockedByMaintenanceWindow(t *testing.T) {
-	mockManager := patch.NewMockPatchManager()
-	patchModule, err := patch.NewPatchModule(mockManager)
+	mockManager := NewMockPatchManager()
+	patchModule, err := NewPatchModule(mockManager)
 	require.NoError(t, err)
 
-	requirements := patch.DefaultWindows11Requirements()
-	checker := patch.NewCompatibilityChecker(requirements)
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
 
-	policy := patch.DefaultUpgradePolicy()
+	policy := DefaultUpgradePolicy()
 	policy.Enabled = true
 	policy.TestMode = false
 
@@ -636,7 +635,7 @@ func TestUpgradeManager_PerformUpgrade_BlockedByMaintenanceWindow(t *testing.T) 
 		canPerformMaint: false,
 	}
 
-	upgradeManager := patch.NewUpgradeManager(patchModule, checker, policy, mockWindow, "test-device")
+	upgradeManager := NewUpgradeManager(patchModule, checker, policy, mockWindow, "test-device")
 
 	dna := createCompatibleDNA()
 	ctx := context.Background()
@@ -644,4 +643,61 @@ func TestUpgradeManager_PerformUpgrade_BlockedByMaintenanceWindow(t *testing.T) 
 	err = upgradeManager.PerformUpgrade(ctx, dna)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot upgrade now")
+}
+
+func TestConfig_Validate_FeatureUpdate(t *testing.T) {
+	config := &Config{PatchType: "feature-update"}
+	err := config.Validate()
+	assert.NoError(t, err, "feature-update must be accepted by Config.validate()")
+}
+
+func TestConfig_Validate_RejectsUnknownPatchType(t *testing.T) {
+	unknownTypes := []string{"major-update", "optional", "driver", ""}
+	for _, pt := range unknownTypes {
+		config := &Config{PatchType: pt}
+		err := config.Validate()
+		assert.ErrorIs(t, err, ErrInvalidPatchType,
+			"patch type %q must be rejected by Config.validate()", pt)
+	}
+}
+
+func TestUpgradeManager_PerformUpgrade_NoErrInvalidPatchType(t *testing.T) {
+	mockManager := NewMockPatchManager()
+	// Add a feature-update patch so InstallPatches has real work to do, making
+	// the state change verifiable and proving the full installation path ran.
+	mockManager.AddAvailablePatch(PatchInfo{
+		ID:             "FU-2024-001",
+		Title:          "Windows 11 Feature Update",
+		Category:       "feature-update",
+		Severity:       "unspecified",
+		RebootRequired: true,
+	})
+
+	patchModule, err := NewPatchModule(mockManager)
+	require.NoError(t, err)
+
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
+
+	policy := DefaultUpgradePolicy()
+	policy.Enabled = true
+	policy.BlockIncompatible = false
+	policy.TestMode = false
+
+	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
+
+	dna := createCompatibleDNA()
+	ctx := context.Background()
+
+	err = upgradeManager.PerformUpgrade(ctx, dna)
+	require.NotErrorIs(t, err, ErrInvalidPatchType,
+		"PerformUpgrade must not return ErrInvalidPatchType for feature-update")
+	require.NoError(t, err, "PerformUpgrade should succeed when feature-update is a valid patch type")
+
+	// Verify the installation path was exercised: the feature-update patch has
+	// RebootRequired=true, so a successful install sets the reboot-required flag.
+	rebootRequired, checkErr := mockManager.CheckRebootRequired(ctx)
+	require.NoError(t, checkErr)
+	assert.True(t, rebootRequired,
+		"feature-update patch install must set reboot-required flag, confirming the install path ran")
 }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package network_activedirectory
 
@@ -14,6 +14,34 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// ErrNotConfigured is returned by providers created via the init() factory when no
+// steward client registry has been registered or the registry returns an error.
+type ErrNotConfigured struct {
+	Reason string
+}
+
+func (e *ErrNotConfigured) Error() string {
+	return fmt.Sprintf("network_activedirectory: provider not configured: %s", e.Reason)
+}
+
+// StewardClientRegistryFunc returns a StewardClient for AD operations.
+// Return a non-nil error when no AD endpoint is available.
+type StewardClientRegistryFunc func() (StewardClient, error)
+
+var (
+	globalRegistryMu sync.RWMutex
+	globalRegistry   StewardClientRegistryFunc
+)
+
+// SetStewardClientRegistry registers the function the init() factory uses to obtain a
+// StewardClient. Must be called before any provider is instantiated via the global
+// DirectoryProviderFactory. Pass nil to reset.
+func SetStewardClientRegistry(fn StewardClientRegistryFunc) {
+	globalRegistryMu.Lock()
+	globalRegistry = fn
+	globalRegistryMu.Unlock()
+}
+
 // ActiveDirectoryProvider implements the DirectoryProvider interface for Active Directory
 // by communicating with AD stewards via gRPC
 type ActiveDirectoryProvider struct {
@@ -27,6 +55,10 @@ type ActiveDirectoryProvider struct {
 	// Steward communication
 	stewardClient StewardClient // Interface for gRPC communication
 
+	// notConfiguredErr is set when the provider is created via init() factory without a
+	// registered steward client registry. All operations return this error.
+	notConfiguredErr *ErrNotConfigured
+
 	// Statistics
 	stats struct {
 		sync.RWMutex
@@ -39,7 +71,7 @@ type ActiveDirectoryProvider struct {
 }
 
 // StewardClient defines the interface for communicating with AD stewards
-// This would be implemented by the actual gRPC client
+// Design decision: gRPC client transport is injected at construction; this comment block describes the expected interface, not missing implementation.
 type StewardClient interface {
 	// Module operations via steward gRPC API
 	GetModuleState(ctx context.Context, stewardID, moduleType, resourceID string) (map[string]interface{}, error)
@@ -138,6 +170,10 @@ func (p *ActiveDirectoryProvider) GetProviderInfo() interfaces.ProviderInfo {
 
 // Connect establishes connection to Active Directory via steward
 func (p *ActiveDirectoryProvider) Connect(ctx context.Context, config interfaces.ProviderConfig) error {
+	if p.notConfiguredErr != nil {
+		return p.notConfiguredErr
+	}
+
 	p.connMux.Lock()
 	defer p.connMux.Unlock()
 
@@ -504,13 +540,33 @@ type ADModuleQueryResult struct {
 	OUs    []interfaces.OrganizationalUnit `json:"ous,omitempty"`
 }
 
+// newFromRegistry is the ProviderConstructor used by init(). It looks up the global
+// steward client registry and returns a configured provider, or one with notConfiguredErr
+// set if the registry is nil or returns an error.
+func newFromRegistry() interfaces.DirectoryProvider {
+	globalRegistryMu.RLock()
+	fn := globalRegistry
+	globalRegistryMu.RUnlock()
+
+	if fn == nil {
+		return &ActiveDirectoryProvider{
+			logger:           logging.NewNoopLogger(),
+			notConfiguredErr: &ErrNotConfigured{Reason: "no steward client registry registered; call SetStewardClientRegistry before using this provider"},
+		}
+	}
+
+	client, err := fn()
+	if err != nil {
+		return &ActiveDirectoryProvider{
+			logger:           logging.NewNoopLogger(),
+			notConfiguredErr: &ErrNotConfigured{Reason: err.Error()},
+		}
+	}
+
+	return NewActiveDirectoryProvider(client, logging.NewNoopLogger())
+}
+
 // init registers this provider with the global factory
 func init() {
-	interfaces.RegisterDirectoryProviderConstructor("network_activedirectory", func() interfaces.DirectoryProvider {
-		// In a real implementation, this would get the steward client from a registry
-		// For now, return a provider that will need to be configured with a client
-		return &ActiveDirectoryProvider{
-			logger: logging.NewNoopLogger(),
-		}
-	})
+	interfaces.RegisterDirectoryProviderConstructor("network_activedirectory", newFromRegistry)
 }

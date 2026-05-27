@@ -1,9 +1,13 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package patch
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -12,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // Helper function to create Config from YAML string
@@ -552,4 +557,127 @@ func TestMockPatchManager(t *testing.T) {
 	// Test IsValidPatchType
 	assert.True(t, mock.IsValidPatchType("security"))
 	assert.False(t, mock.IsValidPatchType("invalid"))
+}
+
+func TestPatchModule_executeScript_logsScript(t *testing.T) {
+	dir := t.TempDir()
+	var scriptPath string
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(dir, "patch-hook.bat")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("@echo off\r\nexit 0\r\n"), 0755))
+	} else {
+		scriptPath = filepath.Join(dir, "patch-hook.sh")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0755))
+	}
+
+	patchManager := NewMockPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	mock := pkgtesting.NewMockLogger(true)
+	require.NoError(t, m.SetLogger(mock))
+
+	err = m.executeScript(context.Background(), scriptPath)
+	require.NoError(t, err)
+
+	logs := mock.GetLogs("debug")
+	require.NotEmpty(t, logs, "expected debug log from executeScript")
+	assert.Equal(t, "executing script", logs[0].Message)
+}
+
+func TestExecuteScript_RunsRealCommand(t *testing.T) {
+	dir := t.TempDir()
+	var scriptPath string
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(dir, "echo-test.bat")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("@echo off\r\necho hello-from-script\r\n"), 0755))
+	} else {
+		scriptPath = filepath.Join(dir, "echo-test.sh")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\necho hello-from-script\n"), 0755))
+	}
+
+	patchManager := NewMockPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	mock := pkgtesting.NewMockLogger(true)
+	require.NoError(t, m.SetLogger(mock))
+
+	err = m.executeScript(context.Background(), scriptPath)
+	require.NoError(t, err)
+
+	// Find the "script completed" log and verify stdout was captured
+	logs := mock.GetLogs("debug")
+	var completedLog *pkgtesting.LogEntry
+	for i := range logs {
+		if logs[i].Message == "script completed" {
+			completedLog = &logs[i]
+			break
+		}
+	}
+	require.NotNil(t, completedLog, "expected 'script completed' log entry")
+
+	// stdout is in Data as key-value pairs: ["script", path, "stdout", output]
+	dataStr := fmt.Sprintf("%v", completedLog.Data)
+	assert.Contains(t, dataStr, "hello-from-script", "stdout should contain the echoed string")
+}
+
+func TestExecuteScript_RejectsRelativePath(t *testing.T) {
+	patchManager := NewMockPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	err = m.executeScript(context.Background(), "relative/path/script.sh")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "absolute")
+}
+
+func TestExecuteScript_RejectsEmptyPath(t *testing.T) {
+	patchManager := NewMockPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	err = m.executeScript(context.Background(), "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty")
+}
+
+func TestExecuteScript_FailedScript(t *testing.T) {
+	dir := t.TempDir()
+	var scriptPath string
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(dir, "fail-script.bat")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("@echo off\r\nexit 1\r\n"), 0755))
+	} else {
+		scriptPath = filepath.Join(dir, "fail-script.sh")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 1\n"), 0755))
+	}
+
+	patchManager := NewMockPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	err = m.executeScript(context.Background(), scriptPath)
+	require.Error(t, err, "script with exit code 1 should return error")
+}
+
+func TestPatchModule_DefaultLoggingSupport_embed(t *testing.T) {
+	m := New()
+
+	// PatchModule must implement LoggingInjectable via the DefaultLoggingSupport embed
+	injectable, ok := m.(modules.LoggingInjectable)
+	require.True(t, ok, "PatchModule must implement modules.LoggingInjectable")
+
+	// Before injection, GetLogger returns nil, false
+	logger, injected := injectable.GetLogger()
+	assert.Nil(t, logger)
+	assert.False(t, injected)
+
+	// After SetLogger, GetLogger returns the injected logger
+	mock := pkgtesting.NewMockLogger(true)
+	require.NoError(t, injectable.SetLogger(mock))
+
+	logger, injected = injectable.GetLogger()
+	assert.Equal(t, mock, logger)
+	assert.True(t, injected)
 }

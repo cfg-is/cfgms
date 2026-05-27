@@ -22,7 +22,9 @@ on:
   workflow_dispatch:
 
 env:
-  GO_VERSION: '1.23'
+  GO_VERSION: '1.26.3'
+
+permissions: {}
 
 jobs:
   license-check:
@@ -31,28 +33,26 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      pull-requests: write
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
 
     - name: Cache Go modules
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-licenses-${{ hashFiles('**/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go-licenses-
-          ${{ runner.os }}-go-
 
     - name: Install go-licenses tool
-      run: go install github.com/google/go-licenses@latest
+      run: go install github.com/google/go-licenses/v2@v2.0.1
 
     - name: Download dependencies
       run: go mod download
@@ -65,11 +65,12 @@ jobs:
         echo ""
 
         # Define forbidden license types
-        # These licenses are incompatible with Apache 2.0 or pose legal risks
+        # CFGMS itself is licensed under AGPL-3.0 (see LICENSE), so copyleft
+        # licenses (GPL/LGPL/AGPL) on third-party *dependencies* are
+        # compatible and intentionally NOT listed here. The forbidden set
+        # below covers licenses that are non-commercial, source-unavailable,
+        # or otherwise incompatible with AGPL-3.0 redistribution.
         FORBIDDEN_LICENSES=(
-          "GPL"
-          "LGPL"
-          "AGPL"
           "CC-BY-NC"
           "Commercial"
           "Proprietary"
@@ -144,15 +145,18 @@ jobs:
         echo '```' >> license-reports/summary.md
 
         echo "" >> license-reports/summary.md
+        echo "## CFGMS Project License" >> license-reports/summary.md
+        echo "CFGMS itself is licensed under **AGPL-3.0** (see [LICENSE](../LICENSE))." >> license-reports/summary.md
+        echo "" >> license-reports/summary.md
         echo "## Allowed License Types" >> license-reports/summary.md
         echo "- ✅ MIT" >> license-reports/summary.md
         echo "- ✅ Apache-2.0" >> license-reports/summary.md
         echo "- ✅ BSD (2-Clause, 3-Clause)" >> license-reports/summary.md
         echo "- ✅ ISC" >> license-reports/summary.md
         echo "- ✅ MPL-2.0" >> license-reports/summary.md
+        echo "- ✅ GPL/LGPL/AGPL (copyleft compatible with project AGPL-3.0)" >> license-reports/summary.md
         echo "" >> license-reports/summary.md
         echo "## Forbidden License Types" >> license-reports/summary.md
-        echo "- ❌ GPL/LGPL/AGPL (copyleft incompatible with Apache-2.0)" >> license-reports/summary.md
         echo "- ❌ CC-BY-NC (non-commercial restriction)" >> license-reports/summary.md
         echo "- ❌ Commercial/Proprietary" >> license-reports/summary.md
         echo "- ❌ SSPL (Server Side Public License)" >> license-reports/summary.md
@@ -160,7 +164,7 @@ jobs:
         cat license-reports/summary.md
 
     - name: Upload license reports
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: license-compliance-report

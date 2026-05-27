@@ -1,17 +1,25 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package trigger
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // MockStorageProvider implements StorageProvider for testing
@@ -70,39 +78,62 @@ func (m *MockStorageProvider) Description() string {
 	return args.String(0)
 }
 
-func (m *MockStorageProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
+func (m *MockStorageProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
 	args := m.Called(config)
-	return args.Get(0).(interfaces.ClientTenantStore), args.Error(1)
+	return args.Get(0).(business.ClientTenantStore), args.Error(1)
 }
 
-func (m *MockStorageProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
+func (m *MockStorageProvider) CreateConfigStore(config map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	args := m.Called(config)
-	return args.Get(0).(interfaces.ConfigStore), args.Error(1)
+	return args.Get(0).(cfgconfig.ConfigStore), args.Error(1)
 }
 
-func (m *MockStorageProvider) CreateAuditStore(config map[string]interface{}) (interfaces.AuditStore, error) {
+func (m *MockStorageProvider) CreateAuditStore(config map[string]interface{}) (business.AuditStore, error) {
 	args := m.Called(config)
-	return args.Get(0).(interfaces.AuditStore), args.Error(1)
+	return args.Get(0).(business.AuditStore), args.Error(1)
 }
 
-func (m *MockStorageProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
+func (m *MockStorageProvider) CreateRBACStore(config map[string]interface{}) (business.RBACStore, error) {
 	args := m.Called(config)
-	return args.Get(0).(interfaces.RBACStore), args.Error(1)
+	return args.Get(0).(business.RBACStore), args.Error(1)
 }
 
-func (m *MockStorageProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
+func (m *MockStorageProvider) CreateTenantStore(config map[string]interface{}) (business.TenantStore, error) {
 	args := m.Called(config)
-	return args.Get(0).(interfaces.RuntimeStore), args.Error(1)
+	return args.Get(0).(business.TenantStore), args.Error(1)
 }
 
-func (m *MockStorageProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+func (m *MockStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	args := m.Called(config)
-	return args.Get(0).(interfaces.TenantStore), args.Error(1)
+	return args.Get(0).(business.RegistrationTokenStore), args.Error(1)
 }
 
-func (m *MockStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
-	args := m.Called(config)
-	return args.Get(0).(interfaces.RegistrationTokenStore), args.Error(1)
+func (m *MockStorageProvider) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (m *MockStorageProvider) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (m *MockStorageProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (m *MockStorageProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (m *MockStorageProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (m *MockStorageProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (m *MockStorageProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, business.ErrNotSupported
 }
 
 func (m *MockStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
@@ -218,6 +249,7 @@ func TestTriggerManagerImpl_NewTriggerManager(t *testing.T) {
 		mockWebhookHandler,
 		mockSIEMIntegration,
 		mockWorkflowTrigger,
+		nil,
 	)
 
 	assert.NotNil(t, manager)
@@ -246,6 +278,7 @@ func TestTriggerManagerImpl_StartStop(t *testing.T) {
 		mockWebhookHandler,
 		mockSIEMIntegration,
 		mockWorkflowTrigger,
+		nil,
 	)
 
 	ctx := context.Background()
@@ -302,6 +335,7 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 		mockWebhookHandler,
 		mockSIEMIntegration,
 		mockWorkflowTrigger,
+		nil,
 	)
 
 	ctx := context.Background()
@@ -332,7 +366,6 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 			setupMocks: func() {
 				mockStorage.On("Available").Return(true, nil)
 				mockWorkflowTrigger.On("ValidateTrigger", ctx, mock.Anything).Return(nil)
-				mockStorage.On("Store", ctx, "triggers/schedule-1", mock.Anything).Return(nil)
 				mockScheduler.On("ScheduleWorkflow", ctx, mock.Anything).Return(nil)
 			},
 			expectError: false,
@@ -357,7 +390,6 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 			setupMocks: func() {
 				mockStorage.On("Available").Return(true, nil)
 				mockWorkflowTrigger.On("ValidateTrigger", ctx, mock.Anything).Return(nil)
-				mockStorage.On("Store", ctx, "triggers/webhook-1", mock.Anything).Return(nil)
 				mockWebhookHandler.On("RegisterWebhook", ctx, mock.Anything).Return(nil)
 			},
 			expectError: false,
@@ -382,7 +414,6 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 			setupMocks: func() {
 				mockStorage.On("Available").Return(true, nil)
 				mockWorkflowTrigger.On("ValidateTrigger", ctx, mock.Anything).Return(nil)
-				mockStorage.On("Store", ctx, "triggers/siem-1", mock.Anything).Return(nil)
 				mockSIEMIntegration.On("RegisterSIEMTrigger", ctx, mock.Anything).Return(nil)
 			},
 			expectError: false,
@@ -438,7 +469,6 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 			setupMocks: func() {
 				mockStorage.On("Available").Return(true, nil)
 				mockWorkflowTrigger.On("ValidateTrigger", ctx, mock.Anything).Return(nil)
-				mockStorage.On("Store", ctx, "triggers/storage-test-1", mock.Anything).Return(nil)
 				mockScheduler.On("ScheduleWorkflow", ctx, mock.Anything).Return(nil)
 			},
 			expectError: false,
@@ -486,6 +516,7 @@ func TestTriggerManagerImpl_UpdateTrigger(t *testing.T) {
 		mockWebhookHandler,
 		mockSIEMIntegration,
 		mockWorkflowTrigger,
+		nil,
 	)
 
 	// Create an existing trigger
@@ -533,7 +564,6 @@ func TestTriggerManagerImpl_UpdateTrigger(t *testing.T) {
 			setupMocks: func() {
 				mockStorage.On("Available").Return(true, nil)
 				mockWorkflowTrigger.On("ValidateTrigger", ctx, mock.Anything).Return(nil)
-				mockStorage.On("Store", ctx, "triggers/schedule-1", mock.Anything).Return(nil)
 				mockScheduler.On("UnscheduleWorkflow", ctx, "schedule-1").Return(nil)
 				mockScheduler.On("ScheduleWorkflow", ctx, mock.Anything).Return(nil)
 			},
@@ -610,6 +640,7 @@ func TestTriggerManagerImpl_DeleteTrigger(t *testing.T) {
 		mockWebhookHandler,
 		mockSIEMIntegration,
 		mockWorkflowTrigger,
+		nil,
 	)
 
 	// Create test triggers
@@ -660,7 +691,6 @@ func TestTriggerManagerImpl_DeleteTrigger(t *testing.T) {
 			triggerID: "schedule-1",
 			setupMocks: func() {
 				mockStorage.On("Available").Return(true, nil)
-				mockStorage.On("Delete", ctx, "triggers/schedule-1").Return(nil)
 				mockScheduler.On("UnscheduleWorkflow", ctx, "schedule-1").Return(nil)
 			},
 			expectError: false,
@@ -670,7 +700,6 @@ func TestTriggerManagerImpl_DeleteTrigger(t *testing.T) {
 			triggerID: "webhook-1",
 			setupMocks: func() {
 				mockStorage.On("Available").Return(true, nil)
-				mockStorage.On("Delete", ctx, "triggers/webhook-1").Return(nil)
 				mockWebhookHandler.On("UnregisterWebhook", ctx, "webhook-1").Return(nil)
 			},
 			expectError: false,
@@ -680,7 +709,6 @@ func TestTriggerManagerImpl_DeleteTrigger(t *testing.T) {
 			triggerID: "siem-1",
 			setupMocks: func() {
 				mockStorage.On("Available").Return(true, nil)
-				mockStorage.On("Delete", ctx, "triggers/siem-1").Return(nil)
 				mockSIEMIntegration.On("UnregisterSIEMTrigger", ctx, "siem-1").Return(nil)
 			},
 			expectError: false,
@@ -691,16 +719,6 @@ func TestTriggerManagerImpl_DeleteTrigger(t *testing.T) {
 			setupMocks:  func() {},
 			expectError: true,
 			errorMsg:    "trigger non-existent not found",
-		},
-		{
-			name:      "storage deletion not implemented yet",
-			triggerID: "schedule-1",
-			setupMocks: func() {
-				mockStorage.On("Available").Return(true, nil)
-				mockStorage.On("Delete", ctx, "triggers/schedule-1").Return(nil)
-				mockScheduler.On("UnscheduleWorkflow", ctx, "schedule-1").Return(nil)
-			},
-			expectError: false,
 		},
 	}
 
@@ -752,6 +770,7 @@ func TestTriggerManagerImpl_GetTrigger(t *testing.T) {
 		mockWebhookHandler,
 		mockSIEMIntegration,
 		mockWorkflowTrigger,
+		nil,
 	)
 
 	// Create test trigger
@@ -818,6 +837,7 @@ func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
 		mockWebhookHandler,
 		mockSIEMIntegration,
 		mockWorkflowTrigger,
+		nil,
 	)
 
 	// Create test triggers
@@ -954,6 +974,7 @@ func TestTriggerManagerImpl_EnableDisableTrigger(t *testing.T) {
 		mockWebhookHandler,
 		mockSIEMIntegration,
 		mockWorkflowTrigger,
+		nil,
 	)
 
 	// Create test trigger
@@ -971,14 +992,12 @@ func TestTriggerManagerImpl_EnableDisableTrigger(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("enable trigger", func(t *testing.T) {
-		mockStorage.On("Store", ctx, "triggers/test-1", mock.Anything).Return(nil)
 		mockScheduler.On("ScheduleWorkflow", ctx, mock.Anything).Return(nil)
 
 		err := manager.EnableTrigger(ctx, "test-1")
 		assert.NoError(t, err)
 		assert.Equal(t, TriggerStatusActive, trigger.Status)
 
-		mockStorage.AssertExpectations(t)
 		mockScheduler.AssertExpectations(t)
 	})
 
@@ -990,15 +1009,12 @@ func TestTriggerManagerImpl_EnableDisableTrigger(t *testing.T) {
 		trigger.Status = TriggerStatusActive
 		trigger.Schedule.Enabled = true
 
-		mockStorage.On("Available").Return(true, nil)
-		mockStorage.On("Store", ctx, "triggers/test-1", mock.Anything).Return(nil)
 		mockScheduler.On("UnscheduleWorkflow", ctx, "test-1").Return(nil)
 
 		err := manager.DisableTrigger(ctx, "test-1")
 		assert.NoError(t, err)
 		assert.Equal(t, TriggerStatusInactive, trigger.Status)
 
-		mockStorage.AssertExpectations(t)
 		mockScheduler.AssertExpectations(t)
 	})
 
@@ -1024,6 +1040,7 @@ func TestTriggerManagerImpl_ExecuteTrigger(t *testing.T) {
 		mockWebhookHandler,
 		mockSIEMIntegration,
 		mockWorkflowTrigger,
+		nil,
 	)
 
 	// Create test trigger
@@ -1042,10 +1059,10 @@ func TestTriggerManagerImpl_ExecuteTrigger(t *testing.T) {
 	}
 
 	mockWorkflowTrigger.On("TriggerWorkflow", ctx, trigger, mock.Anything).Return(
-		&WorkflowExecution{
+		&workflow.WorkflowExecution{
 			ID:           "exec-123",
 			WorkflowName: "test-workflow",
-			Status:       "running",
+			Status:       workflow.StatusRunning,
 			StartTime:    time.Now(),
 		}, nil)
 
@@ -1061,4 +1078,548 @@ func TestTriggerManagerImpl_ExecuteTrigger(t *testing.T) {
 	assert.Contains(t, manager.executions, execution.ID)
 
 	mockWorkflowTrigger.AssertExpectations(t)
+}
+
+func TestTriggerManagerImpl_NilStoragePersistence(t *testing.T) {
+	// When storage is nil (e.g. composite OSS manager where GetProvider returns nil),
+	// save and delete should be no-ops, not panics.
+	manager := &TriggerManagerImpl{
+		storage:    nil,
+		triggers:   make(map[string]*Trigger),
+		executions: make(map[string]*TriggerExecution),
+		logger:     logging.ForModule("workflow.trigger.manager.test"),
+	}
+
+	ctx := context.Background()
+	trigger := &Trigger{ID: "t-nil-storage", Name: "nil-storage-trigger"}
+
+	t.Run("saveTriggerToStorage returns nil when storage is nil", func(t *testing.T) {
+		err := manager.saveTriggerToStorage(ctx, trigger)
+		assert.NoError(t, err, "saveTriggerToStorage must not error when storage is nil")
+	})
+
+	t.Run("deleteTriggerFromStorage returns nil when storage is nil", func(t *testing.T) {
+		err := manager.deleteTriggerFromStorage(ctx, trigger.ID)
+		assert.NoError(t, err, "deleteTriggerFromStorage must not error when storage is nil")
+	})
+}
+
+func TestTriggerManagerSaveRejectsCredentialsWithoutSecretStore(t *testing.T) {
+	ts := newInMemoryTriggerStore()
+	ctx := contextWithTenant("tenant-test")
+
+	mgr := &TriggerManagerImpl{
+		logger:       logging.ForModule("workflow.trigger.manager.test"),
+		triggerStore: ts,
+		secretStore:  nil,
+		triggers:     make(map[string]*Trigger),
+		executions:   make(map[string]*TriggerExecution),
+	}
+
+	tests := []struct {
+		name    string
+		trigger *Trigger
+	}{
+		{
+			name: "bearer token requires secret store",
+			trigger: &Trigger{
+				ID: "t-cred", TenantID: "tenant-test", Name: "n", Type: TriggerTypeWebhook,
+				Status: TriggerStatusActive, WorkflowName: "wf",
+				Webhook: &WebhookConfig{Path: "/x", Authentication: &WebhookAuth{BearerToken: "tok"}},
+			},
+		},
+		{
+			name: "hmac secret requires secret store",
+			trigger: &Trigger{
+				ID: "t-cred", TenantID: "tenant-test", Name: "n", Type: TriggerTypeWebhook,
+				Status: TriggerStatusActive, WorkflowName: "wf",
+				Webhook: &WebhookConfig{Path: "/x", Authentication: &WebhookAuth{Secret: "hmac"}},
+			},
+		},
+		{
+			name: "api key requires secret store",
+			trigger: &Trigger{
+				ID: "t-cred", TenantID: "tenant-test", Name: "n", Type: TriggerTypeWebhook,
+				Status: TriggerStatusActive, WorkflowName: "wf",
+				Webhook: &WebhookConfig{Path: "/x", Authentication: &WebhookAuth{APIKey: "key"}},
+			},
+		},
+		{
+			name: "basic username requires secret store",
+			trigger: &Trigger{
+				ID: "t-cred", TenantID: "tenant-test", Name: "n", Type: TriggerTypeWebhook,
+				Status: TriggerStatusActive, WorkflowName: "wf",
+				Webhook: &WebhookConfig{Path: "/x", Authentication: &WebhookAuth{BasicAuth: &BasicAuth{Username: "u"}}},
+			},
+		},
+		{
+			name: "basic password requires secret store",
+			trigger: &Trigger{
+				ID: "t-cred", TenantID: "tenant-test", Name: "n", Type: TriggerTypeWebhook,
+				Status: TriggerStatusActive, WorkflowName: "wf",
+				Webhook: &WebhookConfig{Path: "/x", Authentication: &WebhookAuth{BasicAuth: &BasicAuth{Password: "p"}}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := mgr.saveTriggerToStorage(ctx, tt.trigger)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "secret store required to persist trigger credentials")
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// In-memory test helpers for persistence tests
+// ---------------------------------------------------------------------------
+
+// inMemoryTriggerStore is a thread-safe in-memory TriggerStore for testing.
+type inMemoryTriggerStore struct {
+	mu      sync.RWMutex
+	records map[string]*business.TriggerRecord
+}
+
+func newInMemoryTriggerStore() *inMemoryTriggerStore {
+	return &inMemoryTriggerStore{records: make(map[string]*business.TriggerRecord)}
+}
+
+func (s *inMemoryTriggerStore) StoreTrigger(_ context.Context, record *business.TriggerRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.records[record.ID] = record
+	return nil
+}
+
+func (s *inMemoryTriggerStore) GetTrigger(_ context.Context, id string) (*business.TriggerRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, ok := s.records[id]
+	if !ok {
+		return nil, business.ErrTriggerNotFound
+	}
+	return r, nil
+}
+
+func (s *inMemoryTriggerStore) DeleteTrigger(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.records[id]; !ok {
+		return business.ErrTriggerNotFound
+	}
+	delete(s.records, id)
+	return nil
+}
+
+func (s *inMemoryTriggerStore) ListTriggers(_ context.Context, filter business.TriggerStoreFilter) ([]*business.TriggerRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var result []*business.TriggerRecord
+	for _, r := range s.records {
+		if filter.TenantID != "" && r.TenantID != filter.TenantID {
+			continue
+		}
+		result = append(result, r)
+	}
+	return result, nil
+}
+
+func (s *inMemoryTriggerStore) Close() error { return nil }
+
+// inMemorySecretStore is a thread-safe in-memory SecretStore for testing.
+type inMemorySecretStore struct {
+	mu      sync.RWMutex
+	secrets map[string]string // key → plaintext value
+}
+
+func newInMemorySecretStore() *inMemorySecretStore {
+	return &inMemorySecretStore{secrets: make(map[string]string)}
+}
+
+func (s *inMemorySecretStore) StoreSecret(_ context.Context, req *secretsif.SecretRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secrets[req.Key] = req.Value
+	return nil
+}
+
+func (s *inMemorySecretStore) GetSecret(_ context.Context, key string) (*secretsif.Secret, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.secrets[key]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", secretsif.ErrSecretNotFound, key)
+	}
+	return &secretsif.Secret{Key: key, Value: v}, nil
+}
+
+func (s *inMemorySecretStore) DeleteSecret(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.secrets[key]; !ok {
+		return fmt.Errorf("%w: %s", secretsif.ErrSecretNotFound, key)
+	}
+	delete(s.secrets, key)
+	return nil
+}
+
+func (s *inMemorySecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *inMemorySecretStore) GetSecrets(_ context.Context, keys []string) (map[string]*secretsif.Secret, error) {
+	result := make(map[string]*secretsif.Secret)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, k := range keys {
+		if v, ok := s.secrets[k]; ok {
+			result[k] = &secretsif.Secret{Key: k, Value: v}
+		}
+	}
+	return result, nil
+}
+func (s *inMemorySecretStore) StoreSecrets(ctx context.Context, secrets map[string]*secretsif.SecretRequest) error {
+	for _, req := range secrets {
+		if err := s.StoreSecret(ctx, req); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (s *inMemorySecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsif.Secret, error) {
+	return nil, errors.New("versioning not supported")
+}
+func (s *inMemorySecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsif.SecretVersion, error) {
+	return nil, nil
+}
+func (s *inMemorySecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsif.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *inMemorySecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+func (s *inMemorySecretStore) RotateSecret(_ context.Context, _ string, _ string) error { return nil }
+func (s *inMemorySecretStore) ExpireSecret(_ context.Context, _ string) error           { return nil }
+func (s *inMemorySecretStore) HealthCheck(_ context.Context) error                      { return nil }
+func (s *inMemorySecretStore) Close() error                                             { return nil }
+
+// newManagerWithPersistence creates a TriggerManagerImpl wired to real in-memory
+// TriggerStore and SecretStore. Used by persistence-focused tests.
+func newManagerWithPersistence(tenantID string) (*TriggerManagerImpl, *inMemoryTriggerStore, *inMemorySecretStore) {
+	ts := newInMemoryTriggerStore()
+	ss := newInMemorySecretStore()
+	mgr := &TriggerManagerImpl{
+		logger:       logging.ForModule("workflow.trigger.manager.test"),
+		triggerStore: ts,
+		secretStore:  ss,
+		triggers:     make(map[string]*Trigger),
+		executions:   make(map[string]*TriggerExecution),
+	}
+	return mgr, ts, ss
+}
+
+// contextWithTenant returns a context carrying the given tenant ID via the trigger package key.
+func contextWithTenant(tenantID string) context.Context {
+	return context.WithValue(context.Background(), TenantIDContextKey, tenantID)
+}
+
+// ---------------------------------------------------------------------------
+// Required persistence tests
+// ---------------------------------------------------------------------------
+
+func TestTriggerManagerSaveRedactsAllCredentials(t *testing.T) {
+	mgr, ts, _ := newManagerWithPersistence("tenant-save")
+	ctx := contextWithTenant("tenant-save")
+
+	trigger := &Trigger{
+		ID:           "t-redact",
+		TenantID:     "tenant-save",
+		Name:         "Redact Test",
+		Type:         TriggerTypeWebhook,
+		Status:       TriggerStatusActive,
+		WorkflowName: "wf",
+		Webhook: &WebhookConfig{
+			Path: "/test",
+			Authentication: &WebhookAuth{
+				BearerToken: "secret-bearer",
+				Secret:      "secret-hmac",
+				APIKey:      "secret-apikey",
+				BasicAuth: &BasicAuth{
+					Username: "secret-user",
+					Password: "secret-pass",
+				},
+			},
+		},
+	}
+
+	require.NoError(t, mgr.saveTriggerToStorage(ctx, trigger))
+
+	record, err := ts.GetTrigger(ctx, "t-redact")
+	require.NoError(t, err)
+
+	// Verify all five ref fields are populated.
+	assert.NotEmpty(t, record.BearerTokenRef, "BearerTokenRef must be set")
+	assert.NotEmpty(t, record.HMACSecretRef, "HMACSecretRef must be set")
+	assert.NotEmpty(t, record.APIKeyRef, "APIKeyRef must be set")
+	assert.NotEmpty(t, record.BasicUsernameRef, "BasicUsernameRef must be set")
+	assert.NotEmpty(t, record.BasicPasswordRef, "BasicPasswordRef must be set")
+
+	// Verify NO plaintext credential appears in ConfigPayload.
+	for _, plaintext := range []string{"secret-bearer", "secret-hmac", "secret-apikey", "secret-user", "secret-pass"} {
+		assert.NotContains(t, string(record.ConfigPayload), plaintext,
+			"plaintext credential %q must not appear in ConfigPayload", plaintext)
+	}
+
+	// Verify the *Ref fields themselves do NOT hold the plaintext values.
+	for _, refField := range []string{
+		record.BearerTokenRef, record.HMACSecretRef, record.APIKeyRef,
+		record.BasicUsernameRef, record.BasicPasswordRef,
+	} {
+		for _, plaintext := range []string{"secret-bearer", "secret-hmac", "secret-apikey", "secret-user", "secret-pass"} {
+			assert.NotEqual(t, plaintext, refField,
+				"ref field %q must not equal plaintext credential %q", refField, plaintext)
+		}
+	}
+}
+
+func TestTriggerManagerPersistenceRoundTrip(t *testing.T) {
+	// Save a trigger with full credentials, then simulate manager restart
+	// by creating a fresh manager pointing at the same stores.
+	ts := newInMemoryTriggerStore()
+	ss := newInMemorySecretStore()
+
+	ctx := contextWithTenant("tenant-rt")
+
+	save := &TriggerManagerImpl{
+		logger:       logging.ForModule("workflow.trigger.manager.test"),
+		triggerStore: ts,
+		secretStore:  ss,
+		triggers:     make(map[string]*Trigger),
+		executions:   make(map[string]*TriggerExecution),
+	}
+
+	original := &Trigger{
+		ID:           "t-rt",
+		TenantID:     "tenant-rt",
+		Name:         "Round Trip",
+		Type:         TriggerTypeWebhook,
+		Status:       TriggerStatusActive,
+		WorkflowName: "wf-rt",
+		CreatedAt:    time.Now().Truncate(time.Second),
+		UpdatedAt:    time.Now().Truncate(time.Second),
+		Webhook: &WebhookConfig{
+			Path:   "/rt",
+			Method: []string{"POST"},
+			Authentication: &WebhookAuth{
+				BearerToken: "rt-bearer",
+				Secret:      "rt-hmac",
+				APIKey:      "rt-apikey",
+				BasicAuth: &BasicAuth{
+					Username: "rt-user",
+					Password: "rt-pass",
+				},
+			},
+		},
+	}
+	require.NoError(t, save.saveTriggerToStorage(ctx, original))
+
+	// Fresh manager (simulates restart) — same backing stores.
+	load := &TriggerManagerImpl{
+		logger:       logging.ForModule("workflow.trigger.manager.test"),
+		triggerStore: ts,
+		secretStore:  ss,
+		triggers:     make(map[string]*Trigger),
+		executions:   make(map[string]*TriggerExecution),
+	}
+	require.NoError(t, load.loadTriggersFromStorage(ctx))
+
+	got, ok := load.triggers["t-rt"]
+	require.True(t, ok, "trigger must be present after load")
+	require.NotNil(t, got.Webhook)
+	require.NotNil(t, got.Webhook.Authentication)
+
+	auth := got.Webhook.Authentication
+	assert.Equal(t, "rt-bearer", auth.BearerToken)
+	assert.Equal(t, "rt-hmac", auth.Secret)
+	assert.Equal(t, "rt-apikey", auth.APIKey)
+	require.NotNil(t, auth.BasicAuth)
+	assert.Equal(t, "rt-user", auth.BasicAuth.Username)
+	assert.Equal(t, "rt-pass", auth.BasicAuth.Password)
+}
+
+func TestTriggerSecretKeyTenantIsolation(t *testing.T) {
+	// Two managers sharing one secret store but different tenants.
+	// A secret written by tenant A must not be readable via tenant B's key namespace.
+	ss := newInMemorySecretStore()
+	tsA := newInMemoryTriggerStore()
+	tsB := newInMemoryTriggerStore()
+
+	ctxA := contextWithTenant("tenant-A")
+	ctxB := contextWithTenant("tenant-B")
+
+	mgrA := &TriggerManagerImpl{
+		logger:       logging.ForModule("workflow.trigger.manager.test"),
+		triggerStore: tsA,
+		secretStore:  ss,
+		triggers:     make(map[string]*Trigger),
+		executions:   make(map[string]*TriggerExecution),
+	}
+	mgrB := &TriggerManagerImpl{
+		logger:       logging.ForModule("workflow.trigger.manager.test"),
+		triggerStore: tsB,
+		secretStore:  ss,
+		triggers:     make(map[string]*Trigger),
+		executions:   make(map[string]*TriggerExecution),
+	}
+
+	trigA := &Trigger{
+		ID:           "t-iso",
+		TenantID:     "tenant-A",
+		Name:         "Isolation A",
+		Type:         TriggerTypeWebhook,
+		Status:       TriggerStatusActive,
+		WorkflowName: "wf",
+		Webhook: &WebhookConfig{
+			Path:           "/iso",
+			Authentication: &WebhookAuth{BearerToken: "secret-A"},
+		},
+	}
+	require.NoError(t, mgrA.saveTriggerToStorage(ctxA, trigA))
+
+	// The secret is stored under the tenant-A key; tenant-B's key for the same
+	// trigger ID and field must not exist.
+	keyA := fmt.Sprintf("trigger-%s-%s-bearer", "tenant-A", "t-iso")
+	keyB := fmt.Sprintf("trigger-%s-%s-bearer", "tenant-B", "t-iso")
+
+	secretA, err := ss.GetSecret(ctxA, keyA)
+	require.NoError(t, err, "tenant-A secret must be retrievable")
+	assert.Equal(t, "secret-A", secretA.Value)
+
+	_, err = ss.GetSecret(ctxB, keyB)
+	assert.ErrorIs(t, err, secretsif.ErrSecretNotFound,
+		"tenant-B must not be able to retrieve tenant-A's secret via its own key namespace")
+
+	// Also verify mgrB cannot load the trigger (it uses a separate tsB store).
+	require.NoError(t, mgrB.loadTriggersFromStorage(ctxB))
+	_, ok := mgrB.triggers["t-iso"]
+	assert.False(t, ok, "mgrB must not see tenant-A's trigger")
+}
+
+func TestTriggerManagerDegradedLoad(t *testing.T) {
+	ts := newInMemoryTriggerStore()
+	ss := newInMemorySecretStore()
+	ctx := contextWithTenant("tenant-dg")
+
+	// Populate store directly: two valid triggers + one with a deleted bearer ref.
+	validBearer1 := "trigger-tenant-dg-t-ok1-bearer"
+	validBearer2 := "trigger-tenant-dg-t-ok2-bearer"
+	brokenBearer := "trigger-tenant-dg-t-broken-bearer"
+
+	require.NoError(t, ss.StoreSecret(ctx, &secretsif.SecretRequest{Key: validBearer1, Value: "v1", TenantID: "tenant-dg"}))
+	require.NoError(t, ss.StoreSecret(ctx, &secretsif.SecretRequest{Key: validBearer2, Value: "v2", TenantID: "tenant-dg"}))
+	// Deliberately do NOT store brokenBearer so GetSecret will return ErrSecretNotFound.
+
+	for _, rec := range []*business.TriggerRecord{
+		{ID: "t-ok1", TenantID: "tenant-dg", Name: "OK1", Type: string(TriggerTypeWebhook), Status: string(TriggerStatusActive), WorkflowName: "wf", BearerTokenRef: validBearer1, ConfigPayload: []byte(`{"path":"/ok1"}`)},
+		{ID: "t-ok2", TenantID: "tenant-dg", Name: "OK2", Type: string(TriggerTypeWebhook), Status: string(TriggerStatusActive), WorkflowName: "wf", BearerTokenRef: validBearer2, ConfigPayload: []byte(`{"path":"/ok2"}`)},
+		{ID: "t-broken", TenantID: "tenant-dg", Name: "Broken", Type: string(TriggerTypeWebhook), Status: string(TriggerStatusActive), WorkflowName: "wf", BearerTokenRef: brokenBearer, ConfigPayload: []byte(`{"path":"/broken"}`)},
+	} {
+		require.NoError(t, ts.StoreTrigger(ctx, rec))
+	}
+
+	mgr := &TriggerManagerImpl{
+		logger:       logging.ForModule("workflow.trigger.manager.test"),
+		triggerStore: ts,
+		secretStore:  ss,
+		triggers:     make(map[string]*Trigger),
+		executions:   make(map[string]*TriggerExecution),
+	}
+
+	require.NoError(t, mgr.loadTriggersFromStorage(ctx))
+
+	// Two valid triggers must be present; the broken one must be absent.
+	assert.Contains(t, mgr.triggers, "t-ok1", "t-ok1 must be loaded")
+	assert.Contains(t, mgr.triggers, "t-ok2", "t-ok2 must be loaded")
+	assert.NotContains(t, mgr.triggers, "t-broken", "t-broken must be skipped")
+
+	// Absence of "t-broken" proves the degraded-load path (WarnCtx + skip) was taken.
+	assert.NotContains(t, mgr.triggers, "t-broken", "broken ref must cause trigger to be skipped")
+}
+
+func TestTriggerDeleteCleansSecrets(t *testing.T) {
+	ts := newInMemoryTriggerStore()
+	ss := newInMemorySecretStore()
+	ctx := contextWithTenant("tenant-del")
+
+	mgr := &TriggerManagerImpl{
+		logger:       logging.ForModule("workflow.trigger.manager.test"),
+		triggerStore: ts,
+		secretStore:  ss,
+		triggers:     make(map[string]*Trigger),
+		executions:   make(map[string]*TriggerExecution),
+	}
+
+	trigger := &Trigger{
+		ID:           "t-del",
+		TenantID:     "tenant-del",
+		Name:         "Delete Test",
+		Type:         TriggerTypeWebhook,
+		Status:       TriggerStatusActive,
+		WorkflowName: "wf",
+		Webhook: &WebhookConfig{
+			Path: "/del",
+			Authentication: &WebhookAuth{
+				BearerToken: "del-bearer",
+				Secret:      "del-hmac",
+				APIKey:      "del-apikey",
+				BasicAuth:   &BasicAuth{Username: "del-user", Password: "del-pass"},
+			},
+		},
+	}
+
+	require.NoError(t, mgr.saveTriggerToStorage(ctx, trigger))
+
+	// Verify secrets were stored.
+	refKeys := []string{
+		"trigger-tenant-del-t-del-bearer",
+		"trigger-tenant-del-t-del-hmac-secret",
+		"trigger-tenant-del-t-del-api-key",
+		"trigger-tenant-del-t-del-basic-user",
+		"trigger-tenant-del-t-del-basic-pass",
+	}
+	for _, k := range refKeys {
+		_, err := ss.GetSecret(ctx, k)
+		require.NoError(t, err, "secret %q must exist before delete", k)
+	}
+
+	require.NoError(t, mgr.deleteTriggerFromStorage(ctx, "t-del"))
+
+	// After deletion, all five secret refs must be gone.
+	for _, k := range refKeys {
+		_, err := ss.GetSecret(ctx, k)
+		assert.ErrorIs(t, err, secretsif.ErrSecretNotFound,
+			"secret %q must be removed after trigger deletion", k)
+	}
+
+	// Partial-delete error: if one DeleteSecret call fails the rest are still attempted.
+	// Simulate by pre-deleting one ref and re-calling deleteTriggerFromStorage on a
+	// fresh record with all refs populated (the method logs WARN and continues).
+	rec := &business.TriggerRecord{
+		ID:               "t-del-partial",
+		TenantID:         "tenant-del",
+		BearerTokenRef:   "partial-bearer",
+		HMACSecretRef:    "partial-hmac",
+		APIKeyRef:        "partial-api",
+		BasicUsernameRef: "partial-user",
+		BasicPasswordRef: "partial-pass",
+	}
+	require.NoError(t, ts.StoreTrigger(ctx, rec))
+	// Only store some of the secrets (simulates partially-missing refs).
+	require.NoError(t, ss.StoreSecret(ctx, &secretsif.SecretRequest{Key: "partial-bearer", Value: "x", TenantID: "tenant-del"}))
+	require.NoError(t, ss.StoreSecret(ctx, &secretsif.SecretRequest{Key: "partial-hmac", Value: "x", TenantID: "tenant-del"}))
+	// partial-api, partial-user, partial-pass are intentionally absent.
+
+	// deleteTriggerFromStorage must succeed even with missing secret refs (WARN + continue).
+	err := mgr.deleteTriggerFromStorage(ctx, "t-del-partial")
+	assert.NoError(t, err, "deleteTriggerFromStorage must not fail on missing secret refs")
 }

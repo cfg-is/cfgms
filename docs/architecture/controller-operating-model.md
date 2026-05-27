@@ -17,19 +17,49 @@ The controller distinguishes between first run and normal startup. First run req
 
 **Why**: If the controller auto-generated a CA and certs on every startup where it couldn't find existing ones, a misconfigured storage mount or wrong config path would silently create a new CA — breaking trust with every registered steward. This is a catastrophic failure disguised as a successful startup.
 
-**First run options:**
+#### The `--init` command
 
-- **Interactive wizard** — `controller --init` walks an admin through storage, certificate, and tenant setup with prompts and validation
-- **Automated setup** — `controller --init --config /path/to/controller.cfg` reads all settings from the config file and initializes non-interactively (for CI/automation)
+Initialization is performed by running `controller --init --config /path/to/controller.cfg`. This is a one-shot command: it performs all initialization steps, prints the result (CA fingerprint, storage provider, timestamp), and exits. It does not start the server.
 
-First run creates:
-1. Storage backend and initial schema
-2. Root CA and server certificates
-3. Signing certificate (for cfg signatures)
-4. Default tenant and admin API key
-5. Marks the installation as initialized (a state flag in storage)
+#### Init sequence
 
-First run only succeeds if all steps complete. Partial initialization is rolled back.
+The `initialization.Run()` function performs the following steps in order:
+
+1. **Pre-flight validation** — verifies that config is present, certificate management is enabled (`certificate.enable_cert_management: true`), and `certificate.ca_path` is set
+2. **Idempotent guard** — reads the CA directory for an existing `.cfgms-initialized` marker. If the marker exists, init refuses to run and reports when and with what CA the controller was previously initialized. To re-initialize, the operator must remove the CA directory and run `--init` again
+3. **Storage backend creation** — initializes the storage backend. Default configuration deployments use the composite flatfile + SQLite backend via `interfaces.CreateOSSStorageManager()`; production-scale deployments may configure a database backend via `interfaces.CreateAllStoresFromConfig()`
+4. **CA directory and CA generation** — creates the CA directory (`os.MkdirAll` with `0700`), then creates a new Certificate Authority via `pkg/cert.Manager` with `LoadExistingCA: false`
+5. **Internal mTLS certificate** — if separated certificate architecture is configured, generates the `cfgms-internal` certificate used for gRPC-over-QUIC inter-component communication
+6. **Config signing certificate** — if separated architecture, generates the `cfgms-config-signer` certificate used to sign cfgs distributed to stewards (4096-bit RSA key)
+7. **RBAC store initialization** — initializes default permissions, roles, and subjects via `rbac.NewManagerWithStorage()`
+8. **Init marker written last** — the `.cfgms-initialized` marker is the final step. If any earlier step fails, no marker is written, and the installation is not considered initialized
+9. **Admin credential bundle** — issues the admin mTLS client certificate and writes the bundle to the platform-default path (`/etc/cfgms/admin.bundle.yaml` on Linux/macOS, `%ProgramData%\cfgms\admin.bundle.yaml` on Windows). If a bundle already exists at that path, issuance is skipped (idempotent). The bundle is the operator's credential for all subsequent REST API access
+
+Server certificates (for the transport listener) are **not** created during `--init`. Those are generated during normal startup by the transport subsystem, which knows the specific certificate names and file paths it requires.
+
+#### The `.cfgms-initialized` marker
+
+The marker is a JSON file named `.cfgms-initialized` placed in the CA directory. It records:
+
+- `version` — marker format version (for future migration)
+- `initialized_at` — UTC timestamp of initialization
+- `controller_version` — version of the controller binary that ran `--init`
+- `storage_provider` — storage backend used (e.g., `flatfile`, `database`)
+- `ca_fingerprint` — SHA-256 fingerprint of the generated CA certificate
+
+The marker is written atomically using a temp file + rename pattern (`WriteInitMarker` writes to `.cfgms-initialized.tmp`, then renames). Placing the marker in the CA directory is intentional: if the CA mount is missing, both CA files and marker are absent, producing the correct failure mode on startup.
+
+#### Rollback on failure
+
+A `RollbackTracker` registers cleanup functions as initialization progresses. If any step fails, all registered cleanup functions execute in LIFO order (e.g., removing the CA directory that was just created). The tracker collects all rollback errors rather than stopping at the first failure.
+
+#### Server startup init guard
+
+On normal startup (without `--init`), the server checks for the marker before loading the certificate manager:
+
+- **Marker present** — proceed with normal startup
+- **No marker but CA files exist** — legacy installation from before the init guard was introduced. The server auto-creates a marker with `storage_provider: unknown-legacy` and the existing CA's fingerprint, then proceeds normally
+- **No marker and no CA files** — refuse to start with `ErrNotInitialized`, directing the operator to run `controller --init --config <path>`
 
 ### Normal Startup
 
@@ -39,11 +69,10 @@ After initialization, the controller starts normally. If required infrastructure
 2. **Initialize storage** — Connect to durable storage backend. Fail if unreachable — the controller cannot operate without persistent storage
 3. **Verify security** — Load existing CA, server certs, and signing cert. Fail if missing or invalid — never regenerate silently
 4. **Initialize RBAC** — Load permissions, roles, subjects from storage
-5. **Start MQTT broker** — Embedded broker for steward control plane (port 1883, mTLS)
-6. **Start QUIC server** — Data plane for cfg delivery and bulk transfers (port 4433, mTLS)
+5. **Start transport server** — Unified gRPC-over-QUIC server for all controller-steward communication (port 4433, mTLS). Serves both control plane (heartbeats, commands, status) and data plane (cfg delivery, DNA sync, bulk transfers) over multiplexed QUIC streams
 7. **Start services** — Heartbeat monitoring, command publisher, registration handler, tenant manager
 8. **Start HA** (if clustered) — Join Raft cluster, participate in leader election
-9. **Start REST API** — HTTP server for administration (port 9080)
+9. **Start REST API** — HTTP server for administration (port 9080). Owned exclusively by `server.Server` (`httpServer` field); `controller.go` does not create a second instance. In `ClusterMode` the TLS listener is configured with `ClientAuth = tls.RequestClientCert`: HA peers that present a client certificate will have it recorded in `r.TLS.PeerCertificates` for application-layer CN verification, while non-cluster API clients (operators, curl, stewards) that do not present a client certificate are accepted without modification
 10. **Start workflow engine** — Begin processing scheduled and queued workflows
 
 **Failure modes on startup:**
@@ -52,6 +81,28 @@ After initialization, the controller starts normally. If required infrastructure
 - CA/certs missing → error explaining that `--init` is required
 - CA/certs expired → error with expiry details and renewal instructions
 - Storage schema mismatch → error with migration instructions
+- Transport address conflict → error with port details and resolution steps
+
+### Node Management
+
+The controller is a self-sufficient application — it creates its own directories, certificates, and storage during `--init` and runs without external dependencies beyond the OS. For quick-start and development, no steward is needed.
+
+For production fleets, a steward runs alongside the controller on each node. The steward manages node-level infrastructure via its convergence loop, while the controller focuses on fleet operations.
+
+| Responsibility | Owner | Examples |
+|----------------|-------|----------|
+| OS packages | Steward | `git`, `sops`, system updates |
+| System directories | Steward | `/etc/cfgms/`, `/var/lib/cfgms/`, `/var/log/cfgms/` |
+| Firewall rules | Steward | Ports 8080/TCP, 4433/UDP |
+| OS service management | Steward | systemd unit, service restart on failure |
+| Controller config file | Steward | `/etc/cfgms/controller.cfg` |
+| CA and certificates | Controller | Generated during `--init`, managed in-memory |
+| RBAC and tenant data | Controller | Stored in durable storage backend |
+| Fleet registry | Controller | Steward registrations and heartbeats persisted in `StewardStore` — survives controller restarts (Issue #663) |
+| Storage backend | Controller | Flatfile + SQLite (default) or PostgreSQL (production scale) operations |
+| Fleet orchestration | Controller | Config distribution, steward registration, workflows |
+
+See [Single Controller Deployment](../../deployment/single-controller/walkthrough.md) for the deployment guide and [ADR-002](decisions/002-steward-bootstrap-for-controllers.md) for the architectural decision.
 
 ### Normal Operation
 
@@ -86,7 +137,7 @@ The controller runs several concurrent activities:
 3. Notify stewards of impending disconnect (stewards continue operating independently)
 4. Flush pending writes to storage
 5. Leave HA cluster cleanly (if clustered)
-6. Close MQTT broker and QUIC server
+6. Close transport server (gRPC-over-QUIC)
 7. Exit
 
 ## Cfg Management
@@ -99,20 +150,26 @@ The controller is the authoring and distribution point for steward cfgs. It does
 Author → Validate → Store → Distribute → Monitor Compliance
 ```
 
-1. **Author** — Cfgs are created or updated via REST API, workflow output, or direct storage edit
-2. **Validate** — Controller validates cfg syntax, module references, and tenant scoping before accepting
-3. **Store** — Cfg is persisted in durable, version-controlled storage. Every change is a new version with full audit trail
-4. **Distribute** — Controller pushes the cfg to the target steward(s) over the QUIC data plane. Cfgs are signed with the controller's signing certificate so stewards can verify authenticity
-5. **Monitor** — Controller receives convergence results from stewards and tracks per-device compliance status
+1. **Author** — Cfgs are created or updated via the `cfg` CLI (`cfg config upload`), the administration web UI, a GitOps webhook, or workflow output. All sources write through the same ConfigStore — there is no separate "fast path".
+2. **Validate** — Controller validates cfg syntax, module references, and tenant scoping before accepting. Validation is part of the write path; an invalid cfg never lands in storage.
+3. **Store** — Cfg is persisted in durable, version-controlled ConfigStore. Every change is a new version with full audit trail.
+4. **Distribute** — A successful `ConfigStore` write inside `SetConfiguration()` triggers automatic distribution via a service-level callback (Issue #1521, Option A). The callback is registered at server startup (`server.go`) and invokes `push.Fanout()` scoped to the tenant from the write context. Distribution is fire-and-forget: `SetConfiguration()` returns without blocking on fanout completion. Cfgs are signed with the controller's signing certificate so stewards can verify authenticity. Note: debounce (burst-save absorption) and per-steward targeting evaluation are tracked as follow-on stories.
+5. **Monitor** — Controller receives convergence results from stewards and tracks per-device compliance status. Operators view propagation via `cfg config deployments <id>`.
+
+**Save = Deploy:** `SetConfiguration()` automatically triggers fan-out to all active stewards of the affected tenant via the registered `FanoutCallback`. `POST /api/v1/config/push` is retained as an explicit-override / force-push endpoint. See [system operating model — Save = Deploy](operating-model.md#save--deploy) for the cross-component view.
 
 ### Cfg Targeting
 
 The controller decides which steward gets which cfg based on:
 
-- **Direct assignment** — a cfg explicitly targets a steward by ID
-- **Group membership** — a cfg targets a group; all stewards in that group receive it
-- **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings at any depth
-- **Effective cfg** — the controller resolves inheritance and produces the effective cfg for each steward, merging all applicable layers
+- **Direct assignment** — a cfg explicitly targets a steward by ID ✓ implemented (`config_service_v2.go`: per-steward config stored and retrieved by steward ID)
+- **Group membership** — a cfg targets a group; all stewards in that group receive it ✓ implemented (tenant/group path used in inheritance resolution)
+- **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings at any depth ✓ implemented (`InheritanceResolver.ResolveConfiguration()`)
+- **Effective cfg** — the controller resolves inheritance and produces the effective cfg for each steward, merging all applicable layers ✓ implemented (`GetEffectiveConfiguration()`)
+- **Tag-based targeting** — stewards can carry arbitrary tags (e.g., `ring=canary`, `role=web-server`, `region=us-east`); a cfg targets stewards by tag expression — tags exist on steward records (fleet query supports tag filtering for device lists), but tag-based cfg distribution fanout is not yet implemented; the current fanout sends to all active stewards
+- **DNA-attribute matching** — a cfg can target stewards whose DNA attributes match a predicate (e.g., `os=linux`, `cpu_arch=arm64`) — desired state; not currently implemented in cfg distribution
+
+**Deployment rings (convention):** operators commonly tag stewards with ring identifiers (`ring=canary`, `ring=prod-early`, `ring=prod-broad`) and author phased rollouts as separate cfgs or staged target lists. v1 is convention; auto-progressive ring machinery (with bake time + health gating) is a future enhancement.
 
 ### Config Signing
 
@@ -122,6 +179,16 @@ Every cfg distributed to a steward is signed using the controller's dedicated si
 
 The controller maintains awareness of all registered stewards and their state.
 
+### Fleet Registry Durability (Issue #663)
+
+The fleet registry is backed by a `StewardStore` (see `pkg/storage/interfaces/steward_store.go`). Registrations, heartbeats, and status transitions are persisted to durable storage so the fleet view survives controller restarts without waiting for all stewards to re-register.
+
+**Steward lifecycle states**: `registered` → `active` → `lost` / `deregistered`. Records are retained indefinitely for audit; a `lost` steward can re-register and will have its record updated in place.
+
+**Implementation**: `features/controller/fleet/fleet.HealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`: task latency counters, config error counts) in-memory only. The in-memory metrics are not persisted and reset on restart — this is by design.
+
+**After a restart**: On startup, the controller can call `ListStewards()` or `ListStewardsByStatus()` to enumerate the fleet without waiting for stewards to check in. The stored `last_seen` and `last_heartbeat_at` timestamps allow the controller to identify stewards that went silent before or during the restart.
+
 ### Steward Tracking
 
 For each steward, the controller tracks:
@@ -130,7 +197,7 @@ For each steward, the controller tracks:
 |------|--------|-----------------|
 | Identity (ID, tenant, group) | Registration | Once |
 | Connection status | Heartbeats | Configurable interval |
-| Last heartbeat | MQTT heartbeat messages | Configurable interval |
+| Last heartbeat | gRPC heartbeat calls | Configurable interval |
 | Health status | Heartbeat payload | With each heartbeat |
 | Compliance status | Convergence result reports | After each convergence run |
 | DNA hash | Heartbeat payload | With each heartbeat |
@@ -141,27 +208,77 @@ For each steward, the controller tracks:
 
 The controller monitors steward heartbeats to detect connectivity loss:
 
-- Stewards send heartbeats at a configurable interval
-- If a heartbeat is missed beyond a timeout threshold, the steward is marked disconnected
+- Stewards send heartbeats at a **20 s base interval with ±10 s uniform per-tick jitter** (effective interval always in [20 s, 30 s) — see the [steward operating model heartbeat timing](steward-operating-model.md#heartbeat-timing) for rationale)
+- The controller marks a steward **offline after 60 s of silence** (`StewardOfflineTimeout`, epic #1664) — this is 3 missed heartbeats at the 20 s base, providing tolerance for transient network blips
 - Disconnected stewards continue operating independently — the controller simply loses visibility until the steward reconnects
 - On reconnect, the steward resyncs queued reports and the controller rebuilds its view
 
+**Two distinct timeout thresholds — do not confuse them:**
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `StewardOfflineTimeout` | 60 s | Marks a steward offline after extended silence (epic #1664). Used by `checkStaleHeartbeats`. |
+| `HeartbeatTimeout` | 15 s | HA-failover detection threshold (Story #198, <15 s). Scoped exclusively to controller-HA scenarios. |
+
+These fields must remain distinct. `HeartbeatTimeout` is intentionally short for fast HA-failover detection and must not be used for steward-liveness decisions.
+
+### IP-Trust Establishment
+
+The controller promotes a steward's source IP to **trusted status** only after it has been continuously healthy for at least the configured threshold (default: **30 minutes**). This is implemented by `IPTrustEvaluator` (`features/controller/registration/ip_trust_evaluator.go`, Issue #1694).
+
+**Mechanism:**
+
+1. Each heartbeat from a healthy steward triggers `RecordLiveness(tenantID, stewardID, ip, healthy=true)` via the `TrustEvaluator` wired into the heartbeat service.
+2. The evaluator maintains an in-memory per-(tenantID, ip) timer recording the first time a healthy liveness event was seen.
+3. When `now − firstSeen ≥ threshold`, the evaluator calls `store.AddTrustedRange(tenantID, ip+"/32", false)` and clears the timer.
+4. When the steward goes offline (`healthy=false`), the timer is reset. The IP must sustain liveness from scratch before trust is granted.
+
+**Sandbox-detonation resistance:** Analysis environments (VMs, containers) that auto-detonate after 3–15 minutes cannot sustain the 30-minute liveness window. Their IP is never promoted to trusted status.
+
+**Failure-safe restarts:** The in-memory timer is intentionally non-durable. After a controller restart the 30-minute clock resets, but existing trust entries in the `IPTrustStore` survive. This is fail-safe — the timer reset only delays trust establishment; it never revokes already-trusted IPs.
+
+**Configuration:** `registration.ip_trust_threshold` (YAML duration, default `30m`). The threshold is configurable per deployment; the default of 30 minutes is chosen to be well above sandbox lifetime (3–15 min) while remaining practical for legitimate registrations.
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `registration.ip_trust_threshold` | 30 min | Continuous liveness required before IP is trusted (Issue #1694) |
+| `registration.ip_trust_dark_window` | 30 days | Inactivity period before a trusted IP range is auto-revoked (Issue #1697) |
+| `registration.pending_review_timeout` | 5 days | Maximum time a pending registration may await operator action (Issue #1697) |
+
+### IP-Trust Dark-Window Expiry (Issue #1697)
+
+A trusted IP range is automatically revoked after 30 consecutive days with no registrations and no healthy stewards from that range (the **dark window**). The sweep is performed hourly by `IPTrustExpiryJob` (`features/controller/registration/ip_trust_expiry.go`).
+
+**Exemption:** Pre-seeded entries (`PreSeeded: true`) are never auto-revoked. Operator-owned ranges added via `cfg registration ip-trust add --pre-seeded` can only be revoked explicitly with `cfg registration ip-trust revoke`.
+
+**Activity tracking:** `RecordHealthySteward` (called on every healthy steward heartbeat) updates the `last_activity` timestamp on the matching CIDR entry. A registration attempt from an already-known IP also counts as activity. An entry whose `last_activity` is older than the dark window is revoked on the next sweep.
+
+**Idempotency:** Revoking an already-revoked entry is a no-op.
+
+### Pending-Registration Expiry (Issue #1697)
+
+Pending registration entries that have not been acted on within 5 days are automatically marked `expired` by `PendingExpiryJob` (`features/controller/registration/pending_expiry.go`). The sweep runs hourly and delegates to `PendingRegistrationStore.ExpireStale`.
+
+Expired entries are visible via `cfg registration pending` (status `expired`). They cannot be approved or denied after expiry; the steward must re-register to obtain a fresh pending entry.
+
 ### Commands
 
-The controller can send commands to stewards over the MQTT control plane:
+The controller can send commands to stewards over the gRPC control plane service:
 
 | Command | Purpose |
 |---------|---------|
-| `sync_config` | Tell steward to fetch its latest cfg now (optimization — steward also checks on schedule) |
-| `connect_dataplane` | Establish QUIC data plane session |
+| `sync_config` | Tell steward to fetch its latest cfg now (optimization — steward also checks on schedule). Save=deploy will automatically issue this command for affected stewards once the storage-watch trigger is wired (see issue #1521). |
 | `sync_dna` | Request fresh DNA collection and upload |
-| `execute_script` | Run an ad-hoc script (outside the cfg) |
+| `reconnect` | Instruct the steward to reconnect to the controller (used during HA failover) |
+| `execute_script` | Run an ad-hoc script (outside the cfg) — [GAP: not implemented as a control-plane command — see issue #1523. Script execution is available via the REST API (`POST /api/v1/stewards/{id}/scripts`).] |
 
 Commands are fire-and-forget with completion tracking — the controller publishes the command and monitors for completion/failure events.
 
 ## Orchestration
 
 The controller coordinates operations that span multiple stewards. Individual stewards apply their own cfgs; the controller determines sequencing and timing.
+
+> [GAP: No orchestration engine is implemented in the current codebase. This section describes the desired-state design for multi-node operation coordination. The REST API category and model below are aspirational — they define the intended behavior for future implementation tracking.]
 
 ### Orchestration Model
 
@@ -344,13 +461,116 @@ The workflow engine must support the following capabilities to fulfill its role 
 
 ### Steward Registration
 
-The controller is the certificate authority and identity provider for stewards:
+The controller is the certificate authority and identity provider for stewards. Two credential flavors support different deployment workflows:
 
-1. Admin creates a **registration token** via REST API (scoped to tenant/group, with expiry)
-2. Steward presents token during registration
-3. Controller validates token, generates steward ID, issues mTLS client certificate
-4. Controller distributes CA cert, signing cert, and connection details
-5. Steward is now a trusted member of the fleet
+**Perennial registration tokens**
+- Generated via REST API or `cfg token create --expires=<duration>`
+- Scoped to tenant/group, with optional expiry
+- Survive multiple registrations (never consumed on use); rotate with `cfg token rotate` to atomically invalidate all prior tokens and issue a fresh one
+- Suitable for: manual onboarding, small fleets, time-bounded provisioning
+
+**Long-lived tenant/group registration codes**
+- Durable random opaque strings stored as a join field on the tenant/group record
+- On registration, the controller looks up the code and assigns the steward to the matching tenant/group
+- Suitable for: RMM/GPO mass deployment where the same code is baked into deployment scripts and used by many devices
+- Renaming a tenant/group does not break previously issued codes (the code is independent of the human-readable name)
+
+**Registration flow:**
+
+1. Admin creates a token or code on the controller (scoped to tenant/group, with optional expiry for tokens).
+2. Steward presents the token/code during registration via the compile-time controller URL.
+3. Controller validates the credential — perennial token: check expiry and revocation; long-lived code: look up matching record.
+4. Controller runs the registration approval workflow via `RegistrationApprovalHook`. The active workflow is selected by `registration.workflow` in `controller.cfg`:
+   - **`ip-trust`** (default): approves the registration when the steward's source IP is trusted for its tenant; quarantines otherwise. The first steward from any new tenant always quarantines because no IP is trusted yet. The hook is code-wired (`IPTrustApprovalHook`), not seeded as a workflow. It fails closed — a nil or erroring trust store quarantines rather than admits.
+   - **`manual-review`** (production): quarantines the steward pending operator action. Sets `registration_decision: quarantine` so the steward is restricted to baseline config until promoted. Operators use `cfg registration pending` to list quarantined stewards, `cfg registration approve <id>` to promote, and `cfg registration deny <id> [--reason ...]` to reject.
+   - **`auto-approve`** (deprecated): approves every valid registration unconditionally. Dev/test environments only — a startup warning is logged. Replaces the legacy `DefaultApprovalHook`.
+   - Custom workflows can implement arbitrary policy (e.g., approve `tenant=lab` registrations, reject everything else)
+5. On approval (`approve`): controller generates the steward ID and issues an mTLS client certificate scoped to the steward's tenant/group identity (HTTP 200 with full cert bundle).
+   On quarantine (`quarantine`): controller returns HTTP 202 with a `pending_id` and no certificates. The pending entry is written to the durable `PendingRegistrationStore` (SQLite by default, PostgreSQL at production scale). The steward polls `GET /api/v1/registration/status/{pending_id}` with its registration token as a Bearer credential until the operator acts. Operators use `cfg registration approve <pending-id>` or `cfg registration deny <pending-id>`.
+   On rejection (`reject`): HTTP 403 is returned; registration is denied.
+6. **Generate-on-claim (quarantine path):** When the operator approves an entry and the steward polls again, the controller generates the mTLS certificate in memory for that single response, marks the entry as `claimed`, and returns the full cert bundle in HTTP 200. A subsequent poll on an already-claimed entry returns HTTP 410 Gone — the cert is never re-issued. Private keys are never stored in the database.
+7. Controller distributes the CA cert, signing cert, and connection details.
+8. Steward is now a trusted member of the fleet and stores its cert for subsequent startups.
+
+**Registration status endpoint (Issue #1696):**
+
+`GET /api/v1/registration/status/{pending_id}` — authenticated with `Authorization: Bearer <regToken>`.
+
+| Response | Meaning |
+|----------|---------|
+| HTTP 200 `{"status":"pending"}` | Operator has not yet acted |
+| HTTP 200 `{"status":"claimed", "client_cert":..., ...}` | Approved and cert issued — steward should connect now |
+| HTTP 410 Gone | Already claimed (duplicate poll) — stop polling |
+| HTTP 200 `{"status":"denied"}` | Operator denied — steward should exit or re-register |
+| HTTP 200 `{"status":"expired"}` | Entry expired before operator acted — steward should re-register |
+| HTTP 403 | Token tenant ≠ entry tenant (tenant isolation) |
+| HTTP 401 | Invalid or missing Bearer token |
+
+**Configuring the registration workflow (`controller.cfg`):**
+
+```yaml
+registration:
+  workflow: ip-trust       # or: manual-review, auto-approve (default: ip-trust)
+  # trusted_proxies lists CIDR ranges of reverse proxies trusted to set
+  # X-Forwarded-For. Empty (default) means X-Forwarded-For is never trusted.
+  trusted_proxies:
+    - "10.0.0.0/8"
+```
+
+| Value | Behavior |
+|---|---|
+| `ip-trust` (default) | Approves the registration when the source IP is trusted for the tenant; quarantines otherwise. Code-wired (`IPTrustApprovalHook`) — no workflow is seeded. Fails closed on a missing or erroring trust store. |
+| `manual-review` | Quarantines every new steward pending operator action. Seeds a built-in workflow with `Variables: {registration_decision: quarantine}`. Use `cfg registration pending` / `approve` / `deny` to manage the queue. |
+| `auto-approve` (deprecated) | Approves all valid registrations immediately. Dev/test environments only — a startup deprecation warning is logged. |
+
+If `registration.workflow` is omitted, the controller defaults to `ip-trust`. The `CFGMS_REGISTRATION_WORKFLOW` environment variable overrides the config-file value (used by test environments to opt into `auto-approve`).
+
+**X-Forwarded-For spoofing protection:** The controller derives the steward's source IP for the IP-trust decision from the TCP peer address (`r.RemoteAddr`). It honors an `X-Forwarded-For` header **only** when the TCP peer falls within a `trusted_proxies` CIDR range. With `trusted_proxies` empty (the default), `X-Forwarded-For` is always ignored, so an attacker on an untrusted network position cannot bypass IP-trust by injecting a forged header. When the controller runs behind a load balancer, set `trusted_proxies` to the load balancer's address range so the real client IP is used.
+
+**Managing pending registrations with `cfg registration`:**
+
+When using `manual-review`, quarantined stewards accumulate in the controller's durable pending queue until approved or denied. Use the `cfg registration` CLI commands to manage them:
+
+```bash
+# List all quarantined stewards awaiting approval (shows SOURCE_IP and RDNS columns)
+cfg registration pending
+
+# Approve a steward (promotes from quarantined → registered)
+cfg registration approve <steward-id>
+
+# Deny a steward (removes from queue; steward must re-register to retry)
+cfg registration deny <steward-id> --reason "Unauthorized deployment"
+
+# Approve all pending registrations in one call
+cfg registration approve-all
+
+# Approve only pending entries whose source IP is in a given CIDR range
+cfg registration approve-by-cidr 10.0.0.0/8
+
+# Add a pre-seeded trusted CIDR range for a tenant (ip-trust workflow)
+cfg registration ip-trust add 10.0.0.0/8 --tenant-id acme-corp
+
+# Revoke a trusted CIDR range for a tenant
+cfg registration ip-trust revoke 10.0.0.0/8 --tenant-id acme-corp
+```
+
+| Command | HTTP call | Effect |
+|---|---|---|
+| `cfg registration pending` | `GET /api/v1/registration/pending` | Lists all quarantined stewards with SOURCE_IP and RDNS |
+| `cfg registration approve <id>` | `POST /api/v1/registration/{id}/approve` | Promotes steward status to `registered` |
+| `cfg registration deny <id>` | `POST /api/v1/registration/{id}/deny` | Removes steward from pending queue |
+| `cfg registration approve-all` | `POST /api/v1/registration/approve-all` | Approves all pending registrations; prints count approved |
+| `cfg registration approve-by-cidr <cidr>` | `POST /api/v1/registration/approve-by-cidr` | Approves pending entries whose source IP falls in the CIDR |
+| `cfg registration ip-trust add <cidr>` | `POST /api/v1/registration/ip-trust` | Adds a pre-seeded trusted CIDR for `--tenant-id` |
+| `cfg registration ip-trust revoke <cidr>` | `DELETE /api/v1/registration/ip-trust/{tenant_id}/{cidr}` | Revokes a trusted CIDR for `--tenant-id` |
+
+Required API key permissions: `registration:list-pending`, `registration:approve`, `registration:deny` for individual and bulk approval operations; `registration:manage-ip-trust` for ip-trust subcommands.
+
+The `pending` output includes a `SOURCE_IP` column showing the steward's source IP at registration time, and an `RDNS` column populated by a best-effort reverse DNS lookup at display time (shows `-` on failure or timeout).
+
+The `approve-by-cidr` command performs IP containment filtering on the controller using `net.ParseCIDR` + `ipNet.Contains` — the CIDR is not delegated to the database. All approved entries are updated atomically per-entry; partial approval (some entries approved, others skipped) is the expected outcome.
+
+The pending queue is backed by the durable `PendingRegistrationStore` (SQLite by default, PostgreSQL at production scale) and survives controller restarts.
 
 ### RBAC
 
@@ -362,10 +582,35 @@ All API operations are governed by role-based access control:
 - **Tenant scoping** — permissions are scoped to tenant path; an MSP admin sees all descendants, a client admin sees only their subtree
 - **Zero-trust evaluation** — every request is evaluated against the policy engine
 
+#### Cache Invalidation
+
+The RBAC and zero-trust policy subsystems maintain a two-tier authorization cache (L1 in-memory, L2 warm store). When a role is revoked or a zero-trust policy is deactivated or retired, all cache layers are invalidated **synchronously** before the write returns. Stale cached grants cannot outlive the policy change that revoked them.
+
+If a cache invalidation call fails transiently (e.g., transient error), the operation is still recorded in the audit log with `cache_invalidation_failed=true`. In that scenario, the worst-case stale window is bounded by cache TTLs: **up to 5 minutes** for L1 + **up to 10 minutes** for L2 (L2 TTL is typically 2× L1). Under normal operation (invalidation succeeds) the stale window is zero.
+
 ### API Authentication
 
-- **API keys** — stored encrypted, used for programmatic access
-- **Registration tokens** — scoped, expirable tokens for steward bootstrap only
+Three authentication mechanisms, used for different purposes.
+
+**Admin mTLS bundle (primary operator path)**
+- Single-file YAML containing admin cert + key + CA inline
+- Generated on `--init` and written to a platform-default path:
+  - Linux/macOS: `/etc/cfgms/admin.bundle.yaml`
+  - Windows: `%ProgramData%\cfgms\admin.bundle.yaml`
+- The `cfg` CLI auto-discovers via: `--bundle <path>` flag → `CFGMS_ADMIN_BUNDLE` env → `~/.config/cfgms/admin.bundle.yaml` → system path
+- `cfgms-controller bootstrap-admin` manages bundles:
+  - Issue named bundles per operator (`bootstrap-admin --name <op> --output <path>`)
+  - Regenerate the system bundle (`bootstrap-admin --regenerate`)
+  - List issued bundles (`bootstrap-admin --list`)
+  - Revoke by serial (`bootstrap-admin --revoke <serial>`)
+
+**API keys (programmatic access)**
+- Stored encrypted, used for service-to-service integration and scripted automation
+- Scoped to specific permissions via RBAC
+
+**Registration tokens (steward bootstrap only)**
+- Scoped, expirable tokens for the steward registration flow described in [Steward Registration](#steward-registration)
+- Not usable for general API authentication after bootstrap
 
 ## Multi-Tenancy
 
@@ -381,7 +626,7 @@ Tenants are identified by **path** (e.g., `root/msp-a/client-1/servers`). Path-b
 - **Wildcard targeting** — `root/msp-a/*/production` matches all production groups across clients
 - **Efficient resolution** — cfg inheritance walks the path from root to leaf
 
-#### Example: Single MSP (Apache / OSS)
+#### Example: Single MSP
 
 ```
 acme-msp (root)
@@ -400,9 +645,9 @@ acme-msp (root)
      └── device-6 (steward)
 ```
 
-One root tenant, unlimited depth. This is the Apache-licensed deployment model.
+One root tenant, unlimited depth.
 
-#### Example: SaaS Platform (Elastic / Commercial)
+#### Example: SaaS Platform
 
 ```
 cfg-is (platform root)
@@ -420,7 +665,7 @@ cfg-is (platform root)
      └── ...
 ```
 
-Multiple independent root tenants under a platform tenant. MSPs cannot see each other's trees. This is the Elastic-licensed deployment model — it enables cfg.is to host hundreds of MSPs on shared infrastructure with per-MSP isolation, resource scheduling, and billing.
+Multiple independent root tenants under a platform tenant. MSPs cannot see each other's trees. This topology enables cfg.is to host hundreds of MSPs on shared infrastructure with per-MSP isolation, resource scheduling, and billing.
 
 ### Cfg Inheritance
 
@@ -436,11 +681,11 @@ Every value in the effective cfg carries its **source path** and **version** for
 ### Isolation Guarantees
 
 - **Data isolation** — tenants cannot access other tenants' cfgs, DNA, or reports
-- **MQTT isolation** — ACL rules enforce per-steward topic namespacing; stewards cannot see other stewards' messages
+- **Transport isolation** — each steward connects with its own mTLS client certificate; gRPC service handlers enforce per-steward identity on every call
 - **Certificate isolation** — each steward gets its own client certificate
 - **RBAC isolation** — permissions are scoped to tenant path; a client admin cannot manage another client's devices
 - **Cfg inheritance** — flows down the hierarchy only; children inherit from parents, never sideways
-- **Multi-root isolation** (commercial) — independent root tenants are fully isolated; no inheritance, no visibility, no shared state between roots
+- **Multi-root isolation** — independent root tenants are fully isolated; no inheritance, no visibility, no shared state between roots
 
 ## Monitoring and Reporting
 
@@ -473,21 +718,37 @@ The controller evaluates fleet-level conditions and raises alerts:
 
 ## High Availability
 
-### OSS (Single Server)
+### Single Server
 
 The controller runs as a single instance. If it goes down, stewards continue operating independently on their last-known cfgs. When the controller comes back, stewards reconnect and resync.
 
-### Commercial (Cluster)
+### Clustered
 
-Multiple controller instances form a Raft consensus cluster:
+Multiple controller instances form a **Raft consensus cluster**. Raft is the sole authority for cluster membership and leader election — there is no static or geographic node discovery layer, and no ad-hoc election logic outside Raft:
 
-- **Leader election** — one node is elected leader and handles writes
-- **State replication** — cfg changes, registration events, and fleet state are replicated across nodes
-- **Automatic failover** — if the leader goes down, a new leader is elected
-- **Split-brain detection** — cluster detects and resolves network partitions
-- **Session sync** — steward sessions are synchronized across nodes for seamless failover
+- **Cluster membership** — determined exclusively by Raft consensus; peers are bootstrapped from the `discovery.config.nodes` list and thereafter managed by Raft configuration changes
+- **Leader election** — Raft consensus elects one node as leader to handle writes; `CheckQuorum:true` causes the leader to step down automatically when it loses quorum, without any explicit demotion call
+- **State replication** — cfg changes, registration events, and fleet state are replicated across nodes via the Raft log
+- **Automatic failover** — if the leader goes down, Raft elects a new leader automatically
+- **Split-brain detection** — the cluster detects and resolves network partitions; quorum-based resolution delegates leader step-down to Raft (`CheckQuorum`) rather than calling explicit demote operations
 
 Stewards connect to any cluster node. If their node goes down, they reconnect to another.
+
+#### Raft Peer Authentication
+
+The `POST /raft/message` endpoint uses **mTLS peer certificate CN verification** as its sole authentication mechanism. The TLS listener in `ClusterMode` is configured with `ClientAuth = tls.RequestClientCert` (set in `setupManagedTLS`), so HA peers that present a client certificate have it recorded in `r.TLS.PeerCertificates` for application-layer inspection.
+
+`HandleMessage` extracts `r.TLS.PeerCertificates[0].Subject.CommonName` and rejects (HTTP 403) any request where:
+
+- `r.TLS` is nil (plain HTTP, not mTLS)
+- No peer certificate was presented
+- The peer certificate CN does not match any entry in the node's `allowedCNs` list
+
+The `allowedCNs` list is built at startup from the `discovery.config.nodes` peer entries (each node's `id` field) plus the local node's own `id`. This means **operators must provision peer certificates whose CN matches the `node.id` value declared in the cluster node configuration**. There is no automatic peer-cert provisioning in the HA subsystem — certificate management is delegated to `pkg/cert` and is operator-controlled via `CFGMS_HA_CA_CERT_PATH`.
+
+The `GET /api/v1/raft/status` endpoint is protected by RBAC (`ha:read-status` permission) via the standard API authentication middleware — it is not a peer endpoint and must not be accessed without a valid API key.
+
+> **Do not use the `X-Raft-From` header for authentication** — it is set by the sender and is untrusted. Only the TLS peer certificate is authoritative.
 
 ## REST API
 
@@ -509,4 +770,4 @@ The REST API is the admin interface to the controller. All operations are authen
 | **Compliance** | Compliance status, reports |
 | **HA** | Cluster status, leader info, node list |
 | **Workflows** | Create, trigger, monitor workflows |
-| **Orchestration** | Initiate and monitor multi-node operations |
+| **Orchestration** | Initiate and monitor multi-node operations [GAP: not implemented — see Orchestration section above] |

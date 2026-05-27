@@ -1,41 +1,44 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package rbac
 
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 func TestManager_CreateRoleWithParent(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	// Initialize manager
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
+
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: create role with parent for hierarchy validation")
 
 	// Create parent role first
 	parentRole := &common.Role{
@@ -47,7 +50,7 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 		TenantId:        "tenant-1",
 		InheritanceType: common.RoleInheritanceType_ROLE_INHERITANCE_NONE,
 	}
-	require.NoError(t, manager.CreateRole(ctx, parentRole))
+	require.NoError(t, manager.CreateRole(ctxJ, parentRole))
 
 	tests := []struct {
 		name            string
@@ -119,7 +122,7 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := manager.CreateRoleWithParent(ctx, tt.role, tt.parentRoleID, tt.inheritanceType)
+			err := manager.CreateRoleWithParent(ctxJ, tt.role, tt.parentRoleID, tt.inheritanceType)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -158,19 +161,21 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 
 func TestManager_GetRoleHierarchy(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	// Initialize and set up test hierarchy
@@ -251,23 +256,28 @@ func TestManager_GetRoleHierarchy(t *testing.T) {
 
 func TestManager_SetAndRemoveRoleParent(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
+
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: create roles for set/remove parent validation")
 
 	// Create test roles
 	parentRole := &common.Role{
@@ -276,7 +286,7 @@ func TestManager_SetAndRemoveRoleParent(t *testing.T) {
 		PermissionIds: []string{},
 		TenantId:      "tenant-1",
 	}
-	require.NoError(t, manager.CreateRole(ctx, parentRole))
+	require.NoError(t, manager.CreateRole(ctxJ, parentRole))
 
 	childRole := &common.Role{
 		Id:            "child.role",
@@ -284,7 +294,7 @@ func TestManager_SetAndRemoveRoleParent(t *testing.T) {
 		PermissionIds: []string{},
 		TenantId:      "tenant-1",
 	}
-	require.NoError(t, manager.CreateRole(ctx, childRole))
+	require.NoError(t, manager.CreateRole(ctxJ, childRole))
 
 	// Test SetRoleParent
 	t.Run("Set role parent", func(t *testing.T) {
@@ -324,19 +334,21 @@ func TestManager_SetAndRemoveRoleParent(t *testing.T) {
 
 func TestManager_ComputeRolePermissions(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
@@ -396,29 +408,34 @@ func TestManager_ComputeRolePermissions(t *testing.T) {
 
 func TestManager_ValidateHierarchyOperation(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
 	ctx := context.Background()
 
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: create roles for hierarchy operation validation")
+
 	// Create roles for testing
 	role1 := &common.Role{Id: "role1", Name: "Role 1", TenantId: "tenant-1"}
 	role2 := &common.Role{Id: "role2", Name: "Role 2", TenantId: "tenant-1"}
-	require.NoError(t, manager.CreateRole(ctx, role1))
-	require.NoError(t, manager.CreateRole(ctx, role2))
+	require.NoError(t, manager.CreateRole(ctxJ, role1))
+	require.NoError(t, manager.CreateRole(ctxJ, role2))
 
 	tests := []struct {
 		name         string
@@ -462,6 +479,8 @@ func TestManager_ValidateHierarchyOperation(t *testing.T) {
 
 func setupManagerHierarchyTestData(t *testing.T, manager *Manager) {
 	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctx = WithSensitiveOperationJustification(ctx, "test: setup hierarchy test data")
 
 	// Create a 3-level hierarchy: root -> middle -> leaf
 	roles := []*common.Role{
@@ -503,6 +522,8 @@ func setupManagerHierarchyTestData(t *testing.T, manager *Manager) {
 
 func setupManagerPermissionTestData(t *testing.T, manager *Manager) {
 	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctx = WithSensitiveOperationJustification(ctx, "test: setup permission test data")
 
 	// Create permissions
 	permissions := []*common.Permission{

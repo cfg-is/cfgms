@@ -12,14 +12,14 @@ allowed-tools: Bash
 
 1. **Detect story number from branch**:
    ```bash
-   branch=$(git branch --show-current)
-   story_number=$(echo "$branch" | grep -oP 'story-\K[0-9]+')
+   git branch --show-current
    ```
+   Extract the story number from the branch name by finding the numeric part after `story-`.
    If no story number found in branch name, check if a story number was passed as argument: `$ARGUMENTS`
 
-2. **Fetch issue details from GitHub**:
+2. **Fetch issue details from GitHub** (use the extracted story number):
    ```bash
-   gh issue view $story_number --json body,title,state,assignees
+   gh issue view <story_number> --json body,title,state,assignees
    ```
 
 3. **Parse acceptance criteria** from issue body:

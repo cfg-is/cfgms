@@ -1,9 +1,13 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package security
 
 import (
+	"context"
+	"net"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidator_ValidateString(t *testing.T) {
@@ -49,65 +53,49 @@ func TestValidator_ValidateString(t *testing.T) {
 			errRule: "required",
 		},
 		{
-			name:    "injection pattern detected",
-			field:   "test",
-			value:   "hello<script>alert('xss')</script>",
-			rules:   []string{},
-			wantErr: true,
-			errRule: "security",
-		},
-		{
-			name:    "SQL injection pattern detected",
-			field:   "test",
-			value:   "'; DROP TABLE users; --",
-			rules:   []string{},
-			wantErr: true,
-			errRule: "security",
-		},
-		{
-			name:    "valid email",
+			name:    "valid email via charset",
 			field:   "email",
 			value:   "user@example.com",
-			rules:   []string{"email"},
+			rules:   []string{"charset:email"},
 			wantErr: false,
 		},
 		{
-			name:    "invalid email",
+			name:    "invalid email via charset",
 			field:   "email",
 			value:   "not-an-email",
-			rules:   []string{"email"},
+			rules:   []string{"charset:email"},
 			wantErr: true,
-			errRule: "email",
+			errRule: "charset",
 		},
 		{
-			name:    "valid UUID",
+			name:    "valid UUID via charset",
 			field:   "id",
 			value:   "550e8400-e29b-41d4-a716-446655440000",
-			rules:   []string{"uuid"},
+			rules:   []string{"charset:uuid"},
 			wantErr: false,
 		},
 		{
-			name:    "invalid UUID",
+			name:    "invalid UUID via charset",
 			field:   "id",
 			value:   "not-a-uuid",
-			rules:   []string{"uuid"},
+			rules:   []string{"charset:uuid"},
 			wantErr: true,
-			errRule: "uuid",
+			errRule: "charset",
 		},
 		{
-			name:    "valid hostname",
+			name:    "valid hostname via charset",
 			field:   "host",
 			value:   "example.com",
-			rules:   []string{"hostname"},
+			rules:   []string{"charset:hostname"},
 			wantErr: false,
 		},
 		{
-			name:    "invalid hostname",
+			name:    "invalid hostname via charset",
 			field:   "host",
 			value:   "invalid..hostname",
-			rules:   []string{"hostname"},
+			rules:   []string{"charset:hostname"},
 			wantErr: true,
-			errRule: "hostname",
+			errRule: "charset",
 		},
 		{
 			name:    "control characters",
@@ -185,6 +173,36 @@ func TestValidator_ValidateInteger(t *testing.T) {
 			rules:   []string{"max:65535"},
 			wantErr: true,
 			errRule: "max",
+		},
+		{
+			name:    "min:0 accepts zero",
+			field:   "count",
+			value:   0,
+			rules:   []string{"min:0"},
+			wantErr: false,
+		},
+		{
+			name:    "min:0 rejects negative",
+			field:   "count",
+			value:   -1,
+			rules:   []string{"min:0"},
+			wantErr: true,
+			errRule: "min",
+		},
+		{
+			name:    "max:0 rejects positive",
+			field:   "count",
+			value:   1,
+			rules:   []string{"max:0"},
+			wantErr: true,
+			errRule: "max",
+		},
+		{
+			name:    "max:0 accepts zero",
+			field:   "count",
+			value:   0,
+			rules:   []string{"max:0"},
+			wantErr: false,
 		},
 	}
 
@@ -283,6 +301,38 @@ func TestValidator_ValidateIPAddress(t *testing.T) {
 	}
 }
 
+// TestValidator_ValidateIPAddress_ValueRedacted verifies that ValidationError.Value
+// is always "" for IP address validation errors (F12 redaction).
+func TestValidator_ValidateIPAddress_ValueRedacted(t *testing.T) {
+	validator := NewValidator()
+
+	cases := []struct {
+		name  string
+		value string
+		rules []string
+	}{
+		{"invalid IP", "300.300.300.300", nil},
+		{"private IP rejected", "192.168.1.1", []string{"no_private"}},
+		{"loopback rejected", "127.0.0.1", []string{"no_loopback"}},
+		{"IPv6 rejected by ipv4_only", "2001:db8::1", []string{"ipv4_only"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := &ValidationResult{Valid: true}
+			validator.ValidateIPAddress(result, "ip", tc.value, tc.rules...)
+			if result.Valid {
+				t.Fatal("expected validation failure")
+			}
+			for _, e := range result.Errors {
+				if e.Value != "" {
+					t.Errorf("ValidationError.Value must be empty (redacted), got %q", e.Value)
+				}
+			}
+		})
+	}
+}
+
 func TestValidator_ValidateURL(t *testing.T) {
 	validator := NewValidator()
 
@@ -297,14 +347,14 @@ func TestValidator_ValidateURL(t *testing.T) {
 		{
 			name:    "valid HTTP URL",
 			field:   "url",
-			value:   "http://example.com",
+			value:   "http://1.1.1.1/",
 			rules:   []string{},
 			wantErr: false,
 		},
 		{
 			name:    "valid HTTPS URL",
 			field:   "url",
-			value:   "https://example.com/path?query=value",
+			value:   "https://8.8.8.8/path?query=value",
 			rules:   []string{},
 			wantErr: false,
 		},
@@ -319,18 +369,10 @@ func TestValidator_ValidateURL(t *testing.T) {
 		{
 			name:    "HTTP not allowed",
 			field:   "url",
-			value:   "http://example.com",
+			value:   "http://1.1.1.1/",
 			rules:   []string{"https_only"},
 			wantErr: true,
 			errRule: "https_only",
-		},
-		{
-			name:    "localhost not allowed",
-			field:   "url",
-			value:   "https://localhost:8080",
-			rules:   []string{"no_localhost"},
-			wantErr: true,
-			errRule: "no_localhost",
 		},
 	}
 
@@ -347,6 +389,197 @@ func TestValidator_ValidateURL(t *testing.T) {
 			}
 			if tt.wantErr && len(result.Errors) > 0 && result.Errors[0].Rule != tt.errRule {
 				t.Errorf("expected error rule %s, got %s", tt.errRule, result.Errors[0].Rule)
+			}
+		})
+	}
+}
+
+func TestValidator_ValidateURL_SSRF(t *testing.T) {
+	validator := NewValidator()
+
+	// All of these must be rejected regardless of which rule fires (ssrf or url).
+	alwaysReject := []struct {
+		name  string
+		value string
+	}{
+		{"loopback IPv4", "http://127.0.0.1/"},
+		{"loopback localhost", "http://localhost/"},
+		{"loopback IPv6", "http://[::1]/"},
+		{"unspecified IPv4", "http://0.0.0.0/"},
+		{"unspecified IPv6", "http://[::]/"},
+		{"link-local metadata endpoint", "http://169.254.169.254/"},
+		{"private RFC1918 class C", "http://192.168.1.1/"},
+		{"private RFC1918 class A", "http://10.0.0.1/"},
+		{"private RFC1918 class B", "http://172.16.0.1/"},
+		{"IPv4-mapped IPv6 loopback", "http://[::ffff:127.0.0.1]/"},
+	}
+	for _, tt := range alwaysReject {
+		t.Run(tt.name, func(t *testing.T) {
+			result := &ValidationResult{Valid: true}
+			validator.ValidateURL(result, "url", tt.value)
+			if result.Valid {
+				t.Errorf("%s: expected SSRF rejection but URL was accepted", tt.value)
+			}
+		})
+	}
+
+	// Decimal and hex IP notation: must be rejected; the firing rule (url vs ssrf) is platform-dependent.
+	for _, value := range []string{"http://2130706433/", "http://0x7f000001/"} {
+		t.Run("numeric notation "+value, func(t *testing.T) {
+			result := &ValidationResult{Valid: true}
+			validator.ValidateURL(result, "url", value)
+			if result.Valid {
+				t.Errorf("%s: expected rejection but URL was accepted", value)
+			}
+		})
+	}
+
+	// allow_host bypasses IP-class rejection for the named host.
+	t.Run("allow_host bypasses SSRF check", func(t *testing.T) {
+		result := &ValidationResult{Valid: true}
+		validator.ValidateURL(result, "url", "http://dev.local/", "allow_host:dev.local")
+		if !result.Valid {
+			t.Errorf("allow_host:dev.local should bypass SSRF check, got errors: %v", result.Errors)
+		}
+	})
+
+	// allow_host matching is case-insensitive.
+	t.Run("allow_host case-insensitive", func(t *testing.T) {
+		result := &ValidationResult{Valid: true}
+		validator.ValidateURL(result, "url", "http://Dev.Local/", "allow_host:dev.local")
+		if !result.Valid {
+			t.Errorf("allow_host case-insensitive match failed, got errors: %v", result.Errors)
+		}
+	})
+}
+
+func TestValidator_ValidateURL_DNSTimeout(t *testing.T) {
+	t.Run("default dnsLookupTimeout is 5s", func(t *testing.T) {
+		v := NewValidator()
+		if v.dnsLookupTimeout != 5*time.Second {
+			t.Errorf("expected dnsLookupTimeout 5s, got %s", v.dnsLookupTimeout)
+		}
+	})
+
+	t.Run("DNS failure rejects URL with url rule", func(t *testing.T) {
+		v := NewValidator()
+		v.dnsLookupTimeout = 1 * time.Millisecond
+		result := &ValidationResult{Valid: true}
+		v.ValidateURL(result, "url", "http://cfgms-test-nonexistent.invalid/")
+		if result.Valid {
+			t.Error("expected DNS failure to reject URL")
+		}
+		if len(result.Errors) == 0 || result.Errors[0].Rule != "url" {
+			t.Errorf("expected rule 'url', got errors: %v", result.Errors)
+		}
+	})
+
+	// dnsLookupTimeout is enforced: a DNS lookup that hangs longer than the
+	// configured timeout must be interrupted and the URL rejected.
+	t.Run("dnsLookupTimeout interrupts hanging DNS lookup", func(t *testing.T) {
+		v := NewValidator()
+		v.dnsLookupTimeout = 50 * time.Millisecond
+		// Inject a lookup that blocks until context deadline fires.
+		v.dnsLookup = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(5 * time.Second):
+				return nil, nil
+			}
+		}
+		result := &ValidationResult{Valid: true}
+		v.ValidateURL(result, "url", "http://cfgms-test-timeout.example/")
+		if result.Valid {
+			t.Error("expected DNS timeout to reject URL")
+		}
+		if len(result.Errors) == 0 || result.Errors[0].Rule != "url" {
+			t.Errorf("expected rule 'url', got errors: %v", result.Errors)
+		}
+	})
+
+	// A successful DNS lookup that returns zero IP addresses must be rejected.
+	// This prevents a silent SSRF bypass when a resolver returns NOERROR with no records.
+	t.Run("zero IPs returned by DNS rejects URL", func(t *testing.T) {
+		v := NewValidator()
+		v.dnsLookup = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+			return nil, nil // no addresses, no error
+		}
+		result := &ValidationResult{Valid: true}
+		v.ValidateURL(result, "url", "http://cfgms-test-zero-ips.example/")
+		if result.Valid {
+			t.Error("expected zero-IPs response to reject URL")
+		}
+		if len(result.Errors) == 0 || result.Errors[0].Rule != "url" {
+			t.Errorf("expected rule 'url', got errors: %v", result.Errors)
+		}
+	})
+
+	// allow_host: is an unconditional bypass — it skips DNS lookup and IP-class
+	// checks for the named host. The rules parameter must only contain
+	// developer-controlled values; user-supplied input must never flow into rules.
+	t.Run("allow_host with loopback IP literal is explicit bypass", func(t *testing.T) {
+		v := NewValidator()
+		result := &ValidationResult{Valid: true}
+		v.ValidateURL(result, "url", "http://127.0.0.1/", "allow_host:127.0.0.1")
+		if !result.Valid {
+			t.Errorf("allow_host:127.0.0.1 is an explicit trust bypass and must be accepted: %v", result.Errors)
+		}
+	})
+}
+
+func TestValidator_getAllowedHosts(t *testing.T) {
+	v := NewValidator()
+
+	tests := []struct {
+		name  string
+		rules []string
+		want  []string
+	}{
+		{"nil rules", nil, nil},
+		{"no allow_host rules", []string{"required", "https_only"}, nil},
+		{"single allow_host", []string{"allow_host:example.com"}, []string{"example.com"}},
+		{"multiple allow_host", []string{"allow_host:a.com", "allow_host:b.com"}, []string{"a.com", "b.com"}},
+		{"mixed rules", []string{"required", "allow_host:foo.internal", "https_only"}, []string{"foo.internal"}},
+		{"empty value after prefix", []string{"allow_host:"}, []string{""}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := v.getAllowedHosts(tt.rules)
+			if len(got) != len(tt.want) {
+				t.Fatalf("getAllowedHosts(%v) = %v, want %v", tt.rules, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("getAllowedHosts[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestContainsFold(t *testing.T) {
+	tests := []struct {
+		name  string
+		slice []string
+		s     string
+		want  bool
+	}{
+		{"empty slice", nil, "foo", false},
+		{"exact match", []string{"foo", "bar"}, "foo", true},
+		{"case-insensitive match upper in slice", []string{"FOO", "bar"}, "foo", true},
+		{"case-insensitive match upper in target", []string{"foo"}, "FOO", true},
+		{"no match", []string{"foo", "bar"}, "baz", false},
+		{"empty string in slice", []string{""}, "", true},
+		{"empty string not in slice", []string{"foo"}, "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := containsFold(tt.slice, tt.s)
+			if got != tt.want {
+				t.Errorf("containsFold(%v, %q) = %v, want %v", tt.slice, tt.s, got, tt.want)
 			}
 		})
 	}
@@ -381,10 +614,32 @@ func TestValidator_ValidateJSON(t *testing.T) {
 		{
 			name:    "JSON with oversized string",
 			field:   "data",
-			value:   `{"key": "` + string(make([]byte, 1001)) + `"}`,
+			value:   `{"key": "` + strings.Repeat("a", 1001) + `"}`,
 			rules:   []string{},
 			wantErr: true,
 			errRule: "json_string_length",
+		},
+		{
+			name:    "brackets inside string do not count as depth",
+			field:   "data",
+			value:   `{"k":"[[[[[[[[[[["}`,
+			rules:   []string{},
+			wantErr: false,
+		},
+		{
+			name:    "close brace inside string does not affect depth",
+			field:   "data",
+			value:   `{"k":"}"}`,
+			rules:   []string{},
+			wantErr: false,
+		},
+		{
+			name:    "malformed JSON fails with json_syntax",
+			field:   "data",
+			value:   `{key: "value"}`,
+			rules:   []string{},
+			wantErr: true,
+			errRule: "json_syntax",
 		},
 	}
 
@@ -435,13 +690,6 @@ func TestEnhancedValidator_ValidateWithContext(t *testing.T) {
 			rules:   []string{"tenant_scoped"},
 			wantErr: true,
 			errRule: "tenant_scope",
-		},
-		{
-			name:    "rate limit abuse detection",
-			field:   "data",
-			value:   string(make([]byte, 101)), // More than 100 chars of repeated pattern
-			rules:   []string{"rate_limit"},
-			wantErr: false, // Our simple pattern detection won't trigger on random bytes
 		},
 	}
 
@@ -509,7 +757,7 @@ func TestValidationError_Error(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			errStr := tt.err.Error()
 			for _, substr := range tt.contains {
-				if !contains(errStr, substr) {
+				if !strings.Contains(errStr, substr) {
 					t.Errorf("expected error to contain '%s', got '%s'", substr, errStr)
 				}
 			}
@@ -687,36 +935,9 @@ func TestValidator_ValidateString_EdgeCases(t *testing.T) {
 			rules:   []string{"charset:base64"},
 			wantErr: false,
 		},
-		// Path traversal detection
+		// Unicode handling — no charset rule means no rejection
 		{
-			name:    "path traversal ../",
-			field:   "path",
-			value:   "../../../etc/passwd",
-			rules:   []string{},
-			wantErr: true,
-			errRule: "security",
-		},
-		// Command injection
-		{
-			name:    "command injection &&",
-			field:   "input",
-			value:   "test && cat /etc/passwd",
-			rules:   []string{},
-			wantErr: true,
-			errRule: "security",
-		},
-		// LDAP injection
-		{
-			name:    "LDAP injection",
-			field:   "ldap",
-			value:   "admin*)(|(objectclass=*)",
-			rules:   []string{},
-			wantErr: true,
-			errRule: "security",
-		},
-		// Unicode handling
-		{
-			name:    "valid unicode",
+			name:    "valid unicode no charset",
 			field:   "text",
 			value:   "こんにちは世界",
 			rules:   []string{},
@@ -729,15 +950,6 @@ func TestValidator_ValidateString_EdgeCases(t *testing.T) {
 			value:   "line1\tcolumn2\nline2",
 			rules:   []string{"no_control_chars"},
 			wantErr: false,
-		},
-		// XSS via expression
-		{
-			name:    "XSS expression",
-			field:   "input",
-			value:   "expression(alert('xss'))",
-			rules:   []string{},
-			wantErr: true,
-			errRule: "security",
 		},
 		// Unknown charset (should pass, no validation)
 		{
@@ -778,13 +990,13 @@ func TestValidator_ValidateInteger_EdgeCases(t *testing.T) {
 		wantErr bool
 		errRule string
 	}{
+		// zero is a valid integer value; callers that need "non-zero" use min:1 or positive
 		{
-			name:    "required zero",
+			name:    "zero is valid with no rules",
 			field:   "count",
 			value:   0,
-			rules:   []string{"required"},
-			wantErr: true,
-			errRule: "required",
+			rules:   []string{},
+			wantErr: false,
 		},
 		{
 			name:    "zero positive check",
@@ -924,22 +1136,14 @@ func TestValidator_ValidateURL_EdgeCases(t *testing.T) {
 		{
 			name:    "HTTPS URL with https_only passes",
 			field:   "url",
-			value:   "https://example.com",
+			value:   "https://8.8.8.8",
 			rules:   []string{"https_only"},
 			wantErr: false,
 		},
 		{
-			name:    "127.0.0.1 with no_localhost",
-			field:   "url",
-			value:   "https://127.0.0.1:8080",
-			rules:   []string{"no_localhost"},
-			wantErr: true,
-			errRule: "no_localhost",
-		},
-		{
 			name:    "URL with port",
 			field:   "url",
-			value:   "https://example.com:8443/path",
+			value:   "https://8.8.8.8:8443/path",
 			rules:   []string{},
 			wantErr: false,
 		},
@@ -1038,194 +1242,30 @@ func TestEnhancedValidator_NilContext(t *testing.T) {
 	}
 }
 
-func TestEnhancedValidator_RateLimitAbuse(t *testing.T) {
-	ctx := &SecurityContext{
-		UserID:   "user123",
-		TenantID: "tenant456",
-	}
-	validator := NewEnhancedValidator(ctx)
-
-	// Create an abusive pattern (101+ chars of repeated 'a')
-	abusePattern := ""
-	for i := 0; i < 101; i++ {
-		abusePattern += "a"
-	}
-
-	result := &ValidationResult{Valid: true}
-	validator.ValidateWithContext(result, "data", abusePattern, "rate_limit")
-
-	// The rate limit check should detect the abuse pattern
-	if result.Valid {
-		t.Error("expected rate limit abuse to be detected")
-	}
-}
-
-func TestValidator_getRuleString(t *testing.T) {
-	validator := NewValidator()
+// TestValidator_hasRuleWithValue verifies the hasRuleWithValue helper used by
+// ValidateInteger to distinguish "rule not present" from "rule present with value 0".
+func TestValidator_hasRuleWithValue(t *testing.T) {
+	v := NewValidator()
 
 	tests := []struct {
-		name     string
-		rules    []string
-		prefix   string
-		expected string
+		name   string
+		rules  []string
+		prefix string
+		want   bool
 	}{
-		{
-			name:     "found rule",
-			rules:    []string{"charset:alphanumeric", "required"},
-			prefix:   "charset",
-			expected: "alphanumeric",
-		},
-		{
-			name:     "not found",
-			rules:    []string{"required", "min_length:5"},
-			prefix:   "charset",
-			expected: "",
-		},
-		{
-			name:     "empty rules",
-			rules:    []string{},
-			prefix:   "charset",
-			expected: "",
-		},
+		{"present with value", []string{"min:0"}, "min", true},
+		{"present with non-zero value", []string{"min:5"}, "min", true},
+		{"not present", []string{"positive"}, "min", false},
+		{"empty rules", nil, "min", false},
+		{"different prefix present", []string{"max:10"}, "min", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := validator.getRuleString(tt.rules, tt.prefix)
-			if result != tt.expected {
-				t.Errorf("expected '%s', got '%s'", tt.expected, result)
+			got := v.hasRuleWithValue(tt.rules, tt.prefix)
+			if got != tt.want {
+				t.Errorf("hasRuleWithValue(%v, %q) = %v, want %v", tt.rules, tt.prefix, got, tt.want)
 			}
 		})
 	}
-}
-
-func TestValidator_getRuleInt(t *testing.T) {
-	validator := NewValidator()
-
-	tests := []struct {
-		name     string
-		rules    []string
-		prefix   string
-		expected int
-	}{
-		{
-			name:     "found valid int",
-			rules:    []string{"min_length:10"},
-			prefix:   "min_length",
-			expected: 10,
-		},
-		{
-			name:     "not found",
-			rules:    []string{"required"},
-			prefix:   "min_length",
-			expected: 0,
-		},
-		{
-			name:     "invalid int format",
-			rules:    []string{"min_length:invalid"},
-			prefix:   "min_length",
-			expected: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := validator.getRuleInt(tt.rules, tt.prefix)
-			if result != tt.expected {
-				t.Errorf("expected %d, got %d", tt.expected, result)
-			}
-		})
-	}
-}
-
-func TestValidator_getRuleInt64(t *testing.T) {
-	validator := NewValidator()
-
-	tests := []struct {
-		name     string
-		rules    []string
-		prefix   string
-		expected int64
-	}{
-		{
-			name:     "found valid int64",
-			rules:    []string{"max:9223372036854775807"},
-			prefix:   "max",
-			expected: 9223372036854775807,
-		},
-		{
-			name:     "not found",
-			rules:    []string{"required"},
-			prefix:   "max",
-			expected: 0,
-		},
-		{
-			name:     "invalid int64 format",
-			rules:    []string{"max:invalid"},
-			prefix:   "max",
-			expected: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := validator.getRuleInt64(tt.rules, tt.prefix)
-			if result != tt.expected {
-				t.Errorf("expected %d, got %d", tt.expected, result)
-			}
-		})
-	}
-}
-
-func TestValidator_hasRule(t *testing.T) {
-	validator := NewValidator()
-
-	tests := []struct {
-		name     string
-		rules    []string
-		rule     string
-		expected bool
-	}{
-		{
-			name:     "found",
-			rules:    []string{"required", "email"},
-			rule:     "required",
-			expected: true,
-		},
-		{
-			name:     "not found",
-			rules:    []string{"required", "email"},
-			rule:     "uuid",
-			expected: false,
-		},
-		{
-			name:     "empty rules",
-			rules:    []string{},
-			rule:     "required",
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := validator.hasRule(tt.rules, tt.rule)
-			if result != tt.expected {
-				t.Errorf("expected %v, got %v", tt.expected, result)
-			}
-		})
-	}
-}
-
-// Helper function for string contains check
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

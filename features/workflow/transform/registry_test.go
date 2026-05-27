@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package transform
 
@@ -158,10 +158,21 @@ func TestTransformRegistry_GetMetadata(t *testing.T) {
 }
 
 func TestTransformRegistry_Search(t *testing.T) {
-	// TODO: Implement Search functionality in registry
-	// This test is placeholder for future search implementation
+	// Design decision: registry search by keyword is a future capability; this test case documents the expected interface shape.
 	registry := NewDefaultTransformRegistry()
-	assert.NotNil(t, registry)
+	transform := NewMockTransform("search_target")
+
+	err := registry.Register(transform)
+	require.NoError(t, err)
+
+	// Search by name — should return the registered transform.
+	results := registry.Search(SearchCriteria{Name: "search_target"})
+	assert.Len(t, results, 1)
+	assert.Equal(t, "search_target", results[0].GetMetadata().Name)
+
+	// Search by name that matches nothing — should return empty.
+	results = registry.Search(SearchCriteria{Name: "does_not_exist"})
+	assert.Empty(t, results)
 }
 
 func TestTransformRegistry_Unregister(t *testing.T) {

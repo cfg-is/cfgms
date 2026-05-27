@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package api
 
@@ -37,6 +37,11 @@ type StewardInfo struct {
 	ConnectedAt time.Time         `json:"connected_at"`
 	Metrics     map[string]string `json:"metrics,omitempty"`
 	DNA         *DNAInfo          `json:"dna,omitempty"`
+	// ActiveSessions is 1 when the steward has an active ControlChannel stream,
+	// 0 otherwise. Each steward holds at most one stream at a time, so this is
+	// a binary sentinel, not a real connection count.
+	ActiveSessions  int    `json:"active_sessions"`
+	ConnectionState string `json:"connection_state"` // "connected" or "disconnected"
 }
 
 // DNAInfo represents DNA information for API responses
@@ -44,6 +49,7 @@ type DNAInfo struct {
 	Hostname     string            `json:"hostname"`
 	OS           string            `json:"os"`
 	Architecture string            `json:"architecture"`
+	ConfigHash   string            `json:"config_hash,omitempty"`
 	Attributes   map[string]string `json:"attributes,omitempty"`
 	CollectedAt  time.Time         `json:"collected_at"`
 }
@@ -78,23 +84,6 @@ type ValidationError struct {
 	Suggestion string `json:"suggestion,omitempty"`
 }
 
-// ConfigStatusInfo represents configuration status
-type ConfigStatusInfo struct {
-	StewardID     string         `json:"steward_id"`
-	ConfigVersion string         `json:"config_version"`
-	Status        string         `json:"status"`
-	Modules       []ModuleStatus `json:"modules"`
-	UpdatedAt     time.Time      `json:"updated_at"`
-}
-
-// ModuleStatus represents the status of a module
-type ModuleStatus struct {
-	Name      string    `json:"name"`
-	Status    string    `json:"status"`
-	Message   string    `json:"message"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
 // CertificateInfo represents certificate information
 type CertificateInfo struct {
 	SerialNumber        string    `json:"serial_number"`
@@ -121,12 +110,6 @@ type CertificateProvisionResult struct {
 	CACertificatePEM string    `json:"ca_certificate_pem"`
 	SerialNumber     string    `json:"serial_number"`
 	ExpiresAt        time.Time `json:"expires_at"`
-}
-
-// CertificateRevocationRequest represents a certificate revocation request
-type CertificateRevocationRequest struct {
-	SerialNumber string `json:"serial_number"`
-	Reason       string `json:"reason,omitempty"`
 }
 
 // RoleInfo represents role information
@@ -212,6 +195,47 @@ type HealthStatus struct {
 	Services  map[string]string `json:"services"`
 }
 
+// ConfigPushResponse is returned by POST /api/v1/config/push on acceptance.
+type ConfigPushResponse struct {
+	PushID   string    `json:"push_id"`
+	Status   string    `json:"status"`
+	QueuedAt time.Time `json:"queued_at"`
+}
+
+// DeploymentSummary holds aggregate counts for a config deployment query.
+type DeploymentSummary struct {
+	Applied int `json:"applied"`
+	Pending int `json:"pending"`
+	Failed  int `json:"failed"`
+	Halted  int `json:"halted"`
+	Total   int `json:"total"`
+}
+
+// StewardDeploymentStatus captures per-steward deployment state for a config.
+type StewardDeploymentStatus struct {
+	StewardID   string    `json:"steward_id"`
+	Status      string    `json:"status"`
+	LastUpdated time.Time `json:"last_updated"`
+}
+
+// PushSummary is a compact view of a push record for the deployments response.
+type PushSummary struct {
+	PushID      string    `json:"push_id"`
+	Status      string    `json:"status"`
+	Version     string    `json:"version"`
+	InitiatedBy string    `json:"initiated_by"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// ConfigDeploymentsResponse is returned by GET /api/v1/configs/{id}/deployments.
+type ConfigDeploymentsResponse struct {
+	ConfigID    string                    `json:"config_id"`
+	Summary     DeploymentSummary         `json:"summary"`
+	Stewards    []StewardDeploymentStatus `json:"stewards"`
+	PushHistory []PushSummary             `json:"push_history"`
+}
+
 // Helper functions to convert protobuf messages to API types
 
 // DNAFromProto converts a protobuf DNA message to DNAInfo
@@ -229,6 +253,7 @@ func DNAFromProto(dna *common.DNA) *DNAInfo {
 		Hostname:     hostname,
 		OS:           os,
 		Architecture: architecture,
+		ConfigHash:   dna.ConfigHash,
 		Attributes:   dna.Attributes,
 		CollectedAt:  dna.LastUpdated.AsTime(),
 	}
@@ -253,21 +278,4 @@ func ValidationErrorFromProto(err *controller.ValidationError) ValidationError {
 		Code:       err.Code,
 		Suggestion: err.Suggestion,
 	}
-}
-
-// ModuleStatusFromProto converts a protobuf ModuleStatus to ModuleStatus
-func ModuleStatusFromProto(status *controller.ModuleStatus) ModuleStatus {
-	return ModuleStatus{
-		Name:      status.Name,
-		Status:    status.Status.Message,
-		Message:   status.Message,
-		Timestamp: status.Timestamp.AsTime(),
-	}
-}
-
-// CertificateInfoFromProto converts a protobuf CertificateInfo to CertificateInfo
-// Note: This is currently not used as we interface directly with cert manager
-func CertificateInfoFromProto(cert interface{}) CertificateInfo {
-	// Placeholder - would need to be implemented if gRPC cert service is used
-	return CertificateInfo{}
 }

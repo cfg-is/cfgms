@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package api
 
@@ -10,12 +10,15 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"gopkg.in/yaml.v3"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
+	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -23,13 +26,57 @@ import (
 var identifierRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // handleListStewards handles GET /api/v1/stewards
+// Supports optional query parameters for filtered search: os, platform, arch, status, hostname,
+// tag (repeatable). TenantID is always taken from the authenticated context, never from query params.
+// When no query params are provided, the existing all-stewards behavior is preserved.
 func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
-	// Get all stewards from the controller service (connected stewards with heartbeats)
+	// Extract tenant from authenticated context (same pattern as handleUpdateStewardConfig).
+	tenantID := ""
+	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
+		tenantID = tid
+	}
+
+	// Build a filter from query params and authenticated tenant scope.
+	filter, err := buildFleetFilter(r, tenantID)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_FILTER")
+		return
+	}
+
+	// When a filter is specified, use FleetQuery for filtered results (connected stewards only).
+	if !isEmptyFilter(filter) {
+		results, err := s.fleetQuery.Search(r.Context(), filter)
+		if err != nil {
+			s.logger.Error("Fleet query failed", "error", err)
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
+			return
+		}
+		stewardList := make([]StewardInfo, 0, len(results))
+		for _, res := range results {
+			info := StewardInfo{
+				ID:       res.ID,
+				Status:   res.Status,
+				LastSeen: res.LastHeartbeat,
+			}
+			if len(res.DNAAttributes) > 0 {
+				info.DNA = &DNAInfo{
+					Hostname:     res.Hostname,
+					OS:           res.OS,
+					Architecture: res.Architecture,
+					Attributes:   res.DNAAttributes,
+				}
+			}
+			stewardList = append(stewardList, info)
+		}
+		s.logger.Info("Listed stewards (filtered)", "count", len(stewardList))
+		s.writeSuccessResponse(w, stewardList)
+		return
+	}
+
+	// No filter: existing behavior — return all stewards including registered-but-not-connected.
 	stewards := s.controllerService.GetAllStewards()
 
-	// Convert to API response format
 	stewardList := make([]StewardInfo, 0, len(stewards))
-	seenStewards := make(map[string]bool) // Track which stewards we've seen
 
 	for _, steward := range stewards {
 		info := StewardInfo{
@@ -37,11 +84,10 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			Version:     steward.Version,
 			Status:      steward.Status,
 			LastSeen:    steward.LastHeartbeat,
-			ConnectedAt: steward.LastHeartbeat, // Using LastHeartbeat as ConnectedAt for now
+			ConnectedAt: steward.LastHeartbeat,
 			Metrics:     steward.Metrics,
 		}
 
-		// Convert DNA if available
 		if steward.DNA != nil {
 			info.DNA = &DNAInfo{
 				Hostname:     steward.DNA.Attributes["hostname"],
@@ -52,27 +98,61 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		}
 
 		stewardList = append(stewardList, info)
-		seenStewards[steward.ID] = true
 	}
-
-	// Also include recently registered stewards that may not have connected yet
-	s.mu.RLock()
-	for stewardID, registered := range s.registeredStewards {
-		if !seenStewards[stewardID] {
-			// Steward registered but hasn't connected yet
-			info := StewardInfo{
-				ID:          stewardID,
-				Status:      registered.Status,
-				ConnectedAt: registered.RegisteredAt,
-				LastSeen:    registered.LastHeartbeat,
-			}
-			stewardList = append(stewardList, info)
-		}
-	}
-	s.mu.RUnlock()
 
 	s.logger.Info("Listed stewards", "count", len(stewardList))
 	s.writeSuccessResponse(w, stewardList)
+}
+
+// buildFleetFilter constructs a fleet.Filter from HTTP query parameters.
+// tenantID comes from the authenticated context, not from query params, to prevent
+// cross-tenant enumeration. Recognized params: os, platform, arch, status, hostname,
+// tag (repeatable).
+//
+// Validation rules:
+//   - status must be "online", "offline", "any", or empty
+//   - string fields are capped at 253 characters (max DNS hostname length)
+func buildFleetFilter(r *http.Request, tenantID string) (fleet.Filter, error) {
+	const maxFieldLen = 253
+	q := r.URL.Query()
+
+	status := q.Get("status")
+	if status != "" && status != "online" && status != "offline" && status != "any" {
+		return fleet.Filter{}, fmt.Errorf("invalid status %q: must be online, offline, or any", status)
+	}
+
+	os := q.Get("os")
+	platform := q.Get("platform")
+	arch := q.Get("arch")
+	hostname := q.Get("hostname")
+
+	for name, val := range map[string]string{"os": os, "platform": platform, "arch": arch, "hostname": hostname} {
+		if len(val) > maxFieldLen {
+			return fleet.Filter{}, fmt.Errorf("filter field %q exceeds maximum length of %d", name, maxFieldLen)
+		}
+	}
+
+	return fleet.Filter{
+		TenantID:     tenantID,
+		OS:           os,
+		Platform:     platform,
+		Architecture: arch,
+		Status:       status,
+		Hostname:     hostname,
+		Tags:         q["tag"],
+	}, nil
+}
+
+// isEmptyFilter reports whether a filter has no criteria set.
+func isEmptyFilter(f fleet.Filter) bool {
+	return f.TenantID == "" &&
+		f.OS == "" &&
+		f.Platform == "" &&
+		f.Architecture == "" &&
+		f.Status == "" &&
+		f.Hostname == "" &&
+		len(f.Tags) == 0 &&
+		len(f.DNAAttributes) == 0
 }
 
 // handleGetSteward handles GET /api/v1/stewards/{id}
@@ -92,12 +172,26 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	activeSessions := 0
+	connectionState := "disconnected"
+	s.mu.RLock()
+	reg := s.registry
+	s.mu.RUnlock()
+	if reg != nil {
+		if _, ok := reg.Get(stewardID); ok {
+			activeSessions = 1
+			connectionState = "connected"
+		}
+	}
+
 	apiStewardInfo := StewardInfo{
-		ID:       stewardInfo.ID,
-		Status:   stewardInfo.Status,
-		LastSeen: stewardInfo.LastHeartbeat,
-		Version:  stewardInfo.Version,
-		Metrics:  stewardInfo.Metrics,
+		ID:              stewardInfo.ID,
+		Status:          stewardInfo.Status,
+		LastSeen:        stewardInfo.LastHeartbeat,
+		Version:         stewardInfo.Version,
+		Metrics:         stewardInfo.Metrics,
+		ActiveSessions:  activeSessions,
+		ConnectionState: connectionState,
 	}
 
 	// Include DNA information if available
@@ -187,7 +281,7 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Convert protobuf to Go struct
-	goConfig, err := stewardconfig.FromProto(protoConfig)
+	goConfig, err := stewardtypes.FromProto(protoConfig)
 	if err != nil {
 		s.logger.Error("Failed to convert protobuf to Go struct", "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to convert configuration", "CONVERSION_ERROR")
@@ -215,7 +309,7 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 		StewardID: stewardID,
 		Version:   configResp.Version,
 		Config:    config,
-		UpdatedAt: getCurrentTimestamp(),
+		UpdatedAt: time.Now().UTC(),
 	}
 
 	s.writeSuccessResponse(w, configInfo)
@@ -236,7 +330,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 
 	// Parse request body into StewardConfig
 	// Support both JSON (legacy) and YAML (production .cfg format)
-	var config stewardconfig.StewardConfig
+	var config stewardtypes.StewardConfig
 	contentType := r.Header.Get("Content-Type")
 
 	// Read body
@@ -266,10 +360,19 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		s.logger.Info("Received configuration in JSON format", "steward_id", stewardIDForLog, "resources", len(config.Resources))
 	}
 
-	// Extract tenant from context or use default
+	// Resolve the tenant the config is stored under. This endpoint targets a
+	// specific steward, so the config must be stored under THAT steward's
+	// tenant — not the caller's. An admin in tenant "default" may push config
+	// to a steward in any tenant; using the caller's tenant would store the
+	// config where neither the save=deploy fanout nor the steward's own sync
+	// can find it. Fall back to the caller's tenant (then "default") only when
+	// the steward is not yet known. (Issue #1572)
 	tenantID := "default"
-	if tid, ok := r.Context().Value("tenant-id").(string); ok && tid != "" {
+	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
 		tenantID = tid
+	}
+	if info, ok := s.controllerService.GetStewardInfo(stewardID); ok && info.TenantID != "" {
+		tenantID = info.TenantID
 	}
 
 	tenantIDForLog := logging.SanitizeLogValue(tenantID)
@@ -279,12 +382,12 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		"tenant_id", tenantIDForLog,
 		"resource_count", len(config.Resources))
 
-	// Store configuration using tenant-aware config service
-	if err := s.configService.SetTenantConfiguration(tenantID, stewardID, &config); err != nil {
+	// Store configuration using V2 durable config service
+	if err := s.configService.SetConfiguration(r.Context(), tenantID, stewardID, &config); err != nil {
 		s.logger.Error("Failed to store configuration",
 			"steward_id", stewardIDForLog,
 			"tenant_id", tenantIDForLog,
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store configuration", "STORAGE_ERROR")
 		return
 	}
@@ -357,29 +460,62 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, result)
 }
 
-// handleGetConfigStatus handles GET /api/v1/stewards/{id}/config/status
-func (s *Server) handleGetConfigStatus(w http.ResponseWriter, r *http.Request) {
+// handleStewardAuthRefresh handles POST /api/v1/stewards/{id}/auth/refresh.
+// It is a no-op surface that validates the steward exists and acknowledges the
+// refresh request. No token or credential state is modified (mTLS is the sole
+// auth mechanism; this endpoint exists for HA test instrumentation only).
+func (s *Server) handleStewardAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	stewardID := vars["id"]
+	id := vars["id"]
+	idForLog := logging.SanitizeLogValue(id)
 
-	if stewardID == "" {
+	if id == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
 		return
 	}
 
-	// Get configuration status from the service
-	// For now, we'll return a placeholder since we need to implement this in the service layer
-	// TODO: Implement configuration status tracking in the service layer
-
-	status := ConfigStatusInfo{
-		StewardID:     stewardID,
-		ConfigVersion: "unknown",
-		Status:        "unknown",
-		Modules:       []ModuleStatus{},
-		UpdatedAt:     getCurrentTimestamp(),
+	_, exists := s.controllerService.GetStewardInfo(id)
+	if !exists {
+		s.logger.Info("Auth refresh requested for unknown steward", "steward_id", idForLog)
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return
 	}
 
-	s.writeSuccessResponse(w, status)
+	s.logger.Info("Auth refresh requested", "steward_id", idForLog)
+	s.respondJSON(w, http.StatusOK, map[string]string{"steward_id": id, "status": "refresh_requested"})
+}
+
+// handleDeleteStewardConfig handles DELETE /api/v1/stewards/{id}/config
+func (s *Server) handleDeleteStewardConfig(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
+
+	if !identifierRegex.MatchString(stewardID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
+	tenantID := "default"
+	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
+		tenantID = tid
+	}
+
+	err := s.configService.DeleteConfiguration(r.Context(), tenantID, stewardID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			s.logger.Debug("Configuration not found for deletion", "steward_id", stewardIDForLog)
+			s.writeErrorResponse(w, http.StatusNotFound, "Configuration not found", "CONFIG_NOT_FOUND")
+		} else {
+			s.logger.Error("Failed to delete configuration", "steward_id", stewardIDForLog, "error", err)
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete configuration", "INTERNAL_ERROR")
+		}
+		return
+	}
+
+	s.logger.Info("Configuration deleted", "steward_id", stewardIDForLog)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleGetEffectiveConfig handles GET /api/v1/stewards/{id}/config/effective
@@ -394,62 +530,25 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Get effective configuration from the configuration service
-	effectiveConfig, err := s.configService.GetEffectiveConfiguration(stewardID)
-	if err != nil {
-		s.logger.Error("Failed to get effective configuration", "steward_id", stewardIDForLog, "error", err)
+	// Extract tenant from context or use default
+	tenantID := "default"
+	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
+		tenantID = tid
+	}
 
-		// Check if steward not found
-		if err.Error() == fmt.Sprintf("steward not found: %s", stewardID) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			return
+	// Get effective configuration from the V2 configuration service (durable storage)
+	effectiveConfig, err := s.configService.GetEffectiveConfiguration(r.Context(), tenantID, stewardID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			s.logger.Debug("No effective configuration found", "steward_id", stewardIDForLog)
+			s.writeErrorResponse(w, http.StatusNotFound, "No effective configuration found for steward", "NOT_FOUND")
+		} else {
+			s.logger.Error("Failed to get effective configuration", "steward_id", stewardIDForLog, "error", err)
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve effective configuration", "INTERNAL_ERROR")
 		}
-
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve effective configuration", "INTERNAL_ERROR")
 		return
 	}
 
-	s.logger.Info("Retrieved effective configuration", "steward_id", stewardIDForLog, "resources_count", len(effectiveConfig.Resources))
+	s.logger.Info("Retrieved effective configuration", "steward_id", stewardIDForLog)
 	s.writeSuccessResponse(w, effectiveConfig)
-}
-
-// handleTriggerQUICConnection handles POST /api/v1/stewards/{id}/quic/connect
-func (s *Server) handleTriggerQUICConnection(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	stewardID := vars["id"]
-
-	stewardIDForLog := logging.SanitizeLogValue(stewardID)
-
-	if stewardID == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
-		return
-	}
-
-	// Check if QUIC trigger function is available
-	s.mu.RLock()
-	triggerFunc := s.quicTriggerFunc
-	s.mu.RUnlock()
-
-	if triggerFunc == nil {
-		s.logger.Error("QUIC trigger function not configured", "steward_id", stewardIDForLog)
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "QUIC functionality not available", "QUIC_NOT_CONFIGURED")
-		return
-	}
-
-	// Trigger QUIC connection
-	commandID, err := triggerFunc(r.Context(), stewardID)
-	if err != nil {
-		s.logger.Error("Failed to trigger QUIC connection", "steward_id", stewardIDForLog, "error", err)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to trigger QUIC connection", "QUIC_CONNECTION_FAILED")
-		return
-	}
-
-	response := map[string]interface{}{
-		"command_id": commandID,
-		"steward_id": stewardID,
-		"message":    "QUIC connection triggered successfully",
-	}
-
-	s.logger.Info("Triggered QUIC connection", "steward_id", stewardIDForLog, "command_id", commandID)
-	s.writeSuccessResponse(w, response)
 }

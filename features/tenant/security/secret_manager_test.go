@@ -1,22 +1,45 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package security
 
 import (
 	"context"
+	"errors"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/audit"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/secrets/providers/steward"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// newTestSecretStore creates a steward-backed SecretStore for tests.
+// Skips the test if /etc/machine-id is absent (required for platform key derivation on Linux).
+func newTestSecretStore(t *testing.T) secretsif.SecretStore {
+	t.Helper()
+	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
+		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
+	}
+	provider := &steward.StewardProvider{}
+	store, err := provider.CreateSecretStore(map[string]interface{}{
+		"secrets_dir": t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
 
 func TestTenantSecretManager_StoreSecret(t *testing.T) {
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
 
-	// Add a rule that allows all operations for test tenant
 	isolationEngine.isolationRules["550e8400-e29b-41d4-a716-446655440000"] = &IsolationRule{
 		TenantID: "550e8400-e29b-41d4-a716-446655440000",
 		ResourceIsolation: ResourceRule{
@@ -25,7 +48,8 @@ func TestTenantSecretManager_StoreSecret(t *testing.T) {
 		},
 	}
 
-	tsm := NewTenantSecretManager(isolationEngine)
+	secretStore := newTestSecretStore(t)
+	tsm := NewTenantSecretManager(isolationEngine, nil, secretStore)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -99,7 +123,7 @@ func TestTenantSecretManager_StoreSecret(t *testing.T) {
 			response, err := tsm.StoreSecret(ctx, tt.request)
 
 			if tt.wantErr {
-				require.NoError(t, err) // Function should not error, but response should contain error
+				require.NoError(t, err)
 				require.NotNil(t, response)
 				assert.NotEmpty(t, response.Error)
 				assert.Contains(t, response.Error, tt.errMsg)
@@ -115,9 +139,6 @@ func TestTenantSecretManager_StoreSecret(t *testing.T) {
 				assert.Equal(t, tt.request.TenantID, secret.TenantID)
 				assert.Equal(t, tt.request.Name, secret.Name)
 				assert.Equal(t, tt.request.SecretType, secret.SecretType)
-				assert.NotEmpty(t, secret.EncryptedData)
-				assert.NotEmpty(t, secret.KeyID)
-				assert.Equal(t, 1, secret.KeyVersion)
 				assert.False(t, secret.CreatedAt.IsZero())
 				assert.False(t, secret.UpdatedAt.IsZero())
 			}
@@ -125,21 +146,210 @@ func TestTenantSecretManager_StoreSecret(t *testing.T) {
 	}
 }
 
+// TestTenantSecretManager_StoreAndRetrieve verifies round-trip persistence:
+// storing a secret and then retrieving it returns the original payload byte-for-byte.
+// This test also validates that the AES-GCM layer removal does not break the round-trip —
+// the underlying steward store handles all encryption at rest.
+func TestTenantSecretManager_StoreAndRetrieve(t *testing.T) {
+	secretStore := newTestSecretStore(t)
+
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
+	isolationEngine := &TenantIsolationEngine{
+		isolationRules: map[string]*IsolationRule{
+			tenantID: {
+				TenantID: tenantID,
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: true,
+				},
+			},
+		},
+	}
+
+	tsm := NewTenantSecretManager(isolationEngine, nil, secretStore)
+	ctx := context.Background()
+
+	originalData := []byte("my-super-secret-password-abc123")
+	storeResp, err := tsm.StoreSecret(ctx, &SecretRequest{
+		TenantID:   tenantID,
+		Name:       "roundtrip-test",
+		SecretType: SecretTypePassword,
+		Data:       originalData,
+	})
+	require.NoError(t, err)
+	require.Empty(t, storeResp.Error)
+	require.NotNil(t, storeResp.Secret)
+	secretID := storeResp.Secret.ID
+
+	retrieveResp, err := tsm.RetrieveSecret(ctx, tenantID, secretID)
+	require.NoError(t, err)
+	require.NotNil(t, retrieveResp)
+	assert.Empty(t, retrieveResp.Error)
+	require.NotNil(t, retrieveResp.Secret)
+
+	assert.Equal(t, originalData, retrieveResp.Data, "retrieved data must match stored data byte-for-byte")
+	assert.Equal(t, tenantID, retrieveResp.Secret.TenantID)
+	assert.Equal(t, secretID, retrieveResp.Secret.ID)
+	assert.True(t, retrieveResp.Secret.AccessCount > 0)
+	assert.NotNil(t, retrieveResp.Secret.LastAccess)
+}
+
+// TestTenantSecretManager_RetrieveUnknownSecret verifies that retrieving a secretID
+// that was never stored returns an error wrapping secretsif.ErrSecretNotFound.
+func TestTenantSecretManager_RetrieveUnknownSecret(t *testing.T) {
+	secretStore := newTestSecretStore(t)
+
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
+	isolationEngine := &TenantIsolationEngine{
+		isolationRules: map[string]*IsolationRule{
+			tenantID: {
+				TenantID: tenantID,
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: true,
+				},
+			},
+		},
+	}
+
+	tsm := NewTenantSecretManager(isolationEngine, nil, secretStore)
+	ctx := context.Background()
+
+	resp, err := tsm.RetrieveSecret(ctx, tenantID, "nonexistent-secret-id-xyz")
+	assert.Nil(t, resp)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, secretsif.ErrSecretNotFound),
+		"expected errors.Is(err, secretsif.ErrSecretNotFound) to be true, got: %v", err)
+}
+
+// TestTenantSecretManager_RetrieveNilSecretStore verifies that RetrieveSecret returns
+// (nil, error) — not a SecretResponse with Error field — when no secretStore is configured.
+func TestTenantSecretManager_RetrieveNilSecretStore(t *testing.T) {
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
+	isolationEngine := &TenantIsolationEngine{
+		isolationRules: map[string]*IsolationRule{
+			tenantID: {
+				TenantID: tenantID,
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: true,
+				},
+			},
+		},
+	}
+
+	tsm := NewTenantSecretManager(isolationEngine, nil, nil)
+	ctx := context.Background()
+
+	resp, err := tsm.RetrieveSecret(ctx, tenantID, "any-secret-id")
+	assert.Nil(t, resp, "RetrieveSecret with nil store must return nil SecretResponse")
+	require.Error(t, err, "RetrieveSecret with nil store must return an error")
+	assert.Contains(t, err.Error(), "secret store not configured")
+}
+
+// TestTenantSecretManager_AccessControlGatesBeforeStore verifies that access control
+// is enforced before the store is consulted — a denied tenant gets no store hit.
+func TestTenantSecretManager_AccessControlGatesBeforeStore(t *testing.T) {
+	secretStore := newTestSecretStore(t)
+
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
+	isolationEngine := &TenantIsolationEngine{
+		isolationRules: map[string]*IsolationRule{
+			tenantID: {
+				TenantID: tenantID,
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: true,
+				},
+			},
+			"unauthorized-tenant": {
+				TenantID: "unauthorized-tenant",
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: false,
+					RestrictedResources:  []string{"secrets"},
+				},
+			},
+		},
+	}
+
+	tsm := NewTenantSecretManager(isolationEngine, nil, secretStore)
+	ctx := context.Background()
+
+	// Store a secret under the valid tenant.
+	storeResp, err := tsm.StoreSecret(ctx, &SecretRequest{
+		TenantID:   tenantID,
+		Name:       "access-control-test",
+		SecretType: SecretTypeAPIKey,
+		Data:       []byte("secret-value"),
+	})
+	require.NoError(t, err)
+	require.Empty(t, storeResp.Error)
+	secretID := storeResp.Secret.ID
+
+	// An unauthorized tenant must be denied before the store is consulted.
+	resp, err := tsm.RetrieveSecret(ctx, "unauthorized-tenant", secretID)
+	require.NoError(t, err) // access denial returns a response, not an error
+	require.NotNil(t, resp)
+	assert.NotEmpty(t, resp.Error)
+	assert.Contains(t, resp.Error, "tenant access denied")
+	assert.Nil(t, resp.Secret)
+}
+
+// TestTenantSecretManager_AccessCountPersisted verifies that AccessCount is incremented
+// on the stored metadata (not on a transient object), so successive retrievals increment it.
+func TestTenantSecretManager_AccessCountPersisted(t *testing.T) {
+	secretStore := newTestSecretStore(t)
+
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
+	isolationEngine := &TenantIsolationEngine{
+		isolationRules: map[string]*IsolationRule{
+			tenantID: {
+				TenantID: tenantID,
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: true,
+				},
+			},
+		},
+	}
+
+	tsm := NewTenantSecretManager(isolationEngine, nil, secretStore)
+	ctx := context.Background()
+
+	storeResp, err := tsm.StoreSecret(ctx, &SecretRequest{
+		TenantID:   tenantID,
+		Name:       "count-test",
+		SecretType: SecretTypeToken,
+		Data:       []byte("count-test-value"),
+	})
+	require.NoError(t, err)
+	require.Empty(t, storeResp.Error)
+	secretID := storeResp.Secret.ID
+
+	r1, err := tsm.RetrieveSecret(ctx, tenantID, secretID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), r1.Secret.AccessCount)
+
+	r2, err := tsm.RetrieveSecret(ctx, tenantID, secretID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), r2.Secret.AccessCount)
+}
+
 func TestTenantSecretManager_RetrieveSecret(t *testing.T) {
+	secretStore := newTestSecretStore(t)
+
+	validTenantID := "550e8400-e29b-41d4-a716-446655440000"
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
-
-	// Add rules for test tenant
-	isolationEngine.isolationRules["test-tenant-id"] = &IsolationRule{
-		TenantID: "test-tenant-id",
+	isolationEngine.isolationRules[validTenantID] = &IsolationRule{
+		TenantID: validTenantID,
 		ResourceIsolation: ResourceRule{
 			IsolatedStorage:      true,
 			AllowResourceSharing: true,
 		},
 	}
-
-	// Add rules that deny access for unauthorized tenant
 	isolationEngine.isolationRules["unauthorized-tenant"] = &IsolationRule{
 		TenantID: "unauthorized-tenant",
 		ResourceIsolation: ResourceRule{
@@ -149,8 +359,19 @@ func TestTenantSecretManager_RetrieveSecret(t *testing.T) {
 		},
 	}
 
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil, secretStore)
 	ctx := context.Background()
+
+	// Pre-store a secret so the valid-retrieval test case has something to find.
+	storeResp, err := tsm.StoreSecret(ctx, &SecretRequest{
+		TenantID:   validTenantID,
+		Name:       "retrieve-test-key",
+		SecretType: SecretTypeAPIKey,
+		Data:       []byte("retrieve-test-value"),
+	})
+	require.NoError(t, err)
+	require.Empty(t, storeResp.Error)
+	storedSecretID := storeResp.Secret.ID
 
 	tests := []struct {
 		name     string
@@ -161,14 +382,14 @@ func TestTenantSecretManager_RetrieveSecret(t *testing.T) {
 	}{
 		{
 			name:     "valid secret retrieval",
-			tenantID: "test-tenant-id",
-			secretID: "secret-123",
+			tenantID: validTenantID,
+			secretID: storedSecretID,
 			wantErr:  false,
 		},
 		{
 			name:     "unauthorized tenant access",
 			tenantID: "unauthorized-tenant",
-			secretID: "secret-123",
+			secretID: storedSecretID,
 			wantErr:  true,
 			errMsg:   "tenant access denied",
 		},
@@ -179,7 +400,7 @@ func TestTenantSecretManager_RetrieveSecret(t *testing.T) {
 			response, err := tsm.RetrieveSecret(ctx, tt.tenantID, tt.secretID)
 
 			if tt.wantErr {
-				require.NoError(t, err) // Function should not error, but response should contain error
+				require.NoError(t, err)
 				require.NotNil(t, response)
 				assert.NotEmpty(t, response.Error)
 				assert.Contains(t, response.Error, tt.errMsg)
@@ -201,64 +422,41 @@ func TestTenantSecretManager_RetrieveSecret(t *testing.T) {
 	}
 }
 
-func TestTenantSecretManager_EncryptDecryptCycle(t *testing.T) {
+// TestTenantSecretManager_RotateSecret verifies that RotateSecret delegates to the
+// underlying secret store and that the rotated value is returned on the next retrieve.
+func TestTenantSecretManager_RotateSecret(t *testing.T) {
+	secretStore := newTestSecretStore(t)
+
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
 	isolationEngine := &TenantIsolationEngine{
-		isolationRules: make(map[string]*IsolationRule),
-	}
-	tsm := NewTenantSecretManager(isolationEngine)
-	ctx := context.Background()
-
-	// Test data
-	originalData := []byte("this-is-a-very-secret-password-123")
-	tenantID := "test-tenant-123"
-
-	// Get encryption key
-	key, err := tsm.getTenantEncryptionKey(ctx, tenantID)
-	require.NoError(t, err)
-	require.NotNil(t, key)
-	assert.Equal(t, tenantID, key.TenantID)
-	assert.Len(t, key.KeyData, 32) // AES-256 key
-	assert.NotEmpty(t, key.KeyID)
-
-	// Encrypt data
-	encryptedData, err := tsm.encryptData(originalData, key)
-	require.NoError(t, err)
-	assert.NotEmpty(t, encryptedData)
-	assert.NotEqual(t, string(originalData), encryptedData)
-
-	// Decrypt data
-	decryptedData, err := tsm.decryptData(encryptedData, key)
-	require.NoError(t, err)
-	assert.Equal(t, originalData, decryptedData)
-}
-
-func TestTenantSecretManager_KeyRotation(t *testing.T) {
-	isolationEngine := &TenantIsolationEngine{
-		isolationRules: make(map[string]*IsolationRule),
-	}
-
-	// Add rules for test tenant
-	isolationEngine.isolationRules["test-tenant-id"] = &IsolationRule{
-		TenantID: "test-tenant-id",
-		ResourceIsolation: ResourceRule{
-			IsolatedStorage:      true,
-			AllowResourceSharing: true,
+		isolationRules: map[string]*IsolationRule{
+			tenantID: {
+				TenantID: tenantID,
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: true,
+				},
+			},
 		},
 	}
 
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil, secretStore)
 	ctx := context.Background()
 
-	tenantID := "test-tenant-id"
-	secretID := "secret-123"
-	newData := []byte("rotated-secret-data")
-
-	// First create an initial key to establish baseline
-	_, err := tsm.getTenantEncryptionKey(ctx, tenantID)
+	// Store an initial secret.
+	storeResp, err := tsm.StoreSecret(ctx, &SecretRequest{
+		TenantID:   tenantID,
+		Name:       "rotate-test",
+		SecretType: SecretTypePassword,
+		Data:       []byte("original-secret-value"),
+	})
 	require.NoError(t, err)
+	require.Empty(t, storeResp.Error)
+	secretID := storeResp.Secret.ID
 
-	// Test key rotation
-	response, err := tsm.RotateSecret(ctx, tenantID, secretID, newData)
+	// Rotate to a new value.
+	rotatedData := []byte("rotated-secret-data")
+	response, err := tsm.RotateSecret(ctx, tenantID, secretID, rotatedData)
 	require.NoError(t, err)
 	require.NotNil(t, response)
 	assert.Empty(t, response.Error)
@@ -267,51 +465,105 @@ func TestTenantSecretManager_KeyRotation(t *testing.T) {
 	secret := response.Secret
 	assert.Equal(t, tenantID, secret.TenantID)
 	assert.Equal(t, secretID, secret.ID)
-	assert.NotEmpty(t, secret.EncryptedData)
-	assert.NotEmpty(t, secret.KeyID)
-	assert.Equal(t, 2, secret.KeyVersion) // Should be incremented
+	assert.False(t, secret.UpdatedAt.IsZero())
+
+	// Verify the rotated value is returned on retrieve.
+	retrieveResp, err := tsm.RetrieveSecret(ctx, tenantID, secretID)
+	require.NoError(t, err)
+	assert.Equal(t, rotatedData, retrieveResp.Data, "retrieve after rotate must return the new value")
 }
 
-func TestTenantSecretManager_KeyRotationNeeded(t *testing.T) {
+// TestTenantSecretManager_RotateSecretNilStore verifies that RotateSecret returns
+// a SecretResponse with Error when no secretStore is configured.
+func TestTenantSecretManager_RotateSecretNilStore(t *testing.T) {
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
 	isolationEngine := &TenantIsolationEngine{
-		isolationRules: make(map[string]*IsolationRule),
+		isolationRules: map[string]*IsolationRule{
+			tenantID: {
+				TenantID: tenantID,
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: true,
+				},
+			},
+		},
 	}
-	tsm := NewTenantSecretManager(isolationEngine)
+
+	tsm := NewTenantSecretManager(isolationEngine, nil, nil)
 	ctx := context.Background()
 
-	tenantID := "test-tenant-123"
-
-	// Initially no key exists
-	needed, err := tsm.CheckKeyRotationNeeded(ctx, tenantID)
+	response, err := tsm.RotateSecret(ctx, tenantID, "any-secret", []byte("new-data"))
 	require.NoError(t, err)
-	assert.False(t, needed)
-
-	// Create a key
-	key, err := tsm.getTenantEncryptionKey(ctx, tenantID)
-	require.NoError(t, err)
-	require.NotNil(t, key)
-
-	// Should not need rotation initially
-	needed, err = tsm.CheckKeyRotationNeeded(ctx, tenantID)
-	require.NoError(t, err)
-	assert.False(t, needed)
-
-	// Simulate key approaching expiration
-	key.ExpiresAt = time.Now().Add(15 * 24 * time.Hour) // 15 days from now
-	tsm.keyCache[tenantID] = key
-
-	// Should need rotation now (within 30 day threshold)
-	needed, err = tsm.CheckKeyRotationNeeded(ctx, tenantID)
-	require.NoError(t, err)
-	assert.True(t, needed)
+	require.NotNil(t, response)
+	assert.Contains(t, response.Error, "secret store not configured")
 }
 
-func TestTenantSecretManager_DeleteSecret(t *testing.T) {
+// TestTenantSecretManager_RotateSecretStoreError verifies that when the underlying
+// store's RotateSecret returns an error, RotateSecret surfaces it wrapped as
+// "rotation failed".
+func TestTenantSecretManager_RotateSecretStoreError(t *testing.T) {
+	secretStore := newTestSecretStore(t)
+
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
+	isolationEngine := &TenantIsolationEngine{
+		isolationRules: map[string]*IsolationRule{
+			tenantID: {
+				TenantID: tenantID,
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: true,
+				},
+			},
+		},
+	}
+
+	tsm := NewTenantSecretManager(isolationEngine, nil, secretStore)
+	ctx := context.Background()
+
+	// Rotating a non-existent secretID causes the steward store to return an error.
+	response, err := tsm.RotateSecret(ctx, tenantID, "nonexistent-secret-xyz", []byte("new-data"))
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	assert.Contains(t, response.Error, "rotation failed")
+	assert.Nil(t, response.Secret)
+}
+
+// TestTenantSecretManager_RotateSecretAccessDenied verifies that RotateSecret returns
+// an access-denied response when the tenant lacks write permission on secrets.
+func TestTenantSecretManager_RotateSecretAccessDenied(t *testing.T) {
+	secretStore := newTestSecretStore(t)
+
+	isolationEngine := &TenantIsolationEngine{
+		isolationRules: map[string]*IsolationRule{
+			"unauthorized-tenant": {
+				TenantID: "unauthorized-tenant",
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: false,
+					RestrictedResources:  []string{"secrets"},
+				},
+			},
+		},
+	}
+
+	tsm := NewTenantSecretManager(isolationEngine, nil, secretStore)
+	ctx := context.Background()
+
+	response, err := tsm.RotateSecret(ctx, "unauthorized-tenant", "any-secret", []byte("new-data"))
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	assert.Contains(t, response.Error, "tenant access denied")
+	assert.Nil(t, response.Secret)
+}
+
+// TestTenantSecretManager_DeleteSecretAccessControl verifies that access control
+// is enforced before any store operation — an unauthorized tenant is rejected.
+// Store delegation is tested separately in TestTenantSecretManager_DeleteSecretPropagatestoStore.
+func TestTenantSecretManager_DeleteSecretAccessControl(t *testing.T) {
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
 
-	// Add rules for test tenant
 	isolationEngine.isolationRules["test-tenant-id"] = &IsolationRule{
 		TenantID: "test-tenant-id",
 		ResourceIsolation: ResourceRule{
@@ -320,7 +572,6 @@ func TestTenantSecretManager_DeleteSecret(t *testing.T) {
 		},
 	}
 
-	// Add rules that deny access for unauthorized tenant
 	isolationEngine.isolationRules["unauthorized-tenant"] = &IsolationRule{
 		TenantID: "unauthorized-tenant",
 		ResourceIsolation: ResourceRule{
@@ -330,7 +581,8 @@ func TestTenantSecretManager_DeleteSecret(t *testing.T) {
 		},
 	}
 
-	tsm := NewTenantSecretManager(isolationEngine)
+	// nil store: these subtests only validate access control, not store delegation.
+	tsm := NewTenantSecretManager(isolationEngine, nil, nil)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -341,7 +593,7 @@ func TestTenantSecretManager_DeleteSecret(t *testing.T) {
 		errMsg   string
 	}{
 		{
-			name:     "valid secret deletion",
+			name:     "access allowed (nil store, no store call made)",
 			tenantID: "test-tenant-id",
 			secretID: "secret-123",
 			wantErr:  false,
@@ -369,12 +621,79 @@ func TestTenantSecretManager_DeleteSecret(t *testing.T) {
 	}
 }
 
+// TestTenantSecretManager_DeleteSecretStoreError verifies that when the underlying
+// store's DeleteSecret returns an error, DeleteSecret surfaces it wrapped as
+// "failed to delete secret".
+func TestTenantSecretManager_DeleteSecretStoreError(t *testing.T) {
+	secretStore := newTestSecretStore(t)
+
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
+	isolationEngine := &TenantIsolationEngine{
+		isolationRules: map[string]*IsolationRule{
+			tenantID: {
+				TenantID: tenantID,
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: true,
+				},
+			},
+		},
+	}
+
+	tsm := NewTenantSecretManager(isolationEngine, nil, secretStore)
+	ctx := context.Background()
+
+	// Deleting a non-existent secretID causes the steward store to return an error.
+	err := tsm.DeleteSecret(ctx, tenantID, "nonexistent-secret-xyz")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to delete secret")
+}
+
+// TestTenantSecretManager_DeleteSecretPropagatestoStore verifies that DeleteSecret
+// delegates to the underlying secret store and the secret is no longer retrievable afterward.
+func TestTenantSecretManager_DeleteSecretPropagatestoStore(t *testing.T) {
+	secretStore := newTestSecretStore(t)
+
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
+	isolationEngine := &TenantIsolationEngine{
+		isolationRules: map[string]*IsolationRule{
+			tenantID: {
+				TenantID: tenantID,
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: true,
+				},
+			},
+		},
+	}
+
+	tsm := NewTenantSecretManager(isolationEngine, nil, secretStore)
+	ctx := context.Background()
+
+	// Store a secret, then delete it, then verify it's gone.
+	storeResp, err := tsm.StoreSecret(ctx, &SecretRequest{
+		TenantID:   tenantID,
+		Name:       "delete-propagate-test",
+		SecretType: SecretTypeAPIKey,
+		Data:       []byte("to-be-deleted"),
+	})
+	require.NoError(t, err)
+	require.Empty(t, storeResp.Error)
+	secretID := storeResp.Secret.ID
+
+	require.NoError(t, tsm.DeleteSecret(ctx, tenantID, secretID))
+
+	_, err = tsm.RetrieveSecret(ctx, tenantID, secretID)
+	require.Error(t, err, "retrieving a deleted secret must return an error")
+	assert.True(t, errors.Is(err, secretsif.ErrSecretNotFound),
+		"expected ErrSecretNotFound after delete, got: %v", err)
+}
+
 func TestTenantSecretManager_ListSecrets(t *testing.T) {
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
 
-	// Add rules for test tenant
 	isolationEngine.isolationRules["test-tenant-id"] = &IsolationRule{
 		TenantID: "test-tenant-id",
 		ResourceIsolation: ResourceRule{
@@ -383,7 +702,6 @@ func TestTenantSecretManager_ListSecrets(t *testing.T) {
 		},
 	}
 
-	// Add rules that deny access for unauthorized tenant
 	isolationEngine.isolationRules["unauthorized-tenant"] = &IsolationRule{
 		TenantID: "unauthorized-tenant",
 		ResourceIsolation: ResourceRule{
@@ -393,7 +711,7 @@ func TestTenantSecretManager_ListSecrets(t *testing.T) {
 		},
 	}
 
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil, nil)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -426,16 +744,21 @@ func TestTenantSecretManager_ListSecrets(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, secrets)
-				// Empty list for now since we don't have real storage
 				assert.Len(t, secrets, 0)
 			}
 		})
 	}
 }
 
+// TestSecretType_Constants verifies that each SecretType constant is accepted
+// by validateSecretRequest — confirming the enum values are in sync with validation logic.
 func TestSecretType_Constants(t *testing.T) {
-	// Ensure all secret types are defined correctly
-	expectedTypes := []SecretType{
+	isolationEngine := &TenantIsolationEngine{
+		isolationRules: make(map[string]*IsolationRule),
+	}
+	tsm := NewTenantSecretManager(isolationEngine, nil, nil)
+
+	validTypes := []SecretType{
 		SecretTypeAPIKey,
 		SecretTypePassword,
 		SecretTypeCertificate,
@@ -446,8 +769,16 @@ func TestSecretType_Constants(t *testing.T) {
 		SecretTypeEncryptionKey,
 	}
 
-	for _, secretType := range expectedTypes {
-		assert.NotEmpty(t, string(secretType))
+	for _, secretType := range validTypes {
+		t.Run(string(secretType), func(t *testing.T) {
+			err := tsm.validateSecretRequest(&SecretRequest{
+				TenantID:   "550e8400-e29b-41d4-a716-446655440000",
+				Name:       "test-secret",
+				SecretType: secretType,
+				Data:       []byte("secret-data"),
+			})
+			assert.NoError(t, err, "SecretType constant %q must be accepted by validateSecretRequest", secretType)
+		})
 	}
 }
 
@@ -455,7 +786,7 @@ func TestTenantSecretManager_ValidateSecretRequest(t *testing.T) {
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil, nil)
 
 	tests := []struct {
 		name    string
@@ -524,49 +855,217 @@ func TestTenantSecretManager_GenerateSecretID(t *testing.T) {
 	isolationEngine := &TenantIsolationEngine{
 		isolationRules: make(map[string]*IsolationRule),
 	}
-	tsm := NewTenantSecretManager(isolationEngine)
+	tsm := NewTenantSecretManager(isolationEngine, nil, nil)
 
-	// Generate multiple IDs and ensure they are unique
 	ids := make(map[string]bool)
 	for i := 0; i < 100; i++ {
 		id := tsm.generateSecretID()
 		assert.NotEmpty(t, id)
-		assert.True(t, len(id) > 10) // Should be reasonably long
+		assert.True(t, len(id) > 10)
 		assert.False(t, ids[id], "Generated duplicate ID: %s", id)
 		ids[id] = true
 	}
 }
 
-// Benchmark tests for performance validation
-func BenchmarkTenantSecretManager_EncryptData(b *testing.B) {
+// TestTenantSecretManager_AuditIntegration verifies that secret operations produce
+// durable audit entries in the central pkg/audit.Manager store.
+func TestTenantSecretManager_AuditIntegration(t *testing.T) {
+	secretStore := newTestSecretStore(t)
+
+	sm := pkgtesting.SetupTestStorage(t)
+	auditMgr, err := audit.NewManager(sm.GetAuditStore(), "tenant_secret_manager")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = auditMgr.Stop(ctx)
+	})
+
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
 	isolationEngine := &TenantIsolationEngine{
-		isolationRules: make(map[string]*IsolationRule),
+		isolationRules: map[string]*IsolationRule{
+			tenantID: {
+				TenantID: tenantID,
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: true,
+				},
+			},
+			"unauthorized-tenant": {
+				TenantID: "unauthorized-tenant",
+				ResourceIsolation: ResourceRule{
+					IsolatedStorage:      true,
+					AllowResourceSharing: false,
+					RestrictedResources:  []string{"secrets"},
+				},
+			},
+		},
 	}
-	tsm := NewTenantSecretManager(isolationEngine)
+
+	tsm := NewTenantSecretManager(isolationEngine, auditMgr, secretStore)
 	ctx := context.Background()
 
-	key, _ := tsm.getTenantEncryptionKey(ctx, "bench-tenant")
-	data := []byte("benchmark-secret-data-for-encryption-testing")
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, _ = tsm.encryptData(data, key)
+	flushAudit := func(t *testing.T) {
+		t.Helper()
+		fCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		require.NoError(t, auditMgr.Flush(fCtx))
 	}
-}
 
-func BenchmarkTenantSecretManager_DecryptData(b *testing.B) {
-	isolationEngine := &TenantIsolationEngine{
-		isolationRules: make(map[string]*IsolationRule),
-	}
-	tsm := NewTenantSecretManager(isolationEngine)
-	ctx := context.Background()
+	t.Run("StoreSecret produces audit entry with correct fields", func(t *testing.T) {
+		resp, err := tsm.StoreSecret(ctx, &SecretRequest{
+			TenantID:   tenantID,
+			Name:       "audit-test-key",
+			SecretType: SecretTypeAPIKey,
+			Data:       []byte("super-secret-value"),
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp.Error)
+		secretID := resp.Secret.ID
 
-	key, _ := tsm.getTenantEncryptionKey(ctx, "bench-tenant")
-	data := []byte("benchmark-secret-data-for-decryption-testing")
-	encryptedData, _ := tsm.encryptData(data, key)
+		flushAudit(t)
+		entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+			TenantID:      tenantID,
+			Actions:       []string{"secret.store"},
+			ResourceTypes: []string{"secret"},
+			ResourceIDs:   []string{secretID},
+			Limit:         10,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, _ = tsm.decryptData(encryptedData, key)
-	}
+		e := entries[0]
+		assert.Equal(t, tenantID, e.TenantID)
+		assert.Equal(t, "secret.store", e.Action)
+		assert.Equal(t, "secret", e.ResourceType)
+		assert.Equal(t, secretID, e.ResourceID)
+		assert.Equal(t, business.AuditResultSuccess, e.Result)
+		assert.Equal(t, "tenant_secret_manager", e.Source)
+	})
+
+	t.Run("RetrieveSecret produces audit entry with correct fields", func(t *testing.T) {
+		// Pre-store so retrieve can succeed and produce a success audit entry.
+		preResp, preErr := tsm.StoreSecret(ctx, &SecretRequest{
+			TenantID:   tenantID,
+			Name:       "retrieve-audit-prereq",
+			SecretType: SecretTypeToken,
+			Data:       []byte("retrieve-audit-value"),
+		})
+		require.NoError(t, preErr)
+		require.Empty(t, preResp.Error)
+		secretID := preResp.Secret.ID
+
+		_, err := tsm.RetrieveSecret(ctx, tenantID, secretID)
+		require.NoError(t, err)
+
+		flushAudit(t)
+		entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+			TenantID:      tenantID,
+			Actions:       []string{"secret.retrieve"},
+			ResourceTypes: []string{"secret"},
+			ResourceIDs:   []string{secretID},
+			Limit:         10,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+
+		e := entries[0]
+		assert.Equal(t, tenantID, e.TenantID)
+		assert.Equal(t, "secret.retrieve", e.Action)
+		assert.Equal(t, "secret", e.ResourceType)
+		assert.Equal(t, secretID, e.ResourceID)
+		assert.Equal(t, business.AuditResultSuccess, e.Result)
+	})
+
+	t.Run("RotateSecret produces audit entry with correct fields", func(t *testing.T) {
+		// Pre-store so rotate can succeed (underlying store requires the key to exist).
+		preResp, preErr := tsm.StoreSecret(ctx, &SecretRequest{
+			TenantID:   tenantID,
+			Name:       "rotate-audit-prereq",
+			SecretType: SecretTypeToken,
+			Data:       []byte("rotate-audit-original"),
+		})
+		require.NoError(t, preErr)
+		require.Empty(t, preResp.Error)
+		secretID := preResp.Secret.ID
+
+		_, err := tsm.RotateSecret(ctx, tenantID, secretID, []byte("new-rotated-value"))
+		require.NoError(t, err)
+
+		flushAudit(t)
+		entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+			TenantID:      tenantID,
+			Actions:       []string{"secret.rotate"},
+			ResourceTypes: []string{"secret"},
+			ResourceIDs:   []string{secretID},
+			Limit:         10,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+
+		e := entries[0]
+		assert.Equal(t, tenantID, e.TenantID)
+		assert.Equal(t, "secret.rotate", e.Action)
+		assert.Equal(t, "secret", e.ResourceType)
+		assert.Equal(t, secretID, e.ResourceID)
+		assert.Equal(t, business.AuditResultSuccess, e.Result)
+	})
+
+	t.Run("Failed RetrieveSecret produces error audit entry", func(t *testing.T) {
+		secretID := "denied-retrieve-test"
+		resp, err := tsm.RetrieveSecret(ctx, "unauthorized-tenant", secretID)
+		require.NoError(t, err)
+		assert.NotEmpty(t, resp.Error)
+
+		flushAudit(t)
+		entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+			TenantID:      "unauthorized-tenant",
+			Actions:       []string{"secret.retrieve"},
+			ResourceTypes: []string{"secret"},
+			ResourceIDs:   []string{secretID},
+			Results:       []business.AuditResult{business.AuditResultError},
+			Limit:         10,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+
+		e := entries[0]
+		assert.Equal(t, "unauthorized-tenant", e.TenantID)
+		assert.Equal(t, business.AuditResultError, e.Result)
+		assert.Equal(t, "SECRET_OP_FAILED", e.ErrorCode)
+	})
+
+	t.Run("DeleteSecret produces audit entry with correct fields", func(t *testing.T) {
+		// Pre-store so delete can succeed.
+		preResp, preErr := tsm.StoreSecret(ctx, &SecretRequest{
+			TenantID:   tenantID,
+			Name:       "delete-audit-prereq",
+			SecretType: SecretTypeAPIKey,
+			Data:       []byte("delete-audit-value"),
+		})
+		require.NoError(t, preErr)
+		require.Empty(t, preResp.Error)
+		secretID := preResp.Secret.ID
+
+		err := tsm.DeleteSecret(ctx, tenantID, secretID)
+		require.NoError(t, err)
+
+		flushAudit(t)
+		entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+			TenantID:      tenantID,
+			Actions:       []string{"secret.delete"},
+			ResourceTypes: []string{"secret"},
+			ResourceIDs:   []string{secretID},
+			Limit:         10,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+
+		e := entries[0]
+		assert.Equal(t, tenantID, e.TenantID)
+		assert.Equal(t, "secret.delete", e.Action)
+		assert.Equal(t, "secret", e.ResourceType)
+		assert.Equal(t, secretID, e.ResourceID)
+		assert.Equal(t, business.AuditResultSuccess, e.Result)
+	})
 }

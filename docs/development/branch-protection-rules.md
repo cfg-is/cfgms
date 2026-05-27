@@ -80,15 +80,40 @@ CFGMS uses GitHub Rulesets to protect branches in a GitFlow-style branching mode
 | Require approval of most recent push | ✅ Yes | Prevent last-minute self-approval |
 | Require conversation resolution | ✅ Yes | All PR comments must be resolved |
 | Status checks required | ✅ Yes | CI checks must pass |
+| Merge queue | ✅ Enabled | Serialized merge with post-rebase validation (replaces strict mode) |
 
-### Required Status Checks (4 total)
+### Required Status Checks (5 total)
 
 - `unit-tests` - Core functionality validation
 - `integration-tests` - Fast comprehensive + production-critical tests
 - `Build Gate` - Cross-platform compilation + Docker integration tests
 - `security-deployment-gate` - Security vulnerability blocking
+- `Controller Integration Tests (Linux)` - Controller integration test suite
 
-**Rationale**: Direct required checks pattern (Story #322) replaced the previous 10-check approach. These 4 checks cover unit tests, integration tests, cross-platform builds, and security scanning. Production-specific gates (`production-risk-assessment`, `integration-test-gate`) are excluded to allow faster iteration.
+**Rationale**: Direct required checks pattern (Story #322) replaced the previous 10-check approach. These checks cover unit tests, integration tests, cross-platform builds, and security scanning. Production-specific gates (`production-risk-assessment`, `integration-test-gate`) are excluded to allow faster iteration.
+
+### Merge Queue
+
+Enabled in Story #801. The merge queue replaces the previous `strict_required_status_checks_policy` (strict mode, enabled in #793).
+
+**How it works:**
+1. A PR marked for merge enters a serial queue
+2. GitHub creates a temporary merge-queue branch: current develop tip + the PR's changes
+3. All 5 required checks run against that combined (post-rebase) state
+4. If checks pass, the PR is squash-merged into develop
+5. If checks fail, the PR is ejected from the queue and the author is notified
+
+**Configuration** (Ruleset 11647684):
+- Merge method: squash (preserves commit convention)
+- Max entries to merge: 1 (serial — prevents ordering bugs like #785)
+- Check response timeout: 60 minutes
+- Grouping strategy: ALLGREEN (each PR must pass individually)
+
+**Why merge queue instead of strict mode**: Strict mode required every PR author/agent to manually rebase before merge, which was manual work that compounded across the autonomous pipeline. Merge queues perform the rebase and re-validation automatically, eliminating that work for the ~80% of PRs with no genuine content conflict.
+
+**Manual rebases are still needed** for genuine content conflicts (estimated ~20% of cases). A rebase is required only when `git merge` would produce a conflict that GitHub cannot auto-resolve.
+
+**Post-merge sanity catch**: `.github/workflows/develop-sanity.yml` runs `go build ./...` on every push to develop (i.e., after every squash-merge). If the build fails it automatically opens a `pipeline:incident` issue linking to the failed run. This is a complementary catch mechanism for the residual cases not covered by pre-merge validation — it does not replace the required status checks above.
 
 ---
 
@@ -127,12 +152,6 @@ CFGMS uses GitHub Rulesets to protect branches in a GitFlow-style branching mode
 
 ## Workflow Integration
 
-### GitHub Actions Permissions
-
-Required workflow permissions for release automation:
-- `contents: write` - Create releases and tags
-- `pull-requests: write` - Create and manage PRs
-
 ### Status Check Sources
 
 | Check Name | Workflow File | Job Name |
@@ -156,5 +175,4 @@ Required workflow permissions for release automation:
 ## Related Documentation
 
 - [Git Workflow](./git-workflow.md) - Development workflow and branching strategy
-- [Release Automation](../../.github/workflows/release-automation.yml) - Automated release workflow
 - [Production Gates](../../.github/workflows/production-gates.yml) - Security and quality gates

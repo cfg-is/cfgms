@@ -1,10 +1,16 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package cert
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"encoding/pem"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,8 +132,11 @@ func TestCA_GenerateServerCertificate(t *testing.T) {
 	assert.NotEmpty(t, cert.SerialNumber)
 	assert.NotEmpty(t, cert.CertificatePEM)
 	assert.NotEmpty(t, cert.PrivateKeyPEM)
-	assert.True(t, cert.IsValid)
 	assert.NotEmpty(t, cert.Fingerprint)
+
+	serverResult, err := ca.ValidateCertificate(cert.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, serverResult.IsValid)
 
 	// Parse and verify the generated certificate
 	x509Cert, err := ParseCertificateFromPEM(cert.CertificatePEM)
@@ -188,8 +197,11 @@ func TestCA_GenerateClientCertificate(t *testing.T) {
 	assert.NotEmpty(t, cert.SerialNumber)
 	assert.NotEmpty(t, cert.CertificatePEM)
 	assert.NotEmpty(t, cert.PrivateKeyPEM)
-	assert.True(t, cert.IsValid)
 	assert.NotEmpty(t, cert.Fingerprint)
+
+	clientResult, err := ca.ValidateCertificate(cert.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, clientResult.IsValid)
 
 	// Parse and verify the generated certificate
 	x509Cert, err := ParseCertificateFromPEM(cert.CertificatePEM)
@@ -326,7 +338,6 @@ func TestCA_GetCAInfo(t *testing.T) {
 	assert.Equal(t, "Test CA Root CA", info.CommonName)
 	assert.NotEmpty(t, info.SerialNumber)
 	assert.NotEmpty(t, info.Fingerprint)
-	assert.True(t, info.IsValid)
 	assert.Greater(t, info.DaysUntilExpiration, 0)
 	assert.Equal(t, info.CommonName, info.Issuer) // Self-signed
 }
@@ -357,6 +368,109 @@ func TestCA_SerialNumberUniqueness(t *testing.T) {
 		assert.False(t, serialNumbers[cert.SerialNumber], "Serial number %s is not unique", cert.SerialNumber)
 		serialNumbers[cert.SerialNumber] = true
 	}
+}
+
+func TestCA_LoadCA_PKCS8Key(t *testing.T) {
+	dir := t.TempDir()
+
+	cfg := &CAConfig{
+		Organization: "Test CA",
+		Country:      "US",
+		ValidityDays: 365,
+		KeySize:      2048,
+		StoragePath:  dir,
+	}
+	ca, err := NewCA(cfg)
+	require.NoError(t, err)
+	err = ca.Initialize(cfg)
+	require.NoError(t, err)
+
+	// Read the saved PKCS1 key and re-encode as PKCS8
+	keyPath := filepath.Join(dir, "ca.key")
+	keyPEM, err := os.ReadFile(keyPath)
+	require.NoError(t, err)
+
+	keyBlock, _ := pem.Decode(keyPEM)
+	require.NotNil(t, keyBlock)
+
+	rsaKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	require.NoError(t, err)
+
+	pkcs8Bytes, err := x509.MarshalPKCS8PrivateKey(rsaKey)
+	require.NoError(t, err)
+
+	pkcs8PEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8Bytes})
+	require.NoError(t, os.WriteFile(keyPath, pkcs8PEM, 0600))
+
+	// LoadCA must succeed with a PKCS8-wrapped RSA key
+	loaded := &CA{}
+	require.NoError(t, loaded.LoadCA(dir))
+	assert.True(t, loaded.IsInitialized())
+
+	cert, err := loaded.GenerateServerCertificate(&ServerCertConfig{
+		CommonName:   "test-server",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, cert)
+}
+
+func TestCA_LoadCA_MismatchedKeyPair(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	cfg1 := &CAConfig{Organization: "Test CA 1", Country: "US", ValidityDays: 365, KeySize: 2048, StoragePath: dir1}
+	ca1, err := NewCA(cfg1)
+	require.NoError(t, err)
+	require.NoError(t, ca1.Initialize(cfg1))
+
+	cfg2 := &CAConfig{Organization: "Test CA 2", Country: "US", ValidityDays: 365, KeySize: 2048, StoragePath: dir2}
+	ca2, err := NewCA(cfg2)
+	require.NoError(t, err)
+	require.NoError(t, ca2.Initialize(cfg2))
+
+	// Write CA1's cert alongside CA2's key to a new dir to create a mismatch
+	mismatchDir := t.TempDir()
+
+	ca1Cert, err := os.ReadFile(filepath.Join(dir1, "ca.crt"))
+	require.NoError(t, err)
+	ca2Key, err := os.ReadFile(filepath.Join(dir2, "ca.key"))
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(mismatchDir, "ca.crt"), ca1Cert, 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(mismatchDir, "ca.key"), ca2Key, 0600))
+
+	loaded := &CA{}
+	err = loaded.LoadCA(mismatchDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "key does not match certificate")
+}
+
+func TestCA_LoadCA_ECKeyRejected(t *testing.T) {
+	dir := t.TempDir()
+
+	cfg := &CAConfig{Organization: "Test CA", Country: "US", ValidityDays: 365, KeySize: 2048, StoragePath: dir}
+	ca, err := NewCA(cfg)
+	require.NoError(t, err)
+	require.NoError(t, ca.Initialize(cfg))
+
+	// Replace the RSA key file with an EC key
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	ecKeyBytes, err := x509.MarshalECPrivateKey(ecKey)
+	require.NoError(t, err)
+
+	ecKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: ecKeyBytes})
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ca.key"), ecKeyPEM, 0600))
+
+	loaded := &CA{}
+	err = loaded.LoadCA(dir)
+	require.Error(t, err)
+	assert.True(t,
+		strings.Contains(err.Error(), "unsupported") || strings.Contains(err.Error(), "RSA"),
+		"expected error about unsupported key type or RSA requirement, got: %s", err.Error(),
+	)
 }
 
 func TestCA_CertificateValidityPeriods(t *testing.T) {

@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.25-alpine3.23 AS builder
+FROM golang:1.26.3-alpine3.23 AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
@@ -22,8 +22,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o controller ./cmd/
 # Final stage - pinned to Alpine 3.23 (latest stable as of 2025-12)
 FROM alpine:3.23
 
-# Install runtime dependencies
-RUN apk --no-cache add ca-certificates netcat-openbsd
+# Install runtime dependencies and apply security patches
+RUN apk --no-cache upgrade && apk --no-cache add ca-certificates netcat-openbsd
 
 # Create non-root user
 RUN addgroup -g 1001 cfgms && \
@@ -48,5 +48,6 @@ USER cfgms
 # 9080: HTTP API (default)
 EXPOSE 1883 4433/udp 8080 9080
 
-# Set default command
-CMD ["./controller"]
+# Set default command: initialize on first boot (idempotent), then start controller
+# The --init step exits 0 on success or non-zero if already initialized (expected on restarts)
+CMD ["sh", "-c", "./controller --init 2>&1 || echo 'Init skipped (already initialized or cert management disabled)'; exec ./controller"]

@@ -1,17 +1,18 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package auth
 
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // TestDelegatedPermissionsIntegration tests the complete delegated permissions workflow
@@ -22,9 +23,7 @@ func TestDelegatedPermissionsIntegration(t *testing.T) {
 	}
 
 	// Setup test environment
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	// Create OAuth2 config with delegated permissions support
 	config := &OAuth2Config{
@@ -48,7 +47,7 @@ func TestDelegatedPermissionsIntegration(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	t.Run("TestDelegatedAuthConfiguration", func(t *testing.T) {
@@ -220,9 +219,7 @@ func TestDelegatedPermissionsScenarios(t *testing.T) {
 		t.Skip("Skipping M365 scenario test - credentials not available")
 	}
 
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "scenario-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:                 os.Getenv("M365_CLIENT_ID"),
@@ -240,7 +237,7 @@ func TestDelegatedPermissionsScenarios(t *testing.T) {
 		},
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	t.Run("TestUserManagementWithDelegatedPermissions", func(t *testing.T) {
@@ -319,9 +316,7 @@ func TestDelegatedPermissionsScenarios(t *testing.T) {
 
 // TestTokenRefreshFlow tests the delegated token refresh functionality
 func TestTokenRefreshFlow(t *testing.T) {
-	tempDir := t.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "refresh-test-passphrase")
-	require.NoError(t, err)
+	credStore := newTestCredentialStore(t)
 
 	config := &OAuth2Config{
 		ClientID:                 "test-client-id",
@@ -331,7 +326,7 @@ func TestTokenRefreshFlow(t *testing.T) {
 		FallbackToAppPermissions: true,
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 	ctx := context.Background()
 
 	t.Run("TestDelegatedTokenRefresh", func(t *testing.T) {
@@ -356,16 +351,17 @@ func TestTokenRefreshFlow(t *testing.T) {
 		err := credStore.StoreDelegatedToken(config.TenantID, userContext.UserID, expiredToken)
 		require.NoError(t, err)
 
-		// Attempt to get a delegated token - should try to refresh but fail with mock token
-		// This tests the refresh flow logic even though the actual refresh will fail
-		_, err = provider.GetDelegatedAccessToken(ctx, config.TenantID, userContext)
-
-		// We expect this to fail since we're using a mock refresh token
-		// But it should attempt refresh and then fall back to app permissions
-		if config.FallbackToAppPermissions {
-			// The error should indicate it tried delegated auth but fell back
-			// In a real scenario with valid tokens, this would succeed
-			t.Logf("Token refresh attempted (expected to fail with mock token): %v", err)
+		// Attempt to get a delegated token - should try to refresh but fail with mock token.
+		// With FallbackToAppPermissions=true and no real credentials, this must either:
+		//   - fail with an error (most likely), OR
+		//   - return a non-delegated fallback token
+		token, err := provider.GetDelegatedAccessToken(ctx, config.TenantID, userContext)
+		if err != nil {
+			// Fake refresh token must cause a failure — verify error is meaningful.
+			assert.NotEmpty(t, err.Error(), "error must have a non-empty message")
+		} else {
+			// Fallback to app permissions succeeded — token must be non-nil.
+			require.NotNil(t, token, "fallback token must not be nil")
 		}
 	})
 
@@ -412,9 +408,7 @@ func TestTokenRefreshFlow(t *testing.T) {
 
 // BenchmarkDelegatedTokenOperations benchmarks the performance of delegated token operations
 func BenchmarkDelegatedTokenOperations(b *testing.B) {
-	tempDir := b.TempDir()
-	credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "creds"), "benchmark-passphrase")
-	require.NoError(b, err)
+	credStore := newTestCredentialStore(b)
 
 	config := &OAuth2Config{
 		ClientID:             "benchmark-client-id",
@@ -422,7 +416,7 @@ func BenchmarkDelegatedTokenOperations(b *testing.B) {
 		SupportDelegatedAuth: true,
 	}
 
-	provider := NewOAuth2Provider(credStore, config)
+	provider := NewOAuth2Provider(credStore, config, logging.NewNoopLogger())
 
 	userContext := &UserContext{
 		UserID:            "benchmark-user",

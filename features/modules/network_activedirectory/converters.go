@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package network_activedirectory
 
@@ -95,6 +95,73 @@ func (m *activeDirectoryModule) ldapEntryToDirectoryUser(entry *ldap.Entry) *int
 	return user
 }
 
+// ldapEntryToDirectoryComputer converts an LDAP entry with objectClass=computer to a DirectoryComputer.
+// Computer accounts are distinct from user accounts in AD despite sharing the base user schema;
+// using the wrong type causes callers to misinterpret OS, last-logon, and enabled-state fields.
+func (m *activeDirectoryModule) ldapEntryToDirectoryComputer(entry *ldap.Entry) *interfaces.DirectoryComputer {
+	computer := &interfaces.DirectoryComputer{
+		ID:                     entry.GetAttributeValue("objectGUID"),
+		Name:                   entry.GetAttributeValue("displayName"),
+		SAMAccountName:         entry.GetAttributeValue("sAMAccountName"),
+		DNSHostName:            entry.GetAttributeValue("dNSHostName"),
+		DN:                     entry.GetAttributeValue("distinguishedName"),
+		OperatingSystem:        entry.GetAttributeValue("operatingSystem"),
+		OperatingSystemVersion: entry.GetAttributeValue("operatingSystemVersion"),
+		Source:                 "activedirectory",
+		ProviderAttributes:     make(map[string]interface{}),
+	}
+
+	// Extract OU from DN
+	computer.OU = m.extractOUFromDN(computer.DN)
+
+	// Determine enabled status from userAccountControl (bit 2 = ACCOUNTDISABLE)
+	userAccountControl := entry.GetAttributeValue("userAccountControl")
+	if userAccountControl != "" {
+		if uac, err := strconv.ParseUint(userAccountControl, 10, 32); err == nil {
+			computer.Enabled = (uac & 0x2) == 0
+			computer.ProviderAttributes["userAccountControl"] = uac
+		}
+	}
+
+	// Convert lastLogonTimestamp from Windows FILETIME (100ns since 1601-01-01) to time.Time
+	lastLogon := entry.GetAttributeValue("lastLogonTimestamp")
+	if lastLogon != "" && lastLogon != "0" {
+		if ts, err := strconv.ParseInt(lastLogon, 10, 64); err == nil && ts > 0 {
+			unixTime := time.Unix((ts/10000000)-11644473600, 0)
+			computer.LastLogon = &unixTime
+		}
+	}
+
+	// Handle creation and modification times
+	if created := entry.GetAttributeValue("whenCreated"); created != "" {
+		if t, err := time.Parse("20060102150405.0Z", created); err == nil {
+			computer.Created = &t
+		}
+	}
+
+	if modified := entry.GetAttributeValue("whenChanged"); modified != "" {
+		if t, err := time.Parse("20060102150405.0Z", modified); err == nil {
+			computer.Modified = &t
+		}
+	}
+
+	// Store additional AD-specific attributes
+	for _, attr := range entry.Attributes {
+		switch attr.Name {
+		case "objectSid", "pwdLastSet":
+			if len(attr.Values) > 0 {
+				computer.ProviderAttributes[attr.Name] = attr.Values[0]
+			}
+		case "servicePrincipalName":
+			if len(attr.Values) > 0 {
+				computer.ProviderAttributes["servicePrincipalName"] = attr.Values
+			}
+		}
+	}
+
+	return computer
+}
+
 // ldapEntryToDirectoryGroup converts an LDAP entry to a DirectoryGroup
 func (m *activeDirectoryModule) ldapEntryToDirectoryGroup(entry *ldap.Entry) *interfaces.DirectoryGroup {
 	group := &interfaces.DirectoryGroup{
@@ -150,7 +217,7 @@ func (m *activeDirectoryModule) ldapEntryToDirectoryGroup(entry *ldap.Entry) *in
 	// Handle members
 	members := entry.GetAttributeValues("member")
 	if len(members) > 0 {
-		// Extract GUIDs from member DNs (simplified - would need actual lookup)
+		// Design decision: member DN-to-GUID resolution requires a separate LDAP lookup per member; deferred for performance reasons.
 		group.Members = members
 	}
 

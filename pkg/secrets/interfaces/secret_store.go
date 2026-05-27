@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package interfaces defines the SecretStore interface for CFGMS secrets management
 // M-AUTH-1: Core secret storage operations with encryption, versioning, and audit support
@@ -6,8 +6,15 @@ package interfaces
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrTenantRequired is returned when TenantID is empty in a multi-tenant context.
+var ErrTenantRequired = errors.New("TenantID is required for multi-tenant secret operations")
+
+// ErrSecretNotFound is returned when a requested secret key does not exist in the store.
+var ErrSecretNotFound = errors.New("secret not found")
 
 // SecretStore defines the interface for storing and retrieving secrets
 // All implementations MUST encrypt secrets at rest - no cleartext storage allowed
@@ -83,6 +90,9 @@ type SecretMetadata struct {
 	UpdatedBy   string            `json:"updated_by"`
 	TenantID    string            `json:"tenant_id"`
 	Description string            `json:"description,omitempty"`
+	// Policy holds provider-level access policy metadata when available.
+	// Populated by providers that expose policy information (e.g. OpenBao mount policies).
+	Policy map[string]string `json:"policy,omitempty"`
 }
 
 // SecretVersion represents a historical version of a secret

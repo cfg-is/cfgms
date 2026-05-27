@@ -1,40 +1,192 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-package audit
+package audit_test
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	// Import storage providers to register them
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	"github.com/cfgis/cfgms/pkg/audit"
+	secretsInterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// testSecretStore is a minimal in-memory implementation of secretsInterfaces.SecretStore
+// used to test WithSecretsStore wiring without requiring an external secrets backend.
+// This is not a mock of CFGMS business functionality — it is a test double for the
+// infrastructure boundary at pkg/secrets/interfaces.SecretStore.
+type testSecretStore struct {
+	secrets  map[string]string
+	storeErr error
+}
+
+func newTestSecretStore() *testSecretStore {
+	return &testSecretStore{secrets: make(map[string]string)}
+}
+
+func (s *testSecretStore) StoreSecret(_ context.Context, req *secretsInterfaces.SecretRequest) error {
+	if s.storeErr != nil {
+		return s.storeErr
+	}
+	s.secrets[req.Key] = req.Value
+	return nil
+}
+
+func (s *testSecretStore) GetSecret(_ context.Context, key string) (*secretsInterfaces.Secret, error) {
+	v, ok := s.secrets[key]
+	if !ok {
+		return nil, errors.New("not found")
+	}
+	return &secretsInterfaces.Secret{Key: key, Value: v}, nil
+}
+
+func (s *testSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
+func (s *testSecretStore) ListSecrets(_ context.Context, _ *secretsInterfaces.SecretFilter) ([]*secretsInterfaces.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *testSecretStore) GetSecrets(_ context.Context, _ []string) (map[string]*secretsInterfaces.Secret, error) {
+	return nil, nil
+}
+func (s *testSecretStore) StoreSecrets(_ context.Context, _ map[string]*secretsInterfaces.SecretRequest) error {
+	return nil
+}
+func (s *testSecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsInterfaces.Secret, error) {
+	return nil, nil
+}
+func (s *testSecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsInterfaces.SecretVersion, error) {
+	return nil, nil
+}
+func (s *testSecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsInterfaces.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *testSecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+func (s *testSecretStore) RotateSecret(_ context.Context, _ string, _ string) error { return nil }
+func (s *testSecretStore) ExpireSecret(_ context.Context, _ string) error           { return nil }
+func (s *testSecretStore) HealthCheck(_ context.Context) error                      { return nil }
+func (s *testSecretStore) Close() error                                             { return nil }
+
+// newTestManager creates a real audit manager backed by OSS storage in a temp dir.
+// The returned manager's drain goroutine is stopped via t.Cleanup so callers do
+// not need to call Stop themselves.
+func newTestManager(t *testing.T, source string) *audit.Manager {
+	t.Helper()
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+
+	m, err := audit.NewManager(storageManager.GetAuditStore(), source)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.Stop(ctx)
+		_ = storageManager.Close()
+	})
+
+	return m
+}
+
+// slowAuditStore wraps a real business.AuditStore and injects a configurable
+// per-write delay so we can prove that Flush actually waits for the drain
+// goroutine to finish writing pending entries rather than returning
+// prematurely. No mocks — every method delegates to the real backing store.
+type slowAuditStore struct {
+	inner business.AuditStore
+	delay time.Duration
+	// writes counts successful calls to StoreAuditEntry so tests can assert the
+	// drain completed N writes before Flush returned.
+	writes atomic.Int64
+}
+
+func (s *slowAuditStore) StoreAuditEntry(ctx context.Context, entry *business.AuditEntry) error {
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	err := s.inner.StoreAuditEntry(ctx, entry)
+	if err == nil {
+		s.writes.Add(1)
+	}
+	return err
+}
+
+func (s *slowAuditStore) GetAuditEntry(ctx context.Context, id string) (*business.AuditEntry, error) {
+	return s.inner.GetAuditEntry(ctx, id)
+}
+func (s *slowAuditStore) ListAuditEntries(ctx context.Context, filter *business.AuditFilter) ([]*business.AuditEntry, error) {
+	return s.inner.ListAuditEntries(ctx, filter)
+}
+func (s *slowAuditStore) StoreAuditBatch(ctx context.Context, entries []*business.AuditEntry) error {
+	return s.inner.StoreAuditBatch(ctx, entries)
+}
+func (s *slowAuditStore) GetAuditsByUser(ctx context.Context, userID string, tr *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.inner.GetAuditsByUser(ctx, userID, tr)
+}
+func (s *slowAuditStore) GetAuditsByResource(ctx context.Context, rt, rid string, tr *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.inner.GetAuditsByResource(ctx, rt, rid, tr)
+}
+func (s *slowAuditStore) GetAuditsByAction(ctx context.Context, action string, tr *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.inner.GetAuditsByAction(ctx, action, tr)
+}
+func (s *slowAuditStore) GetFailedActions(ctx context.Context, tr *business.TimeRange, limit int) ([]*business.AuditEntry, error) {
+	return s.inner.GetFailedActions(ctx, tr, limit)
+}
+func (s *slowAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, tr *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.inner.GetSuspiciousActivity(ctx, tenantID, tr)
+}
+func (s *slowAuditStore) GetAuditStats(ctx context.Context) (*business.AuditStats, error) {
+	return s.inner.GetAuditStats(ctx)
+}
+func (s *slowAuditStore) ArchiveAuditEntries(ctx context.Context, before time.Time) (int64, error) {
+	return s.inner.ArchiveAuditEntries(ctx, before)
+}
+func (s *slowAuditStore) PurgeAuditEntries(ctx context.Context, before time.Time) (int64, error) {
+	return s.inner.PurgeAuditEntries(ctx, before)
+}
+func (s *slowAuditStore) GetLastAuditEntry(ctx context.Context, tenantID string) (*business.AuditEntry, error) {
+	return s.inner.GetLastAuditEntry(ctx, tenantID)
+}
+func (s *slowAuditStore) Close() error { return s.inner.Close() }
+
+// flushOrFail drains the async queue and fails the test if Flush returns an error.
+// Tests that query the store after RecordEvent MUST call flushOrFail first
+// because RecordEvent enqueues asynchronously.
+func flushOrFail(t *testing.T, m *audit.Manager) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, m.Flush(ctx))
+}
 
 // TestNewManager tests audit manager creation
 func TestNewManager(t *testing.T) {
 	tests := []struct {
 		name         string
-		setupStorage func(t *testing.T) (interfaces.AuditStore, error)
+		setupStorage func(t *testing.T) (business.AuditStore, error)
 		wantErr      bool
 	}{
 		{
 			name: "with git storage provider",
-			setupStorage: func(t *testing.T) (interfaces.AuditStore, error) {
-				config := map[string]interface{}{
-					"repository_path": t.TempDir(),
-					"branch":          "main",
-					"auto_init":       true,
-				}
-				storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+			setupStorage: func(t *testing.T) (business.AuditStore, error) {
+				tmpDir := t.TempDir()
+				storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 				if err != nil {
 					return nil, err
 				}
+				t.Cleanup(func() { _ = storageManager.Close() })
 				return storageManager.GetAuditStore(), nil
 			},
 			wantErr: false,
@@ -51,18 +203,24 @@ func TestNewManager(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, auditStore)
 
-			// Test creating audit manager
-			manager := NewManager(auditStore, "test")
+			manager, err := audit.NewManager(auditStore, "test")
+			require.NoError(t, err)
 			require.NotNil(t, manager)
 		})
 	}
 }
 
-// TestNewManager_PanicConditions tests panic conditions
-func TestNewManager_PanicConditions(t *testing.T) {
+// TestNewManager_ErrorConditions tests error conditions (previously tested as panics)
+func TestNewManager_ErrorConditions(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+	realStore := storageManager.GetAuditStore()
+
 	tests := []struct {
 		name   string
-		store  interfaces.AuditStore
+		store  business.AuditStore
 		source string
 	}{
 		{
@@ -72,129 +230,130 @@ func TestNewManager_PanicConditions(t *testing.T) {
 		},
 		{
 			name:   "empty source",
-			store:  &mockAuditStore{},
+			store:  realStore,
 			source: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Panics(t, func() {
-				NewManager(tt.store, tt.source)
-			})
+			m, err := audit.NewManager(tt.store, tt.source)
+			assert.Error(t, err)
+			assert.Nil(t, m)
 		})
 	}
 }
 
-// TestManager_RecordEvent tests basic event recording
+// TestManager_RecordEvent verifies that RecordEvent persists the event to the
+// store. It calls flushOrFail to drain the async queue before reading back, so
+// the test fails if RecordEvent silently discards the event.
 func TestManager_RecordEvent(t *testing.T) {
-	// Setup git storage for testing
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
-	require.NoError(t, err)
-
-	manager := NewManager(storageManager.GetAuditStore(), "test")
+	manager := newTestManager(t, "test")
 	ctx := context.Background()
 
-	// Test basic event recording
-	event := NewEventBuilder().
+	event := audit.NewEventBuilder().
 		Tenant("test-tenant").
-		Type(interfaces.AuditEventConfiguration).
+		Type(business.AuditEventConfiguration).
 		Action("test_action").
-		User("test-user", interfaces.AuditUserTypeHuman).
+		User("test-user", business.AuditUserTypeHuman).
 		Resource("test_resource", "test-id", "Test Resource").
 		Detail("test_key", "test_value").
-		Severity(interfaces.AuditSeverityMedium)
+		Severity(business.AuditSeverityMedium)
 
-	err = manager.RecordEvent(ctx, event)
-	assert.NoError(t, err)
+	require.NoError(t, manager.RecordEvent(ctx, event))
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "test_action", entries[0].Action)
+	assert.Equal(t, "test-tenant", entries[0].TenantID)
 }
 
-// TestManager_RecordBatch tests batch event recording
+// TestManager_RecordBatch verifies that RecordBatch persists all events to the
+// store. It calls flushOrFail to drain the async queue before reading back, so
+// the test fails if RecordBatch silently discards events.
 func TestManager_RecordBatch(t *testing.T) {
-	// Setup git storage for testing
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
-	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
-	require.NoError(t, err)
-
-	manager := NewManager(storageManager.GetAuditStore(), "test")
+	manager := newTestManager(t, "test")
 	ctx := context.Background()
 
-	// Create multiple events
-	events := []*AuditEventBuilder{
-		NewEventBuilder().
+	events := []*audit.AuditEventBuilder{
+		audit.NewEventBuilder().
 			Tenant("test-tenant").
-			Type(interfaces.AuditEventAuthentication).
+			Type(business.AuditEventAuthentication).
 			Action("login").
-			User("user1", interfaces.AuditUserTypeHuman).
+			User("user1", business.AuditUserTypeHuman).
 			Resource("session", "session1", "").
-			Severity(interfaces.AuditSeverityHigh),
-		NewEventBuilder().
+			Severity(business.AuditSeverityHigh),
+		audit.NewEventBuilder().
 			Tenant("test-tenant").
-			Type(interfaces.AuditEventConfiguration).
+			Type(business.AuditEventConfiguration).
 			Action("config_update").
-			User("user2", interfaces.AuditUserTypeHuman).
+			User("user2", business.AuditUserTypeHuman).
 			Resource("config", "config1", "Test Config").
-			Severity(interfaces.AuditSeverityMedium),
+			Severity(business.AuditSeverityMedium),
 	}
 
-	err = manager.RecordBatch(ctx, events)
-	assert.NoError(t, err)
+	require.NoError(t, manager.RecordBatch(ctx, events))
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+
+	actions := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		actions[e.Action] = true
+	}
+	assert.True(t, actions["login"], "expected entry with Action=login")
+	assert.True(t, actions["config_update"], "expected entry with Action=config_update")
 }
 
 // TestManager_ValidationErrors tests validation error handling
 func TestManager_ValidationErrors(t *testing.T) {
-	manager := NewManager(&mockAuditStore{}, "test")
+	manager := newTestManager(t, "test")
 	ctx := context.Background()
 
 	tests := []struct {
 		name          string
-		event         *AuditEventBuilder
+		event         *audit.AuditEventBuilder
 		expectedError error
 	}{
 		{
 			name: "missing tenant ID",
-			event: NewEventBuilder().
-				Type(interfaces.AuditEventConfiguration).
+			event: audit.NewEventBuilder().
+				Type(business.AuditEventConfiguration).
 				Action("test_action").
-				User("test-user", interfaces.AuditUserTypeHuman).
+				User("test-user", business.AuditUserTypeHuman).
 				Resource("test_resource", "test-id", ""),
-			expectedError: interfaces.ErrTenantIDRequired,
+			expectedError: business.ErrTenantIDRequired,
 		},
 		{
 			name: "missing user ID",
-			event: NewEventBuilder().
+			event: audit.NewEventBuilder().
 				Tenant("test-tenant").
-				Type(interfaces.AuditEventConfiguration).
+				Type(business.AuditEventConfiguration).
 				Action("test_action").
 				Resource("test_resource", "test-id", ""),
-			expectedError: interfaces.ErrUserIDRequired,
+			expectedError: business.ErrUserIDRequired,
 		},
 		{
 			name: "missing action",
-			event: NewEventBuilder().
+			event: audit.NewEventBuilder().
 				Tenant("test-tenant").
-				Type(interfaces.AuditEventConfiguration).
-				User("test-user", interfaces.AuditUserTypeHuman).
+				Type(business.AuditEventConfiguration).
+				User("test-user", business.AuditUserTypeHuman).
 				Resource("test_resource", "test-id", ""),
-			expectedError: interfaces.ErrActionRequired,
+			expectedError: business.ErrActionRequired,
 		},
 		{
 			name: "missing resource type",
-			event: NewEventBuilder().
+			event: audit.NewEventBuilder().
 				Tenant("test-tenant").
-				Type(interfaces.AuditEventConfiguration).
+				Type(business.AuditEventConfiguration).
 				Action("test_action").
-				User("test-user", interfaces.AuditUserTypeHuman),
-			expectedError: interfaces.ErrResourceTypeRequired,
+				User("test-user", business.AuditUserTypeHuman),
+			expectedError: business.ErrResourceTypeRequired,
 		},
 	}
 
@@ -209,37 +368,34 @@ func TestManager_ValidationErrors(t *testing.T) {
 
 // TestAuditEventBuilder tests the fluent builder interface
 func TestAuditEventBuilder(t *testing.T) {
-	// Test complete event building
-	event := NewEventBuilder().
+	event := audit.NewEventBuilder().
 		Tenant("test-tenant").
-		Type(interfaces.AuditEventAuthentication).
+		Type(business.AuditEventAuthentication).
 		Action("login").
-		User("test-user", interfaces.AuditUserTypeHuman).
+		User("test-user", business.AuditUserTypeHuman).
 		Session("session123").
 		Resource("session", "session123", "User Session").
-		Result(interfaces.AuditResultSuccess).
+		Result(business.AuditResultSuccess).
 		Request("req123", "POST", "/api/login", "192.168.1.1", "TestAgent/1.0").
 		Detail("login_method", "password").
 		Detail("mfa_used", true).
 		Tag("security").
 		Tag("authentication").
-		Severity(interfaces.AuditSeverityHigh)
+		Severity(business.AuditSeverityHigh)
 
-	// Build into audit entry
-	entry := &interfaces.AuditEntry{}
-	event.build(entry)
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
 
-	// Validate all fields are set correctly
 	assert.Equal(t, "test-tenant", entry.TenantID)
-	assert.Equal(t, interfaces.AuditEventAuthentication, entry.EventType)
+	assert.Equal(t, business.AuditEventAuthentication, entry.EventType)
 	assert.Equal(t, "login", entry.Action)
 	assert.Equal(t, "test-user", entry.UserID)
-	assert.Equal(t, interfaces.AuditUserTypeHuman, entry.UserType)
+	assert.Equal(t, business.AuditUserTypeHuman, entry.UserType)
 	assert.Equal(t, "session123", entry.SessionID)
 	assert.Equal(t, "session", entry.ResourceType)
 	assert.Equal(t, "session123", entry.ResourceID)
 	assert.Equal(t, "User Session", entry.ResourceName)
-	assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
+	assert.Equal(t, business.AuditResultSuccess, entry.Result)
 	assert.Equal(t, "req123", entry.RequestID)
 	assert.Equal(t, "POST", entry.Method)
 	assert.Equal(t, "/api/login", entry.Path)
@@ -249,202 +405,1072 @@ func TestAuditEventBuilder(t *testing.T) {
 	assert.Equal(t, true, entry.Details["mfa_used"])
 	assert.Contains(t, entry.Tags, "security")
 	assert.Contains(t, entry.Tags, "authentication")
-	assert.Equal(t, interfaces.AuditSeverityHigh, entry.Severity)
+	assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 }
 
 // TestPredefinedEventBuilders tests predefined event builder functions
 func TestPredefinedEventBuilders(t *testing.T) {
 	t.Run("AuthenticationEvent", func(t *testing.T) {
-		event := AuthenticationEvent("tenant1", "user1", "login", interfaces.AuditResultSuccess)
-		entry := &interfaces.AuditEntry{}
-		event.build(entry)
+		event := audit.AuthenticationEvent("tenant1", "user1", "login", business.AuditResultSuccess)
+		entry := &business.AuditEntry{}
+		audit.BuildEntry(event, entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
-		assert.Equal(t, interfaces.AuditEventAuthentication, entry.EventType)
+		assert.Equal(t, business.AuditEventAuthentication, entry.EventType)
 		assert.Equal(t, "login", entry.Action)
 		assert.Equal(t, "user1", entry.UserID)
-		assert.Equal(t, interfaces.AuditUserTypeHuman, entry.UserType)
-		assert.Equal(t, interfaces.AuditResultSuccess, entry.Result)
-		assert.Equal(t, interfaces.AuditSeverityHigh, entry.Severity)
+		assert.Equal(t, business.AuditUserTypeHuman, entry.UserType)
+		assert.Equal(t, "session", entry.ResourceType)
+		assert.Equal(t, "user1", entry.ResourceID)
+		assert.Equal(t, business.AuditResultSuccess, entry.Result)
+		assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 	})
 
 	t.Run("AuthorizationEvent", func(t *testing.T) {
-		event := AuthorizationEvent("tenant1", "user1", "config", "config1", "read", interfaces.AuditResultDenied)
-		entry := &interfaces.AuditEntry{}
-		event.build(entry)
+		event := audit.AuthorizationEvent("tenant1", "user1", "config", "config1", "read", business.AuditResultDenied)
+		entry := &business.AuditEntry{}
+		audit.BuildEntry(event, entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
-		assert.Equal(t, interfaces.AuditEventAuthorization, entry.EventType)
+		assert.Equal(t, business.AuditEventAuthorization, entry.EventType)
 		assert.Equal(t, "read", entry.Action)
 		assert.Equal(t, "user1", entry.UserID)
 		assert.Equal(t, "config", entry.ResourceType)
 		assert.Equal(t, "config1", entry.ResourceID)
-		assert.Equal(t, interfaces.AuditResultDenied, entry.Result)
-		assert.Equal(t, interfaces.AuditSeverityHigh, entry.Severity)
+		assert.Equal(t, business.AuditResultDenied, entry.Result)
+		assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 	})
 
 	t.Run("ConfigurationEvent", func(t *testing.T) {
-		event := ConfigurationEvent("tenant1", "user1", "steward_config", "steward1", "Config1", "update")
-		entry := &interfaces.AuditEntry{}
-		event.build(entry)
+		event := audit.ConfigurationEvent("tenant1", "user1", "steward_config", "steward1", "Config1", "update")
+		entry := &business.AuditEntry{}
+		audit.BuildEntry(event, entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
-		assert.Equal(t, interfaces.AuditEventConfiguration, entry.EventType)
+		assert.Equal(t, business.AuditEventConfiguration, entry.EventType)
 		assert.Equal(t, "update", entry.Action)
 		assert.Equal(t, "user1", entry.UserID)
 		assert.Equal(t, "steward_config", entry.ResourceType)
 		assert.Equal(t, "steward1", entry.ResourceID)
 		assert.Equal(t, "Config1", entry.ResourceName)
-		assert.Equal(t, interfaces.AuditSeverityMedium, entry.Severity)
+		assert.Equal(t, business.AuditSeverityMedium, entry.Severity)
 	})
 
 	t.Run("SystemEvent", func(t *testing.T) {
-		event := SystemEvent("tenant1", "startup", "System started successfully")
-		entry := &interfaces.AuditEntry{}
-		event.build(entry)
+		event := audit.SystemEvent("tenant1", "startup", "System started successfully")
+		entry := &business.AuditEntry{}
+		audit.BuildEntry(event, entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
-		assert.Equal(t, interfaces.AuditEventSystemEvent, entry.EventType)
+		assert.Equal(t, business.AuditEventSystemEvent, entry.EventType)
 		assert.Equal(t, "startup", entry.Action)
-		assert.Equal(t, "system", entry.UserID)
-		assert.Equal(t, interfaces.AuditUserTypeSystem, entry.UserType)
+		assert.Equal(t, audit.SystemUserID, entry.UserID)
+		assert.Equal(t, business.AuditUserTypeSystem, entry.UserType)
 		assert.Equal(t, "system", entry.ResourceType)
+		assert.Equal(t, "controller", entry.ResourceID)
 		assert.Equal(t, "System started successfully", entry.Details["description"])
-		assert.Equal(t, interfaces.AuditSeverityLow, entry.Severity)
+		assert.Equal(t, business.AuditSeverityLow, entry.Severity)
 	})
 
 	t.Run("SecurityEvent", func(t *testing.T) {
-		event := SecurityEvent("tenant1", "user1", "intrusion_detected", "Multiple failed login attempts", interfaces.AuditSeverityCritical)
-		entry := &interfaces.AuditEntry{}
-		event.build(entry)
+		event := audit.SecurityEvent("tenant1", "user1", "intrusion_detected", "Multiple failed login attempts", business.AuditSeverityCritical)
+		entry := &business.AuditEntry{}
+		audit.BuildEntry(event, entry)
 
 		assert.Equal(t, "tenant1", entry.TenantID)
-		assert.Equal(t, interfaces.AuditEventSecurityEvent, entry.EventType)
+		assert.Equal(t, business.AuditEventSecurityEvent, entry.EventType)
 		assert.Equal(t, "intrusion_detected", entry.Action)
 		assert.Equal(t, "user1", entry.UserID)
 		assert.Equal(t, "security", entry.ResourceType)
+		assert.Equal(t, "user1", entry.ResourceID)
 		assert.Equal(t, "Multiple failed login attempts", entry.Details["description"])
-		assert.Equal(t, interfaces.AuditSeverityCritical, entry.Severity)
+		assert.Equal(t, business.AuditSeverityCritical, entry.Severity)
 	})
 }
 
-// TestManager_IntegrityVerification tests audit integrity verification
-func TestManager_IntegrityVerification(t *testing.T) {
-	manager := NewManager(&mockAuditStore{}, "test")
+// TestAuthenticationEvent_Persists verifies AuthenticationEvent produces an entry that passes
+// validateEntry and is successfully stored via RecordEvent.
+func TestAuthenticationEvent_Persists(t *testing.T) {
+	manager := newTestManager(t, "controller")
+	ctx := context.Background()
 
-	// Create a test entry
-	entry := &interfaces.AuditEntry{
+	event := audit.AuthenticationEvent("tenant1", "user1", "login", business.AuditResultSuccess)
+	err := manager.RecordEvent(ctx, event)
+	assert.NoError(t, err, "AuthenticationEvent must not return a validation error")
+}
+
+// TestSystemEvent_Persists verifies SystemEvent produces an entry that passes validateEntry
+// and is successfully stored via RecordEvent.
+func TestSystemEvent_Persists(t *testing.T) {
+	manager := newTestManager(t, "controller")
+	ctx := context.Background()
+
+	event := audit.SystemEvent(audit.SystemTenantID, "startup", "Controller started")
+	err := manager.RecordEvent(ctx, event)
+	assert.NoError(t, err, "SystemEvent must not return a validation error")
+}
+
+// TestSecurityEvent_Persists verifies SecurityEvent produces an entry that passes validateEntry
+// and is successfully stored via RecordEvent.
+func TestSecurityEvent_Persists(t *testing.T) {
+	manager := newTestManager(t, "controller")
+	ctx := context.Background()
+
+	event := audit.SecurityEvent(audit.SystemTenantID, audit.SystemUserID, "brute_force_detected", "Multiple failed auth attempts", business.AuditSeverityHigh)
+	err := manager.RecordEvent(ctx, event)
+	assert.NoError(t, err, "SecurityEvent must not return a validation error")
+}
+
+// TestRedactMap verifies that Detail() values with sensitive key names are stored as [REDACTED]
+// and innocuous keys are preserved after BuildEntry.
+func TestRedactMap(t *testing.T) {
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("test_action").
+		User("test-user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("password", "hunter2").
+		Detail("api_token", "tok_abc123").
+		Detail("some_secret", "s3cr3t").
+		Detail("user_count", 42).
+		Detail("enabled", true).
+		Detail("username", "alice").
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	assert.Equal(t, "[REDACTED]", entry.Details["password"], "password should be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["api_token"], "api_token should be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["some_secret"], "some_secret should be redacted")
+	assert.Equal(t, 42, entry.Details["user_count"], "user_count should not be redacted")
+	assert.Equal(t, true, entry.Details["enabled"], "bool values should not be redacted")
+	assert.Equal(t, "alice", entry.Details["username"], "username should not be redacted")
+}
+
+// TestRedactMap_NilAndEmpty verifies edge cases for Details redaction.
+func TestRedactMap_NilAndEmpty(t *testing.T) {
+	// Builder with no Details → entry.Details must be empty after build.
+	event := audit.NewEventBuilder().
+		Tenant("t").
+		Type(business.AuditEventConfiguration).
+		Action("a").
+		User("u", business.AuditUserTypeHuman).
+		Resource("r", "id", "").
+		Severity(business.AuditSeverityLow)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+	assert.Empty(t, entry.Details, "entry with no details must produce empty Details after build")
+}
+
+// TestRedactMap_CaseInsensitive verifies that key matching is case-insensitive.
+func TestRedactMap_CaseInsensitive(t *testing.T) {
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("Password", "secret1").
+		Detail("API_KEY", "secret2").
+		Detail("X-Auth-Token", "secret3").
+		Detail("Username", "alice").
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	assert.Equal(t, "[REDACTED]", entry.Details["Password"], "Password (mixed case) should be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["API_KEY"], "API_KEY (uppercase) should be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["X-Auth-Token"], "X-Auth-Token should be redacted")
+	assert.Equal(t, "alice", entry.Details["Username"], "Username should not be redacted")
+}
+
+// TestRedactMap_NonStringOnSensitiveKey verifies that non-string values under sensitive keys
+// pass through unredacted (only string values are replaced).
+func TestRedactMap_NonStringOnSensitiveKey(t *testing.T) {
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("password", 12345).
+		Detail("token_count", true).
+		Detail("auth_level", 3.14).
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	// Non-string values pass through — only string values are candidates for redaction.
+	assert.Equal(t, 12345, entry.Details["password"], "integer under sensitive key must pass through")
+	assert.Equal(t, true, entry.Details["token_count"], "bool under sensitive key must pass through")
+	assert.Equal(t, 3.14, entry.Details["auth_level"], "float under sensitive key must pass through")
+}
+
+// TestRedactErrorMessage verifies that error messages containing key=value
+// patterns with sensitive key names have the value portion redacted after build.
+func TestRedactErrorMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		contains []string
+		absent   []string
+	}{
+		{
+			name:     "empty string",
+			input:    "",
+			contains: []string{},
+			absent:   []string{},
+		},
+		{
+			name:     "no sensitive key=value",
+			input:    "login failed: username=alice, attempts=3",
+			contains: []string{"username=alice", "attempts=3"},
+			absent:   []string{"[REDACTED]"},
+		},
+		{
+			name:     "single sensitive key=value",
+			input:    "login failed: password=hunter2, username=alice",
+			contains: []string{"password=[REDACTED]", "username=alice"},
+			absent:   []string{"hunter2"},
+		},
+		{
+			name:     "multiple sensitive key=value pairs",
+			input:    "error: token=abc123, api_key=xyz789, user=bob",
+			contains: []string{"token=[REDACTED]", "api_key=[REDACTED]", "user=bob"},
+			absent:   []string{"abc123", "xyz789"},
+		},
+		{
+			name:     "case-insensitive key matching",
+			input:    "auth error: PASSWORD=secret, user=alice",
+			contains: []string{"PASSWORD=[REDACTED]", "user=alice"},
+			absent:   []string{"secret"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := audit.NewEventBuilder().
+				Tenant("t").
+				Type(business.AuditEventAuthentication).
+				Action("login").
+				User("u", business.AuditUserTypeHuman).
+				Resource("session", "u", "").
+				Error("E", tt.input).
+				Severity(business.AuditSeverityMedium)
+
+			entry := &business.AuditEntry{}
+			audit.BuildEntry(event, entry)
+
+			result := entry.ErrorMessage
+			for _, s := range tt.contains {
+				assert.Contains(t, result, s, "result should contain %q", s)
+			}
+			for _, s := range tt.absent {
+				assert.NotContains(t, result, s, "result must not contain %q", s)
+			}
+		})
+	}
+}
+
+// TestRecordEvent_RedactsDetails verifies that Detail("password", ...) is stored as [REDACTED].
+func TestRecordEvent_RedactsDetails(t *testing.T) {
+	manager := newTestManager(t, "test")
+	ctx := context.Background()
+
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("test_action").
+		User("test-user", business.AuditUserTypeHuman).
+		Resource("test_resource", "test-id", "Test Resource").
+		Detail("password", "hunter2").
+		Detail("api_key", "secret-key-value").
+		Detail("user_count", 5).
+		Severity(business.AuditSeverityMedium)
+
+	err := manager.RecordEvent(ctx, event)
+	require.NoError(t, err)
+
+	// Flush to guarantee the asynchronously-queued entry reached the store
+	// before we query it.
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "test-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	assert.Equal(t, "[REDACTED]", entries[0].Details["password"], "password must be redacted in stored entry")
+	assert.Equal(t, "[REDACTED]", entries[0].Details["api_key"], "api_key must be redacted in stored entry")
+	// Storage round-trips through JSON, so integers deserialize as float64
+	assert.EqualValues(t, 5, entries[0].Details["user_count"], "non-sensitive int must be stored as-is")
+}
+
+// TestChanges_Redacted verifies that Changes Before/After maps have sensitive keys redacted.
+func TestChanges_Redacted(t *testing.T) {
+	manager := newTestManager(t, "test")
+	ctx := context.Background()
+
+	before := map[string]interface{}{
+		"password": "old-password",
+		"username": "alice",
+		"token":    "old-token",
+	}
+	after := map[string]interface{}{
+		"password": "new-password",
+		"username": "alice",
+		"token":    "new-token",
+	}
+
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("update_credentials").
+		User("admin", business.AuditUserTypeHuman).
+		Resource("user", "alice", "Alice").
+		Changes(before, after, []string{"password", "username", "token"}).
+		Severity(business.AuditSeverityHigh)
+
+	err := manager.RecordEvent(ctx, event)
+	require.NoError(t, err)
+
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "test-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	require.NotNil(t, entries[0].Changes)
+	assert.Equal(t, "[REDACTED]", entries[0].Changes.Before["password"], "Before.password must be redacted")
+	assert.Equal(t, "[REDACTED]", entries[0].Changes.Before["token"], "Before.token must be redacted")
+	assert.Equal(t, "alice", entries[0].Changes.Before["username"], "Before.username must not be redacted")
+	assert.Equal(t, "[REDACTED]", entries[0].Changes.After["password"], "After.password must be redacted")
+	assert.Equal(t, "[REDACTED]", entries[0].Changes.After["token"], "After.token must be redacted")
+	assert.Equal(t, "alice", entries[0].Changes.After["username"], "After.username must not be redacted")
+
+	// Field names are not redacted, only values
+	assert.Contains(t, entries[0].Changes.Fields, "password", "field names must not be redacted")
+	assert.Contains(t, entries[0].Changes.Fields, "token", "field names must not be redacted")
+
+	// Verify original maps are not mutated
+	assert.Equal(t, "old-password", before["password"], "original before map must not be mutated")
+	assert.Equal(t, "new-password", after["password"], "original after map must not be mutated")
+}
+
+// TestRecordEvent_RedactsErrorMessage verifies that error messages containing key=value
+// patterns with sensitive key names have the value portion redacted.
+func TestRecordEvent_RedactsErrorMessage(t *testing.T) {
+	manager := newTestManager(t, "test")
+	ctx := context.Background()
+
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventAuthentication).
+		Action("login").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("session", "user1", "").
+		Error("AUTH_FAILED", "login failed: password=hunter2, username=alice").
+		Severity(business.AuditSeverityHigh)
+
+	err := manager.RecordEvent(ctx, event)
+	require.NoError(t, err)
+
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "test-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	assert.NotContains(t, entries[0].ErrorMessage, "hunter2", "raw secret must not appear in stored ErrorMessage")
+	assert.Contains(t, entries[0].ErrorMessage, "password=[REDACTED]", "password value must be replaced with [REDACTED]")
+	assert.Contains(t, entries[0].ErrorMessage, "username=alice", "non-sensitive key=value must be preserved")
+}
+
+// TestManager_IntegrityVerification tests audit integrity verification and
+// asserts that chain fields are populated on stored entries.
+func TestManager_IntegrityVerification(t *testing.T) {
+	manager := newTestManager(t, "test")
+	ctx := context.Background()
+
+	// Part 1: direct checksum round-trip (SequenceNumber 0 — pre-chain style).
+	entry := &business.AuditEntry{
 		ID:           "test-id",
 		TenantID:     "test-tenant",
 		Timestamp:    time.Now().UTC(),
-		EventType:    interfaces.AuditEventConfiguration,
+		EventType:    business.AuditEventConfiguration,
 		Action:       "test_action",
 		UserID:       "test-user",
-		UserType:     interfaces.AuditUserTypeHuman,
+		UserType:     business.AuditUserTypeHuman,
 		ResourceType: "test_resource",
 		ResourceID:   "test-id",
-		Result:       interfaces.AuditResultSuccess,
-		Severity:     interfaces.AuditSeverityMedium,
+		Result:       business.AuditResultSuccess,
+		Severity:     business.AuditSeverityMedium,
 		Source:       "test",
 		Version:      "1.0",
 	}
-
-	// Generate checksum
-	entry.Checksum = manager.generateChecksum(entry)
-
-	// Verify integrity (should pass)
+	entry.Checksum = audit.GenerateChecksum(manager, entry)
 	assert.True(t, manager.VerifyIntegrity(entry))
 
-	// Tamper with the entry
 	originalAction := entry.Action
 	entry.Action = "tampered_action"
-
-	// Verify integrity (should fail)
 	assert.False(t, manager.VerifyIntegrity(entry))
 
-	// Restore original action
 	entry.Action = originalAction
-
-	// Verify integrity (should pass again)
 	assert.True(t, manager.VerifyIntegrity(entry))
+
+	// Part 2: record two events via the manager and verify chain fields on the second.
+	event1 := audit.NewEventBuilder().
+		Tenant("integrity-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("first_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-1", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, manager.RecordEvent(ctx, event1))
+
+	event2 := audit.NewEventBuilder().
+		Tenant("integrity-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("second_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-2", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, manager.RecordEvent(ctx, event2))
+
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "integrity-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+
+	assert.Greater(t, entries[0].SequenceNumber, uint64(0), "first entry must have SequenceNumber > 0")
+	assert.Greater(t, entries[1].SequenceNumber, uint64(0), "second entry must have SequenceNumber > 0")
+	assert.NotEmpty(t, entries[1].PreviousChecksum, "second entry must have PreviousChecksum set")
+	assert.Equal(t, entries[0].Checksum, entries[1].PreviousChecksum,
+		"second entry PreviousChecksum must equal first entry Checksum")
 }
 
-// mockAuditStore is a simple mock implementation for testing
-type mockAuditStore struct {
-	entries map[string]*interfaces.AuditEntry
+// TestChain_MonotonicSequence records 5 events for the same tenant and asserts
+// that the stored entries have SequenceNumbers 1 through 5 in order.
+func TestChain_MonotonicSequence(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		event := audit.NewEventBuilder().
+			Tenant("seq-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("seq_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "seq-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 5, "expected 5 stored entries")
+
+	for i, e := range entries {
+		assert.Equal(t, uint64(i+1), e.SequenceNumber,
+			"entry[%d] must have SequenceNumber %d", i, i+1)
+	}
 }
 
-func (m *mockAuditStore) StoreAuditEntry(ctx context.Context, entry *interfaces.AuditEntry) error {
-	if m.entries == nil {
-		m.entries = make(map[string]*interfaces.AuditEntry)
+// TestChain_PreviousChecksumLinked records 5 events and asserts that each
+// entry's PreviousChecksum equals the Checksum of the preceding entry.
+func TestChain_PreviousChecksumLinked(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		event := audit.NewEventBuilder().
+			Tenant("link-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("link_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
 	}
-	m.entries[entry.ID] = entry
-	return nil
+
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "link-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 5)
+
+	// First entry starts the chain with empty PreviousChecksum.
+	assert.Empty(t, entries[0].PreviousChecksum, "first entry must have empty PreviousChecksum")
+
+	for i := 1; i < len(entries); i++ {
+		assert.Equal(t, entries[i-1].Checksum, entries[i].PreviousChecksum,
+			"entry[%d].PreviousChecksum must equal entry[%d].Checksum", i, i-1)
+	}
 }
 
-func (m *mockAuditStore) GetAuditEntry(ctx context.Context, id string) (*interfaces.AuditEntry, error) {
-	if m.entries == nil {
-		return nil, interfaces.ErrAuditNotFound
-	}
-	entry, ok := m.entries[id]
-	if !ok {
-		return nil, interfaces.ErrAuditNotFound
-	}
-	return entry, nil
-}
+// TestVerifyChain_DetectsTampering records 3 entries, then tampers with the
+// middle entry's Action field in-memory and verifies VerifyChain reports a
+// ChainBreak for it.
+func TestVerifyChain_DetectsTampering(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
 
-func (m *mockAuditStore) ListAuditEntries(ctx context.Context, filter *interfaces.AuditFilter) ([]*interfaces.AuditEntry, error) {
-	if m.entries == nil {
-		return []*interfaces.AuditEntry{}, nil
+	for i := 0; i < 3; i++ {
+		event := audit.NewEventBuilder().
+			Tenant("tamper-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("original_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
 	}
 
-	result := make([]*interfaces.AuditEntry, 0, len(m.entries))
-	for _, entry := range m.entries {
-		result = append(result, entry)
-	}
-	return result, nil
-}
+	flushOrFail(t, manager)
 
-func (m *mockAuditStore) StoreAuditBatch(ctx context.Context, entries []*interfaces.AuditEntry) error {
-	for _, entry := range entries {
-		if err := m.StoreAuditEntry(ctx, entry); err != nil {
-			return err
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "tamper-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+
+	// Tamper with entry[1] in-memory — do not write back to the store.
+	entries[1].Action = "tampered_action"
+
+	breaks := manager.VerifyChain(entries)
+	require.NotEmpty(t, breaks, "VerifyChain must report a break for tampered entry")
+
+	found := false
+	for _, b := range breaks {
+		if b.SequenceNumber == entries[1].SequenceNumber {
+			found = true
+			assert.Contains(t, b.Reason, "checksum mismatch")
 		}
 	}
-	return nil
+	assert.True(t, found, "ChainBreak must reference the tampered entry's SequenceNumber")
 }
 
-func (m *mockAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return []*interfaces.AuditEntry{}, nil
+// TestVerifyChain_Empty verifies that VerifyChain on an empty or nil slice
+// returns no breaks.
+func TestVerifyChain_Empty(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	assert.Empty(t, manager.VerifyChain(nil), "nil slice must produce no breaks")
+	assert.Empty(t, manager.VerifyChain([]*business.AuditEntry{}), "empty slice must produce no breaks")
 }
 
-func (m *mockAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return []*interfaces.AuditEntry{}, nil
+// TestVerifyChain_SingleEntry verifies that a single valid entry with
+// PreviousChecksum=="" passes verification.
+func TestVerifyChain_SingleEntry(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	event := audit.NewEventBuilder().
+		Tenant("single-chain-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("single_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-1", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, manager.RecordEvent(ctx, event))
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "single-chain-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	breaks := manager.VerifyChain(entries)
+	assert.Empty(t, breaks, "single valid entry must produce no chain breaks")
 }
 
-func (m *mockAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return []*interfaces.AuditEntry{}, nil
+// TestVerifyChain_DetectsPreviousChecksumMismatch verifies that an entry whose
+// PreviousChecksum does not link to the prior entry's Checksum is detected —
+// even when the entry's own checksum is intact (e.g., an entry is replaced
+// wholesale by a valid-checksum entry that does not belong in this chain).
+func TestVerifyChain_DetectsPreviousChecksumMismatch(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		event := audit.NewEventBuilder().
+			Tenant("prev-mismatch-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("pm_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "prev-mismatch-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+
+	// Replace entry[1]'s PreviousChecksum with a bogus value, leaving the
+	// entry's own Checksum intact (to isolate the PreviousChecksum path).
+	// This simulates an attacker replacing the entry with a forged one that
+	// has a valid self-checksum but wrong chain linkage.
+	modifiedEntry := *entries[1]
+	modifiedEntry.PreviousChecksum = "00000000000000000000000000000000000000000000000000000000000000"
+	// Update the checksum so the self-checksum still matches, isolating the chain-linkage check.
+	modifiedEntry.Checksum = audit.GenerateChecksum(manager, &modifiedEntry)
+	modifiedSlice := []*business.AuditEntry{entries[0], &modifiedEntry, entries[2]}
+
+	breaks := manager.VerifyChain(modifiedSlice)
+	require.NotEmpty(t, breaks, "VerifyChain must report a break for PreviousChecksum mismatch")
+
+	found := false
+	for _, b := range breaks {
+		if b.SequenceNumber == modifiedEntry.SequenceNumber && strings.Contains(b.Reason, "previous_checksum mismatch") {
+			found = true
+		}
+	}
+	assert.True(t, found, "ChainBreak must reference the entry with wrong PreviousChecksum")
 }
 
-func (m *mockAuditStore) GetFailedActions(ctx context.Context, timeRange *interfaces.TimeRange, limit int) ([]*interfaces.AuditEntry, error) {
-	return []*interfaces.AuditEntry{}, nil
+// TestVerifyChain_DetectsDeletion passes a slice missing the entry with
+// SequenceNumber 2 (simulating deletion) and asserts a gap is reported.
+func TestVerifyChain_DetectsDeletion(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		event := audit.NewEventBuilder().
+			Tenant("gap-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("gap_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "gap-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+
+	// Remove the middle entry to simulate deletion.
+	withGap := []*business.AuditEntry{entries[0], entries[2]}
+
+	breaks := manager.VerifyChain(withGap)
+	require.NotEmpty(t, breaks, "VerifyChain must report a break for the missing entry")
+
+	// At least one break must be a sequence gap referencing the entry after the deletion.
+	foundGap := false
+	for _, b := range breaks {
+		if b.SequenceNumber == entries[2].SequenceNumber && strings.Contains(b.Reason, "sequence gap") {
+			foundGap = true
+		}
+	}
+	assert.True(t, foundGap, "ChainBreak must report a sequence gap for the entry after the deletion")
 }
 
-func (m *mockAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *interfaces.TimeRange) ([]*interfaces.AuditEntry, error) {
-	return []*interfaces.AuditEntry{}, nil
+// TestManager_Flush verifies that after RecordEvent returns successfully and
+// Flush completes, every recorded entry is present in the store. This is the
+// contract that shutdown guarantees rely on.
+func TestManager_Flush(t *testing.T) {
+	manager := newTestManager(t, "test")
+	ctx := context.Background()
+
+	const numEvents = 25
+	for i := 0; i < numEvents; i++ {
+		event := audit.NewEventBuilder().
+			Tenant("flush-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("flush_action").
+			User("flush-user", business.AuditUserTypeHuman).
+			Resource("flush_resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+
+		require.NoError(t, manager.RecordEvent(ctx, event), "RecordEvent %d must succeed", i)
+	}
+
+	// Flush must block until every enqueued entry has been written.
+	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Flush(flushCtx), "Flush must complete without error")
+
+	// Verify all events reached the store. Because Flush returned, we should
+	// see exactly numEvents entries with zero retries or polling.
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "flush-tenant",
+	})
+	require.NoError(t, err)
+	assert.Len(t, entries, numEvents, "all recorded events must be durable after Flush")
 }
 
-func (m *mockAuditStore) GetAuditStats(ctx context.Context) (*interfaces.AuditStats, error) {
-	return &interfaces.AuditStats{
-		TotalEntries: int64(len(m.entries)),
-		LastUpdated:  time.Now(),
-	}, nil
+// TestManager_FlushEmpty verifies Flush on an idle manager returns immediately.
+func TestManager_FlushEmpty(t *testing.T) {
+	manager := newTestManager(t, "test")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Flush(ctx), "Flush on empty manager must not block")
 }
 
-func (m *mockAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
-	return 0, nil
+// TestManager_ShutdownOrderGuarantee verifies that Flush actually waits for the
+// drain loop to finish writing — even when the underlying store is slow. A
+// broken Flush implementation would return immediately and the slow store
+// would show fewer writes than the test recorded.
+func TestManager_ShutdownOrderGuarantee(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	// Wrap the real store with a 20ms per-write delay. With 10 events and
+	// sequential drain writes, the drain loop needs roughly 200ms to finish —
+	// easily long enough that a no-op Flush would return too early.
+	slow := &slowAuditStore{
+		inner: storageManager.GetAuditStore(),
+		delay: 20 * time.Millisecond,
+	}
+
+	manager, err := audit.NewManager(slow, "slow-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Stop(ctx)
+	})
+
+	const numEvents = 10
+	ctx := context.Background()
+	for i := 0; i < numEvents; i++ {
+		event := audit.NewEventBuilder().
+			Tenant("slow-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("slow_action").
+			User("slow-user", business.AuditUserTypeHuman).
+			Resource("slow_resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+
+	// At this point the drain loop is still working through the queue. Flush
+	// must not return until every write has completed.
+	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	flushStart := time.Now()
+	require.NoError(t, manager.Flush(flushCtx))
+	flushDuration := time.Since(flushStart)
+
+	// Every event must be reflected in the slow store's counter *at the moment
+	// Flush returned*. This is the strict ordering guarantee callers rely on.
+	assert.Equal(t, int64(numEvents), slow.writes.Load(),
+		"Flush must wait for every pending write to complete (observed %d)", slow.writes.Load())
+
+	// Sanity check: Flush actually waited rather than no-oping. With 10×20ms
+	// writes the drain must take at least ~100ms in the common case.
+	assert.GreaterOrEqual(t, flushDuration, 100*time.Millisecond,
+		"Flush duration (%v) indicates it did not wait for the drain loop", flushDuration)
 }
 
-func (m *mockAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
-	return 0, nil
+// TestManager_StopIdempotent verifies Stop can be called multiple times
+// without panic or error — callers should not have to track whether the
+// manager has already been stopped.
+func TestManager_StopIdempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	manager, err := audit.NewManager(storageManager.GetAuditStore(), "stop-test")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// First Stop should drain + close cleanly.
+	require.NoError(t, manager.Stop(ctx))
+
+	// Subsequent Stops must be safe (idempotency via sync.Once).
+	require.NoError(t, manager.Stop(ctx))
+	require.NoError(t, manager.Stop(ctx))
+}
+
+// TestManager_RecordAfterStop verifies that RecordEvent returns an error once
+// the manager has been stopped rather than blocking forever or silently
+// dropping events into a closed system.
+func TestManager_RecordAfterStop(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	manager, err := audit.NewManager(storageManager.GetAuditStore(), "stopped-test")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, manager.Stop(ctx))
+
+	event := audit.NewEventBuilder().
+		Tenant("stopped-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("stopped_action").
+		User("stopped-user", business.AuditUserTypeHuman).
+		Resource("res", "res-1", "").
+		Severity(business.AuditSeverityMedium)
+
+	err = manager.RecordEvent(ctx, event)
+	require.Error(t, err, "RecordEvent must fail after Stop")
+	assert.Contains(t, err.Error(), "stopped")
+}
+
+// TestManager_ConcurrentRecordAndFlush exercises the race detector: many
+// goroutines concurrently call RecordEvent while one goroutine repeatedly
+// calls Flush. No deadlock or data race should occur.
+func TestManager_ConcurrentRecordAndFlush(t *testing.T) {
+	manager := newTestManager(t, "concurrent")
+	ctx := context.Background()
+
+	const writers = 8
+	const perWriter = 50
+
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	for w := 0; w < writers; w++ {
+		go func(writerID int) {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				event := audit.NewEventBuilder().
+					Tenant("concurrent-tenant").
+					Type(business.AuditEventConfiguration).
+					Action("concurrent_action").
+					User("concurrent-user", business.AuditUserTypeHuman).
+					Resource("res", fmt.Sprintf("w%d-%d", writerID, i), "").
+					Severity(business.AuditSeverityLow)
+				// Errors are acceptable here only when the queue is full — the
+				// test does not assert every write succeeds, only that the
+				// combination of RecordEvent + Flush does not deadlock or race.
+				_ = manager.RecordEvent(ctx, event)
+			}
+		}(w)
+	}
+
+	// Periodic flushes should coexist safely with record traffic.
+	flushDone := make(chan struct{})
+	go func() {
+		defer close(flushDone)
+		for i := 0; i < 5; i++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = manager.Flush(ctx)
+			cancel()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+	<-flushDone
+
+	// Final flush drains everything and must succeed.
+	finalCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Flush(finalCtx))
+}
+
+// TestManager_FlushRespectsContextCancellation verifies that a cancelled
+// context aborts a pending Flush rather than hanging.
+func TestManager_FlushRespectsContextCancellation(t *testing.T) {
+	// Use a very slow store (50ms per write) and a very short Flush deadline
+	// (1ms) so the deadline must expire before the drain completes.
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	slow := &slowAuditStore{
+		inner: storageManager.GetAuditStore(),
+		delay: 50 * time.Millisecond,
+	}
+	manager, err := audit.NewManager(slow, "ctx-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Stop(ctx)
+	})
+
+	// Enqueue many events so the drain will take significantly longer than
+	// the flush deadline.
+	for i := 0; i < 20; i++ {
+		event := audit.NewEventBuilder().
+			Tenant("ctx-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("ctx_action").
+			User("ctx-user", business.AuditUserTypeHuman).
+			Resource("res", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(context.Background(), event))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	defer cancel()
+
+	err = manager.Flush(ctx)
+	require.Error(t, err, "Flush must return when context is cancelled")
+	assert.Contains(t, err.Error(), "context")
+}
+
+// TestWithSecretsStore_LoadsExistingKey verifies that WithSecretsStore loads a
+// pre-existing HMAC key from the secrets store rather than generating a new one.
+// Chain integrity is confirmed by recording entries and calling VerifyChain.
+func TestWithSecretsStore_LoadsExistingKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	// Pre-populate a known 32-byte key.
+	knownKey := make([]byte, 32)
+	for i := range knownKey {
+		knownKey[i] = byte(i + 1)
+	}
+	ss := newTestSecretStore()
+	ss.secrets["audit/hmac-key"] = hex.EncodeToString(knownKey)
+
+	m, err := audit.NewManager(storageManager.GetAuditStore(), "test-src", audit.WithSecretsStore(ss))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.Stop(ctx)
+	})
+
+	// Record an entry and confirm the chain is verifiable — proving the loaded key is functional.
+	ctx := context.Background()
+	event := audit.NewEventBuilder().
+		Tenant("hmac-load-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("load_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-1", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, m.RecordEvent(ctx, event))
+	flushOrFail(t, m)
+
+	entries, err := m.QueryEntries(ctx, &business.AuditFilter{TenantID: "hmac-load-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	breaks := m.VerifyChain(entries)
+	assert.Empty(t, breaks, "chain must be intact when manager loads a pre-existing HMAC key")
+}
+
+// TestWithSecretsStore_GeneratesAndPersistsKey verifies that when no key exists
+// in the secrets store, WithSecretsStore generates a new key and persists it.
+func TestWithSecretsStore_GeneratesAndPersistsKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	ss := newTestSecretStore() // empty store — no pre-existing key
+
+	m, err := audit.NewManager(storageManager.GetAuditStore(), "test-src", audit.WithSecretsStore(ss))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.Stop(ctx)
+	})
+
+	// Key must have been persisted to the secrets store.
+	stored, ok := ss.secrets["audit/hmac-key"]
+	require.True(t, ok, "generated key must be persisted to secrets store")
+	raw, decErr := hex.DecodeString(stored)
+	require.NoError(t, decErr)
+	assert.Len(t, raw, 32, "persisted HMAC key must be 32 bytes")
+
+	// Record an entry and confirm the chain is verifiable — proving the generated key is functional.
+	ctx := context.Background()
+	event := audit.NewEventBuilder().
+		Tenant("hmac-gen-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("gen_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-1", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, m.RecordEvent(ctx, event))
+	flushOrFail(t, m)
+
+	entries, err := m.QueryEntries(ctx, &business.AuditFilter{TenantID: "hmac-gen-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	breaks := m.VerifyChain(entries)
+	assert.Empty(t, breaks, "chain must be intact when using a generated and persisted HMAC key")
+}
+
+// TestWithSecretsStore_StoreFailureFallsBack verifies that when StoreSecret
+// fails, the Manager still starts and uses a generated in-process key.
+func TestWithSecretsStore_StoreFailureFallsBack(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	ss := newTestSecretStore()
+	ss.storeErr = errors.New("backend unavailable")
+
+	m, err := audit.NewManager(storageManager.GetAuditStore(), "test-src", audit.WithSecretsStore(ss))
+	require.NoError(t, err, "Manager must start even when StoreSecret fails")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.Stop(ctx)
+	})
+
+	// Record an entry and confirm the chain is verifiable — proving the fallback key is functional.
+	ctx := context.Background()
+	event := audit.NewEventBuilder().
+		Tenant("hmac-fallback-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("fallback_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-1", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, m.RecordEvent(ctx, event))
+	flushOrFail(t, m)
+
+	entries, err := m.QueryEntries(ctx, &business.AuditFilter{TenantID: "hmac-fallback-tenant"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	breaks := m.VerifyChain(entries)
+	assert.Empty(t, breaks, "chain must be intact even with an in-process fallback HMAC key")
 }

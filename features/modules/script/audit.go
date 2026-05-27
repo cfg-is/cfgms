@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package script
 
@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // AuditLogger handles comprehensive audit logging for script executions
@@ -42,9 +44,11 @@ type AuditRecord struct {
 	Metrics ExecutionMetrics `json:"metrics"`
 
 	// Security and compliance
-	SignatureValidated bool   `json:"signature_validated"`
-	UserID             string `json:"user_id,omitempty"`
-	TenantID           string `json:"tenant_id,omitempty"`
+	SignatureValidated bool             `json:"signature_validated"`
+	ExecutionContext   ExecutionContext `json:"execution_context"`     // How the script was run (system or logged_in_user)
+	ActualUser         string           `json:"actual_user,omitempty"` // OS user the script ran as; empty means system/root
+	UserID             string           `json:"user_id,omitempty"`
+	TenantID           string           `json:"tenant_id,omitempty"`
 
 	// Context information
 	CorrelationID string            `json:"correlation_id,omitempty"`
@@ -53,12 +57,13 @@ type AuditRecord struct {
 
 // ScriptAuditInfo contains sanitized script configuration for audit purposes
 type ScriptAuditInfo struct {
-	Shell         ShellType         `json:"shell"`
-	Timeout       int64             `json:"timeout_ms"`
-	WorkingDir    string            `json:"working_dir,omitempty"`
-	Environment   map[string]string `json:"environment,omitempty"`
-	SigningPolicy SigningPolicy     `json:"signing_policy"`
-	Description   string            `json:"description,omitempty"`
+	Shell            ShellType         `json:"shell"`
+	Timeout          int64             `json:"timeout_ms"`
+	WorkingDir       string            `json:"working_dir,omitempty"`
+	Environment      map[string]string `json:"environment,omitempty"`
+	SigningPolicy    SigningPolicy     `json:"signing_policy"`
+	ExecutionContext ExecutionContext  `json:"execution_context"` // How the script was configured to run
+	Description      string            `json:"description,omitempty"`
 	// Note: Content is not logged for security reasons - only hash
 	ContentHash   string `json:"content_hash"`
 	ContentLength int    `json:"content_length"`
@@ -114,13 +119,13 @@ func (al *AuditLogger) LogExecution(ctx context.Context, record *AuditRecord) er
 	}
 
 	// Extract context information
-	if correlationID, ok := ctx.Value("correlation_id").(string); ok {
+	if correlationID, ok := ctx.Value(ctxkeys.CorrelationIDKey).(string); ok {
 		record.CorrelationID = correlationID
 	}
-	if userID, ok := ctx.Value("user_id").(string); ok {
+	if userID, ok := ctx.Value(ctxkeys.UserIDKey).(string); ok {
 		record.UserID = userID
 	}
-	if tenantID, ok := ctx.Value("tenant_id").(string); ok {
+	if tenantID, ok := ctx.Value(ctxkeys.TenantID).(string); ok {
 		record.TenantID = tenantID
 	}
 
@@ -320,6 +325,7 @@ func CreateAuditRecord(stewardID string, resourceID string, config *ScriptConfig
 		ExecutionTime:      time.Now(),
 		ScriptConfig:       createScriptAuditInfo(config),
 		SignatureValidated: config.Signature != nil,
+		ExecutionContext:   config.ExecutionContext,
 	}
 
 	if result != nil {
@@ -328,6 +334,7 @@ func CreateAuditRecord(stewardID string, resourceID string, config *ScriptConfig
 		record.Stdout = result.Stdout
 		record.Stderr = result.Stderr
 		record.Duration = result.Duration.Milliseconds()
+		record.ActualUser = result.ActualUser
 		record.Metrics = ExecutionMetrics{
 			StartTime: result.StartTime,
 			EndTime:   result.EndTime,
@@ -348,14 +355,15 @@ func CreateAuditRecord(stewardID string, resourceID string, config *ScriptConfig
 func createScriptAuditInfo(config *ScriptConfig) ScriptAuditInfo {
 	// Create a sanitized copy without sensitive content
 	return ScriptAuditInfo{
-		Shell:         config.Shell,
-		Timeout:       config.Timeout.Milliseconds(),
-		WorkingDir:    config.WorkingDir,
-		Environment:   config.Environment,
-		SigningPolicy: config.SigningPolicy,
-		Description:   config.Description,
-		ContentHash:   calculateContentHash(config.Content),
-		ContentLength: len(config.Content),
+		Shell:            config.Shell,
+		Timeout:          config.Timeout.Milliseconds(),
+		WorkingDir:       config.WorkingDir,
+		Environment:      config.Environment,
+		SigningPolicy:    config.SigningPolicy,
+		ExecutionContext: config.ExecutionContext,
+		Description:      config.Description,
+		ContentHash:      calculateContentHash(config.Content),
+		ContentLength:    len(config.Content),
 	}
 }
 

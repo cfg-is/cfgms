@@ -41,8 +41,7 @@ This guide provides instructions for setting up a local CFGMS development enviro
 - **Docker** - For integration tests and local deployment
 - **golangci-lint** - Code linting
   ```bash
-  # Install using go install
-  go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.12.2
   ```
 
 - **entr** - For watch mode during development
@@ -61,7 +60,7 @@ This guide provides instructions for setting up a local CFGMS development enviro
 
 - **gosec** - Security scanning
   ```bash
-  go install github.com/securego/gosec/v2/cmd/gosec@latest
+  go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
   ```
 
 ### System Requirements
@@ -273,10 +272,10 @@ Runs the full test suite as it would run in GitHub Actions.
 
 4. **Commit your changes**:
    ```bash
-   git add .
-   git commit -m "Add my new feature
+   git add <specific-files>  # Never use git add . or git add -A
+   git commit -m "scope: what changed (Issue #XXX)
 
-   Brief explanation of the feature and why it was added.
+   Brief explanation of why the change was made.
 
    Fixes #issue_number"
    ```
@@ -475,7 +474,7 @@ make build-steward
 
 # Create local configuration
 mkdir -p /etc/cfgms
-cat > /etc/cfgms/config.yaml <<EOF
+cat > /etc/cfgms/dev-steward.cfg <<EOF
 steward:
   id: dev-steward
 
@@ -496,7 +495,7 @@ resources:
 EOF
 
 # Run steward in standalone mode
-./bin/cfgms-steward -config /etc/cfgms/config.yaml
+./bin/cfgms-steward -config /etc/cfgms/dev-steward.cfg
 
 # Verify it worked
 cat /tmp/hello-cfgms.txt
@@ -521,7 +520,7 @@ make build-controller
 
 The controller will start on default ports:
 - REST API: 9080
-- MQTT Broker: 1883
+- gRPC-over-QUIC transport: 4433
 - Internal services automatically configured
 
 **Use it for M365/cloud workflows**:
@@ -530,7 +529,7 @@ The controller will start on default ports:
 make build-cli
 
 # Run a workflow
-./bin/cfg workflow run examples/m365-user-provisioning.yaml
+./bin/cfg workflow run my-workflow.yaml --url=http://localhost:9080
 ```
 
 **No stewards needed for cloud-only automation!**
@@ -554,11 +553,12 @@ make build-steward
 
 # 3. Use CLI to manage fleet
 make build-cli
-./bin/cfg steward list
-./bin/cfg config apply fleet-config.yaml
+cfg steward list --url=http://localhost:9080
+# [GAP: cfg config apply not implemented — see issue #1543]
+# Fleet management via REST API: GET http://localhost:9080/api/v1/stewards
 ```
 
-**For production**: See [docs/development/local-development-setup.md](docs/development/local-development-setup.md) for proper certificate management.
+**For production**: See [docs/development/security-setup.md](docs/development/security-setup.md) for proper certificate management.
 
 ## Next Steps
 

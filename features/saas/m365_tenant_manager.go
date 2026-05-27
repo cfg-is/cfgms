@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package saas m365_tenant_manager integrates Microsoft 365 multi-tenant
 // management with CFGMS tenant system, providing discovery, sync, and
@@ -10,34 +10,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	gdaptypes "github.com/cfgis/cfgms/features/modules/m365/gdap/types"
 	"github.com/cfgis/cfgms/features/tenant"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
-
-// GDAPProvider defines the interface for GDAP operations (avoids import cycle)
-type GDAPProvider interface {
-	DiscoverGDAPCustomers(ctx context.Context) ([]GDAPRelationship, error)
-	ValidateGDAPAccess(ctx context.Context, customerTenantID string, requiredRoles []string) (*GDAPRelationship, error)
-}
-
-// GDAPRelationship represents a GDAP relationship (copied to avoid import cycle)
-type GDAPRelationship struct {
-	RelationshipID   string
-	CustomerTenantID string
-	CustomerName     string
-	Status           string // "active", "pending", "expired", "terminated"
-	ExpiresAt        time.Time
-}
 
 // M365TenantManager integrates M365 multi-tenant capabilities with CFGMS tenant management
 type M365TenantManager struct {
 	cfgmsTenantManager *tenant.Manager
 	m365Provider       *MicrosoftMultiTenantProvider
 	adminConsentFlow   *auth.AdminConsentFlow
-	gdapProvider       GDAPProvider
+	gdapProvider       gdaptypes.GDAPProvider
 	httpClient         *http.Client
+	m365IDIndex        map[string]string // maps m365TenantID → cfgmsTenantID; nil means unpopulated
+	indexMu            sync.Mutex
 }
 
 // NewM365TenantManager creates a new M365 tenant manager
@@ -45,14 +35,14 @@ func NewM365TenantManager(
 	cfgmsTenantManager *tenant.Manager,
 	m365Provider *MicrosoftMultiTenantProvider,
 	adminConsentFlow *auth.AdminConsentFlow,
-	gdapProvider GDAPProvider,
+	gdapProvider gdaptypes.GDAPProvider,
 ) *M365TenantManager {
 	return &M365TenantManager{
 		cfgmsTenantManager: cfgmsTenantManager,
 		m365Provider:       m365Provider,
 		adminConsentFlow:   adminConsentFlow,
 		gdapProvider:       gdapProvider,
-		httpClient:         &http.Client{Timeout: 30 * time.Second},
+		httpClient:         NewGraphHTTPClient(10, 20),
 	}
 }
 
@@ -76,7 +66,7 @@ func (m *M365TenantManager) DiscoverAndSyncTenants(ctx context.Context, discover
 			tenants = append(tenants, TenantInfo{
 				TenantID:    rel.CustomerTenantID,
 				DisplayName: rel.CustomerName,
-				HasAccess:   rel.Status == "active",
+				HasAccess:   rel.Status == gdaptypes.GDAPStatusActive,
 			})
 		}
 	default:
@@ -301,22 +291,34 @@ func (m *M365TenantManager) GetM365TenantStatus(ctx context.Context, cfgmsTenant
 
 // Helper methods
 
-func (m *M365TenantManager) getTenantByM365ID(ctx context.Context, m365TenantID string) (*tenant.Tenant, error) {
-	// List all tenants and search for M365 tenant ID in metadata
-	allTenants, err := m.cfgmsTenantManager.ListTenants(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, t := range allTenants {
-		if m365Metadata, err := m.getM365Metadata(t); err == nil {
-			if m365Metadata.M365TenantID == m365TenantID {
-				return t, nil
+func (m *M365TenantManager) getTenantByM365ID(ctx context.Context, m365TenantID string) (*business.TenantData, error) {
+	m.indexMu.Lock()
+	if m.m365IDIndex == nil {
+		allTenants, err := m.cfgmsTenantManager.ListTenants(ctx, nil)
+		if err != nil {
+			m.indexMu.Unlock()
+			return nil, err
+		}
+		m.m365IDIndex = make(map[string]string, len(allTenants))
+		for _, t := range allTenants {
+			if meta, metaErr := m.getM365Metadata(t); metaErr == nil {
+				m.m365IDIndex[meta.M365TenantID] = t.ID
 			}
 		}
 	}
+	cfgmsTenantID, found := m.m365IDIndex[m365TenantID]
+	m.indexMu.Unlock()
 
-	return nil, fmt.Errorf("tenant not found")
+	if !found {
+		return nil, fmt.Errorf("tenant not found")
+	}
+	return m.cfgmsTenantManager.GetTenant(ctx, cfgmsTenantID)
+}
+
+func (m *M365TenantManager) invalidateM365Index() {
+	m.indexMu.Lock()
+	m.m365IDIndex = nil
+	m.indexMu.Unlock()
 }
 
 func (m *M365TenantManager) createCFGMSTenant(ctx context.Context, m365Tenant *TenantInfo, discoveryMethod string, discoveredAt time.Time) error {
@@ -345,10 +347,13 @@ func (m *M365TenantManager) createCFGMSTenant(ctx context.Context, m365Tenant *T
 	}
 
 	_, err = m.cfgmsTenantManager.CreateTenant(ctx, req)
+	if err == nil {
+		m.invalidateM365Index()
+	}
 	return err
 }
 
-func (m *M365TenantManager) updateTenantMetadata(ctx context.Context, cfgmsTenant *tenant.Tenant, m365Tenant *TenantInfo, discoveryMethod string, discoveredAt time.Time) error {
+func (m *M365TenantManager) updateTenantMetadata(ctx context.Context, cfgmsTenant *business.TenantData, m365Tenant *TenantInfo, discoveryMethod string, discoveredAt time.Time) error {
 	m365Metadata, err := m.getM365Metadata(cfgmsTenant)
 	if err != nil {
 		return err
@@ -366,10 +371,14 @@ func (m *M365TenantManager) updateTenantMetadata(ctx context.Context, cfgmsTenan
 		m365Metadata.CountryCode = m365Tenant.CountryCode
 	}
 
-	return m.saveM365Metadata(ctx, cfgmsTenant, m365Metadata)
+	err = m.saveM365Metadata(ctx, cfgmsTenant, m365Metadata)
+	if err == nil {
+		m.invalidateM365Index()
+	}
+	return err
 }
 
-func (m *M365TenantManager) getM365Metadata(cfgmsTenant *tenant.Tenant) (*tenant.M365TenantMetadata, error) {
+func (m *M365TenantManager) getM365Metadata(cfgmsTenant *business.TenantData) (*tenant.M365TenantMetadata, error) {
 	metadataJSON, exists := cfgmsTenant.Metadata["m365_metadata"]
 	if !exists {
 		return nil, fmt.Errorf("M365 metadata not found")
@@ -383,7 +392,7 @@ func (m *M365TenantManager) getM365Metadata(cfgmsTenant *tenant.Tenant) (*tenant
 	return &metadata, nil
 }
 
-func (m *M365TenantManager) saveM365Metadata(ctx context.Context, cfgmsTenant *tenant.Tenant, m365Metadata *tenant.M365TenantMetadata) error {
+func (m *M365TenantManager) saveM365Metadata(ctx context.Context, cfgmsTenant *business.TenantData, m365Metadata *tenant.M365TenantMetadata) error {
 	metadataJSON, err := json.Marshal(m365Metadata)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
@@ -404,13 +413,13 @@ func (m *M365TenantManager) saveM365Metadata(ctx context.Context, cfgmsTenant *t
 	return err
 }
 
-func (m *M365TenantManager) listM365Tenants(ctx context.Context) ([]*tenant.Tenant, error) {
+func (m *M365TenantManager) listM365Tenants(ctx context.Context) ([]*business.TenantData, error) {
 	allTenants, err := m.cfgmsTenantManager.ListTenants(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	m365Tenants := make([]*tenant.Tenant, 0)
+	m365Tenants := make([]*business.TenantData, 0)
 	for _, t := range allTenants {
 		if tenantType, exists := t.Metadata["tenant_type"]; exists && tenantType == "m365" {
 			m365Tenants = append(m365Tenants, t)
@@ -493,7 +502,7 @@ func (m *M365TenantManager) checkGDAPRelationship(ctx context.Context, m365Tenan
 		}
 	}
 
-	if relationship.Status != "active" {
+	if relationship.Status != gdaptypes.GDAPStatusActive {
 		return HealthCheckResult{
 			Name:    "gdap_relationship",
 			Status:  tenant.HealthStatusDegraded,

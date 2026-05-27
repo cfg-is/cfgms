@@ -14,10 +14,10 @@ You are reviewing PR #$ARGUMENTS for the CFGMS project. Execute all 6 phases seq
 
 ## Phase 1: PR Overview Assessment
 
-Fetch PR details and validate workflow:
+Fetch PR details and validate workflow (uses helper to avoid approval prompts):
 
 ```bash
-gh pr view $ARGUMENTS --json title,body,baseRefName,headRefName,state,author,files
+./.claude/scripts/pr-review-helper.sh pr-overview $ARGUMENTS
 ```
 
 **Validate git workflow FIRST (BLOCKING)**:
@@ -38,8 +38,7 @@ Check all changed `.go` files for violations:
 - `tls.Config{}` outside `pkg/cert/` → must use `pkg/cert.Manager`
 - `sql.Open()` or `git.PlainInit()` outside `pkg/storage/` → must use `pkg/storage/interfaces`
 - `logrus.New()` or `zap.New()` outside `pkg/logging/` → must use `pkg/logging` provider
-- Direct MQTT imports from `pkg/mqtt/client` → must use `pkg/controlplane/interfaces`
-- Direct QUIC imports from `pkg/quic/client` → must use `pkg/dataplane/interfaces`
+- Direct imports of deleted packages (`pkg/mqtt/`, `pkg/quic/`) → use `pkg/controlplane/interfaces` and `pkg/dataplane/interfaces`
 
 **Security Analysis**:
 - Hardcoded secrets, passwords, tokens
@@ -72,7 +71,7 @@ Check all changed `.go` files for violations:
 - Table-driven patterns where appropriate
 
 ```bash
-gh pr diff $ARGUMENTS -- '*.go' | grep -n "t\.Skip\|mock\|fake\|stub"
+./.claude/scripts/pr-review-helper.sh diff-scan $ARGUMENTS
 ```
 
 ## Phase 4: Documentation & Integration Review
@@ -86,7 +85,7 @@ gh pr diff $ARGUMENTS -- '*.go' | grep -n "t\.Skip\|mock\|fake\|stub"
 ## Phase 5: GitHub Actions CI Verification (MANDATORY — BLOCKING)
 
 ```bash
-gh pr checks $ARGUMENTS --required
+./.claude/scripts/pr-review-helper.sh pr-checks $ARGUMENTS
 ```
 
 **Required checks** (ALL must pass):

@@ -1,0 +1,456 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+package grpc
+
+import (
+	"context"
+	"crypto/tls"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
+	quicgo "github.com/quic-go/quic-go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// restartServerAndRepoint starts a new server on an ephemeral port and updates
+// the client's addr so the reconnection loop dials the new server.
+// This avoids UDP port reuse issues where quic-go's internal transport holds
+// the socket after listener close.
+func restartServerAndRepoint(t *testing.T, client *Provider, tc *testCA, reg registry.Registry) *Provider {
+	t.Helper()
+	server := New(ModeServer)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": tc.serverTLSConfig(t),
+		"registry":   reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	t.Cleanup(server.ForceStop)
+
+	// Point the client's reconnection loop at the new server address.
+	// SetAddrUnderSendMu holds sendMu because dialAndOpenStream reads addr under sendMu.
+	SetAddrUnderSendMu(client, server.ListenAddr())
+
+	return server
+}
+
+// newTestClient creates a ModeClient Provider pre-configured with fast backoff
+// and short QUIC timeouts for reconnection tests. Fast backoff avoids timeouts
+// under the race detector; short QUIC timeouts ensure server failures are
+// detected quickly on loaded CI machines even when CONNECTION_CLOSE frames are
+// delayed by goroutine scheduling.
+func newTestClient(t *testing.T, addr string, tlsConfig *tls.Config, stewardID string) *Provider {
+	t.Helper()
+	p := New(ModeClient,
+		withBackoff(&backoff{
+			initial:    50 * time.Millisecond,
+			max:        200 * time.Millisecond,
+			multiplier: 2.0,
+			jitter:     0.1,
+		}),
+		withQUICConfig(&quicgo.Config{
+			MaxIdleTimeout:  3 * time.Second,
+			KeepAlivePeriod: 200 * time.Millisecond,
+		}),
+	)
+	require.NoError(t, p.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "client",
+		"addr":       addr,
+		"tls_config": tlsConfig,
+		"steward_id": stewardID,
+	}))
+	return p
+}
+
+func TestReconnectAfterServerRestart(t *testing.T) {
+	tc := newTestCA(t)
+	reg := registry.NewRegistry()
+
+	// Start server
+	server := New(ModeServer)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": tc.serverTLSConfig(t),
+		"registry":   reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+
+	listenAddr := server.ListenAddr()
+
+	// Set up command handler before connecting — handler survives reconnection
+	received := make(chan *types.SignedCommand, 1)
+
+	client := newTestClient(t, listenAddr, tc.clientTLSConfig(t, "steward-reconnect"), "steward-reconnect")
+	require.NoError(t, client.SubscribeCommands(context.Background(), "steward-reconnect", func(ctx context.Context, sc *types.SignedCommand) error {
+		received <- sc
+		return nil
+	}))
+	require.NoError(t, client.Start(context.Background()))
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+
+	// Verify initial connection
+	require.Eventually(t, func() bool {
+		_, ok := reg.Get("steward-reconnect")
+		return ok
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.True(t, client.IsConnected())
+
+	server.ForceStop()
+
+	// Client should detect disconnection
+	require.Eventually(t, func() bool {
+		return GetState(client) != StateConnected
+	}, 5*time.Second, 10*time.Millisecond, "client should detect disconnection")
+
+	// Restart server (new port, client addr updated automatically)
+	server2 := restartServerAndRepoint(t, client, tc, reg)
+
+	// Client should reconnect automatically
+	require.Eventually(t, func() bool {
+		return GetState(client) == StateConnected
+	}, 30*time.Second, 100*time.Millisecond, "client should reconnect")
+
+	// Steward should be back in the registry
+	require.Eventually(t, func() bool {
+		_, ok := reg.Get("steward-reconnect")
+		return ok
+	}, 5*time.Second, 10*time.Millisecond, "steward should be re-registered")
+
+	// Verify commands work after reconnect
+	require.NoError(t, server2.SendCommand(context.Background(), &types.SignedCommand{Command: types.Command{
+		ID:        "cmd-after-reconnect",
+		Type:      types.CommandSyncConfig,
+		StewardID: "steward-reconnect",
+		Timestamp: time.Now(),
+	}}))
+
+	select {
+	case got := <-received:
+		assert.Equal(t, "cmd-after-reconnect", got.Command.ID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for command after reconnect")
+	}
+}
+
+func TestStopDuringReconnection(t *testing.T) {
+	tc := newTestCA(t)
+	reg := registry.NewRegistry()
+
+	// Start and immediately stop server to force reconnection
+	server := New(ModeServer)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": tc.serverTLSConfig(t),
+		"registry":   reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	listenAddr := server.ListenAddr()
+
+	client := newTestClient(t, listenAddr, tc.clientTLSConfig(t, "steward-stop-reconnect"), "steward-stop-reconnect")
+	require.NoError(t, client.Start(context.Background()))
+
+	// Wait for connection
+	require.Eventually(t, func() bool {
+		return GetState(client) == StateConnected
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Kill server to trigger reconnection
+	server.ForceStop()
+
+	// Wait for client to enter reconnecting state. Use 15s to accommodate
+	// loaded CI machines where goroutine scheduling under the race detector
+	// can delay QUIC disconnect propagation beyond the default 5s budget.
+	require.Eventually(t, func() bool {
+		s := GetState(client)
+		return s == StateReconnecting || s == StateDisconnected
+	}, 15*time.Second, 10*time.Millisecond)
+
+	// Stop the client during reconnection — should not hang or leak goroutines
+	done := make(chan struct{})
+	go func() {
+		_ = client.Stop(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Clean shutdown — success
+	case <-time.After(5 * time.Second):
+		t.Fatal("client.Stop() hung during reconnection")
+	}
+
+	assert.Equal(t, StateDisconnected, GetState(client))
+}
+
+func TestSendsDuringDisconnectionReturnErrors(t *testing.T) {
+	tc := newTestCA(t)
+	reg := registry.NewRegistry()
+
+	server := New(ModeServer)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": tc.serverTLSConfig(t),
+		"registry":   reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	listenAddr := server.ListenAddr()
+
+	client := newTestClient(t, listenAddr, tc.clientTLSConfig(t, "steward-send-err"), "steward-send-err")
+	require.NoError(t, client.Start(context.Background()))
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+
+	require.Eventually(t, func() bool {
+		return GetState(client) == StateConnected
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Kill server
+	server.ForceStop()
+
+	// Wait for disconnection
+	require.Eventually(t, func() bool {
+		return GetState(client) != StateConnected
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// All send methods should return errors (state may be disconnected or reconnecting)
+	err := client.PublishEvent(context.Background(), &types.Event{
+		ID: "evt-fail", Type: types.EventError, StewardID: "steward-send-err", Timestamp: time.Now(), Severity: "error",
+	})
+	require.Error(t, err)
+	assert.True(t, assert.ObjectsAreEqual(true,
+		strings.Contains(err.Error(), "disconnected") || strings.Contains(err.Error(), "reconnecting")),
+		"error should mention disconnected or reconnecting, got: %s", err.Error())
+
+	err = client.SendHeartbeat(context.Background(), &types.Heartbeat{
+		StewardID: "steward-send-err", Status: types.StatusHealthy, Timestamp: time.Now(),
+	})
+	require.Error(t, err)
+
+	err = client.SendResponse(context.Background(), &types.Response{
+		CommandID: "cmd-1", StewardID: "steward-send-err", Timestamp: time.Now(),
+	})
+	require.Error(t, err)
+
+	// DeliveryFailures should be incremented
+	clientStats, err := client.GetStats(context.Background())
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, clientStats.DeliveryFailures, int64(3))
+}
+
+func TestOnStateChangeCallback(t *testing.T) {
+	tc := newTestCA(t)
+	reg := registry.NewRegistry()
+
+	var mu sync.Mutex
+	var transitions []ConnectionState
+
+	server := New(ModeServer)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": tc.serverTLSConfig(t),
+		"registry":   reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	listenAddr := server.ListenAddr()
+
+	client := New(ModeClient,
+		withBackoff(&backoff{initial: 50 * time.Millisecond, max: 200 * time.Millisecond, multiplier: 2.0, jitter: 0.1}),
+		withQUICConfig(&quicgo.Config{MaxIdleTimeout: 3 * time.Second, KeepAlivePeriod: 200 * time.Millisecond}),
+	)
+	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "client",
+		"addr":       listenAddr,
+		"tls_config": tc.clientTLSConfig(t, "steward-callback"),
+		"steward_id": "steward-callback",
+		"on_state_change": func(state ConnectionState) {
+			mu.Lock()
+			transitions = append(transitions, state)
+			mu.Unlock()
+		},
+	}))
+	require.NoError(t, client.Start(context.Background()))
+
+	// Should have seen Connecting → Connected
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(transitions) >= 2
+	}, 5*time.Second, 10*time.Millisecond)
+
+	mu.Lock()
+	assert.Equal(t, StateConnecting, transitions[0])
+	assert.Equal(t, StateConnected, transitions[1])
+	mu.Unlock()
+
+	// Stop should produce Disconnected
+	_ = client.Stop(context.Background())
+
+	mu.Lock()
+	lastState := transitions[len(transitions)-1]
+	mu.Unlock()
+	assert.Equal(t, StateDisconnected, lastState)
+}
+
+func TestReconnectStatsTracking(t *testing.T) {
+	tc := newTestCA(t)
+	reg := registry.NewRegistry()
+
+	server := New(ModeServer)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": tc.serverTLSConfig(t),
+		"registry":   reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	listenAddr := server.ListenAddr()
+
+	client := newTestClient(t, listenAddr, tc.clientTLSConfig(t, "steward-stats-reconnect"), "steward-stats-reconnect")
+	require.NoError(t, client.Start(context.Background()))
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+
+	require.Eventually(t, func() bool {
+		return GetState(client) == StateConnected
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Kill server to trigger reconnection attempts
+	server.ForceStop()
+
+	// Wait for at least one reconnect attempt
+	require.Eventually(t, func() bool {
+		stats, err := client.GetStats(context.Background())
+		if err != nil {
+			return false
+		}
+		v, ok := stats.ProviderMetrics["reconnect_attempts"]
+		if !ok {
+			return false
+		}
+		attempts, ok := v.(int64)
+		return ok && attempts >= 1
+	}, 10*time.Second, 50*time.Millisecond)
+
+	// Verify stats include reconnect info
+	stats, err := client.GetStats(context.Background())
+	require.NoError(t, err)
+	assert.Greater(t, stats.ProviderMetrics["reconnect_attempts"].(int64), int64(0))
+	assert.NotNil(t, stats.ProviderMetrics["last_connected_at"])
+	assert.NotNil(t, stats.ProviderMetrics["last_disconnected_at"])
+	assert.NotEqual(t, "connected", stats.ProviderMetrics["connection_state"])
+
+	// Restart server so cleanup reconnection stops
+	_ = restartServerAndRepoint(t, client, tc, reg)
+
+	// Wait for reconnection
+	require.Eventually(t, func() bool {
+		return GetState(client) == StateConnected
+	}, 30*time.Second, 100*time.Millisecond)
+}
+
+// TestProvider_Reconnect verifies that calling Reconnect on a connected client
+// causes it to close the current connection and reach StateConnected again within
+// 5 seconds via the real gRPC-over-QUIC backoff-reconnect loop. No mocks.
+func TestProvider_Reconnect(t *testing.T) {
+	tc := newTestCA(t)
+	reg := registry.NewRegistry()
+	const stewardID = "steward-reconnect-method"
+
+	server := New(ModeServer)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": tc.serverTLSConfig(t),
+		"registry":   reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	t.Cleanup(server.ForceStop)
+
+	client := newTestClient(t, server.ListenAddr(), tc.clientTLSConfig(t, stewardID), stewardID)
+	require.NoError(t, client.Start(context.Background()))
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+
+	// Wait for initial connection
+	require.Eventually(t, func() bool {
+		return GetState(client) == StateConnected
+	}, 5*time.Second, 10*time.Millisecond, "client must reach StateConnected before Reconnect")
+
+	// Calling Reconnect on a server-mode provider must return an error
+	serverErr := server.Reconnect(context.Background())
+	require.Error(t, serverErr, "Reconnect on server-mode provider must return error")
+
+	// Call Reconnect — closes connection, launches reconnectLoop
+	require.NoError(t, client.Reconnect(context.Background()))
+
+	// The client must re-establish the connection within 5 seconds
+	require.Eventually(t, func() bool {
+		return GetState(client) == StateConnected
+	}, 5*time.Second, 10*time.Millisecond, "client must reach StateConnected again after Reconnect")
+
+	// The steward must be present in the server registry after reconnect
+	require.Eventually(t, func() bool {
+		_, ok := reg.Get(stewardID)
+		return ok
+	}, 5*time.Second, 10*time.Millisecond, "steward must be re-registered after Reconnect")
+}
+
+func TestRapidDisconnectReconnectCycles(t *testing.T) {
+	tc := newTestCA(t)
+
+	var serverCount atomic.Int32
+
+	// Start initial server
+	reg := registry.NewRegistry()
+	server := New(ModeServer)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": tc.serverTLSConfig(t),
+		"registry":   reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	listenAddr := server.ListenAddr()
+
+	client := newTestClient(t, listenAddr, tc.clientTLSConfig(t, "steward-rapid"), "steward-rapid")
+	require.NoError(t, client.Start(context.Background()))
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+
+	require.Eventually(t, func() bool {
+		return GetState(client) == StateConnected
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Rapid kill/restart cycles
+	for i := 0; i < 3; i++ {
+		server.ForceStop()
+
+		require.Eventually(t, func() bool {
+			return GetState(client) != StateConnected
+		}, 5*time.Second, 10*time.Millisecond)
+
+		// Restart server (new port, client addr updated automatically)
+		server = restartServerAndRepoint(t, client, tc, reg)
+		serverCount.Add(1)
+
+		require.Eventually(t, func() bool {
+			return GetState(client) == StateConnected
+		}, 30*time.Second, 100*time.Millisecond, "should reconnect after cycle %d", i)
+	}
+
+	// Should have exactly one registry entry (no duplicates).
+	// Both conditions are checked atomically inside the closure to avoid a
+	// TOCTOU window between two separate Eventually calls.
+	require.Eventually(t, func() bool {
+		_, ok := reg.Get("steward-rapid")
+		return ok && reg.Count() == 1
+	}, 5*time.Second, 10*time.Millisecond, "steward should be registered with no duplicates")
+}

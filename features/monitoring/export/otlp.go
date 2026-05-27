@@ -1,20 +1,37 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package export
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	logscollectorpb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	metricscollectorpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	tracecollectorpb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // OTLPExporter exports traces and metrics to OpenTelemetry Protocol (OTLP) endpoints.
 // This enables integration with Jaeger, Zipkin, and other OTLP-compatible backends.
 type OTLPExporter struct {
-	logger logging.Logger
-	config OTLPConfig
+	logger  logging.Logger
+	config  OTLPConfig
+	secrets secretsinterfaces.SecretStore
 
 	// Connection state
 	connected   bool
@@ -55,6 +72,14 @@ func NewOTLPExporter(logger logging.Logger) *OTLPExporter {
 			Headers:             make(map[string]string),
 		},
 	}
+}
+
+// NewOTLPExporterWithSecrets creates an OTLPExporter that retrieves credentials
+// from the provided SecretStore rather than from plaintext ExporterConfig fields.
+func NewOTLPExporterWithSecrets(logger logging.Logger, store secretsinterfaces.SecretStore) *OTLPExporter {
+	oe := NewOTLPExporter(logger)
+	oe.secrets = store
+	return oe
 }
 
 // Name returns the name of this exporter.
@@ -103,13 +128,25 @@ func (oe *OTLPExporter) Configure(config ExporterConfig) error {
 		}
 	}
 
-	// Add authentication headers if provided
-	if config.APIKey != "" {
+	// Resolve the bearer token from the SecretStore when available.
+	// The plaintext APIKey path is skipped when a SecretStore is present to prevent
+	// accidental cleartext credential use.
+	if oe.secrets != nil {
+		if key, ok := config.Config["secret_key"].(string); ok && key != "" {
+			secret, err := oe.secrets.GetSecret(context.Background(), key)
+			if err != nil {
+				oe.logger.WarnCtx(context.Background(), "Failed to retrieve OTLP credential from secret store",
+					"secret_key", logging.SanitizeLogValue(key))
+			} else {
+				oe.config.Headers["Authorization"] = "Bearer " + secret.Value
+			}
+		}
+	} else if config.APIKey != "" {
 		oe.config.Headers["Authorization"] = fmt.Sprintf("Bearer %s", config.APIKey)
 	}
 
 	oe.logger.InfoCtx(context.Background(), "Configured OTLP exporter",
-		"endpoint", oe.config.Endpoint,
+		"endpoint", logging.SanitizeLogValue(oe.config.Endpoint),
 		"export_traces", oe.config.ExportTraces,
 		"export_metrics", oe.config.ExportMetrics,
 		"export_logs", oe.config.ExportLogs,
@@ -121,7 +158,7 @@ func (oe *OTLPExporter) Configure(config ExporterConfig) error {
 // Start initializes the OTLP exporter (no background processes needed).
 func (oe *OTLPExporter) Start(ctx context.Context) error {
 	oe.logger.InfoCtx(ctx, "Starting OTLP exporter",
-		"endpoint", oe.config.Endpoint)
+		"endpoint", logging.SanitizeLogValue(oe.config.Endpoint))
 
 	// Test connectivity
 	health := oe.HealthCheck(ctx)
@@ -194,7 +231,9 @@ func (oe *OTLPExporter) Export(ctx context.Context, data ExportData) error {
 	return nil
 }
 
-// HealthCheck verifies connectivity to the OTLP endpoint.
+// HealthCheck probes the OTLP endpoint by POSTing a minimal empty
+// ExportTraceServiceRequest to /v1/traces. 2xx and 4xx responses indicate
+// the collector is reachable; 5xx responses and connection errors do not.
 func (oe *OTLPExporter) HealthCheck(ctx context.Context) ExporterHealth {
 	health := ExporterHealth{
 		Name:            oe.Name(),
@@ -203,60 +242,79 @@ func (oe *OTLPExporter) HealthCheck(ctx context.Context) ExporterHealth {
 		LastExport:      oe.lastExport,
 	}
 
-	// For now, we'll do a simple connectivity check
-	// In a full implementation, you might want to send a test span
-	if oe.connected {
-		health.Status = "healthy"
-		health.Message = "OTLP endpoint reachable"
-	} else {
+	probeCtx, cancel := context.WithTimeout(ctx, oe.config.Timeout)
+	defer cancel()
+
+	probePayload, err := proto.Marshal(&tracecollectorpb.ExportTraceServiceRequest{})
+	if err != nil {
 		health.Status = "unhealthy"
-		health.Message = "OTLP endpoint not reachable"
+		health.Message = fmt.Sprintf("failed to marshal probe payload: %v", err)
+		oe.connected = false
+		return health
 	}
 
-	// TODO: Implement actual health check by sending test data
-	// This would involve:
-	// 1. Creating a minimal OTLP payload
-	// 2. Sending it to the endpoint
-	// 3. Checking for successful response
+	httpReq, err := http.NewRequestWithContext(probeCtx, http.MethodPost,
+		oe.config.Endpoint+"/v1/traces", bytes.NewReader(probePayload))
+	if err != nil {
+		health.Status = "unhealthy"
+		health.Message = fmt.Sprintf("failed to create probe request: %v", err)
+		oe.connected = false
+		return health
+	}
+	httpReq.Header.Set("Content-Type", "application/x-protobuf")
+	for k, v := range oe.config.Headers {
+		httpReq.Header.Set(k, v)
+	}
 
+	client := &http.Client{Timeout: oe.config.Timeout}
+	start := time.Now()
+	resp, err := client.Do(httpReq)
+	health.ResponseTime = time.Since(start)
+
+	if err != nil {
+		health.Status = "unhealthy"
+		health.Message = fmt.Sprintf("OTLP endpoint not reachable: %v", err)
+		oe.connected = false
+		return health
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode >= 500 {
+		health.Status = "unhealthy"
+		health.Message = fmt.Sprintf("OTLP endpoint returned %d", resp.StatusCode)
+		oe.connected = false
+		return health
+	}
+
+	health.Status = "healthy"
+	health.Message = "OTLP endpoint reachable"
+	oe.connected = true
 	return health
 }
 
 // exportTraces sends trace data to the OTLP traces endpoint.
 func (oe *OTLPExporter) exportTraces(ctx context.Context, traces []TraceSpan) error {
-	// Apply sampling
 	if oe.config.TraceSamplingRate < 1.0 {
 		traces = oe.sampleTraces(traces, oe.config.TraceSamplingRate)
 	}
 
 	if len(traces) == 0 {
-		return nil // Nothing to export after sampling
+		return nil
 	}
 
-	// Convert to OTLP format
-	otlpTraces := oe.convertTracesToOTLP(traces)
-
-	// Send to OTLP traces endpoint
-	endpoint := oe.config.Endpoint + "/v1/traces"
-	return oe.sendOTLPData(ctx, endpoint, otlpTraces)
+	return oe.sendTraces(ctx, oe.convertTracesToOTLP(traces))
 }
 
 // exportMetrics sends metrics data to the OTLP metrics endpoint.
 func (oe *OTLPExporter) exportMetrics(ctx context.Context, data ExportData) error {
-	// Apply sampling
 	if oe.config.MetricsSamplingRate < 1.0 {
-		// Simple sampling - in production, you might want more sophisticated sampling
 		if float64(time.Now().UnixNano()%1000)/1000.0 > oe.config.MetricsSamplingRate {
 			return nil
 		}
 	}
 
-	// Convert to OTLP format
-	otlpMetrics := oe.convertMetricsToOTLP(data)
-
-	// Send to OTLP metrics endpoint
-	endpoint := oe.config.Endpoint + "/v1/metrics"
-	return oe.sendOTLPData(ctx, endpoint, otlpMetrics)
+	return oe.sendMetrics(ctx, oe.convertMetricsToOTLP(data))
 }
 
 // exportLogs sends log data to the OTLP logs endpoint.
@@ -265,149 +323,295 @@ func (oe *OTLPExporter) exportLogs(ctx context.Context, logs []LogEntry) error {
 		return nil
 	}
 
-	// Convert to OTLP format
-	otlpLogs := oe.convertLogsToOTLP(logs)
-
-	// Send to OTLP logs endpoint
-	endpoint := oe.config.Endpoint + "/v1/logs"
-	return oe.sendOTLPData(ctx, endpoint, otlpLogs)
+	return oe.sendLogs(ctx, oe.convertLogsToOTLP(logs))
 }
 
-// sendOTLPData sends data to an OTLP endpoint.
-func (oe *OTLPExporter) sendOTLPData(ctx context.Context, endpoint string, data interface{}) error {
-	// TODO: Implement actual OTLP protocol sending
-	// This would involve:
-	// 1. Serializing data to protobuf format
-	// 2. Compressing if enabled
-	// 3. Creating HTTP request with proper headers
-	// 4. Sending POST request to endpoint
-	// 5. Handling response and errors
-
-	oe.logger.DebugCtx(ctx, "Would send OTLP data",
-		"endpoint", endpoint,
-		"compression", oe.config.Compression)
-
-	// Simulate network delay
-	time.Sleep(10 * time.Millisecond)
-
-	return nil // Placeholder implementation
+// sendTraces marshals an ExportTraceServiceRequest and POSTs it to /v1/traces.
+func (oe *OTLPExporter) sendTraces(ctx context.Context, req *tracecollectorpb.ExportTraceServiceRequest) error {
+	data, err := proto.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal traces: %w", err)
+	}
+	return oe.postOTLP(ctx, oe.config.Endpoint+"/v1/traces", data)
 }
 
-// Helper functions for data conversion
+// sendMetrics marshals an ExportMetricsServiceRequest and POSTs it to /v1/metrics.
+func (oe *OTLPExporter) sendMetrics(ctx context.Context, req *metricscollectorpb.ExportMetricsServiceRequest) error {
+	data, err := proto.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal metrics: %w", err)
+	}
+	return oe.postOTLP(ctx, oe.config.Endpoint+"/v1/metrics", data)
+}
 
-// convertTracesToOTLP converts CFGMS traces to OTLP format.
-func (oe *OTLPExporter) convertTracesToOTLP(traces []TraceSpan) interface{} {
-	// TODO: Implement conversion to OTLP protobuf format
-	// This would create proper OTLP ResourceSpans structure
+// sendLogs marshals an ExportLogsServiceRequest and POSTs it to /v1/logs.
+func (oe *OTLPExporter) sendLogs(ctx context.Context, req *logscollectorpb.ExportLogsServiceRequest) error {
+	data, err := proto.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal logs: %w", err)
+	}
+	return oe.postOTLP(ctx, oe.config.Endpoint+"/v1/logs", data)
+}
 
-	converted := make([]map[string]interface{}, len(traces))
-	for i, trace := range traces {
-		converted[i] = map[string]interface{}{
-			"trace_id":       trace.TraceID,
-			"span_id":        trace.SpanID,
-			"parent_span_id": trace.ParentSpanID,
-			"name":           trace.OperationName,
-			"start_time":     trace.StartTime.UnixNano(),
-			"end_time":       trace.EndTime.UnixNano(),
-			"status":         trace.Status,
-			"attributes":     trace.Tags,
+// postOTLP optionally gzip-compresses data and POSTs it to the given OTLP URL
+// with Content-Type: application/x-protobuf and all configured headers.
+func (oe *OTLPExporter) postOTLP(ctx context.Context, url string, data []byte) error {
+	var body io.Reader = bytes.NewReader(data)
+	contentEncoding := ""
+
+	if oe.config.Compression == "gzip" {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		if _, err := gz.Write(data); err != nil {
+			return fmt.Errorf("gzip compress: %w", err)
+		}
+		if err := gz.Close(); err != nil {
+			return fmt.Errorf("gzip close: %w", err)
+		}
+		body = &buf
+		contentEncoding = "gzip"
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/x-protobuf")
+	if contentEncoding != "" {
+		httpReq.Header.Set("Content-Encoding", contentEncoding)
+	}
+	for k, v := range oe.config.Headers {
+		httpReq.Header.Set(k, v)
+	}
+
+	client := &http.Client{Timeout: oe.config.Timeout}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", logging.SanitizeLogValue(url), err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("OTLP server returned %d for %s", resp.StatusCode, logging.SanitizeLogValue(url))
+	}
+
+	return nil
+}
+
+// convertTracesToOTLP converts CFGMS TraceSpan slices to an ExportTraceServiceRequest.
+func (oe *OTLPExporter) convertTracesToOTLP(traces []TraceSpan) *tracecollectorpb.ExportTraceServiceRequest {
+	spans := make([]*tracepb.Span, 0, len(traces))
+	for _, t := range traces {
+		span := &tracepb.Span{
+			TraceId:           decodeHexID(t.TraceID, 16),
+			SpanId:            decodeHexID(t.SpanID, 8),
+			ParentSpanId:      decodeHexID(t.ParentSpanID, 8),
+			Name:              t.OperationName,
+			StartTimeUnixNano: uint64(t.StartTime.UnixNano()),
+			EndTimeUnixNano:   uint64(t.EndTime.UnixNano()),
+			Status:            &tracepb.Status{Code: traceStatusCode(t.Status)},
+			Attributes:        attrsFromMap(t.Tags),
+		}
+		spans = append(spans, span)
+	}
+
+	return &tracecollectorpb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{
+			{
+				Resource: cfgmsResource(),
+				ScopeSpans: []*tracepb.ScopeSpans{
+					{Spans: spans},
+				},
+			},
+		},
+	}
+}
+
+// convertMetricsToOTLP converts all CFGMS metric maps to an ExportMetricsServiceRequest.
+// Each key-value pair becomes a Gauge metric with a single timestamped data point.
+func (oe *OTLPExporter) convertMetricsToOTLP(data ExportData) *metricscollectorpb.ExportMetricsServiceRequest {
+	now := uint64(time.Now().UnixNano())
+	metrics := make([]*metricspb.Metric, 0)
+
+	addMetrics := func(prefix string, m map[string]interface{}) {
+		for k, v := range m {
+			f, ok := toFloat64(v)
+			if !ok {
+				continue
+			}
+			metrics = append(metrics, &metricspb.Metric{
+				Name: prefix + k,
+				Data: &metricspb.Metric_Gauge{
+					Gauge: &metricspb.Gauge{
+						DataPoints: []*metricspb.NumberDataPoint{
+							{
+								TimeUnixNano: now,
+								Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: f},
+							},
+						},
+					},
+				},
+			})
 		}
 	}
 
-	return map[string]interface{}{
-		"resource_spans": []map[string]interface{}{
+	addMetrics("system_", data.SystemMetrics)
+	addMetrics("resource_", data.ResourceMetrics)
+	addMetrics("steward_", data.StewardMetrics)
+	addMetrics("controller_", data.ControllerMetrics)
+	addMetrics("workflow_", data.WorkflowMetrics)
+
+	return &metricscollectorpb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
 			{
-				"resource": map[string]interface{}{
-					"attributes": map[string]interface{}{
-						"service.name":    "cfgms",
-						"service.version": "v0.2.0",
-					},
-				},
-				"scope_spans": []map[string]interface{}{
-					{
-						"spans": converted,
-					},
+				Resource: cfgmsResource(),
+				ScopeMetrics: []*metricspb.ScopeMetrics{
+					{Metrics: metrics},
 				},
 			},
 		},
 	}
 }
 
-// convertMetricsToOTLP converts CFGMS metrics to OTLP format.
-func (oe *OTLPExporter) convertMetricsToOTLP(data ExportData) interface{} {
-	// TODO: Implement conversion to OTLP protobuf format
-	// This would create proper OTLP ResourceMetrics structure
-
-	allMetrics := make(map[string]interface{})
-
-	// Flatten all metrics
-	for key, value := range data.SystemMetrics {
-		allMetrics["system_"+key] = value
-	}
-	for key, value := range data.ResourceMetrics {
-		allMetrics["resource_"+key] = value
-	}
-	for key, value := range data.StewardMetrics {
-		allMetrics["steward_"+key] = value
-	}
-	for key, value := range data.ControllerMetrics {
-		allMetrics["controller_"+key] = value
-	}
-	for key, value := range data.WorkflowMetrics {
-		allMetrics["workflow_"+key] = value
+// convertLogsToOTLP converts CFGMS LogEntry slices to an ExportLogsServiceRequest.
+func (oe *OTLPExporter) convertLogsToOTLP(logs []LogEntry) *logscollectorpb.ExportLogsServiceRequest {
+	records := make([]*logspb.LogRecord, 0, len(logs))
+	for _, log := range logs {
+		records = append(records, &logspb.LogRecord{
+			TimeUnixNano:   uint64(log.Timestamp.UnixNano()),
+			SeverityNumber: logSeverityNumber(log.Level),
+			SeverityText:   log.Level,
+			Body:           &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: log.Message}},
+			TraceId:        decodeHexID(log.TraceID, 16),
+			Attributes:     attrsFromMap(log.Fields),
+		})
 	}
 
-	return map[string]interface{}{
-		"resource_metrics": []map[string]interface{}{
+	return &logscollectorpb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{
 			{
-				"resource": map[string]interface{}{
-					"attributes": map[string]interface{}{
-						"service.name":    "cfgms",
-						"service.version": "v0.2.0",
-					},
-				},
-				"scope_metrics": []map[string]interface{}{
-					{
-						"metrics": allMetrics,
-					},
+				Resource: cfgmsResource(),
+				ScopeLogs: []*logspb.ScopeLogs{
+					{LogRecords: records},
 				},
 			},
 		},
 	}
 }
 
-// convertLogsToOTLP converts CFGMS logs to OTLP format.
-func (oe *OTLPExporter) convertLogsToOTLP(logs []LogEntry) interface{} {
-	// TODO: Implement conversion to OTLP protobuf format
-	// This would create proper OTLP ResourceLogs structure
+// cfgmsResource returns the standard CFGMS resource descriptor for OTLP payloads.
+func cfgmsResource() *resourcepb.Resource {
+	return &resourcepb.Resource{
+		Attributes: []*commonpb.KeyValue{
+			{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "cfgms"}}},
+			{Key: "service.version", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "v0.2.0"}}},
+		},
+	}
+}
 
-	converted := make([]map[string]interface{}, len(logs))
-	for i, log := range logs {
-		converted[i] = map[string]interface{}{
-			"time_unix_nano": log.Timestamp.UnixNano(),
-			"severity_text":  log.Level,
-			"body":           log.Message,
-			"trace_id":       log.TraceID,
-			"attributes":     log.Fields,
+// attrsFromMap converts a map[string]interface{} to a slice of OTLP KeyValue attributes.
+func attrsFromMap(m map[string]interface{}) []*commonpb.KeyValue {
+	if len(m) == 0 {
+		return nil
+	}
+	attrs := make([]*commonpb.KeyValue, 0, len(m))
+	for k, v := range m {
+		var av *commonpb.AnyValue
+		switch tv := v.(type) {
+		case string:
+			av = &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tv}}
+		case float64:
+			av = &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: tv}}
+		case float32:
+			av = &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: float64(tv)}}
+		case int:
+			av = &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: int64(tv)}}
+		case int64:
+			av = &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: tv}}
+		case bool:
+			av = &commonpb.AnyValue{Value: &commonpb.AnyValue_BoolValue{BoolValue: tv}}
+		default:
+			av = &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: fmt.Sprintf("%v", v)}}
 		}
+		attrs = append(attrs, &commonpb.KeyValue{Key: k, Value: av})
 	}
+	return attrs
+}
 
-	return map[string]interface{}{
-		"resource_logs": []map[string]interface{}{
-			{
-				"resource": map[string]interface{}{
-					"attributes": map[string]interface{}{
-						"service.name":    "cfgms",
-						"service.version": "v0.2.0",
-					},
-				},
-				"scope_logs": []map[string]interface{}{
-					{
-						"log_records": converted,
-					},
-				},
-			},
-		},
+// traceStatusCode maps a CFGMS status string to an OTLP Status_StatusCode.
+func traceStatusCode(status string) tracepb.Status_StatusCode {
+	switch strings.ToLower(status) {
+	case "ok":
+		return tracepb.Status_STATUS_CODE_OK
+	case "error":
+		return tracepb.Status_STATUS_CODE_ERROR
+	default:
+		return tracepb.Status_STATUS_CODE_UNSET
+	}
+}
+
+// logSeverityNumber maps a log level string to an OTLP SeverityNumber.
+// Mapping: debug→5, info→9, warn/warning→13, error→17, default→0 (unspecified).
+func logSeverityNumber(level string) logspb.SeverityNumber {
+	switch strings.ToLower(level) {
+	case "debug":
+		return logspb.SeverityNumber_SEVERITY_NUMBER_DEBUG
+	case "info":
+		return logspb.SeverityNumber_SEVERITY_NUMBER_INFO
+	case "warn", "warning":
+		return logspb.SeverityNumber_SEVERITY_NUMBER_WARN
+	case "error":
+		return logspb.SeverityNumber_SEVERITY_NUMBER_ERROR
+	default:
+		return logspb.SeverityNumber_SEVERITY_NUMBER_UNSPECIFIED
+	}
+}
+
+// decodeHexID decodes a hex string into a fixed-length byte slice.
+// Returns nil for invalid or empty input. Pads with leading zeros if shorter than length.
+func decodeHexID(id string, length int) []byte {
+	if id == "" {
+		return nil
+	}
+	b, err := hex.DecodeString(id)
+	if err != nil || len(b) == 0 {
+		return nil
+	}
+	if len(b) == length {
+		return b
+	}
+	result := make([]byte, length)
+	if len(b) > length {
+		copy(result, b[len(b)-length:])
+	} else {
+		copy(result[length-len(b):], b)
+	}
+	return result
+}
+
+// toFloat64 converts common numeric types to float64 for OTLP gauge data points.
+func toFloat64(v interface{}) (float64, bool) {
+	switch tv := v.(type) {
+	case float64:
+		return tv, true
+	case float32:
+		return float64(tv), true
+	case int:
+		return float64(tv), true
+	case int32:
+		return float64(tv), true
+	case int64:
+		return float64(tv), true
+	case uint:
+		return float64(tv), true
+	case uint32:
+		return float64(tv), true
+	case uint64:
+		return float64(tv), true
+	default:
+		return 0, false
 	}
 }
 
@@ -428,12 +632,10 @@ func (oe *OTLPExporter) sampleTraces(traces []TraceSpan, rate float64) []TraceSp
 
 	sampled := make([]TraceSpan, 0, int(float64(len(traces))*rate))
 	for _, trace := range traces {
-		// Use trace ID for consistent sampling decisions
 		hash := 0
 		for _, b := range []byte(trace.TraceID) {
 			hash = hash*31 + int(b)
 		}
-
 		if float64(hash%1000)/1000.0 < rate {
 			sampled = append(sampled, trace)
 		}

@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package jit
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -12,87 +14,343 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
-	"github.com/cfgis/cfgms/features/rbac/zerotrust"
+	"github.com/cfgis/cfgms/pkg/audit"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// JITAccessManager manages Just-In-Time access requests and grants with zero-trust policy integration
+// WorkflowProvider selects an approval workflow for a JIT access request.
+// When set on JITAccessManager via SetWorkflowProvider, it replaces the built-in
+// single-stage default with tenant-specific, risk-based, or environment-specific
+// workflow policies without forking the core manager.
+type WorkflowProvider func(ctx context.Context, request *JITAccessRequest) (*ApprovalWorkflow, error)
+
+// JITAccessManager manages Just-In-Time access requests and grants
 type JITAccessManager struct {
 	rbacManager         rbac.RBACManager
 	requests            map[string]*JITAccessRequest
 	activeGrants        map[string]*JITAccessGrant
 	approvalWorkflows   map[string]*ApprovalWorkflow
-	auditLogger         *JITAuditLogger
+	auditManager        *audit.Manager
 	notificationService NotificationService
-
-	// Zero-trust policy integration
-	zeroTrustEngine  *zerotrust.ZeroTrustPolicyEngine
-	zeroTrustEnabled bool
-	zeroTrustMode    ZeroTrustJITMode
-	mutex            sync.RWMutex
+	workflowProvider    WorkflowProvider
+	grantStore          business.SessionStore
+	stopCh              chan struct{}
+	doneCh              chan struct{}
+	mutex               sync.RWMutex
 }
 
-// ZeroTrustJITMode defines how zero-trust policies are applied to JIT access
-type ZeroTrustJITMode string
-
-const (
-	// ZeroTrustJITModeDisabled disables zero-trust policy evaluation for JIT access
-	ZeroTrustJITModeDisabled ZeroTrustJITMode = "disabled"
-
-	// ZeroTrustJITModeRequestValidation evaluates zero-trust policies during JIT request creation
-	ZeroTrustJITModeRequestValidation ZeroTrustJITMode = "request_validation"
-
-	// ZeroTrustJITModeApprovalGating requires zero-trust policy approval before JIT approval
-	ZeroTrustJITModeApprovalGating ZeroTrustJITMode = "approval_gating"
-
-	// ZeroTrustJITModeGrantValidation evaluates zero-trust policies when JIT access is activated
-	ZeroTrustJITModeGrantValidation ZeroTrustJITMode = "grant_validation"
-
-	// ZeroTrustJITModeComprehensive applies zero-trust validation at all JIT lifecycle stages
-	ZeroTrustJITModeComprehensive ZeroTrustJITMode = "comprehensive"
-)
-
-// NewJITAccessManager creates a new JIT access manager
+// NewJITAccessManager creates a new JIT access manager without a backing store (memory-only).
 func NewJITAccessManager(rbacManager rbac.RBACManager, notificationService NotificationService) *JITAccessManager {
+	return NewJITAccessManagerWithStore(rbacManager, notificationService, nil)
+}
+
+// NewJITAccessManagerWithStore creates a new JIT access manager backed by a durable session store.
+// Pass nil for store to operate memory-only (equivalent to NewJITAccessManager).
+func NewJITAccessManagerWithStore(rbacManager rbac.RBACManager, notificationService NotificationService, store business.SessionStore) *JITAccessManager {
 	return &JITAccessManager{
 		rbacManager:         rbacManager,
 		requests:            make(map[string]*JITAccessRequest),
 		activeGrants:        make(map[string]*JITAccessGrant),
 		approvalWorkflows:   make(map[string]*ApprovalWorkflow),
-		auditLogger:         NewJITAuditLogger(),
 		notificationService: notificationService,
-
-		// Zero-trust defaults
-		zeroTrustEngine:  nil,
-		zeroTrustEnabled: false,
-		zeroTrustMode:    ZeroTrustJITModeDisabled,
-		mutex:            sync.RWMutex{},
+		grantStore:          store,
+		mutex:               sync.RWMutex{},
 	}
 }
 
-// EnableZeroTrustPolicies enables zero-trust policy evaluation with specified mode
-func (jam *JITAccessManager) EnableZeroTrustPolicies(engine *zerotrust.ZeroTrustPolicyEngine, mode ZeroTrustJITMode) {
+// Start loads active JIT grants from the store into memory and starts the central cleanup ticker.
+// The ticker calls CleanupExpiredGrants and CleanupExpiredRequests on the given interval.
+// On a nil store, Start still runs the ticker for in-memory cleanup.
+func (jam *JITAccessManager) Start(ctx context.Context, cleanupInterval time.Duration) error {
+	jam.mutex.Lock()
+	if jam.stopCh != nil {
+		jam.mutex.Unlock()
+		return fmt.Errorf("JIT access manager already started")
+	}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	jam.stopCh = stopCh
+	jam.doneCh = doneCh
+	jam.mutex.Unlock()
+
+	if err := jam.loadActiveGrants(ctx); err != nil {
+		jam.mutex.Lock()
+		jam.stopCh = nil
+		jam.doneCh = nil
+		jam.mutex.Unlock()
+		return fmt.Errorf("failed to load active grants: %w", err)
+	}
+
+	ticker := time.NewTicker(cleanupInterval)
+	go func() {
+		defer close(doneCh)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				bgCtx := context.Background()
+				if err := jam.CleanupExpiredGrants(bgCtx); err != nil {
+					slog.Warn("jit cleanup expired grants failed", "error", err)
+				}
+				if err := jam.CleanupExpiredRequests(bgCtx); err != nil {
+					slog.Warn("jit cleanup expired requests failed", "error", err)
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+// Stop signals the cleanup ticker to stop and blocks until any in-flight cleanup cycle completes.
+func (jam *JITAccessManager) Stop(ctx context.Context) error {
+	jam.mutex.Lock()
+	stopCh := jam.stopCh
+	doneCh := jam.doneCh
+	jam.stopCh = nil
+	jam.doneCh = nil
+	jam.mutex.Unlock()
+
+	if stopCh == nil {
+		return nil
+	}
+
+	close(stopCh)
+
+	select {
+	case <-doneCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// loadActiveGrants populates activeGrants from the store using ListSessions scoped to
+// SessionTypeJIT + SessionStatusActive. Sessions whose ExpiresAt is already past are
+// immediately marked SessionStatusExpired in the store and are NOT added to activeGrants.
+func (jam *JITAccessManager) loadActiveGrants(ctx context.Context) error {
+	if jam.grantStore == nil {
+		return nil
+	}
+
+	sessions, err := jam.grantStore.ListSessions(ctx, &business.SessionFilter{
+		Type:   business.SessionTypeJIT,
+		Status: business.SessionStatusActive,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list active JIT sessions: %w", err)
+	}
+
+	now := time.Now()
 	jam.mutex.Lock()
 	defer jam.mutex.Unlock()
 
-	jam.zeroTrustEngine = engine
-	jam.zeroTrustMode = mode
-	jam.zeroTrustEnabled = (mode != ZeroTrustJITModeDisabled && engine != nil)
+	for _, session := range sessions {
+		jitData, ok := extractJITSessionData(session)
+		if !ok {
+			slog.Warn("skipping JIT session with unreadable session data", "session_id", session.SessionID)
+			continue
+		}
+
+		if session.ExpiresAt.Before(now) {
+			// Already expired — mark in store and skip
+			session.Status = business.SessionStatusExpired
+			modAt := now
+			session.ModifiedAt = &modAt
+			if updateErr := jam.grantStore.UpdateSession(ctx, session.SessionID, session); updateErr != nil {
+				slog.Warn("failed to expire already-past session on load", "session_id", session.SessionID, "error", updateErr)
+			}
+			continue
+		}
+
+		grant := &JITAccessGrant{
+			ID:                 session.SessionID,
+			RequestID:          jitData.RequestID,
+			RequesterID:        session.UserID,
+			TargetID:           jitData.TargetID,
+			TenantID:           session.TenantID,
+			Permissions:        jitData.Permissions,
+			Roles:              jitData.Roles,
+			ResourceIDs:        jitData.ResourceIDs,
+			ApprovedBy:         jitData.ApprovedBy,
+			ApprovalReason:     jitData.ApprovalReason,
+			GrantedAt:          jitData.GrantedAt,
+			ExpiresAt:          session.ExpiresAt,
+			Status:             JITAccessGrantStatusActive,
+			ExtensionsUsed:     jitData.ExtensionsUsed,
+			MaxExtensions:      jitData.MaxExtensions,
+			ActivationMethod:   ActivationMethodImmediate,
+			DeactivationMethod: DeactivationMethodAutomatic,
+		}
+		jam.activeGrants[grant.ID] = grant
+	}
+
+	return nil
 }
 
-// SetZeroTrustMode updates the zero-trust JIT mode
-func (jam *JITAccessManager) SetZeroTrustMode(mode ZeroTrustJITMode) {
-	jam.mutex.Lock()
-	defer jam.mutex.Unlock()
+// CleanupExpiredGrants sweeps activeGrants for grants whose ExpiresAt has passed,
+// updates the store to SessionStatusExpired, then removes them from activeGrants.
+// A failed store update retains the in-memory entry so the next tick can retry.
+func (jam *JITAccessManager) CleanupExpiredGrants(ctx context.Context) error {
+	now := time.Now()
 
-	jam.zeroTrustMode = mode
-	jam.zeroTrustEnabled = (mode != ZeroTrustJITModeDisabled && jam.zeroTrustEngine != nil)
-}
+	type expiredEntry struct {
+		id    string
+		grant *JITAccessGrant
+	}
 
-// GetZeroTrustMode returns the current zero-trust JIT mode
-func (jam *JITAccessManager) GetZeroTrustMode() ZeroTrustJITMode {
 	jam.mutex.RLock()
-	defer jam.mutex.RUnlock()
-	return jam.zeroTrustMode
+	var expired []expiredEntry
+	for id, grant := range jam.activeGrants {
+		if grant.Status == JITAccessGrantStatusActive && !grant.ExpiresAt.After(now) {
+			expired = append(expired, expiredEntry{id, grant})
+		}
+	}
+	jam.mutex.RUnlock()
+
+	for _, eg := range expired {
+		if jam.grantStore != nil {
+			session, err := jam.grantStore.GetSession(ctx, eg.id)
+			if err != nil {
+				slog.Warn("failed to get session for expiry cleanup", "grant_id", eg.id, "error", err)
+				continue // retry next tick
+			}
+			session.Status = business.SessionStatusExpired
+			modAt := time.Now()
+			session.ModifiedAt = &modAt
+			if err := jam.grantStore.UpdateSession(ctx, eg.id, session); err != nil {
+				slog.Warn("failed to update session to expired", "grant_id", eg.id, "error", err)
+				continue // store update failed — retain in-memory entry, retry next tick
+			}
+		}
+
+		// Store update succeeded (or no store); remove from activeGrants under mutex.
+		jam.mutex.Lock()
+		grant, exists := jam.activeGrants[eg.id]
+		if exists && grant.Status == JITAccessGrantStatusActive {
+			grant.Status = JITAccessGrantStatusExpired
+			deactivatedAt := time.Now()
+			grant.DeactivatedAt = &deactivatedAt
+			delete(jam.activeGrants, eg.id)
+			jam.mutex.Unlock()
+			jam.recordJITAccessExpiry(ctx, grant)
+		} else {
+			jam.mutex.Unlock()
+		}
+	}
+
+	return nil
+}
+
+// CleanupExpiredRequests marks pending requests whose RequestTTL has passed as expired.
+func (jam *JITAccessManager) CleanupExpiredRequests(ctx context.Context) error {
+	now := time.Now()
+
+	jam.mutex.Lock()
+	defer jam.mutex.Unlock()
+
+	for _, request := range jam.requests {
+		if request.Status == JITAccessRequestStatusPending && request.RequestTTL.Before(now) {
+			request.Status = JITAccessRequestStatusExpired
+		}
+	}
+
+	return nil
+}
+
+// SetAuditManager wires a durable audit manager for recording JIT access events.
+// It is a no-op when m is nil.
+func (jam *JITAccessManager) SetAuditManager(m *audit.Manager) {
+	jam.auditManager = m
+}
+
+// SetWorkflowProvider replaces the built-in workflow determination logic with a custom
+// provider. The provider is called once per request creation and must return a non-nil
+// workflow; nil causes request creation to fail.
+func (jam *JITAccessManager) SetWorkflowProvider(provider WorkflowProvider) {
+	jam.mutex.Lock()
+	defer jam.mutex.Unlock()
+	jam.workflowProvider = provider
+}
+
+// recordJITAccessRequest emits a jit_access request audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessRequest(ctx context.Context, request *JITAccessRequest, action string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		request.TenantID, request.RequesterID, "jit_access", request.ID, action,
+		business.AuditResultSuccess,
+	)); err != nil {
+		slog.Warn("failed to record jit access request audit event", "error", err)
+	}
+}
+
+// recordJITAccessApproval emits a jit_access approval audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessApproval(ctx context.Context, request *JITAccessRequest, grant *JITAccessGrant, approverID string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		request.TenantID, request.RequesterID, "jit_access", request.ID, "approve",
+		business.AuditResultSuccess,
+	).Detail("approver_id", approverID).Detail("grant_id", grant.ID)); err != nil {
+		slog.Warn("failed to record jit access approval audit event", "error", err)
+	}
+}
+
+// recordJITAccessDenial emits a jit_access denial audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessDenial(ctx context.Context, request *JITAccessRequest, reviewerID, reason string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		request.TenantID, request.RequesterID, "jit_access", request.ID, "deny",
+		business.AuditResultDenied,
+	).Detail("reviewer_id", reviewerID).Detail("reason", reason)); err != nil {
+		slog.Warn("failed to record jit access denial audit event", "error", err)
+	}
+}
+
+// recordJITAccessExtension emits a jit_access extension audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessExtension(ctx context.Context, grant *JITAccessGrant, requesterID string, duration time.Duration, reason string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		grant.TenantID, requesterID, "jit_access", grant.ID, "extend",
+		business.AuditResultSuccess,
+	).Detail("duration", duration.String()).Detail("reason", reason)); err != nil {
+		slog.Warn("failed to record jit access extension audit event", "error", err)
+	}
+}
+
+// recordJITAccessRevocation emits a jit_access revocation audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessRevocation(ctx context.Context, grant *JITAccessGrant, revokerID, reason string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		grant.TenantID, revokerID, "jit_access", grant.ID, "revoke",
+		business.AuditResultSuccess,
+	).Detail("reason", reason)); err != nil {
+		slog.Warn("failed to record jit access revocation audit event", "error", err)
+	}
+}
+
+// recordJITAccessExpiry emits a jit_access expiry audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordJITAccessExpiry(ctx context.Context, grant *JITAccessGrant) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		grant.TenantID, grant.RequesterID, "jit_access", grant.ID, "expired",
+		business.AuditResultSuccess,
+	)); err != nil {
+		slog.Warn("failed to record jit access expiry audit event", "error", err)
+	}
 }
 
 // RequestAccess creates a new JIT access request
@@ -114,15 +372,10 @@ func (jam *JITAccessManager) RequestAccess(ctx context.Context, req *JITAccessRe
 		return nil, fmt.Errorf("requester already has the requested permissions")
 	}
 
-	// Zero-trust policy validation for request creation
-	if jam.shouldEvaluateZeroTrustForRequest() {
-		ztValidationResult, err := jam.evaluateZeroTrustForJITRequest(ctx, req)
-		if err != nil {
-			return nil, fmt.Errorf("zero-trust policy validation failed: %w", err)
-		}
-		if !ztValidationResult.Granted {
-			return nil, fmt.Errorf("JIT access request denied by zero-trust policies: %s", ztValidationResult.Reason)
-		}
+	// Compute request TTL
+	requestTTL := 24 * time.Hour
+	if req.RequestTTL > 0 {
+		requestTTL = req.RequestTTL
 	}
 
 	// Create the access request
@@ -145,7 +398,7 @@ func (jam *JITAccessManager) RequestAccess(ctx context.Context, req *JITAccessRe
 		Status:            JITAccessRequestStatusPending,
 		CreatedAt:         time.Now(),
 		ExpiresAt:         time.Now().Add(req.Duration),
-		RequestTTL:        time.Now().Add(24 * time.Hour), // Request expires in 24 hours if not processed
+		RequestTTL:        time.Now().Add(requestTTL),
 	}
 
 	// Determine approval workflow
@@ -174,7 +427,7 @@ func (jam *JITAccessManager) RequestAccess(ctx context.Context, req *JITAccessRe
 	}
 
 	// Audit the request
-	_ = jam.auditLogger.LogAccessRequest(ctx, request, "created")
+	jam.recordJITAccessRequest(ctx, request, "created")
 
 	// Send notifications
 	_ = jam.sendNotifications(ctx, request, "request_created")
@@ -182,11 +435,70 @@ func (jam *JITAccessManager) RequestAccess(ctx context.Context, req *JITAccessRe
 	return request, nil
 }
 
-// ApproveRequest approves a JIT access request
+// ApproveRequest approves a JIT access request.
+// For multi-stage workflows it records the stage approval and only creates the
+// grant when the final stage is satisfied. Single-stage workflows grant access
+// immediately (existing behaviour).
 func (jam *JITAccessManager) ApproveRequest(ctx context.Context, requestID, approverID, reason string) (*JITAccessGrant, error) {
 	jam.mutex.Lock()
 	defer jam.mutex.Unlock()
 
+	request, exists := jam.requests[requestID]
+	if !exists {
+		return nil, fmt.Errorf("request %s not found", requestID)
+	}
+
+	if request.Status != JITAccessRequestStatusPending {
+		return nil, fmt.Errorf("request %s is not in pending status", requestID)
+	}
+
+	// Multi-stage path: WorkflowState is only set for workflows with >1 stage.
+	if request.WorkflowState != nil {
+		workflow, exists := jam.approvalWorkflows[requestID]
+		if !exists || workflow == nil {
+			return nil, fmt.Errorf("approval workflow not found for request %s", requestID)
+		}
+
+		// Stage membership check must come before the RBAC permission check so callers
+		// can distinguish the two rejection reasons.
+		if err := jam.validateStageApprover(request, approverID); err != nil {
+			return nil, err
+		}
+
+		stageIdx := request.WorkflowState.CurrentStage
+		stage := workflow.Approvers[stageIdx]
+
+		// Idempotency: silently ignore a duplicate approval from the same approver
+		// in the same stage — no state change, no audit event.
+		if _, already := request.WorkflowState.StageApprovals[stageIdx][approverID]; already {
+			return nil, nil
+		}
+
+		// RBAC check: approver must hold the jit_access.approve permission.
+		if err := jam.validateApprover(ctx, request, approverID); err != nil {
+			return nil, fmt.Errorf("approver validation failed: %w", err)
+		}
+
+		// Record approval in the per-stage set.
+		request.WorkflowState.StageApprovals[stageIdx][approverID] = struct{}{}
+
+		// Emit stage_approved audit event for every new (non-duplicate) approval,
+		// including intermediate stages.
+		jam.recordStageApproval(ctx, request, stage.ID, approverID)
+
+		// Advance when the stage's MinApprovals threshold is met.
+		if len(request.WorkflowState.StageApprovals[stageIdx]) >= stage.MinApprovals {
+			if jam.isWorkflowComplete(request, workflow) {
+				// Final stage complete — delegate to internal approveRequest for grant creation.
+				return jam.approveRequest(ctx, requestID, approverID, reason)
+			}
+			jam.advanceWorkflowStage(ctx, request, workflow)
+		}
+
+		return nil, nil
+	}
+
+	// Single-stage path: original immediate-grant behaviour.
 	return jam.approveRequest(ctx, requestID, approverID, reason)
 }
 
@@ -206,18 +518,12 @@ func (jam *JITAccessManager) approveRequest(ctx context.Context, requestID, appr
 		return nil, fmt.Errorf("approver validation failed: %w", err)
 	}
 
-	// Zero-trust policy validation for approval gating
-	if jam.shouldEvaluateZeroTrustForApproval() {
-		ztValidationResult, err := jam.evaluateZeroTrustForJITApproval(ctx, request, approverID)
-		if err != nil {
-			return nil, fmt.Errorf("zero-trust policy validation for approval failed: %w", err)
-		}
-		if !ztValidationResult.Granted {
-			return nil, fmt.Errorf("JIT access approval denied by zero-trust policies: %s", ztValidationResult.Reason)
-		}
-	}
-
 	// Create the access grant
+	// ExpiresAt is computed from grantedAt + request.Duration (not request.ExpiresAt) so that
+	// the session's ExpiresAt is always strictly after CreatedAt, even on Windows where
+	// timer resolution (~15ms) can make a pre-computed request.ExpiresAt fall before the
+	// later time.Now() call used for GrantedAt.
+	grantedAt := time.Now()
 	grant := &JITAccessGrant{
 		ID:                 uuid.New().String(),
 		RequestID:          requestID,
@@ -229,8 +535,8 @@ func (jam *JITAccessManager) approveRequest(ctx context.Context, requestID, appr
 		ResourceIDs:        request.ResourceIDs,
 		ApprovedBy:         approverID,
 		ApprovalReason:     reason,
-		GrantedAt:          time.Now(),
-		ExpiresAt:          request.ExpiresAt,
+		GrantedAt:          grantedAt,
+		ExpiresAt:          grantedAt.Add(request.Duration),
 		Status:             JITAccessGrantStatusActive,
 		MaxExtensions:      3, // Allow up to 3 extensions
 		ExtensionsUsed:     0,
@@ -263,12 +569,12 @@ func (jam *JITAccessManager) approveRequest(ctx context.Context, requestID, appr
 	}
 
 	// Audit the approval
-	_ = jam.auditLogger.LogAccessApproval(ctx, request, grant, approverID)
+	jam.recordJITAccessApproval(ctx, request, grant, approverID)
 
 	// Send notifications
 	_ = jam.sendNotifications(ctx, request, "request_approved")
 
-	// Schedule automatic deactivation
+	// scheduleDeactivation is a no-op; the central ticker handles expiry.
 	jam.scheduleDeactivation(ctx, grant)
 
 	return grant, nil
@@ -296,7 +602,7 @@ func (jam *JITAccessManager) DenyRequest(ctx context.Context, requestID, reviewe
 	request.DenialReason = reason
 
 	// Audit the denial
-	_ = jam.auditLogger.LogAccessDenial(ctx, request, reviewerID, reason)
+	jam.recordJITAccessDenial(ctx, request, reviewerID, reason)
 
 	// Send notifications
 	_ = jam.sendNotifications(ctx, request, "request_denied")
@@ -343,7 +649,7 @@ func (jam *JITAccessManager) ExtendAccess(ctx context.Context, grantID string, d
 		}
 	}
 
-	// Extend the grant
+	// Extend the grant in memory
 	grant.ExpiresAt = grant.ExpiresAt.Add(duration)
 	grant.ExtensionsUsed++
 	grant.LastExtensionAt = &[]time.Time{time.Now()}[0]
@@ -355,13 +661,29 @@ func (jam *JITAccessManager) ExtendAccess(ctx context.Context, grantID string, d
 		Reason:     reason,
 	})
 
+	// Update store record: Session.ExpiresAt and JITSessionData.ExtensionsUsed must both be updated.
+	if jam.grantStore != nil {
+		session, err := jam.grantStore.GetSession(ctx, grantID)
+		if err == nil {
+			session.ExpiresAt = grant.ExpiresAt
+			jitData, _ := extractJITSessionData(session)
+			jitData.ExtensionsUsed = grant.ExtensionsUsed
+			session.SessionData = jitData
+			if updateErr := jam.grantStore.UpdateSession(ctx, grantID, session); updateErr != nil {
+				slog.Warn("failed to update session for extension", "grant_id", grantID, "error", updateErr)
+			}
+		} else {
+			slog.Warn("failed to get session for extension update", "grant_id", grantID, "error", err)
+		}
+	}
+
 	// Audit the extension
-	_ = jam.auditLogger.LogAccessExtension(ctx, grant, requesterID, duration, reason)
+	jam.recordJITAccessExtension(ctx, grant, requesterID, duration, reason)
 
 	// Send notifications
 	_ = jam.sendExtensionNotifications(ctx, grant, duration, reason)
 
-	// Reschedule deactivation
+	// scheduleDeactivation is a no-op; the central ticker handles expiry.
 	jam.scheduleDeactivation(ctx, grant)
 
 	return nil
@@ -386,7 +708,7 @@ func (jam *JITAccessManager) RevokeAccess(ctx context.Context, grantID, revokerI
 		return fmt.Errorf("revoker validation failed: %w", err)
 	}
 
-	// Deactivate the access
+	// Deactivate the access (updates store to SessionStatusTerminated)
 	err := jam.deactivateAccess(ctx, grant)
 	if err != nil {
 		return fmt.Errorf("failed to deactivate access: %w", err)
@@ -400,7 +722,7 @@ func (jam *JITAccessManager) RevokeAccess(ctx context.Context, grantID, revokerI
 	grant.RevocationReason = reason
 
 	// Audit the revocation
-	_ = jam.auditLogger.LogAccessRevocation(ctx, grant, revokerID, reason)
+	jam.recordJITAccessRevocation(ctx, grant, revokerID, reason)
 
 	// Send notifications
 	_ = jam.sendRevocationNotifications(ctx, grant, reason)
@@ -503,7 +825,27 @@ func (jam *JITAccessManager) checkCurrentAccess(ctx context.Context, subjectID s
 }
 
 func (jam *JITAccessManager) determineApprovalWorkflow(ctx context.Context, request *JITAccessRequest) (*ApprovalWorkflow, error) {
-	// Default workflow - single approver
+	var (
+		workflow *ApprovalWorkflow
+		err      error
+	)
+
+	if jam.workflowProvider != nil {
+		workflow, err = jam.workflowProvider(ctx, request)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		workflow = jam.defaultApprovalWorkflow(request)
+	}
+
+	// Store the resolved workflow keyed by request ID so multi-stage approval can look it up.
+	jam.approvalWorkflows[request.ID] = workflow
+
+	return workflow, nil
+}
+
+func (jam *JITAccessManager) defaultApprovalWorkflow(request *JITAccessRequest) *ApprovalWorkflow {
 	workflow := &ApprovalWorkflow{
 		ID:   "default-approval",
 		Name: "Default Approval Workflow",
@@ -519,17 +861,15 @@ func (jam *JITAccessManager) determineApprovalWorkflow(ctx context.Context, requ
 		},
 	}
 
-	// Emergency access gets expedited workflow
 	if request.EmergencyAccess {
-		workflow.Approvers[0].TimeoutHours = 0.5 // 30 minutes
+		workflow.Approvers[0].TimeoutHours = 0.5
 	}
 
-	// High-privilege requests require multiple approvers
 	if jam.isHighPrivilegeRequest(request) {
 		workflow.Approvers[0].MinApprovals = 2
 	}
 
-	return workflow, nil
+	return workflow
 }
 
 func (jam *JITAccessManager) shouldAutoApprove(ctx context.Context, request *JITAccessRequest) bool {
@@ -657,75 +997,158 @@ func (jam *JITAccessManager) checkExtensionPermission(ctx context.Context, reque
 }
 
 func (jam *JITAccessManager) startApprovalWorkflow(ctx context.Context, request *JITAccessRequest, workflow *ApprovalWorkflow) error {
-	// Implementation would integrate with workflow engine
-	// For now, simulate by notifying first stage approvers
+	if len(workflow.Approvers) > 1 {
+		// Multi-stage: initialise WorkflowState so ApproveRequest uses the staged path.
+		stageApprovals := make(map[int]map[string]struct{}, len(workflow.Approvers))
+		for i := range workflow.Approvers {
+			stageApprovals[i] = make(map[string]struct{})
+		}
+		request.WorkflowState = &WorkflowState{
+			CurrentStage:   0,
+			StageApprovals: stageApprovals,
+		}
+	}
+
 	if len(workflow.Approvers) > 0 {
-		firstStage := workflow.Approvers[0]
-		return jam.sendApprovalNotifications(ctx, request, firstStage.Approvers)
+		return jam.sendApprovalNotifications(ctx, request, workflow.Approvers[0].Approvers)
 	}
 	return nil
 }
 
-func (jam *JITAccessManager) activateAccess(ctx context.Context, grant *JITAccessGrant) error {
-	// Zero-trust policy validation for grant activation
-	if jam.shouldEvaluateZeroTrustForGrant() {
-		ztValidationResult, err := jam.evaluateZeroTrustForJITGrant(ctx, grant)
-		if err != nil {
-			return fmt.Errorf("zero-trust policy validation for grant activation failed: %w", err)
-		}
-		if !ztValidationResult.Granted {
-			return fmt.Errorf("JIT access grant activation denied by zero-trust policies: %s", ztValidationResult.Reason)
+// validateStageApprover checks that approverID is listed in the current pending stage's
+// Approvers slice. It must be called only from the public ApproveRequest path; internal
+// approveRequest (used by auto-approval with approverID="system") is exempt.
+// Returns a distinct error from the RBAC jit_access.approve permission check so callers
+// can tell the two failure modes apart.
+func (jam *JITAccessManager) validateStageApprover(request *JITAccessRequest, approverID string) error {
+	if request.WorkflowState == nil {
+		return nil
+	}
+	workflow, exists := jam.approvalWorkflows[request.ID]
+	if !exists {
+		return nil
+	}
+	stageIdx := request.WorkflowState.CurrentStage
+	if stageIdx >= len(workflow.Approvers) {
+		return nil
+	}
+	stage := workflow.Approvers[stageIdx]
+	for _, a := range stage.Approvers {
+		if a == approverID {
+			return nil
 		}
 	}
+	return fmt.Errorf("approver %s is not a member of stage %s", approverID, stage.ID)
+}
 
-	// Update grant status
+// recordStageApproval emits a stage_approved audit event. No-op when auditManager is nil.
+func (jam *JITAccessManager) recordStageApproval(ctx context.Context, request *JITAccessRequest, stageID, approverID string) {
+	if jam.auditManager == nil {
+		return
+	}
+	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
+		request.TenantID, request.RequesterID, "jit_access", request.ID, "stage_approved",
+		business.AuditResultSuccess,
+	).Detail("stage_id", stageID).Detail("approver_id", approverID)); err != nil {
+		slog.Warn("failed to record jit stage approval audit event", "error", err)
+	}
+}
+
+// advanceWorkflowStage increments the current stage index and notifies the next stage's approvers.
+func (jam *JITAccessManager) advanceWorkflowStage(ctx context.Context, request *JITAccessRequest, workflow *ApprovalWorkflow) {
+	request.WorkflowState.CurrentStage++
+	nextIdx := request.WorkflowState.CurrentStage
+	if nextIdx < len(workflow.Approvers) {
+		_ = jam.sendApprovalNotifications(ctx, request, workflow.Approvers[nextIdx].Approvers)
+	}
+}
+
+// isWorkflowComplete reports whether the current stage is the final stage of the workflow.
+// Called before stage advancement: returns true when stageIdx+1 equals the total stage count.
+func (jam *JITAccessManager) isWorkflowComplete(request *JITAccessRequest, workflow *ApprovalWorkflow) bool {
+	if request.WorkflowState == nil {
+		return false
+	}
+	return request.WorkflowState.CurrentStage+1 >= len(workflow.Approvers)
+}
+
+// activateAccess sets the grant active and persists it to the SessionStore.
+// On nil grantStore, operates memory-only with no panic.
+func (jam *JITAccessManager) activateAccess(ctx context.Context, grant *JITAccessGrant) error {
 	now := time.Now()
 	grant.Status = JITAccessGrantStatusActive
 	grant.ActivatedAt = &now
 
-	// Note: In a full implementation, this would create temporary role assignments
-	// or integrate with the delegation system once it's exposed via the RBACManager interface
-	// For now, the grant is tracked internally and can be checked via GetActiveGrants
+	if jam.grantStore == nil {
+		return nil
+	}
+
+	session := &business.Session{
+		SessionID:    grant.ID,
+		UserID:       grant.RequesterID, // required by Session.Validate()
+		TenantID:     grant.TenantID,
+		SessionType:  business.SessionTypeJIT,
+		CreatedAt:    grant.GrantedAt,
+		LastActivity: grant.GrantedAt,
+		ExpiresAt:    grant.ExpiresAt,
+		Status:       business.SessionStatusActive,
+		Persistent:   true,
+		SessionData: &business.JITSessionData{
+			RequestID:      grant.RequestID,
+			TargetID:       grant.TargetID,
+			Permissions:    grant.Permissions,
+			Roles:          grant.Roles,
+			ResourceIDs:    grant.ResourceIDs,
+			ApprovedBy:     grant.ApprovedBy,
+			ApprovalReason: grant.ApprovalReason,
+			GrantedAt:      grant.GrantedAt,
+			ExtensionsUsed: grant.ExtensionsUsed,
+			MaxExtensions:  grant.MaxExtensions,
+		},
+	}
+
+	if err := jam.grantStore.CreateSession(ctx, session); err != nil {
+		return fmt.Errorf("failed to persist JIT grant to session store: %w", err)
+	}
 
 	return nil
 }
 
+// deactivateAccess updates the grant's in-memory state and sets the store session to
+// SessionStatusTerminated. On nil store, operates memory-only.
+// Store errors are best-effort: a connectivity failure is logged but does not fail the
+// in-memory revocation. The caller (RevokeAccess) remains authoritative; a subsequent
+// restart will reload the session from the store — callers requiring strict durability
+// should layer their own retry or saga logic.
 func (jam *JITAccessManager) deactivateAccess(ctx context.Context, grant *JITAccessGrant) error {
-	// Note: In a full implementation, this would revoke temporary role assignments
-	// or revoke delegations once the delegation system is exposed via RBACManager interface
-
-	// Update grant status
 	now := time.Now()
 	grant.Status = JITAccessGrantStatusDeactivated
 	grant.DeactivatedAt = &now
 
+	if jam.grantStore == nil {
+		return nil
+	}
+
+	session, err := jam.grantStore.GetSession(ctx, grant.ID)
+	if err != nil {
+		slog.Warn("failed to get session for deactivation", "grant_id", grant.ID, "error", err)
+		return nil
+	}
+
+	session.Status = business.SessionStatusTerminated
+	modAt := time.Now()
+	session.ModifiedAt = &modAt
+
+	if err := jam.grantStore.UpdateSession(ctx, grant.ID, session); err != nil {
+		slog.Warn("failed to update session to terminated", "grant_id", grant.ID, "error", err)
+	}
+
 	return nil
 }
 
-func (jam *JITAccessManager) scheduleDeactivation(ctx context.Context, grant *JITAccessGrant) {
-	// In a real implementation, this would schedule a background job
-	// For now, we'll implement a simple goroutine
-	go func() {
-		// Read ExpiresAt under mutex protection to avoid race condition
-		jam.mutex.RLock()
-		expiresAt := grant.ExpiresAt
-		jam.mutex.RUnlock()
-
-		duration := time.Until(expiresAt)
-		if duration > 0 {
-			time.Sleep(duration)
-
-			// Check if grant is still active
-			jam.mutex.Lock()
-			currentGrant, exists := jam.activeGrants[grant.ID]
-			if exists && currentGrant.Status == JITAccessGrantStatusActive {
-				_ = jam.deactivateAccess(context.Background(), currentGrant)
-				currentGrant.Status = JITAccessGrantStatusExpired
-			}
-			jam.mutex.Unlock()
-		}
-	}()
-}
+// scheduleDeactivation is intentionally a no-op. The central ticker loop (started via Start)
+// calls CleanupExpiredGrants on a configurable interval to handle expiry for all grants.
+func (jam *JITAccessManager) scheduleDeactivation(_ context.Context, _ *JITAccessGrant) {}
 
 func (jam *JITAccessManager) sendNotifications(ctx context.Context, request *JITAccessRequest, eventType string) error {
 	if jam.notificationService != nil {
@@ -755,232 +1178,27 @@ func (jam *JITAccessManager) sendRevocationNotifications(ctx context.Context, gr
 	return nil
 }
 
-// Zero-trust policy evaluation methods
-
-// shouldEvaluateZeroTrustForRequest determines if zero-trust evaluation is needed for request creation
-func (jam *JITAccessManager) shouldEvaluateZeroTrustForRequest() bool {
-	return jam.zeroTrustEnabled && jam.zeroTrustEngine != nil &&
-		(jam.zeroTrustMode == ZeroTrustJITModeRequestValidation || jam.zeroTrustMode == ZeroTrustJITModeComprehensive)
-}
-
-// shouldEvaluateZeroTrustForApproval determines if zero-trust evaluation is needed for approval gating
-func (jam *JITAccessManager) shouldEvaluateZeroTrustForApproval() bool {
-	return jam.zeroTrustEnabled && jam.zeroTrustEngine != nil &&
-		(jam.zeroTrustMode == ZeroTrustJITModeApprovalGating || jam.zeroTrustMode == ZeroTrustJITModeComprehensive)
-}
-
-// shouldEvaluateZeroTrustForGrant determines if zero-trust evaluation is needed for grant activation
-func (jam *JITAccessManager) shouldEvaluateZeroTrustForGrant() bool {
-	return jam.zeroTrustEnabled && jam.zeroTrustEngine != nil &&
-		(jam.zeroTrustMode == ZeroTrustJITModeGrantValidation || jam.zeroTrustMode == ZeroTrustJITModeComprehensive)
-}
-
-// evaluateZeroTrustForJITRequest evaluates zero-trust policies for JIT access request creation
-func (jam *JITAccessManager) evaluateZeroTrustForJITRequest(ctx context.Context, req *JITAccessRequestSpec) (*zerotrust.ZeroTrustAccessResponse, error) {
-	// Convert JIT request to access request for zero-trust evaluation
-	accessRequest := jam.convertJITRequestToAccessRequest(req)
-
-	// Create zero-trust request with JIT-specific context
-	zeroTrustRequest := &zerotrust.ZeroTrustAccessRequest{
-		AccessRequest: accessRequest,
-		RequestID:     fmt.Sprintf("jit-request-%d", time.Now().UnixNano()),
-		RequestTime:   time.Now(),
-		SubjectType:   zerotrust.SubjectTypeUser,
-		ResourceType:  "jit_access",
-		SourceSystem:  "jit-access-manager",
-		RequestSource: zerotrust.RequestSourceUI,
-		Priority:      jam.determineZeroTrustPriority(req),
+// extractJITSessionData converts session.SessionData to *business.JITSessionData.
+// Returns the extracted data and true on success, or an empty struct and false on failure.
+// Handles both direct pointer and the map[string]interface{} form produced by JSON round-trips.
+func extractJITSessionData(session *business.Session) (*business.JITSessionData, bool) {
+	if session.SessionData == nil {
+		return &business.JITSessionData{}, false
 	}
-
-	// Set JIT-specific context in subject attributes
-	zeroTrustRequest.SubjectAttributes = map[string]interface{}{
-		"request_type":     "jit_access_request",
-		"requested_for":    req.RequestedFor,
-		"duration":         req.Duration.String(),
-		"justification":    req.Justification,
-		"emergency_access": req.EmergencyAccess,
-		"auto_approve":     req.AutoApprove,
+	switch v := session.SessionData.(type) {
+	case *business.JITSessionData:
+		return v, true
+	case map[string]interface{}:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return &business.JITSessionData{}, false
+		}
+		var jd business.JITSessionData
+		if err := json.Unmarshal(b, &jd); err != nil {
+			return &business.JITSessionData{}, false
+		}
+		return &jd, true
+	default:
+		return &business.JITSessionData{}, false
 	}
-
-	// Evaluate with zero-trust engine
-	return jam.zeroTrustEngine.EvaluateAccess(ctx, zeroTrustRequest)
-}
-
-// evaluateZeroTrustForJITApproval evaluates zero-trust policies for JIT access approval
-func (jam *JITAccessManager) evaluateZeroTrustForJITApproval(ctx context.Context, request *JITAccessRequest, approverID string) (*zerotrust.ZeroTrustAccessResponse, error) {
-	// Convert JIT request to access request for zero-trust evaluation
-	accessRequest := jam.convertJITRequestToAccessRequestFromRequest(request)
-
-	// Create zero-trust request with approval-specific context
-	zeroTrustRequest := &zerotrust.ZeroTrustAccessRequest{
-		AccessRequest: accessRequest,
-		RequestID:     fmt.Sprintf("jit-approval-%s", request.ID),
-		RequestTime:   time.Now(),
-		SubjectType:   zerotrust.SubjectTypeUser,
-		ResourceType:  "jit_access",
-		SourceSystem:  "jit-access-manager",
-		RequestSource: zerotrust.RequestSourceSystem, // Approval is system-initiated
-		Priority:      jam.determineZeroTrustPriorityFromRequest(request),
-	}
-
-	// Set JIT approval-specific context in subject attributes
-	zeroTrustRequest.SubjectAttributes = map[string]interface{}{
-		"request_type":     "jit_access_approval",
-		"requested_for":    request.RequestedFor,
-		"duration":         request.Duration.String(),
-		"justification":    request.Justification,
-		"emergency_access": request.EmergencyAccess,
-		"auto_approve":     request.AutoApprove,
-		"approver_id":      approverID,
-	}
-
-	// Evaluate with zero-trust engine
-	return jam.zeroTrustEngine.EvaluateAccess(ctx, zeroTrustRequest)
-}
-
-// evaluateZeroTrustForJITGrant evaluates zero-trust policies for JIT access grant activation
-func (jam *JITAccessManager) evaluateZeroTrustForJITGrant(ctx context.Context, grant *JITAccessGrant) (*zerotrust.ZeroTrustAccessResponse, error) {
-	// Get the original request to extract context
-	originalRequest := jam.requests[grant.RequestID]
-	if originalRequest == nil {
-		return nil, fmt.Errorf("original request %s not found for grant %s", grant.RequestID, grant.ID)
-	}
-
-	// Convert grant to access request for zero-trust evaluation
-	accessRequest := jam.convertJITGrantToAccessRequest(grant)
-
-	// Create zero-trust request with grant-specific context
-	zeroTrustRequest := &zerotrust.ZeroTrustAccessRequest{
-		AccessRequest: accessRequest,
-		RequestID:     fmt.Sprintf("jit-grant-%s", grant.ID),
-		RequestTime:   time.Now(),
-		SubjectType:   zerotrust.SubjectTypeUser,
-		ResourceType:  "jit_access",
-		SourceSystem:  "jit-access-manager",
-		RequestSource: zerotrust.RequestSourceSystem, // Grant activation is system-initiated
-		Priority:      jam.determineZeroTrustPriorityFromRequest(originalRequest),
-	}
-
-	// Set JIT grant-specific context in subject attributes
-	zeroTrustRequest.SubjectAttributes = map[string]interface{}{
-		"request_type":     "jit_access_grant",
-		"requested_for":    originalRequest.RequestedFor, // Use from original request
-		"duration":         time.Until(grant.ExpiresAt).String(),
-		"justification":    originalRequest.Justification,
-		"emergency_access": originalRequest.EmergencyAccess,
-		"auto_approve":     originalRequest.AutoApprove,
-		"approver_id":      grant.ApprovedBy,
-		"grant_id":         grant.ID,
-	}
-
-	// Evaluate with zero-trust engine
-	return jam.zeroTrustEngine.EvaluateAccess(ctx, zeroTrustRequest)
-}
-
-// Helper methods for zero-trust request conversion
-
-func (jam *JITAccessManager) convertJITRequestToAccessRequest(req *JITAccessRequestSpec) *common.AccessRequest {
-	// Convert the first permission as the primary permission
-	permissionID := ""
-	if len(req.Permissions) > 0 {
-		permissionID = req.Permissions[0]
-	}
-
-	// Convert resource IDs to a single resource (take first or empty)
-	resourceID := ""
-	if len(req.ResourceIDs) > 0 {
-		resourceID = req.ResourceIDs[0]
-	}
-
-	return &common.AccessRequest{
-		SubjectId:    req.RequesterID,
-		PermissionId: permissionID,
-		ResourceId:   resourceID,
-		TenantId:     req.TenantID,
-		Context: map[string]string{
-			"access_type":   "jit",
-			"target_id":     req.TargetID,
-			"duration":      req.Duration.String(),
-			"justification": req.Justification,
-			"emergency":     fmt.Sprintf("%v", req.EmergencyAccess),
-		},
-	}
-}
-
-func (jam *JITAccessManager) convertJITRequestToAccessRequestFromRequest(request *JITAccessRequest) *common.AccessRequest {
-	// Convert the first permission as the primary permission
-	permissionID := ""
-	if len(request.Permissions) > 0 {
-		permissionID = request.Permissions[0]
-	}
-
-	// Convert resource IDs to a single resource (take first or empty)
-	resourceID := ""
-	if len(request.ResourceIDs) > 0 {
-		resourceID = request.ResourceIDs[0]
-	}
-
-	return &common.AccessRequest{
-		SubjectId:    request.RequesterID,
-		PermissionId: permissionID,
-		ResourceId:   resourceID,
-		TenantId:     request.TenantID,
-		Context: map[string]string{
-			"access_type":   "jit",
-			"target_id":     request.TargetID,
-			"duration":      request.Duration.String(),
-			"justification": request.Justification,
-			"emergency":     fmt.Sprintf("%v", request.EmergencyAccess),
-			"request_id":    request.ID,
-		},
-	}
-}
-
-func (jam *JITAccessManager) convertJITGrantToAccessRequest(grant *JITAccessGrant) *common.AccessRequest {
-	// Convert the first permission as the primary permission
-	permissionID := ""
-	if len(grant.Permissions) > 0 {
-		permissionID = grant.Permissions[0]
-	}
-
-	// Convert resource IDs to a single resource (take first or empty)
-	resourceID := ""
-	if len(grant.ResourceIDs) > 0 {
-		resourceID = grant.ResourceIDs[0]
-	}
-
-	return &common.AccessRequest{
-		SubjectId:    grant.RequesterID,
-		PermissionId: permissionID,
-		ResourceId:   resourceID,
-		TenantId:     grant.TenantID,
-		Context: map[string]string{
-			"access_type":     "jit",
-			"target_id":       grant.TargetID,
-			"duration":        time.Until(grant.ExpiresAt).String(),
-			"approval_reason": grant.ApprovalReason,
-			"approved_by":     grant.ApprovedBy,
-			"grant_id":        grant.ID,
-		},
-	}
-}
-
-func (jam *JITAccessManager) determineZeroTrustPriority(req *JITAccessRequestSpec) zerotrust.RequestPriority {
-	if req.EmergencyAccess {
-		return zerotrust.RequestPriorityHigh
-	}
-	if req.Duration > 4*time.Hour {
-		return zerotrust.RequestPriorityNormal
-	}
-	return zerotrust.RequestPriorityLow
-}
-
-func (jam *JITAccessManager) determineZeroTrustPriorityFromRequest(request *JITAccessRequest) zerotrust.RequestPriority {
-	if request.EmergencyAccess {
-		return zerotrust.RequestPriorityHigh
-	}
-	if request.Duration > 4*time.Hour {
-		return zerotrust.RequestPriorityNormal
-	}
-	return zerotrust.RequestPriorityLow
 }

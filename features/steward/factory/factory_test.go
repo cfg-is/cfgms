@@ -1,33 +1,23 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package factory
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/features/modules/file"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
+	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
-
-// mockModule implements the Module interface for testing
-type mockModule struct {
-	mock.Mock
-}
-
-func (m *mockModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
-	args := m.Called(ctx, resourceID)
-	return args.Get(0).(modules.ConfigState), args.Error(1)
-}
-
-func (m *mockModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
-	args := m.Called(ctx, resourceID, config)
-	return args.Error(0)
-}
 
 func TestNew(t *testing.T) {
 	registry := discovery.ModuleRegistry{
@@ -42,7 +32,7 @@ func TestNew(t *testing.T) {
 		ModuleLoadFailure: config.ActionFail,
 	}
 
-	factory := New(registry, errorConfig)
+	factory := New(registry, errorConfig, logging.NewNoopLogger())
 
 	assert.NotNil(t, factory)
 	assert.Equal(t, registry, factory.registry)
@@ -52,7 +42,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestValidateModuleInterface(t *testing.T) {
-	factory := &ModuleFactory{}
+	f := &ModuleFactory{}
 
 	tests := []struct {
 		name    string
@@ -61,7 +51,7 @@ func TestValidateModuleInterface(t *testing.T) {
 	}{
 		{
 			name:    "valid module interface",
-			module:  &mockModule{},
+			module:  file.New(),
 			wantErr: false,
 		},
 		{
@@ -78,7 +68,7 @@ func TestValidateModuleInterface(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := factory.ValidateModuleInterface(tt.module)
+			err := f.ValidateModuleInterface(tt.module)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -122,6 +112,14 @@ func TestCreateModuleInstance(t *testing.T) {
 			expectModule: false,
 			expectErr:    false,
 		},
+		{
+			name:         "built-in file module loads successfully",
+			moduleName:   "file",
+			registry:     discovery.ModuleRegistry{},
+			errorAction:  config.ActionFail,
+			expectModule: true,
+			expectErr:    false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -130,7 +128,7 @@ func TestCreateModuleInstance(t *testing.T) {
 				ModuleLoadFailure: tt.errorAction,
 			}
 
-			factory := New(tt.registry, errorConfig)
+			factory := New(tt.registry, errorConfig, logging.NewNoopLogger())
 
 			module, err := factory.CreateModuleInstance(tt.moduleName)
 
@@ -152,48 +150,50 @@ func TestCreateModuleInstance(t *testing.T) {
 func TestGetLoadedModules(t *testing.T) {
 	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{}
-	factory := New(registry, errorConfig)
+	factory := New(registry, errorConfig, logging.NewNoopLogger())
 
 	// Initially empty
-	modules := factory.GetLoadedModules()
-	assert.Len(t, modules, 0)
+	loaded := factory.GetLoadedModules()
+	assert.Len(t, loaded, 0)
 
-	// Add some instances manually for testing
-	factory.instances["module1"] = &mockModule{}
-	factory.instances["module2"] = &mockModule{}
+	// Load real built-in modules via the factory
+	_, err := factory.LoadModule("file")
+	assert.NoError(t, err)
+	_, err = factory.LoadModule("directory")
+	assert.NoError(t, err)
 
-	modules = factory.GetLoadedModules()
-	assert.Len(t, modules, 2)
-	assert.Contains(t, modules, "module1")
-	assert.Contains(t, modules, "module2")
+	loaded = factory.GetLoadedModules()
+	assert.Len(t, loaded, 2)
+	assert.Contains(t, loaded, "file")
+	assert.Contains(t, loaded, "directory")
 }
 
 func TestUnloadModule(t *testing.T) {
 	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{}
-	factory := New(registry, errorConfig)
+	factory := New(registry, errorConfig, logging.NewNoopLogger())
 
-	// Add module instance
-	factory.instances["test-module"] = &mockModule{}
+	// Load a real module
+	_, err := factory.LoadModule("file")
+	assert.NoError(t, err)
 	assert.Len(t, factory.instances, 1)
 
-	// Unload module
-	factory.UnloadModule("test-module")
+	factory.UnloadModule("file")
 	assert.Len(t, factory.instances, 0)
 }
 
 func TestUnloadAllModules(t *testing.T) {
 	registry := discovery.ModuleRegistry{}
 	errorConfig := config.ErrorHandlingConfig{}
-	factory := New(registry, errorConfig)
+	factory := New(registry, errorConfig, logging.NewNoopLogger())
 
-	// Add multiple module instances
-	factory.instances["module1"] = &mockModule{}
-	factory.instances["module2"] = &mockModule{}
-	factory.instances["module3"] = &mockModule{}
+	// Load multiple real built-in modules
+	for _, name := range []string{"file", "directory", "script"} {
+		_, err := factory.LoadModule(name)
+		assert.NoError(t, err)
+	}
 	assert.Len(t, factory.instances, 3)
 
-	// Unload all modules
 	factory.UnloadAllModules()
 	assert.Len(t, factory.instances, 0)
 }
@@ -210,7 +210,7 @@ func TestGetModuleInfo(t *testing.T) {
 	}
 
 	errorConfig := config.ErrorHandlingConfig{}
-	factory := New(registry, errorConfig)
+	factory := New(registry, errorConfig, logging.NewNoopLogger())
 
 	// Test existing module
 	info, exists := factory.GetModuleInfo("test-module")
@@ -220,4 +220,83 @@ func TestGetModuleInfo(t *testing.T) {
 	// Test non-existent module
 	_, exists = factory.GetModuleInfo("non-existent")
 	assert.False(t, exists)
+}
+
+func TestAllSevenBuiltinModulesLoad(t *testing.T) {
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+	for _, name := range []string{"acme", "directory", "file", "firewall", "package", "patch", "script"} {
+		mod, err := factory.LoadModule(name)
+		assert.NoError(t, err, "built-in module %q must load without error", name)
+		assert.NotNil(t, mod, "built-in module %q must not be nil", name)
+	}
+}
+
+// stubFailingSecretStoreModule implements modules.Module and modules.SecretStoreInjectable.
+// SetSecretStore always returns an error to exercise the warning-log path in attemptSecretStoreInjection.
+type stubFailingSecretStoreModule struct{}
+
+func (s *stubFailingSecretStoreModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return nil, nil
+}
+
+func (s *stubFailingSecretStoreModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+func (s *stubFailingSecretStoreModule) SetSecretStore(_ secretsif.SecretStore) error {
+	return errors.New("injection always fails")
+}
+
+func (s *stubFailingSecretStoreModule) GetSecretStore() (secretsif.SecretStore, bool) {
+	return nil, false
+}
+
+// stubSecretStore is a no-op SecretStore that satisfies the interface so the
+// factory's nil-guard does not short-circuit before reaching SetSecretStore.
+type stubSecretStore struct{}
+
+func (s *stubSecretStore) StoreSecret(_ context.Context, _ *secretsif.SecretRequest) error {
+	return nil
+}
+func (s *stubSecretStore) GetSecret(_ context.Context, _ string) (*secretsif.Secret, error) {
+	return nil, nil
+}
+func (s *stubSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
+func (s *stubSecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *stubSecretStore) GetSecrets(_ context.Context, _ []string) (map[string]*secretsif.Secret, error) {
+	return nil, nil
+}
+func (s *stubSecretStore) StoreSecrets(_ context.Context, _ map[string]*secretsif.SecretRequest) error {
+	return nil
+}
+func (s *stubSecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsif.Secret, error) {
+	return nil, nil
+}
+func (s *stubSecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsif.SecretVersion, error) {
+	return nil, nil
+}
+func (s *stubSecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsif.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *stubSecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+func (s *stubSecretStore) RotateSecret(_ context.Context, _ string, _ string) error { return nil }
+func (s *stubSecretStore) ExpireSecret(_ context.Context, _ string) error           { return nil }
+func (s *stubSecretStore) HealthCheck(_ context.Context) error                      { return nil }
+func (s *stubSecretStore) Close() error                                             { return nil }
+
+func TestModuleFactory_injectSecretStore_logsWarning(t *testing.T) {
+	mock := pkgtesting.NewMockLogger(true)
+	f := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{}, mock)
+	f.secretStore = &stubSecretStore{}
+
+	mod := &stubFailingSecretStoreModule{}
+	f.attemptSecretStoreInjection(mod, "test-module")
+
+	warnLogs := mock.GetLogs("warn")
+	require.Len(t, warnLogs, 1)
+	assert.Equal(t, "failed to inject secret store into module", warnLogs[0].Message)
 }

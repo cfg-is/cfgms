@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package service
 
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,21 +13,82 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/rbac"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-
-	// Import storage providers for testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-func TestRBACService_Integration(t *testing.T) {
-	// Setup RBAC manager and service with git storage
-	config := map[string]interface{}{
-		"repository_path": t.TempDir(),
-		"branch":          "main",
-		"auto_init":       true,
+func TestRBACService_ConvertToProtoHierarchy_Roundtrip(t *testing.T) {
+	s := &RBACService{}
+
+	parent := &rbac.RoleHierarchy{
+		Role:  &common.Role{Id: "parent-role", Name: "Parent Role"},
+		Depth: 1,
 	}
-	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
-	require.NoError(t, err)
+	// Real store assigns Depth: -1 to descendants; converter bounds-checks and clamps it to 0.
+	child := &rbac.RoleHierarchy{
+		Role:  &common.Role{Id: "child-role", Name: "Child Role"},
+		Depth: -1,
+	}
+	hierarchy := &rbac.RoleHierarchy{
+		Role:     &common.Role{Id: "root-role", Name: "Root Role"},
+		Parent:   parent,
+		Children: []*rbac.RoleHierarchy{child},
+		Depth:    0,
+	}
+
+	proto := s.convertToProtoHierarchy(hierarchy)
+
+	require.NotNil(t, proto)
+	assert.Equal(t, "root-role", proto.Role.Id)
+	assert.Equal(t, int32(0), proto.Depth)
+	require.NotNil(t, proto.Parent)
+	assert.Equal(t, "parent-role", proto.Parent.Role.Id)
+	assert.Equal(t, int32(1), proto.Parent.Depth)
+	require.Len(t, proto.Children, 1)
+	assert.Equal(t, "child-role", proto.Children[0].Role.Id)
+	assert.Equal(t, int32(0), proto.Children[0].Depth) // -1 clamped to 0
+}
+
+func TestRBACService_ConvertToProtoHierarchy_Nil(t *testing.T) {
+	s := &RBACService{}
+	assert.Nil(t, s.convertToProtoHierarchy(nil))
+}
+
+func TestRBACService_ConvertToProtoEffectivePermissions(t *testing.T) {
+	s := &RBACService{}
+
+	computedAt := time.Unix(1234567890, 0)
+	directPerm := &common.Permission{Id: "perm.read", Name: "Read"}
+	inheritedPerm := &common.Permission{Id: "perm.write", Name: "Write"}
+
+	effectivePerms := &rbac.EffectivePermissions{
+		RoleID:            "role-123",
+		DirectPermissions: []*common.Permission{directPerm},
+		InheritedPermissions: map[string][]*common.Permission{
+			"parent-role": {inheritedPerm},
+		},
+		ComputedAt: computedAt,
+	}
+
+	proto := s.convertToProtoEffectivePermissions(effectivePerms)
+
+	require.NotNil(t, proto)
+	assert.Equal(t, "role-123", proto.RoleId)
+	require.Len(t, proto.DirectPermissions, 1)
+	assert.Equal(t, "perm.read", proto.DirectPermissions[0].Id)
+	require.Contains(t, proto.InheritedPermissions, "parent-role")
+	require.Len(t, proto.InheritedPermissions["parent-role"].Permissions, 1)
+	assert.Equal(t, "perm.write", proto.InheritedPermissions["parent-role"].Permissions[0].Id)
+	assert.Equal(t, computedAt.Unix(), proto.ComputedAt)
+}
+
+func TestRBACService_ConvertToProtoEffectivePermissions_Nil(t *testing.T) {
+	s := &RBACService{}
+	assert.Nil(t, s.convertToProtoEffectivePermissions(nil))
+}
+
+func TestRBACService_Integration(t *testing.T) {
+	// Setup RBAC manager and service with OSS composite storage
+	storageManager := pkgtesting.SetupTestStorage(t)
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
@@ -34,9 +96,17 @@ func TestRBACService_Integration(t *testing.T) {
 		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
+	// M-AUTH-2: inject justification so sensitive RBAC operations pass the gate
+	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: RBAC service integration")
 
-	err = rbacManager.Initialize(ctx)
+	err := rbacManager.Initialize(ctx)
 	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.FlushAudit(flushCtx)
+	})
 
 	tenantID := "test-tenant"
 	err = rbacManager.CreateTenantDefaultRoles(ctx, tenantID)

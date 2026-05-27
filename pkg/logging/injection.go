@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package logging - Dependency injection mechanisms for module logging integration
 package logging
@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
 
@@ -304,7 +305,7 @@ func WithSession(ctx context.Context, sessionID string) context.Context {
 
 // WithCorrelation adds correlation ID to context for downstream logging
 func WithCorrelation(ctx context.Context, correlationID string) context.Context {
-	return context.WithValue(ctx, correlationIDKey{}, correlationID)
+	return context.WithValue(ctx, ctxkeys.CorrelationIDKey, correlationID)
 }
 
 // WithOperation adds operation context for structured logging

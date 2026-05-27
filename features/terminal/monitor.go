@@ -1,14 +1,112 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package terminal
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
+
+// SessionAuditStore provides access to historical session data for baseline metric derivation.
+type SessionAuditStore interface {
+	// GetRecentSessions returns the most recent limit closed sessions for userID, ordered
+	// newest-first. A limit of 0 or less returns all matching records.
+	GetRecentSessions(ctx context.Context, userID string, limit int) ([]SessionAuditRecord, error)
+}
+
+// SessionAuditRecord captures the per-session fields needed to compute baseline metrics.
+type SessionAuditRecord struct {
+	UserID     string
+	StartedAt  time.Time
+	EndedAt    *time.Time
+	EventCount int64
+}
+
+// SessionMonitorOption is a functional option for NewSessionMonitor.
+type SessionMonitorOption func(*SessionMonitor)
+
+// WithAuditStore wires an audit store into the monitor so that getBaselineMetrics
+// can derive per-user baselines from real historical session data.
+func WithAuditStore(store SessionAuditStore) SessionMonitorOption {
+	return func(sm *SessionMonitor) {
+		sm.auditStore = store
+	}
+}
+
+// RecordingMetaAuditStore implements SessionAuditStore by reading the .rec.meta
+// JSON files written by DefaultSessionRecorder.
+type RecordingMetaAuditStore struct {
+	storagePath string
+}
+
+// NewRecordingMetaAuditStore returns a RecordingMetaAuditStore backed by storagePath.
+func NewRecordingMetaAuditStore(storagePath string) *RecordingMetaAuditStore {
+	return &RecordingMetaAuditStore{storagePath: storagePath}
+}
+
+// GetRecentSessions scans the recording directory for .rec.meta files belonging to
+// userID, sorts them newest-first, and trims to limit.
+func (s *RecordingMetaAuditStore) GetRecentSessions(ctx context.Context, userID string, limit int) ([]SessionAuditRecord, error) {
+	entries, err := os.ReadDir(s.storagePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read recording directory: %w", err)
+	}
+
+	var records []SessionAuditRecord
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".rec.meta") {
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		metaPath := filepath.Join(s.storagePath, entry.Name())
+		data, readErr := os.ReadFile(metaPath) // #nosec G304 — path derived from os.ReadDir, not user input
+		if readErr != nil {
+			continue
+		}
+
+		var meta recordingMeta
+		if jsonErr := json.Unmarshal(data, &meta); jsonErr != nil {
+			continue
+		}
+
+		if meta.UserID != userID {
+			continue
+		}
+
+		records = append(records, SessionAuditRecord{
+			UserID:     meta.UserID,
+			StartedAt:  meta.StartedAt,
+			EndedAt:    meta.EndedAt,
+			EventCount: meta.EventCount,
+		})
+	}
+
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].StartedAt.After(records[j].StartedAt)
+	})
+
+	if limit > 0 && len(records) > limit {
+		records = records[:limit]
+	}
+
+	return records, nil
+}
 
 // SessionMonitor provides real-time monitoring and control of terminal sessions
 type SessionMonitor struct {
@@ -21,6 +119,9 @@ type SessionMonitor struct {
 
 	// Monitoring configuration
 	config *MonitorConfig
+
+	// Audit store for historical baseline derivation
+	auditStore SessionAuditStore
 
 	// Control channels
 	stopChannel chan struct{}
@@ -163,13 +264,15 @@ type MonitorConfig struct {
 	AlertOnAnomalousPatterns   bool `json:"alert_on_anomalous_patterns"`
 }
 
-// NewSessionMonitor creates a new session monitor with the given configuration
-func NewSessionMonitor(validator *SecurityValidator, config *MonitorConfig) *SessionMonitor {
+// NewSessionMonitor creates a new session monitor with the given configuration.
+// Optional SessionMonitorOption values (e.g. WithAuditStore) may be supplied to
+// extend behaviour without changing the core signature.
+func NewSessionMonitor(validator *SecurityValidator, config *MonitorConfig, opts ...SessionMonitorOption) *SessionMonitor {
 	if config == nil {
 		config = DefaultMonitorConfig()
 	}
 
-	return &SessionMonitor{
+	sm := &SessionMonitor{
 		sessions:          make(map[string]*MonitoredSession),
 		securityValidator: validator,
 		auditChannel:      make(chan *CommandAuditEvent, 1000),
@@ -178,6 +281,12 @@ func NewSessionMonitor(validator *SecurityValidator, config *MonitorConfig) *Ses
 		stopChannel:       make(chan struct{}),
 		terminated:        make(chan struct{}),
 	}
+
+	for _, opt := range opts {
+		opt(sm)
+	}
+
+	return sm
 }
 
 // Start begins monitoring sessions
@@ -209,7 +318,7 @@ func (sm *SessionMonitor) AddSession(session *Session, securityContext *SessionS
 		sessionID: session.ID,
 		startTime: time.Now(),
 		anomalyDetector: &AnomalyDetector{
-			baselineMetrics: sm.getBaselineMetrics(securityContext.UserID),
+			baselineMetrics: sm.getBaselineMetrics(context.Background(), securityContext.UserID),
 			anomalyRules:    sm.getAnomalyRules(),
 		},
 	}
@@ -562,13 +671,86 @@ func (sm *SessionMonitor) isPrivilegedCommand(command string) bool {
 	return false
 }
 
-func (sm *SessionMonitor) getBaselineMetrics(userID string) BaselineMetrics {
-	// In a real implementation, this would load from historical data
+func (sm *SessionMonitor) getBaselineMetrics(ctx context.Context, userID string) BaselineMetrics {
+	if sm.auditStore == nil {
+		return conservativeBaselineDefaults()
+	}
+
+	records, err := sm.auditStore.GetRecentSessions(ctx, userID, 20)
+	if err != nil || len(records) == 0 {
+		return conservativeBaselineDefaults()
+	}
+
+	return deriveBaselineFromRecords(records)
+}
+
+// conservativeBaselineDefaults returns low-activity bounds used when no historical
+// session data is available. Conservative means tighter thresholds so that anomaly
+// detection fires earlier rather than later.
+func conservativeBaselineDefaults() BaselineMetrics {
 	return BaselineMetrics{
-		AvgCommandRate:     10.0, // 10 commands per minute
-		AvgSessionDuration: 30 * time.Minute,
-		CommonCommands:     map[string]int{"ls": 50, "cd": 30, "cat": 20},
-		TypicalHours:       []int{9, 10, 11, 14, 15, 16},
+		AvgCommandRate:     1.0,
+		AvgSessionDuration: 15 * time.Minute,
+		CommonCommands:     map[string]int{},
+		TypicalHours:       []int{9, 10, 11, 12, 13, 14, 15, 16, 17},
+	}
+}
+
+// deriveBaselineFromRecords computes baseline metrics from completed historical sessions.
+// Sessions without an EndedAt timestamp are excluded from rate and duration calculations.
+// If no sessions have both a start and end time, conservative defaults are returned.
+func deriveBaselineFromRecords(records []SessionAuditRecord) BaselineMetrics {
+	var completedCount int
+	var totalDuration time.Duration
+	var totalEventRate float64
+	hourCounts := make(map[int]int, 24)
+
+	for _, r := range records {
+		hourCounts[r.StartedAt.Hour()]++
+
+		if r.EndedAt == nil || !r.EndedAt.After(r.StartedAt) {
+			continue
+		}
+
+		dur := r.EndedAt.Sub(r.StartedAt)
+		totalDuration += dur
+		completedCount++
+
+		mins := dur.Minutes()
+		if mins > 0 {
+			totalEventRate += float64(r.EventCount) / mins
+		}
+	}
+
+	if completedCount == 0 {
+		return conservativeBaselineDefaults()
+	}
+
+	avgDuration := totalDuration / time.Duration(completedCount)
+	avgRate := totalEventRate / float64(completedCount)
+
+	// Hours seen in more than 20% of all sampled sessions are considered typical.
+	// Strictly greater-than ensures a session at exactly the 20% boundary is not
+	// counted as established behaviour.
+	threshold := len(records) / 5
+	if threshold < 1 {
+		threshold = 1
+	}
+	var typicalHours []int
+	for h := 0; h < 24; h++ {
+		if hourCounts[h] > threshold {
+			typicalHours = append(typicalHours, h)
+		}
+	}
+	if len(typicalHours) == 0 {
+		typicalHours = []int{9, 10, 11, 12, 13, 14, 15, 16, 17}
+	}
+
+	return BaselineMetrics{
+		AvgCommandRate:     avgRate,
+		AvgSessionDuration: avgDuration,
+		CommonCommands:     map[string]int{},
+		TypicalHours:       typicalHours,
 	}
 }
 

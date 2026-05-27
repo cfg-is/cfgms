@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 package provider
 
@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
-	"github.com/cfgis/cfgms/features/steward/dna/drift"
-	"github.com/cfgis/cfgms/features/steward/dna/storage"
+	"github.com/cfgis/cfgms/pkg/dna/drift"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -54,7 +54,7 @@ func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuer
 
 			historyResult, err := p.storageManager.GetHistory(ctx, deviceID, options)
 			if err != nil {
-				p.logger.Warn("failed to get DNA history for device", "device_id", deviceID, "error", err)
+				p.logger.Warn("failed to get DNA history for device", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
 				continue
 			}
 
@@ -63,29 +63,29 @@ func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuer
 			}
 		}
 	} else {
-		// For queries without specific devices, we'd need a different approach
-		// This would require additional methods in the storage manager
-		p.logger.Debug("querying all devices not implemented, returning empty results")
+		// Design decision: querying all devices requires a fleet listing API not yet
+		// exposed by storage.Manager. Pass explicit DeviceIDs in DataQuery for device-scoped
+		// reports; tenant-scoped listing is tracked in a separate issue.
+		p.logger.Debug("all-device query not supported; pass explicit DeviceIDs",
+			"tenant_count", len(query.TenantIDs))
 	}
 
 	p.logger.Debug("retrieved DNA records",
 		"count", len(allRecords),
-		"time_range", fmt.Sprintf("%v to %v", query.TimeRange.Start, query.TimeRange.End),
+		"time_range", logging.SanitizeLogValue(fmt.Sprintf("%v to %v", query.TimeRange.Start, query.TimeRange.End)),
 		"devices", len(query.DeviceIDs))
 
 	return allRecords, nil
 }
 
-// GetDriftEvents retrieves drift events based on the query parameters
+// GetDriftEvents retrieves drift events based on the query parameters.
+//
+// Design decision: drift events are not persisted; this method returns empty until
+// a drift store ships. The drift package generates events in-memory from DNA comparisons
+// but has no historical query interface.
 func (p *DataProvider) GetDriftEvents(ctx context.Context, query interfaces.DataQuery) ([]drift.DriftEvent, error) {
-	// For now, the drift detection system doesn't have a direct historical query interface.
-	// In a full implementation, we would need to add event storage and querying to the drift package.
-	// This is a limitation that would need to be addressed in the drift detection system.
-
-	p.logger.Debug("drift event querying not fully implemented - returning empty results",
-		"time_range", fmt.Sprintf("%v to %v", query.TimeRange.Start, query.TimeRange.End))
-
-	// Return empty slice for now
+	p.logger.Debug("drift event historical querying unavailable; no drift store exists yet",
+		"time_range", logging.SanitizeLogValue(fmt.Sprintf("%v to %v", query.TimeRange.Start, query.TimeRange.End)))
 	return []drift.DriftEvent{}, nil
 }
 
@@ -120,7 +120,7 @@ func (p *DataProvider) GetDeviceStats(ctx context.Context, deviceIDs []string, t
 	for _, deviceID := range deviceIDs {
 		deviceStats, err := p.calculateDeviceStats(ctx, deviceID, timeRange)
 		if err != nil {
-			p.logger.Warn("failed to calculate stats for device", "device_id", deviceID, "error", err)
+			p.logger.Warn("failed to calculate stats for device", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
 			continue
 		}
 		stats[deviceID] = deviceStats
@@ -386,6 +386,3 @@ func (p *DataProvider) findTimeBucket(timestamp time.Time, buckets []time.Time) 
 
 	return timestamp.Truncate(24 * time.Hour)
 }
-
-// getDriftEvents is a placeholder for getting drift events
-// The drift detection system currently doesn't expose historical event querying

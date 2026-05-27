@@ -31,8 +31,6 @@ linters-settings:
       main:
         deny:
           # BLOCK: Direct storage provider imports (must use interfaces)
-          - pkg: "github.com/cfgis/cfgms/pkg/storage/providers/git"
-            desc: "Import pkg/storage/interfaces instead - business logic must not depend on specific storage implementations"
           - pkg: "github.com/cfgis/cfgms/pkg/storage/providers/database"
             desc: "Import pkg/storage/interfaces instead - business logic must not depend on specific storage implementations"
           - pkg: "github.com/cfgis/cfgms/pkg/storage/providers/memory"
