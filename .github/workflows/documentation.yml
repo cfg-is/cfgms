@@ -311,8 +311,8 @@ jobs:
           echo "   Skipping fleet E2E tests (no code changes)"
           echo "   No fleet test validation required for docs-only changes"
 
-  trivy:
-    name: Trivy
+  trivy-scan:
+    name: trivy-scan
     permissions: {}
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -320,5 +320,8 @@ jobs:
       - name: Docs-only Trivy validation
         run: |
           echo "✅ Documentation-only PR detected"
-          echo "   Skipping Trivy filesystem and image scans (no code or Dockerfile changes)"
+          echo "   Skipping Trivy filesystem scan (no code or Dockerfile changes)"
           echo "   No vulnerability scanning required for docs-only changes"
+          echo "   Matches the check context name emitted by security-scan.yml's"
+          echo "   real trivy-scan job, so the develop ruleset's required check"
+          echo "   is satisfied uniformly for both code PRs and docs-only PRs."
