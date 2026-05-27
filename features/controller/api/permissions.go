@@ -68,6 +68,10 @@ var knownPermissions = map[string]bool{
 	"tenant:manage": true,
 	// Script library administration (Issue #1670)
 	"script:admin": true,
+	// Installer artifact management (Issue #1702)
+	"installer:upload": true,
+	"installer:read":   true,
+	"installer:delete": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

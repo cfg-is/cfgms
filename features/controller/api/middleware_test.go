@@ -668,7 +668,7 @@ func setupTestServerWithCertMgr(t *testing.T, certManager *cert.Manager) *Server
 		cfg, logging.NewNoopLogger(),
 		controllerService, configService,
 		nil, rbacService, certManager, tenantManager, rbacManager,
-		nil, nil, nil, "", nil, auditMgr, nil, nil,
+		nil, nil, nil, "", nil, auditMgr, nil, nil, nil,
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

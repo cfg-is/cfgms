@@ -226,6 +226,10 @@ cfg token list --tenant-id=default
 
 ## Phase 4 — Build and Register Remote Stewards
 
+> **Note (Phase 4a — coming soon):** Once the install-package flow is complete, installer
+> artifacts will be uploadable via `cfg installer upload` and served directly from the
+> controller. See Issue #1661 (steward provisioning epic) for progress.
+
 ### Windows endpoints — MSI installer
 
 Windows endpoints can be enrolled silently using the `cfgms-steward-windows-amd64.msi`

@@ -38,6 +38,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
+	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
@@ -90,6 +91,7 @@ type Server struct {
 	runManager              *controllerrun.Manager            // Issue #1673: run/job/execution model
 	runExecutionQueue       *script.ExecutionQueue            // Issue #1673: queue for ad-hoc run synthesis
 	trustedProxies          []net.IPNet                       // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
+	blobStore               blob.BlobStore                    // Issue #1702: installer artifact storage
 	stopCleanup             chan struct{}                     // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                     // closed when cleanup goroutine exits
 	closeOnce               sync.Once                         // idempotent Close
@@ -138,6 +140,7 @@ func New(
 	auditManager *audit.Manager, // Issue #775: registration audit events
 	commandPublisher *commands.Publisher, // Issue #1319: fan-out config push to active stewards
 	pushStore business.PushStore, // Issue #1320: durable push-state persistence for HA failover
+	blobStore blob.BlobStore, // Issue #1702: installer artifact storage
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -186,6 +189,7 @@ func New(
 		auditManager:            auditManager,             // Issue #775: registration audit events
 		commandPublisher:        commandPublisher,         // Issue #1319: fan-out config push to active stewards
 		pushStore:               pushStore,                // Issue #1320: durable push-state persistence for HA failover
+		blobStore:               blobStore,                // Issue #1702: installer artifact storage
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
 	}
@@ -450,6 +454,14 @@ func (s *Server) setupRouter() {
 	tenants := api.PathPrefix("/tenants").Subrouter()
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
+
+	// Installer artifact management endpoints (Issue #1702).
+	// Always registered — handlers return 503 when blobStore is nil (nil-safe by design).
+	installer := api.PathPrefix("/installer/artifacts").Subrouter()
+	installer.Handle("", s.requirePermission("installer", "read")(http.HandlerFunc(s.handleListInstallerArtifacts))).Methods("GET")
+	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "upload")(http.HandlerFunc(s.handleUploadInstallerArtifact))).Methods("PUT")
+	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetInstallerArtifact))).Methods("GET")
+	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "delete")(http.HandlerFunc(s.handleDeleteInstallerArtifact))).Methods("DELETE")
 
 	// Ad-hoc run endpoints (Issue #1673). Always registered — returns 503 when
 	// run manager is not wired (transport-disabled deployments).
