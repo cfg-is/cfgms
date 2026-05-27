@@ -1,0 +1,108 @@
+# CLA Signature Check
+#
+# Verifies that the author of every pull request has signed CFGMS's
+# Contributor License Agreement (v2.0) by adding their GitHub login to
+# CONTRIBUTORS.md, OR that the PR diff itself adds the signature.
+#
+# This is the "or equivalent" path for Issue #1746 — a self-hosted CLA
+# check that does not require the cla-assistant.io GitHub App. The
+# canonical CLA text lives in docs/legal/CLA.md; signatures live in
+# CONTRIBUTORS.md per the existing "How to Sign" instructions.
+#
+# Maintainers and bot accounts are bypassed automatically. External
+# contributors get a comment with sign-in instructions on the PR.
+
+name: CLA Check
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  cla-check:
+    name: CLA signature check
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.pull_request.draft }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: develop
+
+      - name: Verify CLA signature
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Bypass GitHub bot accounts (dependabot, etc.)
+          if [ "$PR_AUTHOR_TYPE" = "Bot" ]; then
+            echo "::notice::CLA check bypassed for bot account: $PR_AUTHOR"
+            exit 0
+          fi
+
+          # Maintainer allowlist (signed CLA before file existed, or service accounts)
+          case "$PR_AUTHOR" in
+            jrdnr|cfg-agent)
+              echo "::notice::CLA check bypassed for maintainer: $PR_AUTHOR"
+              exit 0
+              ;;
+          esac
+
+          # Check current CONTRIBUTORS.md on the default branch
+          if grep -q "@$PR_AUTHOR\b" CONTRIBUTORS.md 2>/dev/null \
+             || grep -qF "github.com/$PR_AUTHOR" CONTRIBUTORS.md 2>/dev/null; then
+            echo "::notice::CLA already signed by $PR_AUTHOR"
+            exit 0
+          fi
+
+          # Check if this PR adds the contributor to CONTRIBUTORS.md
+          patch=$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER/files" \
+            --jq '.[] | select(.filename == "CONTRIBUTORS.md") | .patch // ""')
+
+          if [ -n "$patch" ] && echo "$patch" \
+              | grep -q "^+.*\(@$PR_AUTHOR\b\|github\.com/$PR_AUTHOR\)"; then
+            echo "::notice::CLA signature added in this PR by $PR_AUTHOR"
+            exit 0
+          fi
+
+          # Post (or update) a CLA-bot comment with sign-in instructions
+          comment_body=$(cat <<EOF
+          <!-- cla-bot -->
+          ## CLA signature required
+
+          Hi @$PR_AUTHOR — thanks for the contribution! Before this PR can be merged, please sign the CFGMS Contributor License Agreement (v2.0).
+
+          **To sign:** add your name to [\`CONTRIBUTORS.md\`](https://github.com/$GH_REPO/blob/develop/CONTRIBUTORS.md) in this PR, using the format:
+
+          \`\`\`
+          - [Your Name] <your@email.com> (@$PR_AUTHOR) - $(date +%Y-%m-%d)
+          \`\`\`
+
+          By adding your name, you confirm you have read and agree to the [CLA v2.0](https://github.com/$GH_REPO/blob/develop/docs/legal/CLA.md). See [\`CONTRIBUTING.md\`](https://github.com/$GH_REPO/blob/develop/CONTRIBUTING.md) for the full process.
+
+          Once your name lands in this PR, this check will pass on the next push.
+          EOF
+          )
+
+          existing_id=$(gh api "repos/$GH_REPO/issues/$PR_NUMBER/comments" \
+            --jq '[.[] | select(.body | startswith("<!-- cla-bot -->"))][0].id // ""')
+
+          if [ -n "$existing_id" ]; then
+            gh api -X PATCH "repos/$GH_REPO/issues/comments/$existing_id" \
+              -f body="$comment_body" > /dev/null
+          else
+            gh pr comment "$PR_NUMBER" --repo "$GH_REPO" --body "$comment_body" > /dev/null
+          fi
+
+          echo "::error::CLA not signed by $PR_AUTHOR. See the bot comment on the PR for sign-in instructions."
+          exit 1
