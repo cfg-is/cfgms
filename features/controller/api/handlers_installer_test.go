@@ -3,9 +3,17 @@
 package api
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,6 +23,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/initialization"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 )
@@ -449,4 +460,234 @@ func TestInstallerArtifactRouterDeletePermission(t *testing.T) {
 	server.router.ServeHTTP(rec2, req2)
 	assert.Equal(t, http.StatusNoContent, rec2.Code,
 		"installer:delete key must be allowed to DELETE an artifact")
+}
+
+// --- Download ---
+
+// extractTarGz parses a tar.gz byte slice and returns a map of path → content.
+func extractTarGz(t *testing.T, data []byte) map[string][]byte {
+	t.Helper()
+	files := make(map[string][]byte)
+	gzr, err := gzip.NewReader(bytes.NewReader(data))
+	require.NoError(t, err, "response must be valid gzip")
+	defer func() {
+		if cerr := gzr.Close(); cerr != nil {
+			t.Logf("failed to close gzip reader: %v", cerr)
+		}
+	}()
+	tr := tar.NewReader(gzr)
+	for {
+		header, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err, "tar read error")
+		content, err := io.ReadAll(tr)
+		require.NoError(t, err, "tar entry read error")
+		files[header.Name] = content
+	}
+	return files
+}
+
+// setupTestCertManager creates a cert.Manager backed by a self-signed CA for tests.
+// It also writes an init marker with the computed CA fingerprint to caPath.
+func setupTestCertManager(t *testing.T, caPath string) (*cert.Manager, string) {
+	t.Helper()
+	certMgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &cert.CAConfig{
+			Organization: "Test CFGMS",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+
+	caCertPEM, err := certMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	block, _ := pem.Decode(caCertPEM)
+	require.NotNil(t, block, "CA cert PEM must be decodable")
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	require.NoError(t, err)
+
+	hash := sha256.Sum256(caCert.Raw)
+	fingerprint := fmt.Sprintf("%x", hash)
+
+	marker := &initialization.InitMarker{
+		Version:           1,
+		InitializedAt:     time.Now().UTC(),
+		ControllerVersion: "test",
+		StorageProvider:   "test",
+		CAFingerprint:     fingerprint,
+	}
+	require.NoError(t, initialization.WriteInitMarker(caPath, marker))
+
+	return certMgr, fingerprint
+}
+
+// TestHandleDownloadInstallPackage_WithCA is the [REQUIRED TEST]:
+// a Server with a filesystem BlobStore containing a dummy artifact and a cert.Manager
+// with a self-signed CA; the archive must contain ca.crt and ca.fingerprint with
+// correct content.
+func TestHandleDownloadInstallPackage_WithCA(t *testing.T) {
+	server, store := setupTestServerWithBlobStore(t)
+
+	// Wire a self-signed cert manager and write an init marker.
+	caPath := t.TempDir()
+	certMgr, expectedFingerprint := setupTestCertManager(t, caPath)
+	server.certManager = certMgr
+	server.cfg.Certificate = &config.CertificateConfig{CAPath: caPath}
+
+	// Get the CA cert PEM to verify the archive content later.
+	expectedCACertPEM, err := certMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	// Upload a dummy artifact under the root tenant.
+	artifactContent := []byte("fake-linux-amd64-installer-binary")
+	require.NoError(t, store.PutBlob(
+		context.Background(),
+		blob.BlobKey{TenantID: downloadTenantID, Namespace: "installers", Name: "linux-amd64"},
+		bytes.NewReader(artifactContent),
+		blob.BlobMeta{ContentType: "application/octet-stream"},
+	))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/linux/amd64", nil)
+	req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+	rec := httptest.NewRecorder()
+
+	server.handleDownloadInstallPackage(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "application/gzip", rec.Header().Get("Content-Type"))
+	assert.Contains(t, rec.Header().Get("Content-Disposition"), "cfgms-steward-linux-amd64.tar.gz")
+
+	files := extractTarGz(t, rec.Body.Bytes())
+
+	// Installer artifact must be present with the correct content.
+	require.Contains(t, files, "installer/linux-amd64/cfgms-steward-amd64", "artifact must be in archive")
+	assert.Equal(t, artifactContent, files["installer/linux-amd64/cfgms-steward-amd64"])
+
+	// CA files must be present and correct (private CA).
+	require.Contains(t, files, "installer/ca.crt", "ca.crt must be in archive for private CA")
+	assert.Equal(t, expectedCACertPEM, files["installer/ca.crt"])
+
+	require.Contains(t, files, "installer/ca.fingerprint", "ca.fingerprint must be in archive for private CA")
+	assert.Equal(t, expectedFingerprint, string(files["installer/ca.fingerprint"]))
+
+	// README must be present.
+	assert.Contains(t, files, "installer/README.txt")
+}
+
+// TestHandleDownloadInstallPackage_WithoutCA is the [REQUIRED TEST]:
+// same setup but certManager is nil so caIsPrivate() returns false; ca.crt must be absent.
+func TestHandleDownloadInstallPackage_WithoutCA(t *testing.T) {
+	server, store := setupTestServerWithBlobStore(t)
+	// certManager remains nil → caIsPrivate() returns false, no CA bundle included.
+
+	artifactContent := []byte("fake-windows-amd64-installer-binary")
+	require.NoError(t, store.PutBlob(
+		context.Background(),
+		blob.BlobKey{TenantID: downloadTenantID, Namespace: "installers", Name: "windows-amd64"},
+		bytes.NewReader(artifactContent),
+		blob.BlobMeta{ContentType: "application/octet-stream"},
+	))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/windows/amd64", nil)
+	req = withVars(req, map[string]string{"platform": "windows", "arch": "amd64"})
+	rec := httptest.NewRecorder()
+
+	server.handleDownloadInstallPackage(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "application/gzip", rec.Header().Get("Content-Type"))
+
+	files := extractTarGz(t, rec.Body.Bytes())
+
+	// Installer artifact must be present (Windows uses .exe extension).
+	require.Contains(t, files, "installer/windows-amd64/cfgms-steward-amd64.exe", "artifact must be in archive")
+	assert.Equal(t, artifactContent, files["installer/windows-amd64/cfgms-steward-amd64.exe"])
+
+	// CA files must NOT be present (public/nil CA).
+	assert.NotContains(t, files, "installer/ca.crt", "ca.crt must not be in archive when CA is not private")
+	assert.NotContains(t, files, "installer/ca.fingerprint", "ca.fingerprint must not be in archive when CA is not private")
+
+	// README must still be present.
+	assert.Contains(t, files, "installer/README.txt")
+}
+
+// TestHandleDownloadInstallPackage_NotFound verifies that a missing artifact returns
+// 404 with the writeErrorResponse JSON shape (not a raw http.Error string).
+func TestHandleDownloadInstallPackage_NotFound(t *testing.T) {
+	server, _ := setupTestServerWithBlobStore(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/linux/amd64", nil)
+	req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+	rec := httptest.NewRecorder()
+
+	server.handleDownloadInstallPackage(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	// Response must be JSON-shaped (writeErrorResponse), not a raw string.
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp), "404 must use JSON error shape")
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "ARTIFACT_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleDownloadInstallPackage_InvalidPlatform verifies that an unknown platform
+// returns 400 with the JSON error shape.
+func TestHandleDownloadInstallPackage_InvalidPlatform(t *testing.T) {
+	server, _ := setupTestServerWithBlobStore(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/solaris/amd64", nil)
+	req = withVars(req, map[string]string{"platform": "solaris", "arch": "amd64"})
+	rec := httptest.NewRecorder()
+
+	server.handleDownloadInstallPackage(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, "INVALID_PLATFORM", errResp.Error.Code)
+}
+
+// TestHandleDownloadInstallPackage_InvalidArch verifies that an unknown arch
+// returns 400 with the JSON error shape.
+func TestHandleDownloadInstallPackage_InvalidArch(t *testing.T) {
+	server, _ := setupTestServerWithBlobStore(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/linux/mips", nil)
+	req = withVars(req, map[string]string{"platform": "linux", "arch": "mips"})
+	rec := httptest.NewRecorder()
+
+	server.handleDownloadInstallPackage(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, "INVALID_ARCH", errResp.Error.Code)
+}
+
+// TestHandleDownloadInstallPackage_RouterNoAuth verifies that the download route is
+// accessible without an API key (no auth required).
+func TestHandleDownloadInstallPackage_RouterNoAuth(t *testing.T) {
+	server, store := setupTestServerWithBlobStore(t)
+
+	require.NoError(t, store.PutBlob(
+		context.Background(),
+		blob.BlobKey{TenantID: downloadTenantID, Namespace: "installers", Name: "linux-amd64"},
+		bytes.NewReader([]byte("dummy")),
+		blob.BlobMeta{ContentType: "application/octet-stream"},
+	))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/linux/amd64", nil)
+	// Deliberately no X-API-Key header.
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	// Must succeed — the download route is public.
+	assert.Equal(t, http.StatusOK, rec.Code, "download endpoint must be accessible without auth")
+	assert.Equal(t, "application/gzip", rec.Header().Get("Content-Type"))
 }

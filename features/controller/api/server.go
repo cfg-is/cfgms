@@ -463,6 +463,10 @@ func (s *Server) setupRouter() {
 	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetInstallerArtifact))).Methods("GET")
 	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "delete")(http.HandlerFunc(s.handleDeleteInstallerArtifact))).Methods("DELETE")
 
+	// Installer package download — public, no auth required (Issue #1704).
+	// Assembles a per-platform tar.gz on the fly. The download URL is the distribution mechanism.
+	s.router.HandleFunc("/api/v1/installer/download/{platform}/{arch}", s.handleDownloadInstallPackage).Methods("GET")
+
 	// Ad-hoc run endpoints (Issue #1673). Always registered — returns 503 when
 	// run manager is not wired (transport-disabled deployments).
 	runs := api.PathPrefix("/runs").Subrouter()
