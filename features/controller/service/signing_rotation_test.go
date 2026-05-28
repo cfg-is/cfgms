@@ -7,6 +7,11 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +26,61 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// recordingLogger captures all log calls for assertion in tests.
+type recordingLogger struct {
+	mu      sync.Mutex
+	entries []recordedLogEntry
+}
+
+type recordedLogEntry struct {
+	level  string
+	msg    string
+	fields []interface{}
+}
+
+func (r *recordingLogger) allText() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var b strings.Builder
+	for _, e := range r.entries {
+		b.WriteString(e.level)
+		b.WriteString(" ")
+		b.WriteString(e.msg)
+		for i := 0; i+1 < len(e.fields); i += 2 {
+			fmt.Fprintf(&b, " %v=%v", e.fields[i], e.fields[i+1])
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func (r *recordingLogger) record(level, msg string, kv []interface{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.entries = append(r.entries, recordedLogEntry{level: level, msg: msg, fields: kv})
+}
+
+func (r *recordingLogger) Debug(msg string, kv ...interface{}) { r.record("DEBUG", msg, kv) }
+func (r *recordingLogger) Info(msg string, kv ...interface{})  { r.record("INFO", msg, kv) }
+func (r *recordingLogger) Warn(msg string, kv ...interface{})  { r.record("WARN", msg, kv) }
+func (r *recordingLogger) Error(msg string, kv ...interface{}) { r.record("ERROR", msg, kv) }
+func (r *recordingLogger) Fatal(msg string, kv ...interface{}) { r.record("FATAL", msg, kv) }
+func (r *recordingLogger) DebugCtx(_ context.Context, msg string, kv ...interface{}) {
+	r.record("DEBUG", msg, kv)
+}
+func (r *recordingLogger) InfoCtx(_ context.Context, msg string, kv ...interface{}) {
+	r.record("INFO", msg, kv)
+}
+func (r *recordingLogger) WarnCtx(_ context.Context, msg string, kv ...interface{}) {
+	r.record("WARN", msg, kv)
+}
+func (r *recordingLogger) ErrorCtx(_ context.Context, msg string, kv ...interface{}) {
+	r.record("ERROR", msg, kv)
+}
+func (r *recordingLogger) FatalCtx(_ context.Context, msg string, kv ...interface{}) {
+	r.record("FATAL", msg, kv)
+}
 
 // newTestCertManager creates a cert.Manager with a CA and a signing cert in dir.
 func newTestCertManager(t *testing.T, dir string) *cert.Manager {
@@ -244,4 +304,168 @@ func TestRefreshOnConnectFailureNoPartialState(t *testing.T) {
 	}
 	assert.NoError(t, serverProvider.SendCommand(context.Background(), sc),
 		"controller should still be able to send commands after hook error")
+}
+
+// TestEnsureStewardCurrentDelivery verifies that EnsureStewardCurrent delivers a
+// push_signing_cert command with a valid cert_pem and overlap_expires_at param.
+func TestEnsureStewardCurrentDelivery(t *testing.T) {
+	t.Parallel()
+	const stewardID = "steward-ensure-current-delivery"
+
+	dir := t.TempDir()
+	certMgr := newTestCertManager(t, dir)
+	// newTestCertManager creates an initial signing cert (cert v1) via EnsureSigningCertificate.
+
+	// Generate a second signing cert (2048-bit for speed) to act as the "rotated" cert.
+	rotatedCert, genErr := certMgr.GenerateSigningCertificate(&cert.SigningCertConfig{
+		CommonName:   "cfgms-config-signer-v2",
+		ValidityDays: 30,
+		KeySize:      2048,
+	})
+	require.NoError(t, genErr)
+
+	// Find the initial cert serial (the one that is NOT rotatedCert).
+	allSigning, listErr := certMgr.GetAllValidCertificatesForPurpose(cert.PurposeSigning)
+	require.NoError(t, listErr)
+	require.GreaterOrEqual(t, len(allSigning), 2, "must have at least 2 signing certs")
+	var initialSerial string
+	for _, c := range allSigning {
+		if c.SerialNumber != rotatedCert.SerialNumber {
+			initialSerial = c.SerialNumber
+			break
+		}
+	}
+	require.NotEmpty(t, initialSerial, "initial signing cert serial must be found")
+
+	// Write a cursor that mirrors what RotateSigningCertificate would produce for a
+	// second rotation: CurrentSerial = rotatedCert, RotatingSerial = initialCert (active
+	// 7-day overlap window). This makes EnsureStewardCurrent produce a non-empty
+	// overlap_expires_at for assertion.
+	cursorToWrite := &cert.SigningCertCursor{
+		CurrentSerial:     rotatedCert.SerialNumber,
+		RotatingSerial:    initialSerial,
+		OverlapWindowDays: 7,
+		RotatedAt:         time.Now().UTC(),
+	}
+	cursorJSON, marshalErr := json.Marshal(cursorToWrite)
+	require.NoError(t, marshalErr)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(certMgr.GetStoragePath(), "signing-cursor.json"),
+		cursorJSON, 0600,
+	))
+
+	logger := logging.NewNoopLogger()
+
+	svc := service.NewSigningRotationService(certMgr, logger)
+
+	serverTLS, clientTLS := tlsForTest(t, stewardID)
+	reg := registry.NewRegistry()
+
+	serverProvider := grpcCP.New(grpcCP.ModeServer)
+	require.NoError(t, serverProvider.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": serverTLS,
+		"registry":   reg,
+	}))
+	require.NoError(t, serverProvider.Start(context.Background()))
+	t.Cleanup(serverProvider.ForceStop)
+
+	publisher, err := commands.New(&commands.Config{
+		ControlPlane: serverProvider,
+		Logger:       logger,
+	})
+	require.NoError(t, err)
+	svc.SetPublisher(publisher)
+
+	clientProvider := grpcCP.New(grpcCP.ModeClient)
+	require.NoError(t, clientProvider.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "client",
+		"addr":       serverProvider.ListenAddr(),
+		"tls_config": clientTLS,
+		"steward_id": stewardID,
+	}))
+
+	var (
+		mu           sync.Mutex
+		receivedCmds []*types.SignedCommand
+	)
+	require.NoError(t, clientProvider.SubscribeCommands(context.Background(), stewardID, func(_ context.Context, sc *types.SignedCommand) error {
+		mu.Lock()
+		receivedCmds = append(receivedCmds, sc)
+		mu.Unlock()
+		return nil
+	}))
+
+	require.NoError(t, clientProvider.Start(context.Background()))
+	t.Cleanup(func() { _ = clientProvider.Stop(context.Background()) })
+
+	require.Eventually(t, func() bool {
+		_, ok := reg.Get(stewardID)
+		return ok
+	}, 5*time.Second, 10*time.Millisecond, "steward should be registered")
+
+	require.NoError(t, svc.EnsureStewardCurrent(context.Background(), stewardID))
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, cmd := range receivedCmds {
+			if cmd.Command.Type == types.CommandPushSigningCert {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond, "push_signing_cert must be received")
+
+	mu.Lock()
+	var pushCmd *types.SignedCommand
+	for _, cmd := range receivedCmds {
+		if cmd.Command.Type == types.CommandPushSigningCert {
+			pushCmd = cmd
+			break
+		}
+	}
+	mu.Unlock()
+
+	require.NotNil(t, pushCmd)
+
+	// cert_pem must be present and decode to non-empty PEM bytes.
+	certPEMB64, ok := pushCmd.Command.Params["cert_pem"].(string)
+	require.True(t, ok, "cert_pem param must be a string")
+	certPEMBytes, decErr := base64.StdEncoding.DecodeString(certPEMB64)
+	require.NoError(t, decErr, "cert_pem must be valid base64")
+	assert.NotEmpty(t, certPEMBytes, "decoded cert_pem must not be empty")
+
+	// overlap_expires_at must be present, non-empty, and a valid RFC3339 timestamp.
+	overlapVal, hasOverlap := pushCmd.Command.Params["overlap_expires_at"]
+	require.True(t, hasOverlap, "overlap_expires_at must be present in push_signing_cert params")
+	overlapStr, isStr := overlapVal.(string)
+	require.True(t, isStr, "overlap_expires_at must be a string")
+	require.NotEmpty(t, overlapStr, "overlap_expires_at must be non-empty when rotation is in progress")
+	_, parseErr := time.Parse(time.RFC3339, overlapStr)
+	assert.NoError(t, parseErr, "overlap_expires_at must be a valid RFC3339 timestamp, got: %s", overlapStr)
+}
+
+// TestRotateAuditLogNoPEMBody verifies that SigningRotationService.Rotate emits a
+// structured audit log entry that contains no PEM block header ("-----BEGIN").
+func TestRotateAuditLogNoPEMBody(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	rl := &recordingLogger{}
+	certMgr := newTestCertManager(t, dir)
+
+	svc := service.NewSigningRotationService(certMgr, rl)
+	// Inject a controller service with no stewards so fan-out is a no-op.
+	svc.SetControllerService(service.NewControllerService(logging.NewNoopLogger()))
+
+	result, err := svc.Rotate(context.Background(), "operator-serial-test", 7)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.NotEmpty(t, result.NewSerial)
+
+	// The combined log output must not contain any PEM block header.
+	allLog := rl.allText()
+	assert.NotContains(t, allLog, "-----BEGIN",
+		"audit log must not contain PEM body data; full log:\n%s", allLog)
 }

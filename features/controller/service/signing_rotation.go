@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -15,14 +16,23 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// RotationResult summarises the outcome of a signing certificate rotation.
+type RotationResult struct {
+	OldSerial         string
+	NewSerial         string
+	OverlapWindowDays int
+	StewardsNotified  int
+}
+
 // SigningRotationService delivers the controller's current signing certificate
 // to stewards that need it refreshed. It is the service-layer implementation of
 // the StewardOnConnectHook interface (Issue #1817).
 type SigningRotationService struct {
-	mu          sync.RWMutex
-	certManager *cert.Manager
-	publisher   *commands.Publisher
-	logger      logging.Logger
+	mu                sync.RWMutex
+	certManager       *cert.Manager
+	publisher         *commands.Publisher
+	controllerService *ControllerService
+	logger            logging.Logger
 }
 
 // NewSigningRotationService creates a new SigningRotationService. The publisher
@@ -44,6 +54,75 @@ func (s *SigningRotationService) SetPublisher(p *commands.Publisher) {
 	s.publisher = p
 }
 
+// SetControllerService injects the controller service used by Rotate to enumerate
+// connected stewards for fan-out.
+func (s *SigningRotationService) SetControllerService(cs *ControllerService) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.controllerService = cs
+}
+
+// Rotate generates a new ConfigSigning certificate, transitions the lifecycle
+// cursor, and fans out a COMMAND_TYPE_PUSH_SIGNING_CERT command to all currently
+// connected stewards. Per-steward delivery errors are logged but do not abort
+// the rotation. An audit log entry is emitted that contains no PEM body data.
+func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial string, overlapDays int) (*RotationResult, error) {
+	// Capture the old serial before rotating.
+	cursor, err := s.certManager.GetSigningCursorState()
+	if err != nil {
+		return nil, fmt.Errorf("signing rotation: get cursor state: %w", err)
+	}
+	var oldSerial string
+	if cursor != nil {
+		oldSerial = cursor.CurrentSerial
+	}
+
+	newCert, err := s.certManager.RotateSigningCertificate(overlapDays)
+	if err != nil {
+		return nil, fmt.Errorf("signing rotation: rotate certificate: %w", err)
+	}
+
+	overlapExpiresAt := time.Now().UTC().Add(time.Duration(overlapDays) * 24 * time.Hour).Format(time.RFC3339)
+
+	s.mu.RLock()
+	publisher := s.publisher
+	controllerSvc := s.controllerService
+	s.mu.RUnlock()
+
+	var stewardsNotified int
+	if publisher != nil && controllerSvc != nil {
+		stewards := controllerSvc.GetAllStewards()
+		certPEM := base64.StdEncoding.EncodeToString(newCert.CertificatePEM)
+		params := map[string]interface{}{
+			"cert_pem":           certPEM,
+			"overlap_expires_at": overlapExpiresAt,
+		}
+		for _, steward := range stewards {
+			if _, pubErr := publisher.PublishCommand(ctx, steward.ID, types.CommandPushSigningCert, params); pubErr != nil {
+				s.logger.Error("failed to push signing cert to steward",
+					"steward_id", logging.SanitizeLogValue(steward.ID),
+					"error", pubErr)
+			} else {
+				stewardsNotified++
+			}
+		}
+	}
+
+	s.logger.Info("signing-cert rotation",
+		"operator_serial", operatorSerial,
+		"old_serial", oldSerial,
+		"new_serial", newCert.SerialNumber,
+		"overlap_days", overlapDays,
+		"stewards_notified", stewardsNotified)
+
+	return &RotationResult{
+		OldSerial:         oldSerial,
+		NewSerial:         newCert.SerialNumber,
+		OverlapWindowDays: overlapDays,
+		StewardsNotified:  stewardsNotified,
+	}, nil
+}
+
 // EnsureStewardCurrent pushes the controller's current signing certificate to
 // the specified steward via COMMAND_TYPE_PUSH_SIGNING_CERT. The push is
 // fire-and-forget (no ack required). Idempotent: the steward ignores pushes
@@ -57,7 +136,6 @@ func (s *SigningRotationService) EnsureStewardCurrent(ctx context.Context, stewa
 		return fmt.Errorf("signing rotation service: publisher not initialized")
 	}
 
-	// loadSigningCursor: get the current signing cert from the cert manager.
 	signingCert, err := s.certManager.GetCurrentCertForPurpose(cert.PurposeSigning)
 	if err != nil {
 		return fmt.Errorf("signing rotation service: load signing cursor: %w", err)
@@ -71,13 +149,21 @@ func (s *SigningRotationService) EnsureStewardCurrent(ctx context.Context, stewa
 		return fmt.Errorf("signing rotation service: empty cert PEM for serial=%s", signingCert.SerialNumber)
 	}
 
-	params := map[string]interface{}{
-		"cert_pem": base64.StdEncoding.EncodeToString(certPEM),
-		"serial":   signingCert.SerialNumber,
+	// Compute overlap_expires_at from the active cursor if rotation is in progress.
+	var overlapExpiresAt string
+	if rotCursor, cursorErr := s.certManager.GetSigningCursorState(); cursorErr == nil && rotCursor != nil && rotCursor.RotatingSerial != "" {
+		deadline := rotCursor.RotatedAt.Add(time.Duration(rotCursor.OverlapWindowDays) * 24 * time.Hour)
+		overlapExpiresAt = deadline.UTC().Format(time.RFC3339)
 	}
 
-	if _, err := publisher.PublishCommand(ctx, stewardID, types.CommandPushSigningCert, params); err != nil {
-		return fmt.Errorf("signing rotation service: publish push_signing_cert to steward %s: %w", stewardID, err)
+	params := map[string]interface{}{
+		"cert_pem":           base64.StdEncoding.EncodeToString(certPEM),
+		"serial":             signingCert.SerialNumber,
+		"overlap_expires_at": overlapExpiresAt,
+	}
+
+	if _, pubErr := publisher.PublishCommand(ctx, stewardID, types.CommandPushSigningCert, params); pubErr != nil {
+		return fmt.Errorf("signing rotation service: publish push_signing_cert to steward %s: %w", stewardID, pubErr)
 	}
 
 	s.logger.Info("signing cert pushed to steward on connect",
