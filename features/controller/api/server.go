@@ -821,16 +821,12 @@ func (s *Server) setupTLS() (*tls.Config, error) {
 
 // setupManagedTLS configures TLS using managed certificates.
 func (s *Server) setupManagedTLS() (*tls.Config, error) {
-	// Story #377: In separated mode with external source, load from disk
-	if s.cfg.Certificate != nil && s.cfg.Certificate.IsSeparatedArchitecture() {
-		if s.cfg.Certificate.GetPublicAPISource() == "external" {
-			return s.setupExternalPublicAPICert()
-		}
-		// separated + internal: generate/use a PublicAPI cert type
-		// Falls through to standard managed TLS (uses same cert generation logic)
+	// External source: load API cert from disk (e.g., certbot/Let's Encrypt)
+	if s.cfg.Certificate != nil && s.cfg.Certificate.GetPublicAPISource() == "external" {
+		return s.setupExternalPublicAPICert()
 	}
 
-	// Get server certificate (reuse the same logic as gRPC server)
+	// Internal source: use or generate a purpose-scoped PublicAPI certificate
 	serverCert, err := s.getServerCertificate()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get server certificate: %w", err)
@@ -927,39 +923,23 @@ func (s *Server) setupLegacyTLS() (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
-// getServerCertificate gets or generates a server certificate (reused from gRPC server logic)
+// getServerCertificate returns the current public API certificate (PurposeAPI).
+// Falls back to generating a new PublicAPI cert if none exists and cert management is enabled.
 func (s *Server) getServerCertificate() (*cert.Certificate, error) {
-	// Look for existing server certificate by common name
-	certificates, err := s.certManager.GetCertificateByCommonName(s.cfg.Certificate.Server.CommonName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to search for existing certificates: %w", err)
+	apiCert, err := s.certManager.GetCurrentCertForPurpose(cert.PurposeAPI)
+	if err == nil {
+		s.logger.Info("Using existing API certificate for HTTP server",
+			"serial", apiCert.SerialNumber,
+			"expires", apiCert.ExpiresAt.Format("2006-01-02"))
+		return apiCert, nil
 	}
 
-	// Check if we have a valid certificate
-	for _, certInfo := range certificates {
-		if certInfo.Type == cert.CertificateTypeServer && certInfo.IsValid && !certInfo.NeedsRenewal {
-			// Load the full certificate
-			fullCert, err := s.certManager.GetCertificate(certInfo.SerialNumber)
-			if err != nil {
-				s.logger.Warn("Failed to load existing certificate, will generate new one",
-					"serial", certInfo.SerialNumber, "error", err)
-				continue
-			}
-
-			s.logger.Info("Using existing server certificate for HTTP server",
-				"common_name", certInfo.CommonName,
-				"serial", certInfo.SerialNumber,
-				"expires", certInfo.ExpiresAt.Format("2006-01-02"))
-			return fullCert, nil
-		}
-	}
-
-	// Generate new server certificate if certificate lifecycle management is enabled
+	// No valid cert found — generate if cert management is enabled
 	if !s.cfg.Certificate.EnableCertManagement {
-		return nil, fmt.Errorf("no valid server certificate found and certificate lifecycle management is disabled")
+		return nil, fmt.Errorf("no valid API certificate found and certificate lifecycle management is disabled")
 	}
 
-	s.logger.Info("Generating new server certificate for HTTP server",
+	s.logger.Info("Generating new API certificate for HTTP server",
 		"common_name", s.cfg.Certificate.Server.CommonName)
 
 	serverConfig := &cert.ServerCertConfig{
@@ -972,11 +952,10 @@ func (s *Server) getServerCertificate() (*cert.Certificate, error) {
 
 	serverCert, err := s.certManager.GenerateServerCertificate(serverConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate server certificate: %w", err)
+		return nil, fmt.Errorf("failed to generate API certificate: %w", err)
 	}
 
-	s.logger.Info("Generated new server certificate for HTTP server",
-		"common_name", serverCert.CommonName,
+	s.logger.Info("Generated new API certificate for HTTP server",
 		"serial", serverCert.SerialNumber,
 		"expires", serverCert.ExpiresAt.Format("2006-01-02"))
 

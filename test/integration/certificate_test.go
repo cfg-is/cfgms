@@ -68,26 +68,28 @@ func (s *CertificateTestSuite) TestCACertificateExists() {
 	s.Equal("CFGMS Test Root CA", caCert.CommonName, "CA certificate should have correct common name (Organization + ' Root CA')")
 }
 
-// TestServerCertificateExists tests that server certificate is properly created
-func (s *CertificateTestSuite) TestServerCertificateExists() {
-	serverCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeServer)
-	s.NoError(err, "Should be able to retrieve server certificates")
-	s.GreaterOrEqual(len(serverCerts), 1, "Should have at least one server certificate")
+// TestInternalServerCertificateExists tests that the internal mTLS certificate is properly created
+func (s *CertificateTestSuite) TestInternalServerCertificateExists() {
+	internalCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeInternalServer)
+	s.NoError(err, "Should be able to retrieve internal server certificates")
+	s.GreaterOrEqual(len(internalCerts), 1, "Should have at least one internal server certificate")
 
-	// The controller generates a server certificate for the gRPC transport layer
-	// Find it by checking for "cfgms-grpc-server" common name
-	var serverCert *cert.CertificateInfo
-	for _, certInfo := range serverCerts {
-		if certInfo.CommonName == "cfgms-grpc-server" {
-			serverCert = certInfo
-			break
-		}
-	}
+	internalCert := internalCerts[0]
+	s.Equal(cert.CertificateTypeInternalServer, internalCert.Type, "Certificate should be InternalServer type")
+	s.True(internalCert.IsValid, "Internal server certificate should be valid")
+	s.True(internalCert.ExpiresAt.After(time.Now()), "Internal server certificate should not be expired")
+}
 
-	s.NotNil(serverCert, "Should find server certificate")
-	s.Equal(cert.CertificateTypeServer, serverCert.Type, "Certificate should be server type")
-	s.True(serverCert.IsValid, "Server certificate should be valid")
-	s.True(serverCert.ExpiresAt.After(time.Now()), "Server certificate should not be expired")
+// TestConfigSigningCertificateExists tests that the config signing certificate is properly created
+func (s *CertificateTestSuite) TestConfigSigningCertificateExists() {
+	signingCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeConfigSigning)
+	s.NoError(err, "Should be able to retrieve config signing certificates")
+	s.GreaterOrEqual(len(signingCerts), 1, "Should have at least one config signing certificate")
+
+	signingCert := signingCerts[0]
+	s.Equal(cert.CertificateTypeConfigSigning, signingCert.Type, "Certificate should be ConfigSigning type")
+	s.True(signingCert.IsValid, "Config signing certificate should be valid")
+	s.True(signingCert.ExpiresAt.After(time.Now()), "Config signing certificate should not be expired")
 }
 
 // TestClientCertificateExists tests that client certificate is properly created
@@ -147,19 +149,19 @@ func (s *CertificateTestSuite) TestCertificateGeneration() {
 func (s *CertificateTestSuite) TestCertificateValidation() {
 	certManager := s.env.GetCertificateManager()
 
-	// Get the server certificate
-	serverCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeServer)
-	s.NoError(err, "Should be able to retrieve server certificates")
-	s.GreaterOrEqual(len(serverCerts), 1, "Should have at least one server certificate")
+	// Get the internal server certificate (transport purpose)
+	internalCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeInternalServer)
+	s.NoError(err, "Should be able to retrieve internal server certificates")
+	s.GreaterOrEqual(len(internalCerts), 1, "Should have at least one internal server certificate")
 
 	// Get the actual certificate data for validation
-	serverCert, err := certManager.GetCertificate(serverCerts[0].SerialNumber)
-	s.NoError(err, "Should be able to get server certificate")
+	internalCert, err := certManager.GetCertificate(internalCerts[0].SerialNumber)
+	s.NoError(err, "Should be able to get internal server certificate")
 
 	// Validate the certificate
-	validationResult, err := certManager.ValidateCertificate(serverCert.CertificatePEM)
+	validationResult, err := certManager.ValidateCertificate(internalCert.CertificatePEM)
 	s.NoError(err, "Should be able to validate certificate")
-	s.True(validationResult.IsValid, "Server certificate should be valid")
+	s.True(validationResult.IsValid, "Internal server certificate should be valid")
 	s.Empty(validationResult.Errors, "Valid certificate should have no errors")
 }
 
@@ -199,31 +201,12 @@ func (s *CertificateTestSuite) TestStewardWithCertificates() {
 	s.env.Start()
 	defer s.env.Stop()
 
-	// Give components time to initialize
-	time.Sleep(200 * time.Millisecond)
-
 	// Verify transport client was created successfully
 	s.NotNil(s.env.TransportClient, "TransportClient should be initialized")
 
 	// Verify certificates are still valid after steward startup
 	err := s.env.ValidateCertificateSetup()
 	s.NoError(err, "Certificate setup should remain valid after steward startup")
-}
-
-// TestCertificateHealthMonitoring tests certificate health monitoring functionality
-func (s *CertificateTestSuite) TestCertificateHealthMonitoring() {
-	// Start both controller and steward to activate health monitoring
-	s.env.Start()
-	defer s.env.Stop()
-
-	// Give health monitoring time to run
-	time.Sleep(500 * time.Millisecond)
-
-	// Check that health monitoring includes certificate status
-	// This would require accessing the steward's health monitor, which would need
-	// to be exposed in the test environment for full testing
-	// For now, we just verify that the system starts and runs without errors
-	s.NotNil(s.env.TransportClient, "TransportClient should be active")
 }
 
 // TestCertificatePersistenceAcrossReboots validates that certificates persist and reload correctly
@@ -236,17 +219,10 @@ func (s *CertificateTestSuite) TestCertificatePersistenceAcrossReboots() {
 	s.Len(caCerts1, 1, "Should have exactly one CA certificate")
 	originalCASerial := caCerts1[0].SerialNumber
 
-	serverCerts1, err := certManager1.GetCertificatesByType(cert.CertificateTypeServer)
-	s.NoError(err, "Should retrieve server certificates")
-	s.GreaterOrEqual(len(serverCerts1), 1, "Should have at least one server certificate")
-	// Track the primary gRPC server certificate serial across reboots
-	originalServerSerial := serverCerts1[0].SerialNumber
-	for _, c := range serverCerts1 {
-		if c.CommonName == "cfgms-grpc-server" {
-			originalServerSerial = c.SerialNumber
-			break
-		}
-	}
+	internalCerts1, err := certManager1.GetCertificatesByType(cert.CertificateTypeInternalServer)
+	s.NoError(err, "Should retrieve internal server certificates")
+	s.GreaterOrEqual(len(internalCerts1), 1, "Should have at least one internal server certificate")
+	originalInternalSerial := internalCerts1[0].SerialNumber
 
 	// Simulate controller reboot by creating new test environment with same cert storage
 	// This validates that LoadExistingCA=true works correctly
@@ -260,18 +236,18 @@ func (s *CertificateTestSuite) TestCertificatePersistenceAcrossReboots() {
 	s.Len(caCerts2, 1, "Should still have exactly one CA certificate after reboot")
 	s.Equal(originalCASerial, caCerts2[0].SerialNumber, "CA certificate serial should be same after reboot (not regenerated)")
 
-	serverCerts2, err := certManager2.GetCertificatesByType(cert.CertificateTypeServer)
-	s.NoError(err, "Should retrieve server certificates after reboot")
-	s.GreaterOrEqual(len(serverCerts2), 1, "Should have at least one server certificate after reboot")
-	// Verify the primary server certificate was preserved (not regenerated)
-	var serverCertFound bool
-	for _, c := range serverCerts2 {
-		if c.SerialNumber == originalServerSerial {
-			serverCertFound = true
+	internalCerts2, err := certManager2.GetCertificatesByType(cert.CertificateTypeInternalServer)
+	s.NoError(err, "Should retrieve internal server certificates after reboot")
+	s.GreaterOrEqual(len(internalCerts2), 1, "Should have at least one internal server certificate after reboot")
+	// Verify the internal server certificate was preserved (not regenerated)
+	var internalCertFound bool
+	for _, c := range internalCerts2 {
+		if c.SerialNumber == originalInternalSerial {
+			internalCertFound = true
 			break
 		}
 	}
-	s.True(serverCertFound, "Server certificate serial should be same after reboot (not regenerated)")
+	s.True(internalCertFound, "InternalServer cert serial must be stable across reboots (AC5)")
 
 	// Verify controller starts successfully with reloaded certificates
 	s.env.Start()

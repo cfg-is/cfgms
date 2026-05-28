@@ -146,55 +146,59 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	}
 	logger.Info("Certificate Authority created")
 
-	// Step 2b: Separated certificate architecture (if configured)
-	if cfg.Certificate.IsSeparatedArchitecture() {
-		logger.Info("Creating separated certificates (internal mTLS + config signing)...")
-		internalCfg := &cert.ServerCertConfig{
-			CommonName:   "cfgms-internal",
-			DNSNames:     []string{"localhost", "cfgms-internal", "controller-standalone"},
-			IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
-			ValidityDays: 365,
+	// Step 2b: Generate purpose-specific certificates (mandatory separated architecture)
+	if err := cfg.Certificate.ValidateCertificateArchitecture(); err != nil {
+		if rbErr := rollback.Execute(); rbErr != nil {
+			logger.Error("Rollback failed after architecture validation error", "rollback_error", rbErr.Error())
 		}
-		if cfg.Certificate.Internal != nil {
-			if cfg.Certificate.Internal.CommonName != "" {
-				internalCfg.CommonName = cfg.Certificate.Internal.CommonName
-			}
-			if len(cfg.Certificate.Internal.DNSNames) > 0 {
-				internalCfg.DNSNames = cfg.Certificate.Internal.DNSNames
-			}
-			if len(cfg.Certificate.Internal.IPAddresses) > 0 {
-				internalCfg.IPAddresses = cfg.Certificate.Internal.IPAddresses
-			}
-		}
-		if cfg.Certificate.InternalCertValidityDays > 0 {
-			internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
-		}
-
-		signingCfg := &cert.SigningCertConfig{
-			CommonName:   "cfgms-config-signer",
-			ValidityDays: 1095,
-			KeySize:      4096,
-		}
-		if cfg.Certificate.Signing != nil {
-			if cfg.Certificate.Signing.CommonName != "" {
-				signingCfg.CommonName = cfg.Certificate.Signing.CommonName
-			}
-			if cfg.Certificate.Signing.Organization != "" {
-				signingCfg.Organization = cfg.Certificate.Signing.Organization
-			}
-		}
-		if cfg.Certificate.SigningCertValidityDays > 0 {
-			signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
-		}
-
-		if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
-			if rbErr := rollback.Execute(); rbErr != nil {
-				logger.Error("Rollback failed after separated cert error", "rollback_error", rbErr.Error())
-			}
-			return nil, fmt.Errorf("failed to create separated certificates: %w", err)
-		}
-		logger.Info("Separated certificates created")
+		return nil, err
 	}
+	logger.Info("Creating separated certificates (internal mTLS + config signing)...")
+	internalCfg := &cert.ServerCertConfig{
+		CommonName:   "cfgms-internal",
+		DNSNames:     []string{"localhost", "cfgms-internal", "controller-standalone"},
+		IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
+		ValidityDays: 365,
+	}
+	if cfg.Certificate.Internal != nil {
+		if cfg.Certificate.Internal.CommonName != "" {
+			internalCfg.CommonName = cfg.Certificate.Internal.CommonName
+		}
+		if len(cfg.Certificate.Internal.DNSNames) > 0 {
+			internalCfg.DNSNames = cfg.Certificate.Internal.DNSNames
+		}
+		if len(cfg.Certificate.Internal.IPAddresses) > 0 {
+			internalCfg.IPAddresses = cfg.Certificate.Internal.IPAddresses
+		}
+	}
+	if cfg.Certificate.InternalCertValidityDays > 0 {
+		internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
+	}
+
+	signingCfg := &cert.SigningCertConfig{
+		CommonName:   "cfgms-config-signer",
+		ValidityDays: 1095,
+		KeySize:      4096,
+	}
+	if cfg.Certificate.Signing != nil {
+		if cfg.Certificate.Signing.CommonName != "" {
+			signingCfg.CommonName = cfg.Certificate.Signing.CommonName
+		}
+		if cfg.Certificate.Signing.Organization != "" {
+			signingCfg.Organization = cfg.Certificate.Signing.Organization
+		}
+	}
+	if cfg.Certificate.SigningCertValidityDays > 0 {
+		signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
+	}
+
+	if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
+		if rbErr := rollback.Execute(); rbErr != nil {
+			logger.Error("Rollback failed after separated cert error", "rollback_error", rbErr.Error())
+		}
+		return nil, fmt.Errorf("failed to create separated certificates: %w", err)
+	}
+	logger.Info("Separated certificates created")
 
 	// Note: Server certificates are NOT generated during initialization.
 	// They are created by the controller startup (gRPC-over-QUIC transport)

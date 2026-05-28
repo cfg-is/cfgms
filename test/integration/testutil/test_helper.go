@@ -357,13 +357,22 @@ func (e *TestEnv) ValidateCertificateSetup() error {
 		return fmt.Errorf("no CA certificates found")
 	}
 
-	// Check that server certificate exists
-	serverCerts, err := e.CertManager.GetCertificatesByType(cert.CertificateTypeServer)
+	// Check that internal server certificate exists (separated architecture is mandatory)
+	internalCerts, err := e.CertManager.GetCertificatesByType(cert.CertificateTypeInternalServer)
 	if err != nil {
 		return err
 	}
-	if len(serverCerts) == 0 {
-		return fmt.Errorf("no server certificates found")
+	if len(internalCerts) == 0 {
+		return fmt.Errorf("no internal server certificates found (separated architecture required)")
+	}
+
+	// Check that config signing certificate exists
+	signingCerts, err := e.CertManager.GetCertificatesByType(cert.CertificateTypeConfigSigning)
+	if err != nil {
+		return err
+	}
+	if len(signingCerts) == 0 {
+		return fmt.Errorf("no config signing certificates found (separated architecture required)")
 	}
 
 	// Check that client certificate exists

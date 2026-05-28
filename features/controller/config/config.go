@@ -199,11 +199,9 @@ type CertificateConfig struct {
 	// Server certificate configuration (used when generating certificates)
 	Server *ServerCertificateConfig `yaml:"server"`
 
-	// Story #377: Three-certificate architecture
-
-	// Architecture selects the certificate deployment mode: "unified" (default) or "separated"
-	// Unified: Single CertificateTypeServer for all purposes (backward compatible)
-	// Separated: Purpose-specific certs (public API, internal mTLS, config signing)
+	// Architecture is parsed from YAML to detect legacy "unified" values and reject them.
+	// Separated architecture is mandatory; do not set this field in new configurations.
+	// Setting it to "unified" causes ValidateCertificateArchitecture to return an error.
 	Architecture string `yaml:"architecture"`
 
 	// SigningCertValidityDays is the validity for config signing certificates (default: 1095 = 3 years)
@@ -619,7 +617,8 @@ func LoadWithPath(configPath string) (*Config, error) {
 		cfg.Certificate.Server.Organization = serverOrg
 	}
 
-	// Story #377: Three-certificate architecture environment variables
+	// CFGMS_CERT_ARCHITECTURE: parsed for legacy detection only.
+	// Setting to "unified" triggers a startup error at ValidateCertificateArchitecture.
 	if certArch := os.Getenv("CFGMS_CERT_ARCHITECTURE"); certArch != "" {
 		cfg.Certificate.Architecture = certArch
 	}
@@ -849,9 +848,19 @@ func (lc *LoggingConfig) ToLoggingManagerConfig() *loggingPkg.LoggingConfig {
 	}
 }
 
-// IsSeparatedArchitecture returns true if the certificate architecture is "separated"
-func (cc *CertificateConfig) IsSeparatedArchitecture() bool {
-	return cc != nil && cc.Architecture == "separated"
+// ValidateCertificateArchitecture returns an error if the config explicitly requests
+// the removed unified-mode architecture. Separated architecture is mandatory.
+// See docs/security/certificate-architecture.md.
+func (cc *CertificateConfig) ValidateCertificateArchitecture() error {
+	if cc != nil && cc.Architecture == "unified" {
+		return fmt.Errorf(
+			"certificate architecture \"unified\" is no longer supported; " +
+				"separated architecture is mandatory; " +
+				"remove 'architecture: unified' from your configuration; " +
+				"see docs/security/certificate-architecture.md#migrating-from-unified-mode",
+		)
+	}
+	return nil
 }
 
 // GetPublicAPISource returns the public API certificate source, defaulting to "internal"

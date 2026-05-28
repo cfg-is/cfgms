@@ -323,29 +323,107 @@ func (m *Manager) EnsureSigningCertificate(signingCfg *SigningCertConfig) error 
 	return nil
 }
 
-// GetSigningCertificate returns the newest valid config signing certificate PEM (public only)
+// purposeToType maps a CertificatePurpose to its underlying CertificateType.
+func purposeToType(p CertificatePurpose) (CertificateType, error) {
+	switch p {
+	case PurposeTransport:
+		return CertificateTypeInternalServer, nil
+	case PurposeAPI:
+		return CertificateTypePublicAPI, nil
+	case PurposeSigning:
+		return CertificateTypeConfigSigning, nil
+	case PurposeClient:
+		return CertificateTypeClient, nil
+	default:
+		return 0, fmt.Errorf("unknown certificate purpose: %d", p)
+	}
+}
+
+// GetCurrentCertForPurpose returns the current (newest valid) certificate for the
+// given purpose. Returns an error if no valid certificate exists. Presentation and
+// signing paths use this method; verification/trust paths use
+// GetAllValidCertificatesForPurpose instead.
+func (m *Manager) GetCurrentCertForPurpose(purpose CertificatePurpose) (*Certificate, error) {
+	certType, err := purposeToType(purpose)
+	if err != nil {
+		return nil, err
+	}
+
+	certs, err := m.store.GetCertificatesByType(certType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve certificates for purpose %s: %w", purpose, err)
+	}
+
+	// GetCertificatesByType returns newest-first; return the first valid one.
+	for _, info := range certs {
+		if info.IsValid {
+			c, cerr := m.store.GetCertificate(info.SerialNumber)
+			if cerr != nil {
+				continue
+			}
+			return c, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no valid certificate found for purpose %s", purpose)
+}
+
+// GetAllValidCertificatesForPurpose returns all currently valid certificates for
+// the given purpose, newest first. Verification and trust paths use this method
+// to accept all valid certs during rotation overlap windows.
+func (m *Manager) GetAllValidCertificatesForPurpose(purpose CertificatePurpose) ([]*CertificateInfo, error) {
+	certType, err := purposeToType(purpose)
+	if err != nil {
+		return nil, err
+	}
+
+	certs, err := m.store.GetCertificatesByType(certType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve certificates for purpose %s: %w", purpose, err)
+	}
+
+	var valid []*CertificateInfo
+	for _, info := range certs {
+		if info.IsValid {
+			valid = append(valid, info)
+		}
+	}
+	return valid, nil
+}
+
+// CheckForLegacyCertificates returns an error if the certificate store contains
+// any certificates with the removed unified-mode type (integer value 1, formerly
+// CertificateTypeServer). Their presence indicates a pre-migration deployment.
+// See docs/security/certificate-architecture.md#migrating-from-unified-mode.
+func (m *Manager) CheckForLegacyCertificates() error {
+	const legacyServerType = CertificateType(1)
+	legacy, err := m.store.GetCertificatesByType(legacyServerType)
+	if err != nil {
+		return fmt.Errorf("failed to scan for legacy certificates: %w", err)
+	}
+	if len(legacy) > 0 {
+		return fmt.Errorf(
+			"startup blocked: found %d legacy unified-mode certificate(s) (type=1, "+
+				"formerly CertificateTypeServer) in the certificate store; "+
+				"this deployment predates the separated-architecture requirement; "+
+				"wipe the certificate store and re-run 'controller --init'; "+
+				"see docs/security/certificate-architecture.md#migrating-from-unified-mode",
+			len(legacy),
+		)
+	}
+	return nil
+}
+
+// GetSigningCertificate returns the current config signing certificate PEM (public only)
 func (m *Manager) GetSigningCertificate() ([]byte, error) {
-	signingCerts, err := m.store.GetCertificatesByType(CertificateTypeConfigSigning)
+	c, err := m.GetCurrentCertForPurpose(PurposeSigning)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve signing certificates: %w", err)
+		return nil, fmt.Errorf("no config signing certificate found: %w", err)
 	}
-
-	if len(signingCerts) == 0 {
-		return nil, fmt.Errorf("no config signing certificate found")
-	}
-
-	// Get the full certificate data (use first valid one)
-	certInfo := signingCerts[0]
-	cert, err := m.store.GetCertificate(certInfo.SerialNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve signing certificate data: %w", err)
-	}
-
-	if len(cert.CertificatePEM) == 0 {
+	if len(c.CertificatePEM) == 0 {
 		return nil, fmt.Errorf("signing certificate PEM data is empty")
 	}
-
-	return cert.CertificatePEM, nil
+	return c.CertificatePEM, nil
 }
 
 // GetCertificate retrieves a certificate by serial number
