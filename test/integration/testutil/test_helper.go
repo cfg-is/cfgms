@@ -349,16 +349,16 @@ func (e *TestEnv) GetCertificateManager() *cert.Manager {
 // ValidateCertificateSetup validates that certificates are properly configured
 func (e *TestEnv) ValidateCertificateSetup() error {
 	// Check that CA is initialized
-	caCerts, err := e.CertManager.GetCertificatesByType(cert.CertificateTypeCA)
+	caInfo, err := e.CertManager.GetCAInfo()
 	if err != nil {
 		return err
 	}
-	if len(caCerts) == 0 {
+	if caInfo == nil {
 		return fmt.Errorf("no CA certificates found")
 	}
 
 	// Check that internal server certificate exists (separated architecture is mandatory)
-	internalCerts, err := e.CertManager.GetCertificatesByType(cert.CertificateTypeInternalServer)
+	internalCerts, err := e.CertManager.GetAllValidCertificatesForPurpose(cert.PurposeTransport)
 	if err != nil {
 		return err
 	}
@@ -367,7 +367,7 @@ func (e *TestEnv) ValidateCertificateSetup() error {
 	}
 
 	// Check that config signing certificate exists
-	signingCerts, err := e.CertManager.GetCertificatesByType(cert.CertificateTypeConfigSigning)
+	signingCerts, err := e.CertManager.GetAllValidCertificatesForPurpose(cert.PurposeSigning)
 	if err != nil {
 		return err
 	}
@@ -376,7 +376,7 @@ func (e *TestEnv) ValidateCertificateSetup() error {
 	}
 
 	// Check that client certificate exists
-	clientCerts, err := e.CertManager.GetCertificatesByType(cert.CertificateTypeClient)
+	clientCerts, err := e.CertManager.GetAllValidCertificatesForPurpose(cert.PurposeClient)
 	if err != nil {
 		return err
 	}
@@ -399,7 +399,28 @@ func (e *TestEnv) GenerateNewClientCertificate(clientID string) (*cert.Certifica
 	})
 }
 
-// GetCertificateInfo returns certificate information for testing
+// GetCertificateInfo returns certificate information for the given certificate type.
+// For CA certificates, uses GetCAInfo; for other types, uses ListCertificates filtered by type.
 func (e *TestEnv) GetCertificateInfo(certType cert.CertificateType) ([]*cert.CertificateInfo, error) {
-	return e.CertManager.GetCertificatesByType(certType)
+	if certType == cert.CertificateTypeCA {
+		info, err := e.CertManager.GetCAInfo()
+		if err != nil {
+			return nil, err
+		}
+		if info == nil {
+			return nil, nil
+		}
+		return []*cert.CertificateInfo{info}, nil
+	}
+	all, err := e.CertManager.ListCertificates()
+	if err != nil {
+		return nil, err
+	}
+	var filtered []*cert.CertificateInfo
+	for _, c := range all {
+		if c.Type == certType {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered, nil
 }

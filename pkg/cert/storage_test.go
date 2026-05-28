@@ -129,7 +129,7 @@ func TestGetCertificatesByType_RecomputesIsValidForExpiredCert(t *testing.T) {
 	freshStore, err := NewFileStore(dir)
 	require.NoError(t, err)
 
-	results, err := freshStore.GetCertificatesByType(CertificateTypeClient)
+	results, err := freshStore.getCertificatesByType(CertificateTypeClient)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
@@ -150,7 +150,7 @@ func TestGetCertificatesByType_ValidCertRemainsValid(t *testing.T) {
 	cert := minimalCert(serial, CertificateTypePublicAPI, time.Now().Add(365*24*time.Hour))
 	require.NoError(t, store.StoreCertificate(cert))
 
-	results, err := store.GetCertificatesByType(CertificateTypePublicAPI)
+	results, err := store.getCertificatesByType(CertificateTypePublicAPI)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
@@ -196,7 +196,7 @@ func TestGetCertificatesByType_DaysUntilExpirationPositiveForValidCert(t *testin
 	cert := minimalCert(serial, CertificateTypePublicAPI, time.Now().Add(365*24*time.Hour))
 	require.NoError(t, store.StoreCertificate(cert))
 
-	results, err := store.GetCertificatesByType(CertificateTypePublicAPI)
+	results, err := store.getCertificatesByType(CertificateTypePublicAPI)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
