@@ -156,6 +156,12 @@ CFGMS_CERT_PUBLIC_API_KEY_PATH=/etc/letsencrypt/live/api.example.com/privkey.pem
 The controller loads these files on startup. Renewal (certbot auto-renew) takes effect on
 the next controller restart or when the HTTP server reloads its TLS config.
 
+## Certificate Rotation
+
+See [certificate-rotation.md](certificate-rotation.md) for the full rotation methodology,
+operator runbook, `cfg controller signing-cert rotate` CLI reference, overlap window
+guidance, and offline-steward recovery via refresh-on-connect.
+
 ## Future Work
 
 - **Issue #401**: Let's Encrypt automation via certbot module (v0.9.3)
