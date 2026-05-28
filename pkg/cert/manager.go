@@ -49,6 +49,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -76,6 +77,7 @@ type Manager struct {
 	renewer    *Renewer
 	config     *ManagerConfig
 	revocation *revocationStore
+	rotateMu   sync.Mutex // serialises RotateSigningCertificate calls
 }
 
 // NewManager creates a new certificate manager
@@ -321,6 +323,54 @@ func (m *Manager) EnsureSigningCertificate(signingCfg *SigningCertConfig) error 
 		return fmt.Errorf("failed to generate config signing certificate: %w", err)
 	}
 	return nil
+}
+
+// RotateSigningCertificate generates a new ConfigSigning certificate and atomically
+// transitions the lifecycle cursor, making the new cert active and keeping the old
+// one valid for the overlap window so in-flight verifications are not disrupted.
+//
+// Returns an error if a rotation is already in progress (RotatingSerial is set and
+// still within the overlap window). Concurrent callers are serialised; the second
+// caller will fail with "rotation already in progress" once the first completes.
+func (m *Manager) RotateSigningCertificate(overlapWindowDays int) (*Certificate, error) {
+	m.rotateMu.Lock()
+	defer m.rotateMu.Unlock()
+
+	// Early guard: reject if an active rotation is still within its overlap window.
+	cursor, err := loadSigningCursor(m.store.basePath)
+	if err != nil {
+		return nil, fmt.Errorf("load signing cursor: %w", err)
+	}
+	if cursor != nil && cursor.RotatingSerial != "" {
+		overlapDuration := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
+		if time.Since(cursor.RotatedAt) < overlapDuration {
+			return nil, fmt.Errorf(
+				"rotation already in progress: rotating serial %q is still within %d-day overlap window (rotated %s ago)",
+				cursor.RotatingSerial,
+				cursor.OverlapWindowDays,
+				time.Since(cursor.RotatedAt).Truncate(time.Second),
+			)
+		}
+	}
+
+	newCert, err := m.ca.GenerateSigningCertificate(&SigningCertConfig{
+		CommonName:   "cfgms-config-signer",
+		ValidityDays: 1095,
+		KeySize:      4096,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("generate signing certificate: %w", err)
+	}
+
+	if err := m.store.StoreCertificate(newCert); err != nil {
+		return nil, fmt.Errorf("store signing certificate: %w", err)
+	}
+
+	if err := transitionSigningCursor(m.store, m.store.basePath, newCert.SerialNumber, overlapWindowDays); err != nil {
+		return nil, fmt.Errorf("transition signing cursor: %w", err)
+	}
+
+	return newCert, nil
 }
 
 // purposeToType maps a CertificatePurpose to its underlying CertificateType.
