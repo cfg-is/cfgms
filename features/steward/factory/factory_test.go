@@ -222,9 +222,9 @@ func TestGetModuleInfo(t *testing.T) {
 	assert.False(t, exists)
 }
 
-func TestAllSevenBuiltinModulesLoad(t *testing.T) {
+func TestAllBuiltinModulesLoad(t *testing.T) {
 	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
-	for _, name := range []string{"acme", "directory", "file", "firewall", "package", "patch", "script"} {
+	for _, name := range []string{"acme", "directory", "file", "firewall", "hyperv", "package", "patch", "script"} {
 		mod, err := factory.LoadModule(name)
 		assert.NoError(t, err, "built-in module %q must load without error", name)
 		assert.NotNil(t, mod, "built-in module %q must not be nil", name)
