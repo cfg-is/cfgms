@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -257,54 +256,55 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to load certificate manager: %w", err)
 		}
 
-		// Story #377: Boot migration for separated certificate architecture
-		if cfg.Certificate.IsSeparatedArchitecture() {
-			logger.Info("Certificate architecture: separated — ensuring purpose-specific certificates")
-			internalCfg := &cert.ServerCertConfig{
-				CommonName:   "cfgms-internal",
-				DNSNames:     []string{"localhost", "cfgms-internal", "controller-standalone"},
-				IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
-				ValidityDays: 365,
-			}
-			if cfg.Certificate.Internal != nil {
-				if cfg.Certificate.Internal.CommonName != "" {
-					internalCfg.CommonName = cfg.Certificate.Internal.CommonName
-				}
-				if len(cfg.Certificate.Internal.DNSNames) > 0 {
-					internalCfg.DNSNames = cfg.Certificate.Internal.DNSNames
-				}
-				if len(cfg.Certificate.Internal.IPAddresses) > 0 {
-					internalCfg.IPAddresses = cfg.Certificate.Internal.IPAddresses
-				}
-			}
-			if cfg.Certificate.InternalCertValidityDays > 0 {
-				internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
-			}
-
-			signingCfg := &cert.SigningCertConfig{
-				CommonName:   "cfgms-config-signer",
-				ValidityDays: 1095,
-				KeySize:      4096,
-			}
-			if cfg.Certificate.Signing != nil {
-				if cfg.Certificate.Signing.CommonName != "" {
-					signingCfg.CommonName = cfg.Certificate.Signing.CommonName
-				}
-				if cfg.Certificate.Signing.Organization != "" {
-					signingCfg.Organization = cfg.Certificate.Signing.Organization
-				}
-			}
-			if cfg.Certificate.SigningCertValidityDays > 0 {
-				signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
-			}
-
-			if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
-				return nil, fmt.Errorf("failed to ensure separated certificates: %w", err)
-			}
-			logger.Info("Separated certificates ensured (internal mTLS + config signing)")
-		} else {
-			logger.Info("Certificate architecture: unified (default)")
+		// Reject legacy unified-mode config and block on legacy cert types in store
+		if err := cfg.Certificate.ValidateCertificateArchitecture(); err != nil {
+			return nil, err
 		}
+		if err := certManager.CheckForLegacyCertificates(); err != nil {
+			return nil, err
+		}
+
+		// Ensure purpose-specific certificates exist (idempotent first-boot generation).
+		// initialization.TransportCertSANs merges transport defaults, operator-configured
+		// SANs (server + internal blocks), and CFGMS_EXTERNAL_HOSTNAME so stewards can
+		// verify the cert by external hostname. Shared with initialization.Run so that
+		// --init mints the cert with the same SAN set this startup path would generate.
+		logger.Info("Ensuring separated certificates (internal mTLS + config signing)...")
+		dnsNames, ipAddresses := initialization.TransportCertSANs(cfg)
+		internalCfg := &cert.ServerCertConfig{
+			CommonName:   "cfgms-internal",
+			DNSNames:     dnsNames,
+			IPAddresses:  ipAddresses,
+			ValidityDays: 365,
+		}
+		if cfg.Certificate.Internal != nil && cfg.Certificate.Internal.CommonName != "" {
+			internalCfg.CommonName = cfg.Certificate.Internal.CommonName
+		}
+		if cfg.Certificate.InternalCertValidityDays > 0 {
+			internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
+		}
+
+		signingCfg := &cert.SigningCertConfig{
+			CommonName:   "cfgms-config-signer",
+			ValidityDays: 1095,
+			KeySize:      4096,
+		}
+		if cfg.Certificate.Signing != nil {
+			if cfg.Certificate.Signing.CommonName != "" {
+				signingCfg.CommonName = cfg.Certificate.Signing.CommonName
+			}
+			if cfg.Certificate.Signing.Organization != "" {
+				signingCfg.Organization = cfg.Certificate.Signing.Organization
+			}
+		}
+		if cfg.Certificate.SigningCertValidityDays > 0 {
+			signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
+		}
+
+		if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
+			return nil, fmt.Errorf("failed to ensure separated certificates: %w", err)
+		}
+		logger.Info("Separated certificates ensured (internal mTLS + config signing)")
 
 		// Create certificate provisioning service
 		certProvisioningService = service.NewCertificateProvisioningService(certManager, logger)
@@ -1657,115 +1657,15 @@ func initializeHAManager(logger logging.Logger, storageManager *interfaces.Stora
 	return haManager, nil
 }
 
-// grpcControlPlaneServerSANs returns the DNS names and IP addresses to embed in
-// the generated gRPC control-plane server certificate.
-//
-// It starts from the transport defaults (localhost / loopback) and merges in
-// any operator-configured server SANs (certificate.server.dns_names and
-// certificate.server.ip_addresses) plus CFGMS_EXTERNAL_HOSTNAME. Without this,
-// a steward dialing the controller by its external hostname fails mTLS
-// verification because the generated certificate omits that name. The
-// CFGMS_EXTERNAL_HOSTNAME value is classified as an IP SAN when it parses as an
-// IP literal and as a DNS SAN otherwise. Duplicates are removed and ordering is
-// deterministic.
-func grpcControlPlaneServerSANs(cfg *config.Config) (dnsNames, ipAddresses []string) {
-	dnsNames = []string{"localhost", "cfgms-grpc-server", "controller-standalone"}
-	ipAddresses = []string{"127.0.0.1", "0.0.0.0"}
-
-	if cfg != nil && cfg.Certificate != nil && cfg.Certificate.Server != nil {
-		dnsNames = append(dnsNames, cfg.Certificate.Server.DNSNames...)
-		ipAddresses = append(ipAddresses, cfg.Certificate.Server.IPAddresses...)
-	}
-
-	if hostname := strings.TrimSpace(os.Getenv("CFGMS_EXTERNAL_HOSTNAME")); hostname != "" {
-		if net.ParseIP(hostname) != nil {
-			ipAddresses = append(ipAddresses, hostname)
-		} else {
-			dnsNames = append(dnsNames, hostname)
-		}
-	}
-
-	return dedupeSANs(dnsNames), dedupeSANs(ipAddresses)
-}
-
-// dedupeSANs returns the input slice with empty strings dropped and duplicates
-// removed, preserving first-seen order.
-func dedupeSANs(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	out := make([]string, 0, len(values))
-	for _, v := range values {
-		v = strings.TrimSpace(v)
-		if v == "" {
-			continue
-		}
-		if _, ok := seen[v]; ok {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	return out
-}
-
 // buildGRPCControlPlaneTLSConfig creates TLS configuration for the gRPC control plane provider.
-//
-// Uses the certificate manager to load or generate the server certificate and CA, then creates
-// a mTLS config with the ALPN identifier required by the gRPC-over-QUIC transport layer.
-// In separated architecture mode, uses CertificateTypeInternalServer for mTLS separation.
-// Generates a server certificate on first boot if none exists.
+// Uses GetCurrentCertForPurpose(PurposeTransport) to resolve the InternalServer certificate.
+// EnsureSeparatedCertificates guarantees the cert exists before this function is called.
 func buildGRPCControlPlaneTLSConfig(cfg *config.Config, certManager *cert.Manager, logger logging.Logger) (*tls.Config, error) {
-	separated := cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture()
-	certType := cert.CertificateTypeServer
-	if separated {
-		certType = cert.CertificateTypeInternalServer
+	serverCert, err := certManager.GetCurrentCertForPurpose(cert.PurposeTransport)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load gRPC control plane transport certificate: %w", err)
 	}
-
-	var serverCertPEM, serverKeyPEM []byte
-
-	// Try to load existing certificate; generate one on first boot if none exists
-	serverCerts, err := certManager.GetCertificatesByType(certType)
-	if err != nil || len(serverCerts) == 0 {
-		if separated {
-			// Also check base server type as fallback in separated mode
-			serverCerts, err = certManager.GetCertificatesByType(cert.CertificateTypeServer)
-		}
-	}
-
-	if err != nil || len(serverCerts) == 0 {
-		// First boot: generate server certificate for gRPC control plane.
-		// SANs merge the transport defaults with any operator-configured server
-		// SANs and CFGMS_EXTERNAL_HOSTNAME so a steward connecting by the
-		// controller's external hostname can verify the certificate.
-		logger.Info("Generating gRPC control plane server certificate")
-		dnsNames, ipAddresses := grpcControlPlaneServerSANs(cfg)
-		certCfg := &cert.ServerCertConfig{
-			CommonName:   "cfgms-grpc-server",
-			Organization: "CFGMS",
-			DNSNames:     dnsNames,
-			IPAddresses:  ipAddresses,
-			ValidityDays: 365,
-		}
-		var generatedCert *cert.Certificate
-		if separated {
-			generatedCert, err = certManager.GenerateInternalServerCertificate(certCfg)
-		} else {
-			generatedCert, err = certManager.GenerateServerCertificate(certCfg)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate gRPC control plane server certificate: %w", err)
-		}
-		serverCertPEM = generatedCert.CertificatePEM
-		serverKeyPEM = generatedCert.PrivateKeyPEM
-		logger.Info("gRPC control plane server certificate generated", "serial", generatedCert.SerialNumber)
-	} else {
-		// Load existing certificate
-		serial := serverCerts[0].SerialNumber
-		serverCertPEM, serverKeyPEM, err = certManager.ExportCertificate(serial, true)
-		if err != nil {
-			return nil, fmt.Errorf("failed to export gRPC control plane server certificate: %w", err)
-		}
-		logger.Info("gRPC control plane using existing server certificate", "serial", serial)
-	}
+	logger.Info("gRPC control plane using transport certificate", "serial", serverCert.SerialNumber)
 
 	caCertPEM, err := certManager.GetCACertificate()
 	if err != nil {
@@ -1773,7 +1673,7 @@ func buildGRPCControlPlaneTLSConfig(cfg *config.Config, certManager *cert.Manage
 	}
 
 	// Build mTLS server config using pkg/cert helper
-	tlsConfig, err := cert.CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM, tls.VersionTLS13)
+	tlsConfig, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, caCertPEM, tls.VersionTLS13)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC control plane TLS config: %w", err)
 	}

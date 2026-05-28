@@ -65,7 +65,7 @@ func TestGetCertificate_RecomputesIsValidForExpiredCert(t *testing.T) {
 	require.NoError(t, err)
 
 	serial := "serial-expired-001"
-	cert := minimalCert(serial, CertificateTypeServer, time.Now().Add(365*24*time.Hour))
+	cert := minimalCert(serial, CertificateTypePublicAPI, time.Now().Add(365*24*time.Hour))
 	require.NoError(t, store.StoreCertificate(cert))
 
 	// Simulate the cert aging past expiry by patching the on-disk metadata.
@@ -84,7 +84,7 @@ func TestGetCertificate_ValidCertRemainsValid(t *testing.T) {
 	require.NoError(t, err)
 
 	serial := "serial-valid-001"
-	cert := minimalCert(serial, CertificateTypeServer, time.Now().Add(365*24*time.Hour))
+	cert := minimalCert(serial, CertificateTypePublicAPI, time.Now().Add(365*24*time.Hour))
 	require.NoError(t, store.StoreCertificate(cert))
 
 	got, err := store.GetCertificate(serial)
@@ -147,10 +147,10 @@ func TestGetCertificatesByType_ValidCertRemainsValid(t *testing.T) {
 	require.NoError(t, err)
 
 	serial := "serial-type-valid-001"
-	cert := minimalCert(serial, CertificateTypeServer, time.Now().Add(365*24*time.Hour))
+	cert := minimalCert(serial, CertificateTypePublicAPI, time.Now().Add(365*24*time.Hour))
 	require.NoError(t, store.StoreCertificate(cert))
 
-	results, err := store.GetCertificatesByType(CertificateTypeServer)
+	results, err := store.GetCertificatesByType(CertificateTypePublicAPI)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
@@ -166,7 +166,7 @@ func TestLoadCertificates_RecomputesDynamicFieldsInCache(t *testing.T) {
 	require.NoError(t, err)
 
 	serial := "serial-cache-001"
-	cert := minimalCert(serial, CertificateTypeServer, time.Now().Add(365*24*time.Hour))
+	cert := minimalCert(serial, CertificateTypePublicAPI, time.Now().Add(365*24*time.Hour))
 	require.NoError(t, store.StoreCertificate(cert))
 
 	// Patch metadata with stale values before reloading.
@@ -193,10 +193,10 @@ func TestGetCertificatesByType_DaysUntilExpirationPositiveForValidCert(t *testin
 	require.NoError(t, err)
 
 	serial := "serial-days-positive-001"
-	cert := minimalCert(serial, CertificateTypeServer, time.Now().Add(365*24*time.Hour))
+	cert := minimalCert(serial, CertificateTypePublicAPI, time.Now().Add(365*24*time.Hour))
 	require.NoError(t, store.StoreCertificate(cert))
 
-	results, err := store.GetCertificatesByType(CertificateTypeServer)
+	results, err := store.GetCertificatesByType(CertificateTypePublicAPI)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
@@ -212,7 +212,7 @@ func TestGetCertificateByCommonName_RecomputesIsValidForExpiredCert(t *testing.T
 	require.NoError(t, err)
 
 	serial := "serial-cn-expired-001"
-	cert := minimalCert(serial, CertificateTypeServer, time.Now().Add(365*24*time.Hour))
+	cert := minimalCert(serial, CertificateTypePublicAPI, time.Now().Add(365*24*time.Hour))
 	require.NoError(t, store.StoreCertificate(cert))
 
 	expired := time.Now().Add(-24 * time.Hour)
@@ -240,7 +240,7 @@ func TestGetCertificateByCommonName_ValidCertRemainsValid(t *testing.T) {
 	require.NoError(t, err)
 
 	serial := "serial-cn-valid-001"
-	cert := minimalCert(serial, CertificateTypeServer, time.Now().Add(365*24*time.Hour))
+	cert := minimalCert(serial, CertificateTypePublicAPI, time.Now().Add(365*24*time.Hour))
 	require.NoError(t, store.StoreCertificate(cert))
 
 	results, err := store.GetCertificateByCommonName("test-" + serial)
