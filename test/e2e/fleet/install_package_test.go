@@ -277,6 +277,12 @@ func placeCACert(t *testing.T, container string, caCertPEM []byte) {
 
 // waitForStewardRegistration polls GET /api/v1/stewards until at least wantCount
 // stewards appear or the deadline is reached.
+//
+// On non-200 responses (e.g. 401/403 from a mis-seeded API key or 5xx from a
+// genuinely broken endpoint), the poll fails fast with t.Fatalf so the test
+// reports the real cause instead of an opaque "timed out" message at deadline.
+// A request-level error (connection refused, network blip) is treated as
+// transient and retried until the deadline.
 func waitForStewardRegistration(t *testing.T, client *http.Client, wantCount int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -287,21 +293,32 @@ func waitForStewardRegistration(t *testing.T, client *http.Client, wantCount int
 		req.Header.Set("X-API-Key", installerAPIKey)
 		resp, err := client.Do(req)
 		cancel()
-		if err == nil && resp.StatusCode == http.StatusOK {
-			var result struct {
-				Data []json.RawMessage `json:"data"`
-			}
-			if jsonErr := json.NewDecoder(resp.Body).Decode(&result); jsonErr == nil {
-				if len(result.Data) >= wantCount {
-					_ = resp.Body.Close()
-					return
-				}
-			}
+		if err != nil {
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
+			t.Fatalf("GET /api/v1/stewards returned %d (expected 200) — body: %s",
+				resp.StatusCode, string(body))
+		}
+
+		var result struct {
+			Data []json.RawMessage `json:"data"`
+		}
+		decErr := json.NewDecoder(resp.Body).Decode(&result)
+		_ = resp.Body.Close()
+		if decErr != nil {
+			t.Fatalf("decode /api/v1/stewards response: %v", decErr)
+		}
+		if len(result.Data) >= wantCount {
+			return
 		}
 		time.Sleep(3 * time.Second)
 	}
-	t.Errorf("expected at least %d registered steward(s) within %s, but poll timed out", wantCount, timeout)
+	t.Fatalf("expected at least %d registered steward(s) within %s, but poll timed out", wantCount, timeout)
 }
 
 // dockerExecRoot runs a command in the container as root.
