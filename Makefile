@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin test-install-sh
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -230,6 +230,13 @@ build-pkg-darwin:
 	@bash build/darwin/build-pkg.sh --arch amd64 --version "$(or $(VERSION),0.0.0)"
 	@bash build/darwin/build-pkg.sh --arch arm64 --version "$(or $(VERSION),0.0.0)"
 	@echo "✅ Packages built: bin/cfgms-steward-darwin-amd64.pkg  bin/cfgms-steward-darwin-arm64.pkg"
+
+# Run Linux install.sh tests (Story #1708)
+test-install-sh:
+	@echo "🐧 Testing build/linux/install.sh"
+	@echo "=================================="
+	@bash build/linux/install_test.sh
+	@echo "✅ Linux install.sh tests passed"
 
 # Smart test - core modules + changed modules only
 test: fix-git-bare

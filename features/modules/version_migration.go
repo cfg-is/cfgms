@@ -678,7 +678,18 @@ func (m *DefaultVersionMigrator) executeMigrationSteps(execution *MigrationExecu
 		endTime := time.Now()
 		execution.EndTime = &endTime
 
-		// Create final result
+		// Finalize status, append to history, and remove from active migrations under
+		// a single lock acquisition. If no terminal status was set (cancelled, failed),
+		// the migration completed successfully. Doing the status flip and the history
+		// append atomically guarantees that any caller observing a terminal status via
+		// GetMigrationStatus or WaitForMigration will also find the migration in
+		// migrationHistory — preventing a race where RollbackMigration is called
+		// immediately after WaitForMigration returns and reports "not found in history".
+		m.mu.Lock()
+		if execution.Status == MigrationStatusRunning {
+			execution.Status = MigrationStatusCompleted
+			execution.Progress = 1.0
+		}
 		result := &MigrationResult{
 			ID:          execution.Path.ID,
 			Path:        execution.Path,
@@ -688,13 +699,9 @@ func (m *DefaultVersionMigrator) executeMigrationSteps(execution *MigrationExecu
 			Duration:    endTime.Sub(execution.StartTime),
 			StepResults: execution.CompletedSteps,
 		}
-
 		if execution.ErrorMessage != "" {
 			result.ErrorMessage = execution.ErrorMessage
 		}
-
-		// Add to history and remove from active migrations
-		m.mu.Lock()
 		m.migrationHistory = append(m.migrationHistory, result)
 		delete(m.activeMigrations, execution.Path.ID)
 		m.mu.Unlock()
@@ -733,13 +740,9 @@ func (m *DefaultVersionMigrator) executeMigrationSteps(execution *MigrationExecu
 		}
 	}
 
-	// Migration completed successfully
-	m.mu.Lock()
-	execution.Status = MigrationStatusCompleted
-	execution.Progress = 1.0
-	m.mu.Unlock()
-
-	// Record the version transition in the registry
+	// Record the version transition in the registry before the deferred cleanup
+	// flips status to Completed. Status remains Running here so observers cannot
+	// see a terminal state until the migration is also present in migrationHistory.
 	var transitionType VersionTransitionType
 	fromSemVer, _ := ParseVersion(execution.Path.FromVersion)
 	toSemVer, _ := ParseVersion(execution.Path.ToVersion)
