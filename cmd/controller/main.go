@@ -540,7 +540,7 @@ func runBootstrapAdminList(cfg *config.Config) error {
 		return fmt.Errorf("failed to load cert manager: %w", err)
 	}
 
-	certs, err := certManager.GetCertificatesByType(certpkg.CertificateTypeClient)
+	certs, err := certManager.GetAllValidCertificatesForPurpose(certpkg.PurposeClient)
 	if err != nil {
 		return fmt.Errorf("failed to list certificates: %w", err)
 	}

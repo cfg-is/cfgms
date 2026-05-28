@@ -214,12 +214,12 @@ func (s *CertificateTestSuite) TestStewardWithCertificates() {
 func (s *CertificateTestSuite) TestCertificatePersistenceAcrossReboots() {
 	// Get certificate info from first "boot"
 	certManager1 := s.env.GetCertificateManager()
-	caCerts1, err := certManager1.GetCertificatesByType(cert.CertificateTypeCA)
-	s.NoError(err, "Should retrieve CA certificates")
-	s.Len(caCerts1, 1, "Should have exactly one CA certificate")
-	originalCASerial := caCerts1[0].SerialNumber
+	caInfo1, err := certManager1.GetCAInfo()
+	s.NoError(err, "Should retrieve CA certificate")
+	s.NotNil(caInfo1, "Should have a CA certificate")
+	originalCASerial := caInfo1.SerialNumber
 
-	internalCerts1, err := certManager1.GetCertificatesByType(cert.CertificateTypeInternalServer)
+	internalCerts1, err := certManager1.GetAllValidCertificatesForPurpose(cert.PurposeTransport)
 	s.NoError(err, "Should retrieve internal server certificates")
 	s.GreaterOrEqual(len(internalCerts1), 1, "Should have at least one internal server certificate")
 	originalInternalSerial := internalCerts1[0].SerialNumber
@@ -231,12 +231,12 @@ func (s *CertificateTestSuite) TestCertificatePersistenceAcrossReboots() {
 
 	// Verify certificates were reloaded, not regenerated
 	certManager2 := s.env.GetCertificateManager()
-	caCerts2, err := certManager2.GetCertificatesByType(cert.CertificateTypeCA)
-	s.NoError(err, "Should retrieve CA certificates after reboot")
-	s.Len(caCerts2, 1, "Should still have exactly one CA certificate after reboot")
-	s.Equal(originalCASerial, caCerts2[0].SerialNumber, "CA certificate serial should be same after reboot (not regenerated)")
+	caInfo2, err := certManager2.GetCAInfo()
+	s.NoError(err, "Should retrieve CA certificate after reboot")
+	s.NotNil(caInfo2, "Should still have a CA certificate after reboot")
+	s.Equal(originalCASerial, caInfo2.SerialNumber, "CA certificate serial should be same after reboot (not regenerated)")
 
-	internalCerts2, err := certManager2.GetCertificatesByType(cert.CertificateTypeInternalServer)
+	internalCerts2, err := certManager2.GetAllValidCertificatesForPurpose(cert.PurposeTransport)
 	s.NoError(err, "Should retrieve internal server certificates after reboot")
 	s.GreaterOrEqual(len(internalCerts2), 1, "Should have at least one internal server certificate after reboot")
 	// Verify the internal server certificate was preserved (not regenerated)

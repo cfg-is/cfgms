@@ -4,6 +4,10 @@ package cert
 
 import (
 	"bytes"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -21,11 +25,11 @@ func TestEnsureSeparatedCertificates_GeneratesMissing(t *testing.T) {
 	manager := setupTestManager(t)
 
 	// Verify no separated certs exist initially
-	internalCerts, err := manager.GetCertificatesByType(CertificateTypeInternalServer)
+	internalCerts, err := manager.GetAllValidCertificatesForPurpose(PurposeTransport)
 	require.NoError(t, err)
 	assert.Empty(t, internalCerts)
 
-	signingCerts, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	signingCerts, err := manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	assert.Empty(t, signingCerts)
 
@@ -34,12 +38,12 @@ func TestEnsureSeparatedCertificates_GeneratesMissing(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify both cert types were generated
-	internalCerts, err = manager.GetCertificatesByType(CertificateTypeInternalServer)
+	internalCerts, err = manager.GetAllValidCertificatesForPurpose(PurposeTransport)
 	require.NoError(t, err)
 	assert.Len(t, internalCerts, 1, "should generate exactly one internal server cert")
 	assert.Equal(t, "cfgms-internal", internalCerts[0].CommonName)
 
-	signingCerts, err = manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	signingCerts, err = manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	assert.Len(t, signingCerts, 1, "should generate exactly one signing cert")
 	assert.Equal(t, "cfgms-config-signer", signingCerts[0].CommonName)
@@ -58,11 +62,11 @@ func TestEnsureSeparatedCertificates_Idempotent(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should still have exactly one of each
-	internalCerts, err := manager.GetCertificatesByType(CertificateTypeInternalServer)
+	internalCerts, err := manager.GetAllValidCertificatesForPurpose(PurposeTransport)
 	require.NoError(t, err)
 	assert.Len(t, internalCerts, 1)
 
-	signingCerts, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	signingCerts, err := manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	assert.Len(t, signingCerts, 1)
 }
@@ -88,12 +92,12 @@ func TestEnsureSeparatedCertificates_CustomConfig(t *testing.T) {
 	err := manager.EnsureSeparatedCertificates(internalCfg, signingCfg)
 	require.NoError(t, err)
 
-	internalCerts, err := manager.GetCertificatesByType(CertificateTypeInternalServer)
+	internalCerts, err := manager.GetAllValidCertificatesForPurpose(PurposeTransport)
 	require.NoError(t, err)
 	require.Len(t, internalCerts, 1)
 	assert.Equal(t, "my-custom-internal", internalCerts[0].CommonName)
 
-	signingCerts, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	signingCerts, err := manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	require.Len(t, signingCerts, 1)
 	assert.Equal(t, "my-custom-signer", signingCerts[0].CommonName)
@@ -158,12 +162,12 @@ func TestRestartStability_InternalAndSigningCertsStable(t *testing.T) {
 	// First boot: generate certs
 	require.NoError(t, manager.EnsureSeparatedCertificates(nil, nil))
 
-	internalAfterBoot1, err := manager.GetCertificatesByType(CertificateTypeInternalServer)
+	internalAfterBoot1, err := manager.GetAllValidCertificatesForPurpose(PurposeTransport)
 	require.NoError(t, err)
 	require.Len(t, internalAfterBoot1, 1)
 	firstInternalSerial := internalAfterBoot1[0].SerialNumber
 
-	signingAfterBoot1, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	signingAfterBoot1, err := manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	require.Len(t, signingAfterBoot1, 1)
 	firstSigningSerial := signingAfterBoot1[0].SerialNumber
@@ -173,14 +177,14 @@ func TestRestartStability_InternalAndSigningCertsStable(t *testing.T) {
 		require.NoError(t, manager.EnsureSeparatedCertificates(nil, nil))
 	}
 
-	internalAfterReboots, err := manager.GetCertificatesByType(CertificateTypeInternalServer)
+	internalAfterReboots, err := manager.GetAllValidCertificatesForPurpose(PurposeTransport)
 	require.NoError(t, err)
 	require.Len(t, internalAfterReboots, 1,
 		"EnsureSeparatedCertificates must not accrete InternalServer certs")
 	assert.Equal(t, firstInternalSerial, internalAfterReboots[0].SerialNumber,
 		"InternalServer cert serial must be stable across restarts (AC5)")
 
-	signingAfterReboots, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	signingAfterReboots, err := manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	require.Len(t, signingAfterReboots, 1,
 		"EnsureSeparatedCertificates must not accrete ConfigSigning certs")
@@ -418,13 +422,13 @@ func findRepoRoot(t *testing.T) string {
 func TestEnsureSigningCertificate_GeneratesWhenMissing(t *testing.T) {
 	manager := setupTestManager(t)
 
-	signingCerts, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	signingCerts, err := manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	assert.Empty(t, signingCerts)
 
 	require.NoError(t, manager.EnsureSigningCertificate(nil))
 
-	signingCerts, err = manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	signingCerts, err = manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	assert.Len(t, signingCerts, 1, "should generate exactly one config signing cert")
 	assert.Equal(t, "cfgms-config-signer", signingCerts[0].CommonName)
@@ -440,7 +444,7 @@ func TestEnsureSigningCertificate_StableAcrossCalls(t *testing.T) {
 	manager := setupTestManager(t)
 
 	require.NoError(t, manager.EnsureSigningCertificate(nil))
-	first, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	first, err := manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	require.Len(t, first, 1)
 	firstSerial := first[0].SerialNumber
@@ -450,7 +454,7 @@ func TestEnsureSigningCertificate_StableAcrossCalls(t *testing.T) {
 		require.NoError(t, manager.EnsureSigningCertificate(nil))
 	}
 
-	after, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	after, err := manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	require.Len(t, after, 1, "EnsureSigningCertificate must not accrete certificates")
 	assert.Equal(t, firstSerial, after[0].SerialNumber,
@@ -463,14 +467,136 @@ func TestEnsureSigningCertificate_NoOpAfterSeparatedCerts(t *testing.T) {
 	manager := setupTestManager(t)
 
 	require.NoError(t, manager.EnsureSeparatedCertificates(nil, nil))
-	before, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	before, err := manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	require.Len(t, before, 1)
 
 	require.NoError(t, manager.EnsureSigningCertificate(nil))
 
-	after, err := manager.GetCertificatesByType(CertificateTypeConfigSigning)
+	after, err := manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	require.Len(t, after, 1, "must reuse the existing signing cert")
 	assert.Equal(t, before[0].SerialNumber, after[0].SerialNumber)
+}
+
+// TestNoGetCertificatesByTypeOutsideCertPackage enforces that GetCertificatesByType
+// is never called outside pkg/cert. The method is package-private on FileStore and
+// removed from Manager's public API. Callers outside pkg/cert must use
+// GetCurrentCertForPurpose or GetAllValidCertificatesForPurpose instead.
+func TestNoGetCertificatesByTypeOutsideCertPackage(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	certPkgPath := filepath.Join(repoRoot, "pkg", "cert")
+
+	var violations []string
+	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == "vendor" || d.Name() == "worktrees" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		// pkg/cert internals use the private getCertificatesByType — skip the whole directory
+		if rel, relErr := filepath.Rel(certPkgPath, path); relErr == nil && !strings.HasPrefix(rel, "..") {
+			return nil
+		}
+
+		fset := token.NewFileSet()
+		f, parseErr := parser.ParseFile(fset, path, nil, 0)
+		if parseErr != nil {
+			return nil
+		}
+
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if sel.Sel.Name == "GetCertificatesByType" {
+				pos := fset.Position(sel.Pos())
+				rel, relErr := filepath.Rel(repoRoot, pos.Filename)
+				if relErr != nil {
+					rel = pos.Filename
+				}
+				violations = append(violations, fmt.Sprintf("%s:%d", filepath.ToSlash(rel), pos.Line))
+			}
+			return true
+		})
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Empty(t, violations,
+		"external callers of GetCertificatesByType found outside pkg/cert; "+
+			"use GetCurrentCertForPurpose or GetAllValidCertificatesForPurpose: %v", violations)
+}
+
+// TestNoCertSliceIndex0InNonTest enforces that cert-collection variables are never
+// blindly indexed at position 0 outside pkg/cert. Selecting [0] from a cert slice
+// races with rotation: the newest cert may be invalid during a rotation overlap
+// window. Use GetCurrentCertForPurpose instead to get a single valid certificate.
+func TestNoCertSliceIndex0InNonTest(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	certPkgPath := filepath.Join(repoRoot, "pkg", "cert")
+
+	var violations []string
+	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == "vendor" || d.Name() == "worktrees" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		// pkg/cert internals are exempt (e.g., clientCerts[0] in GetClientCertificate)
+		if rel, relErr := filepath.Rel(certPkgPath, path); relErr == nil && !strings.HasPrefix(rel, "..") {
+			return nil
+		}
+
+		fset := token.NewFileSet()
+		f, parseErr := parser.ParseFile(fset, path, nil, 0)
+		if parseErr != nil {
+			return nil
+		}
+
+		ast.Inspect(f, func(n ast.Node) bool {
+			indexExpr, ok := n.(*ast.IndexExpr)
+			if !ok {
+				return true
+			}
+			lit, isLit := indexExpr.Index.(*ast.BasicLit)
+			if !isLit || lit.Kind != token.INT || lit.Value != "0" {
+				return true
+			}
+			ident, isIdent := indexExpr.X.(*ast.Ident)
+			if !isIdent {
+				return true
+			}
+			name := ident.Name
+			if strings.Contains(name, "Certs") || strings.Contains(name, "certs") ||
+				strings.Contains(name, "Certificates") || strings.Contains(name, "certificates") {
+				pos := fset.Position(indexExpr.Pos())
+				rel, relErr := filepath.Rel(repoRoot, pos.Filename)
+				if relErr != nil {
+					rel = pos.Filename
+				}
+				violations = append(violations, fmt.Sprintf("%s:%d (%s[0])", filepath.ToSlash(rel), pos.Line, name))
+			}
+			return true
+		})
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Empty(t, violations,
+		"cert-slice [0] indexing found outside pkg/cert; "+
+			"use GetCurrentCertForPurpose for single-cert access: %v", violations)
 }

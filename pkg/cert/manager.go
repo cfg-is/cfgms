@@ -252,7 +252,7 @@ func (m *Manager) GenerateInternalServerCertificate(config *ServerCertConfig) (*
 // Idempotent: safe to call on every startup. Only generates certs that don't exist yet.
 func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, signingCfg *SigningCertConfig) error {
 	// Check for existing internal server certificate
-	internalCerts, err := m.store.GetCertificatesByType(CertificateTypeInternalServer)
+	internalCerts, err := m.store.getCertificatesByType(CertificateTypeInternalServer)
 	if err != nil {
 		return fmt.Errorf("failed to check for internal server certificates: %w", err)
 	}
@@ -272,7 +272,7 @@ func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, sig
 	}
 
 	// Check for existing config signing certificate
-	signingCerts, err := m.store.GetCertificatesByType(CertificateTypeConfigSigning)
+	signingCerts, err := m.store.getCertificatesByType(CertificateTypeConfigSigning)
 	if err != nil {
 		return fmt.Errorf("failed to check for config signing certificates: %w", err)
 	}
@@ -304,7 +304,7 @@ func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, sig
 // certificate, which may be regenerated per boot. When signingCfg is nil, a
 // default 1095-day RSA-4096 signing certificate is generated.
 func (m *Manager) EnsureSigningCertificate(signingCfg *SigningCertConfig) error {
-	signingCerts, err := m.store.GetCertificatesByType(CertificateTypeConfigSigning)
+	signingCerts, err := m.store.getCertificatesByType(CertificateTypeConfigSigning)
 	if err != nil {
 		return fmt.Errorf("failed to check for config signing certificates: %w", err)
 	}
@@ -399,12 +399,12 @@ func (m *Manager) GetCurrentCertForPurpose(purpose CertificatePurpose) (*Certifi
 		return nil, err
 	}
 
-	certs, err := m.store.GetCertificatesByType(certType)
+	certs, err := m.store.getCertificatesByType(certType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve certificates for purpose %s: %w", purpose, err)
 	}
 
-	// GetCertificatesByType returns newest-first; return the first valid one.
+	// getCertificatesByType returns newest-first; return the first valid one.
 	for _, info := range certs {
 		if info.IsValid {
 			c, cerr := m.store.GetCertificate(info.SerialNumber)
@@ -427,7 +427,7 @@ func (m *Manager) GetAllValidCertificatesForPurpose(purpose CertificatePurpose) 
 		return nil, err
 	}
 
-	certs, err := m.store.GetCertificatesByType(certType)
+	certs, err := m.store.getCertificatesByType(certType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve certificates for purpose %s: %w", purpose, err)
 	}
@@ -447,7 +447,7 @@ func (m *Manager) GetAllValidCertificatesForPurpose(purpose CertificatePurpose) 
 // See docs/security/certificate-architecture.md#migrating-from-unified-mode.
 func (m *Manager) CheckForLegacyCertificates() error {
 	const legacyServerType = CertificateType(1)
-	legacy, err := m.store.GetCertificatesByType(legacyServerType)
+	legacy, err := m.store.getCertificatesByType(legacyServerType)
 	if err != nil {
 		return fmt.Errorf("failed to scan for legacy certificates: %w", err)
 	}
@@ -484,11 +484,6 @@ func (m *Manager) GetCertificate(serialNumber string) (*Certificate, error) {
 // ListCertificates returns all certificates
 func (m *Manager) ListCertificates() ([]*CertificateInfo, error) {
 	return m.store.ListCertificates()
-}
-
-// GetCertificatesByType returns certificates of a specific type
-func (m *Manager) GetCertificatesByType(certType CertificateType) ([]*CertificateInfo, error) {
-	return m.store.GetCertificatesByType(certType)
 }
 
 // GetCertificateByCommonName retrieves certificates by common name
@@ -655,7 +650,7 @@ type ManagerStats struct {
 // Each call reads the current certificate from the store so cert rotations are picked
 // up automatically — no explicit notification needed.
 func (m *Manager) GetClientCertificate(_ context.Context) (*tls.Certificate, error) {
-	clientCerts, err := m.store.GetCertificatesByType(CertificateTypeClient)
+	clientCerts, err := m.store.getCertificatesByType(CertificateTypeClient)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve client certificates: %w", err)
 	}
@@ -663,7 +658,7 @@ func (m *Manager) GetClientCertificate(_ context.Context) (*tls.Certificate, err
 		return nil, fmt.Errorf("no client certificate found in store")
 	}
 
-	// GetCertificatesByType returns newest-first.
+	// getCertificatesByType returns newest-first.
 	certInfo := clientCerts[0]
 	c, err := m.store.GetCertificate(certInfo.SerialNumber)
 	if err != nil {

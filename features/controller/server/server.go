@@ -477,7 +477,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// caches the controller's signing certificate at registration (and
 		// restores it from disk on a cert-reuse reconnect) and rejects any
 		// command or config signed by a different key. The gRPC server
-		// certificate must never be used as the signer: GetCertificatesByType
+		// certificate must never be used as the signer: listing certs by type
 		// returns every Server-typed cert newest-first, and the controller owns
 		// more than one (gRPC transport + HTTP API), so that selection is not
 		// stable across restarts. EnsureSigningCertificate is idempotent — it
@@ -486,9 +486,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			if ensureErr := certManager.EnsureSigningCertificate(nil); ensureErr != nil {
 				logger.Warn("Failed to ensure config signing certificate", "error", ensureErr)
 			}
-			signerCerts, scErr := certManager.GetCertificatesByType(cert.CertificateTypeConfigSigning)
-			if scErr == nil && len(signerCerts) > 0 {
-				hoistedSignerCertSerial = signerCerts[0].SerialNumber
+			signerCert, scErr := certManager.GetCurrentCertForPurpose(cert.PurposeSigning)
+			if scErr == nil {
+				hoistedSignerCertSerial = signerCert.SerialNumber
 				certPEM, keyPEM, exportErr := certManager.ExportCertificate(hoistedSignerCertSerial, true)
 				if exportErr == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
 					var signerErr error

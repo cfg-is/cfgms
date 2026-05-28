@@ -398,8 +398,8 @@ func (h *HealthMonitor) updateCertificateHealth() {
 		return
 	}
 
-	// Get current certificates and check their validity
-	certificates, err := h.certManager.GetCertificatesByType(cert.CertificateTypeClient)
+	// Get current valid certificates and check their validity
+	certificates, err := h.certManager.GetAllValidCertificatesForPurpose(cert.PurposeClient)
 	if err != nil {
 		h.logger.Error("Failed to get certificates for health check", "error", err)
 		h.metrics.CertificateErrors++

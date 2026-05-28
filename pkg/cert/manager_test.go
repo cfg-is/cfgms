@@ -272,11 +272,11 @@ func TestManager_ListCertificates(t *testing.T) {
 	assert.Len(t, certs, 2)
 
 	// Verify certificate types
-	serverCerts, err := manager.GetCertificatesByType(CertificateTypePublicAPI)
+	serverCerts, err := manager.GetAllValidCertificatesForPurpose(PurposeAPI)
 	require.NoError(t, err)
 	assert.Len(t, serverCerts, 1)
 
-	clientCerts, err := manager.GetCertificatesByType(CertificateTypeClient)
+	clientCerts, err := manager.GetAllValidCertificatesForPurpose(PurposeClient)
 	require.NoError(t, err)
 	assert.Len(t, clientCerts, 1)
 }

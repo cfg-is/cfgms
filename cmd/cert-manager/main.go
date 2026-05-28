@@ -251,15 +251,19 @@ func listCmd() *cobra.Command {
 
 			switch certType {
 			case "api":
-				certificates, err = manager.GetCertificatesByType(cert.CertificateTypePublicAPI)
+				certificates, err = manager.GetAllValidCertificatesForPurpose(cert.PurposeAPI)
 			case "internal":
-				certificates, err = manager.GetCertificatesByType(cert.CertificateTypeInternalServer)
+				certificates, err = manager.GetAllValidCertificatesForPurpose(cert.PurposeTransport)
 			case "signing":
-				certificates, err = manager.GetCertificatesByType(cert.CertificateTypeConfigSigning)
+				certificates, err = manager.GetAllValidCertificatesForPurpose(cert.PurposeSigning)
 			case "client":
-				certificates, err = manager.GetCertificatesByType(cert.CertificateTypeClient)
+				certificates, err = manager.GetAllValidCertificatesForPurpose(cert.PurposeClient)
 			case "ca":
-				certificates, err = manager.GetCertificatesByType(cert.CertificateTypeCA)
+				if caInfo, caErr := manager.GetCAInfo(); caErr != nil {
+					err = caErr
+				} else if caInfo != nil {
+					certificates = []*cert.CertificateInfo{caInfo}
+				}
 			default:
 				certificates, err = manager.ListCertificates()
 			}
