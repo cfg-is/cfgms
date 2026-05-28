@@ -302,13 +302,15 @@ func (f *E2ETestFramework) initializeRBAC() error {
 	if err := rbacManager.Initialize(f.ctx); err != nil {
 		return fmt.Errorf("failed to initialize RBAC: %w", err)
 	}
-	// Flush pending audit writes before storageManager.Close() to avoid racing
-	// async writes against flatfile directory cleanup (registered before Close
-	// so addCleanup LIFO runs Flush first).
+	// Stop the audit drain goroutine before storageManager.Close() and tempDir
+	// removal. FlushAudit alone only blocks for queued entries; the drain
+	// goroutine keeps running and can hold stdout/file descriptors past test
+	// exit (manifests as "Test I/O incomplete 1m30s after exiting" on CI).
+	// Registered before Close so addCleanup LIFO runs Close → storage.Close.
 	f.addCleanup(func() error {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		return rbacManager.FlushAudit(flushCtx)
+		return rbacManager.Close(closeCtx)
 	})
 
 	// Create test tenants and users
