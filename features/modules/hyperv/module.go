@@ -5,6 +5,8 @@ package hyperv
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 
 	"github.com/cfgis/cfgms/features/modules"
 )
@@ -33,9 +35,15 @@ type hypervModule struct {
 	host          string
 	userSecretKey string
 	passSecretKey string
+	tenantID      string
 
 	transport winrmTransport
 	executor  hypervExecutor
+
+	// vms is the write-through VM cache. Keys are user-visible VM names
+	// (without the cfgms-<tenantID>__ prefix). Updated on executor success only.
+	vmsMu sync.RWMutex
+	vms   map[string]VMConfig
 }
 
 // New creates a new hypervModule. detector is reserved for Story 5 host detection
@@ -43,6 +51,7 @@ type hypervModule struct {
 func New(detector HypervDetector) modules.Module {
 	return &hypervModule{
 		executor: newExecutor(),
+		vms:      make(map[string]VMConfig),
 	}
 }
 
@@ -53,6 +62,9 @@ func New(detector HypervDetector) modules.Module {
 //   - winrm_host: hostname or IP of the Hyper-V host
 //   - winrm_user_secret: SecretStore key for the WinRM username
 //   - winrm_pass_secret: SecretStore key for the WinRM password
+//
+// Optional config keys:
+//   - tenant_id: tenant identifier used to namespace host-side VM names
 func (m *hypervModule) Configure(config modules.ConfigState) error {
 	if config == nil {
 		return errConfigRequired
@@ -83,19 +95,53 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	m.host = host
 	m.userSecretKey = userSecretKey
 	m.passSecretKey = passSecretKey
+	m.tenantID, _ = configMap["tenant_id"].(string)
 	m.transport = newWinRMClientWithStore(host, userSecretKey, passSecretKey, store)
 
 	return nil
 }
 
 // Get returns the current Hyper-V resource configuration.
-// VM retrieval is implemented in Story 2.
-func (m *hypervModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
-	return nil, modules.ErrNotImplemented
+// Supported resource ID prefixes:
+//   - "vm:<name>": retrieve VMConfig for the named virtual machine
+func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
+	prefix, name, ok := splitResourceID(resourceID)
+	if !ok {
+		return nil, modules.ErrNotImplemented
+	}
+	switch prefix {
+	case "vm":
+		return m.getVM(ctx, name)
+	default:
+		return nil, modules.ErrNotImplemented
+	}
 }
 
 // Set applies the desired Hyper-V resource configuration.
-// VM management is implemented in Stories 2–4.
-func (m *hypervModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
-	return modules.ErrNotImplemented
+// Supported resource ID prefixes:
+//   - "vm:<name>": create, update, or delete the named virtual machine
+func (m *hypervModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
+	prefix, _, ok := splitResourceID(resourceID)
+	if !ok {
+		return modules.ErrNotImplemented
+	}
+	switch prefix {
+	case "vm":
+		if config == nil {
+			return modules.ErrNotImplemented
+		}
+		return m.setVM(ctx, resourceID, config)
+	default:
+		return modules.ErrNotImplemented
+	}
+}
+
+// splitResourceID splits "prefix:name" into its parts. Returns ok=false if
+// there is no colon separator.
+func splitResourceID(resourceID string) (prefix, name string, ok bool) {
+	idx := strings.IndexByte(resourceID, ':')
+	if idx < 0 {
+		return "", "", false
+	}
+	return resourceID[:idx], resourceID[idx+1:], true
 }
