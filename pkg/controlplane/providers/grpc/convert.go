@@ -27,16 +27,18 @@ const sigParamKey = "__sig"
 // stewards. The corresponding Go constants were removed (Issue #831); unknown types received
 // over the wire map to the zero value and are ignored by handlers.
 var commandTypeToProto = map[types.CommandType]transportpb.CommandType{
-	types.CommandSyncConfig: transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG,
-	types.CommandSyncDNA:    transportpb.CommandType_COMMAND_TYPE_SYNC_DNA,
-	types.CommandReconnect:  transportpb.CommandType_COMMAND_TYPE_RECONNECT,
+	types.CommandSyncConfig:      transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG,
+	types.CommandSyncDNA:         transportpb.CommandType_COMMAND_TYPE_SYNC_DNA,
+	types.CommandReconnect:       transportpb.CommandType_COMMAND_TYPE_RECONNECT,
+	types.CommandPushSigningCert: transportpb.CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT,
 }
 
 // protoToCommandType maps proto enum to semantic CommandType.
 var protoToCommandType = map[transportpb.CommandType]types.CommandType{
-	transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG: types.CommandSyncConfig,
-	transportpb.CommandType_COMMAND_TYPE_SYNC_DNA:    types.CommandSyncDNA,
-	transportpb.CommandType_COMMAND_TYPE_RECONNECT:   types.CommandReconnect,
+	transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG:       types.CommandSyncConfig,
+	transportpb.CommandType_COMMAND_TYPE_SYNC_DNA:          types.CommandSyncDNA,
+	transportpb.CommandType_COMMAND_TYPE_RECONNECT:         types.CommandReconnect,
+	transportpb.CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT: types.CommandPushSigningCert,
 }
 
 func commandToProto(cmd *types.Command) *transportpb.Command {

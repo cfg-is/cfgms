@@ -34,6 +34,12 @@ const (
 	// CommandRelayResponse carries the controller's HTTP response back to the steward
 	// relay goroutine. Params: execution_id, sequence, status (int), headers (map), body (base64).
 	CommandRelayResponse CommandType = "relay_response"
+
+	// CommandPushSigningCert pushes the controller's current signing certificate to
+	// the steward so it can refresh its in-memory verifier without reconnecting.
+	// Params: cert_pem (base64-encoded PEM certificate). Idempotent — same
+	// fingerprint triggers no disk write on the steward side. (Issue #1817)
+	CommandPushSigningCert CommandType = "push_signing_cert"
 )
 
 // Command represents a command sent from controller to steward.

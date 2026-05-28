@@ -29,14 +29,17 @@ const (
 type CommandType int32
 
 const (
-	CommandType_COMMAND_TYPE_UNSPECIFIED       CommandType = 0
-	CommandType_COMMAND_TYPE_SYNC_CONFIG       CommandType = 1
-	CommandType_COMMAND_TYPE_SYNC_DNA          CommandType = 2
-	CommandType_COMMAND_TYPE_CONNECT_DATAPLANE CommandType = 3
-	CommandType_COMMAND_TYPE_EXECUTE_TASK      CommandType = 4
-	CommandType_COMMAND_TYPE_SHUTDOWN          CommandType = 5
-	CommandType_COMMAND_TYPE_VALIDATE_CONFIG   CommandType = 6
-	CommandType_COMMAND_TYPE_RECONNECT         CommandType = 7
+	CommandType_COMMAND_TYPE_UNSPECIFIED        CommandType = 0
+	CommandType_COMMAND_TYPE_SYNC_CONFIG        CommandType = 1
+	CommandType_COMMAND_TYPE_SYNC_DNA           CommandType = 2
+	CommandType_COMMAND_TYPE_CONNECT_DATAPLANE  CommandType = 3
+	CommandType_COMMAND_TYPE_EXECUTE_TASK       CommandType = 4
+	CommandType_COMMAND_TYPE_SHUTDOWN           CommandType = 5
+	CommandType_COMMAND_TYPE_VALIDATE_CONFIG    CommandType = 6
+	CommandType_COMMAND_TYPE_RECONNECT          CommandType = 7
+	// COMMAND_TYPE_EXECUTE_SCRIPT = 8 is reserved for Issue #1669; proto regen deferred.
+	// CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT added manually pending proto regen (Issue #1817).
+	CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT  CommandType = 9
 )
 
 // Enum value maps for CommandType.
@@ -50,6 +53,7 @@ var (
 		5: "COMMAND_TYPE_SHUTDOWN",
 		6: "COMMAND_TYPE_VALIDATE_CONFIG",
 		7: "COMMAND_TYPE_RECONNECT",
+		9: "COMMAND_TYPE_PUSH_SIGNING_CERT",
 	}
 	CommandType_value = map[string]int32{
 		"COMMAND_TYPE_UNSPECIFIED":       0,
@@ -60,6 +64,7 @@ var (
 		"COMMAND_TYPE_SHUTDOWN":          5,
 		"COMMAND_TYPE_VALIDATE_CONFIG":   6,
 		"COMMAND_TYPE_RECONNECT":         7,
+		"COMMAND_TYPE_PUSH_SIGNING_CERT": 9,
 	}
 )
 
