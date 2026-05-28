@@ -53,10 +53,14 @@ func SetupTestStorage(t *testing.T) *interfaces.StorageManager {
 
 // SetupTestRBACManager creates an RBAC manager with git storage for testing.
 //
-// A FlushAudit cleanup is registered so pending async audit writes land before
+// A Close cleanup is registered so the audit drain goroutine stops before
 // SetupTestStorage closes the storage manager and t.TempDir removes the flatfile
-// directory. Without this flush, the cleanup races with audit writes and fails
-// with "directory not empty" on Linux or held-handle errors on Windows.
+// directory. FlushAudit alone is insufficient: it blocks for queued entries to
+// drain but does not stop the drain goroutine, which can keep writing temp files
+// into the flatfile root after Flush returns. Issue #848 added Manager.Close()
+// for exactly this purpose; this helper wires it in so all callers benefit
+// without per-test boilerplate. A 30s budget accommodates slower CI runners
+// where flushing several hundred audit entries can exceed the previous 5s.
 func SetupTestRBACManager(t *testing.T) *rbac.Manager {
 	storageManager := SetupTestStorage(t)
 
@@ -72,10 +76,10 @@ func SetupTestRBACManager(t *testing.T) *rbac.Manager {
 	}
 
 	t.Cleanup(func() {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := manager.FlushAudit(flushCtx); err != nil {
-			t.Logf("SetupTestRBACManager cleanup: FlushAudit error: %v", err)
+		if err := manager.Close(closeCtx); err != nil {
+			t.Logf("SetupTestRBACManager cleanup: Close error: %v", err)
 		}
 	})
 
