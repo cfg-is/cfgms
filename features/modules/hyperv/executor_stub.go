@@ -5,10 +5,8 @@
 
 package hyperv
 
-// stubHypervExecutor is used on platforms where Hyper-V is not available.
-// All executor methods added in Stories 2–4 will return ErrUnsupportedPlatform.
-type stubHypervExecutor struct{}
-
+// newExecutor returns the stub executor on non-Windows platforms. The struct
+// type is defined in executor.go so tests can reference it on all platforms.
 func newExecutor() hypervExecutor {
 	return &stubHypervExecutor{}
 }

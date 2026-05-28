@@ -288,7 +288,8 @@ func TestWinRMClient_NoArgsCase(t *testing.T) {
 	}
 
 	const cmd = "Get-VM | Select-Object Name"
-	_, _ = client.ExecutePS(context.Background(), cmd, nil)
+	_, err := client.ExecutePS(context.Background(), cmd, nil)
+	require.NoError(t, err)
 
 	recorder.mu.Lock()
 	scriptBlock := recorder.capturedScriptBlock
@@ -314,10 +315,11 @@ func TestWinRMClient_DeterministicArgOrder(t *testing.T) {
 	}
 
 	// Multiple params in non-alphabetical key insertion order.
-	_, _ = client.ExecutePS(context.Background(), "Invoke-Cmd -A $ZZZ -B $AAA", map[string]string{
+	_, err := client.ExecutePS(context.Background(), "Invoke-Cmd -A $ZZZ -B $AAA", map[string]string{
 		"ZZZ": "last-value",
 		"AAA": "first-value",
 	})
+	require.NoError(t, err)
 
 	recorder.mu.Lock()
 	scriptBlock := recorder.capturedScriptBlock
