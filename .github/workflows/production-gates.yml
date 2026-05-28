@@ -490,6 +490,10 @@ jobs:
     name: Steward Integration Tests
     permissions:
       contents: read
+    # Skip macos-latest at merge_group time. See cross-platform-build.yml
+    # `native-builds` job for the rationale; same flake class
+    # (`features/steward` exec subprocess tests). PR-time signal is kept.
+    if: ${{ matrix.os != 'macos-latest' || github.event_name != 'merge_group' }}
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -497,7 +501,7 @@ jobs:
           - os: ubuntu-latest
             platform: Linux
           - os: windows-latest
-            platform: Windows  
+            platform: Windows
           - os: macos-latest
             platform: macOS
     runs-on: ${{ matrix.os }}

@@ -64,6 +64,14 @@ jobs:
     name: Native Build (${{ matrix.os }})
     permissions:
       contents: read
+    # Skip macos-latest at merge_group time: GitHub-hosted macOS runners
+    # are flaky for subprocess-heavy tests (`features/steward` uses ~100
+    # exec.Command sites and routinely hits `WaitDelay expired` /
+    # `panic: test timed out after 5m0s`). The macOS regression signal is
+    # still captured at pull_request time; only the merge queue stops
+    # being held hostage by runner flakiness. See issue #1806 / PR #1808
+    # discussion of merge-queue kicks for the empirical pattern.
+    if: ${{ matrix.os != 'macos-latest' || github.event_name != 'merge_group' }}
     strategy:
       fail-fast: false
       matrix:
