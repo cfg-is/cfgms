@@ -41,6 +41,7 @@ import (
 	"github.com/cfgis/cfgms/features/modules/directory"
 	"github.com/cfgis/cfgms/features/modules/file"
 	"github.com/cfgis/cfgms/features/modules/firewall"
+	"github.com/cfgis/cfgms/features/modules/hyperv"
 	package_module "github.com/cfgis/cfgms/features/modules/package"
 	"github.com/cfgis/cfgms/features/modules/patch"
 	"github.com/cfgis/cfgms/features/modules/script"
@@ -171,6 +172,7 @@ var builtinModuleConstructors = map[string]func() modules.Module{
 	"directory": func() modules.Module { return directory.New() },
 	"file":      func() modules.Module { return file.New() },
 	"firewall":  func() modules.Module { return firewall.New() },
+	"hyperv":    func() modules.Module { return hyperv.New(nil) },
 	"package":   func() modules.Module { return package_module.New() },
 	"patch":     func() modules.Module { return patch.New() },
 	"script":    func() modules.Module { return script.New() },
