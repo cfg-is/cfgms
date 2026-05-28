@@ -229,6 +229,12 @@ func (l *bufferLogger) String() string {
 // Verify bufferLogger satisfies logging.Logger at compile time.
 var _ logging.Logger = (*bufferLogger)(nil)
 
+// noopDetector implements HypervDetector for unit tests that need a concrete
+// detector value but do not exercise detection logic.
+type noopDetector struct{}
+
+func (noopDetector) IsAvailable() (bool, error) { return true, nil }
+
 // ─── WinRM client injection-safety tests ───────────────────────────────────────
 
 // TestWinRMClient_UsesInvokeCommandArgumentList verifies that winrmClient.ExecutePS
@@ -564,6 +570,25 @@ func TestBuildInvokeCommand_SingleArg(t *testing.T) {
 	assert.Contains(t, block, "-ArgumentList")
 	assert.NotContains(t, block, "test-vm", "literal value must not appear in script block")
 	assert.Equal(t, []string{"test-vm"}, args)
+}
+
+// ─── Registry roundtrip test ───────────────────────────────────────────────────
+
+// TestModule_RegistrationRoundtrip verifies that the module can be registered into
+// ModuleRegistry and retrieved back without error.
+func TestModule_RegistrationRoundtrip(t *testing.T) {
+	registry := modules.NewModuleRegistry()
+	metadata := &modules.ModuleMetadata{
+		Name:    "hyperv",
+		Version: "0.1.0",
+	}
+
+	err := registry.RegisterModule(metadata, New(noopDetector{}))
+	require.NoError(t, err, "RegisterModule must succeed")
+
+	instance, err := registry.GetModule("hyperv")
+	require.NoError(t, err, "GetModule must succeed after registration")
+	require.NotNil(t, instance, "retrieved module must not be nil")
 }
 
 func TestBuildInvokeCommand_MultipleArgs_SortedOrder(t *testing.T) {
