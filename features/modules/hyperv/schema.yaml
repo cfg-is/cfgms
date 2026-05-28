@@ -1,0 +1,64 @@
+resources:
+  vm:
+    description: Hyper-V virtual machine (Generation 2)
+    required:
+      - name
+    properties:
+      name:
+        type: string
+        description: User-visible VM name (no __ — used as tenant-namespaced host-side name)
+        pattern: "^[a-zA-Z0-9_\\-]{1,64}$"
+      memory_mb:
+        type: integer
+        description: Startup memory in MiB
+        minimum: 1
+      cpu_count:
+        type: integer
+        description: Number of virtual processors
+        minimum: 1
+      vhd_path:
+        type: string
+        description: Absolute Windows path to the VHD/VHDX file (e.g. C:\\VMs\\disk.vhdx)
+      switch_name:
+        type: string
+        description: Virtual switch name to connect the VM's network adapter
+      generation:
+        type: integer
+        description: VM generation (must be 2 or omitted for default)
+        enum: [2]
+        default: 2
+      state:
+        type: string
+        description: Desired lifecycle state
+        enum:
+          - running
+          - stopped
+          - absent
+        default: running
+
+  snapshot:
+    description: Hyper-V checkpoint (snapshot) for a virtual machine
+    required:
+      - vm_name
+      - name
+    properties:
+      vm_name:
+        type: string
+        description: Name of the virtual machine that owns this checkpoint
+        pattern: "^[a-zA-Z0-9_\\-]{1,64}$"
+      name:
+        type: string
+        description: Checkpoint name (spaces allowed per Hyper-V convention; no __)
+        pattern: "^[a-zA-Z0-9_\\- ]{1,64}$"
+      state:
+        type: string
+        description: >
+          Desired state for the checkpoint.
+          "present" creates the checkpoint if absent.
+          "restored" restores the VM to this checkpoint (write-only: Get returns "present" after restore).
+          "absent" deletes the checkpoint.
+        enum:
+          - present
+          - restored
+          - absent
+        default: present
