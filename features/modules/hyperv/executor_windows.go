@@ -47,3 +47,23 @@ func (w *windowsHypervExecutor) RemoveSnapshot(_ context.Context, _, _ string) e
 func (w *windowsHypervExecutor) RestoreSnapshot(_ context.Context, _, _ string) error {
 	return modules.ErrUnsupportedPlatform
 }
+
+func (w *windowsHypervExecutor) CreateVSwitch(_ context.Context, _ VSwitchConfig) error {
+	return modules.ErrUnsupportedPlatform
+}
+
+func (w *windowsHypervExecutor) GetVSwitch(_ context.Context, _ string) (*VSwitchConfig, error) {
+	return nil, modules.ErrUnsupportedPlatform
+}
+
+func (w *windowsHypervExecutor) RemoveVSwitch(_ context.Context, _ string) error {
+	return modules.ErrUnsupportedPlatform
+}
+
+func (w *windowsHypervExecutor) AttachVMToSwitch(_ context.Context, _, _, _ string) error {
+	return modules.ErrUnsupportedPlatform
+}
+
+func (w *windowsHypervExecutor) DetachVMFromSwitch(_ context.Context, _, _ string) error {
+	return modules.ErrUnsupportedPlatform
+}

@@ -44,14 +44,20 @@ type hypervModule struct {
 	// (without the cfgms-<tenantID>__ prefix). Updated on executor success only.
 	vmsMu sync.RWMutex
 	vms   map[string]VMConfig
+
+	// vswitches is the write-through vSwitch cache. Keys are user-visible switch names
+	// (without the cfgms-<tenantID>__ prefix). Updated on transport success only.
+	vswitchesMu sync.RWMutex
+	vswitches   map[string]VSwitchConfig
 }
 
 // New creates a new hypervModule. detector is reserved for Story 5 host detection
 // and may be nil in Story 1.
 func New(detector HypervDetector) modules.Module {
 	return &hypervModule{
-		executor: newExecutor(),
-		vms:      make(map[string]VMConfig),
+		executor:  newExecutor(),
+		vms:       make(map[string]VMConfig),
+		vswitches: make(map[string]VSwitchConfig),
 	}
 }
 
@@ -105,6 +111,8 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 // Supported resource ID prefixes:
 //   - "vm:<name>": retrieve VMConfig for the named virtual machine
 //   - "snapshot:<vmName>/<snapName>": retrieve SnapshotConfig for the named checkpoint
+//   - "vswitch:<name>": retrieve VSwitchConfig for the named virtual switch
+//   - "vmattach:<vmName>/<switchName>": retrieve VMAttachmentConfig for the named attachment
 func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	prefix, name, ok := splitResourceID(resourceID)
 	if !ok {
@@ -119,6 +127,10 @@ func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.Conf
 			return nil, modules.ErrNotImplemented
 		}
 		return m.getSnapshot(ctx, vmName, snapName)
+	case "vswitch":
+		return m.getVSwitch(ctx, name)
+	case "vmattach":
+		return m.getVMAttachment(ctx, name)
 	default:
 		return nil, modules.ErrNotImplemented
 	}
@@ -128,6 +140,8 @@ func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.Conf
 // Supported resource ID prefixes:
 //   - "vm:<name>": create, update, or delete the named virtual machine
 //   - "snapshot:<vmName>/<snapName>": create, restore, or delete the named checkpoint
+//   - "vswitch:<name>": create or delete the named virtual switch
+//   - "vmattach:<vmName>/<switchName>": attach or detach a VM network adapter
 func (m *hypervModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	prefix, _, ok := splitResourceID(resourceID)
 	if !ok {
@@ -144,6 +158,16 @@ func (m *hypervModule) Set(ctx context.Context, resourceID string, config module
 			return modules.ErrNotImplemented
 		}
 		return m.setSnapshot(ctx, resourceID, config)
+	case "vswitch":
+		if config == nil {
+			return modules.ErrNotImplemented
+		}
+		return m.setVSwitch(ctx, resourceID, config)
+	case "vmattach":
+		if config == nil {
+			return modules.ErrNotImplemented
+		}
+		return m.setVMAttachment(ctx, resourceID, config)
 	default:
 		return modules.ErrNotImplemented
 	}
