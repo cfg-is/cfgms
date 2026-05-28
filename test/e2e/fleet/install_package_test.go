@@ -69,6 +69,9 @@ func TestFleetInstallPackageFlow(t *testing.T) {
 	)
 	require.NoError(t, err)
 	uploadReq.Header.Set("X-API-Key", installerAPIKey)
+	// Binary upload — the validation middleware streams octet-stream bodies
+	// past its 10MB JSON cap so the ~30MB steward binary can be uploaded.
+	uploadReq.Header.Set("Content-Type", "application/octet-stream")
 
 	uploadResp, err := client.Do(uploadReq)
 	require.NoError(t, err)
