@@ -53,6 +53,10 @@ RUN mkdir -p /var/lib/cfgms/steward/certs
 # Change ownership
 RUN chown -R cfgms:cfgms /app /var/lib/cfgms
 
+# Steward is a long-running daemon. pgrep is available via procps (installed above).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD pgrep -x steward || exit 1
+
 # Switch to non-root user
 USER cfgms
 
