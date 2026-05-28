@@ -154,22 +154,21 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		return nil, err
 	}
 	logger.Info("Creating separated certificates (internal mTLS + config signing)...")
+	// TransportCertSANs merges defaults, legacy cfg.Certificate.Server SANs,
+	// cfg.Certificate.Internal SANs, and CFGMS_EXTERNAL_HOSTNAME so a steward
+	// dialing the controller by its external hostname can verify the cert.
+	// EnsureSeparatedCertificates is idempotent — if --init mints the cert
+	// here, controller startup will not regenerate it, so the SAN set written
+	// during --init is what stewards see for the cert's full lifetime.
+	dnsNames, ipAddresses := TransportCertSANs(cfg)
 	internalCfg := &cert.ServerCertConfig{
 		CommonName:   "cfgms-internal",
-		DNSNames:     []string{"localhost", "cfgms-internal", "controller-standalone"},
-		IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
+		DNSNames:     dnsNames,
+		IPAddresses:  ipAddresses,
 		ValidityDays: 365,
 	}
-	if cfg.Certificate.Internal != nil {
-		if cfg.Certificate.Internal.CommonName != "" {
-			internalCfg.CommonName = cfg.Certificate.Internal.CommonName
-		}
-		if len(cfg.Certificate.Internal.DNSNames) > 0 {
-			internalCfg.DNSNames = cfg.Certificate.Internal.DNSNames
-		}
-		if len(cfg.Certificate.Internal.IPAddresses) > 0 {
-			internalCfg.IPAddresses = cfg.Certificate.Internal.IPAddresses
-		}
+	if cfg.Certificate.Internal != nil && cfg.Certificate.Internal.CommonName != "" {
+		internalCfg.CommonName = cfg.Certificate.Internal.CommonName
 	}
 	if cfg.Certificate.InternalCertValidityDays > 0 {
 		internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays

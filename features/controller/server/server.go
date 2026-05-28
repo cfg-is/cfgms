@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -266,22 +265,20 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 
 		// Ensure purpose-specific certificates exist (idempotent first-boot generation).
-		// grpcControlPlaneServerSANs merges transport defaults, operator-configured SANs,
-		// and CFGMS_EXTERNAL_HOSTNAME so stewards can verify the cert by external hostname.
+		// initialization.TransportCertSANs merges transport defaults, operator-configured
+		// SANs (server + internal blocks), and CFGMS_EXTERNAL_HOSTNAME so stewards can
+		// verify the cert by external hostname. Shared with initialization.Run so that
+		// --init mints the cert with the same SAN set this startup path would generate.
 		logger.Info("Ensuring separated certificates (internal mTLS + config signing)...")
-		dnsNames, ipAddresses := grpcControlPlaneServerSANs(cfg)
+		dnsNames, ipAddresses := initialization.TransportCertSANs(cfg)
 		internalCfg := &cert.ServerCertConfig{
 			CommonName:   "cfgms-internal",
 			DNSNames:     dnsNames,
 			IPAddresses:  ipAddresses,
 			ValidityDays: 365,
 		}
-		if cfg.Certificate.Internal != nil {
-			if cfg.Certificate.Internal.CommonName != "" {
-				internalCfg.CommonName = cfg.Certificate.Internal.CommonName
-			}
-			// Per-config SANs override only when explicitly set (grpcControlPlaneServerSANs
-			// already merges operator SANs and external hostname from the config).
+		if cfg.Certificate.Internal != nil && cfg.Certificate.Internal.CommonName != "" {
+			internalCfg.CommonName = cfg.Certificate.Internal.CommonName
 		}
 		if cfg.Certificate.InternalCertValidityDays > 0 {
 			internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
@@ -1658,56 +1655,6 @@ func initializeHAManager(logger logging.Logger, storageManager *interfaces.Stora
 		return nil, fmt.Errorf("failed to create HA manager: %w", err)
 	}
 	return haManager, nil
-}
-
-// grpcControlPlaneServerSANs returns the DNS names and IP addresses to embed in
-// the generated gRPC control-plane server certificate.
-//
-// It starts from the transport defaults (localhost / loopback) and merges in
-// any operator-configured server SANs (certificate.server.dns_names and
-// certificate.server.ip_addresses) plus CFGMS_EXTERNAL_HOSTNAME. Without this,
-// a steward dialing the controller by its external hostname fails mTLS
-// verification because the generated certificate omits that name. The
-// CFGMS_EXTERNAL_HOSTNAME value is classified as an IP SAN when it parses as an
-// IP literal and as a DNS SAN otherwise. Duplicates are removed and ordering is
-// deterministic.
-func grpcControlPlaneServerSANs(cfg *config.Config) (dnsNames, ipAddresses []string) {
-	dnsNames = []string{"localhost", "cfgms-grpc-server", "controller-standalone"}
-	ipAddresses = []string{"127.0.0.1", "0.0.0.0"}
-
-	if cfg != nil && cfg.Certificate != nil && cfg.Certificate.Server != nil {
-		dnsNames = append(dnsNames, cfg.Certificate.Server.DNSNames...)
-		ipAddresses = append(ipAddresses, cfg.Certificate.Server.IPAddresses...)
-	}
-
-	if hostname := strings.TrimSpace(os.Getenv("CFGMS_EXTERNAL_HOSTNAME")); hostname != "" {
-		if net.ParseIP(hostname) != nil {
-			ipAddresses = append(ipAddresses, hostname)
-		} else {
-			dnsNames = append(dnsNames, hostname)
-		}
-	}
-
-	return dedupeSANs(dnsNames), dedupeSANs(ipAddresses)
-}
-
-// dedupeSANs returns the input slice with empty strings dropped and duplicates
-// removed, preserving first-seen order.
-func dedupeSANs(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	out := make([]string, 0, len(values))
-	for _, v := range values {
-		v = strings.TrimSpace(v)
-		if v == "" {
-			continue
-		}
-		if _, ok := seen[v]; ok {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	return out
 }
 
 // buildGRPCControlPlaneTLSConfig creates TLS configuration for the gRPC control plane provider.
