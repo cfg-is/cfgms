@@ -5,10 +5,29 @@
 
 package hyperv
 
+import (
+	"context"
+
+	"github.com/cfgis/cfgms/features/modules"
+)
+
 // windowsHypervExecutor implements hypervExecutor using Windows Hyper-V PowerShell APIs.
-// VM management, snapshot, and vSwitch verbs are added in Stories 2–4.
+// VM management is wired through the WinRM transport on the hypervModule; these
+// methods are reserved for future native Windows operations (Stories 3–4).
 type windowsHypervExecutor struct{}
 
 func newExecutor() hypervExecutor {
 	return &windowsHypervExecutor{}
+}
+
+func (w *windowsHypervExecutor) CreateVM(_ context.Context, _ VMConfig) error {
+	return modules.ErrUnsupportedPlatform
+}
+
+func (w *windowsHypervExecutor) GetVM(_ context.Context, _ string) (*VMConfig, error) {
+	return nil, modules.ErrUnsupportedPlatform
+}
+
+func (w *windowsHypervExecutor) RemoveVM(_ context.Context, _ string) error {
+	return modules.ErrUnsupportedPlatform
 }
