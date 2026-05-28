@@ -658,3 +658,49 @@ func (m *Manager) IsRevoked(serial string) bool {
 func (m *Manager) ListRevoked() ([]RevocationEntry, error) {
 	return m.revocation.allEntries(), nil
 }
+
+// GetAllValidSigningCertificates returns the set of certificates that are valid
+// for verifying config signatures right now. It uses GetAllValidCertificatesForPurpose
+// as the source list, then filters by the signing cursor state:
+//   - CurrentSerial is always included (if valid).
+//   - RotatingSerial is included only while still within its overlap window.
+//   - If no cursor file exists (no rotation in progress) all valid signing certs are returned.
+func (m *Manager) GetAllValidSigningCertificates() ([]*CertificateInfo, error) {
+	all, err := m.GetAllValidCertificatesForPurpose(PurposeSigning)
+	if err != nil {
+		return nil, err
+	}
+
+	cursor, err := loadSigningCursor(m.store.basePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load signing cursor: %w", err)
+	}
+
+	if cursor == nil {
+		return all, nil
+	}
+
+	allowed := make(map[string]bool, 2)
+	allowed[cursor.CurrentSerial] = true
+
+	if cursor.RotatingSerial != "" {
+		overlapDuration := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
+		if time.Since(cursor.RotatedAt) < overlapDuration {
+			allowed[cursor.RotatingSerial] = true
+		}
+	}
+
+	result := make([]*CertificateInfo, 0, len(all))
+	for _, info := range all {
+		if allowed[info.SerialNumber] {
+			result = append(result, info)
+		}
+	}
+	return result, nil
+}
+
+// GetSigningCursorState returns the current signing cursor, or nil if no rotation
+// has been initiated. Use this to inspect lifecycle state without modifying it.
+func (m *Manager) GetSigningCursorState() (*SigningCertCursor, error) {
+	return loadSigningCursor(m.store.basePath)
+}
