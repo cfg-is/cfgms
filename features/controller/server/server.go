@@ -444,9 +444,18 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to build transport TLS config: %w", err)
 		}
 
-		// Initialize CP provider (shared gRPC server created fresh in Start)
+		// Initialize CP provider (shared gRPC server created fresh in Start).
+		// Issue #1817: Create the signing rotation service before the provider so
+		// we can inject it as the on-connect hook. The publisher is wired after
+		// commandPublisher is constructed below (breaks the init cycle).
 		connRegistry = registry.NewRegistry()
-		controlPlane = grpcCP.New(grpcCP.ModeServer)
+		var signingRotationSvc *service.SigningRotationService
+		if certManager != nil {
+			signingRotationSvc = service.NewSigningRotationService(certManager, logger)
+			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(signingRotationSvc))
+		} else {
+			controlPlane = grpcCP.New(grpcCP.ModeServer)
+		}
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
 			"mode":       "server",
 			"addr":       cfg.Transport.ListenAddr,
@@ -580,6 +589,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)
 		}
 		logger.Info("Command publisher initialized successfully", "signing_enabled", hoistedSigner != nil)
+
+		// Issue #1817: Wire the publisher into the signing rotation service now
+		// that it is available. The service was created before the provider to
+		// break the init cycle (hook → provider → publisher → provider).
+		if signingRotationSvc != nil {
+			signingRotationSvc.SetPublisher(commandPublisher)
+			logger.Info("Signing rotation service wired (refresh-on-connect enabled)")
+		}
 	} else {
 		logger.Warn("Transport config not set — gRPC control plane disabled")
 	}
