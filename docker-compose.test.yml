@@ -687,6 +687,9 @@ services:
       CFGMS_LOG_LEVEL: "info"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
+      # Issue #1709: seed installer API key for E2E install-package flow test.
+      CFGMS_SEED_TEST_API_KEYS: "1"
+      CFGMS_API_KEY_INSTALLER: "installer-test-key"
     user: root
     command: ["sh", "-c", "mkdir -p /tmp/cfgms /app/data && ./controller --init 2>/dev/null; exec ./controller"]
     volumes:
@@ -732,21 +735,17 @@ services:
         STEWARD_CONTROLLER_URL: "https://fleet-controller:9080"
     environment:
       CFGMS_REGISTRATION_TOKEN: "dockertest_fleet_child_a"
-      CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
     volumes:
       - fleet_steward1_data:/app/data
-      - fleet_ca_dist:/app/controller-certs:ro
     tmpfs:
       - /test-workspace:uid=1001,gid=1001,mode=0755,exec
     depends_on:
       fleet-controller:
         condition: service_healthy
-      fleet-ca-extract:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
       interval: 10s
@@ -766,21 +765,17 @@ services:
         STEWARD_CONTROLLER_URL: "https://fleet-controller:9080"
     environment:
       CFGMS_REGISTRATION_TOKEN: "dockertest_fleet_child_b"
-      CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
     volumes:
       - fleet_steward2_data:/app/data
-      - fleet_ca_dist:/app/controller-certs:ro
     tmpfs:
       - /test-workspace:uid=1001,gid=1001,mode=0755,exec
     depends_on:
       fleet-controller:
         condition: service_healthy
-      fleet-ca-extract:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
       interval: 10s
