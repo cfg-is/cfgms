@@ -96,6 +96,7 @@ func setupPushServer(t *testing.T) (*Server, *audit.Manager) {
 		auditMgr,
 		nil, // No command publisher: fanout is out of scope for push handler unit tests
 		nil, // No push store for audit-only push tests
+		nil, // No blob store needed
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -457,6 +458,7 @@ func TestHandleConfigPush_PersistenceRecord(t *testing.T) {
 		auditMgr,
 		nil,       // No command publisher: goroutine never runs, record stays in_progress
 		pushStore, // Wire real push store
+		nil,       // No blob store needed
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -554,6 +556,7 @@ func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlan
 		auditMgr,
 		pub,       // real command publisher
 		pushStore, // real push store
+		nil,       // No blob store needed
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"time"
@@ -66,6 +67,13 @@ func expandEnvWithDefaults(content string) string {
 	return os.ExpandEnv(result)
 }
 
+// BlobStorageConfig holds configuration for the blob storage backend (Issue #1702).
+type BlobStorageConfig struct {
+	// Root is the filesystem directory where installer artifacts are stored.
+	// Defaults to <DataDir>/installers when not explicitly set.
+	Root string `yaml:"root"`
+}
+
 // Config holds the controller configuration
 type Config struct {
 	// Controller listen address
@@ -104,6 +112,9 @@ type Config struct {
 	// Default: /etc/cfgms/admin.bundle.yaml (Linux) or %ProgramData%\cfgms\admin.bundle.yaml (Windows).
 	// Mode 0600, daemon-user-owned. Contains the admin mTLS cert, key, CA, and controller URL.
 	AdminBundlePath string `yaml:"admin_bundle_path,omitempty"`
+
+	// BlobStorage configures the blob storage backend for installer artifacts (Issue #1702).
+	BlobStorage BlobStorageConfig `yaml:"blob_storage,omitempty"`
 }
 
 // RegistrationConfig holds registration approval workflow settings.
@@ -399,7 +410,7 @@ func (t *TransportConfig) Validate() error {
 
 // DefaultConfig returns a Config with reasonable defaults
 func DefaultConfig() *Config {
-	return &Config{
+	cfg := &Config{
 		ListenAddr:  "127.0.0.1:8080",
 		ExternalURL: "https://localhost:8080", // Default external URL
 		CertPath:    "certs/",
@@ -454,6 +465,8 @@ func DefaultConfig() *Config {
 			IdleTimeout:     Duration(5 * time.Minute),
 		},
 	}
+	cfg.BlobStorage.Root = filepath.Join(cfg.DataDir, "installers")
+	return cfg
 }
 
 // findConfigFile searches for the controller configuration file using the following priority:

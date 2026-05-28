@@ -130,6 +130,7 @@ func setupTestServer(t *testing.T) *Server {
 		auditMgr, // Issue #775: registration audit events
 		nil,      // No command publisher for basic tests
 		nil,      // No push store for basic tests
+		nil,      // No blob store for basic tests
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -928,6 +929,7 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 		nil, nil, nil, "", nil, auditMgr,
 		nil, // No command publisher for basic tests
 		nil, // No push store for basic tests
+		nil, // No blob store for basic tests
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1370,7 +1372,7 @@ func setupServerWithPublisher(t *testing.T, cp *testControlPlane) (*Server, *ser
 
 	server, err := New(
 		cfg, logger, controllerSvc, configSvc, nil, rbacSvc,
-		nil, tenantMgr, rbacMgr, nil, nil, nil, "", nil, auditMgr, publisher, nil,
+		nil, tenantMgr, rbacMgr, nil, nil, nil, "", nil, auditMgr, publisher, nil, nil,
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

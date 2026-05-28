@@ -61,10 +61,12 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for OSS composite manager
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/filesystem" // register filesystem blob provider (Issue #1702)
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"             // register flatfile provider for OSS composite manager
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"               // register sqlite provider for OSS composite manager
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 	"gopkg.in/yaml.v3"
@@ -643,6 +645,24 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Health collectors initialized (Story #417)")
 	}
 
+	// Initialize installer artifact blob store (Issue #1702).
+	// Default BlobStorage.Root when not explicitly configured (e.g. in tests or
+	// minimal configs that rely on the storage path for co-location).
+	blobRoot := cfg.BlobStorage.Root
+	if blobRoot == "" {
+		if cfg.Storage.FlatfileRoot != "" {
+			blobRoot = filepath.Join(filepath.Dir(cfg.Storage.FlatfileRoot), "installers")
+		} else if cfg.Storage.SQLitePath != "" {
+			blobRoot = filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "installers")
+		}
+	}
+	installerBlobStore, blobErr := blob.CreateBlobStoreFromConfig("filesystem",
+		map[string]interface{}{"root": blobRoot})
+	if blobErr != nil {
+		return nil, fmt.Errorf("failed to initialize installer blob store: %w", blobErr)
+	}
+	logger.Info("Installer artifact blob store initialized", "root", blobRoot)
+
 	// Initialize HTTP API server
 	httpServer, err := api.New(
 		cfg,
@@ -662,6 +682,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		auditManager,                  // Issue #775: registration audit events
 		commandPublisher,              // Issue #1319: fan-out config push to active stewards
 		storageManager.GetPushStore(), // Issue #1320: durable push-state for HA failover
+		installerBlobStore,            // Issue #1702: installer artifact storage
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)
