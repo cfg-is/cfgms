@@ -21,6 +21,7 @@ func vmModuleWithTransport(transport winrmTransport, tenantID string) *hypervMod
 		transport: transport,
 		tenantID:  tenantID,
 		vms:       make(map[string]VMConfig),
+		detector:  &fakeDetector{result: true},
 	}
 }
 
@@ -314,14 +315,14 @@ func TestVMConfig_Validate_AcceptsValidConfig(t *testing.T) {
 // TestModule_Get_UnknownResourceIDReturnsNotImplemented verifies that resource IDs
 // without a known prefix still return ErrNotImplemented (backward compat).
 func TestModule_Get_UnknownResourceIDReturnsNotImplemented(t *testing.T) {
-	m := New(nil)
+	m := New(&fakeDetector{result: true})
 	_, err := m.Get(context.Background(), "unknown-resource")
 	assert.ErrorIs(t, err, modules.ErrNotImplemented)
 }
 
 // TestModule_Set_UnknownResourceIDReturnsNotImplemented verifies backward compat.
 func TestModule_Set_UnknownResourceIDReturnsNotImplemented(t *testing.T) {
-	m := New(nil)
+	m := New(&fakeDetector{result: true})
 	err := m.Set(context.Background(), "unknown-resource", nil)
 	assert.ErrorIs(t, err, modules.ErrNotImplemented)
 }
@@ -332,6 +333,7 @@ func TestModule_Get_VMPrefix_NoTransport(t *testing.T) {
 	m := &hypervModule{
 		executor: &stubHypervExecutor{},
 		vms:      make(map[string]VMConfig),
+		detector: &fakeDetector{result: true},
 	}
 	_, err := m.Get(context.Background(), "vm:somevm")
 	assert.ErrorIs(t, err, ErrVMNotFound)

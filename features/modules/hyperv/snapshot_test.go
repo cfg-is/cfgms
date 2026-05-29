@@ -22,6 +22,7 @@ func snapModuleWithTransport(transport winrmTransport, tenantID string) *hypervM
 		transport: transport,
 		tenantID:  tenantID,
 		vms:       make(map[string]VMConfig),
+		detector:  &fakeDetector{result: true},
 	}
 }
 
@@ -275,6 +276,7 @@ func TestGet_Snapshot_NoTransport(t *testing.T) {
 	m := &hypervModule{
 		executor: &stubHypervExecutor{},
 		vms:      make(map[string]VMConfig),
+		detector: &fakeDetector{result: true},
 	}
 	_, err := m.Get(context.Background(), "snapshot:myvm/mysnap")
 	require.Error(t, err)
@@ -373,6 +375,7 @@ func TestSet_Snapshot_NoTransport(t *testing.T) {
 	m := &hypervModule{
 		executor: &stubHypervExecutor{},
 		vms:      make(map[string]VMConfig),
+		detector: &fakeDetector{result: true},
 	}
 	cfg := &SnapshotConfig{VMName: "myvm", Name: "mysnap", State: "present"}
 	err := m.Set(context.Background(), "snapshot:myvm/mysnap", cfg)
@@ -385,6 +388,7 @@ func TestModule_Get_SnapshotPrefix_NoTransport(t *testing.T) {
 	m := &hypervModule{
 		executor: &stubHypervExecutor{},
 		vms:      make(map[string]VMConfig),
+		detector: &fakeDetector{result: true},
 	}
 	_, err := m.Get(context.Background(), "snapshot:vm/snap")
 	assert.ErrorIs(t, err, ErrSnapshotNotFound)

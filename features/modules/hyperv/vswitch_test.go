@@ -22,6 +22,7 @@ func vswitchModuleWithTransport(transport winrmTransport, tenantID string) *hype
 		tenantID:  tenantID,
 		vms:       make(map[string]VMConfig),
 		vswitches: make(map[string]VSwitchConfig),
+		detector:  &fakeDetector{result: true},
 	}
 }
 
@@ -384,6 +385,7 @@ func TestGet_VSwitch_NoTransport(t *testing.T) {
 		executor:  &stubHypervExecutor{},
 		vms:       make(map[string]VMConfig),
 		vswitches: make(map[string]VSwitchConfig),
+		detector:  &fakeDetector{result: true},
 	}
 	_, err := m.Get(context.Background(), "vswitch:myswitch")
 	assert.ErrorIs(t, err, ErrVSwitchNotFound)
@@ -541,6 +543,7 @@ func TestSet_VMAttach_NoTransport(t *testing.T) {
 		executor:  &stubHypervExecutor{},
 		vms:       make(map[string]VMConfig),
 		vswitches: make(map[string]VSwitchConfig),
+		detector:  &fakeDetector{result: true},
 	}
 	cfg := &VMAttachmentConfig{VMName: "myvm", SwitchName: "sw", State: "present"}
 	err := m.Set(context.Background(), "vmattach:myvm/sw", cfg)
@@ -554,6 +557,7 @@ func TestGet_VMAttach_NoTransport(t *testing.T) {
 		executor:  &stubHypervExecutor{},
 		vms:       make(map[string]VMConfig),
 		vswitches: make(map[string]VSwitchConfig),
+		detector:  &fakeDetector{result: true},
 	}
 	_, err := m.Get(context.Background(), "vmattach:myvm/myswitch")
 	assert.ErrorIs(t, err, ErrVSwitchNotFound)

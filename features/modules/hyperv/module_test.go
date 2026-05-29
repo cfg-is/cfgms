@@ -229,11 +229,20 @@ func (l *bufferLogger) String() string {
 // Verify bufferLogger satisfies logging.Logger at compile time.
 var _ logging.Logger = (*bufferLogger)(nil)
 
-// noopDetector implements HypervDetector for unit tests that need a concrete
-// detector value but do not exercise detection logic.
-type noopDetector struct{}
-
-func (noopDetector) IsAvailable() (bool, error) { return true, nil }
+// newModuleWithDetector creates a hypervModule with the given SecretStore and
+// HypervDetector pre-injected. Follows the newTestModule pattern from firewall.
+func newModuleWithDetector(store secretsif.SecretStore, detector HypervDetector) *hypervModule {
+	m := &hypervModule{
+		executor:  &stubHypervExecutor{},
+		vms:       make(map[string]VMConfig),
+		vswitches: make(map[string]VSwitchConfig),
+		detector:  detector,
+	}
+	if store != nil {
+		_ = m.SetSecretStore(store)
+	}
+	return m
+}
 
 // ─── WinRM client injection-safety tests ───────────────────────────────────────
 
@@ -442,6 +451,7 @@ func TestModule_NoCredentialInLogs_TransportError(t *testing.T) {
 		host:          "testhost",
 		userSecretKey: "user-key",
 		passSecretKey: "pass-key",
+		detector:      &fakeDetector{result: true},
 		transport: &testWinRMTransport{
 			execErr: errors.New("connection refused"),
 		},
@@ -518,14 +528,14 @@ func TestModule_Configure_MissingPassSecretKey(t *testing.T) {
 
 // TestModule_ImplementsConfigurable verifies that *hypervModule satisfies modules.Configurable.
 func TestModule_ImplementsConfigurable(t *testing.T) {
-	m := New(nil)
+	m := New(noopDetector{})
 	_, ok := m.(modules.Configurable)
 	require.True(t, ok, "hypervModule must implement modules.Configurable")
 }
 
 // TestModule_ImplementsSecretStoreInjectable verifies the module accepts SecretStore injection.
 func TestModule_ImplementsSecretStoreInjectable(t *testing.T) {
-	m := New(nil)
+	m := New(noopDetector{})
 	injectable, ok := m.(modules.SecretStoreInjectable)
 	require.True(t, ok, "hypervModule must implement modules.SecretStoreInjectable")
 
@@ -538,18 +548,45 @@ func TestModule_ImplementsSecretStoreInjectable(t *testing.T) {
 	assert.Equal(t, store, got)
 }
 
-// TestModule_GetReturnsNotImplemented verifies stub behaviour on Linux (Story 2 fills this in).
+// TestModule_GetReturnsNotImplemented verifies stub behaviour for unknown resource IDs.
 func TestModule_GetReturnsNotImplemented(t *testing.T) {
-	m := New(nil)
+	m := New(&fakeDetector{result: true})
 	_, err := m.Get(context.Background(), "any-vm")
 	assert.ErrorIs(t, err, modules.ErrNotImplemented)
 }
 
-// TestModule_SetReturnsNotImplemented verifies stub behaviour on Linux.
+// TestModule_SetReturnsNotImplemented verifies stub behaviour for unknown resource IDs.
 func TestModule_SetReturnsNotImplemented(t *testing.T) {
-	m := New(nil)
+	m := New(&fakeDetector{result: true})
 	err := m.Set(context.Background(), "any-vm", nil)
 	assert.ErrorIs(t, err, modules.ErrNotImplemented)
+}
+
+// TestModule_Get_ReturnsErrHostNotHyperV_WhenDetectorReturnsFalse verifies that
+// Get returns ErrHostNotHyperV when the detector reports the host is not Hyper-V.
+func TestModule_Get_ReturnsErrHostNotHyperV_WhenDetectorReturnsFalse(t *testing.T) {
+	m := newModuleWithDetector(nil, &fakeDetector{result: false})
+	_, err := m.Get(context.Background(), "vm:some-vm")
+	assert.ErrorIs(t, err, ErrHostNotHyperV)
+}
+
+// TestModule_Get_ProceedsWhenDetectorReturnsTrue verifies that Get proceeds past
+// the detection gate when the detector reports a Hyper-V host. On non-Windows
+// with no transport the operation fails with ErrVMNotFound, not ErrHostNotHyperV.
+func TestModule_Get_ProceedsWhenDetectorReturnsTrue(t *testing.T) {
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	_, err := m.Get(context.Background(), "vm:some-vm")
+	assert.False(t, errors.Is(err, ErrHostNotHyperV),
+		"Get with true detector must not return ErrHostNotHyperV, got %v", err)
+	assert.ErrorIs(t, err, ErrVMNotFound)
+}
+
+// TestModule_Set_ReturnsErrHostNotHyperV_WhenDetectorReturnsFalse verifies that
+// Set returns ErrHostNotHyperV when the detector reports the host is not Hyper-V.
+func TestModule_Set_ReturnsErrHostNotHyperV_WhenDetectorReturnsFalse(t *testing.T) {
+	m := newModuleWithDetector(nil, &fakeDetector{result: false})
+	err := m.Set(context.Background(), "vm:some-vm", &VMConfig{})
+	assert.ErrorIs(t, err, ErrHostNotHyperV)
 }
 
 // ─── buildInvokeCommand unit tests ─────────────────────────────────────────────
