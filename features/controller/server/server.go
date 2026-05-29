@@ -436,6 +436,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// re-used by the data plane config handler so both consumers share the same key.
 	var hoistedSigner signature.Signer
 	var hoistedSignerCertSerial string
+	// signingRotationSvc is hoisted so it can be wired to both the gRPC on-connect hook
+	// and the HTTP API rotate endpoint (Issue #1816).
+	var signingRotationSvc *service.SigningRotationService
 	if cfg.Transport != nil && certManager != nil {
 		logger.Info("Initializing gRPC control plane provider...", "addr", cfg.Transport.ListenAddr)
 
@@ -449,7 +452,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// we can inject it as the on-connect hook. The publisher is wired after
 		// commandPublisher is constructed below (breaks the init cycle).
 		connRegistry = registry.NewRegistry()
-		var signingRotationSvc *service.SigningRotationService
 		if certManager != nil {
 			signingRotationSvc = service.NewSigningRotationService(certManager, logger)
 			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(signingRotationSvc))
@@ -711,6 +713,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// GET /api/v1/stewards/{id} reports the live connection_state (Issue #1572).
 	if connRegistry != nil {
 		httpServer.SetRegistry(connRegistry)
+	}
+
+	// Issue #1816: Wire signing rotation service so the rotate endpoint is available.
+	if signingRotationSvc != nil {
+		signingRotationSvc.SetControllerService(controllerService)
+		httpServer.SetSigningRotationService(signingRotationSvc)
+		logger.Info("Signing rotation service wired to HTTP API server (Issue #1816)")
 	}
 
 	// Issue #1696: Wire durable pending registration store for status poll endpoint.

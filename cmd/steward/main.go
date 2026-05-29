@@ -620,6 +620,18 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
 		ScriptSigning:               scriptSigning,
 		Logger:                      logger,
+		IdentityPersistFunc: func(pems []string, at *time.Time) error {
+			cur, loadErr := loadIdentity(certStoreDir)
+			if loadErr != nil {
+				return fmt.Errorf("persist signing cert: load identity: %w", loadErr)
+			}
+			if cur == nil {
+				return fmt.Errorf("persist signing cert: identity not found")
+			}
+			cur.SigningCertPEMs = pems
+			cur.OverlapExpiresAt = at
+			return saveIdentity(certStoreDir, *cur)
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transport client: %w", err)
@@ -671,7 +683,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	// Without a controller server/signing cert the steward would reconnect but
 	// silently reject every signed command, so treat an identity record that
 	// lacks both as unusable and fall back to HTTP re-registration.
-	if id.ServerCertPEM == "" && id.SigningCertPEM == "" {
+	if id.ServerCertPEM == "" && id.SigningCertPEM == "" && len(id.SigningCertPEMs) == 0 {
 		return nil, fmt.Errorf("stored identity missing controller server/signing certificate; cannot verify signed commands")
 	}
 
@@ -718,12 +730,25 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		RegistrationToken:           token,
 		CACertPEM:                   id.CACertPEM,
 		ServerCertPEM:               id.ServerCertPEM,
-		SigningCertPEM:              id.SigningCertPEM,
+		SigningCertPEM:              id.SigningCertPEM,  // backward compat seed; seeded into SigningCertPEMs in NewTransportClient when SigningCertPEMs is empty
+		SigningCertPEMs:             id.SigningCertPEMs, // Issue #1816: mutable rotation set
 		CertManager:                 certMgr,
 		SecretStore:                 secretStore,
 		SignedCommandReplayWindow:   commandReplayWindow,
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
 		Logger:                      logger,
+		IdentityPersistFunc: func(pems []string, at *time.Time) error {
+			cur, loadErr := loadIdentity(certStoreDir)
+			if loadErr != nil {
+				return fmt.Errorf("persist signing cert: load identity: %w", loadErr)
+			}
+			if cur == nil {
+				return fmt.Errorf("persist signing cert: identity not found")
+			}
+			cur.SigningCertPEMs = pems
+			cur.OverlapExpiresAt = at
+			return saveIdentity(certStoreDir, *cur)
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transport client: %w", err)
