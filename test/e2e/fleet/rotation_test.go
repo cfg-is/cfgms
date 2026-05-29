@@ -23,11 +23,14 @@ type signingCertRotationResult struct {
 	OverlapExpiresAt string `json:"overlap_expires_at"` // RFC3339; empty when overlap_days=0
 }
 
-// rotateSigningCert calls POST /api/v1/certificates/signing/rotate and returns the result.
+// rotateSigningCert calls POST /api/v1/certificates/signing/rotate with force=true
+// and returns the result. Operator-initiated rotations should bypass the
+// in-progress guard so back-to-back e2e scenarios succeed independent of the
+// cursor state left by the previous test.
 func (s *FleetTestSuite) rotateSigningCert(t *testing.T, overlapDays int) signingCertRotationResult {
 	t.Helper()
 
-	reqBody := fmt.Sprintf(`{"overlap_days":%d}`, overlapDays)
+	reqBody := fmt.Sprintf(`{"overlap_days":%d,"force":true}`, overlapDays)
 	url := fmt.Sprintf("%s/api/v1/certificates/signing/rotate", s.controllerURL)
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader(reqBody))
@@ -60,7 +63,9 @@ func (s *FleetTestSuite) rotateSigningCert(t *testing.T, overlapDays int) signin
 	return apiResp.Data
 }
 
-// tryRotateSigningCert calls the rotation endpoint and returns any error without failing the test.
+// tryRotateSigningCert calls the rotation endpoint WITHOUT force and returns any
+// error without failing the test. Used by CrashMidRotation to verify the
+// in-progress guard fires on the second call.
 func (s *FleetTestSuite) tryRotateSigningCert(t *testing.T, overlapDays int) error {
 	t.Helper()
 

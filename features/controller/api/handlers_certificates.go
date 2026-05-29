@@ -11,9 +11,21 @@ import (
 )
 
 // RotateSigningCertRequest is the optional JSON body for the rotate endpoint.
+// OverlapDays uses a pointer so an explicit 0 is distinguishable from an
+// unset field: 0 means "no overlap, retire the old cert immediately"; nil
+// means "use the default overlap window".
 type RotateSigningCertRequest struct {
-	OverlapDays int `json:"overlap_days"`
+	OverlapDays *int `json:"overlap_days,omitempty"`
+	// Force, when true, bypasses the in-progress guard so an operator-initiated
+	// rotation succeeds even when the previous overlap window has not yet
+	// expired. Defaults to false; CLI/UI flows that surface operator intent
+	// should set this to true.
+	Force bool `json:"force,omitempty"`
 }
+
+// defaultRotationOverlapDays is the overlap window applied when the operator
+// does not pass overlap_days in the request body.
+const defaultRotationOverlapDays = 7
 
 // RotateSigningCertResponse is the JSON response from the rotate endpoint.
 type RotateSigningCertResponse struct {
@@ -55,12 +67,16 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	overlapDays := req.OverlapDays
-	if overlapDays <= 0 {
-		overlapDays = 7
+	overlapDays := defaultRotationOverlapDays
+	if req.OverlapDays != nil {
+		overlapDays = *req.OverlapDays
+		if overlapDays < 0 {
+			s.writeErrorResponse(w, http.StatusBadRequest, "overlap_days must be >= 0", "INVALID_OVERLAP_DAYS")
+			return
+		}
 	}
 
-	result, err := s.signingRotationService.Rotate(r.Context(), principal.CertSerial, overlapDays)
+	result, err := s.signingRotationService.Rotate(r.Context(), principal.CertSerial, overlapDays, req.Force)
 	if err != nil {
 		s.logger.Error("Signing certificate rotation failed",
 			"operator_serial", logging.SanitizeLogValue(principal.CertSerial),

@@ -69,8 +69,15 @@ func (s *SigningRotationService) SetControllerService(cs *ControllerService) {
 // cursor, and fans out a COMMAND_TYPE_PUSH_SIGNING_CERT command to all currently
 // connected stewards. Per-steward delivery errors are logged but do not abort
 // the rotation. An audit log entry is emitted that contains no PEM body data.
-func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial string, overlapDays int) (*RotationResult, error) {
-	// Capture the old serial before rotating.
+//
+// When force is true, an active in-progress overlap is cleared before the new
+// rotation runs — operator-initiated rotations should not block on a previous
+// overlap that has not yet expired. When force is false, the primitive's
+// in-progress guard is enforced (used to validate the crash-mid-rotation path).
+func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial string, overlapDays int, force bool) (*RotationResult, error) {
+	// Capture the old serial before rotating. Prefer the cursor (set after the
+	// first rotation); fall back to the active signing cert for fresh controllers
+	// where no rotation cursor exists yet.
 	cursor, err := s.certManager.GetSigningCursorState()
 	if err != nil {
 		return nil, fmt.Errorf("signing rotation: get cursor state: %w", err)
@@ -79,8 +86,18 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 	if cursor != nil {
 		oldSerial = cursor.CurrentSerial
 	}
+	if oldSerial == "" {
+		if currentCert, cErr := s.certManager.GetCurrentCertForPurpose(cert.PurposeSigning); cErr == nil && currentCert != nil {
+			oldSerial = currentCert.SerialNumber
+		}
+	}
 
-	newCert, err := s.certManager.RotateSigningCertificate(overlapDays)
+	var newCert *cert.Certificate
+	if force {
+		newCert, err = s.certManager.ForceRotateSigningCertificate(overlapDays)
+	} else {
+		newCert, err = s.certManager.RotateSigningCertificate(overlapDays)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("signing rotation: rotate certificate: %w", err)
 	}

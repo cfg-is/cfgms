@@ -127,6 +127,58 @@ func TestRotateSigningCertificateCrashRecovery(t *testing.T) {
 	assert.Equal(t, 7, loaded.OverlapWindowDays)
 }
 
+// TestForceRotateSigningCertificateBypassesInProgress verifies that
+// ForceRotateSigningCertificate succeeds when a normal RotateSigningCertificate
+// would be rejected by the in-progress guard (RotatingSerial set within the
+// overlap window). The cursor is re-transitioned with the new serial.
+func TestForceRotateSigningCertificateBypassesInProgress(t *testing.T) {
+	m := newTestManager(t)
+
+	oldCert, err := m.GenerateSigningCertificate(&SigningCertConfig{
+		CommonName:   "cfgms-config-signer-old",
+		ValidityDays: 30,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+
+	currentCert, err := m.GenerateSigningCertificate(&SigningCertConfig{
+		CommonName:   "cfgms-config-signer-current",
+		ValidityDays: 30,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+
+	// Active rotation within a long overlap window — the regular guard MUST fire.
+	cursor := &SigningCertCursor{
+		CurrentSerial:     currentCert.SerialNumber,
+		RotatingSerial:    oldCert.SerialNumber,
+		OverlapWindowDays: 30,
+		RotatedAt:         time.Now().UTC(),
+	}
+	require.NoError(t, saveSigningCursor(m.store.basePath, cursor))
+
+	// Confirm the non-force call is blocked.
+	_, err = m.RotateSigningCertificate(7)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rotation already in progress")
+
+	// Force-rotate must succeed despite the active in-progress cursor state.
+	newCert, err := m.ForceRotateSigningCertificate(7)
+	require.NoError(t, err)
+	require.NotNil(t, newCert)
+	assert.NotEqual(t, currentCert.SerialNumber, newCert.SerialNumber)
+	assert.NotEqual(t, oldCert.SerialNumber, newCert.SerialNumber)
+
+	loaded, err := loadSigningCursor(m.store.basePath)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, newCert.SerialNumber, loaded.CurrentSerial)
+	// After force-clear+transition, the previously-current cert becomes the
+	// new rotating serial; the old rotating serial is dropped.
+	assert.Equal(t, currentCert.SerialNumber, loaded.RotatingSerial)
+	assert.Equal(t, 7, loaded.OverlapWindowDays)
+}
+
 // TestRotateSigningCertificateConcurrency verifies that concurrent calls to
 // RotateSigningCertificate are serialised: exactly one call succeeds and the
 // rest return "rotation already in progress".

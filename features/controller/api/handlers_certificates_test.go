@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -417,9 +418,120 @@ func TestHandleRotateSigningCert_AdminSuccess(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.NotEmpty(t, resp.Data.NewSerial)
+	assert.NotEmpty(t, resp.Data.OldSerial, "old_serial must be populated from the active signing cert when no rotation cursor exists yet")
+	assert.NotEqual(t, resp.Data.OldSerial, resp.Data.NewSerial, "old_serial and new_serial must differ after rotation")
 	assert.Equal(t, 7, resp.Data.OverlapDays)
 	assert.NotEmpty(t, resp.Data.OverlapExpiresAt, "overlap_expires_at must be populated when overlap_days > 0")
 	if _, parseErr := time.Parse(time.RFC3339, resp.Data.OverlapExpiresAt); parseErr != nil {
 		t.Errorf("overlap_expires_at must be RFC3339 timestamp, got %q: %v", resp.Data.OverlapExpiresAt, parseErr)
 	}
+}
+
+// TestHandleRotateSigningCert_ZeroOverlapPreserved verifies that an explicit
+// overlap_days=0 in the request body is preserved (not defaulted to 7) and that
+// overlap_expires_at is empty for zero-day rotations.
+func TestHandleRotateSigningCert_ZeroOverlapPreserved(t *testing.T) {
+	server, certMgr, _ := setupRotationTestServer(t)
+
+	issuedCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(issuedCert.CertificatePEM)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate",
+		strings.NewReader(`{"overlap_days":0}`))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data RotateSigningCertResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, 0, resp.Data.OverlapDays, "explicit overlap_days=0 must be preserved, not replaced by the default")
+	assert.Empty(t, resp.Data.OverlapExpiresAt, "overlap_expires_at must be empty when overlap_days == 0")
+}
+
+// TestHandleRotateSigningCert_ForceBypassesInProgress verifies that force=true
+// in the request body allows a rotation to succeed even when the previous
+// rotation's overlap window has not yet expired. The first rotation only
+// establishes a CurrentSerial in the cursor (no rotating serial); the second
+// shifts the first's serial into RotatingSerial; the third without force is
+// then blocked by the in-progress guard; the fourth with force succeeds.
+func TestHandleRotateSigningCert_ForceBypassesInProgress(t *testing.T) {
+	server, certMgr, _ := setupRotationTestServer(t)
+
+	issuedCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(issuedCert.CertificatePEM)
+	require.NoError(t, err)
+
+	do := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate",
+			strings.NewReader(body))
+		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Prime the cursor: first rotation seeds CurrentSerial; second shifts it
+	// into RotatingSerial with a 30-day overlap window.
+	require.Equal(t, http.StatusOK, do(`{"overlap_days":30}`).Code, "first prime rotation must succeed")
+	require.Equal(t, http.StatusOK, do(`{"overlap_days":30}`).Code, "second prime rotation must succeed")
+
+	// Third rotation without force MUST fail with "in progress" because the
+	// previous 30-day overlap is still active.
+	rec3 := do(`{"overlap_days":30}`)
+	require.Equal(t, http.StatusInternalServerError, rec3.Code,
+		"non-force rotation during active overlap must be rejected, got body: %s", rec3.Body.String())
+
+	// Fourth rotation with force MUST succeed despite the active in-progress state.
+	rec4 := do(`{"overlap_days":30,"force":true}`)
+	require.Equal(t, http.StatusOK, rec4.Code,
+		"force rotation must succeed despite active overlap, got body: %s", rec4.Body.String())
+
+	var resp struct {
+		Data RotateSigningCertResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec4.Body).Decode(&resp))
+	assert.NotEmpty(t, resp.Data.NewSerial)
+}
+
+// TestHandleRotateSigningCert_NegativeOverlapRejected verifies that a negative
+// overlap_days value is rejected with a 400.
+func TestHandleRotateSigningCert_NegativeOverlapRejected(t *testing.T) {
+	server, certMgr, _ := setupRotationTestServer(t)
+
+	issuedCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(issuedCert.CertificatePEM)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate",
+		strings.NewReader(`{"overlap_days":-1}`))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
