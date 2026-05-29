@@ -62,3 +62,66 @@ resources:
           - restored
           - absent
         default: present
+
+  vswitch:
+    description: Hyper-V virtual switch (external, internal, or private)
+    required:
+      - name
+      - switch_type
+    properties:
+      name:
+        type: string
+        description: User-visible switch name (no __ — tenant-namespaced on the host)
+        pattern: "^[a-zA-Z0-9_\\- ]{1,64}$"
+      switch_type:
+        type: string
+        description: Switch type. NAT is not supported.
+        enum:
+          - external
+          - internal
+          - private
+      net_adapter_name:
+        type: string
+        description: >
+          Physical network adapter to bind. Required for external type;
+          must be empty for internal and private types.
+      allow_management_os:
+        type: boolean
+        description: >
+          Whether the management OS shares the external switch adapter.
+          Forced to true for external type; not applicable for internal/private.
+        default: true
+      state:
+        type: string
+        description: Desired lifecycle state
+        enum:
+          - present
+          - absent
+        default: present
+
+  vmattach:
+    description: Hyper-V VM network adapter attachment to a virtual switch
+    required:
+      - vm_name
+      - switch_name
+    properties:
+      vm_name:
+        type: string
+        description: Name of the virtual machine
+        pattern: "^[a-zA-Z0-9_\\-]{1,64}$"
+      switch_name:
+        type: string
+        description: Name of the virtual switch to attach to
+        pattern: "^[a-zA-Z0-9_\\- ]{1,64}$"
+      adapter_name:
+        type: string
+        description: >
+          Optional name for the network adapter. When empty, Hyper-V assigns a
+          default adapter name and -Name is omitted from the PowerShell command.
+      state:
+        type: string
+        description: Desired lifecycle state
+        enum:
+          - present
+          - absent
+        default: present
