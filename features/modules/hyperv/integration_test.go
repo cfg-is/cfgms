@@ -12,26 +12,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
-
-// fakeDetector implements HypervDetector for integration tests, returning a
-// configurable result so detection does not require running Get-VMHost on the
-// CI test runner (which may be Linux).
-type fakeDetector struct{ result bool }
-
-func (f fakeDetector) IsAvailable() (bool, error) { return f.result, nil }
-
-// newModuleWithDetector creates a hypervModule with a SecretStore pre-injected and
-// a detector indicating whether Hyper-V is available, bypassing OS-level detection.
-func newModuleWithDetector(store secretsif.SecretStore, _ HypervDetector) (*hypervModule, error) {
-	m := &hypervModule{executor: newExecutor()}
-	if err := m.SetSecretStore(store); err != nil {
-		return nil, err
-	}
-	return m, nil
-}
 
 // integrationModule configures a hypervModule using env-var credentials.
 // Returns nil and skips the test if CFGMS_HYPERV_HOST is not set.
@@ -47,8 +28,7 @@ func integrationModule(t *testing.T) *hypervModule {
 	pass := os.Getenv("CFGMS_HYPERV_PASS")
 
 	store := newInlineStore("user-key", user, "pass-key", pass)
-	m, err := newModuleWithDetector(store, fakeDetector{result: true})
-	require.NoError(t, err)
+	m := newModuleWithDetector(store, &fakeDetector{result: true})
 
 	require.NoError(t, m.Configure(mapConfigState{
 		"winrm_host":        host,

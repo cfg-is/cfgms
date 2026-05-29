@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
 )
@@ -18,12 +19,6 @@ var (
 	errUserSecretKeyRequired = errors.New("hyperv: winrm_user_secret key is required")
 	errPassSecretKeyRequired = errors.New("hyperv: winrm_pass_secret key is required")
 )
-
-// HypervDetector detects whether Hyper-V is available on the host.
-// The concrete implementation is added in Story 5 (host detection).
-type HypervDetector interface {
-	IsAvailable() (bool, error)
-}
 
 // hypervModule implements modules.Module and modules.Configurable for remote
 // Hyper-V management via WinRM. Credentials are fetched from SecretStore on
@@ -40,6 +35,13 @@ type hypervModule struct {
 	transport winrmTransport
 	executor  hypervExecutor
 
+	// detector gates every Get and Set — the module refuses operations when the
+	// host is not a Hyper-V host. detMu protects the 5-minute result cache.
+	detector  HypervDetector
+	detMu     sync.Mutex
+	detResult bool
+	detExpiry time.Time
+
 	// vms is the write-through VM cache. Keys are user-visible VM names
 	// (without the cfgms-<tenantID>__ prefix). Updated on executor success only.
 	vmsMu sync.RWMutex
@@ -51,14 +53,47 @@ type hypervModule struct {
 	vswitches   map[string]VSwitchConfig
 }
 
-// New creates a new hypervModule. detector is reserved for Story 5 host detection
-// and may be nil in Story 1.
+// New creates a new hypervModule. Production callers pass newDefaultDetector();
+// tests inject a fakeDetector via newModuleWithDetector.
 func New(detector HypervDetector) modules.Module {
 	return &hypervModule{
 		executor:  newExecutor(),
 		vms:       make(map[string]VMConfig),
 		vswitches: make(map[string]VSwitchConfig),
+		detector:  detector,
 	}
+}
+
+// checkDetection calls the injected HypervDetector and enforces the 5-minute
+// result cache. Returns ErrHostNotHyperV when the host is not a Hyper-V host
+// or when no detector was provided.
+func (m *hypervModule) checkDetection(ctx context.Context) error {
+	if m.detector == nil {
+		return ErrHostNotHyperV
+	}
+
+	m.detMu.Lock()
+	defer m.detMu.Unlock()
+
+	if time.Now().Before(m.detExpiry) {
+		if !m.detResult {
+			return ErrHostNotHyperV
+		}
+		return nil
+	}
+
+	result, err := m.detector.IsHypervHost(ctx)
+	if err != nil {
+		return err
+	}
+	if result {
+		m.detResult = true
+		m.detExpiry = time.Now().Add(5 * time.Minute)
+	}
+	if !result {
+		return ErrHostNotHyperV
+	}
+	return nil
 }
 
 // Configure implements modules.Configurable. It extracts WinRM connection details
@@ -114,6 +149,9 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 //   - "vswitch:<name>": retrieve VSwitchConfig for the named virtual switch
 //   - "vmattach:<vmName>/<switchName>": retrieve VMAttachmentConfig for the named attachment
 func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
+	if err := m.checkDetection(ctx); err != nil {
+		return nil, err
+	}
 	prefix, name, ok := splitResourceID(resourceID)
 	if !ok {
 		return nil, modules.ErrNotImplemented
@@ -143,6 +181,9 @@ func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.Conf
 //   - "vswitch:<name>": create or delete the named virtual switch
 //   - "vmattach:<vmName>/<switchName>": attach or detach a VM network adapter
 func (m *hypervModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
+	if err := m.checkDetection(ctx); err != nil {
+		return err
+	}
 	prefix, _, ok := splitResourceID(resourceID)
 	if !ok {
 		return modules.ErrNotImplemented
