@@ -234,6 +234,17 @@ func New(
 				}
 			}
 		}
+
+		// Issue #1709: installer key uses a separate block (not the EAST/CENTRAL/WEST loop)
+		// because it requires different permissions and must upload under the "root" tenant
+		// so the public download endpoint (which always looks up tenant "root") can find it.
+		if keyVal := os.Getenv("CFGMS_API_KEY_INSTALLER"); keyVal != "" {
+			server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+				Key:         keyVal,
+				Permissions: []string{"installer:upload", "installer:read", "installer:delete", "steward:list"},
+				TenantID:    "root",
+			}
+		}
 	}
 
 	// M-AUTH-1: Do NOT generate default API keys (security anti-pattern)

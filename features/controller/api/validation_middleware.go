@@ -167,12 +167,15 @@ func (s *Server) validateRequestHeaders(validator *security.EnhancedValidator, r
 			// YAML content types are accepted because the steward config
 			// upload endpoint (handleUpdateStewardConfig) ingests production
 			// .cfg files sent as application/yaml by `cfg config upload`.
+			// application/octet-stream is accepted for binary uploads
+			// (handleUploadInstallerArtifact ingests ~30MB steward binaries).
 			if !strings.HasPrefix(contentType, "application/json") &&
 				!strings.HasPrefix(contentType, "application/x-www-form-urlencoded") &&
 				!strings.HasPrefix(contentType, "multipart/form-data") &&
 				!strings.HasPrefix(contentType, "application/yaml") &&
 				!strings.HasPrefix(contentType, "application/x-yaml") &&
-				!strings.HasPrefix(contentType, "text/yaml") {
+				!strings.HasPrefix(contentType, "text/yaml") &&
+				!strings.HasPrefix(contentType, "application/octet-stream") {
 				result.AddError("header.Content-Type", contentType, "content_type", "unsupported content type")
 			}
 		}
@@ -204,9 +207,19 @@ func (s *Server) validateRequestHeaders(validator *security.EnhancedValidator, r
 	}
 }
 
-// validateRequestBody validates the request body for POST/PUT requests
+// validateRequestBody validates the request body for POST/PUT requests.
+//
+// Binary uploads (application/octet-stream) bypass body buffering — they can
+// legitimately exceed the 10MB JSON-body cap (installer artifact uploads carry
+// ~30MB steward binaries), and reading the entire body into memory would also
+// defeat streaming-write to the blob store.
 func (s *Server) validateRequestBody(validator *security.EnhancedValidator, result *security.ValidationResult, r *http.Request) error {
 	if r.Body == nil {
+		return nil
+	}
+
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "application/octet-stream") {
 		return nil
 	}
 
@@ -230,7 +243,6 @@ func (s *Server) validateRequestBody(validator *security.EnhancedValidator, resu
 	}
 
 	// Validate JSON structure if Content-Type is JSON
-	contentType := r.Header.Get("Content-Type")
 	if strings.HasPrefix(contentType, "application/json") {
 		if err := s.validateJSONBody(validator, result, body, r.URL.Path); err != nil {
 			return err

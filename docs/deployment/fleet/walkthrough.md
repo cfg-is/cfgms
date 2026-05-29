@@ -224,120 +224,115 @@ cfg token list --tenant-id=default
 
 ---
 
-## Phase 4 — Build and Register Remote Stewards
+## Phase 4 — Upload Installer Artifacts and Register Remote Stewards
 
-> **Note (Phase 4a — coming soon):** Once the install-package flow is complete, installer
-> artifacts will be uploadable via `cfg installer upload` and served directly from the
-> controller. See Issue #1661 (steward provisioning epic) for progress.
+### 4a — Upload steward installer artifacts (`cfg installer upload`)
 
-### Windows endpoints — MSI installer
+Build a steward binary for your controller's URL and upload it to the controller so
+stewards can download a pre-packaged install bundle (binary + CA cert + fingerprint):
 
-Windows endpoints can be enrolled silently using the `cfgms-steward-windows-amd64.msi`
-(or `arm64`) installer produced by CI. Download the MSI from the release artifacts and
-deploy it from your RMM (NinjaOne, Datto, ConnectWise, etc.):
+```bash
+# Build the steward binary with your controller URL compiled in
+make build-steward STEWARD_CONTROLLER_URL=https://<CONTROLLER_IP>:9080
+
+# Upload the Linux amd64 binary to the controller
+cfg installer upload bin/cfgms-steward --platform linux --arch amd64 \
+  --url=https://<CONTROLLER_IP>:9080
+
+# Verify the artifact is listed
+cfg installer list --url=https://<CONTROLLER_IP>:9080
+```
+
+The uploaded binary is stored in the controller's blob store and served as a
+self-contained install package via the public download endpoint.
+
+### 4b — Download the install package
+
+Retrieve the install package for a specific platform/arch. The package is a `.tar.gz`
+archive containing the steward binary, the controller CA certificate, and the CA
+fingerprint file:
+
+```bash
+curl -O https://<CONTROLLER_IP>:9080/api/v1/installer/download/linux/amd64
+tar tzf cfgms-steward-linux-amd64.tar.gz
+# installer/linux-amd64/cfgms-steward-amd64
+# installer/ca.crt
+# installer/ca.fingerprint
+# installer/README.txt
+```
+
+Extract the archive on each steward VM:
+
+```bash
+tar -C /tmp/cfgms-install -xzf cfgms-steward-linux-amd64.tar.gz
+```
+
+### 4c — Install on Linux (`install.sh`)
+
+The install package includes `build/linux/install.sh`. Copy it alongside the extracted
+archive and run it with the CA fingerprint from `installer/ca.fingerprint`:
+
+```bash
+FINGERPRINT="$(cat /tmp/cfgms-install/installer/ca.fingerprint)"
+
+sudo bash install.sh \
+  --regtoken <REGISTRATION_TOKEN> \
+  --fingerprint "$FINGERPRINT"
+```
+
+The script:
+1. Verifies the CA cert fingerprint matches the supplied value (aborts on mismatch)
+2. Copies the steward binary to `/usr/local/bin/cfgms-steward`
+3. Writes the CA cert to `/etc/cfgms/controller-ca.crt`
+4. Registers the systemd service and starts it
+
+> **CA fingerprint**: `install.sh` computes the fingerprint from `ca.crt` and compares it
+> against the value you provide. Retrieve the fingerprint at any time from the controller:
+> `cfg controller info --url=https://<IP>:9080 | grep fingerprint`
+
+> **Non-interactive install** (CI, RMM scripts): pass `--fingerprint` to skip the
+> interactive confirmation prompt.
+
+### 4d — Install on Windows (MSI via RMM — `msiexec /qn`)
+
+Download the Windows MSI install package from the controller and deploy it silently via
+your RMM (NinjaOne, Datto, ConnectWise, etc.):
+
+```bash
+# Download the Windows package (contains the MSI + CA cert)
+curl -O https://<CONTROLLER_IP>:9080/api/v1/installer/download/windows/amd64
+```
 
 ```powershell
-# Silent install — public CA (controller uses a publicly-trusted cert):
-msiexec /qn /i cfgms-steward-windows-amd64.msi `
-  REGTOKEN="<registration-token>" `
-  CA_FINGERPRINT="<sha256-hex>"
-
-# Silent install — private CA (place ca.crt alongside the MSI before running):
-# ca.crt is auto-detected from the same directory as the .msi file.
-msiexec /qn /i cfgms-steward-windows-amd64.msi `
+# Extract and install silently
+Expand-Archive cfgms-steward-windows-amd64.zip -DestinationPath C:\cfgms-install
+msiexec /qn /i C:\cfgms-install\cfgms-steward-amd64.msi `
   REGTOKEN="<registration-token>" `
   CA_FINGERPRINT="<sha256-hex>"
 ```
 
-The installer places `cfgms-steward.exe` in `C:\Program Files\CFGMS\` and registers the
-`CFGMSSteward` Windows service configured for automatic start with restart-on-failure recovery.
+> **Windows E2E validation** requires real Windows runners and is not exercised by the
+> docker-compose fleet harness. See Epic #1661 for the Windows MSI roadmap.
 
-> **CA fingerprint**: the controller prints the CA fingerprint during `--init`. Retrieve it
-> at any time: `cfg controller info --url=https://<IP>:9080 | grep fingerprint`
-
-> **Full Windows MSI deployment guide**: a complete walkthrough — including how to build
-> a controller-URL-baked MSI for your fleet, download the install package from the controller,
-> and distribute via RMM — will be added in Story 8 of Epic #1661.
-
-### 4a — Build a steward binary for your controller
-
-The steward binary has the controller URL **compiled in at build time**. A given binary
-only ever talks to the controller it was built for — this is a deliberate trust assertion
-(see `cmd/steward/main.go`).
-
-On your build machine:
+### 4e — Install on macOS (`.pkg` via MDM)
 
 ```bash
-git clone https://github.com/cfg-is/cfgms.git
-cd cfgms
-make build-steward STEWARD_CONTROLLER_URL=https://<CONTROLLER_IP>:9080
+# Download the macOS package
+curl -O https://<CONTROLLER_IP>:9080/api/v1/installer/download/darwin/amd64
 ```
 
-This produces `bin/cfgms-steward` with the controller URL embedded. The `STEWARD_CONTROLLER_URL`
-must use the HTTPS scheme and port 9080 (the REST API address stewards use for the initial
-HTTP registration call, before switching to gRPC-over-QUIC on port 4433).
-
-> **For remote stewards with a self-signed controller CA**: The steward verifies the
-> controller's TLS certificate during registration. If the controller uses its
-> auto-generated CA (the default), stewards need the CA certificate to trust it.
-> Set `CFGMS_HTTP_CA_CERT_PATH` on each steward VM before running the binary:
-> ```bash
-> # Copy the CA cert from the controller (at /var/lib/cfgms/certs/ca/ca.crt)
-> scp controller-vm:/var/lib/cfgms/certs/ca/ca.crt /tmp/controller-ca.crt
-> export CFGMS_HTTP_CA_CERT_PATH=/etc/cfgms/controller-ca.crt
-> ```
-> Place the CA cert at a stable path (e.g. `/etc/cfgms/controller-ca.crt`) so the
-> systemd service can find it via its `Environment=` directive.
-
-### 4b — Deploy and register steward-1
-
-Copy the binary and register as a systemd service in one step:
+Distribute the `.pkg` through your MDM (Jamf, Kandji, Mosyle, etc.) or install manually:
 
 ```bash
-# On steward-1 VM
-sudo cp cfgms-steward /usr/local/bin/cfgms-steward
-sudo chmod +x /usr/local/bin/cfgms-steward
-
-# If using the controller's self-signed CA:
-sudo mkdir -p /etc/cfgms
-sudo cp /tmp/controller-ca.crt /etc/cfgms/controller-ca.crt
-sudo chmod 644 /etc/cfgms/controller-ca.crt
-
-# Register and install as systemd service
-# (requires the CFGMS_HTTP_CA_CERT_PATH env to be set in the service unit
-#  if using the controller's self-signed CA — see note below)
-sudo CFGMS_HTTP_CA_CERT_PATH=/etc/cfgms/controller-ca.crt \
-  cfgms-steward install --regtoken <TOKEN_FOR_STEWARD_1>
+sudo installer -pkg cfgms-steward-darwin-amd64.pkg -target /
 ```
 
-> **Systemd environment**: `cfgms-steward install` writes a systemd unit file. If the
-> controller uses a self-signed CA, add the CA path to the unit's `Environment=` directive
-> after install:
-> ```bash
-> sudo systemctl edit cfgms-steward --force
-> # Add:
-> # [Service]
-> # Environment=CFGMS_HTTP_CA_CERT_PATH=/etc/cfgms/controller-ca.crt
-> sudo systemctl daemon-reload
-> sudo systemctl restart cfgms-steward
-> ```
+> **macOS E2E validation** requires real macOS runners and is not exercised by the
+> docker-compose fleet harness. See Epic #1661 for the macOS installer roadmap.
 
-Alternatively, for a quick foreground first-run before committing to systemd:
+### 4f — Verify steward registration
 
-```bash
-sudo CFGMS_HTTP_CA_CERT_PATH=/etc/cfgms/controller-ca.crt \
-  cfgms-steward --regtoken <TOKEN_FOR_STEWARD_1>
-```
-
-This blocks until you `Ctrl-C`. Use it to see registration logs before installing as a service.
-
-### 4c — Deploy and register steward-2
-
-Repeat the same steps on `steward-2` using `<TOKEN_FOR_STEWARD_2>`.
-
-### 4d — Verify steward service
-
-On each steward VM:
+On each steward VM, verify the service is running and registered:
 
 ```bash
 cfgms-steward status

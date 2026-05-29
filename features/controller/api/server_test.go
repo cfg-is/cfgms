@@ -1467,3 +1467,79 @@ func TestNew_FanoutCallbackWired(t *testing.T) {
 }
 
 // stubLeaderStatus is defined in handlers_push_test.go (shared across api package tests).
+
+// TestSeedTestAPIKeys verifies the env-gated test API key seeding block in New(),
+// including the installer key path added for Issue #1709 (PR #1831).
+//
+// Seeding is intentionally never on by default: it requires CFGMS_SEED_TEST_API_KEYS=1
+// AND the specific key env var to be set. The block is the only code path that creates
+// privileged keys without going through the admin API, so verifying both the gate and
+// the resulting key/permission shape catches regressions that would otherwise only
+// surface at E2E time.
+func TestSeedTestAPIKeys(t *testing.T) {
+	t.Run("gate off: installer key not seeded even when env var is set", func(t *testing.T) {
+		t.Setenv("CFGMS_SEED_TEST_API_KEYS", "")
+		t.Setenv("CFGMS_API_KEY_INSTALLER", "installer-test-key")
+
+		server := setupTestServer(t)
+
+		server.mu.RLock()
+		_, exists := server.apiKeys["installer-test-key"]
+		server.mu.RUnlock()
+		require.False(t, exists, "installer key must NOT be seeded when CFGMS_SEED_TEST_API_KEYS is unset")
+	})
+
+	t.Run("gate on, installer var unset: installer key not seeded", func(t *testing.T) {
+		t.Setenv("CFGMS_SEED_TEST_API_KEYS", "1")
+		t.Setenv("CFGMS_API_KEY_INSTALLER", "")
+
+		server := setupTestServer(t)
+
+		server.mu.RLock()
+		// Spot-check: there must not be an installer key with the conventional value
+		_, exists := server.apiKeys["installer-test-key"]
+		server.mu.RUnlock()
+		require.False(t, exists, "installer key must NOT be seeded when CFGMS_API_KEY_INSTALLER is empty")
+	})
+
+	t.Run("gate on, installer var set: installer key seeded with correct permissions and tenant", func(t *testing.T) {
+		t.Setenv("CFGMS_SEED_TEST_API_KEYS", "1")
+		t.Setenv("CFGMS_API_KEY_INSTALLER", "installer-test-key")
+
+		server := setupTestServer(t)
+
+		server.mu.RLock()
+		keyInfo, exists := server.apiKeys["installer-test-key"]
+		server.mu.RUnlock()
+
+		require.True(t, exists, "installer key must be seeded when gate and env var are both set")
+		require.Equal(t, "installer-test-key", keyInfo.Key)
+		require.Equal(t, "root", keyInfo.TenantID,
+			"installer key must use tenant 'root' so the public download endpoint can find it")
+		require.ElementsMatch(t,
+			[]string{"installer:upload", "installer:read", "installer:delete", "steward:list"},
+			keyInfo.Permissions,
+			"installer key permissions must allow upload+read+delete on installer artifacts and steward listing for the E2E flow")
+	})
+
+	t.Run("gate on, east/central/west loop: keys seeded with default tenant and steward permissions", func(t *testing.T) {
+		t.Setenv("CFGMS_SEED_TEST_API_KEYS", "1")
+		t.Setenv("CFGMS_API_KEY_EAST", "east-key")
+		t.Setenv("CFGMS_API_KEY_CENTRAL", "central-key")
+		t.Setenv("CFGMS_API_KEY_WEST", "west-key")
+
+		server := setupTestServer(t)
+
+		for _, k := range []string{"east-key", "central-key", "west-key"} {
+			server.mu.RLock()
+			keyInfo, exists := server.apiKeys[k]
+			server.mu.RUnlock()
+			require.True(t, exists, "loop key %s must be seeded", k)
+			require.Equal(t, "default", keyInfo.TenantID, "loop keys use TenantID=default")
+			require.ElementsMatch(t,
+				[]string{"steward:read", "steward:auth-refresh", "workflow:execute", "workflow:read"},
+				keyInfo.Permissions,
+				"loop key %s must NOT have installer permissions (regression guard for Issue #1709)", k)
+		}
+	})
+}
