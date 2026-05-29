@@ -323,8 +323,10 @@ func (m *hypervModule) createVSwitch(ctx context.Context, switchName string, cfg
 		return ErrInvalidSwitchType
 	}
 
-	if _, err := m.transport.ExecutePS(ctx, psCmd, psArgs); err != nil {
-		return fmt.Errorf("hyperv: create vswitch %q: %w", switchName, err)
+	_, psErr := m.transport.ExecutePS(ctx, psCmd, psArgs)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VMSwitch", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: create vswitch %q: %w", switchName, psErr)
 	}
 
 	cfgCopy := *cfg
@@ -341,8 +343,10 @@ func (m *hypervModule) createVSwitch(ctx context.Context, switchName string, cfg
 func (m *hypervModule) removeVSwitch(ctx context.Context, switchName string) error {
 	hostName := vswitchHostName(m.tenantID, switchName)
 
-	if _, err := m.transport.ExecutePS(ctx, psRemoveVSwitch, map[string]string{"Name": hostName}); err != nil {
-		return fmt.Errorf("hyperv: remove vswitch %q: %w", switchName, err)
+	_, psErr := m.transport.ExecutePS(ctx, psRemoveVSwitch, map[string]string{"Name": hostName})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMSwitch", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: remove vswitch %q: %w", switchName, psErr)
 	}
 
 	m.vswitchesMu.Lock()
@@ -466,8 +470,10 @@ func (m *hypervModule) attachVMToSwitch(ctx context.Context, vmName, switchName,
 		}
 	}
 
-	if _, err := m.transport.ExecutePS(ctx, psCmd, psArgs); err != nil {
-		return fmt.Errorf("hyperv: attach VM %q to switch %q: %w", vmName, switchName, err)
+	_, psErr := m.transport.ExecutePS(ctx, psCmd, psArgs)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMNetworkAdapter", hostVMName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: attach VM %q to switch %q: %w", vmName, switchName, psErr)
 	}
 	return nil
 }
@@ -476,11 +482,13 @@ func (m *hypervModule) attachVMToSwitch(ctx context.Context, vmName, switchName,
 func (m *hypervModule) detachVMFromSwitch(ctx context.Context, vmName, adapterName string) error {
 	hostVMName := vmHostName(m.tenantID, vmName)
 
-	if _, err := m.transport.ExecutePS(ctx, psDetachVM, map[string]string{
+	_, psErr := m.transport.ExecutePS(ctx, psDetachVM, map[string]string{
 		"VMName": hostVMName,
 		"Name":   adapterName,
-	}); err != nil {
-		return fmt.Errorf("hyperv: detach adapter %q from VM %q: %w", adapterName, vmName, err)
+	})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMNetworkAdapter", hostVMName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: detach adapter %q from VM %q: %w", adapterName, vmName, psErr)
 	}
 	return nil
 }

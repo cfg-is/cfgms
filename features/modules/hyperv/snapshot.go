@@ -199,11 +199,13 @@ func (m *hypervModule) createSnapshot(ctx context.Context, vmName, snapName stri
 	hostVMName := vmHostName(m.tenantID, vmName)
 	hostSnapName := snapHostName(m.tenantID, snapName)
 
-	if _, err := m.transport.ExecutePS(ctx, psCreateSnapshot, map[string]string{
+	_, psErr := m.transport.ExecutePS(ctx, psCreateSnapshot, map[string]string{
 		"Name":   hostSnapName,
 		"VMName": hostVMName,
-	}); err != nil {
-		return fmt.Errorf("hyperv: create snapshot %q on VM %q: %w", snapName, vmName, err)
+	})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Checkpoint-VM", hostVMName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: create snapshot %q on VM %q: %w", snapName, vmName, psErr)
 	}
 	return nil
 }
@@ -213,11 +215,13 @@ func (m *hypervModule) removeSnapshot(ctx context.Context, vmName, snapName stri
 	hostVMName := vmHostName(m.tenantID, vmName)
 	hostSnapName := snapHostName(m.tenantID, snapName)
 
-	if _, err := m.transport.ExecutePS(ctx, psRemoveSnapshot, map[string]string{
+	_, psErr := m.transport.ExecutePS(ctx, psRemoveSnapshot, map[string]string{
 		"Name":   hostSnapName,
 		"VMName": hostVMName,
-	}); err != nil {
-		return fmt.Errorf("hyperv: remove snapshot %q on VM %q: %w", snapName, vmName, err)
+	})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMSnapshot", hostVMName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: remove snapshot %q on VM %q: %w", snapName, vmName, psErr)
 	}
 	return nil
 }
@@ -229,11 +233,13 @@ func (m *hypervModule) restoreSnapshot(ctx context.Context, vmName, snapName str
 	hostVMName := vmHostName(m.tenantID, vmName)
 	hostSnapName := snapHostName(m.tenantID, snapName)
 
-	if _, err := m.transport.ExecutePS(ctx, psRestoreSnapshot, map[string]string{
+	_, psErr := m.transport.ExecutePS(ctx, psRestoreSnapshot, map[string]string{
 		"Name":   hostSnapName,
 		"VMName": hostVMName,
-	}); err != nil {
-		return fmt.Errorf("hyperv: restore snapshot %q on VM %q: %w", snapName, vmName, err)
+	})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Restore-VMCheckpoint", hostVMName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: restore snapshot %q on VM %q: %w", snapName, vmName, psErr)
 	}
 	return nil
 }

@@ -310,7 +310,6 @@ func placeCACert(t *testing.T, container string, caCertPEM []byte) {
 	dockerExecRoot(t, container, "chmod", "644", "/etc/cfgms/controller-ca.crt")
 }
 
-
 // dockerExecRoot runs a command in the container as root.
 func dockerExecRoot(t *testing.T, container string, args ...string) {
 	t.Helper()

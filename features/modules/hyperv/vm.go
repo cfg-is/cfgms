@@ -249,8 +249,10 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		"SwitchName": cfg.SwitchName,
 	}
 
-	if _, err := m.transport.ExecutePS(ctx, psCreateVM, psArgs); err != nil {
-		return fmt.Errorf("hyperv: create VM %q: %w", vmName, err)
+	_, psErr := m.transport.ExecutePS(ctx, psCreateVM, psArgs)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VM", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: create VM %q: %w", vmName, psErr)
 	}
 
 	// Write-through: update cache on success
@@ -268,8 +270,10 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 func (m *hypervModule) removeVM(ctx context.Context, vmName string) error {
 	hostName := vmHostName(m.tenantID, vmName)
 
-	if _, err := m.transport.ExecutePS(ctx, psRemoveVM, map[string]string{"Name": hostName}); err != nil {
-		return fmt.Errorf("hyperv: remove VM %q: %w", vmName, err)
+	_, psErr := m.transport.ExecutePS(ctx, psRemoveVM, map[string]string{"Name": hostName})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VM", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: remove VM %q: %w", vmName, psErr)
 	}
 
 	m.vmsMu.Lock()
