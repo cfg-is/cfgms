@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
 
@@ -86,6 +87,17 @@ func setupFleetSuite(t *testing.T) *FleetTestSuite {
 		t.Fatalf("failed to build HTTP clients: %v", err)
 	}
 
+	// Distribute the controller's self-signed CA to each steward so the steward
+	// retry loop can complete TLS verification against the controller. The
+	// docker-compose fleet steward services do not mount any CA at start time —
+	// without this step they retry forever with "x509: certificate signed by
+	// unknown authority" and never register. In production this is the install
+	// package's job (and TestFleetInstallPackageFlow exercises that full path);
+	// here in suite setup we use a direct docker cp from the controller's
+	// pkg/cert storage location for speed and to keep the install-package test
+	// independently meaningful.
+	s.distributeControllerCAToStewards(t)
+
 	for _, name := range []string{"fleet-steward-1", "fleet-steward-2"} {
 		id, err := s.getStewardIDFromLogs(t, name)
 		if err != nil {
@@ -96,6 +108,37 @@ func setupFleetSuite(t *testing.T) *FleetTestSuite {
 	}
 
 	return s
+}
+
+// distributeControllerCAToStewards extracts the controller's self-signed CA
+// from /app/certs/ca/ca.crt (per controller.cfg's certificate.ca_path setting
+// inside fleet-controller) and writes it to /etc/cfgms/controller-ca.crt on
+// each fleet steward. The stewards' 5s retry loop picks up the new cert on
+// its next attempt and completes TLS verification against the controller.
+func (s *FleetTestSuite) distributeControllerCAToStewards(t *testing.T) {
+	t.Helper()
+
+	hostCA := filepath.Join(s.tmpDir, "controller-ca.crt")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "cp",
+		"fleet-controller:/app/certs/ca/ca.crt", hostCA).CombinedOutput()
+	require.NoError(t, err, "extract controller CA: %s", string(out))
+
+	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
+		dockerExecRoot(t, container, "mkdir", "-p", "/etc/cfgms")
+		dockerExecRoot(t, container, "chmod", "755", "/etc/cfgms")
+
+		cpCtx, cpCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cpOut, cpErr := exec.CommandContext(cpCtx, "docker", "cp",
+			hostCA, fmt.Sprintf("%s:/etc/cfgms/controller-ca.crt", container)).CombinedOutput()
+		cpCancel()
+		require.NoError(t, cpErr, "place CA in %s: %s", container, string(cpOut))
+
+		dockerExecRoot(t, container, "chmod", "644", "/etc/cfgms/controller-ca.crt")
+		t.Logf("Distributed controller CA to %s:/etc/cfgms/controller-ca.crt", container)
+	}
 }
 
 // rebuildClients re-extracts the admin bundle from fleet-controller and rebuilds both clients.
@@ -181,7 +224,12 @@ func (s *FleetTestSuite) getStewardIDFromLogs(t *testing.T, container string) (s
 		return "", err
 	}
 
-	for attempt := 1; attempt <= 30; attempt++ {
+	// 90 attempts × ~1s each = ~90s window. The first registration attempt
+	// after distributeControllerCAToStewards may still be in-flight (5s retry
+	// loop in the steward command), so we need headroom beyond a single retry
+	// cycle. Without this margin the steward ID may not appear before the
+	// poll exits — see prior fleet-e2e timing failure on Issue #1709.
+	for attempt := 1; attempt <= 90; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		cmd := exec.CommandContext(ctx, "docker", "exec", container, "sh", "-c",
 			`ls -t /tmp/cfgms/cfgms-*.log 2>/dev/null | head -1 | xargs cat 2>/dev/null | grep -o '"steward_id":"[^"]*"' | tail -1 | cut -d'"' -f4`)
@@ -190,12 +238,12 @@ func (s *FleetTestSuite) getStewardIDFromLogs(t *testing.T, container string) (s
 		if id := strings.TrimSpace(string(out)); err == nil && id != "" {
 			return id, nil
 		}
-		if attempt%5 == 0 {
-			t.Logf("Waiting for steward ID in %s logs (attempt %d/30)...", container, attempt)
+		if attempt%10 == 0 {
+			t.Logf("Waiting for steward ID in %s logs (attempt %d/90)...", container, attempt)
 		}
 		time.Sleep(1 * time.Second)
 	}
-	return "", fmt.Errorf("steward ID not found in %s logs after 30 attempts", container)
+	return "", fmt.Errorf("steward ID not found in %s logs after 90 attempts", container)
 }
 
 // waitForContainerHealthy polls docker ps until the container reports healthy or timeout expires.
