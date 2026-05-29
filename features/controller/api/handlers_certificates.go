@@ -19,8 +19,9 @@ type RotateSigningCertRequest struct {
 type RotateSigningCertResponse struct {
 	OldSerial        string `json:"old_serial"`
 	NewSerial        string `json:"new_serial"`
-	OverlapWindowDays int   `json:"overlap_window_days"`
-	StewardsNotified int   `json:"stewards_notified"`
+	OverlapDays      int    `json:"overlap_days"`
+	StewardsNotified int    `json:"stewards_notified"`
+	OverlapExpiresAt string `json:"overlap_expires_at,omitempty"`
 }
 
 // handleRotateSigningCert handles POST /api/v1/certificates/signing/rotate.
@@ -69,10 +70,11 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.writeSuccessResponse(w, RotateSigningCertResponse{
-		OldSerial:         result.OldSerial,
-		NewSerial:         result.NewSerial,
-		OverlapWindowDays: result.OverlapWindowDays,
-		StewardsNotified:  result.StewardsNotified,
+		OldSerial:        result.OldSerial,
+		NewSerial:        result.NewSerial,
+		OverlapDays:      result.OverlapWindowDays,
+		StewardsNotified: result.StewardsNotified,
+		OverlapExpiresAt: result.OverlapExpiresAt,
 	})
 }
 

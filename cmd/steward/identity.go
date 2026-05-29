@@ -37,8 +37,8 @@ type StewardIdentity struct {
 	TransportAddress string     `json:"transport_address"`
 	CACertPEM        string     `json:"ca_cert_pem"`
 	ServerCertPEM    string     `json:"server_cert_pem,omitempty"`
-	SigningCertPEM   string     `json:"signing_cert_pem,omitempty"`  // backward compat: single cert (legacy)
-	SigningCertPEMs  []string   `json:"signing_cert_pems,omitempty"` // Issue #1816: mutable rotation set
+	SigningCertPEM   string     `json:"signing_cert_pem,omitempty"`   // backward compat: single cert (legacy)
+	SigningCertPEMs  []string   `json:"signing_cert_pems,omitempty"`  // Issue #1816: mutable rotation set
 	OverlapExpiresAt *time.Time `json:"overlap_expires_at,omitempty"` // Issue #1816: rotation overlap deadline
 }
 

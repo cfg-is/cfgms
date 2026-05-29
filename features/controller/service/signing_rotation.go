@@ -22,6 +22,9 @@ type RotationResult struct {
 	NewSerial         string
 	OverlapWindowDays int
 	StewardsNotified  int
+	// OverlapExpiresAt is the UTC RFC3339 deadline after which the old (rotating)
+	// signing cert is no longer accepted by stewards. Empty when overlapDays == 0.
+	OverlapExpiresAt string
 }
 
 // SigningRotationService delivers the controller's current signing certificate
@@ -82,7 +85,17 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 		return nil, fmt.Errorf("signing rotation: rotate certificate: %w", err)
 	}
 
+	// Steward push always carries an RFC3339 deadline so the client-side
+	// overlap check fires deterministically — overlapDays == 0 yields a
+	// just-elapsed timestamp, retiring the old cert on the next verifier rebuild.
 	overlapExpiresAt := time.Now().UTC().Add(time.Duration(overlapDays) * 24 * time.Hour).Format(time.RFC3339)
+
+	// The API contract reports an empty overlap_expires_at when overlapDays == 0
+	// so operators can distinguish "no overlap" from a real future deadline.
+	apiOverlapExpiresAt := overlapExpiresAt
+	if overlapDays == 0 {
+		apiOverlapExpiresAt = ""
+	}
 
 	s.mu.RLock()
 	publisher := s.publisher
@@ -120,6 +133,7 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 		NewSerial:         newCert.SerialNumber,
 		OverlapWindowDays: overlapDays,
 		StewardsNotified:  stewardsNotified,
+		OverlapExpiresAt:  apiOverlapExpiresAt,
 	}, nil
 }
 

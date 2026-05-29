@@ -70,9 +70,9 @@ type TransportClient struct {
 	certPath string
 
 	// Certificate PEMs (from registration response)
-	caCertPEM      string
-	serverCertPEM  string   // Controller's server cert for config signature verification (Story #315)
-	signingCertPEMs []string // Issue #1816: mutable set of signing certs (rotation support)
+	caCertPEM        string
+	serverCertPEM    string     // Controller's server cert for config signature verification (Story #315)
+	signingCertPEMs  []string   // Issue #1816: mutable set of signing certs (rotation support)
 	overlapExpiresAt *time.Time // Issue #1816: rotation overlap deadline for client-side expiry
 
 	// identityPersistFunc is called by the push-signing-cert handler to atomically

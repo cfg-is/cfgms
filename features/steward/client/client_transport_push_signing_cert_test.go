@@ -77,18 +77,6 @@ func minimalClientForPushTest(t *testing.T) *TransportClient {
 	return c
 }
 
-// buildPushCmd creates a SignedCommand for CommandPushSigningCert from the given params.
-func buildPushCmd(params map[string]interface{}) *cpTypes.SignedCommand {
-	return &cpTypes.SignedCommand{Command: cpTypes.Command{
-		ID:        "cmd-push-" + time.Now().Format("150405.000000000"),
-		Type:      cpTypes.CommandPushSigningCert,
-		StewardID: "test-steward",
-		TenantID:  "test-tenant",
-		Timestamp: time.Now(),
-		Params:    params,
-	}}
-}
-
 // TestStewardPushSigningCertPersistBeforeAck verifies that if the identity persist
 // function fails, the in-memory signing cert PEMs are left unchanged and the handler
 // returns an error (persist-before-ack contract, Issue #1816).

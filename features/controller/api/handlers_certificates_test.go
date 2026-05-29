@@ -4,13 +4,9 @@ package api
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -278,27 +274,6 @@ func TestHandleListCertificates_RequiresCorrectPermission(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
-// makeNonAdminCert builds a self-signed cert WITHOUT the CFGMS admin marker.
-// TLS-verified requests presenting this cert fall through to API-key auth.
-func makeNonAdminCert(t *testing.T) *x509.Certificate {
-	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(9999),
-		Subject:      pkix.Name{CommonName: "non-admin-test"},
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	require.NoError(t, err)
-	parsed, err := x509.ParseCertificate(der)
-	require.NoError(t, err)
-	return parsed
-}
-
 // setupRotationTestServer creates a server wired with a real cert manager and
 // signing rotation service for rotate-endpoint tests.
 func setupRotationTestServer(t *testing.T) (*Server, *cert.Manager, *service.SigningRotationService) {
@@ -442,5 +417,9 @@ func TestHandleRotateSigningCert_AdminSuccess(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.NotEmpty(t, resp.Data.NewSerial)
-	assert.Equal(t, 7, resp.Data.OverlapWindowDays)
+	assert.Equal(t, 7, resp.Data.OverlapDays)
+	assert.NotEmpty(t, resp.Data.OverlapExpiresAt, "overlap_expires_at must be populated when overlap_days > 0")
+	if _, parseErr := time.Parse(time.RFC3339, resp.Data.OverlapExpiresAt); parseErr != nil {
+		t.Errorf("overlap_expires_at must be RFC3339 timestamp, got %q: %v", resp.Data.OverlapExpiresAt, parseErr)
+	}
 }
