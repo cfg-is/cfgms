@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/audit"
 )
 
 var (
@@ -31,7 +32,9 @@ type hypervModule struct {
 	userSecretKey string
 	passSecretKey string
 	tenantID      string
+	stewardID     string
 
+	auditMgr  *audit.Manager
 	transport winrmTransport
 	executor  hypervExecutor
 
@@ -138,6 +141,12 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	m.passSecretKey = passSecretKey
 	m.tenantID, _ = configMap["tenant_id"].(string)
 	m.transport = newWinRMClientWithStore(host, userSecretKey, passSecretKey, store)
+	m.auditMgr, _ = configMap["audit_manager"].(*audit.Manager)
+	stewardID, _ := configMap["steward_id"].(string)
+	if stewardID == "" {
+		stewardID = m.tenantID + "/hyperv"
+	}
+	m.stewardID = stewardID
 
 	return nil
 }
