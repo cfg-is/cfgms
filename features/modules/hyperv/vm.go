@@ -125,6 +125,19 @@ const psCreateVM = `New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -Pr
 // $Name is the only parameter; its value is transmitted via ArgumentList.
 const psRemoveVM = `Remove-VM -Name $Name -Force`
 
+// psStartVM starts a VM that already exists on the host.
+const psStartVM = `Start-VM -Name $Name`
+
+// psStopVM stops a running VM (Force prevents interactive confirmation).
+const psStopVM = `Stop-VM -Name $Name -Force`
+
+// psSetVMProcessor updates the virtual processor count on an existing VM.
+const psSetVMProcessor = `Set-VMProcessor -VMName $Name -Count $CPU`
+
+// psSetVMMemory updates the startup memory on an existing VM.
+// Set-VMMemory is not a standard Hyper-V cmdlet; Set-VM with MemoryStartupBytes is used instead.
+const psSetVMMemory = `Set-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB)`
+
 // getVM retrieves the current state of a VM by user-visible name.
 func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, error) {
 	if m.transport == nil {
@@ -191,6 +204,15 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 
 // setVM applies the desired VM configuration.
 // Write-through cache semantics: transport is called first; cache updated on success only.
+//
+// Dispatch logic:
+//   - state == "absent"                 → removeVM
+//   - VM exists in cache or on host:
+//     state == "running"               → Start-VM (with optional stop/resize/start if resize needed)
+//     state == "stopped"               → Stop-VM (with optional resize after)
+//   - VM not found:
+//     state == "running"               → New-VM, then Start-VM
+//     state == "stopped"               → New-VM (Hyper-V starts VMs in Off state by default)
 func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	if m.transport == nil {
 		return modules.ErrNotImplemented
@@ -236,11 +258,38 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		cfg.Name = vmName
 	}
 
+	// Check cache for VM existence first, bypassing transport for known VMs.
+	m.vmsMu.RLock()
+	cachedVM, inCache := m.vms[vmName]
+	m.vmsMu.RUnlock()
+
+	var vmExists bool
+	var currentVM VMConfig
+	if inCache {
+		vmExists = true
+		currentVM = cachedVM
+	} else {
+		current, err := m.getVM(ctx, vmName)
+		if err != nil && !errors.Is(err, ErrVMNotFound) {
+			return fmt.Errorf("hyperv: check VM %q existence: %w", vmName, err)
+		}
+		if err == nil {
+			vmExists = true
+			currentVM = *current
+		}
+	}
+
+	hostName := vmHostName(m.tenantID, vmName)
+
+	if vmExists {
+		return m.applyVMState(ctx, vmName, hostName, cfg, &currentVM, state)
+	}
+
+	// VM does not exist — create it.
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
 
-	hostName := vmHostName(m.tenantID, vmName)
 	psArgs := map[string]string{
 		"Name":       hostName,
 		"MemoryMB":   fmt.Sprintf("%d", cfg.MemoryMB),
@@ -255,6 +304,12 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		return fmt.Errorf("hyperv: create VM %q: %w", vmName, psErr)
 	}
 
+	if state == "running" {
+		if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+			return err
+		}
+	}
+
 	// Write-through: update cache on success
 	cfgCopy := *cfg
 	cfgCopy.Name = vmName
@@ -262,6 +317,105 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	m.vms[vmName] = cfgCopy
 	m.vmsMu.Unlock()
 
+	return nil
+}
+
+// applyVMState transitions an existing VM to the desired power state, applying
+// CPU/memory resize when the desired values differ from current.
+func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string, desired, current *VMConfig, state string) error {
+	needsCPUResize := desired.CPUCount != 0 && desired.CPUCount != current.CPUCount
+	needsMemResize := desired.MemoryMB != 0 && desired.MemoryMB != current.MemoryMB
+
+	switch state {
+	case "running":
+		if needsCPUResize || needsMemResize {
+			// CPU/memory can only be changed on a stopped VM — stop, resize, then start.
+			if err := m.execStopVM(ctx, vmName, hostName); err != nil {
+				return err
+			}
+			if needsCPUResize {
+				if err := m.execSetVMProcessor(ctx, vmName, hostName, desired.CPUCount); err != nil {
+					return err
+				}
+			}
+			if needsMemResize {
+				if err := m.execSetVMMemory(ctx, vmName, hostName, desired.MemoryMB); err != nil {
+					return err
+				}
+			}
+		}
+		if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+			return err
+		}
+		m.vmsMu.Lock()
+		updated := *current
+		updated.State = "running"
+		m.vms[vmName] = updated
+		m.vmsMu.Unlock()
+
+	case "stopped":
+		if err := m.execStopVM(ctx, vmName, hostName); err != nil {
+			return err
+		}
+		if needsCPUResize {
+			if err := m.execSetVMProcessor(ctx, vmName, hostName, desired.CPUCount); err != nil {
+				return err
+			}
+		}
+		if needsMemResize {
+			if err := m.execSetVMMemory(ctx, vmName, hostName, desired.MemoryMB); err != nil {
+				return err
+			}
+		}
+		m.vmsMu.Lock()
+		updated := *current
+		updated.State = "stopped"
+		m.vms[vmName] = updated
+		m.vmsMu.Unlock()
+	}
+
+	return nil
+}
+
+func (m *hypervModule) execStartVM(ctx context.Context, vmName, hostName string) error {
+	_, psErr := m.transport.ExecutePS(ctx, psStartVM, map[string]string{"Name": hostName})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Start-VM", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: Start-VM %q: %w", vmName, psErr)
+	}
+	return nil
+}
+
+func (m *hypervModule) execStopVM(ctx context.Context, vmName, hostName string) error {
+	_, psErr := m.transport.ExecutePS(ctx, psStopVM, map[string]string{"Name": hostName})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Stop-VM", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: Stop-VM %q: %w", vmName, psErr)
+	}
+	return nil
+}
+
+func (m *hypervModule) execSetVMProcessor(ctx context.Context, vmName, hostName string, cpuCount int) error {
+	_, psErr := m.transport.ExecutePS(ctx, psSetVMProcessor, map[string]string{
+		"Name": hostName,
+		"CPU":  fmt.Sprintf("%d", cpuCount),
+	})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMProcessor", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: Set-VMProcessor %q: %w", vmName, psErr)
+	}
+	return nil
+}
+
+func (m *hypervModule) execSetVMMemory(ctx context.Context, vmName, hostName string, memoryMB int64) error {
+	_, psErr := m.transport.ExecutePS(ctx, psSetVMMemory, map[string]string{
+		"Name":     hostName,
+		"MemoryMB": fmt.Sprintf("%d", memoryMB),
+	})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMMemory", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: Set-VMMemory %q: %w", vmName, psErr)
+	}
 	return nil
 }
 

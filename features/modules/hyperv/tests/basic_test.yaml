@@ -1,0 +1,70 @@
+name: Basic Hyper-V Operations
+description: Tests basic Hyper-V VM lifecycle management via WinRM
+tests:
+  - name: Create a Generation 2 VM
+    config:
+      name: "test-vm"
+      memory_mb: 4096
+      cpu_count: 2
+      vhd_path: "C:\\VMs\\test-vm.vhdx"
+      switch_name: "Default Switch"
+      generation: 2
+      state: stopped
+    expected:
+      name: "test-vm"
+      memory_mb: 4096
+      cpu_count: 2
+      state: stopped
+
+  - name: Start an existing VM
+    config:
+      name: "test-vm"
+      state: running
+    expected:
+      name: "test-vm"
+      state: running
+
+  - name: Stop a running VM
+    config:
+      name: "test-vm"
+      state: stopped
+    expected:
+      name: "test-vm"
+      state: stopped
+
+  - name: Remove a VM
+    config:
+      name: "test-vm"
+      state: absent
+    expected_absent: true
+
+  - name: Invalid VM name with double underscore
+    config:
+      name: "bad__name"
+      memory_mb: 2048
+      cpu_count: 1
+      vhd_path: "C:\\VMs\\bad.vhdx"
+      switch_name: "Default Switch"
+      state: stopped
+    expected_error: "invalid VM name"
+
+  - name: Invalid VHD path (non-Windows)
+    config:
+      name: "linux-path-vm"
+      memory_mb: 2048
+      cpu_count: 1
+      vhd_path: "/var/lib/vms/disk.vhd"
+      switch_name: "Default Switch"
+      state: stopped
+    expected_error: "invalid VHD path"
+
+  - name: Invalid generation (Generation 1)
+    config:
+      name: "gen1-vm"
+      memory_mb: 2048
+      cpu_count: 1
+      vhd_path: "C:\\VMs\\gen1.vhdx"
+      switch_name: "Default Switch"
+      generation: 1
+      state: stopped
+    expected_error: "invalid generation"
