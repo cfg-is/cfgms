@@ -1,0 +1,23 @@
+name: hyperv
+description: Remote Hyper-V management via WinRM — manages VMs, snapshots, and virtual switches on Windows Server hosts
+version: 0.1.0
+
+executors:
+  - outpost
+
+author: CFGMS Team
+license: AGPL-3.0
+platforms:
+  - windows
+
+schema: schema.yaml
+interfaces:
+  - Get
+  - Set
+  - Test
+
+security:
+  requires_root: false
+  capabilities: []
+  ports:
+    - 5986  # WinRM HTTPS

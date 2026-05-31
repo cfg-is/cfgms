@@ -25,11 +25,17 @@ import (
 // testWinRMTransport implements winrmTransport and records every ExecutePS call.
 // Stories 2–4 tests use this to assert that user-supplied values appear in args,
 // never embedded in the scriptBlock (psCommand) text.
+//
+// Per-call overrides: if perCallOutputs or perCallErrors are non-empty, the
+// element at the call's zero-based index is used instead of output/execErr.
+// Beyond the slice length the defaults (output, execErr) apply.
 type testWinRMTransport struct {
-	mu      sync.Mutex
-	calls   []winRMCall
-	output  string
-	execErr error
+	mu             sync.Mutex
+	calls          []winRMCall
+	output         string
+	execErr        error
+	perCallOutputs []string
+	perCallErrors  []error
 }
 
 // winRMCall records a single ExecutePS invocation.
@@ -56,8 +62,19 @@ func (t *testWinRMTransport) ExecutePS(_ context.Context, psCommand string, psAr
 		args[i] = psArgs[k]
 	}
 
+	callIdx := len(t.calls)
 	t.calls = append(t.calls, winRMCall{scriptBlock: psCommand, args: args})
-	return t.output, t.execErr
+
+	out := t.output
+	err := t.execErr
+	if callIdx < len(t.perCallOutputs) {
+		out = t.perCallOutputs[callIdx]
+	}
+	if callIdx < len(t.perCallErrors) {
+		err = t.perCallErrors[callIdx]
+	}
+
+	return out, err
 }
 
 // recordingShell implements winrmShell and captures the scriptBlock and args
