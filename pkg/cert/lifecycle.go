@@ -11,6 +11,7 @@ package cert
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,12 @@ import (
 )
 
 const signingCursorFileName = "signing-cursor.json"
+
+// ErrSigningRotationInProgress is returned when a non-forced signing-cert
+// rotation is requested while a previous rotation's overlap window is still
+// open. Callers (e.g. the REST handler) can use errors.Is to map this to a
+// 409 Conflict rather than a generic 500.
+var ErrSigningRotationInProgress = errors.New("signing rotation already in progress")
 
 // SigningCertLifecycleState describes the lifecycle phase of a config-signing certificate.
 type SigningCertLifecycleState int
@@ -111,7 +118,8 @@ func transitionSigningCursor(store *FileStore, basePath string, newSerial string
 		overlapDuration := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
 		if time.Since(cursor.RotatedAt) < overlapDuration {
 			return fmt.Errorf(
-				"rotation already in progress: rotating serial %q is still within %d-day overlap window (rotated %s ago)",
+				"%w: rotating serial %q is still within %d-day overlap window (rotated %s ago)",
+				ErrSigningRotationInProgress,
 				cursor.RotatingSerial,
 				cursor.OverlapWindowDays,
 				time.Since(cursor.RotatedAt).Truncate(time.Second),

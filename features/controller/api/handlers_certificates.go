@@ -4,9 +4,11 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -78,6 +80,15 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 
 	result, err := s.signingRotationService.Rotate(r.Context(), principal.CertSerial, overlapDays, req.Force)
 	if err != nil {
+		// A non-forced rotation requested while a previous overlap window is still
+		// open is a client-recoverable conflict, not a server fault: surface 409 so
+		// callers can retry with force=true (or wait for the window to close).
+		if errors.Is(err, cert.ErrSigningRotationInProgress) {
+			s.logger.Warn("Signing certificate rotation rejected: rotation in progress",
+				"operator_serial", logging.SanitizeLogValue(principal.CertSerial))
+			s.writeErrorResponse(w, http.StatusConflict, "Signing rotation already in progress", "ROTATION_IN_PROGRESS")
+			return
+		}
 		s.logger.Error("Signing certificate rotation failed",
 			"operator_serial", logging.SanitizeLogValue(principal.CertSerial),
 			"error", err)

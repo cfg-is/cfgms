@@ -623,15 +623,44 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 
 	// Initialize config handler for data plane configuration sync (Story #362)
-	// Re-uses the hoisted signer so both config and command signing use the same key.
 	var configHandler *controllerTransport.ConfigHandler
 	var signerCertSerial string // Story #378: Track cert serial for registration handler
 	if dataPlane != nil {
-		// Use the signer hoisted above (nil when certManager absent or export failed).
+		// Story #378: registration handler reports the boot signer serial.
 		signerCertSerial = hoistedSignerCertSerial
-		configHandler = controllerTransport.NewConfigHandler(configService, logger, hoistedSigner).
+
+		// Config signing must always use the CURRENT signing certificate, not the
+		// one captured at boot. After a signing-cert rotation with a short (or zero)
+		// overlap window, stewards retire the old cert; a boot-pinned signer would
+		// keep signing configs with the retired cert and every steward would reject
+		// the payload (Issue #1816 fleet-e2e OfflinePastWindow). The DynamicSigner
+		// resolves the live signing serial per sign and rebuilds the underlying
+		// signer only when that serial changes (once per rotation). The command
+		// publisher deliberately keeps the boot signer: the steward's command
+		// verifier is a connect-time snapshot, so push_signing_cert commands must
+		// stay verifiable with the cert the steward already holds at connect.
+		configSigner := hoistedSigner
+		if certManager != nil {
+			cm := certManager
+			configSigner = signature.NewDynamicSigner(func() (string, func() (signature.SigningKeyExport, error), error) {
+				current, err := cm.GetCurrentCertForPurpose(cert.PurposeSigning)
+				if err != nil {
+					return "", nil, err
+				}
+				serial := current.SerialNumber
+				return serial, func() (signature.SigningKeyExport, error) {
+					certPEM, keyPEM, exportErr := cm.ExportCertificate(serial, true)
+					if exportErr != nil {
+						return signature.SigningKeyExport{}, exportErr
+					}
+					return signature.SigningKeyExport{CertificatePEM: certPEM, PrivateKeyPEM: keyPEM}, nil
+				}, nil
+			})
+		}
+
+		configHandler = controllerTransport.NewConfigHandler(configService, logger, configSigner).
 			WithControllerService(controllerService)
-		logger.Debug("Config handler initialized for data plane", "signing_enabled", hoistedSigner != nil)
+		logger.Debug("Config handler initialized for data plane", "signing_enabled", configSigner != nil)
 	}
 
 	// Initialize health collectors (Story #417, #517)

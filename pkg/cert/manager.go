@@ -368,7 +368,8 @@ func (m *Manager) rotateSigningCertificate(overlapWindowDays int, force bool) (*
 			overlapDuration := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
 			if time.Since(cursor.RotatedAt) < overlapDuration {
 				return nil, fmt.Errorf(
-					"rotation already in progress: rotating serial %q is still within %d-day overlap window (rotated %s ago)",
+					"%w: rotating serial %q is still within %d-day overlap window (rotated %s ago)",
+					ErrSigningRotationInProgress,
 					cursor.RotatingSerial,
 					cursor.OverlapWindowDays,
 					time.Since(cursor.RotatedAt).Truncate(time.Second),

@@ -125,6 +125,7 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 		certPEM := base64.StdEncoding.EncodeToString(newCert.CertificatePEM)
 		params := map[string]interface{}{
 			"cert_pem":           certPEM,
+			"serial":             newCert.SerialNumber,
 			"overlap_expires_at": overlapExpiresAt,
 		}
 		for _, steward := range stewards {

@@ -1363,8 +1363,18 @@ func (c *TransportClient) handlePushSigningCert(_ context.Context, cmd *cpTypes.
 	c.overlapExpiresAt = overlapExpiresAt
 	c.mu.Unlock()
 
+	// Resolve the applied cert's serial for the log. Prefer the controller-supplied
+	// "serial" param (exact controller-side string form); fall back to the parsed
+	// cert's serial so the serial is always recorded even for older controllers or
+	// pushes that omit the param.
+	appliedSerial, _ := cmd.Params["serial"].(string)
+	if appliedSerial == "" {
+		appliedSerial = x509Cert.SerialNumber.String()
+	}
+
 	c.logger.Info("Signing cert push applied",
 		"command_id", cmd.ID,
+		"serial", appliedSerial,
 		"cert_count", len(newPEMs),
 		"retire_old", retireOld)
 	return nil

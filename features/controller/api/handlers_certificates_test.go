@@ -494,10 +494,12 @@ func TestHandleRotateSigningCert_ForceBypassesInProgress(t *testing.T) {
 	require.Equal(t, http.StatusOK, do(`{"overlap_days":30}`).Code, "second prime rotation must succeed")
 
 	// Third rotation without force MUST fail with "in progress" because the
-	// previous 30-day overlap is still active.
+	// previous 30-day overlap is still active. The in-progress guard is a
+	// client-recoverable conflict, surfaced as 409 (not 500) so callers can
+	// retry with force=true (Issue #1816).
 	rec3 := do(`{"overlap_days":30}`)
-	require.Equal(t, http.StatusInternalServerError, rec3.Code,
-		"non-force rotation during active overlap must be rejected, got body: %s", rec3.Body.String())
+	require.Equal(t, http.StatusConflict, rec3.Code,
+		"non-force rotation during active overlap must be rejected with 409, got body: %s", rec3.Body.String())
 
 	// Fourth rotation with force MUST succeed despite the active in-progress state.
 	rec4 := do(`{"overlap_days":30,"force":true}`)
