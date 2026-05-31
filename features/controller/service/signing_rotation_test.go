@@ -459,7 +459,7 @@ func TestRotateAuditLogNoPEMBody(t *testing.T) {
 	// Inject a controller service with no stewards so fan-out is a no-op.
 	svc.SetControllerService(service.NewControllerService(logging.NewNoopLogger()))
 
-	result, err := svc.Rotate(context.Background(), "operator-serial-test", 7)
+	result, err := svc.Rotate(context.Background(), "operator-serial-test", 7, false)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.NotEmpty(t, result.NewSerial)

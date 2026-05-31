@@ -436,6 +436,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// re-used by the data plane config handler so both consumers share the same key.
 	var hoistedSigner signature.Signer
 	var hoistedSignerCertSerial string
+	// signingRotationSvc is hoisted so it can be wired to both the gRPC on-connect hook
+	// and the HTTP API rotate endpoint (Issue #1816).
+	var signingRotationSvc *service.SigningRotationService
 	if cfg.Transport != nil && certManager != nil {
 		logger.Info("Initializing gRPC control plane provider...", "addr", cfg.Transport.ListenAddr)
 
@@ -449,7 +452,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// we can inject it as the on-connect hook. The publisher is wired after
 		// commandPublisher is constructed below (breaks the init cycle).
 		connRegistry = registry.NewRegistry()
-		var signingRotationSvc *service.SigningRotationService
 		if certManager != nil {
 			signingRotationSvc = service.NewSigningRotationService(certManager, logger)
 			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(signingRotationSvc))
@@ -621,15 +623,44 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 
 	// Initialize config handler for data plane configuration sync (Story #362)
-	// Re-uses the hoisted signer so both config and command signing use the same key.
 	var configHandler *controllerTransport.ConfigHandler
 	var signerCertSerial string // Story #378: Track cert serial for registration handler
 	if dataPlane != nil {
-		// Use the signer hoisted above (nil when certManager absent or export failed).
+		// Story #378: registration handler reports the boot signer serial.
 		signerCertSerial = hoistedSignerCertSerial
-		configHandler = controllerTransport.NewConfigHandler(configService, logger, hoistedSigner).
+
+		// Config signing must always use the CURRENT signing certificate, not the
+		// one captured at boot. After a signing-cert rotation with a short (or zero)
+		// overlap window, stewards retire the old cert; a boot-pinned signer would
+		// keep signing configs with the retired cert and every steward would reject
+		// the payload (Issue #1816 fleet-e2e OfflinePastWindow). The DynamicSigner
+		// resolves the live signing serial per sign and rebuilds the underlying
+		// signer only when that serial changes (once per rotation). The command
+		// publisher deliberately keeps the boot signer: the steward's command
+		// verifier is a connect-time snapshot, so push_signing_cert commands must
+		// stay verifiable with the cert the steward already holds at connect.
+		configSigner := hoistedSigner
+		if certManager != nil {
+			cm := certManager
+			configSigner = signature.NewDynamicSigner(func() (string, func() (signature.SigningKeyExport, error), error) {
+				current, err := cm.GetCurrentCertForPurpose(cert.PurposeSigning)
+				if err != nil {
+					return "", nil, err
+				}
+				serial := current.SerialNumber
+				return serial, func() (signature.SigningKeyExport, error) {
+					certPEM, keyPEM, exportErr := cm.ExportCertificate(serial, true)
+					if exportErr != nil {
+						return signature.SigningKeyExport{}, exportErr
+					}
+					return signature.SigningKeyExport{CertificatePEM: certPEM, PrivateKeyPEM: keyPEM}, nil
+				}, nil
+			})
+		}
+
+		configHandler = controllerTransport.NewConfigHandler(configService, logger, configSigner).
 			WithControllerService(controllerService)
-		logger.Debug("Config handler initialized for data plane", "signing_enabled", hoistedSigner != nil)
+		logger.Debug("Config handler initialized for data plane", "signing_enabled", configSigner != nil)
 	}
 
 	// Initialize health collectors (Story #417, #517)
@@ -711,6 +742,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// GET /api/v1/stewards/{id} reports the live connection_state (Issue #1572).
 	if connRegistry != nil {
 		httpServer.SetRegistry(connRegistry)
+	}
+
+	// Issue #1816: Wire signing rotation service so the rotate endpoint is available.
+	if signingRotationSvc != nil {
+		signingRotationSvc.SetControllerService(controllerService)
+		httpServer.SetSigningRotationService(signingRotationSvc)
+		logger.Info("Signing rotation service wired to HTTP API server (Issue #1816)")
 	}
 
 	// Issue #1696: Wire durable pending registration store for status poll endpoint.

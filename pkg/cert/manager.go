@@ -333,23 +333,48 @@ func (m *Manager) EnsureSigningCertificate(signingCfg *SigningCertConfig) error 
 // still within the overlap window). Concurrent callers are serialised; the second
 // caller will fail with "rotation already in progress" once the first completes.
 func (m *Manager) RotateSigningCertificate(overlapWindowDays int) (*Certificate, error) {
+	return m.rotateSigningCertificate(overlapWindowDays, false)
+}
+
+// ForceRotateSigningCertificate behaves like RotateSigningCertificate but bypasses
+// the in-progress guard. Used by operator-initiated rotations to recover when the
+// previous overlap window has not yet expired but a fresh rotation is required.
+// The in-progress RotatingSerial in the cursor is cleared atomically before the
+// new cert is generated and the cursor is re-transitioned.
+func (m *Manager) ForceRotateSigningCertificate(overlapWindowDays int) (*Certificate, error) {
+	return m.rotateSigningCertificate(overlapWindowDays, true)
+}
+
+func (m *Manager) rotateSigningCertificate(overlapWindowDays int, force bool) (*Certificate, error) {
 	m.rotateMu.Lock()
 	defer m.rotateMu.Unlock()
 
-	// Early guard: reject if an active rotation is still within its overlap window.
 	cursor, err := loadSigningCursor(m.store.basePath)
 	if err != nil {
 		return nil, fmt.Errorf("load signing cursor: %w", err)
 	}
+
 	if cursor != nil && cursor.RotatingSerial != "" {
-		overlapDuration := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
-		if time.Since(cursor.RotatedAt) < overlapDuration {
-			return nil, fmt.Errorf(
-				"rotation already in progress: rotating serial %q is still within %d-day overlap window (rotated %s ago)",
-				cursor.RotatingSerial,
-				cursor.OverlapWindowDays,
-				time.Since(cursor.RotatedAt).Truncate(time.Second),
-			)
+		if force {
+			// Clear in-progress state so the cursor transition proceeds as if the
+			// previous overlap had already closed. The just-cleared cursor is then
+			// re-read by transitionSigningCursor inside the same rotateMu critical
+			// section, so the bypass is atomic with respect to other rotations.
+			cursor.RotatingSerial = ""
+			if err := saveSigningCursor(m.store.basePath, cursor); err != nil {
+				return nil, fmt.Errorf("clear signing cursor for force rotate: %w", err)
+			}
+		} else {
+			overlapDuration := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
+			if time.Since(cursor.RotatedAt) < overlapDuration {
+				return nil, fmt.Errorf(
+					"%w: rotating serial %q is still within %d-day overlap window (rotated %s ago)",
+					ErrSigningRotationInProgress,
+					cursor.RotatingSerial,
+					cursor.OverlapWindowDays,
+					time.Since(cursor.RotatedAt).Truncate(time.Second),
+				)
+			}
 		}
 	}
 

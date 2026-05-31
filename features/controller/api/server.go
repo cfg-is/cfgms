@@ -92,6 +92,7 @@ type Server struct {
 	runExecutionQueue       *script.ExecutionQueue            // Issue #1673: queue for ad-hoc run synthesis
 	trustedProxies          []net.IPNet                       // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
 	blobStore               blob.BlobStore                    // Issue #1702: installer artifact storage
+	signingRotationService  *service.SigningRotationService   // Issue #1816: signing cert rotation endpoint
 	stopCleanup             chan struct{}                     // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                     // closed when cleanup goroutine exits
 	closeOnce               sync.Once                         // idempotent Close
@@ -391,6 +392,7 @@ func (s *Server) setupRouter() {
 	certs := api.PathPrefix("/certificates").Subrouter()
 	certs.Handle("", s.requirePermission("certificate", "list")(http.HandlerFunc(s.handleListCertificates))).Methods("GET")
 	certs.Handle("/provision", s.requirePermission("certificate", "provision")(http.HandlerFunc(s.handleProvisionCertificate))).Methods("POST")
+	certs.Handle("/signing/rotate", s.requirePermission("certificate", "rotate")(http.HandlerFunc(s.handleRotateSigningCert))).Methods("POST")
 
 	// RBAC management endpoints
 	rbac := api.PathPrefix("/rbac").Subrouter()
@@ -788,6 +790,15 @@ func (s *Server) SetIPTrustStore(store business.IPTrustStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ipTrustStore = store
+}
+
+// SetSigningRotationService wires the signing rotation service for the
+// POST /api/v1/certificates/signing/rotate endpoint (Issue #1816).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetSigningRotationService(svc *service.SigningRotationService) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signingRotationService = svc
 }
 
 // getHTTPListenAddr determines the HTTP listen address.

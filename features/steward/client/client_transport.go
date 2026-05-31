@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -69,9 +70,15 @@ type TransportClient struct {
 	certPath string
 
 	// Certificate PEMs (from registration response)
-	caCertPEM      string
-	serverCertPEM  string // Controller's server cert for config signature verification (Story #315)
-	signingCertPEM string // Story #377: Dedicated signing cert (preferred over serverCertPEM)
+	caCertPEM        string
+	serverCertPEM    string     // Controller's server cert for config signature verification (Story #315)
+	signingCertPEMs  []string   // Issue #1816: mutable set of signing certs (rotation support)
+	overlapExpiresAt *time.Time // Issue #1816: rotation overlap deadline for client-side expiry
+
+	// identityPersistFunc is called by the push-signing-cert handler to atomically
+	// persist updated signing cert PEMs before in-memory state is updated (Issue #1816).
+	// If nil, persistence is skipped and the cert is learned in memory only.
+	identityPersistFunc func(signingCertPEMs []string, overlapExpiresAt *time.Time) error
 
 	// certManager provides on-demand client certificate loading per TLS handshake (Issue #920).
 	// When non-nil, GetClientCertificate is used instead of static PEM certs.
@@ -153,9 +160,19 @@ type TransportConfig struct {
 	// Story #315: Used to verify configurations signed by the controller
 	ServerCertPEM string
 
-	// SigningCertPEM is the controller's dedicated signing certificate PEM (Story #377)
-	// When present, preferred over ServerCertPEM for config signature verification
+	// SigningCertPEM is the controller's dedicated signing certificate PEM (Story #377).
+	// When present and SigningCertPEMs is empty, it seeds the runtime signingCertPEMs slice
+	// in NewTransportClient for backward compatibility. Registration call sites need not change.
 	SigningCertPEM string
+
+	// SigningCertPEMs is the mutable set of signing certs (Issue #1816).
+	// When non-empty, takes precedence over SigningCertPEM for seeding signingCertPEMs.
+	SigningCertPEMs []string
+
+	// IdentityPersistFunc is called by the push-signing-cert handler to atomically
+	// persist updated signing cert PEMs before the in-memory state is updated (Issue #1816).
+	// If nil, persistence is skipped (cert learned in memory only).
+	IdentityPersistFunc func(signingCertPEMs []string, overlapExpiresAt *time.Time) error
 
 	// HeartbeatInterval for periodic heartbeats
 	HeartbeatInterval time.Duration
@@ -235,6 +252,13 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		return nil, fmt.Errorf("failed to initialize offline queue: %w", err)
 	}
 
+	// Seed signingCertPEMs from the multi-cert field if provided; otherwise
+	// fall back to the singular SigningCertPEM for backward compatibility.
+	signingCertPEMs := cfg.SigningCertPEMs
+	if len(signingCertPEMs) == 0 && cfg.SigningCertPEM != "" {
+		signingCertPEMs = []string{cfg.SigningCertPEM}
+	}
+
 	c := &TransportClient{
 		heartbeatInterval:     heartbeatInterval,
 		rng:                   rng,
@@ -246,12 +270,13 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		certPath:              cfg.TLSCertPath,
 		caCertPEM:             cfg.CACertPEM,
 		serverCertPEM:         cfg.ServerCertPEM,
-		signingCertPEM:        cfg.SigningCertPEM,
+		signingCertPEMs:       signingCertPEMs,
 		certManager:           cfg.CertManager,
 		offlineQueue:          offlineQueue,
 		commandReplayWindow:   cfg.SignedCommandReplayWindow,
 		commandMaxParamsBytes: cfg.SignedCommandMaxParamsBytes,
 		scriptSigning:         cfg.ScriptSigning,
+		identityPersistFunc:   cfg.IdentityPersistFunc,
 		logger:                cfg.Logger,
 	}
 
@@ -593,6 +618,12 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// Register execute_script handler — dispatches controller-sent scripts through
 	// the script module executor and publishes EventScriptCompleted (Issue #1669).
 	handler.RegisterExecuteScriptHandler()
+
+	// Register push_signing_cert handler — controller pushes current signing cert on connect
+	// or after rotation. The handler persists before updating in-memory state (Issue #1816).
+	handler.RegisterHandler(cpTypes.CommandPushSigningCert, func(ctx context.Context, cmd *cpTypes.Command) error {
+		return c.handlePushSigningCert(ctx, cmd)
+	})
 
 	return handler, nil
 }
@@ -1255,26 +1286,175 @@ func (c *TransportClient) createTLSConfig() (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
+// handlePushSigningCert processes a COMMAND_TYPE_PUSH_SIGNING_CERT command from the
+// controller. It validates the pushed cert, persists it atomically (persist-before-ack),
+// then updates the in-memory signing cert set and rebuilds the MultiVerifier (Issue #1816).
+func (c *TransportClient) handlePushSigningCert(_ context.Context, cmd *cpTypes.Command) error {
+	c.logger.Info("Received push_signing_cert command", "command_id", cmd.ID)
+
+	// Extract cert_pem (base64-encoded PEM) from params.
+	certPEMB64, ok := cmd.Params["cert_pem"].(string)
+	if !ok || certPEMB64 == "" {
+		return fmt.Errorf("push_signing_cert: missing or empty cert_pem param")
+	}
+
+	// Decode base64 → PEM bytes.
+	pemBytes, err := decodeBase64(certPEMB64)
+	if err != nil {
+		return fmt.Errorf("push_signing_cert: decode cert_pem: %w", err)
+	}
+
+	// Parse and validate the cert.
+	x509Cert, err := cert.ParseCertificateFromPEM(pemBytes)
+	if err != nil {
+		return fmt.Errorf("push_signing_cert: parse cert: %w", err)
+	}
+	if time.Now().After(x509Cert.NotAfter) {
+		return fmt.Errorf("push_signing_cert: pushed cert is expired (NotAfter=%s)", x509Cert.NotAfter.Format(time.RFC3339))
+	}
+	hasCodeSigning := false
+	for _, eku := range x509Cert.ExtKeyUsage {
+		if eku == x509.ExtKeyUsageCodeSigning {
+			hasCodeSigning = true
+			break
+		}
+	}
+	if !hasCodeSigning {
+		return fmt.Errorf("push_signing_cert: cert missing ExtKeyUsageCodeSigning")
+	}
+
+	// Parse optional overlap_expires_at (RFC3339).
+	var overlapExpiresAt *time.Time
+	if raw, ok := cmd.Params["overlap_expires_at"].(string); ok && raw != "" {
+		t, parseErr := time.Parse(time.RFC3339, raw)
+		if parseErr != nil {
+			return fmt.Errorf("push_signing_cert: parse overlap_expires_at %q: %w", raw, parseErr)
+		}
+		overlapExpiresAt = &t
+	}
+
+	// Build updated cert PEMs slice: retire_old=true replaces; otherwise append.
+	retireOld, _ := cmd.Params["retire_old"].(bool)
+
+	c.mu.RLock()
+	existing := make([]string, len(c.signingCertPEMs))
+	copy(existing, c.signingCertPEMs)
+	c.mu.RUnlock()
+
+	var newPEMs []string
+	newPEMStr := string(pemBytes)
+	if retireOld {
+		newPEMs = []string{newPEMStr}
+	} else {
+		newPEMs = append(existing, newPEMStr)
+	}
+
+	// Persist BEFORE updating in-memory state (persist-before-ack).
+	// If persist fails, return error — controller will retry.
+	if c.identityPersistFunc != nil {
+		if err := c.identityPersistFunc(newPEMs, overlapExpiresAt); err != nil {
+			return fmt.Errorf("push_signing_cert: persist identity: %w", err)
+		}
+	}
+
+	// Update in-memory state under lock only after successful persistence.
+	c.mu.Lock()
+	c.signingCertPEMs = newPEMs
+	c.overlapExpiresAt = overlapExpiresAt
+	c.mu.Unlock()
+
+	// Resolve the applied cert's serial for the log. Prefer the controller-supplied
+	// "serial" param (exact controller-side string form); fall back to the parsed
+	// cert's serial so the serial is always recorded even for older controllers or
+	// pushes that omit the param.
+	appliedSerial, _ := cmd.Params["serial"].(string)
+	if appliedSerial == "" {
+		appliedSerial = x509Cert.SerialNumber.String()
+	}
+
+	c.logger.Info("Signing cert push applied",
+		"command_id", cmd.ID,
+		"serial", appliedSerial,
+		"cert_count", len(newPEMs),
+		"retire_old", retireOld)
+	return nil
+}
+
+// decodeBase64 decodes a standard base64-encoded string, accepting both padded
+// and unpadded variants.
+func decodeBase64(s string) ([]byte, error) {
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		b, err = base64.RawStdEncoding.DecodeString(s)
+	}
+	return b, err
+}
+
 // buildVerifierOnDemand constructs a config/command signature verifier from the
 // controller's certificate PEMs stored in the client. Returns nil when no
 // certificate is available — callers treat a nil verifier as "skip verification".
+//
+// When signingCertPEMs contains multiple entries (rotation overlap window), a
+// MultiVerifier is returned so either cert can verify a signature. When
+// overlapExpiresAt is set and in the past, only the newest cert is included.
 //
 // The verifier is NOT cached (Issue #920 removes the configVerifier field).
 // The cost is trivial — each call parses a PEM block and builds a verifier struct.
 func (c *TransportClient) buildVerifierOnDemand() signature.Verifier {
 	c.mu.RLock()
-	signingCertPEM := c.signingCertPEM
+	signingCertPEMs := make([]string, len(c.signingCertPEMs))
+	copy(signingCertPEMs, c.signingCertPEMs)
+	overlapAt := c.overlapExpiresAt
 	serverCertPEM := c.serverCertPEM
 	caCertPEM := c.caCertPEM
 	certPath := c.certPath
 	c.mu.RUnlock()
 
+	// Build verifier from the signing cert set when available.
+	if len(signingCertPEMs) > 0 {
+		// Client-side overlap expiry: when the overlap window has passed, drop all
+		// but the most recently pushed cert to close the replay-attack window.
+		activePEMs := signingCertPEMs
+		if overlapAt != nil && time.Now().After(*overlapAt) && len(signingCertPEMs) > 1 {
+			activePEMs = signingCertPEMs[len(signingCertPEMs)-1:]
+		}
+
+		if len(activePEMs) == 1 {
+			verifier, err := signature.NewVerifier(&signature.VerifierConfig{CertificatePEM: []byte(activePEMs[0])})
+			if err != nil {
+				c.logger.Warn("Failed to create signing cert verifier", "error", err)
+				return nil
+			}
+			c.logger.Debug("Signing cert verifier built", "key_fingerprint", verifier.KeyFingerprint())
+			return verifier
+		}
+
+		// Multiple active certs — build MultiVerifier for OR-semantics during overlap window.
+		var certs []*x509.Certificate
+		for _, pem := range activePEMs {
+			x509Cert, parseErr := cert.ParseCertificateFromPEM([]byte(pem))
+			if parseErr != nil {
+				c.logger.Warn("Failed to parse signing cert PEM for verifier", "error", parseErr)
+				continue
+			}
+			certs = append(certs, x509Cert)
+		}
+		if len(certs) == 0 {
+			return nil
+		}
+		mv, err := signature.NewMultiVerifier(certs)
+		if err != nil {
+			c.logger.Warn("Failed to create multi-signing-cert verifier", "error", err)
+			return nil
+		}
+		c.logger.Debug("Multi-signing-cert verifier built", "cert_count", len(certs), "key_fingerprint", mv.KeyFingerprint())
+		return mv
+	}
+
+	// Legacy fallback paths (serverCertPEM, disk signing.crt, caCertPEM).
 	var certPEM []byte
 
 	switch {
-	case signingCertPEM != "":
-		certPEM = []byte(signingCertPEM)
-		c.logger.Debug("Using dedicated signing certificate for signature verification")
 	case serverCertPEM != "":
 		certPEM = []byte(serverCertPEM)
 		c.logger.Debug("Using server certificate for signature verification")

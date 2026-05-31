@@ -26,6 +26,7 @@ var knownPermissions = map[string]bool{
 	// Certificate management
 	"certificate:list":      true,
 	"certificate:provision": true,
+	"certificate:rotate":    true,
 	// RBAC
 	"rbac:list-permissions": true,
 	"rbac:read-permission":  true,
@@ -50,6 +51,8 @@ var knownPermissions = map[string]bool{
 	"registration:list-pending": true,
 	"registration:approve":      true,
 	"registration:deny":         true,
+	// IP-trust management (Issue #1698)
+	"registration:manage-ip-trust": true,
 	// Monitoring
 	"monitoring:read-health":            true,
 	"monitoring:read-metrics":           true,

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // identityFileName is the name of the on-disk steward identity file,
@@ -22,17 +23,23 @@ const identityFileName = "steward-identity.json"
 // stored CA PEM; a tampered steward/tenant ID is overridden by the
 // authenticated-CN-wins contract on the controller side.
 //
-// ServerCertPEM and SigningCertPEM are the controller's signature-verification
+// ServerCertPEM and SigningCertPEMs are the controller's signature-verification
 // certificates. They are persisted so the reconnect path can verify signed
 // sync_config commands without HTTP re-registration — without them the steward
 // reconnects but silently rejects every signed command and stops converging.
+//
+// SigningCertPEM (singular) is kept for backward-compatible reading of identity
+// files written before multi-cert support. loadIdentity migrates it into
+// SigningCertPEMs automatically on read.
 type StewardIdentity struct {
-	StewardID        string `json:"steward_id"`
-	TenantID         string `json:"tenant_id"`
-	TransportAddress string `json:"transport_address"`
-	CACertPEM        string `json:"ca_cert_pem"`
-	ServerCertPEM    string `json:"server_cert_pem,omitempty"`
-	SigningCertPEM   string `json:"signing_cert_pem,omitempty"`
+	StewardID        string     `json:"steward_id"`
+	TenantID         string     `json:"tenant_id"`
+	TransportAddress string     `json:"transport_address"`
+	CACertPEM        string     `json:"ca_cert_pem"`
+	ServerCertPEM    string     `json:"server_cert_pem,omitempty"`
+	SigningCertPEM   string     `json:"signing_cert_pem,omitempty"`   // backward compat: single cert (legacy)
+	SigningCertPEMs  []string   `json:"signing_cert_pems,omitempty"`  // Issue #1816: mutable rotation set
+	OverlapExpiresAt *time.Time `json:"overlap_expires_at,omitempty"` // Issue #1816: rotation overlap deadline
 }
 
 // saveIdentity writes id to dir/steward-identity.json with permissions 0600
@@ -63,6 +70,10 @@ func saveIdentity(dir string, id StewardIdentity) error {
 // HTTP re-registration (first-run or manually deleted identity).
 // Returns (nil, err) on read/parse failure — caller should log and fall through
 // to HTTP re-registration; the corrupt file is not fatal.
+//
+// Backward compat: if SigningCertPEMs is empty and SigningCertPEM is set,
+// SigningCertPEMs is seeded from the singular cert so callers need not handle
+// the legacy field.
 func loadIdentity(dir string) (*StewardIdentity, error) {
 	path := filepath.Join(dir, identityFileName)
 	data, err := os.ReadFile(path)
@@ -78,6 +89,10 @@ func loadIdentity(dir string) (*StewardIdentity, error) {
 	}
 	if id.StewardID == "" || id.TransportAddress == "" {
 		return nil, fmt.Errorf("identity file missing required fields (steward_id or transport_address)")
+	}
+	// Migrate legacy single-cert field into the mutable slice on read.
+	if len(id.SigningCertPEMs) == 0 && id.SigningCertPEM != "" {
+		id.SigningCertPEMs = []string{id.SigningCertPEM}
 	}
 	return &id, nil
 }
