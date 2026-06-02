@@ -170,6 +170,8 @@ test_executable_permissions() {
         "scripts/generate-test-credentials.sh"
         "scripts/wait-for-services.sh"
         "scripts/test-with-infrastructure.sh"
+        "scripts/tier1-smoke-test.sh"
+        "scripts/tier1-smoke-test_test.sh"
     )
 
     for script in "${critical_scripts[@]}"; do
@@ -2465,6 +2467,45 @@ PYEOF
     fi
 }
 
+test_tier1_smoke_test() {
+    log_test "Testing tier1-smoke-test.sh fixtures..."
+
+    local smoke_script="scripts/tier1-smoke-test.sh"
+    local test_script="scripts/tier1-smoke-test_test.sh"
+
+    if [[ ! -f "$smoke_script" ]]; then
+        log_fail "tier1-smoke-test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$smoke_script" ]]; then
+        log_fail "tier1-smoke-test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "tier1-smoke-test_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "tier1-smoke-test_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "tier1-smoke-test_test.sh: All fixture tests passed"
+    else
+        log_fail "tier1-smoke-test_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
 # Main execution
 echo "🔍 Script Validation Test Suite"
 echo "================================"
@@ -2536,6 +2577,8 @@ echo ""
 test_trust_boundary
 echo ""
 test_no_pipeline_label_refs
+echo ""
+test_tier1_smoke_test
 echo ""
 echo ""
 echo "📊 Test Summary"
