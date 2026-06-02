@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -62,6 +63,9 @@ func (s *SQLiteTenantStore) CreateTenant(ctx context.Context, tenant *business.T
 		formatTime(tenant.UpdatedAt),
 	)
 	if err != nil {
+		if isUniqueConstraintError(err) {
+			return fmt.Errorf("create tenant %s: %w", tenant.ID, business.ErrTenantAlreadyExists)
+		}
 		return fmt.Errorf("failed to create tenant %s: %w", tenant.ID, err)
 	}
 	return nil
@@ -309,6 +313,12 @@ func populateTenant(t *business.TenantData, parentID sql.NullString, metaStr, st
 	}
 
 	return t, nil
+}
+
+// isUniqueConstraintError returns true when the error is a SQLite UNIQUE constraint violation.
+// The mattn/go-sqlite3 driver embeds the text "UNIQUE constraint failed" in the error message.
+func isUniqueConstraintError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 // ensure SQLiteTenantStore satisfies the interface at compile time

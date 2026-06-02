@@ -6,8 +6,13 @@ package business
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrTenantAlreadyExists is returned by TenantStore.CreateTenant when a tenant
+// with the given ID already exists. Handlers must use errors.Is to detect it.
+var ErrTenantAlreadyExists = errors.New("tenant already exists")
 
 // TenantStore defines storage interface for CFGMS tenant data persistence
 // All tenant modules use this interface - storage provider is chosen by controller

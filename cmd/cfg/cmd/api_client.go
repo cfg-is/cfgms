@@ -465,6 +465,92 @@ func (c *APIClient) doRequestWithContentType(ctx context.Context, method, path s
 	return c.httpClient.Do(req)
 }
 
+// APITenantCreateRequest is the request body for POST /api/v1/tenants.
+type APITenantCreateRequest struct {
+	ID       string `json:"id,omitempty"`
+	Name     string `json:"name,omitempty"`
+	ParentID string `json:"parent_id,omitempty"`
+}
+
+// APITenantResponse represents a tenant returned by the controller API.
+type APITenantResponse struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description,omitempty"`
+	ParentID    string            `json:"parent_id,omitempty"`
+	Status      string            `json:"status"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+	CreatedAt   string            `json:"created_at"`
+	UpdatedAt   string            `json:"updated_at"`
+}
+
+// ErrTenantAlreadyExists is returned by CreateTenantViaAPI when the server responds HTTP 409.
+var ErrTenantAlreadyExists = fmt.Errorf("tenant already exists")
+
+// CreateTenantViaAPI creates a tenant via the controller REST API.
+// Returns ErrTenantAlreadyExists when the server responds HTTP 409 (idempotent callers
+// should treat that as success and exit 0).
+func (c *APIClient) CreateTenantViaAPI(ctx context.Context, req *APITenantCreateRequest) (*APITenantResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/tenants", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusConflict {
+		return nil, ErrTenantAlreadyExists
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+
+	// Unwrap APIResponse envelope: {"data": {...}, "timestamp": "..."}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var tenant APITenantResponse
+	if err := json.Unmarshal(envelope.Data, &tenant); err != nil {
+		return nil, fmt.Errorf("failed to decode tenant data: %w", err)
+	}
+	return &tenant, nil
+}
+
+// GetTenantViaAPI retrieves a tenant by ID via the controller REST API.
+func (c *APIClient) GetTenantViaAPI(ctx context.Context, tenantID string) (*APITenantResponse, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/tenants/"+tenantID, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("tenant not found: %s", tenantID)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var tenant APITenantResponse
+	if err := json.Unmarshal(envelope.Data, &tenant); err != nil {
+		return nil, fmt.Errorf("failed to decode tenant data: %w", err)
+	}
+	return &tenant, nil
+}
+
 // parseError extracts error message from HTTP response
 func (c *APIClient) parseError(resp *http.Response) error {
 	body, err := io.ReadAll(resp.Body)
