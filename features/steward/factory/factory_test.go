@@ -288,6 +288,32 @@ func (s *stubSecretStore) ExpireSecret(_ context.Context, _ string) error       
 func (s *stubSecretStore) HealthCheck(_ context.Context) error                      { return nil }
 func (s *stubSecretStore) Close() error                                             { return nil }
 
+// TestInstallHyperV_BuiltinModuleNoSignatureCheck asserts that the hyperv module
+// is registered as a compiled-in builtin (not disk-loaded). Compiled-in builtins
+// do not require disk-load signature verification.
+//
+// Tracked for future: when pluggable disk-loaded modules are added, a
+// signature/integrity gate must be implemented before load.
+func TestInstallHyperV_BuiltinModuleNoSignatureCheck(t *testing.T) {
+	_, ok := builtinModuleConstructors["hyperv"]
+	assert.True(t, ok, `"hyperv" must be registered in builtinModuleConstructors`)
+
+	// All builtin module names are simple identifiers (no path separators).
+	// A disk-load path would contain "/" or "\" — none must exist in M1.
+	for name := range builtinModuleConstructors {
+		assert.NotContains(t, name, "/",
+			"builtin module name %q must not contain path separators (no disk-load in M1)", name)
+		assert.NotContains(t, name, `\`,
+			"builtin module name %q must not contain path separators (no disk-load in M1)", name)
+	}
+
+	// hyperv must be loadable via the factory (exercises the constructor).
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+	mod, err := factory.LoadModule("hyperv")
+	assert.NoError(t, err, "hyperv builtin must load without error")
+	assert.NotNil(t, mod, "hyperv builtin module must not be nil")
+}
+
 func TestModuleFactory_injectSecretStore_logsWarning(t *testing.T) {
 	mock := pkgtesting.NewMockLogger(true)
 	f := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{}, mock)
