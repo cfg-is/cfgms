@@ -3,6 +3,7 @@ description: Remote Hyper-V management via WinRM — manages VMs, snapshots, and
 version: 0.1.0
 
 executors:
+  - steward
   - outpost
 
 author: CFGMS Team

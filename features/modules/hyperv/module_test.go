@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/masterzen/winrm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -655,4 +657,29 @@ func TestBuildInvokeCommand_MultipleArgs_SortedOrder(t *testing.T) {
 	assert.Equal(t, []string{"myvm", "/vms/myvm"}, args)
 	assert.NotContains(t, block, "myvm")
 	assert.NotContains(t, block, "/vms/myvm")
+}
+
+// ─── module.yaml executor declaration test ────────────────────────────────────
+
+// TestModuleYAMLHasStewardExecutor verifies that module.yaml declares both
+// "steward" and "outpost" in its executors list.
+//
+// executors is semantic metadata only — the steward loader does not gate on
+// this field (discovery.go:51 has no Executors).
+//
+// Parsed into a local struct (NOT ModuleInfo) because features/steward/discovery/
+// discovery.go:51 has no Executors field and silently drops the value at unmarshal.
+func TestModuleYAMLHasStewardExecutor(t *testing.T) {
+	type moduleYAMLSchema struct {
+		Executors []string `yaml:"executors"`
+	}
+
+	data, err := os.ReadFile("module.yaml")
+	require.NoError(t, err, "module.yaml must be readable")
+
+	var schema moduleYAMLSchema
+	require.NoError(t, yaml.Unmarshal(data, &schema), "module.yaml must be valid YAML")
+
+	assert.Contains(t, schema.Executors, "steward", "executors must include steward")
+	assert.Contains(t, schema.Executors, "outpost", "executors must include outpost")
 }

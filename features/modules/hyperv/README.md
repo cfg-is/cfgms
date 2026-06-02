@@ -14,7 +14,7 @@ The module's scope includes:
 - **Virtual switches**: create and remove External, Internal, and Private vSwitches
 - **VM attachment**: add and remove network adapter-to-switch connections
 
-Out of scope: Hyper-V role installation, storage pool management, live migration, replication policies, and controller dispatch wiring (see issue #1790).
+Out of scope: Hyper-V role installation, storage pool management, live migration, replication policies, and controller dispatch wiring; steward-on-host wiring is delivered by #1790.
 
 ## Configuration options
 
