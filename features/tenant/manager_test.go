@@ -5,6 +5,7 @@ package tenant
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -585,4 +586,101 @@ func TestSanitizeAuditURL_RedactsUserinfo(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- Explicit tenant ID tests (Issue #1848) ---
+
+func TestManager_CreateTenant_WithExplicitID(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	req := &TenantRequest{
+		ID:   "team-root",
+		Name: "Team-Root",
+	}
+
+	td, err := manager.CreateTenant(ctx, req)
+	require.NoError(t, err)
+	assert.Equal(t, "team-root", td.ID, "explicit ID must be preserved exactly as provided")
+	assert.Equal(t, "Team-Root", td.Name)
+
+	// Verify the tenant can be retrieved by its exact ID
+	retrieved, err := manager.GetTenant(ctx, "team-root")
+	require.NoError(t, err)
+	assert.Equal(t, "team-root", retrieved.ID)
+}
+
+func TestManager_CreateTenant_ExplicitID_DefaultsNameToID(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	// When Name is omitted, ID is used as Name
+	req := &TenantRequest{
+		ID: "agent-test",
+	}
+
+	td, err := manager.CreateTenant(ctx, req)
+	require.NoError(t, err)
+	assert.Equal(t, "agent-test", td.ID)
+	assert.Equal(t, "agent-test", td.Name, "Name must default to ID when omitted")
+}
+
+func TestManager_CreateTenant_ExplicitID_WithParent(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	parent, err := manager.CreateTenant(ctx, &TenantRequest{ID: "team-root"})
+	require.NoError(t, err)
+
+	child, err := manager.CreateTenant(ctx, &TenantRequest{
+		ID:       "agent-test",
+		ParentID: parent.ID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "agent-test", child.ID)
+	assert.Equal(t, "team-root", child.ParentID)
+}
+
+func TestValidateExplicitTenantID_K8sRules(t *testing.T) {
+	tests := []struct {
+		name    string
+		id      string
+		wantErr bool
+	}{
+		{"valid lowercase alphanumeric", "teamroot", false},
+		{"valid with hyphen", "team-root", false},
+		{"valid single char", "a", false},
+		{"valid with numbers", "agent-test-123", false},
+		{"valid 63 chars", strings.Repeat("a", 63), false},
+		{"empty string", "", true},
+		{"uppercase letter", "Team-Root", true},
+		{"uppercase only", "TEAM", true},
+		{"underscore", "team_root", true},
+		{"leading hyphen", "-team-root", true},
+		{"trailing hyphen", "team-root-", true},
+		{"64 chars (too long)", strings.Repeat("a", 64), true},
+		{"special char @", "team@root", true},
+		{"space", "team root", true},
+		{"dot", "team.root", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateExplicitTenantID(tt.id)
+			if tt.wantErr {
+				assert.Error(t, err, "expected error for id=%q", tt.id)
+			} else {
+				assert.NoError(t, err, "expected no error for id=%q", tt.id)
+			}
+		})
+	}
+}
+
+func TestManager_CreateTenant_InvalidExplicitID_ReturnsError(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	_, err := manager.CreateTenant(ctx, &TenantRequest{ID: "Team_Root"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid explicit tenant ID")
 }

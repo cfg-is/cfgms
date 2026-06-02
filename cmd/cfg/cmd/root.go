@@ -49,6 +49,7 @@ func init() {
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(regcodeCmd)
 	rootCmd.AddCommand(tokenCmd)
+	rootCmd.AddCommand(tenantCmd)
 	rootCmd.AddCommand(registrationCmd)
 	rootCmd.AddCommand(controllerCmd)
 	rootCmd.AddCommand(traceCmd)

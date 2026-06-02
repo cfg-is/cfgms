@@ -463,8 +463,10 @@ func (s *Server) setupRouter() {
 	compliance := api.PathPrefix("/compliance").Subrouter()
 	compliance.Handle("/summary", s.requirePermission("compliance", "read-summary")(http.HandlerFunc(s.handleGetComplianceSummary))).Methods("GET")
 
-	// Tenant config-source management endpoints (Issue #1396)
+	// Tenant management endpoints (Issue #1396, Issue #1848)
 	tenants := api.PathPrefix("/tenants").Subrouter()
+	tenants.Handle("", s.requirePermission("tenant", "create")(http.HandlerFunc(s.handleCreateTenant))).Methods("POST")
+	tenants.Handle("/{id}", s.requirePermission("tenant", "read")(http.HandlerFunc(s.handleGetTenant))).Methods("GET")
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
 
