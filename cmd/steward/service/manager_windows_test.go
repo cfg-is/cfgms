@@ -259,7 +259,7 @@ func TestInstallHyperV_SecretsReadableByServiceAccount(t *testing.T) {
 	err = storeWinRMSecrets(store1, "cfgms-hyperv-test", winrmPass)
 	require.NoError(t, err)
 
-	// Re-open the store as a fresh instance (simulates a different process identity).
+	// Re-open the store as a fresh instance under a different identity context.
 	// Machine-level DPAPI allows any account to decrypt.
 	store2, err := provider.CreateSecretStore(map[string]interface{}{"secrets_dir": dir})
 	require.NoError(t, err)
