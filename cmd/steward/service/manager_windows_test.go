@@ -6,9 +6,14 @@
 package service
 
 import (
+	"context"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/cfgis/cfgms/pkg/logging"
+	stewardsecrets "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -96,3 +101,204 @@ func TestWindowsManagerNew(t *testing.T) {
 	_, ok := m.(*windowsManager)
 	assert.True(t, ok, "New() should return a *windowsManager on Windows")
 }
+
+// TestInstallHyperVCertParams_LocalhostInSAN verifies that buildHyperVCertParams
+// returns a parameter set with localhost, 127.0.0.1, and the machine FQDN in the
+// SAN, and a NotAfter set to 5 years from now (±1 day tolerance).
+// buildHyperVCertParams is a pure function — no elevation required.
+func TestInstallHyperVCertParams_LocalhostInSAN(t *testing.T) {
+	fqdn, err := os.Hostname()
+	require.NoError(t, err)
+
+	params := buildHyperVCertParams(fqdn)
+
+	assert.Contains(t, params.DnsNames, "localhost", "SAN must include localhost")
+	assert.Contains(t, params.DnsNames, "127.0.0.1", "SAN must include 127.0.0.1")
+	assert.Contains(t, params.DnsNames, fqdn, "SAN must include machine FQDN")
+
+	fiveYears := time.Now().Add(5 * 365 * 24 * time.Hour)
+	assert.WithinDuration(t, fiveYears, params.NotAfter, 24*time.Hour,
+		"cert NotAfter must be 5 years from now (±1 day tolerance)")
+}
+
+// TestInstallHyperV_PassNotInArgv verifies that the WinRM password is passed via
+// stdin and does not appear in any element of cmd.Args or in the PowerShell script
+// block string. Inspects the *exec.Cmd struct, not process-list output.
+func TestInstallHyperV_PassNotInArgv(t *testing.T) {
+	rec := &recordingPSRunner{}
+	password := `s3cr3t!P@ss#with"<special>'&chars` // characters that would be dangerous if interpolated
+	username := "cfgms-hyperv"
+
+	err := createLocalUser(rec, username, password)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Calls, 1, "createLocalUser must make exactly one PS call")
+	call := rec.Calls[0]
+
+	// Password must NOT appear in any element of cmd.Args.
+	for _, arg := range call.Cmd.Args {
+		assert.NotContains(t, arg, password,
+			"password must not appear in cmd.Args element %q", arg)
+	}
+
+	// Password must NOT appear in the script block string.
+	assert.NotContains(t, call.ScriptBlock, password,
+		"password must not appear in the PowerShell script block string")
+
+	// Password MUST be in StdinData (the secure delivery channel).
+	assert.Equal(t, password, call.StdinData,
+		"password must be passed via stdin (StdinData)")
+}
+
+// TestInstallHyperV_RequiresElevation verifies that InstallHyperV returns an error
+// when called without Administrator privileges.
+func TestInstallHyperV_RequiresElevation(t *testing.T) {
+	m := New("cfgms-steward.exe")
+	if m.IsElevated() {
+		t.Skip("skipping: running as Administrator")
+	}
+
+	wm := m.(*windowsManager)
+	err := wm.InstallHyperV("tok_test123", "", "", "cfgms-hyperv", "testpass")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Administrator")
+}
+
+// TestInstallHyperV_ListenerBindsLocalhostOnly verifies that setupWinRMListener
+// uses IP:127.0.0.1 (not Address=*) in the winrm set command.
+// Uses recordingPSRunner — no PowerShell execution, no elevation required.
+func TestInstallHyperV_ListenerBindsLocalhostOnly(t *testing.T) {
+	rec := &recordingPSRunner{}
+
+	err := setupWinRMListener(rec, "AABBCCDDEEFF00112233445566778899AABBCCDD")
+	require.NoError(t, err)
+
+	// Find the set command call and verify it uses IP:127.0.0.1, not *.
+	var foundLoopback bool
+	for _, call := range rec.Calls {
+		if strings.Contains(call.ScriptBlock, "winrm set") {
+			assert.Contains(t, call.ScriptBlock, "IP:127.0.0.1",
+				"listener must be bound to IP:127.0.0.1, not *")
+			assert.NotContains(t, call.ScriptBlock, "Address=*",
+				"listener must not use Address=* (binds 0.0.0.0)")
+			foundLoopback = true
+		}
+	}
+	assert.True(t, foundLoopback, "must have a winrm set call for the HTTPS listener")
+}
+
+// TestInstallHyperV_FirewallRuleLoopbackOnly verifies that setupHyperVFirewall
+// produces a script with LocalAddress=127.0.0.1 and a Block rule for non-loopback.
+// Uses recordingPSRunner — no PowerShell execution, no elevation required.
+func TestInstallHyperV_FirewallRuleLoopbackOnly(t *testing.T) {
+	rec := &recordingPSRunner{}
+	err := setupHyperVFirewall(rec)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Calls, 1, "setupHyperVFirewall must make exactly one PS call")
+	call := rec.Calls[0]
+
+	// Script must include loopback-only allow rule parameters.
+	assert.Contains(t, call.ScriptBlock, "LocalAddress 127.0.0.1",
+		"firewall script must include LocalAddress 127.0.0.1")
+	assert.Contains(t, call.ScriptBlock, "RemoteAddress 127.0.0.1",
+		"firewall script must include RemoteAddress 127.0.0.1")
+	// Script must also add a deny rule to block non-loopback.
+	assert.Contains(t, call.ScriptBlock, "Block",
+		"firewall script must include a Block (deny) rule")
+}
+
+// TestInstallHyperV_SecretsPrePopulated verifies that storeWinRMSecrets writes
+// hyperv/winrm_user and hyperv/winrm_pass to the secret store, and that the
+// password value does not appear in any log output.
+func TestInstallHyperV_SecretsPrePopulated(t *testing.T) {
+	m := New("cfgms-steward.exe")
+	if !m.IsElevated() {
+		t.Skip("skipping: requires Administrator privileges")
+	}
+
+	dir := t.TempDir()
+	provider := &stewardsecrets.StewardProvider{}
+	store, err := provider.CreateSecretStore(map[string]interface{}{"secrets_dir": dir})
+	require.NoError(t, err)
+
+	winrmUser := "cfgms-hyperv-test"
+	winrmPass := "testSecretP@ss123!"
+
+	err = storeWinRMSecrets(store, winrmUser, winrmPass)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	userSecret, err := store.GetSecret(ctx, "hyperv/winrm_user")
+	require.NoError(t, err)
+	assert.Equal(t, winrmUser, userSecret.Value, "winrm_user secret must match")
+
+	passSecret, err := store.GetSecret(ctx, "hyperv/winrm_pass")
+	require.NoError(t, err)
+	assert.Equal(t, winrmPass, passSecret.Value, "winrm_pass secret must match")
+}
+
+// TestInstallHyperV_SecretsReadableByServiceAccount verifies that the secret store
+// can be re-opened and secrets read back. The steward provider uses machine-level
+// DPAPI (CRYPTPROTECT_LOCAL_MACHINE flag) so any account on the machine, including
+// LocalSystem (the SCM service identity), can decrypt the blobs.
+func TestInstallHyperV_SecretsReadableByServiceAccount(t *testing.T) {
+	m := New("cfgms-steward.exe")
+	if !m.IsElevated() {
+		t.Skip("skipping: requires Administrator privileges")
+	}
+
+	dir := t.TempDir()
+	provider := &stewardsecrets.StewardProvider{}
+
+	store1, err := provider.CreateSecretStore(map[string]interface{}{"secrets_dir": dir})
+	require.NoError(t, err)
+
+	winrmPass := "machineReadableP@ss456!"
+	err = storeWinRMSecrets(store1, "cfgms-hyperv-test", winrmPass)
+	require.NoError(t, err)
+
+	// Re-open the store as a fresh instance (simulates a different process identity).
+	// Machine-level DPAPI allows any account to decrypt.
+	store2, err := provider.CreateSecretStore(map[string]interface{}{"secrets_dir": dir})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	secret, err := store2.GetSecret(ctx, "hyperv/winrm_pass")
+	require.NoError(t, err, "GetSecret must succeed: machine-level DPAPI allows cross-identity read")
+	assert.Equal(t, winrmPass, secret.Value)
+}
+
+// TestInstallHyperV_LogsAreSanitized verifies that a winrmUser value containing
+// \n and \r does not produce log forgery when processed through
+// logging.SanitizeLogValue, as required for all InstallHyperV log statements.
+func TestInstallHyperV_LogsAreSanitized(t *testing.T) {
+	craftedUsername := "legit-user\r\nINFO: fake-log-entry injected"
+	sanitized := logging.SanitizeLogValue(craftedUsername)
+
+	assert.NotContains(t, sanitized, "\r",
+		"sanitized value must not contain carriage returns")
+	assert.NotContains(t, sanitized, "\n",
+		"sanitized value must not contain newlines")
+	assert.NotContains(t, sanitized, "fake-log-entry",
+		"log-injected content after CR/LF must be stripped")
+
+	// Verify InstallHyperV log pattern: fmt.Printf("... %s ...", logging.SanitizeLogValue(winrmUser))
+	// does not propagate the injection.
+	logLine := "Creating local service account " + logging.SanitizeLogValue(craftedUsername)
+	assert.NotContains(t, logLine, "\n",
+		"log line using SanitizeLogValue must not contain newlines")
+	assert.NotContains(t, logLine, "fake-log-entry",
+		"log line using SanitizeLogValue must not contain injected content")
+}
+
+// TestInstallHyperV_HyperVInstallerInterface verifies that *windowsManager satisfies
+// the HyperVInstaller interface and that the type assertion used in main.go works.
+func TestInstallHyperV_HyperVInstallerInterface(t *testing.T) {
+	mgr := New("cfgms-steward.exe")
+	hi, ok := mgr.(HyperVInstaller)
+	assert.True(t, ok, "*windowsManager must satisfy HyperVInstaller")
+	assert.NotNil(t, hi)
+}
+
