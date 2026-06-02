@@ -81,7 +81,12 @@ Each story must use this exact format:
 
 ## Dependencies
 
-<List other stories from this epic that must be completed first. Use "None" if independent.>
+<List other stories from this epic that must be completed first.>
+
+**Format rules (PO cycle preflight at `.claude/scripts/po-cycle-preflight.py:770-793` enforces these):**
+
+- If the story has no dependencies, the section body must be exactly `None` (or `none.` / `n/a` / empty). Anything else — including `"None — independent of X"` — fails the empty whitelist and gets flagged as malformed.
+- If the story has dependencies, the section MUST contain at least one `#NNN` GitHub issue reference. Prose like `"Sibling story: foo"` without a numeric reference triggers the same malformed warning.
 
 For each dependency, list the issue number AND the PR number (once known) so the
 dev agent can run a `git merge-base --is-ancestor` check before starting:
@@ -90,9 +95,13 @@ dev agent can run a `git merge-base --is-ancestor` check before starting:
 - #NNN — <reason> — must be merged into develop before this story starts (PR: #MMM when known)
 ```
 
+**Sibling stories whose issue numbers aren't assigned at draft time:** use placeholder tokens like `#SIBLING-S1`, `#SIBLING-S2`. The PO uses a two-pass create flow — files all stories, captures numbers, then `gh issue edit` replaces placeholders with actual issue numbers before linking sub-issues and promoting to Ready.
+
 If the dev agent finds a listed PR has not yet merged, it halts and re-queues
 the story. This prevents the multi-module sequencing failures observed in
 issue #923 where parallel stories were dispatched out of order.
+
+The full reference template lives at `docs/development/story-template.md`.
 
 ## Out of Scope
 
