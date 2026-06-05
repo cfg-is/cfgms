@@ -73,7 +73,7 @@ Installs pre-commit (artifact detection) and pre-push (`make test`) hooks. Bypas
 
 ### Threat Model
 
-Stewards run on hosts that may be compromised. Admin accounts may be phished or taken over for short periods. Most managed endpoints run application allowlisting (ThreatLocker-class) and EDR. Design rarely-touched settings (`module_trust.mode: strict`, additional trusted publishers, publisher revocations) that bound the blast radius of admin or controller compromise. Code that runs on endpoints behaves like predictable admin tooling — declared paths, declared LOLBINs, signed binaries, no obfuscation or in-memory tricks.
+Stewards run on hosts that may be compromised. Admin accounts may be phished or taken over for short periods. Most managed endpoints run application allowlisting and EDR. Design rarely-touched settings (`module_trust.mode: strict`, additional trusted publishers, publisher revocations) that bound the blast radius of admin or controller compromise. Code that runs on endpoints behaves like predictable admin tooling — declared paths, declared LOLBINs, signed binaries, no obfuscation or in-memory tricks.
 
 ### Security
 
