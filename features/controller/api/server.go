@@ -21,6 +21,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/health"
+	"github.com/cfgis/cfgms/features/controller/modules/resolution"
 	"github.com/cfgis/cfgms/features/controller/push"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	"github.com/cfgis/cfgms/features/controller/service"
@@ -35,6 +36,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
@@ -93,6 +95,10 @@ type Server struct {
 	trustedProxies          []net.IPNet                       // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
 	blobStore               blob.BlobStore                    // Issue #1702: installer artifact storage
 	signingRotationService  *service.SigningRotationService   // Issue #1816: signing cert rotation endpoint
+	moduleCacheLister       resolution.CacheLister            // Issue #1884: controller module cache for required_modules resolution
+	moduleBundleResolver    resolution.BundleResolver         // Issue #1884: git source resolver for uncached modules
+	moduleBundleApprover    resolution.BundleApprover         // Issue #1884: approval workflow for newly resolved modules
+	moduleTrustStore        trust.TrustStore                  // Issue #1884: publisher trust store consulted during approval
 	stopCleanup             chan struct{}                     // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                     // closed when cleanup goroutine exits
 	closeOnce               sync.Once                         // idempotent Close
@@ -801,6 +807,28 @@ func (s *Server) SetSigningRotationService(svc *service.SigningRotationService) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.signingRotationService = svc
+}
+
+// SetModuleResolution wires the controller-side module resolution dependencies
+// used by handleUpdateStewardConfig to enforce required_modules: on cfg push
+// (Issue #1884). When all four are non-nil, a cfg upload that declares
+// required_modules is blocked with HTTP 422 until every listed module is cached
+// and approved. When any dependency is nil the cfg upload proceeds without
+// module resolution — required_modules: is parsed and stored but not enforced.
+// This nil-tolerant wiring keeps existing deployments and tests that do not yet
+// run the module subsystem unaffected.
+func (s *Server) SetModuleResolution(
+	cache resolution.CacheLister,
+	resolver resolution.BundleResolver,
+	approver resolution.BundleApprover,
+	store trust.TrustStore,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.moduleCacheLister = cache
+	s.moduleBundleResolver = resolver
+	s.moduleBundleApprover = approver
+	s.moduleTrustStore = store
 }
 
 // getHTTPListenAddr determines the HTTP listen address.

@@ -18,6 +18,7 @@ import (
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/features/controller/modules/resolution"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -381,6 +382,37 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		"steward_id", stewardIDForLog,
 		"tenant_id", tenantIDForLog,
 		"resource_count", len(config.Resources))
+
+	// Issue #1884: resolve required_modules: against the controller module cache
+	// before storing the configuration. When the module subsystem is wired, any
+	// declared module that is not cached + approved must block the deployment.
+	// Dependencies are nil-tolerant so deployments without the module subsystem
+	// (and tests that exercise unrelated paths) continue to function unchanged.
+	s.mu.RLock()
+	cacheLister := s.moduleCacheLister
+	bundleResolver := s.moduleBundleResolver
+	bundleApprover := s.moduleBundleApprover
+	trustStore := s.moduleTrustStore
+	s.mu.RUnlock()
+	if len(config.RequiredModules) > 0 &&
+		cacheLister != nil && bundleResolver != nil &&
+		bundleApprover != nil && trustStore != nil {
+		if err := resolution.ResolveCfgRequiredModules(
+			r.Context(),
+			config.RequiredModules,
+			cacheLister,
+			bundleResolver,
+			bundleApprover,
+			trustStore,
+		); err != nil {
+			s.logger.Warn("cfg deployment blocked by required_modules resolution",
+				"steward_id", stewardIDForLog,
+				"tenant_id", tenantIDForLog,
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusUnprocessableEntity, err.Error(), "REQUIRED_MODULE_NOT_APPROVED")
+			return
+		}
+	}
 
 	// Store configuration using V2 durable config service
 	if err := s.configService.SetConfiguration(r.Context(), tenantID, stewardID, &config); err != nil {
