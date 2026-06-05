@@ -25,7 +25,7 @@ func TestMakeSocketPathShortRuntimeDirUsesNaturalPath(t *testing.T) {
 // macOS test failures where t.TempDir() returns paths under /var/folders/...
 // that exceed 104 bytes when combined with the socket filename.
 func TestMakeSocketPathLongRuntimeDirFallsBackToTmp(t *testing.T) {
-	// Simulate the macOS t.TempDir() path that overflowed in CI.
+	// Use the actual macOS t.TempDir() path that overflowed in CI.
 	longDir := "/var/folders/8d/778wjbv96mq1760tv6gk374m0000gn/T/TestEchoModuleLifecycle1001087929/001"
 	path := makeSocketPath(longDir, "echo", 1)
 
