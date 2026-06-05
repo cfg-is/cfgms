@@ -29,8 +29,7 @@
 //
 // Module structure requirements:
 //   - module.yaml with name, version, and optional metadata
-//   - At least one .go source file
-//   - Standard Go module directory structure
+//   - At least one os-arch subdirectory (e.g. linux-amd64/) containing a compiled binary
 //
 // #nosec G304 - Steward discovery requires file access for detecting system configurations
 package discovery
@@ -202,35 +201,45 @@ func ParseModuleMetadata(metadataPath string) (ModuleInfo, error) {
 	return moduleInfo, nil
 }
 
-// ValidateModuleStructure checks if the module directory has the required structure
+// ValidateModuleStructure checks if the module directory has the required bundle
+// layout: a module.yaml file plus at least one OS/arch subdirectory containing
+// at least one file (the compiled module binary).
+//
+// Valid layout example:
+//
+//	my-module/
+//	  module.yaml
+//	  linux-amd64/
+//	    my-module          ← compiled binary
+//	  windows-amd64/
+//	    my-module.exe
 func ValidateModuleStructure(modulePath string) error {
-	// Check for required files
-	requiredFiles := []string{"module.yaml"}
-
-	for _, file := range requiredFiles {
-		filePath := filepath.Join(modulePath, file)
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			return fmt.Errorf("required file missing: %s", file)
-		}
+	// module.yaml is required.
+	yamlPath := filepath.Join(modulePath, "module.yaml")
+	if _, err := os.Stat(yamlPath); os.IsNotExist(err) {
+		return fmt.Errorf("required file missing: module.yaml")
 	}
 
-	// For Go modules, check for .go files
+	// At least one os-arch subdirectory with at least one file is required.
 	entries, err := os.ReadDir(modulePath)
 	if err != nil {
 		return fmt.Errorf("failed to read module directory: %w", err)
 	}
 
-	hasGoFiles := false
 	for _, entry := range entries {
-		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".go" {
-			hasGoFiles = true
-			break
+		if !entry.IsDir() {
+			continue
+		}
+		subEntries, err := os.ReadDir(filepath.Join(modulePath, entry.Name()))
+		if err != nil {
+			continue
+		}
+		for _, sub := range subEntries {
+			if !sub.IsDir() {
+				return nil // found at least one binary file in an os-arch subdir
+			}
 		}
 	}
 
-	if !hasGoFiles {
-		return fmt.Errorf("no Go source files found in module directory")
-	}
-
-	return nil
+	return fmt.Errorf("no os-arch subdirectory with a binary found in module directory")
 }
