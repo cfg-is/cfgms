@@ -24,6 +24,8 @@ func TestDefaultModuleVersionRegistry_RegisterVersion(t *testing.T) {
 				Name:        "test-module",
 				Version:     "1.0.0",
 				Description: "Test module",
+				Publisher:   "cfgms",
+				Executors:   []string{"steward"},
 			},
 			expectErr: false,
 		},
@@ -59,6 +61,8 @@ func TestDefaultModuleVersionRegistry_RegisterVersion(t *testing.T) {
 				Name:        "duplicate-module",
 				Version:     "1.0.0",
 				Description: "Duplicate test",
+				Publisher:   "cfgms",
+				Executors:   []string{"steward"},
 			},
 			expectErr: false, // First registration should succeed
 		},
@@ -102,6 +106,8 @@ func TestDefaultModuleVersionRegistry_GetAvailableVersions(t *testing.T) {
 			Name:        "test-module",
 			Version:     version,
 			Description: "Test module",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		require.NoError(t, registry.RegisterVersion(metadata))
 	}
@@ -129,6 +135,8 @@ func TestDefaultModuleVersionRegistry_GetLatestVersion(t *testing.T) {
 			Name:        "test-module",
 			Version:     version,
 			Description: "Test module",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		require.NoError(t, registry.RegisterVersion(metadata))
 	}
@@ -155,6 +163,8 @@ func TestDefaultModuleVersionRegistry_GetCompatibleVersions(t *testing.T) {
 			Name:        "test-module",
 			Version:     version,
 			Description: "Test module",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		require.NoError(t, registry.RegisterVersion(metadata))
 	}
@@ -213,6 +223,8 @@ func TestDefaultModuleVersionRegistry_UnregisterVersion(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.0.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -254,6 +266,8 @@ func TestDefaultModuleVersionRegistry_ResolveVersionConstraints(t *testing.T) {
 				Name:        moduleName,
 				Version:     version,
 				Description: fmt.Sprintf("Test module %s", moduleName),
+				Publisher:   "cfgms",
+				Executors:   []string{"steward"},
 			}
 			require.NoError(t, registry.RegisterVersion(metadata))
 		}
@@ -317,6 +331,8 @@ func TestDefaultModuleVersionRegistry_VersionHistory(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.0.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -341,6 +357,8 @@ func TestDefaultModuleVersionRegistry_VersionHistory(t *testing.T) {
 			Name:        "test-module",
 			Version:     "1.1.0",
 			Description: "Test module v1.1.0",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		require.NoError(t, registry.RegisterVersion(metadata2))
 
@@ -407,6 +425,8 @@ func TestDefaultModuleVersionRegistry_RegistryStatus(t *testing.T) {
 				Name:        module.name,
 				Version:     module.version,
 				Description: "Test module",
+				Publisher:   "cfgms",
+				Executors:   []string{"steward"},
 			}
 			require.NoError(t, registry.RegisterVersion(metadata))
 		}
@@ -438,6 +458,8 @@ func TestDefaultModuleVersionRegistry_ListAllVersions(t *testing.T) {
 				Name:        moduleName,
 				Version:     version,
 				Description: "Test module",
+				Publisher:   "cfgms",
+				Executors:   []string{"steward"},
 			}
 			require.NoError(t, registry.RegisterVersion(metadata))
 		}
@@ -461,6 +483,8 @@ func TestDefaultModuleVersionRegistry_ActiveVersionManagement(t *testing.T) {
 			Name:        "test-module",
 			Version:     "1.0.0",
 			Description: "Test module",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -473,6 +497,8 @@ func TestDefaultModuleVersionRegistry_ActiveVersionManagement(t *testing.T) {
 			Name:        "test-module",
 			Version:     "1.1.0",
 			Description: "Test module v1.1.0",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -485,6 +511,8 @@ func TestDefaultModuleVersionRegistry_ActiveVersionManagement(t *testing.T) {
 			Name:        "test-module",
 			Version:     "0.9.0",
 			Description: "Test module v0.9.0",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -510,12 +538,16 @@ func TestDefaultModuleVersionRegistry_ConcurrencyBasics(t *testing.T) {
 			Name:        "concurrent-module",
 			Version:     "1.0.0",
 			Description: "Concurrent test",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 
 		metadata2 := &ModuleMetadata{
 			Name:        "concurrent-module",
 			Version:     "1.1.0",
 			Description: "Concurrent test",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 
 		// Register versions concurrently
@@ -553,6 +585,8 @@ func BenchmarkVersionRegistry_RegisterVersion(b *testing.B) {
 			Name:        fmt.Sprintf("bench-module-%d", i),
 			Version:     "1.0.0",
 			Description: "Benchmark module",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		_ = registry.RegisterVersion(metadata) // Ignore error in test setup
 	}
@@ -567,6 +601,8 @@ func BenchmarkVersionRegistry_GetAvailableVersions(b *testing.B) {
 			Name:        "bench-module",
 			Version:     fmt.Sprintf("1.%d.0", i),
 			Description: "Benchmark module",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		_ = registry.RegisterVersion(metadata) // Ignore error in test setup
 	}
@@ -587,6 +623,8 @@ func BenchmarkVersionRegistry_ResolveVersionConstraints(b *testing.B) {
 				Name:        fmt.Sprintf("bench-module-%d", moduleIdx),
 				Version:     fmt.Sprintf("1.%d.0", versionIdx),
 				Description: "Benchmark module",
+				Publisher:   "cfgms",
+				Executors:   []string{"steward"},
 			}
 			_ = registry.RegisterVersion(metadata) // Ignore error in test setup
 		}

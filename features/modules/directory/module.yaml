@@ -2,6 +2,8 @@ name: directory
 version: 0.1.0
 description: Manages system directories, providing functionality to create, modify, and verify directory configurations
 
+publisher: cfgms
+
 # Supported execution environments
 executors:
   - steward  # Local directory management on steward systems
@@ -13,4 +15,4 @@ interfaces:
 security:
   requires_root: false
   capabilities: []
-  ports: [] 
+  ports: []

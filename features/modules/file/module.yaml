@@ -4,11 +4,11 @@ description: >
   Manages file resources on the system.
   Supports reading, writing, and validating file contents.
 
+publisher: cfgms
+
 # Supported execution environments
 executors:
   - steward  # Local file management on steward systems
-
-dependencies: []
 
 requirements:
   os: [windows, linux, darwin]
@@ -28,4 +28,4 @@ security:
 
 documentation:
   api: "docs/api.md"
-  examples: "docs/examples/" 
+  examples: "docs/examples/"

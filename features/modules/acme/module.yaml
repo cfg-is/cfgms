@@ -6,11 +6,10 @@ description: >
   HTTP-01 and DNS-01 challenge types. Uses lego library
   for pure-Go, cross-platform certificate management.
 
+publisher: cfgms
+
 executors:
   - steward
-  - controller
-
-dependencies: []
 
 requirements:
   os: [linux, darwin, windows]

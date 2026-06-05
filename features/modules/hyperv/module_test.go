@@ -635,8 +635,10 @@ func TestBuildInvokeCommand_SingleArg(t *testing.T) {
 func TestModule_RegistrationRoundtrip(t *testing.T) {
 	registry := modules.NewModuleRegistry()
 	metadata := &modules.ModuleMetadata{
-		Name:    "hyperv",
-		Version: "0.1.0",
+		Name:      "hyperv",
+		Version:   "0.1.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 	}
 
 	err := registry.RegisterModule(metadata, New(noopDetector{}))
@@ -661,8 +663,8 @@ func TestBuildInvokeCommand_MultipleArgs_SortedOrder(t *testing.T) {
 
 // ─── module.yaml executor declaration test ────────────────────────────────────
 
-// TestModuleYAMLHasStewardExecutor verifies that module.yaml declares both
-// "steward" and "outpost" in its executors list.
+// TestModuleYAMLHasStewardExecutor verifies that module.yaml declares exactly
+// "steward" as its single executor (single-executor invariant from ADR-006).
 //
 // executors is semantic metadata only — the steward loader does not gate on
 // this field (discovery.go:51 has no Executors).
@@ -680,6 +682,6 @@ func TestModuleYAMLHasStewardExecutor(t *testing.T) {
 	var schema moduleYAMLSchema
 	require.NoError(t, yaml.Unmarshal(data, &schema), "module.yaml must be valid YAML")
 
-	assert.Contains(t, schema.Executors, "steward", "executors must include steward")
-	assert.Contains(t, schema.Executors, "outpost", "executors must include outpost")
+	require.Len(t, schema.Executors, 1, "executors must contain exactly one element")
+	assert.Equal(t, "steward", schema.Executors[0], "executor must be steward")
 }

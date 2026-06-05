@@ -21,13 +21,17 @@ type ModuleMetadata struct {
 	Description string `yaml:"description" json:"description"`
 	Author      string `yaml:"author,omitempty" json:"author,omitempty"`
 	License     string `yaml:"license,omitempty" json:"license,omitempty"`
+	Publisher   string `yaml:"publisher,omitempty" json:"publisher,omitempty"`
 
-	// Module dependencies (NEW - for inter-module dependencies)
+	// Execution environment — exactly one value required
+	// Valid values: steward, outpost, controller
+	Executors []string `yaml:"executors,omitempty" json:"executors,omitempty"`
+	// Kind is derived from Executors[0] at parse time, never read from YAML.
+	// steward→"steward", outpost→"outpost", controller→"workflow"
+	Kind string `yaml:"-" json:"kind,omitempty"`
+
+	// Module dependencies (for inter-module dependencies)
 	ModuleDependencies []ModuleDependency `yaml:"module_dependencies,omitempty" json:"module_dependencies,omitempty"`
-
-	// Legacy dependencies field (for Go package dependencies)
-	// This maintains backwards compatibility with existing modules
-	Dependencies []interface{} `yaml:"dependencies,omitempty" json:"dependencies,omitempty"`
 
 	// Platform and system requirements
 	Requirements *ModuleRequirements `yaml:"requirements,omitempty" json:"requirements,omitempty"`
@@ -44,6 +48,18 @@ type ModuleMetadata struct {
 
 	// Schema file reference for configuration validation
 	Schema string `yaml:"schema,omitempty" json:"schema,omitempty"`
+
+	// BehavioralEnvelope documents what the module does at runtime
+	BehavioralEnvelope *BehavioralEnvelope `yaml:"behavioral_envelope,omitempty" json:"behavioral_envelope,omitempty"`
+}
+
+// BehavioralEnvelope documents the runtime behavior of a module for security auditing
+type BehavioralEnvelope struct {
+	ShellsOutTo              []string `yaml:"shells_out_to,omitempty" json:"shells_out_to,omitempty"`
+	WritesPaths              []string `yaml:"writes_paths,omitempty" json:"writes_paths,omitempty"`
+	ReadsPaths               []string `yaml:"reads_paths,omitempty" json:"reads_paths,omitempty"`
+	NetworkEgress            []string `yaml:"network_egress,omitempty" json:"network_egress,omitempty"`
+	LolbinUsageJustification string   `yaml:"lolbin_usage_justification,omitempty" json:"lolbin_usage_justification,omitempty"`
 }
 
 // ModuleRequirements defines system requirements for a module
@@ -110,6 +126,16 @@ func ParseModuleMetadata(reader io.Reader) (*ModuleMetadata, error) {
 		return nil, fmt.Errorf("invalid module version '%s': %v", metadata.Version, err)
 	}
 
+	// Validate executors and derive kind
+	if err := validateAndDeriveKind(&metadata); err != nil {
+		return nil, err
+	}
+
+	// Validate publisher
+	if metadata.Publisher == "" {
+		return nil, fmt.Errorf("publisher is required")
+	}
+
 	// Validate dependency version constraints
 	for i, dep := range metadata.ModuleDependencies {
 		if dep.Name == "" {
@@ -126,6 +152,28 @@ func ParseModuleMetadata(reader io.Reader) (*ModuleMetadata, error) {
 	}
 
 	return &metadata, nil
+}
+
+// validateAndDeriveKind enforces the single-executor invariant and sets Kind.
+// steward→"steward", outpost→"outpost", controller→"workflow"
+func validateAndDeriveKind(m *ModuleMetadata) error {
+	if len(m.Executors) == 0 {
+		return fmt.Errorf("executors is required: must contain exactly one value (steward, outpost, or controller)")
+	}
+	if len(m.Executors) > 1 {
+		return fmt.Errorf("executors must contain exactly one element, got %d: %v", len(m.Executors), m.Executors)
+	}
+	switch m.Executors[0] {
+	case "steward":
+		m.Kind = "steward"
+	case "outpost":
+		m.Kind = "outpost"
+	case "controller":
+		m.Kind = "workflow"
+	default:
+		return fmt.Errorf("invalid executor %q: must be steward, outpost, or controller", m.Executors[0])
+	}
+	return nil
 }
 
 // SaveModuleMetadata saves module metadata to a module.yaml file
@@ -173,6 +221,16 @@ func (m *ModuleMetadata) Validate() error {
 	// Validate version format
 	if _, err := ParseVersion(m.Version); err != nil {
 		return fmt.Errorf("invalid module version '%s': %v", m.Version, err)
+	}
+
+	// Validate executors and derive Kind as a side effect
+	if err := validateAndDeriveKind(m); err != nil {
+		return err
+	}
+
+	// Validate publisher
+	if m.Publisher == "" {
+		return fmt.Errorf("publisher is required")
 	}
 
 	// Validate dependency version constraints
@@ -266,18 +324,20 @@ func (m *ModuleMetadata) Clone() *ModuleMetadata {
 		Author:      m.Author,
 		License:     m.License,
 		Schema:      m.Schema,
+		Publisher:   m.Publisher,
+		Kind:        m.Kind,
+	}
+
+	// Deep copy executors
+	if m.Executors != nil {
+		clone.Executors = make([]string, len(m.Executors))
+		copy(clone.Executors, m.Executors)
 	}
 
 	// Deep copy module dependencies
 	if m.ModuleDependencies != nil {
 		clone.ModuleDependencies = make([]ModuleDependency, len(m.ModuleDependencies))
 		copy(clone.ModuleDependencies, m.ModuleDependencies)
-	}
-
-	// Deep copy legacy dependencies
-	if m.Dependencies != nil {
-		clone.Dependencies = make([]interface{}, len(m.Dependencies))
-		copy(clone.Dependencies, m.Dependencies)
 	}
 
 	// Deep copy platforms
@@ -327,6 +387,28 @@ func (m *ModuleMetadata) Clone() *ModuleMetadata {
 			API:      m.Documentation.API,
 			Examples: m.Documentation.Examples,
 			README:   m.Documentation.README,
+		}
+	}
+
+	if m.BehavioralEnvelope != nil {
+		clone.BehavioralEnvelope = &BehavioralEnvelope{
+			LolbinUsageJustification: m.BehavioralEnvelope.LolbinUsageJustification,
+		}
+		if m.BehavioralEnvelope.ShellsOutTo != nil {
+			clone.BehavioralEnvelope.ShellsOutTo = make([]string, len(m.BehavioralEnvelope.ShellsOutTo))
+			copy(clone.BehavioralEnvelope.ShellsOutTo, m.BehavioralEnvelope.ShellsOutTo)
+		}
+		if m.BehavioralEnvelope.WritesPaths != nil {
+			clone.BehavioralEnvelope.WritesPaths = make([]string, len(m.BehavioralEnvelope.WritesPaths))
+			copy(clone.BehavioralEnvelope.WritesPaths, m.BehavioralEnvelope.WritesPaths)
+		}
+		if m.BehavioralEnvelope.ReadsPaths != nil {
+			clone.BehavioralEnvelope.ReadsPaths = make([]string, len(m.BehavioralEnvelope.ReadsPaths))
+			copy(clone.BehavioralEnvelope.ReadsPaths, m.BehavioralEnvelope.ReadsPaths)
+		}
+		if m.BehavioralEnvelope.NetworkEgress != nil {
+			clone.BehavioralEnvelope.NetworkEgress = make([]string, len(m.BehavioralEnvelope.NetworkEgress))
+			copy(clone.BehavioralEnvelope.NetworkEgress, m.BehavioralEnvelope.NetworkEgress)
 		}
 	}
 

@@ -2,6 +2,8 @@ name: firewall
 description: Manages firewall rules across different operating systems
 version: 0.1.0
 
+publisher: cfgms
+
 # Supported execution environments
 executors:
   - steward  # Local firewall management on steward systems
@@ -10,11 +12,6 @@ author: CFGMS Team
 license: MIT
 platforms:
   - linux
-dependencies:
-  - name: yaml
-    version: v3
-  - name: net
-    version: standard
 schema: schema.yaml
 interfaces:
   - Get
@@ -23,4 +20,4 @@ interfaces:
 security:
   requires_root: true
   capabilities: []
-  ports: [] 
+  ports: []
