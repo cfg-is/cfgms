@@ -121,6 +121,17 @@ const psRestoreSnapshot = `Restore-VMSnapshot -VMName $VMName -Name $Name -Confi
 // getSnapshot retrieves the current state of a snapshot by user-visible names.
 // Returns ErrSnapshotNotFound if the snapshot does not exist or the transport fails.
 // State is always "present" when found — Get never returns "restored" (Hyper-V semantics).
+// getSnapshot returns the current state of a Hyper-V checkpoint.
+//
+// Contract (matches the directory/file modules):
+//   - snapshot exists   → (&SnapshotConfig{State: "present", ...}, nil)
+//   - snapshot absent   → (&SnapshotConfig{VMName, Name, State: "absent"}, nil)
+//   - module not ready  → (nil, ErrSnapshotNotFound)
+//   - validation/transport failed → (nil, wrapped error)
+//
+// Returning state:"absent" rather than an error lets the unified executor
+// detect drift against a desired state:"present" config and proceed to Set,
+// instead of treating "absent" as a fatal Get failure.
 func (m *hypervModule) getSnapshot(ctx context.Context, vmName, snapName string) (*SnapshotConfig, error) {
 	if m.transport == nil {
 		return nil, ErrSnapshotNotFound
@@ -129,7 +140,7 @@ func (m *hypervModule) getSnapshot(ctx context.Context, vmName, snapName string)
 	// Validate before any WinRM call — defense-in-depth even though ArgumentList
 	// already prevents injection at the transport layer.
 	if err := (&SnapshotConfig{VMName: vmName, Name: snapName}).Validate(); err != nil {
-		return nil, ErrSnapshotNotFound
+		return nil, fmt.Errorf("hyperv: validate snapshot %q/%q: %w", vmName, snapName, err)
 	}
 
 	hostVMName := vmHostName(m.tenantID, vmName)
@@ -140,17 +151,19 @@ func (m *hypervModule) getSnapshot(ctx context.Context, vmName, snapName string)
 		"VMName": hostVMName,
 	})
 	if err != nil {
-		return nil, ErrSnapshotNotFound
+		return nil, fmt.Errorf("hyperv: get snapshot %q/%q: %w", vmName, snapName, err)
 	}
 
 	var parsed map[string]interface{}
 	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed); jsonErr != nil {
-		return nil, ErrSnapshotNotFound
+		return nil, fmt.Errorf("hyperv: parse get-snapshot response for %q/%q: %w", vmName, snapName, jsonErr)
 	}
 
 	found, _ := parsed["found"].(bool)
 	if !found {
-		return nil, ErrSnapshotNotFound
+		// Absent is a valid current state — the executor compares this against
+		// the desired state and calls Set to create the snapshot when needed.
+		return &SnapshotConfig{VMName: vmName, Name: snapName, State: "absent"}, nil
 	}
 
 	// Hyper-V does not delete checkpoints on restore, so the only observable
