@@ -248,26 +248,37 @@ func TestGet_Snapshot_AfterRestore_ReturnsPresent(t *testing.T) {
 
 // ─── Not found tests ───────────────────────────────────────────────────────────
 
-// TestGet_Snapshot_ReturnsErrSnapshotNotFound_WhenMissing verifies that Get returns
-// ErrSnapshotNotFound when the host reports the snapshot does not exist.
-func TestGet_Snapshot_ReturnsErrSnapshotNotFound_WhenMissing(t *testing.T) {
+// TestGet_Snapshot_ReturnsAbsentWhenMissing verifies that Get returns a
+// state:"absent" ConfigState (no error) when the host reports the snapshot
+// does not exist. This matches the contract honored by the directory and file
+// modules and lets the unified executor detect drift against a desired
+// state:"present" configuration.
+func TestGet_Snapshot_ReturnsAbsentWhenMissing(t *testing.T) {
 	transport := &testWinRMTransport{output: `{"found":false}`}
 	m := snapModuleWithTransport(transport, "t")
 
-	_, err := m.Get(context.Background(), "snapshot:myvm/nonexistent")
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrSnapshotNotFound)
+	state, err := m.Get(context.Background(), "snapshot:myvm/nonexistent")
+	require.NoError(t, err, "missing snapshot must NOT be reported as an error")
+	require.NotNil(t, state)
+	assert.Equal(t, "absent", state.AsMap()["state"],
+		"missing snapshot must surface as state:absent so the executor can drive Set")
 }
 
-// TestGet_Snapshot_ReturnsErrSnapshotNotFound_OnTransportError verifies that transport
-// errors are surfaced as ErrSnapshotNotFound.
-func TestGet_Snapshot_ReturnsErrSnapshotNotFound_OnTransportError(t *testing.T) {
+// TestGet_Snapshot_WrapsTransportError verifies that transport-layer failures
+// are returned as wrapped errors (NOT as ErrSnapshotNotFound) so the executor
+// can distinguish "absent" from "transport broken". Conflating the two was
+// part of F14 — every failed Get aborted the Set even when the host was
+// simply offline.
+func TestGet_Snapshot_WrapsTransportError(t *testing.T) {
 	transport := &testWinRMTransport{execErr: errors.New("winrm: connection refused")}
 	m := snapModuleWithTransport(transport, "t")
 
 	_, err := m.Get(context.Background(), "snapshot:myvm/unreachable")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrSnapshotNotFound)
+	assert.NotErrorIs(t, err, ErrSnapshotNotFound,
+		"transport errors must NOT be reported as ErrSnapshotNotFound")
+	assert.Contains(t, err.Error(), "winrm: connection refused",
+		"underlying transport error message must be preserved in the chain")
 }
 
 // TestGet_Snapshot_NoTransport verifies that Get returns ErrSnapshotNotFound when

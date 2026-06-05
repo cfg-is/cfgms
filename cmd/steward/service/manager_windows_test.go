@@ -176,7 +176,12 @@ func TestInstallHyperV_RequiresElevation(t *testing.T) {
 }
 
 // TestInstallHyperV_ListenerBindsLocalhostOnly verifies that setupWinRMListener
-// uses IP:127.0.0.1 (not Address=*) in the winrm set command.
+// creates a loopback-bound HTTPS listener via `winrm create` (NOT `winrm set`,
+// which silently no-ops on hosts with no existing HTTPS listener). The
+// `Hostname='127.0.0.1'` clause aligns the listener record with the
+// IP literal the steward will dial — using `localhost` would land on ::1
+// on IPv6-first Windows and refuse the IPv4 connection.
+//
 // Uses recordingPSRunner — no PowerShell execution, no elevation required.
 func TestInstallHyperV_ListenerBindsLocalhostOnly(t *testing.T) {
 	rec := &recordingPSRunner{}
@@ -184,18 +189,20 @@ func TestInstallHyperV_ListenerBindsLocalhostOnly(t *testing.T) {
 	err := setupWinRMListener(rec, "AABBCCDDEEFF00112233445566778899AABBCCDD")
 	require.NoError(t, err)
 
-	// Find the set command call and verify it uses IP:127.0.0.1, not *.
+	// Find the listener-create call and verify it binds to IP:127.0.0.1.
 	var foundLoopback bool
 	for _, call := range rec.Calls {
-		if strings.Contains(call.ScriptBlock, "winrm set") {
+		if strings.Contains(call.ScriptBlock, "winrm create") {
 			assert.Contains(t, call.ScriptBlock, "IP:127.0.0.1",
 				"listener must be bound to IP:127.0.0.1, not *")
 			assert.NotContains(t, call.ScriptBlock, "Address=*",
 				"listener must not use Address=* (binds 0.0.0.0)")
+			assert.Contains(t, call.ScriptBlock, "Hostname='127.0.0.1'",
+				"Hostname must be the IPv4 literal so it survives IPv6-first DNS resolution")
 			foundLoopback = true
 		}
 	}
-	assert.True(t, foundLoopback, "must have a winrm set call for the HTTPS listener")
+	assert.True(t, foundLoopback, "must have a winrm create call for the HTTPS listener")
 }
 
 // TestInstallHyperV_FirewallRuleLoopbackOnly verifies that setupHyperVFirewall

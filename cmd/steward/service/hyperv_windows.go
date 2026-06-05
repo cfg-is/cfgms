@@ -53,17 +53,30 @@ $cert.Thumbprint`
 // loopback-bound listener at 127.0.0.1:5986 (not 0.0.0.0).
 // thumbprint is passed as $args[0] — never interpolated into the script block.
 // Idempotent: delete-then-create.
+//
+// Uses `winrm create` (not `winrm set`). `winrm set` only modifies an existing
+// listener; on a fresh host it silently no-ops, leaving 5986 unbound — the
+// install reports "Step 3/8 Configuring WinRM HTTPS listener" success but
+// nothing is actually listening, so every later WinRM call fails with
+// "actively refused".
 func setupWinRMListener(ps psRunner, thumbprint string) error {
 	// Delete any existing HTTPS listener; non-fatal if it does not exist.
+	// We try both the wildcard (Address=*) and the loopback-pinned form to
+	// cover both an Enable-PSRemoting-created listener and a previous run of
+	// this same install.
 	_, _ = ps.RunPS(
-		`& winrm delete 'winrm/config/Listener?Address=*+Transport=HTTPS' 2>$null; $true`,
+		`& winrm delete 'winrm/config/Listener?Address=*+Transport=HTTPS' 2>$null; & winrm delete 'winrm/config/Listener?Address=IP:127.0.0.1+Transport=HTTPS' 2>$null; $true`,
 		nil, "")
 
 	// Address=IP:127.0.0.1 binds only to loopback — NOT Address=* (0.0.0.0).
 	// Thumbprint is $args[0], assembled via string concat in PS to avoid interpolation.
+	// Hostname='127.0.0.1' aligns the listener record with the address clients
+	// actually dial (`winrm_host: 127.0.0.1` in steward config). Using
+	// `localhost` here would resolve to ::1 on IPv6-first Windows and the
+	// IPv4-bound listener would refuse the connection.
 	script := `$thumb = $args[0]
-$config = "@{CertificateThumbprint='" + $thumb + "'}"
-& winrm set 'winrm/config/Listener?Address=IP:127.0.0.1+Transport=HTTPS' $config`
+$config = "@{Hostname='127.0.0.1';CertificateThumbprint='" + $thumb + "'}"
+& winrm create 'winrm/config/Listener?Address=IP:127.0.0.1+Transport=HTTPS' $config`
 	_, err := ps.RunPS(script, []string{thumbprint}, "")
 	return err
 }

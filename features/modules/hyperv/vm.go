@@ -139,6 +139,17 @@ const psSetVMProcessor = `Set-VMProcessor -VMName $Name -Count $CPU`
 const psSetVMMemory = `Set-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB)`
 
 // getVM retrieves the current state of a VM by user-visible name.
+// getVM returns the current state of a VM on the host.
+//
+// Contract (matches the directory/file modules):
+//   - resource exists  → (&VMConfig{State: "running"|"stopped"|..., ...}, nil)
+//   - resource absent  → (&VMConfig{Name, State: "absent"}, nil)
+//   - module not ready → (nil, ErrVMNotFound)
+//   - transport failed → (nil, wrapped error)
+//
+// Returning state:"absent" rather than an error lets the unified executor
+// detect drift against a desired state:"present"/"running" config and
+// proceed to Set, instead of treating "absent" as a fatal Get failure.
 func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, error) {
 	if m.transport == nil {
 		return nil, ErrVMNotFound
@@ -147,17 +158,19 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 	hostName := vmHostName(m.tenantID, vmName)
 	output, err := m.transport.ExecutePS(ctx, psGetVM, map[string]string{"Name": hostName})
 	if err != nil {
-		return nil, ErrVMNotFound
+		return nil, fmt.Errorf("hyperv: get vm %q: %w", vmName, err)
 	}
 
 	var parsed map[string]interface{}
 	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed); jsonErr != nil {
-		return nil, ErrVMNotFound
+		return nil, fmt.Errorf("hyperv: parse get-vm response for %q: %w", vmName, jsonErr)
 	}
 
 	found, _ := parsed["found"].(bool)
 	if !found {
-		return nil, ErrVMNotFound
+		// Absent is a valid current state — the executor compares this against
+		// the desired state and calls Set to create the resource when needed.
+		return &VMConfig{Name: vmName, State: "absent"}, nil
 	}
 
 	// Strip the host-side prefix to recover the user-visible VM name.
@@ -270,10 +283,14 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		currentVM = cachedVM
 	} else {
 		current, err := m.getVM(ctx, vmName)
-		if err != nil && !errors.Is(err, ErrVMNotFound) {
+		if err != nil {
+			// getVM no longer returns a sentinel for "not found" — absence is
+			// signalled by State=="absent" with err==nil. Any real error here
+			// (module not configured, transport down, malformed response) is
+			// fatal for this Set call.
 			return fmt.Errorf("hyperv: check VM %q existence: %w", vmName, err)
 		}
-		if err == nil {
+		if current.State != "absent" {
 			vmExists = true
 			currentVM = *current
 		}
