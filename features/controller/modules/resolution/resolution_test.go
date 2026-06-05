@@ -73,6 +73,13 @@ func emptyResolver(t *testing.T) *gitresolver.GitSourceResolver {
 func initSignedGitRepo(t *testing.T, gitBin, repoDir, publisher, moduleName, version string) ed25519.PublicKey {
 	t.Helper()
 
+	// Disable git line-ending conversion so module.yaml and binaries are
+	// byte-identical after clone on every platform. Without this the Windows
+	// runner default (core.autocrlf=true) rewrites LF→CRLF on checkout, the
+	// resolver re-reads different bytes than the test signed, and signature
+	// verification fails. "* -text" treats every path as binary.
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gitattributes"), []byte("* -text\n"), 0640))
+
 	// Write module.yaml
 	meta := &modules.ModuleMetadata{
 		Name:      moduleName,
@@ -135,6 +142,9 @@ func initSignedGitRepo(t *testing.T, gitBin, repoDir, publisher, moduleName, ver
 // The bundle returned by the resolver will have no valid signatures.
 func initUnsignedGitRepo(t *testing.T, gitBin, repoDir, publisher, moduleName, version string) {
 	t.Helper()
+
+	// See initSignedGitRepo for why this is required on Windows runners.
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gitattributes"), []byte("* -text\n"), 0640))
 
 	meta := &modules.ModuleMetadata{
 		Name:      moduleName,

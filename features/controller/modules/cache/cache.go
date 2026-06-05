@@ -294,6 +294,20 @@ func (c *ModuleCache) List() ([]CacheEntry, error) {
 
 	var entries []CacheEntry
 
+	// Stat first so we can detect non-directory roots consistently across
+	// platforms — os.ReadDir on a regular file returns different error shapes
+	// on Linux vs Windows, and we want the same wrapped error either way.
+	info, err := os.Stat(c.rootDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("stat cache root: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("cache root is not a directory: %s", c.rootDir)
+	}
+
 	publishers, err := os.ReadDir(c.rootDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
