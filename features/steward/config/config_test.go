@@ -1103,6 +1103,134 @@ resources: []
 		"missing drift_mode must be empty (executor default: apply)")
 }
 
+// --- required_modules and module_trust parsing ---
+
+// [REQUIRED TEST] cfg file with required_modules parses all fields correctly.
+func TestLoadConfiguration_RequiredModules_ParsesCorrectly(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+
+required_modules:
+  - name: cfgms/firewall
+    version: "^1.0.0"
+  - name: cfgms/package
+    version: ">=2.0.0"
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err)
+
+	require.Len(t, cfg.RequiredModules, 2)
+	assert.Equal(t, "cfgms/firewall", cfg.RequiredModules[0].Name)
+	assert.Equal(t, "^1.0.0", cfg.RequiredModules[0].Version)
+	assert.Equal(t, "cfgms/package", cfg.RequiredModules[1].Name)
+	assert.Equal(t, ">=2.0.0", cfg.RequiredModules[1].Version)
+}
+
+// [REQUIRED TEST] module_trust: {mode: strict, additional_publishers: [vendor-a]} parses correctly.
+func TestLoadConfiguration_ModuleTrust_StrictMode_ParsesCorrectly(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  module_trust:
+    mode: strict
+    additional_publishers:
+      - vendor-a
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err)
+
+	assert.Equal(t, ModuleTrustModeStrict, cfg.Steward.ModuleTrust.Mode)
+	assert.Equal(t, []string{"vendor-a"}, cfg.Steward.ModuleTrust.AdditionalPublishers)
+}
+
+// [REQUIRED TEST] module_trust: {mode: invalid_value} returns a validation error.
+func TestLoadConfiguration_ModuleTrust_InvalidMode_ReturnsError(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  module_trust:
+    mode: invalid_value
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	_, err := LoadConfiguration(configFile)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "module_trust")
+}
+
+func TestLoadConfiguration_ModuleTrust_ControllerMode_Valid(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  module_trust:
+    mode: controller
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err)
+	assert.Equal(t, ModuleTrustModeController, cfg.Steward.ModuleTrust.Mode)
+}
+
+func TestLoadConfiguration_RequiredModules_TopLevel_NotUnderSteward(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	// required_modules must be top-level, NOT nested under steward:
+	configData := `steward:
+  id: test-steward
+
+required_modules:
+  - name: cfgms/firewall
+    version: "^1.0.0"
+
+resources: []
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err)
+	require.Len(t, cfg.RequiredModules, 1)
+	assert.Equal(t, "cfgms/firewall", cfg.RequiredModules[0].Name)
+}
+
 // TestDriftMode_LocalFileCannotSetIt asserts the security invariant:
 // LoadConfiguration clears DriftMode so a tampered local file cannot flip
 // a controller-connected steward into monitor mode.

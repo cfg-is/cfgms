@@ -98,6 +98,10 @@ func ValidateConfiguration(config StewardConfig) error {
 		return fmt.Errorf("script_signing configuration invalid: %w", err)
 	}
 
+	if err := ValidateModuleTrustConfig(config.Steward.ModuleTrust); err != nil {
+		return fmt.Errorf("module_trust configuration invalid: %w", err)
+	}
+
 	resourceNames := make(map[string]bool)
 	for i, resource := range config.Resources {
 		if resource.Name == "" {
@@ -115,6 +119,17 @@ func ValidateConfiguration(config StewardConfig) error {
 		}
 	}
 
+	return nil
+}
+
+// ValidateModuleTrustConfig validates a ModuleTrustConfig for internal consistency.
+func ValidateModuleTrustConfig(cfg ModuleTrustConfig) error {
+	switch cfg.Mode {
+	case ModuleTrustModeStrict, ModuleTrustModeController, ModuleTrustModeBypass, "":
+		// valid; empty defaults to "controller" at runtime
+	default:
+		return fmt.Errorf("invalid module_trust mode %q: must be strict, controller, or bypass", cfg.Mode)
+	}
 	return nil
 }
 

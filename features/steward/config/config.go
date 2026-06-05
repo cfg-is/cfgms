@@ -80,6 +80,9 @@ type (
 	TrustedKeyRef       = stewardtypes.TrustedKeyRef
 	OperationMode       = stewardtypes.OperationMode
 	ErrorAction         = stewardtypes.ErrorAction
+	ModuleTrustConfig   = stewardtypes.ModuleTrustConfig
+	ModuleTrustMode     = stewardtypes.ModuleTrustMode
+	RequiredModule      = stewardtypes.RequiredModule
 )
 
 // Constant re-exports from stewardtypes.
@@ -97,6 +100,9 @@ const (
 	ActionContinue                = stewardtypes.ActionContinue
 	ActionFail                    = stewardtypes.ActionFail
 	ActionWarn                    = stewardtypes.ActionWarn
+	ModuleTrustModeStrict         = stewardtypes.ModuleTrustModeStrict
+	ModuleTrustModeController     = stewardtypes.ModuleTrustModeController
+	ModuleTrustModeBypass         = stewardtypes.ModuleTrustModeBypass
 )
 
 // envVarPattern matches ${VAR} patterns without defaults
@@ -322,6 +328,11 @@ func applyDefaults(config *StewardConfig) {
 	// Set default convergence interval
 	if config.Steward.ConvergeInterval == "" {
 		config.Steward.ConvergeInterval = "30m"
+	}
+
+	// Set default module trust mode
+	if config.Steward.ModuleTrust.Mode == "" {
+		config.Steward.ModuleTrust.Mode = ModuleTrustModeController
 	}
 
 	// Set default steward ID if not provided

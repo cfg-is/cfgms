@@ -3,6 +3,7 @@
 package cache_test
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -118,6 +119,32 @@ func TestModuleCache_List_EmptyCache(t *testing.T) {
 	entries, err := c.List()
 	require.NoError(t, err)
 	assert.Empty(t, entries)
+}
+
+// TestModuleCache_List_RootIsNotDirectory returns a wrapped error if the cache
+// root path exists but is a regular file. Behaviour must be identical across
+// Linux/macOS/Windows — Windows' os.ReadDir on a regular file produces a
+// different error shape than Linux's, so List must Stat the root explicitly.
+func TestModuleCache_List_RootIsNotDirectory(t *testing.T) {
+	parent := t.TempDir()
+	rootAsFile := parent + string(os.PathSeparator) + "module-cache"
+	require.NoError(t, os.WriteFile(rootAsFile, []byte("not-a-dir"), 0640))
+
+	// Construct a cache pointing at the file. We use the fact that cache.New
+	// calls MkdirAll which would fail here — so we go via Put/Get/List through
+	// a freshly-created cache whose rootDir we then sabotage.
+	c, err := cache.New(parent + string(os.PathSeparator) + "real-root")
+	require.NoError(t, err)
+	require.NoError(t, c.Put(makeTestBundle("cfgms", "firewall", "1.0.0", "hash1")))
+
+	// Now sabotage the real-root path by replacing it with a regular file.
+	realRoot := parent + string(os.PathSeparator) + "real-root"
+	require.NoError(t, os.RemoveAll(realRoot))
+	require.NoError(t, os.WriteFile(realRoot, []byte("not-a-dir"), 0640))
+
+	_, listErr := c.List()
+	require.Error(t, listErr)
+	assert.Contains(t, listErr.Error(), "cache root is not a directory")
 }
 
 // TestModuleCache_SetGetApprovalStatus round-trips status updates.
