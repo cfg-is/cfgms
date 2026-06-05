@@ -92,7 +92,7 @@ make install-nancy
 
 ```bash
 # Binary download to Go bin directory
-curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-linux-amd64 -o ~/nancy
+curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-linux-amd64 -o ~/nancy
 chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
@@ -103,7 +103,7 @@ chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 brew install nancy
 
 # Binary download to Go bin directory
-curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-amd64 -o ~/nancy
+curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-amd64 -o ~/nancy
 chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
@@ -111,7 +111,7 @@ chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 
 ```bash
 # Binary download to Go bin directory
-curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-arm64 -o ~/nancy
+curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-arm64 -o ~/nancy
 chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
@@ -126,7 +126,7 @@ yay -S nancy-bin
 
 ```powershell
 # Binary download to Go bin directory
-Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-windows-amd64.exe' -OutFile 'nancy.exe'
+Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-windows-amd64.exe' -OutFile 'nancy.exe'
 Move-Item nancy.exe $(go env GOPATH)\bin\nancy.exe
 ```
 
