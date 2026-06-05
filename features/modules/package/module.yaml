@@ -2,6 +2,8 @@ name: package
 description: Manages system packages across different package managers (apt, yum, brew, etc.)
 version: 0.1.0
 
+publisher: cfgms
+
 # Supported execution environments
 executors:
   - steward  # Local package management on steward systems
@@ -12,11 +14,6 @@ platforms:
   - linux
   - darwin
   - windows
-dependencies:
-  - name: yaml
-    version: v3
-  - name: exec
-    version: standard
 schema: schema.yaml
 interfaces:
   - Get
@@ -25,4 +22,4 @@ interfaces:
 security:
   requires_root: true
   capabilities: []
-  ports: [] 
+  ports: []

@@ -21,6 +21,9 @@ version: 1.2.3
 description: A test module
 author: Test Author
 license: MIT
+publisher: cfgms
+executors:
+  - steward
 module_dependencies:
   - name: dependency1
     version: ">=1.0.0"
@@ -59,6 +62,18 @@ security:
 
 	if metadata.Version != "1.2.3" {
 		t.Errorf("Version = %v, expected 1.2.3", metadata.Version)
+	}
+
+	if metadata.Publisher != "cfgms" {
+		t.Errorf("Publisher = %v, expected cfgms", metadata.Publisher)
+	}
+
+	if len(metadata.Executors) != 1 || metadata.Executors[0] != "steward" {
+		t.Errorf("Executors = %v, expected [steward]", metadata.Executors)
+	}
+
+	if metadata.Kind != "steward" {
+		t.Errorf("Kind = %v, expected steward", metadata.Kind)
 	}
 
 	if len(metadata.ModuleDependencies) != 2 {
@@ -103,7 +118,10 @@ func TestParseModuleMetadata(t *testing.T) {
 		{
 			name: "valid minimal metadata",
 			yaml: `name: test
-version: 1.0.0`,
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward`,
 			expectError: false,
 			validate: func(m *ModuleMetadata) error {
 				if m.Name != "test" {
@@ -111,6 +129,9 @@ version: 1.0.0`,
 				}
 				if m.Version != "1.0.0" {
 					t.Errorf("Version = %v, expected 1.0.0", m.Version)
+				}
+				if m.Kind != "steward" {
+					t.Errorf("Kind = %v, expected steward", m.Kind)
 				}
 				return nil
 			},
@@ -135,6 +156,9 @@ version: invalid`,
 			name: "invalid dependency version constraint",
 			yaml: `name: test
 version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
 module_dependencies:
   - name: dep1
     version: "invalid_constraint"`,
@@ -144,6 +168,9 @@ module_dependencies:
 			name: "dependency without name",
 			yaml: `name: test
 version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
 module_dependencies:
   - version: "1.0.0"`,
 			expectError: true,
@@ -155,6 +182,9 @@ version: 2.1.0-alpha.1
 description: A complex module with all features
 author: CFGMS Team
 license: Apache-2.0
+publisher: cfgms
+executors:
+  - steward
 module_dependencies:
   - name: base
     version: "^1.0.0"
@@ -200,6 +230,76 @@ schema: schema.yaml`,
 				if !m.Security.RequiresRoot {
 					t.Error("Security.RequiresRoot should be true")
 				}
+				if m.Publisher != "cfgms" {
+					t.Errorf("Publisher = %v, expected cfgms", m.Publisher)
+				}
+				if m.Kind != "steward" {
+					t.Errorf("Kind = %v, expected steward", m.Kind)
+				}
+				return nil
+			},
+		},
+		{
+			name: "missing executors",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms`,
+			expectError: true,
+		},
+		{
+			name: "multiple executors rejected",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+  - outpost`,
+			expectError: true,
+		},
+		{
+			name: "invalid executor value",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - agent`,
+			expectError: true,
+		},
+		{
+			name: "missing publisher",
+			yaml: `name: test
+version: 1.0.0
+executors:
+  - steward`,
+			expectError: true,
+		},
+		{
+			name: "outpost executor derives correct kind",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - outpost`,
+			expectError: false,
+			validate: func(m *ModuleMetadata) error {
+				if m.Kind != "outpost" {
+					t.Errorf("Kind = %v, expected outpost", m.Kind)
+				}
+				return nil
+			},
+		},
+		{
+			name: "controller executor derives workflow kind",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - controller`,
+			expectError: false,
+			validate: func(m *ModuleMetadata) error {
+				if m.Kind != "workflow" {
+					t.Errorf("Kind = %v, expected workflow for controller executor", m.Kind)
+				}
 				return nil
 			},
 		},
@@ -223,9 +323,106 @@ schema: schema.yaml`,
 			}
 
 			if tt.validate != nil {
-				_ = tt.validate(metadata) // Ignore error in test validation
+				if err := tt.validate(metadata); err != nil {
+					t.Errorf("validate function returned error: %v", err)
+				}
 			}
 		})
+	}
+}
+
+func TestParseModuleMetadata_BehavioralEnvelopeRoundTrip(t *testing.T) {
+	input := `name: test-module
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+behavioral_envelope:
+  shells_out_to:
+    - /bin/sh
+    - /usr/bin/bash
+  writes_paths:
+    - /etc/config
+  reads_paths:
+    - /etc/config
+    - /var/run/state
+  network_egress:
+    - api.example.com:443
+  lolbin_usage_justification: "required for system management"
+`
+
+	reader := strings.NewReader(input)
+	metadata, err := ParseModuleMetadata(reader)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+
+	if metadata.BehavioralEnvelope == nil {
+		t.Fatal("BehavioralEnvelope should not be nil")
+	}
+
+	be := metadata.BehavioralEnvelope
+	if len(be.ShellsOutTo) != 2 {
+		t.Errorf("ShellsOutTo length = %d, expected 2", len(be.ShellsOutTo))
+	}
+	if be.ShellsOutTo[0] != "/bin/sh" {
+		t.Errorf("ShellsOutTo[0] = %v, expected /bin/sh", be.ShellsOutTo[0])
+	}
+	if len(be.WritesPaths) != 1 || be.WritesPaths[0] != "/etc/config" {
+		t.Errorf("WritesPaths = %v, expected [/etc/config]", be.WritesPaths)
+	}
+	if len(be.ReadsPaths) != 2 {
+		t.Errorf("ReadsPaths length = %d, expected 2", len(be.ReadsPaths))
+	}
+	if len(be.NetworkEgress) != 1 || be.NetworkEgress[0] != "api.example.com:443" {
+		t.Errorf("NetworkEgress = %v, expected [api.example.com:443]", be.NetworkEgress)
+	}
+	if be.LolbinUsageJustification != "required for system management" {
+		t.Errorf("LolbinUsageJustification = %v, expected 'required for system management'", be.LolbinUsageJustification)
+	}
+
+	// Verify round-trip via YAML: kind must not appear in serialized output
+	yamlBytes, err := metadata.ToYAML()
+	if err != nil {
+		t.Fatalf("ToYAML() error: %v", err)
+	}
+
+	yamlStr := string(yamlBytes)
+	if strings.Contains(yamlStr, "kind:") {
+		t.Error("serialized YAML must not contain 'kind:' — kind is derived, not stored")
+	}
+
+	// Deserialize and verify behavioral_envelope survives the round-trip
+	var reparsed ModuleMetadata
+	if err := yaml.Unmarshal(yamlBytes, &reparsed); err != nil {
+		t.Fatalf("failed to unmarshal round-tripped YAML: %v", err)
+	}
+	if reparsed.BehavioralEnvelope == nil {
+		t.Fatal("BehavioralEnvelope missing after round-trip")
+	}
+	if len(reparsed.BehavioralEnvelope.ShellsOutTo) != 2 {
+		t.Errorf("ShellsOutTo after round-trip = %v, expected 2 entries", reparsed.BehavioralEnvelope.ShellsOutTo)
+	}
+}
+
+func TestParseModuleMetadata_KindNotParsedFromYAML(t *testing.T) {
+	// kind: field in YAML must be ignored; Kind is always derived from Executors[0]
+	input := `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+kind: workflow
+`
+	reader := strings.NewReader(input)
+	metadata, err := ParseModuleMetadata(reader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Kind must be derived from executors[0]="steward", not read from YAML ("workflow")
+	if metadata.Kind != "steward" {
+		t.Errorf("Kind = %v, expected steward (derived), not the YAML value 'workflow'", metadata.Kind)
 	}
 }
 
@@ -237,6 +434,9 @@ func TestModuleMetadata_SaveModuleMetadata(t *testing.T) {
 		Name:        "save-test",
 		Version:     "1.0.0",
 		Description: "Test saving metadata",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
+		Kind:        "steward",
 		ModuleDependencies: []ModuleDependency{
 			{Name: "dep1", Version: "^1.0.0"},
 		},
@@ -268,6 +468,15 @@ func TestModuleMetadata_SaveModuleMetadata(t *testing.T) {
 		t.Errorf("Version mismatch after round-trip: got %v, expected %v", loaded.Version, metadata.Version)
 	}
 
+	if loaded.Publisher != "cfgms" {
+		t.Errorf("Publisher mismatch after round-trip: got %v, expected cfgms", loaded.Publisher)
+	}
+
+	// Kind is derived from executors on load, not stored in YAML
+	if loaded.Kind != "steward" {
+		t.Errorf("Kind after round-trip: got %v, expected steward (derived from executors)", loaded.Kind)
+	}
+
 	if len(loaded.ModuleDependencies) != len(metadata.ModuleDependencies) {
 		t.Errorf("Dependencies length mismatch after round-trip: got %v, expected %v",
 			len(loaded.ModuleDependencies), len(metadata.ModuleDependencies))
@@ -276,8 +485,10 @@ func TestModuleMetadata_SaveModuleMetadata(t *testing.T) {
 
 func TestModuleMetadata_ToYAML(t *testing.T) {
 	metadata := &ModuleMetadata{
-		Name:    "yaml-test",
-		Version: "1.0.0",
+		Name:      "yaml-test",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "dep1", Version: "^1.0.0"},
 		},
@@ -327,42 +538,76 @@ func TestModuleMetadata_Validate(t *testing.T) {
 		name        string
 		metadata    *ModuleMetadata
 		expectError bool
+		wantKind    string
 	}{
 		{
 			name: "valid metadata",
 			metadata: &ModuleMetadata{
-				Name:    "valid",
-				Version: "1.0.0",
+				Name:      "valid",
+				Version:   "1.0.0",
+				Publisher: "cfgms",
+				Executors: []string{"steward"},
 			},
 			expectError: false,
+			wantKind:    "steward",
+		},
+		{
+			name: "valid outpost executor",
+			metadata: &ModuleMetadata{
+				Name:      "valid",
+				Version:   "1.0.0",
+				Publisher: "cfgms",
+				Executors: []string{"outpost"},
+			},
+			expectError: false,
+			wantKind:    "outpost",
+		},
+		{
+			name: "valid controller executor",
+			metadata: &ModuleMetadata{
+				Name:      "valid",
+				Version:   "1.0.0",
+				Publisher: "cfgms",
+				Executors: []string{"controller"},
+			},
+			expectError: false,
+			wantKind:    "workflow",
 		},
 		{
 			name: "missing name",
 			metadata: &ModuleMetadata{
-				Version: "1.0.0",
+				Version:   "1.0.0",
+				Publisher: "cfgms",
+				Executors: []string{"steward"},
 			},
 			expectError: true,
 		},
 		{
 			name: "missing version",
 			metadata: &ModuleMetadata{
-				Name: "test",
+				Name:      "test",
+				Publisher: "cfgms",
+				Executors: []string{"steward"},
 			},
 			expectError: true,
 		},
 		{
 			name: "invalid version",
 			metadata: &ModuleMetadata{
-				Name:    "test",
-				Version: "invalid",
+				Name:      "test",
+				Version:   "invalid",
+				Publisher: "cfgms",
+				Executors: []string{"steward"},
 			},
 			expectError: true,
 		},
 		{
 			name: "invalid dependency",
 			metadata: &ModuleMetadata{
-				Name:    "test",
-				Version: "1.0.0",
+				Name:      "test",
+				Version:   "1.0.0",
+				Publisher: "cfgms",
+				Executors: []string{"steward"},
 				ModuleDependencies: []ModuleDependency{
 					{Name: "", Version: "1.0.0"},
 				},
@@ -372,11 +617,51 @@ func TestModuleMetadata_Validate(t *testing.T) {
 		{
 			name: "invalid dependency version constraint",
 			metadata: &ModuleMetadata{
-				Name:    "test",
-				Version: "1.0.0",
+				Name:      "test",
+				Version:   "1.0.0",
+				Publisher: "cfgms",
+				Executors: []string{"steward"},
 				ModuleDependencies: []ModuleDependency{
 					{Name: "dep", Version: "invalid_constraint"},
 				},
+			},
+			expectError: true,
+		},
+		{
+			name: "missing executors",
+			metadata: &ModuleMetadata{
+				Name:      "test",
+				Version:   "1.0.0",
+				Publisher: "cfgms",
+			},
+			expectError: true,
+		},
+		{
+			name: "multiple executors rejected",
+			metadata: &ModuleMetadata{
+				Name:      "test",
+				Version:   "1.0.0",
+				Publisher: "cfgms",
+				Executors: []string{"steward", "outpost"},
+			},
+			expectError: true,
+		},
+		{
+			name: "invalid executor value",
+			metadata: &ModuleMetadata{
+				Name:      "test",
+				Version:   "1.0.0",
+				Publisher: "cfgms",
+				Executors: []string{"agent"},
+			},
+			expectError: true,
+		},
+		{
+			name: "missing publisher",
+			metadata: &ModuleMetadata{
+				Name:      "test",
+				Version:   "1.0.0",
+				Executors: []string{"steward"},
 			},
 			expectError: true,
 		},
@@ -393,14 +678,22 @@ func TestModuleMetadata_Validate(t *testing.T) {
 			if !tt.expectError && err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
+
+			if !tt.expectError && err == nil && tt.wantKind != "" {
+				if tt.metadata.Kind != tt.wantKind {
+					t.Errorf("Kind = %q, want %q after Validate()", tt.metadata.Kind, tt.wantKind)
+				}
+			}
 		})
 	}
 }
 
 func TestModuleMetadata_DependencyMethods(t *testing.T) {
 	metadata := &ModuleMetadata{
-		Name:    "dependency-test",
-		Version: "1.0.0",
+		Name:      "dependency-test",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "dep1", Version: "^1.0.0"},
 			{Name: "dep2", Version: "~2.0.0", Optional: true},
@@ -484,6 +777,9 @@ func TestModuleMetadata_Clone(t *testing.T) {
 		Author:      "Test Author",
 		License:     "MIT",
 		Schema:      "schema.yaml",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
+		Kind:        "steward",
 		ModuleDependencies: []ModuleDependency{
 			{Name: "dep1", Version: "^1.0.0"},
 		},
@@ -505,6 +801,13 @@ func TestModuleMetadata_Clone(t *testing.T) {
 			Examples: "examples/",
 			README:   "README.md",
 		},
+		BehavioralEnvelope: &BehavioralEnvelope{
+			ShellsOutTo:              []string{"/bin/sh"},
+			WritesPaths:              []string{"/etc/config"},
+			ReadsPaths:               []string{"/etc/config"},
+			NetworkEgress:            []string{"api.example.com:443"},
+			LolbinUsageJustification: "required",
+		},
 	}
 
 	// Clone the metadata
@@ -515,10 +818,28 @@ func TestModuleMetadata_Clone(t *testing.T) {
 		t.Errorf("Clone Name = %v, expected %v", clone.Name, original.Name)
 	}
 
+	if clone.Publisher != original.Publisher {
+		t.Errorf("Clone Publisher = %v, expected %v", clone.Publisher, original.Publisher)
+	}
+
+	if clone.Kind != original.Kind {
+		t.Errorf("Clone Kind = %v, expected %v", clone.Kind, original.Kind)
+	}
+
+	if len(clone.Executors) != len(original.Executors) || clone.Executors[0] != original.Executors[0] {
+		t.Errorf("Clone Executors = %v, expected %v", clone.Executors, original.Executors)
+	}
+
 	// Verify deep copy by modifying clone
 	clone.Name = "modified"
 	if original.Name == "modified" {
 		t.Error("Modifying clone affected original")
+	}
+
+	// Verify executors deep copy
+	clone.Executors[0] = "outpost"
+	if original.Executors[0] == "outpost" {
+		t.Error("Modifying clone executors affected original")
 	}
 
 	// Verify slice deep copy
@@ -542,6 +863,19 @@ func TestModuleMetadata_Clone(t *testing.T) {
 	if original.Documentation.API == "modified.md" {
 		t.Error("Modifying clone documentation affected original")
 	}
+
+	// Verify behavioral envelope deep copy
+	if clone.BehavioralEnvelope == nil {
+		t.Fatal("Clone BehavioralEnvelope should not be nil")
+	}
+	clone.BehavioralEnvelope.ShellsOutTo[0] = "/bin/zsh"
+	if original.BehavioralEnvelope.ShellsOutTo[0] == "/bin/zsh" {
+		t.Error("Modifying clone BehavioralEnvelope.ShellsOutTo affected original")
+	}
+	clone.BehavioralEnvelope.LolbinUsageJustification = "modified"
+	if original.BehavioralEnvelope.LolbinUsageJustification == "modified" {
+		t.Error("Modifying clone BehavioralEnvelope.LolbinUsageJustification affected original")
+	}
 }
 
 // Benchmark tests
@@ -553,6 +887,9 @@ func BenchmarkLoadModuleMetadata(b *testing.B) {
 	yamlContent := `name: benchmark-module
 version: 1.0.0
 description: Benchmark test module
+publisher: cfgms
+executors:
+  - steward
 module_dependencies:
   - name: dep1
     version: "^1.0.0"
@@ -578,8 +915,10 @@ interfaces:
 
 func BenchmarkModuleMetadata_ToYAML(b *testing.B) {
 	metadata := &ModuleMetadata{
-		Name:    "benchmark",
-		Version: "1.0.0",
+		Name:      "benchmark",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "dep1", Version: "^1.0.0"},
 			{Name: "dep2", Version: "~2.0.0"},
@@ -597,8 +936,10 @@ func BenchmarkModuleMetadata_ToYAML(b *testing.B) {
 
 func BenchmarkModuleMetadata_Clone(b *testing.B) {
 	metadata := &ModuleMetadata{
-		Name:    "benchmark",
-		Version: "1.0.0",
+		Name:      "benchmark",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "dep1", Version: "^1.0.0"},
 			{Name: "dep2", Version: "~2.0.0"},

@@ -409,8 +409,10 @@ func TestLifecycleAwareModuleFactory_Integration(t *testing.T) {
 
 	// Register module in module registry
 	testMetadata := &ModuleMetadata{
-		Name:    "test-module",
-		Version: "1.0.0",
+		Name:      "test-module",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 	}
 	err := moduleRegistry.RegisterModule(testMetadata, testModule)
 	if err != nil {

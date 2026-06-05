@@ -108,7 +108,7 @@ func TestModuleRegistry_RegisterModule(t *testing.T) {
 		},
 		{
 			name:        "valid registration",
-			metadata:    &ModuleMetadata{Name: "valid", Version: "1.0.0"},
+			metadata:    newTestMetadata("valid", "1.0.0"),
 			instance:    &mockModule{name: "valid"},
 			expectError: false,
 		},
@@ -129,7 +129,7 @@ func TestModuleRegistry_RegisterModule(t *testing.T) {
 	}
 
 	// Test duplicate registration
-	metadata := &ModuleMetadata{Name: "duplicate", Version: "1.0.0"}
+	metadata := newTestMetadata("duplicate", "1.0.0")
 	instance := &mockModule{name: "duplicate"}
 
 	err := registry.RegisterModule(metadata, instance)
@@ -143,7 +143,7 @@ func TestModuleRegistry_RegisterModule(t *testing.T) {
 	}
 
 	// Test version conflict
-	conflictMetadata := &ModuleMetadata{Name: "duplicate", Version: "2.0.0"}
+	conflictMetadata := newTestMetadata("duplicate", "2.0.0")
 	err = registry.RegisterModule(conflictMetadata, instance)
 	if err == nil {
 		t.Error("expected error for version conflict")
@@ -160,12 +160,14 @@ func TestModuleRegistry_UnregisterModule(t *testing.T) {
 	}
 
 	// Register modules with dependencies
-	baseMetadata := &ModuleMetadata{Name: "base", Version: "1.0.0"}
+	baseMetadata := newTestMetadata("base", "1.0.0")
 	baseInstance := &mockModule{name: "base"}
 
 	appMetadata := &ModuleMetadata{
-		Name:    "app",
-		Version: "1.0.0",
+		Name:      "app",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "base", Version: "1.0.0"},
 		},
@@ -204,7 +206,7 @@ func TestModuleRegistry_GetModule(t *testing.T) {
 	}
 
 	// Register and get module
-	metadata := &ModuleMetadata{Name: "test", Version: "1.0.0"}
+	metadata := newTestMetadata("test", "1.0.0")
 	instance := &mockModule{name: "test"}
 
 	_ = registry.RegisterModule(metadata, instance) // Ignore error in test setup
@@ -229,7 +231,7 @@ func TestModuleRegistry_GetModuleMetadata(t *testing.T) {
 	}
 
 	// Register and get metadata
-	metadata := &ModuleMetadata{Name: "test", Version: "1.0.0", Description: "Test module"}
+	metadata := &ModuleMetadata{Name: "test", Version: "1.0.0", Description: "Test module", Publisher: "cfgms", Executors: []string{"steward"}}
 	instance := &mockModule{name: "test"}
 
 	_ = registry.RegisterModule(metadata, instance) // Ignore error in test setup
@@ -262,7 +264,7 @@ func TestModuleRegistry_ListModules(t *testing.T) {
 	// Register modules
 	moduleNames := []string{"module1", "module2", "module3"}
 	for _, name := range moduleNames {
-		metadata := &ModuleMetadata{Name: name, Version: "1.0.0"}
+		metadata := newTestMetadata(name, "1.0.0")
 		instance := &mockModule{name: name}
 		_ = registry.RegisterModule(metadata, instance) // Ignore error in test setup
 	}
@@ -301,16 +303,20 @@ func TestModuleRegistry_Initialize(t *testing.T) {
 	registry = NewModuleRegistry()
 
 	moduleA := &ModuleMetadata{
-		Name:    "a",
-		Version: "1.0.0",
+		Name:      "a",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "b", Version: "1.0.0"},
 		},
 	}
 
 	moduleB := &ModuleMetadata{
-		Name:    "b",
-		Version: "1.0.0",
+		Name:      "b",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "a", Version: "1.0.0"},
 		},
@@ -328,8 +334,10 @@ func TestModuleRegistry_Initialize(t *testing.T) {
 	registry = NewModuleRegistry()
 
 	moduleWithMissingDep := &ModuleMetadata{
-		Name:    "app",
-		Version: "1.0.0",
+		Name:      "app",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "missing", Version: "1.0.0"},
 		},
@@ -356,31 +364,39 @@ func TestModuleRegistry_GetLoadingOrder(t *testing.T) {
 	// crypto <- auth <- middleware <- app
 	//      <- database <-
 
-	crypto := &ModuleMetadata{Name: "crypto", Version: "1.0.0"}
+	crypto := newTestMetadata("crypto", "1.0.0")
 	auth := &ModuleMetadata{
-		Name:    "auth",
-		Version: "1.0.0",
+		Name:      "auth",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "crypto", Version: "1.0.0"},
 		},
 	}
 	database := &ModuleMetadata{
-		Name:    "database",
-		Version: "1.0.0",
+		Name:      "database",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "crypto", Version: "1.0.0"},
 		},
 	}
 	middleware := &ModuleMetadata{
-		Name:    "middleware",
-		Version: "1.0.0",
+		Name:      "middleware",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "auth", Version: "1.0.0"},
 		},
 	}
 	app := &ModuleMetadata{
-		Name:    "app",
-		Version: "1.0.0",
+		Name:      "app",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "middleware", Version: "1.0.0"},
 			{Name: "database", Version: "1.0.0"},
@@ -441,7 +457,7 @@ func TestModuleRegistry_DetectConflicts(t *testing.T) {
 	registry := NewModuleRegistry()
 
 	// Test no conflicts
-	crypto := &ModuleMetadata{Name: "crypto", Version: "1.0.0"}
+	crypto := newTestMetadata("crypto", "1.0.0")
 	_ = registry.RegisterModule(crypto, &mockModule{name: "crypto"}) // Ignore error in test setup
 
 	conflicts, err := registry.DetectConflicts()
@@ -457,16 +473,20 @@ func TestModuleRegistry_DetectConflicts(t *testing.T) {
 	registry = NewModuleRegistry()
 
 	moduleA := &ModuleMetadata{
-		Name:    "a",
-		Version: "1.0.0",
+		Name:      "a",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "b", Version: "1.0.0"},
 		},
 	}
 
 	moduleB := &ModuleMetadata{
-		Name:    "b",
-		Version: "1.0.0",
+		Name:      "b",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "a", Version: "1.0.0"},
 		},
@@ -498,11 +518,17 @@ func TestModuleRegistry_LoadModulesFromDirectory(t *testing.T) {
 	// Create module.yaml files
 	module1YAML := `name: module1
 version: 1.0.0
-description: Test module 1`
+description: Test module 1
+publisher: cfgms
+executors:
+  - steward`
 
 	module2YAML := `name: module2
 version: 1.0.0
 description: Test module 2
+publisher: cfgms
+executors:
+  - steward
 module_dependencies:
   - name: module1
     version: "^1.0.0"`
@@ -547,8 +573,8 @@ func TestModuleRegistry_GetRegistryStatus(t *testing.T) {
 	}
 
 	// Add modules and initialize
-	module1 := &ModuleMetadata{Name: "module1", Version: "1.0.0"}
-	module2 := &ModuleMetadata{Name: "module2", Version: "1.0.0"}
+	module1 := newTestMetadata("module1", "1.0.0")
+	module2 := newTestMetadata("module2", "1.0.0")
 
 	_ = registry.RegisterModule(module1, &mockModule{name: "module1"}) // Ignore error in test setup
 	_ = registry.RegisterModule(module2, &mockModule{name: "module2"}) // Ignore error in test setup
@@ -598,7 +624,7 @@ func TestModuleRegistry_ConcurrentAccess(t *testing.T) {
 	// Register some modules
 	for i := 0; i < 10; i++ {
 		name := fmt.Sprintf("module%d", i)
-		metadata := &ModuleMetadata{Name: name, Version: "1.0.0"}
+		metadata := newTestMetadata(name, "1.0.0")
 		instance := &mockModule{name: name}
 		_ = registry.RegisterModule(metadata, instance) // Ignore error in test setup
 	}
@@ -642,7 +668,7 @@ func BenchmarkModuleRegistry_RegisterModule(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		name := fmt.Sprintf("module%d", i)
-		metadata := &ModuleMetadata{Name: name, Version: "1.0.0"}
+		metadata := newTestMetadata(name, "1.0.0")
 		instance := &mockModule{name: name}
 		_ = registry.RegisterModule(metadata, instance) // Ignore error in benchmark
 	}
@@ -654,7 +680,7 @@ func BenchmarkModuleRegistry_GetModule(b *testing.B) {
 	// Register modules
 	for i := 0; i < 100; i++ {
 		name := fmt.Sprintf("module%d", i)
-		metadata := &ModuleMetadata{Name: name, Version: "1.0.0"}
+		metadata := newTestMetadata(name, "1.0.0")
 		instance := &mockModule{name: name}
 		_ = registry.RegisterModule(metadata, instance) // Ignore error in benchmark setup
 	}
@@ -685,6 +711,8 @@ func BenchmarkModuleRegistry_Initialize(b *testing.B) {
 			metadata := &ModuleMetadata{
 				Name:               name,
 				Version:            "1.0.0",
+				Publisher:          "cfgms",
+				Executors:          []string{"steward"},
 				ModuleDependencies: deps,
 			}
 			instance := &mockModule{name: name}
