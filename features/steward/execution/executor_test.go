@@ -9,16 +9,19 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/modules"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // testFileConfig returns a file resource config appropriate for the current platform.
@@ -576,4 +579,141 @@ func TestApplyConfiguration_ApplyMode_ModeAliasConfigVerifiesClean(t *testing.T)
 	require.NoError(t, readErr)
 	assert.Equal(t, "fleet-managed-content\n", string(got),
 		"drifted resource declared with the mode alias must be re-applied to desired state")
+}
+
+// stubExecutorSecretStore is a minimal in-memory SecretStore used to verify
+// that ExecutorConfig.SecretStore is threaded into the auto-created factory.
+// Implements pkg/secrets/interfaces.SecretStore.
+type stubExecutorSecretStore struct {
+	mu      sync.Mutex
+	secrets map[string]string
+}
+
+func newStubExecutorSecretStore(kv ...string) *stubExecutorSecretStore {
+	s := &stubExecutorSecretStore{secrets: make(map[string]string)}
+	for i := 0; i+1 < len(kv); i += 2 {
+		s.secrets[kv[i]] = kv[i+1]
+	}
+	return s
+}
+
+func (s *stubExecutorSecretStore) GetSecret(_ context.Context, key string) (*secretsif.Secret, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.secrets[key]
+	if !ok {
+		return nil, secretsif.ErrSecretNotFound
+	}
+	return &secretsif.Secret{Key: key, Value: v}, nil
+}
+
+func (s *stubExecutorSecretStore) StoreSecret(_ context.Context, req *secretsif.SecretRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secrets[req.Key] = req.Value
+	return nil
+}
+func (s *stubExecutorSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
+func (s *stubExecutorSecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	return nil, nil
+}
+func (s *stubExecutorSecretStore) GetSecrets(_ context.Context, _ []string) (map[string]*secretsif.Secret, error) {
+	return nil, nil
+}
+func (s *stubExecutorSecretStore) StoreSecrets(_ context.Context, _ map[string]*secretsif.SecretRequest) error {
+	return nil
+}
+func (s *stubExecutorSecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsif.Secret, error) {
+	return nil, secretsif.ErrSecretNotFound
+}
+func (s *stubExecutorSecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsif.SecretVersion, error) {
+	return nil, nil
+}
+func (s *stubExecutorSecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsif.SecretMetadata, error) {
+	return nil, secretsif.ErrSecretNotFound
+}
+func (s *stubExecutorSecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+func (s *stubExecutorSecretStore) RotateSecret(_ context.Context, _ string, _ string) error {
+	return nil
+}
+func (s *stubExecutorSecretStore) ExpireSecret(_ context.Context, _ string) error { return nil }
+func (s *stubExecutorSecretStore) HealthCheck(_ context.Context) error            { return nil }
+func (s *stubExecutorSecretStore) Close() error                                   { return nil }
+
+// stubHypervConfig is a minimal modules.ConfigState whose AsMap carries the
+// keys hyperv.Configure requires. It exists solely to drive Configure past
+// the secret-store check; ToYAML/FromYAML/Validate are unused in this test.
+type stubHypervConfig map[string]interface{}
+
+func (c stubHypervConfig) AsMap() map[string]interface{} { return map[string]interface{}(c) }
+func (c stubHypervConfig) ToYAML() ([]byte, error)       { return nil, nil }
+func (c stubHypervConfig) FromYAML(_ []byte) error       { return nil }
+func (c stubHypervConfig) Validate() error               { return nil }
+func (c stubHypervConfig) GetManagedFields() []string    { return nil }
+
+// TestNewExecutor_SecretStoreInjectedIntoAutoCreatedFactory pins the F15 fix:
+// when ExecutorConfig.SecretStore is non-nil and Factory is nil, NewExecutor
+// must forward the store to the auto-created factory so that
+// SecretStoreInjectable modules (hyperv today, ad/m365 tomorrow) receive it
+// before Configure runs.
+//
+// Behavioural check: load the hyperv module via the factory, then call
+// Configure with valid keys. Without the F15 wiring, Configure returns
+// "secret store must be injected before Configure"; with the wiring it
+// reaches host validation and succeeds.
+func TestNewExecutor_SecretStoreInjectedIntoAutoCreatedFactory(t *testing.T) {
+	logger := logging.ForModule("executor_test")
+	store := newStubExecutorSecretStore("hyperv/user", "admin", "hyperv/pass", "secret")
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:      logger,
+		SecretStore: store,
+	})
+	require.NoError(t, err)
+
+	mod, err := execution.ExecutorFactory(executor).LoadModule("hyperv")
+	require.NoError(t, err)
+
+	configurable, ok := mod.(modules.Configurable)
+	require.True(t, ok, "hyperv module must implement modules.Configurable")
+
+	err = configurable.Configure(stubHypervConfig{
+		"winrm_host":        "127.0.0.1",
+		"winrm_user_secret": "hyperv/user",
+		"winrm_pass_secret": "hyperv/pass",
+	})
+	require.NoError(t, err,
+		"F15 regression: SecretStore on ExecutorConfig must propagate to the factory so hyperv.Configure passes the secret-store check")
+}
+
+// TestNewExecutor_NilSecretStoreLeavesFactoryUnwired is the control case for
+// TestNewExecutor_SecretStoreInjectedIntoAutoCreatedFactory. Confirms that
+// without the SecretStore field set, the auto-created factory does NOT have
+// a store, so hyperv.Configure returns the documented sentinel error — which
+// is the exact failure mode F15 fixes.
+func TestNewExecutor_NilSecretStoreLeavesFactoryUnwired(t *testing.T) {
+	logger := logging.ForModule("executor_test")
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger: logger,
+		// SecretStore intentionally omitted.
+	})
+	require.NoError(t, err)
+
+	mod, err := execution.ExecutorFactory(executor).LoadModule("hyperv")
+	require.NoError(t, err)
+
+	configurable, ok := mod.(modules.Configurable)
+	require.True(t, ok, "hyperv module must implement modules.Configurable")
+
+	err = configurable.Configure(stubHypervConfig{
+		"winrm_host":        "127.0.0.1",
+		"winrm_user_secret": "hyperv/user",
+		"winrm_pass_secret": "hyperv/pass",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secret store must be injected",
+		"without SecretStore on ExecutorConfig, hyperv.Configure must surface the documented sentinel")
 }
