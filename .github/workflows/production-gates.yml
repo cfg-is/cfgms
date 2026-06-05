@@ -52,7 +52,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
-        go-version: '1.26.3'
+        go-version: '1.26.4'
 
     - name: Install Security Tools
       run: |
@@ -241,7 +241,7 @@ jobs:
   #     - name: Set up Go
   #       uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
   #       with:
-  #         go-version: '1.26.3'
+  #         go-version: '1.26.4'
     
   #     - name: Install dependencies
   #       run: go mod download
@@ -288,7 +288,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
-        go-version: '1.26.3'
+        go-version: '1.26.4'
 
     - name: Install dependencies
       run: go mod download
@@ -365,7 +365,7 @@ jobs:
   #     - name: Set up Go
   #       uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
   #       with:
-  #         go-version: '1.26.3'
+  #         go-version: '1.26.4'
     
   #     - name: Install dependencies
   #       run: go mod download
@@ -390,7 +390,7 @@ jobs:
   #     - name: Set up Go
   #       uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
   #       with:
-  #         go-version: '1.26.3'
+  #         go-version: '1.26.4'
     
   #     - name: Install dependencies
   #       run: go mod download
@@ -426,7 +426,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
-        go-version: '1.26.3'
+        go-version: '1.26.4'
 
     - name: Install dependencies
       run: go mod download
@@ -515,7 +515,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
-        go-version: '1.26.3'
+        go-version: '1.26.4'
 
     - name: Install dependencies
       run: go mod download
@@ -570,7 +570,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
-        go-version: '1.26.3'
+        go-version: '1.26.4'
 
     - name: Install dependencies
       run: go mod download
@@ -782,7 +782,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
-        go-version: '1.26.3'
+        go-version: '1.26.4'
 
     - name: Install dependencies
       run: go mod download
