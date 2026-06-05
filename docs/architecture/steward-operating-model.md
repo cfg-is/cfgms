@@ -122,6 +122,15 @@ Controller-side logging captures both the drift event and convergence result reg
 
 Modules are the code packages that manage resources. Each resource block in the cfg references a module by name and provides module-specific configuration.
 
+### Stdlib Modules
+
+The six stdlib modules (`file`, `service`, `package`, `script`, `firewall`, `patch`) ship as out-of-process gRPC binaries bundled in the steward installer. They use the same module contract as third-party modules — publisher-signed bundles, verified by the runtime at load time, invoked via `CFGMS_MODULE_SOCKET`. There are no compiled-in modules; stdlib is governance (installer payload), not implementation.
+
+Installer bundling:
+- **Linux** (tar.gz): binaries at `usr/local/lib/cfgms/modules/cfgms-module-<name>`, copied by `install.sh`
+- **macOS** (.pkg): binaries at `/usr/local/lib/cfgms/modules/cfgms-module-<name>`, included in the pkg payload
+- **Windows** (MSI): binaries at `C:\Program Files\CFGMS\modules\cfgms-module-<name>.exe`, included via WiX components
+
 ### Module Trust Modes
 
 The steward verifies module bundle signatures according to the `module_trust.mode` field in `steward.cfg`:

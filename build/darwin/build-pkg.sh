@@ -119,6 +119,21 @@ mkdir -p "$SCRIPTS_DIR"
 cp "$BINARY_PATH" "$PAYLOAD_DIR/usr/local/bin/cfgms-steward"
 chmod 755 "$PAYLOAD_DIR/usr/local/bin/cfgms-steward"
 
+# Install stdlib module binaries into the payload tree.
+STDLIB_MODULES=(cfgms-module-file cfgms-module-service cfgms-module-package cfgms-module-script cfgms-module-firewall cfgms-module-patch)
+MODULES_PAYLOAD_DIR="$PAYLOAD_DIR/usr/local/lib/cfgms/modules"
+mkdir -p "$MODULES_PAYLOAD_DIR"
+for module_bin in "${STDLIB_MODULES[@]}"; do
+    src="$REPO_ROOT/bin/$module_bin-darwin-$ARCH"
+    if [[ -f "$src" ]]; then
+        cp "$src" "$MODULES_PAYLOAD_DIR/$module_bin"
+        chmod 755 "$MODULES_PAYLOAD_DIR/$module_bin"
+        echo "  Module: $MODULES_PAYLOAD_DIR/$module_bin"
+    else
+        echo "  Warning: stdlib module binary not found: $src (skipping)" >&2
+    fi
+done
+
 # Copy the postinstall script.
 cp "$SCRIPT_DIR/scripts/postinstall" "$SCRIPTS_DIR/postinstall"
 chmod 755 "$SCRIPTS_DIR/postinstall"

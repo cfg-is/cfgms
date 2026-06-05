@@ -124,6 +124,19 @@ else
     exit 1
 fi
 
+# ── Install stdlib module binaries ────────────────────────────────────────────
+
+STDLIB_MODULES=(cfgms-module-file cfgms-module-service cfgms-module-package cfgms-module-script cfgms-module-firewall cfgms-module-patch)
+MODULES_INSTALL_DIR="${INSTALL_PREFIX}/usr/local/lib/cfgms/modules"
+
+install -d "$MODULES_INSTALL_DIR"
+for module_bin in "${STDLIB_MODULES[@]}"; do
+    src="$SCRIPT_DIR/$module_bin"
+    if [[ -x "$src" ]]; then
+        install -m 755 "$src" "$MODULES_INSTALL_DIR/$module_bin"
+    fi
+done
+
 # ── Build and run install command ─────────────────────────────────────────────
 
 INSTALL_ARGS=(install --regtoken "$REGTOKEN")

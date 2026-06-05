@@ -134,6 +134,46 @@ if ($BinaryPath -eq "") {
     }
 }
 
+# ── Step 1b: Build stdlib module binaries ────────────────────────────────────
+
+Write-Host ""
+Write-Host "Building stdlib module binaries for windows/$Arch..." -ForegroundColor Yellow
+
+$StdlibModules = @("file", "service", "package", "script", "firewall", "patch")
+$ModulesDir = Join-Path $RepoRoot "bin" "modules-windows-$Arch"
+
+if (-not (Test-Path $ModulesDir)) {
+    New-Item -ItemType Directory -Path $ModulesDir | Out-Null
+}
+
+$env:GOOS        = "windows"
+$env:GOARCH      = $Arch
+$env:CGO_ENABLED = "0"
+
+Push-Location $RepoRoot
+try {
+    foreach ($module in $StdlibModules) {
+        $moduleBinPath = Join-Path $ModulesDir "cfgms-module-$module.exe"
+        $moduleArgs = @(
+            "build",
+            "-trimpath",
+            "-ldflags", "-s -w",
+            "-o", $moduleBinPath,
+            "./features/modules/$module/cmd"
+        )
+        & go @moduleArgs
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "go build failed for module $module (exit $LASTEXITCODE)"
+        }
+        Write-Host "  Module: $moduleBinPath" -ForegroundColor Green
+    }
+} finally {
+    Pop-Location
+    Remove-Item Env:GOOS        -ErrorAction SilentlyContinue
+    Remove-Item Env:GOARCH      -ErrorAction SilentlyContinue
+    Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
+}
+
 # ── Step 2: Ensure WiX 4 toolset is installed ────────────────────────────────
 
 Write-Host ""
@@ -179,6 +219,7 @@ $WixArgs = @(
     $WxsFile,
     "-d", "ProductVersion=$MsiVersion",
     "-d", "BinaryPath=$BinaryPath",
+    "-d", "ModulesDir=$ModulesDir",
     "-out", $OutputMsi
 )
 

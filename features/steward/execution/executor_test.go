@@ -53,12 +53,14 @@ func testDirConfig(path string) string {
 	parent := filepath.ToSlash(filepath.Dir(path))
 	if runtime.GOOS == "windows" {
 		return `{
+        "type": "directory",
         "state": "present",
         "allowed_base_path": "` + parent + `",
         "path": "` + filepath.ToSlash(path) + `"
       }`
 	}
 	return `{
+        "type": "directory",
         "allowed_base_path": "` + parent + `",
         "path": "` + filepath.ToSlash(path) + `",
         "permissions": 493

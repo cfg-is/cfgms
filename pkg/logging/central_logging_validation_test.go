@@ -8,6 +8,7 @@ package logging_test
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/modules"
-	"github.com/cfgis/cfgms/features/modules/directory"
 	"github.com/cfgis/cfgms/features/modules/file"
 	"github.com/cfgis/cfgms/features/modules/firewall"
 	package_module "github.com/cfgis/cfgms/features/modules/package"
@@ -118,7 +118,7 @@ func testModuleFactoryLoggerInjection(t *testing.T) {
 		moduleName string
 		newFunc    func() modules.Module
 	}{
-		{"directory", directory.New},
+		{"directory", file.New}, // directory merged into file module (type: directory)
 		{"file", file.New},
 		{"firewall", firewall.New},
 		{"package", package_module.New},
@@ -174,11 +174,10 @@ func testModuleFactoryLoggerInjection(t *testing.T) {
 // testAllBuiltinModulesSupported validates that all built-in modules support logging injection
 func testAllBuiltinModulesSupported(t *testing.T) {
 	builtinModules := map[string]func() modules.Module{
-		"directory": directory.New,
-		"file":      file.New,
-		"firewall":  firewall.New,
-		"package":   package_module.New,
-		"script":    script.New,
+		"file":     file.New,
+		"firewall": firewall.New,
+		"package":  package_module.New,
+		"script":   script.New,
 	}
 
 	for moduleName, newFunc := range builtinModules {
@@ -212,10 +211,10 @@ func testStructuredLoggingCompliance(t *testing.T) {
 	// Create a mock logger to capture log entries
 	mockLogger := &MockLogger{}
 
-	// Test with directory module (representative of migrated modules)
-	module := directory.New()
+	// Test with file module (directory type is now merged into file module)
+	module := file.New()
 	injectable, ok := module.(modules.LoggingInjectable)
-	require.True(t, ok, "directory module should support injection")
+	require.True(t, ok, "file module should support injection")
 
 	err := injectable.SetLogger(mockLogger)
 	require.NoError(t, err, "logger injection should succeed")
@@ -231,17 +230,19 @@ func testStructuredLoggingCompliance(t *testing.T) {
 	ctx = logging.WithSession(ctx, "test-session-456")
 	ctx = logging.WithOperation(ctx, "validation_test")
 
-	// Create test configuration
+	// Create test configuration — include allowed_base_path and type so the
+	// file module dispatches to setDirectory and reaches the logging code.
+	tmpBase := t.TempDir()
+	targetPath := filepath.Join(tmpBase, "cfgms-logging-test")
 	testConfig := &TestDirectoryConfig{
-		Path:        "/tmp/test-directory",
-		Permissions: 0755,
+		Path:            targetPath,
+		Permissions:     0755,
+		AllowedBasePath: tmpBase,
 	}
 
 	// Perform operation that should generate structured logs
-	err = module.Set(ctx, "test-resource-001", testConfig)
-	// Note: This may fail due to actual filesystem operations, but we're testing logging
-	// We don't require success, just that logging occurred
-	_ = err
+	err = module.Set(ctx, targetPath, testConfig)
+	require.NoError(t, err, "Set must succeed so the logging code path is exercised")
 
 	// Verify structured log entries were created
 	entries := mockLogger.GetEntries()
@@ -256,8 +257,9 @@ func testStructuredLoggingCompliance(t *testing.T) {
 
 		// Verify field values are correct
 		assert.Equal(t, "test-tenant-123", entry.Fields["tenant_id"], "tenant_id should match context")
-		assert.Equal(t, "test-resource-001", entry.Fields["resource_id"], "resource_id should match parameter")
-		assert.Contains(t, entry.Fields["operation"], "directory", "operation should reference module")
+		assert.Equal(t, targetPath, entry.Fields["resource_id"], "resource_id should match parameter")
+		// directory_set is the operation name emitted by the merged file module for directory ops
+		assert.Contains(t, entry.Fields["operation"], "directory", "operation should reference directory resource type")
 	}
 }
 
@@ -285,10 +287,11 @@ func testTenantIsolationValidation(t *testing.T) {
 			SigningPolicy: "none",
 		}
 
-		// Perform operation
+		// Perform operation — TestScriptConfig has no shell, so Set() will fail
+		// after logging "Starting script execution"; the tenant_id field is written
+		// before the failure, so log isolation can still be verified.
 		err = module.Set(ctx, "script-resource", scriptConfig)
-		// May fail due to execution, but logging should work
-		_ = err
+		assert.Error(t, err, "Set must fail: TestScriptConfig has no shell configured")
 	}
 
 	// Verify tenant isolation in log entries
@@ -343,9 +346,9 @@ func testCentralLoggingControllerVisibility(t *testing.T) {
 	// Simulate operations from each steward
 	for stewardID, moduleFactory := range factoryMap {
 		t.Run("steward_"+stewardID, func(t *testing.T) {
-			// Load and test directory module
-			module := directory.New()
-			injected, err := moduleFactory.InjectLogger(module, "directory")
+			// Load and test file module (directory type merged into file module)
+			module := file.New()
+			injected, err := moduleFactory.InjectLogger(module, "file")
 			assert.NoError(t, err, "injection should succeed")
 			assert.True(t, injected, "logger should be injected")
 
@@ -658,14 +661,17 @@ func (m *MockLogger) extractContextFields(ctx context.Context, fields map[string
 // Test configuration implementations
 
 type TestDirectoryConfig struct {
-	Path        string
-	Permissions int
+	Path            string
+	Permissions     int
+	AllowedBasePath string
 }
 
 func (c *TestDirectoryConfig) AsMap() map[string]interface{} {
 	return map[string]interface{}{
-		"path":        c.Path,
-		"permissions": c.Permissions,
+		"type":              "directory",
+		"path":              c.Path,
+		"permissions":       c.Permissions,
+		"allowed_base_path": c.AllowedBasePath,
 	}
 }
 

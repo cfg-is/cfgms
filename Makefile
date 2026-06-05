@@ -102,10 +102,10 @@ proto-gen-modules: check-proto-grpc-tools
 
 # Build all binaries
 .PHONY: build
-build: fix-git-bare build-steward build-controller build-cli build-cert-manager
+build: fix-git-bare build-steward build-controller build-cli build-cert-manager build-stdlib-modules
 
 # Build individual binaries
-.PHONY: build-steward build-controller build-cli build-cert-manager
+.PHONY: build-steward build-controller build-cli build-cert-manager build-stdlib-modules
 build-steward:
 	go build ${STEWARD_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
 
@@ -117,6 +117,17 @@ build-cli:
 
 build-cert-manager:
 	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
+
+# Stdlib module binaries (out-of-process gRPC binaries bundled in the steward installer)
+STDLIB_MODULES := file service package script firewall patch
+
+.PHONY: build-stdlib-modules
+build-stdlib-modules:
+	@echo "Building stdlib module binaries..."
+	@for module in $(STDLIB_MODULES); do \
+		echo "  Building cfgms-module-$$module..."; \
+		go build ${GO_BUILD_FLAGS} -o bin/cfgms-module-$$module ./features/modules/$$module/cmd || exit 1; \
+	done
 
 # Cross-platform build targets
 # Supported platforms: Linux, Windows, macOS (AMD64 and ARM64)
@@ -349,10 +360,10 @@ test-watch:
 # SMART TESTING SYSTEM
 
 # Core modules for smoke testing (always tested)
-CORE_MODULES := file directory script
+CORE_MODULES := file script
 
 # All modules for change detection
-ALL_MODULES := file directory script firewall package patch m365 activedirectory network_activedirectory
+ALL_MODULES := file script firewall package patch m365 activedirectory network_activedirectory
 
 # Detect changed modules using git diff
 CHANGED_MODULES = $(shell \

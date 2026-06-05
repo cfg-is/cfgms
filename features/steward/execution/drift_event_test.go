@@ -220,6 +220,7 @@ func TestExecuteResource_Configurable_DirectoryModule_EndToEnd(t *testing.T) {
 	executor := newTestExecutor(t, errorConfig)
 
 	cfgMap := map[string]interface{}{
+		"type":              "directory",
 		"allowed_base_path": base,
 		"path":              targetPath,
 	}

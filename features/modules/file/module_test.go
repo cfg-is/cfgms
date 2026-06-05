@@ -16,6 +16,36 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 )
 
+// createDirConfigFromYAML creates a FileConfig for type: directory from YAML string.
+func createDirConfigFromYAML(yamlData string) modules.ConfigState {
+	// Parse as FileConfig since directory is now a type variant of file.
+	var config FileConfig
+	if err := yaml.Unmarshal([]byte(yamlData), &config); err != nil {
+		return nil
+	}
+	return &config
+}
+
+// testDirConfigYAML returns a FileConfig YAML for type: directory appropriate for the platform.
+func testDirConfigYAML(basePath, path, owner, group, extraFields string) string {
+	cfg := "type: directory"
+	cfg += "\nallowed_base_path: " + basePath
+	cfg += "\npath: " + path
+	if platformSupportsPermissions() {
+		cfg += "\npermissions: 493" // 0755 decimal
+	}
+	if owner != "" {
+		cfg += "\nowner: " + owner
+	}
+	if group != "" {
+		cfg += "\ngroup: " + group
+	}
+	if extraFields != "" {
+		cfg += "\n" + extraFields
+	}
+	return cfg
+}
+
 // createConfigFromYAML creates a FileConfig from YAML string
 func createConfigFromYAML(yamlData string) modules.ConfigState {
 	var config FileConfig
@@ -482,4 +512,306 @@ func TestFileModule_Security(t *testing.T) {
 			t.Errorf("AllowedBasePath mismatch: got %q, want %q", fileState.AllowedBasePath, tempDir)
 		}
 	})
+}
+
+// ─── type: directory tests ────────────────────────────────────────────────────
+
+// TestFileModule_TypeDirectory_CreateWithPermissions verifies that a directory is created
+// with the correct ownership and permissions on Linux (required AC test).
+func TestFileModule_TypeDirectory_CreateWithPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permissions not applicable on Windows")
+	}
+	if !platformSupportsPermissions() {
+		t.Skip("platform does not support permission bits")
+	}
+
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "managed-dir")
+
+	currentUser, err := user.Current()
+	if err != nil {
+		t.Fatalf("user.Current() failed: %v", err)
+	}
+	currentGroup, err := user.LookupGroupId(currentUser.Gid)
+	if err != nil {
+		t.Fatalf("LookupGroupId failed: %v", err)
+	}
+
+	m := New()
+	cfg := createDirConfigFromYAML(testDirConfigYAML(base, targetPath, currentUser.Username, currentGroup.Name, ""))
+	if err := m.Set(context.Background(), targetPath, cfg); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("directory not created: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal("expected a directory, got file")
+	}
+	if got := info.Mode().Perm(); got != 0755 {
+		t.Errorf("permissions = %o, want 0755", got)
+	}
+}
+
+// TestFileModule_TypeDirectory_ValidEndToEnd verifies a full create+get cycle.
+func TestFileModule_TypeDirectory_ValidEndToEnd(t *testing.T) {
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "mydir")
+
+	m := New()
+	cfg := createDirConfigFromYAML(testDirConfigYAML(base, targetPath, "", "", ""))
+	if err := m.Set(context.Background(), targetPath, cfg); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+
+	got, err := m.Get(context.Background(), targetPath)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("Get() returned nil")
+	}
+
+	gotMap := got.AsMap()
+	if gotMap["type"] != "directory" {
+		t.Errorf("Get() type = %v, want \"directory\"", gotMap["type"])
+	}
+	if gotMap["state"] != "present" {
+		t.Errorf("Get() state = %v, want \"present\"", gotMap["state"])
+	}
+}
+
+// TestFileModule_TypeDirectory_Get_EmitsModeAlias verifies Get()/AsMap() emits the
+// "mode" octal-string alias alongside "permissions" for type: directory.
+func TestFileModule_TypeDirectory_Get_EmitsModeAlias(t *testing.T) {
+	if !platformSupportsPermissions() {
+		t.Skip("Unix permission bits not applicable on this platform")
+	}
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "managed-dir")
+	m := New()
+
+	cfg := createDirConfigFromYAML(testDirConfigYAML(base, targetPath, "", "", ""))
+	if err := m.Set(context.Background(), targetPath, cfg); err != nil {
+		t.Fatalf("Set() failed: %v", err)
+	}
+
+	state, err := m.Get(context.Background(), targetPath)
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	gotMap := state.AsMap()
+	if gotMap["mode"] != "0755" {
+		t.Errorf("AsMap()[mode] = %v (%T), want \"0755\"", gotMap["mode"], gotMap["mode"])
+	}
+	if gotMap["permissions"] != 0755 {
+		t.Errorf("AsMap()[permissions] = %v, want 493 (0755)", gotMap["permissions"])
+	}
+}
+
+// TestFileModule_TypeDirectory_Get_AbsentOmitsModeAlias verifies the absent case
+// doesn't include "mode" in the returned map.
+func TestFileModule_TypeDirectory_Get_AbsentOmitsModeAlias(t *testing.T) {
+	base := t.TempDir()
+	m := New()
+	missing := filepath.Join(base, "missing-dir")
+
+	configurable, ok := m.(modules.Configurable)
+	if !ok {
+		t.Fatal("file module must implement modules.Configurable")
+	}
+	if err := configurable.Configure(createConfigFromYAML("allowed_base_path: " + base)); err != nil {
+		t.Fatalf("Configure() failed: %v", err)
+	}
+
+	state, err := m.Get(context.Background(), missing)
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	gotMap := state.AsMap()
+	if gotMap["state"] != "absent" {
+		t.Fatalf("Get() state = %v, want \"absent\"", gotMap["state"])
+	}
+	if _, ok := gotMap["mode"]; ok {
+		t.Errorf("AsMap() for absent state should omit \"mode\", got %v", gotMap["mode"])
+	}
+}
+
+// TestFileModule_TypeDirectory_StateAbsent verifies Set() with state: absent returns ErrNotImplemented.
+func TestFileModule_TypeDirectory_StateAbsent(t *testing.T) {
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "should-not-be-created")
+
+	m := New()
+	cfg := createDirConfigFromYAML("type: directory\nallowed_base_path: " + base + "\npath: " + targetPath + "\nstate: absent")
+	err := m.Set(context.Background(), targetPath, cfg)
+	if err == nil {
+		t.Fatal("Set() with state: absent must return a non-nil error")
+	}
+	if !errors.Is(err, modules.ErrNotImplemented) {
+		t.Errorf("Set() with state: absent error = %v, want errors.Is(err, modules.ErrNotImplemented) true", err)
+	}
+
+	if _, statErr := os.Stat(targetPath); !os.IsNotExist(statErr) {
+		t.Error("Set() with state: absent must not create any directory")
+	}
+}
+
+// TestFileModule_TypeDirectory_PathTraversal verifies path traversal is rejected.
+func TestFileModule_TypeDirectory_PathTraversal(t *testing.T) {
+	base := t.TempDir()
+	traversalPath := filepath.Join(base, "subdir", "..", "..", "escape")
+
+	m := New()
+	cfg := createDirConfigFromYAML(testDirConfigYAML(base, traversalPath, "", "", ""))
+	err := m.Set(context.Background(), traversalPath, cfg)
+	if err == nil {
+		t.Error("Set() with path traversal should return an error")
+	}
+}
+
+// TestFileModule_TypeDirectory_RecursiveRequired verifies that creating a directory
+// with non-existent parents and recursive: false returns ErrRecursiveRequired.
+func TestFileModule_TypeDirectory_RecursiveRequired(t *testing.T) {
+	base := t.TempDir()
+	nestedPath := filepath.Join(base, "nonexistent", "dir")
+
+	m := New()
+	cfg := createDirConfigFromYAML(testDirConfigYAML(base, nestedPath, "", "", "recursive: false"))
+	err := m.Set(context.Background(), nestedPath, cfg)
+	if err == nil {
+		t.Error("Set() with non-existent parent and recursive: false should fail")
+	}
+}
+
+// TestFileModule_TypeDirectory_RecursiveTrue verifies that recursive: true creates
+// intermediate directories.
+func TestFileModule_TypeDirectory_RecursiveTrue(t *testing.T) {
+	base := t.TempDir()
+	nestedPath := filepath.Join(base, "nonexistent", "dir")
+
+	m := New()
+	cfg := createDirConfigFromYAML(testDirConfigYAML(base, nestedPath, "", "", "recursive: true"))
+	if err := m.Set(context.Background(), nestedPath, cfg); err != nil {
+		t.Fatalf("Set() with recursive: true failed: %v", err)
+	}
+
+	if _, err := os.Stat(nestedPath); err != nil {
+		t.Errorf("directory not created: %v", err)
+	}
+}
+
+// TestFileModule_TypeDirectory_PathIsFile verifies that targeting an existing regular file
+// returns ErrNotADirectory.
+func TestFileModule_TypeDirectory_PathIsFile(t *testing.T) {
+	base := t.TempDir()
+	filePath := filepath.Join(base, "testfile")
+	if err := os.WriteFile(filePath, []byte("test"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	m := New()
+	cfg := createDirConfigFromYAML(testDirConfigYAML(base, filePath, "", "", ""))
+	err := m.Set(context.Background(), filePath, cfg)
+	if err != ErrNotADirectory {
+		t.Errorf("Set() targeting a file = %v, want ErrNotADirectory", err)
+	}
+}
+
+// TestFileModule_TypeDirectory_Ownership verifies ownership is set when using type: directory.
+// Runs on Unix only since Windows chown behavior differs.
+func TestFileModule_TypeDirectory_Ownership(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ownership via os.Chown not supported on Windows")
+	}
+
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "owned-dir")
+
+	currentUser, err := user.Current()
+	if err != nil {
+		t.Fatalf("user.Current() failed: %v", err)
+	}
+	currentGroup, err := user.LookupGroupId(currentUser.Gid)
+	if err != nil {
+		t.Fatalf("LookupGroupId failed: %v", err)
+	}
+
+	m := New()
+	cfg := createDirConfigFromYAML(testDirConfigYAML(base, targetPath, currentUser.Username, currentGroup.Name, ""))
+	if err := m.Set(context.Background(), targetPath, cfg); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+
+	if _, err := os.Stat(targetPath); err != nil {
+		t.Fatalf("directory not created: %v", err)
+	}
+}
+
+// TestFileModule_TypeDirectory_PermissionsRejectedOnWindows verifies Unix permissions
+// are rejected on Windows.
+func TestFileModule_TypeDirectory_PermissionsRejectedOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only test")
+	}
+
+	base := t.TempDir()
+	dirPath := filepath.Join(base, "testdir")
+	m := New()
+
+	cfg := createDirConfigFromYAML("type: directory\nallowed_base_path: " + base + "\npath: " + dirPath + "\npermissions: 493")
+	err := m.Set(context.Background(), dirPath, cfg)
+	if err == nil {
+		t.Error("Set() with Unix permissions on Windows should fail")
+	}
+}
+
+// TestFileModule_TypeDirectory_InvalidOwner verifies that an invalid owner returns an error.
+func TestFileModule_TypeDirectory_InvalidOwner(t *testing.T) {
+	base := t.TempDir()
+	dirPath := filepath.Join(base, "testdir")
+	m := New()
+
+	cfg := createDirConfigFromYAML(testDirConfigYAML(base, dirPath, "nonexistentuser99999", "", ""))
+	err := m.Set(context.Background(), dirPath, cfg)
+	if err == nil {
+		t.Error("Set() with invalid owner should fail")
+	}
+}
+
+// TestFileModule_TypeDirectory_InvalidGroup verifies that an invalid group returns an error.
+func TestFileModule_TypeDirectory_InvalidGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("group lookup differs on Windows")
+	}
+	base := t.TempDir()
+	dirPath := filepath.Join(base, "testdir")
+	m := New()
+
+	cfg := createDirConfigFromYAML(testDirConfigYAML(base, dirPath, "", "nonexistentgroup99999", ""))
+	err := m.Set(context.Background(), dirPath, cfg)
+	if err == nil {
+		t.Error("Set() with invalid group should fail")
+	}
+}
+
+// TestFileModule_TypeSymlink_ReturnsNotImplemented verifies that type: symlink returns
+// ErrNotImplemented (v1 stub).
+func TestFileModule_TypeSymlink_ReturnsNotImplemented(t *testing.T) {
+	base := t.TempDir()
+	targetPath := filepath.Join(base, "mylink")
+	m := New()
+
+	cfg := &FileConfig{
+		Type:            "symlink",
+		State:           "present",
+		AllowedBasePath: base,
+	}
+	err := m.Set(context.Background(), targetPath, cfg)
+	if !errors.Is(err, modules.ErrNotImplemented) {
+		t.Errorf("Set() with type: symlink = %v, want ErrNotImplemented", err)
+	}
 }
