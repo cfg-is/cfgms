@@ -49,9 +49,15 @@ func (r *execPSRunner) RunPS(scriptBlock string, args []string, stdinData string
 // User-supplied values in args appear in cmd.Args as separate elements after the
 // script block. Sensitive values (passwords) must NOT be in args — pass via
 // cmd.Stdin in the caller (or stdinData in execPSRunner.RunPS).
+//
+// The script block is wrapped in `& { ... }` because powershell.exe -Command
+// does NOT bind trailing CLI arguments to $args by default — it concatenates
+// them onto the command string. Invoking via the call operator (`&`) on a
+// script-block literal does bind $args, which is the contract every caller
+// in this package relies on.
 func buildPSCmd(scriptBlock string, args []string) *exec.Cmd {
 	exeArgs := make([]string, 0, 4+len(args))
-	exeArgs = append(exeArgs, "-NonInteractive", "-NoProfile", "-Command", scriptBlock)
+	exeArgs = append(exeArgs, "-NonInteractive", "-NoProfile", "-Command", "& { "+scriptBlock+" }")
 	exeArgs = append(exeArgs, args...)
 	return exec.Command("powershell.exe", exeArgs...) //#nosec G204 -- scriptBlock is a hardcoded template; user values are in args[]
 }

@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +78,14 @@ func TestVerifyCACertFingerprintInvalidPEM(t *testing.T) {
 }
 
 func TestWriteCACertMode(t *testing.T) {
+	// Windows does not honor Unix mode bits in os.WriteFile — Go's runtime
+	// reports 0666 for any writable file regardless of the mode argument.
+	// The CA cert is public material; mode-bit enforcement is a Unix-only
+	// concern. TestWriteCACertContent covers the platform-agnostic invariant.
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits are not enforced on Windows file writes")
+	}
+
 	dir := t.TempDir()
 	destPath := filepath.Join(dir, "etc", "cfgms", "controller-ca.crt")
 	certPEM, _ := generateTestCACert(t)

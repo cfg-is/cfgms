@@ -67,8 +67,15 @@ func TestWindowsInstallFingerprintMismatch(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "cert file must not exist after fingerprint mismatch")
 }
 
-// TestWindowsInstallCACertWritten verifies that the CA cert is written to the prefixed
-// platform path with mode 0644 when a correct fingerprint is provided.
+// TestWindowsInstallCACertWritten verifies that the CA cert is written to the
+// prefixed platform path with the expected on-disk shape after a successful
+// fingerprint verification.
+//
+// On Windows the Go runtime reports a writable file's mode as 0666 regardless
+// of the mode passed to os.WriteFile — Unix mode bits are not enforced. The
+// CA cert is public material (see writeCACert's #nosec G306 comment), so the
+// security-relevant invariants are: the file exists, sits inside the
+// configured prefix, and is readable.
 func TestWindowsInstallCACertWritten(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CFGMS_INSTALL_PREFIX", dir)
@@ -82,7 +89,11 @@ func TestWindowsInstallCACertWritten(t *testing.T) {
 
 	info, err := os.Stat(destPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0644), info.Mode().Perm(), "CA cert must be written with mode 0644")
+	assert.False(t, info.IsDir(), "destination must be a regular file")
+	assert.Greater(t, info.Size(), int64(0), "CA cert file must be non-empty")
+	written, err := os.ReadFile(destPath) // #nosec G304 -- test reads a path it just wrote
+	require.NoError(t, err)
+	assert.Equal(t, certPEM, string(written), "on-disk content must match the input PEM")
 }
 
 func TestWindowsManagerUninstallRequiresElevation(t *testing.T) {
@@ -273,6 +284,14 @@ func TestInstallHyperV_SecretsReadableByServiceAccount(t *testing.T) {
 // TestInstallHyperV_LogsAreSanitized verifies that a winrmUser value containing
 // \n and \r does not produce log forgery when processed through
 // logging.SanitizeLogValue, as required for all InstallHyperV log statements.
+//
+// The sanitizer's contract is to REPLACE every control character (including
+// CR/LF) with an underscore — not to strip content after the first control
+// character. That contract is sufficient to prevent CWE-117 log forgery
+// because the injected payload can no longer end the host log line; it
+// becomes visible single-line user-controlled input. The substring after the
+// original CR/LF may still appear in the sanitized string — that is the
+// expected and intended behavior.
 func TestInstallHyperV_LogsAreSanitized(t *testing.T) {
 	craftedUsername := "legit-user\r\nINFO: fake-log-entry injected"
 	sanitized := logging.SanitizeLogValue(craftedUsername)
@@ -281,16 +300,16 @@ func TestInstallHyperV_LogsAreSanitized(t *testing.T) {
 		"sanitized value must not contain carriage returns")
 	assert.NotContains(t, sanitized, "\n",
 		"sanitized value must not contain newlines")
-	assert.NotContains(t, sanitized, "fake-log-entry",
-		"log-injected content after CR/LF must be stripped")
 
 	// Verify InstallHyperV log pattern: fmt.Printf("... %s ...", logging.SanitizeLogValue(winrmUser))
-	// does not propagate the injection.
+	// does not propagate the newline injection — the resulting log line must
+	// remain a single line so the injected payload cannot impersonate a
+	// separate log record.
 	logLine := "Creating local service account " + logging.SanitizeLogValue(craftedUsername)
+	assert.NotContains(t, logLine, "\r",
+		"log line using SanitizeLogValue must not contain carriage returns")
 	assert.NotContains(t, logLine, "\n",
 		"log line using SanitizeLogValue must not contain newlines")
-	assert.NotContains(t, logLine, "fake-log-entry",
-		"log line using SanitizeLogValue must not contain injected content")
 }
 
 // TestInstallHyperV_HyperVInstallerInterface verifies that *windowsManager satisfies

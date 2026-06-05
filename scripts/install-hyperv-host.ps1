@@ -214,9 +214,12 @@ if ($CACertPath -ne "") {
 if ($CAFingerprint -ne "") {
     $InstallArgs += @("--fingerprint", ($CAFingerprint.ToLowerInvariant() -replace ":", ""))
 }
-if ($ControllerURL -ne "") {
-    $InstallArgs += @("--controller-url", $ControllerURL)
-}
+
+# Note: -ControllerURL is NOT passed to `cfgms-steward install`. The controller
+# endpoint is baked into the steward binary at build time via
+# `-ldflags "-X main.ControllerURL=https://..."` and is read at service start.
+# The script-level -ControllerURL parameter is kept for operator-facing clarity
+# (it documents which deployment the operator believes they are wiring up).
 
 $bstr  = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($WinRMPass)
 $plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)

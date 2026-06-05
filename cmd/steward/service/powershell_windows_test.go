@@ -90,9 +90,12 @@ func TestInstallHyperVPSHelper_InjectionSafe(t *testing.T) {
 
 			scriptBlockInCmd := cmd.Args[4]
 
-			// Verify the script block is unmodified.
-			assert.Equal(t, tc.scriptBlock, scriptBlockInCmd,
-				"script block must not be modified")
+			// Verify the user-supplied script content is preserved inside the
+			// `& { ... }` wrapper. The wrapper is what makes PowerShell bind
+			// $args from trailing CLI arguments; the wrapped content itself
+			// MUST equal the input scriptBlock byte-for-byte.
+			assert.Equal(t, "& { "+tc.scriptBlock+" }", scriptBlockInCmd,
+				"script block must be wrapped in `& { ... }` with content unchanged")
 
 			// Verify each user-supplied arg is a separate element (not in script block).
 			for _, arg := range tc.args {
@@ -125,6 +128,11 @@ func TestInstallHyperVPSHelper_InjectionSafe(t *testing.T) {
 
 // TestBuildPSCmd_StructureIsCorrect verifies the fixed argument positions
 // that TestInstallHyperV_PassNotInArgv relies on.
+//
+// cmd.Args[4] wraps the user script in `& { ... }` so that powershell.exe
+// invokes it as a script block and binds the trailing args to $args.
+// Without the wrapper, `-Command "<script>" arg1` appends arg1 textually to
+// the script string and $args stays empty.
 func TestBuildPSCmd_StructureIsCorrect(t *testing.T) {
 	cmd := buildPSCmd("Write-Output 'hello'", []string{"arg1", "arg2"})
 
@@ -132,8 +140,49 @@ func TestBuildPSCmd_StructureIsCorrect(t *testing.T) {
 	require.Equal(t, "-NonInteractive", cmd.Args[1])
 	require.Equal(t, "-NoProfile", cmd.Args[2])
 	require.Equal(t, "-Command", cmd.Args[3])
-	require.Equal(t, "Write-Output 'hello'", cmd.Args[4])
+	require.Equal(t, "& { Write-Output 'hello' }", cmd.Args[4])
 	require.Equal(t, "arg1", cmd.Args[5])
 	require.Equal(t, "arg2", cmd.Args[6])
 	assert.Len(t, cmd.Args, 7)
+}
+
+// TestExecPSRunner_ArgsBoundToArgsArray verifies that values passed in args[]
+// are reachable as $args[N] inside the executing script block when invoked
+// by the real powershell.exe.
+//
+// Regression test: prior to wrapping the script block in `& { ... }`, calling
+// `powershell.exe -Command "<script>" arg0` appended arg0 textually after the
+// script content and $args[0] stayed undefined — breaking every Hyper-V install
+// helper that relied on $args. The structural-only test passed because it
+// inspected cmd.Args layout without ever launching PowerShell.
+func TestExecPSRunner_ArgsBoundToArgsArray(t *testing.T) {
+	runner := &execPSRunner{}
+	out, err := runner.RunPS(`Write-Output $args[0]`, []string{"hello-world"}, "")
+	require.NoError(t, err)
+	assert.Equal(t, "hello-world", out)
+}
+
+// TestExecPSRunner_ArgsBoundForMultiStatementScript ensures that $args is
+// bound for every reference site in a multi-line script — mirrors the shape
+// of generateHyperVCert in hyperv_windows.go where $args[0] is read at the
+// top and its derivative is emitted at the bottom of a multi-line block.
+func TestExecPSRunner_ArgsBoundForMultiStatementScript(t *testing.T) {
+	script := `$x = $args[0]
+$y = $args[1]
+Write-Output "$x|$y"`
+	runner := &execPSRunner{}
+	out, err := runner.RunPS(script, []string{"first", "second"}, "")
+	require.NoError(t, err)
+	assert.Equal(t, "first|second", out)
+}
+
+// TestExecPSRunner_StdinDeliveredToScript verifies that stdinData is readable
+// from the executing script block via [Console]::In.ReadToEnd(). This is the
+// path the WinRM service-account password takes — argv stays clean, the
+// secret lives only on stdin.
+func TestExecPSRunner_StdinDeliveredToScript(t *testing.T) {
+	runner := &execPSRunner{}
+	out, err := runner.RunPS(`[Console]::In.ReadToEnd()`, nil, "piped-stdin-data")
+	require.NoError(t, err)
+	assert.Equal(t, "piped-stdin-data", out)
 }
