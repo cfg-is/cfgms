@@ -17,4 +17,5 @@ func TestNullModuleFactory_CreateModuleInstance_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, module)
 	assert.Contains(t, err.Error(), moduleName)
+	assert.Contains(t, err.Error(), "WorkflowModuleClient")
 }

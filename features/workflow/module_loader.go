@@ -6,7 +6,13 @@ import (
 	"fmt"
 
 	"github.com/cfgis/cfgms/features/modules"
+	contractpkg "github.com/cfgis/cfgms/pkg/modules/contract"
 )
+
+// workflowModuleClient is a local alias for the gRPC contract type that the
+// controller workflow engine expects.  It anchors this file's dependency on
+// pkg/modules/contract so the import is compile-checked rather than a bare string.
+type workflowModuleClient = contractpkg.WorkflowModuleClient
 
 // ModuleLoader creates module instances by name for use by the workflow engine.
 // Placing this interface here (rather than in features/modules/) keeps it
@@ -25,8 +31,12 @@ func NewNullModuleFactory() ModuleLoader {
 	return &NullModuleFactory{}
 }
 
-// CreateModuleInstance always returns an error documenting that the controller
-// workflow engine does not load steward modules.
+// CreateModuleInstance always returns an error: the controller workflow engine
+// uses workflowModuleClient (WorkflowModuleClient) and must not load steward-kind
+// modules.
 func (n *NullModuleFactory) CreateModuleInstance(moduleName string) (modules.Module, error) {
-	return nil, fmt.Errorf("controller workflow engine does not load steward modules: %s", moduleName)
+	return nil, fmt.Errorf("controller workflow engine uses WorkflowModuleClient; got steward-kind module: %s", moduleName)
 }
+
+// Ensure workflowModuleClient alias is referenced so the compiler sees it as used.
+var _ workflowModuleClient
