@@ -11,6 +11,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// createBundleLayout creates a valid bundle directory layout under modulePath:
+// module.yaml + a linux-amd64/ subdirectory with a placeholder binary.
+func createBundleLayout(t *testing.T, modulePath string, moduleYAML string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(modulePath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(modulePath, "module.yaml"), []byte(moduleYAML), 0644))
+	archDir := filepath.Join(modulePath, "linux-amd64")
+	require.NoError(t, os.MkdirAll(archDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(archDir, "module"), []byte("ELF"), 0755))
+}
+
 func TestDiscoverModules(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -23,18 +34,13 @@ func TestDiscoverModules(t *testing.T) {
 			setupFunc: func(t *testing.T) ([]string, func()) {
 				tempDir := t.TempDir()
 				modulePath := filepath.Join(tempDir, "test-module")
-				require.NoError(t, os.MkdirAll(modulePath, 0755))
-
-				// Create module.yaml
 				moduleYAML := `name: test-module
 version: 1.0.0
 description: Test module
 capabilities:
   - file-management
 `
-				require.NoError(t, os.WriteFile(filepath.Join(modulePath, "module.yaml"), []byte(moduleYAML), 0644))
-				require.NoError(t, os.WriteFile(filepath.Join(modulePath, "module.go"), []byte("package testmodule"), 0644))
-
+				createBundleLayout(t, modulePath, moduleYAML)
 				return []string{tempDir}, func() {}
 			},
 			wantModules: []string{"test-module"},
@@ -53,26 +59,14 @@ capabilities:
 			setupFunc: func(t *testing.T) ([]string, func()) {
 				tempDir := t.TempDir()
 
-				// Create first module
-				module1Path := filepath.Join(tempDir, "module1")
-				require.NoError(t, os.MkdirAll(module1Path, 0755))
-				module1YAML := `name: module1
+				createBundleLayout(t, filepath.Join(tempDir, "module1"), `name: module1
 version: 1.0.0
 description: First module
-`
-				require.NoError(t, os.WriteFile(filepath.Join(module1Path, "module.yaml"), []byte(module1YAML), 0644))
-				require.NoError(t, os.WriteFile(filepath.Join(module1Path, "module.go"), []byte("package module1"), 0644))
-
-				// Create second module
-				module2Path := filepath.Join(tempDir, "module2")
-				require.NoError(t, os.MkdirAll(module2Path, 0755))
-				module2YAML := `name: module2
+`)
+				createBundleLayout(t, filepath.Join(tempDir, "module2"), `name: module2
 version: 2.0.0
 description: Second module
-`
-				require.NoError(t, os.WriteFile(filepath.Join(module2Path, "module.yaml"), []byte(module2YAML), 0644))
-				require.NoError(t, os.WriteFile(filepath.Join(module2Path, "module.go"), []byte("package module2"), 0644))
-
+`)
 				return []string{tempDir}, func() {}
 			},
 			wantModules: []string{"module1", "module2"},
@@ -177,11 +171,25 @@ func TestValidateModuleStructure(t *testing.T) {
 		wantErr   bool
 	}{
 		{
-			name: "valid module structure",
+			name: "valid bundle structure with os-arch subdir",
 			setupFunc: func(t *testing.T) string {
 				tempDir := t.TempDir()
 				require.NoError(t, os.WriteFile(filepath.Join(tempDir, "module.yaml"), []byte("name: test"), 0644))
-				require.NoError(t, os.WriteFile(filepath.Join(tempDir, "module.go"), []byte("package test"), 0644))
+				archDir := filepath.Join(tempDir, "linux-amd64")
+				require.NoError(t, os.MkdirAll(archDir, 0755))
+				require.NoError(t, os.WriteFile(filepath.Join(archDir, "module"), []byte("ELF"), 0755))
+				return tempDir
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid bundle structure with windows binary",
+			setupFunc: func(t *testing.T) string {
+				tempDir := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(tempDir, "module.yaml"), []byte("name: test"), 0644))
+				archDir := filepath.Join(tempDir, "windows-amd64")
+				require.NoError(t, os.MkdirAll(archDir, 0755))
+				require.NoError(t, os.WriteFile(filepath.Join(archDir, "module.exe"), []byte("MZ"), 0755))
 				return tempDir
 			},
 			wantErr: false,
@@ -190,16 +198,28 @@ func TestValidateModuleStructure(t *testing.T) {
 			name: "missing module.yaml",
 			setupFunc: func(t *testing.T) string {
 				tempDir := t.TempDir()
-				require.NoError(t, os.WriteFile(filepath.Join(tempDir, "module.go"), []byte("package test"), 0644))
+				archDir := filepath.Join(tempDir, "linux-amd64")
+				require.NoError(t, os.MkdirAll(archDir, 0755))
+				require.NoError(t, os.WriteFile(filepath.Join(archDir, "module"), []byte("ELF"), 0755))
 				return tempDir
 			},
 			wantErr: true,
 		},
 		{
-			name: "missing go files",
+			name: "module.yaml present but no os-arch subdir",
 			setupFunc: func(t *testing.T) string {
 				tempDir := t.TempDir()
 				require.NoError(t, os.WriteFile(filepath.Join(tempDir, "module.yaml"), []byte("name: test"), 0644))
+				return tempDir
+			},
+			wantErr: true,
+		},
+		{
+			name: "os-arch subdir exists but is empty",
+			setupFunc: func(t *testing.T) string {
+				tempDir := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(tempDir, "module.yaml"), []byte("name: test"), 0644))
+				require.NoError(t, os.MkdirAll(filepath.Join(tempDir, "linux-amd64"), 0755))
 				return tempDir
 			},
 			wantErr: true,
