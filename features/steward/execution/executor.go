@@ -20,6 +20,7 @@ import (
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // ExecutorConfig holds configuration for creating an Executor.
@@ -46,6 +47,13 @@ type ExecutorConfig struct {
 	// Defaults to DriftModeApply (current behavior) when not set.
 	// Thread from controller-delivered cfg via SetDriftMode; never from local files.
 	DriftMode config.DriftMode
+
+	// SecretStore is the steward's secret store. When non-nil, NewExecutor injects
+	// it into the default factory it creates so that modules implementing
+	// SecretStoreInjectable (e.g. hyperv) receive the store before Configure runs.
+	// Ignored when Factory is supplied — callers wiring their own factory are
+	// responsible for injecting the secret store themselves.
+	SecretStore secretsif.SecretStore
 }
 
 // Executor applies configurations using the unified Get→Compare→Set→Verify workflow.
@@ -81,6 +89,14 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 		// Empty registry — all 7 built-in modules are loaded on demand by the factory
 		f = factory.New(discovery.ModuleRegistry{}, defaultErrCfg, cfg.Logger)
 		errCfg = defaultErrCfg
+		// Wire the secret store into the auto-created factory so modules that
+		// implement SecretStoreInjectable (e.g. hyperv) receive it before
+		// Configure runs. Without this, controller-connected stewards see
+		// `secret store must be injected before Configure` on every secret-
+		// using resource.
+		if cfg.SecretStore != nil {
+			f.SetSecretStore(cfg.SecretStore)
+		}
 	}
 	if comp == nil {
 		comp = stewardtesting.NewStateComparator()

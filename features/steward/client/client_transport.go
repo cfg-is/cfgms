@@ -128,6 +128,14 @@ type TransportClient struct {
 	// Issue #419: drained in order after a successful reconnect.
 	offlineQueue *OfflineQueue
 
+	// secretStore is the steward's secret store, retained here so that
+	// InitializeConfigExecutor can pass it to the unified Executor's default
+	// factory. Modules implementing SecretStoreInjectable (e.g. hyperv) need
+	// the store wired into the factory before Configure runs. Without this,
+	// every controller-pushed config that touches a hyperv resource fails
+	// with `hyperv: secret store must be injected before Configure`.
+	secretStore secretsif.SecretStore
+
 	// DNA state for hash-based sync (Issue #418).
 	// dnaMu guards currentDNAHash and lastPublishedDNA.
 	dnaMu            sync.RWMutex
@@ -277,6 +285,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		commandMaxParamsBytes: cfg.SignedCommandMaxParamsBytes,
 		scriptSigning:         cfg.ScriptSigning,
 		identityPersistFunc:   cfg.IdentityPersistFunc,
+		secretStore:           cfg.SecretStore,
 		logger:                cfg.Logger,
 	}
 
@@ -288,8 +297,9 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 // Uses the unified execution engine (all 7 modules, Get→Compare→Set→Verify).
 func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 	execCfg := &execution.ExecutorConfig{
-		TenantID: tenantID,
-		Logger:   c.logger,
+		TenantID:    tenantID,
+		Logger:      c.logger,
+		SecretStore: c.secretStore,
 	}
 	executor, err := execution.NewExecutor(execCfg)
 	if err != nil {
