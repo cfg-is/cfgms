@@ -58,6 +58,7 @@ func init() {
 	rootCmd.AddCommand(workflowCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(installerCmd)
+	rootCmd.AddCommand(moduleCmd)
 }
 
 // versionCmd represents the version command

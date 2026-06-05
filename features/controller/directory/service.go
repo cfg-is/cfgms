@@ -49,14 +49,8 @@ type providerMetrics struct {
 
 // ModuleRegistry defines how the directory service integrates with CFGMS modules
 type ModuleRegistry interface {
-	// GetModule returns a module by name
-	GetModule(name string) (interface{}, error)
-
-	// ListModules returns all available modules
+	// ListModules returns all available module names
 	ListModules() []string
-
-	// ExecuteModuleOperation executes an operation on a module
-	ExecuteModuleOperation(ctx context.Context, moduleName, operation string, params map[string]interface{}) (interface{}, error)
 }
 
 // NewDirectoryService creates a new directory service instance
