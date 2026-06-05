@@ -60,9 +60,9 @@ Verdict: **HOLD**. Founder summary line: `trivy v0.70.0→v0.71.0 — released 2
 
 ### Example 3 — newer release, past cooldown, no CVE (Verdict: BUMP)
 
-- Pin: `gosec`, current `v2.26.1`
-- Latest: `v2.27.0`, published 9 days ago
-- CVEs in v2.26.1: none
+- Pin: `gosec`, current `v2.27.1`
+- Latest: `v2.27.1`, published 4 days ago
+- CVEs in v2.27.1: none
 - CI signal: none
 - Cooldown: elapsed (9 > 3 days)
 

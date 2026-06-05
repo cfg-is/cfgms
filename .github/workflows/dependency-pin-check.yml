@@ -116,7 +116,7 @@ jobs:
         }
 
         echo "Checking pinned tool versions..."
-        check_version "gosec"       "securego/gosec"                          "v2.26.1"
+        check_version "gosec"       "securego/gosec"                          "v2.27.1"
         check_version "staticcheck" "dominikh/go-tools"                       "2026.1"
         check_version "gitleaks"    "zricethezav/gitleaks"                    "v8.30.1"
         check_version "nancy"       "sonatype-nexus-community/nancy"          "v1.2.0"
