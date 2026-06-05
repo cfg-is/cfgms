@@ -71,6 +71,10 @@ Installs pre-commit (artifact detection) and pre-push (`make test`) hooks. Bypas
 - **`make test-complete` must pass** before creating PR.
 - **`git add <specific files>` only.** Never `git add .` or `git add -A`.
 
+### Threat Model
+
+Stewards run on hosts that may be compromised. Admin accounts may be phished or taken over for short periods. Most managed endpoints run application allowlisting and EDR. Design rarely-touched settings (`module_trust.mode: strict`, additional trusted publishers, publisher revocations) that bound the blast radius of admin or controller compromise. Code that runs on endpoints behaves like predictable admin tooling — declared paths, declared LOLBINs, signed binaries, no obfuscation or in-memory tricks.
+
 ### Security
 
 - Mutual TLS for all internal communication
@@ -78,6 +82,10 @@ Installs pre-commit (artifact detection) and pre-push (`make test`) hooks. Bypas
 - SQL injection prevention (parameterized queries only)
 - No information disclosure in error messages
 - Use `logging.SanitizeLogValue()` for HTTP params, URL paths, headers
+
+### Documentation
+
+Canonical docs (`docs/`, READMEs, ADRs, CLAUDE.md) describe CFGMS directly. No "X-inspired" / "like X" analogies (Salt, Terraform, Puppet, etc.). No real third-party vendor names as illustrative examples — use `vendor-a`, `acme-corp`, etc. Real integrations like M365 are factual capability statements, not examples. Analogies and real vendor names are fine in design conversations, chat, and PR descriptions.
 
 ### Git Messages & PRs
 
@@ -144,6 +152,8 @@ Consult these before implementing steward or controller behavior changes:
 
 ### Central Provider System
 
+**Terminology:** "Provider" and "plugin" refer to the pluggable backend pattern below. Modules are a different concept — see [Modules](#modules).
+
 **Before implementing new functionality, check if it belongs in a central provider.**
 
 **Rules:**
@@ -171,10 +181,30 @@ Consult these before implementing steward or controller behavior changes:
 
 See `pkg/README.md` for the full decision tree.
 
-### Module Deployment
+### Modules
 
-- **Controller:** Cross-system operations, SaaS/Cloud APIs, org-wide policies
-- **Steward:** Local resources (files, packages, firewall), platform-specific, offline capability
+The unit of resource management. Three kinds, one runtime per module:
+
+- **Steward modules** — manage the steward's own host (local FS, services, packages, registry). May use localhost transports (e.g. direct WMI) but never span to other hosts.
+- **Outpost modules** — manage remote devices on the LAN (network gear, printers, IoT, hypervisors via remoting) that cannot host a steward.
+- **Workflow modules** — run on the controller's workflow engine against cloud APIs (Entra ID, Okta, AWS).
+
+A module commits to exactly one kind via `executors:` in `module.yaml`. Cross-kind modules are not supported — the same logical resource on different host kinds is implemented as separate modules.
+
+**Packaging and trust (#1877, ADR-006):** modules are out-of-process gRPC binaries cached by the controller and pulled by hosts. Bundles are publisher-signed; the controller verifies, runs an approval workflow, and stages. End-to-end signing — the controller forwards module signatures intact, never strips and re-signs. `steward.cfg` `module_trust.mode`: `strict` (steward verifies independently), `controller` (default), `bypass` (dev only). CFGMS publisher identity is baked into the steward binary at build time and cannot be changed via cfg push.
+
+**Stdlib** (`file`, `service`, `package`, `script`, `firewall`, `patch`) ships in the steward installer using the same module contract. Stdlib is governance (installer payload), not implementation (never compiled-in).
+
+**Four execution paths on a steward** — every byte of code that runs on a steward arrives through exactly one of these:
+
+1. Modules — gRPC module invoked to enforce cfg (publisher-signed bundle)
+2. Scripts — `<interpreter> -File <path> -ArgumentList ...` against on-disk file (publisher-signed; cfg-content staged to disk with recorded hash)
+3. Inline `cfg` CLI commands — admin mTLS-signed payload, end-to-end (separate epic)
+4. Remote shell — interactive admin session (separate epic)
+
+**Banned patterns** in modules and scripts: `iex` / `Invoke-Expression`, `powershell -Command "<string>"` / `-EncodedCommand` / `-ExecutionPolicy Bypass`, `bash -c "<string>"`, `eval`, `python -c "<code>"`, any runtime code composition. Modules prefer in-process managed APIs (WMI, OS syscalls, vendor SDKs) over shelling out; shelling out is a deliberate choice declared in the manifest behavioral envelope.
+
+**Provider vs Module:** "Provider" / "plugin" / "pluggable" refer to the central-provider pattern (storage, logging, secrets, etc.). Modules are a different concept and never use "plugin" terminology.
 
 ## Testing
 
