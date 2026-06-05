@@ -99,6 +99,39 @@ func TestEchoModuleLifecycle(t *testing.T) {
 	assert.Equal(t, runtime.StateStopped, handle.GetState())
 }
 
+// TestEchoModuleLifecycleWithOverlongRuntimeDir is the regression test for the
+// macOS CI failures (PR #1897 review): on macOS, t.TempDir() returns paths
+// under /var/folders/... that, joined with the socket filename, exceed the
+// 104-byte sun_path limit. The runtime must fall back to a short hashed path
+// under /tmp so net.Listen("unix", ...) succeeds. This test forces the fallback
+// path on all platforms by passing a deliberately long runtimeDir.
+func TestEchoModuleLifecycleWithOverlongRuntimeDir(t *testing.T) {
+	// Build a runtime dir long enough that the natural socket path overflows
+	// 103 bytes — exercising the fallback even on Linux where t.TempDir() is
+	// normally short.
+	base := t.TempDir()
+	deep := filepath.Join(base,
+		"deeply", "nested", "directory", "tree",
+		"with", "enough", "path", "components",
+		"to", "blow", "past", "the", "macos", "sun_path", "limit",
+	)
+	require.NoError(t, os.MkdirAll(deep, 0o755))
+
+	rt := runtime.NewModuleRuntime(deep)
+	b := makeBypassBundle(echoModuleBin)
+
+	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	require.NoError(t, err)
+	require.NotNil(t, handle)
+
+	ctx := context.Background()
+	resp, err := handle.Client.Get(ctx, &proto.GetRequest{ResourceId: "long-path"})
+	require.NoError(t, err)
+	assert.Equal(t, "echo:long-path", resp.ConfigData)
+
+	require.NoError(t, rt.Stop(handle))
+}
+
 // TestStartReturnsErrWrongModuleKindForNonStewardBundle verifies that Start()
 // returns ErrWrongModuleKind immediately, before any fork/exec, for bundles
 // whose kind is not "steward".
