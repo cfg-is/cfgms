@@ -3,6 +3,7 @@
 package logging
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -206,6 +207,29 @@ func TestSanitizeMapValues(t *testing.T) {
 	assert.Equal(t, "tenant__forged", fields["tenant_id"])
 	assert.Equal(t, 3.14, fields["float_value"])
 	assert.Nil(t, fields["nil_value"])
+}
+
+// TestSanitizeMapValues_GoErrorTextified verifies that Go `error` values are
+// converted to their textual form before logging, so they don't serialize to
+// `{}` via the default JSON marshaller (the underlying type for errors.New
+// has only unexported fields).
+//
+// Regression: prior to wiring sanitizeValueRecursive into sanitizeMapValues
+// every `"error", err` pair in the codebase rendered as an empty JSON object
+// in file logs, hiding actual failures from operators.
+func TestSanitizeMapValues_GoErrorTextified(t *testing.T) {
+	fields := map[string]any{
+		"plain_err": errors.New("boom"),
+		"wrapped":   fmt.Errorf("outer: %w", errors.New("inner")),
+		// Control-character-laced error messages must still be sanitized.
+		"sneaky_err": errors.New("oops\r\nINFO: forged-line"),
+	}
+
+	sanitizeMapValues(fields)
+
+	assert.Equal(t, "boom", fields["plain_err"])
+	assert.Equal(t, "outer: inner", fields["wrapped"])
+	assert.Equal(t, "oops__INFO: forged-line", fields["sneaky_err"])
 }
 
 func TestSanitizeKeysAndValues(t *testing.T) {
