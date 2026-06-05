@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin test-install-sh
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen proto-gen-modules lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin test-install-sh
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -83,6 +83,22 @@ proto-gen: check-proto-grpc-tools
 		--go-grpc_out=$(PROTO_DIR) --go-grpc_opt=paths=source_relative \
 		$(TRANSPORT_PROTO_FILES)
 	@echo "Done. Generated files in $(TRANSPORT_PROTO_DIR)/"
+
+# Module proto files requiring gRPC service generation
+MODULES_PROTO_DIR=api/proto/modules
+MODULES_PROTO_FILES=$(shell find $(MODULES_PROTO_DIR) -name "*.proto")
+
+# Generate Go code from module proto files including gRPC service stubs.
+# Generates both message code (*.pb.go) and gRPC stubs (*_grpc.pb.go) for the
+# modules package. IMPORTANT: This is the authoritative target for module protos.
+.PHONY: proto-gen-modules
+proto-gen-modules: check-proto-grpc-tools
+	@echo "Generating module proto files (messages + gRPC services)..."
+	@protoc $(PROTO_INCLUDES) \
+		--go_out=$(PROTO_DIR) --go_opt=paths=source_relative \
+		--go-grpc_out=$(PROTO_DIR) --go-grpc_opt=paths=source_relative \
+		$(MODULES_PROTO_FILES)
+	@echo "Done. Generated files in $(MODULES_PROTO_DIR)/"
 
 # Build all binaries
 .PHONY: build

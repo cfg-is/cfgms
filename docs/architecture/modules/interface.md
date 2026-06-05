@@ -1,446 +1,157 @@
-# Module Interface
+# Module gRPC Contract
 
-This document defines the standard interface that all CFGMS modules must implement. The interface provides a consistent way for the system to interact with different types of modules while allowing each module to handle its specific resource type.
+This document defines the gRPC wire contract for CFGMS out-of-process modules.
+Two service variants exist: `ModuleService` (steward/outpost modules) and
+`WorkflowModuleService` (controller workflow modules).  Both are defined in
+`api/proto/modules/` and generated Go bindings are in the same directory.
+Go consumers should import the stable wrapper types from `pkg/modules/contract`
+rather than the generated package directly.
+
+For module system overview and available modules, see [Module System](README.md).
+For ADR design rationale, see [ADR-006](../../adr/ADR-006-module-packaging-and-distribution.md).
 
 ## Overview
 
-The module interface provides a consistent way for CFGMS to interact with modules, ensuring that all modules behave in a predictable and reliable manner. The interface is designed to be simple yet powerful, allowing modules to be developed independently and integrated seamlessly into the CFGMS workflow.
+Every CFGMS module is a separate process that the host runtime (steward or
+workflow engine) dials over a local socket.  The host calls a standard set of
+RPCs to drive the module: `Handshake` (capability exchange), `Get`/`Set`/`Test`
+(resource lifecycle), and `Shutdown` (clean exit).
 
-For module system overview and available modules, see [Module System](README.md).
-For steward configuration and error handling, see [Steward Configuration](../steward-configuration.md).
+The two contract variants share all lifecycle RPCs but differ only in how
+`Handshake` identifies the calling context:
 
-## Core Interface
+| Variant | `HandshakeRequest` context | Used by |
+|---------|---------------------------|---------|
+| `ModuleService` | `host_runtime` ("steward" or "outpost") | Steward runtime (S7), Outpost runtime |
+| `WorkflowModuleService` | `tenant_id` + `auth_token` | Controller workflow engine |
 
-All modules must implement the following interface:
+## Steward / Outpost Contract — `ModuleService`
+
+Proto source: `api/proto/modules/module.proto`
+Go package: `github.com/cfgis/cfgms/api/proto/modules`
+Wrapper types: `pkg/modules/contract.StewardModuleClient`, `StewardModuleServer`
+
+### Service definition
+
+```protobuf
+service ModuleService {
+  rpc Handshake(HandshakeRequest)   returns (HandshakeResponse);
+  rpc Get(GetRequest)               returns (GetResponse);
+  rpc Set(SetRequest)               returns (SetResponse);
+  rpc Test(TestRequest)             returns (TestResponse);
+  rpc Shutdown(ShutdownRequest)     returns (ShutdownResponse);
+}
+```
+
+### Handshake sequence
+
+1. Host runtime dials the module process on a local socket.
+2. Host sends `HandshakeRequest` identifying the module name/version and its
+   `host_runtime` ("steward" or "outpost").
+3. Module replies with `HandshakeResponse` listing its capabilities and a
+   YAML-serialised `BehavioralEnvelope`.
+4. Session is established; host proceeds to `Get`/`Set`/`Test` calls.
+5. On shutdown the host calls `Shutdown`; the module process exits.
+
+### Message shapes
+
+```protobuf
+message HandshakeRequest {
+  string module_name    = 1;
+  string module_version = 2;
+  string publisher      = 3;
+  string host_runtime   = 4;  // "steward" or "outpost"
+}
+
+message HandshakeResponse {
+  repeated string capabilities    = 1;
+  string behavioral_envelope_yaml = 2;  // YAML-serialised BehavioralEnvelope
+}
+
+message GetRequest  { string resource_id = 1; }
+message GetResponse { string config_data = 1; }  // YAML-serialised ConfigState
+
+message SetRequest  { string resource_id = 1; string config_data = 2; }
+message SetResponse { bool applied = 1; string error = 2; }
+
+message TestRequest  { string resource_id = 1; string config_data = 2; }
+message TestResponse { bool in_compliance = 1; string diff = 2; }
+
+message ShutdownRequest  {}
+message ShutdownResponse {}
+```
+
+### RPC semantics
+
+| RPC | Description |
+|-----|-------------|
+| `Get` | Returns the current resource state as YAML-serialised `ConfigState`. Must be idempotent and side-effect free. |
+| `Set` | Applies `config_data` to the resource. `SetResponse.applied` is `true` when changes were made. `SetResponse.error` is non-empty on failure. |
+| `Test` | Checks compliance without applying changes. `in_compliance` is `true` when no drift is detected. `diff` is a human-readable description of detected drift. |
+| `Shutdown` | Requests clean exit. The module process must release resources and exit after responding. |
+
+## Workflow Contract — `WorkflowModuleService`
+
+Proto source: `api/proto/modules/workflow_module.proto`
+Go package: `github.com/cfgis/cfgms/api/proto/modules`
+Wrapper types: `pkg/modules/contract.WorkflowModuleClient`, `WorkflowModuleServer`
+
+### Service definition
+
+```protobuf
+service WorkflowModuleService {
+  rpc Handshake(WorkflowHandshakeRequest)   returns (WorkflowHandshakeResponse);
+  rpc Get(GetRequest)                       returns (GetResponse);
+  rpc Set(SetRequest)                       returns (SetResponse);
+  rpc Test(TestRequest)                     returns (TestResponse);
+  rpc Shutdown(ShutdownRequest)             returns (ShutdownResponse);
+}
+```
+
+`Get`, `Set`, `Test`, `Shutdown` share the same message types as `ModuleService`.
+Only the `Handshake` messages differ.
+
+### Message shapes (handshake only)
+
+```protobuf
+message WorkflowHandshakeRequest {
+  string module_name    = 1;
+  string module_version = 2;
+  string publisher      = 3;
+  string tenant_id      = 4;  // scopes the session to a specific tenant
+  string auth_token     = 5;  // controller-issued credential for the module
+}
+
+message WorkflowHandshakeResponse {
+  repeated string capabilities    = 1;
+  string behavioral_envelope_yaml = 2;
+}
+```
+
+## Using the contract wrappers
+
+Import `pkg/modules/contract` rather than the generated package to insulate your
+code from generated-path changes:
 
 ```go
-package modules
+import "github.com/cfgis/cfgms/pkg/modules/contract"
 
-import (
-    "context"
-)
+// Steward runtime holds one client per active module session.
+var client contract.StewardModuleClient = modules.NewModuleServiceClient(conn)
 
-// Module defines the core interface that all modules must implement
-type Module interface {
-    // Get returns the current configuration of a resource
-    Get(ctx context.Context, resourceID string) (ConfigState, error)
-
-    // Set updates the resource configuration to match the desired state
-    Set(ctx context.Context, resourceID string, config ConfigState) error
+// Module binary implements the server interface.
+type myModule struct {
+    modules.UnimplementedModuleServiceServer
 }
-
-// ConfigState defines the interface that all module configuration states must implement
-type ConfigState interface {
-    // AsMap returns the configuration as a map for efficient field-by-field comparison
-    AsMap() map[string]interface{}
-    
-    // ToYAML serializes the configuration to YAML for export/storage
-    ToYAML() ([]byte, error)
-    
-    // FromYAML deserializes YAML data into the configuration
-    FromYAML([]byte) error
-    
-    // Validate ensures the configuration is valid
-    Validate() error
-    
-    // GetManagedFields returns the list of fields this configuration manages
-    GetManagedFields() []string
-}
+var _ contract.StewardModuleServer = (*myModule)(nil)
 ```
 
-## Method Descriptions
+## Proto regeneration
 
-### Get Method
+To regenerate the Go bindings after editing the `.proto` files:
 
-The `Get` method retrieves the current configuration of a resource as a ConfigState.
-
-**Signature:**
-
-```go
-Get(ctx context.Context, resourceID string) (ConfigState, error)
+```bash
+make proto-gen-modules
 ```
 
-**Parameters:**
-
-- `ctx`: Context for cancellation and timeouts
-- `resourceID`: Unique identifier for the resource to query
-
-**Returns:**
-
-- `ConfigState`: Current configuration of the resource implementing the ConfigState interface
-- `error`: Any error that occurred during the operation
-
-**Behavior:**
-
-- Must return the current state of the resource
-- Should return a complete configuration that includes all discoverable settings
-- Must handle non-existent resources appropriately
-- Should be idempotent and side-effect free
-- Returns comprehensive state (not just managed fields) for complete system visibility
-
-**Example:**
-
-```go
-// Define module-specific configuration struct
-type FileConfiguration struct {
-    Path        string            `yaml:"path" json:"path"`
-    Content     string            `yaml:"content" json:"content"`
-    Permissions os.FileMode       `yaml:"permissions" json:"permissions"`
-    Owner       string            `yaml:"owner" json:"owner"`
-    Group       string            `yaml:"group" json:"group"`
-    Size        int64             `yaml:"size" json:"size"`
-    ModTime     time.Time         `yaml:"mod_time" json:"mod_time"`
-    Checksum    string            `yaml:"checksum" json:"checksum"`
-}
-
-// Implement ConfigState interface
-func (fc *FileConfiguration) AsMap() map[string]interface{} {
-    return map[string]interface{}{
-        "path":        fc.Path,
-        "content":     fc.Content,
-        "permissions": fc.Permissions,
-        "owner":       fc.Owner,
-        "group":       fc.Group,
-        "size":        fc.Size,
-        "mod_time":    fc.ModTime,
-        "checksum":    fc.Checksum,
-    }
-}
-
-func (fc *FileConfiguration) ToYAML() ([]byte, error) {
-    return yaml.Marshal(fc)
-}
-
-func (fc *FileConfiguration) GetManagedFields() []string {
-    return []string{"path", "content", "permissions", "owner", "group"}
-}
-
-func (m *FileModule) Get(ctx context.Context, resourceID string) (ConfigState, error) {
-    // Read current file configuration
-    info, err := os.Stat(resourceID)
-    if err != nil {
-        return nil, err
-    }
-    
-    content, err := os.ReadFile(resourceID)
-    if err != nil {
-        return nil, err
-    }
-    
-    config := &FileConfiguration{
-        Path:        resourceID,
-        Content:     string(content),
-        Permissions: info.Mode().Perm(),
-        Owner:       getOwner(info),
-        Group:       getGroup(info),
-        Size:        info.Size(),
-        ModTime:     info.ModTime(),
-        Checksum:    calculateChecksum(content),
-    }
-    
-    return config, nil
-}
-```
-
-### Set Method
-
-The `Set` method updates the resource to match the desired configuration.
-
-**Signature:**
-
-```go
-Set(ctx context.Context, resourceID string, config ConfigState) error
-```
-
-**Parameters:**
-
-- `ctx`: Context for cancellation and timeouts
-- `resourceID`: Unique identifier for the resource to modify
-- `config`: Desired configuration for the resource implementing ConfigState interface
-
-**Returns:**
-
-- `error`: Any error that occurred during the operation
-
-**Behavior:**
-
-- Must update the resource to match the desired configuration
-- Should be idempotent - multiple calls with same config should result in same state
-- Must handle partial configurations appropriately (only update managed fields)
-- Should validate configuration before applying changes
-- Must provide atomic operations where possible
-
-**Example:**
-
-```go
-func (m *FileModule) Set(ctx context.Context, resourceID string, config ConfigState) error {
-    // Type assert to module-specific configuration
-    fileConfig, ok := config.(*FileConfiguration)
-    if !ok {
-        return ErrInvalidConfigType
-    }
-    
-    // Validate configuration
-    if err := fileConfig.Validate(); err != nil {
-        return err
-    }
-    
-    // Only update managed fields (don't change size, mod_time, checksum - those are derived)
-    managedFields := fileConfig.GetManagedFields()
-    configMap := fileConfig.AsMap()
-    
-    // Write file content if managed
-    if contains(managedFields, "content") {
-        perms := fileConfig.Permissions
-        if !contains(managedFields, "permissions") {
-            // If permissions not managed, preserve existing
-            if info, err := os.Stat(resourceID); err == nil {
-                perms = info.Mode().Perm()
-            }
-        }
-        
-        if err := os.WriteFile(resourceID, []byte(fileConfig.Content), perms); err != nil {
-            return err
-        }
-    }
-    
-    // Set ownership if managed
-    if contains(managedFields, "owner") || contains(managedFields, "group") {
-        return setOwnership(resourceID, fileConfig.Owner, fileConfig.Group)
-    }
-    
-    return nil
-}
-```
-
-## Test Operation (System-Level)
-
-**Important Note:** While modules only implement Get and Set methods, the Steward system automatically performs test operations by:
-
-1. **Getting current state**: Calls the module's `Get()` method to retrieve current ConfigState
-2. **Extracting managed fields**: Uses `GetManagedFields()` to identify which fields to compare
-3. **Comparing states**: Compares only managed fields from current state against desired configuration
-4. **Detecting drift**: Only calls `Set()` when differences are detected in managed fields
-5. **Verifying changes**: After Set, calls `Get()` again to verify the change was applied correctly
-
-This approach maintains the safety of the previous Get/Test/Set pattern while simplifying the module interface and enabling intelligent partial configuration management.
-
-**Smart Comparison Logic:**
-
-```go
-// Pseudo-code for system-level comparison
-func compareConfigurations(current, desired ConfigState) bool {
-    currentMap := current.AsMap()
-    desiredMap := desired.AsMap()
-    managedFields := desired.GetManagedFields()
-    
-    for _, field := range managedFields {
-        if currentMap[field] != desiredMap[field] {
-            return false // Drift detected
-        }
-    }
-    return true // No drift in managed fields
-}
-```
-
-**Benefits of System-Level Testing:**
-
-- **Selective Comparison**: Only compares fields actually managed by the configuration
-- **Complete Visibility**: Get returns full system state for monitoring/export
-- **Performance**: Uses AsMap() for efficient field access, no marshal/unmarshal overhead
-- **Consistency**: All modules use the same comparison logic
-- **Simplicity**: Module developers only need to implement Get/Set
-- **Maintainability**: Testing logic is centralized in the Steward
-- **Flexibility**: Comparison algorithms can be improved system-wide
-- **Safety**: Drift detection prevents unnecessary Set operations
-
-## Optional Configurable Interface
-
-Modules that require initialization from operator config before `Get()` can safely read the current resource state may implement `Configurable`. The execution engine calls `Configure(desiredState)` before `Get()` when the module implements this interface, allowing security boundaries to be established without modifying any files.
-
-```go
-type Configurable interface {
-    Configure(config ConfigState) error
-}
-```
-
-## Optional Monitor Interface
-
-While not part of the core Module interface, modules may optionally implement monitoring capabilities for real-time configuration drift detection:
-
-```go
-// Monitor interface for modules that support real-time monitoring
-type Monitor interface {
-    // Monitor watches for changes to a resource and triggers events
-    Monitor(ctx context.Context, resourceID string, config ConfigState) error
-
-    // Changes returns a channel for receiving change notifications
-    Changes() <-chan ChangeEvent
-
-    // Close stops monitoring and releases resources
-    Close() error
-}
-
-type ChangeEvent struct {
-    ResourceID string
-    Timestamp  int64      // Unix timestamp (nanoseconds)
-    ChangeType ChangeType
-    Details    ConfigState
-}
-
-type ChangeType int
-
-const (
-    ChangeTypeCreated ChangeType = iota
-    ChangeTypeModified
-    ChangeTypeDeleted
-    ChangeTypePermissions
-)
-```
-
-**Monitor Implementation Notes:**
-
-- Monitoring is **optional** - not all modules need to support it
-- Modules that implement Monitor should use OS-specific hooks (inotify, Windows Event Log, etc.)
-- Monitor implementations should be efficient and not impact system performance
-- Changes should be reported in YAML format for consistency
-- Monitor is primarily used for real-time drift detection in Controller-integrated mode
-
-## Error Handling
-
-### Error Types
-
-Modules should use specific error types to help the system handle different failure scenarios:
-
-```go
-type ModuleError struct {
-    Type    ErrorType
-    Message string
-    Cause   error
-}
-
-type ErrorType int
-
-const (
-    ErrorTypeNotFound ErrorType = iota
-    ErrorTypePermission
-    ErrorTypeValidation
-    ErrorTypeConflict
-    ErrorTypeInternal
-)
-```
-
-### Error Guidelines
-
-- Use appropriate error types for different failure scenarios
-- Provide clear, actionable error messages
-- Include context about what operation failed
-- Wrap underlying errors when appropriate
-- Log errors appropriately based on severity
-
-### System Error Handling
-
-The Steward system handles module errors based on user configuration in `hostname.cfg`:
-
-```yaml
-steward:
-  error_handling:
-    module_load_failure: "continue"     # or "fail"
-    config_validation_failure: "fail"   # or "continue"
-```
-
-**Module Load Failures:**
-
-- `continue`: Skip failed modules, continue with available ones
-- `fail`: Stop execution on any module load failure
-
-**Configuration Validation Failures:**
-
-- `fail`: Stop execution on validation errors (default)
-- `continue`: Skip invalid configurations, process valid ones
-
-**Runtime Error Behavior:**
-
-- Module failures are always isolated to prevent cascade failures
-- Errors are logged with full context for troubleshooting
-- Execution continues with remaining modules unless configured otherwise
-- Retry logic may be applied for transient errors (ErrorTypeInternal)
-
-## Implementation Guidelines
-
-### Best Practices
-
-1. **Idempotency**: Both Get and Set operations should be idempotent
-2. **ConfigState Implementation**: Implement all methods of ConfigState interface correctly
-3. **Validation**: Validate inputs thoroughly in both ConfigState.Validate() and Set method
-4. **Error Handling**: Use appropriate error types and messages
-5. **Performance**: Optimize for common use cases, especially Get operations and AsMap()
-6. **Security**: Follow security best practices, validate all inputs
-7. **Testing**: Implement comprehensive tests for both Get and Set
-8. **Documentation**: Document configuration struct schema and managed fields
-9. **Completeness**: Get should return comprehensive state, not just managed fields
-10. **Selectivity**: Use GetManagedFields() to specify which fields Set will modify
-
-### Resource Identification
-
-- Use consistent resource identification schemes
-- Support hierarchical resource structures where appropriate
-- Handle resource dependencies correctly
-- Provide clear error messages for invalid resource IDs
-
-### Configuration Management
-
-- **ConfigState Consistency**: Ensure Get output can be used as Set input
-- **Schema Validation**: Validate configuration structure in Validate() method
-- **Partial Updates**: Use GetManagedFields() to control which fields Set modifies
-- **Default Values**: Provide sensible defaults for optional fields in struct initialization
-- **Type Safety**: Use strongly-typed structs with proper type definitions
-- **Complete Discovery**: Get should return all discoverable state for comprehensive monitoring
-- **Managed Field Clarity**: Clearly document which fields are managed vs. read-only
-
-### State Management
-
-- Maintain minimal internal state
-- Handle concurrent operations safely
-- Clean up resources appropriately
-- Support graceful shutdown
-- **Comparison Safety**: Ensure Get returns consistent format for system-level comparison
-
-### Execution Flow Integration
-
-Modules should be designed knowing the Steward will:
-
-1. Call `Get()` to retrieve current ConfigState (comprehensive system state)
-2. Use `AsMap()` and `GetManagedFields()` for efficient field-level comparison
-3. Only call `Set()` when drift is detected in managed fields
-4. Call `Get()` again to verify changes
-
-This means:
-
-- Get operations should return complete system state but be optimized for performance
-- AsMap() should be fast and efficient (avoid expensive conversions)
-- Set operations should be robust and only modify managed fields
-- GetManagedFields() should accurately reflect what Set will change
-- Both should handle edge cases gracefully
-- ConfigState structs should be lightweight and efficient for frequent access
-
-## Context Usage
-
-Modules should use the provided context for cancellation and timeout:
-
-- Use `ctx.Done()` to detect cancellation
-- Use `ctx.Err()` to check for errors
-- Use `context.WithTimeout` to set timeouts for operations
-- Use `context.WithValue` to pass values through the context
-
-## Related Documentation
-
-- [Module System Overview](README.md): Available modules and module structure
-- [Steward Configuration](../steward-configuration.md): Configuration file format and error handling settings
-
-## Version Information
-
-- **Document Version:** 2.0
-- **Last Updated:** 2024-07-02
-- **Status:** Updated for Standalone Steward Architecture
-- **Changes:** Simplified interface from Get/Set/Test/Monitor to Get/Set only, added system-level testing explanation
+This requires `protoc` and `protoc-gen-go-grpc` to be installed.
