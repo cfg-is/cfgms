@@ -50,6 +50,7 @@ What becomes easier or harder by making this decision?
 | [001](001-central-provider-compliance-enforcement.md) | Central Provider Compliance Enforcement | 2025-10-20 | Accepted |
 | [003](003-storage-data-taxonomy.md) | Storage Data Taxonomy | 2026-04-13 | Proposed |
 | [005](005-logging-interface-for-transport-providers.md) | Logging Interface for Transport Providers | 2026-05-04 | Accepted |
+| [006](006-module-packaging-and-distribution.md) | Module Packaging and Distribution | 2026-06-05 | Accepted |
 
 ### Superseded/Deprecated
 
