@@ -15,8 +15,8 @@ CFGMS uses a multi-layered security scanning approach with four primary tools:
 
 ```bash
 # 1. Install security tools
-./.github/scripts/install-trivy.sh v0.70.0 \
-    8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9
+./.github/scripts/install-trivy.sh v0.71.0 \
+    30a3d22b23f88c233f1658f562fb477cae3b3e8b4761109d515b7698daf85814
 go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
 go install honnef.co/go/tools/cmd/staticcheck@2026.1
 make install-nancy     # Auto-install Nancy for your platform
@@ -40,14 +40,14 @@ make security-check    # Same as security-scan but optimized for development
 
 Trivy scans for vulnerabilities, secrets, and misconfigurations in the filesystem.
 
-**Pin v0.70.0 (post-CVE-2026-33634 clean release).** NEVER use v0.69.4-v0.69.6 (compromised) and NEVER use `@latest`. The `go install` route is unsupported by Trivy upstream since v0.29.0 and must not be used.
+**Pin v0.71.0 (post-CVE-2026-33634 clean release).** NEVER use v0.69.4-v0.69.6 (compromised) and NEVER use `@latest`. The `go install` route is unsupported by Trivy upstream since v0.29.0 and must not be used.
 
 #### Linux / macOS (x86_64 + arm64)
 
 ```bash
 # Recommended: verified install via project helper (SHA-256 pinned)
-./.github/scripts/install-trivy.sh v0.70.0 \
-    8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9
+./.github/scripts/install-trivy.sh v0.71.0 \
+    30a3d22b23f88c233f1658f562fb477cae3b3e8b4761109d515b7698daf85814
 ```
 
 The helper refuses any version in the v0.69.4-v0.69.6 compromised range and verifies the SHA-256 of the release archive before extraction. See `docs/runbooks/trivy-rollback.md` for rollback procedure.
@@ -55,7 +55,7 @@ The helper refuses any version in the v0.69.4-v0.69.6 compromised range and veri
 #### macOS (alternative)
 
 ```bash
-# Homebrew (verify version after install matches v0.70.0: trivy --version)
+# Homebrew (verify version after install matches v0.71.0: trivy --version)
 brew install trivy
 ```
 
@@ -63,8 +63,8 @@ brew install trivy
 
 ```powershell
 # Binary download with hash verification
-$version = "v0.70.0"
-$expectedHash = "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"
+$version = "v0.71.0"
+$expectedHash = "382250158fb9431ff9b87904205027b066a544234b8952b2dd764bd712d55387"
 Invoke-WebRequest -Uri "https://github.com/aquasecurity/trivy/releases/download/$version/trivy_$($version.TrimStart('v'))_Windows-64bit.zip" -OutFile "trivy.zip"
 $actual = (Get-FileHash trivy.zip -Algorithm SHA256).Hash.ToLower()
 if ($actual -ne $expectedHash) { throw "SHA-256 mismatch: expected $expectedHash, got $actual" }
@@ -420,7 +420,7 @@ make security-check      # Quick security validation for development
 
 Current tool versions (as of v0.3.1):
 
-- **Trivy**: v0.70.0 (pinned — v0.69.4-v0.69.6 compromised per CVE-2026-33634; v0.70.0 is the post-incident clean rebuild with new GPG key. Install via `./.github/scripts/install-trivy.sh`. NEVER use @latest, NEVER use `go install`.)
+- **Trivy**: v0.71.0 (pinned — v0.69.4-v0.69.6 compromised per CVE-2026-33634; v0.71.0 is the post-incident clean release. Install via `./.github/scripts/install-trivy.sh`. NEVER use @latest, NEVER use `go install`.)
 - **Nancy**: v1.2.0
 - **gosec**: v2.27.1 (pinned — avoid @latest)
 - **staticcheck**: 2026.1 (pinned — avoid @latest)

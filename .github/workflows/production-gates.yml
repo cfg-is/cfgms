@@ -60,10 +60,10 @@ jobs:
         echo "=============================================="
         
         # Install Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634);
-        # v0.70.0 is the post-incident clean release. The install helper
+        # v0.71.0 is the post-incident clean release. The install helper
         # verifies the archive SHA-256 against the pinned value before
         # extraction. See docs/runbooks/trivy-rollback.md for rollback.
-        sudo .github/scripts/install-trivy.sh 'v0.70.0' '8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9'
+        sudo .github/scripts/install-trivy.sh 'v0.71.0' '30a3d22b23f88c233f1658f562fb477cae3b3e8b4761109d515b7698daf85814'
 
         # Install other security tools
         make install-nancy
