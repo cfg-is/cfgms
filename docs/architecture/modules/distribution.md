@@ -179,6 +179,57 @@ directory without overwriting the old one.
 
 ---
 
+## Controller Approval Workflow (S5)
+
+After a bundle is fetched from a git source and placed in the cache, the controller runs it through an approval workflow before making it available for steward delivery.
+
+### Approval State Machine
+
+```
+                         ┌──────────────────────────────┐
+  Trusted publisher      │  ApprovalWorkflow.Evaluate() │
+  + valid signature  ────►   AutoApprove                ├──► approved
+                         │                              │
+  Unknown publisher  ────►   QueueForReview             ├──► pending ──► approved
+                         │                              │       (admin Approve())
+  Sig verify fails   ────►   Reject                     ├──► rejected
+                         └──────────────────────────────┘
+```
+
+### Decision Rules
+
+| Condition | `ApprovalDecision` | Cache status |
+|-----------|--------------------|--------------|
+| Publisher in trust store AND `VerifyBundleSignature` passes | `AutoApprove` | `approved` |
+| Publisher NOT in trust store | `QueueForReview` | `pending` |
+| Publisher in trust store, signature fails | `Reject` | `rejected` |
+
+### `cfg module approve` CLI Usage
+
+Operators can promote a queued bundle to approved:
+
+```
+cfg module approve cfgms/hyperv@0.2.1
+```
+
+This calls `ApprovalWorkflow.Approve(addr)`, which transitions the cache entry from `pending` to `approved`. Only `pending` entries can be approved; `approved` and `rejected` entries return an error.
+
+To inspect pending bundles:
+
+```
+cfg module list --status pending
+cfg module list --tenant root/msp-a --status pending
+```
+
+### Implementation Reference
+
+- `features/controller/modules/approval` — `ApprovalWorkflow`
+- `features/controller/modules/cache` — `ModuleCache`
+- `features/controller/modules/sources/git` — `GitSourceResolver`
+- `cmd/cfg/cmd/module.go` — CLI commands
+
+---
+
 ## Steward Trust Mode (S7 reference)
 
 The steward enforces trust before loading a bundle:
