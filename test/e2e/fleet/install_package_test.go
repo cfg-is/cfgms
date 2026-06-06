@@ -266,8 +266,11 @@ func runInstallScriptInContainer(t *testing.T, container string, archiveData []b
 	// Create INSTALL_PREFIX directory tree and a wrapper binary that exits 0.
 	// install.sh locates the binary at INSTALL_PREFIX/usr/local/bin/cfgms-steward when
 	// SCRIPT_DIR/cfgms-steward is absent (the archive binary is named cfgms-steward-amd64).
+	// Pre-create the stdlib modules directory so install.sh's `install -d` call
+	// succeeds when running as a non-root user against a root-owned prefix tree.
 	wrapperPath := installPfx + "/usr/local/bin/cfgms-steward"
 	dockerExecRoot(t, container, "mkdir", "-p", installPfx+"/usr/local/bin")
+	dockerExecRoot(t, container, "mkdir", "-p", installPfx+"/usr/local/lib/cfgms/modules")
 	dockerExecRoot(t, container, "sh", "-c",
 		fmt.Sprintf("printf '#!/bin/sh\\nexit 0\\n' > %s && chmod +x %s", wrapperPath, wrapperPath))
 

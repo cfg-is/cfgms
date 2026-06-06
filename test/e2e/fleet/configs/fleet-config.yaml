@@ -26,6 +26,7 @@ resources:
   - name: managed-dir
     module: directory
     config:
+      type: directory
       path: /test-workspace/managed-dir
       state: present
       mode: "0755"

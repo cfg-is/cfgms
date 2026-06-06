@@ -262,7 +262,10 @@ func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, 
 	}
 
 	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
-		return fmt.Errorf("unix-style permissions are not supported on this platform (NTFS uses ACLs); remove the permissions field from your configuration")
+		logger.WarnCtx(ctx, "unix-style permissions ignored on this platform (NTFS uses ACLs)",
+			"operation", "file_set",
+			"resource_id", resourceID)
+		fileConfig.Permissions = 0
 	}
 
 	if fileConfig.Permissions == 0 && fileConfig.WindowsACL == nil {
@@ -326,7 +329,10 @@ func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath str
 	}
 
 	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
-		return fmt.Errorf("unix-style permissions are not supported on this platform (NTFS uses ACLs); remove the permissions field from your configuration")
+		logger.WarnCtx(ctx, "unix-style permissions ignored on this platform (NTFS uses ACLs)",
+			"operation", "directory_set",
+			"resource_id", resourceID)
+		fileConfig.Permissions = 0
 	}
 
 	if fileConfig.Permissions == 0 && fileConfig.WindowsACL == nil {

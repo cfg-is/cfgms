@@ -7,6 +7,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,12 +18,16 @@ import (
 )
 
 // stubServer satisfies the GracefulStop interface used by Shutdown.
-type stubServer struct{ stopped bool }
+type stubServer struct {
+	stopped chan struct{}
+}
 
-func (s *stubServer) GracefulStop() { s.stopped = true }
+func newStubServer() *stubServer { return &stubServer{stopped: make(chan struct{})} }
+
+func (s *stubServer) GracefulStop() { close(s.stopped) }
 
 func TestHandshakeReturnsModuleName(t *testing.T) {
-	srv := adapter.New(file.New(), "file", &stubServer{})
+	srv := adapter.New(file.New(), "file", newStubServer())
 	resp, err := srv.Handshake(context.Background(), &proto.HandshakeRequest{})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -38,7 +43,7 @@ state: present
 allowed_base_path: ` + tmpBase + `
 permissions: 493
 `
-	srv := adapter.New(file.New(), "file", &stubServer{})
+	srv := adapter.New(file.New(), "file", newStubServer())
 	resp, err := srv.Set(context.Background(), &proto.SetRequest{
 		ResourceId: targetPath,
 		ConfigData: configYAML,
@@ -50,7 +55,7 @@ permissions: 493
 }
 
 func TestSetInvalidYAMLReturnsErrorInResponse(t *testing.T) {
-	srv := adapter.New(file.New(), "file", &stubServer{})
+	srv := adapter.New(file.New(), "file", newStubServer())
 	resp, err := srv.Set(context.Background(), &proto.SetRequest{
 		ResourceId: "/tmp/x",
 		ConfigData: ":\tthis: is: not: yaml",
@@ -71,7 +76,7 @@ allowed_base_path: ` + tmpBase + `
 permissions: 493
 `
 	m := file.New()
-	srv := adapter.New(m, "file", &stubServer{})
+	srv := adapter.New(m, "file", newStubServer())
 
 	// Create the directory first so Get() can find it.
 	_, err := srv.Set(context.Background(), &proto.SetRequest{
@@ -91,13 +96,14 @@ permissions: 493
 }
 
 func TestShutdownCallsGracefulStop(t *testing.T) {
-	stub := &stubServer{}
+	stub := newStubServer()
 	srv := adapter.New(file.New(), "file", stub)
 	_, err := srv.Shutdown(context.Background(), &proto.ShutdownRequest{})
 	require.NoError(t, err)
-	// GracefulStop is called in a goroutine; give it a moment.
-	// We cannot block indefinitely, so this verifies the call is wired up, not timing.
-	// The stub records the call synchronously once the goroutine runs.
-	// For unit test purposes, assert no error and move on — gRPC lifecycle testing
-	// belongs in integration tests.
+	// GracefulStop is dispatched in a goroutine; wait on the closed channel.
+	select {
+	case <-stub.stopped:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("GracefulStop was not called within 100ms")
+	}
 }

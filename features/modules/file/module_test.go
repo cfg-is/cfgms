@@ -368,7 +368,7 @@ func TestFileModule_Get_AbsentOmitsModeAlias(t *testing.T) {
 	}
 }
 
-func TestFileModule_PermissionsRejectedOnWindows(t *testing.T) {
+func TestFileModule_PermissionsIgnoredOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-only test")
 	}
@@ -380,9 +380,14 @@ func TestFileModule_PermissionsRejectedOnWindows(t *testing.T) {
 	configData := "content: \"test content\"\npermissions: 420\nallowed_base_path: " + tempDir
 	configState := createConfigFromYAML(configData)
 
+	// Unix permissions are silently ignored on Windows (NTFS uses ACLs).
+	// Set() must succeed; the file is created with the default NTFS permissions.
 	err := module.Set(context.Background(), testFile, configState)
-	if err == nil {
-		t.Error("Set() with Unix permissions on Windows should fail")
+	if err != nil {
+		t.Errorf("Set() with Unix permissions on Windows should succeed (warn+continue): %v", err)
+	}
+	if _, statErr := os.Stat(testFile); statErr != nil {
+		t.Errorf("file should exist after Set: %v", statErr)
 	}
 }
 
@@ -751,9 +756,9 @@ func TestFileModule_TypeDirectory_Ownership(t *testing.T) {
 	}
 }
 
-// TestFileModule_TypeDirectory_PermissionsRejectedOnWindows verifies Unix permissions
-// are rejected on Windows.
-func TestFileModule_TypeDirectory_PermissionsRejectedOnWindows(t *testing.T) {
+// TestFileModule_TypeDirectory_PermissionsIgnoredOnWindows verifies Unix permissions
+// are silently ignored on Windows (NTFS uses ACLs).
+func TestFileModule_TypeDirectory_PermissionsIgnoredOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-only test")
 	}
@@ -763,9 +768,14 @@ func TestFileModule_TypeDirectory_PermissionsRejectedOnWindows(t *testing.T) {
 	m := New()
 
 	cfg := createDirConfigFromYAML("type: directory\nallowed_base_path: " + base + "\npath: " + dirPath + "\npermissions: 493")
+	// Unix permissions are silently ignored on Windows (NTFS uses ACLs).
+	// Set() must succeed; the directory is created with the default NTFS permissions.
 	err := m.Set(context.Background(), dirPath, cfg)
-	if err == nil {
-		t.Error("Set() with Unix permissions on Windows should fail")
+	if err != nil {
+		t.Errorf("Set() with Unix permissions on Windows should succeed (warn+continue): %v", err)
+	}
+	if info, statErr := os.Stat(dirPath); statErr != nil || !info.IsDir() {
+		t.Errorf("directory should exist after Set: statErr=%v isDir=%v", statErr, info != nil && info.IsDir())
 	}
 }
 
