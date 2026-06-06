@@ -261,6 +261,13 @@ func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, 
 		return nil
 	}
 
+	// Reject out-of-range values before any platform-specific handling so that
+	// invalid inputs (e.g. 9999) are caught on all platforms, including Windows
+	// where valid Unix permissions are otherwise silently zeroed.
+	if fileConfig.Permissions != 0 && (fileConfig.Permissions < 0 || fileConfig.Permissions > 0777) {
+		return ErrInvalidPermissions
+	}
+
 	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
 		logger.WarnCtx(ctx, "unix-style permissions ignored on this platform (NTFS uses ACLs)",
 			"operation", "file_set",
@@ -279,10 +286,6 @@ func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, 
 			"error_code", "CONFIG_VALIDATION_FAILED",
 			"error_details", err.Error())
 		return err
-	}
-
-	if fileConfig.Permissions < 0 || fileConfig.Permissions > 0777 {
-		return modules.ErrInvalidInput
 	}
 	if err := security.SecureWriteFileWithPerms(fileConfig.AllowedBasePath, resourceID, []byte(fileConfig.Content), os.FileMode(fileConfig.Permissions)); err != nil {
 		return err
@@ -328,6 +331,11 @@ func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath str
 		return fmt.Errorf("directory deletion is not supported: %w", modules.ErrNotImplemented)
 	}
 
+	// Reject out-of-range values before any platform-specific handling.
+	if fileConfig.Permissions != 0 && (fileConfig.Permissions < 0 || fileConfig.Permissions > 0777) {
+		return ErrInvalidPermissions
+	}
+
 	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
 		logger.WarnCtx(ctx, "unix-style permissions ignored on this platform (NTFS uses ACLs)",
 			"operation", "directory_set",
@@ -346,10 +354,6 @@ func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath str
 			"error_code", "CONFIG_VALIDATION_FAILED",
 			"error_details", err.Error())
 		return err
-	}
-
-	if fileConfig.Permissions < 0 || fileConfig.Permissions > 0777 {
-		return modules.ErrInvalidInput
 	}
 	fileMode := os.FileMode(fileConfig.Permissions)
 
