@@ -262,17 +262,19 @@ func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, 
 	}
 
 	// Reject out-of-range values before any platform-specific handling so that
-	// invalid inputs (e.g. 9999) are caught on all platforms, including Windows
-	// where valid Unix permissions are otherwise silently zeroed.
+	// invalid inputs (e.g. 9999) are caught on all platforms.
 	if fileConfig.Permissions != 0 && (fileConfig.Permissions < 0 || fileConfig.Permissions > 0777) {
 		return ErrInvalidPermissions
 	}
 
+	// Unix permission bits are not enforced on NTFS. Reject them explicitly rather than
+	// silently dropping a security-relevant field — Windows targets use windows_acl.
 	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
-		logger.WarnCtx(ctx, "unix-style permissions ignored on this platform (NTFS uses ACLs)",
+		logger.ErrorCtx(ctx, "unix-style permissions are not supported on this platform",
 			"operation", "file_set",
-			"resource_id", resourceID)
-		fileConfig.Permissions = 0
+			"resource_id", resourceID,
+			"error_code", "PERMISSIONS_NOT_SUPPORTED")
+		return ErrPermissionsNotSupportedOnPlatform
 	}
 
 	if fileConfig.Permissions == 0 && fileConfig.WindowsACL == nil {
@@ -336,11 +338,14 @@ func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath str
 		return ErrInvalidPermissions
 	}
 
+	// Unix permission bits are not enforced on NTFS. Reject them explicitly rather than
+	// silently dropping a security-relevant field — Windows targets use windows_acl.
 	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
-		logger.WarnCtx(ctx, "unix-style permissions ignored on this platform (NTFS uses ACLs)",
+		logger.ErrorCtx(ctx, "unix-style permissions are not supported on this platform",
 			"operation", "directory_set",
-			"resource_id", resourceID)
-		fileConfig.Permissions = 0
+			"resource_id", resourceID,
+			"error_code", "PERMISSIONS_NOT_SUPPORTED")
+		return ErrPermissionsNotSupportedOnPlatform
 	}
 
 	if fileConfig.Permissions == 0 && fileConfig.WindowsACL == nil {

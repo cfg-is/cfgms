@@ -26,4 +26,9 @@ var (
 
 	// ErrInvalidPermissions is returned when the specified permissions are out of range.
 	ErrInvalidPermissions = errors.New("invalid permissions")
+
+	// ErrPermissionsNotSupportedOnPlatform is returned when Unix permission bits are
+	// specified on a platform that does not enforce them (Windows/NTFS). Windows targets
+	// use the windows_acl field instead. See docs/modules/file.md.
+	ErrPermissionsNotSupportedOnPlatform = errors.New("unix-style permissions are not supported on this platform (NTFS uses ACLs); use the windows_acl field instead")
 )

@@ -4,9 +4,11 @@ package execution_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -420,29 +422,29 @@ func TestApplyConfiguration_MonitorMode(t *testing.T) {
 	assert.Equal(t, initialContent, string(got), "file must be unchanged in monitor mode")
 }
 
-func TestExecutor_ApplyConfiguration_PermissionsIgnoredOnWindows(t *testing.T) {
+func TestExecutor_ApplyConfiguration_PermissionsRejectedOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-only test")
 	}
 
 	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "managed.txt")
 	logger := logging.ForModule("executor_test")
 
 	executor, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: logger})
 	require.NoError(t, err)
 
-	// On Windows, valid Unix permissions (e.g. 420 = 0644) are silently ignored
-	// (NTFS uses ACLs). The file module logs a warning and continues — Set() succeeds.
+	// On Windows, Unix permission bits are not enforced (NTFS uses ACLs). Specifying
+	// the permissions field is a misconfiguration and must produce an explicit error
+	// pointing the operator at windows_acl — not be silently ignored.
 	configJSON := `{
   "steward": {"id": "test-steward", "mode": "controller"},
   "resources": [
     {
-      "name": "perms-ignored",
+      "name": "perms-rejected",
       "module": "file",
       "config": {
-        "path": "` + filepath.ToSlash(filePath) + `",
-        "content": "created on Windows\n",
+        "path": "` + filepath.ToSlash(filepath.Join(tempDir, "rejected.txt")) + `",
+        "content": "should fail on Windows\n",
         "permissions": 420,
         "allowed_base_path": "` + filepath.ToSlash(tempDir) + `"
       }
@@ -451,18 +453,28 @@ func TestExecutor_ApplyConfiguration_PermissionsIgnoredOnWindows(t *testing.T) {
 }`
 
 	ctx := context.Background()
+	// Resource execution failures are reported via report.Status, not returned as error.
 	report, applyErr := executor.ApplyConfiguration(ctx, []byte(configJSON), "v1.0")
-	require.NoError(t, applyErr)
+	require.NoError(t, applyErr, "resource execution failures must not surface as error return")
 	require.NotNil(t, report)
-	assert.Equal(t, "OK", report.Status, "valid Unix permissions on Windows must be silently ignored (warn+continue)")
+	assert.Equal(t, "ERROR", report.Status)
 
 	fileStatus, ok := report.Modules["file"]
 	assert.True(t, ok)
-	assert.Equal(t, "OK", fileStatus.Status)
+	assert.Equal(t, "ERROR", fileStatus.Status)
 
-	// Verify the file was actually created despite the permissions being ignored.
-	_, statErr := os.Stat(filePath)
-	assert.NoError(t, statErr, "file must exist after Set() on Windows")
+	// The error text lands in Details["errors"] as a []string, not in Message
+	errList, ok := fileStatus.Details["errors"].([]string)
+	assert.True(t, ok, "Details[errors] should be a string slice")
+	require.NotEmpty(t, errList)
+	found := false
+	for _, e := range errList {
+		if strings.Contains(e, "not supported on this platform") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, fmt.Sprintf("expected error about unsupported permissions, got: %v", errList))
 }
 
 // TestApplyConfiguration_ApplyMode_CorrectsDriftAndReturnsOK verifies that an executor
