@@ -41,7 +41,6 @@ func TestSetConfiguresThenSetsDirectory(t *testing.T) {
 type: directory
 state: present
 allowed_base_path: ` + tmpBase + `
-permissions: 493
 `
 	srv := adapter.New(file.New(), "file", newStubServer())
 	resp, err := srv.Set(context.Background(), &proto.SetRequest{
@@ -73,7 +72,6 @@ func TestTestReturnsInComplianceWhenStateMatches(t *testing.T) {
 type: directory
 state: present
 allowed_base_path: ` + tmpBase + `
-permissions: 493
 `
 	m := file.New()
 	srv := adapter.New(m, "file", newStubServer())

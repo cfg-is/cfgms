@@ -234,9 +234,11 @@ func testStructuredLoggingCompliance(t *testing.T) {
 	// file module dispatches to setDirectory and reaches the logging code.
 	tmpBase := t.TempDir()
 	targetPath := filepath.Join(tmpBase, "cfgms-logging-test")
+	// No explicit permissions: the directory uses the platform default mode so the
+	// logging code path is exercised on every OS (Unix permission bits are rejected
+	// on Windows, where windows_acl is the supported mechanism).
 	testConfig := &TestDirectoryConfig{
 		Path:            targetPath,
-		Permissions:     0755,
 		AllowedBasePath: tmpBase,
 	}
 
