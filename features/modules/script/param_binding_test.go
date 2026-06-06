@@ -160,6 +160,81 @@ func TestResolveSecretBindings_EmptyBindings(t *testing.T) {
 	assert.Empty(t, resolved)
 }
 
+// TestParamEnvVarName_AllShells verifies that literal params always use the
+// CFGMS_PARAM_ prefix regardless of shell, preventing shadowing of standard env vars.
+func TestParamEnvVarName_AllShells(t *testing.T) {
+	cases := []struct {
+		shell    ShellType
+		input    string
+		expected string
+	}{
+		{ShellBash, "path", "CFGMS_PARAM_PATH"},
+		{ShellSh, "home", "CFGMS_PARAM_HOME"},
+		{ShellZsh, "temp", "CFGMS_PARAM_TEMP"},
+		{ShellPowerShell, "path", "CFGMS_PARAM_PATH"},
+		{ShellCmd, "userprofile", "CFGMS_PARAM_USERPROFILE"},
+		{ShellPython, "script", "CFGMS_PARAM_SCRIPT"},
+		{ShellPython3, "myParam", "CFGMS_PARAM_MYPARAM"},
+	}
+
+	for _, tc := range cases {
+		got := ParamEnvVarName(tc.shell, tc.input)
+		assert.Equal(t, tc.expected, got, "shell=%s param=%s", tc.shell, tc.input)
+	}
+}
+
+// TestLiteralParamDoesNotShadowStandardEnv runs a real script with a literal
+// param named "path" and asserts that CFGMS_PARAM_PATH carries the injected
+// value while the inherited PATH is unchanged.
+func TestLiteralParamDoesNotShadowStandardEnv(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping execution test in short mode")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-only test; PATH shadowing semantics verified on Unix")
+	}
+
+	const paramValue = "/custom/injected/bin"
+
+	bindings := []ParamBinding{
+		{Name: "path", From: ParamSourceLiteral, Value: paramValue},
+	}
+
+	config := &ScriptConfig{
+		Content: `printf "CFGMS_PARAM_PATH=%s\n" "$CFGMS_PARAM_PATH"; printf "PATH=%s\n" "$PATH"`,
+		Shell:   ShellBash,
+		Timeout: 10 * time.Second,
+	}
+	require.NoError(t, config.Validate())
+
+	executor := NewExecutorWithSecrets(config, nil, bindings)
+	result, err := executor.Execute(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.ExitCode, "script should exit 0; stderr: %s", result.Stderr)
+
+	// Literal param named "path" must appear under CFGMS_PARAM_PATH.
+	assert.Contains(t, result.Stdout, "CFGMS_PARAM_PATH="+paramValue,
+		"literal param 'path' must be injected as CFGMS_PARAM_PATH")
+
+	// Inherited PATH must not be overwritten by the literal param value.
+	// Parse line by line to avoid false-positive from the CFGMS_PARAM_PATH line.
+	var pathLine string
+	for _, line := range strings.Split(strings.TrimSpace(result.Stdout), "\n") {
+		if strings.HasPrefix(line, "PATH=") {
+			pathLine = line
+			break
+		}
+	}
+	require.NotEmpty(t, pathLine, "script output must include a PATH= line")
+	assert.NotEqual(t, "PATH="+paramValue, pathLine,
+		"PATH must not be overwritten by the literal param value")
+	parentPATH := os.Getenv("PATH")
+	if parentPATH != "" {
+		assert.Equal(t, "PATH="+parentPATH, pathLine,
+			"inherited PATH must be preserved in the child environment")
+	}
+}
+
 // TestSecretEnvVarName_PowerShell verifies the Windows-safe CFGMS_SECRET_ prefix.
 func TestSecretEnvVarName_PowerShell(t *testing.T) {
 	name := SecretEnvVarName(ShellPowerShell, "DbPassword")
@@ -269,11 +344,11 @@ func TestExecutorWithSecrets_BlocksOnMissingSecret(t *testing.T) {
 	assert.Contains(t, err.Error(), "secret injection blocked")
 }
 
-// TestExecutorWithSecrets_LiteralParamUsesPlainName verifies that literal
-// (non-secret) param bindings are injected with a plain uppercase env var name
-// (no CFGMS_SECRET_ prefix) even when secrets in the same executor would use
-// the prefixed name on Windows-targeted shells.
-func TestExecutorWithSecrets_LiteralParamUsesPlainName(t *testing.T) {
+// TestExecutorWithSecrets_LiteralParamUsesNamespacedName verifies that literal
+// (non-secret) param bindings are injected with the CFGMS_PARAM_ prefix so they
+// cannot shadow standard environment variables (e.g., a param named "apiurl"
+// becomes CFGMS_PARAM_APIURL, never plain APIURL).
+func TestExecutorWithSecrets_LiteralParamUsesNamespacedName(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping literal param env var integration test in short mode")
 	}
@@ -285,9 +360,9 @@ func TestExecutorWithSecrets_LiteralParamUsesPlainName(t *testing.T) {
 		{Name: "ApiUrl", From: ParamSourceLiteral, Value: "https://example.com"},
 	}
 
-	// Script echoes the env var; literal params use plain UPPER name.
+	// Script echoes the namespaced env var; literal params use CFGMS_PARAM_ prefix.
 	config := &ScriptConfig{
-		Content: "echo $APIURL",
+		Content: "echo $CFGMS_PARAM_APIURL",
 		Shell:   ShellBash,
 		Timeout: 10 * time.Second,
 	}
@@ -300,10 +375,10 @@ func TestExecutorWithSecrets_LiteralParamUsesPlainName(t *testing.T) {
 
 	assert.Equal(t, 0, result.ExitCode, "script should exit 0; stderr: %s", result.Stderr)
 	assert.Contains(t, strings.TrimSpace(result.Stdout), "https://example.com",
-		"literal param should be accessible as plain uppercase env var APIURL")
+		"literal param should be accessible as CFGMS_PARAM_APIURL")
 
-	assert.Empty(t, os.Getenv("APIURL"),
-		"APIURL env var must not appear in the parent process (child-process-scoped only)")
+	assert.Empty(t, os.Getenv("CFGMS_PARAM_APIURL"),
+		"CFGMS_PARAM_APIURL env var must not appear in the parent process (child-process-scoped only)")
 }
 
 // TestExecutorWithSecrets_CleansUpOnFailure verifies that secret env vars are

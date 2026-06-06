@@ -67,8 +67,8 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 	// Env var naming by binding type:
 	//   secret-store  → SecretEnvVarName(): CFGMS_SECRET_<PARAM> on Windows (avoids
 	//                   Event 4688 cmdline logging), <PARAM> on Unix (12-factor)
-	//   literal       → strings.ToUpper(param.Name) on all platforms — no secret
-	//                   prefix because the value is not a credential
+	//   literal       → ParamEnvVarName(): CFGMS_PARAM_<PARAM> on all platforms —
+	//                   namespaced to prevent shadowing standard env vars (e.g. PATH)
 	var secretEnvEntries []string
 	if len(e.secretBindings) > 0 {
 		resolved, err := ResolveSecretBindings(ctx, e.secretStore, e.secretBindings)
@@ -81,7 +81,7 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 			if param.IsSecret {
 				envKey = SecretEnvVarName(e.config.Shell, param.Name)
 			} else {
-				envKey = strings.ToUpper(param.Name)
+				envKey = ParamEnvVarName(e.config.Shell, param.Name)
 			}
 			secretEnvEntries = append(secretEnvEntries, fmt.Sprintf("%s=%s", envKey, param.Value))
 		}
