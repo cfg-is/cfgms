@@ -612,9 +612,14 @@ func TestValidator_ValidateJSON(t *testing.T) {
 			errRule: "max_depth",
 		},
 		{
+			// maxJSONStringLength was bumped from 1000 to 65536 during #1887
+			// live validation: signed run-command envelopes routinely contain
+			// >1KB strings (operator cert PEM, base64 signature, base64 script
+			// body) and would reject every legitimate request at the old
+			// limit. Validation now triggers above 64KB.
 			name:    "JSON with oversized string",
 			field:   "data",
-			value:   `{"key": "` + strings.Repeat("a", 1001) + `"}`,
+			value:   `{"key": "` + strings.Repeat("a", 65537) + `"}`,
 			rules:   []string{},
 			wantErr: true,
 			errRule: "json_string_length",
