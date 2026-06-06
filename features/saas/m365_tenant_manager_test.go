@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
-	gdaptypes "github.com/cfgis/cfgms/features/modules/m365/gdap/types"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
+	gdaptypes "github.com/cfgis/cfgms/features/workflow/modules/m365/gdap/types"
 	"github.com/cfgis/cfgms/features/tenant"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )

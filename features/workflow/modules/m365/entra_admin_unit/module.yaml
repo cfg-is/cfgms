@@ -1,0 +1,23 @@
+name: m365-entra-admin-unit
+version: 0.1.0
+description: >
+  Desired-state management of Microsoft Entra ID Administrative Units via
+  the Microsoft Graph API. Manages administrative-unit definitions, scoped
+  role assignments, and member assignments as named resources.
+
+publisher: cfgms
+
+executors:
+  - controller
+
+author: CFGMS Team
+license: AGPL-3.0
+
+platforms:
+  - linux
+  - darwin
+  - windows
+
+interfaces:
+  - Get
+  - Set

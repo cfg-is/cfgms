@@ -8,6 +8,12 @@ publisher: cfgms
 executors:
   - outpost  # Network-based AD management for remote domain controllers
 
+# Candidate for relocation to outpost kind when outpost runtime lands.
+# This module's network-LDAP-only design fits the outpost (remote-network
+# agent) execution shape better than the steward (host agent) shape; once
+# the outpost runtime exists, move this directory under
+# features/outpost/modules/ and drop the executor declaration here.
+
 # Required interfaces for module compliance
 interfaces:
   - Get

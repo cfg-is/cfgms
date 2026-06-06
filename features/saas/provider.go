@@ -31,7 +31,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 )
 
 // Provider defines the universal interface for SaaS platform integrations.
