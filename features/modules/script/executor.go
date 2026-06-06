@@ -91,11 +91,13 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
 	defer cancel()
 
-	// Build command based on shell type and platform
-	cmd, err := e.buildCommand(timeoutCtx)
+	// Build command based on shell type and platform. cleanup removes the temp
+	// script file after execution completes.
+	cmd, cleanup, err := e.buildCommand(timeoutCtx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build command: %w", err)
 	}
+	defer cleanup()
 
 	// Apply execution context: may replace cmd with a sudo wrapper (Unix) or attach a
 	// user token (Windows). This must happen before Dir/Env are set so those values
@@ -197,73 +199,149 @@ func hashScriptContent(content string) string {
 	return fmt.Sprintf("%x", hash[:8]) // First 8 bytes for logging
 }
 
-// buildCommand creates the appropriate command for the shell type and platform
-func (e *Executor) buildCommand(ctx context.Context) (*exec.Cmd, error) {
+// buildCommand creates the appropriate command for the shell type and platform.
+// The returned cleanup function removes any temporary script file created; callers
+// must call it after the command has finished executing.
+func (e *Executor) buildCommand(ctx context.Context) (*exec.Cmd, func(), error) {
 	switch runtime.GOOS {
 	case "windows":
 		return e.buildWindowsCommand(ctx)
 	case "linux", "darwin":
 		return e.buildUnixCommand(ctx)
 	default:
-		return nil, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+		return nil, func() {}, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
 }
 
-// buildWindowsCommand creates commands for Windows platforms
-func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, error) {
+// writeTempScript writes content to a temp file with the given name pattern and
+// returns the path and a cleanup function that removes the file.
+func writeTempScript(pattern, content string) (string, func(), error) {
+	noop := func() {}
+	f, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", noop, fmt.Errorf("create temp script: %w", err)
+	}
+	tmpPath := f.Name()
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return "", noop, fmt.Errorf("write temp script: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", noop, fmt.Errorf("close temp script: %w", err)
+	}
+	cleanup := func() { _ = os.Remove(tmpPath) }
+	return tmpPath, cleanup, nil
+}
+
+// buildWindowsCommand creates commands for Windows platforms.
+// Scripts are staged to a temp file and executed by file path — no inline content
+// is passed to the interpreter, eliminating -ExecutionPolicy Bypass, -Command <string>,
+// and python -c <string> injection vectors.
+func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, func(), error) {
+	noop := func() {}
 	switch e.config.Shell {
 	case ShellPowerShell:
-		// Use PowerShell with appropriate execution policy
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, "powershell.exe",
-			"-ExecutionPolicy", "Bypass",
-			"-NonInteractive",
-			"-Command", e.config.Content), nil
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.ps1", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "powershell.exe", "-NonInteractive", "-File", tmpPath), cleanup, nil
 
 	case ShellCmd:
-		// Use Command Prompt
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, "cmd.exe", "/c", e.config.Content), nil
-
-	case ShellPython, ShellPython3:
-		// Use Python interpreter
-		pythonCmd := "python"
-		if e.config.Shell == ShellPython3 {
-			pythonCmd = "python3"
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.cmd", e.config.Content)
+		if err != nil {
+			return nil, noop, err
 		}
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, pythonCmd, "-c", e.config.Content), nil
+		// cmd.exe /c <filepath> executes the batch file by path; content is on disk,
+		// not passed inline. This differs from the banned pattern cmd.exe /c <inline-content>.
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "cmd.exe", "/c", tmpPath), cleanup, nil
+
+	case ShellPython:
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.py", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "python.exe", tmpPath), cleanup, nil
+
+	case ShellPython3:
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.py", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "python3.exe", tmpPath), cleanup, nil
 
 	default:
-		return nil, fmt.Errorf("unsupported shell on Windows: %s", e.config.Shell)
+		return nil, noop, fmt.Errorf("unsupported shell on Windows: %s", e.config.Shell)
 	}
 }
 
-// buildUnixCommand creates commands for Unix-like platforms (Linux/macOS)
-func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, error) {
+// buildUnixCommand creates commands for Unix-like platforms (Linux/macOS).
+// Scripts are staged to a temp file and executed by file path — no inline content
+// is passed via -c flags, eliminating the bash -c <string> injection vector.
+func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, func(), error) {
+	noop := func() {}
+
+	writeExec := func(pattern string) (string, func(), error) {
+		tmpPath, cleanup, err := writeTempScript(pattern, e.config.Content)
+		if err != nil {
+			return "", noop, err
+		}
+		if err := os.Chmod(tmpPath, 0700); err != nil {
+			cleanup()
+			return "", noop, fmt.Errorf("chmod temp script: %w", err)
+		}
+		return tmpPath, cleanup, nil
+	}
+
 	switch e.config.Shell {
 	case ShellBash:
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, "/bin/bash", "-c", e.config.Content), nil
+		tmpPath, cleanup, err := writeExec("cfgms-script-*")
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "/bin/bash", tmpPath), cleanup, nil
 
 	case ShellZsh:
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, "/bin/zsh", "-c", e.config.Content), nil
+		tmpPath, cleanup, err := writeExec("cfgms-script-*")
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "/bin/zsh", tmpPath), cleanup, nil
 
 	case ShellSh:
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, "/bin/sh", "-c", e.config.Content), nil
-
-	case ShellPython, ShellPython3:
-		pythonCmd := "/usr/bin/python"
-		if e.config.Shell == ShellPython3 {
-			pythonCmd = "/usr/bin/python3"
+		tmpPath, cleanup, err := writeExec("cfgms-script-*")
+		if err != nil {
+			return nil, noop, err
 		}
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, pythonCmd, "-c", e.config.Content), nil
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "/bin/sh", tmpPath), cleanup, nil
+
+	case ShellPython:
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "/usr/bin/python", tmpPath), cleanup, nil
+
+	case ShellPython3:
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "/usr/bin/python3", tmpPath), cleanup, nil
 
 	default:
-		return nil, fmt.Errorf("unsupported shell on Unix: %s", e.config.Shell)
+		return nil, noop, fmt.Errorf("unsupported shell on Unix: %s", e.config.Shell)
 	}
 }
 

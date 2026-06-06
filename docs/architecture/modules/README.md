@@ -13,15 +13,15 @@ CFGMS uses a module-based architecture where all resource management tasks are p
 
 ```
 modules/
-├── directory/
-│   ├── module.yaml          # Module metadata
-│   └── module.go           # Implementation
 ├── file/
-│   ├── module.yaml
+│   ├── module.yaml          # Module metadata (covers file, directory, symlink types)
 │   └── implementation.go
-└── firewall/
+├── firewall/
+│   ├── module.yaml
+│   └── module.go
+└── script/
     ├── module.yaml
-    └── module.go
+    └── implementation.go
 ```
 
 **Required Files:**
@@ -65,16 +65,27 @@ The `executors` field must contain exactly one element. `kind` is computed at pa
 
 ## Available Modules
 
-- `directory` - Directory creation and permissions
-- `file` - File content and attributes
+**Stdlib** (shipped in the steward installer, all `executors: [steward]`):
+
+- `file` - File content, directory creation, and permissions (`type: file` / `type: directory` / `type: symlink`)
 - `firewall` - Firewall rules and policies
 - `package` - Software package management
-- `script` - Cross-platform script execution
+- `patch` - OS patch management (Windows Update COM API on Windows; stub on other platforms)
+- `script` - Cross-platform script execution (file-based, no inline eval)
 - `service` - OS service state management
+
+**Non-stdlib steward modules:**
+
 - `acme` - ACME/Let's Encrypt certificate management
 - `activedirectory` - Local Active Directory integration (steward)
-- `network_activedirectory` - Network-based AD integration via LDAP (outpost)
 - `hyperv` - Remote Hyper-V management via WinRM
+
+**Outpost modules:**
+
+- `network_activedirectory` - Network-based AD integration via LDAP (outpost)
+
+**Workflow modules:**
+
 - `m365/*` - Microsoft 365 modules (auth, conditional access, Entra groups/users/apps/admin units, Intune policy, GDAP)
 
 ## Documentation

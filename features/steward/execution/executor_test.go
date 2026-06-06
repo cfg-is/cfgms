@@ -53,12 +53,14 @@ func testDirConfig(path string) string {
 	parent := filepath.ToSlash(filepath.Dir(path))
 	if runtime.GOOS == "windows" {
 		return `{
+        "type": "directory",
         "state": "present",
         "allowed_base_path": "` + parent + `",
         "path": "` + filepath.ToSlash(path) + `"
       }`
 	}
 	return `{
+        "type": "directory",
         "allowed_base_path": "` + parent + `",
         "path": "` + filepath.ToSlash(path) + `",
         "permissions": 493
@@ -431,7 +433,9 @@ func TestExecutor_ApplyConfiguration_PermissionsRejectedOnWindows(t *testing.T) 
 	executor, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: logger})
 	require.NoError(t, err)
 
-	// On Windows, specifying Unix permissions should produce an error
+	// On Windows, Unix permission bits are not enforced (NTFS uses ACLs). Specifying
+	// the permissions field is a misconfiguration and must produce an explicit error
+	// pointing the operator at windows_acl — not be silently ignored.
 	configJSON := `{
   "steward": {"id": "test-steward", "mode": "controller"},
   "resources": [

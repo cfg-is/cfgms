@@ -68,11 +68,37 @@
                 Name="cfgms-steward.exe"
                 KeyPath="yes" />
         </Component>
+        <Directory Id="MODULESDIR" Name="modules">
+          <Component Id="ModuleFile" Guid="*">
+            <File Id="ModuleFileExe" Source="$(var.ModulesDir)\cfgms-module-file.exe" Name="cfgms-module-file.exe" KeyPath="yes" />
+          </Component>
+          <Component Id="ModuleService" Guid="*">
+            <File Id="ModuleServiceExe" Source="$(var.ModulesDir)\cfgms-module-service.exe" Name="cfgms-module-service.exe" KeyPath="yes" />
+          </Component>
+          <Component Id="ModulePackage" Guid="*">
+            <File Id="ModulePackageExe" Source="$(var.ModulesDir)\cfgms-module-package.exe" Name="cfgms-module-package.exe" KeyPath="yes" />
+          </Component>
+          <Component Id="ModuleScript" Guid="*">
+            <File Id="ModuleScriptExe" Source="$(var.ModulesDir)\cfgms-module-script.exe" Name="cfgms-module-script.exe" KeyPath="yes" />
+          </Component>
+          <Component Id="ModuleFirewall" Guid="*">
+            <File Id="ModuleFirewallExe" Source="$(var.ModulesDir)\cfgms-module-firewall.exe" Name="cfgms-module-firewall.exe" KeyPath="yes" />
+          </Component>
+          <Component Id="ModulePatch" Guid="*">
+            <File Id="ModulePatchExe" Source="$(var.ModulesDir)\cfgms-module-patch.exe" Name="cfgms-module-patch.exe" KeyPath="yes" />
+          </Component>
+        </Directory>
       </Directory>
     </StandardDirectory>
 
     <Feature Id="ProductFeature" Title="CFGMS Steward" Level="1">
       <ComponentRef Id="StewardBinary" />
+      <ComponentRef Id="ModuleFile" />
+      <ComponentRef Id="ModuleService" />
+      <ComponentRef Id="ModulePackage" />
+      <ComponentRef Id="ModuleScript" />
+      <ComponentRef Id="ModuleFirewall" />
+      <ComponentRef Id="ModulePatch" />
     </Feature>
 
     <!--
