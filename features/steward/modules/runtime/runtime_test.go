@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -99,25 +100,31 @@ func TestEchoModuleLifecycle(t *testing.T) {
 	assert.Equal(t, runtime.StateStopped, handle.GetState())
 }
 
-// TestEchoModuleLifecycleWithOverlongRuntimeDir is the regression test for the
-// macOS CI failures (PR #1897 review): on macOS, t.TempDir() returns paths
+// TestEchoModuleLifecycleWithHashFallbackRuntimeDir is the regression test for
+// the macOS CI concern (PR #1897 review): on macOS, t.TempDir() returns paths
 // under /var/folders/... that, joined with the socket filename, exceed the
-// 104-byte sun_path limit. The runtime must fall back to a short hashed path
-// under /tmp so net.Listen("unix", ...) succeeds. This test forces the fallback
-// path on all platforms by passing a deliberately long runtimeDir.
-func TestEchoModuleLifecycleWithOverlongRuntimeDir(t *testing.T) {
-	// Build a runtime dir long enough that the natural socket path overflows
-	// 103 bytes — exercising the fallback even on Linux where t.TempDir() is
-	// normally short.
-	base := t.TempDir()
-	deep := filepath.Join(base,
-		"deeply", "nested", "directory", "tree",
-		"with", "enough", "path", "components",
-		"to", "blow", "past", "the", "macos", "sun_path", "limit",
-	)
-	require.NoError(t, os.MkdirAll(deep, 0o755))
+// 104-byte sun_path limit. The runtime must hash the socket name into the
+// steward-private sockets directory (never /tmp) so net.Listen("unix", ...)
+// succeeds.
+//
+// A runtimeDir of exactly 71 chars is used: the minimum that triggers the hash
+// fallback (natural = 71+33 = 104 > 103) while the hash path still fits
+// within the private dir (hash = 71+32 = 103 ≤ 103). Uses /tmp directly for
+// a predictably short base (~28 chars) so no platform-conditional skip is needed.
+func TestEchoModuleLifecycleWithHashFallbackRuntimeDir(t *testing.T) {
+	// Use /tmp directly for a short, predictable base on all platforms.
+	const targetLen = 71
+	base, err := os.MkdirTemp("/tmp", "cfgms-rt-test-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	if len(base) >= targetLen {
+		t.Fatalf("base dir %q (%d bytes) is already >= %d", base, len(base), targetLen)
+	}
+	paddingLen := targetLen - len(base) - 1
+	long := filepath.Join(base, strings.Repeat("d", paddingLen))
+	require.NoError(t, os.MkdirAll(long, 0o755))
 
-	rt := runtime.NewModuleRuntime(deep)
+	rt := runtime.NewModuleRuntime(long)
 	b := makeBypassBundle(echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)

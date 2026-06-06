@@ -18,9 +18,12 @@ import (
 
 // makeSocketPath returns the named pipe path for a module instance.
 // Format: \\.\pipe\cfgms-module-${name}-${id}
-// runtimeDir is unused on Windows (named pipes don't use directories).
-func makeSocketPath(runtimeDir, moduleName string, id int64) string {
-	return fmt.Sprintf(`\\.\pipe\cfgms-module-%s-%d`, sanitizeName(moduleName), id)
+//
+// runtimeDir is unused on Windows: named pipes are identified by name, not
+// filesystem path. Windows enforces per-user pipe ACLs at the kernel level,
+// so no additional directory permission hardening is required here.
+func makeSocketPath(runtimeDir, moduleName string, id int64) (string, error) {
+	return fmt.Sprintf(`\\.\pipe\cfgms-module-%s-%d`, sanitizeName(moduleName), id), nil
 }
 
 // waitForSocket polls the named pipe at socketPath until it accepts a
