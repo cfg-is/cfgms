@@ -488,14 +488,18 @@ func TestModule_NoCredentialInLogs_TransportError(t *testing.T) {
 
 // ─── Module.Configurable tests ─────────────────────────────────────────────────
 
-// TestModule_Configure_ExtractsAllKeys verifies that Configure correctly extracts
-// winrm_host, winrm_user_secret, and winrm_pass_secret from the config map.
-func TestModule_Configure_ExtractsAllKeys(t *testing.T) {
+// TestModule_Configure_ExtractsAllKeys_WinRM verifies that Configure correctly
+// extracts winrm_host, winrm_user_secret, and winrm_pass_secret when the
+// operator pins transport: "winrm" (the named-fallback path). The default
+// transport is the local PS host; tests that need to exercise the WinRM
+// path specifically must pin it here.
+func TestModule_Configure_ExtractsAllKeys_WinRM(t *testing.T) {
 	store := newInlineStore()
 	m := &hypervModule{executor: &stubHypervExecutor{}}
 	require.NoError(t, m.SetSecretStore(store))
 
 	cfg := mapConfigState{
+		"transport":         "winrm",
 		"winrm_host":        "10.0.0.1",
 		"winrm_user_secret": "svc-user",
 		"winrm_pass_secret": "svc-pass",
@@ -518,29 +522,43 @@ func TestModule_Configure_NilConfig(t *testing.T) {
 
 func TestModule_Configure_MissingSecretStore(t *testing.T) {
 	m := &hypervModule{executor: &stubHypervExecutor{}}
-	err := m.Configure(mapConfigState{"winrm_host": "h", "winrm_user_secret": "u", "winrm_pass_secret": "p"})
+	err := m.Configure(mapConfigState{"transport": "winrm", "winrm_host": "h", "winrm_user_secret": "u", "winrm_pass_secret": "p"})
 	assert.ErrorIs(t, err, errSecretStoreRequired)
 }
 
-func TestModule_Configure_MissingHost(t *testing.T) {
+// TestModule_Configure_MissingHost_WinRM, _MissingUserSecretKey_WinRM, and
+// _MissingPassSecretKey_WinRM verify the WinRM-fallback path's required-
+// field errors. Each pins transport: "winrm" explicitly because the default
+// PS-host path does not consult any winrm_* keys.
+func TestModule_Configure_MissingHost_WinRM(t *testing.T) {
 	m := &hypervModule{executor: &stubHypervExecutor{}}
 	require.NoError(t, m.SetSecretStore(newInlineStore()))
-	err := m.Configure(mapConfigState{"winrm_user_secret": "u", "winrm_pass_secret": "p"})
+	err := m.Configure(mapConfigState{"transport": "winrm", "winrm_user_secret": "u", "winrm_pass_secret": "p"})
 	assert.ErrorIs(t, err, errHostRequired)
 }
 
-func TestModule_Configure_MissingUserSecretKey(t *testing.T) {
+func TestModule_Configure_MissingUserSecretKey_WinRM(t *testing.T) {
 	m := &hypervModule{executor: &stubHypervExecutor{}}
 	require.NoError(t, m.SetSecretStore(newInlineStore()))
-	err := m.Configure(mapConfigState{"winrm_host": "h", "winrm_pass_secret": "p"})
+	err := m.Configure(mapConfigState{"transport": "winrm", "winrm_host": "h", "winrm_pass_secret": "p"})
 	assert.ErrorIs(t, err, errUserSecretKeyRequired)
 }
 
-func TestModule_Configure_MissingPassSecretKey(t *testing.T) {
+func TestModule_Configure_MissingPassSecretKey_WinRM(t *testing.T) {
 	m := &hypervModule{executor: &stubHypervExecutor{}}
 	require.NoError(t, m.SetSecretStore(newInlineStore()))
-	err := m.Configure(mapConfigState{"winrm_host": "h", "winrm_user_secret": "u"})
+	err := m.Configure(mapConfigState{"transport": "winrm", "winrm_host": "h", "winrm_user_secret": "u"})
 	assert.ErrorIs(t, err, errPassSecretKeyRequired)
+}
+
+// TestModule_Configure_RejectsUnknownTransport verifies the explicit
+// allowlist on the "transport" config key.
+func TestModule_Configure_RejectsUnknownTransport(t *testing.T) {
+	m := &hypervModule{executor: &stubHypervExecutor{}}
+	require.NoError(t, m.SetSecretStore(newInlineStore()))
+	err := m.Configure(mapConfigState{"transport": "bogus"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown transport")
 }
 
 // ─── Module interface compliance tests ─────────────────────────────────────────
