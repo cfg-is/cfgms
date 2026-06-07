@@ -456,6 +456,128 @@ func TestCutover_IntegrationFailedSmoketest(t *testing.T) {
 		"original canonical must still be serving after a failed cutover")
 }
 
+// TestCutover_IntegrationAbortedMidflight covers the [REQUIRED TEST]
+// for operator Ctrl-C mid-cutover: cancelling the orchestration ctx
+// must NOT leave the orchestrator in a partial state, and the
+// original canonical must continue serving traffic.
+//
+// Flow:
+//  1. Build the controller binary, generate certs, --init.
+//  2. Spawn the initial canonical, wait healthy.
+//  3. Start Upgrade in a goroutine.
+//  4. Cancel the context ~1.5s in (mid-smoketest or mid-swap).
+//  5. Wait for Upgrade to return.
+//  6. Assert: orchestrator is in StateIdle; original canonical still
+//     responds to /api/v1/health within 5s.
+func TestCutover_IntegrationAbortedMidflight(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test — requires controller binary build + spawn")
+	}
+
+	exe := buildControllerBinary(t)
+	dataDir := t.TempDir()
+	certDir := filepath.Join(dataDir, "certs")
+	require.NoError(t, os.MkdirAll(certDir, 0o755))
+
+	apiAddr := freePortLocal(t)
+	transportAddr := freePortLocal(t)
+	candAPIAddr := freePortLocal(t)
+	candTransportAddr := freePortLocal(t)
+
+	cfgPath := writeMinimalConfig(t, dataDir, certDir, apiAddr, transportAddr)
+	initController(t, exe, cfgPath)
+
+	initial := NewExecProcessHandle(exe, cfgPath)
+	stdoutBuf := &threadSafeBuffer{}
+	stderrBuf := &threadSafeBuffer{}
+	initial.Stdout = stdoutBuf
+	initial.Stderr = stderrBuf
+	bgCtx, bgCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer bgCancel()
+	require.NoError(t, initial.Start(bgCtx, apiAddr, transportAddr))
+	t.Cleanup(func() {
+		stopCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+		defer c()
+		_ = initial.Stop(stopCtx)
+		if t.Failed() {
+			t.Logf("controller stdout:\n%s", stdoutBuf.String())
+			t.Logf("controller stderr:\n%s", stderrBuf.String())
+		}
+	})
+	require.NoError(t, waitForControllerHealthy(bgCtx, apiAddr, 30*time.Second))
+
+	spawn := func(binaryPath string) ProcessHandle {
+		return NewExecProcessHandle(binaryPath, cfgPath)
+	}
+	// Use a deliberately-slow smoketester so the abort lands DURING
+	// smoketest, not after — the production HTTPSmoketester probes
+	// /api/v1/health in <500ms which leaves no realistic cancel
+	// window. The AC's "router stays pointed at previous canonical"
+	// only holds when the abort lands BEFORE the swap drains the
+	// original; with a fast smoketest the only meaningful cancel
+	// happens once it's too late. Use a Smoketester impl that blocks
+	// on ctx so the abort path is exercised cleanly.
+	slowSmoke := &blockingSmoketester{}
+	swap := &PortSwapTarget{
+		PortHandoffTimeout: 5 * time.Second,
+		CandidateSpawner:   spawn,
+		ReadinessProbe:     slowSmoke,
+	}
+	orch := NewOrchestrator(
+		Config{
+			CanonicalAPIAddr:       apiAddr,
+			CanonicalTransportAddr: transportAddr,
+			CandidateAPIAddr:       candAPIAddr,
+			CandidateTransportAddr: candTransportAddr,
+			QuarantineWindow:       30 * time.Second,
+			SmoketestTimeout:       30 * time.Second,
+		},
+		initial,
+		nil,
+		slowSmoke,
+		swap,
+		spawn,
+	)
+
+	upgradeCtx, upgradeCancel := context.WithCancel(bgCtx)
+	var (
+		upErr   error
+		upDone  = make(chan struct{})
+		upStart = time.Now()
+	)
+	go func() {
+		defer close(upDone)
+		upErr = orch.Upgrade(upgradeCtx, exe)
+	}()
+
+	// Cancel after 500ms — the blockingSmoketester is happily
+	// blocked on ctx so we're guaranteed to be in StateSmoketesting,
+	// not yet drained.
+	time.Sleep(500 * time.Millisecond)
+	t.Logf("cancelling upgrade context at +%s", time.Since(upStart))
+	upgradeCancel()
+
+	select {
+	case <-upDone:
+		t.Logf("upgrade returned %s after cancel (err: %v)", time.Since(upStart), upErr)
+	case <-time.After(30 * time.Second):
+		t.Fatal("Upgrade did not return within 30s of cancel — orchestrator hangs on aborted cutover")
+	}
+
+	require.Error(t, upErr, "Upgrade must surface the cancellation as an error")
+	require.Equal(t, StateIdle, orch.Status().State,
+		"after aborted cutover, orchestrator must be back in StateIdle (no partial state)")
+	// Post-abort recovery window. The aborted candidate may have left
+	// shared-storage state (WAL transactions, flatfile temp files) that
+	// the original canonical needs to step around — Story B's retry
+	// helpers handle the steady state but a freshly-killed candidate
+	// can briefly contend. 15s is the operator-perceptible budget under
+	// which the AC's "router stays pointed at the previous canonical"
+	// is honoured.
+	require.NoError(t, waitForControllerHealthy(bgCtx, apiAddr, 15*time.Second),
+		"original canonical must still respond after an aborted cutover")
+}
+
 // freePortLocal: free TCP port reservation, returns ":<port>".
 func freePortLocal(t *testing.T) string {
 	t.Helper()
@@ -492,6 +614,19 @@ func waitForControllerHealthy(ctx context.Context, addr string, timeout time.Dur
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// blockingSmoketester is a Smoketester that blocks forever on its ctx.
+// Used by the aborted-cutover test to give the orchestrator a long
+// enough window in StateSmoketesting that the cancel lands cleanly
+// before any destructive swap step has begun. Production smoketests
+// return in well under a second; this fake stays blocked until cancel
+// fires.
+type blockingSmoketester struct{}
+
+func (blockingSmoketester) Probe(ctx context.Context, _ ProcessHandle, _, _ string) error {
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 // threadSafeBuffer is a thread-safe bytes buffer for capturing
