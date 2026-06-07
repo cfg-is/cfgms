@@ -238,6 +238,72 @@ On startup, the steward:
 3. Reconnects to controller if configured
 4. Resumes normal schedule
 
+## Concurrent Controller Execution (Blue/Green Pattern)
+
+CFGMS controllers are designed to support a **blue/green upgrade pattern**: two
+controller binaries running on the same host (or two hosts sharing storage)
+can coexist on the same data directory without corrupting state. This is the
+substrate for the zero-downtime upgrade flow described in epic #1917.
+
+### What's safe
+
+- **Read concurrency.** Both controllers can serve API reads concurrently against
+  shared storage. Storage backends are coordinated via filesystem-level
+  primitives (POSIX rename / Windows MoveFileEx + retry for flatfile; WAL-mode
+  shared-memory locking for SQLite).
+- **Single-writer + reader peers.** During cutover, one controller is the
+  primary writer for new state (registrations, heartbeats, config updates) and
+  the peer serves reads. Identity continuity is exact: a steward registered
+  against the writer is immediately visible on a read from the peer — no
+  replication lag, no re-registration. See `pkg/storage/providers/sqlite/
+  concurrent_writers_test.go::TestSQLite_IdentityContinuity_BlueWriteGreenRead`
+  for the pinned guarantee.
+- **Concurrent writes to disjoint keys.** Two writers updating different
+  records concurrently complete safely. WAL coordinates SQLite writers; atomic
+  rename + retry coordinates flatfile writers.
+
+### What's not safe (yet)
+
+- **Concurrent writes to the same key.** Two writers updating the same
+  steward record / config / RBAC entry at the same moment race on
+  last-writer-wins semantics. No corruption, but the merge is unordered. This
+  is acceptable for blue/green cutover (the primary writer is well-defined at
+  any given moment) but is **not** acceptable for multi-active HA — that
+  needs a separate epic with proper write coordination.
+- **Schema migrations during cutover.** A migration that changes column or
+  field shapes must run during a maintenance window or after both sides have
+  upgraded. Blue/green cutover assumes both binaries speak the same storage
+  schema.
+
+### Storage layer guarantees
+
+| Backend  | Concurrency contract                                                                                                                                                                                                              |
+|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| SQLite   | WAL mode + `busy_timeout=5000ms`. Multiple `*sql.DB` handles on the same file (in-process OR cross-process) write safely without lock failures. Tested at 1000 concurrent writes split across two handles with zero failures.    |
+| Flatfile | Writes commit via atomic temp-file + rename. On Windows, rename retries `ERROR_SHARING_VIOLATION` from concurrent readers; reads retry the same error from concurrent writers. Tested with 1 writer + N reader subprocesses, 0 torn reads. |
+
+### Operator interface
+
+The blue controller runs on the canonical ports from `controller.cfg`. The
+green controller binds on overrides supplied at startup:
+
+```sh
+cfgms-controller \
+    --config /etc/cfgms/controller.cfg \
+    --listen-api-addr :9081 \
+    --listen-transport-addr :4434
+```
+
+Precedence: CLI flag > env var (`CFGMS_HTTP_LISTEN_ADDR`,
+`CFGMS_TRANSPORT_LISTEN_ADDR`) > cfg file value > built-in default. Both
+binaries read the same `data_dir`, same storage configuration, same identity
+material — so the green binary is bit-for-bit indistinguishable from the
+blue binary in terms of "what it serves." Only the listen addresses differ.
+
+The cutover mechanism itself (routing client traffic from blue → green) is
+the subject of story #1920; the substrate this section documents is the
+prerequisite that makes such routing safe to implement.
+
 ## Deployment Modes
 
 All deployment modes use the same steward binary. The mode only determines where the cfg comes from and whether a controller channel exists.

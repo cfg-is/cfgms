@@ -43,8 +43,10 @@ func main() {
 // buildRootCommand constructs the cobra command tree for cfgms-controller.
 func buildRootCommand() *cobra.Command {
 	var (
-		configPath string
-		initMode   bool
+		configPath        string
+		initMode          bool
+		listenAPIAddr     string
+		listenTransportAddr string
 	)
 
 	root := &cobra.Command{
@@ -58,15 +60,23 @@ Entry paths:
   cfgms-controller --config /etc/cfgms/controller.cfg   Run in foreground
   cfgms-controller --init --config /path/to/config      First-run initialization
   cfgms-controller install --config /path/to/config     Install as OS service
-  cfgms-controller status                               Show service status`, version.Short()),
+  cfgms-controller status                               Show service status
+
+Blue/green operation:
+  --listen-api-addr / --listen-transport-addr override the canonical listen
+  addresses from the config file so a "green" controller can bind on
+  alternate ports while a "blue" controller holds the canonical ones. Both
+  must point at the same data_dir + storage backing (Issue #1919).`, version.Short()),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runController(configPath, initMode)
+			return runController(configPath, initMode, listenAPIAddr, listenTransportAddr)
 		},
 	}
 
 	root.Flags().StringVar(&configPath, "config", "", "Path to configuration file (default: search /etc/cfgms/controller.cfg, then ./controller.cfg)")
 	root.Flags().BoolVar(&initMode, "init", false, "Perform first-run initialization (creates CA, storage, RBAC defaults)")
+	root.Flags().StringVar(&listenAPIAddr, "listen-api-addr", "", "Override REST API listen address (e.g. ':9081'); takes precedence over config + env")
+	root.Flags().StringVar(&listenTransportAddr, "listen-transport-addr", "", "Override unified transport listen address (e.g. ':4434'); takes precedence over config + env")
 
 	root.AddCommand(
 		buildInstallCommand(),
@@ -79,11 +89,20 @@ Entry paths:
 }
 
 // runController starts the controller server (or runs --init and exits).
-func runController(configPath string, initMode bool) error {
+//
+// listenAPIAddr / listenTransportAddr — when non-empty — override the
+// matching cfg fields after the config file + env vars have been applied.
+// This is the highest-precedence layer so an operator can stand up a
+// blue/green pair on the same host (Issue #1919). An empty string means
+// "use what config + env produced," preserving legacy single-controller
+// startup exactly.
+func runController(configPath string, initMode bool, listenAPIAddr, listenTransportAddr string) error {
 	cfg, err := config.LoadWithPath(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
+
+	applyListenOverrides(cfg, listenAPIAddr, listenTransportAddr)
 
 	// Guard: reject deprecated git provider before any initialization
 	if cfg.Storage != nil && cfg.Storage.Provider == "git" {
@@ -191,6 +210,25 @@ func runControllerServer(srv controllerServer, sigChan <-chan os.Signal) error {
 		return fmt.Errorf("controller server failed: %w", runErr)
 	}
 	return nil
+}
+
+// applyListenOverrides applies CLI listen-address overrides on top of the
+// already-loaded config. Empty strings are no-ops so that operators who
+// don't pass the flags get exactly the legacy startup behaviour.
+//
+// Precedence (highest wins): CLI flag → env var → cfg file → built-in default.
+// The env-var layer is applied inside config.LoadWithPath, so by the time
+// this function runs cfg already reflects env > file > default.
+func applyListenOverrides(cfg *config.Config, listenAPIAddr, listenTransportAddr string) {
+	if listenAPIAddr != "" {
+		cfg.ListenAddr = listenAPIAddr
+	}
+	if listenTransportAddr != "" {
+		if cfg.Transport == nil {
+			cfg.Transport = &config.TransportConfig{}
+		}
+		cfg.Transport.ListenAddr = listenTransportAddr
+	}
 }
 
 // buildInstallCommand builds the `cfgms-controller install` subcommand.
