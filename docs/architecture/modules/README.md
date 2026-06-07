@@ -88,6 +88,29 @@ The `executors` field must contain exactly one element. `kind` is computed at pa
 
 - `m365/*` - Microsoft 365 modules (auth, conditional access, Entra groups/users/apps/admin units, Intune policy, GDAP)
 
+## Script Module — Parameter Environment Variables
+
+Script parameters are injected into the child process environment only (the steward process environment is never modified). Two namespaces are used:
+
+| Type | Env var name | Example |
+|------|-------------|---------|
+| Literal param | `CFGMS_PARAM_<NAME_UPPER>` | `path` → `CFGMS_PARAM_PATH` |
+| Secret-store param | `CFGMS_SECRET_<NAME_UPPER>` (PowerShell/CMD) or `<NAME_UPPER>` (Unix shells) | `dbPass` → `CFGMS_SECRET_DBPASS` / `DBPASS` |
+
+The `CFGMS_PARAM_` prefix prevents a literal param from silently overwriting a standard environment variable (e.g., a param named `path` becomes `CFGMS_PARAM_PATH`, not `PATH`). Scripts read params via the namespaced name:
+
+```bash
+# bash/sh/zsh — literal param named "install_path"
+echo "$CFGMS_PARAM_INSTALL_PATH"
+```
+
+```powershell
+# PowerShell — literal param named "install_path"
+Write-Output $env:CFGMS_PARAM_INSTALL_PATH
+```
+
+Secret params on Windows use `CFGMS_SECRET_` to avoid logging the value via Event 4688 command-line auditing. On Unix shells, secrets use a bare uppercase name (`<NAME_UPPER>`) following the 12-factor convention.
+
 ## Documentation
 
 - [Module Interface](interface.md) - Essential interface specification and ConfigState details
