@@ -138,20 +138,94 @@ func TestRollback_NoPreviousReturnsError(t *testing.T) {
 	}
 }
 
-func TestReadVersionFile_TrimsTrailingNewline(t *testing.T) {
+func TestReadLegacyPointer_TrimsTrailingNewline(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "current.txt")
 	if err := os.WriteFile(p, []byte("v1\n\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	got, err := readVersionFile(p)
+	got, err := readLegacyPointer(p)
 	if err != nil {
-		t.Fatalf("readVersionFile: %v", err)
+		t.Fatalf("readLegacyPointer: %v", err)
 	}
 	if got != "v1" {
-		t.Errorf("readVersionFile = %q, want %q", got, "v1")
+		t.Errorf("readLegacyPointer = %q, want %q", got, "v1")
 	}
 	if strings.ContainsAny(got, " \t\r\n") {
-		t.Errorf("readVersionFile returned whitespace: %q", got)
+		t.Errorf("readLegacyPointer returned whitespace: %q", got)
+	}
+}
+
+// TestLayout_LegacyPointerMigration verifies installations that booted
+// before state.json existed (with current.txt + previous.txt as the
+// pointer files) are correctly read on first load. After a WriteCurrent
+// call all subsequent reads come from state.json.
+func TestLayout_LegacyPointerMigration(t *testing.T) {
+	l := newLayout(t)
+	require := func(cond bool, msg string) {
+		t.Helper()
+		if !cond {
+			t.Fatal(msg)
+		}
+	}
+
+	// Pre-seed legacy single-line pointer files like an older installation.
+	require(os.WriteFile(l.CurrentPath(), []byte("v-legacy-current\n"), 0o600) == nil, "write legacy current.txt")
+	require(os.WriteFile(l.PreviousPath(), []byte("v-legacy-previous\n"), 0o600) == nil, "write legacy previous.txt")
+
+	cur, err := l.ReadCurrent()
+	if err != nil {
+		t.Fatalf("ReadCurrent: %v", err)
+	}
+	if cur != "v-legacy-current" {
+		t.Errorf("ReadCurrent = %q, want v-legacy-current", cur)
+	}
+	prev, err := l.ReadPrevious()
+	if err != nil {
+		t.Fatalf("ReadPrevious: %v", err)
+	}
+	if prev != "v-legacy-previous" {
+		t.Errorf("ReadPrevious = %q, want v-legacy-previous", prev)
+	}
+
+	// After WriteCurrent, the canonical source is state.json. The
+	// previous slot must still hold v-legacy-current (the value
+	// previously in current.txt) so a Rollback would still work.
+	if err := l.WriteCurrent("v-new"); err != nil {
+		t.Fatalf("WriteCurrent: %v", err)
+	}
+	if _, err := os.Stat(l.StatePath()); err != nil {
+		t.Errorf("state.json must exist after WriteCurrent: %v", err)
+	}
+	cur, _ = l.ReadCurrent()
+	prev, _ = l.ReadPrevious()
+	if cur != "v-new" || prev != "v-legacy-current" {
+		t.Errorf("post-migration state: current=%q previous=%q, want v-new / v-legacy-current", cur, prev)
+	}
+}
+
+// TestLayout_StateJSONAtomicity verifies the single-file pointer state
+// is the only on-disk source after migration: a manually corrupted
+// state.json results in a parse error, NOT a fallback to the legacy
+// files (because state.json existing is the signal that migration has
+// happened — silently re-reading the stale legacy files would mask
+// data loss).
+func TestLayout_StateJSONCorruption_DoesNotFallBack(t *testing.T) {
+	l := newLayout(t)
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent: %v", err)
+	}
+	// Corrupt state.json — write garbage that's not valid JSON.
+	if err := os.WriteFile(l.StatePath(), []byte("garbage{"), 0o600); err != nil {
+		t.Fatalf("corrupt write: %v", err)
+	}
+	// Pre-seed legacy files as a tempting-but-wrong fallback target.
+	if err := os.WriteFile(l.CurrentPath(), []byte("v-old-legacy\n"), 0o600); err != nil {
+		t.Fatalf("legacy write: %v", err)
+	}
+
+	_, err := l.ReadCurrent()
+	if err == nil {
+		t.Fatal("ReadCurrent must surface the state.json parse error, not silently fall back to current.txt")
 	}
 }

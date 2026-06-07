@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,18 +14,28 @@ import (
 // Layout describes the on-disk binary layout the launcher manages.
 //
 //	<Root>/
-//	    cfgms-steward-launcher.exe       ← the OS service binary
-//	    current.txt                       ← name of the currently-active version
-//	    previous.txt                      ← name of the previous-good version (for rollback)
+//	    cfgms-steward-launcher.exe   ← the OS service binary
+//	    state.json                    ← {current, previous} written atomically
 //	    versions/
-//	        <name1>/
-//	            cfgms-steward(.exe)
-//	        <name2>/
-//	            cfgms-steward(.exe)
+//	        <name1>/cfgms-steward(.exe)
+//	        <name2>/cfgms-steward(.exe)
 //
 // Version "name" is operator-chosen — typically a content hash, semver, or
 // short slug. The launcher never assigns one; the caller of swap() decides.
 // This keeps the launcher boring + free of any hashing/dependency surface.
+//
+// # Why a single state.json
+//
+// Earlier revisions stored current + previous in separate files
+// (current.txt, previous.txt). A crash between writing one and writing
+// the other could leave the launcher's pointer state inconsistent
+// (e.g. current.txt pointed at the broken upgrade but previous.txt
+// still pointed at the version BEFORE the previous-known-good). A
+// single JSON document written via temp-file + rename is atomic under
+// every supported filesystem and removes the two-write window
+// entirely. Old single-file pointers (current.txt / previous.txt) are
+// still read on startup if state.json is missing — one-time migration
+// for installations that booted before this commit.
 type Layout struct {
 	// Root is the install directory. On Windows that's C:\Program Files\CFGMS;
 	// on Linux it might be /opt/cfgms or /usr/local/cfgms; on macOS
@@ -40,13 +51,26 @@ type Layout struct {
 	StewardBinaryName string
 }
 
-// CurrentPath returns the path of the file recording the active version
-// name. The file's contents (a single line, no decoration) name the
-// subdirectory under versions/ to exec from.
+// pointerState is the JSON document persisted to state.json. Older
+// installations may not have this file yet, in which case the loader
+// falls back to the deprecated single-line pointer files (current.txt /
+// previous.txt).
+type pointerState struct {
+	Current  string `json:"current"`
+	Previous string `json:"previous,omitempty"`
+}
+
+// StatePath returns the path of the single JSON document that records
+// both the active version and the previous-good version.
+func (l Layout) StatePath() string { return filepath.Join(l.Root, "state.json") }
+
+// CurrentPath returns the path of the legacy single-line pointer file
+// recording the active version name. Kept for the one-time migration
+// path; new writes always go to state.json.
 func (l Layout) CurrentPath() string { return filepath.Join(l.Root, "current.txt") }
 
-// PreviousPath returns the path of the file recording the previous-good
-// version name. Used by Rollback().
+// PreviousPath returns the path of the legacy single-line pointer file
+// recording the previous-good version name. Kept for the migration path.
 func (l Layout) PreviousPath() string { return filepath.Join(l.Root, "previous.txt") }
 
 // VersionsDir returns the path of the directory holding all installed
@@ -65,10 +89,16 @@ func (l Layout) StewardExeFor(version string) (string, error) {
 }
 
 // validateVersion rejects empty strings and path-traversal candidates so a
-// malformed current.txt or operator typo can't read or write outside the
+// malformed state file or operator typo can't read or write outside the
 // versions directory. The launcher never tries to *interpret* the version
 // name beyond this check — version IDs are opaque tags chosen by the
 // operator (typically a content hash or semver).
+//
+// The ".." check rejects the substring (not just the exact value)
+// because filepath.Join("a..b") still produces an in-bounds path on
+// every platform — but a value like "../../etc/passwd" would escape.
+// Multi-dot semver pre-release tags ("v1.2.3-beta..1") are rejected;
+// operators using semver should drop the empty segment.
 func validateVersion(v string) error {
 	if v == "" {
 		return errors.New("launcher: version name must not be empty")
@@ -79,65 +109,80 @@ func validateVersion(v string) error {
 	return nil
 }
 
-// ReadCurrent returns the version name recorded in current.txt. Empty
-// string + nil error means "no version currently active" — caller decides
-// whether that's a fresh install or a configuration error.
-func (l Layout) ReadCurrent() (string, error) {
-	return readVersionFile(l.CurrentPath())
+// loadState reads the combined pointer state. If state.json exists it
+// is the source of truth; otherwise the loader falls back to the two
+// legacy pointer files for the one-time migration. Missing state with
+// missing legacy files is reported as zero-value (Current=="", no error)
+// so callers can distinguish "fresh install" from "read error."
+func (l Layout) loadState() (pointerState, error) {
+	if raw, err := os.ReadFile(l.StatePath()); err == nil { //#nosec G304 -- launcher owns its install root
+		var ps pointerState
+		if jerr := json.Unmarshal(raw, &ps); jerr != nil {
+			return pointerState{}, fmt.Errorf("launcher: parse state.json: %w", jerr)
+		}
+		return ps, nil
+	} else if !os.IsNotExist(err) {
+		return pointerState{}, err
+	}
+	// Legacy fallback: synthesise from the old single-line files.
+	cur, err := readLegacyPointer(l.CurrentPath())
+	if err != nil {
+		return pointerState{}, err
+	}
+	prev, err := readLegacyPointer(l.PreviousPath())
+	if err != nil {
+		return pointerState{}, err
+	}
+	return pointerState{Current: cur, Previous: prev}, nil
 }
 
-// ReadPrevious returns the version name recorded in previous.txt. Empty
-// string + nil error means "no rollback target available."
-func (l Layout) ReadPrevious() (string, error) {
-	return readVersionFile(l.PreviousPath())
-}
-
-// WriteCurrent atomically updates the active version. The previous value
-// is preserved in previous.txt so Rollback() can restore it.
-//
-// Atomicity is achieved by writing to a sibling temp file then renaming
-// over the target — on every supported OS, rename of a file within the
-// same directory is atomic with respect to readers that open by path.
-func (l Layout) WriteCurrent(version string) error {
-	if err := validateVersion(version); err != nil {
+// saveState writes the combined pointer state atomically. The whole
+// document lands via temp-file + rename so a reader is guaranteed to
+// observe either the pre-write state or the post-write state — never
+// a partially-updated one.
+func (l Layout) saveState(ps pointerState) error {
+	if err := os.MkdirAll(l.Root, 0o755); err != nil {
 		return err
 	}
-	// Stash the existing current as previous (so rollback can restore it).
-	if existing, err := l.ReadCurrent(); err == nil && existing != "" && existing != version {
-		if writeErr := writeVersionFile(l.PreviousPath(), existing); writeErr != nil {
-			return fmt.Errorf("launcher: stage previous version: %w", writeErr)
+	raw, err := json.Marshal(ps)
+	if err != nil {
+		return err
+	}
+	statePath := l.StatePath()
+	dir := filepath.Dir(statePath)
+	tmp, err := os.CreateTemp(dir, ".state-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	success := false
+	defer func() {
+		if !success {
+			_ = os.Remove(tmpPath)
 		}
+	}()
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		return err
 	}
-	return writeVersionFile(l.CurrentPath(), version)
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, statePath); err != nil {
+		return err
+	}
+	success = true
+	return nil
 }
 
-// Rollback swaps current and previous: the previously-recorded version
-// becomes active, and the currently-active version is recorded as the new
-// previous (so the rollback itself is reversible).
-//
-// Returns the name of the newly-active version on success.
-func (l Layout) Rollback() (string, error) {
-	current, err := l.ReadCurrent()
-	if err != nil {
-		return "", fmt.Errorf("launcher: read current: %w", err)
-	}
-	previous, err := l.ReadPrevious()
-	if err != nil {
-		return "", fmt.Errorf("launcher: read previous: %w", err)
-	}
-	if previous == "" {
-		return "", errors.New("launcher: no previous version recorded — nothing to roll back to")
-	}
-	if err := writeVersionFile(l.CurrentPath(), previous); err != nil {
-		return "", fmt.Errorf("launcher: write current during rollback: %w", err)
-	}
-	if err := writeVersionFile(l.PreviousPath(), current); err != nil {
-		return "", fmt.Errorf("launcher: write previous during rollback: %w", err)
-	}
-	return previous, nil
-}
-
-func readVersionFile(p string) (string, error) {
+// readLegacyPointer reads a deprecated single-line pointer file.
+// Returns "" on os.IsNotExist so callers can treat "no legacy file"
+// as "no pointer" without distinguishing it from "couldn't read."
+func readLegacyPointer(p string) (string, error) {
 	b, err := os.ReadFile(p) //#nosec G304 -- launcher owns these paths
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -148,13 +193,62 @@ func readVersionFile(p string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-func writeVersionFile(p, value string) error {
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, []byte(value+"\n"), 0o644); err != nil { //#nosec G306 -- version pointers are plaintext, no secrets
-		return err
-	}
-	return os.Rename(tmp, p)
+// ReadCurrent returns the version name currently active. Empty string +
+// nil error means "no version currently active."
+func (l Layout) ReadCurrent() (string, error) {
+	ps, err := l.loadState()
+	return ps.Current, err
 }
+
+// ReadPrevious returns the version name recorded as the previous-good
+// rollback target. Empty string + nil error means "no rollback target
+// available."
+func (l Layout) ReadPrevious() (string, error) {
+	ps, err := l.loadState()
+	return ps.Previous, err
+}
+
+// WriteCurrent atomically updates the active version. The previously
+// active version (if any, and if different) is preserved in the
+// "previous" slot so Rollback() can restore it.
+//
+// Both fields land in one rename operation, so a crash mid-call leaves
+// the launcher in either the pre-call or post-call state — never a
+// partial one. This is the property that the earlier two-file
+// representation could not provide.
+func (l Layout) WriteCurrent(version string) error {
+	if err := validateVersion(version); err != nil {
+		return err
+	}
+	ps, err := l.loadState()
+	if err != nil {
+		return err
+	}
+	if ps.Current != "" && ps.Current != version {
+		ps.Previous = ps.Current
+	}
+	ps.Current = version
+	return l.saveState(ps)
+}
+
+// Rollback swaps current and previous: the previously-recorded version
+// becomes active, and the currently-active version is recorded as the new
+// previous (so the rollback itself is reversible). Both fields update
+// in one atomic rename.
+//
+// Returns the name of the newly-active version on success.
+func (l Layout) Rollback() (string, error) {
+	ps, err := l.loadState()
+	if err != nil {
+		return "", err
+	}
+	if ps.Previous == "" {
+		return "", errors.New("launcher: no previous version recorded — nothing to roll back to")
+	}
+	newPS := pointerState{Current: ps.Previous, Previous: ps.Current}
+	if err := l.saveState(newPS); err != nil {
+		return "", err
+	}
+	return newPS.Current, nil
+}
+

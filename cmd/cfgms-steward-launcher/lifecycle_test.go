@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -241,6 +240,61 @@ func TestSupervise_BrokenChild_NoPreviousReturnsError(t *testing.T) {
 	}
 }
 
+// TestSupervise_ContextCancel_AfterHealthyChildStaysAlive covers the
+// review-flagged "exit code discarded as clean shutdown" race. Before
+// the fix-up, ANY ctx.Err() != nil short-circuited Supervise to return
+// nil — even when the child had already exited with a non-zero code
+// before the cancel arrived. The fix differentiates: cancellation
+// AFTER the startup window propagates as clean shutdown; non-zero exit
+// INSIDE the startup window still triggers rollback even on cancel.
+//
+// This test exercises the "healthy child past window, then cancel"
+// case: cancellation must return nil and not interpret the SIGTERM-
+// induced exit as a failure.
+func TestSupervise_ContextCancel_AfterHealthyChildStaysAlive(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+
+	// Child sleeps long; cancel fires mid-sleep. exec.CommandContext
+	// kills the child producing a non-zero exit. The supervisor must
+	// recognise this as a cancellation, not a child fault.
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_SLEEP_MS":  "60000",
+		"FAKE_STEWARD_EXIT_CODE": "0",
+	})
+
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     20 * time.Millisecond, // tiny window so the kill lands OUTSIDE it
+		MaxRollbackCycles: 0,
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var result error
+	done := make(chan struct{})
+	go func() {
+		result = s.Supervise(ctx)
+		close(done)
+	}()
+	// Wait long enough that the child is well past StartupWindow.
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Supervise did not return after cancel")
+	}
+	if result != nil {
+		t.Errorf("Supervise returned %v on cancel after healthy child; want nil", result)
+	}
+}
+
 func TestSupervise_ContextCancel_ExitsClean(t *testing.T) {
 	l := newLayout(t)
 	installFakeSteward(t, l, "v1")
@@ -299,31 +353,42 @@ func TestSupervise_ContextCancel_ExitsClean(t *testing.T) {
 // cleanly past the startup window must NOT trigger rollback; the loop
 // must restart it. We bound the test by stopping the loop with a context
 // cancel after observing at least 2 child invocations.
+//
+// Timing budgets are intentionally generous so the test is robust on
+// Windows under CI load (the earlier 50ms-window/200ms-sleep numbers
+// raced fork-exec overhead on Windows, hence a previous Windows skip
+// the adversarial review correctly objected to). The current values
+// give a 5× safety margin between sleep duration and startup window;
+// fork/exec overhead would have to balloon over 350ms before false
+// positives kick in.
 func TestSupervise_HealthyChild_RestartsWithoutRollback(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// On Windows, time.Sleep behaviour under heavy CI load can race
-		// our 50ms startup window. The behaviour is identical on Linux
-		// (where every other launcher test runs in CI), so we skip this
-		// timing-sensitive variant on Windows.
-		t.Skip("timing-sensitive; covered on Linux CI")
-	}
-
 	l := newLayout(t)
 	installFakeSteward(t, l, "v1")
 	if err := l.WriteCurrent("v1"); err != nil {
 		t.Fatalf("WriteCurrent v1: %v", err)
 	}
 
-	// Sleep just past the 50ms startup window then exit cleanly.
+	// Sleep well past the startup window then exit cleanly. The window
+	// is intentionally short (50ms) and the sleep long (500ms) so the
+	// classifier "this child stayed up past the startup window" stays
+	// stable even when Windows fork+exec overhead doubles or triples
+	// under CI load.
 	envForChild(t, map[string]string{
-		"FAKE_STEWARD_SLEEP_MS":  "200",
+		"FAKE_STEWARD_SLEEP_MS":  "500",
 		"FAKE_STEWARD_EXIT_CODE": "0",
 	})
 
 	s := &Supervisor{
-		Layout:            l,
-		StartupWindow:     50 * time.Millisecond,
-		MaxRollbackCycles: 0, // ZERO rollback budget — any rollback attempt would fail
+		Layout: l,
+		// 50ms startup window: any healthy child that completes a 500ms
+		// sleep + exit is comfortably outside the window.
+		StartupWindow: 50 * time.Millisecond,
+		// ZERO rollback budget. A healthy child must NOT trigger rollback
+		// regardless of budget, so this proves the classifier path even
+		// when no rollback is permitted. Previously this was coerced
+		// silently to 1; the fix-up exposes 0 as a legitimate operator
+		// choice.
+		MaxRollbackCycles: 0,
 		Stdout:            &bytes.Buffer{},
 		Stderr:            &bytes.Buffer{},
 		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
@@ -339,13 +404,14 @@ func TestSupervise_HealthyChild_RestartsWithoutRollback(t *testing.T) {
 	}()
 
 	// Let the supervisor restart the child at least twice — proves the
-	// loop is in fact looping on clean exits.
-	time.Sleep(700 * time.Millisecond)
+	// loop is in fact looping on clean exits. 1500ms gives 3 iterations
+	// of 500ms sleep + restart, even with fork-exec overhead.
+	time.Sleep(1500 * time.Millisecond)
 	cancel()
 
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("Supervise did not return after cancel")
 	}
 	if result != nil {

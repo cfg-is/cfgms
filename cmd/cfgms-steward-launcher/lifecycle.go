@@ -81,8 +81,14 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 	if s.StartupWindow <= 0 {
 		s.StartupWindow = 30 * time.Second
 	}
-	if s.MaxRollbackCycles <= 0 {
-		s.MaxRollbackCycles = 1
+	// MaxRollbackCycles: zero (or negative) is a legitimate operator
+	// choice — "no auto-rollback, just fail-fast and let the OS service
+	// manager retry per its recovery policy." The previous behaviour
+	// silently coerced 0 → 1, which masked the operator's intent and
+	// confused review tests. Only negative values get coerced (they
+	// represent a programming mistake, not a deliberate choice).
+	if s.MaxRollbackCycles < 0 {
+		s.MaxRollbackCycles = 0
 	}
 
 	rollbacksRemaining := s.MaxRollbackCycles
@@ -107,10 +113,32 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 		exitErr := s.execOnce(ctx, exe)
 		ranFor := s.clock.Since(started)
 
-		// Context cancelled → propagate normally; service manager is
-		// shutting us down, not the child crashing.
+		// Context cancelled → service manager is shutting us down.
+		// Distinguish two sub-cases:
+		//   (a) The child was still running when ctx fired and got
+		//       killed by exec.CommandContext. exitErr is non-nil but
+		//       reflects the cancellation, not a child fault. Return
+		//       nil so the service manager logs a clean shutdown.
+		//   (b) The child had ALREADY crashed by the time ctx fired —
+		//       e.g. SIGTERM and a crash arriving in the same scheduler
+		//       turn during an in-progress upgrade. exitErr is non-nil
+		//       AND ranFor < StartupWindow. Discarding this as "just a
+		//       cancellation" would silently mask the upgrade failure.
+		//       Differentiate by checking whether the child had time
+		//       to exit on its own: a child that ran past StartupWindow
+		//       definitionally wasn't crashing-during-startup, so
+		//       treat its exit as graceful regardless of code. A child
+		//       that exited inside the window with a non-zero code
+		//       gets the failure surfaced even on cancel.
 		if ctx.Err() != nil {
-			return nil
+			failedStartupOnCancel := ranFor < s.StartupWindow && exitErr != nil
+			if !failedStartupOnCancel {
+				return nil
+			}
+			// Fall through to the rollback logic below — this looks
+			// like a real upgrade failure that happened to coincide
+			// with a cancel. The operator (or the next startup) will
+			// observe the rolled-back state.
 		}
 
 		failedStartup := ranFor < s.StartupWindow
